@@ -92,6 +92,22 @@ oc create secret generic htpasswd-workshop-users \
   --dry-run=client -o yaml | oc apply -f - >/dev/null
 ok "htpasswd-workshop-users (openshift-config) — ${USERS} users"
 
+# 2a'. Merge the workshop IdP into the OAuth SINGLETON imperatively (append-if-absent).
+# Deliberately NOT GitOps-managed: clusters arrive with pre-existing IdPs (this RHDP cluster
+# has an 'rhbk' OpenID provider backing the admin login) and a forced server-side apply from
+# Argo would replace the atomic identityProviders list — locking everyone out.
+if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' | grep -qw "workshop-users"; then
+  ok "OAuth IdP 'workshop-users' already present"
+else
+  IDP_JSON='{"name":"workshop-users","mappingMethod":"claim","type":"HTPasswd","htpasswd":{"fileData":{"name":"htpasswd-workshop-users"}}}'
+  if [[ -z "$(oc get oauth cluster -o jsonpath='{.spec.identityProviders}')" ]]; then
+    oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders\",\"value\":[${IDP_JSON}]}]" >/dev/null
+  else
+    oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders/-\",\"value\":${IDP_JSON}}]" >/dev/null
+  fi
+  ok "OAuth IdP 'workshop-users' appended (existing IdPs preserved)"
+fi
+
 # 2b. MaaS token for OpenShift Lightspeed (only when ai-assist is enabled).
 if [[ "$LIGHTSPEED" == "true" ]]; then
   [[ -n "$MAAS_KEY" && "$MAAS_KEY" != "null" && "$MAAS_KEY" != "CHANGEME" ]] \
@@ -120,6 +136,24 @@ echo
 curl -ksf "$MIRROR_API" >/dev/null 2>&1 \
   || die "mirror repo ${MIRROR_ORG}/${MIRROR_REPO} absent after 15m — check the mirror job: oc get jobs -n ${GITEA_NS}"
 ok "Gitea mirror ready: https://${GITEA_HOST}/${MIRROR_ORG}/${MIRROR_REPO}"
+
+# Freshness: the workshop chart must actually be IN the mirror at the target revision
+# (mirrors pull on interval — force a sync so a just-pushed chart is served now).
+info "refreshing the mirror and confirming the workshop chart is present…"
+ADMIN_PASS="$(oc get gitea gitea -n "$GITEA_NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+if [[ -n "$ADMIN_PASS" ]]; then
+  curl -ksf -u "gitea-admin:${ADMIN_PASS}" -X POST \
+    "https://${GITEA_HOST}/api/v1/repos/${MIRROR_ORG}/${MIRROR_REPO}/mirror-sync" >/dev/null 2>&1 || true
+fi
+CHART_RAW="https://${GITEA_HOST}/${MIRROR_ORG}/${MIRROR_REPO}/raw/branch/${REVISION}/gitops/workshop-config/Chart.yaml"
+for _ in $(seq 1 30); do
+  curl -ksf "$CHART_RAW" >/dev/null 2>&1 && break
+  printf '.'; sleep 5
+done
+echo
+curl -ksf "$CHART_RAW" >/dev/null 2>&1 \
+  || die "workshop chart not in the mirror at revision ${REVISION} — push it upstream, then re-run (or: ws git-refresh)"
+ok "mirror serves gitops/workshop-config@${REVISION}"
 
 # ── 4. shared workshop password for Gitea seeding (gitea ns now exists) ───────
 info "[4/6] recording the shared workshop password (secret workshop-user-creds)"
