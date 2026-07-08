@@ -1,0 +1,47 @@
+---
+name: content-build
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies (pinned)
+        run: npm ci
+
+      - name: Install yq (for gen-attributes.sh)
+        run: |
+          sudo curl -sfL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Version-attribute drift gate
+        run: |
+          tools/gen-attributes.sh
+          if ! git diff --exit-code content/modules/ROOT/partials/version-attributes.adoc; then
+            echo "::error::version-attributes.adoc is out of sync with versions.yaml." \
+                 "Run tools/gen-attributes.sh and commit the result."
+            exit 1
+          fi
+
+      - name: Build all three renderings (warnings fail the build)
+        working-directory: content
+        run: |
+          for flavor in workshop demo instructor; do
+            echo "::group::antora site-${flavor}.yml"
+            npx antora --fetch --log-failure-level=warn "site-${flavor}.yml"
+            echo "::endgroup::"
+          done

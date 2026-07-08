@@ -57,7 +57,9 @@ if [ "${1:-}" = "--check" ]; then
   if [ ! -f "$out_file" ] || ! diff -q "$out_file" "$tmp_file" >/dev/null 2>&1; then
     echo "❌ ${out_file#"${repo_root}/"} is stale." >&2
     echo "   Fix: run tools/gen-attributes.sh and commit the result." >&2
-    [ -f "$out_file" ] && diff -u "$out_file" "$tmp_file" >&2 || true
+    if [ -f "$out_file" ]; then
+      diff -u "$out_file" "$tmp_file" >&2 || true
+    fi
     exit 1
   fi
   echo "✅ version-attributes.adoc is in sync with versions.yaml (verified ${verified})."

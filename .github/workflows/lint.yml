@@ -1,0 +1,106 @@
+---
+name: lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  vale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Asciidoctor (Vale's .adoc parser)
+        run: sudo apt-get update && sudo apt-get install -y asciidoctor
+      - name: Install Vale
+        run: |
+          curl -sfL \
+            https://github.com/errata-ai/vale/releases/download/v3.15.1/vale_3.15.1_Linux_64-bit.tar.gz \
+            | sudo tar -xz -C /usr/local/bin vale
+      - name: Vale (fails on error-level terminology violations)
+        run: vale content/
+
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install "yamllint==1.35.1"
+      - run: yamllint .
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: ShellCheck all shell scripts
+        run: |
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(
+            find . -type f -name '*.sh' \
+              -not -path './node_modules/*' -not -path './www/*' -not -path './.cache/*'
+          )
+          # Extensionless bash scripts we ship (the ws CLI, utilities/*).
+          for f in tools/ws/ws utilities/*; do
+            [ -f "$f" ] && head -1 "$f" | grep -qE '^#!.*sh' && files+=("$f")
+          done
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No shell scripts found."; exit 0
+          fi
+          printf 'shellcheck: %s\n' "${files[@]}"
+          shellcheck "${files[@]}"
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: helm lint + template every chart
+        run: |
+          shopt -s nullglob
+          charts=(gitops/entry-states/*/Chart.yaml)
+          [ -f gitops/workshop-config/Chart.yaml ] && charts+=(gitops/workshop-config/Chart.yaml)
+          if [ ${#charts[@]} -eq 0 ]; then
+            echo "No Helm charts yet."; exit 0
+          fi
+          rc=0
+          for c in "${charts[@]}"; do
+            d="$(dirname "$c")"
+            echo "::group::helm $d"
+            helm lint "$d" || rc=1
+            helm template "$d" >/dev/null || rc=1
+            echo "::endgroup::"
+          done
+          exit "$rc"
+
+  kustomize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kustomize (pinned)
+        run: |
+          curl -sfL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.0/kustomize_v5.8.0_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+      - name: kustomize build every platform-portfolio overlay/base
+        run: |
+          rc=0
+          while IFS= read -r k; do
+            d="$(dirname "$k")"
+            echo "::group::kustomize build $d"
+            if ! kustomize build --enable-helm "$d" >/dev/null; then
+              echo "::error::kustomize build failed: $d"
+              rc=1
+            fi
+            echo "::endgroup::"
+          done < <(find platform-portfolio -name kustomization.yaml | sort)
+          exit "$rc"
