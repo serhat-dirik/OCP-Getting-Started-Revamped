@@ -65,10 +65,20 @@ user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee 
 
 app_name() { echo "entry-${1}-${2}"; }
 
+argo_project() {  # workshop-entries once the workshop layer exists; default before that
+  if oc get appproject "${ARGO_PROJECT}" -n "${ARGO_NS}" >/dev/null 2>&1; then
+    echo "${ARGO_PROJECT}"
+  else
+    echo "⚠ AppProject ${ARGO_PROJECT} not found — using 'default' (apply the workshop layer for proper scoping)" >&2
+    echo "default"
+  fi
+}
+
 render_app() {  # module user  → Application manifest on stdout
-  local module="$1" user="$2" url domain
+  local module="$1" user="$2" url domain project
   url="$(repo_url)"
   domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo apps.example.com)"
+  project="$(argo_project)"
   cat <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -81,7 +91,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: ${ARGO_PROJECT}
+  project: ${project}
   source:
     repoURL: ${url}
     targetRevision: ${SOURCE_REVISION}
@@ -160,12 +170,24 @@ cmd_reset() {
   local module user="$1"; module="$2"
   need_oc
   local app; app="$(app_name "$module" "$user")"
-  info "resetting ${module} for ${user} (delete + re-materialize)…"
+  info "resetting ${module} for ${user} (delete + purge + re-materialize)…"
   if oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
     oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s
-    ok "previous state pruned"
+    ok "chart-owned state pruned"
   else
     info "no existing entry app — clean start"
+  fi
+  # Purge user-created leftovers per the module's ws-meta.yaml (entry state = clean slate).
+  local meta="${ENTRY_DIR}/${module}/ws-meta.yaml"
+  if [[ -f "$meta" ]]; then
+    grep -E '^\s*-\s' "$meta" | sed -e 's/^\s*-\s*//' -e 's/"//g' | while read -r ns_tmpl; do
+      local ns="${ns_tmpl//\$\{USER\}/${user}}"
+      if oc get ns "$ns" >/dev/null 2>&1; then
+        info "purging user workloads in ${ns}…"
+        oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+        ok "purge requested in ${ns}"
+      fi
+    done
   fi
   cmd_start "$user" "$module"
 }

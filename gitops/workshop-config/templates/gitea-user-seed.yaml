@@ -1,0 +1,138 @@
+# Seeds one Gitea account per attendee (shared workshop password) via the admin API — the
+# consumer-layer counterpart to the portfolio's git-mirror job. Gitea itself stays workshop-agnostic
+# (giteaCreateUsers: false); users are added HERE. Same route+admin-credential discovery pattern as
+# platform-portfolio/components/git-mirror.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea-user-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+---
+# why: read the Gitea CR status + operator admin secret + route host + workshop-user-creds secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitea-user-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+rules:
+  - apiGroups: ["pfe.rhpds.com"]
+    resources: ["giteas"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitea-user-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gitea-user-seed
+subjects:
+  - kind: ServiceAccount
+    name: gitea-user-seed
+    namespace: {{ .Values.giteaNamespace }}
+---
+# Argo Sync hook (BeforeHookCreation): re-runs on every workshop-config sync; wave 2 keeps it
+# after the RBAC/namespaces settle. The job self-waits for Gitea, so ordering is belt-and-braces.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gitea-user-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: gitea-user-seed
+    spec:
+      serviceAccountName: gitea-user-seed
+      restartPolicy: Never
+      containers:
+        - name: seed
+          # why ose-cli: ships oc + curl on every connected cluster; no custom image to maintain.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: USER_COUNT
+              value: {{ .Values.userCount | quote }}
+            - name: USER_PREFIX
+              value: {{ .Values.userPrefix | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 10
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+              if [[ -z "$ADMIN_PASS" ]]; then
+                ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+              fi
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ could not discover Gitea admin password (CR status + gitea-admin-credentials secret)"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ reading the shared workshop password (secret workshop-user-creds)…"
+              USER_PASS="$(oc get secret workshop-user-creds -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+              [[ -n "$USER_PASS" ]] || { echo "❌ secret workshop-user-creds (key 'password') missing in ${NS} — bootstrap/install.sh creates it"; exit 1; }
+
+              echo "▶ waiting for the Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 10
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
+
+              BODY="$(mktemp)"; trap 'rm -f "$BODY"' EXIT
+              FAIL=0
+              for i in $(seq 1 "${USER_COUNT}"); do
+                U="${USER_PREFIX}${i}"
+                CODE="$(curl -ks -o /dev/null -w '%{http_code}' -u "$AUTH" "${GITEA_URL}/api/v1/users/${U}")"
+                if [[ "$CODE" == "200" ]]; then
+                  echo "  ✓ ${U} exists"
+                  continue
+                fi
+                # must_change_password:false so attendees can log in with the shared password as-is.
+                HTTP="$(curl -ks -o "$BODY" -w '%{http_code}' -u "$AUTH" -X POST "${GITEA_URL}/api/v1/admin/users" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"username\":\"${U}\",\"email\":\"${U}@parasol.example.com\",\"password\":\"${USER_PASS}\",\"must_change_password\":false}")"
+                case "$HTTP" in
+                  201) echo "  ✓ ${U} created";;
+                  409|422) echo "  ✓ ${U} exists (${HTTP})";;
+                  *) echo "  ❌ ${U} create failed (HTTP ${HTTP}): $(cat "$BODY")"; FAIL=$((FAIL + 1));;
+                esac
+              done
+
+              [[ "$FAIL" -eq 0 ]] || { echo "❌ ${FAIL} user(s) failed to seed"; exit 1; }
+              echo "✅ seeded ${USER_COUNT} Gitea users at ${GITEA_URL}"
