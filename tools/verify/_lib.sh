@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # USER_NAME/ENTRY_ONLY are consumed by the sourcing verify script
 # Shared helpers for per-module verify scripts (tools/verify/mNN.sh).
 # Contract: each script takes --user U (default user1) and optional --entry-only,
 # checks ENTRY state (what `ws start` materializes) and, unless --entry-only,
@@ -35,9 +36,7 @@ verify_summary() {  # call at end of every script
 }
 
 parse_verify_args() {  # sets USER_NAME, ENTRY_ONLY from "$@"
-  # shellcheck disable=SC2034  # consumed by the sourcing verify script, not this lib
   USER_NAME="user1"
-  # shellcheck disable=SC2034
   ENTRY_ONLY="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
