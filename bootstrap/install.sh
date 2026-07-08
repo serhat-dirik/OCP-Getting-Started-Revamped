@@ -71,8 +71,17 @@ if [[ -z "$WS_PASS" || "$WS_PASS" == "null" || "$WS_PASS" == "generate" || "$WS_
 fi
 
 # ── 1. portfolio stacks ───────────────────────────────────────────────────────
+# Pre-installed detection: managed/demo clusters (RHDP) often ship Lightspeed already wired
+# to their own LLM. Fighting that wiring breaks a working assistant (duplicate OperatorGroup
+# → OLM ResolutionFailed; secret/OLSConfig clobbering) — reuse it instead.
+LIGHTSPEED_PREINSTALLED="false"
+if oc get olsconfig cluster >/dev/null 2>&1; then
+  LIGHTSPEED_PREINSTALLED="true"
+  PROVIDER="$(oc get olsconfig cluster -o jsonpath='{.spec.llm.providers[0].type}' 2>/dev/null || echo '?')"
+  ok "OpenShift Lightspeed pre-installed (provider: ${PROVIDER}) — reusing it; ai-assist stack skipped"
+fi
 STACKS="core-devtools"
-[[ "$LIGHTSPEED" == "true" ]] && STACKS="core-devtools,ai-assist"
+[[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]] && STACKS="core-devtools,ai-assist"
 info "[1/6] installing portfolio stacks: ${STACKS}"
 "$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$REPO_URL" --revision "$REVISION"
 
@@ -108,8 +117,9 @@ else
   ok "OAuth IdP 'workshop-users' appended (existing IdPs preserved)"
 fi
 
-# 2b. MaaS token for OpenShift Lightspeed (only when ai-assist is enabled).
-if [[ "$LIGHTSPEED" == "true" ]]; then
+# 2b. MaaS token for OpenShift Lightspeed (only when WE install it — a pre-installed
+# Lightspeed brings its own provider secret, which we must never overwrite).
+if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
   [[ -n "$MAAS_KEY" && "$MAAS_KEY" != "null" && "$MAAS_KEY" != "CHANGEME" ]] \
     || die "lightspeed: true but maas.api_key is unset/CHANGEME in ${VARS}"
   oc create namespace openshift-lightspeed --dry-run=client -o yaml | oc apply -f - >/dev/null

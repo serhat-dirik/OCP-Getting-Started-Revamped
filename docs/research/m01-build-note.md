@@ -6,7 +6,7 @@ Date: 2026-07-08 · Author: PM (consolidating R1/R2/R3 research) · Spec: 02-MOD
 
 - OCP **4.21.22** (`stable-4.21`); content targets 4.20+. Console URL comes from `{ocp_console_url}`.
 - **Web Terminal** operator `fast` v1.16.1 — installed via portfolio (`pp-web-terminal`).
-- **OpenShift Lightspeed** operator `stable` v1.1.1, GA. Wired to MaaS via OLSConfig (`type: rhoai_vllm`, url `…/v1`, model `qwen3-14b`, secret `credentials`/`apitoken` in `openshift-lightspeed`) — the `ai-assist` stack + bootstrap secret provide it. **Verify live before writing the Lightspeed exercise**; the module MUST keep the graceful-degradation path (a NOTE + instructor talk track) for clusters without it.
+- **OpenShift Lightspeed** operator `stable` v1.1.1, GA — **pre-installed and working on THIS cluster** (RHDP wiring: `azure_openai` provider, gpt-4; verified live 2026-07-08, all pods healthy). On clean clusters the portfolio `ai-assist` stack wires it to MaaS instead; bootstrap auto-detects which case applies. Content must stay provider-agnostic (never name gpt-4/qwen — "the cluster's configured model") and MUST keep the graceful-degradation path (a NOTE + instructor talk track) for clusters without Lightspeed at all.
 - User-workload monitoring enabled (`pp-monitoring-uwm`) — pod metrics visible in console for the observe step.
 - Gitea per-user accounts exist (workshop layer seeding); M01 itself only needs the account to exist (used from M02 on) — mention, don't exercise.
 
