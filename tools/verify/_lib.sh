@@ -35,7 +35,9 @@ verify_summary() {  # call at end of every script
 }
 
 parse_verify_args() {  # sets USER_NAME, ENTRY_ONLY from "$@"
+  # shellcheck disable=SC2034  # consumed by the sourcing verify script, not this lib
   USER_NAME="user1"
+  # shellcheck disable=SC2034
   ENTRY_ONLY="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
