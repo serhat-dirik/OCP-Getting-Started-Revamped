@@ -38,13 +38,16 @@ spec:
               [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
               GITEA_URL="https://${HOST}"
 
-              echo "▶ discovering admin credentials…"
+              echo "▶ discovering admin credentials (operator writes them to CR status after admin setup)…"
               ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
-              ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
-              if [[ -z "$ADMIN_PASS" ]]; then
-                ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
-              fi
-              [[ -n "$ADMIN_PASS" ]] || { echo "❌ could not discover Gitea admin password (checked CR status + gitea-admin-credentials secret)"; exit 1; }
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 10
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 10m (checked CR .status.adminPassword + gitea-admin-credentials secret)"; exit 1; }
               AUTH="${ADMIN_USER}:${ADMIN_PASS}"
 
               echo "▶ waiting for Gitea API…"
