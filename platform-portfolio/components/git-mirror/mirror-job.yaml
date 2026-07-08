@@ -1,0 +1,95 @@
+# Sync-hook Job: makes the in-cluster Gitea pull-mirror every configured upstream repo.
+# Gitea does the cloning itself (migrate API with mirror=true) — this job is pure API calls.
+# Re-running an Argo sync re-runs the job (BeforeHookCreation), which re-syncs all mirrors:
+# that is exactly what `ws git-refresh` triggers.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: git-mirror
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: git-mirror
+    spec:
+      serviceAccountName: git-mirror
+      restartPolicy: Never
+      containers:
+        - name: mirror
+          # why ose-cli: ships oc + curl on every connected cluster; no custom image to maintain
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="gitea"
+
+              echo "▶ waiting for Gitea to be ready…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 10
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+              if [[ -z "$ADMIN_PASS" ]]; then
+                ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+              fi
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ could not discover Gitea admin password (checked CR status + gitea-admin-credentials secret)"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ waiting for Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 10
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
+
+              echo "▶ collecting mirror config from labeled ConfigMaps…"
+              ORG="$(oc get cm -n "$NS" -l git-mirror.portfolio.redhat.com/repos=true -o jsonpath='{.items[0].data.org}')"
+              REPOS="$(oc get cm -n "$NS" -l git-mirror.portfolio.redhat.com/repos=true -o jsonpath='{range .items[*]}{.data.repos}{end}')"
+              [[ -n "$ORG" && -n "$REPOS" ]] || { echo "❌ no mirror config found"; exit 1; }
+
+              echo "▶ ensuring org '${ORG}' exists…"
+              CODE=$(curl -ks -o /dev/null -w '%{http_code}' -u "$AUTH" "${GITEA_URL}/api/v1/orgs/${ORG}")
+              if [[ "$CODE" == "404" ]]; then
+                curl -ksf -u "$AUTH" -X POST "${GITEA_URL}/api/v1/orgs" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"username\":\"${ORG}\",\"visibility\":\"public\"}" >/dev/null
+                echo "  ✓ org created"
+              else
+                echo "  ✓ org exists"
+              fi
+
+              FAIL=0
+              while IFS='=' read -r NAME URL; do
+                [[ -z "$NAME" || "$NAME" == \#* ]] && continue
+                NAME="$(echo "$NAME" | xargs)"; URL="$(echo "$URL" | xargs)"
+                CODE=$(curl -ks -o /dev/null -w '%{http_code}' -u "$AUTH" "${GITEA_URL}/api/v1/repos/${ORG}/${NAME}")
+                if [[ "$CODE" == "404" ]]; then
+                  echo "▶ migrating ${NAME} ← ${URL} (pull-mirror)…"
+                  if curl -ksf -u "$AUTH" -X POST "${GITEA_URL}/api/v1/repos/migrate" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"clone_addr\":\"${URL}\",\"repo_name\":\"${NAME}\",\"repo_owner\":\"${ORG}\",\"mirror\":true,\"mirror_interval\":\"30m\"}" >/dev/null; then
+                    echo "  ✓ mirrored"
+                  else
+                    echo "  ❌ migrate failed for ${NAME}"; FAIL=$((FAIL+1))
+                  fi
+                else
+                  echo "▶ refreshing mirror ${NAME}…"
+                  curl -ksf -u "$AUTH" -X POST "${GITEA_URL}/api/v1/repos/${ORG}/${NAME}/mirror-sync" >/dev/null \
+                    && echo "  ✓ sync triggered" || { echo "  ❌ sync failed for ${NAME}"; FAIL=$((FAIL+1)); }
+                fi
+              done <<< "$REPOS"
+
+              [[ "$FAIL" -eq 0 ]] || { echo "❌ ${FAIL} repo(s) failed"; exit 1; }
+              echo "✅ git-localize mirror up to date at ${GITEA_URL}/${ORG}"
