@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# ws — workshop state CLI: materialize, verify, and reset per-user module environments.
+#
+#   ws list                          modules with an entry state
+#   ws start  <module> [--user U]    materialize the module's entry state for a user
+#   ws verify <module> [--user U]    run the module's verification script
+#   ws reset  <module> [--user U]    return the user's world to the module's entry state
+#   ws solve  <module> [--user U]    materialize the END state (instructor only)
+#   ws git-refresh                   re-sync the in-cluster Gitea mirrors from upstream
+#   ws doctor                        environment sanity: login, argo, gitea, operators
+#
+# Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
+# Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
+# mirror (git-localize) — the public repo stays the upstream source of truth.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ENTRY_DIR="${REPO_ROOT}/gitops/entry-states"
+VERIFY_DIR="${REPO_ROOT}/tools/verify"
+ARGO_NS="${WS_ARGO_NS:-openshift-gitops}"
+ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"
+GITEA_NS="${WS_GITEA_NS:-gitea}"
+MIRROR_ORG="${WS_MIRROR_ORG:-parasol}"
+MIRROR_REPO="${WS_MIRROR_REPO:-ocp-getting-started}"
+SOURCE_REVISION="${WS_REVISION:-main}"
+
+ok()   { echo "✅ $*"; }
+err()  { echo "❌ $*" >&2; }
+info() { echo "▶ $*"; }
+die()  { err "$*"; exit 1; }
+
+need_oc() {
+  command -v oc >/dev/null || die "oc not found in PATH"
+  oc whoami >/dev/null 2>&1 || die "not logged in — oc login first (KUBECONFIG=${KUBECONFIG:-~/.kube/config})"
+}
+
+# Source repo for entry-state Applications: prefer the local Gitea mirror (git-localize),
+# fall back to upstream GitHub when the mirror isn't up (early bootstrap, laptop dev).
+repo_url() {
+  local host
+  host="$(oc get route gitea -n "${GITEA_NS}" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  if [[ -n "$host" ]]; then
+    echo "https://${host}/${MIRROR_ORG}/${MIRROR_REPO}.git"
+  else
+    echo "https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
+  fi
+}
+
+module_arg() {
+  local m="${1:-}"
+  [[ -n "$m" ]] || die "module required (e.g. m01) — see: ws list"
+  m="$(echo "$m" | tr '[:upper:]' '[:lower:]')"
+  [[ "$m" =~ ^m[0-9]{2}$ ]] || die "module must look like m01, got '$m'"
+  echo "$m"
+}
+
+user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee self-service)
+  local u="${1:-}"
+  if [[ -z "$u" ]]; then
+    u="$(oc whoami 2>/dev/null || true)"
+    [[ "$u" == system:admin || "$u" == *"kube:admin"* || -z "$u" ]] && u="user1"
+  fi
+  echo "$u"
+}
+
+app_name() { echo "entry-${1}-${2}"; }
+
+render_app() {  # module user  → Application manifest on stdout
+  local module="$1" user="$2" url domain
+  url="$(repo_url)"
+  domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo apps.example.com)"
+  cat <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: $(app_name "$module" "$user")
+  namespace: ${ARGO_NS}
+  labels:
+    workshop.redhat.com/module: "${module}"
+    workshop.redhat.com/user: "${user}"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: ${ARGO_PROJECT}
+  source:
+    repoURL: ${url}
+    targetRevision: ${SOURCE_REVISION}
+    path: gitops/entry-states/${module}
+    helm:
+      parameters:
+        - name: user
+          value: "${user}"
+        - name: clusterDomain
+          value: "${domain}"
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+    retry:
+      limit: 10
+      backoff: {duration: 10s, factor: 2, maxDuration: 2m}
+EOF
+}
+
+wait_healthy() {  # appname [timeout_s]
+  local app="$1" timeout="${2:-300}" t=0 health sync
+  info "waiting for ${app} to sync (up to ${timeout}s)…"
+  while (( t < timeout )); do
+    health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+    sync="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+    if [[ "$health" == "Healthy" && "$sync" == "Synced" ]]; then
+      ok "entry state ready (Synced/Healthy)"
+      return 0
+    fi
+    sleep 5; t=$((t+5))
+  done
+  err "entry state not ready after ${timeout}s (health=${health:-?} sync=${sync:-?})"
+  echo "   inspect: oc describe application ${app} -n ${ARGO_NS}"
+  return 1
+}
+
+cmd_list() {
+  echo "Modules with entry states:"
+  local found=0
+  for d in "${ENTRY_DIR}"/m*/; do
+    [[ -d "$d" ]] || continue
+    found=1
+    local m desc
+    m="$(basename "$d")"
+    desc="$(grep -m1 '^description:' "${d}Chart.yaml" 2>/dev/null | sed 's/description:[[:space:]]*//' || true)"
+    printf "  %-6s %s\n" "$m" "${desc:-—}"
+  done
+  [[ "$found" == 1 ]] || echo "  (none yet)"
+}
+
+cmd_start() {
+  local module user="$1" ; module="$2"
+  need_oc
+  [[ -d "${ENTRY_DIR}/${module}" ]] || die "no entry state for ${module} (${ENTRY_DIR}/${module})"
+  info "materializing ${module} entry state for ${user}…"
+  render_app "$module" "$user" | oc apply -f -
+  wait_healthy "$(app_name "$module" "$user")"
+  echo
+  ok "${user} can start ${module}."
+}
+
+cmd_verify() {
+  local module user="$1"; module="$2"; shift 2 || true
+  need_oc
+  local script="${VERIFY_DIR}/${module}.sh"
+  [[ -x "$script" ]] || die "no verify script for ${module} (${script})"
+  "$script" --user "$user" "$@"
+}
+
+cmd_reset() {
+  local module user="$1"; module="$2"
+  need_oc
+  local app; app="$(app_name "$module" "$user")"
+  info "resetting ${module} for ${user} (delete + re-materialize)…"
+  if oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
+    oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s
+    ok "previous state pruned"
+  else
+    info "no existing entry app — clean start"
+  fi
+  cmd_start "$user" "$module"
+}
+
+cmd_solve() {
+  local module user="$1"; module="$2"
+  need_oc
+  [[ -d "${ENTRY_DIR}/${module}/solve" ]] || die "${module} has no solve state defined yet"
+  die "solve engine lands with the first demo-flavor module — not implemented in this skeleton"
+}
+
+cmd_git_refresh() {
+  need_oc
+  info "re-running the git-localize mirror sync…"
+  # Re-sync of the mirror app re-fires its Sync-hook Job (BeforeHookCreation).
+  if command -v argocd >/dev/null 2>&1 && argocd account get-user-info >/dev/null 2>&1; then
+    argocd app sync pp-git-mirror --async >/dev/null && ok "mirror sync triggered (argocd)"
+  else
+    # No argocd CLI session — nudge via annotation refresh + let selfHeal re-run the hook.
+    oc annotate application pp-git-mirror -n "$ARGO_NS" \
+      argocd.argoproj.io/refresh=hard --overwrite >/dev/null
+    ok "mirror refresh requested (hard refresh annotation)"
+  fi
+  echo "   watch: oc get jobs -n ${GITEA_NS} -w"
+}
+
+cmd_doctor() {
+  need_oc
+  echo "ws doctor — environment sanity"
+  local fail=0
+  printf "  %-28s" "cluster login"; oc whoami >/dev/null 2>&1 && ok "$(oc whoami) @ $(oc whoami --show-server)" || { err "not logged in"; fail=1; }
+  printf "  %-28s" "gitops operator"
+  local csv
+  csv="$(oc get csv -n openshift-gitops-operator -o jsonpath='{.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}' 2>/dev/null || true)"
+  [[ "$csv" == *Succeeded* ]] && ok "installed" || { err "not ready (${csv:-missing})"; fail=1; }
+  printf "  %-28s" "argo applications"
+  local bad
+  bad="$(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}={.status.health.status} {end}' 2>/dev/null | tr ' ' '\n' | grep -v '=Healthy' | grep -v '^$' || true)"
+  [[ -z "$bad" ]] && ok "all Healthy" || { err "unhealthy: $(echo "$bad" | tr '\n' ' ')"; fail=1; }
+  printf "  %-28s" "gitea"
+  local host
+  host="$(oc get route gitea -n "$GITEA_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  if [[ -n "$host" ]] && curl -ksf "https://${host}/api/v1/version" >/dev/null 2>&1; then ok "https://${host}"; else err "unreachable"; fail=1; fi
+  printf "  %-28s" "mirror (${MIRROR_ORG}/${MIRROR_REPO})"
+  if [[ -n "$host" ]] && curl -ksf "https://${host}/api/v1/repos/${MIRROR_ORG}/${MIRROR_REPO}" >/dev/null 2>&1; then ok "mirrored"; else err "missing — run: ws git-refresh"; fail=1; fi
+  (( fail == 0 )) && { echo; ok "environment looks good"; } || { echo; err "issues found — fix hints above"; exit 1; }
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  local user="" module="" extra=()
+  # collect --user anywhere; first bare arg = module
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --user) user="$2"; shift 2;;
+      -*) extra+=("$1"); shift;;
+      *) [[ -z "$module" ]] && module="$1" || extra+=("$1"); shift;;
+    esac
+  done
+  case "$cmd" in
+    list)        cmd_list;;
+    start)       cmd_start "$(user_arg "$user")" "$(module_arg "$module")";;
+    verify)      cmd_verify "$(user_arg "$user")" "$(module_arg "$module")" "${extra[@]:-}";;
+    reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;
+    solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
+    git-refresh) cmd_git_refresh;;
+    doctor)      cmd_doctor;;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,12p';;
+    *) die "unknown command '$cmd' — try: ws help";;
+  esac
+}
+main "$@"
