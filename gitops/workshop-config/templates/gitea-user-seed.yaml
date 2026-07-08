@@ -20,7 +20,8 @@ metadata:
     workshop.redhat.com/layer: workshop-config
 rules:
   - apiGroups: ["pfe.rhpds.com"]
-    resources: ["giteas"]
+    # NOTE: the rhpds CRD's plural is literally "gitea" (not "giteas") — verified live 2026-07-08
+    resources: ["gitea"]
     verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["secrets", "configmaps"]
@@ -94,13 +95,16 @@ spec:
               [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
               GITEA_URL="https://${HOST}"
 
-              echo "▶ discovering admin credentials…"
+              echo "▶ discovering admin credentials (retry loop — operator writes them post-setup)…"
               ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
-              ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
-              if [[ -z "$ADMIN_PASS" ]]; then
-                ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
-              fi
-              [[ -n "$ADMIN_PASS" ]] || { echo "❌ could not discover Gitea admin password (CR status + gitea-admin-credentials secret)"; exit 1; }
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 10
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 10m (CR status + gitea-admin-credentials secret)"; exit 1; }
               AUTH="${ADMIN_USER}:${ADMIN_PASS}"
 
               echo "▶ reading the shared workshop password (secret workshop-user-creds)…"

@@ -32,8 +32,8 @@ Recommended paths: 3-day flagship (`WS-FULL-3D`), 2-day compressed, 1-day develo
 # 1. Stand up a cluster's platform (any OpenShift 4.20+, cluster-admin)
 ./bootstrap/install.sh --profiles core --users 5 --domain apps.cluster-x.example.com
 
-# 2. Preview the content locally
-npx antora content/site-workshop.yml
+# 2. Preview the content locally (builds run from content/ — see docs/authoring-conventions.md)
+npm run build:workshop   # or: ./utilities/lab-serve
 
 # 3. Materialize a module for a user
 tools/ws/ws start m01 --user user1
