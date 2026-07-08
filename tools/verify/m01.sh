@@ -53,7 +53,7 @@ if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------
   check "parasol-web deployment exists"         oc get deploy parasol-web -n "$NS"   || hint "deploy the image — lab exercise 2 (oc new-app --image=…/parasol-web:1.0 --name=parasol-web)"
   check "parasol-web has >=1 ready replica"     deploy_ready parasol-web "$NS"       || hint "wait for rollout: oc rollout status deploy/parasol-web -n ${NS}"
-  check "route parasol-web answers 200 on /"    route_answers_200 "$NS"              || hint "publish the app — lab exercise 5 (oc expose service/parasol-web --port=8080)"
+  check "route parasol-web answers 200 on /"    route_answers_200 "$NS"              || hint "publish the app — lab exercise 4 (oc expose service/parasol-web --port=8080)"
 fi
 
 verify_summary
