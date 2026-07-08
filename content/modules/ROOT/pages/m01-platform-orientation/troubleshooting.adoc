@@ -1,0 +1,116 @@
+= Platform Orientation & First App: Troubleshooting
+:module-id: m01
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (2026-07-08) plus the
+// build-note failure-mode seeds. Format: Symptom / Cause / Fix.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+
+== First console login is slow or shows an error page
+
+Symptom:: The very first sign-in as `{user}` hangs for 10–30 seconds, or briefly shows an authentication error before the console loads.
+Cause:: The OAuth flow and the htpasswd identity provider warm up on first use for a freshly-provisioned user; the first token exchange is the slow one.
+Fix:: Wait, then refresh the page. It is not broken. Subsequent logins are fast. If it still fails after a minute, confirm you are using the exact username `{user}` and the workshop password, and that you are on the {ocp_console_url}[correct console URL^].
+
+== `ImagePullBackOff` when deploying parasol-web
+
+Symptom:: The Pod never reaches `Running`; `oc get pods` shows `ImagePullBackOff` or `ErrImagePull`.
+Cause:: Your project's ServiceAccounts lack permission to pull from the `parasol-images` registry namespace (the `system:image-puller` RoleBinding for workshop attendees is missing), or the image reference has a typo.
+Fix:: First check the reference is exactly `image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0`. Then look at the Pod events:
++
+[source,sh,role=execute]
+----
+oc describe pod -l deployment=parasol-web | sed -n '/Events/,$p'
+----
++
+If events say the pull is *forbidden* / *unauthorized*, the puller grant is missing — this is an environment issue, not something you can fix from your project. Tell your instructor; the fix is a `system:image-puller` RoleBinding on `parasol-images` for the workshop attendees group.
+
+== `oc expose` complains it can't choose a port
+
+Symptom:: `oc expose service/parasol-web` errors or creates a Route on an unexpected port; the app is unreachable.
+Cause:: The Service publishes *two* ports (8080 for HTTP, 8443 for HTTPS). Without a port, `oc expose` cannot pick which to publish.
+Fix:: Name the HTTP port explicitly:
++
+[source,sh,role=execute]
+----
+oc delete route parasol-web --ignore-not-found
+oc expose service/parasol-web --port=8080
+----
+
+== The app URL returns 503 (Service Unavailable) right after creating the Route
+
+Symptom:: Opening `http://parasol-web-{user}-dev.{cluster_domain}/` immediately after creating the Route returns a 503 page.
+Cause:: The ingress router takes a moment to reconcile a brand-new Route; for a second or two the host exists in DNS but the router has no backend for it yet. (It can also mean the Service has no ready Pods — see below.)
+Fix:: Wait a few seconds and refresh. If the 503 persists past ~15 seconds, check that the Service actually has ready endpoints:
++
+[source,sh,role=execute]
+----
+oc get endpoints parasol-web
+----
++
+No addresses listed means no Pods are `Running` — scale back up (`oc scale deployment/parasol-web --replicas=3`) and retry.
+
+== A deprecation warning about a legacy workload API appears
+
+Symptom:: `oc get all` and `oc status` print a warning line like this:
++
+[source,texinfo]
+----
+Warning: apps.openshift.io/v1 DeploymentConfig is deprecated in v4.14+, unavailable in v4.10000+
+----
+Cause:: `oc` prints this whenever it *could* have listed that legacy object type — whether or not any exist. This lab never creates one; you deployed a *Deployment*, the current supported workload API.
+Fix:: Ignore it. It is informational and does not affect anything you built. To list only what this module uses, run `oc get deployment,pod,svc,route`.
+
+== The web terminal takes a while to open the first time
+
+Symptom:: Clicking the masthead terminal icon shows a "starting" spinner for several seconds on first use.
+Cause:: OpenShift starts a small per-user workspace Pod to back the terminal; the first launch in a session includes that startup.
+Fix:: Wait for it — later opens are quick. If it never starts, use any other terminal that is logged in as `{user}`; nothing in the lab requires the *web* terminal specifically.
+
+== OpenShift Lightspeed is missing or slow to answer
+
+Symptom:: There is no Lightspeed button in the masthead, or the chat panel spins without returning an answer.
+Cause:: OpenShift Lightspeed is an optional add-on and may not be installed on this cluster; when present, answers come from a live model and latency (and wording) vary.
+Fix:: This is expected, not a failure. Everything Lightspeed would tell you is available from the CLI:
++
+[source,sh,role=execute]
+----
+oc get events --sort-by=.lastTimestamp | tail -20
+oc logs deployment/parasol-web --tail=20
+oc describe pod -l deployment=parasol-web
+----
++
+Nothing else in the workshop depends on Lightspeed being present.
+
+== My app looks like someone else's / Route host already taken
+
+Symptom:: You expected an empty project but see unfamiliar workloads, or creating the Route reports the host is in use.
+Cause:: You are working in the wrong project. Route hosts and objects are per-project; two attendees only collide if they are in the same namespace.
+Fix:: Return to your own project and confirm it:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc project {user}-dev
+oc whoami
+----
++
+Everything you create in this module belongs in `{user}-dev`. If your project is genuinely cluttered, `ws reset {module-id}` wipes it back to empty.
+
+== `ws reset` didn't clean up my workloads (running it locally)
+
+Symptom:: After `ws reset {module-id}`, `oc get all` still shows `parasol-web` running.
+Cause:: Running `ws reset` from a *macOS* laptop hits a shell-portability issue (BSD `sed` handles the purge pattern differently from the GNU `sed` in the Linux Showroom terminal), so the workload purge can be skipped. Attendees running `ws reset` in the in-browser Showroom terminal are not affected.
+Fix:: Delete the workloads directly, then re-run start:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc delete all,route --all -n {user}-dev
+ws start {module-id}
+----
++
+If you are an instructor seeing this from your laptop, flag it to the platform team (tracked as a `ws` CLI portability fix); it does not affect the attendee experience.
+
+'''
+
+_Last verified on OpenShift {ocp_version} (2026-07-08)._

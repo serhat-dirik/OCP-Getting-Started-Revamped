@@ -1,0 +1,578 @@
+= Platform Orientation & First App: Lab
+:module-id: m01
+include::partial$version-attributes.adoc[]
+
+// Lab page for M01. Workshop exercises are guarded ifndef::demo[] so the DEMO
+// rendering shows only the presenter arc; the WORKSHOP rendering shows the
+// hands-on steps. Every attendee command uses role=execute (click-to-run).
+// Console click-paths marked [CAPTURE-VERIFY] await a browser confirmation pass
+// (unified 4.20+ console; verified from CLI/API, not yet screenshotted).
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+In this lab you take Parasol's claims portal from nothing to a published, self-healing application — first in the web console, then again in six `oc` commands — and finish by asking the cluster's AI assistant a question.
+Everything you create lives in your own project, `{user}-dev`; nothing you do can affect another attendee.
+
+[TIP]
+====
+Every step is offered two ways.
+Use the *Console* tab to learn the graphical workflow, or the *CLI* tab to learn `oc` — or do a step one way and repeat it the other.
+The two paths produce the same objects.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 12-minute presenter arc (console tour -> deploy -> kill pod -> Lightspeed)
+// ============================================================================
+ifdef::demo[]
+== Demo arc — First app & self-healing (12 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws solve m01 --user {user}` (or deploy `parasol-web` by hand) *before the session* so you can fall back to a ready state, then delete it to demo live.
+Have two windows ready: the *web console* (for the visual wow) and a *terminal* (`oc`, already logged in to `{user}-dev`) for the kill-a-Pod beat so Topology animates while you type.
+Console labels below were grounded from the cluster API on 4.21; *[CAPTURE-VERIFY]* marks a label to confirm on your screen before you go live.
+====
+
+[demo-block]
+[TIME 2m]
+Say:: "Parasol's claims portal is moving to OpenShift. I'm a developer with nothing but a container image. Watch how little I have to do to get it running — and keep it running."
+Show:: The web console, already open at `{user}-dev`. The unified navigation on the left; the *+Add* and *Topology* items; the *Lightspeed* button and *terminal* icon in the masthead.
+Do:: Point out that there is *one* console — no perspective to switch. Open the *Topology* view; it is empty. "This is my project. Let's fill it."
+
+[demo-block]
+[TIME 3m]
+Say:: "I'll deploy straight from a container image. No Dockerfile, no build — the image already exists in the cluster registry."
+Show:: *+Add* → *Container images*. Paste the image, let the form auto-fill the name, leave *Create route* checked. _[CAPTURE-VERIFY: exact tile label on 4.21.]_
+Do:: Enter `image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0`. Click *Create*. Switch to *Topology*: narrate the ring going from light to dark blue as the Pod pulls and starts. "That ring is the platform pulling the image, starting the container, and health-checking it — no ticket, no server."
+
+[demo-block]
+[TIME 2m]
+Say:: "One copy is a single point of failure. I want three, and I want the platform to keep it at three."
+Show:: In Topology, click the `parasol-web` node; use the up-arrow on the Pod donut to scale to 3. The donut fills with three blue segments.
+Do:: Scale to *3*. "I didn't start three servers. I raised a number — desired state — and the platform is making reality match it."
+
+[demo-block]
+[TIME 2m]
+Say:: "Here's the part that changes how you sleep. I'm going to kill one of these Pods — the thing you'd normally get paged for."
+Show:: The *terminal* window beside Topology. Run the delete; snap back to Topology.
+Do::
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc delete pod -l deployment=parasol-web --field-selector status.phase=Running \
+  -n {user}-dev | head -1
+----
++
+"Watch — one segment goes, and before I can finish this sentence a new one is already coming up. The Service never stopped serving. Nobody was paged. That's the reconcile loop: actual dropped below desired, and the platform fixed it in seconds. Cattle, not pets."
+
+[demo-block]
+[TIME 3m]
+Say:: "Last thing. When something *does* go wrong, you're not alone in a man page. The cluster has an assistant."
+Show:: The *Lightspeed* button in the masthead → the chat panel. _[CAPTURE-VERIFY: masthead entry point on 4.21.]_
+Do:: Type *"Why is my pod restarting?"*. Read back the first two causes it lists (CrashLoopBackOff, OOMKilled…) and note it hands you the exact `oc` commands and links OpenShift docs. "This is OpenShift Lightspeed — the in-console assistant. It knows OpenShift, and later in the workshop we point AI at our *own* apps. Deploy, scale, self-heal, and an assistant — in twelve minutes, from one image."
+
+[NOTE]
+.If Lightspeed is unavailable
+====
+On a cluster without Lightspeed the masthead button is absent.
+Pivot to the CLI equivalent and keep the story: `oc get events` and `oc logs` are where the same answers live — "the assistant just reads these faster than you can."
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Explore the console and the web terminal
+⏱ *~10 min* · get oriented before you deploy anything
+
+Open the {ocp_console_url}[OpenShift web console^] and sign in as `{user}` with your workshop password.
+
+[NOTE]
+.One console, no perspective to switch
+====
+Since OpenShift 4.19 the console is *unified*: there is a single navigation that exposes both application workflows (Topology, *+Add*, builds) and administrative views.
+If you have used older OpenShift, there is no longer a *Developer* / *Administrator* perspective switch to hunt for — everything is in one place.
+====
+
+Take two minutes to find these landmarks; you will use every one of them today:
+
+. The *project selector* at the top of the navigation — set it to `{user}-dev`. This scopes everything you see to your own project.
+. *+Add* — the front door for deploying applications (from an image, from Git, from the catalog).
+. *Topology* — the live map of what is running in your project (empty right now).
+. The *terminal* icon in the masthead (top bar) — opens a browser-based shell, already authenticated as you.
+. The *Lightspeed* button in the masthead — the in-console AI assistant (you use it in the last exercise).
+
+Now open the *web terminal* from the masthead terminal icon and confirm who and where you are:
+
+[source,sh,role=execute]
+----
+oc whoami
+----
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc project {user}-dev
+----
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+{user}
+Now using project "{user}-dev" on server "https://api...:6443".
+----
+
+[NOTE]
+.First launch of the web terminal
+====
+The first time you open the web terminal in a session, OpenShift starts a small workspace Pod for you, so it can take a few seconds longer than later launches.
+The shell lands in your last-used project.
+====
+
+// [CAPTURE-VERIFY] Confirm in a browser on 4.21: the masthead terminal icon and Lightspeed button positions, the "+Add" label, and that the project selector reads user1-dev after ws start. Grounded from CLI/API: dev perspective is Disabled (unified console), lightspeed-console-plugin + web-terminal operator installed, LightspeedButton capability Enabled.
+// TODO(media): image::m01-platform-orientation/m01-platform-orientation-04-unified-console-landmarks.png[Unified console with +Add, Topology, terminal, and Lightspeed annotated] — see media-manifest.md
+
+[.checkpoint]
+****
+✔ *Verify:* You are signed in, the project selector shows `{user}-dev`, and the web terminal prints `{user}` for `oc whoami`.
+If `oc whoami` shows a different name, sign out and back in as `{user}`.
+****
+
+== 2. Deploy the Parasol claims portal
+⏱ *~10 min* · deploy a prebuilt image and watch it start
+
+The claims portal image already exists in the cluster's internal registry — Parasol's platform team built it for you.
+You are going to *run* it.
+Both paths below deploy the same image and create a Deployment, a ReplicaSet, Pods, and a Service.
+
+[tabs]
+====
+Console::
++
+--
+. Go to *+Add* → *Container images*.
+. Under *Image name from external registry* / *Image stream tag from internal registry*, enter the image reference:
++
+[.copy]
+`image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0`
+. The *Name* field auto-fills to `parasol-web` — keep it.
+. Leave *Resource type* as *Deployment*.
+. Leave *Target port* at *8080*.
+. For now, *uncheck* *Create route* — you will add the Route yourself in exercise 4.
+. Click *Create*. The console drops you into *Topology*, where a `parasol-web` node appears with a Pod ring that darkens as the image pulls and the container starts.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the "+Add -> Container images" tile label, the internal-registry radio option, that Resource type offers "Deployment" (the current type, not the legacy config object), and the Create route checkbox lives under Advanced options. Grounded from CLI: oc new-app on this image creates ImageStream+Deployment+Service(8080,8443) and the console Deploy Image form has historically offered image/name/resource-type/target-port/create-route.
+// TODO(media): image::m01-platform-orientation/m01-platform-orientation-02-deploy-image-dialog.png[Deploy Image dialog with the registry reference filled in] — see media-manifest.md
+--
+CLI::
++
+--
+Deploy the image with a single command:
+
+[source,sh,role=execute]
+----
+oc new-app \
+  --image=image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0 \
+  --name=parasol-web
+----
+
+.Expected output
+[%collapsible]
+=====
+[source,texinfo]
+----
+--> Found container image b854b0f for "image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0"
+    Java Applications
+    -----------------
+    Platform for running plain Java applications (fat-jar and flat classpath)
+--> Creating resources ...
+    imagestream.image.openshift.io "parasol-web" created
+    deployment.apps "parasol-web" created
+    service "parasol-web" created
+--> Success
+    Application is not exposed. You can expose services to the outside world by executing one or more of the commands below:
+     'oc expose service/parasol-web'
+    Run 'oc status' to view your app.
+----
+=====
+
+`oc new-app` inspected the image, recognized it as a Java (Quarkus) application, and created three objects for you: an *ImageStream* (a cluster-local pointer to the image), a *Deployment* (your desired state), and a *Service* (the stable in-cluster address).
+Watch the Pod come up:
+
+[source,sh,role=execute]
+----
+oc get pods -w
+----
+
+Press *Ctrl+C* once the Pod shows `1/1` and `Running`.
+--
+====
+
+Confirm the Deployment is ready and look at *how* the platform is running your container:
+
+[source,sh,role=execute]
+----
+oc get deployment parasol-web
+----
+
+[source,sh,role=execute]
+----
+oc get pod -l deployment=parasol-web \
+  -o jsonpath='{.items[0].spec.containers[0].securityContext}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME          READY   UP-TO-DATE   AVAILABLE   AGE
+parasol-web   1/1     1            1           25s
+
+{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"runAsUser":1001010000}
+----
+
+You never asked for any of that security configuration.
+OpenShift applied it: your container runs as a *random non-root user* (`1001010000`), with all Linux capabilities dropped and privilege escalation disabled.
+This is the "secure-by-default" the concept promised — you get it for free, and a later module (Multi-Tenancy & Workload Security) explains how to work with it.
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get deployment parasol-web` shows `1/1` ready, and the Pod's `runAsNonRoot` is `true` with a high `runAsUser`.
+In Topology, the `parasol-web` node has a solid dark-blue ring.
+If the Pod is stuck in `ImagePullBackOff`, see the troubleshooting page (image pull permissions).
+****
+
+== 3. Scale out and watch self-healing
+⏱ *~10 min* · the heart of the module — desired state defends itself
+
+One replica is a single point of failure.
+Raise your desired state to three, then break it on purpose and watch the platform put it back.
+
+=== Scale 1 → 3
+
+[tabs]
+====
+Console::
++
+--
+. In *Topology*, click the `parasol-web` node to open its side panel.
+. On the Pod donut, click the *up arrow* twice to raise the Pod count to *3* (or use *Actions → Edit Pod count*).
+. Watch three segments fill the ring as the new Pods schedule and start.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the Pod-donut up/down arrows and the "Edit Pod count" action label in the Topology side panel.
+// TODO(media): image::m01-platform-orientation/m01-platform-orientation-01-topology-3pods.png[Topology view with parasol-web scaled to three running Pods] — see media-manifest.md
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc scale deployment/parasol-web --replicas=3
+----
+
+[source,sh,role=execute]
+----
+oc get pods -o wide
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME                           READY   STATUS    RESTARTS   AGE   NODE
+parasol-web-6475f4bbb5-4qspj   1/1     Running   0          21s   worker-...-1
+parasol-web-6475f4bbb5-chnfm   1/1     Running   0          21s   worker-...-2
+parasol-web-6475f4bbb5-v9xdv   1/1     Running   0          112s  worker-...-3
+----
+--
+====
+
+Notice the three Pods landed on *three different worker nodes* — the scheduler spread them for you, so losing one node does not take out all your replicas.
+
+=== Break it: kill a Pod
+
+This is the deliberate break-and-fix of the module.
+You are going to delete a running Pod — the exact event that used to mean a 2 a.m. page — and watch the platform absorb it.
+
+First, in a *second* terminal (or the console Topology), keep an eye on the Pods:
+
+[source,sh,role=execute]
+----
+oc get pods -w
+----
+
+Then, in your main terminal, delete one Pod:
+
+[source,sh,role=execute]
+----
+oc delete pod "$(oc get pods -l deployment=parasol-web -o jsonpath='{.items[0].metadata.name}')"
+----
+
+In the watch window you see it happen in real time: the deleted Pod goes `Terminating`, and *before it is even gone* a new Pod appears in `ContainerCreating` and then `Running`.
+Your desired state is three; actual briefly dropped to two; the ReplicaSet reconciled it back to three.
+
+Confirm with the events:
+
+[source,sh,role=execute]
+----
+oc get events --sort-by=.lastTimestamp | grep -E "Killing|SuccessfulCreate" | tail -4
+----
+
+.Expected output
+[source,texinfo]
+----
+Normal   Killing            pod/parasol-web-6475f4bbb5-4qspj    Stopping container parasol-web
+Normal   SuccessfulCreate   replicaset/parasol-web-6475f4bbb5   Created pod: parasol-web-6475f4bbb5-t7l6q
+----
+
+There it is in the platform's own words: `SuccessfulCreate` from the *ReplicaSet*.
+No human created that Pod.
+
+=== Break it harder (optional): scale to zero
+
+Want to feel desired state from the other side? Set it to zero, watch every Pod disappear, then bring it back:
+
+[source,sh,role=execute]
+----
+oc scale deployment/parasol-web --replicas=0 && oc get pods
+----
+
+[source,sh,role=execute]
+----
+oc scale deployment/parasol-web --replicas=3 && oc rollout status deployment/parasol-web
+----
+
+The platform did exactly what you declared each time — down to nothing, back to three.
+That is the point: the number you set is the number the platform defends.
+
+[.checkpoint]
+****
+✔ *Verify:* After deleting a Pod, `oc get pods` still shows *3* `Running` Pods (with one much younger than the others), and `oc get events` contains a `SuccessfulCreate` from the ReplicaSet.
+End this exercise back at *3* replicas.
+****
+
+== 4. Publish the app with a Route
+⏱ *~7 min* · make the claims portal reachable from a browser
+
+Your Service load-balances the three Pods, but only *inside* the cluster.
+A *Route* publishes it at a real URL on the cluster domain.
+
+[tabs]
+====
+Console::
++
+--
+. In *Topology*, click the `parasol-web` node.
+. Choose *Actions → Create Route* (or open the *Resources* tab in the side panel and click *Create Route*).
+. Leave the target port at *8080*, and click *Create*.
+. Back in Topology, click the *Open URL* arrow that now appears on the top-right of the `parasol-web` node.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the "Create Route" action location and the Open-URL (external-link) icon on the Topology node.
+--
+CLI::
++
+--
+The Service exposes two ports (8080 for HTTP, 8443 for HTTPS), so tell `oc expose` which one to publish:
+
+[source,sh,role=execute]
+----
+oc expose service/parasol-web --port=8080
+----
+
+[source,sh,role=execute]
+----
+oc get route parasol-web
+----
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+NAME          HOST/PORT                                        SERVICES      PORT   TERMINATION
+parasol-web   parasol-web-{user}-dev.{cluster_domain}          parasol-web   8080
+----
+
+[NOTE]
+.Why `--port=8080`
+=====
+Because the Service has more than one port, `oc expose` cannot guess which to publish.
+`--port=8080` picks the HTTP port explicitly.
+The Route's host is built from the Route name and your project — `parasol-web-{user}-dev.{cluster_domain}` — so it is unique to you; no two attendees collide.
+=====
+--
+====
+
+Open your app at http://parasol-web-{user}-dev.{cluster_domain}/[the claims portal^].
+You should see the *Parasol Insurance — Claims Portal* landing page.
+The seeded claims data is served at `/api/claims`:
+
+[source,sh,role=execute,subs="attributes"]
+----
+curl -s http://parasol-web-{user}-dev.{cluster_domain}/api/claims | head -c 300
+----
+
+.Expected output
+[source,texinfo]
+----
+[{"id":"CLM-1001","policyholder":"Alice Nguyen","type":"Auto","status":"Under Review","amount":4200.0,...}]
+----
+
+[.checkpoint]
+****
+✔ *Verify:* The Route host `parasol-web-{user}-dev.{cluster_domain}` opens the Parasol claims portal in your browser (HTTP 200), and `curl .../api/claims` returns a JSON array of claims.
+If you briefly get a 503, wait a few seconds and refresh — the router takes a moment to pick up a brand-new Route.
+****
+
+== 5. Read the logs and events
+⏱ *~7 min* · find out what your app is doing
+
+When you need to know what an app is doing — or why it is not — logs and events are the first two places to look.
+
+[tabs]
+====
+Console::
++
+--
+. In *Topology*, click the `parasol-web` node, then a running Pod in the side panel.
+. Open the *Logs* tab to stream the container's output.
+. Open the *Events* tab to see scheduling, pulling, and scaling activity for the Pod.
+. From the Pod's *Terminal* tab you can even open a shell *inside* the running container.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the Pod detail Logs / Events / Terminal tab labels.
+--
+CLI::
++
+--
+Stream the application log (with three replicas, `oc logs` on the Deployment picks one Pod):
+
+[source,sh,role=execute]
+----
+oc logs deployment/parasol-web --tail=8
+----
+
+.Expected output
+[%collapsible]
+=====
+[source,texinfo,subs="attributes"]
+----
+Found 3 pods, using pod/parasol-web-6475f4bbb5-v9xdv
+__  ____  __  _____   ___  __ ____  ______
+ --/ __ \/ / / / _ | / _ \/ //_/ / / / __/
+ -/ /_/ / /_/ / __ |/ , _/ ,< / /_/ /\ \
+--\___\_\____/_/ |_/_/|_/_/|_|\____/___/
+INFO  [io.quarkus] parasol-web 1.0.0 on JVM (powered by Quarkus {quarkus_version}) started in 8.599s. Listening on: http://0.0.0.0:8080
+INFO  [io.quarkus] Profile prod activated.
+INFO  [io.quarkus] Installed features: [cdi, micrometer, rest, rest-jackson, smallrye-health, vertx]
+----
+=====
+
+To read a *specific* Pod's log, name it: `oc logs <pod-name>`.
+Now look at the project's events — the platform's running commentary:
+
+[source,sh,role=execute]
+----
+oc get events --sort-by=.lastTimestamp | tail -8
+----
+
+And get a one-screen summary of your whole application:
+
+[source,sh,role=execute]
+----
+oc status
+----
+--
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc logs deployment/parasol-web` shows the Quarkus startup banner ending in `Listening on: http://0.0.0.0:8080`, and `oc get events` lists `Pulled`, `Started`, and `SuccessfulCreate` entries.
+****
+
+== 6. The whole lab in six commands
+⏱ *~6 min* · build the CLI muscle memory
+
+Everything you did in the console is six `oc` commands.
+This is the recap to remember — the shape of "deploy and operate an app" that every later module builds on.
+
+[source,sh,role=execute]
+----
+# 1. deploy the image (creates Deployment + Service + ImageStream)
+oc new-app --image=image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0 --name=parasol-web
+
+# 2. watch it start
+oc get pods -w        # Ctrl+C when Running
+
+# 3. scale to three
+oc scale deployment/parasol-web --replicas=3
+
+# 4. prove self-healing (delete a Pod; the ReplicaSet replaces it)
+oc delete pod -l deployment=parasol-web --field-selector=status.phase=Running
+
+# 5. publish it at a URL
+oc expose service/parasol-web --port=8080
+
+# 6. read what it's doing
+oc logs deployment/parasol-web --tail=5
+----
+
+[TIP]
+====
+`oc new-app`, `oc scale`, `oc expose`, `oc logs`, `oc get`, `oc delete` — six verbs cover most of a developer's daily loop on OpenShift.
+Learn these and the console becomes a convenience, not a crutch.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* Run `ws verify {module-id}` in your terminal. It should report the deployment ready and the Route answering `200` — all checks green.
+****
+
+== 7. Ask the cluster: OpenShift Lightspeed
+⏱ *~8 min* · get an answer without leaving the console
+
+*OpenShift Lightspeed* is the assistant built into the OpenShift web console — it answers OpenShift and Kubernetes questions in plain language and points you at the right `oc` commands and docs.
+(It is distinct from *Developer Lightspeed for Red Hat Developer Hub* and *Developer Lightspeed for the Migration Toolkit for Applications*, which you meet in later modules.)
+
+. In the console masthead, click the *Lightspeed* button to open the chat panel.
+. Ask a real operational question:
++
+[.copy]
+`Why is my pod restarting?`
+. Read the answer. It should list the usual causes — `CrashLoopBackOff`, `OOMKilled`, a failing liveness probe, `ImagePullBackOff`, node pressure — and, importantly, hand you the exact commands to investigate (`oc get events`, `oc logs`, `oc describe pod`) with links to OpenShift documentation.
+. Ask a follow-up about *your* app, for example:
++
+[.copy]
+`How do I see the logs for a deployment called parasol-web?`
+
+The point is not that the AI is magical — it is that the fastest path from "something's wrong" to "here's the command to run" is now one question, in the same window where you fix things.
+Later modules point this same idea at Parasol's *own* applications.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the masthead Lightspeed entry point and that a live "why is my pod restarting?" answer renders in the panel. Grounded from API: lightspeed-app-server healthy, /v1/query returns a doc-cited answer listing CrashLoopBackOff/OOMKilled/probe/ImagePullBackOff/node causes.
+// TODO(media): image::m01-platform-orientation/m01-platform-orientation-03-lightspeed-answer.png[OpenShift Lightspeed panel answering why is my pod restarting] — see media-manifest.md
+
+[NOTE]
+.If you don't see the Lightspeed button
+====
+OpenShift Lightspeed is an add-on and may not be installed on every cluster.
+If the masthead button is absent, you get the same answers from the CLI — `oc get events`, `oc logs`, and `oc describe pod <name>` are exactly what the assistant reads on your behalf.
+Nothing else in this workshop depends on Lightspeed being present.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You asked Lightspeed at least one question and got an OpenShift-specific answer that names concrete `oc` commands — or, if Lightspeed is not installed, you ran `oc get events` and `oc logs` and found the same information yourself.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the six verbs. Try this on your own:
+
+* Scale `parasol-web` to *five* replicas, then use `oc get pods -o wide` to see how the scheduler placed them across nodes.
+* Delete the *Deployment* (`oc delete deployment parasol-web`) and then check `oc get pods`. What happens to the Pods, and why? (Contrast this with deleting a single Pod in exercise 3.)
+* Re-deploy the app and re-create the Route in a *single* `oc new-app` command by adding `--labels` and then one `oc expose`. How few commands can you get to a published app?
+* Ask Lightspeed to explain the difference between a *Service* and a *Route*, then verify its answer against what you built.
+
+When you are done, run `ws verify {module-id}` — or `ws reset {module-id}` to wipe your project back to an empty `{user}-dev` and start fresh.
+
+endif::demo[]

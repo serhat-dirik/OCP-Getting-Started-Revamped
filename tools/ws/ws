@@ -74,8 +74,8 @@ argo_project() {  # workshop-entries once the workshop layer exists; default bef
   fi
 }
 
-render_app() {  # module user  → Application manifest on stdout
-  local module="$1" user="$2" url domain project
+render_app() {  # module user [solve]  → Application manifest on stdout
+  local module="$1" user="$2" solve="${3:-false}" url domain project
   url="$(repo_url)"
   domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo apps.example.com)"
   project="$(argo_project)"
@@ -102,6 +102,8 @@ spec:
           value: "${user}"
         - name: clusterDomain
           value: "${domain}"
+        - name: solve
+          value: "${solve}"
   destination:
     server: https://kubernetes.default.svc
   syncPolicy:
@@ -180,7 +182,8 @@ cmd_reset() {
   # Purge user-created leftovers per the module's ws-meta.yaml (entry state = clean slate).
   local meta="${ENTRY_DIR}/${module}/ws-meta.yaml"
   if [[ -f "$meta" ]]; then
-    grep -E '^\s*-\s' "$meta" | sed -e 's/^\s*-\s*//' -e 's/"//g' | while read -r ns_tmpl; do
+    # [[:space:]] not \s — BSD sed (macOS) has no \s and silently mangles the token
+    grep -E '^[[:space:]]*-[[:space:]]' "$meta" | sed -e 's/^[[:space:]]*-[[:space:]]*//' -e 's/"//g' | while read -r ns_tmpl; do
       local ns="${ns_tmpl//\$\{USER\}/${user}}"
       if oc get ns "$ns" >/dev/null 2>&1; then
         info "purging user workloads in ${ns}…"
@@ -192,11 +195,17 @@ cmd_reset() {
   cmd_start "$user" "$module"
 }
 
-cmd_solve() {
+cmd_solve() {  # instructor: materialize the module END state (entry chart with solve=true)
   local module user="$1"; module="$2"
   need_oc
-  [[ -d "${ENTRY_DIR}/${module}/solve" ]] || die "${module} has no solve state defined yet"
-  die "solve engine lands with the first demo-flavor module — not implemented in this skeleton"
+  [[ -d "${ENTRY_DIR}/${module}" ]] || die "no entry state for ${module}"
+  grep -q '^solve:' "${ENTRY_DIR}/${module}/values.yaml" 2>/dev/null \
+    || die "${module}'s chart defines no solve state (values.yaml lacks 'solve:')"
+  info "materializing ${module} END state for ${user} (instructor solve)…"
+  render_app "$module" "$user" "true" | oc apply -f -
+  wait_healthy "$(app_name "$module" "$user")"
+  echo
+  ok "${module} solved for ${user} — demo-ready."
 }
 
 cmd_git_refresh() {
@@ -260,7 +269,7 @@ main() {
   case "$cmd" in
     list)        cmd_list;;
     start)       cmd_start "$(user_arg "$user")" "$(module_arg "$module")";;
-    verify)      cmd_verify "$(user_arg "$user")" "$(module_arg "$module")" "${extra[@]:-}";;
+    verify)      cmd_verify "$(user_arg "$user")" "$(module_arg "$module")" ${extra[@]:+"${extra[@]}"};;
     reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;
     solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
     git-refresh) cmd_git_refresh;;

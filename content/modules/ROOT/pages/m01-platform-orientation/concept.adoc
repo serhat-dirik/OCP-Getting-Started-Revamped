@@ -1,0 +1,139 @@
+= Platform Orientation & First App: Concept
+:module-id: m01
+include::partial$version-attributes.adoc[]
+
+// Concept page for M01. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+
+[.lead]
+Your first day on Parasol Insurance's platform team: get the claims portal running on OpenShift and prove the platform keeps it alive without you.
+
+Parasol Insurance is modernizing how it processes claims, and the claims portal — the web front end adjusters use all day — is moving to Red Hat OpenShift {ocp_version}.
+Your first task is small on purpose: deploy the portal from a container image, then watch what the platform does when things go wrong.
+By the end you will have deployed, scaled, and self-healed a real application, and you will understand *why* a platform is different from a pile of servers.
+
+== What you'll learn
+
+* How Kubernetes models an application as *desired state* — and why that one idea changes how you operate software.
+* The three objects every OpenShift app is built from: *Pods*, *Deployments*, and *Services*.
+* What OpenShift adds on top of Kubernetes: a build-to-run-to-operate workflow, secure-by-default containers, a web console, and Routes.
+* Why *self-healing* means you stop hand-nursing servers ("pets") and start running interchangeable workloads ("cattle").
+* Where OpenShift Lightspeed — the in-console AI assistant — fits when you need an answer fast.
+
+== Why a platform, and not just servers
+
+The old way to run the claims portal was a server somebody named, patched, and prayed over.
+When it wedged at 2 a.m., a human logged in, poked at it, and restarted a process.
+That server was a *pet*: unique, hand-fed, and mourned when it died.
+
+A platform flips this.
+You tell OpenShift *what you want* — "run three copies of this image, keep them reachable at this address" — and the platform's job is to make reality match that description and *keep it matching*, forever, without you.
+The servers become *cattle*: identical, disposable, automatically replaced.
+That shift — from running processes by hand to declaring desired state and letting a control loop enforce it — is the whole reason this workshop exists.
+
+[NOTE]
+====
+Throughout the workshop you use the `oc` command-line tool.
+`oc` is OpenShift's CLI; it is a superset of Kubernetes' `kubectl`, so every `kubectl` command works as `oc`, plus OpenShift-only verbs like `oc new-app` and `oc expose`.
+We use `oc` everywhere.
+====
+
+== The Kubernetes mental model: desired state
+
+Kubernetes (the engine inside OpenShift) does not run your app directly.
+You hand it a description of the app you *want*, and a set of controllers work continuously to make the cluster match that description.
+That description is built from a few object types:
+
+Pod:: The smallest unit that runs. A Pod wraps one (or a few tightly-coupled) containers with a shared network address. Pods are *cattle*: cheap, disposable, and never repaired in place — they are replaced.
+Deployment:: The *desired state* for a set of identical Pods. You say "I want 3 replicas of this image"; the Deployment creates a ReplicaSet that creates the Pods, and if a Pod disappears the ReplicaSet makes another. You almost never create Pods yourself — you create a Deployment and let it own them.
+Service:: A stable in-cluster address (name + IP) that load-balances across a Deployment's Pods. Pods come and go with random names and IPs; the Service is the fixed front door so other components never chase a moving target.
+
+The engine that ties these together is the *reconcile loop*: every controller constantly compares *desired* (what you declared) against *actual* (what is running) and acts to close the gap.
+
+[mermaid]
+....
+graph LR
+  You([You]) -->|"desired: 3 replicas"| D[Deployment]
+  D -->|owns| RS[ReplicaSet]
+  RS -->|creates & replaces| P1[Pod]
+  RS --> P2[Pod]
+  RS --> P3[Pod]
+  SVC[Service] -.load-balances.-> P1
+  SVC -.-> P2
+  SVC -.-> P3
+  loop{{"reconcile loop:<br/>desired vs actual"}} -.watches.-> RS
+  loop -.watches.-> P1
+....
+
+// TODO(media): replace/augment with SVG export m01-platform-orientation-01-desired-state.svg (see media-manifest.md)
+
+This is the idea to internalize before you touch the lab: *you never operate Pods directly*.
+You declare intent on a Deployment, and the reconcile loop does the operating.
+Delete a Pod and one reappears — not because someone paged an engineer, but because actual no longer matched desired and a controller fixed it in milliseconds.
+
+== What OpenShift adds over Kubernetes
+
+Kubernetes gives you the reconcile loop and the object model.
+OpenShift is Kubernetes plus everything a real engineering organization needs to *build, run, and operate* applications safely on day one:
+
+* **A web console and developer catalog.** A full graphical view of your applications — a Topology map, deploy-from-image and deploy-from-Git flows, logs, events, and a built-in terminal — so you are productive without memorizing CLI flags.
+* **Routes.** A Service is only reachable *inside* the cluster. OpenShift's *Route* publishes a Service at a real URL on the cluster's domain, with the ingress router and DNS handled for you — no load balancer to file a ticket for.
+* **Secure-by-default containers.** OpenShift refuses to run your container as root. It assigns each project a random high user ID (you will see something like `1001010000`), drops Linux capabilities, and applies a restricted security profile automatically. Your app is hardened before you have thought about security at all. (The full story is a later module; today you just observe it.)
+* **Build-to-run-to-operate.** The same platform builds images from source, runs them, and operates them — the console, `oc`, pipelines, and GitOps all speak the same object model. This module is the "run" corner; the rest of the workshop fills in the others.
+
+[mermaid]
+....
+graph TB
+  subgraph cluster["OpenShift cluster"]
+    subgraph proj["Your project (your-name-dev)"]
+      DEP["Deployment: parasol-web<br/>(desired: N replicas)"]:::hi
+      POD1["Pod"]:::hi
+      POD2["Pod"]:::hi
+      POD3["Pod"]:::hi
+      SVC["Service :8080"]:::hi
+      DEP --> POD1 & POD2 & POD3
+      SVC -.-> POD1 & POD2 & POD3
+    end
+    RT["Route<br/>(per-user URL)"]:::hi
+    RT --> SVC
+    SEC["Security defaults<br/>non-root · random UID · restricted"]:::plat
+    CON["Web console · Lightspeed · web terminal"]:::plat
+    SEC -.applied to.-> POD1
+  end
+  USER([Adjuster]) -->|HTTPS| RT
+  classDef hi fill:#e00,stroke:#900,color:#fff;
+  classDef plat fill:#f3f3f3,stroke:#888,color:#333;
+....
+
+// TODO(media): replace/augment with SVG export m01-platform-orientation-02-platform-accretion-v1.svg — the master Parasol platform-accretion diagram with the M01 layer (red) highlighted; each later module highlights its own layer on the same base.
+
+The red layer above is everything you build in this module.
+It is the first layer of a diagram that *accretes* across the workshop: every module lights up one more piece of the same Parasol platform until, by the end, the whole picture is governed, observed, and AI-assisted.
+
+== Self-healing: cattle, not pets
+
+Here is the payoff of desired state.
+Because a Deployment's ReplicaSet is *always* reconciling actual against desired, a lost Pod is not an incident — it is a routine event the platform absorbs.
+
+Kill one of three Pods and the sequence is automatic: the ReplicaSet notices `actual (2) < desired (3)`, emits a `SuccessfulCreate`, schedules a replacement onto a healthy node, and the Service keeps routing to the survivors the entire time.
+No human, no pager, no downtime.
+You will do exactly this in the lab and watch the replacement appear in seconds.
+
+That is what "cattle, not pets" means in practice: you do not repair a sick Pod, you let the platform replace it — and you design every workload so that replacement is safe.
+
+== How this shows up in real orgs
+
+* **The on-call rotation shrinks.** The 2 a.m. "restart the stuck process" page mostly disappears, because the reconcile loop already did it. On-call shifts from *restarting* things to investigating *why* desired state could not be met (bad image, no capacity, failing dependency).
+* **"Works on my machine" stops being an argument.** The unit of deployment is an image plus a declared desired state, not a hand-configured server. What runs in your project is what runs in production.
+* **Platform teams sell desired state, not servers.** The team that runs your clusters gives application teams a self-service platform: you declare what you want, quotas and security are enforced automatically, and nobody hands out SSH to a named box. This module is your first taste of being on the consuming side of that deal.
+* **You will still meet pets.** Not everything should be cattle — a stateful legacy database or a licensed appliance may still be a carefully-tended pet. Knowing the difference is the skill; the wrap-up returns to when *not* to run something this way.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+The two ideas that must land: (1) *desired state* — you declare intent, a loop enforces it; (2) *cattle, not pets* — a lost Pod is routine, not an incident.
+Everything you show in the demo (deploy, scale, kill-a-Pod, Lightspeed) is a proof of those two sentences. Use the self-healing diagram as your anchor.
+====
+endif::demo[]
