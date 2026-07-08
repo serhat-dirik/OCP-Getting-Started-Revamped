@@ -45,7 +45,13 @@ echo "▶ [1/2] Installing OpenShift GitOps operator (idempotent)…"
 if [[ "$DRY_RUN" == "true" ]]; then
   oc kustomize "${SCRIPT_DIR}/operator" >/dev/null && echo "  ✓ operator kustomization renders"
 else
-  oc apply -k "${SCRIPT_DIR}/operator"
+  # Pre-installed detection: many managed/demo clusters ship GitOps already. Applying our
+  # OperatorGroup next to an existing one breaks OLM (TooManyOperatorGroups) — reuse instead.
+  if oc get subscription openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
+    echo "  ✓ operator subscription already present — reusing existing install"
+  else
+    oc apply -k "${SCRIPT_DIR}/operator"
+  fi
   echo "  … waiting for operator CSV to succeed (up to 5m)"
   for _ in $(seq 1 60); do
     CSV="$(oc get subscription openshift-gitops-operator -n openshift-gitops-operator -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
