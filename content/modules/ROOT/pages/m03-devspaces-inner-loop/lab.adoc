@@ -128,7 +128,7 @@ java -version
 [source,texinfo]
 ----
 openjdk version "21.0.11" 2026-04-21 LTS
-OpenJDK Runtime Environment (Red Hat, Inc. ...)
+OpenJDK Runtime Environment (Red_Hat-21.0.11.0.10-1) (build 21.0.11+10-LTS)
 ----
 
 The universal developer image ships several JDKs and *defaults to 17*, but this project targets *Java 21*.
@@ -259,7 +259,7 @@ The first request triggers Quarkus to recompile just what changed and reload it 
 .Expected output (in the dev-mode terminal)
 [source,texinfo]
 ----
-INFO  [io.quarkus.deployment.dev.RuntimeUpdatesProcessor] Restarting quarkus due to changes in ClaimResource.class.
+INFO  [io.quarkus.deployment.dev.RuntimeUpdatesProcessor] Restarting quarkus due to changes in ClaimResource$NewClaim.class, ClaimResource.class, ClaimResource$StatusUpdate.class.
 INFO  [io.quarkus.deployment.dev.RuntimeUpdatesProcessor] Live reload total time: 2.2s
 ----
 
@@ -307,7 +307,8 @@ Under `components:`, add a `cache` component, and under `commands:`, add a `cach
   # add under components:
   - name: cache
     container:
-      image: registry.redhat.io/rhel9/redis-7:latest
+      # pinned by digest: tags move, digests don't — a devfile exists to be reproducible
+      image: registry.redhat.io/rhel9/redis-7@sha256:4e9f428f53b7ee73796aa398f3c9fb340a43453685b2042baba6f9b782fc1467
       memoryLimit: 256Mi
       endpoints:
         - name: redis
@@ -334,12 +335,8 @@ Now restart the workspace so Dev Spaces rebuilds it from the updated devfile:
 // [CAPTURE-VERIFY] Confirm on Dev Spaces 3.29: the command-palette entry "Restart Workspace from Local Devfile" and that the Endpoints view lists the new internal `redis` endpoint after restart. Grounded from the DevWorkspace API: adding the cache component + cache-ping command and re-applying restarts the workspace in ~17 s with a third container `cache` (registry.redhat.io/rhel9/redis-7) alongside `tools` and `che-gateway`; `redis-cli ping` returns PONG.
 
 When the workspace comes back, the `cache` container is part of it.
-Confirm it in the workspace terminal:
-
-[source,sh]
-----
-redis-cli ping
-----
+Confirm it by running the devfile command you just declared: open the command palette (*F1*) → *Tasks: Run Task* → *devfile: Ping the Redis cache*.
+It executes `redis-cli ping` *inside the `cache` container* (the `redis-cli` binary lives there, not in your `tools` terminal).
 
 .Expected output
 [source,texinfo]
@@ -347,11 +344,25 @@ redis-cli ping
 PONG
 ----
 
-The two containers share the workspace Pod's network, so your app could reach Redis at `localhost:6379` — no service, no route, just a sidecar you declared in Git.
+The two containers share the workspace Pod's network, so your app — and your terminal — can reach Redis at `localhost:6379`.
+Prove it from the *workspace terminal* without any Redis tooling, using bash's built-in TCP support:
+
+[source,sh]
+----
+exec 3<>/dev/tcp/localhost/6379 && printf 'PING\r\n' >&3 && head -c 7 <&3
+----
+
+.Expected output
+[source,texinfo]
+----
++PONG
+----
+
+No service, no route — just a sidecar you declared in Git.
 
 [.checkpoint]
 ****
-✔ *Verify:* After the restart, `redis-cli ping` returns `PONG`, and the workspace now runs a `cache` container.
+✔ *Verify:* After the restart, the *devfile: Ping the Redis cache* task returns `PONG`, and the workspace now runs a `cache` container (the terminal TCP probe answers `+PONG` too).
 If the restart fails, your devfile has a YAML error — check the indentation of the two blocks you added (see xref:m03-devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
 ****
 
@@ -361,7 +372,15 @@ If the restart fails, your devfile has a YAML error — check the indentation of
 Your `/ping` change lives only in the workspace.
 Commit it and push it to your fork — this is the moment the inner loop hands off to the outer loop that the rest of the workshop builds (pipelines, GitOps).
 
-In the workspace terminal:
+In the workspace terminal, first tell git who you are — a fresh workspace container has no git identity yet (set it once per workspace; the values only label your commits):
+
+[source,sh,subs="attributes"]
+----
+git config --global user.email "{user}@parasol.example.com"
+git config --global user.name "{user}"
+----
+
+Then commit and push:
 
 [source,sh]
 ----
@@ -509,6 +528,6 @@ Try this on your own:
 * Add a second devfile *command* that runs the tests (`./mvnw test`) as a task, restart from the devfile, and run it from the IDE's task menu.
 * Break the app on purpose: introduce a compile error, save, and see how Quarkus dev mode reports it on the next request; then fix it and watch it recover — no restart.
 
-When you are done, run `ws verify {module-id}` in the *Showroom terminal* — or `ws reset {module-id}` to return your world to a fresh claims app + database and start over.
+When you are done, run `ws verify {module-id}` in the *Showroom terminal* — or `ws reset {module-id}` to return your world to a fresh claims app + database and start over (your fork keeps its pushed commits — delete the fork in Gitea if you want a truly clean redo).
 
 endif::demo[]
