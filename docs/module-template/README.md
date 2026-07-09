@@ -11,7 +11,7 @@ Extracted from the M01 vertical slice (2026-07-08). Copy `skeleton/` and follow 
 | Entry state | `gitops/entry-states/mNN/` (Helm chart + `ws-meta.yaml`) | compose, don't chain (ADR-0001); `solve:` value guards end-state templates |
 | Verify script | `tools/verify/mNN.sh` | entry + end checks via `_lib.sh`; runnable as the attendee (no cross-ns reads) |
 | Slides outline | `slides/outlines/mNN-<slug>.md` | 5–8 slides; validate with `tools/slides/build-deck.py` |
-| Media manifest | `content/modules/ROOT/assets/images/mNN-<slug>/media-manifest.md` | every screenshot spec'd; asciinema script; embeds marked `// TODO(media)` |
+| Media manifest | `content/modules/ROOT/assets/images/mNN-<slug>/media-manifest.md` | every screenshot spec'd; asciinema script; embeds marked `// media-pass:` (never `TODO` — the media pass is a planned phase, not an open item; DoD's zero-TODO check must stay meaningful) |
 | Nav entries | all three `nav-*.adoc` | workshop: concept+lab+wrapup · demo: concept+lab · instructor: concept+instructor+troubleshooting |
 
 ## Pattern-locking rules (M01 lessons — follow or your build breaks)
