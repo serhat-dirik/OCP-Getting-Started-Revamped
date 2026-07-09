@@ -10,7 +10,8 @@ This module is built around one emotional beat: attendees *lose a database* to a
 Optimize the room for that contrast in exercises 2 and 4.
 Everything after (the storage chain, the StatefulSet, partitioned updates, init containers, resize) is mechanics that land easily once the ephemeral-versus-persistent idea is felt, not just heard.
 
-The single most common confusion is a *`Pending` PVC*, and it is not a bug — it is `WaitForFirstConsumer` doing its job. Pre-empt it (see Watchouts).
+The single most common confusion is a *`Pending` PVC*, and it is not a bug — it is `WaitForFirstConsumer` doing its job.
+Pre-empt it (see Watchouts).
 
 == Timing
 
@@ -38,7 +39,8 @@ The *Measured core* column is real.
 On the build cluster (OCP {ocp_version}, OpenShift Data Foundation external Ceph) on 2026-07-09, every exercise was performed as `user7` and the rollouts timed:
 
 * *Ephemeral DB Pod recreate* — delete Pod, new Pod `Ready`: *~15 s* (no volume to attach).
-* *Persistent DB Pod recreate* — same, but the RWO Ceph-RBD volume must detach from the old node and attach to the new: *~33 s*. This is the honest cost of RWO on this backend; if the Pod lands on the same node it is faster.
+* *Persistent DB Pod recreate* — same, but the RWO Ceph-RBD volume must detach from the old node and attach to the new: *~33 s*.
+This is the honest cost of RWO on this backend; if the Pod lands on the same node it is faster.
 * *App recover-restart* — `rollout restart deploy/parasol-claims` to `Ready`: *~34 s* (Quarkus boot + readiness `initialDelay`).
 * *PVC bind* — `WaitForFirstConsumer` means the PVC stays `Pending` until the new DB Pod schedules; provision + attach + Pod ready measured *~30–50 s*.
 * *StatefulSet* — two Pods created *in order* (0 then 1) to `2/2`: *~50 s*.
@@ -96,52 +98,71 @@ Because the app uses `schema-management.strategy=update`, it creates an empty sc
 Beyond the Say/Show/Do arc in the demo flavor:
 
 * *Run the demo from the entry (ephemeral) state, not `ws solve`.*
-The story *is* the data loss, so you must start ephemeral. `ws solve m05` renders the finished, persistent structure (DB-with-PVC + the StatefulSet) — use it to *show the destination* or to pre-stage the StatefulSet exercises, never as the demo's starting point.
+The story *is* the data loss, so you must start ephemeral.
+`ws solve m05` renders the finished, persistent structure (DB-with-PVC + the StatefulSet) — use it to *show the destination* or to pre-stage the StatefulSet exercises, never as the demo's starting point.
 * *Make the Pod deletion feel routine.*
-Say "node drain, upgrade, crash — this happens constantly" as you delete the Pod. The audience must believe this is normal, because it is; that is why ephemeral storage is a trap and not an edge case.
+Say "node drain, upgrade, crash — this happens constantly" as you delete the Pod.
+The audience must believe this is normal, because it is; that is why ephemeral storage is a trap and not an edge case.
 * *Show the HTTP 500, then explain it.*
-After the ephemeral kill, the app returns `500`, not an empty list — because the *table* is gone, not just the rows. That is a stronger beat than an empty list; narrate it ("even the schema lived in that volume").
+After the ephemeral kill, the app returns `500`, not an empty list — because the *table* is gone, not just the rows.
+That is a stronger beat than an empty list; narrate it ("even the schema lived in that volume").
 * *Do not restart the app in the persistent step.*
-The payoff in step 4 is that the app *keeps working* through the DB Pod restart. If you restart the app there, you throw away the contrast. Only restart the app in the *ephemeral* recovery (step 2) and in the PVC *setup* (step 3, to build the schema on the new volume).
-* *Keep one terminal, large font.* This module is all CLI; there is no console view to switch to.
+The payoff in step 4 is that the app *keeps working* through the DB Pod restart.
+If you restart the app there, you throw away the contrast.
+Only restart the app in the *ephemeral* recovery (step 2) and in the PVC *setup* (step 3, to build the schema on the new volume).
+* *Keep one terminal, large font.*
+This module is all CLI; there is no console view to switch to.
 
 == Top questions attendees ask
 
 *1. "My PVC says `Pending` and nothing is happening — is it broken?"*::
-Almost always no — it is `WaitForFirstConsumer`. The default StorageClass deliberately waits to provision the volume until a Pod that mounts the PVC is scheduled, so the disk lands near the Pod.
-A PVC with no consuming Pod will sit `Pending` by design. `oc describe pvc <name>` shows the `WaitForFirstConsumer` event.
+Almost always no — it is `WaitForFirstConsumer`.
+The default StorageClass deliberately waits to provision the volume until a Pod that mounts the PVC is scheduled, so the disk lands near the Pod.
+A PVC with no consuming Pod will sit `Pending` by design.
+`oc describe pvc <name>` shows the `WaitForFirstConsumer` event.
 It binds the moment a Pod using it schedules — which in the lab is the rolling DB Pod.
 
 *2. "Why did killing the DB Pod return a 500, not just fewer claims?"*::
 Because the schema — the `claim` table itself — was created inside the emptyDir the first time the app connected, and it died with the Pod.
 The app is configured to reuse an existing schema (it never wipes data on boot), so against a brand-new empty database it fails rather than silently recreating the table.
-Restarting the app rebuilds the empty schema; the *data* is still gone. That is the lesson: the whole database, not just the rows, lived in ephemeral storage.
+Restarting the app rebuilds the empty schema; the *data* is still gone.
+That is the lesson: the whole database, not just the rows, lived in ephemeral storage.
 
 *3. "Two replicas of PostgreSQL — is that a highly-available database?"*::
-No, and this matters. The StatefulSet gives each Pod a stable identity and its own volume; it does *not* replicate data between them.
+No, and this matters.
+The StatefulSet gives each Pod a stable identity and its own volume; it does *not* replicate data between them.
 `pg-sts-0` and `pg-sts-1` are two independent PostgreSQL instances with separate storage.
-Real HA PostgreSQL is the job of an Operator (or a managed service) that handles replication, failover, and backups. The StatefulSet is the plumbing under that, not the database strategy itself.
+Real HA PostgreSQL is the job of an Operator (or a managed service) that handles replication, failover, and backups.
+The StatefulSet is the plumbing under that, not the database strategy itself.
 
 *4. "Why is the lab's StatefulSet PostgreSQL 16 but the claims DB is 15?"*::
-On purpose. The claims database uses the in-cluster image stream, which tops out at PostgreSQL 15 (`15-el9`); the StatefulSet uses PostgreSQL 16 pulled from `registry.redhat.io` (digest-pinned).
-It underlines that the StatefulSet is a *separate* exercise about storage mechanics, not a second copy of the app's database. Tell attendees not to "fix" the mismatch.
+On purpose.
+The claims database uses the in-cluster image stream, which tops out at PostgreSQL 15 (`15-el9`); the StatefulSet uses PostgreSQL 16 pulled from `registry.redhat.io` (digest-pinned).
+It underlines that the StatefulSet is a *separate* exercise about storage mechanics, not a second copy of the app's database.
+Tell attendees not to "fix" the mismatch.
 
 *5. "If I delete the StatefulSet, do I lose the data?"*::
-Not immediately, and that is a trap. Deleting a StatefulSet does *not* delete its `volumeClaimTemplate` PVCs (`data-pg-sts-0/1`) — they survive, still bound, holding data (and cost).
+Not immediately, and that is a trap.
+Deleting a StatefulSet does *not* delete its `volumeClaimTemplate` PVCs (`data-pg-sts-0/1`) — they survive, still bound, holding data (and cost).
 That is deliberate (so you can delete and recreate a StatefulSet without losing data), but it means orphaned PVCs pile up if you are not careful.
 `ws reset m05` purges PVCs explicitly for exactly this reason; the challenge exercise makes attendees see the survival firsthand.
 
 == Watchouts
 
 * *`Pending` PVC panic.*
-The most common "help, it's broken" of the module, and it is `WaitForFirstConsumer` working. Say so *before* exercise 3 so nobody spins on it.
+The most common "help, it's broken" of the module, and it is `WaitForFirstConsumer` working.
+Say so *before* exercise 3 so nobody spins on it.
 * *Storage class differs per cluster.*
-This module was built on ODF/Ceph (default RWO `ceph-rbd`, RWX `cephfs`, expansion on, `WaitForFirstConsumer`). On a cloud cluster the default may be EBS/PD (RWO only, often `WaitForFirstConsumer`, expansion on) with *no* RWX at all.
+This module was built on ODF/Ceph (default RWO `ceph-rbd`, RWX `cephfs`, expansion on, `WaitForFirstConsumer`).
+On a cloud cluster the default may be EBS/PD (RWO only, often `WaitForFirstConsumer`, expansion on) with *no* RWX at all.
 The lab and verify script *detect* the default class rather than hardcoding it, but the RWX-on-CephFS step (exercise 5) is ODF-specific — on a block-only cluster, say so and skip the probe.
 * *RWO reattach is not instant.*
-Deleting the persistent DB Pod took ~33 s here because the RWO Ceph volume must detach from one node and attach to another. If attendees expect the ~15 s ephemeral speed, the wait reads as a hang — it is not.
+Deleting the persistent DB Pod took ~33 s here because the RWO Ceph volume must detach from one node and attach to another.
+If attendees expect the ~15 s ephemeral speed, the wait reads as a hang — it is not.
 * *The claims app must use `update`, not `drop-and-create`.*
-The entry state sets `QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update` so the app never wipes/reseeds on boot — otherwise the storage lesson is masked (the app would "restore" data by reseeding). If someone edits that back to `drop-and-create`, exercises 2 and 4 stop making sense. `ws reset m05` restores it.
+The entry state sets `QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update` so the app never wipes/reseeds on boot — otherwise the storage lesson is masked (the app would "restore" data by reseeding).
+If someone edits that back to `drop-and-create`, exercises 2 and 4 stop making sense.
+`ws reset m05` restores it.
 * *PVC reclaim on reset is destructive and quota-bound.*
 `ws reset` runs `oc delete all,pvc --all` in `{user}-dev`, which deletes PVCs (reclaim `Delete` → the Ceph volumes go too). That is intended. Also: each user's PVC quota is *5* — the module uses 3 (claims-db-data + two StatefulSet PVCs), so an attendee who forgets to clean up a challenge PVC can hit the cap. `ws reset` clears it.
 * *Shared Ceph at seat scale.*

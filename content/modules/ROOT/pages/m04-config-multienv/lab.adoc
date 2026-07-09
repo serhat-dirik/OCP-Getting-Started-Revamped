@@ -56,14 +56,15 @@ oc -n {user}-dev get deploy parasol-claims \
 [TIME 4m]
 Say:: "I'll break the readiness check — point it at a URL that doesn't exist — and roll it out. This is the failure the platform is built to contain."
 Show:: The terminal, then the Topology node going out of rotation, then the Route returning 503.
-Do:: Break readiness, force the old pod out, and hit the Route:
+Do:: Break readiness, roll the whole deployment onto the broken probe, and hit the Route:
 +
 [source,sh,subs="attributes"]
 ----
 oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
-# after the new pod comes up NotReady, delete the last ready pod so only NotReady pods remain
-oc -n {user}-dev delete pod -l app=parasol-claims --field-selector=status.phase=Running --wait=false
-sleep 15
+# scale to 0 then 1 so the only pod uses the broken readiness check
+oc -n {user}-dev scale deploy/parasol-claims --replicas=0
+oc -n {user}-dev scale deploy/parasol-claims --replicas=1
+sleep 40
 oc -n {user}-dev get endpoints parasol-claims
 CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
 curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
@@ -453,13 +454,15 @@ parasol-claims-d4f69cc5c-vwz2w    1/1     Running   0          3m8s
 ----
 
 A broken new version that *never receives traffic* is exactly what you want.
+(While the old pod is still serving, the Route stays `200` — that is the rollout being *gated* by readiness.)
 Now see the other half — what happens when there is *no* ready pod at all.
-Remove the last ready pod so only the NotReady one remains:
+Roll the *whole* deployment onto the broken probe by scaling it to zero and back to one, so the only pod uses the failing readiness check:
 
 [source,sh,role=execute]
 ----
-oc delete pod -l app=parasol-claims --field-selector=status.phase=Running --wait=false
-sleep 20
+oc scale deploy/parasol-claims --replicas=0
+oc scale deploy/parasol-claims --replicas=1
+sleep 40
 oc get endpoints parasol-claims
 ----
 
