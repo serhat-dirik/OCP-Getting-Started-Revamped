@@ -7,7 +7,7 @@ Evidence: live cluster `ocp-ws-revamped` (OCP 4.21.22), queried 2026-07-09, unle
 
 - Cluster capabilities include **Build**, **ImageRegistry** (Managed, PVC `pvc-image-registry`), **openshift-samples** (Managed, x86_64) — so S2I/BuildConfig + ImageStreams work out of the box (`oc get clusterversion version -o jsonpath=…enabledCapabilities`).
 - **S2I builder ImageStreams in `openshift` ns** (`oc get is -n openshift`, tags via `.spec.tags`):
-  - `java` — `latest` → `openjdk-17-ubi8` (`registry.redhat.io/ubi8/openjdk-17`); other tags 8, 11, openjdk-8/11-ubi8, openjdk-8/11-el7. **Java paved road = OpenJDK 17 on UBI8** — fits Quarkus 3.33 LTS. No ubi9 / JDK21 java tag exists.
+  - `java` — `latest` → `openjdk-17-ubi8` (`registry.redhat.io/ubi8/openjdk-17`); other tags 8, 11, openjdk-8/11-ubi8, openjdk-8/11-el7. No ubi9 / JDK21 java tag in the STOCK stream. **SUPERSEDED (Serhat directive 2026-07-09): the Java paved road is JDK 21 — the workshop ships its own `java-21` builder ImageStream in `openshift` ns** (source `registry.access.redhat.com/ubi9/openjdk-21`, installed by workshop-config, catalog-annotated). All S2I flows use `java-21`; the stock stream's age becomes an instructor governance talking point (ties M15).
   - `java-runtime` — openjdk-11/17-ubi8 (runtime-only image for chained builds).
   - `nodejs` — `latest` → `22-ubi9`; tags 20-/22- across ubi8/9/10 (+minimal).
   - `python` — `latest` → `3.12-ubi8`; tags 3.9/3.11/3.12 on ubi8/9, 3.12-minimal-ubi10.
@@ -27,7 +27,7 @@ Evidence: live cluster `ocp-ws-revamped` (OCP 4.21.22), queried 2026-07-09, unle
 ## Console-reality checks the builder MUST do live ([CAPTURE-VERIFY])
 
 Unified console — see m01-build-note §console for the perspective/enablement question (already flagged).
-1. **+Add → Import from Git**: paste `{gitea_url}/{user}/parasol-claims` → verify builder auto-detect picks **Java (openjdk-17-ubi8)**; capture the "Git type / builder image / target port 8080" dialog. For a **private** fork, verify the "Source Secret" (basic-auth {user} creds) field — entry-state should pre-seed that secret.
+1. **+Add → Import from Git**: paste `{gitea_url}/{user}/parasol-claims` → builder selection must be **Java 21 (UBI 9)** (the workshop `java-21` stream; auto-detect may propose the stock older stream — document explicitly selecting java-21); capture the "Git type / builder image / target port 8080" dialog. For a **private** fork, verify the "Source Secret" (basic-auth {user} creds) field — entry-state should pre-seed that secret.
 2. **Dockerfile strategy**: Import from Git on a repo with a Containerfile → verify it offers the **Dockerfile** strategy; compare BuildConfig `.spec.strategy` Source vs Docker.
 3. **+Add → Container images** (deploy-from-image) and **+Add → Developer Catalog** (Templates / Samples / operator-backed) click-paths.
 4. **Build inspection**: BuildConfig → build → logs → ImageStream tag pushed to the internal registry (`image-registry.openshift-image-registry.svc:5000/{user}-dev/…`); capture a real S2I build-log tail.
@@ -40,7 +40,7 @@ Unified console — see m01-build-note §console for the perspective/enablement 
 - Story hook (≤3): Parasol's claims service must reach the cluster four different ways; you pick the right on-ramp for each and learn why the platform ships the paved road.
 - demo arc `[TIME 5m]` (+ catalog tour + trusted-content talk track): import-from-git → running claims app; Say/Show/Do.
 - wrapup: when-not-to-use each build path; map-to-org (who owns your base images? where do they come from today?); go-deeper (M06, M07, M15).
-- troubleshooting seeds: build fails cloning a private Gitea repo (missing source secret); build OOM/throttled under LimitRange defaults (raise build resources); `registry.redhat.io` 401 (global pull secret); wrong builder tag picked (pin `java:openjdk-17-ubi8`).
+- troubleshooting seeds: build fails cloning a private Gitea repo (missing source secret); build OOM/throttled under LimitRange defaults (raise build resources); `registry.redhat.io` 401 (global pull secret); wrong builder tag picked (use the workshop `java-21` stream — JDK 21 baseline per Serhat directive; the app's pom targets release 21 and fails on older JVMs).
 
 ## Verify script sketch (tools/verify/m02.sh)
 

@@ -1,0 +1,82 @@
+# The claims service already deployed (as in M02's end state), wired to claims-db via env.
+# Runs the SHARED prebuilt image so M03 never depends on M02's build having happened.
+---
+# why: the running claims REST API; %prod datasource is env-driven at the Service claims-db.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m03
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: m03
+    spec:
+      containers:
+        - name: parasol-claims
+          # Shared image built once into parasol-images (independent of any per-user build).
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+          ports:
+            - containerPort: 8080
+          env:
+            # Point the %prod datasource at the claims-db Service in this namespace.
+            - name: POSTGRESQL_HOST
+              value: claims-db
+          envFrom:
+            # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
+            - secretRef:
+                name: claims-db
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+# why: stable in-cluster address for the claims API (port 8080).
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m03
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# why: publishes the claims API at parasol-claims-{user}-dev.{clusterDomain} (host auto-generated).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m03
+spec:
+  to:
+    kind: Service
+    name: parasol-claims
+  port:
+    targetPort: http

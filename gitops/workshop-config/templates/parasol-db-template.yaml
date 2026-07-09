@@ -1,0 +1,171 @@
+# Parasol "PostgreSQL (ephemeral)" developer-catalog Template.
+#
+# WHY THIS EXISTS: the stock postgresql-ephemeral/-persistent Templates render a
+# DeploymentConfig (banned — 04-STYLE-GUIDE §5) on POSTGRESQL_VERSION=10 (EOL). This
+# ships the same "deploy a database from the catalog" UX as a Deployment on the
+# supported postgresql:15-el9 imagestream tag, so M02/M04/M05 stay on current, trusted
+# tech. Ephemeral by design (emptyDir): M05 opens on the data-loss lesson.
+#
+# This is a plain OpenShift Template object: its ${PARAM} tokens are processed by
+# `oc process`, not by Helm (this file holds no Go-template actions, so Helm renders
+# it verbatim).
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  # why namespace=openshift: the "openshift" project is the cluster-wide developer
+  # catalog source, so this tile appears for every attendee without per-user copies.
+  name: parasol-postgresql-ephemeral
+  namespace: openshift
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    samples.operator.openshift.io/managed: "false"
+  annotations:
+    openshift.io/display-name: "Parasol PostgreSQL (ephemeral)"
+    openshift.io/provider-display-name: "Parasol Insurance"
+    description: >-
+      PostgreSQL 15 database with NO persistent storage — data is lost when the
+      pod restarts. Renders a Deployment (not a DeploymentConfig) on the supported
+      postgresql:15-el9 image. Ideal for the claims service in dev; give it a
+      PersistentVolumeClaim before you rely on the data (see the Storage module).
+    tags: "database,parasol,postgresql"
+    iconClass: "icon-postgresql"
+    template.openshift.io/long-description: >-
+      Provisions an ephemeral PostgreSQL 15 instance (Secret + Service + Deployment)
+      for Parasol Insurance workloads. The generated credentials land in a Secret
+      named after the application so other services can consume them by reference.
+    template.openshift.io/documentation-url: "https://docs.redhat.com/en/documentation/openshift_container_platform"
+message: >-
+  The ephemeral database "${APP_NAME}" is deploying. Connect to it in-cluster at
+  ${APP_NAME}:5432. Credentials are in the Secret "${APP_NAME}" (keys: POSTGRESQL_HOST,
+  POSTGRESQL_DATABASE, POSTGRESQL_USER, POSTGRESQL_PASSWORD) — an app consumes them with
+  `oc set env deploy/<app> --from=secret/${APP_NAME}`. Reminder: this database has NO
+  persistent storage — restarting the pod loses all data.
+parameters:
+  - name: APP_NAME
+    displayName: Database name
+    description: Name for the Deployment, Service, and Secret (in-cluster host).
+    value: claims-db
+    required: true
+  - name: POSTGRESQL_DATABASE
+    displayName: PostgreSQL database name
+    value: claimsdb
+    required: true
+  - name: POSTGRESQL_USER
+    displayName: PostgreSQL connection username
+    description: Username for the application to connect with (auto-generated if blank).
+    generate: expression
+    from: "claims"
+    required: true
+  - name: POSTGRESQL_PASSWORD
+    displayName: PostgreSQL connection password
+    description: Password for the application user (auto-generated).
+    generate: expression
+    from: "[a-zA-Z0-9]{16}"
+    required: true
+  - name: MEMORY_LIMIT
+    displayName: Memory limit
+    description: Maximum amount of memory the container can use.
+    value: 512Mi
+    required: true
+objects:
+  # Credentials live in a Secret named after the app so other workloads consume them
+  # by reference, never by copy. Keys use the app's env contract (POSTGRESQL_*) so a
+  # consumer wires up with a single `oc set env deploy/<app> --from=secret/${APP_NAME}`
+  # (the claims service in M02/M04 does exactly this). POSTGRESQL_HOST carries the
+  # in-cluster Service name so the consumer needs no hardcoded host.
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: ${APP_NAME}
+      labels:
+        app: ${APP_NAME}
+        app.kubernetes.io/part-of: parasol
+    stringData:
+      POSTGRESQL_HOST: ${APP_NAME}
+      POSTGRESQL_DATABASE: ${POSTGRESQL_DATABASE}
+      POSTGRESQL_USER: ${POSTGRESQL_USER}
+      POSTGRESQL_PASSWORD: ${POSTGRESQL_PASSWORD}
+  # Stable in-cluster address on the PostgreSQL port.
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: ${APP_NAME}
+      labels:
+        app: ${APP_NAME}
+        app.kubernetes.io/part-of: parasol
+    spec:
+      selector:
+        deployment: ${APP_NAME}
+      ports:
+        - name: postgresql
+          port: 5432
+          targetPort: 5432
+  # Deployment (NOT DeploymentConfig) on the supported postgresql:15-el9 tag, pulled
+  # from the cluster's shared "openshift" imagestream via the internal registry.
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: ${APP_NAME}
+      labels:
+        app: ${APP_NAME}
+        app.kubernetes.io/part-of: parasol
+        app.kubernetes.io/component: database
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          deployment: ${APP_NAME}
+      strategy:
+        type: Recreate
+      template:
+        metadata:
+          labels:
+            deployment: ${APP_NAME}
+            app: ${APP_NAME}
+        spec:
+          containers:
+            - name: postgresql
+              image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+              ports:
+                - containerPort: 5432
+              # The database bootstraps its user/password/db from the same Secret the
+              # claims service consumes — one source of truth for the credentials.
+              env:
+                - name: POSTGRESQL_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${APP_NAME}
+                      key: POSTGRESQL_USER
+                - name: POSTGRESQL_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${APP_NAME}
+                      key: POSTGRESQL_PASSWORD
+                - name: POSTGRESQL_DATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${APP_NAME}
+                      key: POSTGRESQL_DATABASE
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: ${MEMORY_LIMIT}
+              readinessProbe:
+                exec:
+                  command: ["/usr/libexec/check-container"]
+                initialDelaySeconds: 5
+                timeoutSeconds: 1
+              livenessProbe:
+                exec:
+                  command: ["/usr/libexec/check-container", "--live"]
+                initialDelaySeconds: 120
+                timeoutSeconds: 10
+              volumeMounts:
+                - name: ${APP_NAME}-data
+                  mountPath: /var/lib/pgsql/data
+          volumes:
+            # emptyDir = ephemeral: the "lose your data on restart" lesson lives in M05.
+            - name: ${APP_NAME}-data
+              emptyDir: {}

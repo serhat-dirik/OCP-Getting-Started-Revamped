@@ -1,0 +1,151 @@
+{{- if .Values.solve }}
+# END state for instructor demos (`ws solve m02`): what an attendee finishes M02 with —
+# the claims service running behind a Route, wired to an ephemeral PostgreSQL. To stay
+# demo-fast and reliable this uses the SHARED prebuilt claims image (parasol-claims:1.0),
+# NOT a per-user S2I build; the hands-on lab is where the real build happens.
+#
+# One Secret carries the DB credentials in the app's env contract (POSTGRESQL_*) so both
+# the database and the claims service consume it with envFrom — one source of truth.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m02
+stringData:
+  POSTGRESQL_HOST: claims-db
+  POSTGRESQL_DATABASE: claimsdb
+  POSTGRESQL_USER: claims
+  POSTGRESQL_PASSWORD: claims-demo-pw
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m02
+spec:
+  selector:
+    deployment: claims-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m02
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      deployment: claims-db
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        deployment: claims-db
+        app: claims-db
+    spec:
+      containers:
+        - name: postgresql
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          ports:
+            - containerPort: 5432
+          # POSTGRESQL_HOST in the secret is harmless to the DB image (it ignores it).
+          envFrom:
+            - secretRef:
+                name: claims-db
+          readinessProbe:
+            exec:
+              command: ["/usr/libexec/check-container"]
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+          livenessProbe:
+            exec:
+              command: ["/usr/libexec/check-container", "--live"]
+            initialDelaySeconds: 120
+            timeoutSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m02
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      deployment: parasol-claims
+  template:
+    metadata:
+      labels:
+        deployment: parasol-claims
+        app: parasol-claims
+    spec:
+      containers:
+        - name: parasol-claims
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+          ports:
+            - containerPort: 8080
+          # Wire to the database (POSTGRESQL_HOST/DATABASE/USER/PASSWORD) from the Secret.
+          envFrom:
+            - secretRef:
+                name: claims-db
+          readinessProbe:
+            httpGet: {path: /q/health/ready, port: 8080}
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: {path: /q/health/live, port: 8080}
+            initialDelaySeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m02
+spec:
+  selector:
+    deployment: parasol-claims
+  ports:
+    - name: 8080-tcp
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m02
+spec:
+  to:
+    kind: Service
+    name: parasol-claims
+  port:
+    targetPort: 8080-tcp
+{{- end }}
