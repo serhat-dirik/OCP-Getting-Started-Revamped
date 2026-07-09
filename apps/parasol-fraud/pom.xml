@@ -5,10 +5,10 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.parasol</groupId>
-  <artifactId>parasol-claims</artifactId>
+  <artifactId>parasol-fraud</artifactId>
   <version>1.0.0</version>
-  <name>parasol-claims</name>
-  <description>Parasol Insurance core claims service (REST + PostgreSQL, Quarkus). Star of modules M02-M09.</description>
+  <name>parasol-fraud</name>
+  <description>Parasol Insurance fraud-scoring service (bearer-only OIDC, Quarkus). Token-exchange target for module M29.</description>
 
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
@@ -16,7 +16,7 @@
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
     <!-- Quarkus current LTS: 3.33 (recommended for production; maintained until 2027-03-25).
-         Same BOM as parasol-web so both services move in lockstep. -->
+         Same BOM as parasol-claims / parasol-web so the whole portfolio moves in lockstep. -->
     <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
     <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
     <quarkus.platform.version>3.33.2.1</quarkus.platform.version>
@@ -24,11 +24,6 @@
     <compiler-plugin.version>3.13.0</compiler-plugin.version>
     <surefire-plugin.version>3.5.2</surefire-plugin.version>
     <skipITs>true</skipITs>
-
-    <!-- CycloneDX SBOM generation (curriculum: M07 trusted supply chain). The build
-         emits a CycloneDX 1.6 JSON bill of materials that M07's pipeline signs and
-         attests with cosign (type cyclonedx) and attendees inspect with jq. -->
-    <cyclonedx-plugin.version>2.9.2</cyclonedx-plugin.version>
   </properties>
 
   <dependencyManagement>
@@ -44,22 +39,20 @@
   </dependencyManagement>
 
   <dependencies>
-    <!-- REST + JSON: the /api/claims CRUD surface. -->
+    <!-- REST + JSON: the single /api/fraud/score/{claimId} endpoint. -->
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-rest-jackson</artifactId>
     </dependency>
-    <!-- Persistence: Panache active-record over Hibernate ORM (the Claim entity). -->
+    <!-- OIDC: this is a BEARER-ONLY resource server (application-type=service). The
+         tenant ships DISABLED (quarkus.oidc.tenant-enabled=false) so M01-M28 are
+         unaffected; M29 enables it and turns on aud=fraud enforcement so an exchanged,
+         down-scoped token is accepted and an escalation attempt is rejected. -->
     <dependency>
       <groupId>io.quarkus</groupId>
-      <artifactId>quarkus-hibernate-orm-panache</artifactId>
+      <artifactId>quarkus-oidc</artifactId>
     </dependency>
-    <!-- PostgreSQL JDBC driver: the production datasource (M04/M05 wire it via env). -->
-    <dependency>
-      <groupId>io.quarkus</groupId>
-      <artifactId>quarkus-jdbc-postgresql</artifactId>
-    </dependency>
-    <!-- Health probes: /q/health/live and /q/health/ready (curriculum: M04/M11). -->
+    <!-- Health probes: /q/health/live and /q/health/ready (curriculum + smoke tests). -->
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-smallrye-health</artifactId>
@@ -69,30 +62,15 @@
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
     </dependency>
-    <!-- Distributed tracing: OTLP-exported spans across web->claims->db (curriculum: M11).
-         Instrumentation ships in the image; the exporter is switched on in M11 (see README). -->
+    <!-- Distributed tracing: OTLP-exported spans so the M29 web->claims->fraud
+         token-exchange chain shows as one trace in M11. Exporter OFF by default. -->
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-opentelemetry</artifactId>
     </dependency>
-    <!-- OIDC: this is a bearer-only resource server (curriculum: M29). The tenant
-         ships DISABLED (quarkus.oidc.tenant-enabled=false) so M01-M28 stay
-         unprotected (module independence); M29 enables it and adds
-         @RolesAllowed("claims-adjuster") on the guarded method. -->
-    <dependency>
-      <groupId>io.quarkus</groupId>
-      <artifactId>quarkus-oidc</artifactId>
-    </dependency>
-    <!-- OIDC client: lets M29 exchange the caller's user token for a token scoped
-         to aud=fraud (RFC 8693 standard token exchange) before calling parasol-fraud.
-         Inert until M29 configures a quarkus.oidc-client.* grant. -->
-    <dependency>
-      <groupId>io.quarkus</groupId>
-      <artifactId>quarkus-oidc-client</artifactId>
-    </dependency>
 
-    <!-- Test-only: build-time smoke tests over the seeded API + probes (feeds CI "apps" job).
-         H2 keeps tests self-contained so CI never needs a PostgreSQL. -->
+    <!-- Test-only: build-time smoke over the scoring endpoint + readiness probe.
+         Runs with the OIDC tenant disabled, proving anonymous access by default. -->
     <dependency>
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-junit</artifactId>
@@ -101,11 +79,6 @@
     <dependency>
       <groupId>io.rest-assured</groupId>
       <artifactId>rest-assured</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.quarkus</groupId>
-      <artifactId>quarkus-jdbc-h2</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -138,31 +111,6 @@
           <systemPropertyVariables>
             <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
           </systemPropertyVariables>
-        </configuration>
-      </plugin>
-      <!-- CycloneDX SBOM: bound to `package`, so `mvn package` (and the in-cluster
-           Containerfile build) emits target/parasol-claims-sbom.json describing every
-           dependency. M07 signs and attests it; the seeded log4j-core CVE on the
-           `seed-vulnerable` branch is what attendees find when they inspect it. -->
-      <plugin>
-        <groupId>org.cyclonedx</groupId>
-        <artifactId>cyclonedx-maven-plugin</artifactId>
-        <version>${cyclonedx-plugin.version}</version>
-        <executions>
-          <execution>
-            <id>build-sbom</id>
-            <phase>package</phase>
-            <goals>
-              <goal>makeBom</goal>
-            </goals>
-          </execution>
-        </executions>
-        <configuration>
-          <projectType>application</projectType>
-          <schemaVersion>1.6</schemaVersion>
-          <outputFormat>json</outputFormat>
-          <outputName>parasol-claims-sbom</outputName>
-          <outputDirectory>${project.build.directory}</outputDirectory>
         </configuration>
       </plugin>
     </plugins>

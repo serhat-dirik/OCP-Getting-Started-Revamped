@@ -2,13 +2,17 @@ package com.parasol.claims;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.quarkus.hibernate.orm.panache.Panache;
 import io.quarkus.hibernate.orm.panache.PanacheQuery;
 import io.quarkus.panache.common.Page;
 import io.quarkus.panache.common.Sort;
+import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -47,6 +51,10 @@ public class ClaimResource {
     private static final int DEFAULT_PAGE_SIZE = 20;
     private static final int MAX_PAGE_SIZE = 100;
 
+    /** Micrometer registry for the custom business metric (curriculum: M11). */
+    @Inject
+    MeterRegistry registry;
+
     /**
      * List claims, sorted by claim number. Returns every claim by default so lab text and
      * dashboards see all 30 seeds; pass {@code ?page=N&size=M} to page through them. The
@@ -80,6 +88,40 @@ public class ClaimResource {
     }
 
     /**
+     * A claim's audit timeline.
+     *
+     * <p><strong>Deliberate N+1 query pattern (curriculum: M11).</strong> This method
+     * first runs ONE query to fetch the ids of the claim's events, then loads each
+     * event individually by primary key in a loop — so a claim with N events costs
+     * {@code 1 + N} SELECTs. Every {@code findById} shows as its own JDBC span in the
+     * M11 trace, which is how attendees spot the anti-pattern. The one-line fix (a
+     * single {@code ClaimEvent.list("claimNumber", Sort.by("createdAt"), claimNumber)})
+     * is left for the lab — do NOT "optimize" it here, the slowness is the lesson.
+     */
+    @GET
+    @Path("/{claimNumber}/history")
+    public Response history(@PathParam("claimNumber") String claimNumber) {
+        Claim claim = Claim.findById(claimNumber);
+        if (claim == null) {
+            return notFound(claimNumber);
+        }
+
+        // Query #1: just the ids of this claim's events, oldest first.
+        List<Long> eventIds = Panache.getEntityManager()
+                .createQuery("select e.id from ClaimEvent e where e.claimNumber = ?1 order by e.createdAt", Long.class)
+                .setParameter(1, claimNumber)
+                .getResultList();
+
+        // Queries #2..N+1: load each event on its own — one SELECT per row (the N+1).
+        List<ClaimEvent> events = new ArrayList<>();
+        for (Long id : eventIds) {
+            events.add(ClaimEvent.findById(id));
+        }
+
+        return Response.ok(new ClaimHistory(claim.claimNumber, claim.claimant, claim.status, events)).build();
+    }
+
+    /**
      * Create a claim. The caller supplies the claimant, type, amount and incident date;
      * the server assigns the next claim number (CLM-1031, CLM-1032, ...) and opens it in
      * the {@code Submitted} state with an {@code Unassigned} adjuster.
@@ -99,6 +141,9 @@ public class ClaimResource {
         claim.adjuster = isBlank(input.adjuster()) ? "Unassigned" : input.adjuster();
         claim.status = "Submitted";
         claim.persist();
+        // Custom business metric (curriculum: M11). Micrometer appends _total to
+        // counters, so this is scraped at /q/metrics as claims_created_total.
+        registry.counter("claims_created").increment();
         return Response.status(Response.Status.CREATED).entity(claim).build();
     }
 
@@ -151,5 +196,9 @@ public class ClaimResource {
 
     /** Request body for {@code PUT /api/claims/{claimNumber}/status}. */
     public record StatusUpdate(String status) {
+    }
+
+    /** Response body for {@code GET /api/claims/{claimNumber}/history}. */
+    public record ClaimHistory(String claimNumber, String claimant, String status, List<ClaimEvent> events) {
     }
 }

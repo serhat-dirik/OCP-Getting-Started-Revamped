@@ -1,6 +1,7 @@
 package com.parasol.claims;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
@@ -120,5 +121,61 @@ class ClaimResourceTest {
                 .then()
                 .statusCode(200)
                 .body("status", is("UP"));
+    }
+
+    /**
+     * M29 regression guard: quarkus-oidc is on the classpath but the tenant is
+     * DISABLED by default, so the API must stay anonymous - no token, still 200.
+     * If someone flips tenant-enabled=true in the shipped config, this fails.
+     */
+    @Test
+    void apiIsAnonymousByDefault() {
+        given()
+                .when().get("/api/claims")
+                .then()
+                .statusCode(200);
+        given()
+                .when().get("/api/claims/CLM-1001")
+                .then()
+                .statusCode(200)
+                .body("claimNumber", is("CLM-1001"));
+    }
+
+    /** The M11 N+1 endpoint returns the seeded timeline, oldest event first. */
+    @Test
+    void historyReturnsSeededTimeline() {
+        given()
+                .when().get("/api/claims/CLM-1001/history")
+                .then()
+                .statusCode(200)
+                .body("claimNumber", is("CLM-1001"))
+                .body("claimant", is("Alice Nguyen"))
+                .body("events.size()", is(5))
+                .body("events[0].eventType", is("Submitted"))
+                .body("events[4].eventType", is("UnderReview"));
+    }
+
+    @Test
+    void historyForUnknownClaimReturns404() {
+        given()
+                .when().get("/api/claims/CLM-9999/history")
+                .then()
+                .statusCode(404);
+    }
+
+    /** Creating a claim increments the custom Micrometer counter (claims_created_total). */
+    @Test
+    void createIncrementsClaimsCreatedCounter() {
+        given()
+                .contentType("application/json")
+                .body("{\"claimant\":\"Metric Probe\",\"type\":\"home\",\"amount\":100.00}")
+                .when().post("/api/claims")
+                .then()
+                .statusCode(201);
+        given()
+                .when().get("/q/metrics")
+                .then()
+                .statusCode(200)
+                .body(containsString("claims_created_total"));
     }
 }
