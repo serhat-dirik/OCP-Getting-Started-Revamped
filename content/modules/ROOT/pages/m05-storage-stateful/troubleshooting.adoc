@@ -1,0 +1,138 @@
+= Storage & Stateful Apps: Troubleshooting
+:module-id: m05
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} / ODF external Ceph
+// (2026-07-09) plus the build-note failure-mode seeds. Format: Symptom / Cause / Fix.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+
+== A new PVC is stuck in `Pending` and never binds
+
+Symptom:: `oc get pvc claims-db-data` shows `Pending` with no volume, and it stays that way.
+Cause:: This is usually *not* a failure. The default StorageClass uses `volumeBindingMode: WaitForFirstConsumer`, which deliberately delays provisioning the volume until a Pod that mounts the PVC is scheduled — so the disk lands near the Pod.
+A PVC with no consuming Pod will sit `Pending` by design.
+Fix:: Confirm the reason, then make sure a Pod actually uses the PVC:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev describe pvc claims-db-data | grep -A1 WaitForFirstConsumer
+oc -n {user}-dev get pods -l app=claims-db
+----
++
+The event `waiting for first consumer to be created before binding` confirms it is `WaitForFirstConsumer`.
+Once the Deployment's Pod schedules (in the lab, after `oc set volume` rolls a new Pod), the PVC binds within a minute.
+If it stays `Pending` with a *different* event — `no persistent volumes available` or a provisioner error — check that a default StorageClass exists (`oc get sc`) and that the storage backend is healthy.
+
+== `oc set volume` fails: "volume 'data' already exists"
+
+Symptom:: Attaching the PVC fails with one of:
++
+[source,texinfo]
+----
+error: deployments/claims-db volume 'data' already exists. Use --overwrite to replace
+error: deployments/claims-db volume mount '/var/lib/pgsql/data' already exists for container 'postgresql'
+----
+Cause:: There is already a volume named `data` mounted at that path — the ephemeral `emptyDir`.
+`--add` alone tries to add a *second* volume (the first message when you name it `--name data`, the second when `oc` auto-generates a name that collides on the mount path), which is not allowed.
+This is the deliberate break in exercise 3.
+Fix:: You are *replacing* the emptyDir, not adding alongside it. Use `--overwrite` and name the existing volume:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev set volume deploy/claims-db --add --overwrite --name data \
+  -t pvc --claim-name=claims-db-data --mount-path=/var/lib/pgsql/data
+----
++
+`--overwrite --name data` swaps that one volume's source from emptyDir to the PVC, keeping the same mount path.
+(Because you created the PVC yourself in exercise 3, no `--claim-size` is needed here — `oc` binds the existing claim; add `--claim-size=2Gi` only if you want `oc` to create the PVC for you in one step.)
+
+== The claims API returns HTTP 500 after a database Pod restart
+
+Symptom:: `curl .../api/claims` returns `500 - Internal Server Error`; the app log shows a PostgreSQL error such as `An I/O error occurred while sending to the backend` or `relation "claim" does not exist`.
+Cause:: The database came back *empty*. If the DB volume was an emptyDir (the entry state), a Pod restart wiped everything — including the schema, so the `claim` table no longer exists. The app reuses an existing schema and does not recreate it on its own, so it fails honestly against the empty database.
+This is exactly the point of exercise 2.
+Fix:: If this is the ephemeral lesson, recover the app so it rebuilds the (empty) schema — the *data* is genuinely gone:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev rollout restart deploy/parasol-claims
+oc -n {user}-dev rollout status deploy/parasol-claims
+----
++
+If you have *already* added the PVC and still see this, confirm the Pod actually mounted the PVC (not a fresh emptyDir) and that the PVC is `Bound`:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev get deploy claims-db -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")]}{"\n"}'
+oc -n {user}-dev get pvc claims-db-data
+----
+
+== The database initializes an empty data directory / ignores the PVC
+
+Symptom:: After attaching a PVC, the database starts fresh every time and never keeps data, even though the PVC is `Bound`.
+Cause:: The volume is mounted at the *wrong path*. PostgreSQL for RHEL9 stores its data under `/var/lib/pgsql/data`; mount the PVC anywhere else (for example `/var/lib/pgsql`) and the server writes its real data to the container's ephemeral layer while your persistent volume sits unused.
+Fix:: Confirm the mount path is exactly `/var/lib/pgsql/data`:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev get deploy claims-db \
+  -o jsonpath='{range .spec.template.spec.containers[0].volumeMounts[*]}{.name}{" -> "}{.mountPath}{"\n"}\{end}'
+----
++
+If it is wrong, re-run the `oc set volume --add --overwrite --name data ... --mount-path=/var/lib/pgsql/data` command with the correct path.
+
+== A PVC resize does not take effect
+
+Symptom:: You patched a PVC to a larger size, but `oc get pvc` still shows the old capacity, or the Pod's filesystem did not grow.
+Cause:: Either the StorageClass does not allow expansion, or the resize is still in progress, or you tried to *shrink* (which is not allowed).
+Fix:: Check the class allows expansion and watch the PVC conditions:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc get sc "$(oc -n {user}-dev get pvc claims-db-data -o jsonpath='{.spec.storageClassName}')" -o jsonpath='allowVolumeExpansion={.allowVolumeExpansion}{"\n"}'
+oc -n {user}-dev get pvc claims-db-data -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}\{end}'
+----
++
+If `allowVolumeExpansion` is `false`, the backend cannot grow the volume — nothing you do at the PVC level will help.
+If you see `Resizing` / `FileSystemResizePending`, it is simply still working; on this cluster the transition took ~15–20 s.
+You can only ever grow a PVC — a request for a *smaller* size is rejected.
+
+== Deleting a StatefulSet leaves PVCs behind
+
+Symptom:: You ran `oc delete statefulset pg-sts`, but `oc get pvc` still lists `data-pg-sts-0` and `data-pg-sts-1`.
+Cause:: This is intentional Kubernetes behavior: `volumeClaimTemplate` PVCs are *never* garbage-collected when a StatefulSet is deleted, so you can delete and recreate a StatefulSet without losing data.
+The side effect is orphaned PVCs (and real storage cost) if you forget them.
+Fix:: Delete them explicitly when you truly want the data gone:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev get pvc -l app=pg-sts
+oc -n {user}-dev delete pvc -l app=pg-sts
+----
++
+`ws reset {module-id}` does this for you — it purges all PVCs in `{user}-dev` for exactly this reason.
+
+== A StatefulSet Pod is stuck `Pending` on scale-up
+
+Symptom:: After `oc scale statefulset/pg-sts --replicas=3`, `pg-sts-2` stays `Pending`.
+Cause:: Usually one of two things: the new PVC cannot be provisioned (no default StorageClass, or the backend is out of capacity), or the namespace PVC quota is reached (each user's quota here is *5* PVCs).
+Fix:: Check the quota and the new PVC:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev get resourcequota workshop-quota -o jsonpath='pvcs: {.status.used.persistentvolumeclaims}/{.status.hard.persistentvolumeclaims}{"\n"}'
+oc -n {user}-dev describe pod pg-sts-2 | tail -5
+----
++
+If you are at the PVC cap, delete PVCs you no longer need (or `ws reset {module-id}`), then scale again.
+
+== The claims database shows 0 claims right after `ws start`
+
+Symptom:: Immediately after materializing the module, `curl .../api/claims` returns `[]` — an empty list.
+Cause:: This is expected, not a failure. The claims app is configured to *reuse* an existing schema (`schema-management.strategy=update`) rather than reseed on boot, so a freshly-created database starts empty.
+Fix:: Nothing to fix — seed it yourself in exercise 1 with the `POST` calls. Starting empty is what makes the data-loss and data-survival exercises meaningful (the claims you lose and save are the ones *you* created).
+
+'''
+
+_Last verified on OpenShift {ocp_version} / OpenShift Data Foundation external Ceph (2026-07-09)._

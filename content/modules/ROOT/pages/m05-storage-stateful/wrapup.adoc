@@ -1,0 +1,74 @@
+= Storage & Stateful Apps: Wrap-up
+:module-id: m05
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims database from a time bomb to durable storage, and then ran a real stateful workload.
+You seeded three claims and watched a routine Pod restart destroy them because the volume was an emptyDir; you swapped that emptyDir for a PersistentVolumeClaim with one `oc set volume` command, met `WaitForFirstConsumer` binding, and watched the same Pod restart leave the data intact.
+You walked the PVC → PV → StorageClass chain, confirmed which access modes this cluster actually offers, ran a two-replica PostgreSQL StatefulSet with a headless Service and per-Pod volumes, staged a partitioned update to one member, migrated a schema with an init container, and grew a volume online.
+
+[mermaid]
+....
+graph LR
+  emptyDir["emptyDir<br/>(data dies with the Pod)"] -->|"oc set volume --overwrite"| pvc["PVC claims-db-data<br/>Bound · 2Gi → 3Gi"]
+  pvc --> pv[("PersistentVolume<br/>on the default StorageClass")]
+  sts["StatefulSet pg-sts<br/>pg-sts-0 · pg-sts-1"] --> perpod[("per-Pod PVCs<br/>data-pg-sts-0 / -1")]
+  sts -.->|headless DNS| id["stable identity<br/>+ partitioned update<br/>+ init-container migration"]
+  classDef done fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef bad fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class pvc,pv,sts,perpod,id done;
+  class emptyDir bad;
+....
+
+// TODO(media): recap SVG m05-storage-stateful-04-what-you-built.svg (green = persistent; red = the ephemeral trap you removed).
+
+The one idea under all of it: *persistence is a property of the volume, not the app.*
+The same database Pod lost or kept its data based only on what its `data` volume was — and a StatefulSet is the pattern for when each replica needs its *own* durable volume and a stable identity to go with it.
+
+== Map to your org
+
+Take these back to how your teams run stateful workloads today:
+
+. *Which of your "databases" are actually ephemeral?*
+You just saw a Pod restart wipe a database whose storage was an emptyDir.
+Somewhere in your estate is a dev or test datastore exactly like that — fine until the node it lands on drains.
+For one real workload of yours: can you name its volume type without looking? If you can't, that is the thing to check on Monday.
+. *Who owns backup and failover for your in-cluster data?*
+A StatefulSet gives you identity and storage — not backups, not failover, not upgrades.
+For each stateful workload you run in-cluster, who restores it when a volume is lost, and when did they last *test* that restore?
+If the answer is "nobody has" then you are running a pet you cannot resurrect.
+. *Is your StorageClass a clean contract?*
+Your developers wrote a PVC and got 2Gi of storage without knowing or caring what array was behind it.
+Do your app teams get that same self-service, or do they file a ticket and wait? The gap between those two is a platform-team backlog item with a real dollar value.
+
+== When *not* to run it this way
+
+In-cluster persistent storage and StatefulSets are powerful, and they are not always the right call.
+Be honest about the edges:
+
+* *A StatefulSet is not a managed database.*
+For a production system of record, a managed data service (or a mature database Operator that owns failover, backup, point-in-time recovery, and minor-version upgrades) usually beats a hand-built StatefulSet.
+Use the StatefulSet pattern when your team will genuinely own that operational burden, or when portability across clouds and staying inside one security perimeter outweigh the convenience of a managed service.
+Running `replicas: 2` of PostgreSQL does *not* give you a replicated, highly-available database — those two Pods in the lab are independent instances; real replication is an Operator's job.
+* *Reaching for ReadWriteMany is often a design smell.*
+RWX is right for genuinely shared files — a media library, a shared content directory.
+But teams frequently reach for it to work around a missing object store or a missing database, and shared-writer file volumes bring their own consistency and locking problems.
+Before you require RWX, ask whether an S3-compatible bucket or a real datastore is the better shape — and remember RWX may not exist at all on some clusters.
+* *Not every workload needs persistence.*
+Caches, scratch space, and anything you can rebuild are *better* on emptyDir — persistent volumes cost money, count against quota, and are one more thing to back up.
+The skill is knowing which data is precious and which is disposable, and only paying for the precious kind.
+
+== Go deeper
+
+* *Backup and restore (OpenShift API for Data Protection)* — persistence keeps data across Pod restarts, but not across a deleted PVC, a corrupted volume, or a bad migration. Backing up PVCs and namespaces is its own platform capability, covered in the data-protection module (a separate module in this workshop).
+* *Jobs, Batch & Queued Workloads* — the batch module reuses a seeded PVC as shared input to parallel Jobs; it is a good next look at storage from the workload side (a separate module).
+* Red Hat documentation: the OpenShift *Storage* guide (persistent storage, dynamic provisioning, expanding PVCs) and the *StatefulSet* / *Configuring persistent storage* sections; your storage backend's docs for the access modes it supports (this cluster runs OpenShift Data Foundation / Ceph).
+
+[NOTE]
+.Clean up
+====
+To return your world to a fresh (ephemeral) claims app and remove everything you created — the claims-db PVC, the `pg-sts` StatefulSet and its per-Pod PVCs, and the init-container demo — run `ws reset {module-id}` in the Terminal.
+Reset purges PersistentVolumeClaims explicitly, because StatefulSet volumes are *not* deleted when you delete the StatefulSet (you saw that in the challenge) and would otherwise leak.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

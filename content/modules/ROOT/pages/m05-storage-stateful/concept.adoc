@@ -1,0 +1,141 @@
+= Storage & Stateful Apps: Concept
+:module-id: m05
+include::partial$version-attributes.adoc[]
+
+// Concept page for M05. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// Upstream/exercise versions (PostgreSQL 15/16) are plain text — they are not Red Hat
+// product-version attributes. The storage backend (ODF/Ceph) is mentioned, never assumed:
+// the lab teaches you to DISCOVER your cluster's storage, because it differs per environment.
+
+[.lead]
+Parasol's claims database has been running in `{user}-dev` all week, and nobody noticed it was a time bomb.
+Its data lives in an *emptyDir* volume — memory-and-disk that belongs to the Pod — so the first time that Pod is rescheduled, upgraded, or simply dies, every claim vanishes.
+This module is about the difference between storage that dies with a Pod and storage that outlives it, and about running databases on the platform honestly.
+
+== What you'll learn
+
+* The *storage abstraction chain* — PersistentVolumeClaim, PersistentVolume, StorageClass — and how *dynamic provisioning* turns a one-line request into real disk.
+* What *access modes* (RWO, RWX, ROX) mean, and which ones your cluster's storage actually offers — measured, not assumed.
+* Why a *StatefulSet* is not just "a Deployment that keeps its data": stable network identity, a headless Service, per-Pod volumes (`volumeClaimTemplates`), and controlled *partitioned* updates.
+* How an *init container* runs a schema migration to completion before your app is allowed to start.
+* When an in-cluster database is the right call — and the honest cases where a managed data service beats it.
+
+== The storage abstraction chain
+
+A container's own filesystem is *ephemeral*: it is part of the Pod, and when the Pod goes away, so does everything written to it.
+That is correct behavior for stateless apps (the whole point of "cattle, not pets"), but a database needs storage that survives the Pod.
+
+OpenShift gives you that through three objects, and the separation between them is the entire idea:
+
+PersistentVolumeClaim (PVC)::
+What your app *asks for* — "I need 2Gi of ReadWriteOnce storage." It lives in your namespace, next to your app. You write PVCs; you never write the disk directly.
+PersistentVolume (PV)::
+What the platform *provisioned* — the actual piece of network storage bound to your claim. It is cluster-scoped and you rarely create one by hand.
+StorageClass (SC)::
+The *rules* the platform followed to create the PV — which storage backend, which access modes, whether volumes can grow, what happens when the claim is deleted.
+
+You ask (PVC); the platform provisions (PV) according to a recipe (SC); the PV is backed by real storage.
+
+[mermaid]
+....
+graph LR
+  app["Pod<br/>(your database)"] -->|mounts| pvc["PersistentVolumeClaim<br/>claims-db-data · 2Gi · RWO<br/>(your namespace)"]
+  pvc -->|bound to| pv["PersistentVolume<br/>pvc-0dcf… · 2Gi · RWO<br/>(cluster-scoped)"]
+  pv -->|provisioned per| sc["StorageClass<br/>(default) · dynamic provisioner<br/>binding · expansion · reclaim"]
+  sc -->|carves from| backend[("Cluster storage backend<br/>(here: ODF / Ceph)")]
+  classDef ask fill:#e00,stroke:#900,color:#fff;
+  classDef plat fill:#f3f3f3,stroke:#888,color:#333;
+  class pvc ask;
+  class pv,sc,backend plat;
+....
+
+// TODO(media): replace/augment with SVG export m05-storage-stateful-01-storage-chain.svg (see media-manifest.md)
+
+*Dynamic provisioning* is what makes this a one-liner.
+You never pre-create disks or hand-craft PVs.
+You submit a PVC, and the StorageClass's provisioner creates a matching PV on demand and binds them.
+
+One behavior of the default StorageClass will surprise you, and the lab makes you meet it head-on: *binding mode*.
+A class with `volumeBindingMode: WaitForFirstConsumer` deliberately leaves a new PVC in `Pending` until a Pod that uses it is scheduled — so the volume is created in the same place the Pod lands.
+A `Pending` PVC with no Pod is not broken; it is waiting, on purpose.
+
+== Access modes: what your app may assume
+
+A PVC requests an *access mode*, and this is where mental models from one cloud mislead you on another:
+
+* *ReadWriteOnce (RWO)* — mountable read-write by Pods on *one node* at a time. Correct for a single-writer database. This is what the default class here provides.
+* *ReadWriteMany (RWX)* — mountable read-write by many Pods across many nodes at once. Needed for shared-file workloads (uploaded media, a shared content directory). Not every backend offers it.
+* *ReadOnlyMany (ROX)* — mounted read-only by many Pods. Niche.
+
+The rule that matters: *do not assume RWX exists.* Many block-storage backends only offer RWO, and an app that quietly relies on many Pods sharing one volume will fail to schedule on them.
+On this cluster you can see both — the default class is RWO, and a separate file class offers RWX — and in the lab you confirm which is which by reading the StorageClasses directly instead of guessing.
+
+== StatefulSet vs Deployment
+
+A Deployment treats its Pods as interchangeable: same spec, random names, one shared Service load-balancing across them, and any Pod can use any volume.
+That is exactly wrong for stateful software where *identity* matters — where "replica 0" owns a specific slice of data and clients must reach *that* member, not a random one.
+
+A *StatefulSet* changes four things:
+
+Stable network identity::
+Pods are named by ordinal — `pg-sts-0`, `pg-sts-1` — and each keeps its name across restarts. Paired with a *headless Service* (one with `clusterIP: None`), each Pod gets its own stable DNS name, `pg-sts-0.pg-sts.<namespace>.svc`, so clients can address a specific member. The Pod's IP changes on restart; the *name* does not.
+Per-Pod storage::
+A `volumeClaimTemplate` gives *each* Pod its own PVC — `data-pg-sts-0`, `data-pg-sts-1` — not one shared volume. When `pg-sts-0` is rescheduled, it re-attaches to *its* PVC, so its data follows its identity.
+Ordered lifecycle::
+Pods are created and scaled in order (0, then 1, …), which matters when members must join a cluster in sequence.
+Controlled updates::
+Beyond the ordering, you can stage an update with a *partition*: set `rollingUpdate.partition: 1` and only Pods with ordinal ≥ 1 roll to the new spec — a built-in canary. Move the partition to 0 to finish. (The alternative strategy, `OnDelete`, updates a Pod only when you delete it — fully manual.)
+
+[mermaid]
+....
+graph TB
+  subgraph dep["Deployment — interchangeable Pods"]
+    d0["pod-a1b2"] --- dsvc(["Service<br/>one IP, load-balanced"])
+    d1["pod-c3d4"] --- dsvc
+  end
+  subgraph sts["StatefulSet — stable identities"]
+    s0["pg-sts-0"] --- s0p[("data-pg-sts-0")]
+    s1["pg-sts-1"] --- s1p[("data-pg-sts-1")]
+    s0 -. "pg-sts-0.pg-sts.svc" .- hsvc(["Headless Service<br/>clusterIP: None"])
+    s1 -. "pg-sts-1.pg-sts.svc" .- hsvc
+  end
+  classDef hi fill:#e00,stroke:#900,color:#fff;
+  classDef plat fill:#f3f3f3,stroke:#888,color:#333;
+  class s0,s1,s0p,s1p,hsvc hi;
+  class d0,d1,dsvc plat;
+....
+
+// TODO(media): replace/augment with SVG export m05-storage-stateful-02-sts-vs-deployment.svg (see media-manifest.md)
+// TODO(media): the master Parasol platform-accretion diagram (v5) with the M05 layer (persistent DB + StatefulSet) highlighted — m05-storage-stateful-03-platform-accretion-v5.svg
+
+== Stateful workloads on Kubernetes, honestly
+
+The platform can absolutely run stateful software — you will make it do so in the lab, and it will survive restarts.
+But "it can" is not "you always should." A production database needs backups you have *restored from*, monitoring, failover, version upgrades, and connection management.
+A StatefulSet gives you stable identity and storage; it does *not* give you any of that operational machinery for free.
+
+The honest decision comes down to who runs the database:
+
+* *In-cluster (StatefulSet or an Operator)* fits when you want it close to the app, portable across clouds, and inside one security and networking perimeter — and when your team (or a database Operator) will own backup, failover, and upgrades.
+* *A managed data service* fits when you would rather pay someone else to run undifferentiated database plumbing, and your app just needs a connection string.
+
+The wrap-up returns to this with a concrete decision guide.
+Where *backup* fits — for the in-cluster case — is a platform capability of its own (OpenShift API for Data Protection), covered in the backup-and-restore module (a separate module).
+
+== How this shows up in real orgs
+
+* *"Storage is a platform service."* App teams should write a PVC and get storage, without filing a ticket or knowing which array is behind it. The StorageClass is the contract between the platform team (who picks and tunes the backend) and app teams (who just ask). When that contract is clean, storage stops being a project.
+* *The RWX temptation is a design smell.* Teams reach for ReadWriteMany to let many Pods share a directory — and often it is papering over missing object storage or a missing database. Sometimes shared files are genuinely right; frequently the better fix is an S3-compatible bucket or a real datastore. Reaching for RWX should trigger a design conversation, not a reflex.
+* *StatefulSet is not a database strategy by itself.* A StatefulSet is plumbing — identity and volumes. Running PostgreSQL well in-cluster means an Operator that handles failover, backup, and upgrades, or a managed service. Presenting "we run a StatefulSet" as "we run a resilient database" is how teams get surprised at 3 a.m.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Two ideas must land: (1) the *storage chain* — a PVC is a request, the StorageClass is the recipe, dynamic provisioning turns the request into a real PV; (2) *ephemeral vs persistent is a property of the volume, not the app* — the same database Pod loses or keeps its data depending only on what its `data` volume is.
+The demo is the eight-minute data-loss-then-redemption arc: seed claims, kill the Pod, watch them vanish, add a PVC, kill the Pod again, watch them survive.
+Use the storage-chain diagram as your anchor when you show `oc get pvc → pv → sc`.
+====
+endif::demo[]
