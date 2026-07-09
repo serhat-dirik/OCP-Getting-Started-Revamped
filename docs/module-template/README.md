@@ -26,6 +26,8 @@ Extracted from the M01 vertical slice (2026-07-08). Copy `skeleton/` and follow 
 8. **Entry chart conventions:** marker ConfigMap `ws-entry-mNN` in the primary namespace (verify scripts check it); `ws-meta.yaml` lists purge namespaces for reset; every template carries a one-line "why" comment; secrets only by reference.
 9. **Measure timings while performing** — the instructor table and `[~N min]` chips are measured, never guessed.
 10. **Verify scripts run as the attendee**: no reads outside the user's namespaces (e.g. derive the Gitea host from the ingress domain instead of reading the route cross-namespace).
+11. **Naming/acronym house convention** (resolves the 04-STYLE-GUIDE §1-vs-§5 ambiguity): full product name at first PROSE use per page ("Red Hat OpenShift Dev Spaces", then "Dev Spaces"); workshop-concept acronyms (S2I, UDI, ESO…) expanded at first use per page; ubiquitous tech acronyms (DNS, API, JSON, CPU, URL, JVM, PVC…) never expanded. Page titles and `//` comments don't count as first use.
+12. **Checkpoints are for cluster-verifiable actions** — video/reading-only sections carry a timing chip but no `✔ Verify` block. **Tabs dual-path applies where console/CLI duality exists** — IDE-centric modules (M03) are a sanctioned exception.
 
 ## Gates
 
