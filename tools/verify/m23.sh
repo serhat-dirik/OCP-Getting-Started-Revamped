@@ -37,9 +37,12 @@ localqueue_active() {
 # The dataset seed succeeded. The seed Job is a Sync hook: after `ws start`/`ws reset` it is
 # present and Complete, but a completed hook can be cleaned up later — so absence is treated as
 # "ran and cleaned up" (the PVC-Bound check covers the volume). A seed Job that is PRESENT but not
-# Complete (Failed/Running) is a real problem and fails the check.
+# Complete (Failed/Running) is a real problem and fails the check. Gate on the namespace first:
+# with the namespace itself missing, "job absent" must read as FAILURE, not cleanup (G3-M23 F4
+# false-positive — the check printed green while nothing existed at all).
 seed_ok() {
   local job="claims-data-seed-m23-${USER_NAME}"
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
   oc get job "$job" -n "$NS" >/dev/null 2>&1 || return 0
   oc get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null | grep -q True
 }

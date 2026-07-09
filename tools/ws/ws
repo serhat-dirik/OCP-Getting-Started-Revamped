@@ -263,7 +263,17 @@ cmd_reset() {
   local app; app="$(app_name "$module" "$user")"
   info "resetting ${module} for ${user} (delete + purge + re-materialize)…"
   if oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
-    oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s
+    # A wedged sync operation slows the resources-finalizer well past 180s (seen live: ~4 min,
+    # G3-M23 F2). Under set -e a bare timeout aborted reset AFTER the delete, leaving no app and
+    # no re-materialization — tolerate the timeout and re-poll bounded instead.
+    if ! oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s; then
+      info "app deletion slow (finalizer still pruning) — waiting up to 180s more…"
+      local t=0
+      while oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; do
+        (( t >= 180 )) && die "entry app ${app} stuck deleting — inspect: oc get application ${app} -n ${ARGO_NS} -o yaml (finalizers)"
+        sleep 5; t=$((t+5))
+      done
+    fi
     ok "chart-owned state pruned"
   else
     info "no existing entry app — clean start"
