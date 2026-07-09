@@ -142,6 +142,7 @@ oc new-app java-21~{gitea_url}/{user}/parasol-claims.git --name=parasol-claims
 =====
 [source,texinfo]
 ----
+warning: Cannot check if git requires authentication.
 --> Found image ... in image stream "openshift/java-21" under tag "latest" for "java-21"
     Java Applications
     Platform for building and running plain Java applications (fat-jar and flat classpath)
@@ -211,7 +212,7 @@ Confirm what it is complaining about:
 
 [source,sh,role=execute]
 ----
-oc logs deployment/parasol-claims --tail=15 | grep -iE 'datasource|connection|refused' | head -3
+oc logs deployment/parasol-claims --tail=40 | grep -iE 'UnknownHost|PSQLException|connection attempt|datasource' | head -3
 ----
 
 Leave it crash-looping — you will give it a database in exercise 4 and wire it up in exercise 5.
@@ -250,7 +251,7 @@ Console::
 . Under *Import Strategy*, choose *Dockerfile*, and set the *Dockerfile path* to `Containerfile`.
 . Set the *Name* to `claims-docker` (so it does not collide with your S2I app), and click *Create*.
 
-// [CAPTURE-VERIFY] Confirm on 4.21: that Import-from-Git offers a "Dockerfile" import strategy with an editable Dockerfile-path field, and that setting it to "Containerfile" is accepted. Grounded from CLI: a Docker-strategy BuildConfig with dockerStrategy.dockerfilePath=Containerfile builds the repo's multi-stage Containerfile to completion (~95s) and pushes claims-docker:latest.
+// [CAPTURE-VERIFY] Confirm on 4.21: that Import-from-Git offers a "Dockerfile" import strategy with an editable Dockerfile-path field, and that setting it to "Containerfile" is accepted. Grounded from CLI: a Docker-strategy BuildConfig with dockerStrategy.dockerfilePath=Containerfile builds the repo's multi-stage Containerfile to completion (~4.5 min cold on this cluster; G3 measured 258s) and pushes claims-docker:latest.
 --
 CLI::
 +
@@ -367,7 +368,7 @@ Console::
 . Confirm the builder is *Node.js*, *Name* `parasol-notifications`, *Target port* `8080`.
 . Click *Create*.
 
-// [CAPTURE-VERIFY] Confirm on 4.21: the "Context dir" field under advanced Git options; that setting it to /node selects the Node.js builder and builds the node subdir. Grounded from CLI: `oc new-app nodejs:22-ubi9~<git> --context-dir=node` builds and pushes in ~45s (zero-dependency stdlib app, no npm registry needed).
+// [CAPTURE-VERIFY] Confirm on 4.21: the "Context dir" field under advanced Git options; that setting it to /node selects the Node.js builder and builds the node subdir. Grounded from CLI: `oc new-app nodejs:22-ubi9~<git> --context-dir=node` builds and pushes in ~90s (G3 measured 92s; zero-dependency stdlib app, no npm registry needed).
 --
 CLI::
 +
@@ -396,7 +397,7 @@ oc expose service/parasol-notifications
 
 [source,sh,role=execute,subs="attributes"]
 ----
-curl -s http://parasol-notifications-{user}-dev.{cluster_domain}/health
+curl -s --retry 8 --retry-connrefused --retry-delay 2 http://parasol-notifications-{user}-dev.{cluster_domain}/health
 ----
 
 .Expected output
@@ -542,7 +543,8 @@ oc expose service/parasol-claims
 
 [source,sh,role=execute,subs="attributes"]
 ----
-curl -s http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | head -c 200
+# the app has no readiness probe yet (that's next module) — retry while Quarkus finishes starting
+curl -s --retry 10 --retry-connrefused --retry-delay 2 --retry-all-errors http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | head -c 200
 ----
 
 .Expected output
