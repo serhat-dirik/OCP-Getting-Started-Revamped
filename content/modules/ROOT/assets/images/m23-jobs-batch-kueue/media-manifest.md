@@ -14,7 +14,7 @@ commented `// media-pass: image::…` line — uncomment when the asset lands.
 |----------|--------|-------|
 | `m23-jobs-batch-kueue-01-async-spectrum.svg` | concept.adoc Mermaid "async spectrum" | request-driven → event-driven → **batch** (highlighted); the framing diagram, reused on slide 2 |
 | `m23-jobs-batch-kueue-02-kueue-admission.svg` | concept.adoc Mermaid "admission flow" | Job (labelled) → LocalQueue → ClusterQueue quota → **admitted / pending / preempted**; the module's anchor diagram, reused on slide 5 |
-| `m23-jobs-batch-kueue-03-platform-accretion-v23.svg` | concept.adoc TODO(media) | **master accretion diagram**, the M23 layer (batch tier + admission control) highlighted on the running Parasol platform |
+| `m23-jobs-batch-kueue-03-platform-accretion-v23.svg` | concept.adoc — media-pass pending (no inline Mermaid source; centrally maintained master diagram) | **master accretion diagram**, the M23 layer (batch tier + admission control) highlighted on the running Parasol platform |
 | `m23-jobs-batch-kueue-04-what-you-built.svg` | wrapup.adoc Mermaid recap | Job/CronJob → LocalQueue → ClusterQueue (admitted / pending / preempted), with the AI inference job feeding the *same* LocalQueue (green = ran to completion; amber = queued/preempted) |
 
 Shared legend across all four: namespace box, Job/Pod, queue (LocalQueue/ClusterQueue) tag, quota

@@ -10,7 +10,8 @@ This module is built around one beat: attendees watch a *queue preempt a running
 Everything before it (Jobs, backoff, Indexed, CronJob) is the vocabulary that makes the preemption legible; everything after it (AI batch inference) is the pay-off — the same object, the same queue.
 Optimize the room for exercise 5: slow down, let them read the `Preempted`/`Requeued` conditions, and connect it out loud to GPUs.
 
-The single most common "it's broken" is a *labelled Job that ran immediately without queueing* — almost always the namespace is missing the Kueue opt-in label, or the label was added *after* creation. Pre-empt it (see Watchouts).
+The single most common "it's broken" is a *labelled Job that ran immediately without queueing* — almost always the namespace is missing the Red Hat build of Kueue opt-in label, or the label was added *after* creation.
+Pre-empt it (see Watchouts).
 
 == Timing
 
@@ -35,10 +36,14 @@ The *Measured core* column is real.
 On the build cluster (OCP {ocp_version}, Red Hat build of Kueue {kueue_version}, ODF external Ceph) on 2026-07-09, every exercise was performed as `user8` and timed:
 
 * *Monthly-statement* — `completions:6, parallelism:3` reached `6/6` in *~44 s*: the first three Pods finished around `3/6` at ~27 s (first-wave image pull dominates), the second three by ~45 s.
-* *Break-and-fix* — `backoffLimit:2` ran three Pods (initial + two retries) with ~10 s then ~20 s exponential backoff, hitting `BackoffLimitExceeded` at *~67 s*. The in-place `oc patch` failed instantly with `field is immutable`. The re-created (correct) Job completed in *~13 s*.
+* *Break-and-fix* — `backoffLimit:2` ran three Pods (initial + two retries) with ~10 s then ~20 s exponential backoff, hitting `BackoffLimitExceeded` at *~67 s*.
+The in-place `oc patch` failed instantly with `field is immutable`.
+The re-created (correct) Job completed in *~13 s*.
 * *Indexed* — five shard Pods completed in *~20–30 s*; the subtotals summed to the exercise-1 total (2,853,700), proving a clean partition.
-* *CronJob* — the `*/1` schedule fired at the top of the next minute (so the wait is *0–60 s* depending on when they apply it); the run itself is instant. Suspend takes effect immediately.
-* *Kueue* — five `batch-low` jobs settled to *2 admitted / 3 pending* within ~8 s. Submitting one `batch-high` preempted a running low Workload within *~3 s* (`Evicted`/`Preempted`/`Requeued`).
+* *CronJob* — the `*/1` schedule fired at the top of the next minute (so the wait is *0–60 s* depending on when they apply it); the run itself is instant.
+Suspend takes effect immediately.
+* *Kueue* — five `batch-low` jobs settled to *2 admitted / 3 pending* within ~8 s.
+Submitting one `batch-high` preempted a running low Workload within *~3 s* (`Evicted`/`Preempted`/`Requeued`).
 * *Inference* — the two-worker Indexed Job scored 6 claims and completed in *~17 s*; each MaaS call returned in ~2–3 s at `temperature 0`.
 
 The *Attendee time* adds reading, the deliberate break-and-fix, and the CronJob's up-to-a-minute wait.
@@ -82,7 +87,8 @@ oc -n user1-batch get pvc claims-data
 Expect the LocalQueue pointing at `cq-user1`, and the PVC `Bound` with access mode `RWX` (it is CephFS, *not* the default block class — see Watchouts).
 
 . *MaaS egress works from a Pod (the batch-inference exercise depends on it).*
-The entry state copies a bearer token into `user1-batch/maas-credentials`. The token is short-lived (RHDP); confirm a live call *the morning of* the session:
+The entry state copies a bearer token into `user1-batch/maas-credentials`.
+The token is short-lived (RHDP); confirm a live call *the morning of* the session:
 +
 [source,sh,role=execute]
 ----
@@ -91,7 +97,8 @@ oc -n user1-batch create job maas-check --image=registry.access.redhat.com/ubi9/
 sleep 15 && oc -n user1-batch logs -l job-name=maas-check ; oc -n user1-batch delete job maas-check
 ----
 +
-Expect `MaaS HTTP 200`. A `401` means the token rotated — re-run `ws reset m23 --user user1` to re-copy it, or have attendees skip exercise 6 gracefully (the Job degrades, it does not crash the lab).
+Expect `MaaS HTTP 200`.
+A `401` means the token rotated — re-run `ws reset m23 --user user1` to re-copy it, or have attendees skip exercise 6 gracefully (the Job degrades, it does not crash the lab).
 
 == Demo-mode notes
 
@@ -101,43 +108,74 @@ Beyond the Say/Show/Do arc in the demo flavor:
 The story is the queue filling and then preempting, so you must start with an *empty* queue.
 `ws solve m23` renders the finished end state (a completed statement Job + a suspended CronJob + a completed queued Workload) — use it to *show the destination*, never as the demo's start.
 * *Size the pause for the preemption.*
-After you submit the high-priority job, wait and narrate while Kueue evicts a low one — the `Preempted`/`Requeued` conditions are the payoff. Don't rush to the next command.
-* *The low-priority demo jobs `sleep 600` on purpose* so they can't finish naturally mid-demo and muddy the preemption. Delete them right after (`oc -n $NS delete jobs --all`) — you never wait out the sleep.
-* *Land the GPU line.* The single sentence that makes SAs lean in: "the machinery that just kept a claims batch fair is the machinery that keeps teams from fighting over GPUs — same object, same queue."
+After you submit the high-priority job, wait and narrate while Kueue evicts a low one — the `Preempted`/`Requeued` conditions are the payoff.
+Don't rush to the next command.
+* *The low-priority demo jobs `sleep 600` on purpose* so they can't finish naturally mid-demo and muddy the preemption.
+Delete them right after (`oc -n $NS delete jobs --all`) — you never wait out the sleep.
+* *Land the GPU line.*
+The single sentence that makes SAs lean in: "the machinery that just kept a claims batch fair is the machinery that keeps teams from fighting over GPUs — same object, same queue."
 
 == Top questions attendees ask
 
 *1. "Why Kueue at all? Isn't a ResourceQuota enough?"*::
-A `ResourceQuota` caps *one namespace* — it says "this team may use at most X." It cannot arbitrate *between* teams or express *priority*: it has no notion of "hold this job until there's room, and if an urgent job arrives, evict a lower-priority one." Kueue adds exactly that — it holds Jobs *suspended* until a ClusterQueue has quota, admits them in priority order, and *preempts* to make room for urgent work. Quotas prevent one team from over-committing; Kueue makes many teams *share fairly under contention*. You want both.
+A `ResourceQuota` caps *one namespace* — it says "this team may use at most X."
+It cannot arbitrate *between* teams or express *priority*: it has no notion of "hold this job until there's room, and if an urgent job arrives, evict a lower-priority one."
+Kueue adds exactly that — it holds Jobs *suspended* until a ClusterQueue has quota, admits them in priority order, and *preempts* to make room for urgent work.
+Quotas prevent one team from over-committing; Kueue makes many teams *share fairly under contention*.
+You want both.
 
 *2. "I labelled my Job and it ran immediately — no queue. Why?"*::
-Two usual causes. First, the *namespace* must carry `kueue.openshift.io/managed: "true"` — Red Hat build of Kueue's admission webhooks only intercept Jobs in opted-in namespaces (the entry state sets this label; a Job you create in some *other* namespace won't be managed). Second, the `kueue.x-k8s.io/queue-name` label must be present *at creation* — Kueue mutates the Job (suspends it) via a creation webhook, so adding the label to an already-running Job does nothing. Recreate it with the label baked into the manifest.
+Two usual causes.
+First, the *namespace* must carry `kueue.openshift.io/managed: "true"` — Red Hat build of Kueue's admission webhooks only intercept Jobs in opted-in namespaces (the entry state sets this label; a Job you create in some *other* namespace won't be managed).
+Second, the `kueue.x-k8s.io/queue-name` label must be present *at creation* — Kueue mutates the Job (suspends it) via a creation webhook, so adding the label to an already-running Job does nothing.
+Recreate it with the label baked into the manifest.
 
 *3. "Why exactly two admitted, not three?"*::
-Arithmetic against the ClusterQueue quota (`500m` CPU, `512Mi` memory). Each sample Job requests `200m`/`256Mi`. Two fit (`400m`/`512Mi` ≤ quota); a third would need `600m`/`768Mi`, over on *both* — so it pends. Memory is the tighter bound here (two Pods use the full `512Mi`). If you change the requests, the admitted count changes; that is the knob platform teams turn.
+Arithmetic against the ClusterQueue quota (`500m` CPU, `512Mi` memory).
+Each sample Job requests `200m`/`256Mi`.
+Two fit (`400m`/`512Mi` ≤ quota); a third would need `600m`/`768Mi`, over on *both* — so it pends.
+Memory is the tighter bound here (two Pods use the full `512Mi`).
+If you change the requests, the admitted count changes; that is the knob platform teams turn.
 
 *4. "The preempted job — did it lose its work?"*::
-The *Workload* is not lost — it is `Evicted (Preempted)` and `Requeued`, and Kueue re-admits it when quota frees. But the *Pod* is killed and, on re-admission, starts *from scratch*. That is the honest constraint on preemptible batch: it must be *idempotent and restartable* (checkpoint long work, or make each run safe to repeat). Preemption trades a restart for fairness; design your batch to survive a restart.
+The *Workload* is not lost — it is `Evicted (Preempted)` and `Requeued`, and Kueue re-admits it when quota frees.
+But the *Pod* is killed and, on re-admission, starts *from scratch*.
+That is the honest constraint on preemptible batch: it must be *idempotent and restartable* (checkpoint long work, or make each run safe to repeat).
+Preemption trades a restart for fairness; design your batch to survive a restart.
 
 *5. "This 'AI' job is just a shell script calling curl. Where's the ML infrastructure?"*::
-That is the entire point of the module. A batch-inference or evaluation job *is* an ordinary Job — it reads input, calls a model, writes output, and stops. OpenShift AI's distributed-workloads stack adds richer *integrations* (RayJob, PyTorchJob, JobSet) and GPU-aware ResourceFlavors, but the *admission layer is identical* — the same ClusterQueue, priorities, and preemption you just used. Teaching it on a tiny CPU curl job is deliberate: the control plane is what transfers, and it is the same one governing GPUs.
+That is the entire point of the module.
+A batch-inference or evaluation job *is* an ordinary Job — it reads input, calls a model, writes output, and stops.
+OpenShift AI's distributed-workloads stack adds richer *integrations* (RayJob, PyTorchJob, JobSet) and GPU-aware ResourceFlavors, but the *admission layer is identical* — the same ClusterQueue, priorities, and preemption you just used.
+Teaching it on a tiny CPU curl job is deliberate: the control plane is what transfers, and it is the same one governing GPUs.
 
 == Watchouts
 
 * *One user's batch starving others IS the lesson — and the reason for per-user ClusterQueues.*
-A single shared ClusterQueue would let one attendee's five jobs starve everyone else's — which is the very failure the module teaches. That is why the workshop layer gives *each* user their own `cq-userN` with its own tiny quota. If you re-architect to a shared queue for a smaller event, understand you are re-introducing the starvation you are teaching against; size and cohort deliberately.
+A single shared ClusterQueue would let one attendee's five jobs starve everyone else's — which is the very failure the module teaches.
+That is why the workshop layer gives *each* user their own `cq-userN` with its own tiny quota.
+If you re-architect to a shared queue for a smaller event, understand you are re-introducing the starvation you are teaching against; size and cohort deliberately.
 * *The `kueue.openshift.io/managed` namespace label is mandatory.*
-Without it, labelled Jobs run *unmanaged* — no Workload, no admission, no preemption — and the whole exercise silently does nothing. The entry state sets it on `{user}-batch`; if an attendee wanders into another namespace, Jobs there won't queue. This is the number-one "it's broken."
+Without it, labelled Jobs run *unmanaged* — no Workload, no admission, no preemption — and the whole exercise silently does nothing.
+The entry state sets it on `{user}-batch`; if an attendee wanders into another namespace, Jobs there won't queue.
+This is the number-one "it's broken."
 * *The dataset PVC is `ReadWriteMany`, not the default class.*
-`claims-data` is CephFS (RWX) on purpose: the statement Job (parallelism 3) and inference Job (parallelism 2) mount it from Pods the scheduler *spreads across nodes*. The default block class (RWO) would `Multi-Attach`-fail those parallel Pods. On a cluster without an RWX class, the parallel exercises need a different dataset strategy (a per-Pod copy, or a ConfigMap for the tiny dataset) — flag it before teaching.
+`claims-data` is CephFS (RWX) on purpose: the statement Job (parallelism 3) and inference Job (parallelism 2) mount it from Pods the scheduler *spreads across nodes*.
+The default block class (RWO) would `Multi-Attach`-fail those parallel Pods.
+On a cluster without an RWX class, the parallel exercises need a different dataset strategy (a per-Pod copy, or a ConfigMap for the tiny dataset) — flag it before teaching.
 * *The MaaS token is short-lived.*
-It is copied from the platform at `ws start` time; on a long-running event it can rotate and start returning `401`. Re-run `ws reset m23 --user <u>` to re-copy, or let exercise 6 degrade (the Job writes `unknown` rather than crashing). Never print the token.
+It is copied from the platform at `ws start` time; on a long-running event it can rotate and start returning `401`.
+Re-run `ws reset m23 --user <u>` to re-copy, or let exercise 6 degrade (the Job writes `unknown` rather than crashing).
+Never print the token.
 * *`temperature 0` + `/no_think`.*
-The exercise uses a "thinking" model; the `/no_think` switch in the prompt is what yields a direct one-word answer instead of chain-of-thought, and `temperature 0` makes the batch reproducible. If you swap models, verify the answer-shaping still works.
+The exercise uses a "thinking" model; the `/no_think` switch in the prompt is what yields a direct one-word answer instead of chain-of-thought, and `temperature 0` makes the batch reproducible.
+If you swap models, verify the answer-shaping still works.
 * *Kueue demo jobs sleep long on purpose.*
-The `batch-low` jobs `sleep 300`+ so they don't finish naturally while you observe preemption. Tell attendees to *delete* them after the exercise (the lab does) rather than wait — they are placeholders, not real work.
+The `batch-low` jobs `sleep 300`+ so they don't finish naturally while you observe preemption.
+Tell attendees to *delete* them after the exercise (the lab does) rather than wait — they are placeholders, not real work.
 * *Workload API version.*
-On Red Hat build of Kueue {kueue_version} the served/storage version is `kueue.x-k8s.io/v1beta2` (v1beta1 is still served for compatibility). `oc get workload -o yaml` returns v1beta2 — if you copy manifests from older docs written for v1beta1, they still apply, but the returned objects are v1beta2.
+On Red Hat build of Kueue {kueue_version} the served/storage version is `kueue.x-k8s.io/v1beta2` (v1beta1 is still served for compatibility).
+`oc get workload -o yaml` returns v1beta2 — if you copy manifests from older docs written for v1beta1, they still apply, but the returned objects are v1beta2.
 
 == Provenance
 
