@@ -1,0 +1,180 @@
+= Config, Secrets & Multi-Environment: Concept
+:module-id: m04
+include::partial$version-attributes.adoc[]
+
+// Concept page for M04. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+
+[.lead]
+Parasol's claims team shipped a change that passed every check in staging and then broke in production — again.
+
+The bug was not in the code; it was in *configuration* that lived in three different places and quietly drifted between environments.
+This module makes configuration a first-class, externalized part of the platform, so the *same image* runs in dev, stage, and prod with only its settings changing — and so a broken setting fails loudly and safely instead of at 2 a.m. in production.
+
+== What you'll learn
+
+* Why the *same container image* must run in every environment, and how *externalized configuration* — environment variables, ConfigMaps, Secrets, and mounted files — makes that possible.
+* The honest difference between a *ConfigMap* and a *Secret*, and why base64 is *encoding, not encryption*.
+* What the platform actually *does* with each of the three health probes — *liveness*, *readiness*, and *startup* — and how a readiness gate holds traffic away from a pod that is not ready.
+* How *requests and limits* interact with a namespace *ResourceQuota* and *LimitRange*, and what happens when a workload asks for more than its share.
+* How to *promote* an application across dev → stage → prod with per-environment config, changing settings without ever rebuilding the image.
+
+== Why externalize configuration at all
+
+A container image is meant to be *immutable* and *portable*: build it once, run it anywhere.
+The moment you bake an environment's specifics — a database hostname, a password, a log level — *into* the image, you have broken that promise.
+Now "promote to production" means "rebuild," and the thing you tested in staging is not the thing you ship.
+
+The discipline that fixes this is old and simple: *keep configuration outside the artifact*.
+The image carries the *behavior*; the environment supplies the *settings*.
+This is the heart of what people call *twelve-factor* configuration, and OpenShift gives you four places to put those settings, in increasing order of how they are handled:
+
+[mermaid]
+....
+graph LR
+  subgraph img["The image (built once, never changes)"]
+    app["parasol-claims<br/>reads config at startup"]
+  end
+  env["Env vars<br/>(inline)"] --> app
+  cm["ConfigMap<br/>(non-secret config)"] --> app
+  sec["Secret<br/>(credentials)"] --> app
+  file["Mounted file<br/>(config as a volume)"] --> app
+  classDef art fill:#e00,stroke:#900,color:#fff;
+  classDef cfg fill:#f3f3f3,stroke:#888,color:#333;
+  class app art;
+  class env,cm,sec,file cfg;
+....
+
+// TODO(media): replace/augment with SVG export m04-config-multienv-01-config-sources.svg (see media-manifest.md)
+
+Environment variables::
+The simplest lever. Good for a handful of values.
+The catch: everything is visible in the Deployment spec, so putting a *password* here means anyone who can read the Deployment can read the password.
+ConfigMap::
+A named object holding *non-secret* configuration — hostnames, ports, feature flags, log levels.
+It lives and is versioned *separately* from the Deployment, so you can change config without editing (or redeploying) the app, and the same Deployment can point at a different ConfigMap in each environment.
+Secret::
+The same idea, for *sensitive* values.
+A crucial honesty: a Secret's data is *base64-encoded, not encrypted* — anyone with permission to read the Secret reads the plaintext.
+What a Secret buys you is *separate access control* (you can let people deploy without letting them read credentials) and a single place to rotate a credential.
+Mounted file::
+A ConfigMap or Secret projected into the container as a *file* instead of an environment variable.
+This is the right tool for larger config (a whole properties or YAML file), for values you want to rotate *without* changing the Deployment, and for keeping secrets out of the process environment (where they can leak into logs and crash dumps).
+
+The lab uses all four, in that order, on the real claims service.
+
+== Probes: how the platform knows your app is healthy
+
+Running is not the same as *ready*.
+A pod can be started but still loading; it can be alive but wedged.
+The platform cannot know the difference unless you tell it — and you tell it with *probes*, small health checks the kubelet runs on a schedule.
+There are three, and the platform does something *different* with each:
+
+[cols="1,3,3",options="header"]
+|===
+| Probe | The question it answers | What the platform does on failure
+
+| *startup* | "Has the app finished booting?" | Hold off the other two probes until this passes — so a slow start is not mistaken for a failure and killed.
+| *readiness* | "Can the app take traffic *right now*?" | Remove the pod from the Service's endpoints — traffic is *held*, not sent to a pod that would error.
+| *liveness* | "Is the app still working, or wedged?" | *Restart* the container.
+|===
+
+The claims service exposes these as HTTP endpoints — `/q/health/started`, `/q/health/ready`, and `/q/health/live` — a convention its Quarkus {quarkus_version} runtime provides out of the box.
+The distinction that matters most in practice is *readiness*: when a pod fails its readiness check, the platform stops sending it traffic.
+
+[mermaid]
+....
+graph TB
+  route["Route / Service"]
+  subgraph ready["Pod — readiness PASSING"]
+    r1["in the Service endpoints<br/>receives traffic"]
+  end
+  subgraph notready["Pod — readiness FAILING"]
+    r2["removed from endpoints<br/>traffic held (Route → 503)"]
+  end
+  route -->|"traffic"| r1
+  route -.->|"no endpoint"| r2
+  classDef ok fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef bad fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class r1 ok;
+  class r2 bad;
+....
+
+// TODO(media): replace/augment with SVG export m04-config-multienv-02-readiness-gate.svg (see media-manifest.md)
+
+In the lab you break readiness on purpose and watch the platform pull the pod out of rotation — the Route starts returning `503` because there is *nowhere safe to send the request*.
+That is the platform protecting your users from a half-broken pod, and it is the single most useful thing probes do.
+
+== Requests, limits, and living inside a quota
+
+Every container can declare two numbers for CPU and memory:
+
+* a *request* — what the scheduler *reserves* for it (and what it uses to decide which node the pod fits on);
+* a *limit* — the ceiling the container may not exceed (a memory over-limit is killed; a CPU over-limit is throttled).
+
+Your namespaces come with two guardrails already in place.
+A *LimitRange* supplies *default* requests and limits so a container that declares none still gets sensible numbers (here, a request of `100m` CPU / `256Mi` memory and a limit of `500m` / `1Gi`).
+A *ResourceQuota* caps the *namespace total* — across all your pods you may request at most `3` CPU cores and `6Gi` of memory.
+
+These are not obstacles to fight; they are the shape of the room you are working in.
+In the lab you set explicit requests and limits on the claims app, then deliberately ask for more CPU than the whole namespace is allowed and watch the platform refuse to schedule it — with an error that tells you exactly why.
+
+== Promotion: same image, different config
+
+Put the pieces together and *promotion* becomes almost boring, which is the goal.
+Because the image is immutable and every environment-specific setting is external, moving from stage to prod is not a rebuild — it is *applying a different set of configuration values* to the same image.
+
+The lab does this with *Kustomize*, a templating-free way to describe one *base* (the claims app, its Service, its Route, its config) and then *overlays* that change only what should differ per environment:
+
+[mermaid]
+....
+graph TB
+  base["base/<br/>claims app + config<br/>(image: parasol-claims:1.0)"]
+  base --> dev["overlay: dev<br/>1 replica · APP_ENV=dev · log DEBUG"]
+  base --> stage["overlay: stage<br/>2 replicas · APP_ENV=stage · log INFO"]
+  base --> prod["overlay: prod<br/>3 replicas · APP_ENV=prod · log WARN"]
+  dev --> devns[("your-name-dev")]
+  stage --> stagens[("your-name-stage")]
+  prod --> prodns[("your-name-prod")]
+  classDef same fill:#e00,stroke:#900,color:#fff;
+  classDef ns fill:#f3f3f3,stroke:#888,color:#333;
+  class base same;
+  class devns,stagens,prodns ns;
+....
+
+// TODO(media): replace/augment with SVG export m04-config-multienv-03-promotion-overlays.svg (see media-manifest.md)
+// TODO(media): the master Parasol platform-accretion diagram (v4) with the M04 layer (config + multi-env) highlighted — m04-config-multienv-04-platform-accretion-v4.svg
+
+The same image lands in all three namespaces; only replica counts and configuration differ.
+You will prove at the end that all three environments run the *identical image digest* — the exact bytes, not just the same tag — which is what "we tested what we shipped" really means.
+
+== A note on real secret management
+
+The lab keeps credentials in a Kubernetes *Secret*, which is the right first step — but remember the honesty above: base64 is not encryption, and the Secret sits in the cluster's datastore.
+Mature organizations keep the *source of truth* for secrets in a dedicated manager (HashiCorp Vault, a cloud secrets service) and *sync* them into the cluster on demand.
+On OpenShift the tool for that is the *External Secrets Operator* (ESO) {external_secrets_version}: you write a small `ExternalSecret` that references the external manager, and the operator produces a normal Kubernetes Secret your app consumes unchanged.
+It is not installed on this cluster, so this module treats it as an *optional, instructor-led* topic — the pattern is worth knowing even where you will not run it today.
+
+== How this shows up in real orgs
+
+* *"It worked in staging" stops being a mystery.*
+When every environment runs the same image and differs only by declared config, the gap between stage and prod shrinks to something you can read in a diff.
+The class of bug that comes from environment drift largely disappears.
+* *Config becomes reviewable and auditable.*
+A ConfigMap and a Secret reference in Git is a change you can review, approve, and roll back — not a value someone typed into a console at midnight.
+* *Secrets get real access control.*
+Splitting credentials into Secrets lets you grant "can deploy" without granting "can read the database password," and gives you one place to rotate.
+* *It is not free.*
+More externalization means more objects to manage; a five-value app does not need a secrets manager and three overlays.
+The wrap-up is honest about where this discipline earns its keep and where it is over-engineering.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Two ideas must land: (1) the *same image* runs everywhere and configuration is what changes between environments; (2) *readiness* is the probe that holds traffic away from a pod that is not ready.
+Everything you show live — the readiness gate returning `503`, then the same image promoted to stage and prod with different config — is a proof of those two sentences.
+Use the promotion diagram as your anchor for "one base, three overlays, one image."
+====
+endif::demo[]

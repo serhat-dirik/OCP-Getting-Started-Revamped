@@ -1,0 +1,125 @@
+# The claims service deployed the NAIVE way in {user}-dev: it runs and serves, but it is
+# deliberately under-configured so the lab can improve it. Specifically it has:
+#   * ALL config AND credentials crammed inline as plain env vars — including the database
+#     PASSWORD in the Deployment spec, readable by anyone with view on the namespace. The lab
+#     externalizes the non-secret keys into a ConfigMap and the credentials into a Secret;
+#   * NO health probes — the lab adds liveness/readiness/startup and breaks/fixes readiness;
+#   * NO explicit requests/limits — the lab sets them and then busts the namespace quota.
+# Inline env vars are used (not an envFrom secretRef) precisely because they are what the lab
+# removes with `oc set env KEY-` as it refactors — the deliberate "before" state. The values
+# are the throwaway demo credentials (parasol/parasol), the same ones already in the claims-db
+# init Secret; nothing here is a real secret.
+# Runs the SHARED prebuilt image so M04 never depends on any per-user build having happened.
+---
+# why: the running claims REST API (%prod profile); datasource is env-driven at claims-db.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m04
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: m04
+    spec:
+      containers:
+        - name: parasol-claims
+          # Shared image built once into parasol-images (independent of any per-user build).
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+          ports:
+            - containerPort: 8080
+{{- if .Values.solve }}
+          # SOLVE (end state): the fully-externalized dev app the lab produces — config from a
+          # ConfigMap, creds from a Secret (both rendered by solve-endstate.yaml), all three
+          # probes, and explicit requests/limits.
+          envFrom:
+            - configMapRef:
+                name: claims-config
+            - secretRef:
+                name: claims-creds
+          startupProbe:
+            httpGet:
+              path: /q/health/started
+              port: 8080
+            periodSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+{{- else }}
+          env:
+            # Everything inline — the deliberate anti-pattern. Non-secret config (host/port/db)
+            # AND the credentials (user/password) are hardcoded in the Deployment spec. The lab
+            # moves the first group to a ConfigMap and the second to a Secret.
+            - name: POSTGRESQL_HOST
+              value: claims-db
+            - name: POSTGRESQL_PORT
+              value: "5432"
+            - name: POSTGRESQL_DATABASE
+              value: parasol
+            - name: POSTGRESQL_USER
+              value: parasol
+            - name: POSTGRESQL_PASSWORD
+              value: parasol
+          # NOTE: intentionally no readiness/liveness/startup probes and no resources block.
+          # The container inherits the namespace LimitRange defaults (request 100m/256Mi,
+          # limit 500m/1Gi) until the lab sets explicit values.
+{{- end }}
+---
+# why: stable in-cluster address for the claims API (port 8080).
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m04
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# why: publishes the claims API at parasol-claims-{user}-dev.{clusterDomain} (host auto-generated).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m04
+spec:
+  to:
+    kind: Service
+    name: parasol-claims
+  port:
+    targetPort: http

@@ -1,0 +1,78 @@
+= Config, Secrets & Multi-Environment: Wrap-up
+:module-id: m04
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took the claims service from a fragile, hardcoded configuration to a properly externalized one — and then promoted it across three environments without ever rebuilding the image.
+You broke the app with a bad datasource URL and read the `CrashLoopBackOff` logs, moved its non-secret config into a *ConfigMap* and its credentials into a *Secret*, saw that base64 is not encryption, delivered config as a *mounted file* and reverted it, added all three *probes* and watched a broken readiness gate drain the endpoints and return `503`, set explicit *requests and limits* and bumped into the namespace *quota*, and finally promoted the *same image digest* to stage and prod with per-environment configuration.
+
+[mermaid]
+....
+graph LR
+  img["parasol-claims:1.0<br/>(one image, one digest)"]
+  cm["ConfigMap<br/>claims-config"] --> app
+  sec["Secret<br/>claims-creds"] --> app
+  img --> app["dev: configured + probed"]
+  app -->|"oc apply -k overlays/stage"| stage[("stage<br/>2 replicas · INFO")]
+  app -->|"oc apply -k overlays/prod"| prod[("prod<br/>3 replicas · WARN")]
+  classDef done fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef same fill:#e00,stroke:#900,color:#fff;
+  class app,stage,prod done;
+  class img same;
+....
+
+// TODO(media): recap SVG m04-config-multienv-05-what-you-built.svg (green = what the attendee ran this module).
+
+The one idea under all of it: the image carries the *behavior*, and the environment supplies the *settings*.
+Get that split right and "promote to production" becomes applying config to bytes you already tested — not a rebuild, and not a surprise.
+
+== Map to your org
+
+Take these back to how your teams work today:
+
+. *Where does your configuration actually live?*
+List one real service and count the places its configuration hides: baked into the image, in environment variables, in a config file on a server, in someone's head.
+How many of those would survive the person who set them up leaving? What would it take to make the environment's config a reviewed change in Git instead?
+. *Who can read your production database password right now?*
+A Kubernetes Secret separates "can deploy" from "can read credentials" — but only if you use that separation.
+For a real system of yours, ask: can everyone who can deploy also read the production secrets? Should they? Where is the *source of truth* for that credential, and who rotates it?
+. *How different are your environments, really?*
+You proved dev, stage, and prod can run the identical image and differ only by declared config.
+For your own pipeline: how much of the difference between your staging and production is *configuration you could diff* — and how much is drift nobody can fully account for? Every bit you move into the first column is a class of "worked in staging" bug you retire.
+
+== When *not* to do it this way
+
+Externalized configuration is a strong default, but every tool here can be over-applied.
+Be honest about the edges:
+
+* *Env-var sprawl is a real smell.*
+Environment variables are perfect for a handful of values.
+When a service accumulates *dozens* of them, they become as hard to manage as the hardcoding you replaced — no structure, no types, no grouping.
+That is the signal to move to a *mounted config file* (a whole properties or YAML document) or, at real scale, a dedicated configuration service.
+Do not let "externalize everything into env vars" become its own mess.
+* *A Secret is not a vault.*
+Base64 is encoding, not encryption, and a Kubernetes Secret sits in the cluster datastore readable by anyone with the right RBAC.
+For low-stakes workshop credentials that is fine; for regulated data, PCI, or anything that would make the news, a Secret alone is *not* sufficient.
+That is where the External Secrets Operator and a real manager (Vault, a cloud secrets service) earn their place — do not mistake a Secret for security it does not provide.
+* *Three overlays for a two-setting app is over-engineering.*
+The base-plus-overlays pattern shines when environments genuinely diverge and change often.
+A small internal tool with one environment does not need a Kustomize base, three overlays, and a promotion flow — that machinery is cost you pay for flexibility you are not using.
+Reach for it when the number of environments or the rate of config change justifies it, not by default.
+* *Probes can lie if you point them at the wrong thing.*
+A readiness probe that checks something trivial (the process is up) tells the platform the pod is ready when it is not; a liveness probe that checks a *dependency* (the database) can restart a healthy pod during a blip and turn a small outage into a restart storm.
+Probe *your own* readiness — can I serve? — not your dependencies' health.
+
+== Go deeper
+
+* *Storage & Stateful Apps* — the databases in this lab are ephemeral; that module gives them persistent storage so a restart does not lose data (a separate module in this workshop).
+* *GitOps at Scale* — you promoted with `oc apply -k` by hand; that module has a controller watch your config repo and promote automatically, turning a `git push` into a deployment (a separate module).
+* *Trusted Supply Chain* — you proved the same image digest ran everywhere; that module signs and verifies those digests so only trusted images run at all (a separate module).
+* Red Hat documentation: the OpenShift *ConfigMaps and Secrets*, *pod health checks (probes)*, and *ResourceQuota / LimitRange* guides; the *External Secrets Operator* {external_secrets_version} docs; and the *Quarkus* configuration reference for `quarkus.config.locations`.
+
+[NOTE]
+.Clean up
+====
+To return your three namespaces to a fresh entry state (naive dev app, empty stage and prod), run `ws reset {module-id}` in the Showroom terminal.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

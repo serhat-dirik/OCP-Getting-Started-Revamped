@@ -1,0 +1,87 @@
+# The claims app in its FULLY-CONFIGURED form — the end state the M04 lab builds by hand in
+# dev, captured here as code so it promotes unchanged to any environment. The image is the
+# SAME across every environment (the artifact); only the ConfigMap/Secret/replicas differ.
+# It carries all three probes and explicit requests/limits — the disciplines the lab teaches.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  labels:
+    app: parasol-claims
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+    spec:
+      containers:
+        - name: parasol-claims
+          # SAME image reference in every environment — promotion changes config, not the artifact.
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+          ports:
+            - containerPort: 8080
+          envFrom:
+            # Non-secret config (host/port/db/APP_ENV/log level) + the credentials Secret.
+            - configMapRef:
+                name: claims-config
+            - secretRef:
+                name: claims-creds
+          # Startup gates the slow first boot (drop-and-create + seed); once it passes, the
+          # tight readiness/liveness periods take over. Readiness drains traffic on DB loss;
+          # liveness restarts a wedged process. All three hit the app's SmallRye Health paths.
+          startupProbe:
+            httpGet:
+              path: /q/health/started
+              port: 8080
+            periodSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  labels:
+    app: parasol-claims
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-claims
+  labels:
+    app: parasol-claims
+spec:
+  to:
+    kind: Service
+    name: parasol-claims
+  port:
+    targetPort: http

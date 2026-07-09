@@ -1,0 +1,758 @@
+= Config, Secrets & Multi-Environment: Lab
+:module-id: m04
+include::partial$version-attributes.adoc[]
+
+// Lab page for M04. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows
+// only the presenter arc. Every command runs in the SHOWROOM terminal as {user}, so blocks are
+// role=execute (click-to-run) with subs="attributes" where {user} appears. All commands and
+// outputs were performed on OCP {ocp_version} / Quarkus {quarkus_version} as user6 (2026-07-09);
+// outputs are shown with generic values (no subs) so captured text is never re-interpolated.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+In this lab you take the claims service from a fragile, hardcoded configuration to a properly externalized one, and then promote it across three environments.
+You break the app with a bad setting and read the failure, move its configuration into a ConfigMap, move its credentials into a Secret, add health probes and watch a readiness gate hold traffic, set resource requests and bump into the namespace quota, and finally promote the *same image* to stage and prod with per-environment config.
+Everything happens in your own namespaces — `{user}-dev`, `{user}-stage`, `{user}-prod` — so nothing you do can affect another attendee.
+
+[NOTE]
+.Everything here runs in the Showroom terminal
+====
+Unlike the Dev Spaces module, every command in this lab runs in the *Terminal* tab beside these instructions, logged in as `{user}`.
+The blocks are click-to-run.
+A few steps have a *Console* alternative shown in tabs — use whichever you prefer; the result is identical.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 10–12 minute presenter arc (probe-gate + promote-same-image)
+// ============================================================================
+ifdef::demo[]
+== Demo arc — The readiness gate and one image in three environments (10–12 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws solve m04 --user {user}` a few minutes ahead so the end state is up: the claims app fully configured in `{user}-dev`, and promoted to `{user}-stage` (2 replicas) and `{user}-prod` (3 replicas).
+Have a terminal logged in as `{user}` and the web console *Topology* for `{user}-dev` open.
+All values below were measured on {ocp_version} / Quarkus {quarkus_version}.
+====
+
+[demo-block]
+[TIME 2m]
+Say:: "Parasol runs the exact same claims image in dev, stage, and production. The only thing that changes between them is configuration. Let me show you what that buys us — starting with what happens when a pod goes unhealthy."
+Show:: The Topology view in `{user}-dev` with `parasol-claims` and `claims-db` running, then the terminal.
+Do:: Show the app is healthy and note the three probes it carries:
++
+[source,sh,subs="attributes"]
+----
+oc -n {user}-dev get deploy parasol-claims \
+  -o jsonpath='{.spec.template.spec.containers[0].startupProbe.httpGet.path} {.spec.template.spec.containers[0].readinessProbe.httpGet.path} {.spec.template.spec.containers[0].livenessProbe.httpGet.path}{"\n"}'
+----
++
+"Three probes: started, ready, live. Watch what readiness does."
+
+[demo-block]
+[TIME 4m]
+Say:: "I'll break the readiness check — point it at a URL that doesn't exist — and roll it out. This is the failure the platform is built to contain."
+Show:: The terminal, then the Topology node going out of rotation, then the Route returning 503.
+Do:: Break readiness, force the old pod out, and hit the Route:
++
+[source,sh,subs="attributes"]
+----
+oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
+# after the new pod comes up NotReady, delete the last ready pod so only NotReady pods remain
+oc -n {user}-dev delete pod -l app=parasol-claims --field-selector=status.phase=Running --wait=false
+sleep 15
+oc -n {user}-dev get endpoints parasol-claims
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
+----
++
+"No ready pods means no endpoints, and the Route returns 503. The platform is *holding* the request, not sending it to a broken pod. That's readiness doing its job."
+
+[demo-block]
+[TIME 2m]
+Say:: "Now I fix it, and the platform puts the pod straight back into rotation."
+Show:: The Route returning 200 again within seconds.
+Do:: Restore the readiness path:
++
+[source,sh,subs="attributes"]
+----
+oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
+oc -n {user}-dev rollout status deploy/parasol-claims
+curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
+----
++
+"Green again. That whole cycle — drain, hold, recover — happened without anyone touching the load balancer."
+
+[demo-block]
+[TIME 3m]
+Say:: "Here's the other half: the same image, promoted across three environments with only configuration changing."
+Show:: The terminal comparing dev, stage, and prod.
+Do:: Show the identical image digest and the different per-environment config:
++
+[source,sh,subs="attributes"]
+----
+for ns in {user}-dev {user}-stage {user}-prod; do
+  printf "%-16s replicas=%s  APP_ENV=%s  image=%s\n" "$ns" \
+    "$(oc -n $ns get deploy parasol-claims -o jsonpath='{.status.readyReplicas}')" \
+    "$(oc -n $ns get cm claims-config -o jsonpath='{.data.APP_ENV}')" \
+    "$(oc -n $ns get pod -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' | sed 's#.*@##' | cut -c1-19)"
+done
+----
++
+"Same image digest in all three — the exact bytes we tested. Different replica counts and config per environment. Promotion here means applying config, not rebuilding."
+
+[demo-block]
+[TIME 1m]
+Say:: "Config in a ConfigMap, credentials in a Secret, health in three probes, and one image everywhere. That's the whole discipline — and it's why 'it worked in staging' stops being a surprise."
+Show:: The Topology of `{user}-prod` with its three healthy replicas.
+Do:: Leave the healthy prod environment on screen as the closing image.
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Break the app with a bad setting — and read the failure
+⏱ *~10 min* · the deliberate break: configuration can take a running app down
+
+Your claims service is running in `{user}-dev`, but it is configured the *naive* way: every setting, including the database password, is hardcoded inline in the Deployment.
+See for yourself:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc project {user}-dev
+oc set env deploy/parasol-claims --list
+----
+
+.Expected output
+[source,texinfo]
+----
+# deployments/parasol-claims, container parasol-claims
+POSTGRESQL_HOST=claims-db
+POSTGRESQL_PORT=5432
+POSTGRESQL_DATABASE=parasol
+POSTGRESQL_USER=parasol
+POSTGRESQL_PASSWORD=parasol
+----
+
+Everything — including `POSTGRESQL_PASSWORD` — is sitting in plain text in the Deployment.
+We will fix that.
+But first, feel *why* configuration matters: change one setting to a bad value and watch the app fall over.
+Point the datasource at a database host that does not exist:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims \
+  QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://wrong-db-host:5432/parasol
+----
+
+`QUARKUS_DATASOURCE_JDBC_URL` is the environment-variable form of the app's datasource URL, and it *overrides* the correct value the image ships with.
+Watch the rollout: the new pod starts, tries to reach the database at boot, fails, and the container exits — over and over.
+Give it about a minute, then look:
+
+[source,sh,role=execute]
+----
+oc get pods -l app=parasol-claims
+----
+
+.Expected output (the deliberate failure)
+[source,texinfo]
+----
+NAME                              READY   STATUS             RESTARTS      AGE
+parasol-claims-5f7d47fdbd-9pxbt   0/1     CrashLoopBackOff   2 (16s ago)   94s
+----
+
+[NOTE]
+.The pod may flicker "Running" before it dies
+====
+The container needs about twenty seconds to boot before it hits the database and fails, so a quick look can catch it briefly `Running`.
+The truth is in the *restart count* climbing and the `CrashLoopBackOff` status — the pod is booting, failing, and being restarted on a back-off timer.
+====
+
+Now do the thing this whole module is about: *read the logs.*
+A `CrashLoopBackOff` pod has no current logs (the container keeps exiting), so ask for the *previous* container's logs:
+
+[source,sh,role=execute]
+----
+oc logs -l app=parasol-claims --previous --tail=40 | grep -A2 -iE 'Failed to start|UnknownHost'
+----
+
+.Expected output
+[source,texinfo]
+----
+ERROR [io.quarkus.runtime.Application] (main) Failed to start application: java.lang.RuntimeException: Failed to start quarkus
+Caused by: org.hibernate.exception.JDBCConnectionException: Unable to open JDBC Connection for DDL execution [The connection attempt failed.]
+Caused by: org.postgresql.util.PSQLException: The connection attempt failed.
+Caused by: java.net.UnknownHostException: wrong-db-host
+----
+
+The root cause is right there at the bottom: `UnknownHostException: wrong-db-host`.
+The app cannot resolve the database host you gave it.
+The lesson is not the fix — it is the *habit*: when a pod will not start, the logs almost always tell you why in plain language, and the last `Caused by` is usually the real culprit.
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get pods -l app=parasol-claims` shows `CrashLoopBackOff`, and the previous-container logs end with `UnknownHostException: wrong-db-host`.
+Leave it broken — you fix it, properly, in the next exercise.
+****
+
+== 2. Fix it the right way: move config into a ConfigMap
+⏱ *~10 min* · externalize non-secret configuration
+
+The quick fix is to remove the bad override:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_DATASOURCE_JDBC_URL-
+----
+
+(The trailing `-` on a variable name *removes* it.)
+The app recovers — but you have just proved the deeper problem: configuration is scattered inline in the Deployment, where it is easy to fat-finger and hard to manage.
+Externalize it.
+Create a *ConfigMap* — a named object that holds *non-secret* configuration — for the host, port, database name, and log level:
+
+[source,sh,role=execute]
+----
+oc create configmap claims-config \
+  --from-literal=POSTGRESQL_HOST=claims-db \
+  --from-literal=POSTGRESQL_PORT=5432 \
+  --from-literal=POSTGRESQL_DATABASE=parasol \
+  --from-literal=QUARKUS_LOG_LEVEL=INFO
+----
+
+Look at what you made:
+
+[source,sh,role=execute]
+----
+oc get configmap claims-config -o yaml | grep -A5 '^data:'
+----
+
+.Expected output
+[source,texinfo]
+----
+data:
+  POSTGRESQL_DATABASE: parasol
+  POSTGRESQL_HOST: claims-db
+  POSTGRESQL_PORT: "5432"
+  QUARKUS_LOG_LEVEL: INFO
+----
+
+Now point the Deployment at the ConfigMap.
+`oc set env --from` injects every key in the ConfigMap as an environment variable, and — because the names match — it *replaces* the matching inline values with references to the ConfigMap:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims --from=configmap/claims-config
+----
+
+Confirm the non-secret config now comes from the ConfigMap (only the credentials remain inline):
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims --list
+----
+
+.Expected output
+[source,texinfo]
+----
+# deployments/parasol-claims, container parasol-claims
+POSTGRESQL_USER=parasol
+POSTGRESQL_PASSWORD=parasol
+# POSTGRESQL_HOST from configmap claims-config, key POSTGRESQL_HOST
+# POSTGRESQL_PORT from configmap claims-config, key POSTGRESQL_PORT
+# POSTGRESQL_DATABASE from configmap claims-config, key POSTGRESQL_DATABASE
+# QUARKUS_LOG_LEVEL from configmap claims-config, key QUARKUS_LOG_LEVEL
+----
+
+The `#`-commented lines are the values sourced from the ConfigMap.
+The app is now configured from an object you can review, version, and change *without touching the Deployment* — and, crucially, without rebuilding the image.
+
+[.checkpoint]
+****
+✔ *Verify:* `oc set env deploy/parasol-claims --list` shows `POSTGRESQL_HOST/PORT/DATABASE` and `QUARKUS_LOG_LEVEL` coming *from configmap claims-config*, and the app serves claims again:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc rollout status deploy/parasol-claims
+curl -s "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims" | head -c 80; echo
+----
+****
+
+== 3. Move credentials into a Secret — and mount config as a file
+⏱ *~15 min* · secret hygiene, and env vs mounted files
+
+Look again at the last output: `POSTGRESQL_PASSWORD=parasol` is still sitting in plain text in the Deployment.
+Anyone who can read the Deployment can read the password.
+Move the credentials into a *Secret*, which is stored and access-controlled separately:
+
+[source,sh,role=execute]
+----
+oc create secret generic claims-creds \
+  --from-literal=POSTGRESQL_USER=parasol \
+  --from-literal=POSTGRESQL_PASSWORD=parasol
+
+oc set env deploy/parasol-claims --from=secret/claims-creds
+----
+
+As with the ConfigMap, this replaces the inline `POSTGRESQL_USER`/`POSTGRESQL_PASSWORD` with references to the Secret.
+Now every setting is sourced from an object, and *nothing* sensitive is inline:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims --list
+----
+
+.Expected output
+[source,texinfo]
+----
+# deployments/parasol-claims, container parasol-claims
+# POSTGRESQL_HOST from configmap claims-config, key POSTGRESQL_HOST
+# POSTGRESQL_PORT from configmap claims-config, key POSTGRESQL_PORT
+# POSTGRESQL_DATABASE from configmap claims-config, key POSTGRESQL_DATABASE
+# POSTGRESQL_USER from secret claims-creds, key POSTGRESQL_USER
+# POSTGRESQL_PASSWORD from secret claims-creds, key POSTGRESQL_PASSWORD
+# QUARKUS_LOG_LEVEL from configmap claims-config, key QUARKUS_LOG_LEVEL
+----
+
+Now the honesty a Secret demands.
+A Secret is *not* encrypted — its values are merely base64-encoded.
+See for yourself:
+
+[source,sh,role=execute]
+----
+echo -n "stored:  "; oc get secret claims-creds -o jsonpath='{.data.POSTGRESQL_PASSWORD}'; echo
+echo -n "decoded: "; oc get secret claims-creds -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | base64 -d; echo
+----
+
+.Expected output
+[source,texinfo]
+----
+stored:  cGFyYXNvbA==
+decoded: parasol
+----
+
+Anyone with permission to *read* the Secret reads the password.
+What a Secret gives you is *separate access control* — you can let people deploy without letting them read credentials — and one place to rotate.
+Encryption of the source of truth is what a real secrets manager adds (the optional section at the end).
+
+=== Mount config as a file (the other way to deliver it)
+
+Environment variables are perfect for a handful of values, but they have downsides: they are visible in the process environment (and thus in crash dumps and some logs), and changing one means changing the Deployment.
+The alternative is to deliver configuration as a *mounted file*.
+Try it: put a small properties file in a ConfigMap and mount it into the container, then tell Quarkus to read it.
+
+[source,sh,role=execute]
+----
+# a ConfigMap whose single key is a whole application.properties file
+oc create configmap claims-file-config \
+  --from-literal=application.properties=$'# delivered as a MOUNTED FILE\nquarkus.http.access-log.enabled=true\n'
+
+# mount it read-only at /mnt/claims-config
+oc set volume deploy/parasol-claims --add --name=file-config --type=configmap \
+  --configmap-name=claims-file-config --mount-path=/mnt/claims-config --read-only=true
+
+# point Quarkus at the mounted file (the documented quarkus.config.locations pattern)
+oc set env deploy/parasol-claims QUARKUS_CONFIG_LOCATIONS=/mnt/claims-config/application.properties
+oc rollout status deploy/parasol-claims
+----
+
+The property you put in that file — `quarkus.http.access-log.enabled=true` — turns on HTTP access logging, which nothing else sets.
+So if you now see access-log lines, the mounted file was read.
+Make a couple of requests and look:
+
+[source,sh,role=execute,subs="attributes"]
+----
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -o /dev/null "http://$CLAIMS/api/claims"; curl -s -o /dev/null "http://$CLAIMS/api/claims"
+oc logs -l app=parasol-claims --tail=20 | grep access-log
+----
+
+.Expected output
+[source,texinfo]
+----
+... INFO  [io.quarkus.http.access-log] (executor-thread-1) 10.233.2.2 - - [09/Jul/2026:09:38:39 +0000] "GET /api/claims HTTP/1.1" 200 4798
+----
+
+That proves the mounted file was loaded.
+For this app a few environment variables are simpler, so revert the mount and keep the env-based config for the rest of the lab:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_CONFIG_LOCATIONS-
+oc set volume deploy/parasol-claims --remove --name=file-config
+oc rollout status deploy/parasol-claims
+----
+
+[NOTE]
+.Env vs mounted file — when to use which
+====
+Reach for *environment variables* for a handful of discrete values.
+Reach for a *mounted file* when you have a large or structured config (a whole properties/YAML file), when you want to rotate a value *without* editing the Deployment (update the ConfigMap/Secret and the file changes in place), or when you want to keep secrets *out* of the process environment.
+Both are first-class; the choice is about size and rotation, not correctness.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc set env deploy/parasol-claims --list` shows `POSTGRESQL_USER`/`POSTGRESQL_PASSWORD` coming *from secret claims-creds*, and you saw an `io.quarkus.http.access-log` line while the file was mounted.
+****
+
+== 4. Add probes — and watch a readiness gate hold traffic
+⏱ *~15 min* · the platform learns your app's health; the second deliberate break
+
+Your app runs, but the platform has *no idea* whether it is healthy — it has no probes.
+Add all three, pointed at the health endpoints the claims service already exposes:
+
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --startup   --get-url=http://:8080/q/health/started --period-seconds=3  --failure-threshold=30
+oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready   --period-seconds=10 --failure-threshold=3
+oc set probe deploy/parasol-claims --liveness  --get-url=http://:8080/q/health/live    --period-seconds=10 --failure-threshold=3
+oc rollout status deploy/parasol-claims
+----
+
+Confirm all three are set:
+
+[source,sh,role=execute]
+----
+oc get deploy parasol-claims -o jsonpath='startup={.spec.template.spec.containers[0].startupProbe.httpGet.path}{"\n"}readiness={.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}liveness={.spec.template.spec.containers[0].livenessProbe.httpGet.path}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+startup=/q/health/started
+readiness=/q/health/ready
+liveness=/q/health/live
+----
+
+Now break *readiness* on purpose — point it at a path that returns `404` — and watch the platform's reaction.
+
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
+----
+
+Because readiness gates a *rollout*, the first thing you see is the platform *protecting* users: the new pod comes up but never passes readiness, so it is held out of rotation while the old, healthy pod keeps serving.
+Wait about thirty seconds, then look:
+
+[source,sh,role=execute]
+----
+oc get pods -l app=parasol-claims
+----
+
+.Expected output (rollout gated — new pod NotReady, old pod still serving)
+[source,texinfo]
+----
+NAME                              READY   STATUS    RESTARTS   AGE
+parasol-claims-6b94df5d7b-4qrfs   0/1     Running   0          31s
+parasol-claims-d4f69cc5c-vwz2w    1/1     Running   0          3m8s
+----
+
+A broken new version that *never receives traffic* is exactly what you want.
+Now see the other half — what happens when there is *no* ready pod at all.
+Remove the last ready pod so only the NotReady one remains:
+
+[source,sh,role=execute]
+----
+oc delete pod -l app=parasol-claims --field-selector=status.phase=Running --wait=false
+sleep 20
+oc get endpoints parasol-claims
+----
+
+.Expected output (endpoints drained — no ready address)
+[source,texinfo]
+----
+NAME             ENDPOINTS   AGE
+parasol-claims   <none>      ...
+----
+
+With no ready pods, the Service has *no endpoints*, and the Route has nowhere to send traffic:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -w "Route: %{http_code}\n" "http://$CLAIMS/api/claims"
+----
+
+.Expected output
+[source,texinfo]
+----
+Route: 503
+----
+
+That `503` is the platform *holding* the request — refusing to send it to a pod that would fail it.
+Now fix readiness and watch the pod return to rotation:
+
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
+oc rollout status deploy/parasol-claims
+curl -s -o /dev/null -w "Route: %{http_code}\n" "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+----
+
+.Expected output
+[source,texinfo]
+----
+deployment "parasol-claims" successfully rolled out
+Route: 200
+----
+
+[.checkpoint]
+****
+✔ *Verify:* while readiness was broken, `oc get endpoints parasol-claims` showed `<none>` and the Route returned `503`; after the fix the Route returns `200`.
+****
+
+== 5. Set requests and limits — and bump into the quota
+⏱ *~12 min* · resource governance; the third deliberate break
+
+Your app has been inheriting *default* requests and limits from the namespace *LimitRange*.
+See those defaults, then set *explicit* values on the claims app:
+
+[source,sh,role=execute]
+----
+oc get limitrange workshop-limits -o jsonpath='default(limit)={.spec.limits[0].default}{"\n"}defaultRequest={.spec.limits[0].defaultRequest}{"\n"}'
+
+oc set resources deploy/parasol-claims \
+  --requests=cpu=100m,memory=256Mi \
+  --limits=cpu=500m,memory=512Mi
+oc rollout status deploy/parasol-claims
+----
+
+.Expected output
+[source,texinfo]
+----
+default(limit)={"cpu":"500m","memory":"1Gi"}
+defaultRequest={"cpu":"100m","memory":"256Mi"}
+deployment "parasol-claims" successfully rolled out
+----
+
+Now meet the other guardrail: the namespace *ResourceQuota*.
+It caps the *total* your namespace may request:
+
+[source,sh,role=execute]
+----
+oc describe resourcequota workshop-quota | grep -E 'requests.cpu|requests.memory|pods'
+----
+
+.Expected output
+[source,texinfo]
+----
+requests.cpu       200m    3
+requests.memory    512Mi   6Gi
+pods               2       30
+----
+
+You may request at most `3` CPU cores across the whole namespace, and you are using `200m`.
+Ask for more than the cap and watch the platform refuse.
+Create a deployment whose one pod requests `4` cores:
+
+[source,sh,role=execute]
+----
+cat <<'EOF' | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-hog
+  labels: { app: claims-hog }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: claims-hog } }
+  template:
+    metadata: { labels: { app: claims-hog } }
+    spec:
+      containers:
+        - name: hog
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["sleep", "infinity"]
+          resources:
+            requests: { cpu: "4", memory: 256Mi }
+            limits:   { cpu: "4", memory: 256Mi }
+EOF
+----
+
+Wait a few seconds, then look at why it never becomes available:
+
+[source,sh,role=execute]
+----
+oc get deploy claims-hog
+oc get deploy claims-hog -o jsonpath='{range .status.conditions[?(@.type=="ReplicaFailure")]}{.reason}: {.message}{"\n"}{end}'
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME         READY   UP-TO-DATE   AVAILABLE   AGE
+claims-hog   0/1     0            0           11s
+FailedCreate: pods "claims-hog-79f759969d-8h666" is forbidden: exceeded quota: workshop-quota, requested: requests.cpu=4, used: requests.cpu=200m, limited: requests.cpu=3
+----
+
+The message is exact: you asked for `requests.cpu=4`, `200m` is already used, and the limit is `3` — so the pod is *forbidden*.
+The Deployment exists but has a `ReplicaFailure` condition and zero pods.
+Fix it by removing the greedy deployment (right-sizing its request to fit would work too):
+
+[source,sh,role=execute]
+----
+oc delete deploy claims-hog
+----
+
+[NOTE]
+.Work *with* the guardrails, not against them
+====
+The LimitRange and ResourceQuota are not there to frustrate you — they keep one team's workload from starving another's on a shared cluster.
+The right instinct when you hit a quota is to *right-size your requests* (do you really need 4 cores?), not to demand the quota be raised.
+Requests are a reservation; asking for more than you use wastes the whole namespace's headroom.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* the claims app shows explicit requests/limits (`oc get deploy parasol-claims -o jsonpath='{.spec.template.spec.containers[0].resources}'`), you saw the `exceeded quota: workshop-quota` message, and `claims-hog` is gone.
+****
+
+== 6. Promote the same image to stage and prod
+⏱ *~13 min* · one image, three environments, different config
+
+You have configured *dev* by hand, one imperative command at a time.
+That does not scale to more environments.
+The answer is to capture the desired configuration *as code* and promote it.
+The workshop has forked a small config repository into your Git account — `{user}/claims-config` — containing a Kustomize *base* (the claims app, its config, its database) and three *overlays* that change only what differs per environment.
+
+Clone it in the Showroom terminal:
+
+[source,sh,role=execute,subs="attributes"]
+----
+cd ${HOME:-/tmp}
+git clone {gitea_url}/{user}/claims-config
+cd claims-config
+----
+
+Preview what the *stage* overlay will apply — note the namespace, replica count, and `APP_ENV`, all set by the overlay:
+
+[source,sh,role=execute]
+----
+oc kustomize overlays/stage | grep -E 'namespace:|replicas:|APP_ENV:|QUARKUS_LOG_LEVEL:|image:' | sort -u
+----
+
+.Expected output
+[source,texinfo]
+----
+      image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+  APP_ENV: stage
+  namespace: user1-stage
+  QUARKUS_LOG_LEVEL: INFO
+  replicas: 2
+----
+
+Now promote — apply the stage overlay, then the prod overlay.
+Each stands up the claims app, its config, and its own database in the matching namespace:
+
+[source,sh,role=execute]
+----
+oc apply -k overlays/stage
+oc apply -k overlays/prod
+----
+
+Wait for both to roll out (the startup probe gives each a moment to boot and seed its database):
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-stage rollout status deploy/parasol-claims
+oc -n {user}-prod  rollout status deploy/parasol-claims
+----
+
+Now prove the point of the whole module.
+Compare all three environments — *same image digest*, different config:
+
+[source,sh,role=execute,subs="attributes"]
+----
+for ns in {user}-dev {user}-stage {user}-prod; do
+  printf "%-16s replicas=%s  APP_ENV=%-5s  digest=%s\n" "$ns" \
+    "$(oc -n $ns get deploy parasol-claims -o jsonpath='{.status.readyReplicas}')" \
+    "$(oc -n $ns get cm claims-config -o jsonpath='{.data.APP_ENV}')" \
+    "$(oc -n $ns get pod -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' | sed 's#.*@##' | cut -c1-16)"
+done
+----
+
+.Expected output
+[source,texinfo]
+----
+user1-dev        replicas=1  APP_ENV=dev    digest=sha256:0995ab38
+user1-stage      replicas=2  APP_ENV=stage  digest=sha256:0995ab38
+user1-prod       replicas=3  APP_ENV=prod   digest=sha256:0995ab38
+----
+
+The *identical* image digest runs in all three namespaces — the exact bytes, not just the same tag.
+Only the replica count and the configuration differ.
+That is promotion done right: you ship what you tested, and the environment supplies the settings.
+
+The log level is a real, running difference too.
+`stage` runs at `INFO` and `prod` at `WARN`, so the prod pods are quieter — the startup banner that stage logs is suppressed in prod:
+
+[source,sh,role=execute,subs="attributes"]
+----
+echo "stage (INFO):"; oc -n {user}-stage logs -l app=parasol-claims --tail=100 | grep -c 'io.quarkus'
+echo "prod  (WARN):"; oc -n {user}-prod  logs -l app=parasol-claims --tail=100 | grep -c 'io.quarkus'
+----
+
+Stage prints Quarkus `INFO` lines; prod prints none.
+
+[.checkpoint]
+****
+✔ *Verify:* run `ws verify {module-id}` in the Showroom terminal.
+It confirms the dev app is externalized (ConfigMap + Secret + all three probes + explicit resources) and that stage (2 replicas, `APP_ENV=stage`) and prod (3 replicas, `APP_ENV=prod`) run the promoted app.
+All three environments answer on their own Route with the same 30 seeded claims.
+****
+
+== 7. [OPTIONAL] Real secret management with External Secrets
+⏱ *~5 min* · read / instructor-led — no hands-on on this cluster
+
+You saw it plainly: a Kubernetes Secret is base64, not encryption, and it lives in the cluster.
+For anything beyond a workshop, the *source of truth* for a credential belongs in a dedicated secrets manager — HashiCorp Vault, or a cloud provider's secrets service — and should be *synced* into the cluster on demand, never copied by hand.
+
+On OpenShift the tool for that is the *External Secrets Operator* (ESO) {external_secrets_version}.
+You write a small `ExternalSecret` object that names a key in the external manager; the operator fetches it and produces an ordinary Kubernetes Secret that your app consumes *unchanged* — the app never knows the difference.
+A minimal `ExternalSecret` looks like this:
+
+[source,yaml]
+----
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: claims-creds
+spec:
+  refreshInterval: 1h
+  secretStoreRef:              # points at a configured Vault / cloud store
+    name: parasol-vault
+    kind: SecretStore
+  target:
+    name: claims-creds         # the Secret the operator will create — same name your app uses
+  data:
+    - secretKey: POSTGRESQL_PASSWORD
+      remoteRef:
+        key: parasol/claims-db
+        property: password
+----
+
+[IMPORTANT]
+.This is a platform add-on, not installed here
+====
+The External Secrets Operator is a cluster-wide operator that a platform team installs and wires to your secrets manager.
+It is *not* installed on this workshop cluster, so there are no hands-on steps — treat this as the pattern to reach for in a real environment, and see your instructor's demo if one is scheduled.
+The key idea to carry forward: your app keeps consuming a normal Secret; *where that Secret comes from* becomes a platform concern, not an application one.
+====
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the full picture. Try these on your own:
+
+* Change the log level in `{user}-stage` to `DEBUG` by editing its `claims-config` ConfigMap, restart the deployment, and watch the extra logging appear — then set it back.
+* In your `claims-config` fork, change the prod overlay to *4* replicas, commit, and re-apply `overlays/prod`. Confirm the new replica count — and that you never rebuilt the image.
+* Break the app a different way: set a *wrong* database password in the `claims-creds` Secret and watch how the failure differs from the wrong-host failure in exercise 1 (read the logs).
+
+When you are done, run `ws verify {module-id}` — or `ws reset {module-id}` to return your three namespaces to a fresh entry state and start over.
+
+endif::demo[]
