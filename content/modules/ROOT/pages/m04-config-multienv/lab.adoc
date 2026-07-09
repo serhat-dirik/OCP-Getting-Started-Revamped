@@ -214,11 +214,12 @@ oc set env deploy/parasol-claims QUARKUS_DATASOURCE_JDBC_URL-
 (The trailing `-` on a variable name *removes* it.)
 The app recovers — but you have just proved the deeper problem: configuration is scattered inline in the Deployment, where it is easy to fat-finger and hard to manage.
 Externalize it.
-Create a *ConfigMap* — a named object that holds *non-secret* configuration — for the host, port, database name, and log level:
+Create a *ConfigMap* — a named object that holds *non-secret* configuration — for the environment name, host, port, database name, and log level:
 
 [source,sh,role=execute]
 ----
 oc create configmap claims-config \
+  --from-literal=APP_ENV=dev \
   --from-literal=POSTGRESQL_HOST=claims-db \
   --from-literal=POSTGRESQL_PORT=5432 \
   --from-literal=POSTGRESQL_DATABASE=parasol \
@@ -236,6 +237,7 @@ oc get configmap claims-config -o yaml | grep -A5 '^data:'
 [source,texinfo]
 ----
 data:
+  APP_ENV: dev
   POSTGRESQL_DATABASE: parasol
   POSTGRESQL_HOST: claims-db
   POSTGRESQL_PORT: "5432"
@@ -263,11 +265,12 @@ oc set env deploy/parasol-claims --list
 [source,texinfo]
 ----
 # deployments/parasol-claims, container parasol-claims
-POSTGRESQL_USER=parasol
-POSTGRESQL_PASSWORD=parasol
 # POSTGRESQL_HOST from configmap claims-config, key POSTGRESQL_HOST
 # POSTGRESQL_PORT from configmap claims-config, key POSTGRESQL_PORT
 # POSTGRESQL_DATABASE from configmap claims-config, key POSTGRESQL_DATABASE
+POSTGRESQL_USER=parasol
+POSTGRESQL_PASSWORD=parasol
+# APP_ENV from configmap claims-config, key APP_ENV
 # QUARKUS_LOG_LEVEL from configmap claims-config, key QUARKUS_LOG_LEVEL
 ----
 =====
@@ -277,7 +280,7 @@ The app is now configured from an object you can review, version, and change *wi
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc set env deploy/parasol-claims --list` shows `POSTGRESQL_HOST/PORT/DATABASE` and `QUARKUS_LOG_LEVEL` coming *from configmap claims-config*, and the app serves claims again:
+✔ *Verify:* `oc set env deploy/parasol-claims --list` shows `APP_ENV`, `POSTGRESQL_HOST/PORT/DATABASE`, and `QUARKUS_LOG_LEVEL` coming *from configmap claims-config*, and the app serves claims again:
 +
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -394,6 +397,8 @@ oc set volume deploy/parasol-claims --remove --name=file-config
 oc rollout status deploy/parasol-claims
 ----
 
+(Leave the `claims-file-config` ConfigMap itself in place — unreferenced, it does no harm, and `ws reset` cleans it up.)
+
 [NOTE]
 .Env vs mounted file — when to use which
 ====
@@ -475,10 +480,12 @@ oc get endpoints parasol-claims
 .Expected output (endpoints drained — no ready address)
 [source,texinfo]
 ----
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
 NAME             ENDPOINTS   AGE
 parasol-claims   <none>      ...
 ----
 
+(The deprecation warning is normal on OpenShift 4.21 — the classic Endpoints view is still the quickest way to see the readiness gate; EndpointSlice is its long-form successor.)
 With no ready pods, the Service has *no endpoints*, and the Route has nowhere to send traffic:
 
 [source,sh,role=execute]
@@ -550,9 +557,9 @@ oc describe resourcequota workshop-quota | grep -E 'requests.cpu|requests.memory
 .Expected output
 [source,texinfo]
 ----
+pods               2       30
 requests.cpu       200m    3
 requests.memory    512Mi   6Gi
-pods               2       30
 ----
 
 You may request at most `3` CPU cores across the whole namespace, and you are using `200m`.
@@ -638,7 +645,7 @@ git clone {gitea_url}/{user}/claims-config
 cd claims-config
 ----
 
-Preview what the *stage* overlay will apply — note the namespace, replica count, and `APP_ENV`, all set by the overlay:
+Preview what the *stage* overlay will apply — note the namespace, replica count, and `APP_ENV`, all set by the overlay, and that it carries *both* deployments: the claims app (2 replicas) and its database (1):
 
 [source,sh,role=execute]
 ----
@@ -648,10 +655,12 @@ oc kustomize overlays/stage | grep -E 'namespace:|replicas:|APP_ENV:|QUARKUS_LOG
 .Expected output
 [source,texinfo]
 ----
-      image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+        image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+        image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
   APP_ENV: stage
-  namespace: user1-stage
   QUARKUS_LOG_LEVEL: INFO
+  namespace: user1-stage
+  replicas: 1
   replicas: 2
 ----
 
@@ -698,7 +707,7 @@ Only the replica count and the configuration differ.
 That is promotion done right: you ship what you tested, and the environment supplies the settings.
 
 The log level is a real, running difference too.
-`stage` runs at `INFO` and `prod` at `WARN`, so the prod pods are quieter — the startup banner that stage logs is suppressed in prod:
+`stage` runs at `INFO` and `prod` at `WARN`, so the prod pods are noticeably quieter — most of the startup banner stage logs is suppressed in prod:
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -706,7 +715,8 @@ echo "stage (INFO):"; oc -n {user}-stage logs -l app=parasol-claims --tail=100 |
 echo "prod  (WARN):"; oc -n {user}-prod  logs -l app=parasol-claims --tail=100 | grep -c 'io.quarkus'
 ----
 
-Stage prints Quarkus `INFO` lines; prod prints none.
+Stage prints its full `INFO` startup banner — 11 matching lines in our capture — while prod at `WARN` keeps only a handful of unavoidable startup lines (5 in ours).
+The `INFO` chatter is gone, not every last line; what matters is the clear stage ≫ prod drop.
 
 [.checkpoint]
 ****
