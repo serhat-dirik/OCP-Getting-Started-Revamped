@@ -1,0 +1,153 @@
+= Dev Spaces & the Inner Loop: Concept
+:module-id: m03
+include::partial$version-attributes.adoc[]
+
+// Concept page for M03. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+
+[.lead]
+A new engineer joins Parasol's claims team and needs to be productive today — not after a two-day laptop-setup marathon.
+
+Instead of installing a Java Development Kit (JDK), Maven, a database, and the right container tooling on a laptop and hoping it matches production, they open the claims service in a browser-based development environment that is *already running inside the cluster* and already talks to the cluster's services.
+That environment is Red Hat OpenShift Dev Spaces {devspaces_version}, and this module is about the fast, local-feeling development loop it gives you — the *inner loop* — without anything actually being local.
+
+== What you'll learn
+
+* The difference between the *inner loop* (edit → build → run → test, many times an hour) and the *outer loop* (commit → pipeline → deploy), and why the platform optimizes each differently.
+* Why teams move the IDE (integrated development environment) *into the cluster*: onboarding time, "works on my machine" drift, and governance.
+* How a *devfile* — a small YAML file in your Git repository — is the *contract* that defines a reproducible workspace: its container image, commands, and endpoints.
+* How Quarkus *dev mode* gives you sub-second hot reload while talking to a real, in-cluster PostgreSQL database.
+* Where in-cluster development is the wrong tool, and what the take-home local options are.
+
+== Inner loop vs outer loop
+
+Every change you make to software travels through two very different loops.
+
+The *inner loop* is what you do dozens of times an hour while building a feature: edit a file, compile, run, hit an endpoint, read the result, edit again.
+Its currency is *seconds*. If it is slow or fiddly, your whole day is slow.
+
+The *outer loop* is what happens after you are happy with a change: commit to Git, a pipeline builds and tests an image, scanners and policies gate it, GitOps promotes it toward production.
+Its currency is *minutes to hours*, and it is about safety and repeatability, not speed of iteration.
+
+[mermaid]
+....
+graph LR
+  subgraph inner["INNER LOOP — seconds (this module)"]
+    edit[Edit code] --> compile[Build] --> run[Run in dev mode] --> observe[Hit it / observe] --> edit
+  end
+  observe -.->|"happy? commit"| push[git push]
+  subgraph outer["OUTER LOOP — minutes (later modules)"]
+    push --> pipeline[Pipeline: build + test + scan] --> image[(Image)] --> gitops[GitOps promote] --> prod[Running in prod]
+  end
+  classDef in fill:#e00,stroke:#900,color:#fff;
+  classDef out fill:#f3f3f3,stroke:#888,color:#333;
+  class edit,compile,run,observe in;
+  class pipeline,image,gitops,prod out;
+....
+
+// TODO(media): replace/augment with SVG export m03-devspaces-inner-loop-01-inner-outer-loop.svg (see media-manifest.md)
+
+This module lives entirely in the *red inner loop*.
+The outer loop is the rest of the workshop — pipelines, supply-chain trust, GitOps — and it begins the moment you `git push` at the end of this lab.
+
+== Why put the IDE in the cluster
+
+You could run the inner loop on your laptop, and for decades everyone did.
+Moving it into the cluster solves three problems that laptops create:
+
+Onboarding time::
+A laptop dev environment is a checklist: install the right JDK, the right Maven, a local database, container tooling, environment variables, VPN, credentials.
+It takes hours to days and it rots.
+A Dev Spaces workspace is a *link*: click it, and a correct environment materializes in under two minutes.
+Day-one productivity stops being a goal and becomes the default.
+
+"Works on my machine"::
+When each developer's tools drift from each other and from production, bugs hide in the gaps.
+A workspace is built from a pinned container image and a file in Git, so *every* developer — and the pipeline — uses the same JDK, the same Maven, the same base image.
+The environment is code, reviewed like code.
+
+Governance::
+Source code, credentials, and data never leave the cluster to sit on a laptop that can be lost or stolen.
+Access follows the same identity and RBAC (role-based access control) as everything else on the platform.
+The security team governs one place, not a fleet of laptops.
+
+== The devfile: your workspace as a contract in Git
+
+The thing that makes a workspace reproducible is the *devfile* — a file named `devfile.yaml` at the root of your repository, written to the open *devfile 2.2.0* schema.
+It is the contract: given this file, Dev Spaces builds the same workspace every time, for anyone.
+
+A devfile has three parts you will use today:
+
+Components::
+The containers your workspace runs. At minimum, a *tools* container built from an image that has your language runtime — here the Red Hat *universal developer image* (UDI), which bundles JDK 21 and Maven.
+You can add more components (you will add a Redis cache in the lab).
+Commands::
+Named actions — like "run Quarkus dev mode" or "package the app" — that show up as tasks in the IDE so nobody has to remember the exact command line.
+Endpoints::
+Ports the workspace exposes. The claims app serves on 8080; the devfile marks that endpoint public so the platform's gateway publishes it back to your browser over HTTPS.
+
+[mermaid]
+....
+graph TB
+  subgraph browser["Your browser"]
+    ide["che-code IDE<br/>(VS Code in a tab)"]
+  end
+  subgraph cluster["OpenShift cluster"]
+    subgraph wsns["Workspace project (your-name-devspaces)"]
+      gw["che-gateway<br/>(HTTPS, per-user auth)"]
+      tools["tools container (UDI)<br/>Quarkus dev mode :8080 · debug :5005"]
+      gw --- tools
+    end
+    subgraph devns["App project (your-name-dev)"]
+      db[("claims-db<br/>PostgreSQL :5432")]
+    end
+    tools -->|"cross-namespace DNS<br/>claims-db.your-name-dev.svc:5432"| db
+  end
+  ide -->|HTTPS| gw
+  classDef hi fill:#e00,stroke:#900,color:#fff;
+  classDef plat fill:#f3f3f3,stroke:#888,color:#333;
+  class tools,gw hi;
+  class db plat;
+....
+
+// TODO(media): replace/augment with SVG export m03-devspaces-inner-loop-02-workspace-gateway-services.svg (see media-manifest.md)
+// TODO(media): the master Parasol platform-accretion diagram (v3) with the M03 layer (Dev Spaces workspace) highlighted — m03-devspaces-inner-loop-03-platform-accretion-v3.svg
+
+Two things about that picture matter for the lab.
+First, the IDE in your browser never connects to the workspace directly — it goes through the *che-gateway*, which terminates HTTPS and enforces that only you can reach your workspace.
+Second, the workspace runs in its *own* project, `{user}-devspaces`, separate from where the claims app and database run, `{user}-dev`.
+They reach each other by ordinary in-cluster DNS — `claims-db.{user}-dev.svc` — which is exactly how one microservice finds another.
+Your dev-mode code is a first-class citizen of the cluster network, not an outsider poking in.
+
+== Quarkus dev mode: the fast heart of the loop
+
+The claims service is a Quarkus application, and Quarkus has a *dev mode* (`mvn quarkus:dev`) built for the inner loop.
+Start it once; then every time you save a file and make a request, Quarkus recompiles just what changed and hot-reloads it in place — typically in a second or two, with no restart.
+In the lab you point dev mode at the real `claims-db` running in the cluster, change a claims endpoint, and watch the change go live on the next request while the same database keeps its data.
+
+It also opens a Java debug port (5005) automatically, so you can set a breakpoint in the browser IDE and step through a live request — the subject of the debugging exercise.
+
+== How this shows up in real orgs
+
+* *Onboarding collapses from days to a click.*
+The question "how long until a new hire ships their first change?" is a real, measured cost.
+Teams that move the inner loop into the cluster answer it in minutes, and they stop maintaining a wiki page of laptop-setup steps that is always slightly wrong.
+* *The environment becomes reviewable.*
+Because the workspace is a devfile in the repo, a change to the toolchain is a pull request.
+"Upgrade everyone to JDK 21" is a one-line diff that the pipeline and every developer pick up together — no laptop-by-laptop chase.
+* *Security gets one perimeter.*
+Code and data stay in the cluster under the same RBAC as production.
+A lost laptop is no longer a data-breach question.
+* *It is not always the answer.*
+Air-gapped work, IDE plugins that need a local GPU or USB device, and heavy native toolchains can be a poor fit — the wrap-up is honest about where a laptop still wins.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+The two ideas that must land: (1) the *inner loop* is a seconds-scale edit-run-observe cycle, and this is what Dev Spaces makes fast; (2) the *devfile* is the workspace-as-code contract that kills "works on my machine."
+Everything you show live — one-click workspace, dev-mode hot reload against the in-cluster database — is a proof of those two sentences.
+Use the workspace/gateway/services diagram as your anchor for "the IDE is in the cluster, talking to real services."
+====
+endif::demo[]

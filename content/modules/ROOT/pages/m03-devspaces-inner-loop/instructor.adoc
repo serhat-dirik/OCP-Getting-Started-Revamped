@@ -1,0 +1,166 @@
+= Dev Spaces & the Inner Loop: Instructor Guide
+:module-id: m03
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings measured on the build cluster (OCP {ocp_version},
+// Dev Spaces {devspaces_version}) as user4 on 2026-07-09 via the DevWorkspace API +
+// oc exec into the workspace pod; see the "how timing was measured" note below.
+
+This module is where developers feel the platform work *for* them for the first time: a link becomes a running, editable service in under two minutes.
+Optimize for that "oh — that's it?" moment.
+The two ideas that must land are the *inner loop* (seconds-scale edit-run-observe) and the *devfile as a contract in Git*; the debugging and Redis exercises are reinforcement.
+
+The single biggest delivery risk is *workspace start time*, and it is entirely about image pull — plan for it (see Pre-flight and Watchouts).
+
+== Timing
+
+Total hands-on: *~75–85 min* (spec target 75–90 min).
+Add ~10–15 min of in-room concept discussion up front.
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Open your workspace from your fork | ~12 min | cold start → Running *~83 s*; warm restart *~21 s*
+| 2 | Wire dev mode to the in-cluster DB | ~15 min | plain dev mode fails in seconds; wired boot *~6.6 s* (deps warm), *~40 s* first time (Maven deps)
+| 3 | Change a live endpoint, hot-reload | ~12 min | live reload *~2.3 s*
+| 4 | Extend the devfile: add Redis | ~15 min | restart-from-devfile with new sidecar *~17 s*
+| 5 | Commit and push your change | ~10 min | push instant once credentials are set
+| 6 | Debug a live request | ~12 min | debugger attaches to 5005 instantly
+| 7 | Showcase — Android in Dev Spaces | ~5 min | recorded video (~60–90 s)
+| 8 | Take-home: local options | ~3 min | read
+|===
+
+[NOTE]
+.How this timing was measured
+====
+The *Measured core* column is real.
+On the build cluster (OCP {ocp_version}, Dev Spaces {devspaces_version}) on 2026-07-09, a workspace was created for `user4` from the DevWorkspace API and driven with `oc exec`:
+
+* *Cold start* — first workspace, universal developer image not yet on the node: *83 s* from `started: true` to phase `Running`.
+* *Warm restart* — stop then start, all images cached: *21 s*.
+* *Restart from an edited devfile* — adding the Redis sidecar (a new, small image pull): *17 s*.
+* *Dev mode* — `./mvnw quarkus:dev` boots the app in *6.6 s* once Maven dependencies are cached in the per-user home volume; the *first* run in a fresh workspace adds Maven download time (~30–40 s on this cluster).
+* *Hot reload* — editing `ClaimResource` and hitting the endpoint: `Live reload total time: 2.3 s`.
+
+The *Attendee time* column adds realistic reading, IDE-navigation, and checkpoint overhead on top of that core.
+Image Puller is *not* enabled on this cluster, so the cold-start number is a genuine per-node pull — it is the number to plan around.
+====
+
+== Pre-flight checklist
+
+Run these *before the session*.
+
+. *Dev Spaces is installed and its CheCluster is Active.*
++
+[source,sh,role=execute]
+----
+oc get checluster devspaces -n openshift-devspaces \
+  -o jsonpath='{.status.chePhase}{"  "}{.status.cheVersion}{"\n"}'
+----
++
+Expect `Active  {devspaces_version}`.
+If it is not Active, no workspace will start — fix Dev Spaces before anything else.
+
+. *Entry state materializes and verifies* for a sample user:
++
+[source,sh,role=execute]
+----
+ws start m03 --user user1
+ws verify m03 --user user1 --entry-only
+----
++
+Expect `✅ all 7 checks passed` (namespace, marker, quota, Gitea fork, claims-db ready, parasol-claims ready, Route 200).
+
+. *A workspace actually starts — and this warms the image on a node.*
+Open `{devspaces_url}/#{gitea_url}/user1/parasol-claims` in a browser as `user1`, wait for the che-code editor, and run `java -version` in the workspace terminal (expect openjdk 21).
+Doing this before the room arrives pulls the universal developer image onto at least one node, so the first attendee workspaces on that node start in ~20 s instead of ~85 s.
+
+. *Governance is as expected.*
++
+[source,sh,role=execute]
+----
+oc get checluster devspaces -n openshift-devspaces \
+  -o jsonpath='max/user={.spec.devEnvironments.maxNumberOfRunningWorkspacesPerUser}{"  idle="}{.spec.devEnvironments.secondsOfInactivityBeforeIdling}{"s\n"}'
+----
++
+Expect `max/user=2  idle=1800s`.
+Attendees can run two workspaces at once and idle after 30 minutes — tell them so a stopped workspace does not read as broken.
+
+[NOTE]
+.Recommended for events of ~30 users: enable the Image Puller
+====
+This cluster does *not* run the Kubernetes Image Puller, so every workspace start pulls the universal developer image (and the editor) per node on first use.
+With ~30 attendees starting near-simultaneously, that is a pull storm that makes first starts slow and uneven.
+
+For a large event, have the platform team enable pre-pulling in the Dev Spaces stack — set `spec.components.imagePuller.enable: true` on the CheCluster (and let it seed `registry.redhat.io/devspaces/udi-rhel9:{devspaces_version}` plus the editor image).
+This is a *platform change*, not something to apply live from the instructor seat — flag it during provisioning.
+Warming one workspace per node (pre-flight step 3) is the manual fallback if the puller is not available.
+====
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Warm a workspace first, always.*
+Open the demo workspace before the session so its image is on the node.
+A cold 85 s pull with the room watching a spinner is the one way this demo dies.
+Keep the pre-opened workspace as your fallback.
+* *Show `java -version` early.*
+It is a five-second beat that makes the devfile-as-contract point concrete: "JDK 21, from a file in the repo, not from my laptop."
+* *Do the hot reload from two panes.*
+Edit in the editor, and have a terminal (or browser tab) ready to hit the endpoint, so the audience sees the change go live on the request — the `Live reload` line landing in ~2 s is the money shot.
+* *Wire the database explicitly, out loud.*
+The `export QUARKUS_DATASOURCE_JDBC_URL=…claims-db.<user>-dev.svc…` line is the "this is talking to a real cluster service, not a fake" proof. Do not skip it.
+* *The Android video is the closer, not the middle.*
+Play it last, keep it under ~90 s, and use it to make one point: same one-click loop, any stack.
+
+== Top questions attendees ask
+
+*1. "Where does the workspace actually run — and is my code on my laptop at all?"*::
+It runs as a Pod in the cluster, in your own `<user>-devspaces` project; the browser is just a thin client to the che-code editor via the che-gateway (HTTPS, per-user authenticated).
+Your code is cloned into the workspace's volume in the cluster, not onto your laptop.
+That is the governance win — code and data stay under the same RBAC as everything else and never sit on a laptop.
+
+*2. "Why did `java -version` say 17 before the fix — and why 21 now?"*::
+The universal developer image bundles several JDKs (8, 11, 17, 21) and defaults to 17.
+This project targets Java 21, so the devfile pins `JAVA_HOME` to the bundled JDK 21 and prefixes it on `PATH`.
+The point for attendees: the toolchain version is decided by a file in Git that everyone shares, not by whatever each laptop happens to have.
+
+*3. "Why not just let Quarkus start its own database in dev mode?"*::
+Quarkus Dev Services will try to, but a workspace has no container runtime inside it, so that fails — which is the deliberate break in exercise 2.
+More importantly, the lesson is that a dev instance should iterate against the *real* in-cluster database over ordinary service DNS, the same way one microservice reaches another.
+That is why we wire it with environment variables instead.
+
+*4. "Is a Dev Spaces workspace where my app runs in production?"*::
+No — it is a development environment, not a runtime.
+It idles after 30 minutes, is capped at two per user, and dev mode is for iterating.
+Production comes from the outer loop: the `git push` at the end feeds pipelines and GitOps in later modules.
+
+*5. "My workspace is slow to start / stuck. Is it broken?"*::
+Almost always it is a first-time image pull (the universal developer image is large) — give it up to ~90 s on a cold node.
+If it is genuinely stuck past a few minutes, it is usually image pull or scheduling; the troubleshooting page has the exact `oc get devworkspace` / events checks.
+Enabling the Image Puller (see Pre-flight) removes this for large events.
+
+== Watchouts
+
+* *First start is an image pull, full stop.*
+~83 s cold, ~21 s warm on this cluster. Everything about pacing follows from warming nodes ahead of time.
+* *Two workspaces per user, max.*
+`maxNumberOfRunningWorkspacesPerUser=2`. If an attendee left the debug workspace running and starts another, they may hit the cap — tell them to stop old ones (the dashboard lists them).
+* *Start storms at ~30 users.*
+Simultaneous first starts hammer image pull and per-user PVC provisioning.
+Stagger the "open your workspace" step across the room, or (better) enable the Image Puller during provisioning.
+* *Git push needs credentials the first time.*
+This is the exercise-5 break-and-fix and it will generate questions; the fix (credential helper, or the che-code Source Control panel which prompts) is in the lab and troubleshooting.
+Because the source repos are public, clone works with no credentials — only *push* needs them.
+* *Dev-mode environment variables do not survive a workspace restart.*
+After exercise 4's restart, attendees must re-`export` the datasource variables before dev mode in exercises 5–6. The lab repeats the block; expect a few to forget.
+* *The database is shared between the deployed app and the dev instance.*
+That is the point in exercise 3, but it means a `drop-and-create` in dev mode would wipe the deployed app's data — the lab uses `schema-management.strategy=update` to prevent that. Do not let attendees "fix" it back to drop-and-create.
+
+== Provenance
+
+The Android-in-Dev-Spaces showcase and the devfile-authoring patterns (multi-target devfile, declarative task groups, bind-to-0.0.0.0 endpoints, per-workspace on-cluster device) are adapted from `serhat-dirik/devspaces-android-sample-app` and `serhat-dirik/devspaces-android`, credited per the reuse policy (D18) in the wrap-up and the CREDITS page.
+All hands-on steps are freshly built and verified on OpenShift {ocp_version} / Dev Spaces {devspaces_version} (2026-07-09); the `parasol-claims` devfile was corrected during this build (Red Hat universal developer image {devspaces_version}, JDK 21 pinned) and re-verified.
+No content ported from stale material.

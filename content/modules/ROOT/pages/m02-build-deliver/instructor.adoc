@@ -1,0 +1,155 @@
+= Ways to Build & Deliver Apps: Instructor Guide
+:module-id: m02
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings measured on the build cluster (OCP {ocp_version})
+// as user2 on 2026-07-09; see the "how timing was measured" note below.
+
+This module turns "here is some source code" into a running, database-backed application four different ways.
+The one idea that must land is the *build spectrum*: S2I is the fast default, the Dockerfile strategy is a deliberate choice you make when you need control, and knowing which to reach for is the skill.
+The single biggest pacing risk is the *first S2I build* (~4–4.5 minutes) — plan the room around it rather than watching a progress bar.
+
+== Timing
+
+Total hands-on: *~50–58 min* (spec target 75 min), leaving room for ~15 min of concept up front.
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core (as user2, {ocp_version})
+
+| 1 | Import claims from Git (S2I) | ~15 min | first S2I build (java-21) → `Complete` *~4–4.5 min* (Maven download + Quarkus augmentation), then push
+| 2 | The Dockerfile way + compare | ~10 min | Docker/Containerfile build *~95 s* (multi-stage, JDK 21)
+| 3 | Polyglot notifications (Node.js) | ~10 min | Node S2I build *~45 s* (zero dependencies, no npm registry)
+| 4 | Browse catalog + deploy database | ~10 min | PostgreSQL 15 rollout *~15–20 s*
+| 5 | Wire claims to its database | ~8 min | rollout to Ready *~15 s*; Route answers 200 immediately
+|===
+
+[NOTE]
+.How this timing was measured
+====
+The *Measured core* column is real: each step was executed as a workshop user (`user2`) on the build cluster (OCP {ocp_version}) on 2026-07-09 and timed.
+The claims S2I build was measured at the namespace's *default* memory limit (1 Gi from the workshop LimitRange); the current `java-21` (UBI 9 / OpenJDK 21) builder completes there without tuning.
+The *Attendee time* adds reading, console navigation, and checkpoint overhead on top of that core.
+The dominant variable is the *first* claims build — a cold node with no cached Maven artifacts or builder image runs longer; pre-warm before a demo (below).
+====
+
+== Pre-flight checklist
+
+Run these *before the session*.
+All should pass.
+
+. *Entry state materializes and verifies* for a sample user:
++
+[source,sh,role=execute]
+----
+ws start m02 --user user1
+ws verify m02 --user user1 --entry-only
+----
++
+Expect `✅ all 6 checks passed` (namespace, entry marker, quota, both Gitea forks, PostgreSQL template).
+The entry state's fork job runs in the `gitea` namespace; if a fork is missing, re-running `ws start` re-forks idempotently.
+
+. *The Java 21 builder is present* in the shared catalog:
++
+[source,sh,role=execute]
+----
+oc get is java-21 -n openshift -o jsonpath='{.spec.tags[?(@.name=="latest")].from.name}{"\n"}'
+----
++
+Expect `registry.access.redhat.com/ubi9/openjdk-21:latest`.
+This is the workshop-provided builder the lab imports with; without it, import-from-Git falls back to the older stock `java` stream (see watchouts).
+
+. *The Parasol PostgreSQL template is present and attendee-readable:*
++
+[source,sh,role=execute]
+----
+oc get template parasol-postgresql-ephemeral -n openshift
+----
++
+Expect one row. Attendees read this template from the `openshift` namespace; it renders a Deployment on `postgresql:15-el9`.
+
+. *A user can build* (warms the builder image and Maven cache on a node):
++
+[source,sh,role=execute]
+----
+oc new-app java-21~$(oc get route gitea -n gitea -o jsonpath='{.spec.host}')/user1/parasol-claims.git --name=preflight -n user1-dev
+oc logs -f bc/preflight -n user1-dev   # wait for "Push successful"
+oc delete all -l app=preflight -n user1-dev
+----
++
+Expect a `Complete` build ending in `Push successful`.
+If the build fails to clone, check the fork exists; if it OOMs, see watchouts (build memory).
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Pre-stage the database and pre-warm the build.*
+Run `ws solve m02 --user {user}` before the session, then delete only the `parasol-claims` Deployment (keep `claims-db`) so the live import has a database waiting and the app comes up clean once built.
+Pre-warming also caches the builder image and Maven artifacts, cutting the live build from ~4.5 min toward ~2.
+* *Talk through the build, do not watch it.*
+The catalog tour and the `registry.access` vs `registry.redhat.io` trusted-content beat are timed to fill the build.
+Start the import, then immediately pivot to the catalog — do not narrate a progress bar.
+* *The trusted-content contrast is the intellectual payoff.*
+Anonymous UBI pull (200) versus authenticated `registry.redhat.io` (401) is a concrete, memorable proof of "provenance is real."
+Have the one-liner ready in a terminal; it lands better than a slide.
+* *Keep the demo to import → catalog → trusted content → running app.*
+Resist doing the Dockerfile comparison and the polyglot import live — those are the hands-on payoff, and they blow the time budget.
+
+== Top questions attendees ask
+
+*1. "S2I or Dockerfile — how do I choose?"*::
+Default to S2I: you write nothing, the platform builds your source with a supported, patched builder image, and you own no `Containerfile`.
+Reach for the Dockerfile strategy only when you need something S2I cannot give — a specific or hardened base image, a system package, an unusual build step.
+The test is "do I have a *reason* to own a base image?" If not, S2I.
+
+*2. "The build succeeded but my claims Pod is in CrashLoopBackOff — did the build fail?"*::
+No — the build succeeded; the *app* cannot start yet.
+`parasol-claims` creates its schema and loads seed data at boot, so it needs a reachable PostgreSQL.
+Until you deploy the database (exercise 4) and wire it in (exercise 5), the app exits and restarts.
+This is deliberate — it is the module's break-and-fix, and it previews how config and dependencies work in the next module.
+
+*3. "Why is the builder called `java-21` and not just `java`?"*::
+The stock OpenShift samples ship a `java` builder stream that trails the current release.
+This workshop provides its own `java-21` builder (UBI 9 / OpenJDK 21) so everyone builds on a *current* JDK that matches the Quarkus {quarkus_version} apps.
+That is a live example of a platform team curating builder images — the "golden path" idea a later module builds on.
+
+*4. "Where do the builds actually run, and what stops them eating the cluster?"*::
+Each build runs in a *build Pod* in the attendee's own namespace, subject to that namespace's ResourceQuota and LimitRange.
+The default container memory limit (1 Gi) is enough for these Quarkus builds on the `java-21` builder; a larger app can need more (see watchouts).
+Builds are first-class, quota-bound workloads — not magic happening off to the side.
+
+*5. "Is this database real? Where does my data go?"*::
+It is a real PostgreSQL 15, but *ephemeral* — it uses an `emptyDir`, so restarting the Pod loses all data.
+That is intentional: it keeps the module simple and sets up the storage module, which gives the database durable, identity-stable storage.
+Never point anything you care about at an ephemeral database.
+
+== Watchouts
+
+* *First build is the slow step.*
+The initial claims S2I build runs ~4–4.5 min (Maven dependency download + Quarkus augmentation) on this cluster at the default memory; a cold node is slower.
+Set expectations, and use the wait for the catalog/trusted-content material rather than silence.
+* *Build memory and the LimitRange.*
+Build Pods inherit the namespace LimitRange default (1 Gi).
+The current `java-21` (UBI 9) builder completes there; note for your own awareness that the *older* stock `java` stream (OpenJDK 17, UBI 8) has hit `OutOfMemoryError` under that 1 Gi default on this same source, and a larger app can too.
+The fix is `oc patch bc/<name> --type=merge -p '{"spec":{"resources":{"limits":{"memory":"3Gi"}}}}'` then rebuild.
+(This is also a nice governance teaser — the platform team owns both the builder images and the default limits.)
+* *`Containerfile`, not `Dockerfile`.*
+`oc new-app --strategy=docker` refuses the repo ("No Dockerfile was found") because the file is named `Containerfile`.
+Attendees must set the Dockerfile path explicitly (console) or create a BuildConfig with `dockerStrategy.dockerfilePath: Containerfile` (CLI).
+Expect this question; it is in the lab and the troubleshooting guide.
+* *Claims crash-loops until wired.*
+Between exercises 1 and 5 the `parasol-claims` Pod is red in Topology.
+Tell attendees up front that this is expected and gets fixed at the end, or the noise reads as "broken."
+* *Per-user build concurrency.*
+When a whole room starts the claims build at once, node CPU and the internal registry take the load; builds queue and run slower than the solo timing.
+For large rooms, stagger the start of exercise 1 or pre-warm the builder image on the worker nodes.
+* *Gitea fork must exist.*
+The lab builds from `{user}/parasol-claims` and `{user}/parasol-notifications`.
+If a fork is missing, `ws start m02 --user <user>` re-runs the fork job (idempotent).
+
+== Provenance
+
+The Source-to-Image narrative (source → builder image → running app, and the S2I-versus-Dockerfile framing) is adapted from Red Hat's *OpenShift starter-guides* S2I walkthrough (credited in the wrap-up per the reuse policy).
+All technical steps, the Parasol applications, the PostgreSQL catalog template, and the build flows are freshly built and verified on OpenShift {ocp_version} (2026-07-09).
+No content ported from the 2020-era labs.

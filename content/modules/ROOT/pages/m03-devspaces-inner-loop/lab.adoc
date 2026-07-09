@@ -1,0 +1,503 @@
+= Dev Spaces & the Inner Loop: Lab
+:module-id: m03
+include::partial$version-attributes.adoc[]
+
+// Lab page for M03. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering
+// shows only the presenter arc. Most commands run in the WORKSPACE terminal (inside the
+// browser IDE), NOT the Showroom terminal — so they are copy-enabled, not role=execute.
+// role=execute (click-to-run into the Showroom terminal) is used only for the few steps
+// that genuinely run there (the prereq check, cross-checks via oc, ws verify).
+// Browser-IDE click paths are marked [CAPTURE-VERIFY] pending a screenshot pass
+// (Dev Spaces 3.29 on OCP 4.21; mechanics grounded from the DevWorkspace API + oc exec).
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+In this lab you take the developer inner loop into the cluster.
+You open Parasol's claims service in a browser IDE that starts in under two minutes, run it in Quarkus dev mode against the *real* in-cluster database, change a live endpoint and watch it hot-reload, extend the workspace definition with a Redis cache, push your change to Git, and step through a running request in a debugger.
+Everything happens in your own projects — `{user}-devspaces` for the workspace, `{user}-dev` for the app and database — so nothing you do can affect another attendee.
+
+[IMPORTANT]
+.Two terminals — know which one you are in
+====
+This lab uses two different terminals:
+
+* The *workspace terminal* — inside the browser IDE (Dev Spaces). *Almost every command runs here.* These blocks are copy-enabled; paste them into the IDE terminal.
+* The *Showroom terminal* — the terminal tab beside these instructions, logged in as `{user}`. Only steps explicitly labelled *Showroom terminal* run here (they use `oc` to look at the cluster from the outside). Those are click-to-run.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 8–10 minute presenter arc (topology -> one-click IDE -> live change -> Android closer)
+// ============================================================================
+ifdef::demo[]
+== Demo arc — One click from topology to a live change (8–10 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws start m03 --user {user}` well before the session and *open the workspace once* so the universal developer image is already pulled on a node — a cold first start is ~85 s of image pull and kills the pacing (a warm start is ~20 s).
+Have three things ready: the *web console* Topology in `{user}-dev`, the *Dev Spaces* dashboard signed in, and the Android showcase video cued.
+Console labels below were grounded from the DevWorkspace API on {ocp_version} / Dev Spaces {devspaces_version}; *[CAPTURE-VERIFY]* marks a screen label to confirm before you go live.
+====
+
+[demo-block]
+[TIME 2m]
+Say:: "A new developer joins Parasol today. No laptop setup — no JDK, no Maven, no local database. Watch how fast they get to a running, editable claims service."
+Show:: The web console *Topology* in `{user}-dev`: the `parasol-claims` app and its `claims-db` database, already running.
+Do:: Click the `parasol-claims` node, then the *Open in Dev Spaces* / edit-source link in the side panel. _[CAPTURE-VERIFY: the "Edit source code" / Dev Spaces link on the Topology node, {ocp_version}.]_
+"One link. That opens the source of this exact service in a browser IDE."
+
+[demo-block]
+[TIME 3m]
+Say:: "The environment is defined by a file in the repo — a devfile — so it's the same for everyone, every time. It's coming up now."
+Show:: The Dev Spaces workspace starting, then the che-code editor (VS Code in the browser) with the `parasol-claims` project loaded.
+Do:: In the workspace terminal, show the toolchain is correct and pinned:
++
+[source,sh]
+----
+java -version   # openjdk 21 — pinned by the devfile, not the laptop
+----
++
+"JDK 21, from the devfile — not from anyone's machine."
+
+[demo-block]
+[TIME 3m]
+Say:: "Now the inner loop. I'll run the service in dev mode, pointed at the database that's already running in the cluster, and change it live."
+Show:: The workspace terminal running dev mode; then a browser tab hitting the claims API through the workspace endpoint.
+Do:: Start dev mode wired to the in-cluster database, then edit a claims endpoint and save.
+On the next request the change is live — narrate the "Live reload" line in the terminal (it lands in ~2 s).
+"No rebuild, no redeploy, no restart. That's the inner loop — and it's talking to the real in-cluster PostgreSQL, not a fake."
+
+[demo-block]
+[TIME 2m]
+Say:: "And this isn't just for Java web services."
+Show:: The Android-in-Dev-Spaces showcase video (recorded): a full Android build and a live device screen, in the same browser IDE.
+Do:: Play the ~60–90 s clip.
+"Same platform, same one-click workspace — an Android app building against an on-cluster device. The inner loop, in the cluster, for whatever you build."
+
+[NOTE]
+.If a workspace is slow to start live
+====
+Never wait on a cold pull in front of the room.
+If the workspace is not up in ~20 s, cut to the pre-opened workspace you warmed before the session and keep the story moving — the point is the *loop*, not the spinner.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Open your workspace from your fork
+⏱ *~12 min* · one click to a correct, running environment
+
+The workshop setup has already forked the claims service into your own Git account, at `{user}/parasol-claims`, and its repository root contains a `devfile.yaml` — the workspace contract.
+Opening a *factory URL* of the shape `{devspaces_url}/#<git-repo-url>` tells Dev Spaces to clone that repo and build the workspace its devfile describes.
+
+Open your workspace:
+
+. Open the {devspaces_url}[Dev Spaces dashboard^] and sign in as `{user}` (same credentials as the console).
+The first sign-in provisions your workspace project, `{user}-devspaces`, automatically.
+. Open your workspace with this factory URL (it clones *your* fork):
++
+[.copy]
+`{devspaces_url}/#{gitea_url}/{user}/parasol-claims`
++
+. Wait for the workspace to start.
+The *first* start pulls the universal developer image and can take around a minute and a half; later starts take about twenty seconds.
+When it finishes, the che-code editor (VS Code in your browser) opens with the `parasol-claims` project loaded.
+
+// [CAPTURE-VERIFY] Confirm on Dev Spaces 3.29: the factory URL provisions user-devspaces, the che-code editor loads with the parasol-claims project in the Explorer, and the "Starting workspace" progress view. Grounded from the DevWorkspace API: a DevWorkspace named parasol-claims reaches phase=Running with the project cloned to /projects/parasol-claims; cold start measured 83 s, warm 21 s.
+// TODO(media): image::m03-devspaces-inner-loop/m03-devspaces-inner-loop-01-workspace-loaded.png[che-code editor open with the parasol-claims project] — see media-manifest.md
+
+Take two minutes to get oriented, then confirm your toolchain.
+Open a terminal in the IDE (menu *Terminal → New Terminal*) and check the Java version:
+
+[source,sh]
+----
+java -version
+----
+
+.Expected output
+[source,texinfo]
+----
+openjdk version "21.0.11" 2026-04-21 LTS
+OpenJDK Runtime Environment (Red Hat, Inc. ...)
+----
+
+The universal developer image ships several JDKs and *defaults to 17*, but this project targets *Java 21*.
+The devfile pins JDK 21 (via `JAVA_HOME` and `PATH`) so your build and your editor both use it — a one-line change in Git that everyone on the team inherits, instead of a per-laptop chase.
+
+// [CAPTURE-VERIFY] Confirm the IDE integrated terminal shows openjdk 21. Grounded: with the devfile's JAVA_HOME=/usr/lib/jvm/java-21 + PATH prefix, `java -version` reports 21.0.11 in both login and non-login shells, and `./mvnw -v` reports "Java version: 21.0.11".
+
+[.checkpoint]
+****
+✔ *Verify:* The che-code editor is open with the `parasol-claims` project in the Explorer, and `java -version` in the workspace terminal reports *openjdk 21*.
+If it reports 17, your workspace started from a stale devfile — stop and restart the workspace (see xref:m03-devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
+****
+
+== 2. Wire dev mode to the in-cluster database
+⏱ *~15 min* · the deliberate break-and-fix — a dev instance needs a real database
+
+Quarkus *dev mode* (`./mvnw quarkus:dev`) runs the app with live reload.
+Start it the naive way first, in the *workspace terminal*, and watch it fail on purpose:
+
+[source,sh]
+----
+cd /projects/parasol-claims
+./mvnw quarkus:dev
+----
+
+After the dependencies download, it stops with an error:
+
+.Expected output (the deliberate failure)
+[%collapsible]
+=====
+[source,texinfo]
+----
+ERROR [...DockerClientProviderStrategy] Could not find a valid Docker environment. ...
+WARN  [...DevServicesDatasourceProcessor] Please configure the datasource URL for
+      default datasource or ensure the Docker daemon is up and running.
+ERROR [io.quarkus.runtime.Application] Failed to start application:
+  Datasource '<default>' was deactivated automatically because its URL is not set.
+  To activate the datasource, set configuration property 'quarkus.datasource.jdbc.url'.
+----
+=====
+
+Read what happened, because it is the whole lesson.
+The claims app needs a database.
+With no database configured, Quarkus tried to *start one for you* (a throwaway container, called a Dev Service) — but a workspace has no container runtime inside it, so that failed, and the app refused to start without a datasource URL.
+
+You do not want a throwaway database anyway.
+You want the *real* `claims-db` that is already running in your `{user}-dev` project — the same one the deployed claims app uses.
+Your workspace can reach it by ordinary in-cluster DNS, across namespaces: `claims-db.{user}-dev.svc`.
+
+Press *Ctrl+C* to stop the failed attempt, then wire the datasource with environment variables and start dev mode again:
+
+[source,sh,subs="attributes"]
+----
+export QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://claims-db.{user}-dev.svc:5432/parasol
+export QUARKUS_DATASOURCE_USERNAME=parasol
+export QUARKUS_DATASOURCE_PASSWORD=parasol
+export QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update
+./mvnw quarkus:dev
+----
+
+This time it starts. Watch for these lines:
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+INFO  [io.quarkus] parasol-claims 1.0.0 on JVM (powered by Quarkus {quarkus_version}) started in 6.6s. Listening on: http://0.0.0.0:8080
+INFO  [io.quarkus] Profile dev activated. Live Coding activated.
+INFO  [io.quarkus] Installed features: [..., hibernate-orm, jdbc-postgresql, ...]
+----
+
+[NOTE]
+.Why environment variables, not an edit to the code
+=====
+The claims service reads its database URL, username, and password from environment variables, so the *same image* runs in dev, stage, and prod with only configuration changing.
+You just used that: you pointed a dev instance at the cluster database without touching a line of code.
+The schema strategy `update` tells your dev instance to *use* the existing tables, not drop and reseed them — so you never clobber the shared database.
+Externalizing configuration like this is the subject of a later module (Config, Secrets & Multi-Environment — a separate module).
+=====
+
+With dev mode running, confirm your workspace instance is talking to the in-cluster database.
+In the workspace terminal, in a *second* IDE terminal tab (leave dev mode running in the first):
+
+[source,sh]
+----
+curl -s http://localhost:8080/api/claims | head -c 200
+----
+
+You should see real claims — `CLM-1001`, `CLM-1002`, … — the 30 seeded rows served from `claims-db`.
+
+[.checkpoint]
+****
+✔ *Verify:* Dev mode logs `Profile dev activated. Live Coding activated`, and `curl http://localhost:8080/api/claims` returns seeded claims.
+If you get `Connection refused`, dev mode has not finished starting — wait for the `Listening on` line.
+If the app fails with a datasource error, re-check the `export` lines (host `claims-db.{user}-dev.svc`).
+****
+
+== 3. Change a live endpoint and watch it hot-reload
+⏱ *~12 min* · the inner loop at full speed
+
+Now the payoff: change the running service without rebuilding or restarting it.
+Leave dev mode running.
+
+In the IDE Explorer, open `src/main/java/com/parasol/claims/ClaimResource.java`.
+Add a small new endpoint just before the final closing brace of the class:
+
+[source,java]
+----
+    @GET
+    @Path("/ping")
+    @Produces(MediaType.TEXT_PLAIN)
+    public String ping() {
+        return "parasol-claims dev mode: hot reload works";
+    }
+----
+
+Save the file (*Ctrl+S*).
+You did *not* restart anything.
+Now hit the new endpoint from your second terminal tab:
+
+[source,sh]
+----
+curl http://localhost:8080/api/claims/ping
+----
+
+The first request triggers Quarkus to recompile just what changed and reload it in place — you will see it in the dev-mode terminal:
+
+.Expected output (in the dev-mode terminal)
+[source,texinfo]
+----
+INFO  [io.quarkus.deployment.dev.RuntimeUpdatesProcessor] Restarting quarkus due to changes in ClaimResource.class.
+INFO  [io.quarkus.deployment.dev.RuntimeUpdatesProcessor] Live reload total time: 2.2s
+----
+
+— and `curl` prints `parasol-claims dev mode: hot reload works`.
+That endpoint did not exist a moment ago.
+No image was built, no Pod was replaced; the loop was *seconds*.
+
+Prove it is the *same shared database* as the deployed app.
+Create a claim through your dev instance, then read it back through the *deployed* app's public Route — from the *Showroom terminal* this time:
+
+[source,sh]
+----
+# workspace terminal: create a claim via your dev instance
+curl -s -X POST http://localhost:8080/api/claims \
+  -H 'Content-Type: application/json' \
+  -d '{"claimant":"Dev Mode Demo","type":"auto","amount":500.00}'
+----
+
+[source,sh,role=execute,subs="attributes"]
+----
+# Showroom terminal: read it back through the DEPLOYED app's Route
+CLAIMS_HOST=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s "http://$CLAIMS_HOST/api/claims" | tr ',' '\n' | grep -A1 "Dev Mode Demo"
+----
+
+Your new claim, written by the workspace dev instance, is visible through the separately-deployed app — because both point at the one `claims-db`.
+
+[.checkpoint]
+****
+✔ *Verify:* `curl .../api/claims/ping` returns your string, the dev-mode terminal shows a `Live reload` line, and the claim you POSTed appears through the deployed Route.
+****
+
+== 4. Extend the workspace: add a Redis cache to the devfile
+⏱ *~15 min* · the devfile is yours to change — restart the workspace from it
+
+A workspace is not fixed — it is whatever its devfile says.
+Add a second container (a Redis cache the app could use) and a command to talk to it, then restart the workspace *from the devfile* so the new container appears.
+
+Stop dev mode (*Ctrl+C*).
+In the IDE Explorer, open `devfile.yaml` at the repository root.
+Under `components:`, add a `cache` component, and under `commands:`, add a `cache-ping` command:
+
+[source,yaml]
+----
+  # add under components:
+  - name: cache
+    container:
+      image: registry.redhat.io/rhel9/redis-7:latest
+      memoryLimit: 256Mi
+      endpoints:
+        - name: redis
+          targetPort: 6379
+          exposure: internal
+----
+
+[source,yaml]
+----
+  # add under commands:
+  - id: cache-ping
+    exec:
+      label: Ping the Redis cache
+      component: cache
+      commandLine: redis-cli ping
+----
+
+Save the file.
+Now restart the workspace so Dev Spaces rebuilds it from the updated devfile:
+
+. Open the command palette (*F1* or *Ctrl+Shift+P*).
+. Run *Dev Spaces: Restart Workspace from Local Devfile*.
+
+// [CAPTURE-VERIFY] Confirm on Dev Spaces 3.29: the command-palette entry "Restart Workspace from Local Devfile" and that the Endpoints view lists the new internal `redis` endpoint after restart. Grounded from the DevWorkspace API: adding the cache component + cache-ping command and re-applying restarts the workspace in ~17 s with a third container `cache` (registry.redhat.io/rhel9/redis-7) alongside `tools` and `che-gateway`; `redis-cli ping` returns PONG.
+
+When the workspace comes back, the `cache` container is part of it.
+Confirm it in the workspace terminal:
+
+[source,sh]
+----
+redis-cli ping
+----
+
+.Expected output
+[source,texinfo]
+----
+PONG
+----
+
+The two containers share the workspace Pod's network, so your app could reach Redis at `localhost:6379` — no service, no route, just a sidecar you declared in Git.
+
+[.checkpoint]
+****
+✔ *Verify:* After the restart, `redis-cli ping` returns `PONG`, and the workspace now runs a `cache` container.
+If the restart fails, your devfile has a YAML error — check the indentation of the two blocks you added (see xref:m03-devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
+****
+
+== 5. Commit and push your change
+⏱ *~10 min* · the hand-off from inner loop to outer loop
+
+Your `/ping` change lives only in the workspace.
+Commit it and push it to your fork — this is the moment the inner loop hands off to the outer loop that the rest of the workshop builds (pipelines, GitOps).
+
+In the workspace terminal:
+
+[source,sh]
+----
+cd /projects/parasol-claims
+git add -A
+git commit -m "Add /api/claims/ping endpoint"
+git push origin main
+----
+
+The *first* push will likely fail asking for credentials:
+
+.Expected output (the auth wall)
+[source,texinfo]
+----
+fatal: could not read Username for 'https://...': No such device or address
+----
+
+That is expected: your workspace can *read* the public repo but has no credentials to *write* to it yet.
+Give it your workshop credentials once, then push again:
+
+[source,sh,subs="attributes"]
+----
+git config --global credential.helper store
+printf 'https://{user}:YOUR_PASSWORD@%s\n' "$(echo {gitea_url} | sed 's#https://##')" > ~/.git-credentials
+chmod 600 ~/.git-credentials
+git push origin main
+----
+
+Replace `YOUR_PASSWORD` with your workshop password.
+The push succeeds:
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+To https://.../{user}/parasol-claims.git
+   3bf5a39..c270dc8  main -> main
+----
+
+[TIP]
+.The IDE has a Git UI too
+====
+You do not have to use the terminal.
+The che-code *Source Control* panel (the branch icon in the left rail) stages, commits, and pushes with buttons, and it prompts for your username and password in a dialog the first time you push — no credential file needed.
+Use whichever you prefer; the result is the same commit on your fork.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `git push` reports your commit was written to `main`.
+Open your fork in the {gitea_url}[Git server^] (browse to `{user}/parasol-claims`) and confirm the latest commit is your `/ping` change.
+****
+
+== 6. Debug a live request
+⏱ *~12 min* · set a breakpoint and step through the running service
+
+Quarkus dev mode opens a Java debug port (5005) automatically, so you can attach the IDE debugger to the *running* dev instance and step through a real request.
+
+Start dev mode again (wired to the database, as in exercise 2 — the environment variables are gone after a restart):
+
+[source,sh,subs="attributes"]
+----
+cd /projects/parasol-claims
+export QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://claims-db.{user}-dev.svc:5432/parasol
+export QUARKUS_DATASOURCE_USERNAME=parasol
+export QUARKUS_DATASOURCE_PASSWORD=parasol
+export QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update
+./mvnw quarkus:dev
+----
+
+Confirm the debug port is live — you will see this line in the dev-mode output:
+
+[source,texinfo]
+----
+Listening for transport dt_socket at address: 5005
+----
+
+Now attach the debugger:
+
+. In the IDE Explorer, open `ClaimResource.java` and click in the left margin next to the first line of the `list(...)` method to set a *breakpoint* (a red dot appears).
+. Open the *Run and Debug* view (the play-with-bug icon in the left rail).
+. Create an *Attach* launch configuration to `localhost:5005` (che-code's Quarkus/Java tooling offers "Attach to Quarkus" / "Java: Attach to Process"), and start it.
+. From your second terminal tab, hit the endpoint to trigger the breakpoint:
++
+[source,sh]
+----
+curl http://localhost:8080/api/claims
+----
+. Execution pauses on your breakpoint. Inspect variables, step over a few lines, then resume.
+
+// [CAPTURE-VERIFY] Confirm on che-code (Dev Spaces 3.29): setting a breakpoint in ClaimResource.list, the Attach-to-5005 launch config, and that a curl to /api/claims halts on the breakpoint with variables inspectable. Grounded from the workspace pod: dev mode prints "Listening for transport dt_socket at address: 5005", and `jdb -attach localhost:5005` connects and enumerates the live JVM threads (Quarkus Main Thread, vert.x event loops) — 5005 is a real, attachable JDWP endpoint.
+// TODO(media): image::m03-devspaces-inner-loop/m03-devspaces-inner-loop-02-debug-5005.png[che-code paused on a breakpoint in ClaimResource with the debug toolbar] — see media-manifest.md
+
+[.checkpoint]
+****
+✔ *Verify:* A `curl` to `/api/claims` pauses execution on your breakpoint in the IDE, and you can see the method's variables.
+If the debugger will not attach, confirm dev mode is running and printed the `Listening for transport dt_socket at address: 5005` line.
+****
+
+== 7. Showcase — beyond Java: Android in Dev Spaces
+⏱ *~5 min* · watch and discuss (recorded demo)
+
+Everything you did today was a Java web service, but the inner-loop-in-the-cluster idea is not language-specific.
+
+Watch the recorded showcase: a full *Android* application developed in Dev Spaces — the same one-click browser IDE — building against an on-cluster Android device whose screen streams into a browser tab.
+
+// TODO(media): embed narrated video m03-devspaces-inner-loop-showcase-android.mp4 (recorded in Phase 6) — see media-manifest.md
+
+What to notice, and why it matters for how you think about the platform:
+
+* *One devfile, more than one target.* The showcase workspace uses a devfile with multiple build targets (a `devfile.yaml` and a registry-specific variant) — the same contract idea you used, scaled to a bigger toolchain.
+* *Declarative tasks.* Build, run, and test are devfile *commands* with task groups — there is no magic "Run" button, just named tasks anyone can discover, exactly like your `cache-ping`.
+* *The device is a governed workload.* The Android device runs as a virtual machine on the cluster; the workspace's service account has *no* rights to create VMs, so the device lifecycle is a governed, separate concern — a preview of how the platform keeps blast radius small (covered in the Virtualization and Multi-Tenancy modules — separate modules).
+
+[NOTE]
+.Why this is a recorded demo, not hands-on here
+====
+The Android device streams from a virtual machine, which needs OpenShift Virtualization (bare-metal nodes).
+This workshop's cluster does not run it, so the showcase is a video by default; where a `virt`-capable cluster exists, it can be run live.
+The take-home below gives you a purely local way to explore the same inner-loop idea.
+====
+
+== 8. Take-home: the same loop, locally
+⏱ *~3 min* · read
+
+In-cluster workspaces are one end of a spectrum.
+When you want the inner loop entirely on your own machine — on a plane, air-gapped, or just offline — two Red Hat tools give you the same shape:
+
+* *Podman Desktop* — build and run containers (and small Kubernetes/Pod setups) locally; the natural home for the container half of the inner loop without a cluster.
+* *Red Hat OpenShift Local* — a single-node OpenShift on your laptop, for when you need the *platform* (Routes, operators, the console) and not just containers.
+
+Both run the same images and, in OpenShift Local's case, the same objects you have been using all along — the skills transfer directly.
+When you are done for the day, your Dev Spaces workspace idles automatically after 30 minutes of inactivity to free cluster resources, and resumes where you left off.
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the loop. Try this on your own:
+
+* Change the `/ping` endpoint to return JSON that includes the total number of claims (inject `ClaimResource`'s count, or call `Claim.count()`), save, and watch it hot-reload.
+* Add a second devfile *command* that runs the tests (`./mvnw test`) as a task, restart from the devfile, and run it from the IDE's task menu.
+* Break the app on purpose: introduce a compile error, save, and see how Quarkus dev mode reports it on the next request; then fix it and watch it recover — no restart.
+
+When you are done, run `ws verify {module-id}` in the *Showroom terminal* — or `ws reset {module-id}` to return your world to a fresh claims app + database and start over.
+
+endif::demo[]

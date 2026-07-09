@@ -1,0 +1,582 @@
+= Ways to Build & Deliver Apps: Lab
+:module-id: m02
+include::partial$version-attributes.adoc[]
+
+// Lab page for M02. Workshop exercises are guarded ifndef::demo[] so the DEMO
+// rendering shows only the presenter arc; the WORKSHOP rendering shows the hands-on
+// steps. Every attendee command uses role=execute (click-to-run). Console click-paths
+// marked [CAPTURE-VERIFY] await a browser confirmation pass (unified 4.21 console;
+// grounded from CLI/API, not yet screenshotted). Java is JDK 21 throughout (workshop
+// java-21 S2I builder); the S2I builder ref is java-21 (openshift/java-21:latest).
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+In this lab you take Parasol's `parasol-claims` service from *source code* to a running, database-backed application — building it four different ways so you learn which on-ramp fits which situation.
+Everything you create lives in your own project, `{user}-dev`, and everything you build comes from *your own fork* of the source in Gitea, which the workshop already created for you.
+
+[TIP]
+====
+Most steps are offered two ways.
+Use the *Console* tab to learn the graphical workflow, or the *CLI* tab to learn `oc` — the two paths create the same objects.
+Console labels marked _[verify on screen]_ are confirmed from the CLI; if a label reads slightly differently on your cluster, the CLI command beside it is the source of truth.
+====
+
+[NOTE]
+.Your source lives in Gitea
+====
+The workshop forked two Parasol repositories into your Gitea account:
+
+* `{gitea_url}/{user}/parasol-claims` — the Quarkus claims service (this module's star).
+* `{gitea_url}/{user}/parasol-notifications` — a small notifications service, in *both* Node.js and Python.
+
+Open the {gitea_url}/{user}/parasol-claims[parasol-claims repo^] in a browser tab now — you will paste its URL into the build flows below.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 10–12 minute presenter arc (import-from-git -> running app +
+// catalog tour + trusted-content talk track)
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Source to running app (11 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws solve m02 --user {user}` *before the session* so a finished, database-backed claims app is already running to fall back to — then delete the `parasol-claims` Deployment (leave `claims-db`) to build it live.
+A Quarkus S2I build takes *~4–5 minutes*; the catalog tour and trusted-content talk track below are timed to cover it, so the build finishes while you talk.
+Have the {gitea_url}/{user}/parasol-claims[parasol-claims repo^] open in a browser tab.
+Console labels below were grounded from the cluster API on {ocp_version}; *[verify on screen]* marks a label to confirm before you go live.
+====
+
+[demo-block]
+[TIME 3m]
+Say:: "Parasol's dev team handed me a claims service as *source code* — a Git repo, no image. Watch the platform build and run it for me, no Dockerfile in sight."
+Show:: *+Add* → *Import from Git*.
+Paste the repo URL; the console detects the builder.
+_[verify on screen: the builder tile reads "Java 21 (UBI 9)"; if it auto-selects a different Java builder, pick *Java 21* from the Builder Image dropdown.]_
+Do:: Paste `{gitea_url}/{user}/parasol-claims`, confirm the *Java 21* builder and target port *8080*, click *Create*.
+Land in *Topology*: "That build you see starting is Source-to-Image — my source plus a supported Java 21 builder image, no Dockerfile."
+
+[demo-block]
+[TIME 3m]
+Say:: "While that builds, let me show you where images come from here — because 'where did this come from?' is the first question security asks."
+Show:: *+Add* → *Developer Catalog*.
+Scroll the *Databases* and *Languages* views; point out the Parasol PostgreSQL tile and the language builders.
+Do:: "Everything here is *curated* — the platform team chose it. These builders are UBI-based: Red Hat's Universal Base Image, maintained and patched. That's the paved road your subscription already includes."
+
+[demo-block]
+[TIME 2m]
+Say:: "One level deeper on trust. There are two Red Hat registries, and they behave differently on purpose."
+Show:: A terminal.
+Do::
++
+[source,sh,role=execute]
+----
+oc run probe --image=registry.access.redhat.com/ubi9/ubi-minimal --restart=Never --rm -i --command -- curl -sI https://registry.access.redhat.com/v2/ | head -1
+----
++
+"`registry.access.redhat.com` hands out UBI *anonymously*. The fuller catalog on `registry.redhat.io` needs credentials — the cluster's pull secret. That difference *is* provenance: you always know what you're running and where it came from."
+
+[demo-block]
+[TIME 3m]
+Say:: "Let's check on our build — it should be done, and the app running."
+Show:: *Topology* → the `parasol-claims` node → *Resources* → the completed *Build*, then the *Route*.
+_[verify on screen: the build shows *Complete*; the ImageStream tag `parasol-claims:latest` is pushed.]_
+Do:: Open the app's `/api/claims` URL (from the pre-staged, database-wired instance): show the JSON list of claims.
+"From a Git repo to a running, database-backed API — the platform did the build, wired in a PostgreSQL from the catalog, and published it. That's the whole build-and-deliver story in one screen."
+
+[NOTE]
+.If the live build is slow
+====
+S2I build time depends on the node cache; a cold first build can run past five minutes.
+If it is still going when you finish the talk track, switch to the pre-staged `ws solve` instance to show the running app, and return to the live build's logs afterward.
+Never stall on a progress bar — narrate the trusted-content story instead.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Import the claims service from Git (Source-to-Image)
+⏱ *~15 min* · the paved road: source in, running image out
+
+You have no container image for `parasol-claims` — only source.
+Source-to-Image (S2I) takes your Git repository plus a language *builder image* and produces a runnable image for you, no Dockerfile required.
+The workshop provides a *Java 21* builder (`java-21`) in the shared catalog; because the claims service is a Java 21 application, that builder is the right match.
+
+[tabs]
+====
+Console::
++
+--
+. Go to *+Add* → *Import from Git*.
+. In *Git Repo URL*, paste your fork:
++
+[.copy%interactive]
+`{gitea_url}/{user}/parasol-claims`
+. The console inspects the repo and selects a *Builder Image*.
+Confirm it is *Java 21* — if a different Java builder is auto-selected, open the *Builder Image* dropdown and choose *Java 21* explicitly.
+. Leave the *Name* as `parasol-claims`, *Target port* `8080`, and *Resource type* *Deployment*.
+. Click *Create*.
+You land in *Topology*; the `parasol-claims` node shows a build starting.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the "+Add -> Import from Git" flow; the exact builder tile label for the workshop java-21 stream ("Java 21 (UBI 9)"?); whether import auto-detects java-21 vs the stock 'java' stream, and that the Builder Image dropdown lets you pick "Java 21" explicitly; the Build/Resources tabs in the Topology side panel. Grounded from CLI: `oc new-app java-21~<git>` selects openshift/java-21:latest (description "Build and run Java 21 applications ... on UBI 9"); BuildConfig strategy=Source; build pushes parasol-claims:latest.
+// TODO(media): image::m02-build-deliver/m02-build-deliver-01-import-from-git.png[Import from Git with the Java 21 builder auto-detected] — see media-manifest.md
+--
+CLI::
++
+--
+`oc new-app` with the `builder~git` syntax kicks off an S2I build in one command:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc new-app java-21~{gitea_url}/{user}/parasol-claims.git --name=parasol-claims
+----
+
+.Expected output
+[%collapsible]
+=====
+[source,texinfo]
+----
+--> Found image ... in image stream "openshift/java-21" under tag "latest" for "java-21"
+    Java Applications
+    Platform for building and running plain Java applications (fat-jar and flat classpath)
+    Tags: builder, java
+--> Creating resources ...
+    imagestream.image.openshift.io "parasol-claims" created
+    buildconfig.build.openshift.io "parasol-claims" created
+    deployment.apps "parasol-claims" created
+    service "parasol-claims" created
+--> Success
+    Build scheduled, use 'oc logs -f buildconfig/parasol-claims' to track its progress.
+----
+=====
+
+`oc new-app` created four objects: an *ImageStream* (to hold the built image), a *BuildConfig* (the recipe: this source + this builder), a *Deployment* (to run the result), and a *Service*.
+--
+====
+
+Watch the build.
+The first build downloads Maven dependencies and runs the Quarkus build, so it takes a few minutes:
+
+[source,sh,role=execute]
+----
+oc logs -f buildconfig/parasol-claims
+----
+
+You will see S2I at work — it pulls the Java 21 builder, runs the Maven build inside it, then packages and pushes the result:
+
+.Build log highlights (real excerpts)
+[source,texinfo]
+----
+Generating dockerfile with builder image image-registry.openshift-image-registry.svc:5000/openshift/java-21@sha256:...
+STEP 8/9: RUN /usr/local/s2i/assemble
+Java version: 21.0.11, vendor: Red Hat, Inc., runtime: /usr/lib/jvm/java-21-openjdk-...
+INFO Running 'mvn -e -Popenshift -DskipTests ... package'
+[INFO] BUILD SUCCESS
+INFO Copying deployments from target to /deployments...
+Pushing image image-registry.openshift-image-registry.svc:5000/{user}-dev/parasol-claims:latest ...
+Push successful
+----
+
+Now look at *how* the platform recorded the build — a first-class object, not a shell script:
+
+[source,sh,role=execute]
+----
+oc get buildconfig parasol-claims -o jsonpath='{.spec.strategy.type}{"\n"}'
+----
+
+[source,sh,role=execute]
+----
+oc get istag parasol-claims:latest -o jsonpath='pushed image: {.image.dockerImageReference}{"\n"}'
+----
+
+The BuildConfig's strategy is `Source` — that is S2I.
+The ImageStream now has a `parasol-claims:latest` tag pointing at the image you just built, living in the cluster's internal registry.
+
+[IMPORTANT]
+.Your app builds, then can't fully start — that is expected
+====
+Once the build finishes, the Deployment runs your image — and the Pod goes into `CrashLoopBackOff`.
+That is *not* a build failure; the build succeeded.
+The claims service needs a *PostgreSQL database* to start (it creates its schema and loads seed data at boot), and there is no database yet.
+Confirm what it is complaining about:
+
+[source,sh,role=execute]
+----
+oc logs deployment/parasol-claims --tail=15 | grep -iE 'datasource|connection|refused' | head -3
+----
+
+Leave it crash-looping — you will give it a database in exercise 4 and wire it up in exercise 5.
+This is a real dependency, and fixing it is the payoff at the end of the lab.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get buildconfig parasol-claims` exists with strategy `Source`, the build reached `Complete` (`oc get builds`), and `oc get istag parasol-claims:latest` shows a pushed image.
+The `parasol-claims` Pod is *not* Ready yet (no database) — that is expected.
+If the build fails to clone, see xref:m02-build-deliver/troubleshooting.adoc[the troubleshooting page].
+****
+
+== 2. The same app, the Dockerfile way — and why you'd choose it
+⏱ *~10 min* · full control, at the cost of owning a Containerfile
+
+S2I built the image *for* you from a builder image you did not write.
+Sometimes you need control S2I does not give — a specific base image, a system package, an exact build.
+Your `parasol-claims` repo also ships a `Containerfile` (the vendor-neutral name for a Dockerfile), so you can build the *same source* with the *Docker* strategy and compare.
+
+[NOTE]
+.`Containerfile`, not `Dockerfile`
+====
+The Docker build strategy looks for a file named `Dockerfile` by default.
+Parasol's repo uses the vendor-neutral name `Containerfile`, so you must point the build at it explicitly.
+This is a real, common gotcha — `oc new-app --strategy=docker` will refuse the repo ("No Dockerfile was found") until you tell it the path.
+====
+
+[tabs]
+====
+Console::
++
+--
+. Go to *+Add* → *Import from Git* again.
+. Paste the same URL: `{gitea_url}/{user}/parasol-claims`.
+. Under *Import Strategy*, choose *Dockerfile*, and set the *Dockerfile path* to `Containerfile`.
+. Set the *Name* to `claims-docker` (so it does not collide with your S2I app), and click *Create*.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: that Import-from-Git offers a "Dockerfile" import strategy with an editable Dockerfile-path field, and that setting it to "Containerfile" is accepted. Grounded from CLI: a Docker-strategy BuildConfig with dockerStrategy.dockerfilePath=Containerfile builds the repo's multi-stage Containerfile to completion (~95s) and pushes claims-docker:latest.
+--
+CLI::
++
+--
+`oc new-app --strategy=docker` inspects the repo first and refuses it, because the file is named `Containerfile`:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc new-app --strategy=docker {gitea_url}/{user}/parasol-claims.git --name=claims-docker
+----
+
+.Expected output
+[source,texinfo]
+----
+error: No Dockerfile was found in the repository and the requested build strategy is 'docker'
+----
+
+Create the build the explicit way — a BuildConfig that names the `Containerfile`.
+This applies an ImageStream to hold the result and a Docker-strategy BuildConfig whose
+`dockerfilePath` points at `Containerfile`:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc apply -f - <<'EOF'
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: claims-docker
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: claims-docker
+spec:
+  source:
+    type: Git
+    git:
+      uri: "{gitea_url}/{user}/parasol-claims.git"
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: claims-docker:latest
+EOF
+----
+
+Start the build and watch the multi-stage `Containerfile` run:
+
+[source,sh,role=execute]
+----
+oc start-build claims-docker && oc logs -f bc/claims-docker
+----
+--
+====
+
+Now compare the two BuildConfigs side by side:
+
+[source,sh,role=execute]
+----
+oc get bc parasol-claims claims-docker -o custom-columns=NAME:.metadata.name,STRATEGY:.spec.strategy.type
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME             STRATEGY
+parasol-claims   Source
+claims-docker    Docker
+----
+
+Same source, two strategies.
+The *Source* (S2I) build used the platform's Java 21 builder — you conform to its runtime.
+The *Docker* build ran the repo's `Containerfile`, which pins its *own* base image (`ubi9/openjdk-21`) — you control the runtime, and you own that file forever.
+
+[TIP]
+.Which did you just prove you'd rather maintain?
+====
+Both produced a working image.
+S2I needed *nothing* from you but the source; the Docker path needed a hand-written, hand-patched `Containerfile`.
+For most services, that is the whole argument for S2I — and the wrap-up returns to when the Docker path genuinely earns its keep.
+====
+
+You do not need `claims-docker` past this comparison — clean it up so it does not clutter your project:
+
+[source,sh,role=execute]
+----
+oc delete bc,is claims-docker
+----
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get bc` showed `parasol-claims` as `Source` and `claims-docker` as `Docker` before you deleted the latter.
+You understand the trade-off: S2I = the platform owns the build; Dockerfile = you own the base image and the file.
+****
+
+== 3. Polyglot: import the notifications service (Node.js)
+⏱ *~10 min* · the same on-ramp, a different language
+
+S2I is not just for Java.
+The `parasol-notifications` service ships the *same* small API in two languages — Node.js and Python — in `node/` and `python/` subdirectories of one repo.
+You import from a subdirectory with a *context directory*.
+Node.js is the paved-road path here (it has zero dependencies, so nothing to download); the Python path is noted at the end if you want to try it.
+
+[tabs]
+====
+Console::
++
+--
+. *+Add* → *Import from Git*, URL `{gitea_url}/{user}/parasol-notifications`.
+. Expand *Show advanced Git options* and set *Context dir* to `/node`.
+. Confirm the builder is *Node.js*, *Name* `parasol-notifications`, *Target port* `8080`.
+. Click *Create*.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the "Context dir" field under advanced Git options; that setting it to /node selects the Node.js builder and builds the node subdir. Grounded from CLI: `oc new-app nodejs:22-ubi9~<git> --context-dir=node` builds and pushes in ~45s (zero-dependency stdlib app, no npm registry needed).
+--
+CLI::
++
+--
+[source,sh,role=execute,subs="attributes"]
+----
+oc new-app nodejs:22-ubi9~{gitea_url}/{user}/parasol-notifications.git \
+  --context-dir=node --name=parasol-notifications
+----
+
+Watch it build — this one is quick, because the Node app uses only the standard library (no `npm install`):
+
+[source,sh,role=execute]
+----
+oc logs -f bc/parasol-notifications
+----
+--
+====
+
+Expose it and confirm it answers:
+
+[source,sh,role=execute]
+----
+oc expose service/parasol-notifications
+----
+
+[source,sh,role=execute,subs="attributes"]
+----
+curl -s http://parasol-notifications-{user}-dev.{cluster_domain}/health
+----
+
+.Expected output
+[source,texinfo]
+----
+{"status":"UP"}
+----
+
+That is the polyglot point: *one on-ramp* (S2I), *one workflow*, whatever the language.
+The platform picked the Node.js builder from the source, exactly as it picked Java for the claims service.
+
+[NOTE]
+.Prefer Python?
+====
+The same repo has a FastAPI version under `python/`.
+Import it with the Python builder and a `/python` context dir instead:
+`oc new-app python:3.12-ubi8~{gitea_url}/{user}/parasol-notifications.git --context-dir=python --name=notifications-py`.
+It behaves identically — same endpoints, same responses.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get deploy parasol-notifications` is Ready `1/1`, and `curl .../health` returns `{"status":"UP"}`.
+****
+
+== 4. Browse the catalog and deploy a database
+⏱ *~10 min* · the front door, and the fix your claims app is waiting for
+
+Your claims service is still crash-looping — it needs PostgreSQL.
+Rather than hand-write a database Deployment, you deploy one from the *developer catalog*, the platform's front door for ready-to-run services.
+
+[tabs]
+====
+Console::
++
+--
+. Go to *+Add* → *Developer Catalog* → *Database* (or search the catalog for `postgres`).
+. Find and select the *Parasol PostgreSQL (ephemeral)* tile.
+. Click *Instantiate Template*.
+. Leave *Database name* as `claims-db` and the other defaults, and click *Create*.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the Developer Catalog "Database"/"Template" filters; that the "Parasol PostgreSQL (ephemeral)" tile appears (display-name, provider "Parasol Insurance", tags database/parasol) and the Instantiate form shows APP_NAME/POSTGRESQL_DATABASE/POSTGRESQL_USER/MEMORY_LIMIT. Grounded from CLI: `oc get template parasol-postgresql-ephemeral -n openshift` present and attendee-readable; `oc process ... | oc apply` creates Secret+Service+Deployment and PG 15 rolls out.
+// TODO(media): image::m02-build-deliver/m02-build-deliver-02-catalog-postgres-tile.png[Developer Catalog Databases view with the Parasol PostgreSQL tile] — see media-manifest.md
+--
+CLI::
++
+--
+The Parasol PostgreSQL template lives in the shared `openshift` catalog namespace.
+`oc process` fills in its parameters and prints the objects; pipe them to `oc apply`:
+
+[source,sh,role=execute]
+----
+oc process openshift//parasol-postgresql-ephemeral -p APP_NAME=claims-db | oc apply -f -
+----
+
+.Expected output
+[source,texinfo]
+----
+secret/claims-db created
+service/claims-db created
+deployment.apps/claims-db created
+----
+
+Watch PostgreSQL come up:
+
+[source,sh,role=execute]
+----
+oc rollout status deployment/claims-db
+----
+--
+====
+
+Notice what the template did *not* create — a `DeploymentConfig`.
+Parasol ships this template precisely because the stock PostgreSQL templates render a deprecated workload type on an end-of-life database engine.
+Confirm you got a modern *Deployment* on PostgreSQL 15 instead:
+
+[source,sh,role=execute]
+----
+oc get deployment claims-db -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+----
+
+The template also created a *Secret* named `claims-db` holding the database host, name, user, and password — you wire the claims service to it next.
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get deployment claims-db` is Ready `1/1`, `oc get secret claims-db` exists, and `oc get deploymentconfig` reports *no resources* (Parasol uses Deployments only).
+****
+
+== 5. Wire the claims service to its database
+⏱ *~10 min* · the break-and-fix payoff — and a preview of config
+
+The database is running; the claims service is still crash-looping because it does not yet know where the database is.
+The claims image reads its datasource from environment variables (`POSTGRESQL_HOST`, `POSTGRESQL_DATABASE`, `POSTGRESQL_USER`, `POSTGRESQL_PASSWORD`) — and the `claims-db` Secret holds exactly those keys.
+So wiring them is one command: pull every key from the Secret into the Deployment as environment.
+
+[tabs]
+====
+Console::
++
+--
+. In *Topology*, click the `parasol-claims` node → *Actions* → *Edit Deployment* (or open the *Environment* tab on the Deployment).
+. Add *All values from a ConfigMap or Secret* → select the `claims-db` Secret.
+. Save.
+The Deployment rolls out a new Pod with the database environment; it starts, connects, and goes Ready.
+
+// [CAPTURE-VERIFY] Confirm on 4.21: the Deployment "Environment" tab "Add from ConfigMap/Secret" control and that selecting the claims-db secret injects its four keys. Grounded from CLI: `oc set env deploy/parasol-claims --from=secret/claims-db` injects POSTGRESQL_HOST/DATABASE/USER/PASSWORD; claims then reaches Ready and /q/health/ready returns 200.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set env deployment/parasol-claims --from=secret/claims-db
+----
+
+.Expected output
+[source,texinfo]
+----
+deployment.apps/parasol-claims updated
+----
+
+Watch the crash loop turn into a healthy Pod:
+
+[source,sh,role=execute]
+----
+oc rollout status deployment/parasol-claims
+----
+--
+====
+
+Publish the claims API and prove it works end to end:
+
+[source,sh,role=execute]
+----
+oc expose service/parasol-claims
+----
+
+[source,sh,role=execute,subs="attributes"]
+----
+curl -s http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | head -c 200
+----
+
+.Expected output
+[source,texinfo]
+----
+[{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,...}]
+----
+
+There it is: a service that arrived as *source code* is now a running, database-backed API you built yourself — and the crash loop is gone because you gave it what it declared it needed.
+
+[NOTE]
+.You just previewed two later modules
+====
+Injecting configuration from a Secret instead of baking it into the image is *config externalization* — the whole subject of the next module (*Config, Secrets & Multi-Environment* — a separate module).
+And this database is *ephemeral*: restart its Pod and the data is gone.
+Making it survive is the *Storage & Stateful Apps* module (a separate module).
+You are standing exactly where those modules begin.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* Run `ws verify {module-id}` in your terminal.
+It should report `parasol-claims` and `claims-db` Ready, the Route answering `200`, and no DeploymentConfig objects — all checks green.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have all four on-ramps now.
+Try these on your own:
+
+* Import the *Python* version of notifications (`--context-dir=python`, the `python:3.12-ubi8` builder) and confirm it answers `/health` identically to the Node.js one.
+* Trigger a rebuild of `parasol-claims` with `oc start-build parasol-claims` and watch a *second* build appear in `oc get builds` — the BuildConfig is reusable.
+* Look at the labels S2I stamped onto your image: `oc describe istag parasol-claims:latest | grep -iE 'commit|author'`.
+Where did the platform get the Git commit and author from?
+* Ask OpenShift Lightspeed: "what is the difference between a Source and a Docker build strategy?" and check its answer against what you built.
+
+When you are done, run `ws verify {module-id}` — or `ws reset {module-id}` to wipe `{user}-dev` back to the entry state (empty project, forks intact) and start fresh.
+
+endif::demo[]

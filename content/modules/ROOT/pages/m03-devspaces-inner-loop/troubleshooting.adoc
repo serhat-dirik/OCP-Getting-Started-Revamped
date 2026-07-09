@@ -1,0 +1,131 @@
+= Dev Spaces & the Inner Loop: Troubleshooting
+:module-id: m03
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} / Dev Spaces {devspaces_version}
+// (2026-07-09) plus the build-note failure-mode seeds. Format: Symptom / Cause / Fix.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+
+== The workspace takes a long time to start (or looks stuck "Starting")
+
+Symptom:: After opening the factory URL, the workspace sits on "Starting workspace" for a minute or more.
+Cause:: The *first* start on a node pulls the universal developer image (and the editor image), which is large.
+On this cluster the Kubernetes Image Puller is not enabled, so there is no pre-warm — measured cold start was ~83 s, warm ~21 s.
+Fix:: Give it up to ~90 seconds on a cold node.
+If it is genuinely stuck past a few minutes, check the workspace from the *Showroom terminal*:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc get devworkspace -n {user}-devspaces
+oc get pods -n {user}-devspaces
+oc get events -n {user}-devspaces --sort-by=.lastTimestamp | tail -10
+----
++
+`ImagePullBackOff` or `Pending`/`FailedScheduling` in the events points at image pull or capacity, not your devfile.
+For an event, ask the platform team to enable the Image Puller (see the instructor guide).
+
+== `java -version` reports 17, and the build fails with "release version 21 not supported"
+
+Symptom:: In the workspace terminal `java -version` shows openjdk 17, and a build fails with `error: release version 21 not supported`.
+Cause:: The universal developer image bundles several JDKs and *defaults to 17*, but the claims project targets Java 21 (`maven.compiler.release=21`).
+Your workspace started from a devfile that does not pin JDK 21.
+Fix:: The corrected `devfile.yaml` pins JDK 21 with `JAVA_HOME=/usr/lib/jvm/java-21` and a `PATH` prefix.
+Confirm your workspace's devfile has those, then restart the workspace from the devfile.
+If you are on an older fork, pull the latest devfile, or set it for the current session:
++
+[source,sh]
+----
+export JAVA_HOME=/usr/lib/jvm/java-21
+export PATH=$JAVA_HOME/bin:$PATH
+java -version   # now openjdk 21
+----
+
+== Dev mode fails: "Datasource '<default>' was deactivated because its URL is not set"
+
+Symptom:: `./mvnw quarkus:dev` stops with a Docker/Dev Services error and `Datasource '<default>' was deactivated automatically because its URL is not set`.
+Cause:: With no datasource configured, Quarkus tried to start a throwaway database (a Dev Service), which needs a container runtime the workspace does not have — so it gave up and refused to start.
+This is the deliberate break in exercise 2.
+Fix:: Point dev mode at the real in-cluster database with environment variables, then start it again:
++
+[source,sh,subs="attributes"]
+----
+export QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://claims-db.{user}-dev.svc:5432/parasol
+export QUARKUS_DATASOURCE_USERNAME=parasol
+export QUARKUS_DATASOURCE_PASSWORD=parasol
+export QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update
+./mvnw quarkus:dev
+----
++
+Note these variables are lost when the workspace restarts — re-export them before dev mode in the later exercises.
+
+== Dev mode can't reach the database: "Connection refused" / "UnknownHost claims-db..."
+
+Symptom:: Dev mode starts but fails to connect, or logs an unknown-host / connection-refused error for `claims-db`.
+Cause:: Either the host is wrong (it must be the *cross-namespace* name `claims-db.{user}-dev.svc`, because your workspace is in `{user}-devspaces` and the database is in `{user}-dev`), or the claims-db Pod is not running.
+Fix:: Check the database is up from the *Showroom terminal*:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc get pods -n {user}-dev -l app=claims-db
+----
++
+If it is `Running`, re-check your JDBC URL host is exactly `claims-db.{user}-dev.svc` (a bare `claims-db` will *not* resolve from the workspace's namespace).
+If the Pod is missing, re-materialize the entry state: `ws reset {module-id}`.
+
+== `git push` fails with "could not read Username" / an askpass error
+
+Symptom:: `git push` fails with `fatal: could not read Username for 'https://...'` or an error mentioning `ssh-askpass`.
+Cause:: The workspace can *read* the public repository but has no credentials to *write* to it, and Dev Spaces sets `GIT_ASKPASS` to a helper that cannot prompt in a plain terminal.
+Fix:: Provide your workshop credentials once (or use the che-code *Source Control* panel, which prompts in a dialog):
++
+[source,sh,subs="attributes"]
+----
+git config --global credential.helper store
+printf 'https://{user}:YOUR_PASSWORD@%s\n' "$(echo {gitea_url} | sed 's#https://##')" > ~/.git-credentials
+chmod 600 ~/.git-credentials
+git push origin main
+----
++
+Replace `YOUR_PASSWORD` with your workshop password.
+Because the source repos are public, only *push* needs credentials — clone does not.
+
+== Restarting from the devfile fails after editing it
+
+Symptom:: *Restart Workspace from Local Devfile* fails, or the workspace comes back without the new container.
+Cause:: The devfile has a YAML error — almost always indentation of the block you added under `components:` or `commands:`.
+Devfile fields are indentation-sensitive; a component sits at the same level as the existing `tools` component.
+Fix:: Compare the indentation of your new `cache` block with the existing `tools` block — both list items align under `components:`.
+The che-code editor flags YAML problems in the *Problems* view; fix them, save, and restart from the devfile again.
+
+== Port 8080 is already in use when starting dev mode
+
+Symptom:: Dev mode fails to bind port 8080 / `Address already in use`.
+Cause:: A previous dev-mode process is still running in the workspace (you started it in another terminal tab and did not stop it).
+Fix:: Stop the other dev-mode process (`Ctrl+C` in its terminal), or find and stop it:
++
+[source,sh]
+----
+pkill -f quarkus:dev
+----
++
+Then start dev mode again. Only one dev-mode instance can own 8080 at a time.
+
+== "You have reached the maximum number of running workspaces"
+
+Symptom:: Opening a new workspace is refused with a maximum-running-workspaces message.
+Cause:: Governance caps each user at *two* running workspaces (`maxNumberOfRunningWorkspacesPerUser=2`).
+Fix:: Stop a workspace you are not using from the Dev Spaces dashboard (the workspaces list has a stop action), then open the new one.
+Stopped workspaces keep their state and resume where you left off.
+
+== The workspace idled and stopped on its own
+
+Symptom:: You came back after a break and the workspace is stopped.
+Cause:: Workspaces idle automatically after 30 minutes of inactivity (`secondsOfInactivityBeforeIdling=1800`) to free cluster resources.
+Fix:: This is expected, not a failure.
+Reopen it from the dashboard; your files and Git history are preserved in the workspace volume.
+Re-`export` the datasource variables before running dev mode again.
+
+'''
+
+_Last verified on OpenShift {ocp_version} / Dev Spaces {devspaces_version} (2026-07-09)._

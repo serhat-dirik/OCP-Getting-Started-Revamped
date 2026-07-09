@@ -1,0 +1,125 @@
+= Ways to Build & Deliver Apps: Troubleshooting
+:module-id: m02
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (2026-07-09) plus the
+// build-note failure-mode seeds. Format: Symptom / Cause / Fix.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+
+== The build succeeded, but the claims Pod is in `CrashLoopBackOff`
+
+Symptom:: `oc get builds` shows the `parasol-claims` build `Complete`, but the Pod never becomes Ready — it cycles through `Error` / `CrashLoopBackOff`.
+Cause:: This is *expected* until you deploy and wire the database.
+The claims service creates its schema and loads seed data at startup, so it needs a reachable PostgreSQL; with no database it exits during boot.
+Fix:: Deploy the database (lab exercise 4) and wire it in (exercise 5):
++
+[source,sh,role=execute]
+----
+oc process openshift//parasol-postgresql-ephemeral -p APP_NAME=claims-db | oc apply -f -
+oc rollout status deployment/claims-db
+oc set env deployment/parasol-claims --from=secret/claims-db
+----
++
+Confirm the datasource is the complaint before you assume anything else:
++
+[source,sh,role=execute]
+----
+oc logs deployment/parasol-claims --tail=20 | grep -iE 'datasource|connection|refused'
+----
+
+== `oc new-app --strategy=docker` says "No Dockerfile was found"
+
+Symptom:: Trying to build the claims service with the Docker strategy fails immediately: `error: No Dockerfile was found in the repository and the requested build strategy is 'docker'`.
+Cause:: The Docker strategy looks for a file named `Dockerfile`.
+Parasol's repo uses the vendor-neutral name `Containerfile`, so the auto-detection does not find it.
+Fix:: Tell the build the path explicitly.
+Create the BuildConfig with `dockerStrategy.dockerfilePath` set to `Containerfile` (CLI), or set the *Dockerfile path* field to `Containerfile` in the console's Import-from-Git *Dockerfile* strategy.
+The lab's exercise 2 shows the full BuildConfig.
+
+== S2I build fails: `release version 21 not supported`
+
+Symptom:: The claims S2I build fails during compile with `error: release version 21 not supported`.
+Cause:: The build used a Java builder image *older* than the source's Java level.
+The claims service targets Java 21; if import-from-Git selected the stock `java` builder (which trails the current release) instead of the workshop's `java-21` builder, its compiler cannot target release 21.
+Fix:: Rebuild with the `java-21` builder.
+On the CLI, name it explicitly:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc delete all -l app=parasol-claims
+oc new-app java-21~{gitea_url}/{user}/parasol-claims.git --name=parasol-claims
+----
++
+In the console Import-from-Git flow, open the *Builder Image* dropdown and choose *Java 21* rather than the auto-detected default.
+Confirm the cluster has the builder: `oc get is java-21 -n openshift`.
+
+== S2I build fails: `OutOfMemoryError: Java heap space`
+
+Symptom:: The build runs for a while, then dies with `Terminating due to java.lang.OutOfMemoryError: Java heap space` and `build error: … exit status 3`.
+Cause:: The build Pod inherited the namespace's default memory limit (1 Gi from the workshop LimitRange), and the Maven/Quarkus build needed more heap than that allowed.
+The `java-21` builder completes within 1 Gi for these apps, but a larger application — or the older stock `java` builder — can exceed it.
+Fix:: Raise the build's memory limit and rebuild:
++
+[source,sh,role=execute]
+----
+oc patch bc/parasol-claims --type=merge \
+  -p '{"spec":{"resources":{"requests":{"memory":"1Gi"},"limits":{"memory":"3Gi"}}}}'
+oc start-build parasol-claims
+----
++
+Build resources are set on the BuildConfig's `.spec.resources` (not with `oc set resources`, which targets Pod templates and does not apply to a BuildConfig).
+
+== The claims build cannot clone the Git repository
+
+Symptom:: The build fails early with a Git error — `unable to access` / `Could not resolve host` / `authentication failed`.
+Cause:: Usually the fork does not exist yet, or the URL is wrong.
+The lab builds from *your* fork, `{user}/parasol-claims`, which the entry state creates.
+Fix:: Confirm the fork exists and the URL is right:
++
+[source,sh,role=execute,subs="attributes"]
+----
+curl -sI {gitea_url}/{user}/parasol-claims | head -1
+----
++
+If it 404s, the fork is missing — ask your instructor to re-run `ws start m02 --user {user}`, which re-forks it (the fork job is idempotent).
+The Gitea route uses a trusted (Let's Encrypt) certificate, so S2I needs no extra CA configuration.
+
+== The "Parasol PostgreSQL (ephemeral)" tile is not in the catalog
+
+Symptom:: The developer catalog has no Parasol PostgreSQL tile, and `oc process openshift//parasol-postgresql-ephemeral` reports the template is not found.
+Cause:: The template lives in the shared `openshift` namespace and is delivered by the workshop-config layer; if that layer has not synced, the template is absent.
+Fix:: Confirm and, if missing, ask your instructor to sync the workshop configuration:
++
+[source,sh,role=execute]
+----
+oc get template parasol-postgresql-ephemeral -n openshift
+----
++
+If it is missing, the instructor re-syncs the `workshop-config` Argo application.
+Nothing in your project is wrong — this is a platform-layer issue.
+
+== The database Pod restarted and my claims data is gone
+
+Symptom:: After the `claims-db` Pod restarted, `/api/claims` returns only the original seeded claims (or the app briefly errors), and anything you added is gone.
+Cause:: This database is *ephemeral* — it stores data in an `emptyDir` volume that lives and dies with the Pod.
+This is by design for this module.
+Fix:: Nothing to fix here — it is working as intended.
+Giving the database durable storage that survives a restart is the subject of the *Storage & Stateful Apps* module (a separate module).
+For now, a restart resetting to the seeded 30 claims is expected.
+
+== A `DeploymentConfig` appeared in my project
+
+Symptom:: `oc get deploymentconfig` shows an object, and `ws verify m02` fails its "no DeploymentConfig" check.
+Cause:: You likely deployed a database from a *stock* `postgresql-*` template instead of the Parasol one — the stock templates render a `DeploymentConfig` (a deprecated workload type) on an end-of-life engine.
+Fix:: Delete it and deploy the Parasol template instead:
++
+[source,sh,role=execute]
+----
+oc delete deploymentconfig --all
+oc process openshift//parasol-postgresql-ephemeral -p APP_NAME=claims-db | oc apply -f -
+----
+
+'''
+
+_Last verified on OpenShift {ocp_version} (2026-07-09)._
