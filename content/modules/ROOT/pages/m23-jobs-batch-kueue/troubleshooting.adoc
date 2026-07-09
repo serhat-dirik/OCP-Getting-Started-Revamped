@@ -1,0 +1,147 @@
+= Jobs, Batch & Queued Workloads: Troubleshooting
+:module-id: m23
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} / Red Hat build of Kueue
+// {kueue_version} (2026-07-09) plus known failure-mode seeds. Format: Symptom / Cause / Fix.
+// Commands use $NS = {user}-batch (set it once: NS={user}-batch).
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the project shortcut first: `NS={user}-batch`.
+
+== A labelled Job runs immediately — no queue, no Workload
+
+Symptom:: You created a Job with `kueue.x-k8s.io/queue-name: user-queue`, but it started running at once and `oc -n $NS get workloads` shows nothing.
+Cause:: Red Hat build of Kueue only manages Jobs in namespaces that *opt in* with the label `kueue.openshift.io/managed: "true"`, and only when the queue-name label is present *at creation* (Kueue suspends the Job through a creation webhook — adding the label later does nothing).
+Fix:: Confirm the namespace label, and make sure the Job carries the queue label in its manifest, not applied afterwards:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc get ns {user}-batch -o jsonpath='managed={.metadata.labels.kueue\.openshift\.io/managed}{"\n"}'
+----
++
+If it is not `managed=true`, the entry state didn't finish — `ws reset m23 --user {user}`.
+If the label is present but you `oc label`-ed a running Job, delete and re-create it with the label in the YAML (see lab exercise 5). Only Jobs *created* in a managed namespace, *with* the queue-name label, become Workloads.
+
+== A Workload sits `Pending` forever and never admits
+
+Symptom:: `oc -n $NS get workloads` shows a Workload that never reaches `Admitted: True`, even with nothing else running.
+Cause:: The job's resource request exceeds what the ClusterQueue can ever grant. The quota here is `500m` CPU / `512Mi` memory; a single Pod requesting more than that (or a Job whose `parallelism × per-Pod` total exceeds it) can *never* fit, so it pends indefinitely — this is not a transient wait.
+Fix:: Read the Workload's own explanation, then compare against the quota:
++
+[source,sh,role=execute]
+----
+oc -n $NS get workloads -o jsonpath='{range .items[*]}{.metadata.name}: {.status.conditions[?(@.type=="QuotaReserved")].message}{"\n"}{end}'
+----
++
+A message like `insufficient unused quota for memory in flavor default-flavor, 256Mi more needed` tells you exactly what is short.
+Either lower the Job's requests, or reduce `parallelism` so the Workload's total fits the `500m`/`512Mi` ClusterQueue. (A Kueue Workload is admitted *all-or-nothing* — a `parallelism: 3` Job at `200m` each needs `600m` at once and will pend against a `500m` queue.)
+
+== A high-priority Job does not preempt a running one
+
+Symptom:: You submitted a `batch-high` Job into a full queue, but it stays `Pending` and nothing gets evicted.
+Cause:: Usually one of three things: the priority label is missing or misspelled (so the "high" job has the *same* priority as the running ones), the ClusterQueue has no `preemption.withinClusterQueue` policy, or the running workloads are *not* lower priority.
+Fix:: Confirm the submitted Workload actually has the higher priority number:
++
+[source,sh,role=execute]
+----
+oc -n $NS get workloads -o custom-columns='WORKLOAD:.metadata.name,PRIORITY:.spec.priority'
+----
++
+The `batch-high` Workload must show `1000` and the low ones `100`. If the high job shows `100`, its `kueue.x-k8s.io/priority-class: batch-high` label is missing or wrong — recreate it with the correct label.
+Preemption only evicts *strictly lower* priority Workloads, and only when the ClusterQueue's `preemption.withinClusterQueue` is `LowerPriority` (it is, in this workshop). Two `batch-low` jobs will never preempt each other.
+
+== A Job fails but you cannot tell why (it "succeeds" empty)
+
+Symptom:: A batch Job reports success, but produced no output / processed zero rows — or a command you expected to fail didn't.
+Cause:: A shell pipeline reports the exit status of its *last* command, not the one that failed. `bad-command | wc -l` exits `0` because `wc` succeeded, so a missing input file slips through silently.
+Fix:: Use `set -euo pipefail` in batch scripts so a failure *anywhere* in a pipeline fails the Pod, and add explicit checks:
++
+[source,sh]
+----
+set -euo pipefail
+test -f /data/claims.csv || { echo "input missing"; exit 1; }
+----
++
+This is why exercise 2's broken Job uses an explicit `test -f` — without it, the wrong-filename bug would have "succeeded" with zero rows instead of failing honestly.
+
+== `oc edit`/`oc patch` on a Job fails with "field is immutable"
+
+Symptom:: Editing a Job's command, image, or Pod template returns `spec.template: Invalid value: ... field is immutable`.
+Cause:: A Job's Pod template is *immutable* by design — you cannot change what a Job runs once it exists.
+Fix:: Delete and re-create the Job with the corrected manifest:
++
+[source,sh,role=execute]
+----
+oc -n $NS delete job <name>
+oc -n $NS apply -f <corrected-file>.yaml
+----
++
+This is the platform nudging you to keep batch definitions in files and Git, not in live hand-edits. (A `CronJob`'s `jobTemplate` *can* be edited — the next scheduled run picks up the change — but each individual Job it spawns is still immutable.)
+
+== Parallel Job Pods stick in `ContainerCreating` with a `Multi-Attach` error
+
+Symptom:: A Job with `parallelism > 1` has some Pods `Running` and others stuck `ContainerCreating`; `oc describe pod` shows `Multi-Attach error for volume ... Volume is already used by pod(s) on another node`.
+Cause:: The shared dataset volume is `ReadWriteOnce` (a block class), which can attach to only *one node* at a time. When the scheduler spreads parallel Pods across nodes, Pods on the other nodes cannot attach.
+Fix:: A dataset read by many Pods at once must be `ReadWriteMany`. In this module `claims-data` is CephFS (RWX) for exactly this reason — confirm it:
++
+[source,sh,role=execute]
+----
+oc -n $NS get pvc claims-data -o custom-columns='NAME:.metadata.name,MODE:.spec.accessModes[0],SC:.spec.storageClassName'
+----
++
+Expect `ReadWriteMany`. If you build your own parallel-read dataset, request an RWX class, or give each Pod its own copy, or (for a tiny dataset) mount a ConfigMap instead of a PVC.
+
+== The batch-inference Job returns HTTP 401 or times out
+
+Symptom:: Exercise 6's Pods log an auth error or `HTTP 401`, or the `curl` times out, and the risk verdict is `unknown`.
+Cause:: The MaaS bearer token is short-lived and copied from the platform at `ws start` time; on a long session it can rotate. A timeout instead points at egress (the cluster cannot reach the MaaS endpoint).
+Fix:: Re-copy the token by re-materializing, then re-run:
++
+[source,sh,role=execute,subs="attributes"]
+----
+ws reset m23 --user {user}
+----
++
+Check the endpoint the Job is calling is reachable and the token non-empty:
++
+[source,sh,role=execute]
+----
+oc -n $NS get cm maas-config -o jsonpath='endpoint={.data.endpoint}{"\n"}'
+oc -n $NS get secret maas-credentials -o jsonpath='token bytes: {.data.apitoken}' | wc -c
+----
++
+The Job is written to *degrade*, not crash — it writes `unknown` for a failed call and still completes, so a rotated token does not break the rest of the lab. The model is a "thinking" model; the prompt's `/no_think` switch and `temperature 0` are required for a clean one-word verdict — if you swapped models and see chain-of-thought text, that switch is why.
+
+== The `claims-data` dataset is empty (seed did not run)
+
+Symptom:: A Job reads `/data/claims.csv` and finds nothing; `wc -l` returns `0`.
+Cause:: The seed hook Job (`claims-data-seed-m23-{user}`) did not complete — usually the PVC failed to bind (no RWX class) or the hook errored.
+Fix:: Check the seed Job and the PVC, then re-materialize if needed:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n $NS get job claims-data-seed-m23-{user}
+oc -n $NS get pvc claims-data
+----
++
+If the seed Job is `Failed` or the PVC is `Pending`, `ws reset m23 --user {user}` re-runs the seed against a fresh PVC. A `Pending` PVC almost always means no `ReadWriteMany` StorageClass is available on this cluster.
+
+== A CronJob never fires (or fires late and then skips)
+
+Symptom:: The CronJob exists but no Jobs appear, or a run is skipped after a delay.
+Cause:: Either it is `suspend: true`, or a run was missed by more than `startingDeadlineSeconds` (so the controller *deliberately* skipped it rather than piling up), or `concurrencyPolicy: Forbid` is holding off a new run because the previous one is still `Active`.
+Fix:: Check the CronJob's state and recent history:
++
+[source,sh,role=execute]
+----
+oc -n $NS get cronjob nightly-statement -o custom-columns='SUSPEND:.spec.suspend,ACTIVE:.status.active,LAST:.status.lastScheduleTime'
+oc -n $NS get jobs -l app=nightly-statement
+----
++
+If `SUSPEND: True`, un-suspend with `oc -n $NS patch cronjob nightly-statement --type=merge -p '{"spec":{"suspend":false}}'`.
+If `ACTIVE` is non-zero and `Forbid` is set, a prior run is still going — that is the policy working, not a bug. Skipped-because-late is also intentional: raise `startingDeadlineSeconds` only if you genuinely want to catch up missed ticks.
+
+'''
+
+_Last verified on OpenShift {ocp_version} / Red Hat build of Kueue {kueue_version} (2026-07-09)._

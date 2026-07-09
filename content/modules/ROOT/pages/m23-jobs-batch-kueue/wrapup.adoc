@@ -1,0 +1,102 @@
+= Jobs, Batch & Queued Workloads: Wrap-up
+:module-id: m23
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You ran Parasol's batch tier end to end, then put it under governance.
+You ran a monthly-statement Job that processed 200 claims to completion in two parallel waves; you broke a Job on purpose and read its backoff, its `BackoffLimitExceeded`, and the `field is immutable` refusal that proves batch belongs in Git; you sharded the dataset with an Indexed Job and watched five Pods each take a clean fifth by `$JOB_COMPLETION_INDEX`; and you scheduled the run with a CronJob, then suspended it.
+Then the heart of it: you submitted five jobs into a tiny Kueue ClusterQueue and watched *two admitted, three queued*; you fired one high-priority job and watched it *preempt* a running low-priority one — evicted and requeued, not dropped.
+Finally you ran an AI *batch-inference* job through the very same LocalQueue and saw it admitted like any other Job.
+
+[mermaid]
+....
+graph LR
+  job["Job / CronJob<br/>completions · parallelism<br/>Indexed · schedule"] -->|"label: queue-name"| lq["LocalQueue<br/>user-queue"]
+  lq --> cq["ClusterQueue cq-user<br/>quota · priority · preemption"]
+  cq --> adm["Admitted (2)"]
+  cq --> pend["Pending (3)"]
+  cq --> pre["Preempted → Requeued"]
+  ai["AI batch inference<br/>(same label, same object)"] -->|"queue-name"| lq
+  classDef done fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef q fill:#e00,stroke:#900,color:#fff;
+  classDef wait fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class job,ai done;
+  class lq,cq q;
+  class adm done;
+  class pend,pre wait;
+....
+
+// media-pass: recap SVG m23-jobs-batch-kueue-04-what-you-built.svg (green = ran to completion; amber = queued/preempted; the AI job feeds the same LocalQueue).
+
+The one idea under all of it: *admission control is what makes a batch tier fair at scale*, and an AI inference job is admitted by exactly the same machinery as a statement run — which is why the whole industry is standardizing GPU scheduling on it.
+
+== Choosing the right tool: Job vs Tekton vs Serverless
+
+Batch is one of three ways to run work that isn't a long-lived server, and picking the wrong one is a common, expensive mistake. Use this guide:
+
+[cols="1,2,2",options="header"]
+|===
+| Tool | Use it when | Not when
+
+| *Job / CronJob* (this module)
+| A *bounded* body of work runs to completion and stops — process a dataset, generate statements, score a batch, run on a nightly schedule. One step (or a simple parallel fan-out), no inter-step artifacts.
+| The work is a multi-step *pipeline* with dependencies and hand-offs (use Tekton), or it reacts to individual events and should scale to zero between them (use Serverless).
+
+| *Tekton / OpenShift Pipelines*
+| Work is a *sequence of steps* with ordering, shared *workspaces*, passed *results*, and gates — build → test → scan → deploy. You want per-step logs, retries, and a visual graph.
+| It is a single bounded computation with no steps — that is a Job, and wrapping it in a Pipeline is overhead.
+
+| *Serverless / Knative*
+| Work is *event-* or *request-driven* and bursty, and should *scale to zero* when idle — an HTTP endpoint, a per-message handler, a webhook.
+| The work is a bounded batch that runs once and stops — Knative keeps *reconciling to a desired state*; a Job is the right "run once, then done" shape.
+|===
+
+The short version: *Jobs run to completion; Pipelines orchestrate steps; Serverless reacts to events.* Batch inference is a Job (it runs over a dataset and stops); a model *serving* endpoint is Serverless (it answers requests and scales to zero); a model *build-and-deploy* flow is a Pipeline.
+
+== Map to your org
+
+Take these back to how your teams run batch today:
+
+. *Who owns the batch quota?*
+You watched a ClusterQueue decide which jobs ran and which waited — that queue is a *policy*, and policies have owners.
+In your org, who decides how much of the cluster the batch tier may use, and how competing teams share it?
+If the answer is "whoever submits the biggest job wins," you have found a platform-team backlog item with a real dollar value.
+. *Which of your CronJobs can you name the owner of?*
+Estates accumulate CronJobs the way garages accumulate boxes — dozens of them, half overlapping, some that should have become event-driven the day a queue appeared.
+Pick one scheduled job you run in production: can you name its owner, its `concurrencyPolicy`, and what happens when a run overruns the next tick?
+If not, that is a 2&nbsp;a.m. page waiting to happen.
+. *Where will your first GPU-contention fight happen?*
+The first time two teams want the same accelerators at the same time, someone invents an admission policy — usually a spreadsheet and an argument.
+You just saw that policy as code. For your AI roadmap, who arbitrates GPU access, and would you rather design that queue now or during the crunch?
+
+== When *not* to reach for this
+
+Batch and admission control are powerful, and they are not always the right call. Be honest about the edges:
+
+* *Don't put Kueue in front of a three-job team.*
+Admission control earns its keep when *many* teams contend for *scarce* capacity. If one team runs a handful of jobs on a cluster with headroom, a namespace `ResourceQuota` is enough — a ClusterQueue, priorities, and preemption are governance you will not use, and every attendee here got their own queue precisely because sharing one is what creates contention.
+Add Kueue when contention is real, not before.
+* *Don't cron what should be event-driven.*
+A CronJob that polls every minute for "did a file arrive" is a queue-shaped problem wearing a schedule.
+If the trigger is an *event* — a message, an upload, a webhook — an event-driven handler (Serverless, or a queue consumer) reacts instantly and costs nothing while idle, instead of waking every minute to find nothing.
+Reach for a schedule only when the trigger genuinely *is* the clock.
+* *Don't run a Job where a Deployment belongs (or vice-versa).*
+A Job that never ends (an infinite `sleep`, a server loop) is a Deployment in disguise — you lose health/rollout semantics and confuse the scheduler.
+A Deployment doing a one-shot migration on every start is a Job in disguise — it re-runs on every restart.
+Match the object to the lifecycle: *runs forever* → Deployment; *runs once, then done* → Job.
+
+== Go deeper
+
+* *OpenShift Pipelines (Tekton)* — the multi-step counterpart to Jobs, for build/test/deploy workflows with dependencies and artifacts (a separate module in this workshop).
+* *OpenShift Serverless (Knative)* — the event-driven, scale-to-zero counterpart, for request- and event-shaped work (a separate module).
+* *Red Hat build of Kueue* documentation — quotas and workloads, cohorts and borrowing, and the fair-sharing and provisioning features this module only touched; and the OpenShift AI distributed-workloads guide, which builds model training and evaluation on this exact admission layer.
+* *Custom Metrics Autoscaler (KEDA)* — the event-driven scaling counterpart: where a CronJob runs on the clock and Kueue admits on quota, a KEDA `ScaledJob` creates jobs in response to a *queue depth* or other external metric (mention-only here; its own topic).
+
+[NOTE]
+.Clean up
+====
+To return your world to a fresh, empty queue and a re-seeded dataset — removing every Job, CronJob, and Workload you created — run `ws reset {module-id}` in the Terminal.
+Reset purges the `{user}-batch` project (including the `claims-data` volume) and re-materializes it, so you start clean.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====
