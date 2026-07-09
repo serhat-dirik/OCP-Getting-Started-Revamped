@@ -261,26 +261,37 @@ cmd_reset() {
   local module user="$1"; module="$2"
   need_oc
   local app; app="$(app_name "$module" "$user")"
-  info "resetting ${module} for ${user} (delete + purge + re-materialize)…"
+  info "resetting ${module} for ${user} (purge + delete + re-materialize)…"
+
+  # Purge FIRST — this ordering is load-bearing (G3-M23 SEV1). Attendee-created workloads (Jobs/
+  # pods the entry app does NOT own) can pin a chart-owned PVC through kubernetes.io/pvc-protection.
+  # If we delete the Application first, its resources-finalizer blocks indefinitely trying to prune
+  # that PVC while the pods holding it are never removed (they aren't app-owned), and the purge that
+  # WOULD remove them never runs. Purging first deletes those pods (Completed pods drain in ~1s),
+  # releases the PVC, and empties the namespace; with selfHeal:false the still-present app never
+  # re-creates what we delete (it only marks OutOfSync). This also hardens m05's StatefulSet reset,
+  # where volumeClaimTemplate PVCs are pinned the same way.
+  local ns
+  for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns"; done
+
+  # Now remove the GitOps wrapper. With the namespace already emptied the finalizer has little or
+  # nothing left to prune and completes fast; if it still lingers, strip the finalizer rather than
+  # fail the reset — the manual purge already did the pruning the finalizer exists to do.
   if oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
-    # A wedged sync operation slows the resources-finalizer well past 180s (seen live: ~4 min,
-    # G3-M23 F2). Under set -e a bare timeout aborted reset AFTER the delete, leaving no app and
-    # no re-materialization — tolerate the timeout and re-poll bounded instead.
-    if ! oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s; then
-      info "app deletion slow (finalizer still pruning) — waiting up to 180s more…"
+    if ! oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=120s; then
+      info "finalizer still settling — namespace already purged, removing it…"
+      oc patch application "$app" -n "$ARGO_NS" --type=json \
+        -p '[{"op":"remove","path":"/metadata/finalizers"}]' >/dev/null 2>&1 || true
       local t=0
       while oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; do
-        (( t >= 180 )) && die "entry app ${app} stuck deleting — inspect: oc get application ${app} -n ${ARGO_NS} -o yaml (finalizers)"
-        sleep 5; t=$((t+5))
+        (( t >= 60 )) && die "entry app ${app} stuck deleting — inspect: oc get application ${app} -n ${ARGO_NS} -o yaml (finalizers)"
+        sleep 3; t=$((t+3))
       done
     fi
     ok "chart-owned state pruned"
   else
     info "no existing entry app — clean start"
   fi
-  # Purge user-created leftovers per the module's ws-meta.yaml (entry state = clean slate).
-  local ns
-  for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns"; done
   cmd_start "$user" "$module"
 }
 
