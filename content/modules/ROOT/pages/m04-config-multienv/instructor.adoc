@@ -10,7 +10,8 @@ This module is where configuration stops being an afterthought and becomes a dis
 The two ideas that must land are *"the same image runs everywhere; config is what changes"* and *"readiness holds traffic away from a pod that is not ready."*
 The three deliberate breaks — a bad datasource URL, a broken readiness probe, and a quota-busting request — are the spine; each one is a "read the error, then fix it" beat, not a detour.
 
-The biggest delivery subtlety is that two of the breaks do *not* behave the naive way, and attendees will notice: a bad config `CrashLoop`s only after a ~20 s boot (so the pod flickers `Running`), and a broken readiness probe does *not* immediately `503` because the rolling update keeps the old pod serving. Both are covered in the lab, but expect questions — they are in the Top-5 below.
+The biggest delivery subtlety is that two of the breaks do *not* behave the naive way, and attendees will notice: a bad config `CrashLoop`s only after a ~20 s boot (so the pod flickers `Running`), and a broken readiness probe does *not* immediately `503` because the rolling update keeps the old pod serving.
+Both are covered in the lab, but expect questions — they are in the Top-5 below.
 
 == Timing
 
@@ -27,7 +28,7 @@ Add ~10–12 min of in-room concept discussion up front.
 | 4 | Add probes; break/fix readiness | ~15 min | new pod NotReady in *~30 s*; stable Route `503` after scale 0→1; recovery *~15 s*
 | 5 | Requests/limits; bust the quota | ~12 min | quota rejection is *immediate* (admission-time `ReplicaFailure`)
 | 6 | Promote to stage and prod | ~13 min | each env boots + seeds in *~10 s* (Quarkus `started in 10.1 s`); ready with startup probe *~30–45 s*
-| 7 | [OPTIONAL] External Secrets | ~5 min | read / instructor-led — no hands-on (ESO not installed)
+| 7 | [OPTIONAL] External Secrets | ~5 min | read / instructor-led — no hands-on (External Secrets Operator not installed)
 |===
 
 [NOTE]
@@ -36,8 +37,11 @@ Add ~10–12 min of in-room concept discussion up front.
 The *Measured core* column is real.
 On the build cluster (OCP {ocp_version}, Quarkus {quarkus_version}) on 2026-07-09, every exercise was performed as `user6` from the Showroom-terminal commands in the lab:
 
-* *Config `CrashLoop`* — a bad `QUARKUS_DATASOURCE_JDBC_URL` makes the app fail at boot (Hibernate needs the DB for schema init). Each attempt boots for ~22 s, throws `UnknownHostException`, exits `1`, and restarts — reaching `CrashLoopBackOff` after 2 restarts (~90 s).
-* *Readiness break* — pointing readiness at a `404` path makes the *new* pod NotReady in ~30 s while the old pod keeps serving (the rolling update protects users). Only after the last ready pod is removed does the Route `503`. Fix + recovery is ~15 s.
+* *Config `CrashLoop`* — a bad `QUARKUS_DATASOURCE_JDBC_URL` makes the app fail at boot (Hibernate needs the DB for schema init).
+Each attempt boots for ~22 s, throws `UnknownHostException`, exits `1`, and restarts — reaching `CrashLoopBackOff` after 2 restarts (~90 s).
+* *Readiness break* — pointing readiness at a `404` path makes the *new* pod NotReady in ~30 s while the old pod keeps serving (the rolling update protects users).
+Only after the last ready pod is removed does the Route `503`.
+Fix + recovery is ~15 s.
 * *Quota bust* — a pod requesting `requests.cpu=4` against a `3`-core cap is refused at admission time, immediately, with `exceeded quota: workshop-quota`.
 * *Promotion* — each of stage/prod boots the app and seeds its ephemeral DB in ~10 s (`parasol-claims 1.0.0 ... started in 10.101s`); with the startup probe it reports Ready in ~30–45 s.
 
@@ -106,43 +110,67 @@ Run `ws solve m04` a few minutes ahead so dev is configured and stage/prod are p
 The promotion boots two databases; do not do it live under time pressure.
 * *The readiness break needs the "scale 0→1" beat.*
 If you only break readiness, the old pod keeps serving and the Route stays `200` — which is a great lesson (the rollout is *gated*), but not the `503` you are selling.
-Scale the deployment to zero and back to one so the *only* pod uses the broken probe, and the audience sees the endpoints drain and a stable `503`. Say out loud *why* it stayed green first. (Deleting a pod will not do it — the old ReplicaSet recreates a ready one.)
+Scale the deployment to zero and back to one so the *only* pod uses the broken probe, and the audience sees the endpoints drain and a stable `503`.
+Say out loud *why* it stayed green first.
+(Deleting a pod will not do it — the old ReplicaSet recreates a ready one.)
 * *Show the digest side by side.*
-The single most convincing frame is the three-line `for ns in ...` output with the *identical* `sha256:` in all three environments. Let it sit on screen.
+The single most convincing frame is the three-line `for ns in ...` output with the *identical* `sha256:` in all three environments.
+Let it sit on screen.
 * *Prod is quieter on purpose.*
 If someone notices prod logs almost nothing, that is the `WARN` log level from its config — a live example of "config changes behavior," not a bug.
 
 == Top questions attendees ask
 
 *1. "It said `Running`, then `CrashLoopBackOff`. Which is it?"*::
-Both, in sequence. The container boots (so it shows `Running` for ~20 s), then Hibernate tries to reach the database for schema init, fails on the bad host, and the process exits `1` — so Kubernetes restarts it on a back-off timer. The signal that it is broken is the *restart count climbing* and the `CrashLoopBackOff` status, not a single snapshot. Always read `oc logs --previous`.
+Both, in sequence.
+The container boots (so it shows `Running` for ~20 s), then Hibernate tries to reach the database for schema init, fails on the bad host, and the process exits `1` — so Kubernetes restarts it on a back-off timer.
+The signal that it is broken is the *restart count climbing* and the `CrashLoopBackOff` status, not a single snapshot.
+Always read `oc logs --previous`.
 
 *2. "Why did `oc set env --from=configmap/...` not error when those variables already existed inline?"*::
-`oc set env --from` defaults to *overwrite*: for each key in the ConfigMap that matches an existing inline variable, it replaces the inline value with a reference to the ConfigMap. That is exactly what you want here — it is what turns the hardcoded values into sourced ones. (There is no `oc set env` flag to remove an `envFrom` block, which is why the entry state uses inline vars — they are cleanly removable.)
+`oc set env --from` defaults to *overwrite*: for each key in the ConfigMap that matches an existing inline variable, it replaces the inline value with a reference to the ConfigMap.
+That is exactly what you want here — it is what turns the hardcoded values into sourced ones.
+(There is no `oc set env` flag to remove an `envFrom` block, which is why the entry state uses inline vars — they are cleanly removable.)
 
 *3. "Is a Secret encrypted?"*::
-No. A Secret's values are *base64-encoded*, which is trivially reversible — the lab decodes the password in one command. What a Secret buys you is *separate RBAC* (deploy without read-credentials) and one place to rotate. Encryption of the source of truth is what a real secrets manager (Vault, cloud KMS, via the External Secrets Operator) adds — the optional section covers it.
+No.
+A Secret's values are *base64-encoded*, which is trivially reversible — the lab decodes the password in one command.
+What a Secret buys you is *separate RBAC* (deploy without read-credentials) and one place to rotate.
+Encryption of the source of truth is what a real secrets manager (Vault, cloud KMS, via the External Secrets Operator) adds — the optional section covers it.
 
 *4. "When I broke readiness, why didn't the Route `503` right away?"*::
-Because a probe change triggers a *rolling update*, and the rollout is itself gated by readiness: the new (broken) pod never becomes Ready, so it is held out of the Service while the old, healthy pod keeps serving. That is the platform protecting users. You only see the `503` once there is *no* ready pod at all — which is why the lab scales the deployment to zero and back to one, so the *only* pod uses the broken probe. (Deleting individual pods does not work: the old ReplicaSet keeps recreating a ready pod, so the Route recovers to `200`.)
+Because a probe change triggers a *rolling update*, and the rollout is itself gated by readiness: the new (broken) pod never becomes Ready, so it is held out of the Service while the old, healthy pod keeps serving.
+That is the platform protecting users.
+You only see the `503` once there is *no* ready pod at all — which is why the lab scales the deployment to zero and back to one, so the *only* pod uses the broken probe.
+(Deleting individual pods does not work: the old ReplicaSet keeps recreating a ready pod, so the Route recovers to `200`.)
 
 *5. "Why does each environment get its own database?"*::
-So the environments are genuinely independent — promoting to prod must not touch stage's data. Each overlay stands up its own ephemeral PostgreSQL, seeded with the same 30 claims at boot. (They are ephemeral on purpose; persistent storage is the next module.)
+So the environments are genuinely independent — promoting to prod must not touch stage's data.
+Each overlay stands up its own ephemeral PostgreSQL, seeded with the same 30 claims at boot.
+(They are ephemeral on purpose; persistent storage is the next module.)
 
 == Watchouts
 
 * *Probe timing can flake under load* (the spec's named risk).
-The lab uses generous values (startup `period=3s failureThreshold=30` ≈ 90 s of grace; readiness/liveness `period=10s`). On a busy cluster with ~30 users promoting at once, image pulls and scheduling can push a slow boot past a tight probe — the generous startup window is what prevents a healthy-but-slow pod from being killed. Do not tighten these for the workshop.
+The lab uses generous values (startup `period=3s failureThreshold=30` ≈ 90 s of grace; readiness/liveness `period=10s`).
+On a busy cluster with ~30 users promoting at once, image pulls and scheduling can push a slow boot past a tight probe — the generous startup window is what prevents a healthy-but-slow pod from being killed.
+Do not tighten these for the workshop.
 * *Quota headroom across three namespaces.*
-Each of `{user}-dev/-stage/-prod` has its *own* `requests.cpu=3` / `pods=30` quota, so the promotion (1 + 2 + 3 claims replicas plus a DB each) is comfortable. The only place a user hits the quota is the *deliberate* bust in exercise 5 — that is the lesson, not a problem.
+Each of `{user}-dev/-stage/-prod` has its *own* `requests.cpu=3` / `pods=30` quota, so the promotion (1 + 2 + 3 claims replicas plus a DB each) is comfortable.
+The only place a user hits the quota is the *deliberate* bust in exercise 5 — that is the lesson, not a problem.
 * *The `CrashLoop` boot-then-die confuses people.*
-Expect "it says Running" during exercise 1. Tell the room to watch the restart count, not a single `get pods`.
+Expect "it says Running" during exercise 1.
+Tell the room to watch the restart count, not a single `get pods`.
 * *Rapid `oc set env`/`oc set probe` cause several quick rollouts.*
-Between rollouts the Route can briefly `503`. The lab waits for the *final* `oc rollout status`; attendees who curl mid-rollout will see a transient `503` — that is normal, have them wait for the rollout to finish.
+Between rollouts the Route can briefly `503`.
+The lab waits for the *final* `oc rollout status`; attendees who curl mid-rollout will see a transient `503` — that is normal, have them wait for the rollout to finish.
 * *`ws reset` leaves ConfigMaps/Secrets behind.*
-The reset purge removes workloads (`oc delete all,pvc`) but not the `claims-config`/`claims-creds` objects the lab creates. A reset *then* a redo will hit `already exists` on `oc create configmap claims-config`. Until the platform purge is extended (flagged to the platform team), tell a resetting attendee to first `oc delete configmap claims-config claims-creds -n {user}-dev` (and the same in stage/prod), or to `oc delete configmap claims-config --ignore-not-found` before re-creating.
+The reset purge removes workloads (`oc delete all,pvc`) but not the `claims-config`/`claims-creds` objects the lab creates.
+A reset *then* a redo will hit `already exists` on `oc create configmap claims-config`.
+Until the platform purge is extended (flagged to the platform team), tell a resetting attendee to first `oc delete configmap claims-config claims-creds -n {user}-dev` (and the same in stage/prod), or to `oc delete configmap claims-config --ignore-not-found` before re-creating.
 * *The promotion clones over HTTPS.*
-`git clone` of the public fork needs no credentials. If a proxy or TLS interception is in play, the clone can fail where `oc` succeeds — check the Gitea route is reachable from the Showroom terminal (`curl -sI {gitea_url}`).
+`git clone` of the public fork needs no credentials.
+If a proxy or TLS interception is in play, the clone can fail where `oc` succeeds — check the Gitea route is reachable from the Showroom terminal (`curl -sI {gitea_url}`).
 
 == Provenance
 

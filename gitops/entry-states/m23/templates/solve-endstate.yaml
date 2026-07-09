@@ -1,0 +1,107 @@
+{{- if .Values.solve }}
+# END state for instructor demos / `ws solve m23`: what the attendee's world looks like after the
+# CronJob + statement-Job exercises — a SUSPENDED nightly-statement CronJob and one already-
+# completed monthly-statement Job. Both read the seeded claims-data dataset. This is a plain
+# (non-Kueue) statement run, matching lab exercise 1 (Kueue admission comes later in the lab and
+# leaves no standing end state — its Jobs are ephemeral).
+---
+# why: one completed monthly-statement Job (parallelism 3, completions 6) — the finished artifact
+# of the first exercise. It runs to completion when applied (pods ~10s each).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: monthly-statement
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    app: monthly-statement
+    workshop.redhat.com/module: m23
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+spec:
+  parallelism: 3
+  completions: 6
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        app: monthly-statement
+        workshop.redhat.com/module: m23
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: statement
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 300m, memory: 256Mi}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              DATA=/data/claims.csv
+              for i in $(seq 1 30); do [ -s "$DATA" ] && break; echo "waiting for dataset…"; sleep 2; done
+              [ -s "$DATA" ] || { echo "no dataset at $DATA"; exit 1; }
+              total=$(tail -n +2 "$DATA" | wc -l | tr -d ' ')
+              sum=$(tail -n +2 "$DATA" | awk -F, '{s+=$5} END{printf "%.0f", s}')
+              echo "monthly statement worker ${HOSTNAME}: processed ${total} claims, total exposure USD ${sum}"
+              sleep 8
+              echo "statement segment complete"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: claims-data
+---
+# why: the nightly-statement CronJob, left SUSPENDED (suspend: true) — the state after the
+# attendee toggles suspend at the end of the CronJob exercise. concurrencyPolicy Forbid +
+# startingDeadlineSeconds mirror the exercise. It will not fire while suspended.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-statement
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    app: nightly-statement
+    workshop.redhat.com/module: m23
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+spec:
+  schedule: "0 2 * * *"          # 02:00 daily — the "nightly batch" window
+  suspend: true                  # left suspended (the exercise's final toggle)
+  concurrencyPolicy: Forbid      # never overlap a slow run with the next tick
+  startingDeadlineSeconds: 120   # if the controller misses the tick by >2m, skip (don't pile up)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 4
+      template:
+        metadata:
+          labels:
+            app: nightly-statement
+            workshop.redhat.com/module: m23
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: statement
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: 300m, memory: 256Mi}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  DATA=/data/claims.csv
+                  [ -s "$DATA" ] || { echo "no dataset at $DATA"; exit 1; }
+                  total=$(tail -n +2 "$DATA" | wc -l | tr -d ' ')
+                  sum=$(tail -n +2 "$DATA" | awk -F, '{s+=$5} END{printf "%.0f", s}')
+                  echo "nightly statement run: processed ${total} claims, total exposure USD ${sum}"
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: claims-data
+{{- end }}

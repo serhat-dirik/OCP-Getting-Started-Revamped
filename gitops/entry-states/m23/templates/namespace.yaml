@@ -1,0 +1,97 @@
+# The module's own namespace. It is module-extra (not one of the workshop layer's
+# dev/stage/prod/cicd), so THIS chart owns it — including the per-user admin RoleBinding and a
+# modest quota that the workshop layer provides for the standard namespaces but not for -batch.
+# The workshop.redhat.com/user label is load-bearing: the per-user ClusterQueue cq-{user} has a
+# namespaceSelector matchLabels{workshop.redhat.com/user: {user}}, so a LocalQueue here can only
+# bind to that ClusterQueue because this namespace carries the label.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "m23.namespace" . }}
+  labels:
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/module: m23
+---
+# The attendee is admin on their own batch namespace (mirrors the workshop layer's per-user-rbac
+# pattern for the standard namespaces). Grants Jobs/CronJobs/Pods/PVC/ConfigMap/Secret verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.user }}-admin
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/module: m23
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ .Values.user | quote }}
+---
+# why: the default `admin` role does NOT include Kueue's workload API (the kueue.x-k8s.io CRDs
+# carry no aggregate-to-admin label — verified on-cluster). Without this, an attendee could not
+# `oc get localqueues/workloads` and the queue-admission/preemption exercise would be blind.
+# kueue-batch-user-role is the operator-shipped role for exactly this: read localqueues +
+# workloads (+ pending-workloads visibility) and manage Jobs in one's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.user }}-kueue-batch-user
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/module: m23
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kueue-batch-user-role
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ .Values.user | quote }}
+---
+# Modest quota so a runaway batch can't consume the cluster, but DELIBERATELY generous relative
+# to the sample workloads: the visible admission constraint in the lab must be the Kueue
+# ClusterQueue (500m / 512Mi), not this namespace quota. Peak lab concurrency is small
+# (parallelism-3 statement Job at 200m each, a couple of Kueue-admitted pods).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/module: m23
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "5"
+    pods: "50"
+---
+# Default container requests/limits so bare pods (e.g. an attendee's quick test Job) get sane
+# values and don't trip the ResourceQuota. Kueue sample Jobs set EXPLICIT requests in the lab so
+# their admission math is deterministic regardless of these defaults.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/module: m23
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 1Gi
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
