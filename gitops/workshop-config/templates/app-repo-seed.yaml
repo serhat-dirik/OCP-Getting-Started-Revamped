@@ -4,14 +4,17 @@
   fork jobs have something to fork. This GitOps-ifies docs/research/app-repo-publishing.md (which was
   a by-hand procedure). Design + rationale: docs/research/app-repo-seed-design.md.
 
-  DISABLED BY DEFAULT. A force-push into the shared parasol/* seed repos is Serhat's call, not the
-  agent's (it is the action the permission guard blocked on 2026-07-10). Enable with
-  --set appRepoSeed.enabled=true only after sign-off. While disabled this whole file renders to
-  nothing, so committing it is inert.
+  ENABLED (Serhat sign-off 2026-07-10 via decision prompt; gate history in values.yaml). The
+  standard workshop pattern is repos populated automatically as part of provisioning — the monorepo
+  is the enforced source of truth for the parasol/* seeds; hand-edits to them are unsupported.
 
-  Counterpart to gitea-user-seed.yaml (same route + admin-credential discovery, same BeforeHookCreation
-  hook so `ws git-refresh` re-seeds). Unlike the curl-only git-mirror job, this one needs `git` to
-  push a subdir as a repo root — ose-cli has no git, so the container installs git-core at runtime.
+  Counterpart to gitea-user-seed.yaml (same BeforeHookCreation hook so `ws git-refresh` re-seeds).
+  Split-brain by design: an ose-cli INIT container does the oc-only discovery (Gitea CR admin
+  password, seed map) and hands off via a memory-backed emptyDir; the MAIN container is
+  git-cloner (ships git+curl+bash) talking to Gitea over the INTERNAL service URL — no route
+  dependency, no TLS flags, no runtime package installs. The first live run (2026-07-10) proved
+  the old single-container ubi9 approach cannot work: `dnf install git-core` needs root, and the
+  restricted SCC runs the pod as a random non-root UID.
 */ -}}
 {{- if .Values.appRepoSeed.enabled }}
 apiVersion: v1
@@ -103,63 +106,81 @@ spec:
     spec:
       serviceAccountName: app-repo-seed
       restartPolicy: Never
-      containers:
-        - name: seed
-          # TODO(verify-on-install): git image. ubi9 + runtime git-core needs Red Hat CDN egress
-          # (present on this cluster). Swap for a prebuilt git image before a disconnected delivery.
-          image: registry.access.redhat.com/ubi9/ubi:latest
+      volumes:
+        # Memory-backed handoff for the admin password — never a ConfigMap, never in logs,
+        # gone with the pod.
+        - name: shared
+          emptyDir:
+            medium: Memory
+      initContainers:
+        # The ONLY container that needs oc: read the Gitea CR admin password + the seed map,
+        # hand off via /shared. ose-cli ships oc but no git; git-cloner ships git but no oc.
+        - name: discover
+          image: registry.redhat.io/openshift4/ose-cli:latest
           env:
             - name: GITEA_NS
               value: {{ .Values.giteaNamespace | quote }}
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -euo pipefail
               NS="${GITEA_NS}"
-
-              echo "▶ installing git (ose-cli has none; this image ships dnf)…"
-              dnf install -y -q git-core >/dev/null
-
-              echo "▶ waiting for the Gitea route…"
-              for i in $(seq 1 60); do
-                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-                [[ -n "$HOST" ]] && break
-                sleep 10
-              done
-              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
-              GITEA_URL="https://${HOST}"
-
-              echo "▶ discovering admin credentials (retry loop — operator writes them post-setup)…"
+              echo "▶ discovering admin credentials (retry — operator writes them post-setup)…"
               ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
               ADMIN_PASS=""
               for i in $(seq 1 60); do
                 ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
-                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
                 [[ -n "$ADMIN_PASS" ]] && break
                 sleep 10
               done
               [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 10m"; exit 1; }
+              {
+                echo "ADMIN_USER=${ADMIN_USER}"
+                echo "ADMIN_PASS=${ADMIN_PASS}"
+                oc get cm app-repo-seed-map -n "$NS" -o jsonpath='ORG={.data.org}{"\n"}MIRROR_REPO={.data.mirrorRepo}{"\n"}REVISION={.data.revision}{"\n"}'
+              } > /shared/seed.env
+              oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.repos}' > /shared/repos.map
+              [[ -s /shared/repos.map ]] || { echo "❌ empty seed map"; exit 1; }
+              echo "  ✓ discovery complete (credentials not shown)"
+      containers:
+        - name: seed
+          # git-cloner ships git+curl+bash prebuilt (same pinned image the Showroom stack uses) —
+          # runs clean under the restricted SCC; ubi9 + runtime dnf could not (needs root).
+          image: quay.io/rhpds/git-cloner:v1.1.5
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # shellcheck disable=SC1091
+              source /shared/seed.env
+              [[ -n "$ORG" && -n "$MIRROR_REPO" && -n "$ADMIN_PASS" ]] || { echo "❌ incomplete discovery handoff"; exit 1; }
               AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+              # Internal service URL: no route dependency, no TLS, works on a disconnected cluster.
+              GITEA_HOST="gitea.${GITEA_NS}.svc:3000"
+              GITEA_URL="http://${GITEA_HOST}"
 
-              echo "▶ reading the repo→subdir map…"
-              ORG="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.org}')"
-              MIRROR_REPO="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.mirrorRepo}')"
-              REVISION="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.revision}')"
-              REPOS="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.repos}')"
-              [[ -n "$ORG" && -n "$MIRROR_REPO" && -n "$REPOS" ]] || { echo "❌ incomplete seed map"; exit 1; }
-
-              echo "▶ waiting for the Gitea API…"
+              echo "▶ waiting for the Gitea API at ${GITEA_URL}…"
               for i in $(seq 1 30); do
-                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                curl -sf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
                 sleep 10
               done
-              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
+              curl -sf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
 
-              # Clone the in-cluster monorepo mirror once (credentials in the URL are never echoed).
+              # Clone the in-cluster monorepo mirror once (public repo — anonymous clone, no creds in argv).
               WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+              REVISION="${REVISION:-main}"
               echo "▶ cloning mirror ${ORG}/${MIRROR_REPO}@${REVISION}…"
               git clone -q --depth 1 --branch "$REVISION" \
-                "https://${AUTH}@${HOST}/${ORG}/${MIRROR_REPO}.git" "$WORK/mono" \
+                "${GITEA_URL}/${ORG}/${MIRROR_REPO}.git" "$WORK/mono" \
                 2>/dev/null || { echo "❌ mirror clone failed"; exit 1; }
 
               FAIL=0
@@ -191,12 +212,12 @@ spec:
                 git -C "$PUB" -c user.email="workshop@parasol.local" -c user.name="Parasol Workshop" add -A
                 git -C "$PUB" -c user.email="workshop@parasol.local" -c user.name="Parasol Workshop" \
                   commit -q -m "Seed ${REPO} from ${MIRROR_REPO}/${SUBDIR}@${REVISION}" || true
-                if git -C "$PUB" push -q --force "https://${AUTH}@${HOST}/${ORG}/${REPO}.git" main 2>/dev/null; then
+                if git -C "$PUB" push -q --force "http://${AUTH}@${GITEA_HOST}/${ORG}/${REPO}.git" main 2>/dev/null; then
                   echo "  ✓ ${ORG}/${REPO} seeded"
                 else
                   echo "  ❌ push ${REPO} failed"; FAIL=$((FAIL+1))
                 fi
-              done <<< "$REPOS"
+              done < /shared/repos.map
 
               [[ "$FAIL" -eq 0 ]] || { echo "❌ ${FAIL} repo(s) failed"; exit 1; }
               echo "✅ app repos seeded under ${GITEA_URL}/${ORG}"
