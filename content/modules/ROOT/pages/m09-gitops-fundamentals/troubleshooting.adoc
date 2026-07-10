@@ -1,0 +1,109 @@
+= GitOps Fundamentals: Troubleshooting
+:module-id: m09
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} / OpenShift GitOps {gitops_version}
+// (Argo CD 3.4) as user7 on 2026-07-10/11. Format: Symptom / Cause / Fix. Several entries below are
+// failures actually hit on-cluster during the build (the oc-apply denial, the reconcile-loop
+// self-heal delay, the controller OOM, the git-not-noticed-until-refresh behavior, the CLI 504).
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Terminal commands assume you set `DEV={user}-dev` and `STAGE={user}-stage` at the start of the lab.
+
+== `oc apply` of an Application is `Forbidden`
+
+Symptom:: `oc apply -n student-gitops -f application.yaml` fails with `applications.argoproj.io is forbidden: User "{user}" cannot get resource "applications" in ... namespace "student-gitops"`.
+Cause:: This is *expected and correct* — it is exercise B's teaching point.
+The student Argo CD instance is shared by the room, and attendees are not granted write access to its control-plane namespace.
+Fix:: Do not apply Applications with `oc`.
+Create them in the *Argo CD web UI* ({student_argo_url}), signed in with *Log in via OpenShift* as `{user}`.
+Argo CD creates the object on your behalf and scopes you to your own project (`proj-{user}`).
+
+== I signed in to Argo CD but see no applications (or cannot create one)
+
+Symptom:: The Argo CD UI loads but your apps are missing, or *+ NEW APP* fails with a permissions error.
+Cause:: You logged in with the *local `admin`* account (or a different identity) instead of via OpenShift, so Argo CD does not map you to `role:{user}`.
+Fix:: Log out, and on the login page click *LOG IN VIA OPENSHIFT* (not the username/password box).
+Authenticate as your workshop user `{user}`.
+Argo CD maps that identity to `role:{user}`, scoped to `proj-{user}` — you will see and be able to create only your own apps.
+
+== My scale-up (drift) did not revert — even with self-heal on
+
+Symptom:: You enabled *Self Heal*, scaled the Deployment to 3, and it is *still* at 3 a minute later.
+Cause:: Self-heal is not instant.
+It runs on Argo CD's *reconcile cycle* — every 180 seconds by default on this cluster — so drift persists up to a reconcile interval before it is corrected.
+A manual *Refresh* does *not* accelerate self-heal (verified on-cluster).
+Fix:: Wait — it reverts on the next reconcile pass (measured ~3 minutes here).
+If you want it reverted *now*, click *SYNC → SYNCHRONIZE*; the manual Sync is immediate.
+This is the intended behavior, not a fault: self-heal is a continuous safety net, not a real-time lock.
+
+== Argo CD did not notice my Git commit
+
+Symptom:: You edited `overlays/stage/kustomization.yaml` and committed to `main`, but the Argo CD app still shows the *old* revision and stays `Synced`.
+Cause:: Argo CD caches the branch → commit resolution; it re-reads `main` on its reconcile cycle or when you *Refresh*.
+Until then it is still comparing against the previous commit.
+Fix:: In the app, click *REFRESH* (a *hard* refresh from the Refresh dropdown forces a re-read).
+Within ~20 seconds it re-resolves `main` to your new commit and goes *OutOfSync*; then *SYNC* to apply it.
+Confirm the commit is actually on `main` in the Gitea UI (the file view shows your change) if a refresh still shows the old content.
+
+== A sync will not complete; the app is stuck `OutOfSync` / `Progressing`
+
+Symptom:: You click Sync but the operation hangs, resources stay `Progressing`, and nothing converges — across *all* users, not just yours.
+Cause:: The shared `student-gitops` application-controller is *OOMKilling and crash-looping* (its 1&nbsp;Gi memory limit is exhausted by caching the whole cluster's resource tree).
+While it restarts, sync and self-heal operations do not make progress.
+Fix:: This is a *platform* problem, not something to fix from the UI.
+An instructor/admin should check:
++
+[source,sh,role=execute]
+----
+oc get pod student-gitops-application-controller-0 -n student-gitops \
+  -o jsonpath='ready={.status.containerStatuses[0].ready} restarts={.status.containerStatuses[0].restartCount} last={.status.containerStatuses[0].lastState.terminated.reason}{"\n"}'
+----
++
+A climbing `restarts` count with `last=OOMKilled` confirms it.
+The platform team must raise the controller's memory (limit ≥&nbsp;2&nbsp;Gi) and let `workshop-config` re-sync.
+Attendees can only wait for the controller to recover.
+
+== The app is `Healthy` in Argo CD but the Route returns 503
+
+Symptom:: Argo CD shows the app `Synced`/`Healthy`, but `curl …/api/claims` (or `/q/health/ready`) returns `503` for a short while.
+Cause:: The claims app boots, connects to `claims-db`, and seeds its schema before readiness passes; and the Route needs a moment to program after it is created.
+Immediately after the first sync there is a brief window where the pod is not ready yet.
+Fix:: Give it a few seconds and retry — the startup probe gates the slow first boot:
++
+[source,sh,role=execute]
+----
+oc rollout status deploy/parasol-claims -n $DEV
+curl -s -o /dev/null -w "%{http_code}\n" \
+  "http://$(oc get route parasol-claims -n $DEV -o jsonpath='{.spec.host}')/q/health/ready"
+----
++
+Expect `200` once the pod is ready.
+If it stays `503`, check `claims-db` is `1/1` (`oc get deploy claims-db -n $DEV`) — the app's readiness gates on the database.
+
+== The New App sync fails: destination namespace not permitted
+
+Symptom:: Sync errors with a message about the destination being denied, or the app will not target `{user}-stage`/`{user}-prod`.
+Cause:: The Application's *Project* is not `proj-{user}`, or its *Namespace* is outside what that project allows.
+`proj-{user}` boxes apps to `{user}-dev`, `{user}-stage`, and `{user}-prod` only.
+Fix:: Recreate (or edit) the app with *Project* `proj-{user}` and a *Namespace* of `{user}-dev`, `{user}-stage`, or `{user}-prod`.
+A destination outside your three namespaces is refused by the AppProject on purpose — that is the tenancy boundary.
+
+== I cannot push my edit to the fork
+
+Symptom:: `git push` from your cloned `claims-config` fails with an authentication error.
+Cause:: The clone in exercise A is *anonymous read* (no credentials).
+Pushing requires your workshop credentials.
+Fix:: Either edit the file in the *Gitea UI* (the pencil icon → *Commit Changes*), which needs no terminal credentials, or push with your workshop username and password when git prompts.
+The Gitea-UI edit is the same commit and is the path the lab recommends.
+
+== (Instructor) `argocd app get --hard-refresh` returns 504 from the CLI
+
+Symptom:: Driving the API from the `argocd` CLI, a blocking `argocd app get --hard-refresh` returns `504` through the route.
+Cause:: The blocking call exceeds the OpenShift edge route's timeout; the refresh still runs server-side.
+Fix:: Use the async path instead of a blocking Get — `oc annotate application <app> -n student-gitops argocd.argoproj.io/refresh=hard --overwrite` — then poll status.
+The *UI* Refresh is async and never hits this; only scripted CLI use does.
+
+'''
+
+_Last verified on OpenShift {ocp_version} / OpenShift GitOps {gitops_version} (Argo CD 3.4) — 2026-07-10/11._

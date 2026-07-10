@@ -1,0 +1,184 @@
+= GitOps Fundamentals: Concept
+:module-id: m09
+include::partial$version-attributes.adoc[]
+
+// Concept page for M09. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// Everything here was performed on OCP {ocp_version} / OpenShift GitOps {gitops_version}
+// (Argo CD 3.4) as user7 on 2026-07-10/11 — the Application object, the sync/health states, the
+// drift-and-self-heal behavior, and the git-driven change are all cluster-verified, not recalled.
+// Mermaid labels are deliberately attribute-free (the diagram extension mangles {attr} subs).
+
+[.lead]
+Parasol's claims service is configured in Git — a Kustomize repository with one base and three environment overlays — yet the running `dev` and `stage` environments are still changed by hand.
+
+Someone runs `oc apply`, someone scales a Deployment in the console, someone tweaks a ConfigMap to chase a bug, and now the cluster no longer matches the repository that is supposed to describe it.
+Nobody can say, with confidence, what is actually running — or how to get back to a known-good state.
+In this module you put a *controller inside the cluster* in charge of that gap: it reads the desired state from Git, compares it to what is live, and continuously makes the cluster match — so Git becomes the single, honest answer to "what is deployed, and why."
+
+== What you'll learn
+
+* The difference between *push* delivery (a pipeline reaches into the cluster and applies changes) and *pull* delivery (a controller in the cluster pulls desired state from Git) — and why pull is what "GitOps" means.
+* The *reconcile loop*: desired state in Git, live state in the cluster, and a controller that diffs and converges them — reported as *sync status* and *health*.
+* How to create an Argo CD *Application* — the object that binds one Git path to one cluster destination — and read what it shows you.
+* *Drift detection and self-heal*: when the live cluster diverges from Git, Argo CD flags it *OutOfSync*, and — once you ask it to — puts it back. Git wins.
+* Why *Kustomize base + overlays* is the shape GitOps reconciles, and *where Helm fits* alongside it.
+
+== Push versus pull: two ways a change reaches the cluster
+
+You have already shipped changes to a cluster one way.
+In the pipeline module, a build ran `oc apply`/`oc rollout` from *inside a PipelineRun* — the pipeline held cluster credentials and *pushed* the change out to a namespace.
+That is *push* delivery, and it is how most CI systems deploy: the thing that makes the change lives *outside* the cluster and reaches *in*.
+
+*Pull* delivery inverts that.
+A controller runs *inside* the cluster, watches a Git repository, and *pulls* the desired state in — nothing outside the cluster needs cluster credentials, because the cluster reconciles *itself*.
+
+[mermaid]
+....
+flowchart LR
+  subgraph PUSH["Push delivery (CI pushes in)"]
+    direction LR
+    CI[CI / pipeline<br/>holds cluster creds] -->|oc apply / rollout| NS1[(namespace)]
+  end
+  subgraph PULL["Pull delivery (GitOps — cluster pulls in)"]
+    direction LR
+    GIT[(Git repo<br/>desired state)] --> CTRL[Argo CD controller<br/>inside the cluster]
+    CTRL -->|reconciles| NS2[(namespace)]
+    NS2 -. observes live state .-> CTRL
+  end
+  classDef p fill:#e6f0ff,stroke:#2b6cb0,color:#1a365d;
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class CI,NS1 p;
+  class GIT,CTRL,NS2 g;
+....
+
+// media-pass: replace/augment with SVG export m09-gitops-fundamentals-01-push-vs-pull.svg (see media-manifest.md)
+
+The pull model buys three things the push model cannot:
+
+* *Git is the source of truth, continuously.* In push, Git is where a change *starts*; after the pipeline runs, the cluster can drift and Git never knows. In pull, the controller keeps checking — so Git is where the change *stays true*.
+* *No outside system holds cluster credentials.* The controller pulls; CI does not push. That removes a standing key to production from every pipeline.
+* *Every environment converges to what its folder in Git says* — not to whatever the last person to touch it did.
+
+This is the whole idea of GitOps, and OpenShift GitOps (Argo CD {gitops_version}) is the controller that implements it.
+
+== The reconcile loop, and the Application that drives it
+
+The controller does one thing, forever: compare *desired* (Git) against *live* (cluster), and converge them.
+
+Desired state:: The manifests at a *path in a Git repository, at a revision* — for you, the `overlays/dev` folder of your `claims-config` fork on `main`.
+Live state:: The actual objects in a *destination* — a cluster and namespace, for you `{user}-dev`.
+Reconcile:: The controller renders the desired manifests, diffs them against live, and reports two facts — *sync status* (`Synced` when they match, `OutOfSync` when they differ) and *health* (is the running app actually up: `Healthy`, `Progressing`, `Degraded`, `Missing`). A *sync* applies the desired state to close the gap.
+
+The object that ties one desired source to one live destination is the *Application*.
+It is a small Kubernetes custom resource, and the whole of it is just "this Git path → that namespace, reconciled this way":
+
+[source,yaml]
+----
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  project: proj-<user>            # <1>
+  source:
+    repoURL: https://…/<user>/claims-config.git
+    targetRevision: main
+    path: overlays/dev            # <2>
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: <user>-dev         # <3>
+  syncPolicy: {}                  # <4>
+----
+<1> The *AppProject* the app belongs to — a tenancy boundary that limits which repos, clusters, and namespaces this app may use.
+<2> *Desired state*: the Kustomize overlay Argo CD renders and reconciles.
+<3> *Live destination*: where the rendered objects land.
+<4> *How* to reconcile — empty here means *manual* (you press Sync); later you turn on *automated* sync and *self-heal*.
+
+[mermaid]
+....
+flowchart LR
+  GIT[(Git: overlays/dev<br/>desired state)] --> APP[Application CR]
+  APP --> RECON{{reconcile:<br/>diff desired vs live}}
+  LIVE[(namespace<br/>live state)] --> RECON
+  RECON -->|match| SYNCED[Synced + Healthy]
+  RECON -->|differ| OOS[OutOfSync]
+  OOS -->|Sync| LIVE
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef a fill:#fef5e7,stroke:#b7791f,color:#744210;
+  class GIT,LIVE,SYNCED g;
+  class APP,RECON a;
+  class OOS a;
+....
+
+// media-pass: SVG export m09-gitops-fundamentals-02-reconcile-loop.svg (see media-manifest.md)
+
+You create this Application in the *Argo CD web UI*, signed in with your OpenShift identity — not with `oc apply`.
+That is deliberate: the Argo CD instance you use is shared by the whole room, and attendees are *not* permitted to write objects into its control-plane namespace directly.
+You act *through* Argo CD, which checks that you may only touch *your* project (`proj-{user}`) and *your* namespaces — the tenancy the lab proves in passing.
+
+== Drift and self-heal: Git wins
+
+The payoff of the reconcile loop is what happens when the live cluster stops matching Git — *drift*.
+Someone scales your Deployment from 1 replica to 3 in the console.
+The moment Argo CD next compares desired against live, the app goes *OutOfSync* and shows you the exact diff: live `replicas: 3`, desired `replicas: 1`.
+
+What happens next is a choice you make on the Application:
+
+* *Manual sync* — Argo CD *reports* the drift and waits. Nothing changes until you press *Sync*, which reapplies Git and the replica count snaps back to 1. This is the safety of "see it, then decide."
+* *Self-heal* — turn it on, and Argo CD stops waiting: on its next reconcile pass it *reverts the drift on its own*, with no human. The console edit simply disappears, because Git said 1 and Git wins.
+
+[NOTE]
+.Self-heal is a reconcile-loop safety net, not an instant lock
+====
+Self-heal reverts drift on the controller's *reconcile cycle* — by default every few minutes, not the instant you make the change.
+So a manual scale-up lingers for up to a reconcile interval, then vanishes on its own.
+That is the honest behavior, and the right mental model: self-heal is a *continuous correction*, not a real-time guard.
+You see both in the lab — the manual sync that reverts *now*, and the self-heal that reverts *on its own, shortly*.
+====
+
+This is the beat that makes GitOps click: the cluster is no longer something people edit and hope stays put.
+It is a *projection of Git*, and anything that diverges is either reported for you to reconcile or corrected automatically.
+
+== Kustomize and Helm: what GitOps reconciles
+
+GitOps does not replace how you *describe* an app — it reconciles whatever your Git repo renders to.
+Your `claims-config` repo is plain *Kustomize*: one `base/` that describes a claims environment once (ConfigMap, Secret, database, Deployment, Service, Route), and three *overlays* (`dev`, `stage`, `prod`) that change only what differs — replica count, `APP_ENV`, log level — while the *image stays identical across all three*.
+That base-plus-overlays shape is exactly what Argo CD renders: point an Application at `overlays/dev` and it reconciles the dev variant; point another at `overlays/stage` and it reconciles the stage variant, from the *same* base.
+
+*Where does Helm fit?*
+Helm is the other common way to render manifests — a packaged chart with a `values.yaml` you override per environment.
+Argo CD renders Helm charts just as happily as Kustomize overlays; an Application's `source` can point at either.
+The rule of thumb: reach for *Kustomize* when you are layering environment-specific patches over shared YAML you own (this repo), and for *Helm* when you are installing a *packaged* application whose author exposes a values contract.
+GitOps is agnostic — it reconciles the *output* either way.
+
+[NOTE]
+.The machinery that has been building your world all day
+====
+Every time you ran `ws prep` to set up a module, an Argo CD *Application* materialized your environment — the same object you are about to create by hand.
+The workshop's own platform runs on a *separate* Argo CD instance from the one you use in this lab, so a mistake in your instance can never touch the machinery that builds the workshop.
+You will inspect that platform instance — read-only — in a later module (covered in the Developer Hub & platform modules, separate modules); here, just notice that the thing you are learning is the thing that has been provisioning you all along.
+====
+
+== How this shows up in real orgs
+
+* *"What is running in prod?" has one answer, and it is a Git commit.*
+Before GitOps, the true state of an environment lives in the cluster and in people's memories, and the two disagree.
+After, the environment *is* a folder in Git at a known revision — the honest, current answer, and the thing you roll back by reverting a commit.
+* *Drift stops being invisible.*
+The 2 a.m. console edit that fixed an incident and was never written down is exactly the change GitOps surfaces as `OutOfSync` — and either makes you reconcile deliberately or corrects automatically.
+Teams adopt self-heal precisely to kill the class of outage that starts with "someone changed something and forgot."
+* *Promotion becomes a pull request, not a privileged deploy.*
+Because each environment converges to its folder in Git, moving a change from dev to stage is *editing Git* — a reviewed, diffable, revertible change — not a person with cluster credentials running `apply` against production.
+* *The blast radius of automation shrinks.*
+No pipeline needs standing write access to production when a controller pulls from Git instead. The credential that used to live in every CI job is gone.
+
+// media-pass: the cross-module Parasol platform-accretion diagram with the M09 layer (GitOps / Argo CD reconcile) highlighted — m09-gitops-fundamentals-04-platform-accretion.svg (see media-manifest.md)
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than six minutes here before the live demo.
+Two ideas must land: (1) *pull, not push* — a controller in the cluster reconciles Git to live, continuously; (2) *drift is the demo* — edit the running app, watch Argo CD flag it `OutOfSync`, and revert it.
+The live drift-revert (edit a Deployment, press Sync, watch it snap back — then let self-heal do it unasked) is the payoff; keep the concept tight so there is time to let it breathe.
+====
+endif::demo[]

@@ -1,0 +1,186 @@
+= GitOps Fundamentals: Instructor Guide
+:module-id: m09
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version} / OpenShift
+// GitOps {gitops_version}, Argo CD 3.4) as user7 on 2026-07-10/11 by performing every exercise and
+// timing the operations. The student Argo CD instance is SHARED; read "Watchouts → controller memory"
+// before running this module for a room — it is the one thing that will bite you.
+
+This module has one dominant pacing fact and one platform dependency.
+The pacing fact: *self-heal is not instant* — Argo CD reverts drift on its reconcile loop (~3 minutes by default on this cluster), so the "watch it revert on its own" beat is a *wait*, while the *manual Sync* revert is instant.
+Structure the room around that: the manual Sync in exercise C is the reliable money moment; self-heal is the "and now automatically" coda you either narrate through or pre-stage.
+The platform dependency: the student Argo CD *application-controller is memory-tight* — see Watchouts before an event.
+
+The single most memorable beat is exercise C: a console `oc scale` that Argo CD *erases*.
+
+== Timing
+
+Total hands-on: *~70 min* (spec target 75 min; add ~12–15 min of concept up front).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core (as user7, {ocp_version})
+
+| A | Git is the source of truth | ~10 min | read-only (`git clone`, `cat`, `oc kustomize`) — seconds
+| B | Create your first Application | ~20 min | UI form + first Sync: 7 resources applied in *3s*, fully *Healthy in 26s* (warm image cache); the `oc apply` denial is instant
+| C | Drift and self-heal | ~25 min | drift → OutOfSync immediate; *manual Sync reverts in seconds*; *self-heal reverts a fresh drift in ~190s* (Argo default reconcile 180s)
+| D | Git-driven change (stage) | ~15 min | stage first sync ~30–60s; after a git edit, Refresh re-reads `main` in *~20s* → OutOfSync, Sync converges in seconds
+|===
+
+[NOTE]
+.How this timing was measured
+====
+Every exercise was performed as `user7` on the build cluster (OCP {ocp_version}, OpenShift GitOps {gitops_version}, Argo CD 3.4) on 2026-07-10/11, driving the Argo CD control plane the way the UI does and timing each operation.
+
+* *First sync (exercise B)* — the sync *operation* completed in *3 seconds* (all seven objects created); full rollout to *Healthy* took *26 seconds* on a warm cluster (the `parasol-claims:1.0` image was already cached). On a *cold* node add the image pull (a few minutes) for the first user of the day.
+* *Manual Sync revert (exercise C)* — the `replicas` field reverts to the Git value within seconds of clicking Sync; the operation shows a longer *Duration* only because it waits for the extra pods to terminate and the rollout to settle.
+* *Self-heal revert (exercise C)* — measured *~190 seconds* from `oc scale` to reverted, matching Argo CD's default `timeout.reconciliation` of 180s (unset on this instance). Self-heal fires on the *reconcile pass*; a manual Refresh does *not* accelerate it (verified). This is the honest number — set attendee expectations to "a couple of minutes."
+* *Git-driven change (exercise D)* — after a commit to `main`, a UI *Refresh* re-resolved the branch to the new commit in *~20s* and the app went OutOfSync; Sync then converged in seconds.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster admin unless noted).
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m09 --user user1
+ws verify m09 --user user1 --entry-only
+----
++
+Expect `✅ all 8 checks passed`: the `user1-gitops` namespace + entry marker, the student Argo CD instance reachable, the `proj-user1` AppProject, the Gitea fork `user1/claims-config`, its `overlays/dev` personalized to `user1-dev`, and `user1-dev`/`user1-stage` *empty* (the attendee's Application is the deploy).
+
+. *The student Argo CD instance is healthy — check the controller is NOT crash-looping.*
++
+[source,sh,role=execute]
+----
+oc get pods -n student-gitops
+oc get pod student-gitops-application-controller-0 -n student-gitops \
+  -o jsonpath='ready={.status.containerStatuses[0].ready} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
+----
++
+Expect all five pods `Running` and the application-controller `ready=true` with a *low, stable* restart count.
+A climbing restart count or `CrashLoopBackOff` means the controller is OOMKilling (see Watchouts) — sync and self-heal will be unreliable until its memory is raised. *Do not run the module for a room in that state.*
+
+. *Per-user isolation is enforced (the tenancy the lab relies on).*
++
+[source,sh,role=execute]
+----
+argocd admin settings rbac can user1 sync applications 'proj-user1/x' --namespace student-gitops
+argocd admin settings rbac can user1 sync applications 'proj-user2/x' --namespace student-gitops
+----
++
+Expect `Yes` then `No` — user1 may sync their own project's apps and *not* another user's.
+This is what makes a shared Argo CD instance safe for a room.
+
+. *The fork exists and its overlays are personalized.*
++
+[source,sh,role=execute]
+----
+GITEA=$(oc get route gitea -n gitea -o jsonpath='{.spec.host}')
+curl -ks "https://$GITEA/api/v1/repos/user1/claims-config/raw/overlays/dev/kustomization.yaml?ref=main" | grep namespace:
+----
++
+Expect `namespace: user1-dev`.
+If it still reads `__user__`, the fork job did not personalize — `ws reset m09 --user user1`.
+
+. *(For a demo) pre-solve a sample user — it blocks ~4–6 min by design.*
++
+[source,sh,role=execute]
+----
+ws solve m09 --user user1     # creates the dev+stage Applications; BLOCKS until both Healthy
+----
++
+[IMPORTANT]
+.`ws solve m09` blocks for ~4–6 minutes — that is correct, not a hang
+=====
+`ws solve` creates the two student Applications (`claims-dev-user1`, `claims-stage-user1`) and *waits* for both to be Synced/Healthy before returning — it does not print "demo-ready" until the claims app is actually up in both `user1-dev` and `user1-stage` (image pull + `claims-db` init + app startup, two environments).
+The solve apps ship `selfHeal: true` and a cascade finalizer, matching the end state M10 builds on.
+Do not Ctrl-C it thinking it stalled.
+=====
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Pre-solve and pre-sign-in before the room.*
+Run `ws solve m09 --user {user}` early (blocks ~4–6 min) so a finished, Healthy `claims-dev-{user}` is your opening visual, and sign in to the student Argo CD UI as `{user}` with *Log in via OpenShift* ahead of time — the OpenShift login redirect eats 20–30 seconds you do not want live.
+* *The manual Sync is the reliable money moment; self-heal is the coda.*
+Beat 3 (drift → click Sync → snaps back to 1) is instant and always lands — lead with it.
+Beat 4 (enable self-heal, drift, it reverts unaided) takes ~3 minutes on the reconcile loop; either *pre-drift* just before the segment so the revert lands on cue, or narrate the "why GitOps" story while it reverts and cut back to it.
+Never stand watching a static screen for three minutes.
+* *Show the annotation, not just the tree.*
+The `oc get deploy … tracking-id` line is the crisp "this came from Git, not from `oc apply`" proof — it turns the abstract "GitOps-managed" into a concrete fingerprint.
+* *Have a fallback.*
+If the student controller is sluggish (see Watchouts) and a sync is slow live, narrate from the already-Synced `ws solve` end state and the diff view rather than waiting on a fresh sync.
+
+== Top questions attendees ask
+
+*1. "Why can't I just `oc apply` the Application like every other object?"*::
+Because the Argo CD instance is *shared* by the whole room, and attendees are not granted write access to its control-plane namespace (`student-gitops`) — an `oc apply` there returns `Forbidden`.
+You act *through* Argo CD instead, signed in with your OpenShift identity, and its RBAC lets you manage only your own project (`proj-{user}`).
+The Application object is identical either way; the UI is just how you create it under your own, scoped identity.
+This is the tenancy model that makes one Argo CD safe for many users.
+
+*2. "Why did self-heal take three minutes instead of reverting instantly?"*::
+Self-heal runs on Argo CD's *reconcile cycle* — every 180 seconds by default on this cluster — not the instant you make the change.
+So drift lingers up to a reconcile interval, then is corrected on the next pass.
+That is the honest, correct behavior: self-heal is a *continuous safety net*, not a real-time lock.
+If you want the change reverted *now*, that is exactly what the manual *Sync* button does — and a Refresh does not speed self-heal up.
+(A platform team can lower `timeout.reconciliation` to make it feel snappier; the trade-off is more controller load.)
+
+*3. "Kustomize or Helm — which should we use?"*::
+Both, and Argo CD renders either — an Application's `source` can point at a Kustomize path *or* a Helm chart with values.
+Rule of thumb: *Kustomize* when you are layering environment patches over YAML you own (this repo — base + overlays), *Helm* when you are installing a *packaged* app whose author exposes a `values.yaml` contract.
+GitOps is agnostic; it reconciles the rendered output regardless of which templating produced it.
+
+*4. "Is deploying straight from Git really how production works?"*::
+Yes — that is the whole point.
+Promotion becomes *editing Git* (a reviewed, diffable, revertible commit), and a controller reconciles each environment to its folder, so no pipeline needs standing write access to production.
+What this module does *not* yet show is *scale*: one Application per environment does not fit dozens of apps.
+The next GitOps module generates Applications with ApplicationSets, orders them with sync waves, and adds progressive delivery (Argo Rollouts) — that is where "GitOps in the large" lives.
+
+*5. "What is the difference between Refresh and Sync?"*::
+*Refresh* re-reads Git and the live cluster and recomputes *status* (Synced/OutOfSync, health) — it changes *nothing* in the cluster.
+*Sync* applies the desired state to the cluster to close the gap.
+You Refresh to *see* where things stand (e.g. after a git commit, to make Argo CD notice the new revision); you Sync to *make it so*.
+Self-heal is automated Sync on drift; auto-sync is automated Sync on new Git revisions.
+
+== Watchouts
+
+* *The student Argo CD application-controller is memory-tight — a full room can OOM it.*
+The `student-gitops` controller ships with a *1&nbsp;Gi* memory limit, and the Argo CD application-controller caches the whole cluster's resource tree (across every user namespace and CRD) regardless of how few Applications exist.
+During this build it *OOMKilled and CrashLooped* under the load of two Applications plus repeated syncs.
+A room of many users each creating and syncing Applications *will* stress it.
+Before an event, confirm the platform team has raised the controller's memory (limit ≥&nbsp;2&nbsp;Gi) — pre-flight check 2 catches a crash-looping controller.
+If it is thrashing mid-lab, syncs and self-heal go slow or stall; the fix is a platform-side memory bump, not anything an attendee or instructor can do from the UI.
+* *Self-heal is a ~3-minute reconcile, not instant.*
+Set expectations in exercise C, and consider (with the platform team) lowering `timeout.reconciliation` to ~60–90s on the student instance for snappier labs.
+The manual Sync path is always instant — lean on it when time is tight.
+* *Attendee Applications live in the shared control plane and are created via the UI.*
+There is no per-user Argo CD instance and no `oc apply` path (GitOps 1.21 refuses per-user source namespaces on a namespace-scoped instance — see ADR-0002).
+Each attendee's Applications live in `student-gitops` with `.spec.project: proj-{user}`.
+`ws reset`/`ws prep` delete them *by project* (attendees create them in a UI and cannot be relied on to label them), so a reset cleans up a user's apps without touching anyone else's.
+* *Argo CD login is OpenShift SSO.*
+Attendees click *Log in via OpenShift* (Dex + OpenShift OAuth) and authenticate as their workshop user; Argo CD maps that identity to `role:{user}`, scoped to `proj-{user}`.
+If a login lands them with no visible apps, they likely logged in as the local `admin` account instead of via OpenShift — send them back to the *Log in via OpenShift* button.
+* *The platform (`openshift-gitops`) instance is separate from the student instance — by design.*
+The workshop's own entry-state machinery runs on `openshift-gitops`; attendees use `student-gitops`.
+A mistake (or an OOM) in the student instance cannot touch the entry states — verified during the build (the platform instance stayed Healthy while the student controller crash-looped).
+That failure-domain split is the point of the two-instance topology; do not "consolidate" them.
+* *Driving Argo CD from the `argocd` CLI through the route: expect 504 on long calls.*
+A blocking `argocd app get --hard-refresh` can exceed the edge route's timeout and return `504` — the refresh still proceeds server-side.
+The *UI* refresh is async and unaffected; if you script against the API, use the async annotation (`argocd.argoproj.io/refresh=hard`) rather than a blocking CLI Get.
+* *`git clone` in the terminal is anonymous-read; push needs the workshop password.*
+Exercise A clones read-only (fine without credentials).
+Exercise D's git-driven change is easiest via the *Gitea UI* pencil (a commit with no credential prompt); the terminal `git push` alternative prompts for the attendee's workshop username and password.
+
+== Provenance
+
+M09 is built fresh on OpenShift GitOps {gitops_version} (Argo CD 3.4, `argoproj.io/v1alpha1`) against the Parasol `claims-config` Kustomize repo, on a shared student Argo CD instance with per-user AppProjects and OpenShift-SSO login, then performed end-to-end on OpenShift {ocp_version} as `user7` on 2026-07-10/11.
+Every command, output, and timing — the `oc apply` Forbidden denial, the 3s/26s first sync of seven objects, the drift diff (`replicas: 3` vs `1`), the instant manual-Sync revert, the ~190s self-heal revert on the reconcile loop, and the git-driven stage promotion (edit `main`, Refresh in ~20s, Sync) — was captured on-cluster during that build.
+The student-controller OOM under load was observed and reported to the platform team; the timings above assume a controller with adequate memory.
+No content ported from stale material.
