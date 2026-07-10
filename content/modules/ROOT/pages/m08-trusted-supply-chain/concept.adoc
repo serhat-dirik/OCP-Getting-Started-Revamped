@@ -1,0 +1,170 @@
+= Trusted Software Supply Chain: Concept
+:module-id: m08
+include::partial$version-attributes.adoc[]
+
+// Concept page for M08. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// Everything technical here was performed on OCP {ocp_version} / OpenShift Pipelines
+// {pipelines_version} / RHACS {acs_version} / Tekton Chains as user2 on 2026-07-10 — the scan-gate
+// Log4Shell violation, the CycloneDX SBOM, the Chains signature + SLSA attestation, and the
+// cosign verify are all cluster-verified, not recalled. Entitlement: [ADS].
+
+[.lead]
+Parasol just failed a supplier security audit: nobody could prove which build produced the claims image running in production, or what was inside it.
+
+The pipeline from the previous work builds and deploys `parasol-claims` reliably — but "it builds" is not the same as "it is trustworthy."
+The auditor asked three questions Parasol could not answer: _what dependencies are in this image, who built it, and can you prove the running image is the one your pipeline produced?_
+In this module you add the three controls that answer those questions — a *vulnerability scan gate*, *image signing with provenance*, and a *software bill of materials* — and you make the cluster *refuse to run* anything that is not signed.
+
+[NOTE]
+.What "[ADS]" means, and what is actually included
+====
+This module uses *Red Hat Advanced Cluster Security for Kubernetes* (RHACS) and *Red Hat Trusted Artifact Signer* (RHTAS) — part of the *Red Hat Advanced Developer Suite* (RHADS), a separate subscription from a base OpenShift subscription.
+RHACS is *also* included with OpenShift Platform Plus.
+Two of the controls you use, though — *Tekton Chains* image signing and the native *`ImagePolicy`* admission gate — ship with OpenShift itself, so part of the trust story is included the moment you have Pipelines.
+The lab flags which control is which as you go.
+====
+
+== What you'll learn
+
+* The *supply-chain threat model* in plain words — "you ship your dependencies" — and what the *SLSA* levels actually ask of you.
+* The *signature / attestation / SBOM triangle*: three different facts about an image, and why you need all three.
+* How a *scan gate* fails a build on a known vulnerability (RHACS), and why scoping the gate to a policy category makes it *deterministic*.
+* How *Tekton Chains* signs every pipeline-built image and emits *SLSA provenance* — with no per-build wiring — and how you verify it with `cosign`.
+* The difference between *policy-as-gate* (fail the build) and *policy-as-admission* (refuse to run), and how a native OpenShift `ImagePolicy` enforces "only signed images run."
+
+== You ship your dependencies
+
+The single idea under this whole module: *the code your team wrote is a small fraction of what you deploy.*
+The `parasol-claims` image is mostly other people's code — the Quarkus runtime, its transitive libraries, the base operating-system layers — pulled in at build time.
+That is normal and good; it is also the attack surface.
+When a critical flaw is found in a widely used library (Log4Shell in `log4j-core`, in December 2021, is the canonical example), the question is not "did we write the bug" — it is *"is it in anything we ship, and can we find out in minutes?"*
+
+A trusted software supply chain answers three questions about every artifact you build:
+
+Provenance:: _Where did this come from?_ Who built it, from which source, with which builder — and can you prove the running image is that exact build, not a substitute.
+Integrity:: _Has it been tampered with?_ A cryptographic *signature* that the image you run is byte-for-byte the image your pipeline produced.
+Contents:: _What is inside?_ A *software bill of materials* (SBOM) — the itemized list of every component and version — so that when the next Log4Shell lands, "are we affected?" is a query, not an archaeology project.
+
+[TIP]
+.SLSA, in one paragraph
+====
+*SLSA* (Supply-chain Levels for Software Artifacts, pronounced "salsa") is an industry framework that grades _how trustworthy your build process is_ — not your code, your *process*.
+The levels climb roughly like this: *build on a hosted system* (not a laptop), *produce signed provenance* (the build system attests what it did), and *make that provenance tamper-resistant and complete*.
+You do not need to memorize the level numbers.
+What matters is the shape: a pipeline that builds on the cluster, signs what it produces, and attaches machine-readable provenance is *already* climbing SLSA — and that is exactly what Tekton Chains gives you in this module for free.
+====
+
+== The signature / attestation / SBOM triangle
+
+Three artifacts travel with a trustworthy image, and they answer three *different* questions.
+People conflate them constantly, so pin the distinction now:
+
+[cols="1,3,2",options="header"]
+|===
+| Artifact | Answers | Produced by (in this lab)
+
+| *Signature* | "This image is intact and came from us." A cryptographic signature over the image digest. | Tekton Chains (cosign key)
+| *Attestation (provenance)* | "Here is _how_ this image was built" — the builder, the source, the steps, the timestamps. A signed *SLSA provenance* statement. | Tekton Chains (in-toto / SLSA)
+| *SBOM* | "Here is _what is inside_" — every component and version. | The build (CycloneDX)
+|===
+
+A signature with no SBOM tells you the image is authentic but not what is in it.
+An SBOM with no signature tells you what _a_ build contained but not that _this_ image is that build.
+You need all three, and they reinforce each other: the attestation is _signed_, the SBOM can be _attested_, and the signature is what an admission gate _checks_.
+
+[mermaid]
+....
+flowchart LR
+  SRC[(Source repo\nparasol-claims)] --> BUILD
+  subgraph PIPE["Supply-chain pipeline (in your -cicd namespace)"]
+    direction TB
+    SBOMT[SBOM report\nCycloneDX] --> BUILD[build-image\nbuildah]
+    BUILD --> SCAN{scan gate\nRHACS}
+  end
+  BUILD -. Tekton Chains signs .-> SIG[[signature + SLSA provenance\nstored beside the image]]
+  SCAN -->|clean| REG[(image + .sig + .att\nin the registry)]
+  SCAN -->|CVE found| STOP[/build fails —\nimage never ships/]
+  SIG --> REG
+  REG --> ADM{ImagePolicy\nadmission}
+  ADM -->|signed| RUN([pod runs])
+  ADM -->|unsigned| DENY[/pull refused/]
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef r fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class REG,RUN,SIG g;
+  class STOP,DENY r;
+....
+
+// media-pass: SVG export m08-trusted-supply-chain-01-trust-triangle.svg (see media-manifest.md)
+
+== Policy as a gate, and policy as an admission control
+
+There are two places to stop a bad image, and they are not interchangeable — a mature supply chain uses *both*.
+
+Policy-as-gate (build time)::
+A *scan gate* runs inside the pipeline: build the image, scan it, and *fail the build* if it violates policy.
+This is where you catch a vulnerable dependency _before_ the image is ever published.
+In the lab, RHACS runs `roxctl image check` as a pipeline task; a critical CVE returns a non-zero exit code, the task fails, and the pipeline stops.
+The gate's value is *shift-left*: the developer who introduced the flaw finds out in their own pipeline run, not in production.
+
+Policy-as-admission (run time)::
+A gate only helps if _every_ image goes through the pipeline.
+*Admission* closes that gap by enforcing a rule at the cluster: OpenShift's native `ImagePolicy` tells the node to *verify a signature before it will pull an image* into a namespace.
+An unsigned image — one that never went through your signing pipeline — is *refused at pull time*.
+The gate is a policy you _run_; admission is a policy the platform _enforces_ whether or not anyone remembered to run the gate.
+
+[NOTE]
+.Why the scan gate keys on a specific policy — determinism
+====
+A default RHACS build policy like "Fixable Severity at least Important" fires on *any* fixable CVE in the image — including base-operating-system CVEs that appear and disappear as the vulnerability feed updates.
+That is correct for a real security program, but it makes a _teaching_ gate non-deterministic: the same image can pass on Monday and fail on Friday.
+So the lab's gate is scoped to a *single policy category* ("Supply Chain Security") containing one deterministic, enforced policy — "Block Log4Shell (CVE-2021-44228) at build."
+The gate then fires on exactly one thing: the seeded `log4j-core` dependency.
+Remove that dependency and the gate goes green — reliably, every time.
+====
+
+== Red Hat trusted content and the base image
+
+The base image is the largest single source of what you ship, and it is the thread from the earlier build module.
+`parasol-claims` builds `FROM` a Red Hat *Universal Base Image* (UBI) OpenJDK layer.
+Trusted content matters here for two reasons.
+First, *provenance*: UBI images are built and signed by Red Hat, so the bottom of your image has a supply chain you did not have to assemble.
+Second, *currency*: a UBI tag is patched over time, so an _older_ tag carries known base-OS CVEs that a _newer_ tag has fixed.
+The lab's seeded image pins an older UBI tag on purpose — bumping it is *complementary hardening* (fewer base-OS CVEs), and the lab treats it as exactly that: a good habit, but *not* the thing that turns the scan gate green.
+The gate is about the vulnerable dependency you _added_; the base image is about keeping the foundation current.
+
+== How this shows up in real orgs
+
+* *"Are we affected by <the CVE that just broke the internet>?" becomes a query.*
+Before SBOMs, that question triggers a fire drill: every team greps their build files by hand.
+After, you search your stored bills of materials for the component and get a list of affected images in minutes.
+The SBOM is boring infrastructure until the day it saves you a weekend.
+* *The pipeline is where security shifts left.*
+A scan gate in the pipeline means the person who added the vulnerable dependency is the person who sees it fail — in their own run, with the CVE named.
+That is far cheaper than a security team finding it in production and filing a ticket back to a developer who has moved on to something else.
+* *Signing is only half the story; enforcement is the other half.*
+Plenty of organizations sign their images and then never check the signature at run time.
+Admission control (`ImagePolicy` here, or RHACS's cluster-wide admission) is what turns "we sign our images" into "the cluster will not run an unsigned one" — the difference between a policy on a wiki and a policy the platform enforces.
+* *Provenance is what an auditor actually asks for.*
+"Show me that the image in production came from this commit through this pipeline" is a real audit question.
+A signed SLSA attestation is a machine-checkable answer — and because Tekton Chains produces it automatically, you get the answer without anyone writing it up.
+
+[NOTE]
+.Where this sits relative to the pipeline and GitOps modules
+====
+The previous module gave you a pipeline that produces an image and *data* (results).
+This module adds the *trust* controls to that pipeline — a scan that can fail the build, a signature and provenance on every image, and an SBOM.
+The GitOps modules that follow take the *trustworthy, signed* image this pipeline produces and reconcile it into each environment — so admission control (only-signed-runs) and GitOps promotion are the two halves of "the right image, and only the right image, reaches production" (both are separate modules).
+====
+
+// media-pass: the cross-module Parasol platform-accretion diagram with the M08 trust layer highlighted — m08-trusted-supply-chain-04-platform-accretion.svg (see media-manifest.md)
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Two ideas must land: (1) *three artifacts, three questions* — signature (intact + ours), attestation (how it was built), SBOM (what is inside); (2) *gate vs admission* — the pipeline can _fail_ a bad build, and the cluster can _refuse to run_ an unsigned one.
+The live demo (the scan gate catching Log4Shell, then the fix, then the signature) is the payoff — keep the concept tight so there is time for it.
+====
+endif::demo[]

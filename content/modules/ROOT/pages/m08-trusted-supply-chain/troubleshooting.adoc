@@ -1,0 +1,129 @@
+= Trusted Software Supply Chain: Troubleshooting
+:module-id: m08
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} / RHACS {acs_version} / OpenShift
+// Pipelines {pipelines_version} / Tekton Chains (2026-07-10). Format: Symptom / Cause / Fix. Every
+// entry below is a behaviour that was actually observed on-cluster during the build.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Most terminal commands assume you set `NS={user}-cicd` at the start of the lab.
+
+== The scan gate PASSES on the vulnerable branch (no Log4Shell violation)
+
+Symptom:: You run the pipeline on `seed-vulnerable` and `acs-scan` *passes* — no `Block Log4Shell` violation — even though the `log4j-core` dependency is there.
+Cause:: The RHACS *vulnerability store is not warm yet*.
+On a freshly installed cluster, Scanner V4 takes *~1 hour* to download its vulnerability data; until then `roxctl image check` finds no CVEs and the gate passes on everything.
+Fix:: Wait for the scanner to populate, then re-run.
+An instructor can confirm warmth with the pre-flight run (instructor guide): the vulnerable pipeline should print `Block Log4Shell (CVE-2021-44228) at build`.
+This is the top pre-session check — the lab's first beat depends on it.
+
+== The build `Succeeded` but the run is `Failed` — did the build break?
+
+Symptom:: `tkn pipelinerun describe --last` shows `build-image: Succeeded` but the overall run is `Failed`.
+Cause:: This is the *intended* behavior, not an error.
+The scan gate (`acs-scan`) runs *after* the build — you cannot scan an image you have not built — so on the vulnerable branch the image is built (and even signed) and then the *scan* refuses it.
+Fix:: Nothing to fix — this is the lesson.
+Read the `acs-scan` step: it names the enforced policy (`Block Log4Shell (CVE-2021-44228) at build`) and the CVE.
+To make the run pass, *remove the `log4j-core` dependency* (exercise 3), not the build.
+
+== `mvn ...:makeBom` (or `mvn package`) produces no SBOM file
+
+Symptom:: You run a Maven build but there is no `target/bom.json` (or no `target/parasol-claims-sbom.json`); `ls target/*bom*` finds nothing.
+Cause:: Two variants.
+(a) You ran `mvn package` on a *fork that predates the CycloneDX plugin* in `pom.xml`, so no SBOM execution is bound to the build.
+(b) The build failed before it reached the plugin.
+Fix:: Use the *plugin CLI invocation*, which fetches the plugin from Maven Central and does not depend on the `pom.xml` declaring it (this is what the lab and the pipeline both use):
++
+[source,sh,role=execute]
+----
+cd ~/parasol-claims
+mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
+ls -la target/bom.json
+----
++
+That writes `target/bom.json` (CycloneDX, ~225 components) regardless of the fork's `pom.xml`.
+
+== `chains.tekton.dev/signed` is blank right after the build
+
+Symptom:: Immediately after a successful run, `oc get taskrun ... signed=...` shows an empty value, not `true`.
+Cause:: *Tekton Chains signs a few seconds after* the build TaskRun completes — it is an asynchronous controller, not part of the TaskRun.
+Fix:: Wait a few seconds and re-check:
++
+[source,sh,role=execute]
+----
+oc get taskrun -n $NS -l tekton.dev/pipelineTask=build-image \
+  -o jsonpath='{range .items[*]}{.metadata.name}{" signed="}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}'
+----
++
+If it stays blank for more than a minute, confirm Chains is configured (`oc get tektonconfig config -o jsonpath='{.spec.chain}'`) and that `signing-secrets` exists in `openshift-pipelines`.
+
+== The pipeline errors at `acs-scan` with a secret or endpoint error
+
+Symptom:: `acs-scan` fails immediately (not on a policy) with an error about `rox-api-token`, an empty endpoint, or authentication.
+Cause:: The scan task reads Central's endpoint and a CI token from the `rox-api-token` Secret in your namespace; if the entry state's copy hook did not run, that Secret is missing.
+Fix:: Confirm the Secret is present, and re-materialize the entry state if not:
++
+[source,sh,role=execute]
+----
+oc get secret rox-api-token -n $NS -o jsonpath='keys: {.data.rox-api-token} / {.data.rox-central-endpoint}{"\n"}' 2>/dev/null && echo "(present)"
+# if missing:
+ws prep {module-id} --yes
+----
++
+`ws prep` re-runs the hook that copies `rox-api-token` from the shared `stackrox` namespace into yours.
+
+== `cosign: command not found` in the terminal
+
+Symptom:: You try `cosign verify` in the Showroom terminal and it is not installed.
+Cause:: The Showroom terminal image ships `oc`, `tkn`, `mvn`, `jq`, `git`, and `skopeo` — but *not `cosign`*.
+Fix:: Signature *verification* is an instructor-run step in this module (the instructor guide has a one-line verification pod using the RHTAS client image).
+Your hands-on proof that the image is signed uses only `oc`: the `chains.tekton.dev/signed=true` annotation and the `.sig`/`.att` tags on the ImageStream (exercise 4).
+
+== `oc apply` of an `ImagePolicy` is forbidden
+
+Symptom:: You try to create an `ImagePolicy` yourself and get `Error from server (Forbidden): ... imagepolicies.config.openshift.io is forbidden`.
+Cause:: `ImagePolicy` is a cluster-configuration resource (`config.openshift.io/v1`); the namespace `admin` role you hold does not include it — only cluster admins can create one.
+Fix:: This is why exercise 5 (admission) is an *instructor-demo* — the instructor applies the `ImagePolicy` cluster-wide and the effect lands in your namespace.
+You verify the pieces that make it work (`chains-cosign-pub` and a signed image) with `oc`, which you _can_ do.
+
+== A build TaskRun dies mid-`mvn`/`buildah` with `OOMKilled`
+
+Symptom:: `sbom-report` or `build-image` fails partway; `oc describe` on the Pod shows `Reason: OOMKilled`.
+Cause:: The build Pod inherited the namespace's default memory limit (1 Gi from the workshop LimitRange), and the Maven/buildah build needs more.
+This happens if you write your *own* PipelineRun and leave out the memory overrides.
+Fix:: Set more memory for the build-heavy Tasks in the PipelineRun's `taskRunSpecs` (the lab's PipelineRuns already do this):
++
+[source,yaml]
+----
+  taskRunSpecs:
+    - pipelineTaskName: sbom-report
+      computeResources: {requests: {memory: 1Gi}, limits: {memory: 1536Mi}}
+    - pipelineTaskName: build-image
+      computeResources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}
+----
+
+== You fixed `pom.xml` but the pipeline still fails on Log4Shell
+
+Symptom:: You removed `log4j-core` but a re-run still reports the `Block Log4Shell` violation.
+Cause:: The run built a different revision than you edited — either you committed to the wrong branch, or the run's `git-revision` was not `seed-vulnerable`.
+Fix:: Confirm your edit landed on `seed-vulnerable` (the Gitea file view shows the branch), and that the run used that branch:
++
+[source,sh,role=execute]
+----
+tkn pipelinerun describe --last -n $NS | grep -iA3 'Params'
+----
++
+The `git-revision` should read `seed-vulnerable`.
+The default already is, so a plain re-run (exercise 3's PipelineRun) rebuilds the branch you fixed — just make sure the *commit* is on `seed-vulnerable`, not `main`.
+
+== A harmless warning in the `acs-scan` logs
+
+Symptom:: The `acs-scan` step logs `warning: unsuccessful cred copy: ".docker" from "/tekton/creds" to "/": ... permission denied`.
+Cause:: `roxctl` probes for a docker credential directory it cannot create; it does not need one.
+Fix:: Ignore it — it is benign.
+`roxctl` authenticates to Central with the token from `rox-api-token`, and the scan proceeds normally after this line.
+
+'''
+
+_Last verified on OpenShift {ocp_version} / RHACS {acs_version} / OpenShift Pipelines {pipelines_version} (Tekton Chains) — 2026-07-10._

@@ -1,0 +1,87 @@
+= Trusted Software Supply Chain: Wrap-up
+:module-id: m08
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's pipeline from "it builds" to "it is *trustworthy*."
+You ran the `parasol-claims-supply-chain` Pipeline and watched its *scan gate* (RHACS `roxctl image check`) *fail the build* on a seeded Log4Shell vulnerability — `CVE-2021-44228`, CVSS 10, in `log4j-core` 2.14.1.
+You generated a *CycloneDX SBOM* and found that exact component with a one-line `jq` query, *removed the dependency* in your fork, and watched the gate go *green* — with no base-image change.
+You saw that *Tekton Chains* had *signed* every build automatically and attached a *SLSA provenance* attestation, and you saw how a native `ImagePolicy` makes the cluster *refuse to run an unsigned image*.
+
+[mermaid]
+....
+flowchart LR
+  PUSH([fix on your fork]) --> RUN[supply-chain PipelineRun]
+  subgraph RUN[" "]
+    direction LR
+    A[fetch-source] --> B[sbom-report<br/>CycloneDX] --> C[build-image<br/>+ Chains signs] --> D[acs-scan<br/>gate]
+  end
+  D -->|clean| REG[(image + .sig + .att)]
+  D -. "Log4Shell → red" .-> STOP[/build refused/]
+  REG --> ADM{ImagePolicy}
+  ADM -->|signed| OK([runs])
+  ADM -->|unsigned| NO[/pull refused/]
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef r fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class REG,OK,C g;
+  class STOP,NO r;
+....
+
+// media-pass: recap SVG m08-trusted-supply-chain-03-what-you-built.svg (green = trustworthy path; red = the two refusals — gate + admission).
+
+The idea under all of it: *trust is three facts about an artifact — what is inside it, who built it, and whether it is intact — produced automatically and enforced by the platform*, so "prove this image is safe to run" is a query and a policy, not a promise.
+
+== Map to your org
+
+. *When the next Log4Shell lands, how fast can you answer "are we affected?"*
+You searched an SBOM and had the answer in one line.
+For a real service in your org: is there a stored bill of materials you could query, or would answering that question mean a team grepping build files by hand for a weekend?
+What would it take to make every build produce and keep an SBOM?
+. *Do you sign your images — and does anything check the signature?*
+Signing without verification is theater.
+If your org signs images today, where is the signature actually _enforced_ — at admission on every cluster, or nowhere?
+If it does not sign yet, the Tekton Chains path you saw needs no per-build work — what stops you turning it on?
+. *Where should the gate live — the pipeline, admission, or both?*
+You saw a build-time scan gate and a run-time admission control.
+For a service that matters, which failures do you want caught in a developer's pipeline run (shift-left) versus refused at the cluster no matter what?
+Most mature answers are "both" — which one is missing in your pipeline today?
+
+== When *not* to reach for this
+
+The controls in this module are the right default for anything you ship — which means being honest about their edges:
+
+* *Don't gate on non-deterministic policy in a place people can't act.*
+A gate that fails intermittently (because the vulnerability feed shifted, not because the code changed) trains people to ignore it.
+Scope build-breaking gates to policies developers can actually _fix_ (a vulnerable dependency), and route the noisier "any fixable CVE" policies to a report or a dashboard, not a hard build failure.
+* *Don't sign images you never verify.*
+If no admission control or downstream check ever validates the signature, signing is pure overhead.
+Turn signing on _with_ a place that enforces it — otherwise you have added a step that produces an artifact nobody reads.
+* *Keyless signing is powerful, but it is not free.*
+The keyless flow (Fulcio short-lived certs + a Rekor transparency log) removes long-lived keys, but it adds an OIDC-identity dependency, a transparency-log retention question, and more moving parts.
+For a controlled build system, a well-managed cosign key is often the simpler, sufficient choice — reach for keyless when you need public verifiability or per-identity signing, not by default.
+* *An SBOM is a snapshot, not a subscription.*
+The bill of materials is accurate the moment it is built; it does not tell you a component became vulnerable _after_ the build.
+Storing SBOMs is what lets you re-query them when a _new_ CVE lands — the SBOM is only as useful as the process that keeps and re-scans it.
+
+== Go deeper
+
+* *GitOps Fundamentals* — this module made the image _trustworthy_ and taught the cluster to refuse an _unsigned_ one; the GitOps module is where that signed image is reconciled into each environment from Git, so "only the right image reaches production" is the two halves together (a separate module).
+* *Registry, Images & Catalog Governance* — the cluster-wide version of the admission control you saw: allowed-registries policy, mirroring, and where images may come from (a separate module).
+* *Red Hat Trusted Profile Analyzer* (RHTPA {rhtpa_version}) — the enterprise "SBOM at scale" story: ingest every build's SBOM and query your whole estate for an affected component from one place (the RHADS component this lab's terminal `jq` foreshadows).
+* Red Hat documentation: *Advanced Cluster Security for Kubernetes* (RHACS {acs_version}) "Verifying image signatures" and build-time policy; *OpenShift Pipelines* "Using Tekton Chains for supply chain security"; *Trusted Artifact Signer* (RHTAS {rhtas_version}); and OpenShift "Managing secure signatures with sigstore" (`ImagePolicy`).
+
+[NOTE]
+.Credits
+====
+This module is built fresh on RHACS {acs_version}, OpenShift Pipelines {pipelines_version} (Tekton Chains), and RHTAS {rhtas_version}, with the Parasol `parasol-claims` service, the curated `acs-image-check` task in the `parasol-tasks` library, and the `parasol-claims-supply-chain` Pipeline authored for the workshop.
+The threat-model framing draws on the SLSA framework and the sigstore/cosign projects; every command, output, and timing was performed and measured on OpenShift {ocp_version} (2026-07-10).
+====
+
+[NOTE]
+.Clean up
+====
+Leave your work running if you are continuing — nothing depends on tearing it down.
+To wipe `{user}-cicd` back to the entry state — the Pipeline, the copied RHACS token and Chains public key, and your fork with its vulnerable `seed-vulnerable` branch restored — run `ws prep {module-id} --yes`.
+That clears every PipelineRun and built image so you start the module fresh.
+====
