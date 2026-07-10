@@ -167,6 +167,9 @@ data:
     lab_name: OpenShift Application Platform — Getting Started
 ---
 # Per-user terminal home. Survives pod restarts so attendee scratch work + kubeconfig persist.
+# SAME sync-wave as the Deployment (3), NOT earlier: the default StorageClass is
+# WaitForFirstConsumer, so this PVC only binds once its consuming pod schedules. In an earlier
+# wave Argo would block forever waiting for a Pending PVC to become Healthy (proven on-cluster).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -176,7 +179,7 @@ metadata:
     workshop.redhat.com/layer: workshop-config
     workshop.redhat.com/user: {{ $user | quote }}
   annotations:
-    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   accessModes:
     - ReadWriteOnce
@@ -264,9 +267,14 @@ spec:
               set -euo pipefail
               export HOME=/home/lab-user
               mkdir -p "$HOME/.kube"
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
 
               echo "▶ reading the shared workshop password (secret workshop-user-creds)…"
-              PW="$(oc get secret workshop-user-creds -n "$GITEA_NS" -o jsonpath='{.data.password}' | base64 -d)"
+              # Force ServiceAccount auth explicitly: the home PVC persists, so a prior run's {user}
+              # kubeconfig may sit at $HOME/.kube/config — and {user} cannot read the gitea secret.
+              PW="$(oc get secret workshop-user-creds -n "$GITEA_NS" -o jsonpath='{.data.password}' \
+                    --server=https://kubernetes.default.svc \
+                    --token="$(cat $SA/token)" --certificate-authority="$SA/ca.crt" | base64 -d)"
               [[ -n "$PW" ]] || { echo "❌ workshop-user-creds/password missing in $GITEA_NS"; exit 1; }
 
               echo "▶ logging in as ${WS_USER} (password not shown)…"
