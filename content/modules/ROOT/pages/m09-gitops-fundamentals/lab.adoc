@@ -12,9 +12,10 @@ include::partial$version-attributes.adoc[]
 // To keep jsonpath braces literal, the first block sets DEV/STAGE with subs=attributes (no braces)
 // and later oc blocks use $DEV/$STAGE with NO subs (same idiom as m06/m07). All commands, outputs,
 // and timings were performed as user7 on OCP {ocp_version} / OpenShift GitOps {gitops_version}
-// (Argo CD 3.4) on 2026-07-10/11: dev app synced to Healthy in 26s (7 resources), drift replicas
-// 1→3 showed OutOfSync, manual Sync reverted to 1, self-heal reverted a fresh drift at ~190s
-// (Argo default reconcile), and a git edit (stage replicas 2→3) arrived after Refresh + Sync.
+// (Argo CD 3.4) as user7, re-verified on the fixed 2Gi controller (appSync 90s): dev app synced to
+// Healthy in 26s (7 resources), drift replicas 1→3 showed OutOfSync, manual Sync reverted to 1,
+// self-heal reverted a fresh drift in ~4s (watch-triggered; the 90s reconcile interval is only the
+// ceiling under load), and a git edit (stage replicas 2→3) arrived after Refresh + Sync.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -83,7 +84,7 @@ oc get deploy parasol-claims -n $DEV \
 
 [demo-block]
 [TIME 4m]
-Say:: "Now watch what GitOps is really for. I'll do what happens in every real cluster — reach in and change a running app by hand. I'll scale it from one replica to three."
+Say:: "Now watch what GitOps is really for. I'll reach into the running app by hand — the way every real cluster gets changed — and scale it from one replica to three."
 Show:: The terminal scaling the Deployment, then the Argo CD UI going *OutOfSync* with a diff.
 Do:: Drift the live cluster, then switch to the Argo CD tab:
 +
@@ -119,17 +120,16 @@ Do:: Enable *Auto-Sync* and *Self Heal* in the UI, then drift once more:
 [source,sh,role=execute]
 ----
 oc scale deployment/parasol-claims --replicas=3 -n $DEV
-echo "drifted to 3 — now nobody touches Argo CD; it reverts on its next reconcile pass (a couple of minutes)"
+echo "drifted to 3 — now nobody touches Argo CD; watch it snap back on its own in seconds"
 ----
 +
-"I'm not going to press anything. Within a couple of minutes Argo CD's reconcile loop notices the drift and puts it back to one — the platform enforcing Git without a human. That is GitOps: the cluster is a projection of Git, and anything that diverges gets corrected."
+"I'm not going to press anything — and within seconds Argo CD catches the drift and puts it back to one, the platform enforcing Git without a human. That is GitOps: the cluster is a projection of Git, and anything that diverges gets corrected on its own."
 
 [NOTE]
-.Pacing the self-heal wait
+.The self-heal beat lands live
 ====
-Self-heal reverts on the controller's reconcile cycle — measured ~3 minutes on this cluster, not instant.
-Either narrate the "why GitOps" story while it reverts (check back live), or *pre-drift* before this segment so the revert lands on cue.
-The instant, always-lands version is the *manual Sync* in beat 3; treat self-heal as the "and now automatically" coda.
+Self-heal is watch-triggered — it reverts drift in a few seconds (measured ~4s on this cluster), so this beat lands live with no waiting.
+Both the manual Sync (beat 3) and self-heal (beat 4) are near-instant, so the whole drift-revert arc stays snappy.
 `ws reset m09 --user {user}` returns everything to the entry state between runs.
 ====
 endif::demo[]
@@ -139,7 +139,7 @@ endif::demo[]
 // ============================================================================
 ifndef::demo[]
 
-== A — Git is the source of truth
+== 1. Git is the source of truth
 ⏱ *~10 min* · tour the repository that describes your environments
 
 Before a controller can reconcile your cluster to Git, you should know what is *in* Git.
@@ -180,7 +180,7 @@ Read it:
 cat overlays/dev/kustomization.yaml
 ----
 
-.Expected output (abridged)
+.Expected output (the YAML below the comment header)
 [%collapsible]
 ====
 [source,texinfo]
@@ -195,10 +195,16 @@ replicas:
     count: 1
 
 patches:
-  - target: {kind: ConfigMap, name: claims-config}
+  - target:
+      kind: ConfigMap
+      name: claims-config
     patch: |-
-      - {op: replace, path: /data/APP_ENV, value: dev}
-      - {op: replace, path: /data/QUARKUS_LOG_LEVEL, value: DEBUG}
+      - op: replace
+        path: /data/APP_ENV
+        value: dev
+      - op: replace
+        path: /data/QUARKUS_LOG_LEVEL
+        value: DEBUG
 ----
 ====
 
@@ -209,7 +215,7 @@ Now render what Argo CD will actually reconcile.
 
 [source,sh,role=execute]
 ----
-oc kustomize overlays/dev | grep -E '^kind:|  name:|namespace:|replicas:|image:' | grep -v 'apiVersion'
+oc kustomize overlays/dev | grep -E '^kind:|^  name:|^  namespace:|^  replicas:'
 ----
 
 .Expected output
@@ -237,10 +243,13 @@ kind: Deployment
   name: parasol-claims
   namespace: user1-dev
   replicas: 1
+kind: Route
+  name: parasol-claims
+  namespace: user1-dev
 ----
 ====
 
-That rendered YAML — seven objects, all in `{user}-dev`, the claims app at 1 replica — is the *desired state*.
+That rendered YAML — seven objects (ConfigMap, Secret, two Services, two Deployments, and a Route), all in `{user}-dev`, the claims app at 1 replica — is the *desired state*.
 In the config module you applied it by hand with `oc apply -k`.
 This module hands that job to a controller: you point an Argo CD Application at `overlays/dev`, and it renders and applies exactly this, then keeps the cluster matching it.
 
@@ -249,7 +258,7 @@ This module hands that job to a controller: you point an Argo CD Application at 
 ✔ *Verify:* `find` shows a `base/` and three `overlays/`; `overlays/dev/kustomization.yaml` pins `namespace: {user}-dev` and `count: 1`; and `oc kustomize overlays/dev` renders seven objects into `{user}-dev` — the desired state, not yet applied.
 ****
 
-== B — Create your first Argo CD Application
+== 2. Create your first Argo CD Application
 ⏱ *~20 min* · point a controller at Git and watch it deploy
 
 Your `{user}-dev` namespace is empty of the claims app right now — you removed nothing; the entry state left it clean so *this* is the deploy.
@@ -333,6 +342,7 @@ The form and the YAML are the same object; the UI is how you create it under you
 ====
 
 The app appears as a card, *Missing* and *OutOfSync* — Argo CD knows what *should* exist but has not applied it yet (that is what *Manual* sync means).
+The card may take up to ~90 seconds to first populate while Argo CD clones your repository for the first time — if it looks empty for a moment, give it a beat.
 Open the app to see its resource tree: the seven objects you rendered earlier, all greyed out and OutOfSync.
 
 // media-pass: screenshot m09-gitops-fundamentals-03-app-outofsync-missing.png — the claims-dev app
@@ -389,7 +399,7 @@ You created one object in a web form and a controller stood up a complete, datab
 ✔ *Verify:* the `oc apply` of an Application was *Forbidden* (you use the UI); the `claims-dev-{user}` app is *Synced* and *Healthy* in Argo CD; `oc get deploy -n {user}-dev` shows `claims-db` and `parasol-claims` both `1/1`; the Deployment carries an `argocd.argoproj.io/tracking-id`; and the Route answers `200` with seeded claims.
 ****
 
-== C — Drift and self-heal: the platform argues back
+== 3. Drift and self-heal: the platform argues back
 ⏱ *~25 min* · break the cluster by hand, and watch Git win — first on demand, then on its own
 
 This is the beat that makes GitOps matter.
@@ -460,62 +470,49 @@ In the Argo CD app, open *APP DETAILS* (or *DETAILS*), find *SYNC POLICY*, and c
 // panel with AUTO-SYNC enabled and SELF HEAL enabled. Embed here. See media-manifest.md.
 
 With self-heal on, Argo CD stops waiting.
-Drift the cluster one more time — and this time *do not touch Argo CD at all*:
+Drift the cluster one more time — and this time *do not touch Argo CD at all*.
+Watch it snap back on its own: this command polls the live replica count once a second and stops the moment Argo CD has put it back to 1.
 
 [source,sh,role=execute]
 ----
-oc scale deployment/parasol-claims --replicas=3 -n $DEV
-date +%T; echo "drifted to 3 at the time above — now watch, hands off"
-----
-
-Argo CD reverts drift on its *reconcile loop* — every few minutes, not instantly.
-Watch it happen on its own.
-This command polls the live replica count and stops when Argo CD has put it back to 1:
-
-[source,sh,role=execute]
-----
-echo "watching for self-heal to revert 3 → 1 (Argo reconciles ~every 3 min)…"
-for i in $(seq 1 40); do
+oc scale deployment/parasol-claims --replicas=3 -n $DEV >/dev/null
+echo "drifted to 3 — now watch, hands off (Argo CD snaps it back):"
+for i in $(seq 1 30); do
   R=$(oc get deployment/parasol-claims -n $DEV -o jsonpath='{.spec.replicas}')
   echo "  $(date +%T)  replicas=$R"
   [ "$R" = "1" ] && { echo "  ✔ self-heal reverted the drift — no human touched Argo CD"; break; }
-  sleep 15
+  sleep 1
 done
 ----
 
-.Expected output (abridged — the revert lands within the reconcile window)
-[%collapsible]
-====
+.Expected output — the revert lands in a few seconds
 [source,texinfo]
 ----
-watching for self-heal to revert 3 → 1 (Argo reconciles ~every 3 min)…
-  00:14:03  replicas=3
-  00:14:18  replicas=3
-  ...
-  00:17:10  replicas=1
+drifted to 3 — now watch, hands off (Argo CD snaps it back):
+  02:44:30  replicas=3
+  02:44:32  replicas=3
+  02:44:34  replicas=1
   ✔ self-heal reverted the drift — no human touched Argo CD
 ----
-====
 
-The console edit vanished with *nobody* pressing Sync.
-That is self-heal: the cluster is continuously reconciled to Git, so drift does not just get *noticed* — it gets *corrected*.
+The console edit vanished — in a few seconds, with *nobody* pressing Sync.
+That is self-heal: Argo CD *watches* the resources it manages, so it catches drift the moment it happens and corrects it — not on a slow timer.
 
 [NOTE]
-.Why the wait — and why that is the honest answer
+.How fast, and the one number that bounds it
 ====
-Self-heal is not a real-time lock; it runs on Argo CD's reconcile cycle (about every 3 minutes by default on this cluster).
-So your scale-up lingers, then disappears on the next pass.
-That is the correct mental model: self-heal is a *continuous correction*, a safety net that closes drift within a bounded window — not an instant guard that blocks the edit.
-If you want the change reverted *now*, that is what the manual *Sync* button does.
+Self-heal is *watch-triggered*: Argo CD reacts to the live change almost immediately (measured ~4 seconds here), not on a slow poll.
+The controller's periodic reconcile interval — `90s` on this cluster — is only the *ceiling*, the longest drift could linger if a watch event were ever missed under heavy load.
+Either way you *cannot out-edit Git*: the manual *Sync* button reverts drift instantly, and self-heal reverts it within seconds, unasked.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* after scaling to 3 with *Manual* sync, the Deployment *stayed* at 3 until you pressed *Sync*, which reverted it to 1; after enabling *Self Heal*, a fresh scale-to-3 reverted to 1 *on its own* within the reconcile window — with no Sync click.
+✔ *Verify:* after scaling to 3 with *Manual* sync, the Deployment *stayed* at 3 until you pressed *Sync*, which reverted it to 1; after enabling *Self Heal*, a fresh scale-to-3 reverted to 1 *on its own within seconds* — with no Sync click.
 Git won both times.
 ****
 
-== D — A git-driven change: promote to stage
+== 4. A git-driven change: promote to stage
 ⏱ *~15 min* · change the cluster by changing Git, not by touching the cluster
 
 Drift taught you that Git wins over live edits.
@@ -569,7 +566,7 @@ Open your fork in the *Gitea* tab at {gitea_url}/{user}/claims-config[{user}/cla
 [NOTE]
 .Prefer the terminal? The clone you made works too
 ====
-You already cloned the repo in exercise A.
+You already cloned the repo in exercise 1.
 You can make the same change there instead — edit `overlays/stage/kustomization.yaml`, then `git commit -am "stage: scale to 3" && git push` (sign in with your workshop username and password when prompted).
 Editing in the Gitea UI is the same commit, without the credential prompt.
 ====
@@ -583,7 +580,7 @@ Open the Deployment's *DIFF*: desired `replicas: 3`, live `replicas: 2`.
 // revision. Embed here. See media-manifest.md.
 
 Now apply it: *SYNC → SYNCHRONIZE*.
-This is the *same* Sync you used in exercise C — there it reconciled the cluster *back* to Git after a console edit; here it reconciles the cluster *forward* to a change you made in Git.
+This is the *same* Sync you used in exercise 3 — there it reconciled the cluster *back* to Git after a console edit; here it reconciles the cluster *forward* to a change you made in Git.
 Either way, Sync makes the live cluster match desired state.
 Once the sync completes, `{user}-stage` runs the *3 replicas you set in the repository*.
 Watch the third replica arrive (poll until the Deployment reports 3):
