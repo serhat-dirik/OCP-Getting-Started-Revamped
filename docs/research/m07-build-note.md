@@ -101,16 +101,23 @@ adjuster must own a claim before it can be approved"*. Default = 14/14 green.
 "your claim number", never quote a fixed `CLM-10xx`. The toggle is documented in the app README's
 "Intentional flaws — do not fix" list; don't let a content pass "fix" it.
 
-**Entry state — chart COMMITTED (`6742664`); live cycle PARKED on a cluster outage.**
-`gitops/entry-states/m07/` (fork + `.tekton` seeded into the user's OWN fork via Gitea API,
-claims-db, in-namespace Pipeline by cluster-resolver refs, optional PaC `Repository` CR, solve
-end-state, `tools/verify/m07.sh`; ws-meta: namespace `{user}-cicd`, no conflicts with built
-modules — first `-cicd` module). Statically validated (helm lint/template, rule-13 clean, server
-dry-runs). The full `ws start→verify→solve→reset→prep` cycle was cut off by the cluster going
-dark mid-run (2026-07-10 ~17:00, RHDP auto-stop signature); one fork-race hardening edit is held
-uncommitted by the PE to batch with live-cycle fixes. **The cycle MUST be proven before G1 closes
-— do not build content on an unproven entry state.** Known cleanup for the resumed cycle: an Argo
-app applied during the API degradation may sit under the `default` project — delete before re-running.
+**Entry state — DONE, G1 CLOSED (2026-07-10; chart `6742664` + fixes `e2161b1`/`c433bcd`, full
+live cycle PASSED on user6).** `gitops/entry-states/m07/` (fork + `.tekton` seeded into the
+user's OWN fork via Gitea API with a populated-main wait, claims-db, in-namespace Pipeline by
+cluster-resolver refs, optional PaC `Repository` CR, blocking solve, `tools/verify/m07.sh`;
+ws-meta: namespace `{user}-cicd`, no conflicts with built modules — first `-cicd` module,
+`waitSeconds: 1200`). Cycle evidence: `ws start` Synced/Healthy first try + 7/7 verify checks ·
+`ws solve` **blocks ~8 min and returns only when the app is truly up** (deploy 1/1, pod Running,
+0 restarts against the entry claims-db — the deploy-target decision holds) · `ws reset` leaves
+zero PipelineRuns and no app · `ws prep --yes` 7/7 → "start the lab".
+
+**Engine changes shipped with this module (`c433bcd`) — content authors should know:**
+1. `ws` readiness now also gates on the Argo sync *operation* (PostSync hooks genuinely block),
+   sized per-module via ws-meta `waitSeconds`. The first live cycle caught `ws solve` printing
+   "demo-ready" ~7 min early while the pipeline still ran — instructors: solve now takes ~8–10
+   min BY DESIGN and is truthful when it returns; put that in the instructor pre-flight/timing.
+2. `ws reset` now purges `pipelineruns.tekton.dev` (`oc delete all` never touched Tekton CRs) —
+   attendee re-runs start with a clean run list.
 
 **Seed-gate note for the PaC exercise:** the attendee's fork is created by THIS module's entry
 state, so M07 does not wait on the (disabled) app-repo seed Job. But the fork is taken from
