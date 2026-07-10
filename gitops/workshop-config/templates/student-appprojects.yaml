@@ -1,0 +1,76 @@
+{{- /*
+  Per-user AppProject on the student-gitops instance — the second isolation layer under the Argo
+  RBAC in student-argocd.yaml. Attendee app CRs live in the student-gitops namespace itself
+  (ADR-0002 amendment 1, option B — no sourceNamespaces), so this AppProject does NOT set
+  spec.sourceNamespaces; isolation comes from:
+    - destinations {user}-dev/stage/prod ONLY (an attendee cannot deploy into another user's or a
+      system namespace — Argo rejects the sync),
+    - namespaced resources only (empty clusterResourceWhitelist — no Namespaces/ClusterRoles via GitOps),
+    - no quotas/limits (blacklist) — those belong to the workshop layer and must survive their edits.
+  sourceRepos is "*": the in-cluster Gitea host can't be templated reliably (same tradeoff as the
+  workshop-entries AppProject); containment comes from the destination + resource rules.
+*/ -}}
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add1 $i) }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: proj-{{ $user }}
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  description: "GitOps sandbox for {{ $user }} (M09/M10)"
+  sourceRepos:
+    - "*"
+  destinations:
+    - namespace: {{ $user }}-dev
+      server: https://kubernetes.default.svc
+    - namespace: {{ $user }}-stage
+      server: https://kubernetes.default.svc
+    - namespace: {{ $user }}-prod
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+---
+# Let the attendee READ their own AppProject in the control-plane namespace (get by name only) so
+# they can introspect their sandbox and `ws verify`/`ws prep` (run as the attendee) can assert it
+# exists — same "attendee can read the shared thing they use" pattern as parasol-tasks-reader (M07).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $user }}-appproject-reader
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["appprojects"]
+    verbs: ["get"]
+    resourceNames:
+      - proj-{{ $user }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-appproject-reader
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $user }}-appproject-reader
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}

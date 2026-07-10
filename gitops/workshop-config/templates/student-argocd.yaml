@@ -1,0 +1,116 @@
+{{- /*
+  student-gitops — the SECOND Argo CD instance (ADR-0002), the one ATTENDEES write to.
+
+  WHY A SEPARATE INSTANCE (not per-user AppProjects on the platform instance): a student RBAC slip
+  must not be able to touch the entry-state machinery. The operator's cluster-config namespace is
+  ONLY openshift-gitops (verified live), so this instance is NAMESPACE-SCOPED — it can deploy only
+  into namespaces explicitly granted to it (the argocd.argoproj.io/managed-by label on {user}-dev/
+  stage/prod, set in per-user-namespaces.yaml). That is the split failure domain ADR-0002 wants.
+
+  NO spec.sourceNamespaces (ADR-0002 amendment 1, option B, ratified 2026-07-10): the 1.21.1
+  operator REFUSES sourceNamespaces on a namespace-scoped instance (verified live four ways — it
+  reverts the cmd-params application.namespaces in ~15s). So attendee Application CRs live in THIS
+  namespace (student-gitops, the instance's own control plane, managed natively — no source config),
+  isolated per-user by the Argo RBAC below (proj-{user} scoped) + the per-user AppProjects
+  (student-appprojects.yaml) that box each app's DESTINATIONS to {user}-dev/stage/prod. Cluster-
+  scoping the instance to unlock sourceNamespaces (option A) was rejected — it would gut this ADR's
+  primary promise (a student slip cannot reach the platform machinery).
+
+  WHY IN THE WORKSHOP LAYER (not per-user entry state): it is shared + persistent and must survive
+  `ws reset` (PM decision 2026-07-09). Shape copied from the live openshift-gitops CR: Dex +
+  openShiftOAuth (sso.keycloak is Removed in the CRD), edge route, annotation tracking.
+*/ -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/shared: "true"
+---
+# The attendee-writable Argo CD instance. Login = OpenShift OAuth via Dex (same mechanism the
+# default instance proves). Per-user RBAC below scopes each OpenShift user to their own project.
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: student-gitops
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+spec:
+  # OpenShift OAuth login through Dex — copied verbatim from the live openshift-gitops instance.
+  sso:
+    provider: dex
+    dex:
+      openShiftOAuth: true
+      resources:
+        requests:
+          cpu: 250m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+  # Per-user isolation. Each OpenShift user maps to a role that can manage ONLY their proj-{user}
+  # applications; a non-matching identity gets nothing (defaultPolicy empty). scopes must include
+  # preferred_username so `g, {user}, ...` matches the OpenShift username claim from Dex. Proven live:
+  # `argocd admin settings rbac can` — userN may sync own proj-userN apps, is denied on proj-userM.
+  rbac:
+    scopes: '[groups, preferred_username]'
+    defaultPolicy: ''
+    policy: |
+      {{- $lines := list "g, system:cluster-admins, role:admin" "g, admin, role:admin" }}
+      {{- range $i := until (int .Values.userCount) }}
+      {{- $u := printf "%s%d" $.Values.userPrefix (add1 $i) }}
+      {{- $lines = append $lines (printf "p, role:%s, applications, get, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, applications, create, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, applications, update, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, applications, delete, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, applications, sync, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, applications, override, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, applications, action/*, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, logs, get, proj-%s/*, allow" $u $u) }}
+      {{- $lines = append $lines (printf "p, role:%s, appprojects, get, proj-%s, allow" $u $u) }}
+      {{- $lines = append $lines (printf "g, %s, role:%s" $u $u) }}
+      {{- end }}
+      {{ join "\n" $lines | indent 6 | trim }}
+  # Same resource-tracking + external route shape as the platform instance (live-verified). annotation
+  # tracking also stamps deployed workloads with argocd.argoproj.io/tracking-id (verify asserts it).
+  resourceTrackingMethod: annotation
+  server:
+    insecure: true
+    route:
+      enabled: true
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
+    resources:
+      requests:
+        cpu: 125m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  controller:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+  repo:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+  redis:
+    resources:
+      requests:
+        cpu: 125m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi

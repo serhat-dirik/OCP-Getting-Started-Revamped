@@ -1,0 +1,201 @@
+# Forks {sourceOrg}/{sourceRepo} (the claims-config promotion template) into the attendee's own
+# Gitea account as {user}/{forkRepo}, then PERSONALIZES the overlay namespaces so their first Argo
+# CD Application (pointed at overlays/dev) deploys into {user}-dev. Independent of any other module:
+# this is M09's own Job (names suffixed -m09-{user}) using the SAME admin-credential-discovery +
+# Sudo-header technique as M04's fork job, so the two never collide even when both forks target the
+# same {user}/claims-config repo (a pre-existing fork is a safe no-op — compose, don't chain).
+#
+# Idempotent on every axis: the fork is skipped when it already exists (200), and the
+# personalization only rewrites an overlay file if it still contains the __user__ placeholder,
+# so a re-sync (ws start/reset) is a safe no-op.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea-fork-m09-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m09
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+---
+# why: read the Gitea CR status (admin password) + admin secret + route host to call the API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitea-fork-m09-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m09
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+rules:
+  - apiGroups: ["pfe.rhpds.com"]
+    # the rhpds CRD's plural is literally "gitea" (not "giteas") — verified live 2026-07-09
+    resources: ["gitea"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitea-fork-m09-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m09
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gitea-fork-m09-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: gitea-fork-m09-{{ .Values.user }}
+    namespace: {{ .Values.giteaNamespace }}
+---
+# Argo Sync hook: re-runs on every entry-state sync (ws start / reset). BeforeHookCreation
+# clears the prior Job so a re-sync always re-fires. Every step is idempotent, so re-runs are
+# safe. Wave 1 = after the RBAC above.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gitea-fork-m09-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m09
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: gitea-fork-m09-{{ .Values.user }}
+    spec:
+      serviceAccountName: gitea-fork-m09-{{ .Values.user }}
+      restartPolicy: Never
+      containers:
+        - name: fork
+          # ose-cli ships oc + curl + python3 on every connected cluster; no custom image.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: SOURCE_ORG
+              value: {{ .Values.sourceOrg | quote }}
+            - name: SOURCE_REPO
+              value: {{ .Values.sourceRepo | quote }}
+            - name: FORK_USER
+              value: {{ .Values.user | quote }}
+            - name: FORK_REPO
+              value: {{ .Values.forkRepo | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 5
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 5m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials (CR status is authoritative; secret is a fallback)…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 5
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 5m"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ waiting for the Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 5
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering (or admin creds wrong)"; exit 1; }
+
+              # --- fork (idempotent): skip when {user}/{forkRepo} already exists ---------------
+              CODE="$(curl -ks -o /dev/null -w '%{http_code}' "${GITEA_URL}/api/v1/repos/${FORK_USER}/${FORK_REPO}")"
+              if [[ "$CODE" == "200" ]]; then
+                echo "✅ ${FORK_USER}/${FORK_REPO} already exists — skipping fork"
+              else
+                echo "▶ forking ${SOURCE_ORG}/${SOURCE_REPO} → ${FORK_USER}/${FORK_REPO} (Sudo: ${FORK_USER})…"
+                BODY="$(mktemp)"; trap 'rm -f "$BODY"' EXIT
+                HTTP="$(curl -ks -o "$BODY" -w '%{http_code}' -u "$AUTH" -X POST \
+                  "${GITEA_URL}/api/v1/repos/${SOURCE_ORG}/${SOURCE_REPO}/forks" \
+                  -H 'Content-Type: application/json' -H "Sudo: ${FORK_USER}" \
+                  -d "{\"name\":\"${FORK_REPO}\"}")"
+                case "$HTTP" in
+                  200|201|202|409) echo "✅ fork requested for ${FORK_USER} (HTTP ${HTTP})";;
+                  *) echo "❌ fork failed (HTTP ${HTTP}): $(cat "$BODY")"; exit 1;;
+                esac
+                echo "▶ waiting for the fork to materialize…"
+                for i in $(seq 1 30); do
+                  RC="$(curl -ks -o /dev/null -w '%{http_code}' "${GITEA_URL}/api/v1/repos/${FORK_USER}/${FORK_REPO}")"
+                  [[ "$RC" == "200" ]] && break
+                  sleep 3
+                done
+                [[ "$RC" == "200" ]] || { echo "❌ fork did not appear after ~90s"; exit 1; }
+              fi
+
+              # --- personalize overlay namespaces (__user__ → ${FORK_USER}) --------------------
+              # Rewrites overlays/{dev,stage,prod}/kustomization.yaml so the attendee's Argo CD
+              # Application (and `oc apply -k`) lands in their own namespaces. Idempotent: only files
+              # still holding __user__ are committed. Uses python3 (in ose-cli; no jq/git needed).
+              echo "▶ personalizing overlay namespaces for ${FORK_USER}…"
+              GITEA_URL="$GITEA_URL" AUTH="$AUTH" FORK_USER="$FORK_USER" FORK_REPO="$FORK_REPO" python3 - <<'PY'
+              import base64, json, os, ssl, urllib.request
+
+              base = os.environ["GITEA_URL"].rstrip("/")
+              auth = os.environ["AUTH"]
+              user = os.environ["FORK_USER"]
+              repo = os.environ["FORK_REPO"]
+              ctx = ssl._create_unverified_context()
+              hdr = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(),
+                     "Content-Type": "application/json",
+                     "Sudo": user}
+
+              def api(method, path, body=None):
+                  data = json.dumps(body).encode() if body is not None else None
+                  req = urllib.request.Request(base + path, data=data, headers=hdr, method=method)
+                  with urllib.request.urlopen(req, context=ctx) as r:
+                      return r.status, json.loads(r.read().decode() or "{}")
+
+              paths = ["overlays/dev/kustomization.yaml",
+                       "overlays/stage/kustomization.yaml",
+                       "overlays/prod/kustomization.yaml"]
+              changed = 0
+              for p in paths:
+                  status, meta = api("GET", f"/api/v1/repos/{user}/{repo}/contents/{p}?ref=main")
+                  content = base64.b64decode(meta["content"]).decode()
+                  if "__user__" not in content:
+                      print(f"  ✓ {p} already personalized")
+                      continue
+                  new = content.replace("__user__", user)
+                  api("PUT", f"/api/v1/repos/{user}/{repo}/contents/{p}", {
+                      "message": f"Personalize {p} namespace for {user}",
+                      "content": base64.b64encode(new.encode()).decode(),
+                      "sha": meta["sha"],
+                      "branch": "main",
+                  })
+                  changed += 1
+                  print(f"  ✓ {p} → namespace {user}-*")
+              print(f"✅ personalization complete ({changed} file(s) updated)")
+              PY
+              echo "✅ ${FORK_USER}/${FORK_REPO} ready — create your first Argo CD Application against overlays/dev"
