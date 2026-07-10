@@ -1,0 +1,203 @@
+{{- /*
+  App-repo seed — publishes the workshop's standalone app repos into the in-cluster Gitea by
+  splitting monorepo subdirs into their own repos under the `parasol` org, so per-user entry-state
+  fork jobs have something to fork. This GitOps-ifies docs/research/app-repo-publishing.md (which was
+  a by-hand procedure). Design + rationale: docs/research/app-repo-seed-design.md.
+
+  DISABLED BY DEFAULT. A force-push into the shared parasol/* seed repos is Serhat's call, not the
+  agent's (it is the action the permission guard blocked on 2026-07-10). Enable with
+  --set appRepoSeed.enabled=true only after sign-off. While disabled this whole file renders to
+  nothing, so committing it is inert.
+
+  Counterpart to gitea-user-seed.yaml (same route + admin-credential discovery, same BeforeHookCreation
+  hook so `ws git-refresh` re-seeds). Unlike the curl-only git-mirror job, this one needs `git` to
+  push a subdir as a repo root — ose-cli has no git, so the container installs git-core at runtime.
+*/ -}}
+{{- if .Values.appRepoSeed.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-repo-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+---
+# why: read the Gitea CR status (admin password), the operator admin secret, and the route host —
+# the same discovery gitea-user-seed uses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-repo-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+rules:
+  - apiGroups: ["pfe.rhpds.com"]
+    # the rhpds CRD's plural is literally "gitea" (verified live 2026-07-08)
+    resources: ["gitea"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: app-repo-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: app-repo-seed
+subjects:
+  - kind: ServiceAccount
+    name: app-repo-seed
+    namespace: {{ .Values.giteaNamespace }}
+---
+# The repo -> monorepo-subdir map. One line per standalone app repo. Overridable via values so the
+# mechanism stays workshop-agnostic (the Job reads this, not a hardcoded list).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-repo-seed-map
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    app-repo-seed.workshop.redhat.com/map: "true"
+data:
+  org: {{ .Values.mirrorOrg | quote }}
+  # Source of truth = the in-cluster mirror of the monorepo (fast, no GitHub egress).
+  mirrorRepo: {{ .Values.mirrorRepo | quote }}
+  revision: {{ .Values.appRepoSeed.revision | default "main" | quote }}
+  # repo = path/under/the/monorepo
+  repos: |
+    {{- range .Values.appRepoSeed.repos }}
+    {{ .repo }}={{ .subdir }}
+    {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: app-repo-seed
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    # before gitea-user-seed (wave 2); ordering vs. entry-state fork jobs (separate Argo apps) is
+    # not needed — a fresh cluster seeds here at bootstrap, long before any `ws start` forks.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: app-repo-seed
+    spec:
+      serviceAccountName: app-repo-seed
+      restartPolicy: Never
+      containers:
+        - name: seed
+          # TODO(verify-on-install): git image. ubi9 + runtime git-core needs Red Hat CDN egress
+          # (present on this cluster). Swap for a prebuilt git image before a disconnected delivery.
+          image: registry.access.redhat.com/ubi9/ubi:latest
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+
+              echo "▶ installing git (ose-cli has none; this image ships dnf)…"
+              dnf install -y -q git-core >/dev/null
+
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 10
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials (retry loop — operator writes them post-setup)…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 10
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 10m"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ reading the repo→subdir map…"
+              ORG="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.org}')"
+              MIRROR_REPO="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.mirrorRepo}')"
+              REVISION="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.revision}')"
+              REPOS="$(oc get cm app-repo-seed-map -n "$NS" -o jsonpath='{.data.repos}')"
+              [[ -n "$ORG" && -n "$MIRROR_REPO" && -n "$REPOS" ]] || { echo "❌ incomplete seed map"; exit 1; }
+
+              echo "▶ waiting for the Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 10
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
+
+              # Clone the in-cluster monorepo mirror once (credentials in the URL are never echoed).
+              WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+              echo "▶ cloning mirror ${ORG}/${MIRROR_REPO}@${REVISION}…"
+              git clone -q --depth 1 --branch "$REVISION" \
+                "https://${AUTH}@${HOST}/${ORG}/${MIRROR_REPO}.git" "$WORK/mono" \
+                2>/dev/null || { echo "❌ mirror clone failed"; exit 1; }
+
+              FAIL=0
+              while IFS='=' read -r REPO SUBDIR; do
+                REPO="$(echo "$REPO" | xargs)"; SUBDIR="$(echo "$SUBDIR" | xargs)"
+                [[ -z "$REPO" || "$REPO" == \#* ]] && continue
+                SRC="$WORK/mono/${SUBDIR}"
+                if [[ ! -d "$SRC" ]]; then
+                  echo "  ❌ ${REPO}: source '${SUBDIR}' absent in the mirror"; FAIL=$((FAIL+1)); continue
+                fi
+
+                # Ensure the target repo exists (idempotent: 200 = already there).
+                CODE=$(curl -ks -o /dev/null -w '%{http_code}' -u "$AUTH" "${GITEA_URL}/api/v1/repos/${ORG}/${REPO}")
+                if [[ "$CODE" == "404" ]]; then
+                  echo "▶ creating ${ORG}/${REPO}…"
+                  curl -ksf -u "$AUTH" -X POST "${GITEA_URL}/api/v1/orgs/${ORG}/repos" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"name\":\"${REPO}\",\"private\":false,\"default_branch\":\"main\",\"auto_init\":false}" >/dev/null \
+                    || { echo "  ❌ create ${REPO} failed"; FAIL=$((FAIL+1)); continue; }
+                fi
+
+                # Snapshot the subdir into a fresh tree and force-push it as the repo root. Force-push
+                # keeps canonical === monorepo; attendee forks do not track it, so this cannot clobber
+                # attendee work. Identity is set with -c flags (no global git config touched).
+                echo "▶ seeding ${ORG}/${REPO} ← ${SUBDIR}…"
+                PUB="$WORK/pub-${REPO}"; rm -rf "$PUB"; mkdir -p "$PUB"
+                cp -R "$SRC/." "$PUB/"
+                git -C "$PUB" init -q -b main
+                git -C "$PUB" -c user.email="workshop@parasol.local" -c user.name="Parasol Workshop" add -A
+                git -C "$PUB" -c user.email="workshop@parasol.local" -c user.name="Parasol Workshop" \
+                  commit -q -m "Seed ${REPO} from ${MIRROR_REPO}/${SUBDIR}@${REVISION}" || true
+                if git -C "$PUB" push -q --force "https://${AUTH}@${HOST}/${ORG}/${REPO}.git" main 2>/dev/null; then
+                  echo "  ✓ ${ORG}/${REPO} seeded"
+                else
+                  echo "  ❌ push ${REPO} failed"; FAIL=$((FAIL+1))
+                fi
+              done <<< "$REPOS"
+
+              [[ "$FAIL" -eq 0 ]] || { echo "❌ ${FAIL} repo(s) failed"; exit 1; }
+              echo "✅ app repos seeded under ${GITEA_URL}/${ORG}"
+{{- end }}
