@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 import org.junit.jupiter.api.Test;
 
@@ -177,5 +178,41 @@ class ClaimResourceTest {
                 .then()
                 .statusCode(200)
                 .body(containsString("claims_created_total"));
+    }
+
+    /**
+     * M07 break-fix device (Pipelines lab), not a real feature - it encodes the Parasol
+     * rule that a claim cannot be Approved while still Unassigned. Flip the toggle below
+     * (true -> false) to inject the bug; the unit-test task goes red, then revert for green.
+     */
+    @Test
+    void approvingAClaimRequiresAnAssignedAdjuster() {
+        // M07 lab: change this one line true -> false to break the build; revert to fix it.
+        final boolean assignAdjusterBeforeApproval = true;
+
+        // Open a claim. Toggle on -> it names an adjuster; toggle off -> it stays Unassigned.
+        String claimNumber = given()
+                .contentType("application/json")
+                .body(assignAdjusterBeforeApproval
+                        ? "{\"claimant\":\"Break-Fix Check\",\"type\":\"auto\",\"amount\":8200.00,\"adjuster\":\"Rebecca Torres\"}"
+                        : "{\"claimant\":\"Break-Fix Check\",\"type\":\"auto\",\"amount\":8200.00}")
+                .when().post("/api/claims")
+                .then()
+                .statusCode(201)
+                .extract().path("claimNumber");
+
+        // Approve it, then read back the adjuster the claim was approved under.
+        String adjuster = given()
+                .contentType("application/json")
+                .body("{\"status\":\"Approved\"}")
+                .when().put("/api/claims/" + claimNumber + "/status")
+                .then()
+                .statusCode(200)
+                .body("status", is("Approved"))
+                .extract().path("adjuster");
+
+        assertNotEquals("Unassigned", adjuster,
+                "Parasol rule violated: claim " + claimNumber + " was Approved while still "
+                        + "Unassigned - an adjuster must own a claim before it can be approved");
     }
 }

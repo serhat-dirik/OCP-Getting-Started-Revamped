@@ -94,7 +94,8 @@ oc tag parasol-images/parasol-claims:latest parasol-images/parasol-claims:1.1
 
 ## Intentional flaws — do not fix
 
-Two deliberate, documented teachable flaws:
+Three deliberate teaching devices (two always-on flaws plus one green-by-default
+break-fix toggle):
 
 1. **N+1 query on `GET /api/claims/{claimNumber}/history`** (for **M11**
    observability). The endpoint fetches the claim's event ids in one query, then
@@ -106,3 +107,10 @@ Two deliberate, documented teachable flaws:
    trusted supply chain). The `main` branch is clean. The `seed-vulnerable`
    branch pins an older UBI9 base tag and a known-CVE `log4j-core` so the M07 ACS
    scan gate fails and the SBOM inspection finds it; see that branch's README.
+3. **Toggleable failing test — green by default** (for **M07** pipelines
+   break-fix). `ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster()`
+   encodes the Parasol rule that a claim cannot be Approved while still
+   `Unassigned`, and **passes as shipped**. The M07 lab has attendees flip its
+   one-line toggle in their fork (`assignAdjusterBeforeApproval = true` → `false`)
+   so the pipeline's `unit-test` task goes red with a readable message, then revert
+   to green. Do **not** remove or "simplify" it away — it is a workshop device.
