@@ -152,6 +152,13 @@ meta_conflicts() {  # module → ws-meta conflictsWith module list
   meta_list "$meta" conflictsWith
 }
 
+meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); empty = engine default.
+  # Modules whose hooks do real work (m07 solve runs a ~9-min pipeline) declare a longer window.
+  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
+  [[ -f "$meta" ]] || return 0
+  awk '$1=="waitSeconds:"{print $2; exit}' "$meta"
+}
+
 purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve system objects
   # and ONLY the keep-module's entry marker. Preserving ALL ws-entry-* markers let stale
   # markers of long-gone modules survive every reset and false-green marker checks (G4-F9).
@@ -159,8 +166,10 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   oc get ns "$ns" >/dev/null 2>&1 || return 0
   info "purging user workloads in ${ns}…"
   oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # CRs 'oc delete all' misses: workspaces (M03+) — extend here as modules add types
+  # CRs 'oc delete all' misses: workspaces (M03+), Tekton runs (M07+) — extend as modules add types.
+  # PipelineRuns cascade to their TaskRuns; deleting them also releases per-run workspace PVCs.
   oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
+  oc delete pipelineruns.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   # Secrets/ConfigMaps the user created (e.g. template-instantiated DB creds) leak past
   # 'oc delete all' — purge them EXCEPT system objects and the current module's marker.
   for kind in secret configmap; do
@@ -214,18 +223,22 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
 }
 
 wait_healthy() {  # appname [timeout_s]
-  local app="$1" timeout="${2:-300}" t=0 health sync
+  local app="$1" timeout="${2:-300}" t=0 health sync phase
   info "waiting for ${app} to sync (up to ${timeout}s)…"
   while (( t < timeout )); do
     health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
     sync="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
-    if [[ "$health" == "Healthy" && "$sync" == "Synced" ]]; then
+    # Hooks keep the sync OPERATION Running after the app already reads Synced/Healthy — and a
+    # solve hook that does real work (m07: runs the whole pipeline) is exactly the point. Ready
+    # means the operation finished too, or "demo-ready" prints while the namespace is still empty.
+    phase="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
+    if [[ "$health" == "Healthy" && "$sync" == "Synced" && ( -z "$phase" || "$phase" == "Succeeded" ) ]]; then
       ok "entry state ready (Synced/Healthy)"
       return 0
     fi
     sleep 5; t=$((t+5))
   done
-  err "entry state not ready after ${timeout}s (health=${health:-?} sync=${sync:-?})"
+  err "entry state not ready after ${timeout}s (health=${health:-?} sync=${sync:-?} op=${phase:-?})"
   echo "   inspect: oc describe application ${app} -n ${ARGO_NS}"
   return 1
 }
@@ -266,7 +279,7 @@ cmd_start() {
   gc_conflicts "$user" "$module"
   info "materializing ${module} entry state for ${user}…"
   render_app "$module" "$user" | oc apply -f -
-  wait_healthy "$(app_name "$module" "$user")"
+  wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
   echo
   ok "${user} can start ${module}."
 }
@@ -400,7 +413,7 @@ cmd_solve() {  # instructor: materialize the module END state (entry chart with 
   gc_conflicts "$user" "$module"
   info "materializing ${module} END state for ${user} (instructor solve)…"
   render_app "$module" "$user" "true" | oc apply -f -
-  wait_healthy "$(app_name "$module" "$user")"
+  wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
   echo
   ok "${module} solved for ${user} — demo-ready."
 }

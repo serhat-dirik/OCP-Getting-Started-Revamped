@@ -1,14 +1,16 @@
 {{- if .Values.solve }}
 # END state for instructor demos (`ws solve m07`): actually RUN the build-test-deploy pipeline so
-# the module's outcome — a pipeline-built, DB-backed claims app — really exists. A PostSync hook Job
-# LAUNCHES the PipelineRun and returns immediately (fire-and-forget): the build is ~8 min, far longer
-# than ws's wait_healthy window, and the PipelineRun/Deployment it creates are not Argo-owned, so the
-# entry Application still reports Synced/Healthy right away. The pipeline then completes on its own and
-# leaves parasol-claims HEALTHY against claims-db (the entry state's DB). `ws verify m07` confirms it.
+# the module's outcome — a pipeline-built, DB-backed claims app — really exists. The PostSync hook
+# Job launches the PipelineRun and WAITS for it to succeed: "demo-ready" must not print while the
+# pipeline still has minutes to go and Topology is empty (caught live, first cycle 2026-07-10 — the
+# original fire-and-forget let `ws solve` report ready ~7 min early). The blocking hook keeps the
+# Argo sync OPERATION Running, which ws's wait now gates on (operationState.phase), sized by
+# ws-meta `waitSeconds` — the pipeline is ~9 min; window 1200s covers a cold cluster.
 #
 # Job pod templates are immutable, so re-solve must recreate the Job: the BeforeHookCreation delete
 # policy + the -{user}-suffixed name handle that. The PipelineRun uses generateName (unique per run)
 # and a per-run volumeClaimTemplate PVC (auto-pruned), so re-solve never wedges on immutability/PVCs.
+# backoffLimit 0: a retry would launch a SECOND PipelineRun beside a possibly-live first — fail loud.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -70,8 +72,8 @@ metadata:
     argocd.argoproj.io/hook: PostSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
-  backoffLimit: 2
-  activeDeadlineSeconds: 180
+  backoffLimit: 0
+  activeDeadlineSeconds: 1200
   template:
     metadata:
       labels:
@@ -96,7 +98,19 @@ spec:
               set -euo pipefail
               echo "▶ launching the build-test-deploy pipeline (solve end-state)…"
               PR="$(oc create -o name -f /solve/pipelinerun.yaml)"
-              echo "  ✓ started ${PR}"
-              echo "  it builds/tests/deploys parasol-claims (~8 min) and wires it to claims-db;"
-              echo "  the app is HEALTHY once it completes.  follow: tkn pipelinerun logs -Lf ${PR##*/}"
+              echo "  ✓ started ${PR#*/} — waiting for it (build+test+deploy ≈ 9 min)…"
+              for i in $(seq 1 110); do
+                s="$(oc get "$PR" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || true)"
+                case "$s" in
+                  True)
+                    echo "  ✓ pipeline Succeeded — parasol-claims deployed and wired to claims-db"
+                    exit 0;;
+                  False)
+                    echo "  ❌ pipeline FAILED — inspect: tkn pipelinerun logs ${PR##*/}"
+                    exit 1;;
+                esac
+                sleep 10
+              done
+              echo "  ❌ pipeline still not finished after ~18 min — inspect: oc get ${PR}"
+              exit 1
 {{- end }}
