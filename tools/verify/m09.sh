@@ -6,7 +6,8 @@
 #          EMPTY (the attendee's first Application is the lab).
 #   End:   claims runs GitOps-managed in {user}-dev (claims-db + app ready, app route answers 200,
 #          and the Deployment carries the Argo tracking annotation — proving it was deployed by the
-#          student instance, not applied by hand) AND promoted to {user}-stage (2 replicas).
+#          student instance, not applied by hand) AND promoted to {user}-stage (>=2 replicas: solve
+#          leaves 2, the completed lab's Exercise D scales to 3 — both pass).
 # End checks are outcome-based: they pass for BOTH the attendee's own Application AND `ws solve`'s
 # two Applications. Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
 set -euo pipefail
@@ -68,11 +69,13 @@ deploy_ready() {
   [[ -n "$ready" && "$ready" -ge 1 ]]
 }
 
-# Deployment reports exactly N ready replicas (proves the stage per-env replica delta).
-deploy_ready_count() {
+# Deployment reports AT LEAST N ready replicas. Stage starts at 2 (the overlay's canonical count,
+# which `ws solve` produces) but the completed lab deliberately ends at 3 (Exercise D scales up) —
+# so the end check must accept >= 2, not == 2, or a correct attendee gets a false red.
+deploy_ready_min() {
   local name="$1" ns="$2" want="$3" ready
   ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ "$ready" == "$want" ]]
+  [[ -n "$ready" && "$ready" -ge "$want" ]]
 }
 
 # The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student
@@ -114,7 +117,7 @@ else
   check "parasol-claims ready in ${DEV}"                 deploy_ready parasol-claims "$DEV"                  || hint "create your Argo Application (overlays/dev) on student-gitops; ws solve m09 does this"
   check "dev claims is GitOps-managed (Argo tracking)"   deploy_gitops_managed parasol-claims "$DEV"         || hint "deploy it via an Argo Application, not oc apply — that is the M09 lesson"
   check "route parasol-claims answers 200 in ${DEV}"     route_ready_200 "$DEV"                              || hint "claims app not ready — check pods: oc get pods -n ${DEV}"
-  check "parasol-claims promoted to ${STAGE} (2 replicas)" deploy_ready_count parasol-claims "$STAGE" 2      || hint "promote — add a second Application pointed at overlays/stage (ws solve m09 does this)"
+  check "parasol-claims promoted to ${STAGE} (>=2 replicas)" deploy_ready_min parasol-claims "$STAGE" 2     || hint "promote — add a second Application pointed at overlays/stage (ws solve m09 does this)"
 fi
 
 verify_summary
