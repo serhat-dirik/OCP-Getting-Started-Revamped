@@ -1,4 +1,4 @@
-# M23 — Jobs, Batch & Queued Workloads
+# M06 — Jobs, Batch & Queued Workloads
 
 ## Slide: The overnight run that can take down the cluster
 
@@ -20,7 +20,7 @@ Visual: A calendar/clock "2 a.m." with one giant job box squeezing several small
 - The Job is the batch-tier object
 
 Notes: Place batch on the spectrum so people pick the right tool. Request-driven work has a caller holding a socket — a Deployment behind a Service, measured in latency. Event-driven work reacts to a message or webhook within seconds. Batch is different in kind: a bounded body of work runs to completion and stops — "process all 40,000 claims" — and nobody waits on a connection; you care that it finishes, correctly, within a window. OpenShift's object for that end of the spectrum is the Job.
-Visual: Reuse concept diagram m23-...-01-async-spectrum.svg — request → event → batch, batch highlighted.
+Visual: Reuse concept diagram m06-...-01-async-spectrum.svg — request → event → batch, batch highlighted.
 
 ## Slide: The Job controller — runs to completion, then stops
 
@@ -42,7 +42,7 @@ Visual: A Job box spawning two waves of three Pods, plus a small CronJob clock a
 - Higher priority preempts — evict + requeue
 
 Notes: The heart of the module. Plain Jobs have no arbitration; Red Hat build of Kueue adds an admission layer above the Job controller. A ClusterQueue holds the quota (each attendee gets their own, so nobody starves anyone else); a LocalQueue is the namespaced pointer into it; a Job opts in with a `queue-name` label and Kueue holds it suspended until there is room. When the queue is full, some jobs are admitted and the rest wait — and a higher-priority job can preempt a running lower-priority one, evicting it back into the queue. You watch exactly this: five jobs, two admitted, three pending; one urgent job preempts a running one.
-Visual: Reuse concept diagram m23-...-02-kueue-admission.svg — Job → LocalQueue → ClusterQueue → admitted / pending / preempted.
+Visual: Reuse concept diagram m06-...-02-kueue-admission.svg — Job → LocalQueue → ClusterQueue → admitted / pending / preempted.
 
 ## Slide: AI batch is just batch
 

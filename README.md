@@ -22,7 +22,7 @@ The same content base doubles as a **presenter-led demo kit** for Red Hat Soluti
 
 ## Module library
 
-27 active modules in four blocks — **A Foundations** (M01–M05, M23) · **B Delivery & Trust** (M06–M11, M29) · **C Platform & Tenancy** (M12–M15) · **D Advanced Electives** (M16–M28). Any module can be someone's first: entry states are materialized per user by automation (`ws start m09`), never by "please complete the previous module."
+27 active modules in four blocks — **A Foundations** (M01–M06) · **B Delivery & Trust** (M07–M13) · **C Platform & Tenancy** (M14–M17) · **D Advanced Electives** (M18–M27). Any module can be someone's first: entry states are materialized per user by automation (`ws start m07`), never by "please complete the previous module."
 
 Recommended paths: 3-day flagship (`WS-FULL-3D`), 2-day compressed, 1-day developer / DevOps days, and 45-minute demo picks. SAs compose any subset.
 

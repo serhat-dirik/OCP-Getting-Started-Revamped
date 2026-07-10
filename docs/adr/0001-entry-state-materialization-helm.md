@@ -31,7 +31,7 @@ Two field-proven semantics were added to the engine after the M04/M05 smoke test
    while the entry-marker check stays green (G3-M04 SEV2). Each chart's `ws-meta.yaml` now declares
    `conflictsWith:`; start/solve evicts those Applications, purges this module's `purgeNamespaces`, and
    recycles its own Application so the fresh apply triggers a creation auto-sync (required with selfHeal off).
-   Disjoint modules (m01 `parasol-web`, m23 `{user}-batch`) still coexist untouched — proven live
+   Disjoint modules (m01 `parasol-web`, m06 `{user}-batch`) still coexist untouched — proven live
    (m01 survived an m04 start on the same user; m01+m02+m05 markers coexisted through the M05 smoke).
 
 Consequence for authors: a module whose chart re-materializes an existing named workload MUST list the other

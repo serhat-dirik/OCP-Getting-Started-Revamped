@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M23 — Jobs, Batch & Queued Workloads.
+# Verify M06 — Jobs, Batch & Queued Workloads.
 #   Entry: {user}-batch exists (labeled for Kueue), holds the seeded claims-data PVC, a LocalQueue
 #          (user-queue) bound to the per-user ClusterQueue, and MaaS batch-inference credentials;
 #          entry marker + quota present.
@@ -38,10 +38,10 @@ localqueue_active() {
 # present and Complete, but a completed hook can be cleaned up later — so absence is treated as
 # "ran and cleaned up" (the PVC-Bound check covers the volume). A seed Job that is PRESENT but not
 # Complete (Failed/Running) is a real problem and fails the check. Gate on the namespace first:
-# with the namespace itself missing, "job absent" must read as FAILURE, not cleanup (G3-M23 F4
+# with the namespace itself missing, "job absent" must read as FAILURE, not cleanup (G3-M06 F4
 # false-positive — the check printed green while nothing existed at all).
 seed_ok() {
-  local job="claims-data-seed-m23-${USER_NAME}"
+  local job="claims-data-seed-m06-${USER_NAME}"
   oc get ns "$NS" >/dev/null 2>&1 || return 1
   oc get job "$job" -n "$NS" >/dev/null 2>&1 || return 0
   oc get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null | grep -q True
@@ -62,16 +62,16 @@ cq_active() {
   [[ "$(oc get clusterqueue "$CQ" -o jsonpath='{.status.conditions[?(@.type=="Active")].status}' 2>/dev/null || true)" == "True" ]]
 }
 
-# --- entry state (what `ws start m23` materializes) --------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws start m23 --user ${USER_NAME}"
-check "entry marker ws-entry-m23 present"               oc get cm ws-entry-m23 -n "$NS"              || hint "entry app not synced — ws start m23 --user ${USER_NAME}"
-check "workshop quota present in ${NS}"                 oc get resourcequota workshop-quota -n "$NS" || hint "entry app not synced — ws reset m23 --user ${USER_NAME}"
-check "namespace opted into Kueue (kueue.openshift.io/managed=true)" ns_kueue_managed                || hint "without this label Kueue ignores labeled Jobs — ws reset m23 --user ${USER_NAME}"
-check "LocalQueue user-queue is Active (bound to ${CQ})" localqueue_active                            || hint "LocalQueue missing/inactive — check the workshop layer created ${CQ}: ws reset m23 --user ${USER_NAME}"
+# --- entry state (what `ws start m06` materializes) --------------------------
+check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws start m06 --user ${USER_NAME}"
+check "entry marker ws-entry-m06 present"               oc get cm ws-entry-m06 -n "$NS"              || hint "entry app not synced — ws start m06 --user ${USER_NAME}"
+check "workshop quota present in ${NS}"                 oc get resourcequota workshop-quota -n "$NS" || hint "entry app not synced — ws reset m06 --user ${USER_NAME}"
+check "namespace opted into Kueue (kueue.openshift.io/managed=true)" ns_kueue_managed                || hint "without this label Kueue ignores labeled Jobs — ws reset m06 --user ${USER_NAME}"
+check "LocalQueue user-queue is Active (bound to ${CQ})" localqueue_active                            || hint "LocalQueue missing/inactive — check the workshop layer created ${CQ}: ws reset m06 --user ${USER_NAME}"
 check "claims-data PVC is Bound"                        pvc_bound claims-data                        || hint "dataset PVC not bound — needs an RWX StorageClass; check: oc get pvc claims-data -n ${NS}"
-check "claims-data seed Job succeeded (or cleaned up)"  seed_ok                                      || hint "seed Job present but not Complete — ws reset m23 --user ${USER_NAME} (check the claims-data-seed-m23-${USER_NAME} Job)"
-check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset m23 --user ${USER_NAME} (check maas-copy-m23-${USER_NAME})"
-check "MaaS endpoint/model present (configmap maas-config)" oc get cm maas-config -n "$NS"            || hint "entry app not synced — ws reset m23 --user ${USER_NAME}"
+check "claims-data seed Job succeeded (or cleaned up)"  seed_ok                                      || hint "seed Job present but not Complete — ws reset m06 --user ${USER_NAME} (check the claims-data-seed-m06-${USER_NAME} Job)"
+check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset m06 --user ${USER_NAME} (check maas-copy-m06-${USER_NAME})"
+check "MaaS endpoint/model present (configmap maas-config)" oc get cm maas-config -n "$NS"            || hint "entry app not synced — ws reset m06 --user ${USER_NAME}"
 
 # ClusterQueue is cluster-scoped — attendees can't read it. Assert it only when the caller can
 # (admin/CI); attendees see the same fact via the LocalQueue Active check above.
@@ -80,10 +80,10 @@ if oc auth can-i get clusterqueues.kueue.x-k8s.io >/dev/null 2>&1; then
 fi
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
-  # --- end state (what a completed lab / `ws solve m23` looks like) -----------
-  check "at least one Job has Completed"                 any_job_complete                             || hint "run the monthly-statement Job (lab exercise 1) — or ws solve m23 --user ${USER_NAME}"
-  check "nightly-statement CronJob exists"               oc get cronjob nightly-statement -n "$NS"    || hint "create the CronJob (lab exercise 4) — or ws solve m23 --user ${USER_NAME}"
-  check "a Kueue Workload shows Admitted=True"           any_workload_admitted                        || hint "submit a Job through the LocalQueue (lab exercise 5/6) — or ws solve m23 --user ${USER_NAME}"
+  # --- end state (what a completed lab / `ws solve m06` looks like) -----------
+  check "at least one Job has Completed"                 any_job_complete                             || hint "run the monthly-statement Job (lab exercise 1) — or ws solve m06 --user ${USER_NAME}"
+  check "nightly-statement CronJob exists"               oc get cronjob nightly-statement -n "$NS"    || hint "create the CronJob (lab exercise 4) — or ws solve m06 --user ${USER_NAME}"
+  check "a Kueue Workload shows Admitted=True"           any_workload_admitted                        || hint "submit a Job through the LocalQueue (lab exercise 5/6) — or ws solve m06 --user ${USER_NAME}"
 fi
 
 verify_summary
