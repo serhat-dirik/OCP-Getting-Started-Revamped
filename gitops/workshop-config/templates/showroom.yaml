@@ -1,0 +1,463 @@
+{{- /*
+  Showroom cockpit — per-attendee RHDP Showroom shell (instructions + embedded terminals + tool
+  tabs). One Deployment per user in a single shared `showroom` namespace: attendees never touch
+  this namespace directly, they reach it only through their per-user Route and the in-pod terminal,
+  which logs THEM in (oc login as {user}). Adapted from the rhpds hyperledger-on-openshift-demo
+  showroom chart (helm/components/showroom), the closest working model.
+
+  Serving pipeline (per pod): init content-clone (mirror → /showroom/repo) → init antora-build
+  (showroom/site.yml → /showroom/www, per-user attributes injected) → init terminal-prep (oc login
+  {user}, seed $HOME). Runtime containers: nginx (8080 proxy) + content (nookbag UI over /showroom/www,
+  :8000) + terminal (ttyd :7681, forks a fresh shell per websocket → one container backs both
+  /tty-top and /tty-bottom).
+
+  ROLLOUT: .Values.showroom.pilotUser gates a two-phase rollout — when set, ONLY that user is
+  rendered (the PM verifies the pilot before it scales to all userCount). Empty string = all users.
+*/ -}}
+{{- if .Values.showroom.enabled }}
+{{- $ns := .Values.showroom.namespace }}
+{{- $domain := .Values.clusterDomain }}
+{{- $apiHost := printf "api.%s:6443" (trimPrefix "apps." .Values.clusterDomain) }}
+{{- $giteaHost := printf "gitea-gitea.%s" .Values.clusterDomain }}
+{{- $mirrorUrl := printf "https://gitea-gitea.%s/%s/%s.git" .Values.clusterDomain .Values.mirrorOrg .Values.mirrorRepo }}
+{{- $img := .Values.showroom.images }}
+{{- /* Build the target user list: pilot user only, or the full 1..userCount range. */ -}}
+{{- $users := list }}
+{{- if .Values.showroom.pilotUser }}
+{{- $users = list .Values.showroom.pilotUser }}
+{{- else }}
+{{- range $i := until (int .Values.userCount) }}{{- $users = append $users (printf "%s%d" $.Values.userPrefix (add $i 1)) }}{{- end }}
+{{- end }}
+---
+# Shared cockpit namespace. Per-user Deployments/Routes live here; the attendee is never granted
+# access to it — isolation is by the terminal's oc-login identity, not by namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+---
+# One ServiceAccount backs every showroom pod. It carries NO attendee identity; its only privilege
+# is reading the shared workshop password (below) so the terminal-prep init can oc-login as {user}.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: showroom
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+---
+# why (cross-namespace read): the shared workshop password lives in secret workshop-user-creds in the
+# gitea namespace (single source of truth, same one gitea-user-seed reads). Grant the showroom SA
+# get on JUST that secret so the init can fetch it at runtime — never copied into a ConfigMap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: showroom-read-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["workshop-user-creds"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: showroom-read-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: showroom-read-creds
+subjects:
+  - kind: ServiceAccount
+    name: showroom
+    namespace: {{ $ns }}
+---
+# nginx reverse proxy shared by all showroom pods: / → nookbag content (:8000); /tty-top + /tty-bottom
+# → the one ttyd (:7681), which forks an independent shell per connection (watch-in-one/act-in-the-
+# other). Long timeouts keep idle terminal websockets alive for the whole session.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: showroom-proxy
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  nginx.conf: |
+    events {}
+    error_log /dev/stdout info;
+    http {
+      include /etc/nginx/mime.types;
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+      server {
+        listen 8080;
+        absolute_redirect off;
+        location / {
+          proxy_pass http://127.0.0.1:8000;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+        location = /tty-top { return 302 /tty-top/; }
+        location /tty-top/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_read_timeout 43200000;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+        location = /tty-bottom { return 302 /tty-bottom/; }
+        location /tty-bottom/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_read_timeout 43200000;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+      }
+    }
+{{- range $user := $users }}
+---
+# Per-user Antora attributes → injected as build-time doc attributes so instructions render
+# personalized clickable links ({user}, {cluster_domain}, {ocp_console_url}, {gitea_url}, ...).
+# NOTE: the shared password is deliberately NOT here (never bake a credential into a ConfigMap) —
+# content that shows {password} falls back to its @-soft default until a secure path is designed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: showroom-userdata-{{ $user }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+data:
+  user_data.yml: |
+    user: {{ $user }}
+    cluster_domain: {{ $domain }}
+    ocp_console_url: https://console-openshift-console.{{ $domain }}
+    gitea_url: https://{{ $giteaHost }}
+    devspaces_url: https://devspaces.{{ $domain }}
+    guid: {{ $user }}
+    lab_name: OpenShift Application Platform — Getting Started
+---
+# Per-user terminal home. Survives pod restarts so attendee scratch work + kubeconfig persist.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: showroom-home-{{ $user }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ $.Values.showroom.homeStorage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: showroom-{{ $user }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+    app.kubernetes.io/name: showroom
+    app.kubernetes.io/instance: showroom-{{ $user }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: showroom-{{ $user }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: showroom
+        app.kubernetes.io/instance: showroom-{{ $user }}
+        workshop.redhat.com/user: {{ $user | quote }}
+    spec:
+      serviceAccountName: showroom
+      initContainers:
+        # 1) Clone the in-cluster monorepo mirror (public repo, valid RHDP wildcard cert → no auth).
+        - name: content-clone
+          image: {{ $img.gitCloner | quote }}
+          env:
+            - name: GIT_REPO_URL
+              value: {{ $mirrorUrl | quote }}
+            - name: GIT_REPO_REF
+              value: {{ $.Values.showroom.contentRef | quote }}
+            - name: CLONE_DIR
+              value: /showroom/repo
+          volumeMounts:
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+        # 2) Build our Antora content into /showroom/www, injecting this user's attributes.
+        - name: antora-build
+          image: {{ $img.antora | quote }}
+          env:
+            - name: FILES_DIR
+              value: /showroom/repo
+            - name: OUTPUT_DIR
+              value: /showroom/www
+            - name: ANTORA_SITE_FILE
+              value: showroom/site.yml
+          volumeMounts:
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+            - name: showroom-files
+              mountPath: /showroom/www
+              subPath: www
+            - name: userdata
+              mountPath: /user_data/
+        # 3) Log THIS attendee in (oc login as {user}) and seed their terminal home. The password is
+        #    fetched from the gitea secret via the SA token and used only for the login — never echoed.
+        - name: terminal-prep
+          image: {{ $img.terminal | quote }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: WS_USER
+              value: {{ $user | quote }}
+            - name: API_HOST
+              value: {{ $apiHost | quote }}
+            - name: GITEA_NS
+              value: {{ $.Values.giteaNamespace | quote }}
+            - name: MIRROR_URL
+              value: {{ $mirrorUrl | quote }}
+          args:
+            - |
+              set -euo pipefail
+              export HOME=/home/lab-user
+              mkdir -p "$HOME/.kube"
+
+              echo "▶ reading the shared workshop password (secret workshop-user-creds)…"
+              PW="$(oc get secret workshop-user-creds -n "$GITEA_NS" -o jsonpath='{.data.password}' | base64 -d)"
+              [[ -n "$PW" ]] || { echo "❌ workshop-user-creds/password missing in $GITEA_NS"; exit 1; }
+
+              echo "▶ logging in as ${WS_USER} (password not shown)…"
+              for i in $(seq 1 20); do
+                if oc login "https://${API_HOST}" -u "$WS_USER" -p "$PW" \
+                     --insecure-skip-tls-verify=true --kubeconfig="$HOME/.kube/config" >/dev/null 2>&1; then
+                  break
+                fi
+                echo "  attempt $i/20 — oauth may still be settling, retrying…"; sleep 6
+              done
+              unset PW
+              oc --kubeconfig="$HOME/.kube/config" whoami >/dev/null 2>&1 \
+                || { echo "❌ oc login as ${WS_USER} failed"; exit 1; }
+              oc --kubeconfig="$HOME/.kube/config" project "${WS_USER}-dev" >/dev/null 2>&1 || true
+
+              echo "▶ seeding the workshop repo clone (best effort)…"
+              if [[ ! -d "$HOME/ocp-getting-started/.git" ]]; then
+                git clone --depth 1 "$MIRROR_URL" "$HOME/ocp-getting-started" 2>/dev/null \
+                  || echo "  (skipped — mirror clone failed, not fatal)"
+              fi
+
+              echo "▶ writing shell greeting…"
+              mkdir -p "$HOME/.bashrc.d"
+              cat > "$HOME/.bashrc.d/00-workshop.sh" <<EOF
+              echo "You are logged in as \$(oc whoami 2>/dev/null || echo ${WS_USER}) — project: \$(oc project -q 2>/dev/null || echo ${WS_USER}-dev)"
+              EOF
+              echo "✅ terminal prepared for ${WS_USER}"
+          volumeMounts:
+            - name: home
+              mountPath: /home/lab-user
+      containers:
+        # nginx proxy — the only container the Route targets.
+        - name: nginx
+          image: {{ $img.nginx | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: web
+              containerPort: 8080
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-pid
+              mountPath: /var/run
+        # nookbag content — serves the built site + split-screen UI, reading our ui-config.
+        - name: content
+          image: {{ $img.content | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GIT_REPO_URL
+              value: {{ $mirrorUrl | quote }}
+            - name: GIT_REPO_REF
+              value: {{ $.Values.showroom.contentRef | quote }}
+            - name: ANTORA_PLAYBOOK
+              value: showroom/site.yml
+            - name: DOMAIN
+              value: {{ $domain | quote }}
+            - name: ZT_UI_ENABLED
+              value: "true"
+            - name: ZT_BUNDLE
+              value: {{ $.Values.showroom.nookbagBundle | quote }}
+            - name: SHOWROOM_UI_CONFIG
+              value: |
+                ---
+                type: showroom
+                default_width: 45
+                persist_url_state: true
+                view_switcher:
+                  enabled: true
+                  default_mode: split
+                antora:
+                  name: modules
+                tabs:
+                  - name: Terminal 1
+                    secondary_name: Terminal 2
+                    type: double-terminal
+                  - name: OCP Console
+                    url: https://console-openshift-console.{{ $domain }}
+                    external: true
+                  - name: Gitea
+                    url: https://{{ $giteaHost }}
+                    external: true
+          volumeMounts:
+            - name: userdata
+              mountPath: /user_data/
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+            - name: showroom-files
+              mountPath: /showroom/www
+              subPath: www
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+        # ttyd terminal — home carries the kubeconfig written by terminal-prep, so shells open as {user}.
+        - name: terminal
+          image: {{ $img.terminal | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 7681
+              protocol: TCP
+          volumeMounts:
+            - name: home
+              mountPath: /home/lab-user
+          resources:
+            requests:
+              cpu: {{ $.Values.showroom.terminalResources.requests.cpu | quote }}
+              memory: {{ $.Values.showroom.terminalResources.requests.memory | quote }}
+            limits:
+              cpu: {{ $.Values.showroom.terminalResources.limits.cpu | quote }}
+              memory: {{ $.Values.showroom.terminalResources.limits.memory | quote }}
+      volumes:
+        - name: showroom-files
+          emptyDir: {}
+        - name: userdata
+          configMap:
+            name: showroom-userdata-{{ $user }}
+        - name: nginx-config
+          configMap:
+            name: showroom-proxy
+            defaultMode: 420
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-pid
+          emptyDir: {}
+        - name: home
+          persistentVolumeClaim:
+            claimName: showroom-home-{{ $user }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: showroom-{{ $user }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: showroom-{{ $user }}
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Per-user cockpit URL: showroom-{user}.<apps-domain>. Long HAProxy timeouts keep terminal
+# websockets alive; edge TLS with redirect so http → https.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: showroom-{{ $user }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    haproxy.router.openshift.io/timeout: 1h
+    haproxy.router.openshift.io/timeout-tunnel: 1h
+spec:
+  host: showroom-{{ $user }}.{{ $domain }}
+  to:
+    kind: Service
+    name: showroom-{{ $user }}
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+{{- end }}
+{{- end }}
