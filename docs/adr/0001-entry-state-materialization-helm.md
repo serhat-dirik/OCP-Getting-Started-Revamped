@@ -31,9 +31,25 @@ Two field-proven semantics were added to the engine after the M04/M05 smoke test
    while the entry-marker check stays green (G3-M04 SEV2). Each chart's `ws-meta.yaml` now declares
    `conflictsWith:`; start/solve evicts those Applications, purges this module's `purgeNamespaces`, and
    recycles its own Application so the fresh apply triggers a creation auto-sync (required with selfHeal off).
-   Disjoint modules (m01 `parasol-web`, m06 `{user}-batch`) still coexist untouched — proven live
-   (m01 survived an m04 start on the same user; m01+m02+m05 markers coexisted through the M05 smoke).
 
-Consequence for authors: a module whose chart re-materializes an existing named workload MUST list the other
-owners in `conflictsWith` (both directions); the G3 smoke deliberately probes cross-module coexistence to catch
-omissions.
+## Amendment — 2026-07-10 (attendee self-service + same-namespace policy)
+
+3. **`ws prep` — attendee self-service front door** (Serhat directive). Attendees hold per-user,
+   name-scoped RBAC on their own entry Applications (`gitops/workshop-config/templates/per-user-argo-rbac.yaml`:
+   get/list broadly; patch/delete pinned to `entry-mNN-{user}` by resourceNames; create accepted un-scoped for
+   the workshop threat model, guarded by the workshop-entries AppProject repo pin). `ws prep <module>` detects
+   leftovers/conflicts/missing state, reports them plainly, asks consent (`--yes` for non-interactive), then
+   runs the purge-first reset path and the entry verify. Instructor `ws start`/`ws reset` remain the
+   no-questions bulk/backstop verbs. Proven live as a real attendee (user7: fast no-op on a clean module;
+   full detect→evict→create→verify on a dirty one).
+4. **Same-namespace modules are conflicts — coexistence requires disjoint namespaces.** The earlier claim that
+   m01 (`parasol-web`) coexists with the claims modules in `{user}-dev` proved purge-fragile: any prep/reset of
+   a claims module purges the shared namespace, killing m01's workloads, and with selfHeal off the m01 app then
+   reports Synced/Healthy while its Deployment is GONE (observed live on user7 — the worst failure mode: green
+   status, wrong world). Policy: modules that materialize into the same namespace declare each other in
+   `conflictsWith` (m01 ↔ m02–m05 are mutual); only cross-namespace modules truly coexist (m06 in
+   `{user}-batch` beside any dev-namespace module — proven through three G3 runs and the G4 audit).
+
+Consequence for authors: a module whose chart re-materializes an existing named workload OR shares a namespace
+with another module MUST list the other owners in `conflictsWith` (both directions); the G3 smoke deliberately
+probes cross-module coexistence to catch omissions.
