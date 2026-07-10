@@ -1,67 +1,86 @@
-# M06 build note — Pipelines Fundamentals & Task Libraries  `[OCP]`
+# M23 build note — Jobs, Batch & Queued Workloads
 
-Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M06 (lines 97-106)
-Method: live build cluster `ocp-ws-revamped` (OCP 4.21.22), OLM packagemanifests + CSV, `oc api-resources`/`oc explain`, live TektonConfig + shipped Tasks + PAC route, docs.redhat.com + pipelinesascode.com, repo inspection. versions.yaml (2026-07-08) trusted; re-verified live 2026-07-09.
+Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M23 (lines 82-91)
+Method: live cluster `ocp-ws-revamped` (OCP 4.21.22), OLM packagemanifests (CSV alm-examples), `oc explain`, live MaaS egress test, docs.redhat.com Red Hat build of Kueue.
 
 ## Verified versions
 | Product | Version | Channel | Source | Date |
 |---|---|---|---|---|
-| OpenShift | 4.21.22 | stable-4.21 | `oc version` (live) | 2026-07-09 |
-| OpenShift Pipelines | 1.22.4 | latest (== pipelines-1.22) | packagemanifest `openshift-pipelines-operator-rh` + CSV `…v1.22.4` Succeeded (live); versions.yaml | 2026-07-09 |
-| Tekton core API | `tekton.dev/v1` (Pipeline/Task/PipelineRun/TaskRun GA); StepAction `tekton.dev/v1beta1` | — | `oc api-resources` (live) | 2026-07-09 |
-| Pipelines-as-Code | bundled + GA; `Repository` `pipelinesascode.tekton.dev/v1alpha1` | — | live PAC controller/watcher/webhook pods + CRD | 2026-07-09 |
+| Red Hat build of Kueue operator | 1.3.1 | stable-v1.3 | packagemanifest `kueue-operator` (Red Hat Operators) | 2026-07-09 |
+| Custom Metrics Autoscaler (KEDA) | 2.19.0-1 | stable | packagemanifest `openshift-custom-metrics-autoscaler-operator` | 2026-07-09 |
 
-Cluster reality (verified live 2026-07-09):
-- Operator installed **cluster-wide** (OperatorGroup in `openshift-operators`), CSV `openshift-pipelines-operator-rh.v1.22.4` Succeeded. Default `TektonConfig/config` present: `enable-api-fields: beta`, **all four resolvers ON** (`enable-cluster-resolver`, `enable-git-resolver`, `enable-hub-resolver`, `enable-bundles-resolver` = true); addon params `resolverTasks`/`communityResolverTasks`/`pipelineTemplates` = true. → PAC + resolvers work with **no extra config**.
-- **45 bundled Tasks** in `openshift-pipelines` ns (`git-clone`, `buildah`, `maven`, `s2i-java`, `openshift-client`, `argocd-task-sync-and-wait`, `helm-upgrade-*`, `kn`, `pull-request`…, plus `…-1-22-0` versioned twins) + 6 StepActions — all **cluster-resolver-referenceable**. `ClusterTask` kind **REMOVED since Pipelines 1.17** (redhat.com "Migration from ClusterTasks to Tekton Resolvers"); we run 1.22.4 → never author ClusterTasks.
-- **PAC + Gitea feasible.** PAC controller route live: `pipelines-as-code-controller-openshift-pipelines.apps.cluster-qvkd5…` (edge TLS) = the webhook target. Gitea is a first-class PAC provider (`git_provider.type: gitea|forgejo`, `url`, `secret`, `webhook_secret`; signatures NOT validated for Gitea) — pipelinesascode.com/docs/providers/forgejo + docs.redhat.com PaC. In-cluster Gitea route live (`gitea-gitea.apps.cluster-qvkd5…`) → in-cluster webhook reachable.
-- `{user}-cicd` exists (live): ResourceQuota `workshop-quota` = requests.cpu 3 / requests.memory 6Gi / limits.cpu 6 / **limits.memory 12Gi** / **pvc 5** / pods 30; LimitRange `workshop-limits` default container **500m / 1Gi**, request 100m/256Mi, **no min/max**.
-- `apps/parasol-claims` EXISTS (contradicts M04 note gap): Quarkus JVM fast-jar, JDK 21 / UBI9 (Containerfile, non-root UID 185), Panache + PostgreSQL (prod) / **H2 (test)**, SmallRye Health, **one** rest-assured test (`ClaimResourceTest`). Builds via `buildah` (Containerfile) OR `s2i-java` (java-21 ImageStream in `openshift` ns). Shared prebuilt image `…/parasol-images/parasol-claims:1.0`; per-user fork `{user}/parasol-claims` seeded by the M02 fork job (`gitops/entry-states/m02/templates/fork-repos.yaml`).
-- **`pipelines/` repo directory EXISTS but is EMPTY** — the intended reusable task library is unbuilt.
+API shapes (verified 2026-07-09):
+- **Kueue operator config CR:** `Kueue` (`kueue.openshift.io/v1`), name `cluster`; alm-example spec = `{managementState, config:{integrations:{frameworks:[BatchJob]}}}`. InstallMode **AllNamespaces only**; suggested ns `openshift-kueue-operator`. (packagemanifest CSV)
+- **Kueue workload CRDs (operand, `kueue.x-k8s.io/v1beta1`):** ResourceFlavor, ClusterQueue, LocalQueue, Workload, WorkloadPriorityClass. Grounded via docs.redhat.com "Red Hat build of Kueue" (quotas & workloads). CRDs ABSENT on cluster until the operand installs (verified absent).
+- **Job (batch/v1, `oc explain`):** completions, parallelism, backoffLimit, activeDeadlineSeconds, ttlSecondsAfterFinished, completionMode(Indexed), suspend, podFailurePolicy, backoffLimitPerIndex, maxFailedIndexes — all present.
+- **CronJob (batch/v1):** schedule(req), concurrencyPolicy, startingDeadlineSeconds, suspend, successfulJobsHistoryLimit, failedJobsHistoryLimit, timeZone — all present/GA.
+- **KEDA/CMA CRDs (packagemanifest):** `ScaledJob` & `ScaledObject` at `keda.sh/v1alpha1`; operator config `KedaController` (`keda.sh/v1alpha1`, name `keda`, ns `openshift-keda`); TriggerAuthentication, CloudEventSource, HTTPScaledObject(`http.keda.sh/v1alpha1`). NOT installed.
+- **MaaS egress:** `https://maas-rhdp.apps.maas.redhatworkshops.io/v1/models` reachable FROM cluster pods — **HTTP 200 in 0.38s** (ubi9 pod, 2026-07-09). Auth = Bearer from `secret/credentials` key `apitoken` in `openshift-lightspeed`. Live model: `qwen3-14b` (content stays model-agnostic per M01; recorded for build).
+- **Namespace:** `user1-batch` does NOT exist yet — entry state / batch stack must create it. Namespaces carry `workshop.redhat.com/user` label (usable for ClusterQueue `namespaceSelector`).
 
 ## Spec deltas
-- Spec "Tekton Hub deprecation → verify": confirmed — `ClusterTask` removed (1.17+); `TektonHub` CRD still present but deprecated-as-product (banned, 04-STYLE §5). Current reuse = **cluster / git / hub resolvers**; hub resolver → **Artifact Hub** (Artifact Hub content itself is not Red Hat-supported, only the resolver config is). Teach resolvers, never ClusterTask.
-- `pipelines/` empty → the "company task library" the spec leans on does not exist; net-new content+platform.
-- `platform-portfolio/components/openshift-pipelines/` = **Subscription only** (channel `latest`); relies on the operator's auto-created default `TektonConfig` (verified sufficient). Fine, but pruner/retention is unmanaged — optional add.
-- LimitRange default container **limit = 1Gi**: a Maven/Quarkus build TaskRun under that cap risks **OOMKill** — the spec's "pipeline PVC contention" watchout understates it (it's memory too).
+- **Quota model:** entry state says "per-user LocalQueues against a quota'd ClusterQueue" (singular). Kueue quota lives ONLY in the ClusterQueue; LocalQueue holds none. A single shared CQ = cross-user starvation, contradicting the watchout "one user's batch can't starve others." → use **per-user ClusterQueue** (each with its LocalQueue). Sketched below.
+- **Kueue packaging (spec "verify GA/version"):** operator CSV v1.3.1; config CR `kueue.openshift.io/v1`; workload API `kueue.x-k8s.io/v1beta1` (NOT v1). Entitlement OCP is provisional (D16 dagger) — confirm with Serhat.
+- `user1-batch` namespace + all Kueue CRs are net-new platform (the batch stack) — nothing present today.
 
 ## Approach recommendations
-1. Teach **PipelineRun-centric first** (author Pipeline+Tasks, run, read logs; params/workspaces/results), **then PaC** as the git-push evolution (`.tekton/` in `{user}/parasol-claims` → Gitea webhook → `Repository` CR) — both halves feasible (in-cluster Gitea + PAC route live).
-2. Build parasol-claims via bundled `buildah` (cluster resolver, Containerfile) + `maven` (test) + `openshift-client` (deploy) — all by resolver, zero copied YAML.
-3. "Company task library" = a shared **`parasol-tasks` namespace** of curated Tasks referenced via **cluster resolver** (`resolver: cluster; params kind/name/namespace`) — the supported ClusterTask replacement; grant per-user pipeline SAs `get` on tasks there.
-4. Library beat: author custom `image-size-report` Task into `parasol-tasks` + pull a `lint`/catalog task from Artifact Hub via **hub resolver** → shows the reuse layers (catalog → org library → app pipeline).
-5. Workspace = a `volumeClaimTemplate` PVC in `{user}-cicd` (vs pvc 5 cap); set build-task memory **request 1.5Gi / limit 2Gi** to beat the 1Gi LimitRange default; runs serial per user.
+1. Batch stack: install Kueue operator (AllNamespaces, ns `openshift-kueue-operator`) + `Kueue/cluster` with `integrations.frameworks:[BatchJob]`; then seed ResourceFlavor + per-user ClusterQueue/LocalQueue + `user{N}-batch` ns.
+2. Per-user ClusterQueue (NOT shared) with tiny `nominalQuota` so ~2 sample pods fit and the rest pend — makes admission order visible; `preemption.withinClusterQueue: LowerPriority` for visible preemption.
+3. Two WorkloadPriorityClasses (batch-low/high); Jobs carry labels `kueue.x-k8s.io/queue-name` + `kueue.x-k8s.io/priority-class`; keep sample pods 200m/256Mi and <2 min (spec watchout).
+4. Batch-inference sample: Job POSTs to MaaS `/v1/chat/completions` (egress verified) using the `apitoken` secret; model-agnostic ("cluster's configured model"), tiny batch, ties M22.
+5. KEDA is mention-only: reference `ScaledJob` (`keda.sh/v1alpha1`) as the event-driven contrast; do NOT install CMA for M23 unless a queue-depth-scaling demo needs it.
 
 ## Mining results
-- `adv-app-platform-demo-showroom` M2 (Tekton + Sonar + Argo handoff) → "pipeline-catches-a-bug" narrative + pipeline→GitOps handoff beat (oldcontent-mining-index §4). Discard Sonar (that is M07).
-- `redhat-ads-tech/parasol-insurance-manifests` `build/` (maven-build → update-manifest → triggers Tekton chain) → pipeline SHAPE + task decomposition for parasol-claims; re-implement (license = none). (mining-index §3)
-- MAD M3 + `rh-mad-workshop/mad-dev-guides-m6`, `tech-exercise` pipeline exercises → mechanics/lab-progression IDEAS only; anti-goal on tech-exercise's opinionated TL500 stack (05-REFERENCES; mining-index §2b).
-- Discard everywhere: `ClusterTask`, Tekton-Hub-as-product, `kam`.
+- Spec Mine = fresh. Kueue YAML from docs.redhat.com "Red Hat build of Kueue 1.x" (quotas_and_workloads, cohorts_and_advanced_configurations).
+- RHOAI 3.x distributed-workloads docs (Kueue-backed) for the AI-batch narrative.
+- developers.redhat.com: "manage LLM evaluation workloads at scale with EvalHub and Kueue" (2026-06-18) + "gang autoscaling on OpenShift with Kueue and ProvisionRequest" (2026-06-08) — current AI-batch talk tracks.
+- No OldContent (net-new module).
 
 ## Open risks
-- `pipelines/` empty + `parasol-tasks` ns + per-user pipeline SA/RBAC = net-new platform+content; nothing today.
-- Maven build **OOM** under the 1Gi LimitRange default — set explicit task resources; confirm a full parasol-claims build fits `{user}-cicd` quota. `// TODO(verify-on-cluster)`
-- PAC Gitea webhook: signatures unvalidated (acceptable for lab); confirm the fork's webhook POSTs to the PAC route from in-cluster egress on a real push. `// TODO(verify-on-cluster)`
-- Break-fix needs a deliberately-failing unit test — parasol-claims has ONE test; app-developer adds a toggleable failing test (or lab flips an assertion).
-- `tektonpipeline` status reports operand "pipeline v1.9.3"; the load-bearing fact is the **API `tekton.dev/v1` (GA)** — do not cite the operand number in content.
+- Workload API is `v1beta1` (config CR is v1) — spec "API churn" watchout stands; re-verify with `oc explain clusterqueue` at build AFTER operand install.
+- Cluster-total nominal quota = Σ per-user CQs (30 users × 500m ≈ 15 cores); size so concurrent admission fits real allocatable capacity; test at target seat count.
+- MaaS key is short-lived (RHDP) — batch-inference Job reads the secret at runtime; degrade gracefully on 401 (mirror M01 Lightspeed degradation).
+- Kueue entitlement (OCP vs add-on) provisional — confirm before claiming `[OCP]` in rendered content.
 
-## Builder appendix
-
-**Teaching goals (from spec):** read/author Tasks+Pipelines (params/workspaces/results); a build-test-deploy PipelineRun; trigger on git push via PaC; find/reuse tasks (resolvers/Artifact Hub); start + justify a curated org task library.
-
-**Exercise arc (Parasol framing, ~90 min):**
-- `[~15m]` Anatomy: run the seeded `parasol-claims` build-test-deploy Pipeline in `{user}-cicd`; follow logs; read params/workspaces/results.
-- `[~15m]` Reuse: add a hub-resolver `lint` task; swap in a cluster-resolver task from `parasol-tasks`.
-- `[~20m]` Author: write `image-size-report` Task; add it to the Parasol library ns; reference it by cluster resolver.
-- `[~25m]` PaC: seed `.tekton/pull-request.yaml` in the `{user}/parasol-claims` fork; create the `Repository` CR + Gitea webhook; push from Dev Spaces (M03 muscle memory) → pipeline fires; PR-based flow glimpse.
-- `[~10m]` Wrap: "why platform teams curate a library" + decision guide; break-fix = failing test gates the build.
-
-**Entry-state requirements (`gitops/entry-states/m06/`, per-user):** assumes `{user}-cicd`, java-21 IS, parasol-images pull, the shared `parasol-tasks` library. Materializes: `{user}/parasol-claims` fork (reuse m02 fork-job pattern); a pipeline SA + push RoleBinding to its image target; the seeded Pipeline + Tasks (or cluster-resolver refs); the `.tekton/` PipelineRun in the fork; optionally the PAC `Repository` CR (attendee adds the webhook = lab).
-
-**Platform requirements:**
-- *Shared/cluster:* OpenShift Pipelines operator — **EXISTS** (`pp-openshift-pipelines`). **NEW** `parasol-tasks` namespace + curated Tasks + read-RBAC for per-user pipeline SAs (the cluster-resolver library). Optional TektonConfig pruner tuning.
-- *Per-user:* pipeline ServiceAccount + registry-push RoleBinding, workspace PVC, PAC `Repository` CR — all in `{user}-cicd` (materialized by the entry state).
-
-**App requirements:** parasol-claims builds today via buildah + s2i (verified). ADD a toggleable failing unit test (break-fix). Populate `pipelines/` (Tasks + Pipeline + `.tekton/` PipelineRun) — content+platform.
-
-**Demo angle:** push → pipeline → deployed in 10 min + task-library talk track (platform-team POV). Terminal cast of the PipelineRun + a short capture of the PaC fire on push.
+## Builder appendix — Kueue layout (config CR from CSV alm-example; workload API v1beta1 per docs.redhat.com). Sizing 5–30 users:
+```yaml
+apiVersion: kueue.openshift.io/v1              # 1) operator config (one, cluster-scoped)
+kind: Kueue
+metadata: {name: cluster}
+spec: {managementState: Managed, config: {integrations: {frameworks: [BatchJob]}}}
+---
+apiVersion: kueue.x-k8s.io/v1beta1             # 2) one shared ResourceFlavor (matches any node)
+kind: ResourceFlavor
+metadata: {name: default-flavor}
+---
+apiVersion: kueue.x-k8s.io/v1beta1             # 3) two priorities -> visible preemption
+kind: WorkloadPriorityClass
+metadata: {name: batch-low}
+value: 100
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata: {name: batch-high}
+value: 1000
+---
+apiVersion: kueue.x-k8s.io/v1beta1             # 4) PER-USER ClusterQueue (isolation; no cohort = no borrowing)
+kind: ClusterQueue
+metadata: {name: cq-user1}
+spec:
+  namespaceSelector: {matchLabels: {workshop.redhat.com/user: user1}}   # binds to user1's ns
+  preemption: {withinClusterQueue: LowerPriority, reclaimWithinCohort: Never}
+  resourceGroups:
+  - coveredResources: [cpu, memory]
+    flavors:
+    - name: default-flavor
+      resources:
+      - {name: cpu,    nominalQuota: "500m"}    # ~2 pods @200m  -> 3rd job pends
+      - {name: memory, nominalQuota: "512Mi"}   # ~2 pods @256Mi
+---
+apiVersion: kueue.x-k8s.io/v1beta1             # 5) PER-USER LocalQueue in user{N}-batch
+kind: LocalQueue
+metadata: {name: user-queue, namespace: user1-batch}
+spec: {clusterQueue: cq-user1}
+# Job labels: kueue.x-k8s.io/queue-name: user-queue ; kueue.x-k8s.io/priority-class: batch-high|batch-low
+# Lesson: submit 5 batch-low -> 2 admitted, 3 pending ; submit 1 batch-high -> preempts 1 low.
+```

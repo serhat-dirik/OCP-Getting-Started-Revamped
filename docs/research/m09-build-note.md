@@ -1,67 +1,67 @@
-# M09 build note — GitOps at Scale & Progressive Delivery  `[OCP]`
+# M08 build note — GitOps Fundamentals  `[OCP]`
 
-Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M09 (lines 130-139) · Builds on the M08 student instance (ADR-0002)
-Method: live build cluster `ocp-ws-revamped` (OCP 4.21.22), `oc api-resources`/`oc explain` (Rollout/ApplicationSet CRDs), live UWM + Argo instance, docs.redhat.com GitOps + developers.redhat.com, repo inspection. versions.yaml (2026-07-08) trusted; re-verified live 2026-07-09.
+Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M08 (lines 119-128) · Operationalizes ADR-0002 (two Argo instances)
+Method: live build cluster `ocp-ws-revamped` (OCP 4.21.22), OLM CSV, `oc explain argocd/appproject`, live `openshift-gitops` ArgoCD CR + pods, repo inspection. versions.yaml (2026-07-08) trusted; GitOps re-verified live 2026-07-09.
 
 ## Verified versions
 | Product | Version | Channel | Source | Date |
 |---|---|---|---|---|
 | OpenShift | 4.21.22 | stable-4.21 | `oc version` (live) | 2026-07-09 |
-| OpenShift GitOps | 1.21.1 (Argo CD 3.4) | latest | packagemanifest + CSV Succeeded (live); versions.yaml | 2026-07-09 |
-| Argo Rollouts | `RolloutManager`/`Rollout` `argoproj.io/v1alpha1`; Analysis CRDs present; GA since GitOps 1.13 | `oc api-resources` (live); versions.yaml | 2026-07-09 |
-| ApplicationSet | `argoproj.io/v1alpha1`; generators list/git/matrix/merge/clusters/scmProvider/pullRequest/plugin/clusterDecisionResource/selector | `oc explain applicationset.spec.generators` (live) | 2026-07-09 |
-| OpenShift Route traffic-router plugin | supported since GitOps 1.13 | docs.redhat.com GitOps `argo_rollouts`; developers.redhat.com 2024-10-02 | 2026-07-09 |
+| OpenShift GitOps | 1.21.1 (Argo CD 3.4) | latest (== gitops-1.21) | packagemanifest `openshift-gitops-operator` + CSV Succeeded (live); versions.yaml | 2026-07-09 |
+| ArgoCD CR | `argoproj.io/v1beta1` | — | `oc explain argocd` (live) | 2026-07-09 |
+| Application / AppProject / ApplicationSet | `argoproj.io/v1alpha1` | — | `oc api-resources` (live) | 2026-07-09 |
 
 Cluster reality (verified live 2026-07-09):
-- **ApplicationSet generators** confirmed present: `list`, `git`, `matrix` (spec's minimum) **+** `merge`, `clusters`, `scmProvider`, `pullRequest`, `plugin`, `clusterDecisionResource`, `selector`. `applicationSet.sourceNamespaces` present.
-- **Rollout.spec.strategy has BOTH `canary` and `blueGreen`.** Analysis CRDs (`analysistemplates`, `analysisruns`, `clusteranalysistemplates`, `experiments`) present. **NO `RolloutManager` installed** → the Rollouts controller must be provisioned.
-- **OpenShift Route traffic-router plugin** (GitOps 1.13+, supported): mutates `Route.alternateBackends` for canary weight; creates route + rollout + 2 services; if the Route is Argo-managed → Argo shows out-of-sync, fix with `ignoreDifferences` (developers.redhat.com/blog/2024/10/02/argo-rollouts-traffic-manager-openshift-routes). **No mesh/Gateway needed on the core profile.**
-- **UWM enabled** (`prometheus-user-workload-0/1` + `thanos-ruler-user-workload` running) → a Prometheus `AnalysisTemplate` can query user-workload metrics (aligns with M11).
-- Builds on the M08 student instance + `{user}-gitops` + `proj-{user}` (workshop layer). `{user}-dev/stage/prod` exist. `claims-config-template` dev/stage/prod overlays exist — but **no Rollout/ApplicationSet/AnalysisTemplate source** yet.
+- Default `openshift-gitops` ArgoCD instance (v1beta1) live. **SSO = `sso.dex.openShiftOAuth: true`, `provider: dex`** (dex-server pod running) — OpenShift OAuth login via **Dex** is the default + confirmed pattern. `sso.keycloak` is marked **Removed** in the CRD ("no longer supported") → do NOT use keycloak SSO.
+- Instance footprint = **5 workload pods** (application-controller StatefulSet, dex-server, redis, repo-server, server) + shared operator `cluster` + gitops-plugin. A second (student) instance ≈ **+5 pods** — matches ADR-0002.
+- Apps-in-any-namespace present: `argocd.spec.sourceNamespaces` (+ `applicationSet.sourceNamespaces`) and `appproject.spec.sourceNamespaces` all exist → per-user boxing feasible. `NamespaceManagement` CRD (`argoproj.io/v1beta1`) present. Default instance `sourceNamespaces` = EMPTY (apps only in `openshift-gitops` today).
+- `gitops/promotion/claims-config-template` exists: kustomize **base** (configmap/secret/db/app+svc+route, all 3 probes, requests/limits) + **dev/stage/prod overlays** (replicas/APP_ENV/log level; `__user__` namespace placeholder). Published as `parasol/claims-config-template`; the M04 fork job (`gitops/entry-states/m04/templates/gitea-fork.yaml`) forks it → `{user}/claims-config` and personalizes `__user__`→`{user}`. Image = `…/parasol-images/parasol-claims:1.0`.
+- `{user}-dev/stage/prod/cicd` exist. **NO `{user}-gitops` namespace exists** (`per-user-namespaces.yaml` makes only dev/stage/prod/cicd).
+- `workshop-attendees` Group + per-user `admin` RoleBindings on `{user}-*` exist; the PLATFORM AppProject `workshop-entries` (`gitops/workshop-config/templates/appproject-workshop-entries.yaml`) boxes entry-state apps in `openshift-gitops`.
 
 ## Spec deltas
-- Spec entry state "M08 end state + prod namespace + Rollouts controller": prod ns exists; **`RolloutManager` does NOT** → provision as shared infra (cluster-scoped, **one per cluster**). Independence: the M09 entry state must **pre-create the per-user Applications synced to dev+stage** (the M08 end state) so M09 runs without M08.
-- Spec "verify GA status/analysis templates": **Rollouts GA** (GitOps 1.13+); canary + blueGreen + AnalysisTemplate all present live. Confirmed.
-- Route traffic-splitting (spec watchout): **supported via the OpenShift Route plugin on the core profile** — but requires `RolloutManager` plugin config + `ignoreDifferences` on the Argo-managed Route.
-- Analysis needs UWM (spec "align with M11"): UWM already on, **but** the Prometheus `AnalysisTemplate` must authenticate to `thanos-querier` (openshift-monitoring) with a token + `cluster-monitoring-view` RBAC on the analysis SA — non-trivial; flag.
+- Spec watchout "per-user Argo vs shared + AppProjects (decide in build)": **DECIDED by ADR-0002** = two SHARED instances. Platform `openshift-gitops` (portfolio + entry states, attendee read-only) + student `student-gitops` (attendee-writable, apps-in-any-namespace, per-user AppProject). Student instance + AppProjects land in the **workshop layer** (persistent, survives `ws reset`), NOT per-user entry states.
+- ADR-0002 names a **`userN-gitops` source namespace that does not exist yet** — must be added (workshop layer). Alternative: reuse existing `{user}-cicd`. Recommend adding `{user}-gitops` (ADR-blessed; keeps CI vs GitOps concerns separate; lightweight, no workloads).
+- Argo SSO mechanism unpinned by spec; CRD reality forces **Dex + openShiftOAuth** (keycloak removed) — record it.
+- Independence: M08 assumes student instance + AppProject + `{user}-gitops` (shared platform infra, always present); the entry state materializes only the `{user}/claims-config` fork + EMPTY dev/stage (attendee creates the first Application = the lab).
 
 ## Approach recommendations
-1. Provision Rollouts as a **cluster-scoped `RolloutManager`** (shared infra, new component) with the **OpenShift Route trafficRouterPlugin** enabled — one per cluster covers all `{user}-prod`.
-2. M09 entry state **pre-creates the M08 end state per-user**: `{user}/claims-config` fork + Applications (dev+stage) synced via the student instance → attendee starts from "app is GitOps-managed" (keeps the module independent).
-3. ApplicationSet arc: convert dev/stage/prod to a `list` or `git` generator over env folders (take the **"folders not branches"** position); add sync-waves (db → app → web) + a pre-sync migration-hook Job.
-4. Canary on prod: convert claims Deployment → `Rollout` (canary 20/50/100 + Prometheus `AnalysisTemplate` on error-rate; fail one step on purpose → auto-rollback); use the Route plugin for real traffic %; add `ignoreDifferences` on `Route.alternateBackends`.
-5. Blue-green as the second strategy (manual promotion gate) reusing the same Rollout scaffolding; keep `{user}-prod` tiny (replicas 1-2) for quota.
+1. Build `student-gitops` as a workshop-layer `ArgoCD` CR (ns `student-gitops`; copy `sso.dex.openShiftOAuth: true` from the default; `sourceNamespaces: ["*-gitops"]`, `applicationSet.sourceNamespaces: ["*-gitops"]`).
+2. Per-user isolation = `AppProject proj-{user}` (`sourceNamespaces: [{user}-gitops]`; `destinations: [{user}-dev/stage/prod only]`; `sourceRepos: "*"`) + Argo RBAC policy mapping OpenShift user → role scoped to `proj-{user}`; add `{user}-gitops` ns to workshop-config.
+3. M08 entry state = **reuse the M04 claims-config fork job** (fork `parasol/claims-config-template` → `{user}/claims-config`, personalize overlays); leave dev/stage EMPTY so the attendee's first Application deploys the app live.
+4. Design the drift beat around **`selfHeal: true`**: attendee bumps replicas in the console, watches Argo revert it within the reconcile window ("the platform argues back") — the confirmed selfHeal-reverts-manual-edits behavior IS the lesson.
+5. Meta-reveal: attendees open the PLATFORM `openshift-gitops` UI **read-only** to see the `entry-*` Applications + Helm charts in Gitea that built their world (ADR-0002) — no writes.
 
 ## Mining results
-- `OpenShiftDemos/advanced-gitops-workshop` + `argo-rollouts-workshop` → "both directly reusable" (05-REFERENCES §Mine): ApplicationSet / app-of-apps / sync-wave labs + canary / blue-green / analysis-template shapes. Discard the empty "TBD" troubleshooting (anti-pattern).
-- `Argo Rollouts Lab Instructions.pdf` → facilitator run-book + pre-flight "all Argo apps Synced" gate.
-- `redhat-ads-tech/parasol-insurance-manifests` `app/` Helm (hpa, deployment, route) → prod deploy shape to convert to a Rollout; re-implement (license = none). (mining-index §3)
-- old Rollouts PDF run-book pattern.
+- `OpenShiftDemos/openshift-gitops-workshop` (current, 2026-03) → Application-CR anatomy labs + sync/self-heal exercises (mining-index §2b). Discard `kam`, Homeroom.
+- `OpenShift GitOps Workshop.pdf` → push-vs-pull contrast, Application-CR anatomy walkthrough, 20-min-theory/long-lab split (05-REFERENCES §1). Discard kam CLI, DevNation logistics.
+- `advanced-gitops-workshop` → base/overlays + RBAC-per-team shapes (re-verify operator channel).
+- `adv-app-platform-demo-showroom` (GitOps handoff beat) → demo-flavor Say/Show/Do reference.
 
 ## Open risks
-- `RolloutManager` (cluster-scoped + Route-plugin config) = net-new shared component; **only one per cluster** — coordinate any other Rollouts use. Verify exact supported plugin coordinates/config at build. `// TODO(verify-on-cluster)`
-- Prometheus `AnalysisTemplate` → `thanos-querier` auth + `cluster-monitoring-view` RBAC per `{user}-prod` analysis SA is fiddly; build + verify a working template before content. Fallback: a job/web metric provider or a deterministic synthetic metric. `// TODO(verify-on-cluster)`
-- Argo-managed Route + the Rollouts plugin mutating `alternateBackends` → out-of-sync noise; `ignoreDifferences` required — verify the exact JSON path.
-- Per-user prod quota (pvc 5 / pods 30 / 12Gi): canary transiently doubles pods (stable+canary) + analysis pods — size replicas 1-2; verify concurrent 8-user canary fits allocatable.
-- Migration hook is synthetic (parasol-claims uses Hibernate auto-DDL + `import.sql`, no Flyway/Liquibase) — design an idempotent SQL pre-sync Job or add a real migration (app-developer).
+- `student-gitops` instance + per-user AppProjects + `{user}-gitops` ns + Argo RBAC = net-new workshop-layer infra (nothing today); platform-engineer build.
+- Verify the Argo RBAC policy actually blocks user2 from user1's project on a live student instance. `// TODO(verify-on-cluster)`
+- Dex `openShiftOAuth` on a NON-default namespaced ArgoCD instance: confirm group/user claims + RBAC scoping work for a second instance at 1.21 (the default instance proves the mechanism; a second instance is untested). `// TODO(verify-on-cluster)`
+- sync-wave collisions with entry-state apps (spec watchout): student apps live in `student-gitops`, entry apps in `openshift-gitops` — split failure domains help, but verify no cross-instance contention on the same `{user}-*` namespaces.
+- Quota: the student Application deploys claims+db into `{user}-dev/stage` (within pvc 5 / pods 30) — fine; watch when M09 adds prod + Rollout.
 
 ## Builder appendix
 
-**Teaching goals (from spec):** structure repos for many apps/envs; ApplicationSets vs app-of-apps; sync-waves/hooks; promote by PR; canary + blue-green with Argo Rollouts + automated analysis; know ACM/multicluster exists (pointer to M20).
+**Teaching goals (from spec):** pull vs push reconciliation; create an Argo `Application`; experience drift/self-heal; structure kustomize base/overlays; read health/sync; where Helm fits; the meta-reveal.
 
-**Exercise arc (Parasol framing, ~90 min):**
-- `[~15m]` Convert dev/stage/prod to an ApplicationSet (env generator) on the student instance.
-- `[~15m]` Add a pre-sync DB-migration hook + waves (db → app → web); watch ordered sync.
-- `[~15m]` Promotion PR dev→stage; merge; watch the ApplicationSet reconcile.
-- `[~25m]` Convert prod Deployment → Rollout; canary 20/50/100 with metric analysis; fail one on purpose → auto-rollback.
-- `[~15m]` Blue-green with a manual promotion gate. `[~5m]` Wrap: progressive-delivery decision guide (Rollouts vs Mesh vs Serverless — xref M16/M17).
+**Exercise arc (Parasol framing, ~75 min):**
+- `[~15m]` Concept + create `Application` (points at `{user}/claims-config` overlay dev) → app appears; read health/sync.
+- `[~15m]` Drift theater: edit the live Deployment (replicas 1→3) in the console; watch selfHeal revert it.
+- `[~15m]` Git is truth: change via Git (PR in Gitea) → sync → diff view.
+- `[~15m]` Overlay change for stage (replicas/config); promote by pointing an Application at the stage overlay.
+- `[~10m]` Break the manifest; read degraded health; fix. Wrap + meta-reveal (read-only platform Argo).
 
-**Entry-state requirements (`gitops/entry-states/m09/`, per-user):** assumes student instance + `proj-{user}` + `{user}-gitops` + cluster `RolloutManager` + UWM. Materializes the **M08 end state**: `{user}/claims-config` fork with dev+stage Applications synced; prod overlay + the Rollout/AnalysisTemplate/ApplicationSet source in the fork; analysis SA + `cluster-monitoring-view` RBAC in `{user}-prod`.
+**Entry-state requirements (`gitops/entry-states/m08/`, per-user):** assumes student instance + `proj-{user}` + `{user}-gitops` (workshop layer) + claims image. Materializes: `{user}/claims-config` fork (reuse m04 job); EMPTY dev/stage (attendee's Application does the deploy). Do NOT pre-create the Application.
 
-**Platform requirements:**
-- *Shared/cluster (NEW):* `RolloutManager` (cluster-scoped) + OpenShift Route `trafficRouterPlugin` config. Reuses `student-gitops` (M08) + UWM (`monitoring-uwm` component, live).
-- *Per-user:* the analysis SA + monitoring-view RBAC in `{user}-prod` (entry state).
+**Platform requirements (all NEW, workshop layer — platform-engineer):**
+- *Shared/cluster:* `student-gitops` `ArgoCD` instance (Dex+openShiftOAuth; sourceNamespaces `*-gitops`) + Argo RBAC policy.
+- *Per-user (persistent):* `{user}-gitops` namespace; `AppProject proj-{user}` (source ns + destination boxing); OpenShift RBAC so the attendee may CRUD `Application` CRs in their `{user}-gitops` ns + read the student Argo UI.
 
-**App requirements:** ADD to `claims-config-template` (or a `rollouts` overlay): a `Rollout` variant (canary + blueGreen), a Prometheus `AnalysisTemplate`, an `ApplicationSet`, and a pre-sync migration Job (real or synthetic SQL). App-developer/content.
+**App requirements:** none new — `claims-config-template` (base + dev/stage/prod overlays) already exists and is reused.
 
-**Demo angle:** canary with auto-rollback on bad metrics — 12 min flagship. Console capture of the Rollout dashboard rolling back at a failed analysis step.
+**Demo angle:** drift-revert theater (edit live, watch Argo undo) — 8 min, always lands. Short console capture of the self-heal revert.

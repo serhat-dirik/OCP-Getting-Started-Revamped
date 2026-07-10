@@ -1,0 +1,66 @@
+# Attendee self-service prep (Serhat directive 2026-07-10): attendees must be able to
+# detect-and-wipe-and-re-prepare their own module environment WITHOUT an instructor.
+# `ws prep` runs as the attendee and needs Kubernetes-level rights on the entry
+# Applications in the platform Argo namespace — scoped to THEIR OWN app names.
+#
+# Verb scoping notes (why the rules look like this):
+#   - get/list/watch: broad reads on Applications are harmless (specs hold no secrets)
+#     and let prep inspect state + wait for Synced/Healthy.
+#   - patch/delete: resourceNames-scoped to entry-mNN-{user} for the whole catalog
+#     (m01..m27, enumerated ahead of modules existing — harmless). delete powers
+#     conflict eviction + self-reset; patch powers the declarative sync trigger
+#     (operation field) on an already-provisioned app.
+#   - create: CANNOT be resourceName-scoped (no name exists at admission time) — an
+#     attendee could in principle create an arbitrary Application object. Accepted for
+#     the workshop threat model (cooperative attendees, dedicated disposable cluster):
+#     the ws CLI always renders project=workshop-entries whose AppProject pins the
+#     source repo to the in-cluster mirror. Revisit if this portfolio ever backs a
+#     shared/long-lived cluster.
+{{- $modules := list }}
+{{- range $n := until 27 }}{{- $modules = append $modules (printf "m%02d" (add $n 1)) }}{{- end }}
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $user }}-entry-apps
+  namespace: {{ $.Values.argoNamespace | default "openshift-gitops" }}
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch"]
+  # read-only on AppProjects: render_app resolves `workshop-entries` before creating an
+  # Application — without this read the CLI silently falls back to project `default`.
+  - apiGroups: ["argoproj.io"]
+    resources: ["appprojects"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["patch", "delete"]
+    resourceNames:
+{{- range $m := $modules }}
+      - entry-{{ $m }}-{{ $user }}
+{{- end }}
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-entry-apps
+  namespace: {{ $.Values.argoNamespace | default "openshift-gitops" }}
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $user }}-entry-apps
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}

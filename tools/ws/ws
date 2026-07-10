@@ -2,6 +2,7 @@
 # ws — workshop state CLI: materialize, verify, and reset per-user module environments.
 #
 #   ws list                          modules with an entry state
+#   ws prep   <module> [--yes]       ATTENDEE self-service: detect leftovers, offer wipe, prepare
 #   ws start  <module> [--user U]    materialize the module's entry state for a user
 #   ws verify <module> [--user U]    run the module's verification script
 #   ws reset  <module> [--user U]    return the user's world to the module's entry state
@@ -36,10 +37,16 @@ need_oc() {
 
 # Source repo for entry-state Applications: prefer the local Gitea mirror (git-localize),
 # fall back to upstream GitHub when the mirror isn't up (early bootstrap, laptop dev).
+# Attendees can't read the gitea Route cross-namespace (rule 10), so derive the host from
+# the cluster ingress domain — the same attendee-safe pattern the verify scripts use.
 repo_url() {
-  local host
+  local host domain
   host="$(oc get route gitea -n "${GITEA_NS}" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -n "$host" ]]; then
+  if [[ -z "$host" ]]; then
+    domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
+    [[ -n "$domain" ]] && host="gitea-${GITEA_NS}.${domain}"
+  fi
+  if [[ -n "$host" ]] && curl -ksf --max-time 5 "https://${host}/api/v1/version" >/dev/null 2>&1; then
     echo "https://${host}/${MIRROR_ORG}/${MIRROR_REPO}.git"
   else
     echo "https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
@@ -249,6 +256,80 @@ cmd_start() {
   ok "${user} can start ${module}."
 }
 
+cmd_prep() {  # ATTENDEE self-service (Serhat directive 2026-07-10): attendees forget to wipe the
+  # previous module before starting the next, and prep must never depend on an instructor.
+  # Detect what's in the user's world, say it plainly, ask consent, then run the proven
+  # purge-first reset path. Requires the per-user Argo RBAC from the workshop layer
+  # (gitops/workshop-config/templates/per-user-argo-rbac.yaml).
+  local module user="$1"; module="$2"; shift 2 || true
+  local yes="false"
+  [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && yes="true"
+  need_oc
+  [[ -d "${ENTRY_DIR}/${module}" ]] || die "no entry state for ${module} (${ENTRY_DIR}/${module})"
+  local app; app="$(app_name "$module" "$user")"
+
+  info "checking your ${module} environment (${user})…"
+  local findings=() ns c capp
+  # 1. Leftovers from OTHER modules in the namespaces this module owns/purges.
+  for ns in $(meta_namespaces "$module" "$user"); do
+    oc get ns "$ns" >/dev/null 2>&1 || continue
+    local foreign
+    foreign="$(oc get cm -n "$ns" -o name 2>/dev/null | sed -n 's|configmap/ws-entry-||p' | grep -v "^${module}\$" || true)"
+    [[ -n "$foreign" ]] && findings+=("${ns} still holds state from module(s): $(echo "$foreign" | tr '\n' ' ')")
+    local workloads
+    workloads="$(oc get deploy,statefulsets,jobs,cronjobs -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "$workloads" -gt 0 && -z "$(oc get cm "ws-entry-${module}" -n "$ns" -o name 2>/dev/null)" ]] \
+      && findings+=("${ns} has ${workloads} workload(s) but no ${module} marker")
+  done
+  # 2. Conflicting modules' entry apps still live (would deadlock this module's world).
+  for c in $(meta_conflicts "$module"); do
+    capp="$(app_name "$c" "$user")"
+    oc get application "$capp" -n "$ARGO_NS" >/dev/null 2>&1 && findings+=("conflicting module ${c} is still provisioned (${capp})")
+  done
+  # 3. The module's own state: app + marker + entry verify.
+  local have_app="false" clean="true"
+  oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1 && have_app="true"
+  if [[ "$have_app" == "true" && ${#findings[@]} -eq 0 ]]; then
+    local script="${VERIFY_DIR}/${module}.sh"
+    if [[ -x "$script" ]] && "$script" --user "$user" --entry-only >/dev/null 2>&1; then
+      ok "your ${module} environment is already prepared — nothing to do."
+      echo "   (want a factory-fresh copy anyway? re-run with: ws prep ${module} --yes)"
+      [[ "$yes" != "true" ]] && return 0
+      findings+=("re-prep requested with --yes")
+    else
+      findings+=("${module} is provisioned but its entry checks are not passing")
+    fi
+  fi
+  [[ "$have_app" == "false" ]] && findings+=("${module} is not provisioned for ${user} yet")
+
+  echo
+  echo "Found:"
+  local f; for f in "${findings[@]}"; do echo "  • $f"; done
+  echo
+  echo "Preparing ${module} will WIPE the leftovers above (your namespaces are purged and"
+  echo "re-materialized; anything you built in them is deleted) and set up a clean ${module} world."
+  if [[ "$yes" != "true" ]]; then
+    if [[ -t 0 ]]; then
+      local reply
+      read -r -p "Wipe and prepare ${module} now? [y/N] " reply
+      [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]] || { info "nothing changed. Re-run when ready (or use --yes)."; return 0; }
+    else
+      die "not a terminal and no --yes given — re-run: ws prep ${module} --yes"
+    fi
+  fi
+
+  cmd_reset "$user" "$module"
+  echo
+  local script="${VERIFY_DIR}/${module}.sh"
+  if [[ -x "$script" ]]; then
+    if "$script" --user "$user" --entry-only; then
+      ok "${module} is ready — start the lab."
+    else
+      info "setup hooks may still be settling (seeding data takes up to ~1 min) — re-check with: ws verify ${module}"
+    fi
+  fi
+}
+
 cmd_verify() {
   local module user="$1"; module="$2"; shift 2 || true
   need_oc
@@ -370,6 +451,7 @@ main() {
   done
   case "$cmd" in
     list)        cmd_list;;
+    prep)        cmd_prep "$(user_arg "$user")" "$(module_arg "$module")" ${extra[@]:+"${extra[@]}"};;
     start)       cmd_start "$(user_arg "$user")" "$(module_arg "$module")";;
     verify)      cmd_verify "$(user_arg "$user")" "$(module_arg "$module")" ${extra[@]:+"${extra[@]}"};;
     reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;

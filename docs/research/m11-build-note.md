@@ -1,73 +1,110 @@
-# M11 build note — Observability, Health & Scale
+# M10 build note — Developer Hub & Golden Paths
 
-Date: 2026-07-09 · Author: research-analyst R4c · Spec: 02-MODULE-SPECS §M11 (lines 152-161)
-Method: live build cluster `ocp-ws-revamped` (OCP 4.21.22, k8s 1.34.8) — OLM packagemanifests (channels/CSVs/alm-examples/installModes), UWM configmaps + pods, node/storage capacity; repo inspection (apps + entry-states + portfolio); docs.redhat.com (COO 1-latest, Monitoring stack 4.21); developers.redhat.com (4.19 unified console). versions.yaml re-verified + extended 2026-07-09.
+Date: 2026-07-09 · Author: research-analyst R4b · Spec: 02-MODULE-SPECS §M10 (lines 141-150) · Entitlement: **[ADS]** (RHADS — RHDH + Developer Lightspeed)
+Method: live cluster `ocp-ws-revamped` — OLM packagemanifests, CRD/CSV/OAuth/Keycloak inspection; docs.redhat.com (RHDH 1.7/1.9 auth, sizing, Lightspeed, templates); versions.yaml re-confirmed live.
 
 ## Verified versions
 
-| Product | Version | Channel | Source | Date |
-|---|---|---|---|---|
-| OpenShift | 4.21.22 | stable-4.21 | `oc version` (live) | 2026-07-09 |
-| Cluster Observability Operator (COO) | 1.5.1 | stable | packagemanifest `cluster-observability-operator` (Red Hat); csv `cluster-observability-operator.v1.5.1` | 2026-07-09 |
-| Tempo Operator | 0.21.0-2 | stable | packagemanifest `tempo-product` (Red Hat); csv `tempo-operator.v0.21.0-2` | 2026-07-09 |
-| Red Hat build of OpenTelemetry | 0.152.0-1 | stable | packagemanifest `opentelemetry-product` (Red Hat); csv `opentelemetry-operator.v0.152.0-1` | 2026-07-09 |
-| Loki Operator (Red Hat) | 6.5.1 | stable-6.5 | packagemanifest `loki-operator` (Red Hat); csv `loki-operator.v6.5.1` | 2026-07-09 |
-| Red Hat OpenShift Logging | 6.5.1 | stable-6.5 | packagemanifest `cluster-logging` (Red Hat) | 2026-07-09 |
-| VerticalPodAutoscaler | 4.21.0 | stable | packagemanifest `vertical-pod-autoscaler` (Red Hat) | 2026-07-09 |
-| Custom Metrics Autoscaler (KEDA) | 2.19.0 | stable | versions.yaml (installed via batch stack, M23) | 2026-07-08 |
-
-All entitlement `[OCP]` (COO/Tempo/OTel/Loki/Logging/VPA are Red Hat platform-observability operators). All four observability operators install **AllNamespaces**; **none installed today** (verified: no CSV on cluster). COO owns `UIPlugin` (`uiplugins.observability.openshift.io/v1alpha1`) → console Observe → Dashboards(Perses)/Traces/Logs (docs.redhat.com `red_hat_openshift_cluster_observability_operator/1-latest`).
+| Product | Version | Channel | Install mode | Source | Date |
+|---|---|---|---|---|---|
+| Red Hat Developer Hub (RHDH) | 1.10.2 | **fast** (=`fast-1.10`) | AllNamespaces | packagemanifest `rhdh` (live); versions.yaml | 2026-07-09 |
+| Backstage CR | `rhdh.redhat.com/v1alpha4` (also `v1alpha5` served) | — | — | CSV owned CRDs (live) | 2026-07-09 |
+| Developer Lightspeed for RHDH | ships w/ 1.9+ (dynamic plugin) | — | plugin + 2 sidecars | docs.redhat.com RHDH 1.9 | 2026-07-09 |
+| Red Hat build of Keycloak (rhbk) | catalog **26.6.4-opr.1** (`stable-v26.6`); **live IdP instance 26.4.13** | — | — | packagemanifest + live `Keycloak/keycloak` | 2026-07-09 |
+| Gitea (in-cluster) | operator v2.1.0 | — | — | live CSV; versions.yaml | 2026-07-09 |
 
 Cluster reality (verified live 2026-07-09):
 
-- **UWM already ON cluster-wide** — configmap `cluster-monitoring-config` = `enableUserWorkload: true`; UWM Prometheus retention `24h` (configmap `user-workload-monitoring-config`); pods `prometheus-user-workload-0/1` + `thanos-ruler-user-workload-0/1` Running (ns `openshift-user-workload-monitoring`). Owned by portfolio component `platform-portfolio/components/monitoring-uwm`. → per-namespace ServiceMonitor + PrometheusRule work **today**, no new metrics infra.
-- **parasol-claims is metrics- and trace-ready** (`apps/parasol-claims/pom.xml` + `application.properties`): Quarkus 3.33.2.1/JDK21; exposes **`/q/metrics`** (`quarkus-micrometer-registry-prometheus`, `quarkus.micrometer.binder.http-server.enabled=true` → `http_server_requests_seconds*` per app); ships `quarkus-opentelemetry` with OTLP exporter **OFF** (`quarkus.otel.sdk.disabled=true`) — M11 flips `QUARKUS_OTEL_SDK_DISABLED=false` + `OTEL_EXPORTER_OTLP_ENDPOINT` (4317 gRPC). Health `/q/health/{live,ready}`. `parasol-web` has the same metrics baseline (`apps/parasol-web/pom.xml`). → **core arc needs no app code change.**
-- **Capacity is ample:** 6 nodes (3 control-plane+worker @15.5 CPU/64Gi, 3 worker @15.5 CPU/30Gi) ≈ **93 CPU / 285Gi allocatable** for 8 users (`oc get nodes`). A shared metrics+traces+logs stack (~3 CPU / ~7Gi est.) is negligible here.
-- **Object storage exists:** ODF external Ceph — storageclasses `ocs-external-storagecluster-ceph-rbd` (default RWO), `-cephfs` (RWX), **`openshift-storage.noobaa.io`** (S3 OBC); `objectbucketclaims.objectbucket.io` CRD present → LokiStack/TempoStack object backends feasible.
-- **KEDA already installed** via the batch stack (M23) — the custom-metric/event autoscaler is present; M23 owns the KEDA hands-on (`docs/research/m23-build-note.md`).
+- **Workshop attendees are HTPasswd users.** `oauth/cluster` has two IdPs: `rhbk` (OpenID — backs `admin`) and **`workshop-users` (HTPasswd)** → `user1..user8` identities `workshop-users:userN`; group `workshop-attendees` = user1..8. **user1..8 are NOT in the rhbk `sso` realm** (which holds only client `idp-4-ocp`).
+- **Cluster IdP rhbk** = `Keycloak/keycloak` (`k8s.keycloak.org/v2alpha1`, ns `keycloak`, 1 instance, postgres, route `sso.apps.cluster-qvkd5...`), realm import `sso`. **Reusing this realm for RHDH is NOT sane** — attendees aren't in it and it backs cluster login (do not co-opt).
+- **`Backstage` CR** is deliberately minimal by default (alm-example = name+labels only). Real config = `spec.application.appConfig.configMaps[]`, `spec.application.dynamicPluginsConfigMapName`, `spec.application.extraEnvs`, `spec.application.extraFiles` (docs.redhat.com RHDH configuring). RHDH operator deploys a **bundled local PostgreSQL** by default (no separate DB component needed at workshop scale).
+- **Developer Lightspeed for RHDH** = dynamic plugin added to the `dynamic-plugins-rhdh` ConfigMap + **two sidecars** (Lightspeed Core Service + Llama Stack); inference endpoint is MaaS-wireable (docs.redhat.com RHDH 1.9 "Interacting with Developer Lightspeed").
+- **Gitea** present (`gitea-operator.v2.1.0`); org `parasol`, per-user forks are the convention. GitHub/GitLab are RHDH first-class; **Gitea needs `integrations.gitea` + the community `publish:gitea` scaffolder module** (backstage `scaffolder-backend-module-gitea`).
+- **Capacity**: ~44 CPU / ~72Gi free on workers (as M07) — comfortably fits one shared RHDH.
 
 ## Spec deltas
 
-- Spec lists "Loki, Tempo+OTel" per the entry state's single-user framing; on a shared cluster these are **shared single installs** (one LokiStack / TempoMonolithic / OTel Collector), per-user isolation via namespace-scoped queries + RBAC — **not per-user stacks**. Per-user cost is only app + load-gen + ServiceMonitor + PrometheusRule.
-- Spec "per-user dashboard (console dashboards or Perses/Grafana per current guidance — verify)": current path is **COO Perses** dashboards/UIPlugin; the catalog Grafana operator is **Community** (avoid as a product). Use console Observe → Metrics + COO Perses; not Grafana. (docs.redhat.com COO 1-latest)
-- Spec "HPA on CPU/custom metric": OCP ships **no custom-metrics adapter** by default — custom-metric autoscaling = KEDA `ScaledObject` (already installed). Keep M11's HPA hands-on to **CPU (autoscaling/v2)**; treat custom-metric/KEDA as a short decision-tree beat pointing to M23 (avoids overlap — `m23-build-note.md`).
-- Entry state "claims app (instrumented build) under load generator in `{user}-dev`": the app now exists (`apps/parasol-claims`, contra the stale note in `m04-build-note.md`) and is instrumented, but **there is no `gitops/entry-states/m11/` chart yet** (only m01-05, m23). Load-gen + ServiceMonitor + OTLP env wiring are net-new entry-state material.
-- Spec "trace the slow endpoint; find the N+1 to db": `ClaimResource` has **no N+1 today** (single `findAll`+`count`, `apps/parasol-claims/.../ClaimResource.java`). The N+1 story needs a deliberately-slow endpoint (app work below) or a reframe to "read the JDBC span latency."
-- Console: from **4.19 the Developer perspective is no longer enabled by default** (unified console) — all M11 console steps use the single unified Observe section (developers.redhat.com/articles/2025/06/26/openshift-419-brings-unified-console; docs.redhat.com OCP 4.20 web_console).
+- **Auth** — spec is agnostic; grounded answer: **RHDH → OpenShift OAuth** (attendees are htpasswd OpenShift users), **not** the rhbk `sso` realm. Realm reuse would require adding attendees to a realm that backs cluster login — rejected.
+- **Backstage CR version** — older docs/mining use `rhdh.redhat.com/v1alpha3`; the 1.10 operator serves **`v1alpha4`/`v1alpha5`**. Author `v1alpha4`.
+- **"[ADS]"** = RHADS; RHDH + Developer Lightspeed are the developer-experience half of the same suite as M07 (developers.redhat.com RHADS overview). Consistent tagging across M07/M10.
+- **Gitea scaffolder is not first-class** — golden-path *publish* to Gitea needs the community `publish:gitea` action loaded as a dynamic plugin; supported status in RHDH 1.10 is unconfirmed → `TODO(verify-on-cluster)`, with generic-`url` catalog registration as the robust fallback.
+- **Developer Lightspeed adds real weight** (2 sidecars + MaaS dependency) — treat as an optional section that degrades gracefully (mirror M01 Lightspeed 403 handling), not a hard requirement.
 
-## Approach recommendations
+## Approach recommendations (≤5)
 
-1. Build M11 in three signal tiers, all **shared** infra: **T1 (zero new footprint)** UWM metrics + PromQL in console Observe → Metrics + a `PrometheusRule` (`monitoring.coreos.com/v1`) alert in `{user}-dev`, fires in Observe → Alerting; **T2** COO + `TempoMonolithic` + one `OpenTelemetryCollector` for the trace-the-slow-request story + a Perses dashboard; **T3 (capacity-gated)** shared `LokiStack` 1x.demo + `ClusterLogForwarder` + COO Logging UIPlugin for "logs across replicas." Log baseline degrades to `oc logs`/console Pod Logs (always-true).
-2. New **`observability` portfolio stack** (mirror `stacks/batch`) with components `coo`, `tempo`, `opentelemetry`, and optional `loki`+`cluster-logging` — each an AllNamespaces Subscription (kueue component pattern) + config CRs (UIPlugins, TempoMonolithic, OpenTelemetryCollector, LokiStack). Shared, one install; never per-user.
-3. Scale arc = **plain HPA (autoscaling/v2) on CPU** under the load-gen (the star) + **PodDisruptionBudget** quick-win (hands-on) + node-drain honoring the PDB `[INSTRUCTOR-DEMO]`; KEDA custom-metric `ScaledObject` = optional short beat pointing to M23; **VPA = concept-only** (don't let VPA + HPA both manage CPU on one target).
-4. Entry state `m11` (Helm chart like `entry-states/m05`): `parasol-claims` + `claims-db` + `parasol-web` in `{user}-dev` with OTLP env wired to the shared collector; a per-user `ServiceMonitor` targeting `/q/metrics`; a tiny load-gen Deployment (curl loop, 50m/64Mi — sized per the "load generator sizing" watchout). Solve state adds HPA + PrometheusRule + PDB (mirror the m05 `.Values.solve` split).
-5. Per-user isolation = namespaced `ServiceMonitor`/`PrometheusRule` in `{user}-dev` (UWM scopes rules to the namespace; docs.redhat.com Monitoring stack 4.21 "managing alerts as a developer"). Self-serve alert **routing** (`AlertmanagerConfig`) additionally needs the UWM Alertmanager enabled — a platform toggle on the `monitoring-uwm` component; keep routing optional.
+1. **Single shared RHDH** (platform layer, `pp-portal`) with **OpenShift OAuth sign-in** so user1..8 log in with their console creds; keep RBAC light (all attendees read the shared Parasol catalog + run templates) — strict per-user catalog namespacing is overkill; document the trade-off.
+2. **Register Parasol catalog via `catalog.locations` type `url`** pointing at raw Gitea `catalog-info.yaml` (works for any git host, avoids the Gitea-integration gap for catalog *read*); use `integrations.gitea` + `publish:gitea` only for the scaffolder *write*.
+3. **Golden-path template** = a Backstage Software Template that scaffolds a **Quarkus JDK-21** service skeleton + PaC pipeline + Argo app + devfile into the **user's Gitea org**; verify `publish:gitea` loads, else fall back to `publish:git`/generic (`TODO(verify)`).
+4. **Developer Lightspeed = optional [ADS] section** wired to the MaaS endpoint (`{maas_endpoint}`, `apitoken` secret — same contract as M01/M23); degrade to "unavailable" if the key expired, don't block the module.
+5. **TechDocs = local builder** (in-Backstage, no external S3) to keep the module simple; note the external-builder option in wrap-up.
+
+## Exercise arc (Parasol framing · 75 min: ~15 concept + ~55 hands-on)
+
+Hook: *"A new engineer joins Parasol's claims team — day one, they need a service wired to pipeline, GitOps, and Dev Spaces without learning nine tools first."*
+
+1. `[~10m]` **Browse the catalog** — find `parasol-claims` Component, its API, owner, docs, and its System; see the org map.
+2. `[~15m]` **Run "New Parasol microservice" template** — fill a form → watch it create a **Gitea repo + PaC pipeline + Argo Application + Dev Spaces link** in the user's org.
+3. `[~10m]` **Hands-free delivery** — change code in the scaffolded repo → PaC pipeline + Argo sync run without touching YAML ("modules 2-9 behind one button").
+4. `[~10m]` **TechDocs** — edit docs-as-code; render in RHDH.
+5. `[~10m]` **Developer Lightspeed** — ask about the component (optional/[ADS]).
+
+Demo arc: template → running-governed-service in 10 min. When-not-to-use (wrap-up): IDP maintenance cost, template sprawl, golden-path-as-cage vs paved-road.
+
+## NEW platform stack — `pp-portal` (stacks/portal/) — fully specified
+
+- **`components/rhdh`** — `Subscription` (name/pkg `rhdh`, channel **`fast`** =v1.10.2, ns `rhdh-operator` or `openshift-operators`, source `redhat-operators`) + AllNamespaces `OperatorGroup`; `Backstage` CR `developer-hub` (`rhdh.redhat.com/v1alpha4`, ns `rhdh`) referencing:
+  - ConfigMap **`app-config-rhdh`** — `app.baseUrl`/`backend.baseUrl` (RHDH route), `auth.providers` (OpenShift OAuth), `signInPage`, `integrations.gitea:[{host: gitea-gitea.apps..., baseUrl}]`, `catalog.locations:[{type: url, target: <raw gitea catalog-info URLs>}]`, `catalog.rules`. Exact `auth.providers.*` keys `TODO(verify-at-build)` (docs.redhat.com RHDH 1.9 auth; 403 on WebFetch).
+  - ConfigMap **`dynamic-plugins-rhdh`** — enable: TechDocs, `scaffolder-backend-module-gitea` (`TODO(verify)` supported/community), Developer Lightspeed plugin (optional).
+  - `spec.application.{appConfig.configMaps,dynamicPluginsConfigMapName,extraEnvs}` wire the above (live CSV fields).
+  - Wave 2 CR, `SkipDryRunOnMissingResource=true`.
+- **Secret contracts** (documented per component, never in git — like `components/openshift-lightspeed/README.md`): `rhdh-oauth` (OpenShift OAuth client — via `OAuthClient` CR or registered secret), `rhdh-gitea` (Gitea token for scaffolder publish), `rhdh-lightspeed` (MaaS `apitoken`, optional).
+- **No separate Postgres component** — RHDH operator's bundled local DB suffices at workshop scale.
+- **Footprint (shared, one instance; validate with `oc adm top`)**: Backstage ~1 CPU / 2Gi req, ~2 CPU / 2.5-3Gi limit; bundled Postgres ~0.5 CPU / 1Gi; **+Developer Lightspeed sidecars ~+1 CPU / +1.5-2Gi** → **~2.5-3.5 CPU / 5-6Gi total** (docs.redhat.com RHDH 1.9 sizing — exact table `TODO(verify)`). Single shared instance is the right shape; per-user isolation via each user's own Gitea org, not per-user RHDH.
+
+## Entry-state requirements — `gitops/entry-states/m10/` (per-user, light)
+
+RHDH itself is shared platform (pp-portal), so the entry state is mostly Gitea seeding + catalog registration:
+
+- Hook Jobs (m23 seed pattern): ensure the user's Gitea org has (a) the **golden-path template repo**, (b) `parasol-claims`/`parasol-web` forks each carrying **`catalog-info.yaml`**; register a per-user `catalog.location` (or rely on shared org-scan).
+- No per-user RHDH namespace; scaffolder target = user's Gitea org + `{user}-dev`/`{user}-cicd` (workshop-layer ns).
+- `ws-meta.yaml`: purge the user's scaffolded repos/apps on reset for idempotent re-runs (`TODO`: scaffolder idempotency per user — spec watchout).
+
+## App requirements
+
+- **`catalog-info.yaml`** for `parasol-claims`, `parasol-web`, `parasol-notifications` (Backstage `Component`/`API`/`System` entities, `spec.owner: parasol`, links to pipeline/Argo/Dev Spaces) — net-new, small.
+- **Golden-path Software Template** (`parasol-service-template`): scaffolds a minimal **Quarkus 3.33 / JDK-21** service (pom `release=21`, UBI9 openjdk-21 Containerfile, health/metrics/OTel on — mirror `apps/parasol-claims` conventions) + PaC `.tekton/` + Argo `Application` + `devfile.yaml` (mirror `apps/parasol-claims/devfile.yaml`, JDK-21 pin). Net-new content/app work. Mine the *shape* of `rh-mad-workshop/coolstore-software-templates`.
 
 ## Mining results
 
-Spec says "none of the old assets does this well → build fresh." Confirmed.
+- `adv-app-platform-demo-showroom` **M4** (Developer Hub + Software Catalog + Developer Lightspeed + self-service) → catalog + golden-path narrative, screenshot set, `.Section N` nav pattern (oldcontent-mining-index §4). License=none → ideas only.
+- `rh-mad-workshop/coolstore-software-templates` + `mad-dev-guides-m7` → **RHDH Software Template shape** and per-module dev-guide structure (oldcontent-mining-index §2b, §3). Discard 3scale/RH-SSO.
+- `redhat-ads-tech/parasol-insurance` → domain model for `catalog-info.yaml` entities (Claim/Email services) (oldcontent-mining-index §3).
+- Tech: docs.redhat.com RHDH 1.7/1.9 (Authentication, Configuring, Sizing, Interacting-with-Developer-Lightspeed, About-Software-Templates); backstage `scaffolder-backend-module-gitea` README.
 
-- `adv-app-platform-demo-showroom` **M3 "Platform operations"** (autoscaling/HPA demo; `assets/images/ocp-hpa-*`) → the HPA-under-load demo beat + console screenshot targets. (`docs/research/oldcontent-mining-index.md` §4)
-- Nothing else portable; keep the "observe your app / the platform observes itself" framing fresh and **re-verify COO nav every build** (fast-moving area, per spec Mine).
+## Open risks & feasibility verdicts
 
-## Open risks
+- **LAB-VIABLE**: shared RHDH + catalog browse; OpenShift OAuth sign-in (exact keys `TODO`); TechDocs local; template scaffold **if** `publish:gitea` loads.
+- **LAB-VIABLE-OPTIONAL**: Developer Lightspeed for RHDH (2 sidecars + MaaS) — degrade gracefully; or make it [INSTRUCTOR-DEMO].
+- **CONTINGENT**: golden-path publish to Gitea depends on `publish:gitea` dynamic-plugin availability in RHDH 1.10 — **top build risk**; fallback = generic `publish:git`/`url`. Verify first.
+- **CUT/KEEP-LIGHT**: strict per-user catalog RBAC namespacing (overkill; use shared read + per-user Gitea org).
+- RHDH auth keys, sizing table, and gitea-plugin support are `TODO(verify-on-cluster)` (docs.redhat.com blocked WebFetch 403; confirm on cluster at build).
+- Template idempotency per user across `ws reset` (spec watchout) — design scaffold + purge to be re-runnable.
+- rhbk live instance is **26.4.13** (behind catalog 26.6.4) — irrelevant to RHDH (uses OpenShift OAuth) but note if any realm work is added later.
 
-- COO `UIPlugin` exact `spec.type` casing (Dashboards / DistributedTracing / Logging / Monitoring / TroubleshootingPanel) + the Perses dashboard CR — `TODO(verify-on-cluster)` after COO install (`oc explain uiplugin`; alm-examples did not surface UIPlugin). apiVersion `observability.openshift.io/v1alpha1` confirmed via owned CRD.
-- `LokiStack` size enum: alm-example ships `1x.small`; smallest is `1x.demo` — confirm at build. Loki is the heaviest add (Vector DaemonSet 1 pod/node ×6 + ~6 Loki pods, ~1.5 CPU/4Gi est.) — trivial here, but the cut candidate for a lean event.
-- Tempo retention on shared cluster (spec watchout): `TempoMonolithic` memory/PV backend — cap retention low; `TempoStack` needs an OBC (available).
-- Custom-metric HPA overlaps M23's KEDA — keep M11 to CPU HPA + pointer. VPA operator not installed; concept-only.
-- Load-gen sizing: over-aggressive load trips UWM/quota — keep concurrency low, cap CPU so the HPA scale-up is visible but bounded.
+## Builder appendix — grounded config skeleton (live CRD fields 2026-07-09)
 
-## Builder/platform appendix — observability stack sketch (verify CRs at build; component pattern = `platform-portfolio/components/kueue/`, stack = `stacks/batch/`)
-
-- **coo:** Subscription `cluster-observability-operator` (channel `stable`, AllNamespaces OperatorGroup) + `UIPlugin` CRs (Dashboards, DistributedTracing, [Logging]).
-- **tempo:** Subscription `tempo-product` (`stable`) + `TempoMonolithic` (`tempo.grafana.com/v1alpha1`) with OTLP ingest, monolithic memory/PV backend.
-- **opentelemetry:** Subscription `opentelemetry-product` (`stable`) + `OpenTelemetryCollector` (`opentelemetry.io/v1beta1`) receiving OTLP :4317, exporting to Tempo.
-- **loki (optional):** Subscription `loki-operator` (`stable-6.5`) + `LokiStack` (`loki.grafana.com/v1`, size `1x.demo`, ODF OBC) + Subscription `cluster-logging` + `ClusterLogForwarder` → Loki; COO Logging UIPlugin.
-- **App OTLP env (entry-state, on parasol-claims Deployment):** `QUARKUS_OTEL_SDK_DISABLED=false`, `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>.<obs-ns>.svc:4317`.
-
-**App work for app-developer (both OPTIONAL — core arc needs none):** (1) add a deliberately-slow / N+1 endpoint on `parasol-claims` for the trace exercise (e.g. `GET /api/claims/{n}/history` issuing one query per related row); (2) a custom business metric (Micrometer `Counter claims_created_total`) for the "custom metric" PromQL/dashboard beat.
-
-**Demo-flavor angle:** "trace-the-slow-request" 10 min — Observe → Traces (COO), drill web→claims→db spans, point at the slow DB span; alert fires live in Observe → Alerting. (spec Demo arc)
-
-**Timing (90 min workshop):** metrics/PromQL/alert ~30 · trace + dashboard ~25 · logs ~10 · scale (HPA+PDB+drain) ~25. Demo flavor 10-15 min.
+```yaml
+apiVersion: rhdh.redhat.com/v1alpha4        # live: operator serves v1alpha4 + v1alpha5
+kind: Backstage
+metadata: {name: developer-hub, namespace: rhdh}
+spec:
+  application:
+    appConfig: {configMaps: [{name: app-config-rhdh}]}
+    dynamicPluginsConfigMapName: dynamic-plugins-rhdh
+    extraEnvs: {secrets: [{name: rhdh-gitea}, {name: rhdh-lightspeed}]}   # secret contracts
+# app-config-rhdh (ConfigMap) carries:
+#   auth.providers.<openshift-oauth>  + signInPage        # TODO(verify exact keys, RHDH 1.9 auth doc)
+#   integrations.gitea: [{host: gitea-gitea.apps.<domain>, baseUrl: https://...}]
+#   catalog.locations: [{type: url, target: https://<gitea>/parasol/parasol-claims/raw/branch/main/catalog-info.yaml}]
+# dynamic-plugins-rhdh (ConfigMap): techdocs, scaffolder-backend-module-gitea (TODO verify), developer-lightspeed (optional)
+```
