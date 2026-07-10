@@ -11,6 +11,7 @@
 # by attendees, so that check AUTO-SKIPS unless the caller has cluster read (admin/CI), mirroring
 # the m03 DevWorkspace pattern. See tools/verify/README.md.
 set -euo pipefail
+# shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 parse_verify_args "$@"
 NS="${USER_NAME}-batch"

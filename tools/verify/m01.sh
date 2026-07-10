@@ -4,6 +4,7 @@
 #   End:   parasol-web Deployment ready · Route answers HTTP 200 on / .
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
 set -euo pipefail
+# shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 parse_verify_args "$@"
 NS="${USER_NAME}-dev"
