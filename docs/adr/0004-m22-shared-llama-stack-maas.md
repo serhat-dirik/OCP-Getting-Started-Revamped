@@ -1,5 +1,7 @@
 # ADR-0004: M22 AI architecture — one shared Llama Stack over MaaS, Quarkus-direct fallback
 
+> Module renumbered 2026-07-10: the agentic-AI module is now **M23** (file keeps its historical m22 slug — decoder: docs/module-catalog-renumber-2026-07-10.md).
+
 Date: 2026-07-08 · Status: accepted (re-verify at M22 build — fastest-moving area) · Owner: PM (spike by research-analyst)
 
 ## Context

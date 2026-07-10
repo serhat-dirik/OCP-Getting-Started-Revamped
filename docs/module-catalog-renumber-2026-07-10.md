@@ -36,20 +36,18 @@ Pipelines, new M06 = Jobs). Always disambiguate by module TOPIC.
 Old **M18** (Kafka — folded into M24) and old **M26** (Connectivity Link — cut, D17) never existed
 as content; any old-text reference to them is stale, not remappable.
 
-## Renumber state (as of 2026-07-10, commit `17ccb31`)
+## Renumber state — COMPLETE (2026-07-10)
 
-DONE: built module m23→m06 (all artifacts) · repo catalog (index.adoc, 3 navs, README) ·
-Project-Shared spec/backlog/status headline numbers · `[OCP]` entitlement row + README ranges
-hand-fixed.
-
-REMAINING (a content-editor sweep — safe to re-run because it verifies by TOPIC, which is
-idempotent; pure number-pattern remapping is NOT re-runnable):
-1. Cross-refs to other modules inside built content m01–m05 (disambiguate M06 Jobs-vs-Pipelines by topic).
-2. `docs/research/` build-note file renames (collision-heavy: use two-phase temp names; m23→m06,
-   m06→m07, m07→m08, m08→m09, m09→m10, m10→m11, m11→m12, m29→m13) + their internal titles/cross-refs.
-3. Range expressions in 02-MODULE-SPECS body (lines ~146, 256, 287, 346 were endpoint-remapped and
-   may be distorted — recompute each from the module SET it means).
-4. Maintainer comments in gitops/ + platform-portfolio/ that reference other modules by number.
-5. ON-CLUSTER (needs cluster): orphan Argo apps `entry-m23-user6`/`entry-m23-user8` still carry the
-   old id — delete and re-materialize as m06 (`ws start m06 --user userN`); marker ConfigMaps are
-   chart-owned and follow automatically. Mirror-sync after any push.
+- Built module m23→m06 (all artifacts) · repo catalog (index, navs, README) · Project-Shared
+  spec/backlog/status (`74cb405` + hand fixes).
+- Consistency sweep done: 8 research notes renamed + internally remapped by topic; 18
+  maintainer-comment files in gitops/ + platform-portfolio/; spec ranges recomputed (L256
+  M01–M19; Build-order note rewritten — stale Connectivity-Link clause dropped, "numbered by
+  arrival" claim replaced); backlog research-note filenames corrected. m01–m05 content pages
+  verified to carry ZERO numeric cross-refs (prose-only convention).
+- On-cluster: the three orphaned `entry-m23-*` apps (user6/7/8) swapped to m06, each verified 10/10.
+- Deliberately NOT renumbered (historical records — decode with the table above): dated log
+  entries in 06-BACKLOG §Decision-log · pre-2026-07-10 reports (G3/G4, STATUS-*) · m01–m05
+  research notes + oldcontent-mining-index + app-repo-publishing (consumed inputs) · ADR
+  filenames 0003-m16-*/0004-m22-* (their headers carry a renumber note; content already cites
+  new numbers where live).

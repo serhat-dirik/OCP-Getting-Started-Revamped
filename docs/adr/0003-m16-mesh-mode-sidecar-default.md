@@ -1,5 +1,7 @@
 # ADR-0003: M16 default mesh mode — sidecar; ambient as concept + optional exercise
 
+> Module renumbered 2026-07-10: the mesh module is now **M18** (file keeps its historical m16 slug — decoder: docs/module-catalog-renumber-2026-07-10.md).
+
 Date: 2026-07-08 · Status: accepted · Owner: PM (spike by research-analyst)
 
 ## Context
