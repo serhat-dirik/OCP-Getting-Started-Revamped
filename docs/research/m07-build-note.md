@@ -65,3 +65,54 @@ Cluster reality (verified live 2026-07-09):
 **App requirements:** parasol-claims builds today via buildah + s2i (verified). ADD a toggleable failing unit test (break-fix). Populate `pipelines/` (Tasks + Pipeline + `.tekton/` PipelineRun) — content+platform.
 
 **Demo angle:** push → pipeline → deployed in 10 min + task-library talk track (platform-team POV). Terminal cast of the PipelineRun + a short capture of the PaC fire on push.
+
+---
+
+## PM addendum — platform landed, read this before building content (2026-07-10, PM)
+
+Everything below is BUILT and verified (per-item status); the module-builder starts from here,
+not from the "nothing exists today" framing above.
+
+**Task library — DONE (`ded7cf4`), PM-verified end-to-end.** `parasol-tasks` namespace with
+curated `image-size-report` + `maven-jdk21` Tasks + per-user reader RBAC (workshop layer,
+`gitops/workshop-config/templates/parasol-tasks.yaml`); `pipelines/` populated (Pipeline
+`parasol-claims-build-test-deploy` — 5 tasks, ALL by cluster resolver — PipelineRun with
+`volumeClaimTemplate` + memory overrides, `.tekton/` PaC entrypoint, per-user RBAC example).
+Proven twice on-cluster (PE run + independent PM re-run from committed artifacts): Succeeded,
+~8.5 min first run, image 391 MB within the 500 MB budget, no OOM.
+
+**Delta superseding §30:** the bundled `maven` task is **JDK-17-pinned with no image param**
+(`stepSpecs` cannot override a step image) → it cannot build this app. The library's
+**`maven-jdk21`** task (ubi9/openjdk-21, ships Maven 3.9) is the unit-test task. Teach this
+delta — it IS the "why platform teams curate a library" beat, better than any invented example.
+
+**Deploy-target decision (PM, recorded in 06-BACKLOG decision log):** the pipeline deploys into
+`{user}-cicd` and the entry state ships an ephemeral `claims-db` there (M04/M05 pattern). No
+cross-namespace deploy; environment promotion stays M09/M10's story. The lab should not imply the
+`-cicd` deploy is production practice — one honest sentence ("in later modules the pipeline hands
+off to GitOps instead") plants M09.
+
+**Break-fix — DONE (`82dd046`), PM-verified both states on two JDK-21 distros.** Test
+`approvingAClaimRequiresAnAssignedAdjuster` in `ClaimResourceTest`. The attendee's one-line
+change in their fork (line ~191): `final boolean assignAdjusterBeforeApproval = true;` → `false`.
+Failure reads: *"Parasol rule violated: claim CLM-NNNN was Approved while still Unassigned - an
+adjuster must own a claim before it can be approved"*. Default = 14/14 green.
+⚠ **The claim number is DYNAMIC** (sibling tests bump the shared H2 counter) — the lab must say
+"your claim number", never quote a fixed `CLM-10xx`. The toggle is documented in the app README's
+"Intentional flaws — do not fix" list; don't let a content pass "fix" it.
+
+**Entry state — chart COMMITTED (`6742664`); live cycle PARKED on a cluster outage.**
+`gitops/entry-states/m07/` (fork + `.tekton` seeded into the user's OWN fork via Gitea API,
+claims-db, in-namespace Pipeline by cluster-resolver refs, optional PaC `Repository` CR, solve
+end-state, `tools/verify/m07.sh`; ws-meta: namespace `{user}-cicd`, no conflicts with built
+modules — first `-cicd` module). Statically validated (helm lint/template, rule-13 clean, server
+dry-runs). The full `ws start→verify→solve→reset→prep` cycle was cut off by the cluster going
+dark mid-run (2026-07-10 ~17:00, RHDP auto-stop signature); one fork-race hardening edit is held
+uncommitted by the PE to batch with live-cycle fixes. **The cycle MUST be proven before G1 closes
+— do not build content on an unproven entry state.** Known cleanup for the resumed cycle: an Argo
+app applied during the API degradation may sit under the `default` project — delete before re-running.
+
+**Seed-gate note for the PaC exercise:** the attendee's fork is created by THIS module's entry
+state, so M07 does not wait on the (disabled) app-repo seed Job. But the fork is taken from
+`parasol/parasol-claims` as-is — if that shared repo is ever refreshed (Serhat's call), nothing
+here breaks; the fork job tolerates pre-existing forks.
