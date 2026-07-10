@@ -152,19 +152,23 @@ meta_conflicts() {  # module → ws-meta conflictsWith module list
   meta_list "$meta" conflictsWith
 }
 
-purge_ns() {  # ns — delete user workloads/leftovers; preserve system objects + entry markers
-  local ns="$1" kind name
+purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve system objects
+  # and ONLY the keep-module's entry marker. Preserving ALL ws-entry-* markers let stale
+  # markers of long-gone modules survive every reset and false-green marker checks (G4-F9).
+  local ns="$1" keep="${2:-}" kind name
   oc get ns "$ns" >/dev/null 2>&1 || return 0
   info "purging user workloads in ${ns}…"
   oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   # CRs 'oc delete all' misses: workspaces (M03+) — extend here as modules add types
   oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   # Secrets/ConfigMaps the user created (e.g. template-instantiated DB creds) leak past
-  # 'oc delete all' — purge them EXCEPT system objects and chart-owned entry markers.
+  # 'oc delete all' — purge them EXCEPT system objects and the current module's marker.
   for kind in secret configmap; do
     for name in $(oc get "$kind" -n "$ns" -o name 2>/dev/null); do
       case "$name" in
-        */builder-dockercfg-*|*/default-dockercfg-*|*/deployer-dockercfg-*|*/builder-token-*|*/default-token-*|*/deployer-token-*|*/kube-root-ca.crt|*/openshift-service-ca.crt|*/ws-entry-*) ;;
+        */builder-dockercfg-*|*/default-dockercfg-*|*/deployer-dockercfg-*|*/builder-token-*|*/default-token-*|*/deployer-token-*|*/kube-root-ca.crt|*/openshift-service-ca.crt) ;;
+        */ws-entry-${keep}) [[ -n "$keep" ]] || oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
+        */ws-entry-*) oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
         *) oc delete "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true;;
       esac
     done
@@ -186,10 +190,21 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
       info "evicting conflicting entry app ${app} (shares workloads with ${module})…"
       oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s || true
       evicted=1
+    else
+      # The conflicting module's app may be long gone while its ORPHANED leftovers still
+      # squat in our namespaces (bare 'oc delete application' skips the purge — G4-F3:
+      # start over such leftovers produced a wrong entry state behind partly-green checks).
+      # A surviving marker is the tell — trigger the purge path even with no app to evict.
+      for ns in $(meta_namespaces "$module" "$user"); do
+        if oc get cm "ws-entry-${c}" -n "$ns" >/dev/null 2>&1; then
+          info "found orphaned ${c} leftovers in ${ns} (marker, no app) — reclaiming…"
+          evicted=1; break
+        fi
+      done
     fi
   done
   if [[ "$evicted" == 1 ]]; then
-    for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns"; done
+    for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
     # The purge also removed THIS module's chart-owned resources if its app pre-existed.
     # With selfHeal off, re-applying an UNCHANGED app never re-syncs them — recycle the
     # app so the fresh apply is a creation, which always auto-syncs.
@@ -353,7 +368,7 @@ cmd_reset() {
   # re-creates what we delete (it only marks OutOfSync). This also hardens m05's StatefulSet reset,
   # where volumeClaimTemplate PVCs are pinned the same way.
   local ns
-  for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns"; done
+  for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
 
   # Now remove the GitOps wrapper. With the namespace already emptied the finalizer has little or
   # nothing left to prune and completes fast; if it still lingers, strip the finalizer rather than
