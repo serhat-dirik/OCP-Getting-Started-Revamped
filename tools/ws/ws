@@ -159,6 +159,19 @@ meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); 
   awk '$1=="waitSeconds:"{print $2; exit}' "$meta"
 }
 
+meta_apps() {  # module user → "namespace project" if the module declares attendee-created Argo
+  # Application CRs living OUTSIDE its purge namespaces (m09+: the student-gitops control plane —
+  # ADR-0002 amendment 5: GitOps 1.21 refuses per-user source namespaces on a namespace-scoped
+  # instance, so attendee apps live in the instance ns, isolated by Argo RBAC + AppProjects).
+  # ws-meta keys: purgeAppsNamespace + purgeAppsProject (${USER} resolves).
+  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml" ns proj
+  [[ -f "$meta" ]] || return 0
+  ns="$(awk '$1=="purgeAppsNamespace:"{print $2; exit}' "$meta")"
+  proj="$(awk '$1=="purgeAppsProject:"{print $2; exit}' "$meta")"
+  [[ -n "$ns" && -n "$proj" ]] || return 0
+  echo "${ns} ${proj//\$\{USER\}/${2}}"
+}
+
 purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve system objects
   # and ONLY the keep-module's entry marker. Preserving ALL ws-entry-* markers let stale
   # markers of long-gone modules survive every reset and false-green marker checks (G4-F9).
@@ -183,6 +196,23 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
     done
   done
   ok "purge requested in ${ns}"
+}
+
+purge_apps() {  # module user — delete the user's attendee-created Application CRs for this module.
+  # These live in a control-plane namespace (ws-meta purgeAppsNamespace, e.g. student-gitops), NOT
+  # in the module's purge namespaces, so purge_ns never sees them. Selected by .spec.project (the
+  # per-user AppProject, e.g. proj-user7) — attendees create apps via the Argo UI and cannot be
+  # relied on to label them.
+  local module="$1" user="$2" pair ns proj name
+  pair="$(meta_apps "$module" "$user")"
+  [[ -n "$pair" ]] || return 0
+  ns="${pair%% *}"; proj="${pair##* }"
+  for name in $(oc get applications.argoproj.io -n "$ns" \
+      -o jsonpath="{range .items[?(@.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
+    info "deleting attendee Argo app ${ns}/${name} (project ${proj})…"
+    oc delete application "$name" -n "$ns" --wait=true --timeout=120s >/dev/null 2>&1 \
+      || oc patch application "$name" -n "$ns" --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+  done
 }
 
 gc_conflicts() {  # user module — evict conflicting modules' entry apps before materializing
@@ -211,6 +241,10 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
         fi
       done
     fi
+    # The conflicting module's attendee-created Argo apps (ws-meta purgeApps*) live in a
+    # control-plane ns and would keep selfHeal-ing its world back — purge them regardless
+    # of whether the entry app itself was still present.
+    purge_apps "$c" "$user"
   done
   if [[ "$evicted" == 1 ]]; then
     for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
@@ -382,6 +416,9 @@ cmd_reset() {
   # where volumeClaimTemplate PVCs are pinned the same way.
   local ns
   for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
+  # Attendee-created Argo apps (ws-meta purgeApps*) live outside the purge namespaces and would
+  # selfHeal their workloads straight back after the purge — delete them before the app teardown.
+  purge_apps "$module" "$user"
 
   # Now remove the GitOps wrapper. With the namespace already emptied the finalizer has little or
   # nothing left to prune and completes fast; if it still lingers, strip the finalizer rather than
