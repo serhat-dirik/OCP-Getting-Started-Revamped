@@ -1,0 +1,102 @@
+# Trust-signing bootstrap: give Tekton Chains a cosign key so pipeline-built images are signed +
+# attested (in-toto SLSA provenance) with a verifiable key. This is the LAB-critical half of the
+# trust story (RHACS scans, this signs) — it needs neither RHTAS nor keyless OIDC, only Chains +
+# a key in the operator-owned `signing-secrets`.
+#
+# WHY A JOB, NOT AN ARGO-MANAGED SECRET: `signing-secrets` is created (empty) and co-owned by the
+# Tekton operator's TektonInstallerSet (manifestival). Argo cannot co-own it without a permanent
+# OutOfSync fight — same class of problem as the operator-managed TektonConfig (build-note ADR flag).
+# So a hook Job PATCHES the key in (server-side apply, no delete → no race with the operator
+# re-creating the placeholder) and is idempotent: if a cosign key is already present it is left
+# untouched (rotating it would invalidate every prior signature + the per-user ImagePolicy pubkey).
+#
+# Split-brain containers (same idiom as the workshop app-repo-seed): the init container has cosign
+# (bundled in the RHTAS client image) but no oc; the main container has oc but no cosign. They hand
+# the freshly-generated key material across a memory-backed emptyDir; only the PUBLIC key is exported.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cosign-keygen
+  namespace: trust-signing
+  labels:
+    portfolio.redhat.com/component: trust-signing
+  annotations:
+    # Re-runs on every stack sync (BeforeHookCreation); idempotent, so re-sync never rotates the key.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: cosign-keygen
+    spec:
+      serviceAccountName: cosign-keygen
+      restartPolicy: Never
+      volumes:
+        # Memory-backed handoff for the private key material — never a ConfigMap, gone with the pod.
+        - name: shared
+          emptyDir:
+            medium: Memory
+      initContainers:
+        # Generate a cosign key pair using the cosign binary bundled in the RHTAS client image.
+        # Digest-pinned (verified live from the rhtas-operator relatedImages, RHTAS 1.4.x) — immutable
+        # + Red Hat-sourced; refresh the digest when the trust stack's RHTAS minor moves.
+        - name: keygen
+          image: registry.redhat.io/rhtas/client-server-rhel9@sha256:050f362dc6b245851e58348e82a057fac7a6efc31e274fe03f3420a440b8ef11
+          env:
+            # Empty passphrase: this is a workshop demonstration key, and Chains reads cosign.password
+            # from the secret to decrypt it. COSIGN_YES suppresses the interactive confirm.
+            - name: COSIGN_PASSWORD
+              value: ""
+            - name: COSIGN_YES
+              value: "true"
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ extracting cosign from the RHTAS client image…"
+              tar xzf /tmp/cosign/cosign_linux_amd64.tar.gz -C /shared
+              echo "▶ generating a cosign key pair (empty passphrase)…"
+              cd /shared
+              ./cosign generate-key-pair
+              # generate-key-pair writes ./cosign.key (encrypted priv) + ./cosign.pub (pub) in CWD.
+              printf '' > /shared/cosign.password        # empty passphrase, stored as-is for Chains
+              echo "  ✓ key material staged in /shared (private key never leaves this pod)"
+      containers:
+        # Publish the key into the operator-owned signing-secrets (idempotent) + export the public
+        # half as a ConfigMap for downstream (ImagePolicy pubkey, `cosign verify`).
+        - name: publish
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS=openshift-pipelines
+              if oc get secret signing-secrets -n "$NS" -o jsonpath='{.data.cosign\.pub}' 2>/dev/null | grep -q .; then
+                echo "✓ signing-secrets already carries a cosign key — leaving it (no rotation)"
+              else
+                echo "▶ publishing the cosign key into ${NS}/signing-secrets…"
+                # apply (not delete+create) merges data into the operator's empty placeholder without
+                # racing its re-create; Chains picks the key up on its next reconcile.
+                oc create secret generic signing-secrets -n "$NS" \
+                  --from-file=cosign.key=/shared/cosign.key \
+                  --from-file=cosign.pub=/shared/cosign.pub \
+                  --from-file=cosign.password=/shared/cosign.password \
+                  --dry-run=client -o yaml | oc apply -f -
+                echo "  ✓ signing-secrets populated"
+              fi
+              echo "▶ exporting the PUBLIC key as ${NS}/chains-cosign-pub (downstream verify + ImagePolicy)…"
+              oc get secret signing-secrets -n "$NS" -o jsonpath='{.data.cosign\.pub}' | base64 -d > /shared/pub.pem
+              oc create configmap chains-cosign-pub -n "$NS" \
+                --from-file=cosign.pub=/shared/pub.pem \
+                --dry-run=client -o yaml | oc apply -f -
+              echo "✅ trust-signing ready — Tekton Chains will sign pipeline images with this cosign key"

@@ -1,0 +1,64 @@
+# Enable RHACS delegated scanning so Central can scan images in the CLUSTER-LOCAL OpenShift registry
+# (image-registry.openshift-image-registry.svc:5000) — the M08 pipeline builds there and Central has
+# no external creds for it. Delegated scanning hands enrichment to THIS secured cluster's Scanner V4
+# (it pulls locally). Verified live 2026-07-11: without this, `roxctl image check` fails with "no
+# matching image registries found"; with enabledFor=ALL → the local scanner pulls + scans.
+#
+# PostSync (runs after the wave-3 SecuredCluster) so the cluster is registered in Central; it waits
+# for the sensor to appear, reads the cluster id, and sets the config idempotently.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rhacs-delegated-scanning
+  namespace: stackrox
+  labels:
+    portfolio.redhat.com/component: rhacs-central
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: rhacs-delegated-scanning
+    spec:
+      serviceAccountName: rhacs-init-bundle
+      restartPolicy: Never
+      containers:
+        - name: delegated-scanning
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: CENTRAL
+              value: "https://central.stackrox.svc"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS=stackrox
+              curl -ksf "${CENTRAL}/v1/ping" >/dev/null 2>&1 || { echo "❌ Central API unreachable"; exit 1; }
+              PASS="$(oc get secret central-htpasswd -n "$NS" -o jsonpath='{.data.password}' | base64 -d)"
+
+              echo "▶ waiting for the secured cluster to register in Central…"
+              CID=""
+              for i in $(seq 1 60); do
+                CID="$(curl -ks -u "admin:${PASS}" "${CENTRAL}/v1/clusters" \
+                  | grep -oE '"id":"[0-9a-f-]{36}"' | head -1 | sed 's/^"id":"//; s/"$//')"
+                [[ -n "$CID" ]] && break
+                sleep 10
+              done
+              [[ -n "$CID" ]] || { echo "❌ no secured cluster registered after 10m"; exit 1; }
+              echo "  ✓ secured cluster id: ${CID}"
+
+              CUR="$(curl -ks -u "admin:${PASS}" "${CENTRAL}/v1/delegatedregistryconfig" | grep -oE '"enabledFor":"[A-Z]+"' | sed 's/.*://; s/"//g')"
+              if [[ "$CUR" == "ALL" ]]; then
+                echo "  ✓ delegated scanning already enabled (ALL) — skip"
+              else
+                echo "▶ enabling delegated scanning (ALL → this secured cluster)…"
+                curl -ksf -u "admin:${PASS}" -X PUT "${CENTRAL}/v1/delegatedregistryconfig" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"enabledFor\":\"ALL\",\"defaultClusterId\":\"${CID}\",\"registries\":[]}" >/dev/null
+                echo "  ✓ delegated scanning enabled"
+              fi
+              echo "✅ Central can now scan cluster-local registry images (M08 pipeline scan gate)"

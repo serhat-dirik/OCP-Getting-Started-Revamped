@@ -1,0 +1,42 @@
+# The keygen Job runs as this SA in `trust-signing` but writes the cosign key into the operator-owned
+# `signing-secrets` in openshift-pipelines. That cross-namespace write is granted by a Role BOUND in
+# openshift-pipelines (below) — scoped to secrets only, no cluster-wide grant.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cosign-keygen
+  namespace: trust-signing
+  labels:
+    portfolio.redhat.com/component: trust-signing
+---
+# why: the Job idempotently reads/creates/updates ONLY the signing-secrets Secret so Tekton Chains has
+# a cosign key to sign with, and publishes the PUBLIC half as the chains-cosign-pub ConfigMap
+# (downstream ImagePolicy + `cosign verify` read it). get+list to test idempotency; create/update/patch
+# to publish. Scoped to openshift-pipelines (where Chains + signing-secrets live) — no cluster grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cosign-keygen-signing-secrets
+  namespace: openshift-pipelines
+  labels:
+    portfolio.redhat.com/component: trust-signing
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cosign-keygen-signing-secrets
+  namespace: openshift-pipelines
+  labels:
+    portfolio.redhat.com/component: trust-signing
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cosign-keygen-signing-secrets
+subjects:
+  - kind: ServiceAccount
+    name: cosign-keygen
+    namespace: trust-signing

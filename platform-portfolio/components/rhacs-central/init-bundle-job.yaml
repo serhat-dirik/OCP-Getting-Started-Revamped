@@ -1,0 +1,84 @@
+# The fragile-but-essential RHACS bootstrap (build-note flag): SecuredCluster needs a Central-minted
+# init bundle (sensor-tls/collector-tls/admission-control-tls), and the M08 pipeline scan gate needs a
+# roxctl API token. Both are one-time secrets only available at generation time, so a hook Job mints
+# them against the live Central API and writes them into stackrox. Idempotent: skips if the secrets
+# already exist (re-generating would rotate the sensor certs + leak duplicate tokens). Never logs a
+# secret value. Same Central API the console uses (probed live 2026-07-11: kubectlBundle=base64 YAML,
+# apitokens/generate={metadata,token}, role "Continuous Integration" present).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rhacs-init-bundle
+  namespace: stackrox
+  labels:
+    portfolio.redhat.com/component: rhacs-central
+  annotations:
+    # Sync hook at wave 2 (with the Central CR): runs during the sync, waits for the Central API,
+    # then mints the secrets so the wave-3 SecuredCluster finds them. Re-runs on every sync.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: rhacs-init-bundle
+    spec:
+      serviceAccountName: rhacs-init-bundle
+      restartPolicy: Never
+      containers:
+        - name: init-bundle
+          # ose-cli ships oc + curl + base64 + grep/sed — no jq/python needed for these flat responses.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: CENTRAL
+              # In-cluster service (Central is in this same namespace); serves its own cert → curl -k.
+              value: "https://central.stackrox.svc"
+            - name: ENDPOINT
+              # roxctl/scan-task endpoint form (host:port, no scheme).
+              value: "central.stackrox.svc:443"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS=stackrox
+              echo "▶ waiting for the Central API…"
+              for i in $(seq 1 90); do
+                curl -ksf "${CENTRAL}/v1/ping" >/dev/null 2>&1 && break
+                sleep 10
+              done
+              curl -ksf "${CENTRAL}/v1/ping" >/dev/null 2>&1 || { echo "❌ Central API not answering after 15m"; exit 1; }
+              PASS="$(oc get secret central-htpasswd -n "$NS" -o jsonpath='{.data.password}' | base64 -d)"
+
+              # --- 1) sensor init bundle (idempotent: skip if sensor-tls already applied) ----------
+              if oc get secret sensor-tls -n "$NS" >/dev/null 2>&1; then
+                echo "  ✓ init-bundle secrets already present — skip"
+              else
+                echo "▶ generating a cluster init bundle…"
+                RESP="$(curl -ks -u "admin:${PASS}" -X POST "${CENTRAL}/v1/cluster-init/init-bundles" \
+                  -H 'Content-Type: application/json' -d "{\"name\":\"workshop-$(date +%s)\"}")"
+                B64="$(printf '%s' "$RESP" | grep -oE '"kubectlBundle":"[^"]*"' | sed 's/^"kubectlBundle":"//; s/"$//')"
+                [[ -n "$B64" ]] || { echo "❌ no kubectlBundle in response"; exit 1; }
+                printf '%s' "$B64" | base64 -d | oc apply -n "$NS" -f - >/dev/null
+                echo "  ✓ init-bundle TLS secrets applied to ${NS}"
+              fi
+
+              # --- 2) CI scan token for the M08 pipeline (idempotent: skip if present) -------------
+              if oc get secret rox-api-token -n "$NS" >/dev/null 2>&1; then
+                echo "  ✓ rox-api-token already present — skip"
+              else
+                echo "▶ minting a Continuous Integration API token for the scan gate…"
+                TRESP="$(curl -ks -u "admin:${PASS}" -X POST "${CENTRAL}/v1/apitokens/generate" \
+                  -H 'Content-Type: application/json' -d '{"name":"parasol-ci-scan","role":"Continuous Integration"}')"
+                TOKEN="$(printf '%s' "$TRESP" | grep -oE '"token":"[^"]*"' | sed 's/^"token":"//; s/"$//')"
+                [[ -n "$TOKEN" ]] || { echo "❌ no token in response"; exit 1; }
+                # value never echoed; endpoint stored alongside so the scan task needs no other config.
+                oc create secret generic rox-api-token -n "$NS" \
+                  --from-literal=rox-api-token="$TOKEN" \
+                  --from-literal=rox-central-endpoint="${ENDPOINT}" \
+                  --dry-run=client -o yaml | oc apply -f - >/dev/null
+                echo "  ✓ rox-api-token secret created (value not shown)"
+              fi
+              echo "✅ RHACS bootstrap complete — SecuredCluster + M08 scan gate have their secrets"
