@@ -6,28 +6,46 @@ numbered red circles matching the referenced step. Every screenshot needs alt te
 (what it shows + what to notice). Embed points are marked in the `.adoc` files with a
 commented `// TODO(media): image::…` line — uncomment when the asset lands.
 
-Constrained-environment note: the module was built and verified from the CLI/API (every
-build, template, and end state was performed on the cluster as `user2`), but without a
-browser. Diagrams ship inline as Mermaid (they satisfy the ≥1-diagram requirement today);
-the SVG exports and the console screenshots below are the deferred media pass.
+Media note: the module's build/template/end-state mechanics were verified from the CLI/API as
+`user2`; the console screenshots below were then captured on the live 4.21 console during the
+2026-07-10 browser-verification pass (see the Status column). Diagrams ship inline as Mermaid
+(they satisfy the ≥1-diagram requirement today); the SVG diagram exports remain the deferred
+media pass.
 
 ## Screenshots (console views — the view IS the content)
 
-| # | Filename | Console view | Annotate | Embed point |
-|---|----------|--------------|----------|-------------|
-| 1 | `m02-build-deliver-01-import-from-git.png` | **+Add → Import from Git**, URL for `user1/parasol-claims` pasted, builder detected | Circle: the Git URL field; the detected **Java 21** builder tile; Target port 8080; Create | lab.adoc ex. 1 (Console tab) |
-| 2 | `m02-build-deliver-02-catalog-postgres-tile.png` | **+Add → Developer Catalog → Database**, the Parasol PostgreSQL tile | Circle: the "Parasol PostgreSQL (ephemeral)" tile; provider "Parasol Insurance"; the database/parasol tags | lab.adoc ex. 4 (Console tab) |
-| 3 | `m02-build-deliver-03-buildconfig-to-imagestream.png` | Topology `parasol-claims` node → **Resources**: the completed Build and the ImageStream tag | Circle: the `Complete` build; `parasol-claims:latest`; the "Source (S2I)" strategy | lab.adoc ex. 1 (inspect) |
-| 4 | `m02-build-deliver-04-topology-built-and-wired.png` | Topology, project `user1-dev`, claims + claims-db + notifications all healthy | Circle: the `parasol-claims`→`claims-db` connection; the Open-URL arrow on claims | lab.adoc ex. 5 (end state) |
+| # | Filename | Status | Console view | Notice | Embed point |
+|---|----------|--------|--------------|--------|-------------|
+| 1 | `m02-build-deliver-01-import-from-git.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Import from Git**, `user1/parasol-claims` pasted, **repository-unreachable** warning, Import Strategy = **Builder Image → Java 21** | the Git URL field; the "repository is unreachable / unable to detect the import strategy" warning; the manually-selected **Java 21** tile | lab.adoc ex. 1 (Console tab) |
+| 2 | `m02-build-deliver-02-catalog-postgres-tile.png` | ✅ DONE 2026-07-10 | **Ecosystem → Software Catalog → Databases**, the Parasol PostgreSQL tile | the "Parasol PostgreSQL (ephemeral)" tile; provider "Provided by Parasol Insurance"; the DATABASE / PARASOL / POSTGRESQL tags | lab.adoc ex. 4 (Console tab) |
+| 3 | `m02-build-deliver-03-buildconfig-to-imagestream.png` | ⬜ NOT CAPTURED | Topology `parasol-claims` node → **Resources**: the completed Build and the ImageStream tag | the `Complete` build; `parasol-claims:latest`; the "Source (S2I)" strategy | lab.adoc ex. 1 (inspect) |
+| 4 | `m02-build-deliver-04-topology-built-and-wired.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, claims + claims-db + notifications all healthy | the `parasol-claims`→`claims-db` connection; the Open-URL arrow on claims | lab.adoc ex. 5 (end state) |
 
-While shooting, resolve every `[CAPTURE-VERIFY]` note in `lab.adoc` and report any label that
-differs from the text. The exact 4.21 labels to confirm:
+**#3 `m02-build-deliver-03-buildconfig-to-imagestream.png` remains uncaptured** — the 2026-07-10
+browser pass prioritized the two load-bearing shots (#1 the import reality, #2 the catalog) plus
+the #4 end-state; the BuildConfig→ImageStream inspection (#3) is enrichment for an inline CLI step
+and is deferred to the next media pass. It has no `// media-pass:` embed comment in `lab.adoc`
+(no embed point), so its absence breaks nothing.
 
-- **Import-from-Git builder tile** for the workshop `java-21` stream — is it "Java 21 (UBI 9)"? Does import **auto-detect** it, or must the attendee pick it from the *Builder Image* dropdown? (CLI grounding: `oc new-app java-21~<git>` selects `openshift/java-21:latest`.)
-- **Dockerfile import strategy** — the *Dockerfile path* field accepts `Containerfile`.
-- **Context dir** field under advanced Git options (notifications `/node`).
-- **Developer Catalog** filters ("Database"/"Template") and the Instantiate form fields (APP_NAME / POSTGRESQL_DATABASE / POSTGRESQL_USER / MEMORY_LIMIT).
-- **Deployment → Environment** tab "Add from ConfigMap/Secret" control (wiring claims to `claims-db`).
+**4.21 console reality confirmed during the pass (corrections applied to `lab.adoc`):**
+
+- **Import from Git does NOT auto-detect the builder.** The console backend cannot reach the
+  in-cluster Gitea host, so it shows "the repository is unreachable" and "Unable to detect the
+  import strategy"; the attendee selects *Import Strategy → Builder Image → **Java 21*** (a
+  separate tile from "Java") and types the Name by hand. Added a troubleshooting entry and an
+  honest lab NOTE; flagged as a candidate platform fix.
+- **Builder tile label is "Java 21"** (info text: "Java 21 (UBI 9, S2I) … from source on UBI 9"),
+  not "Java 21 (UBI 9)".
+- **Dockerfile import strategy** — the *Dockerfile path* field renders **empty** and accepts
+  `Containerfile`. Confirmed.
+- **Context dir** under *Show advanced Git options* (Git reference / Context dir / Source Secret).
+  Confirmed.
+- **Catalog is renamed "Software Catalog"** (nav: **Ecosystem → Software Catalog**), Databases
+  category, Type filter Templates/Helm Charts; the button is **Instantiate Template**; the form
+  shows **display names** ("Database name", "PostgreSQL database name", …), not raw param names.
+- **Deployment → Environment** — the all-keys control is the **"All values from existing
+  ConfigMaps or Secrets (envFrom)"** section (equivalent to `--from=secret/claims-db`); a per-key
+  "Add from ConfigMap or Secret" control also exists in the Single-values section.
 
 ## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
 
@@ -63,8 +81,9 @@ curl -s http://parasol-claims-user1-dev.$(oc get ingresses.config cluster -o jso
 Target length < 2 min after trimming the build wait. Embed with asciinema-player on lab.adoc (near exercise 1 or 5).
 
 ### Screen capture — import-from-Git to Topology (`m02-build-deliver-import.gif`, < 90 s)
-Playwright/console capture: **+Add → Import from Git**, paste `user1/parasol-claims`, confirm the
-**Java 21** builder, Create, and land in Topology with the build starting. This is the console-heavy
+Playwright/console capture: **Quick create (+) → Import from Git**, paste `user1/parasol-claims`,
+dismiss the **repository-unreachable** warning, pick **Import Strategy → Builder Image → Java 21**,
+type the Name, Create, and land in Topology with the build starting. This is the console-heavy
 "source in, app out" moment; embed near lab.adoc exercise 1. Silent (no narration).
 
 ## Narration script

@@ -6,22 +6,32 @@ numbered red circles matching the referenced step. Every screenshot needs alt te
 (what it shows + what to notice). Embed points are marked in the `.adoc` files with a
 commented `// TODO(media): image::…` line — uncomment when the asset lands.
 
-Constrained-environment note: the module was built without browser access. Diagrams ship
-inline as Mermaid (they satisfy the ≥1-diagram requirement today); the SVG exports and the
-console screenshots below are the deferred media pass.
+Media note: the console screenshots below were captured on the live 4.21 console during the
+2026-07-10 browser-verification pass and are embedded in `lab.adoc` (see the Status column).
+Diagrams ship inline as Mermaid (they satisfy the ≥1-diagram requirement today); the SVG diagram
+exports remain the deferred media pass.
 
 ## Screenshots (console views — the view IS the content)
 
-| # | Filename | Console view | Annotate | Embed point |
-|---|----------|--------------|----------|-------------|
-| 1 | `m01-platform-orientation-01-topology-3pods.png` | Topology, project `user1-dev`, `parasol-web` scaled to 3 | Circle the Pod donut showing 3/3; the node title; the Open-URL arrow | lab.adoc ex. 3 (scale) |
-| 2 | `m01-platform-orientation-02-deploy-image-dialog.png` | **+Add → Container images** form with the registry reference pasted | Circle: the internal-registry image field, auto-filled Name, Resource type = Deployment, Target port 8080 | lab.adoc ex. 2 (Console tab) |
-| 3 | `m01-platform-orientation-03-lightspeed-answer.png` | OpenShift Lightspeed panel after asking "Why is my pod restarting?" | Circle: masthead Lightspeed button; the bulleted causes; the suggested `oc` commands | lab.adoc ex. 7 |
-| 4 | `m01-platform-orientation-04-unified-console-landmarks.png` | Unified console home, project `user1-dev` selected | Circle (1) project selector, (2) +Add, (3) Topology, (4) masthead terminal icon, (5) Lightspeed button | lab.adoc ex. 1 |
+All four console screenshots were **captured on the live 4.21 console (2026-07-10)** during the
+browser-verification pass and are embedded in `lab.adoc`. Status: **DONE**.
 
-While shooting, resolve every `[CAPTURE-VERIFY]` note in `lab.adoc` (exact 4.21 labels:
-+Add tile name, internal-registry radio, Resource type options, Create-Route location,
-Pod-donut controls, Lightspeed entry point). Report any label that differs from the text.
+| # | Filename | Status | Console view | Notice | Embed point |
+|---|----------|--------|--------------|--------|-------------|
+| 1 | `m01-platform-orientation-01-topology-3pods.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, `parasol-web` scaled to 3 | the Pod donut showing 3/3; the node title; the Open-URL arrow | lab.adoc ex. 3 (scale) |
+| 2 | `m01-platform-orientation-02-deploy-image-dialog.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Container images** form, registry reference pasted and **Validated** | the *Image name from external registry* field, the green *Validated*, the auto-filled Name, Resource type = Deployment; Target port and *Create a route* live under *Advanced options* | lab.adoc ex. 2 (Console tab) |
+| 3 | `m01-platform-orientation-03-lightspeed-answer.png` | ✅ DONE 2026-07-10 | OpenShift Lightspeed panel after asking "Why is my pod restarting?" | the Lightspeed **chat bubble at bottom-right**; the bulleted causes; the suggested `oc` commands; the doc citations | lab.adoc ex. 7 |
+| 4 | `m01-platform-orientation-04-unified-console-landmarks.png` | ✅ DONE 2026-07-10 | Unified console, project `user1-dev` selected | (1) project selector, (2) masthead **Quick create (+)** menu, (3) Topology under **Workloads**, (4) masthead terminal icon, (5) Lightspeed **chat bubble (bottom-right)** | lab.adoc ex. 1 |
+
+**4.21 console reality confirmed during the pass (corrections applied to `lab.adoc`):** there is
+**no `+Add` nav item** — the deploy flows (Import YAML / Import from Git / Container images) live
+in the masthead **Quick create (+)** menu; **Topology** sits under the **Workloads** nav group;
+**Lightspeed is a floating chat bubble at bottom-right** (not a masthead button) whose drawer
+auto-opens on first visit; the **Container images** tile label and *Deploy Image* form fields are
+confirmed, with **Create a route** (default checked) under *Advanced options*; the Pod-donut
+up/down controls and **Edit Pod count** action are confirmed. **There is no *Actions → Create
+Route*** and the side-panel *Resources* tab has no Create-Route button — Routes are created from
+**Networking → Routes → Create Route** (the CLI `oc expose` path is unchanged).
 
 ## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
 
