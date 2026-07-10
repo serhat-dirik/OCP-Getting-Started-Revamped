@@ -1,0 +1,104 @@
+# image-size-report — the flagship Parasol "company task library" example (M07).
+#
+# WHY THIS EXISTS: a curated org Task that a platform team publishes ONCE into the shared
+# parasol-tasks library so every app pipeline can `taskRef` it by cluster resolver instead of
+# copy-pasting bash. It inspects a just-built image, reports its pull size, and gates it against
+# a memory-of-a-budget (MAX_SIZE_MB) — the concrete "why platform teams curate a library" beat.
+#
+# It talks to the cluster-internal registry using the running ServiceAccount's own token as a
+# registry credential (no extra Secret), so it works unchanged in any {user}-cicd namespace whose
+# pipeline SA already has image-puller on the target image. `oc image info -o json` needs no jq —
+# ose-cli is the workshop's standard image, so this Task adds no new dependency.
+#
+# CANONICAL SOURCE. This standalone copy is the portable artifact + the lab's author-beat reference.
+# The SAME Task is installed into the shared parasol-tasks library by the workshop layer
+# (gitops/workshop-config/templates/parasol-tasks.yaml) — keep the two in lockstep by hand.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: image-size-report
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Reports a container image's total pull size and checks it against a size budget.
+    A curated Parasol library Task, referenced from app pipelines via the cluster resolver.
+  params:
+    - name: IMAGE
+      type: string
+      description: Fully-qualified image reference to inspect (registry/namespace/name:tag).
+    - name: MAX_SIZE_MB
+      type: string
+      description: Soft budget in MB; the Task flags (does not fail) an image over budget.
+      default: "500"
+    - name: TLS_VERIFY
+      type: string
+      description: Verify registry TLS. "false" for the in-cluster registry (service-CA cert).
+      default: "false"
+  results:
+    - name: image-size-bytes
+      description: Total image size in bytes (sum of layer + config descriptor sizes).
+    - name: image-size-mb
+      description: Total image size in whole MB (bytes / 1000000).
+    - name: within-budget
+      description: '"true" if image-size-mb <= MAX_SIZE_MB, else "false".'
+  steps:
+    - name: report
+      # ose-cli ships `oc` (and `oc image info`) on every connected cluster — no custom image.
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      env:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: MAX_SIZE_MB
+          value: $(params.MAX_SIZE_MB)
+        - name: TLS_VERIFY
+          value: $(params.TLS_VERIFY)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # Authenticate to the registry with the pod's ServiceAccount token (username is
+        # arbitrary for the internal registry; the bearer token is the password). Never echoed.
+        REG="${IMAGE%%/*}"
+        TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+        AUTH="$(printf 'pipeline:%s' "${TOKEN}" | base64 -w0)"
+        CFG="$(mktemp -d)/config.json"
+        printf '{"auths":{"%s":{"auth":"%s"}}}' "${REG}" "${AUTH}" > "${CFG}"
+
+        INSECURE=""
+        [ "${TLS_VERIFY}" = "false" ] && INSECURE="--insecure"
+
+        echo "▶ inspecting ${IMAGE}"
+        if ! oc image info "${IMAGE}" ${INSECURE} -a "${CFG}" -o json > /tmp/info.json 2>/tmp/err; then
+          echo "❌ could not read ${IMAGE}"
+          echo "   fix: confirm the image exists and the pipeline SA has image-puller on it."
+          sed 's/^/   /' /tmp/err
+          exit 1
+        fi
+
+        # Sum every layer/config descriptor size. The config descriptor is a few KB, so the total
+        # tracks the pull size closely; no jq needed (ose-cli has none).
+        BYTES="$(grep -oE '"size": *[0-9]+' /tmp/info.json | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
+        MB=$(( BYTES / 1000000 ))
+
+        WITHIN="true"
+        [ "${MB}" -gt "${MAX_SIZE_MB}" ] && WITHIN="false"
+
+        # Machine-readable results for downstream tasks / the console.
+        printf '%s' "${BYTES}"   | tee "$(results.image-size-bytes.path)" >/dev/null
+        printf '%s' "${MB}"      | tee "$(results.image-size-mb.path)"    >/dev/null
+        printf '%s' "${WITHIN}"  | tee "$(results.within-budget.path)"    >/dev/null
+
+        echo "────────────────────────────────────────────"
+        echo "  image        : ${IMAGE}"
+        echo "  size         : ${MB} MB (${BYTES} bytes)"
+        echo "  budget       : ${MAX_SIZE_MB} MB"
+        if [ "${WITHIN}" = "true" ]; then
+          echo "  verdict      : ✅ within budget"
+        else
+          echo "  verdict      : ⚠️  OVER budget by $(( MB - MAX_SIZE_MB )) MB"
+          echo "  hint         : slim the base image or use a smaller runtime layer."
+        fi
+        echo "────────────────────────────────────────────"

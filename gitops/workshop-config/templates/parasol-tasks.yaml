@@ -1,0 +1,190 @@
+{{- /*
+  parasol-tasks — the shared "company task library" for M07 (Pipelines Fundamentals).
+
+  WHY THIS LIVES IN THE WORKSHOP LAYER (not platform-portfolio): it is Parasol-branded workshop
+  content (the image-size-report teaching Task, the JDK 21 build Task for Parasol's apps) and its
+  read-RBAC is parameterized by the workshop's per-user model (userCount/userPrefix) — the portfolio
+  has no concept of "users" and must stay workshop-agnostic (hard rule 2). Structurally this is the
+  twin of parasol-images-pull.yaml: a shared namespace + curated objects + per-user SA-group grants.
+
+  Shared + survives `ws reset` (entry-states README rule 2: shared namespaces are workshop-layer).
+  The per-user pipeline SA + workspace PVC are materialized per-run by the M07 entry state, NOT here.
+
+  LOCKSTEP: the two Task bodies below are byte-identical to the canonical standalone artifacts in
+  pipelines/tasks/*.yaml (which the module + PipelineRuns reference). Helm cannot read files outside
+  its chart, so the definitions are duplicated on purpose and kept in sync by hand (same pattern as
+  gitops/entry-states/m04 _helpers.tpl ↔ gitops/promotion base).
+*/ -}}
+# The shared library namespace — every attendee's pipeline resolves Tasks from here by cluster resolver.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: parasol-tasks
+  labels:
+    workshop.redhat.com/shared: "true"
+    workshop.redhat.com/layer: workshop-config
+---
+# image-size-report — flagship curated Task: reports a built image's pull size and checks a budget.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: image-size-report
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Reports a container image's total pull size and checks it against a size budget.
+    A curated Parasol library Task, referenced from app pipelines via the cluster resolver.
+  params:
+    - name: IMAGE
+      type: string
+      description: Fully-qualified image reference to inspect (registry/namespace/name:tag).
+    - name: MAX_SIZE_MB
+      type: string
+      description: Soft budget in MB; the Task flags (does not fail) an image over budget.
+      default: "500"
+    - name: TLS_VERIFY
+      type: string
+      description: Verify registry TLS. "false" for the in-cluster registry (service-CA cert).
+      default: "false"
+  results:
+    - name: image-size-bytes
+      description: Total image size in bytes (sum of layer + config descriptor sizes).
+    - name: image-size-mb
+      description: Total image size in whole MB (bytes / 1000000).
+    - name: within-budget
+      description: '"true" if image-size-mb <= MAX_SIZE_MB, else "false".'
+  steps:
+    - name: report
+      # ose-cli ships `oc` (and `oc image info`) on every connected cluster — no custom image.
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      env:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: MAX_SIZE_MB
+          value: $(params.MAX_SIZE_MB)
+        - name: TLS_VERIFY
+          value: $(params.TLS_VERIFY)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # Authenticate to the registry with the pod's ServiceAccount token (username is
+        # arbitrary for the internal registry; the bearer token is the password). Never echoed.
+        REG="${IMAGE%%/*}"
+        TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+        AUTH="$(printf 'pipeline:%s' "${TOKEN}" | base64 -w0)"
+        CFG="$(mktemp -d)/config.json"
+        printf '{"auths":{"%s":{"auth":"%s"}}}' "${REG}" "${AUTH}" > "${CFG}"
+
+        INSECURE=""
+        [ "${TLS_VERIFY}" = "false" ] && INSECURE="--insecure"
+
+        echo "▶ inspecting ${IMAGE}"
+        if ! oc image info "${IMAGE}" ${INSECURE} -a "${CFG}" -o json > /tmp/info.json 2>/tmp/err; then
+          echo "❌ could not read ${IMAGE}"
+          echo "   fix: confirm the image exists and the pipeline SA has image-puller on it."
+          sed 's/^/   /' /tmp/err
+          exit 1
+        fi
+
+        # Sum every layer/config descriptor size. The config descriptor is a few KB, so the total
+        # tracks the pull size closely; no jq needed (ose-cli has none).
+        BYTES="$(grep -oE '"size": *[0-9]+' /tmp/info.json | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
+        MB=$(( BYTES / 1000000 ))
+
+        WITHIN="true"
+        [ "${MB}" -gt "${MAX_SIZE_MB}" ] && WITHIN="false"
+
+        # Machine-readable results for downstream tasks / the console.
+        printf '%s' "${BYTES}"   | tee "$(results.image-size-bytes.path)" >/dev/null
+        printf '%s' "${MB}"      | tee "$(results.image-size-mb.path)"    >/dev/null
+        printf '%s' "${WITHIN}"  | tee "$(results.within-budget.path)"    >/dev/null
+
+        echo "────────────────────────────────────────────"
+        echo "  image        : ${IMAGE}"
+        echo "  size         : ${MB} MB (${BYTES} bytes)"
+        echo "  budget       : ${MAX_SIZE_MB} MB"
+        if [ "${WITHIN}" = "true" ]; then
+          echo "  verdict      : ✅ within budget"
+        else
+          echo "  verdict      : ⚠️  OVER budget by $(( MB - MAX_SIZE_MB )) MB"
+          echo "  hint         : slim the base image or use a smaller runtime layer."
+        fi
+        echo "────────────────────────────────────────────"
+---
+# maven-jdk21 — curated Task: the org's JDK 21 Maven runner (the bundled maven task is JDK 17).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: maven-jdk21
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs Maven goals against a workspace checkout using a JDK 21 runner (Red Hat UBI9 OpenJDK 21,
+    Maven 3.9). The Parasol org standard for building/testing its JDK 21 services.
+  params:
+    - name: GOALS
+      type: array
+      description: Maven goals and flags to run.
+      default:
+        - -B
+        - -ntp
+        - test
+    - name: SUBDIRECTORY
+      type: string
+      description: Path within the workspace that holds the pom.xml.
+      default: "."
+  workspaces:
+    # The source checkout (git-clone writes here); Maven runs against it in place.
+    - name: source
+  steps:
+    - name: mvn-goals
+      # UBI9 OpenJDK 21 builder image — ships Maven 3.9 at /usr/bin/mvn; JDK 21 matches the app.
+      image: registry.access.redhat.com/ubi9/openjdk-21:latest
+      workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      command:
+        - /usr/bin/mvn
+      # Array param expands to individual args (e.g. -B -ntp test); no shell involved.
+      args:
+        - $(params.GOALS[*])
+---
+# Read grant for the cluster resolver: a pipeline can only resolve a Task it can `get`. This Role
+# (get/list/watch tasks in parasol-tasks) is bound to every attendee's -cicd ServiceAccounts below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: parasol-tasks-reader
+  namespace: parasol-tasks
+  labels:
+    workshop.redhat.com/layer: workshop-config
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["tasks"]
+    verbs: ["get", "list", "watch"]
+---
+# One binding grants every per-user -cicd SA group read access (same group-subject shape as
+# parasol-images-pull.yaml). Pipelines run in {user}-cicd, so only those SAs need to resolve.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: parasol-tasks-readers
+  namespace: parasol-tasks
+  labels:
+    workshop.redhat.com/layer: workshop-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: parasol-tasks-reader
+subjects:
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add1 $i) }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts:{{ $user }}-cicd
+{{- end }}

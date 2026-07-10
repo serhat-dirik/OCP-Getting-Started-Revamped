@@ -1,0 +1,69 @@
+# Per-user pipeline RBAC/workspace pattern — REFERENCE for the M07 entry state (not applied here).
+#
+# The M07 entry state (gitops/entry-states/m07/, built later) will template `USER` below with
+# `{{ .Values.user }}`. This file is plain YAML for one namespace so it lints and reads cleanly;
+# it is NOT wired into any kustomization.
+#
+# WHAT THE ENTRY STATE ACTUALLY NEEDS (verified live on OCP 4.21 / Pipelines 1.22):
+#
+#   1. ServiceAccount + registry-push + deploy RBAC  ->  ALREADY PROVIDED by the operator.
+#      OpenShift Pipelines auto-creates a `pipeline` ServiceAccount in every namespace, pre-bound to
+#      `edit` (deploy) and `system:image-builder` (push to the in-namespace registry). The pipeline
+#      pushes to and deploys within its own {user}-cicd namespace with NO extra RBAC. The PipelineRuns
+#      use `serviceAccountName: pipeline` for exactly this reason.
+#
+#   2. Cluster-resolver read access to the shared library  ->  PROVIDED by the WORKSHOP LAYER.
+#      gitops/workshop-config/templates/parasol-tasks.yaml binds every {user}-cicd SA group to a
+#      reader Role in parasol-tasks, so `resolver: cluster` can fetch the curated Tasks. Not per-user.
+#
+#   3. Workspace  ->  a per-run PVC via `volumeClaimTemplate` in the PipelineRun (see
+#      pipelines/pipelinerun/parasol-claims-run.yaml). One PVC per run, auto-pruned, well under the
+#      pvc:5 namespace quota. There is NO standing workspace PVC to pre-create.
+#
+# So for the DEFAULT design the entry state materializes only the Pipeline + a PipelineRun (or the
+# .tekton/ file) — the SA/push/deploy RBAC is free. The block below is the OPTIONAL explicit variant
+# for a workshop that wants a DEDICATED, self-contained pipeline SA instead of the operator default
+# (e.g. to not depend on the operator having reconciled the `pipeline` SA yet).
+---
+# OPTIONAL dedicated pipeline ServiceAccount (only if not reusing the operator `pipeline` SA).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: parasol-pipeline
+  namespace: USER-cicd
+  labels:
+    workshop.redhat.com/module: m07
+---
+# Push rights to the in-namespace internal registry (buildah push target).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: parasol-pipeline-image-builder
+  namespace: USER-cicd
+  labels:
+    workshop.redhat.com/module: m07
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-builder
+subjects:
+  - kind: ServiceAccount
+    name: parasol-pipeline
+    namespace: USER-cicd
+---
+# Deploy rights (create/patch Deployments, rollout) in the same namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: parasol-pipeline-edit
+  namespace: USER-cicd
+  labels:
+    workshop.redhat.com/module: m07
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: ServiceAccount
+    name: parasol-pipeline
+    namespace: USER-cicd

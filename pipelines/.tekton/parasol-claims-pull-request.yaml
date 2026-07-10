@@ -1,0 +1,58 @@
+# parasol-claims-pull-request — the Pipelines-as-Code (PaC) entrypoint for the M07 git-push beat.
+#
+# WHY THIS EXISTS: the second half of M07 evolves from "run the pipeline by hand" to "push code and
+# the pipeline fires." An attendee commits this file to .tekton/ in their {user}/parasol-claims fork
+# and adds a Gitea webhook + a Repository CR; PaC then starts this PipelineRun on every push / PR to
+# main. It references the SAME parasol-claims-build-test-deploy Pipeline (installed by the entry
+# state) — PaC only supplies the git coordinates and a per-commit image tag from the event payload.
+#
+# The PaC {{ ... }} tokens are expanded by Pipelines-as-Code at event time (quoted so the file stays
+# valid YAML). See docs.redhat.com "Pipelines as Code" and pipelinesascode.com.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: parasol-claims-pull-request
+  annotations:
+    # Fire on pushes and PRs targeting main.
+    pipelinesascode.tekton.dev/on-event: "[push, pull_request]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    # Keep the namespace tidy — retain only the last few runs.
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+spec:
+  pipelineRef:
+    name: parasol-claims-build-test-deploy
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  params:
+    # Build the pushed commit of the attendee's own fork; tag the image with the commit SHA.
+    - name: git-url
+      value: "{{ repo_url }}"
+    - name: git-revision
+      value: "{{ revision }}"
+    - name: image
+      value: "image-registry.openshift-image-registry.svc:5000/{{ target_namespace }}/parasol-claims:{{ revision }}"
+    - name: max-size-mb
+      value: "500"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+  taskRunSpecs:
+    # Raise Maven/Quarkus memory above the 1Gi namespace LimitRange default (see the ad-hoc run).
+    - pipelineTaskName: unit-test
+      computeResources:
+        requests:
+          memory: 1Gi
+        limits:
+          memory: 1536Mi
+    - pipelineTaskName: build-image
+      computeResources:
+        requests:
+          memory: 1536Mi
+        limits:
+          memory: 2Gi

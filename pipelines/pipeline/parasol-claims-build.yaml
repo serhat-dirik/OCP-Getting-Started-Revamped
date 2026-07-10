@@ -1,0 +1,164 @@
+# parasol-claims-build-test-deploy — the M07 "build-test-deploy" Pipeline.
+#
+# WHY THIS EXISTS: the reference application pipeline attendees run, read, and evolve in M07.
+# Every step is referenced by the CLUSTER RESOLVER (the supported ClusterTask replacement) — the
+# bundled git-clone/buildah/openshift-client from the openshift-pipelines namespace, and the two
+# curated tasks (maven-jdk21, image-size-report) from the shared parasol-tasks library. Nothing is
+# copy-pasted: the whole point of M07 is reuse.
+#
+#   fetch-source (git-clone) -> unit-test (parasol-tasks/maven-jdk21) -> build-image (buildah)
+#     -> image-report (parasol-tasks/image-size-report) -> deploy (openshift-client)
+#
+# Memory for the Maven/Quarkus steps is raised above the 1Gi namespace LimitRange default in the
+# PipelineRun (taskRunSpecs), not here, so the Pipeline stays runtime-agnostic. See
+# pipelines/pipelinerun/parasol-claims-run.yaml and pipelines/.tekton/.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: parasol-claims-build-test-deploy
+  labels:
+    app.kubernetes.io/part-of: parasol-claims
+    workshop.redhat.com/module: m07
+spec:
+  params:
+    - name: git-url
+      type: string
+      description: Source repository (defaults to the in-cluster Gitea shared repo).
+      default: http://gitea.gitea.svc:3000/parasol/parasol-claims.git
+    - name: git-revision
+      type: string
+      description: Branch, tag, or commit to build.
+      default: main
+    - name: image
+      type: string
+      description: Fully-qualified target image reference (registry/namespace/name:tag).
+      # Defaults to the run's OWN namespace registry path, so this Pipeline is portable across
+      # every {user}-cicd namespace with no edit. (context vars resolve in the Pipeline spec,
+      # not in a PipelineRun's own params — so the default lives here.)
+      default: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:latest
+    - name: max-size-mb
+      type: string
+      description: Image size budget in MB, enforced (as a report) by image-size-report.
+      default: "500"
+  workspaces:
+    # One shared PVC carries the checkout from git-clone through unit-test and the image build.
+    - name: shared-workspace
+  results:
+    # Surface the library Task's verdict at the PipelineRun level for `tkn pr describe` / ws doctor.
+    - name: image-size-mb
+      value: $(tasks.image-report.results.image-size-mb)
+    - name: image-within-budget
+      value: $(tasks.image-report.results.within-budget)
+  tasks:
+    # 1) Clone the app source into the shared workspace (bundled task, cluster resolver).
+    - name: fetch-source
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        # Bundled git-clone uses UPPERCASE param names (URL/REVISION).
+        - name: URL
+          value: $(params.git-url)
+        - name: REVISION
+          value: $(params.git-revision)
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+
+    # 2) Run the unit tests (H2-backed, self-contained). A failing test gates the build.
+    #    Uses the curated parasol-tasks/maven-jdk21 (NOT the bundled maven, which is JDK 17 and
+    #    cannot compile this JDK 21 app) — the concrete payoff of curating an org task library.
+    - name: unit-test
+      runAfter:
+        - fetch-source
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: maven-jdk21
+          - name: namespace
+            value: parasol-tasks
+      params:
+        - name: GOALS
+          value:
+            - -B
+            - -ntp
+            - test
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    # 3) Build the image from the Containerfile and push it to the internal registry.
+    #    TLS_VERIFY=false: the in-cluster registry serves a service-CA cert the build pod
+    #    does not trust by default; the push is over the cluster-internal service only.
+    - name: build-image
+      runAfter:
+        - unit-test
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: buildah
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: IMAGE
+          value: $(params.image)
+        - name: DOCKERFILE
+          value: ./Containerfile
+        - name: TLS_VERIFY
+          value: "false"
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    # 4) The curated org library Task in action: report image size + budget (cluster resolver
+    #    into the SHARED parasol-tasks library — the "why we curate a task library" beat).
+    - name: image-report
+      runAfter:
+        - build-image
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: image-size-report
+          - name: namespace
+            value: parasol-tasks
+      params:
+        - name: IMAGE
+          value: $(params.image)
+        - name: MAX_SIZE_MB
+          value: $(params.max-size-mb)
+
+    # 5) Roll the freshly-built image out as a Deployment in the pipeline's own namespace
+    #    (self-contained: no cross-namespace RBAC; the ns SA pulls its own image).
+    - name: deploy
+      runAfter:
+        - image-report
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: openshift-client
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: SCRIPT
+          value: |
+            oc set image deployment/parasol-claims parasol-claims="$(params.image)" \
+              || oc create deployment parasol-claims --image="$(params.image)"
+            oc rollout status deployment/parasol-claims --timeout=300s
