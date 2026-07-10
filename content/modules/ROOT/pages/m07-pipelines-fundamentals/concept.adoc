@@ -1,0 +1,226 @@
+= Pipelines Fundamentals & Task Libraries: Concept
+:module-id: m07
+include::partial$version-attributes.adoc[]
+
+// Concept page for M07. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// Everything here was performed on OCP {ocp_version} / OpenShift Pipelines {pipelines_version}
+// as user6 on 2026-07-10 — the pipeline, the cluster-resolver refs, the maven JDK delta, the
+// image-size results, and the PaC git-push fire are all cluster-verified, not recalled.
+
+[.lead]
+Parasol's claims service builds and ships by hand today — and every engineer does it a little differently.
+
+You built and deployed `parasol-claims` in earlier work with single commands you typed yourself.
+That is fine for one person learning the platform, but it does not scale to a team: there is no shared record of *how* the app is built and tested, no gate that a broken change has to pass, and no way to make "the build" happen the same way every time.
+In this module you turn that manual sequence into a *pipeline* — a versioned, repeatable build-test-deploy that any Git push can run — and you start the *company task library* that keeps every Parasol team's pipeline consistent.
+
+== What you'll learn
+
+* The *anatomy of a pipeline* — Tasks, a Pipeline, and a PipelineRun — and the three inputs/outputs that make Tasks reusable: *parameters*, *workspaces*, and *results*.
+* The three *reuse layers* — shipped catalog Tasks, a curated *organization library*, and your app's own Pipeline — and how the *cluster resolver* wires them together.
+* *Why platform teams curate a task library*, shown by a concrete gap: the shipped `maven` Task cannot build this app, so Parasol curated one that can.
+* *Pipelines-as-Code* — the pipeline definition lives *with the code*, and a Git push fires it — so every change is built the same way, automatically.
+* That *pipelines produce data, not just artifacts*: a Task can emit results (here, an image's size and whether it fits a budget) that surface at the run level.
+
+== Anatomy of a pipeline
+
+A pipeline is not magic; it is three plain Kubernetes objects, and once you see the shapes the rest follows.
+
+Task:: A single, reusable unit of work — clone a repository, run a Maven build, build an image, roll out a Deployment.
+A Task declares *what it needs* and *what it produces*, so it can be reused across many pipelines without editing.
+Pipeline:: An *ordered graph of Tasks*: "clone, then test, then build, then report, then deploy."
+The Pipeline itself runs nothing — it is the recipe.
+PipelineRun:: *One execution* of a Pipeline.
+This is where the Pipeline meets reality: you hand it parameter values and a workspace, and it creates the Pods that do the work.
+Run the same Pipeline ten times and you get ten PipelineRuns.
+
+The reason a Task is reusable — rather than a copy-pasted shell script — is three typed connection points:
+
+Parameters:: Typed *inputs* to a Task or Pipeline (the Git URL, the image tag, a size budget).
+The same Task builds *any* repository because the repository is a parameter, not a hardcoded value.
+Workspaces:: *Shared storage* attached at run time — usually a PersistentVolumeClaim.
+The claims Pipeline clones the source into a workspace, and the test and build Tasks read that *same* checkout.
+A workspace is how one Task hands files to the next.
+Results:: Small typed *outputs* a Task publishes (a computed image size, a "within budget" verdict, a Git commit SHA).
+Results let a Task report a *fact* — and let later Tasks, or a human reading the run, act on it.
+
+This is the whole vocabulary.
+The claims Pipeline you run in the lab, `parasol-claims-build-test-deploy`, is exactly this: five Tasks in order, sharing one workspace, driven by a handful of parameters, publishing two results.
+
+[mermaid]
+....
+flowchart TB
+  subgraph CATALOG["① Catalog — shipped with OpenShift Pipelines (openshift-pipelines namespace)"]
+    direction LR
+    GC[git-clone]:::cat
+    BAH[buildah]:::cat
+    OCL[openshift-client]:::cat
+  end
+  subgraph LIB["② Company library — curated by the platform team (parasol-tasks namespace)"]
+    direction LR
+    MJ[maven-jdk21]:::lib
+    ISR[image-size-report]:::lib
+  end
+  subgraph APP["③ Your app Pipeline — parasol-claims-build-test-deploy ({user}-cicd)"]
+    direction LR
+    T1([fetch-source]) --> T2([unit-test]) --> T3([build-image]) --> T4([image-report]) --> T5([deploy])
+  end
+  GC -. "resolver: cluster" .-> T1
+  MJ -. "resolver: cluster" .-> T2
+  BAH -. "resolver: cluster" .-> T3
+  ISR -. "resolver: cluster" .-> T4
+  OCL -. "resolver: cluster" .-> T5
+  classDef cat fill:#e6f0ff,stroke:#2b6cb0,color:#1a365d;
+  classDef lib fill:#fef5e7,stroke:#b7791f,color:#744210;
+  T1:::app
+  classDef app fill:#e6f4ea,stroke:#137333,color:#0d652d;
+....
+
+// media-pass: replace/augment with SVG export m07-pipelines-fundamentals-01-anatomy-and-layers.svg (see media-manifest.md)
+
+Notice that *not one* of the five Tasks is defined inside your Pipeline.
+Each is a `taskRef` that points somewhere else, resolved when the run starts.
+That pointer is the subject of the next section.
+
+== Three reuse layers, wired by the cluster resolver
+
+The best Tekton Task is one you *did not write*.
+A build-test-deploy pipeline is mostly generic work — clone, build, roll out — that thousands of teams have already solved.
+OpenShift Pipelines organizes that reuse into three layers, and your app's Pipeline pulls from all three:
+
+. *Catalog Tasks* — shipped with the product.
+OpenShift Pipelines installs around forty ready Tasks (`git-clone`, `buildah`, `openshift-client`, and more) into the `openshift-pipelines` namespace.
+You reference them; you never maintain them.
+. *The organization library* — curated by your platform team.
+Tasks your organization standardizes on, published once into a shared namespace (here, `parasol-tasks`) so every team's pipeline references the *same* blessed version.
+. *Your app Pipeline* — the one thing that is genuinely yours.
+It composes layers ① and ② into the specific build your app needs, and lives in your own namespace.
+
+The wiring between layers is the *cluster resolver*.
+Instead of copying a Task's YAML into your Pipeline, you write a reference — "the Task named `git-clone`, in namespace `openshift-pipelines`" — and Tekton *resolves* it at run time:
+
+[source,yaml]
+----
+taskRef:
+  resolver: cluster        # <-- fetch a Task that already lives on this cluster
+  params:
+    - {name: kind, value: task}
+    - {name: name, value: maven-jdk21}
+    - {name: namespace, value: parasol-tasks}
+----
+
+[NOTE]
+.The cluster resolver is the modern replacement for `ClusterTask`
+====
+Older Tekton had a `ClusterTask` kind — a Task installed cluster-wide.
+It was *removed* in OpenShift Pipelines 1.17, and this cluster runs {pipelines_version}, so `ClusterTask` does not exist here.
+The *cluster resolver* is its supported successor: reference any Task in any namespace you can read, by name.
+If you find a tutorial that tells you to create a `ClusterTask`, it is out of date — use a resolver reference like the one above.
+====
+
+== Why a platform team curates a library: the `maven` gap
+
+The middle layer — the curated organization library — is the one people question: "if OpenShift already ships a catalog of Tasks, why maintain our own?"
+The claims Pipeline answers it with a concrete, unavoidable gap.
+
+The Pipeline needs to run the app's unit tests with Maven.
+OpenShift Pipelines *ships* a `maven` Task — so the obvious move is to reference it from layer ①.
+Except the shipped `maven` Task pins its build step to a *Java 17* runner image and exposes *no parameter* to change it.
+`parasol-claims` is a *Java 21* application, so building it with the shipped Task fails immediately:
+
+[source,texinfo]
+----
+error: release version 21 not supported
+----
+
+You cannot fix this by passing a parameter, because there is no parameter to pass.
+Your choices are to fork and maintain your own copy of the Task in *every* pipeline that touches a Java 21 app, or to curate *one* correct Task, once, that every team references.
+That is precisely what Parasol's platform team did: `maven-jdk21`, a Maven Task on a Java 21 runner image, published into the `parasol-tasks` library.
+
+[TIP]
+.This is the whole argument for an organization library
+====
+A curated library is not bureaucracy — it is the fix for "every team rediscovers the same gap and patches it a slightly different way."
+Publish the correct Task once; every pipeline references it by cluster resolver; when the Task needs an update, one change reaches every team.
+The lab has you read both `maven-jdk21` and the flagship `image-size-report` Task from the `parasol-tasks` namespace — the curated library you *use* is the same kind you will *contribute to* on a real platform team.
+====
+
+== Pipelines-as-Code: the pipeline lives with the code
+
+Running a Pipeline by hand — the way you start the first run in the lab — proves it works.
+But a pipeline someone has to remember to run is a pipeline that will drift from the code it builds.
+*Pipelines-as-Code* (PaC) closes that gap: the PipelineRun definition lives in a `.tekton/` directory *inside the application's own Git repository*, and a *push* to the repository fires it.
+
+[mermaid]
+....
+flowchart LR
+  DEV([You push to your fork]) --> GIT[(Gitea repo<br/>.tekton/pull-request.yaml)]
+  GIT -->|webhook| PAC[Pipelines-as-Code<br/>controller]
+  PAC -->|matches Repository CR| RUN[New PipelineRun<br/>builds the pushed commit]
+  classDef n fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class GIT,PAC,RUN n;
+....
+
+// media-pass: SVG export m07-pipelines-fundamentals-02-pac-flow.svg (see media-manifest.md)
+
+Two things make this work, and you set up both in the lab:
+
+* A *webhook* on the Git repository that POSTs to the PaC controller on every push.
+* A `Repository` custom resource in your namespace that PaC matches to the incoming webhook by URL, telling it *which* namespace to run the pipeline in.
+
+The payoff is that the build is *versioned with the app*: the `.tekton/` file is reviewed, diffed, and rolled back like any other code, and every push — yours or a teammate's — is built and tested the same way, with no one remembering to press a button.
+
+== Pipelines produce data, not just artifacts
+
+A pipeline's obvious output is an artifact — a container image.
+But a Task can also publish *results*: small, typed facts about what it did.
+Parasol's curated `image-size-report` Task inspects the freshly built image, computes its pull size, and compares it against a budget — then publishes three results (`image-size-bytes`, `image-size-mb`, `within-budget`).
+The Pipeline surfaces two of them at the *run* level, so `tkn pipelinerun describe` shows, for the claims image:
+
+[source,texinfo]
+----
+📝 Results
+
+ NAME                   VALUE
+ image-size-mb          391
+ image-within-budget    true
+----
+
+That is a small idea with large consequences: once a pipeline emits *data*, later steps can *branch* on it (fail a build whose image blew its budget, block a deploy on a failed scan), and humans can *audit* it.
+The next module builds heavily on this — signing, attestation, and vulnerability gates are all "a Task produced a fact, and a later step enforced it."
+
+== How this shows up in real orgs
+
+* *"How is this service built?" has one answer, and it is in Git.*
+Before a pipeline, the real build lives in someone's shell history and a wiki page that is six months stale.
+After, the build-test-deploy is a reviewed file in the repository — the honest, current answer to "how do we ship this?"
+* *The platform team's leverage is the library.*
+The single most valuable thing a platform team ships here is not a pipeline — it is the curated Task library every pipeline reuses.
+Fix a Task once (a CVE in a builder image, a new required scan) and every team inherits it.
+The `maven-jdk21` gap is a tiny, real example of that leverage.
+* *A failing test that stops the build is a feature, not a nuisance.*
+The moment tests run *in the pipeline*, a broken change cannot become a deployed image — the pipeline refuses to build past a red test.
+Teams that put this gate in place stop shipping the class of bug their tests already catch.
+* *Push-to-build is the on-ramp to everything that follows.*
+Once a Git push reliably builds, tests, and reports, you have the hook that supply-chain gates (next module) and GitOps promotion (later) attach to.
+Pipelines are where "we have some automation" becomes "we have a delivery process."
+
+[NOTE]
+.Where the pipeline deploys — and where it will deploy later
+====
+In this module the pipeline deploys the built image into your own `{user}-cicd` namespace, right next to the pipeline, so the module stays self-contained.
+That keeps the focus on *pipeline mechanics*.
+Deploying straight from a build into a namespace is fine for a CI sandbox and deliberately *not* how you promote to staging or production — in later modules the pipeline hands the image off to GitOps, which reconciles it into each environment.
+Notice here that the pipeline *can* deploy; the question of *where it should* is the GitOps modules' story.
+====
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Two ideas must land: (1) a pipeline is *Tasks → Pipeline → PipelineRun*, made reusable by *params, workspaces, results*; (2) the *library* is the platform team's leverage — the `maven-jdk21` gap is the memorable proof.
+The live demo (a Git push firing the pipeline, and the break-then-fix) is the payoff — keep the concept tight so there is time for it.
+====
+endif::demo[]

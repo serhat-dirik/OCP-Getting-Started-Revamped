@@ -64,3 +64,13 @@ namespace. The run builds from the shared `parasol/parasol-claims` repo in the i
 - **Deploy target:** the pipeline deploys into its own `-cicd` namespace to stay self-contained. The
   parasol-claims prod profile needs a PostgreSQL datasource, so the M07 entry state must provide a
   `claims-db` in the target namespace (reuse the M04/M05 pattern) for a healthy end state.
+- **PaC `pipelineRef` must use the cluster resolver.** `.tekton/pull-request.yaml` resolves the
+  in-namespace Pipeline via `resolver: cluster` (kind/name/namespace=`{{ target_namespace }}`), NOT a
+  bare `pipelineRef: {name: …}`. PaC resolves a name-only ref from the repo's `.tekton` dir or a
+  remote-pipeline annotation, never from the run namespace, so a name-only ref fails the webhook with
+  `cannot find referenced pipeline parasol-claims-build-test-deploy` (M07-build, 2026-07-10).
+- **Gitea PaC needs `git_provider` on the `Repository` CR.** Without it the webhook is rejected with
+  `failed to find git_provider details in repository spec`. The M07 entry state ships `git_provider`
+  (type gitea, url, and secret/webhook_secret refs to `gitea-pac-secret`) so the attendee only creates
+  the Secret + the Gitea webhook. Gitea webhook signatures are not validated by PaC (webhook-secret is
+  still required as the shared trust string).

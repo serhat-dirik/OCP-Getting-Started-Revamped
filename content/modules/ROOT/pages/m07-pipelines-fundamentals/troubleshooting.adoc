@@ -1,0 +1,161 @@
+= Pipelines Fundamentals & Task Libraries: Troubleshooting
+:module-id: m07
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} / OpenShift Pipelines
+// {pipelines_version} (2026-07-10). Format: Symptom / Cause / Fix. Every PaC entry below is a
+// failure that was actually hit and resolved on-cluster during the build.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Most terminal commands assume you set `NS={user}-cicd` at the start of the lab.
+
+== The first pipeline run takes 10+ minutes
+
+Symptom:: `tkn pipelinerun logs --last -f` sits for a long time on `unit-test`, then again on `build-image`, before the run finishes — around 13 minutes total the first time.
+Cause:: This is *expected* on a cold node.
+The pipeline builds `parasol-claims` from source, so Maven downloads its dependency tree — *twice*, once for the test Task and once inside the image build.
+On a node that has never built this app, that download dominates the run.
+Fix:: Nothing is wrong — let it run (start exercise 2 while it builds).
+The *next* run on the same node is roughly half the time because the artifacts are cached.
+You can confirm progress at any point with `tkn pipelinerun describe --last -n $NS` (it shows which Task is running).
+
+== The build dies mid-`mvn` with `OutOfMemoryError` / the Task is `OOMKilled`
+
+Symptom:: `unit-test` or `build-image` fails partway through the Maven build; `oc describe` on the Pod shows `Reason: OOMKilled`.
+Cause:: The build Pod inherited the namespace's default memory limit (1 Gi from the workshop LimitRange), and the Quarkus/Maven build needs more.
+This happens if you write your *own* PipelineRun and leave out the memory overrides.
+Fix:: Set more memory for the Maven-heavy Tasks in the PipelineRun's `taskRunSpecs` (the lab's PipelineRun already does this):
++
+[source,yaml]
+----
+  taskRunSpecs:
+    - pipelineTaskName: unit-test
+      computeResources: {requests: {memory: 1Gi}, limits: {memory: 1536Mi}}
+    - pipelineTaskName: build-image
+      computeResources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}
+----
+
+== `unit-test` fails with `release version 21 not supported`
+
+Symptom:: The `unit-test` Task fails immediately during compilation with `error: release version 21 not supported`.
+Cause:: The test ran on a *Java 17* Maven image — almost always because a pipeline was pointed at the *shipped* `maven` Task (which is pinned to Java 17) instead of the curated `maven-jdk21`.
+`parasol-claims` is a Java 21 app.
+Fix:: Reference the curated Task.
+The seeded Pipeline already does (`unit-test` uses `resolver: cluster`, `name: maven-jdk21`, `namespace: parasol-tasks`); confirm with:
++
+[source,sh,role=execute]
+----
+oc get pipeline parasol-claims-build-test-deploy -n $NS \
+  -o jsonpath='{.spec.tasks[?(@.name=="unit-test")].taskRef.params[1].value}{"\n"}'
+----
++
+It should print `maven-jdk21`.
+This gap is exactly the lesson of exercise 2 — the shipped Task cannot build a Java 21 app.
+
+== The `unit-test` step is red: `Parasol rule violated: claim CLM-XXXX was Approved while still Unassigned`
+
+Symptom:: A run fails at `unit-test` with `approvingAClaimRequiresAnAssignedAdjuster` and the message about a claim being Approved while Unassigned; `build-image`/`deploy` show `---` (Skipped).
+Cause:: This is the *intended* break-fix.
+You (or a teammate) set the toggle in `ClaimResourceTest.java` to `false`, which violates the rule the test guards, so the test fails and the pipeline gate stops the build.
+Fix:: This *is* the lesson — a failing test stopped a bad build.
+To go green, edit `src/test/java/com/parasol/claims/ClaimResourceTest.java` in your fork, set `final boolean assignAdjusterBeforeApproval = true;`, commit, and re-run.
+(The claim number in the message is assigned at test time and changes every run — do not look for a specific `CLM-` number.)
+
+== You edited the test but the pipeline built the *old* code
+
+Symptom:: You changed `ClaimResourceTest.java` in Gitea, but the run's result did not change (still green when you expected red, or vice versa).
+Cause:: The manual PipelineRun built the *default* source (the shared `parasol/parasol-claims` repo), not your fork — or you committed to a branch other than `main`.
+Fix:: Point the run at your fork by setting the `git-url` parameter, and commit to `main`:
++
+[source,sh,role=execute]
+----
+# the run's git-url should be YOUR fork:
+tkn pipelinerun describe --last -n $NS | grep -A2 'Params'
+----
++
+The lab's break-fix PipelineRun sets `git-url: http://gitea.gitea.svc:3000/{user}/parasol-claims.git` — the in-cluster address of your fork.
+Confirm your edit landed on `main` in the Gitea UI (the file view shows the new content).
+
+== Pipelines-as-Code: the push did not start a run
+
+Symptom:: You pushed to your fork, but no `parasol-claims-pull-request-…` PipelineRun appears in `tkn pipelinerun list -n $NS`.
+Cause:: The webhook did not reach the controller, or PaC rejected it.
+Gitea records exactly what happened.
+Fix:: Read the webhook's delivery, then the controller's reason:
++
+. In Gitea → your fork → *Settings* → *Webhooks* → your webhook → *Recent Deliveries*.
+A green check with response `202` means PaC accepted it; a red delivery or `4xx/5xx` means the POST failed (wrong URL, or the target is unreachable).
+. If Gitea delivered it but no run appeared, check the two things PaC needs (both are common):
++
+[source,sh,role=execute]
+----
+# (a) the Repository must carry git_provider details:
+oc get repository parasol-claims -n $NS -o jsonpath='git_provider: {.spec.git_provider.type}{"\n"}'
+# (b) the secret must exist with BOTH keys:
+oc get secret gitea-pac-secret -n $NS -o jsonpath='keys: {.data.token}{" / "}{.data.webhook-secret}{"\n"}' 2>/dev/null && echo "(both present)"
+----
++
+`git_provider` empty → re-apply the entry state (`ws prep {module-id} --yes`), which ships it; a missing secret or key → re-create `gitea-pac-secret` (exercise 4).
+
+== Pipelines-as-Code fires but the run errors: `cannot find referenced pipeline`
+
+Symptom:: A PaC run is created but immediately errors, and the controller logs say `cannot find referenced pipeline parasol-claims-build-test-deploy. for a remote pipeline make sure to add it in the annotation`.
+Cause:: The `.tekton/pull-request.yaml` referenced the Pipeline by *name only* (`pipelineRef: {name: …}`).
+PaC resolves a name-only reference from the repository's own `.tekton` directory or a remote-pipeline annotation — *not* from your namespace — so it cannot find the Pipeline the entry state installed in `{user}-cicd`.
+Fix:: The seeded `.tekton/pull-request.yaml` resolves the Pipeline with the *cluster resolver* instead:
++
+[source,yaml]
+----
+  pipelineRef:
+    resolver: cluster
+    params:
+      - {name: kind, value: pipeline}
+      - {name: name, value: parasol-claims-build-test-deploy}
+      - {name: namespace, value: "{{ target_namespace }}"}
+----
++
+If you hand-edited the file back to a name-only ref, restore it (`ws prep {module-id} --yes` re-seeds the correct version into your fork), then push again.
+
+== The webhook target URL is refused / times out
+
+Symptom:: Gitea's webhook *Recent Deliveries* shows a connection error, or you are not sure what URL to use (you cannot read the route).
+Cause:: Attendees cannot read routes in `openshift-pipelines`, so the controller URL has to be built by hand — and a wrong host is refused.
+Fix:: Build the URL from your cluster domain; the controller route follows the standard `<route>-<namespace>.<domain>` pattern:
++
+[source,sh,role=execute,subs="attributes"]
+----
+echo "https://pipelines-as-code-controller-openshift-pipelines.{cluster_domain}"
+----
++
+Use exactly that (with `https://`), POST, content type `application/json`.
+
+== A PipelineRun stays `Pending` and never schedules
+
+Symptom:: `tkn pipelinerun list` shows your run `Pending`/`Running` but no Task Pods start; `tkn pipelinerun describe` mentions the ServiceAccount or a PVC.
+Cause:: Usually the run referenced a ServiceAccount other than `pipeline` (the operator-provided one that can push images and deploy), or the namespace hit its PVC quota (5) from leftover runs.
+Fix:: Use `serviceAccountName: pipeline` in the PipelineRun (the lab's runs do).
+If PVCs are the problem, clear old runs — each `volumeClaimTemplate` run leaves a PVC until pruned:
++
+[source,sh,role=execute]
+----
+oc get pvc -n $NS
+ws reset {module-id}     # clears PipelineRuns, their PVCs, and the deployed app
+----
+
+== The deployed `parasol-claims` Pod is `CrashLoopBackOff` after a run
+
+Symptom:: The `deploy` Task finished, but the `parasol-claims` Pod restarts; its logs mention a datasource or connection error.
+Cause:: The app needs the `claims-db` PostgreSQL the entry state provides; if `claims-db` is missing (for example after a partial reset), the app cannot start.
+Fix:: Confirm the database is present and ready, then let the deploy re-roll:
++
+[source,sh,role=execute]
+----
+oc get deploy claims-db -n $NS
+----
++
+If it is absent, re-materialize the entry state with `ws prep {module-id} --yes` and run the pipeline again.
+The pipeline's `deploy` step wires the app to `claims-db` automatically when the Secret is present.
+
+'''
+
+_Last verified on OpenShift {ocp_version} / OpenShift Pipelines {pipelines_version} (2026-07-10)._

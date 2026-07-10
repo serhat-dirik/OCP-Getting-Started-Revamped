@@ -1,0 +1,181 @@
+= Pipelines Fundamentals & Task Libraries: Instructor Guide
+:module-id: m07
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version} / OpenShift
+// Pipelines {pipelines_version}) as user6 on 2026-07-10 by performing every exercise and timing the
+// runs; see "how timing was measured" below.
+
+This module has one dominant pacing fact: *the first pipeline run is long* (a cold Maven dependency download twice — for the test and the image build — puts it near 13 minutes), and *every run after that is roughly half that* once the nodes have cached the artifacts.
+Plan the room around the first run: start exercise 1, then send attendees into exercise 2 (the task library) while it builds — the module is *designed* so the reading fills the wait.
+The single most memorable beat is exercise 3: a one-line change turns the pipeline red at the test and the build never runs.
+
+== Timing
+
+Total hands-on: *~70–80 min* (spec target 90 min; add ~12–15 min of concept up front).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core (as user6, {ocp_version})
+
+| 1 | Run the build-test-deploy pipeline | ~20 min | first run (cold Maven cache) `Succeeded` in *12m54s* — unit-test 4m50s, build-image 7m14s, image-report 8s, deploy 21s; image *391 MB*
+| 2 | Explore the company task library | ~15 min | read-only (`oc get`/`jsonpath`) — seconds; done *during* the exercise-1 build
+| 3 | Break the build (failing test) | ~20 min | RED run fails at unit-test in *2m47s* (build/report/deploy SKIPPED); GREEN re-run *7m0s* (warm cache)
+| 4 | Pipelines-as-Code (git push) | ~20 min | webhook setup ~5 min; the PaC-fired run *~7 min* (warm cache), appears *within ~5 s* of the push
+|===
+
+[NOTE]
+.How this timing was measured
+====
+The *Measured core* column is real: every exercise was performed as `user6` on the build cluster (OCP {ocp_version}, OpenShift Pipelines {pipelines_version}) on 2026-07-10 and timed.
+
+* *First run (exercise 1)* — the Pipeline builds the shared repo with a *cold* node cache, so Maven downloads its dependency tree *twice* (once in `unit-test`, once inside the image build's `Containerfile`).
+That is the whole ~13-minute cost; the actual work (compile, image assembly, deploy) is a couple of minutes.
+* *Every later run* — on the *same* nodes the Maven artifacts are cached, so `unit-test` drops from ~4m50s to ~2m26s and a full green run lands around *7 minutes*.
+* *A failing test fails fast* — the RED break-fix run *failed at `unit-test` in 2m47s* and the three downstream Tasks (`build-image`, `image-report`, `deploy`) were *Skipped*, so a broken change costs ~3 minutes, not a full build.
+* *PaC latency* — the PipelineRun appeared *within ~5 seconds* of the push; its duration is just a normal (warm) run.
+
+The dominant variable across a room is node cache: pre-warm before the session (see pre-flight) and the first-run pain largely disappears.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster admin unless noted).
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m07 --user user1
+ws verify m07 --user user1 --entry-only
+----
++
+Expect `✅ all 7 checks passed`: the `user1-cicd` namespace + entry marker, `claims-db` ready, the `parasol-claims-build-test-deploy` Pipeline, the Gitea fork, its seeded `.tekton/pull-request.yaml`, and the curated `parasol-tasks` library reachable.
+
+. *The curated library exists and its two Tasks are readable.*
++
+[source,sh,role=execute]
+----
+oc get task -n parasol-tasks
+----
++
+Expect `image-size-report` and `maven-jdk21`.
+If the namespace is missing, the workshop-config Argo app has not synced — re-sync it (the library is workshop-layer, not per-user).
+
+. *The `maven` gap the lab teaches is real on this cluster.*
++
+[source,sh,role=execute]
+----
+oc get task maven -n openshift-pipelines -o jsonpath='shipped maven build image: {.spec.steps[1].image}{"\n"}'
+----
++
+Expect a `…/ubi9/openjdk-17…` image.
+Exercise 2's whole point is that this is Java 17 and cannot build the Java 21 app; if a future operator ships a Java 21 `maven` Task, revisit the exercise's framing.
+
+. *The Pipelines-as-Code controller is up and reachable at the predictable URL.*
++
+[source,sh,role=execute]
+----
+oc get pods -n openshift-pipelines | grep pipelines-as-code-controller
+echo "webhook target: https://pipelines-as-code-controller-openshift-pipelines.$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}')"
+----
++
+Expect the controller Pod `Running`.
+Attendees *cannot* read the route themselves (it is in `openshift-pipelines`), so the lab has them build the URL from `{cluster_domain}` — confirm that host resolves.
+
+. *Pre-warm the Maven cache (strongly recommended).*
+Run one full pipeline on a sample user before the room so the worker nodes cache the Quarkus/Maven artifacts — this is what turns the *first* attendee run from ~13 min into ~7:
++
+[source,sh,role=execute]
+----
+ws solve m07 --user user1     # runs the real pipeline to completion; BLOCKS ~8–13 min by design
+----
++
+[IMPORTANT]
+.`ws solve m07` blocks for ~8–13 minutes — that is correct, not a hang
+=====
+`ws solve` runs the actual build-test-deploy pipeline and *waits for it to finish* before returning (the engine gates on the Argo sync operation, sized by the module's `waitSeconds: 1200`).
+*Measured 2026-07-10:* `7m45s` end-to-end on a *warm* cluster (the solve Job's own pipeline ran 7m15s), and it was *truthful on return* — the `parasol-claims` deploy was `1/1`, pod Running, `0` restarts against `claims-db`.
+Budget up to ~13 min on a *cold* cluster (the first pipeline run downloads Maven twice).
+It prints "demo-ready" *only when the app is truly up*; earlier engine versions printed ready ~7 min early, and that was fixed for this module.
+Do not Ctrl-C it thinking it stalled.
+=====
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Pre-solve, and pre-wire the webhook, before the room.*
+Run `ws solve m07 --user {user}` early (it blocks ~8–13 min) so a finished, healthy `parasol-claims` is your opening visual and the Maven cache is warm.
+The demo's live beats (3–4) are a *PaC push*, so you also need the webhook set up on your fork *before* you present — do lab exercise 4's setup (create the Gitea token, the `gitea-pac-secret`, and the webhook) ahead of time.
+Rehearse the one-line test edit once.
+* *Talk through the build, never at it.*
+Even warm, a run is ~7 minutes.
+Start the push, then narrate the task-library story (the Java 17 vs 21 gap) while it builds — do not watch a progress bar.
+* *The red-then-green is the whole demo.*
+Beat 3 (push a broken test → pipeline goes red at `unit-test`, build never runs) and beat 4 (revert → push → green → deployed) are the payoff.
+The line that lands: "a failing test *stopped* the deploy — the pipeline refused to ship the bug."
+* *Have a fallback.*
+If a live push is slow or a webhook hiccups, show the pre-solved run's `tkn pipelinerun describe --last` (the five Tasks + the `image-within-budget` result) and narrate from there.
+
+== Top questions attendees ask
+
+*1. "Why did my first run take 12 minutes when the demo said pipelines are fast?"*::
+Almost all of it is Maven downloading the dependency tree — *twice*, once for the test Task and once inside the image build.
+On a cold node that is ~9–11 minutes of the ~13; the second run on the same node is ~7 because the artifacts are cached.
+In a real setup you would add a persistent Maven cache (a shared workspace or a mirror) to pay that cost once.
+It is not the pipeline machinery that is slow — it is a first-time dependency download, and it is the honest cost of building from source.
+
+*2. "Why curate a `maven-jdk21` Task when OpenShift ships a `maven` Task?"*::
+Because the shipped one cannot build this app.
+Its build step is pinned to a Java 17 runner image and exposes no parameter to change it, so a Java 21 app fails with `release version 21 not supported`.
+Rather than every team patch their own copy, the platform team publishes one correct Task into a shared library and everyone references it by cluster resolver.
+That single, concrete gap *is* the argument for an organization library — fix it once, everyone inherits the fix.
+
+*3. "Where did `ClusterTask` go? My old pipeline used them."*::
+`ClusterTask` was removed in OpenShift Pipelines 1.17; this cluster runs {pipelines_version}, so it does not exist.
+The *cluster resolver* replaces it — `taskRef: {resolver: cluster, params: [name, namespace, kind]}` — and it is better: Tasks live in ordinary namespaces with ordinary RBAC, and you reference the exact one you want.
+Any tutorial telling you to create a `ClusterTask` is pre-1.17.
+
+*4. "The failing test stopped the whole pipeline — is that configurable?"*::
+Yes, and stopping is the default and usually what you want: `build-image` has `runAfter: unit-test`, so a failed test means the build (and everything after) is *skipped*.
+That is the gate — a broken change cannot become a deployed image.
+If you ever want a Task to run *despite* an earlier failure (say, always publish a test report), Tekton has `finally` tasks for exactly that; the default dependency chain is a hard gate on purpose.
+
+*5. "Is deploying straight from the pipeline how we go to production?"*::
+No — and the lab says so.
+Here the pipeline deploys into its own `-cicd` namespace to keep the module self-contained.
+In practice the pipeline's job ends at *building and publishing a trustworthy image*; promoting that image across dev/stage/prod is GitOps' job (a later module), where Argo CD reconciles the image into each environment from Git.
+Pushing an image straight from CI into prod is the anti-pattern GitOps exists to replace.
+
+== Watchouts
+
+* *Two Maven downloads per run.*
+`unit-test` (`mvn test`) and `build-image` (the `Containerfile`'s `mvn package`) each resolve dependencies, so a *cold* run downloads twice (~13 min).
+Pre-warm with a `ws solve` on a sample user before the room; warm runs are ~7 min.
+Never let the room sit watching the first build — that is what exercise 2 is for.
+* *`ws reset` purges PipelineRuns.*
+`ws reset m07` deletes `pipelineruns.tekton.dev` (and the deployed app) as well as the usual workloads — a plain `oc delete all` does *not* touch Tekton CRs, so the reset was extended for this module.
+Attendees who reset start with a clean run list; that is intended.
+* *The break-fix claim number is dynamic — never quote a fixed one.*
+The failing test's message reads "claim `CLM-XXXX` was Approved while still Unassigned"; the number is *assigned at test time* (sibling tests advance the shared in-memory counter), so it differs run to run.
+On the measured run it was `CLM-1032`; on the next it will not be.
+The lab says "your claim number" — keep it that way.
+* *The PaC webhook is per-fork, and one-time.*
+Each attendee wires a webhook on *their own* fork; there is no shared webhook.
+If PaC does not fire, check three things in order: the webhook exists and is *active* in Gitea (Settings → Webhooks → *Recent Deliveries* shows the POST and its response), the `gitea-pac-secret` Secret exists with both keys (`token`, `webhook-secret`), and the webhook's secret *matches* the Secret's `webhook-secret`.
+* *The `Repository` CR must keep its `git_provider` — and the `.tekton` uses a cluster resolver.*
+Two things the entry state now ships (both were on-cluster failures during the build): the `Repository` carries `git_provider` (a bare `url` makes PaC reject the webhook with "failed to find git_provider details"), and `.tekton/pull-request.yaml` resolves the Pipeline with `resolver: cluster` (a name-only `pipelineRef` fails with "cannot find referenced pipeline").
+If you hand-edit the `Repository` and drop `git_provider`, PaC breaks — re-apply the entry state.
+* *Memory: the builds need more than the namespace default.*
+The PipelineRun raises `unit-test`/`build-image` memory to 1–2 Gi via `taskRunSpecs`, above the 1 Gi LimitRange default — without it the Quarkus build risks OOMKill.
+If an attendee writes their own PipelineRun and omits this, that is the likely cause of a build that dies mid-`mvn`.
+* *Break-fix depends on the fork carrying the test.*
+The break-fix test (`approvingAClaimRequiresAnAssignedAdjuster`) must be present in the attendee's fork of `parasol-claims`.
+It is in the monorepo's `apps/parasol-claims`; confirm the shared `parasol/parasol-claims` seed repo (which forks are taken from) carries it before an event — `curl -s <gitea>/parasol/parasol-claims/raw/branch/main/src/test/java/com/parasol/claims/ClaimResourceTest.java | grep -c '@Test'` should report `14`.
+
+== Provenance
+
+M07 is built fresh on OpenShift Pipelines {pipelines_version} (`tekton.dev/v1`, Pipelines-as-Code) from the OpenShift Pipelines documentation and the resolver/PaC references, then performed end-to-end on OpenShift {ocp_version} as `user6` on 2026-07-10.
+Every command, output, and timing — the 12m54s cold first run (image 391 MB, `image-within-budget: true`), the 2m47s RED break-fix with the build Skipped and the `Parasol rule violated` message, the 7m0s warm green run, and a live PaC git-push firing a run within ~5 s — was captured on-cluster during that build.
+No content ported from stale material.
