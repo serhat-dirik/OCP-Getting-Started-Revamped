@@ -1,0 +1,177 @@
+# Forks parasol/parasol-claims into THIS attendee's Gitea account AND seeds .tekton/pull-request.yaml
+# into the fork root (where Pipelines-as-Code expects it). Same Gitea route + admin-credential
+# discovery + Sudo-as-the-user idiom as gitops/entry-states/m02/templates/fork-repos.yaml — here it
+# also pushes ONE file via the Gitea contents API (the fork job class of per-user materialization).
+# The .tekton content is fetched from the in-cluster monorepo MIRROR (pipelines/.tekton/…) so there
+# is ONE source of truth and nothing is pushed to any shared parasol/* repo (seed-gated).
+# All names are -{user} suffixed so concurrent per-user entry states never collide in gitea.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: m07-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m07
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+---
+# why: read the Gitea CR status + operator admin secret + route host to reach the API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: m07-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m07
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+rules:
+  - apiGroups: ["pfe.rhpds.com"]
+    # the rhpds CRD's plural is literally "gitea" (verified live)
+    resources: ["gitea"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: m07-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m07
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: m07-fork-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: m07-fork-{{ .Values.user }}
+    namespace: {{ .Values.giteaNamespace }}
+---
+# Argo Sync hook (BeforeHookCreation): re-runs on every ws start / ws reset so the fork + its
+# .tekton seed are (re)made idempotently; a pre-existing fork/file is tolerated.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m07-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m07
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: m07-fork-{{ .Values.user }}
+    spec:
+      serviceAccountName: m07-fork-{{ .Values.user }}
+      restartPolicy: Never
+      containers:
+        - name: fork
+          # why ose-cli: ships oc + curl + base64 on every connected cluster; no custom image.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: TARGET_USER
+              value: {{ .Values.user | quote }}
+            - name: UPSTREAM_ORG
+              value: {{ .Values.upstreamOrg | quote }}
+            - name: MIRROR_REPO
+              value: {{ .Values.mirrorRepo | quote }}
+            - name: REPO
+              value: "parasol-claims"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 10
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials (retry loop — operator writes them post-setup)…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 10
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 10m"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ waiting for the Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 10
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
+
+              # --- 1) fork parasol/parasol-claims into the attendee's account -----------------
+              if curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}"; then
+                echo "  ✓ ${TARGET_USER}/${REPO} already exists"
+              else
+                CODE="$(curl -ks -o /tmp/fork.json -w '%{http_code}' -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                  -X POST "${GITEA_URL}/api/v1/repos/${UPSTREAM_ORG}/${REPO}/forks" \
+                  -H 'Content-Type: application/json' -d '{}')"
+                case "$CODE" in
+                  201|202) echo "  ✓ ${TARGET_USER}/${REPO} fork requested (${CODE})";;
+                  409|422) echo "  ✓ ${TARGET_USER}/${REPO} already exists (${CODE})";;
+                  *) echo "  ❌ fork ${REPO} failed (HTTP ${CODE}): $(cat /tmp/fork.json)"; exit 1;;
+                esac
+              fi
+              # Fork is asynchronous — poll until the new repo answers (bounded).
+              for i in $(seq 1 30); do
+                curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}" && break
+                sleep 4
+              done
+              curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}" \
+                || { echo "❌ ${TARGET_USER}/${REPO} never became ready"; exit 1; }
+
+              # --- 2) seed .tekton/pull-request.yaml into the fork (PaC entrypoint) -----------
+              # Source of truth = the monorepo mirror's pipelines/.tekton copy (never a shared fork).
+              echo "▶ seeding .tekton/pull-request.yaml from the mirror…"
+              SRC="pipelines/.tekton/parasol-claims-pull-request.yaml"
+              DST=".tekton/pull-request.yaml"
+              RAW="$(curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/repos/${UPSTREAM_ORG}/${MIRROR_REPO}/raw/${SRC}?ref=main" || true)"
+              [[ -n "$RAW" ]] || { echo "❌ could not fetch ${SRC} from mirror ${UPSTREAM_ORG}/${MIRROR_REPO}"; exit 1; }
+              CONTENT_B64="$(printf '%s' "$RAW" | base64 -w0)"
+
+              # Idempotent: if the file already exists, update it (PUT with its blob sha), else create (POST).
+              SHA="$(curl -ksf -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/${DST}?ref=main" 2>/dev/null \
+                | grep -oE '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' | head -1 | grep -oE '[0-9a-f]{40}' || true)"
+              if [[ -n "$SHA" ]]; then
+                BODY="$(printf '{"message":"Seed .tekton/pull-request.yaml (M07 PaC)","branch":"main","content":"%s","sha":"%s"}' "$CONTENT_B64" "$SHA")"
+                METHOD=PUT
+              else
+                BODY="$(printf '{"message":"Seed .tekton/pull-request.yaml (M07 PaC)","branch":"main","content":"%s"}' "$CONTENT_B64")"
+                METHOD=POST
+              fi
+              CODE="$(curl -ks -o /tmp/seed.json -w '%{http_code}' -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                -H 'Content-Type: application/json' -X "$METHOD" \
+                "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/${DST}" -d "$BODY")"
+              case "$CODE" in
+                200|201) echo "  ✓ ${DST} seeded (${CODE})";;
+                *) echo "  ❌ seeding ${DST} failed (HTTP ${CODE}): $(cat /tmp/seed.json)"; exit 1;;
+              esac
+
+              echo "✅ ${TARGET_USER}/${REPO} forked and .tekton seeded at ${GITEA_URL}/${TARGET_USER}/${REPO}"

@@ -1,0 +1,102 @@
+{{- if .Values.solve }}
+# END state for instructor demos (`ws solve m07`): actually RUN the build-test-deploy pipeline so
+# the module's outcome — a pipeline-built, DB-backed claims app — really exists. A PostSync hook Job
+# LAUNCHES the PipelineRun and returns immediately (fire-and-forget): the build is ~8 min, far longer
+# than ws's wait_healthy window, and the PipelineRun/Deployment it creates are not Argo-owned, so the
+# entry Application still reports Synced/Healthy right away. The pipeline then completes on its own and
+# leaves parasol-claims HEALTHY against claims-db (the entry state's DB). `ws verify m07` confirms it.
+#
+# Job pod templates are immutable, so re-solve must recreate the Job: the BeforeHookCreation delete
+# policy + the -{user}-suffixed name handle that. The PipelineRun uses generateName (unique per run)
+# and a per-run volumeClaimTemplate PVC (auto-pruned), so re-solve never wedges on immutability/PVCs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m07-solve-run-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: m07
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+data:
+  # The PipelineRun the solve Job submits. Same shape as pipelines/pipelinerun/parasol-claims-run.yaml
+  # (SA pipeline + per-run workspace PVC + Maven memory above the 1Gi LimitRange default). All Pipeline
+  # params default (shared repo, own-namespace image target), so none are set here.
+  pipelinerun.yaml: |
+    apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      generateName: solve-parasol-claims-
+      labels:
+        app.kubernetes.io/part-of: parasol-claims
+        workshop.redhat.com/module: m07
+    spec:
+      pipelineRef:
+        name: parasol-claims-build-test-deploy
+      taskRunTemplate:
+        serviceAccountName: pipeline
+      workspaces:
+        - name: shared-workspace
+          volumeClaimTemplate:
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 1Gi
+      taskRunSpecs:
+        - pipelineTaskName: unit-test
+          computeResources:
+            requests:
+              memory: 1Gi
+            limits:
+              memory: 1536Mi
+        - pipelineTaskName: build-image
+          computeResources:
+            requests:
+              memory: 1536Mi
+            limits:
+              memory: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m07-solve-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: m07
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    # PostSync: run after claims-db + the Pipeline have synced, so the launched run finds them.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        app: m07-solve-{{ .Values.user }}
+    spec:
+      # The operator-provisioned pipeline SA (edit) can create PipelineRuns in its own namespace.
+      serviceAccountName: pipeline
+      restartPolicy: Never
+      volumes:
+        - name: solve
+          configMap:
+            name: m07-solve-run-{{ .Values.user }}
+      containers:
+        - name: solve
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          volumeMounts:
+            - name: solve
+              mountPath: /solve
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ launching the build-test-deploy pipeline (solve end-state)…"
+              PR="$(oc create -o name -f /solve/pipelinerun.yaml)"
+              echo "  ✓ started ${PR}"
+              echo "  it builds/tests/deploys parasol-claims (~8 min) and wires it to claims-db;"
+              echo "  the app is HEALTHY once it completes.  follow: tkn pipelinerun logs -Lf ${PR##*/}"
+{{- end }}
