@@ -46,8 +46,33 @@ exact; the ENDPOINTS view and `redis` endpoint exist after the Redis add; **no "
 Open-in-Dev-Spaces decorator exists** on the Topology node (only the Open-URL decorator); the
 factory URL shows a **"Do you trust the authors of this repository?" → Continue** gate and creates
 a **random-suffixed** workspace if one of the same name exists; **che-code ships no Java debug
-tooling by default**, so the GUI Attach-to-5005 flow needs the recommended extensions (now shipped
-in the fork) and the lab carries a `jdb` fallback.
+tooling by default**, so the GUI Attach-to-5005 flow needs two extensions installed first, and the
+lab carries a `jdb` fallback that always works.
+
+**Extension registry — verified live 2026-07-10 (probed from inside the cluster):** this Dev Spaces
+leaves `openVSXURL` unset, which selects the **embedded** Open VSX registry served by the
+`plugin-registry` pod at `/openvsx`. Probed against
+`http://plugin-registry.openshift-devspaces.svc:8080/openvsx/api/…`:
+
+| Extension | Embedded registry |
+|---|---|
+| `redhat.java` (Language Support for Java) | **HTTP 200 — present** |
+| `vscjava.vscode-java-debug` (Debugger for Java) | **HTTP 200 — present** |
+| `vscjava.vscode-java-test` | HTTP 200 — present |
+| `redhat.vscode-quarkus` | HTTP 200 — present |
+| `vscjava.vscode-java-pack` (Extension Pack for Java) | **HTTP 404 — ABSENT** |
+
+So the GUI debug path **does work here** — but only ever recommend the *individual* extensions.
+The `vscode-java-pack` meta-extension is not in the embedded registry and would fail to install.
+(`open-vsx.org` is separately reachable from the cluster, but the IDE does not query it.)
+
+> ⚠ **The seed repo `parasol/parasol-claims` does NOT yet carry `.vscode/`.** The files exist in
+> `apps/parasol-claims/` in this monorepo, but that repo is **not a mirror** — it is published
+> imperatively (`docs/research/app-repo-publishing.md`), and a Gitea fork is a clone taken at fork
+> time, so existing `{user}/parasol-claims` forks would not pick the files up even after a re-publish.
+> Until the seed is refreshed (parked for Serhat — see `06-BACKLOG.md` "For Serhat"), the lab must
+> not promise attendees a `.vscode/` prompt. It currently tells them to install the two extensions
+> from the *Extensions* view, which works today.
 
 ## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
 
