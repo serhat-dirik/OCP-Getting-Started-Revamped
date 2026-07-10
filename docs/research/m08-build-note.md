@@ -1,6 +1,6 @@
-# M07 build note — Trusted Software Supply Chain
+# M08 build note — Trusted Software Supply Chain
 
-Date: 2026-07-09 · Author: research-analyst R4b · Spec: 02-MODULE-SPECS §M07 (lines 108-117) · Entitlement: **[ADS]** (Red Hat Advanced Developer Suite)
+Date: 2026-07-09 · Author: research-analyst R4b · Spec: 02-MODULE-SPECS §M08 (lines 108-117) · Entitlement: **[ADS]** (Red Hat Advanced Developer Suite)
 Method: live build cluster `ocp-ws-revamped` (OCP 4.21.22, k8s 1.34.8) — OLM packagemanifests, `oc explain`, live TektonConfig/CRD inspection; docs.redhat.com (RHACS, Pipelines, OCP config-APIs); versions.yaml (2026-07-08) cross-checked and re-confirmed live.
 
 ## Verified versions
@@ -31,7 +31,7 @@ Cluster reality (verified live 2026-07-09):
 - **ACS entitlement** — ACS ships in **both** OpenShift Platform Plus **and** RHADS (developers.redhat.com RHADS overview). Spec footnote ‡ is right; content should say "included in Platform Plus and in RHADS," not ADS-only.
 - **Native admission is [OCP] now** — spec assumes the "block unsigned" gate is an ACS/[ADS] job; OCP 4.20+ ships **namespaced `ImagePolicy`** (GA). The per-user beat can be [OCP], strengthening the D16 "lead with what OpenShift includes" framing. Spec should acknowledge the OCP path.
 - **RHTPA install mode** — spec/versions.yaml imply a normal cluster operator; it is **OwnNamespace/SingleNamespace** and deploys a ~12-pod stack needing its own OIDC + object storage + Postgres. Materially affects stack design (see risks).
-- **M06 not built; `pipelines/` empty** — entry state cannot assume M06's pipeline exists; M07 must define the pipeline/task library itself (compose-don't-chain).
+- **M07 not built; `pipelines/` empty** — entry state cannot assume M07's pipeline exists; M08 must define the pipeline/task library itself (compose-don't-chain).
 
 ## Approach recommendations (≤5)
 
@@ -65,12 +65,12 @@ Follows the `platform-portfolio` component pattern (Subscription+OperatorGroup+n
 - **`components/rhtpa` (OPTIONAL / demo profile)** — `Subscription` (`rhtpa-operator`, channel **`stable-v1.1`**, ns `rhtpa`) + **SingleNamespace `OperatorGroup` targeting `rhtpa`** (NOT AllNamespaces) + `TrustedProfileAnalyzer` CR (`rhtpa.io/v1`) with `oidc` (own realm on shared rhbk), `storage` (noobaa OBC — `openshift-storage.noobaa.io` SC present), `database`, `appDomain`. Keep in a `trust-demo` stack variant, not the core `pp-trust`.
 - **Footprint estimate (shared, validate with `oc adm top` post-install)**: ACS ~5-6 CPU / 13-16Gi (Central+DB+scanner+DB+sensor) · RHTAS ~1.5-2.5 CPU / 3-5Gi (~8 sigstore pods) · RHTPA ~4-6 CPU / 8-12Gi (~12-15 pods) · Recommend **single shared instance of each**; RHTPA optional. All fit ~44 CPU/72Gi free.
 
-## Entry-state requirements — `gitops/entry-states/m07/` (per-user, self-contained)
+## Entry-state requirements — `gitops/entry-states/m08/` (per-user, self-contained)
 
-Compose-don't-chain (README rules): materialize the whole build world; do **not** reference M06.
+Compose-don't-chain (README rules): materialize the whole build world; do **not** reference M07.
 
 - `{user}-cicd` in-namespace state: the **claims build→scan→sign pipeline + task library** (Parasol tasks; net-new in `pipelines/`), the user's Gitea fork of `parasol-claims` seeded at a **known-vulnerable commit** (older base tag / pinned CVE dep — documented intentional flaw), cosign **public-key** ConfigMap for verify, RBAC to read ACS + Rekor.
-- Hook Job (Sync/BeforeHookCreation, per m23 `claims-data.yaml` pattern): run one baseline `PipelineRun` so a signable image exists at entry.
+- Hook Job (Sync/BeforeHookCreation, per m06 `claims-data.yaml` pattern): run one baseline `PipelineRun` so a signable image exists at entry.
 - `{user}-dev`: deploy target for the `ImagePolicy` admission beat (workshop-layer ns; survives reset).
 - `ws-meta.yaml purgeNamespaces: {user}-cicd` (clear PipelineRuns/images on reset). Idempotent templates.
 - Shared references (not per-user): ACS Central endpoint, RHTAS TUF/Rekor URLs, `signing-secrets` (in `openshift-pipelines`).

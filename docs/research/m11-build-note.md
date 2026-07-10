@@ -1,6 +1,6 @@
-# M10 build note — Developer Hub & Golden Paths
+# M11 build note — Developer Hub & Golden Paths
 
-Date: 2026-07-09 · Author: research-analyst R4b · Spec: 02-MODULE-SPECS §M10 (lines 141-150) · Entitlement: **[ADS]** (RHADS — RHDH + Developer Lightspeed)
+Date: 2026-07-09 · Author: research-analyst R4b · Spec: 02-MODULE-SPECS §M11 (lines 141-150) · Entitlement: **[ADS]** (RHADS — RHDH + Developer Lightspeed)
 Method: live cluster `ocp-ws-revamped` — OLM packagemanifests, CRD/CSV/OAuth/Keycloak inspection; docs.redhat.com (RHDH 1.7/1.9 auth, sizing, Lightspeed, templates); versions.yaml re-confirmed live.
 
 ## Verified versions
@@ -20,13 +20,13 @@ Cluster reality (verified live 2026-07-09):
 - **`Backstage` CR** is deliberately minimal by default (alm-example = name+labels only). Real config = `spec.application.appConfig.configMaps[]`, `spec.application.dynamicPluginsConfigMapName`, `spec.application.extraEnvs`, `spec.application.extraFiles` (docs.redhat.com RHDH configuring). RHDH operator deploys a **bundled local PostgreSQL** by default (no separate DB component needed at workshop scale).
 - **Developer Lightspeed for RHDH** = dynamic plugin added to the `dynamic-plugins-rhdh` ConfigMap + **two sidecars** (Lightspeed Core Service + Llama Stack); inference endpoint is MaaS-wireable (docs.redhat.com RHDH 1.9 "Interacting with Developer Lightspeed").
 - **Gitea** present (`gitea-operator.v2.1.0`); org `parasol`, per-user forks are the convention. GitHub/GitLab are RHDH first-class; **Gitea needs `integrations.gitea` + the community `publish:gitea` scaffolder module** (backstage `scaffolder-backend-module-gitea`).
-- **Capacity**: ~44 CPU / ~72Gi free on workers (as M07) — comfortably fits one shared RHDH.
+- **Capacity**: ~44 CPU / ~72Gi free on workers (as M08) — comfortably fits one shared RHDH.
 
 ## Spec deltas
 
 - **Auth** — spec is agnostic; grounded answer: **RHDH → OpenShift OAuth** (attendees are htpasswd OpenShift users), **not** the rhbk `sso` realm. Realm reuse would require adding attendees to a realm that backs cluster login — rejected.
 - **Backstage CR version** — older docs/mining use `rhdh.redhat.com/v1alpha3`; the 1.10 operator serves **`v1alpha4`/`v1alpha5`**. Author `v1alpha4`.
-- **"[ADS]"** = RHADS; RHDH + Developer Lightspeed are the developer-experience half of the same suite as M07 (developers.redhat.com RHADS overview). Consistent tagging across M07/M10.
+- **"[ADS]"** = RHADS; RHDH + Developer Lightspeed are the developer-experience half of the same suite as M08 (developers.redhat.com RHADS overview). Consistent tagging across M08/M11.
 - **Gitea scaffolder is not first-class** — golden-path *publish* to Gitea needs the community `publish:gitea` action loaded as a dynamic plugin; supported status in RHDH 1.10 is unconfirmed → `TODO(verify-on-cluster)`, with generic-`url` catalog registration as the robust fallback.
 - **Developer Lightspeed adds real weight** (2 sidecars + MaaS dependency) — treat as an optional section that degrades gracefully (mirror M01 Lightspeed 403 handling), not a hard requirement.
 
@@ -35,7 +35,7 @@ Cluster reality (verified live 2026-07-09):
 1. **Single shared RHDH** (platform layer, `pp-portal`) with **OpenShift OAuth sign-in** so user1..8 log in with their console creds; keep RBAC light (all attendees read the shared Parasol catalog + run templates) — strict per-user catalog namespacing is overkill; document the trade-off.
 2. **Register Parasol catalog via `catalog.locations` type `url`** pointing at raw Gitea `catalog-info.yaml` (works for any git host, avoids the Gitea-integration gap for catalog *read*); use `integrations.gitea` + `publish:gitea` only for the scaffolder *write*.
 3. **Golden-path template** = a Backstage Software Template that scaffolds a **Quarkus JDK-21** service skeleton + PaC pipeline + Argo app + devfile into the **user's Gitea org**; verify `publish:gitea` loads, else fall back to `publish:git`/generic (`TODO(verify)`).
-4. **Developer Lightspeed = optional [ADS] section** wired to the MaaS endpoint (`{maas_endpoint}`, `apitoken` secret — same contract as M01/M23); degrade to "unavailable" if the key expired, don't block the module.
+4. **Developer Lightspeed = optional [ADS] section** wired to the MaaS endpoint (`{maas_endpoint}`, `apitoken` secret — same contract as M01/M06); degrade to "unavailable" if the key expired, don't block the module.
 5. **TechDocs = local builder** (in-Backstage, no external S3) to keep the module simple; note the external-builder option in wrap-up.
 
 ## Exercise arc (Parasol framing · 75 min: ~15 concept + ~55 hands-on)
@@ -61,11 +61,11 @@ Demo arc: template → running-governed-service in 10 min. When-not-to-use (wrap
 - **No separate Postgres component** — RHDH operator's bundled local DB suffices at workshop scale.
 - **Footprint (shared, one instance; validate with `oc adm top`)**: Backstage ~1 CPU / 2Gi req, ~2 CPU / 2.5-3Gi limit; bundled Postgres ~0.5 CPU / 1Gi; **+Developer Lightspeed sidecars ~+1 CPU / +1.5-2Gi** → **~2.5-3.5 CPU / 5-6Gi total** (docs.redhat.com RHDH 1.9 sizing — exact table `TODO(verify)`). Single shared instance is the right shape; per-user isolation via each user's own Gitea org, not per-user RHDH.
 
-## Entry-state requirements — `gitops/entry-states/m10/` (per-user, light)
+## Entry-state requirements — `gitops/entry-states/m11/` (per-user, light)
 
 RHDH itself is shared platform (pp-portal), so the entry state is mostly Gitea seeding + catalog registration:
 
-- Hook Jobs (m23 seed pattern): ensure the user's Gitea org has (a) the **golden-path template repo**, (b) `parasol-claims`/`parasol-web` forks each carrying **`catalog-info.yaml`**; register a per-user `catalog.location` (or rely on shared org-scan).
+- Hook Jobs (m06 seed pattern): ensure the user's Gitea org has (a) the **golden-path template repo**, (b) `parasol-claims`/`parasol-web` forks each carrying **`catalog-info.yaml`**; register a per-user `catalog.location` (or rely on shared org-scan).
 - No per-user RHDH namespace; scaffolder target = user's Gitea org + `{user}-dev`/`{user}-cicd` (workshop-layer ns).
 - `ws-meta.yaml`: purge the user's scaffolded repos/apps on reset for idempotent re-runs (`TODO`: scaffolder idempotency per user — spec watchout).
 

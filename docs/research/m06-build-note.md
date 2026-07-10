@@ -1,6 +1,6 @@
-# M23 build note — Jobs, Batch & Queued Workloads
+# M06 build note — Jobs, Batch & Queued Workloads
 
-Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M23 (lines 82-91)
+Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M06 (lines 82-91)
 Method: live cluster `ocp-ws-revamped` (OCP 4.21.22), OLM packagemanifests (CSV alm-examples), `oc explain`, live MaaS egress test, docs.redhat.com Red Hat build of Kueue.
 
 ## Verified versions
@@ -27,8 +27,8 @@ API shapes (verified 2026-07-09):
 1. Batch stack: install Kueue operator (AllNamespaces, ns `openshift-kueue-operator`) + `Kueue/cluster` with `integrations.frameworks:[BatchJob]`; then seed ResourceFlavor + per-user ClusterQueue/LocalQueue + `user{N}-batch` ns.
 2. Per-user ClusterQueue (NOT shared) with tiny `nominalQuota` so ~2 sample pods fit and the rest pend — makes admission order visible; `preemption.withinClusterQueue: LowerPriority` for visible preemption.
 3. Two WorkloadPriorityClasses (batch-low/high); Jobs carry labels `kueue.x-k8s.io/queue-name` + `kueue.x-k8s.io/priority-class`; keep sample pods 200m/256Mi and <2 min (spec watchout).
-4. Batch-inference sample: Job POSTs to MaaS `/v1/chat/completions` (egress verified) using the `apitoken` secret; model-agnostic ("cluster's configured model"), tiny batch, ties M22.
-5. KEDA is mention-only: reference `ScaledJob` (`keda.sh/v1alpha1`) as the event-driven contrast; do NOT install CMA for M23 unless a queue-depth-scaling demo needs it.
+4. Batch-inference sample: Job POSTs to MaaS `/v1/chat/completions` (egress verified) using the `apitoken` secret; model-agnostic ("cluster's configured model"), tiny batch, ties M23.
+5. KEDA is mention-only: reference `ScaledJob` (`keda.sh/v1alpha1`) as the event-driven contrast; do NOT install CMA for M06 unless a queue-depth-scaling demo needs it.
 
 ## Mining results
 - Spec Mine = fresh. Kueue YAML from docs.redhat.com "Red Hat build of Kueue 1.x" (quotas_and_workloads, cohorts_and_advanced_configurations).

@@ -1,6 +1,6 @@
-# M06 build note — Pipelines Fundamentals & Task Libraries  `[OCP]`
+# M07 build note — Pipelines Fundamentals & Task Libraries  `[OCP]`
 
-Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M06 (lines 97-106)
+Date: 2026-07-09 · Author: research-analyst R5 · Spec: 02-MODULE-SPECS §M07 (lines 97-106)
 Method: live build cluster `ocp-ws-revamped` (OCP 4.21.22), OLM packagemanifests + CSV, `oc api-resources`/`oc explain`, live TektonConfig + shipped Tasks + PAC route, docs.redhat.com + pipelinesascode.com, repo inspection. versions.yaml (2026-07-08) trusted; re-verified live 2026-07-09.
 
 ## Verified versions
@@ -33,7 +33,7 @@ Cluster reality (verified live 2026-07-09):
 5. Workspace = a `volumeClaimTemplate` PVC in `{user}-cicd` (vs pvc 5 cap); set build-task memory **request 1.5Gi / limit 2Gi** to beat the 1Gi LimitRange default; runs serial per user.
 
 ## Mining results
-- `adv-app-platform-demo-showroom` M2 (Tekton + Sonar + Argo handoff) → "pipeline-catches-a-bug" narrative + pipeline→GitOps handoff beat (oldcontent-mining-index §4). Discard Sonar (that is M07).
+- `adv-app-platform-demo-showroom` M2 (Tekton + Sonar + Argo handoff) → "pipeline-catches-a-bug" narrative + pipeline→GitOps handoff beat (oldcontent-mining-index §4). Discard Sonar (that is M08).
 - `redhat-ads-tech/parasol-insurance-manifests` `build/` (maven-build → update-manifest → triggers Tekton chain) → pipeline SHAPE + task decomposition for parasol-claims; re-implement (license = none). (mining-index §3)
 - MAD M3 + `rh-mad-workshop/mad-dev-guides-m6`, `tech-exercise` pipeline exercises → mechanics/lab-progression IDEAS only; anti-goal on tech-exercise's opinionated TL500 stack (05-REFERENCES; mining-index §2b).
 - Discard everywhere: `ClusterTask`, Tekton-Hub-as-product, `kam`.
@@ -56,7 +56,7 @@ Cluster reality (verified live 2026-07-09):
 - `[~25m]` PaC: seed `.tekton/pull-request.yaml` in the `{user}/parasol-claims` fork; create the `Repository` CR + Gitea webhook; push from Dev Spaces (M03 muscle memory) → pipeline fires; PR-based flow glimpse.
 - `[~10m]` Wrap: "why platform teams curate a library" + decision guide; break-fix = failing test gates the build.
 
-**Entry-state requirements (`gitops/entry-states/m06/`, per-user):** assumes `{user}-cicd`, java-21 IS, parasol-images pull, the shared `parasol-tasks` library. Materializes: `{user}/parasol-claims` fork (reuse m02 fork-job pattern); a pipeline SA + push RoleBinding to its image target; the seeded Pipeline + Tasks (or cluster-resolver refs); the `.tekton/` PipelineRun in the fork; optionally the PAC `Repository` CR (attendee adds the webhook = lab).
+**Entry-state requirements (`gitops/entry-states/m07/`, per-user):** assumes `{user}-cicd`, java-21 IS, parasol-images pull, the shared `parasol-tasks` library. Materializes: `{user}/parasol-claims` fork (reuse m02 fork-job pattern); a pipeline SA + push RoleBinding to its image target; the seeded Pipeline + Tasks (or cluster-resolver refs); the `.tekton/` PipelineRun in the fork; optionally the PAC `Repository` CR (attendee adds the webhook = lab).
 
 **Platform requirements:**
 - *Shared/cluster:* OpenShift Pipelines operator — **EXISTS** (`pp-openshift-pipelines`). **NEW** `parasol-tasks` namespace + curated Tasks + read-RBAC for per-user pipeline SAs (the cluster-resolver library). Optional TektonConfig pruner tuning.

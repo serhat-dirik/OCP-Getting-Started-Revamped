@@ -1,6 +1,6 @@
 # component: loki-logging (OPTIONAL / capacity-gated)
 
-The log-aggregation tier for M11 ("logs across replicas"): the **Loki Operator** + **Red Hat OpenShift
+The log-aggregation tier for M12 ("logs across replicas"): the **Loki Operator** + **Red Hat OpenShift
 Logging** stand up a shared **LokiStack** log store, a **Vector** `ClusterLogForwarder` that ships
 application + infrastructure logs into it, and the **COO Logging UIPlugin** that surfaces them in the
 console **Observe -> Logs** view.
