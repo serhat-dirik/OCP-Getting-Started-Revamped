@@ -1,0 +1,77 @@
+# acs-image-check — the third curated Parasol "company task library" Task (M08 Trusted Software
+# Supply Chain). Runs an RHACS (Red Hat Advanced Cluster Security) build-time image check with roxctl
+# and FAILS the pipeline when an enforced build policy is violated — e.g. the "Block Log4Shell
+# (CVE-2021-44228) at build" policy the trust stack ships. This is the M08 scan gate.
+#
+# CONTRACT: a Secret named `rox-api-token` in the run namespace, with keys `rox-api-token` (a
+# Continuous Integration API token) and `rox-central-endpoint` (host:port). The trust stack mints it
+# in `stackrox`; the M08 entry state copies it per-user into {user}-cicd. Central must have delegated
+# scanning enabled so it can read the cluster-local registry (the trust stack does this).
+#
+# CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
+# workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — keep the two in lockstep.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: acs-image-check
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs an RHACS build-time image check (roxctl) against a built image and fails the build on an
+    enforced policy violation (the M08 scan gate). Reads Central's endpoint + a CI token from the
+    rox-api-token Secret in the run namespace.
+  params:
+    - name: IMAGE
+      type: string
+      description: Fully-qualified image reference to check (registry/namespace/name:tag).
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: '"true" gates the build on an enforced violation; "false" reports only.'
+      default: "true"
+  results:
+    - name: check-passed
+      description: '"true" if no enforced build policy was violated, else "false".'
+  steps:
+    - name: image-check
+      # RHACS roxctl image (digest-pinned, verified live 2026-07-11 — RHACS 4.11.1). Refresh the
+      # digest when the trust stack's RHACS minor moves; Central serves a version-matched roxctl too.
+      image: registry.redhat.io/advanced-cluster-security/rhacs-roxctl-rhel9@sha256:979f329cbe0d0dd1c41e63b471c246294780c5daf029c239ebd7d48129e75a15
+      env:
+        # Endpoint + token from the run-namespace secret; the token value is never echoed.
+        - name: ROX_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-central-endpoint
+        - name: ROX_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-api-token
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        echo "▶ RHACS build-time image check: ${IMAGE}"
+        # --insecure-skip-tls-verify: Central serves its own service cert; the call is cluster-internal.
+        roxctl image check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify --image "${IMAGE}"
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ image check passed — no enforced build-time policy violations"
+          printf 'true' > "$(results.check-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.check-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  policy violation(s) found (reporting only — FAIL_ON_VIOLATION=false)"
+          exit 0
+        fi
+        echo "❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell)."
+        echo "   fix: remove the vulnerable dependency / bump the base image, then re-run."
+        exit "$RC"

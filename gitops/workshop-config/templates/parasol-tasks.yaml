@@ -154,6 +154,73 @@ spec:
       args:
         - $(params.GOALS[*])
 ---
+# acs-image-check — curated Task: the RHACS build-time scan gate (M08 Trusted Software Supply Chain).
+# LOCKSTEP with pipelines/tasks/acs-image-check.yaml. Contract: a `rox-api-token` Secret (keys
+# rox-api-token + rox-central-endpoint) in the run namespace — the trust stack mints it in stackrox,
+# the M08 entry state copies it per-user into {user}-cicd.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: acs-image-check
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs an RHACS build-time image check (roxctl) against a built image and fails the build on an
+    enforced policy violation (the M08 scan gate). Reads Central's endpoint + a CI token from the
+    rox-api-token Secret in the run namespace.
+  params:
+    - name: IMAGE
+      type: string
+      description: Fully-qualified image reference to check (registry/namespace/name:tag).
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: '"true" gates the build on an enforced violation; "false" reports only.'
+      default: "true"
+  results:
+    - name: check-passed
+      description: '"true" if no enforced build policy was violated, else "false".'
+  steps:
+    - name: image-check
+      # RHACS roxctl image (digest-pinned, verified live 2026-07-11 — RHACS 4.11.1).
+      image: registry.redhat.io/advanced-cluster-security/rhacs-roxctl-rhel9@sha256:979f329cbe0d0dd1c41e63b471c246294780c5daf029c239ebd7d48129e75a15
+      env:
+        - name: ROX_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-central-endpoint
+        - name: ROX_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-api-token
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        echo "▶ RHACS build-time image check: ${IMAGE}"
+        roxctl image check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify --image "${IMAGE}"
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ image check passed — no enforced build-time policy violations"
+          printf 'true' > "$(results.check-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.check-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  policy violation(s) found (reporting only — FAIL_ON_VIOLATION=false)"
+          exit 0
+        fi
+        echo "❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell)."
+        echo "   fix: remove the vulnerable dependency / bump the base image, then re-run."
+        exit "$RC"
+---
 # Read grant for the cluster resolver: a pipeline can only resolve a Task it can `get`. This Role
 # (get/list/watch tasks in parasol-tasks) is bound to every attendee's -cicd ServiceAccounts below.
 apiVersion: rbac.authorization.k8s.io/v1
