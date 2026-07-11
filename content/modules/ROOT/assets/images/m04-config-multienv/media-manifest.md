@@ -6,10 +6,12 @@ numbered red circles matching the referenced step. Every screenshot needs alt te
 (what it shows + what to notice). Embed points are marked in the `.adoc` files with a
 commented `// TODO(media): image::…` line — uncomment when the asset lands.
 
-Constrained-environment note: the module was built entirely from the **Showroom-terminal `oc`
-commands** (no browser-only steps), so every lab mechanic is cluster-grounded and needs no
-`[CAPTURE-VERIFY]`. The screenshots below are the console *alternatives* to the CLI spine and the
-SVG diagram exports; both are the deferred media pass.
+Constrained-environment note: the lab's CLI spine was built entirely from the **Showroom-terminal
+`oc` commands** and is cluster-grounded. The 2026-07-11 dual-path retrofit added Console tabs whose
+5 novel form/label references carry `[CAPTURE-VERIFY]` markers in `lab.adoc` — they map 1:1 onto
+the screenshots below, so one browser pass confirms the labels and captures the shots together.
+The screenshots are the console *alternatives* to the CLI spine plus the SVG diagram exports; both
+remain the deferred media pass.
 
 ## Screenshots (console views — the view IS the content)
 
