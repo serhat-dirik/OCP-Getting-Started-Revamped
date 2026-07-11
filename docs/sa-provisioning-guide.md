@@ -2,7 +2,7 @@
 
 Audience: the Red Hat SA (or instructor) **provisioning and planning** a session.
 Attendees never see this page — their Showroom shows only the module library and the
-modules you selected. (Serhat direction 2026-07-11: recommended paths live here, not
+modules you selected. (project direction 2026-07-11: recommended paths live here, not
 on the attendee index; demo paths belong to the SA-Demos showroom, not the workshop.)
 
 ## How paths relate to module numbers

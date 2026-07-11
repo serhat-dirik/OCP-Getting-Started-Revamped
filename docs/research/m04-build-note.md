@@ -37,7 +37,7 @@ Cluster reality (verified live 2026-07-09):
 
 ## Open risks
 - `parasol-claims` absent → lab UNVERIFIABLE end-to-end today; datasource env-var names are the Quarkus convention (grounded) but exact keys + intentional flaw must be confirmed against the app README when built.
-- No downstream module owns ESO/Vault "full story" (spec points at M07/M09 which don't fit) — PM/Serhat decision.
+- No downstream module owns ESO/Vault "full story" (spec points at M07/M09 which don't fit) — PM/project decision.
 - ESO hands-on needs a net-new platform component (portfolio stack); if not added this wave, ESO stays concept-only.
 - Quota: default 1Gi limit/container across ≤30 pods and 5 PVC/ns — multi-env promote is fine, but instructor watches the pvc=5 cap once DB/ESO are added.
 

@@ -1,4 +1,4 @@
-# Module catalog renumber — 2026-07-10 (Serhat directive: sequential teaching order)
+# Module catalog renumber — 2026-07-10 (project directive: sequential teaching order)
 
 The catalog was renumbered to contiguous M01–M27 in teaching order (commit `74cb405`). Anything
 written before 2026-07-10 (status reports, G3/G4 test reports, research build notes, git history,

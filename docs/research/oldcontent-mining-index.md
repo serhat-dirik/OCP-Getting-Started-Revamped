@@ -197,7 +197,7 @@ Supplemental overlay files live in `content/supplemental-ui/` (`css/site-extra.c
 ---
 
 ## 6. Risks / flags
-- **License = none on all `redhat-ads-tech` and most `rhpds` repos** (parasol-insurance, manifests, adv-app-platform-demo-showroom, showroom-rhtap, agentops). Mine ideas/domain/shape and re-implement; do **not** copy source verbatim without a license grant. Raise with Serhat if we intend to lift code (Decision-Record question).
+- **License = none on all `redhat-ads-tech` and most `rhpds` repos** (parasol-insurance, manifests, adv-app-platform-demo-showroom, showroom-rhtap, agentops). Mine ideas/domain/shape and re-implement; do **not** copy source verbatim without a license grant. Raise with the project owner if we intend to lift code (Decision-Record question).
 - **RHTAP renamed → Red Hat Advanced Developer Suite (RHADS).** `showroom-rhtap` and older Parasol demos use the old name; re-verify every product name/UI path against 04-STYLE-GUIDE §5 before porting (M07).
 - **AI stack churn (highest):** parasol-insurance AI path (LiteLLM/Ollama/Jlama), agentops showroom, and Red Hat AI versions must be re-verified at M22 build time per 05-REFERENCES §4 — do not trust anything here beyond ~60 days.
 - **`nookbag` vs `default` template divergence:** RHDP is mid-migration (default README defers to nookbag; live demo still uses the older two-playbook shape). PM should choose ONE base now; recommend the nookbag structure + patternfly-6 bundle to avoid a rebuild later.

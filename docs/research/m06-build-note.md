@@ -20,7 +20,7 @@ API shapes (verified 2026-07-09):
 
 ## Spec deltas
 - **Quota model:** entry state says "per-user LocalQueues against a quota'd ClusterQueue" (singular). Kueue quota lives ONLY in the ClusterQueue; LocalQueue holds none. A single shared CQ = cross-user starvation, contradicting the watchout "one user's batch can't starve others." → use **per-user ClusterQueue** (each with its LocalQueue). Sketched below.
-- **Kueue packaging (spec "verify GA/version"):** operator CSV v1.3.1; config CR `kueue.openshift.io/v1`; workload API `kueue.x-k8s.io/v1beta1` (NOT v1). Entitlement OCP is provisional (D16 dagger) — confirm with Serhat.
+- **Kueue packaging (spec "verify GA/version"):** operator CSV v1.3.1; config CR `kueue.openshift.io/v1`; workload API `kueue.x-k8s.io/v1beta1` (NOT v1). Entitlement OCP is provisional (D16 dagger) — confirm with the project owner.
 - `user1-batch` namespace + all Kueue CRs are net-new platform (the batch stack) — nothing present today.
 
 ## Approach recommendations

@@ -1,6 +1,6 @@
 # Design note — automating app-repo seeding (GitOps-ifying `app-repo-publishing.md`)
 
-**Status:** DRAFT / files-only, disabled by default — awaiting Serhat's go-ahead (2026-07-10, PM).
+**Status:** DRAFT / files-only, disabled by default — awaiting the project owner's go-ahead (2026-07-10, PM).
 **Why now:** discovered while closing G4-F11 that the workshop's app repos are published *by hand*
 and nothing re-publishes them. That is an imperative install sequence living outside
 `platform-portfolio/`, which CLAUDE.md's GitOps-only rule forbids, and it blocks Phase 3 (M07 forks
@@ -65,10 +65,10 @@ The template is guarded by `{{- if .Values.appRepoSeed.enabled }}` with `enabled
 `values.yaml`. **Rationale:** unlike a standalone files-only stack, a template inside `workshop-config`
 would be *armed* — the next Argo sync would run it and force-push the app repos, including the M03
 `.vscode/` files. That force-push into the shared `parasol/*` seed repos is precisely the action the
-permission guard blocked me from doing by hand (2026-07-10), and it is Serhat's call, not mine. The
+permission guard blocked me from doing by hand (2026-07-10), and it is the project owner's call, not mine. The
 flag keeps the mechanism reviewable and inert until he flips it.
 
-### Open decisions for Serhat / verify-on-install
+### Open decisions for the project owner / verify-on-install
 
 - `// TODO(verify-on-install)`: the git image. Draft uses `ubi9` + `dnf install -y git-core` at
   runtime (this cluster has Red Hat CDN egress). A prebuilt git image would remove the egress

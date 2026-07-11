@@ -2,7 +2,7 @@
 
 Date: 2026-07-08 · Status: accepted, amended 2026-07-09 · Owner: PM (spike by research-analyst)
 
-> **Amendment (Serhat, 2026-07-09):** Phase-6 deck ASSEMBLY runs through the Red Hat presentation
+> **Amendment (project owner, 2026-07-09):** Phase-6 deck ASSEMBLY runs through the Red Hat presentation
 > skill (redhat-deck-design) available in the build environment — it owns branding/layout fidelity.
 > The `slides/outlines/*.md` schema stays the source of truth and `build-deck.py` remains the
 > CI structural proof + template-file fallback for environments without the skill.

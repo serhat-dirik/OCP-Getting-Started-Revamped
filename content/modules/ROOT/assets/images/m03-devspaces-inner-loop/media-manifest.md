@@ -70,7 +70,7 @@ The `vscode-java-pack` meta-extension is not in the embedded registry and would 
 > `apps/parasol-claims/` in this monorepo, but that repo is **not a mirror** — it is published
 > imperatively (`docs/research/app-repo-publishing.md`), and a Gitea fork is a clone taken at fork
 > time, so existing `{user}/parasol-claims` forks would not pick the files up even after a re-publish.
-> Until the seed is refreshed (parked for Serhat — see `06-BACKLOG.md` "For Serhat"), the lab must
+> Until the seed is refreshed (parked for the project owner — see `06-BACKLOG.md` "For the project owner"), the lab must
 > not promise attendees a `.vscode/` prompt. It currently tells them to install the two extensions
 > from the *Extensions* view, which works today.
 
@@ -99,7 +99,7 @@ The closer. Recorded narrated walkthrough (Phase 6): a full Android app develope
 same one-click browser IDE — building against an on-cluster Android device whose screen streams
 into a browser tab. Source material and patterns adapted from `serhat-dirik/devspaces-android-sample-app`
 (credit per D18). Embed in lab.adoc exercise 7 and as the demo-arc closer. Hosting decision
-(unlisted video vs repo release) is a "For Serhat" item.
+(unlisted video vs repo release) is a "For the project owner" item.
 
 ## Narration script
 Draft from the demo-flavor Say/Show/Do blocks in `lab.adoc` (`ifdef::demo[]`, the 8–10 min arc).

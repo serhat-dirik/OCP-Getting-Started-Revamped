@@ -92,7 +92,7 @@ Compose-don't-chain (README rules): materialize the whole build world; do **not*
 
 - **LAB-VIABLE**: ACS scan+CVE-fail gate; key-based cosign sign + in-toto attest + `cosign verify`; CycloneDX SBOM + terminal inspection; per-user native `ImagePolicy` block-unsigned.
 - **DEMO-ONLY**: keyless Fulcio/Rekor signing (per-user OIDC wiring too fragile in 60 min); ACS cluster-wide admission policy; RHTPA SBOM UI.
-- **CUT CANDIDATE**: RHTPA entirely (heavy, own OIDC/object-store; CycloneDX terminal beat covers the SBOM objective) — PM/Serhat call; keep as optional `trust-demo` component if kept.
+- **CUT CANDIDATE**: RHTPA entirely (heavy, own OIDC/object-store; CycloneDX terminal beat covers the SBOM objective) — PM/project-owner call; keep as optional `trust-demo` component if kept.
 - **ACS init-bundle bootstrap** is the fragile install step (SecuredCluster needs a Central-minted secret) — solve with a hook Job; test idempotency.
 - **`TektonConfig` singleton ownership** — patch-Job, not Argo-managed manifest (ADR).
 - **RHACS signature cache is 4h** — for the lab, admission enforcement is real-time on deploy but the *scan/policy re-eval* lags; script the demo to avoid the cache window (`TODO(verify-on-cluster)` the exact enforcement timing).

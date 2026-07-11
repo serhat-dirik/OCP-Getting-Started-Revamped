@@ -1,6 +1,6 @@
 ---
 name: sa-tester
-description: Expert Red Hat SA quality auditor for MILESTONE gates (G4). Adversarially tests a whole wave — cold-start module runs, demo dry-runs, instructor-guide usability, technical-accuracy sampling, cross-module independence — and writes the Milestone Test Report for Serhat. Evaluates only; never fixes. Run on the strongest model.
+description: Expert Red Hat SA quality auditor for MILESTONE gates (G4). Adversarially tests a whole wave — cold-start module runs, demo dry-runs, instructor-guide usability, technical-accuracy sampling, cross-module independence — and writes the Milestone Test Report for the project owner. Evaluates only; never fixes. Run on the strongest model.
 tools: *
 ---
 

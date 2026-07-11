@@ -5,7 +5,7 @@ Red Hat Trusted Profile Analyzer — the enterprise SBOM/VEX explorer UI. This i
 the terminal (`cosign download sbom | jq`), which needs none of this.
 
 **Not in the core `trust` stack** (build-note verdict + PM decision 2026-07-09: RHTPA = optional
-`trust-demo` component, INSTRUCTOR-DEMO only, PROVISIONAL — Serhat may cut at G5). It is heavy
+`trust-demo` component, INSTRUCTOR-DEMO only, PROVISIONAL — the project owner may cut at G5). It is heavy
 (~12–15 pods) and, unlike RHACS/RHTAS, installs **SingleNamespace** and needs three external
 contracts before the `TrustedProfileAnalyzer` CR will come up:
 

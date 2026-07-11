@@ -78,7 +78,7 @@ Takeaway: we do **not** need to invent the FSC shape — we need to wrap our exi
 
 ---
 
-## 3. The MaaS key answer (Serhat's explicit question) — MECHANISM FOUND
+## 3. The MaaS key answer (the project owner's explicit question) — MECHANISM FOUND
 
 **"Lite MaaS Model API Key" = LiteMaaS** (`rhpds/rhpds.litemaas`), a LiteLLM-based Models-as-a-Service. Per-lab keys are issued by the `rhpds.litellm_virtual_keys` collection (role `ocp4_workload_litellm_virtual_keys`), which creates a key `virtkey-{GUID}` against the production endpoint cluster **`maas-rdhp`**.
 
@@ -113,7 +113,7 @@ Takeaway: we do **not** need to invent the FSC shape — we need to wrap our exi
 | **B. Own Keycloak (Red Hat build of Keycloak)** | Small shared RHBK in our namespace; per-user realms; add an OpenID IdP to `oauth/cluster` for console login | Portable across ANY cluster; real OIDC = curriculum for M13/M14; one identity for console AND apps | We own IdP lifecycle; must patch `oauth/cluster` (imperative or Job); ~2 pods (KC+Postgres) footprint | Both paths; best for standalone |
 | **C. Current htpasswd (status quo)** | `bootstrap/install.sh` builds htpasswd secret + appends `workshop-users` IdP to `oauth/cluster` (append-if-absent) | Works today; simple; idempotent; preserves pre-existing IdPs | Imperative (not GitOps-expressible for FSC); no app-auth story | Standalone only |
 
-**M13 synergy:** M13 already plans a **new, shared, workshop-owned Red Hat build of Keycloak** as `platform-portfolio/components/keycloak` + `stacks/auth` (Subscription `rhbk-operator` `stable-v26.6` + `Keycloak` CR + Postgres), with **one realm per user** via `KeycloakRealmImport realm-{user}` using `spec.placeholders` for per-user redirect URIs (`docs/research/m13-build-note.md`). That instance is designed for **app login**; Serhat's "workshop users log in via KC" idea additionally wants **console login** — achievable by pointing `oauth/cluster` at the same RHBK (an OpenID IdP), which is what the live RHDP cluster already does for its admin login. Live cluster login IdP is `keycloak/sso` — **read-only, do not reuse**.
+**M13 synergy:** M13 already plans a **new, shared, workshop-owned Red Hat build of Keycloak** as `platform-portfolio/components/keycloak` + `stacks/auth` (Subscription `rhbk-operator` `stable-v26.6` + `Keycloak` CR + Postgres), with **one realm per user** via `KeycloakRealmImport realm-{user}` using `spec.placeholders` for per-user redirect URIs (`docs/research/m13-build-note.md`). That instance is designed for **app login**; the project owner's "workshop users log in via KC" idea additionally wants **console login** — achievable by pointing `oauth/cluster` at the same RHBK (an OpenID IdP), which is what the live RHDP cluster already does for its admin login. Live cluster login IdP is `keycloak/sso` — **read-only, do not reuse**.
 
 **Recommendation:** **Option B, built once, consumed by both paths, sequenced after M13's `auth` stack lands.** Promote M13's `components/keycloak` to also serve **console** login (opt-in overlay). Standalone path uses it directly; FSC path keeps Option A (`multi_user` values) as the default but can layer B for AI/auth-heavy events. Keep current htpasswd (C) as the zero-dependency default until the RHBK stack is proven.
 
@@ -121,7 +121,7 @@ Takeaway: we do **not** need to invent the FSC shape — we need to wrap our exi
 
 ## 5. Fallback (standalone) install-script contract — draft
 
-Serhat's verbatim constraints: (a) **every project we create — showrooms included — gets an `ogsr-` prefix**; (b) target clusters **may already have** our operators (GitOps, Pipelines) — **adopt/skip, never fight or duplicate**, and **uninstall must not destroy pre-existing platform components**.
+the project owner's verbatim constraints: (a) **every project we create — showrooms included — gets an `ogsr-` prefix**; (b) target clusters **may already have** our operators (GitOps, Pipelines) — **adopt/skip, never fight or duplicate**, and **uninstall must not destroy pre-existing platform components**.
 
 ### 5.1 Prereqs (from `bootstrap/install.sh` preflight + `platform-portfolio/README.md`)
 - OpenShift **4.20+**, cluster-admin (`oc auth can-i '*' '*'`).
@@ -135,7 +135,7 @@ Serhat's verbatim constraints: (a) **every project we create — showrooms inclu
 ### 5.3 `ogsr-` naming — what changes (files to touch; do NOT change mid-wave)
 **Prefix these workshop-created namespaces** (currently unprefixed — verified none carry `ogsr-`):
 - `gitea` → `ogsr-gitea`; `showroom` → `ogsr-showroom`; `student-gitops` → `ogsr-student-gitops`; `parasol-tasks` → `ogsr-parasol-tasks`; `parasol-images` → `ogsr-parasol-images`; `observability-workshop` → `ogsr-observability-workshop`. Sources: `gitops/workshop-config/values.yaml` (giteaNamespace, showroom.namespace), `bootstrap/install.sh` `GITEA_NS`, various `platform-portfolio/components/*/namespace.yaml`.
-- Per-user sandboxes `{user}-dev/stage/prod/cicd` (`gitops/workshop-config/templates/per-user-namespaces.yaml`) and entry-state namespaces (`parasol-claims`, `parasol-web`, `parasol-claims-supply-chain`, `parasol-claims-build-test-deploy`, `user-queue` under `gitops/entry-states/*`) — **scope question for Serhat** (attendee-visible names lengthen).
+- Per-user sandboxes `{user}-dev/stage/prod/cicd` (`gitops/workshop-config/templates/per-user-namespaces.yaml`) and entry-state namespaces (`parasol-claims`, `parasol-web`, `parasol-claims-supply-chain`, `parasol-claims-build-test-deploy`, `user-queue` under `gitops/entry-states/*`) — **scope question for the project owner** (attendee-visible names lengthen).
 - **Do NOT prefix** product-canonical operator namespaces (`openshift-gitops`, `openshift-operators`, `cert-manager-operator`, `stackrox`, `openshift-logging`, `openshift-lightspeed`, `rhdh`, `openshift-tempo-operator`, etc.) — OLM/products own those names; renaming breaks installs.
 - **Belt-and-suspenders:** because operator namespaces can't be renamed, also stamp **every resource we create with a common owner label** (e.g. `workshop.redhat.com/owner: ogsr`) so admins can find our footprint even inside shared namespaces. Model: hyperledger's `app.kubernetes.io/part-of: certchain`.
 
@@ -161,19 +161,19 @@ Draft `ogsr-uninstall.sh` (model: hyperledger `teardown-all.sh`):
 
 **Recommendation: BOTH, script-first, then a thin FSC wrapper.** The two paths share ~90% of the machinery (same `platform-portfolio` stacks + `workshop-config` layer + showroom). They differ only at the entrypoint and in how imperative steps are handled.
 
-- **Wave 1 — harden the standalone/script path (effort: ~1–3 days, we own all the code).** Delivers Serhat's verbatim constraints regardless of RHDP: `ogsr-` prefixing + owner label; operator-adoption guards on the ~15 components; non-destructive `ogsr-uninstall.sh`. Bonus: makes us a good tenant on *any* cluster, including RHDP-provisioned ones. Low-risk: nothing depends on unverifiable RHDP internals.
+- **Wave 1 — harden the standalone/script path (effort: ~1–3 days, we own all the code).** Delivers the project owner's verbatim constraints regardless of RHDP: `ogsr-` prefixing + owner label; operator-adoption guards on the ~15 components; non-destructive `ogsr-uninstall.sh`. Bonus: makes us a good tenant on *any* cluster, including RHDP-provisioned ones. Low-risk: nothing depends on unverifiable RHDP internals.
 - **Wave 2 — add the FSC wrapper (effort: ~2–4 days; the imperative→GitOps conversion is the crux).** Create one root Helm chart (mirror hyperledger `helm/bootstrap`) at a repo path RHDP can point `field-content` at, that: (1) accepts `deployer.*`, `litemaas.*`, `multi_user.*` values; (2) emits our existing stacks + workshop-config as child Argo apps; (3) emits a `demo.redhat.com/userinfo` ConfigMap (showroom URL, console, gitea, users, password) + `demo.redhat.com/application` health labels; (4) **GitOps-ifies the imperative bootstrap steps** — the htpasswd secret + `oauth/cluster` IdP patch + MaaS secret currently done by `oc` in `bootstrap/install.sh` must become in-chart Jobs (FSC ansible-runner pattern) *or* be replaced by platform `multi_user`/`litemaas` inputs. Items (1)–(3) are trivial; item (4) is the entire risk of this wave.
 
 Why not FSC-only: FSC de-provisioning = destroy the cluster, and it forbids imperative `oc` — a poor fit for BYO/partner clusters and for our IdP patching. Why not script-only: we'd forgo one-click RHDP ordering that the hyperledger demo proves works for this exact architecture.
 
 ---
 
-## 7. Open questions — only Serhat / RHDP can answer
+## 7. Open questions — only the project owner / RHDP can answer
 
 1. **RHDP test order needed:** does the Field-Content catalog item expose a "lite MaaS Model API Key" checkbox itself, or is MaaS provisioned by the base OpenShift CI? And does the base CI create htpasswd `userN` identities (vs. only passing the `multi_user` values)?
 2. **Catalog item confirmation:** is `published.ocp-field-asset.prod` still the current FSC item, and what OCP version/size does it provision?
 3. **MaaS entitlement/quota:** which LiteMaaS package/model tier do we target (`llama-scout-17b` default vs. a Granite model), and is per-attendee token quota enough for a full AI module?
-4. **`ogsr-` scope decision:** do per-user sandbox namespaces (`{user}-dev/…`) get renamed to `ogsr-{user}-dev` (changes attendee-visible names) or is the owner-label sufficient for those? Attendee-UX call for Serhat.
+4. **`ogsr-` scope decision:** do per-user sandbox namespaces (`{user}-dev/…`) get renamed to `ogsr-{user}-dev` (changes attendee-visible names) or is the owner-label sufficient for those? Attendee-UX call for the project owner.
 5. **Console-login-via-Keycloak:** approve promoting M13's `auth`/RHBK stack to also back OpenShift console login (adds an `oauth/cluster` OpenID IdP binding)? Cluster-OAuth change — Decision-Record territory.
 
 ---
@@ -184,7 +184,7 @@ Why not FSC-only: FSC de-provisioning = destroy the cluster, and it forbids impe
 - **Imperative-to-GitOps conversion (Wave 2, item 4)** is the only hard part and touches cluster OAuth — highest-risk change; keep it behind a Job + idempotent guard, test on the disposable cluster only.
 - **`prune: true` everywhere** means the uninstall gap is a *live* footgun today on any shared cluster — first thing to fix in Wave 1.
 - **MaaS endpoint churn:** `litellm-rhpds` decommissioned 2026-06-21; any mined doc referencing it is stale. Pin to `maas-rdhp`.
-- Everything verified from source files/URLs as of 2026-07-11; §7 items are explicitly UNVERIFIED, gated on an RHDP test order or a Serhat decision.
+- Everything verified from source files/URLs as of 2026-07-11; §7 items are explicitly UNVERIFIED, gated on an RHDP test order or a project decision.
 
 ---
 

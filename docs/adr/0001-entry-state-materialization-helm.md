@@ -1,6 +1,6 @@
 # ADR-0001: Entry states are Helm-parameterized charts materialized as Argo CD Applications
 
-Date: 2026-07-08 · Status: accepted (PM decision, flagged for Serhat review) · Owner: PM
+Date: 2026-07-08 · Status: accepted (PM decision, flagged for the project owner review) · Owner: PM
 
 ## Context
 
@@ -34,7 +34,7 @@ Two field-proven semantics were added to the engine after the M04/M05 smoke test
 
 ## Amendment — 2026-07-10 (attendee self-service + same-namespace policy)
 
-3. **`ws prep` — attendee self-service front door** (Serhat directive). Attendees hold per-user,
+3. **`ws prep` — attendee self-service front door** (project directive). Attendees hold per-user,
    name-scoped RBAC on their own entry Applications (`gitops/workshop-config/templates/per-user-argo-rbac.yaml`:
    get/list broadly; patch/delete pinned to `entry-mNN-{user}` by resourceNames; create accepted un-scoped for
    the workshop threat model, guarded by the workshop-entries AppProject repo pin). `ws prep <module>` detects
