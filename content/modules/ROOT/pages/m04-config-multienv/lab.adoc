@@ -15,12 +15,14 @@ In this lab you take the claims service from a fragile, hardcoded configuration 
 You break the app with a bad setting and read the failure, move its configuration into a ConfigMap, move its credentials into a Secret, add health probes and watch a readiness gate hold traffic, set resource requests and bump into the namespace quota, and finally promote the *same image* to stage and prod with per-environment config.
 Everything happens in your own namespaces — `{user}-dev`, `{user}-stage`, `{user}-prod` — so nothing you do can affect another attendee.
 
-[NOTE]
-.Everything here runs in the Showroom terminal
+[TIP]
+.Two ways to do most steps
 ====
-Unlike the Dev Spaces module, every command in this lab runs in the *Terminal* tab beside these instructions, logged in as `{user}`.
-The blocks are click-to-run.
-Configuration work is CLI-native, so this lab stays in the terminal; where the web console offers the same view (Deployment environment, ConfigMaps), the text points it out in passing.
+Most steps below are offered two ways.
+Use the *Console* tab for the graphical workflow in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), or the *CLI* tab for `oc` in the *Terminal* tab beside these instructions — the two paths create the same objects.
+Pick a path once: the tabs stay in sync across the page.
+A few steps are CLI-only — promoting with Kustomize, delivering config as a mounted file, and reading a crash-looping pod's _previous_ logs — and say so where they appear.
+The console click-paths follow the {ocp_version} unified console; if a label reads slightly differently on your cluster, the `oc` command beside it is the source of truth.
 ====
 endif::demo[]
 
@@ -145,11 +147,27 @@ We will fix that.
 But first, feel *why* configuration matters: change one setting to a bad value and watch the app fall over.
 Point the datasource at a database host that does not exist:
 
+// [CAPTURE-VERIFY] Deployment > Environment tab: the "Single values (env)" add-row label (OCP 4.21) — CLI 'oc set env' beside it is authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Deployments* → `parasol-claims`, and open the *Environment* tab.
+. Under *Single values (env)*, add a variable: name `QUARKUS_DATASOURCE_JDBC_URL`, value `jdbc:postgresql://wrong-db-host:5432/parasol`.
+. Click *Save*.
+The Deployment rolls out a new pod that picks up the bad datasource URL.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc set env deploy/parasol-claims \
   QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://wrong-db-host:5432/parasol
 ----
+--
+====
 
 `QUARKUS_DATASOURCE_JDBC_URL` is the environment-variable form of the app's datasource URL, and it *overrides* the correct value the image ships with.
 Watch the rollout: the new pod starts, tries to reach the database at boot, fails, and the container exits — over and over.
@@ -216,6 +234,19 @@ The app recovers — but you have just proved the deeper problem: configuration 
 Externalize it.
 Create a *ConfigMap* — a named object that holds *non-secret* configuration — for the environment name, host, port, database name, and log level:
 
+// [CAPTURE-VERIFY] Workloads > ConfigMaps > "Create ConfigMap" form/YAML view (OCP 4.21) — CLI 'oc create configmap' authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *ConfigMaps* and click *Create ConfigMap* (switch to the *YAML view* if you prefer to paste the keys).
+. Name it `claims-config` and add five key/value pairs: `APP_ENV`=`dev`, `POSTGRESQL_HOST`=`claims-db`, `POSTGRESQL_PORT`=`5432`, `POSTGRESQL_DATABASE`=`parasol`, `QUARKUS_LOG_LEVEL`=`INFO`.
+. Click *Create*.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc create configmap claims-config \
@@ -225,6 +256,8 @@ oc create configmap claims-config \
   --from-literal=POSTGRESQL_DATABASE=parasol \
   --from-literal=QUARKUS_LOG_LEVEL=INFO
 ----
+--
+====
 
 Look at what you made:
 
@@ -244,13 +277,25 @@ data:
   QUARKUS_LOG_LEVEL: INFO
 ----
 
-Now point the Deployment at the ConfigMap.
-`oc set env --from` injects every key in the ConfigMap as an environment variable, and — because the names match — it *replaces* the matching inline values with references to the ConfigMap:
+Now point the Deployment at the ConfigMap — this injects every key as an environment variable and, because the names match, *replaces* the matching inline values with references to the ConfigMap:
 
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Deployments* → `parasol-claims` → the *Environment* tab.
+. In the *All values from existing ConfigMaps or Secrets (envFrom)* section, add the `claims-config` ConfigMap, and click *Save*.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc set env deploy/parasol-claims --from=configmap/claims-config
 ----
+--
+====
 
 Confirm the non-secret config now comes from the ConfigMap (only the credentials remain inline):
 
@@ -296,6 +341,19 @@ Look again at the last output: `POSTGRESQL_PASSWORD=parasol` is still sitting in
 Anyone who can read the Deployment can read the password.
 Move the credentials into a *Secret*, which is stored and access-controlled separately:
 
+// [CAPTURE-VERIFY] Workloads > Secrets > "Create" > "Key/value secret" form (OCP 4.21) — CLI 'oc create secret generic' authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Secrets*, click *Create* → *Key/value secret*, and name it `claims-creds`.
+. Add two keys: `POSTGRESQL_USER`=`parasol` and `POSTGRESQL_PASSWORD`=`parasol`. Click *Create*.
+. Wire it into the app: *Workloads* → *Deployments* → `parasol-claims` → *Environment* tab → in the *All values from existing ConfigMaps or Secrets (envFrom)* section, add the `claims-creds` Secret, and *Save*.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc create secret generic claims-creds \
@@ -304,6 +362,8 @@ oc create secret generic claims-creds \
 
 oc set env deploy/parasol-claims --from=secret/claims-creds
 ----
+--
+====
 
 As with the ConfigMap, this replaces the inline `POSTGRESQL_USER`/`POSTGRESQL_PASSWORD` with references to the Secret.
 Now every setting is sourced from an object, and *nothing* sensitive is inline:
@@ -418,6 +478,19 @@ Both are first-class; the choice is about size and rotation, not correctness.
 Your app runs, but the platform has *no idea* whether it is healthy — it has no probes.
 Add all three, pointed at the health endpoints the claims service already exposes:
 
+// [CAPTURE-VERIFY] Deployment > Actions > "Add Health Checks" flow (Startup/Readiness/Liveness, HTTP GET, port 8080) (OCP 4.21) — CLI 'oc set probe' authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Add Health Checks*.
+. Add a *Startup*, a *Readiness*, and a *Liveness* probe — each an *HTTP GET* on port `8080`, with paths `/q/health/started`, `/q/health/ready`, and `/q/health/live` respectively (leave the periods and failure thresholds at the values shown in the CLI tab).
+. *Save*, then wait for the rollout to finish.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc set probe deploy/parasol-claims --startup   --get-url=http://:8080/q/health/started --period-seconds=3  --failure-threshold=30
@@ -425,6 +498,8 @@ oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/r
 oc set probe deploy/parasol-claims --liveness  --get-url=http://:8080/q/health/live    --period-seconds=10 --failure-threshold=3
 oc rollout status deploy/parasol-claims
 ----
+--
+====
 
 Confirm all three are set:
 
@@ -528,6 +603,18 @@ Route: 200
 Your app has been inheriting *default* requests and limits from the namespace *LimitRange*.
 See those defaults, then set *explicit* values on the claims app:
 
+// [CAPTURE-VERIFY] Administration > LimitRanges detail; Deployment > Actions > "Edit resource limits" (OCP 4.21) — CLI 'oc get limitrange'/'oc set resources' authoritative.
+[tabs]
+====
+Console::
++
+--
+. See the namespace defaults every pod inherits: *Administration* → *LimitRanges* → `workshop-limits` (its *Default* limit and *Default request*).
+. Set explicit values on the app: *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit resource limits*, then set CPU request `100m` / limit `500m` and Memory request `256Mi` / limit `512Mi`, and *Save*.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get limitrange workshop-limits -o jsonpath='default(limit)={.spec.limits[0].default}{"\n"}defaultRequest={.spec.limits[0].defaultRequest}{"\n"}'
@@ -545,6 +632,8 @@ default(limit)={"cpu":"500m","memory":"1Gi"}
 defaultRequest={"cpu":"100m","memory":"256Mi"}
 deployment "parasol-claims" successfully rolled out
 ----
+--
+====
 
 Now meet the other guardrail: the namespace *ResourceQuota*.
 It caps the *total* your namespace may request:
