@@ -53,7 +53,7 @@ metrics_expose() {
   local needle="$1" host i out
   host="$(oc get route parasol-claims -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   [[ -n "$host" ]] || return 1
-  for i in $(seq 1 10); do
+  for _ in $(seq 1 10); do
     out="$(curl -ks --max-time 15 "http://${host}/q/metrics" 2>/dev/null || true)"
     grep -q "$needle" <<<"$out" && return 0
     sleep 3
