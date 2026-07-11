@@ -1,0 +1,217 @@
+= Securing Apps with Keycloak: Concept
+:module-id: m13
+include::partial$version-attributes.adoc[]
+
+// Concept page for M13. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// Everything here was performed on OCP {ocp_version} with the workshop Red Hat build of Keycloak
+// {rhbk_version} (instance sso-workshop, per-user realm realm-user1) as user1 on 2026-07-11 — the
+// bearer 401/200/403 matrix, the web-app 302 redirect with PKCE S256, the parasol-batch
+// client-credentials token, and the RFC 8693 exchange to aud=parasol-fraud (plus the escalation that
+// Keycloak refused) were all cluster-run, not recalled.
+// Mermaid labels are deliberately attribute-free (the diagram extension mangles {attr}).
+
+[.lead]
+Parasol's claims API answers to anyone who can reach it on the network.
+Type the URL, get every claimant's name, amount, and adjuster — no login, no token, no questions asked.
+That was fine when "on the network" meant a locked server room; it is a data breach when the network is a shared cluster, a partner integration, and a mobile app.
+
+This module puts a *front door* on the Parasol apps — a login for the web frontend, bearer tokens for the API, a machine identity for the batch job — using *Red Hat build of Keycloak*, the identity and single sign-on (SSO) product that ships with your OpenShift subscription.
+You will not write a password check, a session store, or a login page.
+You will point your apps at Keycloak, describe *who may do what*, and let the platform enforce it.
+
+== Authentication is not authorization
+
+Two questions hide inside every "is this allowed?" and confusing them is the most common security bug there is.
+
+* *Authentication (authN)* — *who are you?* Proving identity. A login, a token, a certificate.
+* *Authorization (authZ)* — *what may you do?* Checking permission. A role, a group, an ownership rule.
+
+A valid token answers only the first question.
+The Parasol `viewer` user can *log in* perfectly — correct password, valid token — and still must not be allowed to list claims, because listing claims needs the `claims-adjuster` role they do not have.
+You will see this split as two different HTTP status codes in the lab: *401 Unauthorized* means "I don't know who you are" (authN failed), and *403 Forbidden* means "I know exactly who you are, and the answer is no" (authZ failed).
+Keep them straight and half of application security falls into place.
+
+== The four flows, and when each applies
+
+OAuth 2.0 and OpenID Connect (OIDC) define a handful of *flows* — scripted conversations for getting a token.
+It is tempting to learn all of them; resist.
+Four flows cover almost everything an enterprise app needs, and this module teaches exactly those four.
+
+[mermaid]
+....
+flowchart TB
+  subgraph HUMAN["a human is present"]
+    WEB["<b>Auth-code + PKCE</b><br/>browser logs in at Keycloak,<br/>app never sees the password<br/>— the web frontend"]
+    BEARER["<b>Bearer token</b><br/>caller presents a token,<br/>API validates + checks role<br/>— the claims API"]
+  end
+  subgraph MACHINE["no human — service to service"]
+    CC["<b>Client credentials</b><br/>a service authenticates<br/>as ITSELF<br/>— the batch job"]
+    TE["<b>Token exchange (RFC 8693)</b><br/>one service re-audiences a<br/>user's token to call another<br/>ON THE USER'S BEHALF"]
+  end
+  WEB -->|"user's token<br/>is then sent to"| BEARER
+  BEARER -->|"re-audienced by<br/>exchange into"| TE
+  classDef human fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef machine fill:#e8f0fe,stroke:#1a73e8,color:#174ea6;
+  class WEB,BEARER human;
+  class CC,TE machine;
+....
+
+// media-pass: SVG export m13-securing-apps-keycloak-01-four-flows.svg (see media-manifest.md)
+
+* *Authorization code + PKCE* protects the *web frontend*.
+The browser is redirected to Keycloak, the human logs in *there*, and the app receives a short-lived *authorization code* it swaps for tokens.
+The app never handles the password.
+*PKCE* (Proof Key for Code Exchange, "pixie") adds a one-time secret per login so a stolen code is useless — mandatory for browser and mobile clients that cannot keep a secret.
+* *Bearer tokens* protect the *API*.
+The caller attaches a token (`Authorization: Bearer …`); the API validates its signature, issuer, expiry, and audience, then reads its roles to decide.
+No redirect, no session — every request stands alone.
+* *Client credentials* is for *machines*.
+The M06 batch job has no human and no browser; it authenticates as *itself* with a client id and secret and gets a token that represents the *service*, not a person.
+* *Token exchange (RFC 8693)* is for *one service calling another on a user's behalf*.
+The claims service takes the user's token and asks Keycloak to *re-audience* it for the fraud service — same user, narrower scope.
+The crucial property, which you will prove in the lab: exchange can *downscope* but never *escalate*.
+
+[NOTE]
+.A JWT is a signed, readable claim — not an opaque secret
+====
+The tokens in this module are *JSON Web Tokens* (JWT, "jot"): three base64url segments — header, payload, signature — joined by dots.
+The payload is *not encrypted*; anyone can decode it and read the claims (`iss`, `aud`, `exp`, `preferred_username`, `realm_access.roles`).
+What they *cannot* do is forge one, because the signature is Keycloak's and the API checks it against Keycloak's public keys.
+"Debug tokens like an adult" in the lab is exactly this: decode the payload, read the claims, and stop guessing.
+====
+
+== Realm, client, role, user — the whole mental model
+
+Keycloak has a small vocabulary, and once it clicks the product stops being mysterious.
+
+[mermaid]
+....
+flowchart TD
+  REALM["<b>Realm</b> — an isolated world of identity<br/>(this workshop: one realm per attendee)"]
+  REALM --> CLIENTS["<b>Clients</b> — the apps that use the realm"]
+  REALM --> ROLES["<b>Roles</b> — named permissions"]
+  REALM --> USERS["<b>Users</b> — the people who log in"]
+  CLIENTS --> C1["parasol-web<br/>(public, browser login)"]
+  CLIENTS --> C2["parasol-claims<br/>(confidential API)"]
+  CLIENTS --> C3["parasol-fraud<br/>(bearer-only API)"]
+  CLIENTS --> C4["parasol-batch<br/>(machine identity)"]
+  ROLES --> R1["claims-adjuster"]
+  USERS --> U1["adjuster<br/>(has claims-adjuster)"]
+  USERS --> U2["viewer<br/>(no roles)"]
+  classDef realm fill:#fef7e0,stroke:#f9ab00,color:#b06000;
+  classDef kind fill:#f3f3f3,stroke:#888,color:#333;
+  classDef leaf fill:#e8f0fe,stroke:#1a73e8,color:#174ea6;
+  class REALM realm;
+  class CLIENTS,ROLES,USERS kind;
+  class C1,C2,C3,C4,R1,U1,U2 leaf;
+....
+
+// media-pass: SVG export m13-securing-apps-keycloak-02-realm-model.svg (see media-manifest.md)
+
+* A *realm* is a self-contained world of identity: its own users, roles, clients, keys, and login page.
+This workshop gives *every attendee their own realm* (`realm-<your-user>`) on one shared Keycloak, so your changes never touch anyone else's — the same isolation pattern a real platform team uses to separate business units or environments.
+* A *client* is an application that talks to the realm.
+Clients come in two flavors that matter: *public* clients (the browser app — cannot keep a secret, so it uses PKCE) and *confidential* clients (a backend — holds a client secret).
+* A *role* is a named permission. `claims-adjuster` is a *realm role*, and it rides inside the token under `realm_access.roles` — where the app reads it to decide.
+* A *user* is a person who can log in. Your realm is seeded with two: `adjuster`, who holds `claims-adjuster`, and `viewer`, who holds nothing — the two sides of every authorization check.
+
+[NOTE]
+.Why realm roles need one line of mapping
+====
+Keycloak puts *realm* roles under the `realm_access.roles` claim — not the top-level `roles` claim some identity providers use.
+So a framework's role check has to be told where to look: in Quarkus that is `quarkus.oidc.roles.role-claim-path=realm_access/roles`.
+The Parasol images already ship this setting, which is why `claims-adjuster` resolves straight from the token in the lab.
+It is called out here because forgetting it is the classic trap: a user who genuinely *has* the role still gets *403*, and you burn an afternoon before checking where the role actually lives in the token.
+====
+
+== Don't build your own login page
+
+Every hour spent building authentication is an hour not spent on claims processing — and the thing you build will be worse.
+
+[mermaid]
+....
+flowchart LR
+  subgraph BUILD["build it yourself"]
+    B1["password hashing<br/>+ reset flows"]
+    B2["session store<br/>+ CSRF"]
+    B3["MFA, lockout,<br/>audit, federation"]
+    B4["...and keep it<br/>patched forever"]
+  end
+  subgraph BUY["use the platform"]
+    K["Red Hat build<br/>of Keycloak<br/>— included with<br/>OpenShift"]
+  end
+  BUILD -.->|"months of work,<br/>your bug surface"| RISK["every one is a<br/>breach waiting"]
+  BUY -->|"configure, don't code"| DONE["SSO, MFA, federation,<br/>audit — day one"]
+  classDef bad fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef good fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class B1,B2,B3,B4,RISK bad;
+  class K,DONE good;
+....
+
+// media-pass: SVG export m13-securing-apps-keycloak-03-build-vs-buy.svg (see media-manifest.md)
+
+Authentication is a *solved problem*, and getting it slightly wrong is catastrophic — a weak reset flow or a missing token check is the whole breach.
+A dedicated identity provider gives you password policies, multi-factor authentication, account lockout, social and enterprise federation, token issuance, and an audit trail — built, tested, and patched by people who do only this.
+Your job shrinks to *describing* who may do what and pointing your apps at it.
+
+And here is the punchline the room's leadership should hear: *Red Hat build of Keycloak is included with your OpenShift subscription.*
+The same product backs OpenShift's own console login.
+SSO for your applications is a *platform capability you already own*, not a line item to purchase — and a team treating "add login" as a procurement project is usually re-buying what the subscription already includes.
+
+== The security layer over the Parasol platform
+
+Everything you built in earlier modules — the deployment, the config, the database, the pipeline — has been *open by default*.
+This module adds the layer that decides *who gets in*.
+
+[mermaid]
+....
+flowchart TB
+  subgraph SEC["identity & access (this module)"]
+    LOGIN[web login<br/>auth-code + PKCE]
+    API[bearer-protected API<br/>+ role checks]
+    M2M[machine identity<br/>client credentials]
+    EXCH[token exchange<br/>service to service]
+  end
+  subgraph PLAT["the Parasol claims platform (M01-M12)"]
+    APP[claims + web + db]
+    DEL[pipelines + GitOps + observability]
+  end
+  KC[Red Hat build of Keycloak<br/>per-user realm]
+  KC --> SEC
+  SEC --> APP
+  SEC --> DEL
+  classDef hi fill:#e00,stroke:#900,color:#fff;
+  classDef plat fill:#f3f3f3,stroke:#888,color:#333;
+  classDef kc fill:#fef7e0,stroke:#f9ab00,color:#b06000;
+  class LOGIN,API,M2M,EXCH hi;
+  class APP,DEL plat;
+  class KC kc;
+....
+
+// media-pass: SVG export m13-securing-apps-keycloak-04-security-layer.svg (see media-manifest.md)
+
+== How this shows up in real orgs
+
+* *"Trusted network" stops being your security model.*
+The open claims API is the shape of most internal breaches: something got onto the network and everything trusted it.
+A bearer-protected API trusts a *token it can validate*, not a network location — the foundation of zero-trust, and the difference between one compromised pod and a full data exfiltration.
+* *One login, every app — and one place to cut it off.*
+When identity lives in Keycloak, a new hire gets access to every Parasol app at once, and a departing employee loses it at once.
+The alternative — a separate user table per app — is how orphaned accounts and "we forgot that system existed" breaches happen.
+* *Machines are identities too.*
+The batch job having its *own* credential, distinct from any human, means you can see what it did, rotate its secret, and revoke it without paging a person — and no engineer is tempted to run it under their own login.
+* *Delegation without impersonation.*
+Token exchange lets the claims service call the fraud service *as the user* while provably *narrowing* what that call can do.
+That is how you build a chain of services that each see only what they need — and can *prove* an escalation is impossible, not just promise it.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing for the demo arc
+====
+The lab page carries the timed *Say / Show / Do* demo arc (about 15 minutes) built from the entry (unprotected) state, flipped live.
+The signature beat is *the open API — anyone reads every claim — then one config change and it's 401 without a token, 200 for the adjuster, 403 for the viewer*: authentication and authorization on screen in four minutes.
+The encore is the *token-exchange chain* — the claims service re-audiences the user's token to call fraud, and the *escalation attempt that Keycloak flatly refuses*.
+Keep the concept to the two diagrams that matter (the four flows and authN-vs-authZ); the drama is the status codes changing live, not the theory.
+====
+endif::demo[]

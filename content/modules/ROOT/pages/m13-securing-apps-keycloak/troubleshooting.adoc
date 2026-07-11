@@ -1,0 +1,144 @@
+= Securing Apps with Keycloak: Troubleshooting
+:module-id: m13
+include::partial$version-attributes.adoc[]
+
+// Troubleshooting for M13. Every entry is a real surprise hit performing the lab as user1 on OCP
+// {ocp_version} against the workshop Red Hat build of Keycloak {rhbk_version} on 2026-07-11: the
+// http redirect_uri rejection, the role-claim-path trap, the exchange audience refusals, the
+// wrong-password grant error, the empty-token symptom, and the 401-vs-403 confusion.
+
+Each entry is a symptom you (or an attendee) may hit, its cause, and the fix.
+The first is *expected* — it is exercise 4's deliberate break — but it lands here too because the error text is what people search for.
+
+== Web login fails: `Invalid parameter: redirect_uri` (HTTP 400 from Keycloak)
+
+Symptom:: After enabling OpenID Connect (OIDC) on `parasol-web`, opening the frontend bounces to a Keycloak page that says *"We are sorry... Invalid parameter: redirect_uri"* — or `curl`-following the redirect returns `HTTP 400`.
+Cause:: The app is behind the OpenShift *edge Route*: it terminates HTTPS and forwards plain HTTP to the pod. Seeing an HTTP request, the app built an `http://` `redirect_uri`, but the realm's `parasol-web` client only trusts the `https://` callback it was registered with — so Keycloak refuses the mismatch.
+Fix:: Tell the app to honor the `X-Forwarded-*` headers the Route sets, so it knows the original request was HTTPS:
++
+[source,sh,role=execute]
+----
+oc set env deployment/parasol-web QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true
+oc rollout status deployment/parasol-web
+----
++
+Then the redirect is built as `https://…` and Keycloak accepts it.
+Confirm with `curl -ks -D - -o /dev/null "$WEB/" | grep -i location` — the `redirect_uri` should start with `https%3A%2F%2F`.
+This is exercise 4's intended lesson, not a mistake on your part.
+
+== A user who *has* the role still gets 403
+
+Symptom:: You required `claims-adjuster`, the token clearly contains it (`decode` shows `realm_access.roles: ["claims-adjuster"]`), yet the API returns *403 Forbidden*.
+Cause:: The role check is looking in the wrong place. Keycloak puts *realm* roles under the `realm_access.roles` claim, but a framework's default role source may be the top-level `roles` claim or client roles — so the name never matches.
+Fix:: Point the role check at `realm_access/roles`. In Quarkus that is one setting:
++
+[source,sh,role=execute]
+----
+oc set env deployment/parasol-claims QUARKUS_OIDC_ROLES_ROLE_CLAIM_PATH=realm_access/roles
+oc rollout status deployment/parasol-claims
+----
++
+[NOTE]
+.You will not hit this in the lab — but you will in real life
+=====
+The Parasol `parasol-claims` image *already* ships `quarkus.oidc.roles.role-claim-path=realm_access/roles`, so `claims-adjuster` resolves without you setting anything.
+This entry is here for when you protect an app that does *not* bake it in: the symptom is exactly "the role is in the token but I get 403," and the cause is always "the check is not looking at `realm_access.roles`."
+=====
+
+== Token exchange fails: `Requested audience not available`
+
+Symptom:: A token-exchange call returns `{"error":"invalid_request","error_description":"Requested audience not available: <name>"}`.
+Cause:: The requesting client is not permitted to mint tokens for that audience. In the lab, `parasol-claims` is configured (via an audience mapper) to exchange *only* toward `parasol-fraud`; any other target is refused.
+Fix:: If you are targeting `parasol-batch` (or anything other than `parasol-fraud`), *this is correct behavior* — it is exercise 7's "escalation is refused" lesson. Exchange toward `parasol-fraud` instead:
++
+[source,sh]
+----
+  -d audience=parasol-fraud
+----
++
+If you genuinely need a new exchange target in a real system, that is a *realm configuration* change (add an audience the client is allowed to request) made by a Keycloak admin — deliberately not something a client can grant itself.
+
+== Token exchange fails: `invalid_client` / `Audience not found`
+
+Symptom:: A token-exchange call returns `{"error":"invalid_client","error_description":"Audience not found"}`.
+Cause:: The `audience` you requested does not name a client that exists in the realm (a typo, or a client that was never created).
+Fix:: The audience must be an existing client id. In this lab the valid target is exactly `parasol-fraud`. Check for typos, and confirm you are pointed at *your* realm (`echo $REALM`).
+
+== Every call returns 401, even with a token I just got
+
+Symptom:: `GET /api/claims` returns *401* for *every* request, including with a freshly minted, valid-looking `adjuster` token.
+Cause:: Usually one of: the app's `QUARKUS_OIDC_AUTH_SERVER_URL` does not match the realm the token came from (a token from realm A is not valid at an API pointed at realm B); the OIDC tenant did not actually enable (`QUARKUS_OIDC_TENANT_ENABLED` missing/false); or the pod has not finished rolling out the new config.
+Fix:: Confirm the app and your token agree on the realm, and that the rollout finished:
++
+[source,sh,role=execute]
+----
+oc set env deployment/parasol-claims --list | grep QUARKUS_OIDC_AUTH_SERVER_URL
+echo "$REALM"           # these two must match
+oc rollout status deployment/parasol-claims
+----
++
+If they match and it still 401s for a valid token, the token may have *expired* (see below) — get a fresh one with `get_token adjuster`.
+
+== My token stopped working after a while (was fine earlier)
+
+Symptom:: A token that returned *200* earlier now returns *401*.
+Cause:: It expired. This realm issues *30-minute* access tokens; after `exp`, the API rejects it.
+Fix:: Get a new one — that is normal:
++
+[source,sh,role=execute]
+----
+ADJ=$(get_token adjuster)
+get_token adjuster | decode | jq '{exp, seconds_left: (.exp - now | floor)}'
+----
++
+A negative `seconds_left` means expired. In a real app the framework refreshes tokens for you; with raw `curl` you just request another. (If a *just-issued* token looks already-expired, suspect clock skew between the API pod and Keycloak — this realm keeps lifetimes long precisely to tolerate small skew.)
+
+== `viewer` gets 403 — is the token broken?
+
+Symptom:: The `viewer` user's token is valid and decodes fine, but `GET /api/claims` returns *403*.
+Cause:: Nothing is broken — `viewer` authenticated successfully but holds *no* `claims-adjuster` role, so authorization denies the request. *401* would mean "I don't know who you are"; *403* means "I know exactly who you are, and no."
+Fix:: There is nothing to fix — this is exercise 3 working. Confirm the role difference:
++
+[source,sh,role=execute]
+----
+get_token adjuster | decode | jq -c '.realm_access.roles'   # ["claims-adjuster"]
+get_token viewer   | decode | jq -c '.realm_access.roles'   # null
+----
+
+== `get_token` prints `null` and every call 401s
+
+Symptom:: `get_token adjuster` prints `null` (not a token), so every authenticated call fails.
+Cause:: The token request itself failed and `jq -r .access_token` printed `null` for the missing field. Common causes: wrong password, wrong username, the realm is unreachable, or `$REALM` is empty.
+Fix:: Call the token endpoint without the `jq` filter to see the real error:
++
+[source,sh,role=execute]
+----
+echo "REALM=$REALM"
+curl -ks "$REALM/protocol/openid-connect/token" \
+  -d grant_type=password -d client_id=parasol-web \
+  -d username=adjuster -d password=parasol -d scope=openid | jq .
+----
++
+`{"error":"invalid_grant","error_description":"Invalid user credentials"}` means a wrong username/password (the demo password is `parasol`).
+An empty `$REALM` means the entry marker was not read — re-run the setup block (`REALM=$(oc get cm ws-entry-m13 -n $NS -o jsonpath='{.data.authServerUrl}')`).
+A connection error means the workshop Keycloak may be down — tell your instructor.
+
+== The web app's health probes fail after I protect it
+
+Symptom:: After enabling OIDC on `parasol-web`, the pod never becomes ready, or readiness probes start failing / redirecting.
+Cause:: The `authenticated` permission was applied to `/*` *without* leaving `/q/*` open, so the platform's health probes at `/q/health/*` get redirected to login instead of a 200.
+Fix:: Keep the health/metrics endpoints public alongside the protected app — the pair of permission rules from exercise 4:
++
+[source,sh,role=execute]
+----
+oc set env deployment/parasol-web \
+  QUARKUS_HTTP_AUTH_PERMISSION_PUBLIC_PATHS='/q/*' \
+  QUARKUS_HTTP_AUTH_PERMISSION_PUBLIC_POLICY=permit
+oc rollout status deployment/parasol-web
+----
++
+"Protect the app, not its plumbing" — probes and metrics under `/q` stay open; everything else requires a login.
+
+'''
+
+_Last verified on OpenShift {ocp_version} with Red Hat build of Keycloak {rhbk_version} (workshop instance `sso-workshop`, realm `realm-user1`) — 2026-07-11._

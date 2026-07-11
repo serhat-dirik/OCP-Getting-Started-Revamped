@@ -1,0 +1,96 @@
+= Securing Apps with Keycloak: Wrap-up
+:module-id: m13
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took the Parasol apps from *open to anyone on the network* to *identity-aware*, using Red Hat build of Keycloak — the single sign-on (SSO) product that ships with OpenShift — and without writing a line of authentication code:
+
+* *A tour of your realm* — read the OpenID Connect (OIDC) discovery document and decoded your first token to see `iss`, `aud`, and `realm_access.roles`.
+* *Bearer protection for the API* — turned the open `/api/claims` into one that returns *401* without a token and *200* with a valid one, by configuration alone.
+* *Role enforcement* — required `claims-adjuster`, so `adjuster` gets *200* and `viewer` — authenticated but unprivileged — gets *403*: authentication and authorization, told apart.
+* *A browser login for the web frontend* — auth-code + PKCE, including the `http` `redirect_uri` trap and the `PROXY_ADDRESS_FORWARDING` fix.
+* *A machine identity* — a client-credentials token for the batch service, distinct from any human.
+* *Token debugging* — decode, expiry, audience: the three questions that resolve most auth failures.
+* *Standard token exchange (RFC 8693)* — re-audienced a user's token so claims could call fraud *on the user's behalf*, and proved the exchange can downscope but *never escalate*.
+
+[mermaid]
+....
+flowchart LR
+  U[adjuster] -->|"auth-code + PKCE"| WEB[parasol-web]
+  U -.->|"bearer token"| API[parasol-claims<br/>401 / 200 / 403]
+  API -->|"token exchange<br/>re-audience"| FRAUD[parasol-fraud<br/>aud enforced]
+  BATCH[batch job] -->|"client credentials"| KC[Red Hat build<br/>of Keycloak<br/>your realm]
+  KC --- WEB
+  KC --- API
+  KC --- FRAUD
+  classDef good fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef kc fill:#fef7e0,stroke:#f9ab00,color:#b06000;
+  class WEB,API,FRAUD,BATCH good;
+  class KC kc;
+....
+
+// media-pass: SVG export m13-securing-apps-keycloak-07-what-you-built.svg (see media-manifest.md)
+
+== Map to your org
+
+. *How many of your internal APIs trust the network instead of a token?*
+You turned an open API into a bearer-protected one with a config change and no rebuild.
+Think of one internal service in your org that answers anyone who can reach it.
+What is the blast radius if a single pod on that network is compromised — and is that service one `QUARKUS_OIDC_*` block (or its equivalent) away from trusting a *token* instead?
+. *Where in your systems is "authenticated" quietly standing in for "authorized"?*
+You watched `viewer` log in perfectly and still get *403*.
+Find a place in your apps where any valid login can do something only some users should.
+What is the one role check that closes it — and does the role already live in your identity provider, or is it hardcoded in the app?
+. *Which of your services run under a human's credentials because setting up a machine identity felt like too much work?*
+You gave the batch job its own client-credentials identity in one call.
+Which scheduled jobs, sync scripts, or service integrations in your org authenticate as a person today — and what breaks (audit, rotation, that person leaving) because of it?
+. *Do your service-to-service calls carry the user's identity, or a shared super-credential?*
+You re-audienced a user's token so one service called another *as the user*, provably unable to escalate.
+Where do your services call each other with a single all-powerful key instead? What would it take to pass a *downscoped* user token instead — and how much would that shrink what a compromised service can do?
+
+== When *not* to reach for this
+
+Identity is foundational, which means being honest about its edges and its failure modes:
+
+* *Don't invent flows you don't need.*
+This module used four — auth-code+PKCE, bearer, client-credentials, token-exchange — and that covers the vast majority of enterprise apps.
+The implicit and resource-owner-password flows exist mostly for legacy reasons; reaching for them (or hand-rolling a fifth) is usually a sign you have modeled the problem wrong.
+* *Don't put a role in a token that belongs in the data.*
+`claims-adjuster` is a coarse, sland-changing permission — perfect for a realm role.
+"Can this adjuster see *this specific claim*?" is *per-record* authorization that belongs in your application's data model, not in a token claim that would balloon and go stale.
+Tokens carry *who you are and your broad roles*; the app still owns fine-grained, data-dependent decisions.
+* *Don't confuse token exchange with impersonation.*
+Exchange *downscopes* a real user's token for a real, narrower purpose.
+If you find yourself wanting a service to *become* an arbitrary user it has no token for, that is impersonation — a different, far more dangerous capability that standard exchange deliberately does not give you. Wanting it is a design smell.
+* *Don't run one realm for everything.*
+This workshop isolates each attendee in their own realm for a reason: a realm is a blast-radius boundary.
+Cramming unrelated business units, environments, or trust levels into a single shared realm trades away exactly the isolation that makes the model safe — but the opposite extreme (a realm per app) drowns you in duplicated users and federation. Draw realm boundaries around *trust domains*, not org charts.
+
+== Go deeper
+
+* *Enforce the role in code, not just config.* The lab enforced `claims-adjuster` with a `quarkus.http.auth.*` policy so the shipped image needed no rebuild.
+The code-level equivalent is annotating the endpoint with `@RolesAllowed("claims-adjuster")` — it reads the same `realm_access.roles` (via `quarkus.oidc.roles.role-claim-path`, which the image already sets) and produces the identical *401/403*.
+Config for operators, annotations for developers; know both.
+* *Wire the exchange into the app.* In the lab you performed the token exchange with `curl`.
+The `parasol-claims` image carries `quarkus-oidc-client` but does not yet *call* fraud itself — turning that manual exchange into an in-app REST call (so a claims endpoint transparently fetches a fraud score on the user's behalf) is the natural next build, and a tracked enhancement to the sample app.
+* *Tour the realm in the admin console.* This workshop keeps identity CLI-driven because it does not provision per-realm admin users.
+On a cluster where you *are* the Keycloak admin, the admin console is where you would create clients, roles, mappers, and users through a UI — the same objects you read from the token here.
+* *Cross-realm and federation.* Standard token exchange here stayed *within one realm*.
+The `serhat-dirik/kc-token-exchangeV2-demo` reference goes further — an RFC 7523 cross-realm chain with just-in-time user provisioning — which is the pattern when the calling and called services live in *different* trust domains. A pointer, not lab content.
+* *Tie it to the platform.* The `[INSTRUCTOR-DEMO]` showed the same Keycloak backing the OpenShift console login. Making applications *and* the cluster share one identity provider, and the multi-tenancy that builds on it, is the next module.
+
+[NOTE]
+.Credits
+====
+The standard token-exchange flow (subject token → re-audienced token, downscope-not-escalate) and its copy-pasteable `curl` teaching style are adapted from *serhat-dirik/kc-token-exchangeV2-demo* (Keycloak 26.5+, `token-exchange-standard` v2), re-verified against Red Hat build of Keycloak {rhbk_version} and Quarkus {quarkus_version} on this workshop's cluster (reuse-with-credit per the project's mining policy).
+Everything else was built fresh against the current Red Hat build of Keycloak operator and Quarkus OIDC.
+====
+
+[NOTE]
+.Clean up
+====
+Redoing the module, or moving on?
+`ws prep {module-id} --yes` returns `{user}-dev` to the clean *unprotected* entry state — it strips the OIDC configuration from both apps and removes the `parasol-fraud` service you deployed.
+Your per-user Keycloak realm is workshop infrastructure; it is seeded once and left in place, so there is nothing for you to clean up there.
+====

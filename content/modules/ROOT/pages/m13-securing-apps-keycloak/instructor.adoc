@@ -1,0 +1,158 @@
+= Securing Apps with Keycloak: Instructor Guide
+:module-id: m13
+include::partial$version-attributes.adoc[]
+
+// Instructor runbook for M13. Timings MEASURED performing the lab as user1 on OCP {ocp_version}
+// against the workshop Red Hat build of Keycloak {rhbk_version} (instance sso-workshop, realm
+// realm-user1) on 2026-07-11. Pre-flight expected outputs are real captures. The signature beat is
+// exercise 2-3 (open API -> 401/200/403 by config); the encore is exercise 7 (RFC 8693 exchange +
+// the escalation Keycloak refuses).
+
+This module is mostly *terminal + curl*, and its drama is watching HTTP status codes change: an open API that starts returning *401*, a valid login that gets *403*, and a token exchange that Keycloak flatly *refuses*.
+Nearly every step is a *configuration* change (`oc set env` / the console Environment tab) on an image that already carries the OpenID Connect (OIDC) library — there is no build, so steps are fast and the room stays together.
+Two things need your attention before you teach: exercise 4 contains a *deliberate break* (an `http` `redirect_uri` that Keycloak rejects) that every attendee is meant to hit and fix, so do not let them "fix" it early; and the whole module depends on the *workshop* Keycloak (`sso-workshop`) and each attendee's seeded realm being up — confirm pre-flight items 2 and 3 before the session.
+
+== Timing
+
+Total hands-on: *~89 minutes* (spec chip: 90).
+There are no long waits — the pacing is set by the ~25-second rollouts after each config change and by reading tokens.
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core (as user1, {ocp_version})
+
+| 1 | Tour your realm and mint a token | ~10 min | discovery `curl` + token get/decode are *instant* (~0.7s round-trip); no cluster change
+| 2 | Protect the claims API (bearer) | ~12 min | `oc set env` → rollout *~25s*; 401/200 immediately after
+| 3 | Enforce a role (authZ) | ~12 min | second `oc set env` → rollout *~25s*; adjuster 200 / viewer 403; decode is instant
+| 4 | Protect the web frontend (break-fix) | ~15 min | two rollouts *~25s* each; the `http`→400 break and the proxy-forwarding fix are the time sink (reading + understanding)
+| 5 | Machine identity (client credentials) | ~8 min | one `curl` to the token endpoint; instant
+| 6 | Debug tokens like an adult | ~7 min | pure decode/inspection; no cluster change
+| 7 | [ADVANCED] token exchange (RFC 8693) | ~18 min | fraud deploy rollout *~20-30s* (image cached); exchange + calls instant; the escalation refusal is instant
+| 8 | [INSTRUCTOR-DEMO] cluster IdP tie | ~5 min | one read-only `oc get oauth`; discussion
+|===
+
+[NOTE]
+.How this timing was measured
+====
+Every core number was captured performing the lab as `user1` on 2026-07-11, not estimated.
+A representative `oc set env` + `oc rollout status` cycle on `parasol-claims` took *25 seconds*; a token round-trip (`get_token` → `decode`) took *~660 ms*.
+There is no multi-minute wait anywhere in this module, so the attendee-time figures are dominated by *reading and understanding*, not by the cluster — budget generously for exercises 3, 4, and 7 where the concept load is highest.
+====
+
+== Pre-flight checklist
+
+Run these before the session.
+A sample user (`user1`) is used here; substitute any assigned attendee id.
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m13 --user user1
+ws verify m13 --user user1 --entry-only
+----
++
+Expect `✅ all 9 checks passed`: `user1-dev` with `parasol-web` + `parasol-claims` + an ephemeral `claims-db`, *all unprotected* (`GET /api/claims` is 200 with no token), and *no `parasol-fraud` yet* (deploying it is exercise 7).
+
+. *The workshop Keycloak is up — and it is NOT the cluster login IdP.*
+*(REQUIRED — the whole module depends on it.)*
++
+[source,sh,role=execute]
+----
+oc get keycloak -A
+----
++
+[IMPORTANT]
+.There are two Keycloaks; the module uses the workshop one
+=====
+Expect *two* rows: `keycloak/keycloak` (the *cluster login* IdP — leave it alone) and `sso-workshop/sso-workshop` (the *workshop* instance this module uses).
+[source,texinfo]
+----
+NAMESPACE      NAME           AGE
+keycloak       keycloak       3d
+sso-workshop   sso-workshop   95m
+----
+If `sso-workshop` is missing, the auth stack was not installed — the environment needs the `auth` profile/stack (`--stacks auth`, or `auth: true` in `bootstrap/vars.yaml`). Nothing in the module works without it.
+=====
+
+. *The sample user's realm is seeded and issues tokens.*
+*(REQUIRED — exercises 1-7 all get tokens from it.)*
++
+[source,sh,role=execute]
+----
+oc get keycloakrealmimport realm-user1 -n sso-workshop -o jsonpath='{.status.conditions[?(@.type=="Done")].status}{"\n"}'
+REALM=$(oc get cm ws-entry-m13 -n user1-dev -o jsonpath='{.data.authServerUrl}')
+curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=parasol-web \
+  -d username=adjuster -d password=parasol -d scope=openid | jq -r 'if .access_token then "token OK" else .error end'
+----
++
+Expect `True` (the realm import completed) then `token OK`.
+If the import status is not `True`, the realm was not seeded — realm imports are *import-once* and survive `ws reset`, so a missing realm is a workshop-layer gap (`gitops/workshop-config`), not something a reset fixes.
+
+. *The end state solves — for the demo and as a reference.*
++
+[source,sh,role=execute]
+----
+ws solve m13 --user user1
+ws verify m13 --user user1
+----
++
+Expect `✅ all 10 checks passed`: the entry checks *plus* the API protected (401 without a token, 200 with an `adjuster` token) and the web frontend redirecting an unauthenticated request (302).
+`ws solve` also deploys `parasol-fraud` (the exchange target).
+Reset with `ws prep m13 --user user1 --yes` when done.
+
+== Demo-mode notes
+
+* The arc *starts unprotected* and flips live — do *not* `ws solve` first (that would pre-protect the app and kill the opening beat). Run `ws prep m13 --user {user} --yes` so the API is open, and define the lab's shell vars/helpers in your terminal first.
+* The signature moment is beat 2: one `oc set env` and the same `curl` goes 200 → 401/200/403. Have the three-line matrix (`no token` / `adjuster` / `viewer`) ready to paste the instant the rollout finishes.
+* The `parasol-fraud` service the encore calls is *not* in the entry state. Either run `ws solve m13 --user {user}` once beforehand (it deploys fraud, and the flip beats still work because solve also protects the apps — so if you pre-solve, drop beat 2's "watch it flip" and just *show* the states), or deploy fraud live from the exercise-7 manifest. The cleanest live arc is: `ws prep` (open) → flip claims live (beat 2) → deploy fraud during beat 5's narration → exchange (beat 5).
+* Token lifetime is 30 minutes — long enough that a token you grabbed at the start of the demo is still valid at the encore, but if a beat 401s unexpectedly, `get_token adjuster` again.
+
+== Top questions attendees ask
+
+*1. "I required the `claims-adjuster` role but never set a role-claim-path — why did it just work?"*::
+Because the Parasol image ships `quarkus.oidc.roles.role-claim-path=realm_access/roles` baked in.
+Keycloak puts *realm* roles under `realm_access.roles`, not the top-level `roles` claim, so a framework has to be told where to look — and this image already is.
+Make the teaching point explicit: on an app that does *not* set it, a user who has the role still gets *403*, and it is the single most common Keycloak-with-Quarkus bug. Have them `decode` a token to see exactly where the role lives.
+
+*2. "My web login fails with 'Invalid parameter: redirect_uri' — did I do it wrong?"*::
+No — that is *exercise 4's deliberate break*, and every attendee should hit it.
+The app is behind the edge Route (HTTPS terminated, HTTP forwarded to the pod), so it built an `http://` `redirect_uri` that the realm — which only trusts the `https://` callback — rejects.
+The fix is `QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true`. If someone's login fails *after* that, check they did not typo the client id (`parasol-web`) or the realm URL.
+
+*3. "Can I open the Keycloak admin console to look at my realm?"*::
+Not in this workshop.
+Attendees have no per-realm admin identity — and sharing one admin across every attendee's realm would break the isolation the workshop depends on.
+Everything needed lives at the realm's *public OIDC endpoints* (the discovery document) and *inside the tokens* (decode them). Point curious attendees at the wrap-up's go-deeper note. This is a known scoping decision, not a missing feature.
+
+*4. "The token-exchange escalation attempt returns 'Requested audience not available' — is that an error in the lab?"*::
+That *is* the lesson — the exchange toward `parasol-batch` is *supposed* to fail.
+The `parasol-claims` client is configured to mint tokens only for the `parasol-fraud` audience (via an audience mapper), so Keycloak refuses any other target.
+That refusal is the proof that exchange can re-audience/downscope but never escalate. The *successful* exchange in the same exercise is toward `parasol-fraud` (returns a token); the *refused* one is toward `parasol-batch` (returns the error).
+
+*5. "Is this the same Keycloak that logs me in to the OpenShift console?"*::
+No — deliberately.
+The cluster login runs on a *separate* Keycloak (`keycloak/keycloak`); this module uses a *workshop* instance (`sso-workshop/sso-workshop`) with a throwaway realm per attendee, so nobody can lock themselves (or the room) out of the cluster by experimenting.
+The `[INSTRUCTOR-DEMO]` shows that the *same product* backs both, which is the bridge to the multi-tenancy module — but the two instances are intentionally distinct.
+
+== Watchouts
+
+* *The workshop Keycloak (`sso-workshop`) is the single point of failure for the whole module.*
+If it is down, *nothing* works — no tokens, no logins, no exchange.
+It is separate from the cluster login IdP, so a healthy console login does *not* prove the workshop Keycloak is up. Confirm pre-flight item 2 explicitly.
+* *Never touch `keycloak/keycloak` or `oauth/cluster`.*
+That instance backs live cluster logins. The module only reads `oauth cluster` (exercise 8) and only ever writes to the `sso-workshop` realms via seeded imports. Reconfiguring the login IdP can lock the room out of OpenShift.
+* *Realm imports are import-once and survive `ws reset`.*
+`ws prep`/`reset` restores the *apps* in `{user}-dev`; it does *not* re-seed the realm (the realm is workshop-layer state, seeded once). So a broken realm is not fixed by a reset — escalate it as a platform-layer issue.
+* *The break in exercise 4 is intentional — coach, don't pre-empt.*
+Attendees are meant to configure the web app, watch the login fail with the `redirect_uri` error, and fix it. If you warn them off it, you remove the lesson. Let them hit it; be ready to explain the edge-Route/`X-Forwarded` mechanism when they do.
+* *Client secrets in the lab are seeded demo values.*
+`parasol-claims-secret` and `parasol-batch-secret` are workshop fixtures shown in the clear on purpose. Name that out loud: in production these are generated, stored in a Secret, and never printed — this is a teaching shortcut, not a pattern to copy.
+* *`viewer` getting 403 is success, not a bug.*
+Some attendees read the `viewer` 403 as "my token is broken." It is the whole point of exercise 3 — authenticated, not authorized. Reinforce the 401-vs-403 distinction when it comes up.
+
+== Provenance
+
+Built fresh for this workshop; no content was ported from stale material, and no legacy SSO product branding is used — this is Red Hat build of Keycloak throughout.
+Every command, output, and timing on these pages was produced performing the lab as `user1` on OpenShift {ocp_version} against the workshop Red Hat build of Keycloak {rhbk_version} (instance `sso-workshop`, realm `realm-user1`) on 2026-07-11 — the open API at 200, the bearer matrix (401 no token / 200 adjuster / 403 viewer / 401 bad token), the web-app `http`→400 break and the proxy-forwarding fix (`https` 302 with `response_type=code` + PKCE `S256`), the `parasol-batch` client-credentials token, and the RFC 8693 exchange to `aud=parasol-fraud` (200) with the `parasol-batch` escalation Keycloak refused.
+The standard token-exchange flow adapts `serhat-dirik/kc-token-exchangeV2-demo`, re-verified against this cluster.
