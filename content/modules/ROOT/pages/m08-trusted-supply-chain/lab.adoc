@@ -31,10 +31,17 @@ You run a *supply-chain pipeline* that builds, generates a bill of materials, si
 You find the vulnerable dependency in the SBOM, *fix it*, and watch the gate go green and the image get *signed* with provenance.
 Finally you see the cluster *refuse to run an unsigned image*.
 
-[NOTE]
-.One terminal, plus the Gitea web UI
+[TIP]
 ====
-Most commands run in the *Terminal* tab beside these instructions, logged in as `{user}`, using `oc`, `tkn` (the Tekton CLI), `mvn`, and `jq`.
+Several steps below are offered two ways.
+The *Console* tab drives the graphical *Pipelines* and *ImageStreams* views in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`, project `{user}-cicd`); the *CLI* tab uses `oc` and `tkn` in the *Terminal* tab beside these instructions.
+A few steps are terminal-only by nature — generating the SBOM (`mvn`, `jq`) and the `cosign` signature checks — and are marked where they occur; if a console label reads differently on your cluster, the CLI beside it is the source of truth.
+====
+
+[NOTE]
+.Your terminal, the console, and the Gitea web UI
+====
+The *CLI* path runs in the *Terminal* tab beside these instructions, logged in as `{user}`, using `oc`, `tkn` (the Tekton CLI), `mvn`, and `jq`; the *Console* path uses the *OpenShift web console* tab.
 The `$NS` shortcut points at your `{user}-cicd` project — keep the terminal open so it persists.
 One exercise edits a file in the *Gitea web UI*: open your fork at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^] in a second browser tab now.
 ====
@@ -193,6 +200,20 @@ Your project has a Pipeline the platform team seeded — `parasol-claims-supply-
 It is the build-and-deploy shape from the previous module with *three trust controls* added.
 Read it before you run it:
 
+// [CAPTURE-VERIFY] Pipelines > Pipelines > parasol-claims-supply-chain Details (graph of 4 Tasks) + YAML tab spec.tasks resolver refs (OCP 4.21) — CLI 'tkn pipeline describe' authoritative.
+[tabs]
+====
+Console::
++
+--
+. In the {ocp_console_url}[OpenShift web console^] navigation, choose *Pipelines* → *Pipelines* (project `{user}-cicd`).
+. Click the `parasol-claims-supply-chain` Pipeline.
+Its *Details* page draws four Tasks in order: `fetch-source` → `sbom-report` → `build-image` → `acs-scan`.
+. Switch to the *YAML* tab: `fetch-source`, `build-image`, and `acs-scan` are `taskRef` with `resolver: cluster` (the scan gate resolves the curated `acs-image-check`), while `sbom-report` is defined inline.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 tkn pipeline describe parasol-claims-supply-chain -n $NS
@@ -200,7 +221,7 @@ tkn pipeline describe parasol-claims-supply-chain -n $NS
 
 .Expected output (abridged)
 [%collapsible]
-====
+=====
 [source,texinfo]
 ----
 Params
@@ -220,6 +241,8 @@ Tasks
  build-image               sbom-report    IMAGE, DOCKERFILE: ./Containerfile, TLS_VERIFY: false
  acs-scan                  build-image    IMAGE
 ----
+=====
+--
 ====
 
 Four Tasks in order: `fetch-source` → `sbom-report` → `build-image` → `acs-scan`.
@@ -247,6 +270,25 @@ The scan gate is the curated Task — the platform team standardized _one_ way t
 Now *run* it.
 A PipelineRun attaches a fresh workspace and raises memory for the two Maven/build-heavy steps above the namespace default:
 
+// [CAPTURE-VERIFY] masthead "+" (Quick create) > "Import YAML"; Pipelines > PipelineRuns graph — build-image green, acs-scan red (OCP 4.21) — CLI heredoc authoritative.
+[tabs]
+====
+Console::
++
+--
+Use the masthead *+* (*Quick create*) → *Import YAML*, paste the PipelineRun manifest from the *CLI* tab, and click *Create* — it builds your fork's `seed-vulnerable` branch by default, so nothing to edit.
+Then open *Pipelines* → *PipelineRuns* and click the new `supply-chain-run-…` run: the graph fills in and stops *red at `acs-scan`* while `build-image` stays green.
+
+[NOTE]
+.Import YAML, not the *Start* button
+=====
+Create the run from *Import YAML* (which takes the whole manifest), *not* from the Pipeline's *Actions → Start* form.
+This run raises per-Task memory for the build steps (the `taskRunSpecs` in the manifest), and the *Start* form cannot set that — a run started without it is killed mid-build.
+=====
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc create -n $NS -f - <<'EOF'
@@ -278,6 +320,8 @@ spec:
         limits: {memory: 2Gi}
 EOF
 ----
+--
+====
 
 Follow it live.
 The build downloads Maven dependencies, so expect *roughly 6–12 minutes* (longer the first time on a node):
@@ -328,6 +372,18 @@ Because `acs-scan` exited non-zero, the pipeline is `Failed` and the image — t
 
 Confirm the run's shape — every Task's status in one view:
 
+// [CAPTURE-VERIFY] PipelineRun graph — acs-scan red, fetch-source/sbom-report/build-image green (OCP 4.21) — CLI 'tkn pipelinerun describe' authoritative.
+[tabs]
+====
+Console::
++
+--
+On the run's graph (*Pipelines* → *PipelineRuns* → your run), only `acs-scan` is red; `fetch-source`, `sbom-report`, and `build-image` are all green.
+The build ran to completion — the *scan*, at the end, is what turned the run red.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 tkn pipelinerun describe --last -n $NS | sed -n '/^Taskruns/,$p'
@@ -344,6 +400,8 @@ Taskruns
  supply-chain-run-xxxxx-sbom-report    sbom-report    7 minutes ago   1m39s      Succeeded
  supply-chain-run-xxxxx-fetch-source   fetch-source   8 minutes ago   14s        Succeeded
 ----
+--
+====
 
 Only `acs-scan` is `Failed`; `fetch-source`, `sbom-report`, and `build-image` all `Succeeded`.
 The build *ran to completion* — this is different from the previous module's failing _test_, which stopped everything before the build.
@@ -361,6 +419,12 @@ That is deliberate: you cannot scan an image you have not built.
 The scan gate told you _something_ is wrong.
 The *SBOM* — the software bill of materials — tells you _exactly what_, and it is the artifact you will search the day the next Log4Shell lands.
 Your pipeline already generated one (the `sbom-report` step); now generate the same bill of materials yourself and inspect it.
+
+[NOTE]
+.Why this exercise is terminal-only
+====
+Generating the SBOM (`git clone`, `mvn`) and querying it (`jq`) are terminal tasks — there is no console equivalent for running Maven or `jq` — so this exercise has no *Console* tab.
+====
 
 Clone your fork's `seed-vulnerable` branch and produce a *CycloneDX* SBOM.
 This is the identical plugin invocation the pipeline's `sbom-report` step uses, so it works whether or not the project's `pom.xml` declares the plugin:
@@ -466,6 +530,18 @@ Fewer dependencies is fewer supply-chain risk: the smallest attack surface is th
 
 Now re-run the pipeline against your fork — the default `git-revision` is already `seed-vulnerable`, so this rebuilds the branch you just fixed:
 
+// [CAPTURE-VERIFY] "Import YAML"; Pipelines > PipelineRuns graph — acs-scan turns green this time (OCP 4.21) — CLI heredoc authoritative.
+[tabs]
+====
+Console::
++
+--
+As in exercise 1, *+* (*Quick create*) → *Import YAML*, paste the manifest from the *CLI* tab, and *Create* (it rebuilds `seed-vulnerable`, now fixed).
+Watch the new run under *Pipelines* → *PipelineRuns*: this time `acs-scan` goes *green* and the whole graph succeeds.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc create -n $NS -f - <<'EOF'
@@ -492,6 +568,8 @@ spec:
 EOF
 tkn pipelinerun logs --last -f -n $NS
 ----
+--
+====
 
 [TIP]
 .Another full build — use the wait
@@ -516,6 +594,17 @@ It passes:
 The `CRITICAL` Log4Shell violation is *gone* — only the harmless `LOW` "Latest tag" advice remains, and that does not break the build.
 The run is `Succeeded`, and the pipeline surfaces its verdict as a *result*:
 
+// [CAPTURE-VERIFY] Pipelines > PipelineRuns > <run> Details "Results" section listing scan-passed=true (OCP 4.21) — CLI 'oc get pipelinerun -o jsonpath' authoritative.
+[tabs]
+====
+Console::
++
+--
+On the fixed run's page (*Pipelines* → *PipelineRuns* → your `supply-chain-fixed-…` run), the *Results* section shows `scan-passed` = `true` — the gate's verdict, published as run data.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get pipelinerun --sort-by=.metadata.creationTimestamp -n $NS \
@@ -527,6 +616,8 @@ oc get pipelinerun --sort-by=.metadata.creationTimestamp -n $NS \
 ----
 supply-chain-fixed-xxxxx  scan-passed=true
 ----
+--
+====
 
 Removing the dependency was the *entire* fix — the base image never changed.
 A broken supply chain became a clean one with a one-line commit, and the pipeline _proved_ it with a scan.
@@ -573,6 +664,18 @@ You want all three; here they all happened automatically.
 
 Chains stores the signature and the provenance *in the registry, beside the image* — as extra tags derived from the image digest:
 
+// [CAPTURE-VERIFY] Builds > ImageStreams > parasol-claims Details "Tags" — latest + sha256-….att + sha256-….sig (OCP 4.21) — CLI 'oc get imagestream' authoritative.
+[tabs]
+====
+Console::
++
+--
+In the navigation, choose *Builds* → *ImageStreams* (project `{user}-cicd`) and click `parasol-claims`.
+Its *Tags* list shows three tags: `latest` (the image) plus two derived from its digest — `sha256-….att` (the attestation) and `sha256-….sig` (the signature).
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get imagestream parasol-claims -n $NS \
@@ -586,6 +689,8 @@ latest
 sha256-<your-image-digest>.att
 sha256-<your-image-digest>.sig
 ----
+--
+====
 
 The `.sig` tag is the *signature*; the `.att` tag is the *attestation* — a signed *SLSA provenance* statement describing how the image was built.
 They travel with the image: copy the image to another registry and the signature comes too.
@@ -678,6 +783,17 @@ That is the whole point of admission: it does not matter whether anyone _remembe
 
 Confirm the pieces that make this possible are already in *your* namespace — the public key the policy trusts, and a signed image for it to admit:
 
+// [CAPTURE-VERIFY] Workloads > ConfigMaps > chains-cosign-pub present (OCP 4.21) — CLI 'oc get configmap'/'oc get imagestream' authoritative.
+[tabs]
+====
+Console::
++
+--
+Confirm both in the console: under *Workloads* → *ConfigMaps* (project `{user}-cicd`), `chains-cosign-pub` is present (the key admission trusts); and under *Builds* → *ImageStreams* → `parasol-claims` (from exercise 4), the `.sig`/`.att` tags are the signature admission verifies.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 echo "trust key present:  $(oc get configmap chains-cosign-pub -n $NS -o name)"
@@ -690,6 +806,8 @@ echo "signed image tags:  $(oc get imagestream parasol-claims -n $NS -o jsonpath
 trust key present:  configmap/chains-cosign-pub
 signed image tags:  latest sha256-....att sha256-....sig
 ----
+--
+====
 
 The key that admission verifies against, and the signature it verifies — both are here.
 `ImagePolicy` is the switch that turns "we sign our images" into "the cluster will not run one we did not sign."
