@@ -2,8 +2,10 @@
 # Verify M08 — Trusted Software Supply Chain [ADS].
 #   Entry: {user}-cicd exists · entry marker CM · the parasol-claims-supply-chain Pipeline present ·
 #          the copied rox-api-token Secret (scan-gate contract) + chains-cosign-pub ConfigMap (verify
-#          contract) · Gitea fork answers · the fork's seed-vulnerable branch carries the seeded
-#          log4j-core CVE · the curated parasol-tasks acs-image-check task is reachable.
+#          contract) · Gitea fork answers with its seed-vulnerable branch · the curated parasol-tasks
+#          acs-image-check task is reachable. ONLY in --entry-only mode: the fork's seed-vulnerable
+#          branch still carries the seeded log4j-core CVE (the lab's fix removes it, so this check is
+#          NOT run in full mode — it validates entry materialization, not lab completion).
 #   End:   a parasol-claims image was built (ImageStream present) AND Tekton Chains signed a build
 #          TaskRun (chains.tekton.dev/signed=true) — i.e. the pipeline built + signed an image.
 # End checks are outcome-based (satisfied by an attendee's real pipeline run AND by `ws solve`).
@@ -52,7 +54,7 @@ signed_taskrun_exists() {
   oc get taskrun -n "$1" -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' 2>/dev/null | grep -q 'true'
 }
 
-# --- entry state (what `ws start m08` materializes) --------------------------
+# --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
 check "namespace ${NS} exists"                             oc get ns "$NS"                                     || hint "run: ws start m08 --user ${USER_NAME}"
 check "entry marker ws-entry-m08 present"                  oc get cm ws-entry-m08 -n "$NS"                     || hint "entry app not synced — ws start m08 --user ${USER_NAME}"
 check "Pipeline parasol-claims-supply-chain present"       oc get pipeline parasol-claims-supply-chain -n "$NS" || hint "entry app not synced — ws start m08 --user ${USER_NAME}"
@@ -60,11 +62,17 @@ check "rox-api-token copied into ${NS} (scan-gate secret)" oc get secret rox-api
 check "chains-cosign-pub copied into ${NS} (verify key)"   oc get cm chains-cosign-pub -n "$NS"                || hint "the secrets hook copies it from openshift-pipelines — needs the trust-signing component"
 check "Gitea fork ${USER_NAME}/parasol-claims answers"     gitea_repo_exists "$USER_NAME" parasol-claims       || hint "fork missing — re-run: ws start m08 --user ${USER_NAME} (fork job)"
 check "fork branch seed-vulnerable exists"                 gitea_branch_exists "$USER_NAME" parasol-claims seed-vulnerable || hint "re-run the fork/seed job: ws reset m08 --user ${USER_NAME}"
-check "seed-vulnerable carries the seeded log4j CVE"       gitea_raw_contains "$USER_NAME" parasol-claims pom.xml seed-vulnerable "log4j-core" || hint "re-run the fork/seed job: ws reset m08 --user ${USER_NAME}"
 check "curated library task acs-image-check reachable"     oc get task acs-image-check -n parasol-tasks        || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 
-if [[ "$ENTRY_ONLY" != "true" ]]; then
+if [[ "$ENTRY_ONLY" == "true" ]]; then
+  # Entry-only: the seeded flaw exists ONLY in the fresh entry state. The M08 lab's fix REMOVES
+  # log4j-core from the fork, so in FULL mode this would false-FAIL a successful attendee (G3
+  # finding) — it validates ENTRY materialization, not lab completion. Same mode-split as m09.
+  check "seed-vulnerable carries the seeded log4j CVE"     gitea_raw_contains "$USER_NAME" parasol-claims pom.xml seed-vulnerable "log4j-core" || hint "re-run the fork/seed job: ws reset m08 --user ${USER_NAME}"
+else
   # --- end state (what a completed lab / solve looks like) -------------------
+  # The seeded CVE is expected to be GONE here — removing log4j-core IS the lab's fix (success), so
+  # the seeded-CVE check above is deliberately NOT run in this mode.
   check "parasol-claims image built (ImageStream present)" imagestream_exists parasol-claims "$NS"             || hint "run the pipeline (ws solve m08 --user ${USER_NAME}); build-image pushes here"
   check "Tekton Chains signed a build TaskRun"             signed_taskrun_exists "$NS"                         || hint "Chains signs a few seconds after the build TaskRun completes — re-check, or run the pipeline"
 fi
