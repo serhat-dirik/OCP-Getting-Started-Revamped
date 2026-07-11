@@ -390,3 +390,97 @@ ocp_image_policy:
     "block unsigned images" beat in M07 as [OCP]; ClusterImagePolicy is the cluster-wide variant.
     GA since 4.20; 4.21 adds core-payload verification. policyType: PublicKey | FulcioCAWithRekor | PKI.
   entitlement: OCP
+
+# ---------- REGISTRY / IMAGES / CATALOG GOVERNANCE (M17) — verified 2026-07-12 vs live cluster ocp-ws-revamped (OCP 4.21.22 / k8s 1.34.8) ----------
+ocp_registry_governance:
+  status: GA (core OCP)
+  version: "4.21"
+  verified: 2026-07-12
+  source: >
+    live cluster ocp-ws-revamped: oc explain + oc get on image.config.openshift.io/cluster,
+    imagedigestmirrorsets/imagetagmirrorsets.config.openshift.io, imagecontentsourcepolicies.operator.openshift.io,
+    configs.samples.operator.openshift.io/cluster, imagepruners.imageregistry.operator.openshift.io/cluster,
+    config.imageregistry.operator.openshift.io/cluster, consoles.operator.openshift.io/cluster, consolesamples.console.openshift.io;
+    docs.redhat.com OCP Images/Disconnected chapters + openshift/openshift-docs images-configuration-registry-mirror.adoc
+  notes: >
+    Internal registry Service image-registry.openshift-image-registry.svc:5000 (status.internalRegistryHostname, live);
+    registry operator Managed, storage=PVC pvc-image-registry, rolloutStrategy=Recreate, defaultRoute NOT set (no external route today).
+    MIRRORING: ImageDigestMirrorSet (idms) + ImageTagMirrorSet (itms) at config.openshift.io/v1 are CURRENT (Compatibility level 1 = stable);
+    ImageContentSourcePolicy (ICSP) at operator.openshift.io/v1alpha1 is DEPRECATED since OCP 4.13 (Compatibility level 4), still served for
+    back-compat; migrate with `oc adm migrate icsp`. Applying IDMS/ITMS renders /etc/containers/registries.conf via the Machine Config
+    Operator -> MCP node rollout (drain/reboot) [TODO(verify-on-cluster) exact 4.21 rollout scope].
+    ALLOWED REGISTRIES: image.config.openshift.io/cluster has TWO distinct controls -- spec.registrySources.allowedRegistries|blockedRegistries
+    (pods+builds via CRI-O, MCO-rendered -> node reboot; only one of allowed|blocked may be set; does NOT govern the internal registry) VS
+    spec.allowedRegistriesForImport (imagestream-import admission by openshift-apiserver, INSTANT, no node reboot, does not affect admins).
+    Both are cluster-wide -> [INSTRUCTOR-DEMO] only. All three fields empty on cluster (clean baseline).
+    SAMPLES: samples operator CR Kind is Config (configs.samples.operator.openshift.io, name cluster), managementState=Managed, x86_64;
+    disable ONE sample via spec.skippedImagestreams/skippedTemplates (managementState=Removed nukes all 60 imagestreams + 51 templates in ns openshift).
+    PRUNER: imagepruners.imageregistry.operator.openshift.io/cluster active -- daily @ midnight (schedule ""), keepTagRevisions=3, keepYoungerThan default 60m.
+    CATALOG TYPES: consoles.operator.openshift.io/cluster spec.customization.developerCatalog.{types,categories} governs sub-catalog visibility
+    (dev perspective Disabled = unified console). Custom catalog Sample = ConsoleSample (console.openshift.io/v1, source type GitImport|ContainerImport, cluster-scoped).
+    Namespaced Template (template.openshift.io/v1) added to a user ns appears only in that user's developer catalog (attendee-safe).
+    OperatorHub sources governed by operatorhub.config.openshift.io/cluster spec.sources[] + CatalogSource (operators.coreos.com/v1alpha1);
+    live custom catalog example on cluster: catalogsource redhat-rhpds-gitea (ns gitea-operator). imageStreamImportMode cluster default = Legacy.
+    ImageStream import controls (image.openshift.io/v1): spec.tags[].importPolicy.scheduled (periodic re-import) + .importMode, referencePolicy.type Source|Local
+    (Local = pull-through the integrated registry, creds managed from the stream ns). Quay = mention-level only (not on cluster).
+  entitlement: OCP
+
+# ---------- DEPLOYMENT TARGETS & SCHEDULING (M16) — verified 2026-07-12 vs live cluster ocp-ws-revamped (OCP 4.21.22 / k8s 1.34.8) ----------
+ocp_scheduling:
+  status: GA (core OCP / Kubernetes)
+  version: "4.21"
+  verified: 2026-07-12
+  source: >
+    live cluster ocp-ws-revamped READ-ONLY: oc explain on deployment.spec.strategy (enum Recreate|RollingUpdate; maxSurge/maxUnavailable
+    default 25%/25%), pdb.spec (policy/v1; minAvailable/maxUnavailable/selector/unhealthyPodEvictionPolicy enum AlwaysAllow|IfHealthyBudget),
+    ...template.spec.terminationGracePeriodSeconds + containers.lifecycle.preStop; node/machineset/daemonset inventory;
+    docs.redhat.com OCP 4.20 Nodes "Controlling pod placement onto nodes (scheduling)" + pod topology spread + pod disruption budget
+  notes: >
+    All scheduling primitives are core-GA: nodeSelector, node/pod (anti)affinity, topologySpreadConstraints, taints+tolerations,
+    Deployment strategy (RollingUpdate maxSurge/maxUnavailable vs Recreate), PodDisruptionBudget (policy/v1), DaemonSet (apps/v1),
+    graceful shutdown (terminationGracePeriodSeconds + preStop + SIGTERM). Entitlement OCP; no operator.
+    CLUSTER-TOPOLOGY REALITY (load-bearing for M16 entry state): 6 SCHEDULABLE nodes (3 control-plane+worker @15.5CPU/64Gi, 3 worker
+    @15.5CPU/~30Gi; masters carry NO NoSchedule taint) but ZERO taints, NO topology.kubernetes.io/zone|region, NO instance-type, NO custom
+    workload/pool labels -- only kubernetes.io/hostname. Platform=BareMetal; sole MachineSet cluster-abcde-mv7nt-worker-0 desired=0/current=0,
+    only 3 master Machine objects (workers NOT machine-managed), no MachineAutoscaler/ClusterAutoscaler. => the spec's "labeled/tainted node
+    groups prepared" must be SYNTHESIZED at bootstrap (cluster-scoped: oc label/oc adm taint a worker; optional synthetic zone labels), NOT in a
+    per-user entry chart; MachineSet beat is observe-only + hollow; "taint a pool live" = [INSTRUCTOR-DEMO] via oc adm taint, never MachineSet scaling.
+    platform-observer already grants nodes+machinesets/machines read but NOT apps/daemonsets (add for the DaemonSet-inspection beat). See docs/research/m16-build-note.md.
+  entitlement: OCP
+
+native_sidecar:
+  api: apps/v1 (spec.template.spec.initContainers[].restartPolicy)
+  status: GA
+  version: "4.21"          # k8s 1.34.8; feature stable since Kubernetes 1.33
+  verified: 2026-07-12
+  source: >
+    live `oc explain deployment.spec.template.spec.initContainers.restartPolicy` on ocp-ws-revamped -- field present in STABLE apps/v1,
+    description states the "continually restarted until all regular containers terminate ... referred to as a sidecar" lifecycle;
+    kubernetes.io/blog/2023/08/25/native-sidecar-containers + kubernetes.io Sidecar Containers concept (stable since v1.33)
+  notes: >
+    Native sidecar = an init container with restartPolicy: Always (starts before app containers, runs for the pod lifetime, is shut down
+    AFTER them, and lets Jobs complete). GA/stable since Kubernetes 1.33; SidecarContainers feature gate default-on since 1.29. This is the
+    M16 "know they exist" beat -- frame as GA, NOT tech-preview/beta. Only accepted value for the field is "Always".
+  entitlement: OCP
+
+# ---------- M15 Networking (verified 2026-07-12, read-only live cluster) ----------
+gateway_api:
+  api: gateway.networking.k8s.io/v1        # +v1beta1 served
+  bundle_version: "v1.3.0"                  # live CRD annotation on gateways.gateway.networking.k8s.io
+  status: GA                                # GatewayAPI + GatewayAPIController + GatewayAPIWithoutOLM gates default-on (4.19+ GA)
+  implementation: ingress-operator-managed lightweight Istio (OSSM3-based) in openshift-ingress
+  gatewayclass: openshift-default           # controllerName openshift.io/gateway-controller/v1 (create to activate)
+  standard_crds: [gatewayclasses, gateways, httproutes, grpcroutes, referencegrants]
+  experimental_crds_blocked: [tcproutes, tlsroutes, udproutes]  # VAP openshift-ingress-operator-gatewayapi-crd-admission
+  verified: 2026-07-12
+  source: live CRDs + featuregate/cluster on ocp-ws-revamped; docs.okd.io/4.21 ingress-gateway-api
+  entitlement: OCP
+udn:
+  api: k8s.ovn.org/v1                       # UserDefinedNetwork + ClusterUserDefinedNetwork
+  status: GA                                # NetworkSegmentation gate default-on; primary UDN GA since OCP 4.18
+  topologies: [Layer2, Layer3]              # both support role Primary (CRD enum/CEL; oc explain layer2 desc is stale)
+  primary_ns_label: k8s.ovn.org/primary-user-defined-network   # must be set at namespace creation
+  constraint: UDN/CUDN must exist before pods; cannot convert a populated namespace
+  verified: 2026-07-12
+  source: live CRD raw schema on ocp-ws-revamped; docs.redhat.com 4.20 multiple_networks/primary-networks
+  entitlement: OCP
