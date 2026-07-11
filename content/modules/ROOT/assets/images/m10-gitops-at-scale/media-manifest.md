@@ -44,11 +44,11 @@ as the editable source (do not delete it).
 
 | # | Filename | Status | Source (inline Mermaid in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `m10-gitops-at-scale-01-appset.svg` | ⬜ TODO (export) | concept.adoc | hand-made-per-env vs one ApplicationSet (generator → template → 3 apps) |
-| 2 | `m10-gitops-at-scale-02-sync-waves.svg` | ⬜ TODO (export) | concept.adoc | db (wave 0) → migration hook (wave 1) → app Rollout (wave 2) |
-| 3 | `m10-gitops-at-scale-03-canary-analysis.svg` | ⬜ TODO (export) | concept.adoc | canary 25→50 → analysis → pass (100%) / fail (roll back to stable) |
-| 4 | `m10-gitops-at-scale-04-platform-accretion.svg` | ⬜ TODO (shared) | concept.adoc (pointer) | the cross-module Parasol platform diagram with the M10 layer (ApplicationSets + Rollouts) highlighted |
-| 5 | `m10-gitops-at-scale-05-what-you-built.svg` | ⬜ TODO (export) | wrapup.adoc | ApplicationSet → 3 apps; prod canary with the pass/rollback fork highlighted |
+| 1 | `m10-gitops-at-scale-01-appset.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | hand-made-per-env vs one ApplicationSet (generator → template → 3 apps) |
+| 2 | `m10-gitops-at-scale-02-sync-waves.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | db (wave 0) → migration hook (wave 1) → app Rollout (wave 2) |
+| 3 | `m10-gitops-at-scale-03-canary-analysis.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | canary 25→50 → analysis → pass (100%) / fail (roll back to stable) |
+| 4 | `m10-gitops-at-scale-04-platform-accretion.svg` | ⬜ NOT CAPTURED (shared) | concept.adoc (pointer) | the cross-module Parasol platform diagram with the M10 layer (ApplicationSets + Rollouts) highlighted |
+| 5 | `m10-gitops-at-scale-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc | ApplicationSet → 3 apps; prod canary with the pass/rollback fork highlighted |
 
 ## Recording (demo-arc happy path)
 
