@@ -201,17 +201,24 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   ok "purge requested in ${ns}"
 }
 
-purge_apps() {  # module user — delete the user's attendee-created Application CRs for this module.
+purge_apps() {  # module user [keep-module] — delete the user's Application CRs for this module.
   # These live in a control-plane namespace (ws-meta purgeAppsNamespace, e.g. student-gitops), NOT
   # in the module's purge namespaces, so purge_ns never sees them. Selected by .spec.project (the
   # per-user AppProject, e.g. proj-user7) — attendees create apps via the Argo UI and cannot be
-  # relied on to label them.
-  local module="$1" user="$2" pair ns proj name
+  # relied on to label them. keep-module (M10 G1 engine flag #1): a module's OWN chart-materialized
+  # apps carry workshop.redhat.com/module=<module> and share the same project as a conflicting
+  # module's — on a bare re-start, gc must not purge the TARGET's own world (it would never
+  # re-sync: the unchanged entry app is not recycled when nothing was evicted).
+  local module="$1" user="$2" keep="${3:-}" pair ns proj name mod
   pair="$(meta_apps "$module" "$user")"
   [[ -n "$pair" ]] || return 0
   ns="${pair%% *}"; proj="${pair##* }"
   for name in $(oc get applications.argoproj.io -n "$ns" \
       -o jsonpath="{range .items[?(@.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
+    if [[ -n "$keep" ]]; then
+      mod="$(oc get application "$name" -n "$ns" -o jsonpath='{.metadata.labels.workshop\.redhat\.com/module}' 2>/dev/null || true)"
+      [[ "$mod" == "$keep" ]] && continue
+    fi
     info "deleting attendee Argo app ${ns}/${name} (project ${proj})…"
     oc delete application "$name" -n "$ns" --wait=true --timeout=120s >/dev/null 2>&1 \
       || oc patch application "$name" -n "$ns" --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
@@ -246,8 +253,10 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
     fi
     # The conflicting module's attendee-created Argo apps (ws-meta purgeApps*) live in a
     # control-plane ns and would keep selfHeal-ing its world back — purge them regardless
-    # of whether the entry app itself was still present.
-    purge_apps "$c" "$user"
+    # of whether the entry app itself was still present. Keep the TARGET module's own
+    # chart-labeled apps: on a bare re-start nothing recycles the entry app, so purging
+    # its world would wipe it permanently (M10 G1 flag #1).
+    purge_apps "$c" "$user" "$module"
   done
   if [[ "$evicted" == 1 ]]; then
     for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
@@ -260,7 +269,7 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
 }
 
 wait_healthy() {  # appname [timeout_s]
-  local app="$1" timeout="${2:-300}" t=0 health sync phase
+  local app="$1" timeout="${2:-300}" t=0 health sync phase empty_ok=0
   info "waiting for ${app} to sync (up to ${timeout}s)…"
   while (( t < timeout )); do
     health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
@@ -269,9 +278,24 @@ wait_healthy() {  # appname [timeout_s]
     # solve hook that does real work (m07: runs the whole pipeline) is exactly the point. Ready
     # means the operation finished too, or "demo-ready" prints while the namespace is still empty.
     phase="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
-    if [[ "$health" == "Healthy" && "$sync" == "Synced" && ( -z "$phase" || "$phase" == "Succeeded" ) ]]; then
-      ok "entry state ready (Synced/Healthy)"
-      return 0
+    if [[ "$health" == "Healthy" && "$sync" == "Synced" ]]; then
+      if [[ "$phase" == "Succeeded" ]]; then
+        ok "entry state ready (Synced/Healthy)"
+        return 0
+      fi
+      # Empty phase can be a transient window BETWEEN hook retries (M10 G1 flag #3: a failing
+      # PostSync hook briefly reads Synced/Healthy/no-op) — accept it only after it HOLDS.
+      if [[ -z "$phase" ]]; then
+        empty_ok=$((empty_ok+1))
+        if (( empty_ok >= 3 )); then
+          ok "entry state ready (Synced/Healthy)"
+          return 0
+        fi
+      else
+        empty_ok=0
+      fi
+    else
+      empty_ok=0
     fi
     sleep 5; t=$((t+5))
   done
