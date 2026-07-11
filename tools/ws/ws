@@ -213,6 +213,17 @@ purge_apps() {  # module user [keep-module] — delete the user's Application CR
   pair="$(meta_apps "$module" "$user")"
   [[ -n "$pair" ]] || return 0
   ns="${pair%% *}"; proj="${pair##* }"
+  # ApplicationSets FIRST: an attendee's appset (M10 beat 1) re-generates any Application we
+  # delete, so purging apps before their generator is a self-defeating loop (M10 G1 flag #2).
+  for name in $(oc get applicationsets.argoproj.io -n "$ns" \
+      -o jsonpath="{range .items[?(@.spec.template.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
+    if [[ -n "$keep" ]]; then
+      mod="$(oc get applicationset "$name" -n "$ns" -o jsonpath='{.metadata.labels.workshop\.redhat\.com/module}' 2>/dev/null || true)"
+      [[ "$mod" == "$keep" ]] && continue
+    fi
+    info "deleting attendee ApplicationSet ${ns}/${name} (project ${proj})…"
+    oc delete applicationset "$name" -n "$ns" --wait=true --timeout=120s >/dev/null 2>&1 || true
+  done
   for name in $(oc get applications.argoproj.io -n "$ns" \
       -o jsonpath="{range .items[?(@.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
     if [[ -n "$keep" ]]; then
@@ -483,18 +494,34 @@ cmd_solve() {  # instructor: materialize the module END state (entry chart with 
   ok "${module} solved for ${user} — demo-ready."
 }
 
+sync_app_operation() {  # app — start a fresh sync OPERATION (hooks only re-run on operations;
+  # a refresh alone re-compares but re-fires nothing — proven painfully 2026-07-10). Waits out a
+  # running operation first (patching .operation while one runs is silently swallowed), and
+  # hard-refreshes so Argo re-resolves the branch (cached revisions otherwise sync stale).
+  local app="$1" t=0 ph
+  while (( t < 300 )); do
+    ph="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
+    [[ "$ph" != "Running" && "$ph" != "Terminating" ]] && break
+    sleep 5; t=$((t+5))
+  done
+  oc annotate application "$app" -n "$ARGO_NS" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+  sleep 10
+  oc patch application "$app" -n "$ARGO_NS" --type merge \
+    -p '{"operation":{"initiatedBy":{"username":"ws-git-refresh"},"sync":{"revision":"main"}}}' >/dev/null 2>&1 \
+    && ok "sync operation started on ${app}" \
+    || err "could not start a sync on ${app} (still busy?) — retry shortly"
+}
+
 cmd_git_refresh() {
   need_oc
+  # Two layers pull from git: pp-git-mirror (Gitea pull-mirrors the monorepo) and
+  # workshop-config (whose Sync hooks re-run the user seed AND the app-repo seed —
+  # the parasol/* app repos only refresh through THAT hook). Both need a real sync
+  # operation; no argocd CLI dependence (a stale CLI session used to fail silently here).
   info "re-running the git-localize mirror sync…"
-  # Re-sync of the mirror app re-fires its Sync-hook Job (BeforeHookCreation).
-  if command -v argocd >/dev/null 2>&1 && argocd account get-user-info >/dev/null 2>&1; then
-    argocd app sync pp-git-mirror --async >/dev/null && ok "mirror sync triggered (argocd)"
-  else
-    # No argocd CLI session — nudge via annotation refresh + let selfHeal re-run the hook.
-    oc annotate application pp-git-mirror -n "$ARGO_NS" \
-      argocd.argoproj.io/refresh=hard --overwrite >/dev/null
-    ok "mirror refresh requested (hard refresh annotation)"
-  fi
+  sync_app_operation pp-git-mirror
+  info "re-running the workshop-config seed hooks (user seed + app-repo seed)…"
+  sync_app_operation workshop-config
   echo "   watch: oc get jobs -n ${GITEA_NS} -w"
 }
 
