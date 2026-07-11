@@ -2,8 +2,11 @@
 #
 # Scaffolds a minimal Quarkus 3.33 / JDK-21 service (health + metrics + OTel on, a
 # UBI9 Containerfile, a devfile, and a catalog-info.yaml) matching the parasol-claims
-# conventions, then — once the M10 builder wires the publish step — creates the repo,
-# PaC pipeline, and Argo app in the user's Gitea org.
+# conventions, then publishes it as a new repo in the attendee's Gitea org and registers
+# it in the software catalog. Publishing uses publish:gitea (dynamic plugin loaded by the
+# portal stack) against the in-cluster Gitea service address, so the template is portable
+# across clusters. The repo carries a PaC .tekton/ pipeline and can be wired to Argo CD in
+# the lab — "modules 2-9 behind one button".
 apiVersion: scaffolder.backstage.io/v1beta3
 kind: Template
 metadata:
@@ -25,6 +28,7 @@ spec:
     - title: Provide service details
       required:
         - name
+        - orgName
         - owner
       properties:
         name:
@@ -33,6 +37,14 @@ spec:
           description: Unique lowercase service name (e.g. parasol-policy).
           pattern: '^[a-z][a-z0-9-]{2,40}$'
           ui:autofocus: true
+        orgName:
+          title: Your Gitea organization
+          type: string
+          # publish:gitea publishes into a Gitea ORGANIZATION (verified: it rejects a user namespace).
+          # Each attendee owns a dedicated scaffold org named <username>-svcs (materialized by the M11
+          # entry state). Enter yours, e.g. user1-svcs.
+          description: Your personal scaffold org, named <your-username>-svcs (e.g. user1-svcs).
+          pattern: '^[a-z][a-z0-9-]{2,60}$'
         owner:
           title: Owner
           type: string
@@ -49,48 +61,44 @@ spec:
           name: ${{ parameters.name }}
           owner: ${{ parameters.owner }}
 
-    # -------------------------------------------------------------------------
-    # TODO(M10 builder): PUBLISH + REGISTER — target intentionally UNRESOLVED.
-    #
-    # Do NOT guess the publish action. Publishing into the workshop Gitea needs
-    # ONE of the following, decided at RHDH build time:
-    #   a) publish:gitea — requires the community dynamic plugin
-    #      `scaffolder-backend-module-gitea` to be loaded in RHDH 1.10 (support
-    #      status TODO-verify per m10-build-note). Preferred if it loads.
-    #   b) publish:git   — generic git publish; works without the Gitea plugin
-    #      (robust fallback).
-    #
-    # When decided, uncomment the matching block below, set the Gitea host from the
-    # cluster domain, and wire catalog:register to the publish output. Example shape
-    # (publish:gitea):
-    #
-    # - id: publish
-    #   name: Publish to Gitea
-    #   action: publish:gitea
-    #   input:
-    #     repoUrl: gitea-gitea.<cluster_domain>:443/?owner=${{ parameters.owner }}&repo=${{ parameters.name }}
-    #     description: '${{ parameters.name }} — scaffolded from parasol-service-template'
-    #     defaultBranch: main
-    #
-    # - id: register
-    #   name: Register in the software catalog
-    #   action: catalog:register
-    #   input:
-    #     repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
-    #     catalogInfoPath: /catalog-info.yaml
-    # -------------------------------------------------------------------------
+    # Publish the scaffolded service into the attendee's Gitea org via publish:gitea
+    # (@backstage/plugin-scaffolder-backend-module-gitea, loaded as a dynamic plugin by the
+    # portal stack — verified live 2026-07-11: repo + full skeleton pushed end to end).
+    # The host is the IN-CLUSTER Gitea SERVICE address (gitea.gitea.svc:3000) — stable on any
+    # cluster, so this template needs no per-cluster host injection (RHDH, Dev Spaces, and the
+    # workshop terminal all reach it in-cluster). The gitea integration for this host is
+    # configured in the portal's app-config-rhdh.
+    - id: publish
+      name: Publish to Gitea
+      action: publish:gitea
+      input:
+        # publish:gitea requires an ORGANIZATION owner (it rejects a user namespace) — the
+        # attendee's own <username>-svcs org, materialized by the M11 entry state.
+        repoUrl: gitea.gitea.svc:3000?owner=${{ parameters.orgName }}&repo=${{ parameters.name }}
+        description: '${{ parameters.name }} — scaffolded from parasol-service-template'
+        defaultBranch: main
+
+    - id: register
+      name: Register in the software catalog
+      action: catalog:register
+      input:
+        # Register the FULL catalog-info URL (branch included). Verified live 2026-07-11: the
+        # repoContentsUrl+catalogInfoPath form re-derives the URL through the gitea integration and
+        # drops the branch (…/src/branch/ → 400); passing catalogInfoUrl with the explicit
+        # /src/branch/main/ path registers cleanly. Internal host = portable across clusters.
+        catalogInfoUrl: http://gitea.gitea.svc:3000/${{ parameters.orgName }}/${{ parameters.name }}/src/branch/main/catalog-info.yaml
 
   output:
+    links:
+      - title: Open the new repository
+        url: ${{ steps.publish.output.remoteUrl }}
+      - title: Open in the software catalog
+        icon: catalog
+        entityRef: ${{ steps.register.output.entityRef }}
     text:
       - title: Scaffolded
         content: |
-          Service `${{ parameters.name }}` was scaffolded from the Parasol
-          golden-path template. Once the M10 publish step is wired, links to the
-          new Gitea repository, its PaC pipeline, and its Argo application will
-          appear here.
-    # links:
-    #   - title: Open the new repository
-    #     url: ${{ steps.publish.output.remoteUrl }}
-    #   - title: Open in the catalog
-    #     icon: catalog
-    #     entityRef: ${{ steps.register.output.entityRef }}
+          Service `${{ parameters.name }}` was scaffolded from the Parasol golden-path
+          template and published to `${{ parameters.orgName }}` in Gitea, then registered
+          in the software catalog. Open it in Dev Spaces or the workshop terminal to make
+          your first change.
