@@ -1,0 +1,137 @@
+= Developer Hub & Golden Paths: Troubleshooting
+:module-id: m11
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on Red Hat Developer Hub {rhdh_version} / OCP {ocp_version}
+// as user6 on 2026-07-11. Format: Symptom / Cause / Fix. Several are failures actually hit while
+// building the module on the cluster (the duplicate-name 409, the README's oc new-build command
+// failing on Dockerfile-vs-Containerfile, the internal gitea.gitea.svc links, TechDocs not built).
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Terminal commands assume you set `DEV={user}-dev`, `ORG={user}-svcs`, and `SVC=parasol-policy` at the start of the lab.
+
+== The "Open the new repository" (or catalog "source") link does not open in my browser
+
+Symptom:: After scaffolding, the *Open the new repository* link — or a catalog entity's *source*/*view* link — leads nowhere, or your browser cannot resolve the host.
+Cause:: Those links point at Gitea's *in-cluster service address*, `http://gitea.gitea.svc:3000/...`, which is how Red Hat Developer Hub reads and writes Git internally.
+That address is only routable *inside* the cluster; your browser cannot reach it.
+Fix:: Open the repository through the Gitea *route* instead: `{gitea_url}/{user}-svcs/parasol-policy`.
+The *Open in the software catalog* link (which stays inside the portal) works normally.
+This is a known rough edge of the workshop portal's internal wiring, not a broken scaffold.
+
+== The scaffolder task failed at "Publish to Gitea" with a 409
+
+Symptom:: The *New Parasol microservice* task ran, but the *Publish to Gitea* step failed; its log shows `409 Conflict, "The repository with the same name already exists."`.
+Cause:: A Git server will not hold two repositories with the same name, and you tried to scaffold a service whose name already exists in your `{user}-svcs` org (most often: you ran the template twice with the same name).
+The *fetch* step succeeded, but *publish* refused to overwrite your existing repo — nothing was created on this second run.
+Fix:: Choose a *unique* service name (`parasol-quote`, `parasol-billing`, …) and run the template again.
+If you truly meant to replace the existing service, delete its repo first (in the Gitea UI, or via the API), then re-run.
+A `ws prep m11 --user {user}` empties your `{user}-svcs` org, so a fresh start always has an empty slate.
+
+== The scaffolder failed at "Publish" but *not* with a 409
+
+Symptom:: The publish step fails with an authorization error, a "not found" on the org, or a connection error — not a `409`.
+Cause:: Either your scaffold org `{user}-svcs` does not exist (the entry-state hook that creates it did not run), or the portal's Gitea integration credentials are not working.
+Fix:: Confirm the org exists, then re-materialize the entry state if it does not:
++
+[source,sh,role=execute,subs="attributes"]
+----
+curl -sk "{gitea_url}/api/v1/orgs/{user}-svcs" -o /dev/null -w "org {user}-svcs: HTTP %\{http_code}\n"
+----
++
+A `200` means the org is there (re-check the name you typed in the form — it must be exactly `{user}-svcs`).
+A `404` means the org is missing — run `ws prep m11 --user {user}`, which recreates it.
+If the org exists and you still cannot publish, tell your instructor: the portal's Gitea integration credentials may need attention (an instructor/admin task).
+
+== The scaffolded README's build command fails with "Dockerfile: no such file or directory"
+
+Symptom:: You copied the build command from the scaffolded `README.md` — `oc new-build --strategy=docker --binary --name=parasol-policy` — started a build, and it failed almost immediately with `error: open /tmp/build/inputs/Dockerfile: no such file or directory`.
+Cause:: `oc new-build --strategy=docker` defaults to looking for a file named `Dockerfile`, but the scaffolded repo's container recipe is named `Containerfile`.
+Fix:: Use the lab's build steps instead of the README's command — apply the repo's own `BuildConfig`, which is configured for `Containerfile`:
++
+[source,sh,role=execute]
+----
+oc apply -f openshift/buildconfig.yaml -n $DEV
+oc start-build $SVC --from-dir=. -n $DEV
+----
++
+(The scaffolded `openshift/buildconfig.yaml` sets `dockerfilePath: Containerfile` correctly; only the README's convenience command has the mismatch.)
+
+== My first build is numbered `parasol-policy-2`, not `-1` — did build 1 fail?
+
+Symptom:: After `oc apply -f openshift/buildconfig.yaml` and `oc start-build`, the build is `parasol-policy-2`, and `oc get builds` shows no `-1`.
+Cause:: Applying the `BuildConfig` registers a trigger that claims build number 1 without producing a build object, so your first *manual* build is numbered 2.
+Fix:: Nothing to fix — it is cosmetic.
+The lab's exercise-4 poll finds the build *by label* (`-l buildconfig=$SVC`), so the number does not matter.
+Do not go looking for a "missing" or "failed" build 1.
+
+== The build has been running for several minutes — is it stuck?
+
+Symptom:: `oc get build ...` shows the build `Running` for many minutes and nothing seems to happen.
+Cause:: Almost always normal.
+The first build on a node pulls the UBI9 Java 21 *builder image* and then runs a *full Maven build* (downloading every dependency), which takes about *8–9 minutes*.
+Fix:: Give it time — the lab starts the build in exercise 3 precisely so it runs while you read.
+Watch real progress in the build log:
++
+[source,sh,role=execute]
+----
+B=$(oc get build -n $DEV -l buildconfig=$SVC --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+oc logs build/$B -n $DEV | tail -15
+----
++
+You should see Maven downloading dependencies, then compiling, then the Quarkus build.
+If the log is truly idle for a long time or the pod is `Pending`, check your namespace's events for image-pull or quota problems: `oc get events -n $DEV --sort-by=.lastTimestamp | tail -10`.
+
+== `/api/info` returns 503 right after I expose the route
+
+Symptom:: The first `curl .../api/info` returns `503`, though the deployment rolled out.
+Cause:: Immediately after `oc expose`, the OpenShift Route needs a moment to program, and the pod a moment to finish starting.
+Fix:: Wait a few seconds and retry — it becomes `200` once the pod is ready:
++
+[source,sh,role=execute]
+----
+ROUTE=$(oc get route $SVC -n $DEV -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -w "%{http_code}\n" "http://$ROUTE/api/info"
+----
++
+If it stays `503`, check the pod: `oc get pods -n $DEV -l deployment=$SVC` — it should be `Running` and `Ready`.
+
+== The TechDocs tab on a catalog entity shows "not found"
+
+Symptom:: You open a Component's *TechDocs* tab and it reports that documentation could not be found.
+Cause:: The Parasol Components carry a `backstage.io/techdocs-ref` annotation (the *intent* to have docs-as-code), but no documentation is *built* in this workshop portal, so there is nothing to render.
+Fix:: Nothing to fix for the lab — TechDocs is not part of this module's hands-on.
+Rendering docs needs a TechDocs *build* (an in-portal builder or an external one) that this workshop does not run; it is a "go deeper" capability, noted in the wrap-up.
+
+== I scaffolded a service but it does not appear in the Catalog
+
+Symptom:: The task finished, the repo exists in Gitea, but `parasol-policy` is not visible in the *Catalog* list yet.
+Cause:: Usually a brief processing delay, or the *Catalog* list is filtered to a different Kind/owner.
+Fix:: Confirm the registration from the terminal (it is authoritative), then refresh the Catalog page:
++
+[source,sh,role=execute,subs="attributes"]
+----
+TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+curl -sk -H "Authorization: Bearer $TOKEN" "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-policy" \
+  | python3 -c 'import sys,json;print("registered:", json.load(sys.stdin).get("metadata",{}).get("name","not yet"))'
+----
++
+If it prints `registered: parasol-policy`, the entity exists — set the Catalog *Kind* filter to *Component* and clear any owner filter, and it will be listed (the catalog processor may take a few seconds after the `catalog:register` step).
+
+== The portal shows a blank page or "Enter" does nothing
+
+Symptom:: The Developer Hub portal will not load, or clicking *Enter* does not sign you in.
+Cause:: The shared `backstage-developer-hub` pod may be restarting, or your guest session expired.
+Fix:: Reload the page and click *Enter* again (guest sign-in is stateless — a fresh click starts a new session).
+If the portal itself does not respond, confirm it is up (an instructor/admin check):
++
+[source,sh,role=execute]
+----
+oc get pods -n rhdh
+----
++
+Expect a `Running` `backstage-developer-hub-...` pod; if it is restarting, wait for it to settle, then reload.
+
+'''
+
+_Last verified on Red Hat Developer Hub {rhdh_version} / OpenShift {ocp_version} — 2026-07-11._

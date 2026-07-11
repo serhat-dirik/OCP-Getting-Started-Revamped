@@ -1,0 +1,578 @@
+= Developer Hub & Golden Paths: Lab
+:module-id: m11
+include::partial$version-attributes.adoc[]
+
+// Lab page for M11. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. The Red Hat Developer Hub portal is a WEB UI — the catalog browse and the golden-path
+// scaffold happen in the browser (guest sign-in), so those steps are UI steps marked with
+// // media-pass: capture comments; every OUTCOME (the published Gitea repo, the registered catalog
+// Component, the built image, the running service) is verified from the terminal with oc + curl and is
+// load-bearing/verifiable. Terminal commands run in the Showroom Terminal as {user}, so blocks are
+// [source,sh,role=execute]; subs="attributes" is used where {user}/{gitea_url}/{rhdh_url} appear, and
+// jsonpath/brace-bearing blocks use $DEV/$ORG/$SVC with NO subs (same idiom as m09/m10). Everything —
+// the guest catalog query, the scaffolder task (fetch/publish:gitea/register), the 409 on a duplicate
+// name, the paved-road repo contents, the in-cluster UBI9 build (~8.5 min cold), oc new-app + expose,
+// and the /api/info + /q/health/ready + /q/metrics responses — was performed as user6 on the shared
+// RHDH {rhdh_version} portal, OCP {ocp_version}, on 2026-07-11 (not recalled).
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set three shortcuts you will reuse in the terminal commands below:
+
+[source,sh,role=execute,subs="attributes"]
+----
+DEV={user}-dev
+ORG={user}-svcs
+SVC=parasol-policy
+echo "namespace: $DEV · your scaffold org: $ORG · service you will create: $SVC"
+----
+
+In this lab you step into the shoes of a new Parasol engineer.
+You tour the *software catalog* to learn what the org already runs and who owns it, then use a *golden-path template* to scaffold a brand-new, standards-compliant Parasol service into your *own* Git organization — repo published, catalog entry registered, paved-road wiring already in place.
+You inspect what the template pre-wired, then build and run the scaffolded service in `{user}-dev` and watch its health and metrics endpoints answer — observability you never had to set up.
+
+[NOTE]
+.One terminal, plus two browser tabs
+====
+Terminal commands run in the *Terminal* tab beside these instructions, logged in as `{user}`.
+They act on *your own* namespace (`{user}-dev`) and your own Git organization (`{user}-svcs`).
+Two tabs in the browser carry the portal work:
+
+* *Red Hat Developer Hub* — the shared portal: {rhdh_url}[the Developer Hub portal^].
+Sign in with *Enter* (guest) — one click, no password (real deployments wire single sign-on instead).
+This is where you *browse the catalog* and *run the golden-path template*.
+* *Gitea* — your Git server, where your scaffolded repo lands: {gitea_url}[Gitea^].
+Sign in with your workshop username `{user}` and password.
+
+Open both now.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — ~11-minute presenter arc: the catalog, then a service from one button
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Modules 2 through 10, packaged into one button (11 min)
+
+[NOTE]
+.Before you present
+====
+Two prep steps, both *before the room*:
+
+. Run `ws solve m11 --user {user}`.
+It materializes a demo-ready *already-scaffolded* service (`{user}-svcs/parasol-golden`) in your scaffold org so you have a concrete post-scaffold repo to fall back on, and confirms the portal + catalog + template are serving.
+. Sign in to the {rhdh_url}[Developer Hub portal^] with *Enter* (guest), open the *Catalog*, and filter to the `parasol-claims` Component so the org map is your opening visual.
+
+The money moment is beat 2: a short form produces a complete, catalog-registered Parasol service in your own Git org in *under a minute*.
+====
+
+[demo-block]
+[TIME 3m]
+Say:: "This is Parasol's developer portal. Everything the company runs is in one catalog — the claims service, the APIs it exposes, the team that owns it. When an engineer asks 'what do we run and who owns it,' this is the answer, and it is generated from files that live next to the code."
+Show:: The Developer Hub *Catalog*: the `parasol-claims` Component; open it and trace *owner* (`parasol` group), *System* (`parasol-insurance`), and the *API* it provides (`parasol-claims-api`) — click the API and show the OpenAPI definition rendering.
+Do:: In the terminal, prove the catalog is an API, not just a screen:
++
+[source,sh,role=execute,subs="attributes"]
+----
+TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+curl -sk -H "Authorization: Bearer $TOKEN" \
+  "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-claims" \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);s=d["spec"];print("owner:",s["owner"],"| system:",s["system"],"| provides:",s.get("providesApis"))'
+----
++
+"Owner, system, the API it provides — the map is queryable."
+
+[demo-block]
+[TIME 5m]
+Say:: "Now the payoff of this whole workshop. A new engineer needs a service — one that builds the trusted way, has probes and metrics and tracing, and is ready for GitOps. Instead of a week of plumbing, they fill in a form."
+Show:: *Create* → the *New Parasol microservice* template → the form: *Name* `parasol-demo`, *Your Gitea organization* `{user}-svcs`, *Owner* `parasol` → *Create*. Watch the three steps run: fetch the skeleton, publish to Gitea, register in the catalog.
+Do:: While the task runs, narrate the steps; when it finishes, follow the *Open in the software catalog* link to the new Component, then show the repo it created:
++
+[source,sh,role=execute,subs="attributes"]
+----
+curl -sk "{gitea_url}/api/v1/orgs/{user}-svcs/repos" \
+  | python3 -c 'import sys,json;[print("repo:",r["full_name"]) for r in json.load(sys.stdin)]'
+----
++
+"A form became a real Git repository and a registered service in under a minute — carrying the base image, the probes, the metrics, the tracing, the GitOps wiring you built by hand across the last nine modules. The platform team packaged all of it into one button."
+
+[demo-block]
+[TIME 3m]
+Say:: "And it is a paved road, not a cage — plain, standard code in the engineer's own repo, theirs to change."
+Show:: The scaffolded repo in Gitea: `pom.xml` (Quarkus, Java 21), `src/.../InfoResource.java`, `application.properties` (health, metrics, OpenTelemetry), the UBI9 `Containerfile`, `catalog-info.yaml`, `devfile.yaml`.
+Do:: Point at the wiring that is already there:
++
+[source,sh,role=execute,subs="attributes"]
+----
+curl -sk "{gitea_url}/{user}-svcs/parasol-golden/raw/branch/main/catalog-info.yaml" | grep -E 'kind:|owner:|system:'
+----
++
+"Nobody hand-wrote any of this. The golden path made the correct decisions once, and the new service inherits them — then the engineer owns it and drives wherever they need to."
+
+[NOTE]
+.Resetting between runs
+====
+`ws prep m11 --user {user} --yes` returns everything to the entry state: it empties your `{user}-svcs` scaffold org and purges `{user}-dev`, so the next run starts from a clean slate.
+The scaffold is fast (seconds), so the create-a-service beat lands live with no waiting.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Tour the software catalog
+⏱ *~12 min* · learn what Parasol runs, and who owns it
+
+Open the {rhdh_url}[Developer Hub portal^] and click *Enter* to sign in as a guest.
+You land on the portal home; in the left sidebar, click *Catalog*.
+
+The catalog defaults to showing *Components* — the things Parasol builds and runs.
+You should see the Parasol services, including `parasol-claims`, `parasol-web`, and `parasol-notifications`.
+
+// media-pass: screenshot m11-developer-hub-golden-paths-01-catalog-components.png — the Developer Hub
+// Catalog list filtered to Kind=Component, showing parasol-claims / parasol-web / parasol-notifications
+// with their owner (parasol) and type columns. HIGH priority — this is the "org map" opening visual.
+// See media-manifest.md.
+
+Click *parasol-claims* to open its entity page.
+Read what the catalog knows about it, without opening a single YAML file:
+
+* *Owner* — the `parasol` group (the team responsible).
+* *System* — `parasol-insurance` (the group of services it belongs to).
+* *Provides API* — `parasol-claims-api`.
+* *Tags* — `java`, `quarkus`, `rest`, `postgresql`.
+
+Click the *parasol-claims-api* link (or open the *API* tab), and you will see its *OpenAPI* definition rendered in the portal — the contract other services consume, browsable without leaving the catalog.
+
+// media-pass: screenshot m11-developer-hub-golden-paths-02-component-and-api.png — the parasol-claims
+// entity page (About card: owner=parasol, system=parasol-insurance, provides parasol-claims-api) and
+// the parasol-claims-api OpenAPI definition rendering. HIGH priority. See media-manifest.md.
+
+The catalog is not just a screen — it is an *API*, and the entity you just read came from a `catalog-info.yaml` file in the service's own Git repository.
+Prove both from the terminal.
+Fetch a short-lived guest token, then ask the catalog API about the claims service:
+
+[source,sh,role=execute,subs="attributes"]
+----
+TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+curl -sk -H "Authorization: Bearer $TOKEN" \
+  "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-claims" \
+  | python3 -c 'import sys,json
+d=json.load(sys.stdin); s=d["spec"]; a=d["metadata"]["annotations"]
+print("kind:      ", d["kind"])
+print("owner:     ", s["owner"])
+print("system:    ", s["system"])
+print("providesApi:", ",".join(s.get("providesApis",[])))
+print("source:    ", a.get("backstage.io/managed-by-location"))'
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+kind:       Component
+owner:      parasol
+system:     parasol-insurance
+providesApi: parasol-claims-api
+source:     url:http://gitea.gitea.svc:3000/parasol/parasol-claims/raw/branch/main/catalog-info.yaml
+----
+====
+
+That `source:` line is the point: the catalog entry is generated from a file that lives *with the code* (a `catalog-info.yaml` in the `parasol-claims` repo), reviewed in pull requests — not maintained by hand in a separate system.
+
+[NOTE]
+.About that internal `gitea.gitea.svc:3000` link
+====
+The `source:` URL points at Gitea's *in-cluster service address* (`gitea.gitea.svc:3000`), which the portal uses to read catalog files — it is *not* a link your browser can open.
+When you want to view a repository in your browser, use the Gitea *route* instead: {gitea_url}[Gitea^].
+This is a known rough edge of the workshop portal's internal wiring; note it and move on.
+====
+
+Finally, open the *System* — click through to `parasol-insurance` (from the claims entity's About card, or via *Catalog → Kind: System*).
+Its page shows every Component and API that is *part of* it — the org map for the whole claims platform on one screen.
+
+[.checkpoint]
+****
+✔ *Verify:* in the catalog you found the `parasol-claims` Component, and can state its *owner* (`parasol` group), its *System* (`parasol-insurance`), and the *API* it provides (`parasol-claims-api`) — and the terminal query returned the same facts, sourced from a `catalog-info.yaml` in the service's repo.
+****
+
+== 2. Scaffold a service from the golden path
+⏱ *~15 min* · turn a short form into a complete, registered Parasol service
+
+Now create something new — the way a new engineer should: from a golden path, not by copying an existing repo.
+
+In the portal, click *Create* (left sidebar).
+You see the templates available to you; the recommended one is *New Parasol microservice*.
+Read its description — it scaffolds a Quarkus (Java 21) service that already has health probes, Prometheus metrics, OpenTelemetry, a UBI9 `Containerfile`, and a Dev Spaces `devfile.yaml`.
+Click *Choose*.
+
+// media-pass: screenshot m11-developer-hub-golden-paths-03-create-templates.png — the Create page with
+// the "New Parasol microservice" template card (tags: recommended, quarkus, java, parasol) and its
+// paved-road description. See media-manifest.md.
+
+Fill in the form:
+
+[cols="1,3",options="header"]
+|===
+| Field | Value
+
+| Name | `parasol-policy`
+| Your Gitea organization | `{user}-svcs`
+| Owner | `parasol` _(the default)_
+|===
+
+`parasol-policy` is a believable new service for the claims team (a policy lookup).
+The *Your Gitea organization* is your *own* scaffold org, `{user}-svcs` — this is where the new repo will be published, isolated from everyone else's.
+
+Click *Next*, review, then *Create*.
+
+// media-pass: screenshot m11-developer-hub-golden-paths-04-template-form.png — the "New Parasol
+// microservice" form filled in exactly (Name parasol-policy, Your Gitea organization user1-svcs, Owner
+// parasol). HIGHEST priority — the form is the core action of the module. See media-manifest.md.
+
+Watch the task run.
+It executes three steps, and you can follow each one's log live:
+
+. *Fetch skeleton and substitute values* — copies the paved-road service skeleton, substituting your service name.
+. *Publish to Gitea* — creates the repository in your `{user}-svcs` org and pushes the initial commit.
+. *Register in the software catalog* — adds the new service to the catalog so it appears next to `parasol-claims`.
+
+// media-pass: screenshot m11-developer-hub-golden-paths-05-scaffold-steps.png — the scaffolder task
+// page with the three steps (fetch / publish / register) completed green and the output links ("Open
+// the new repository", "Open in the software catalog"). HIGH priority — this is the module's signature
+// "one button" visual. See media-manifest.md.
+
+When it finishes you get two links: *Open the new repository* and *Open in the software catalog*.
+
+[NOTE]
+.The "Open the new repository" link points at the internal address
+====
+Just like the catalog `source:` link in exercise 1, *Open the new repository* resolves to Gitea's *in-cluster* address (`gitea.gitea.svc:3000`) and will not open in your browser.
+To view your new repo, use the Gitea *route*: {gitea_url}/{user}-svcs/parasol-policy[{user}-svcs/parasol-policy^].
+The *Open in the software catalog* link works normally — it stays inside the portal.
+====
+
+Now verify the outcome from the terminal — both halves of what the template did.
+First, the repository really exists in *your* org:
+
+[source,sh,role=execute,subs="attributes"]
+----
+curl -sk "{gitea_url}/api/v1/orgs/{user}-svcs/repos" \
+  | python3 -c 'import sys,json
+for r in json.load(sys.stdin):
+    print("repo:", r["full_name"], "|", r["description"])'
+----
+
+.Expected output
+[source,texinfo]
+----
+repo: user1-svcs/parasol-policy | parasol-policy — scaffolded from parasol-service-template
+----
+
+Second, it is registered in the catalog and already *part of the parasol-insurance System*:
+
+[source,sh,role=execute,subs="attributes"]
+----
+TOKEN=$(curl -sk {rhdh_url}/api/auth/guest/refresh | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+curl -sk -H "Authorization: Bearer $TOKEN" \
+  "{rhdh_url}/api/catalog/entities/by-name/component/default/parasol-policy" \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);s=d["spec"];print("registered:", d["metadata"]["name"], "| owner:", s["owner"], "| system:", s["system"], "| lifecycle:", s["lifecycle"])'
+----
+
+.Expected output
+[source,texinfo]
+----
+registered: parasol-policy | owner: parasol | system: parasol-insurance | lifecycle: experimental
+----
+
+Open the *Catalog* in the portal and confirm `parasol-policy` now sits alongside `parasol-claims`, owned by `parasol`, part of `parasol-insurance` — a complete service that did not exist two minutes ago.
+
+=== Break and fix: run the template again with the same name
+The golden path publishes to a *real* Git server, and a Git server will not hold two repositories with the same name.
+Prove it: go back to *Create → New Parasol microservice*, fill in the *same* name `parasol-policy` and the *same* org `{user}-svcs`, and *Create*.
+
+This time the task *fails at the Publish step*.
+Open the failed step's log and read it:
+
+[source,texinfo]
+----
+Publish to Gitea
+  Error: Unable to create repository, 409 Conflict,
+  {"message":"The repository with the same name already exists."}
+----
+
+// media-pass: screenshot m11-developer-hub-golden-paths-06-scaffold-409.png — the scaffolder task with
+// the Publish step failed (red) and the 409 "repository with the same name already exists" error in the
+// step log. Embed here — the deliberate break. See media-manifest.md.
+
+That is the golden path being honest: it *fetched* the skeleton fine, but *publishing* into a repository that already exists is refused — no silent overwrite of your existing service.
+The *fix* is what you would do in real life: give the new service a *unique* name (`parasol-quote`, `parasol-billing`, …), or delete the old repo first if you truly meant to replace it.
+(The workshop clears your `{user}-svcs` slate on every `ws prep m11`, so a fresh run always starts empty.)
+
+[.checkpoint]
+****
+✔ *Verify:* the *New Parasol microservice* template published `{user}-svcs/parasol-policy` and registered it as a Component (`owner: parasol`, `system: parasol-insurance`) — confirmed from both Gitea and the catalog API; and re-running the template with the *same* name failed at *Publish* with a `409 … already exists`, which you read and understood.
+****
+
+== 3. Inspect the paved road — and start its build
+⏱ *~12 min* · see everything the template pre-wired, while the cluster builds it
+
+The template did not just make a folder; it made a *standards-compliant* service.
+Clone your scaffolded repo and look at what came pre-wired.
+
+[source,sh,role=execute,subs="attributes"]
+----
+cd ${HOME:-/tmp}
+git clone {gitea_url}/{user}-svcs/parasol-policy
+cd parasol-policy
+find . -type f -not -path './.git/*' | sort
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+./.dockerignore
+./.gitignore
+./.mvn/wrapper/maven-wrapper.properties
+./Containerfile
+./README.md
+./catalog-info.yaml
+./devfile.yaml
+./mvnw
+./mvnw.cmd
+./openshift/buildconfig.yaml
+./pom.xml
+./src/main/java/com/parasol/service/InfoResource.java
+./src/main/resources/application.properties
+./src/test/java/com/parasol/service/InfoResourceTest.java
+----
+====
+
+The scaffolded repo ships its own *build recipe* too — a UBI9 `Containerfile` plus a declarative `openshift/buildconfig.yaml` — so the cluster can turn this source into a container image with no Dockerfile or pipeline authoring from you.
+That build takes several minutes, so *start it now* and let it run on the cluster while you read the rest of this exercise.
+Apply the paved-road `BuildConfig`, then kick off a build from your working directory:
+
+[source,sh,role=execute]
+----
+oc apply -f openshift/buildconfig.yaml -n $DEV
+oc start-build $SVC --from-dir=. -n $DEV
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+imagestream.image.openshift.io/parasol-policy created
+buildconfig.build.openshift.io/parasol-policy created
+Uploading finished
+build.build.openshift.io/parasol-policy-2 started
+----
+====
+
+The build now runs *on the cluster* — pulling the UBI9 Java 21 builder image and running a full Maven build.
+(The build is numbered `-2` rather than `-1`: applying the `BuildConfig` registers its trigger, which claims build number 1, so your first manual build is 2 — cosmetic, and the next exercise finds it by label regardless.)
+Leave it; you will collect the result in the next exercise.
+Meanwhile, walk the paved road, file by file — every one of these is a decision the platform team made *once*, in the template, and you inherited:
+
+*The runtime is current and pinned.*
+`pom.xml` builds a *Quarkus {quarkus_version}* service on *Java 21* — the same LTS the rest of the Parasol portfolio runs, so services move in lockstep:
+
+[source,sh,role=execute]
+----
+grep -E 'maven.compiler.release|quarkus.platform.version' pom.xml
+----
+
+.Expected output
+[source,texinfo]
+----
+    <maven.compiler.release>21</maven.compiler.release>
+    <quarkus.platform.version>3.33.2.1</quarkus.platform.version>
+----
+
+*Observability is on by default.*
+`application.properties` and `pom.xml` wire health, metrics, and tracing without you asking — the endpoints you would otherwise add by hand:
+
+[source,sh,role=execute]
+----
+grep -E 'smallrye-health|micrometer-registry-prometheus|quarkus-opentelemetry' pom.xml
+----
+
+.Expected output
+[source,texinfo]
+----
+      <artifactId>quarkus-smallrye-health</artifactId>
+      <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
+      <artifactId>quarkus-opentelemetry</artifactId>
+----
+
+That gives every scaffolded service `/q/health/live`, `/q/health/ready`, and `/q/metrics` for free.
+
+*The image is trusted and non-root.*
+The `Containerfile` is a UBI9, multi-stage build on Red Hat's `openjdk-21` images, and the runtime stage runs as the numeric non-root user `185` — exactly the trusted-base, non-root discipline from the build modules:
+
+[source,sh,role=execute]
+----
+grep -E 'FROM |USER ' Containerfile
+----
+
+.Expected output
+[source,texinfo]
+----
+FROM registry.access.redhat.com/ubi9/openjdk-21:1.23 AS build
+FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.23
+USER 185
+----
+
+*The rest of the road is here too:* `catalog-info.yaml` (the entry that put the service in the catalog you saw in exercise 2), `devfile.yaml` (an "Open in Dev Spaces" workspace, Java 21 pinned), and `openshift/buildconfig.yaml` (a declarative in-cluster build recipe).
+The only real code is `InfoResource.java`, a one-endpoint starter you are meant to replace:
+
+[source,sh,role=execute]
+----
+cat src/main/java/com/parasol/service/InfoResource.java | grep -A2 'public Map'
+----
+
+.Expected output
+[source,texinfo]
+----
+    public Map<String, String> info() {
+        return Map.of("service", appName, "status", "ready");
+    }
+----
+
+That is the paved road: a correct starting line — current runtime, trusted image, probes, metrics, tracing, catalog entry, workspace — with the business logic left to you.
+
+[.checkpoint]
+****
+✔ *Verify:* in the cloned repo you can point to where each standard comes from — Java 21 + Quarkus {quarkus_version} (`pom.xml`), health/metrics/tracing (`pom.xml` + `application.properties`), the UBI9 non-root image (`Containerfile`), and the catalog registration (`catalog-info.yaml`) — none of which you wrote.
+****
+
+== 4. Deploy your scaffolded service into {user}-dev
+⏱ *~10 min* · collect the build and run the new service
+
+The build you started in exercise 3 has been running on the cluster while you toured the repo.
+Collect it — poll until it reports `Complete` (the first build on a fresh node pulls the UBI9 Java 21 builder image and runs a full Maven build, so on the build cluster this took about *8–9 minutes* end to end):
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 90); do
+  B=$(oc get build -n $DEV -l buildconfig=$SVC --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)
+  P=$(oc get build "$B" -n $DEV -o jsonpath='{.status.phase}' 2>/dev/null)
+  echo "  $(date +%T)  ${B:-build}: ${P:-Pending}"
+  case "$P" in
+    Complete) echo "  ✔ image built and pushed to the internal registry"; break;;
+    Failed|Error|Cancelled) echo "  ✖ build $P — see: oc logs build/$B -n $DEV"; break;;
+  esac
+  sleep 12
+done
+----
+
+.Expected output — the build converges (abbreviated)
+[%collapsible]
+====
+[source,texinfo]
+----
+  07:41:20  parasol-policy-1: Running
+  ...
+  07:49:40  parasol-policy-1: Running
+  07:49:52  parasol-policy-1: Complete
+  ✔ image built and pushed to the internal registry
+----
+====
+
+With the image in your namespace's registry, deploy and expose it.
+`oc new-app` creates a `Deployment` + `Service` from the image tag; `oc expose` gives it a `Route`:
+
+[source,sh,role=execute]
+----
+oc new-app ${SVC}:latest -n $DEV
+oc expose service/${SVC} -n $DEV
+oc rollout status deploy/${SVC} -n $DEV --timeout=120s
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+--> Found image ... in image stream "user6-dev/parasol-policy" under tag "latest" for "parasol-policy:latest"
+    Java Applications
+    ...
+--> Creating resources ...
+    deployment.apps "parasol-policy" created
+    service "parasol-policy" created
+--> Success
+    Application is not exposed. You can expose services ... 'oc expose service/parasol-policy'
+route/parasol-policy exposed
+deployment "parasol-policy" successfully rolled out
+----
+====
+
+Now prove the scaffolded service is live — and that the paved road's observability is real, not just wired.
+Call the starter endpoint, the readiness probe, and the metrics endpoint:
+
+[source,sh,role=execute]
+----
+ROUTE=$(oc get route $SVC -n $DEV -o jsonpath='{.spec.host}')
+curl -s "http://$ROUTE/api/info"; echo
+curl -s -o /dev/null -w "readiness /q/health/ready : %{http_code}\n" "http://$ROUTE/q/health/ready"
+curl -s -o /dev/null -w "metrics   /q/metrics      : %{http_code}\n" "http://$ROUTE/q/metrics"
+----
+
+.Expected output
+[source,texinfo]
+----
+{"status":"ready","service":"parasol-policy"}
+readiness /q/health/ready : 200
+metrics   /q/metrics      : 200
+----
+
+[NOTE]
+.A `503` for a few seconds right after exposing the route is normal
+====
+Immediately after `oc expose`, the Route needs a moment to program and the pod a moment to finish starting.
+If `/api/info` returns `503` on the first try, wait a few seconds and retry — it becomes `200` once the pod is ready.
+====
+
+Stop and notice what you did *not* do.
+You never wrote a Dockerfile, never chose a base image, never added a health endpoint or a metrics dependency, never set up tracing.
+You filled in a form, and minutes later a trusted-image, health-checked, metrics-emitting Parasol service is running in your namespace — the golden path carried every one of those decisions for you.
+
+[.checkpoint]
+****
+✔ *Verify:* the scaffolded `parasol-policy` built from its paved-road `Containerfile` (`build … Complete`), deployed into `{user}-dev`, and answers on its Route — `/api/info` returns `{"status":"ready","service":"parasol-policy"}`, and `/q/health/ready` and `/q/metrics` both return `200`, observability you never configured.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You scaffolded, inspected, and ran a golden-path service.
+Try these on your own:
+
+* *Wire the platform probe to the app's health endpoint.*
+`oc new-app` did not add a Kubernetes readiness probe — but the app already serves one.
+Connect them: `oc set probe deploy/$SVC --readiness --get-url=http://:8080/q/health/ready --initial-delay-seconds=10 -n $DEV`, then confirm the pod is gated on real readiness (`oc get pod -n $DEV -l deployment=$SVC`).
+Then *break it* — point the probe at `/q/health/WRONG`, watch the pod go `NotReady`, read the event, and fix it.
+* *Make your first change on the paved road.*
+Edit `InfoResource.java` to add a field to the JSON (say `"team": "claims"`), commit, and rebuild with another `oc start-build $SVC --from-dir=. -n $DEV` — the image redeploys and `/api/info` shows your change.
+* *Open the service in Dev Spaces.*
+The scaffold shipped a `devfile.yaml`. From your Dev Spaces module knowledge, open the repo in a Java 21 workspace and run `./mvnw quarkus:dev` (a separate module covers Dev Spaces in depth).
+* *Scaffold a second service under a new name.*
+Run the template again with a *unique* name and watch it register beside the first — reason about what the platform team would change in *one* place to give every future service a new standard (hint: the template's skeleton).
+
+When you are done, run `ws verify {module-id}` to confirm your scaffold outcome, or `ws prep {module-id} --yes` to empty your `{user}-svcs` org and purge `{user}-dev` for a clean start.
+
+[NOTE]
+.Clean up when you are done
+====
+`ws prep {module-id} --yes` returns everything to a clean entry state: it empties your `{user}-svcs` scaffold org (so the template can publish fresh) and purges `{user}-dev` (removing the service you built and ran).
+Your seeded Parasol forks in your personal Git namespace are never touched.
+====
+
+endif::demo[]

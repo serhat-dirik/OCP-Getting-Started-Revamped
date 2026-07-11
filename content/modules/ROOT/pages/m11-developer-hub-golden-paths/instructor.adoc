@@ -1,0 +1,186 @@
+= Developer Hub & Golden Paths: Instructor Guide
+:module-id: m11
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (Red Hat Developer Hub {rhdh_version},
+// OCP {ocp_version}) as user6 on 2026-07-11 by performing every exercise: the guest catalog tour, the
+// scaffolder task (fetch/publish:gitea/register ~10-15s), the 409 on a duplicate name, and the
+// in-cluster UBI9 build of the scaffolded service (~8.5 min COLD — the long pole). Read
+// "Watchouts → the build is the long pole" and "Watchouts → internal RHDH links" before running this
+// for a room; both will generate questions.
+
+The module's signature beat is exercise 2: a short form scaffolds a complete, catalog-registered Parasol service into the attendee's own Git org in *seconds* — "modules 2 through 10 in one button."
+The one thing that needs managing is *time*: the scaffold is instant, but *building* the scaffolded image in-cluster (exercise 4) takes about *8–9 minutes* the first time on a node, so the lab deliberately *starts the build in exercise 3* and fills the wait with the paved-road inspection.
+Two other seams to know up front: the portal uses *guest* sign-in (everyone is "guest"; isolation is per-Gitea-org, not per-portal-identity), and several *links inside RHDH point at Gitea's internal service address* and are not browser-clickable.
+
+== Timing
+
+Total hands-on: *~49 min* of attendee activity, but the wall clock is dominated by the *~8–9 min in-cluster build* that overlaps exercises 3–4 (spec target 75 min; add ~15 min of concept up front).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core (as user6, RHDH {rhdh_version})
+
+| 1 | Tour the software catalog | ~12 min | UI browse + one guest-token catalog query — *seconds*
+| 2 | Scaffold from the golden path | ~15 min | scaffolder task (fetch → publish:gitea → register) *~10–15s*; the duplicate-name `409` *~5s*
+| 3 | Inspect the paved road + start build | ~12 min | clone *seconds*; the in-cluster build is *started here* and runs *~8–9 min* in the background
+| 4 | Deploy into `{user}-dev` | ~10 min | collect the build (poll to `Complete`); `oc new-app` + `oc expose` *~30s*; rollout + curl *~30s*
+|===
+
+[NOTE]
+.How this timing was measured
+====
+Every exercise was performed as `user6` on the build cluster (Red Hat Developer Hub {rhdh_version}, OCP {ocp_version}) on 2026-07-11.
+
+* *Catalog tour (exercise 1)* — browsing is instant; the terminal catalog query (guest token via `/api/auth/guest/refresh`, then `/api/catalog/entities/by-name/...`) returns in *under a second*.
+* *Scaffold (exercise 2)* — the scaffolder task ran its three steps (fetch the skeleton, `publish:gitea` to `{user}-svcs`, `catalog:register`) in *~10–15 seconds*; the deliberate duplicate-name re-run failed at *Publish* with a `409` almost immediately.
+* *Build (exercises 3–4)* — the first in-cluster build measured *~8.5 minutes* (`509s`): it pulls the UBI9 `openjdk-21` builder image and runs a full Maven build (downloading dependencies).
+Builds land on *any* worker node, so a "second" build is not reliably warmer — assume *~8–9 min* per build.
+This is why the lab *starts the build in exercise 3* and inspects the repo while it runs.
+* *Deploy (exercise 4)* — once the image is built, `oc new-app` + `oc expose` + rollout took *~30 seconds*; `/api/info`, `/q/health/ready`, and `/q/metrics` answered `200` (a transient `503` for a few seconds while the Route programmed).
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster admin unless noted).
+`SAMPLE` is any attendee you use to smoke-test; note that starting M11 *evicts* that user's M01–M05 / M09 / M10 entry (they share `{user}-dev`).
+
+. *A sample user's entry state materializes and verifies 7/7.*
++
+[source,sh,role=execute]
+----
+SAMPLE=user1
+ws start m11 --user $SAMPLE
+ws verify m11 --user $SAMPLE --entry-only
+----
++
+Expect `✅ all 7 checks passed`: `$SAMPLE-dev` + the `ws-entry-m11` marker, the shared RHDH portal reachable, the Parasol catalog populated (`parasol-claims`), the golden-path template registered, the `$SAMPLE-svcs` scaffold org present, and a *clean scaffold slate* (the org is empty — running the template is the lab).
+
+. *The shared Developer Hub portal is up and serving guest sign-in.*
++
+[source,sh,role=execute]
+----
+DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+curl -ks -o /dev/null -w 'portal: HTTP %{http_code}\n' "https://backstage-developer-hub-rhdh.${DOMAIN}/"
+oc get pods -n rhdh
+----
++
+Expect `portal: HTTP 200` and a running `backstage-developer-hub-...` pod (plus its `backstage-psql-...` database).
+The portal is *shared by the whole room* — one instance serves everyone.
+
+. *The Parasol catalog is populated and the golden-path template is registered.*
++
+[source,sh,role=execute]
+----
+RHDH="backstage-developer-hub-rhdh.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
+TOKEN=$(curl -sk "https://$RHDH/api/auth/guest/refresh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/entities/by-name/component/default/parasol-claims" | python3 -c 'import sys,json;print("component:", json.load(sys.stdin)["metadata"]["name"])'
+curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/entities/by-name/template/default/parasol-service-template" | python3 -c 'import sys,json;print("template: ", json.load(sys.stdin)["metadata"]["name"])'
+----
++
+Expect `component: parasol-claims` and `template:  parasol-service-template`.
+If either is missing, the catalog wiring (`app-config-rhdh` `catalog.locations`, pointing at the `parasol/*` Gitea repos) or the Gitea seeding needs attention.
+
+. *Each attendee's scaffold org exists and is empty.*
++
+[source,sh,role=execute]
+----
+GITEA="gitea-gitea.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
+curl -sk "https://$GITEA/api/v1/orgs/user1-svcs/repos" | python3 -c 'import sys,json;print("repos in user1-svcs:", len(json.load(sys.stdin)))'
+----
++
+Expect `repos in user1-svcs: 0` on a fresh entry state.
+The org is created (and emptied) by the entry-state hook on every `ws start`/`ws prep`; a non-empty org means a prior scaffold was not cleared — re-run `ws prep m11 --user user1`.
+
+. *(For a demo) pre-solve a sample user.*
++
+[source,sh,role=execute]
+----
+ws solve m11 --user user1     # materializes user1-svcs/parasol-golden (a demo-ready scaffolded repo)
+----
++
+`ws solve m11` creates a representative already-scaffolded service (`{user}-svcs/parasol-golden`) with a `catalog-info.yaml`, so you have a concrete post-scaffold repo to show without running the template live.
+It materializes the *repo outcome*, not a built/running image (the lab's build is interactive).
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Do the scaffold live — it is fast.*
+The scaffolder task finishes in ~10–15 seconds, so the "one button becomes a service" beat lands *live*; you do not need to pre-bake it.
+Keep `ws solve m11 --user {user}` (`{user}-svcs/parasol-golden`) as a fallback if the portal is sluggish, and to show a "here's one from earlier" repo.
+* *Sign in ahead of time and pin the catalog.*
+Click *Enter* (guest) before the room and open the *Catalog* filtered to `parasol-claims`, so beat 1 is one glance.
+* *Drive the scaffold from the portal, verify from the terminal.*
+Fill the form on screen for the visual; then confirm the outcome with the two `curl`s in the demo arc (the repo in Gitea, the Component in the catalog) so the audience sees it is *real*, not a mock.
+* *Do not build live.*
+The in-cluster build is ~8–9 minutes — too long for a demo.
+The demo stops at "scaffolded + registered"; the *running* service is a workshop exercise, or show `ws solve`'s `parasol-golden` repo as the artifact.
+* *Skip the internal "Open the new repository" link on screen* — it points at `gitea.gitea.svc:3000` and will not open.
+Open the repo via the Gitea route instead ({gitea_url}/{user}-svcs/parasol-golden).
+
+== Top questions attendees ask
+
+*1. "Why is the sign-in just an 'Enter' button — no password?"*::
+The workshop portal uses *guest* sign-in: one click, no credentials, everyone is the same guest identity.
+It is the simplest honest auth for a shared teaching portal — no per-attendee login friction.
+A real deployment wires *single sign-on* (OpenShift OAuth or an identity provider) so the catalog and templates run under each engineer's real identity, with role-based access.
+Attendee *isolation* here comes from each person scaffolding into their *own* Gitea org (`{user}-svcs`), not from the portal identity.
+
+*2. "The 'Open the new repository' link (or the catalog 'source' link) doesn't open."*::
+Those links resolve to Gitea's *in-cluster service address* (`gitea.gitea.svc:3000`) — the address RHDH uses internally to read and write Git.
+Your browser cannot reach that address.
+Open the repo through the Gitea *route* instead: {gitea_url}/{user}-svcs/parasol-policy.
+This is a known rough edge of the workshop portal's internal wiring; the *Open in the software catalog* link (which stays inside RHDH) works normally.
+
+*3. "The template didn't create a pipeline or an Argo app — where's the rest?"*::
+This golden path scaffolds three things: the *service skeleton* (with probes, metrics, tracing, a trusted image, and a build recipe), the *published repository* in your org, and the *catalog registration*.
+Turning it into a *running* service is exercise 4 (build the paved-road image, run it).
+Wiring a pipeline (a separate Pipelines module) and GitOps delivery (a separate GitOps module) on top is the paved road's *next layer* — exactly the kind of thing a platform team adds to the template so every future service inherits it.
+The point of the module is the *pattern*: standards encoded once, applied on every click.
+
+*4. "My scaffold failed with a 409 — did I break something?"*::
+No — that is the deliberate break-and-fix in exercise 2.
+The `publish:gitea` step refuses to create a repository whose name already exists in your org (a Git server will not hold two repos with the same name).
+Fix it by choosing a *unique* name, or delete the existing repo first.
+The workshop empties your `{user}-svcs` org on every `ws prep m11`, so a fresh run always starts from an empty slate.
+
+*5. "Why does the build take so long?"*::
+The first in-cluster build pulls the UBI9 Java 21 *builder image* and runs a *full Maven build* (downloading every dependency) — about *8–9 minutes*.
+Builds can land on any worker node, so a later build is not reliably faster.
+The lab is structured around this: you *start the build in exercise 3* and inspect the repo while it runs, then *collect it in exercise 4*.
+It is real work happening on the cluster, not a hang.
+
+== Watchouts
+
+* *The build is the long pole — protect the interleave.*
+The scaffolded image build is ~8–9 minutes and the lab hides it behind the exercise-3 inspection.
+If an attendee races ahead to exercise 4 before starting the build, they will sit and wait; make sure the room *starts the build at the top of exercise 3* (the `oc apply -f openshift/buildconfig.yaml` + `oc start-build`) and reads while it runs.
+Budget the module's wall clock around one ~9-minute build, not around the ~49 minutes of activity.
+* *Guest auth means one shared identity — a portal restart drops sessions.*
+Everyone signs in as the same guest, and the portal is shared and read-mostly.
+If the `backstage-developer-hub` pod restarts mid-session, attendees just click *Enter* again.
+Isolation is by *Gitea org* (`{user}-svcs`), so two attendees scaffolding the *same service name* into *different* orgs is fine; the same name into the *same* org is the `409`.
+* *Links inside RHDH point at the internal Gitea address.*
+The catalog `source`/`view`/`edit` links and the scaffolder's "Open the new repository" link resolve to `gitea.gitea.svc:3000` and are not browser-clickable.
+Steer attendees to the Gitea *route* ({gitea_url}) to view repos; set the expectation early so it does not read as "broken."
+* *TechDocs is annotated but not built.*
+The Parasol Components carry a `backstage.io/techdocs-ref` annotation, but no docs are built in this workshop, so the *TechDocs* tab shows "not found."
+Do not promise a rendered docs experience; TechDocs is a "go deeper" capability (it needs a docs build or an external builder), not a lab step here.
+* *The scaffolded README's build command does not match the repo.*
+The generated `README.md` suggests `oc new-build --strategy=docker --binary` (which defaults to looking for `Dockerfile`), but the repo ships a `Containerfile` — so that exact command *fails* with `open .../Dockerfile: no such file or directory`.
+The lab deliberately uses `oc apply -f openshift/buildconfig.yaml` instead (the repo's `BuildConfig` correctly sets `dockerfilePath: Containerfile`).
+If an attendee copies the README command and it fails, that is why — point them at the lab's build steps.
+* *Applying the `BuildConfig` claims build number 1.*
+The repo's `BuildConfig` carries a trigger that increments the build counter on apply, so the attendee's first *manual* build is numbered `-2`, not `-1` (there is no failed `-1` object — it is cosmetic).
+The exercise-4 poll finds the build *by label*, so the number does not matter; do not chase a "missing build 1."
+* *M11 shares `{user}-dev` with several modules.*
+Its entry state (and the service you build) lives in `{user}-dev`, which M01–M05, M09, and M10 also use.
+`ws prep`/`ws start m11` evicts those modules' entry apps and purges `{user}-dev` automatically — so switching to M11 from any of them is clean, and switching back re-materializes the other module's world.
+
+== Provenance
+
+M11 is built fresh on *Red Hat Developer Hub {rhdh_version}* (guest sign-in; a shared, read-mostly portal), with a Parasol software catalog fed from the `parasol/*` Gitea repositories (Components `parasol-claims`/`parasol-web`/`parasol-notifications`, three `parasol-*-api` APIs, the `parasol-insurance` System, the `parasol` Group) via `app-config-rhdh` `catalog.locations`, and a golden-path Software Template ("New Parasol microservice") that scaffolds a Quarkus {quarkus_version} / Java 21 service and publishes it into each attendee's own Gitea organization (`{user}-svcs`) with the first-party `publish:gitea` scaffolder action, then registers it with `catalog:register`.
+Every command, output, and timing — the guest catalog query, the scaffolder task (`fetch:template` → `publish:gitea` → `catalog:register`, ~10–15s), the `409` on a duplicate name, the paved-road repo contents (Quarkus/JDK-21, health/metrics/OTel, a UBI9 non-root `Containerfile`, `catalog-info.yaml`, `devfile.yaml`, `openshift/buildconfig.yaml`), the in-cluster UBI9 build (~8.5 min), `oc new-app` + `oc expose`, and the `/api/info` + `/q/health/ready` + `/q/metrics` responses — was performed and measured on Red Hat Developer Hub {rhdh_version} / OpenShift {ocp_version} as `user6` on 2026-07-11.
+Developer Lightspeed for Red Hat Developer Hub (a `lightspeed-core` sidecar ships with the portal) is *not* wired to a usable chat UI in this environment and is treated as an [ADS] "go deeper" capability, not a lab step.
+Structure and narrative adapt the Advanced App Platform Developer Hub material (credit per the reuse policy); no content ported from stale material.
