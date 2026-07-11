@@ -1,0 +1,119 @@
+# PostgreSQL backing store for the workshop Keycloak. The RHBK operator does NOT bundle a database
+# (unlike RHDH), so the Keycloak CR needs an external DB — this is the smallest supported one.
+# PERSISTENT (PVC, not emptyDir): realms/clients/users imported here must survive a Keycloak or DB
+# pod restart, or every attendee's seeded realm-{user} would vanish on reschedule.
+---
+# why: the DB credentials, consumed by BOTH the postgres container (to init) and the Keycloak CR
+# (db.usernameSecret/passwordSecret). Internal-only, disposable workshop DB — a fixed value is fine
+# (same posture as the entry-state claims-db precedent); the DB is never reachable off-cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-db
+  namespace: sso-workshop
+  labels:
+    app: keycloak-db
+    portfolio.redhat.com/component: keycloak
+type: Opaque
+stringData:
+  username: keycloak
+  password: keycloak-workshop-db
+  database: keycloak
+---
+# why: 10Gi persistent volume on the cluster default StorageClass (auto-detected — no storageClassName,
+# so the portfolio installs on any cluster). Holds the Keycloak schema (realms/clients/users).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: keycloak-db
+  namespace: sso-workshop
+  labels:
+    app: keycloak-db
+    portfolio.redhat.com/component: keycloak
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# why: the PostgreSQL 15 server. Internal OpenShift imagestream (openshift/postgresql:15-el9) — cached
+# on every cluster, no external pull secret needed (replicable). Env mapped from the keycloak-db Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak-db
+  namespace: sso-workshop
+  labels:
+    app: keycloak-db
+    portfolio.redhat.com/component: keycloak
+spec:
+  replicas: 1
+  # Recreate: one writer to one PVC — never two pods on the same data dir.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: keycloak-db
+  template:
+    metadata:
+      labels:
+        app: keycloak-db
+        portfolio.redhat.com/component: keycloak
+    spec:
+      containers:
+        - name: postgresql
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef: {name: keycloak-db, key: username}
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: keycloak-db, key: password}
+            - name: POSTGRESQL_DATABASE
+              valueFrom:
+                secretKeyRef: {name: keycloak-db, key: database}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: keycloak-db
+---
+# why: stable in-cluster address the Keycloak CR resolves — keycloak-db.sso-workshop.svc:5432.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-db
+  namespace: sso-workshop
+  labels:
+    app: keycloak-db
+    portfolio.redhat.com/component: keycloak
+spec:
+  selector:
+    app: keycloak-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432

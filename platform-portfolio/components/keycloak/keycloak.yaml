@@ -1,0 +1,56 @@
+# The workshop Keycloak instance (Red Hat build of Keycloak 26.6). One instance, backed by the
+# adjacent PostgreSQL. Separate from the cluster login IdP (ns `keycloak`) in every way.
+#
+# Hostname strategy is DOMAIN-FREE for portfolio replicability: instead of hardcoding a hostname
+# (the portfolio never knows the cluster domain), the operator's wildcard ingress is disabled and a
+# host-less edge Route (below) lets OpenShift auto-assign keycloak-sso-workshop.<ingress-domain>.
+# hostname.strict:false + proxy.headers:xforwarded make Keycloak resolve its issuer URL from the
+# router's X-Forwarded headers, so tokens are issued for whatever domain the cluster actually has.
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  name: sso-workshop
+  namespace: sso-workshop
+  labels:
+    portfolio.redhat.com/component: keycloak
+spec:
+  instances: 1
+  db:
+    vendor: postgres
+    host: keycloak-db
+    database: keycloak
+    usernameSecret: {name: keycloak-db, key: username}
+    passwordSecret: {name: keycloak-db, key: password}
+  # Serve plain HTTP inside the pod; the edge Route below terminates TLS with the cluster ingress cert.
+  http:
+    httpEnabled: true
+  hostname:
+    # Dynamic issuer resolution from request headers — no cluster domain baked into the portfolio.
+    strict: false
+  # Trust the OpenShift router's X-Forwarded-* headers so Keycloak knows the external scheme is https.
+  proxy:
+    headers: xforwarded
+  # Disable the operator's default wildcard Ingress (HOSTS '*' → OpenShift makes no usable Route);
+  # the host-less edge Route below is the reachable, domain-free entry point instead.
+  ingress:
+    enabled: false
+---
+# why: the browser-facing entry point. No spec.host → OpenShift auto-assigns keycloak-sso-workshop.
+# <ingress-domain> (deterministic from cluster domain, so the entry state can compute the auth-server
+# URL). Edge termination uses the cluster's default ingress certificate — no cert to provision.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: keycloak
+  namespace: sso-workshop
+  labels:
+    portfolio.redhat.com/component: keycloak
+spec:
+  to:
+    kind: Service
+    name: sso-workshop-service
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
