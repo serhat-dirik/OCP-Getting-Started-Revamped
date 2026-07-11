@@ -293,17 +293,38 @@ spec:
                 || { echo "❌ oc login as ${WS_USER} failed"; exit 1; }
               oc --kubeconfig="$HOME/.kube/config" project "${WS_USER}-dev" >/dev/null 2>&1 || true
 
-              echo "▶ seeding the workshop repo clone (best effort)…"
-              if [[ ! -d "$HOME/ocp-getting-started/.git" ]]; then
-                git clone --depth 1 "$MIRROR_URL" "$HOME/ocp-getting-started" 2>/dev/null \
-                  || echo "  (skipped — mirror clone failed, not fatal)"
+              echo "▶ cloning the workshop repo (the ws CLI + entry states live here)…"
+              # Reliable, not best-effort: `ws` (attendee prep/verify) resolves REPO_ROOT from this
+              # clone, so a missing clone = no `ws`. Retry the in-cluster mirror a few times.
+              for i in $(seq 1 6); do
+                [[ -d "$HOME/ocp-getting-started/.git" ]] && break
+                git clone --depth 1 "$MIRROR_URL" "$HOME/ocp-getting-started" && break
+                echo "  clone attempt $i/6 failed — retrying in 5s…"; sleep 5
+              done
+              if [[ -x "$HOME/ocp-getting-started/tools/ws/ws" ]]; then
+                echo "✅ ws CLI present"
+              else
+                echo "⚠ ws CLI missing after clone — 'ws prep' unavailable until the terminal restarts"
               fi
 
-              echo "▶ writing shell greeting…"
-              mkdir -p "$HOME/.bashrc.d"
-              cat > "$HOME/.bashrc.d/00-workshop.sh" <<EOF
-              echo "You are logged in as \$(oc whoami 2>/dev/null || echo ${WS_USER}) — project: \$(oc project -q 2>/dev/null || echo ${WS_USER}-dev)"
-              EOF
+              echo "▶ writing shell profile (ws on PATH + greeting)…"
+              # Seed .bashrc from skel (HOME=/home/lab-user is set on the terminal container), then
+              # append an idempotent workshop block — PATH so `ws` is runnable, greeting on interactive
+              # shells only. Guarded by a marker because the home PVC persists across restarts. Written
+              # with single-quoted echoes (NOT a heredoc: an indented closing delimiter is invalid both
+              # in this YAML block scalar and to bash) so every $ lands literally in .bashrc.
+              [[ -f "$HOME/.bashrc" ]] || cp /etc/skel/.bashrc "$HOME/.bashrc" 2>/dev/null || touch "$HOME/.bashrc"
+              if ! grep -q "WS_WORKSHOP_PROFILE" "$HOME/.bashrc" 2>/dev/null; then
+                {
+                  echo ''
+                  echo '# WS_WORKSHOP_PROFILE — workshop terminal setup (idempotent)'
+                  echo 'export PATH="$HOME/ocp-getting-started/tools/ws:$PATH"'
+                  echo 'if [[ $- == *i* ]]; then'
+                  echo '  echo "You are logged in as $(oc whoami 2>/dev/null || echo attendee) — project: $(oc project -q 2>/dev/null || echo none)"'
+                  echo '  echo "Set up a module with: ws prep m01   (then follow the lab; ws verify m01 checks it)"'
+                  echo 'fi'
+                } >> "$HOME/.bashrc"
+              fi
               echo "✅ terminal prepared for ${WS_USER}"
           volumeMounts:
             - name: home
@@ -391,6 +412,13 @@ spec:
           image: {{ $img.terminal | quote }}
           imagePullPolicy: IfNotPresent
           env:
+            # The terminal image's passwd sets HOME=/data, but the persistent PVC + the kubeconfig,
+            # repo clone, and shell profile that terminal-prep writes all live at /home/lab-user.
+            # Without this override the ttyd shell opened as the showroom ServiceAccount and `ws` was
+            # absent (found in the first live test, 2026-07-11). Point HOME at the PVC so shells open
+            # as {user} with `ws` on PATH — realizing the intent the comment above always claimed.
+            - name: HOME
+              value: /home/lab-user
             - name: NAMESPACE
               valueFrom:
                 fieldRef:
