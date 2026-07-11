@@ -39,18 +39,22 @@ The same grant is what lets `ws verify m12` read your ServiceMonitor and rule.
 
 == My alert never fires even though the app is clearly failing
 
-Symptom:: You scaled the database to zero, the claims API is failing, but `ParasolClaimsErrorRateHigh` sits in *Inactive* far longer than you expected — or never leaves it.
-Cause:: Two effects starve the rule of data.
-The load generator's steady trickle produces only ~0.08/s of 5xx while the database is down — just *under* the rule's `0.1/s` threshold — and within ~40–60s the failing app trips its own `/q/health/ready` probe, so the platform pulls the pod out of rotation and the router answers with 503s that never reach the app to be counted.
-With too few recorded 5xx, `rate(...[5m])` never climbs past the line, so the `for: 2m` timer never starts.
-Fix:: Drive a firm push of failing requests during the break — the same thing the lab's failing-load step does — so the 5xx rate clearly clears `0.1/s`:
+Symptom:: You scaled the database to zero, the claims API is failing, but `ParasolClaimsErrorRateHigh` sits in *Inactive* (or flaps briefly into *Pending* and falls back) — it never reaches *Firing*.
+Cause:: You are banking too few 5xx before the failing pod removes itself from the scrape.
+While the database is down the app returns 500s, but within ~60–80s it trips its own `/q/health/ready` probe; Kubernetes then pulls the pod out of the Service endpoints (you will see the sampled requests flip from `500` to `503` as it leaves rotation), the ServiceMonitor's scrape *freezes*, and the 5xx counter stops climbing.
+A *serial* one-request-at-a-time loop — plus the load generator's steady trickle — banks only a couple of dozen 5xx before that freeze, a 5-minute rate of ~0.08/s that is just *under* the rule's `0.1/s` threshold, so `rate(...[5m])` never crosses the line and the `for: 2m` timer never completes.
+Fix:: Drive a *concurrent* burst, not a serial loop, so you bank hundreds of 5xx in the first half-minute — while the pod is still being scraped — and the rate clears `0.1/s` with room to spare:
 +
 [source,sh,role=execute]
 ----
-END=$((SECONDS+90)); while [ $SECONDS -lt $END ]; do curl -s -o /dev/null -w 'HTTP %{http_code}\n' "$CLAIMS/api/claims"; done
+end=$(( $(date +%s) + 90 ))
+for w in $(seq 1 20); do
+  ( while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null "$CLAIMS/api/claims"; done ) &
+done
+wait
 ----
 +
-With that load the rule reaches *Pending* at ~79s and *Firing* at ~192s (about 3¼ minutes).
+With the burst the 5xx rate holds around ~12/s and the rule reaches *Pending* at ~59s and *Firing* at ~178s (about 3 minutes).
 The `for: 2m` window over a `rate(...[5m])` is deliberately slow so a brief blip does not page anyone — confirm the rule loaded (`oc get prometheusrule parasol-claims-alerts -n <user>-dev`) and give it the full window.
 
 == I brought the database back, but the claims API still returns 500

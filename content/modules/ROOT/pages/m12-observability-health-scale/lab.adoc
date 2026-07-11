@@ -290,17 +290,41 @@ oc scale deploy/claims-db -n $NS --replicas=0
 --
 ====
 
-The database is gone — but the load generator's *steady trickle* barely moves the 5xx rate, and within a minute the failing app trips its own readiness probe, so the platform pulls the pod out of rotation and later requests never reach it to be counted.
-Give the API a *firm push* while it is still failing, so the 5xx rate clearly crosses your alert's `0.1/s` line.
-Run this from the terminal — it works whichever lane you picked — and watch every request fail: *200* while the old connection pool still works, *500* once it breaks, then *503* once the pod is marked NotReady:
+The database is gone — but making the alert fire is a *race against the app's own health check*.
+A one-request-at-a-time loop loses that race: within about a minute the failing app trips its own `/q/health/ready` probe, Kubernetes pulls the pod out of the Service endpoints, and the metrics scrape *freezes* with only a couple of dozen 5xx recorded — a 5-minute rate of roughly `0.08/s`, just *under* your `0.1/s` line, so the alert flaps in and out of *Pending* and never fires.
+Win the race with a *concurrent burst* instead — twenty workers hammering the failing API at once — so you bank hundreds of server-errors in the first half-minute, while the pod is still being scraped, and pin the 5-minute rate well above the line.
+Run it from the terminal (it works whichever lane you picked) and watch the sampled status go *200* while the old connection pool is still warm, then a steady stream of *500* once it breaks:
 
 [source,sh,role=execute]
 ----
-# ~90s of load against the failing API — Ctrl-C early once you have seen it failing:
-end=$(( $(date +%s) + 90 )); while [ "$(date +%s)" -lt "$end" ]; do
-  curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
+# 20 workers hammer the failing API so the 5xx rate clears 0.1/s *before* the app
+# trips its readiness probe (~1 min in) and drops out of the metrics scrape:
+end=$(( $(date +%s) + 90 ))
+for w in $(seq 1 20); do
+  ( while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null "$CLAIMS/api/claims"; done ) &
 done
+# meanwhile, sample the status once a second so you can watch 200 -> 500:
+while [ "$(date +%s)" -lt "$end" ]; do
+  curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
+  sleep 1
+done
+wait
 ----
+
+.Expected output (the once-a-second sampled line; the 20 workers push silently in the background)
+[%collapsible]
+====
+[source,texinfo]
+----
+GET /api/claims -> HTTP 200
+GET /api/claims -> HTTP 200
+GET /api/claims -> HTTP 500
+GET /api/claims -> HTTP 500
+GET /api/claims -> HTTP 500
+GET /api/claims -> HTTP 500
+GET /api/claims -> HTTP 500
+----
+====
 
 Now watch the alert catch it.
 The live *Inactive → Pending → Firing* progression lives in the platform's alerting engine, not on the `PrometheusRule` object — the CR carries only your rule's *spec*, and reading the ruler directly needs a cluster-monitoring role you do not have.
@@ -322,9 +346,10 @@ A healthy claims request logs nothing, and even the failures are terse — which
 [NOTE]
 .Measured: how long until it fires
 ====
-With the push of failing load, the alert reached *Pending* about *79 seconds* after the database went down — the 5-minute 5xx rate had to build past `0.1/s` — and *Firing* about two minutes after that, roughly *3¼ minutes* end to end.
-The two-minute `for:` window is deliberate: it stops a brief blip from paging anyone.
-(The steady trickle on its own peaks at only ~0.08/s of 5xx, just under the line — which is why you gave it the push.)
+With the concurrent burst, the 5xx rate cleared `0.1/s` within about *40 seconds* and climbed to roughly *12/s* — so `ParasolClaimsErrorRateHigh` reached *Pending* about *1 minute* after the database went down and *Firing* about two minutes after that (its `for: 2m` window), close to *3 minutes* end to end.
+It fires with a wide margin, not a squeaker.
+A single serial `curl` loop, by contrast, peaks at only ~*0.08/s*: the failing pod trips its readiness probe and drops out of the scrape before enough server-errors are banked, so the rate never clears the line and the alert stays *Inactive*.
+That is why the burst is concurrent — and the two-minute `for:` window is deliberate, so a brief blip never pages anyone.
 ====
 
 // media-pass: screenshot m12-observability-health-scale-04-alert-firing.png — Observe -> Alerting, ParasolClaimsErrorRateHigh Firing (HIGH; the signature visual). Alt: "Observe Alerting view showing the ParasolClaimsErrorRateHigh alert Firing with warning severity while claims-db is scaled to zero."
@@ -342,7 +367,7 @@ oc rollout status deploy/parasol-claims -n $NS
 ----
 
 Give it a moment, then confirm the service is healthy again — *HTTP 200*.
-The alert does not clear the instant you recover: the 5-minute rate has to decay back below the threshold, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for a few minutes after the fix before it returns to *Inactive*.
+The alert does not clear the instant you recover: the 5-minute rate has to decay back below the threshold, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for several minutes after the fix before it returns to *Inactive* — the harder you pushed, the more 5xx there are to drain from the window, so it can take the better part of ten minutes.
 
 [source,sh,role=execute]
 ----
@@ -614,7 +639,7 @@ ifdef::demo[]
 ====
 Run `ws solve m12 --user {user}` first: it materializes the *end state* — the claims app at 2 replicas with the CPU HorizontalPodAutoscaler (HPA), the `parasol-claims-alerts` rule, and the PodDisruptionBudget (PDB) already in place — so every signal is live and you only have to *drive* it.
 Have the console open on *Observe → Metrics* with the 5xx-rate query ready, a second tab on *Observe → Alerting*, and a terminal logged in as `{user}`.
-The database break plus a short push of failing load fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
+The database break plus a *concurrent burst* of failing load fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
 ====
 
 [demo-block]
@@ -635,14 +660,15 @@ curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics \
 [TIME 1m]
 Say:: "I'm going to take the database away. Watch the alert — it's armed and inactive right now."
 Show:: *Observe → Alerting*, `ParasolClaimsErrorRateHigh` in *Inactive*.
-Do:: Break it, then push a short burst of failing load so the 5xx rate clears the alert's threshold (the steady trickle alone sits just under it) — note the time; it fires in about three minutes:
+Do:: Break it, then drive a *concurrent burst* of failing load so the 5xx rate clears the alert's threshold before the failing pod trips its readiness probe and drops out of the scrape (a serial trickle never gets there) — note the time; it fires in about three minutes:
 +
 [source,sh,role=execute,subs="attributes"]
 ----
 oc scale deploy/claims-db -n {user}-dev --replicas=0
-# ~90s of load against the now-failing API, backgrounded so you can keep narrating:
-END=$((SECONDS+90)); while [ $SECONDS -lt $END ]; do \
-  curl -s -o /dev/null http://parasol-claims-{user}-dev.{cluster_domain}/api/claims; done &
+# 20 workers pound the now-failing API for ~90s, backgrounded so you can keep narrating:
+end=$(( $(date +%s) + 90 )); for w in $(seq 1 20); do \
+  ( while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null http://parasol-claims-{user}-dev.{cluster_domain}/api/claims; done ) & \
+done
 ----
 +
 "Three minutes to fire. While it cooks, let's see what the signals say — and why logs won't save us here."
