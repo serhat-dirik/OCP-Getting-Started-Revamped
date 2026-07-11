@@ -16,6 +16,12 @@ include::partial$version-attributes.adoc[]
 // Healthy in 26s (7 resources), drift replicas 1→3 showed OutOfSync, manual Sync reverted to 1,
 // self-heal reverted a fresh drift in ~4s (watch-triggered; the 90s reconcile interval is only the
 // ceiling under load), and a git edit (stage replicas 2→3) arrived after Refresh + Sync.
+// Console dual-path retrofit (2026-07-11): the k8s-facing workload-inspection/mutation steps
+// (confirm dev empty, confirm workloads + tracking-id, route serving, drift-scale, self-heal watch,
+// stage 2 replicas, stage 2→3) now carry [tabs] Console|CLI. Argo CD UI beats (create app, Sync,
+// self-heal toggle, DIFF), the forbidden-apply teaching CLI, Gitea edits, and the git-clone/oc-kustomize
+// repo tour stay single-path (no OpenShift-console duality). Console nav reuses the m01/m02 live-grounded
+// 4.21 unified-console labels; annotation views use the universal YAML tab.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -264,6 +270,17 @@ This module hands that job to a controller: you point an Argo CD Application at 
 Your `{user}-dev` namespace is empty of the claims app right now — you removed nothing; the entry state left it clean so *this* is the deploy.
 Confirm it:
 
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}[OpenShift web console^], set the *Project* selector to `{user}-dev`, then open *Workloads* → *Deployments*.
+The list is empty — no claims app is deployed here yet.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get deploy -n $DEV
@@ -274,6 +291,8 @@ oc get deploy -n $DEV
 ----
 No resources found in user1-dev namespace.
 ----
+--
+====
 
 Now create the Application.
 You do this in the *Argo CD web UI*, not with `oc` — and there is a concrete reason.
@@ -357,8 +376,20 @@ Within a minute the app is *Synced* and *Healthy*.
 // fully green: Synced + Healthy, all 7 resources with green health hearts, the two Deployments Healthy.
 // HIGH priority (this is the "it worked" payoff). See media-manifest.md.
 
-Confirm the result from the terminal — the workloads are really there, and they are *GitOps-managed*:
+Confirm the result — the workloads are really there, and they are *GitOps-managed*:
 
+[tabs]
+====
+Console::
++
+--
+With the *Project* set to `{user}-dev`, open *Workloads* → *Deployments*: `claims-db` and `parasol-claims` are both there, `1/1` ready — the same tree Argo CD shows, now as real workloads.
+Click `parasol-claims`, open its *YAML* tab, and find under `metadata.annotations` the line `argocd.argoproj.io/tracking-id: claims-dev-{user}:apps/Deployment:{user}-dev/parasol-claims`.
+That annotation is Argo CD's fingerprint — the CLI reads the same field below.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get deploy -n $DEV
@@ -374,10 +405,23 @@ claims-db        1/1     1            1           64s
 parasol-claims   1/1     1            1           64s
 tracking-id: claims-dev-user1:apps/Deployment:user1-dev/parasol-claims
 ----
+--
+====
 
 That `tracking-id` annotation is Argo CD's fingerprint: this Deployment was reconciled from your Git repo, not applied by hand.
 Prove the app actually serves Parasol's claims, database-backed:
 
+[tabs]
+====
+Console::
++
+--
+Open *Networking* → *Routes* in `{user}-dev` and click the `parasol-claims` route's *Location* link — it opens the claims portal in a new tab.
+Append `/api/claims` to that URL to see the seeded claims as JSON, and `/q/health/ready` to see the readiness endpoint answer.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 ROUTE=$(oc get route parasol-claims -n $DEV -o jsonpath='{.spec.host}')
@@ -391,6 +435,8 @@ curl -s "http://$ROUTE/api/claims" | head -c 120; echo
 health: 200
 [{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,...
 ----
+--
+====
 
 You created one object in a web form and a controller stood up a complete, database-backed environment from Git — and stamped it as its own.
 
@@ -407,6 +453,17 @@ Your app is deployed from Git and `Synced`.
 Now do what happens in every real cluster: reach in and change the running app by hand, *behind Git's back*.
 Scale the Deployment from its Git-defined 1 replica up to 3:
 
+[tabs]
+====
+Console::
++
+--
+In *Topology* (Project `{user}-dev`), click the `parasol-claims` node to open its side panel, then click the *up arrow* on the Pod donut twice to raise the count to *3* (or *Actions* → *Edit Pod count*).
+The ring fills to three Pods — a hand edit, exactly the kind of out-of-band change Git is about to notice.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc scale deployment/parasol-claims --replicas=3 -n $DEV
@@ -419,6 +476,8 @@ oc get deployment/parasol-claims -n $DEV -o jsonpath='live replicas now: {.spec.
 deployment.apps/parasol-claims scaled
 live replicas now: 3
 ----
+--
+====
 
 Switch to the Argo CD tab and press *Refresh* on the `claims-dev-{user}` app.
 It flips to *OutOfSync*.
@@ -471,7 +530,20 @@ In the Argo CD app, open *APP DETAILS* (or *DETAILS*), find *SYNC POLICY*, and c
 
 With self-heal on, Argo CD stops waiting.
 Drift the cluster one more time — and this time *do not touch Argo CD at all*.
-Watch it snap back on its own: this command polls the live replica count once a second and stops the moment Argo CD has put it back to 1.
+Watch it snap back on its own.
+
+[tabs]
+====
+Console::
++
+--
+In *Topology* (Project `{user}-dev`), scale `parasol-claims` up to *3* again with the Pod-donut up arrow, then *keep Topology open and do nothing else*.
+Within a few seconds the ring shrinks back to a single Pod on its own — Argo CD caught the drift and reverted it, with no Sync click.
+--
+CLI::
++
+--
+This command polls the live replica count once a second and stops the moment Argo CD has put it back to 1:
 
 [source,sh,role=execute]
 ----
@@ -494,6 +566,8 @@ drifted to 3 — now watch, hands off (Argo CD snaps it back):
   02:44:34  replicas=1
   ✔ self-heal reverted the drift — no human touched Argo CD
 ----
+--
+====
 
 The console edit vanished — in a few seconds, with *nobody* pressing Sync.
 That is self-heal: Argo CD *watches* the resources it manages, so it catches drift the moment it happens and corrects it — not on a slow timer.
@@ -538,8 +612,18 @@ In the Argo CD UI, *+ NEW APP*:
 
 Click *CREATE*, then *SYNC → SYNCHRONIZE*.
 The stage overlay says *2 replicas* (that is its one real difference from dev), so Argo CD stands up the claims app two-up in `{user}-stage`.
-Confirm from the terminal:
+Confirm it:
 
+[tabs]
+====
+Console::
++
+--
+Switch the *Project* selector to `{user}-stage` and open *Workloads* → *Deployments*: `parasol-claims` is `2/2` — two replicas, exactly what `overlays/stage` declares.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get deployment/parasol-claims -n $STAGE -o jsonpath='stage replicas: {.spec.replicas} (from overlays/stage){"\n"}'
@@ -550,6 +634,8 @@ oc get deployment/parasol-claims -n $STAGE -o jsonpath='stage replicas: {.spec.r
 ----
 stage replicas: 2 (from overlays/stage)
 ----
+--
+====
 
 Now the point of the exercise: *change stage by changing Git*.
 Bump stage from 2 replicas to 3 — in the repository, not the cluster.
@@ -583,7 +669,20 @@ Now apply it: *SYNC → SYNCHRONIZE*.
 This is the *same* Sync you used in exercise 3 — there it reconciled the cluster *back* to Git after a console edit; here it reconciles the cluster *forward* to a change you made in Git.
 Either way, Sync makes the live cluster match desired state.
 Once the sync completes, `{user}-stage` runs the *3 replicas you set in the repository*.
-Watch the third replica arrive (poll until the Deployment reports 3):
+Watch the third replica arrive.
+
+[tabs]
+====
+Console::
++
+--
+In *Topology* (Project `{user}-stage`), watch the `parasol-claims` Pod donut fill from two Pods to *three* as the sync lands — or open *Workloads* → *Deployments* and see it settle at `3/3`.
+You never touched the cluster directly; the count changed because *Git* changed.
+--
+CLI::
++
+--
+Poll until the Deployment reports 3:
 
 [source,sh,role=execute]
 ----
@@ -595,6 +694,8 @@ done
 ----
 
 You should see the Deployment settle at `3/3` — the replica count you set *in Git*, now running, applied without ever running `oc scale`.
+--
+====
 
 [NOTE]
 .If the count does not move for a few minutes
