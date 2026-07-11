@@ -1,0 +1,61 @@
+# The "under load generator" half of the M12 entry state (spec: "claims app (instrumented build)
+# under load generator in {user}-dev"). A single, gentle curl loop against the in-cluster claims
+# Service — enough continuous traffic that golden-signal metrics, the custom counter, and traces are
+# always flowing for the PromQL/dashboard/trace beats, without pinning CPU (so the HPA scale-up in the
+# scale beat is visible and BOUNDED per the load-generator-sizing watchout). Each cycle:
+#   * GET  /api/claims                       — list traffic (http_server_requests golden signals)
+#   * GET  /api/claims/CLM-1001/history      — the deliberate N+1 (6 JDBC spans → the slow trace)
+#   * POST /api/claims                       — increments claims_created_total (the custom metric)
+#   * GET  /api/claims/CLM-0000              — a 404 (a small, steady error rate for the alert beat)
+# Uses ose-cli (bash + curl on every connected cluster; no custom image). Resources are tiny and
+# capped so it never dominates the {user}-dev quota.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-load
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-load
+    workshop.redhat.com/module: m12
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claims-load
+  template:
+    metadata:
+      labels:
+        app: claims-load
+        workshop.redhat.com/module: m12
+    spec:
+      containers:
+        - name: load
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          env:
+            - name: TARGET
+              value: http://parasol-claims:8080
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              echo "▶ claims load generator → ${TARGET} (gentle steady baseline)"
+              # Wait for the claims API to answer readiness before driving load (avoids a burst of
+              # connection errors during the initial rollout that would skew the first metrics).
+              until curl -sf -o /dev/null "${TARGET}/q/health/ready"; do sleep 3; done
+              echo "  ✓ claims ready — generating traffic"
+              while true; do
+                curl -s  -o /dev/null "${TARGET}/api/claims"
+                curl -s  -o /dev/null "${TARGET}/api/claims/CLM-1001/history"
+                curl -s  -o /dev/null -X POST "${TARGET}/api/claims" \
+                  -H 'Content-Type: application/json' \
+                  -d '{"claimant":"Load Generator","type":"auto","amount":100.00}'
+                curl -s  -o /dev/null "${TARGET}/api/claims/CLM-0000"
+                sleep 2
+              done
