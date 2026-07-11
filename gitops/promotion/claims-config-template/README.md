@@ -27,7 +27,7 @@ rollouts/                 M10 progressive-delivery form of prod (same artifact, 
   claims-analysis-template.yaml  job-provider AnalysisTemplate (probes the canary + verdict knob)
   db-migration-job.yaml     wave-ordered pre-app migration hook (db -> migrate -> app)
   kustomization.yaml        reuses base; swaps the Deployment for the Rollout; APP_ENV=prod
-applicationset.yaml       M10 beat 1 — ONE ApplicationSet (git dirs generator over overlays/*)
+applicationset.yaml       M10 beat 1 — ONE ApplicationSet (list generator; prod → rollouts/)
 ```
 
 The `rollouts/` overlay and `applicationset.yaml` are **M10 (GitOps at Scale & Progressive

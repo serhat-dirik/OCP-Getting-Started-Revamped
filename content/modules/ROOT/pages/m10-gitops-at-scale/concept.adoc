@@ -1,0 +1,242 @@
+= GitOps at Scale & Progressive Delivery: Concept
+:module-id: m10
+include::partial$version-attributes.adoc[]
+
+// Concept page for M10. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// Everything here was performed on OCP {ocp_version} / OpenShift GitOps {gitops_version}
+// (Argo CD 3.4, Argo Rollouts GA) as user4 on 2026-07-11 — the ApplicationSet generation, the
+// wave-ordered sync, the canary steps (25/50/100 pod-ratio), the job-provider AnalysisTemplate, the
+// auto-rollback at a failed analysis step, and the blue-green preview/promote were all cluster-run,
+// not recalled. Mermaid labels are deliberately attribute-free (the diagram extension mangles {attr}).
+
+[.lead]
+Parasol's claims service is now GitOps-managed in `dev` and `stage` — but it is deployed one *hand-made Argo CD Application per environment*, and the platform team is about to onboard a dozen more services.
+
+At that scale, "one Application per service per environment" is hundreds of near-identical objects nobody wants to author or keep consistent — and pushing a new build straight to production at 100% is a bet that it works.
+This module fixes both: you *generate* Applications from a single template with an *ApplicationSet*, *order* each environment's rollout with sync waves and hooks, and ship to production as a *canary* that an automated *analysis* step can *roll back on its own* before a bad release reaches your users.
+
+== What you'll learn
+
+* How to structure many apps and environments in Git, and generate their Argo CD *Applications* from one *ApplicationSet* instead of hand-authoring each — with a *position* on repo layout: *folders, not branches*.
+* How *sync waves* and *resource hooks* order a deployment so a *database migration* runs *after* the database is up and *before* the app starts.
+* What *progressive delivery* is, and why you ship to production as a *canary* (a small slice first) rather than all-at-once.
+* How an *Argo Rollout* runs canary steps with an *automated analysis* gate, and *auto-rolls-back* to the last good version when analysis fails — no human in the loop.
+* When to reach for *canary* versus *blue-green*, and where mesh- and serverless-based traffic shifting fit instead (covered in the Service Mesh and Serverless modules — separate modules).
+
+== From many Applications to one ApplicationSet
+
+In the previous GitOps module you created an Argo CD *Application* by hand for each environment — one for `dev`, one for `stage`.
+That is fine for one service and two environments.
+Now count it at Parasol's real scale: a dozen services, three environments each, is *thirty-six* Applications — every one a near-copy of another, differing only in a repo path and a target namespace, and every one a thing a human has to create, keep consistent, and not forget.
+
+An *ApplicationSet* is the Argo CD object that removes that toil.
+You describe the Application *once*, as a template, and hand the ApplicationSet a *generator* that produces the set of parameters to stamp it out — one Application per parameter set.
+Change the template once and every generated Application changes; add an environment and one line of input adds its Application.
+
+[mermaid]
+....
+flowchart LR
+  subgraph HAND["By hand: one Application per env, forever"]
+    direction TB
+    H1[Application: claims-dev]
+    H2[Application: claims-stage]
+    H3[Application: claims-prod]
+    H4[... x every new service]
+  end
+  subgraph SET["One ApplicationSet"]
+    direction TB
+    GEN[generator:<br/>dev, stage, prod] --> TMPL[Application template]
+  end
+  TMPL --> A1[claims-dev]
+  TMPL --> A2[claims-stage]
+  TMPL --> A3[claims-prod]
+  classDef h fill:#fde8e8,stroke:#c0392b,color:#7b241c;
+  classDef s fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class H1,H2,H3,H4 h;
+  class GEN,TMPL,A1,A2,A3 s;
+....
+
+// media-pass: replace/augment with SVG export m10-gitops-at-scale-01-appset.svg (see media-manifest.md)
+
+*Generators are the interesting part.*
+The ApplicationSet spec lists one or more generators, each a different *source of truth* for "what set of things should exist":
+
+* a *list* generator — you enumerate the environments inline (what this module uses: explicit and legible);
+* a *git* generator — discover them from *folders* (or files) in a Git repo, so adding a folder adds an Application;
+* a *cluster* generator — one Application per registered cluster (the multi-cluster story, previewed below);
+* *matrix* / *merge* — combine generators (every service × every environment).
+
+Whichever you pick, the shape is the same: *parameters in, Applications out*.
+
+[NOTE]
+.Take a position: folders, not branches
+====
+There are two common ways to represent environments in Git.
+*Branches* (`dev`/`stage`/`prod` branches of the same files) look tidy but rot: the branches drift, merges between them get political, and "what is different about prod" is buried in a diff between branches.
+*Folders* (one `overlays/dev`, `overlays/stage`, `overlays/prod` directory on a single `main`) keep every environment visible side by side, on one branch, reviewable in one place — the difference between environments *is* the difference between folders.
+This workshop takes the folders position, and it is why the generators above key on *paths*, not *revisions*.
+====
+
+A real strength shows up the moment two environments must *differ in kind*, not just in a value.
+Your `dev` and `stage` are plain `Deployment`s; your `prod` is a progressive-delivery *Rollout*.
+One ApplicationSet still covers all three — each generated Application just points at the folder that describes that environment (`overlays/dev`, `overlays/stage`, and for prod the `rollouts/` folder).
+Same single object; environments that legitimately differ.
+
+== Order matters: sync waves and hooks
+
+Applying a folder of manifests "all at once" is usually fine — Kubernetes is eventually consistent, and controllers retry.
+Usually.
+It is *not* fine when one object must be ready before another is even created: a schema *migration* must run *after* the database accepts connections and *before* the application boots against it, or the app crashes on a schema it expects but that is not there yet.
+
+Argo CD gives you two tools to impose that order inside a single sync.
+
+Sync waves:: A `argocd.argoproj.io/sync-wave` annotation (an integer, default `0`) groups resources into ordered waves.
+Argo applies *all* of wave 0, waits for it to be healthy, then wave 1, then wave 2.
+Lower waves go first; negative waves go before the default.
+Resource hooks:: A resource annotated as a `Sync` (or `PreSync`/`PostSync`) *hook* is run as part of the sync rather than reconciled as steady-state.
+A `Sync` hook at a chosen wave is the idiomatic way to slot a *one-shot Job* — like a migration — into the middle of an ordered rollout.
+
+Your production folder uses exactly this to get *database → migration → application*:
+
+[mermaid]
+....
+flowchart LR
+  W0[wave 0<br/>claims-db + config + secret + services + route] --> W1[wave 1<br/>db-migration Job<br/>Sync hook]
+  W1 --> W2[wave 2<br/>claims Rollout<br/>the app]
+  classDef a fill:#fef5e7,stroke:#b7791f,color:#744210;
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class W0,W2 g;
+  class W1 a;
+....
+
+// media-pass: SVG export m10-gitops-at-scale-02-sync-waves.svg (see media-manifest.md)
+
+The database is wave `0` (the default).
+The migration is a `Sync` hook at wave `1`: it waits for the database, applies an idempotent schema change, and exits — a *Job*, not a Deployment, because it is an *action that runs once*, not desired state that should keep existing.
+The application (as a Rollout) is wave `2`: it is not even created until the migration Job has succeeded.
+The result is that a fresh production sync converges in the right order, unattended, every time — and because the migration is *idempotent* (safe to re-run), so does every re-sync.
+
+== Progressive delivery: canary, analysis, and automatic rollback
+
+GitOps gets a *new version's manifests* into an environment.
+It does not, by itself, answer the operational question that keeps release nights tense: _is this new version actually healthy under real conditions, and if it is not, how fast can we get off it?_
+Rolling a new image to *all* production pods at once bets the whole environment on the answer being "yes."
+
+*Progressive delivery* refuses that bet.
+Instead of replacing the running version wholesale, you route a *small slice* to the new version, *watch it*, and only widen the slice as it proves itself — and if it fails a check, you *stop and revert automatically*.
+*Argo Rollouts* is the controller that does this: it is a drop-in replacement for a `Deployment` (a `Rollout` object with the same pod template) whose `strategy` describes how to shift from the old version to the new one.
+
+The *canary* strategy shifts gradually.
+Your production Rollout runs these steps on every new version:
+
+[source,yaml]
+----
+strategy:
+  canary:
+    steps:
+      - setWeight: 25          # <1>
+      - pause: {duration: 20}  # <2>
+      - setWeight: 50
+      - analysis:              # <3>
+          templates:
+            - templateName: claims-canary-analysis
+      - setWeight: 100         # <4>
+----
+<1> Send *25%* to the new version (the *canary*); the rest stays on the proven *stable* version.
+<2> *Pause* — bake time to observe before widening.
+<3> Run an *AnalysisTemplate* against the canary; if it fails, the Rollout *aborts* and reverts to stable.
+<4> Only after analysis passes does the new version take *100%*.
+
+[NOTE]
+.How the traffic actually splits here: pod ratio, not request percentages
+====
+This platform shifts traffic by *pod ratio*: at `setWeight: 25` with 4 replicas, the controller scales the canary to *1 pod* and keeps *3* on stable, so roughly a quarter of pods — and so, behind one Service, roughly a quarter of requests — run the new version.
+That is honest and needs *no extra infrastructure*.
+*Request-level* precision (exactly 25.0% of requests, header-based routing) needs a *traffic router* — an OpenShift Route plugin, or a service mesh — which the Networking and Service Mesh modules cover (separate modules).
+Pod-ratio canary is the right default; reach for a traffic router when you need exact or rule-based splitting.
+====
+
+The *analysis* step is what makes this safe without a human watching.
+An *AnalysisTemplate* defines one or more *metrics*, each with a success/failure condition; the Rollout runs it at the step you place it and treats a failed metric as a signal to *abort*.
+Analysis providers vary — Prometheus queries, web checks, or a *Job* that runs your own probe.
+Your template uses a *Job* provider: it launches a short Job that probes the canary's real readiness endpoint (a `200` also proves the database wiring is good) and reports pass or fail.
+
+When analysis fails, the Rollout does the thing you most want at 2 a.m. and least want to do by hand:
+
+[mermaid]
+....
+flowchart LR
+  NEW[new version pushed<br/>via Git] --> C25[canary 25%]
+  C25 --> P[pause]
+  P --> C50[canary 50%]
+  C50 --> AN{analysis gate}
+  AN -->|pass| FULL[100% - promoted]
+  AN -->|fail| RB[abort and<br/>roll back to stable]
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef a fill:#fef5e7,stroke:#b7791f,color:#744210;
+  classDef r fill:#fde8e8,stroke:#c0392b,color:#7b241c;
+  class NEW,C25,C50,FULL g;
+  class P,AN a;
+  class RB r;
+....
+
+// media-pass: SVG export m10-gitops-at-scale-03-canary-analysis.svg (see media-manifest.md)
+
+It *aborts the rollout and keeps the stable version serving every request* — the canary pods are scaled away, the abort is recorded, and production never left the last known-good version.
+You did not lose sleep and your users did not see the bad build.
+The lab makes this happen on purpose: you force an analysis failure, watch the auto-rollback, and read the failed `AnalysisRun` the way you would read an incident.
+
+== Canary versus blue-green: two shapes of a safe rollout
+
+Canary is one progressive-delivery strategy; *blue-green* is the other, and Argo Rollouts serves both.
+
+Blue-green runs *two full versions side by side*: the current version (*blue*, taking all live traffic through an *active* service) and the new version (*green*, reachable through a separate *preview* service).
+You verify green on the preview endpoint, then *promote* — the active service flips from blue to green in one cut.
+There is *no gradual slice*: it is all-old, then all-new, with a *manual promotion gate* in between.
+
+[cols="1,2,2",options="header"]
+|===
+| | Canary | Blue-green
+
+| Traffic shift | Gradual (25% → 50% → 100%) | Instant cutover after promotion
+| Extra capacity | Small (a canary slice) | Full (two complete versions at once)
+| Best when | You want to limit blast radius and can measure health mid-rollout | You want a clean, instant switch and a full pre-flight on a preview URL
+| Rollback | Abort mid-rollout; stable never left | Flip active back to blue
+|===
+
+Rollouts is not the only way to shift traffic on OpenShift — it is the *deployment-controller* way.
+A *service mesh* shifts by L7 routing rules, and *serverless* (Knative) shifts by revision tags; both are covered in their own modules (separate modules).
+Rule of thumb: reach for *Argo Rollouts* when you want progressive delivery driven by the *deployment* and gated by *metrics/analysis*; reach for *mesh* when routing is already your traffic-management plane; reach for *serverless* when you are already on Knative revisions.
+
+[NOTE]
+.Where multi-cluster fits (a pointer, not this module)
+====
+The *cluster* generator turns one ApplicationSet into "this app, on every registered cluster" — the foundation of multi-cluster GitOps, usually paired with Red Hat Advanced Cluster Management.
+That is the Business Continuity & Multi-Cluster module's territory (a separate module); here, notice only that the *same ApplicationSet shape* you learn on three namespaces is what scales to many clusters.
+====
+
+== How this shows up in real orgs
+
+* *"Onboard a new service" stops meaning "author N more Applications."*
+With an ApplicationSet, a new service or a new environment is a template the platform team owns and a line of generator input — standards apply by construction, and nobody hand-copies YAML that then drifts.
+* *Release risk moves from "hope" to "measured."*
+Before progressive delivery, a production deploy is all-or-nothing and the rollback is a human noticing, deciding, and acting under pressure.
+After, the new version earns its traffic in slices, an analysis gate decides on evidence, and rollback is automatic and instant — the class of outage that starts with "the deploy looked fine" shrinks.
+* *The migration-ordering bug becomes structural, not tribal.*
+"Run the migration before the app, after the database" stops being a runbook step someone can skip; it is encoded as waves and hooks in the same repo as the app, and it happens the same way every time.
+* *Promotion stays a pull request.*
+Shipping a new version to production is still *editing Git* — the canary and its analysis are what make that edit *safe to automate*, so the platform can move fast without a privileged human running `apply` against prod.
+
+// media-pass: the cross-module Parasol platform-accretion diagram with the M10 layer (ApplicationSets + Argo Rollouts progressive delivery) highlighted — m10-gitops-at-scale-04-platform-accretion.svg (see media-manifest.md)
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than six minutes here before the live demo.
+Two ideas must land: (1) *one ApplicationSet generates the fleet* — you author the Application once and a generator stamps out one per environment; (2) *progressive delivery makes a production deploy safe to automate* — a canary earns its traffic in slices and an analysis gate rolls it back on its own.
+The money moment is the *auto-rollback*: ship a bad release, watch the canary abort at the failed analysis step and the stable version never leave production.
+Keep the concept tight so that beat can breathe.
+====
+endif::demo[]

@@ -1,0 +1,620 @@
+= GitOps at Scale & Progressive Delivery: Lab
+:module-id: m10
+include::partial$version-attributes.adoc[]
+
+// Lab page for M10. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Terminal commands run in the Showroom Terminal as {user}, so blocks are
+// [source,sh,role=execute]. The attendee OWNS {user}-dev/stage/prod, so every WORKLOAD view (deploys,
+// the Rollout, pods, the migration Job, AnalysisRuns, the route) is a real `oc` command there and is
+// load-bearing/verifiable. The Argo CD control plane (student-gitops) is SHARED and attendees cannot
+// write to it with oc — so the ApplicationSet is CREATED in the Argo CD WEB UI (as themselves, via
+// their applicationsets RBAC on proj-{user}) and the canary is WATCHED in the Argo CD Rollouts view;
+// those UI moments carry // media-pass: capture markers. New versions are shipped by editing the
+// {user}/claims-config FORK in the Gitea UI (git-driven, same as the previous GitOps module).
+// To keep jsonpath braces literal, the first block sets DEV/STAGE/PROD with subs=attributes (no
+// braces) and later oc blocks use $DEV/$STAGE/$PROD with NO subs. All commands, outputs, and timings
+// were performed as user4 on OCP {ocp_version} / OpenShift GitOps {gitops_version} (Argo CD 3.4, Argo
+// Rollouts GA) on 2026-07-11: the ApplicationSet adopted dev+stage and generated prod (~8s), prod
+// converged wave-ordered (db -> migrate -> Rollout, ~50s), the 1.0->1.1 canary ran 25%/pause/50%/
+// analysis(green)/100% (~2 min), and with the verdict knob = fail a 1.1->1.0 canary ABORTED at the
+// failed AnalysisRun with stable preserved (route 200 throughout), then a git revert recovered it.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set three shortcuts you will reuse in the terminal commands below:
+
+[source,sh,role=execute,subs="attributes"]
+----
+DEV={user}-dev
+STAGE={user}-stage
+PROD={user}-prod
+echo "your environments: $DEV, $STAGE, $PROD"
+----
+
+In this lab you take Parasol's claims platform from "GitOps-managed" to "GitOps *at scale*, delivered *safely*."
+You replace the hand-made per-environment Applications with *one ApplicationSet*, watch production converge in the right order through *sync waves and a migration hook*, ship a new version to production as a *canary* gated by *automated analysis*, and then deliberately ship a bad release and watch the canary *roll itself back* before it can reach your users.
+
+[NOTE]
+.One terminal, plus two browser tabs
+====
+Terminal commands run in the *Terminal* tab beside these instructions, logged in as `{user}`.
+They act on *your own* namespaces (`{user}-dev`, `{user}-stage`, `{user}-prod`), where the workloads live.
+Two tabs in the browser carry the rest:
+
+* *Argo CD* (the student instance) — {student_argo_url}[the student Argo CD UI^].
+Sign in with *Log in via OpenShift* as `{user}`.
+This is where you *create the ApplicationSet* and *watch the canary*.
+* *Gitea* — your config repo: {gitea_url}/{user}/claims-config[{user}/claims-config^].
+This is where you *ship a new version* by editing Git.
+
+Open both now.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — ~12-minute presenter arc: one ApplicationSet, a green canary, then the auto-rollback
+// ============================================================================
+ifdef::demo[]
+== Demo arc — The bad release that rolled itself back (12 min)
+
+[NOTE]
+.Before you present
+====
+Two prep steps, both *before the room*:
+
+. Run `ws solve m10 --user {user}`.
+It creates the ApplicationSet-equivalent end state — the claims app GitOps-managed in `{user}-dev`/`{user}-stage` *and* running in `{user}-prod` as a canary *Rollout* (with the wave-ordered migration hook) — then *blocks ~4–6 minutes by design* while everything goes Healthy.
+Do it early; it is truthful when it returns.
+. Sign in to the student Argo CD UI ({student_argo_url}) as `{user}`, open the `claims-prod-{user}` application, and switch to its *Rollout* view so the canary dashboard is your opening visual.
+
+Have a terminal with `PROD={user}-prod` set.
+The money moment is beat 3: a bad release that the analysis gate *aborts* on its own, stable never leaving production.
+====
+
+[demo-block]
+[TIME 3m]
+Say:: "Parasol runs a dozen services across three environments. Nobody hand-writes thirty-six Argo CD Applications — one ApplicationSet generates them. And production doesn't take a new build all at once; it takes it as a canary that has to prove itself."
+Show:: The Argo CD UI: the three `claims-{dev,stage,prod}-{user}` applications, all green; then the `claims-prod-{user}` *Rollout* view — 4 stable pods, Healthy.
+Do:: In the terminal, show that production really is a progressive-delivery Rollout, not a plain Deployment:
++
+[source,sh,role=execute,subs="attributes"]
+----
+PROD={user}-prod
+oc get rollout parasol-claims -n $PROD \
+  -o jsonpath='prod is a {.kind}, strategy {.spec.strategy.canary.steps[*].setWeight}%, phase {.status.phase}{"\n"}'
+----
++
+"One object generated all three environments; prod is the one that runs progressive delivery."
+
+[demo-block]
+[TIME 4m]
+Say:: "Let's ship a new build of the claims service to production — version 1.1 — the GitOps way: I edit Git, and the canary takes over."
+Show:: The Gitea editor on `rollouts/claims-rollout.yaml`, bumping the image tag `1.0` → `1.1` and committing; then back to the Argo CD Rollout view.
+Do:: After committing in Gitea, click *Refresh* on `claims-prod-{user}`, switch to the Rollout view, and narrate the steps while polling the terminal:
++
+[source,sh,role=execute]
+----
+for i in $(seq 1 24); do
+  S=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.currentStepIndex}')
+  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}')
+  echo "  $(date +%T)  step $S/5   $P   analysis:${A:-none}"
+  [ "$P" = "Healthy" ] && [ "$S" = "5" ] && break
+  sleep 7
+done
+----
++
+"25% to the canary, a pause, 50%, then an *analysis* Job probes the new pods — it passes — and only now does 1.1 take 100%. The new version earned its traffic."
+
+[demo-block]
+[TIME 4m]
+Say:: "Now the beat that matters. I ship another release — but this time the canary's analysis will fail, the way it would if the new build spiked errors. Watch production *not* break."
+Show:: The terminal setting the analysis verdict to fail, the Gitea commit of the next build, then the Argo CD Rollout view going *Degraded* and snapping back to stable.
+Do:: Force the analysis to fail, then ship:
++
+[source,sh,role=execute]
+----
+oc patch configmap m10-canary-control -n $PROD --type merge -p '{"data":{"verdict":"fail"}}'
+----
++
+Then in Gitea bump `rollouts/claims-rollout.yaml` image `1.1` → `1.0` (a stand-in for "the next build"), commit, *Refresh* `claims-prod-{user}`, and watch:
++
+[source,sh,role=execute]
+----
+for i in $(seq 1 20); do
+  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}')
+  echo "  $(date +%T)  $P   analysis:${A:-none}"
+  [ "$P" = "Degraded" ] && break
+  sleep 7
+done
+oc get route parasol-claims -n $PROD -o jsonpath='{.spec.host}' \
+  | xargs -I{} curl -ks -o /dev/null -w "users still served: %{http_code}\n" http://{}/q/health/ready
+----
++
+"The analysis failed at 50%, the Rollout *aborted*, and it rolled back to the stable version on its own — production answered `200` the entire time. No human, no incident, no bad build in front of users."
+
+[demo-block]
+[TIME 1m]
+Say:: "And here's the receipt — the analysis run that made the call."
+Show:: The failed `AnalysisRun` and its message.
+Do::
++
+[source,sh,role=execute]
+----
+oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp \
+  -o jsonpath='{.items[-1:].metadata.name}: {.items[-1:].status.phase} — {.items[-1:].status.message}{"\n"}'
+----
++
+"`Failed` — the metric breached its threshold, so the rollout was aborted. Read like an incident review, except the rollback already happened."
+
+[NOTE]
+.Resetting between runs
+====
+`ws prep m10 --user {user} --yes` returns everything to the entry state (namespaces purged, the fork restored, the attendee ApplicationSet cleared).
+The canary + auto-rollback arc is fast (each canary ~2 min); the abort lands live, no waiting to narrate around.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. From many Applications to one ApplicationSet
+⏱ *~15 min* · generate a fleet of Applications from one object
+
+Your claims app is GitOps-managed in `dev` and `stage` today — as *two hand-made Applications*.
+Confirm the starting point: dev and stage run the app, and *production is empty* (standing production up is part of this module).
+
+[source,sh,role=execute]
+----
+oc get deploy -n $DEV
+oc get deploy -n $STAGE
+oc get deploy,rollout -n $PROD
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME             READY   UP-TO-DATE   AVAILABLE   AGE
+claims-db        1/1     1            1           14m
+parasol-claims   1/1     1            1           14m
+NAME             READY   UP-TO-DATE   AVAILABLE   AGE
+claims-db        1/1     1            1           14m
+parasol-claims   2/2     2            2           14m
+No resources found in user1-prod namespace.
+----
+
+Adding production by hand means authoring a *third* Application.
+At Parasol's real scale — a dozen services, three environments each — that is thirty-six near-identical Applications to write and keep consistent.
+Instead you describe the Application *once* and let an *ApplicationSet* generate one per environment.
+The template is already in your fork.
+Clone it and read it:
+
+[source,sh,role=execute,subs="attributes"]
+----
+cd ${HOME:-/tmp}
+git clone {gitea_url}/{user}/claims-config 2>/dev/null; cd claims-config
+cat applicationset.yaml
+----
+
+.Expected output (the YAML below the comment header)
+[%collapsible]
+====
+[source,texinfo]
+----
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: claims-user1
+  namespace: student-gitops
+spec:
+  goTemplate: true
+  generators:
+    - list:
+        elements:
+          - env: dev
+            path: overlays/dev
+          - env: stage
+            path: overlays/stage
+          - env: prod
+            path: rollouts        # prod uses progressive delivery, not a plain Deployment
+  template:
+    metadata:
+      name: 'claims-{{.env}}-user1'
+    spec:
+      project: proj-user1
+      source:
+        repoURL: http://gitea.gitea.svc:3000/user1/claims-config.git
+        targetRevision: main
+        path: '{{.path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'user1-{{.env}}'
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
+----
+====
+
+Read what this says: a *list generator* enumerates three environments, and for each one the *folder* that describes it — `overlays/dev` and `overlays/stage` (plain Deployments), and for prod the `rollouts` folder (the progressive-delivery Rollout you will drive later).
+The `template` is stamped once per element: `claims-dev-{user}`, `claims-stage-{user}`, `claims-prod-{user}`.
+*One object describes the whole fleet* — and `dev`/`stage`/`prod` legitimately differ (prod is a Rollout), yet still come from this single ApplicationSet.
+
+Now create it.
+You do this in the *Argo CD web UI*, signed in as yourself — the same reason as the previous GitOps module: the Argo CD instance is *shared*, you cannot write to its control-plane namespace with `oc`, and Argo CD scopes you (via your `applicationsets` permission on `proj-{user}`) to your own project.
+Open the {student_argo_url}[student Argo CD UI^], *Log in via OpenShift* as `{user}`, go to the *ApplicationSets* view, and *create* an ApplicationSet from the `applicationset.yaml` above.
+
+// media-pass: screenshot m10-gitops-at-scale-01-appset-create.png — the Argo CD ApplicationSet
+// CREATE view with the claims-user1 ApplicationSet YAML (list generator, three env elements) pasted
+// in, before submit. HIGHEST priority + FLAG: confirm the exact 3.4 UI create affordance here (the
+// attendee terminal has no argocd CLI and cannot oc-apply to student-gitops, so the UI is the only
+// create path). See media-manifest.md and the instructor guide.
+
+The moment you create it, the ApplicationSet generates its three Applications.
+Two of them — `claims-dev-{user}` and `claims-stage-{user}` — already existed (your hand-made ones); the ApplicationSet *adopts* them by name and now manages them.
+The third — `claims-prod-{user}` — is *new*, and it stands production up.
+Watch production appear from the terminal (it was empty a moment ago):
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 24); do
+  RO=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}' 2>/dev/null)
+  echo "  $(date +%T)  prod rollout: ${RO:-<not created yet>}"
+  [ "$RO" = "Healthy" ] && { echo "  ✔ production is up — generated by the ApplicationSet"; break; }
+  sleep 7
+done
+----
+
+.Expected output — production converges in under a minute
+[source,texinfo]
+----
+  06:12:20  prod rollout: <not created yet>
+  06:12:34  prod rollout: Progressing
+  06:12:48  prod rollout: Healthy
+  ✔ production is up — generated by the ApplicationSet
+----
+
+// media-pass: screenshot m10-gitops-at-scale-02-appset-three-apps.png — the Argo CD ApplicationSet
+// detail (or Applications list filtered to the user) showing ONE ApplicationSet owning THREE
+// applications claims-dev/stage/prod-user1, all Synced/Healthy. HIGH priority. See media-manifest.md.
+
+You created *one* object and it produced *three* Applications — adopting the two that existed and standing up the one that did not.
+Add a fourth environment later and it is one more element in the list; onboard another service and it is another ApplicationSet the platform team owns.
+
+[.checkpoint]
+****
+✔ *Verify:* one *ApplicationSet* now manages three Applications; `claims-dev-{user}` and `claims-stage-{user}` were *adopted* (dev still `1/1`, stage still `2/2`), and `claims-prod-{user}` is *new* — `oc get rollout parasol-claims -n {user}-prod` reports `Healthy` where the namespace was empty before.
+****
+
+== 2. Sync waves and hooks: ordered convergence
+⏱ *~10 min* · watch production come up in the right order — database, then migration, then app
+
+Production did not just "appear" — it converged in a deliberate *order*.
+The `rollouts` folder your prod Application points at contains a *database migration* that must run *after* the database is accepting connections and *before* the app starts.
+Argo CD enforces that with *sync waves* and a *resource hook*.
+Look at what ran, in your own prod namespace.
+
+First, the migration Job — a `Sync` *hook* that Argo ran as part of the sync:
+
+[source,sh,role=execute]
+----
+oc get job claims-db-migrate -n $PROD
+oc logs job/claims-db-migrate -n $PROD | tail -8
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME                STATUS     COMPLETIONS   DURATION   AGE
+claims-db-migrate   Complete   1/1           12s        3m
+▶ waiting for claims-db:5432 to accept connections…
+claims-db:5432 - accepting connections
+▶ applying idempotent schema migration (schema_version marker)…
+CREATE TABLE
+INSERT 0 1
+✅ migration applied — schema_version:
+ version |          applied_at
+---------+-------------------------------
+       1 | 2026-07-11 02:37:24.182936+00
+(1 row)
+----
+
+The Job *waited* for the database, applied an idempotent schema change, and exited.
+It is a *Job*, not a Deployment, because it is an *action that runs once* — not desired state that should keep existing.
+Now see the annotations that *ordered* it — the database is the default wave `0`, the migration is a `Sync` hook at wave `1`, and the app Rollout is wave `2`:
+
+[source,sh,role=execute]
+----
+oc get deploy claims-db -n $PROD \
+  -o jsonpath='claims-db          wave: {.metadata.annotations.argocd\.argoproj\.io/sync-wave}{" (unset = default 0)"}{"\n"}'
+oc get job claims-db-migrate -n $PROD \
+  -o jsonpath='claims-db-migrate  wave: {.metadata.annotations.argocd\.argoproj\.io/sync-wave}  hook: {.metadata.annotations.argocd\.argoproj\.io/hook}{"\n"}'
+oc get rollout parasol-claims -n $PROD \
+  -o jsonpath='parasol-claims     wave: {.metadata.annotations.argocd\.argoproj\.io/sync-wave}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+claims-db          wave:  (unset = default 0)
+claims-db-migrate  wave: 1  hook: Sync
+parasol-claims     wave: 2
+----
+
+That is the whole ordering, encoded in the repo next to the app: *wave 0* (database) → *wave 1* (migration hook) → *wave 2* (application).
+Argo applied each wave only after the previous one was healthy, so the app was never created against a database whose schema was not ready.
+It happens the same way on every fresh sync — and because the migration is idempotent, safely on every *re-*sync too.
+Confirm production is actually serving, database-backed:
+
+[source,sh,role=execute]
+----
+oc get rollout parasol-claims -n $PROD
+ROUTE=$(oc get route parasol-claims -n $PROD -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -w "prod health: %{http_code}\n" "http://$ROUTE/q/health/ready"
+curl -s "http://$ROUTE/api/claims" | head -c 90; echo
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME             DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+parasol-claims   4         4         4            4           4m
+prod health: 200
+[{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview",...
+----
+
+[.checkpoint]
+****
+✔ *Verify:* the `claims-db-migrate` Job is `Complete` and its log shows it waited for the database then applied the schema; the wave annotations read *db (0) → migrate (1, Sync hook) → app (2)*; and prod runs `parasol-claims` as a Rollout `4/4` with the route answering `200`.
+****
+
+== 3. A canary rollout with automated analysis
+⏱ *~20 min* · ship a new version to production as a canary that has to prove itself
+
+Production runs claims `1.0` today.
+You are going to ship `1.1` — but *not* to all four pods at once.
+Because prod is a *Rollout*, a new image is delivered as a *canary*: a small slice first, a pause, a wider slice, an *automated analysis* check, and only then 100%.
+You trigger it the GitOps way — by editing Git.
+
+Open your fork in the *Gitea* tab at {gitea_url}/{user}/claims-config[{user}/claims-config^]:
+
+. Navigate to `rollouts/claims-rollout.yaml` and click the *pencil* (Edit) icon.
+. Find the `image:` line ending in `parasol-claims:1.0` and change the tag to `parasol-claims:1.1`.
+. *Commit Changes* directly to `main` (message e.g. "prod: ship claims 1.1").
+
+// media-pass: screenshot m10-gitops-at-scale-03-gitea-image-bump.png — the Gitea editor on
+// rollouts/claims-rollout.yaml with the image tag changed 1.0 -> 1.1, Commit Changes panel visible.
+// See media-manifest.md.
+
+Back in the *Argo CD* tab, open `claims-prod-{user}` and press *Refresh* so Argo re-reads `main` and syncs the new image into the Rollout.
+The Rollout controller sees a new version and starts the canary.
+Switch to the app's *Rollout* view to watch it visually, and poll it from the terminal at the same time:
+
+// media-pass: screenshot m10-gitops-at-scale-04-canary-progressing.png — the Argo CD Rollout view
+// mid-canary: revision 2 (canary, image 1.1) alongside revision 1 (stable, 1.0), SetWeight 25 or 50,
+// the analysis step. HIGH priority — this is the module's signature visual. See media-manifest.md.
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 30); do
+  S=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.currentStepIndex}')
+  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+  U=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.updatedReplicas}')
+  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null)
+  echo "  $(date +%T)  step $S/5   $P   canary-pods:${U:-0}/4   analysis:${A:-none}"
+  [ "$P" = "Healthy" ] && [ "$S" = "5" ] && { echo "  ✔ promoted to 100%"; break; }
+  sleep 7
+done
+----
+
+.Expected output — the canary earns its way to 100%
+[source,texinfo]
+----
+  06:39:38  step 0/5   Progressing   canary-pods:1/4   analysis:none
+  06:40:00  step 1/5   Paused        canary-pods:1/4   analysis:none
+  06:40:21  step 2/5   Progressing   canary-pods:2/4   analysis:none
+  06:40:32  step 3/5   Progressing   canary-pods:2/4   analysis:Running
+  06:41:27  step 4/5   Progressing   canary-pods:4/4   analysis:Successful
+  06:41:41  step 5/5   Healthy       canary-pods:4/4   analysis:Successful
+  ✔ promoted to 100%
+----
+
+Read the shape of it: *step 0* put *1 of 4 pods* on the canary (`setWeight: 25`), *step 1* was the *pause*, *step 2* widened to *2 of 4* (`50`), *step 3* ran the *analysis*, and only when analysis came back `Successful` did *step 4/5* take it to *all 4 pods* on `1.1`.
+The analysis is a short *Job* that probed the canary's real readiness endpoint — a genuine health check, not a timer.
+Look at the run that made the call, and confirm prod now serves `1.1`:
+
+[source,sh,role=execute]
+----
+oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp \
+  -o jsonpath='{.items[-1:].metadata.name}: {.items[-1:].status.phase}{"\n"}'
+oc get rollout parasol-claims -n $PROD \
+  -o jsonpath='stable image now: {.spec.template.spec.containers[0].image}{"\n"}' | sed 's|.*/parasol|parasol|'
+----
+
+.Expected output
+[source,texinfo]
+----
+parasol-claims-5485b86bcd-2-3: Successful
+stable image now: parasol-claims:1.1
+----
+
+[.checkpoint]
+****
+✔ *Verify:* editing the image to `1.1` in Git started a *canary* (you never ran `oc set image`); it progressed *25% → pause → 50% → analysis → 100%*, the `AnalysisRun` is `Successful`, and prod's Rollout now runs `parasol-claims:1.1` — shipped in slices, gated by a health check.
+****
+
+== 4. Break and fix: the analysis that saves production
+⏱ *~20 min* · ship a bad release on purpose, and watch the canary roll itself back
+
+A canary is only worth the toil if it *stops* a bad release.
+So ship one.
+You cannot reliably break a real image inside a timed lab, so production carries a deterministic *analysis control knob* — a ConfigMap in your prod namespace whose value the analysis Job honors.
+Set it to `fail`, and the next canary's analysis reports a failure *exactly as if the new build had spiked errors under real traffic*.
+
+Set the knob (this is in *your* namespace, so plain `oc` works):
+
+[source,sh,role=execute]
+----
+oc patch configmap m10-canary-control -n $PROD --type merge -p '{"data":{"verdict":"fail"}}'
+oc get configmap m10-canary-control -n $PROD -o jsonpath='analysis verdict is now: {.data.verdict}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+configmap/m10-canary-control patched
+analysis verdict is now: fail
+----
+
+Now ship the next build.
+In the *Gitea* tab, edit `rollouts/claims-rollout.yaml` again and change the image tag from `parasol-claims:1.1` back to `parasol-claims:1.0` — a stand-in for "the next release candidate" — and *Commit Changes* to `main` (message e.g. "prod: ship next build").
+Back in *Argo CD*, *Refresh* `claims-prod-{user}` and open the *Rollout* view.
+The canary starts again — but this time watch it *abort*:
+
+// media-pass: screenshot m10-gitops-at-scale-05-canary-aborted.png — the Argo CD Rollout view showing
+// the canary DEGRADED/aborted at the analysis step, the failed AnalysisRun, and stable still serving.
+// HIGH priority — the payoff visual. See media-manifest.md.
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 22); do
+  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null)
+  echo "  $(date +%T)  rollout: $P   analysis: ${A:-none}"
+  [ "$P" = "Degraded" ] && { echo "  ✖ canary aborted — analysis failed"; break; }
+  sleep 7
+done
+----
+
+.Expected output — the canary fails its analysis and aborts
+[source,texinfo]
+----
+  06:42:33  rollout: Progressing   analysis: Running
+  06:43:19  rollout: Progressing   analysis: Running
+  06:43:38  rollout: Degraded      analysis: Failed
+  ✖ canary aborted — analysis failed
+----
+
+Read it like an incident review — the Rollout tells you exactly what it did and why, and the failed `AnalysisRun` is the evidence:
+
+[source,sh,role=execute]
+----
+oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.message}{"\n"}'
+AR=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+oc get analysisrun "$AR" -n $PROD -o jsonpath='{.metadata.name}: {.status.phase} — {.status.message}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+RolloutAborted: Rollout aborted update to revision 3: Step-based analysis phase error/failed: Metric "canary-health" assessed Failed due to failed (1) > failureLimit (0)
+parasol-claims-7fcf6cf74c-3-3: Failed — Metric "canary-health" assessed Failed due to failed (1) > failureLimit (0)
+----
+
+Here is the point of the whole module.
+The canary *aborted* and *rolled back to the stable version on its own* — no human noticed, decided, and acted under pressure.
+And production *never went down*: the stable pods kept serving every request through the entire failed rollout.
+Prove it — the route answered `200` the whole time, and prod is still on the *good* version, not the aborted one:
+
+[source,sh,role=execute]
+----
+ROUTE=$(oc get route parasol-claims -n $PROD -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -w "prod health through the abort: %{http_code}\n" "http://$ROUTE/q/health/ready"
+oc get rollout parasol-claims -n $PROD \
+  -o jsonpath='stable ReplicaSet still serving: {.status.stableRS}  (the canary was scaled away){"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+prod health through the abort: 200
+stable ReplicaSet still serving: 5485b86bcd  (the canary was scaled away)
+----
+
+Now *fix it*, the GitOps way.
+A real fix is two things: clear the fault, and *revert the bad change in Git*.
+Clear the knob (the regression is "resolved"), then in the *Gitea* tab change the image tag back to `parasol-claims:1.1` and *Commit Changes* to `main` (message e.g. "Revert bad release; restore 1.1").
+Because you are reverting to the version that is *already* the stable one, the Rollout clears the abort and returns to `Healthy` — no new canary needed, because production is already running that version.
+
+[source,sh,role=execute]
+----
+oc patch configmap m10-canary-control -n $PROD --type merge -p '{"data":{"verdict":"pass"}}'
+# after committing the image revert to 1.1 in Gitea and pressing Refresh in Argo CD:
+for i in $(seq 1 12); do
+  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+  echo "  $(date +%T)  rollout: $P"
+  [ "$P" = "Healthy" ] && { echo "  ✔ recovered — production Healthy on the good version"; break; }
+  sleep 7
+done
+----
+
+.Expected output
+[source,texinfo]
+----
+configmap/m10-canary-control patched
+  06:44:15  rollout: Degraded
+  06:44:38  rollout: Healthy
+  ✔ recovered — production Healthy on the good version
+----
+
+[.checkpoint]
+****
+✔ *Verify:* with analysis forced to fail, shipping a new build started a canary that *aborted* at the analysis step (`RolloutAborted … Metric "canary-health" assessed Failed`); the route answered `200` *throughout* and the *stable* ReplicaSet kept serving; after you cleared the knob and reverted the image in Git, the Rollout returned to `Healthy`.
+Production was never at risk.
+****
+
+== 5. Blue-green: the other strategy
+⏱ *~5 min* · know the second shape of a safe rollout, and when to pick it
+
+Canary is one progressive-delivery strategy; *blue-green* is the other, and the same Argo Rollouts controller serves it.
+Where a canary shifts traffic *gradually* (25% → 50% → 100%) and gates on analysis mid-rollout, blue-green runs *two full versions side by side* — the live one (*blue*, behind an *active* service) and the new one (*green*, behind a *preview* service) — and cuts over *all at once* when you *promote*, with a *manual gate* in between.
+
+[cols="1,2,2",options="header"]
+|===
+| | Canary (what you did) | Blue-green
+
+| Traffic shift | Gradual, analysis-gated | Instant cutover on promotion
+| Extra capacity | A small canary slice | A full second copy
+| Reach for it when | You want to limit blast radius and can measure health mid-rollout | You want a clean instant switch after a full pre-flight on a preview URL
+|===
+
+You do not have to choose blindly: the decision guide is in the wrap-up, and the Challenge below lets you stand up a blue-green Rollout yourself if you want to see the preview-then-promote cut live.
+
+[.checkpoint]
+****
+✔ *Verify (understanding):* you can state, in one sentence each, when you would reach for a *canary* versus a *blue-green* rollout — and why request-level traffic percentages here would need a *traffic router* (Route plugin or mesh) rather than the pod-ratio splitting the canary used.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the whole progressive-delivery loop.
+Try these on your own:
+
+* *Add a fourth environment to the ApplicationSet.*
+In your fork's `applicationset.yaml`, add a `qa` element (`env: qa`, `path: overlays/stage` to reuse an overlay) — then reason about what has to be true for a new Application to appear (hint: your `proj-{user}` allows only `{user}-dev/stage/prod` destinations, so a `{user}-qa` would be *refused* by the AppProject — a tenancy boundary, not a bug).
+* *Read the analysis you cannot see in the UI.*
+Re-run a failing canary and `oc logs` the analysis Job's pod (`oc get pods -n {user}-prod -l job-name`) — the probe prints exactly why it failed.
+* *Stand up a blue-green Rollout.*
+Deploy a second, throwaway Rollout using the `blueGreen` strategy (`activeService` + `previewService` + `autoPromotionEnabled: false`), push a new image, watch the *preview* service point at the new version while *active* stays on the old, then promote it in the Argo CD Rollout view and watch active cut over.
+(The Rollouts controller serves blue-green with no extra infrastructure — same pod-ratio-free cutover you read about above.)
+* *Break the ordering on purpose.*
+Reason about what would happen if the migration hook were wave `3` instead of `1` — would the app come up before the schema was ready?
+
+When you are done, run `ws verify {module-id}` to confirm production is a healthy Rollout.
+
+[IMPORTANT]
+.Before you leave: delete your ApplicationSet, *then* reset
+====
+The ApplicationSet you created lives in the shared Argo CD control plane, and it will keep *regenerating* your Applications until you remove it — a namespace cleanup alone is not enough.
+To reset cleanly, do it in this order:
+
+. In the *Argo CD UI*, delete the `claims-{user}` ApplicationSet (this prunes the three Applications it generated).
+. Then run `ws prep {module-id} --yes` to purge your namespaces and re-materialize the clean entry state (your fork restored, dev/stage back to plain Applications, prod empty).
+
+Do step 1 first: if you `ws prep` while the ApplicationSet still exists, it will re-generate the apps you just purged.
+====
+
+endif::demo[]

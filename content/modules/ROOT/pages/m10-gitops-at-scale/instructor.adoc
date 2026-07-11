@@ -1,0 +1,176 @@
+= GitOps at Scale & Progressive Delivery: Instructor Guide
+:module-id: m10
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version} / OpenShift
+// GitOps {gitops_version}, Argo CD 3.4, Argo Rollouts GA) as user4 on 2026-07-11 by performing every
+// exercise and timing the operations. Read "Watchouts → creating the ApplicationSet" before running
+// this for a room — it is the one seam that will bite you (the attendee terminal has no argocd CLI
+// and cannot oc-apply to the shared Argo instance, so the ApplicationSet is created in the UI).
+
+The module's signature beat is exercise 4: a bad release that the canary's analysis *aborts* on its own, the stable version never leaving production (route `200` throughout).
+Both canaries are fast (~2 min each, pod-ratio pause + a job-provider analysis), so the whole ship-canary-rollback arc lands *live* with no waiting to narrate around.
+Two seams need your attention up front: attendees *create the ApplicationSet in the Argo CD UI* (no CLI path from the terminal), and the ApplicationSet *outlives a namespace reset* (delete it before `ws prep`).
+
+== Timing
+
+Total hands-on: *~70 min* (spec target 90 min; add ~12–15 min of concept up front).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core (as user4, {ocp_version})
+
+| 1 | One ApplicationSet generates the fleet | ~15 min | UI create; generation *~8s*; prod converges (db + migration + Rollout Healthy) in *~50s*
+| 2 | Sync waves and hooks | ~10 min | read-only (`oc get`/`oc logs`) — seconds
+| 3 | Canary with automated analysis | ~20 min | one Gitea commit + Refresh; canary *25%→pause 20s→50%→analysis ~45s→100%* ≈ *2 min*
+| 4 | Break and fix (auto-rollback) | ~20 min | knob + Gitea commit; canary aborts at analysis in *~90s*; git-revert recovery *~30s*
+| 5 | Blue-green (concept + challenge) | ~5 min | reading; optional hands-on blue-green in the Challenge
+|===
+
+[NOTE]
+.How this timing was measured
+====
+Every exercise was performed as `user4` on the build cluster (OCP {ocp_version}, OpenShift GitOps {gitops_version}, Argo CD {argocd_version}, Argo Rollouts GA via a cluster-scoped `RolloutManager`) on 2026-07-11, driving the shared Argo CD control plane the way the UI does (create/refresh the ApplicationSet + Applications) and shipping new versions by committing to the `{user}/claims-config` fork, then timing each operation.
+
+* *ApplicationSet (exercise 1)* — the three Applications were generated in *~8 seconds* (dev + stage *adopted* by name, prod *created*); production then converged in *~50 seconds* (claims-db, the wave-1 migration Job, then the Rollout to `4/4` Healthy) on a warm image cache.
+On a *cold* node add the image pull for the first user of the day.
+* *Canary (exercise 3)* — from the Gitea commit to `100%` Healthy was *~2 minutes*: `setWeight 25` (1 of 4 pods), a *20 s* pause, `setWeight 50` (2 of 4), the job-provider analysis (*~45 s*: two 200-probes at a 15 s interval plus Job startup), then `setWeight 100`.
+* *Break/abort (exercise 4)* — with `m10-canary-control` = `fail`, the canary reached the analysis step and *aborted* about *90 seconds* after the commit; the route answered `200` throughout and the stable ReplicaSet never scaled down.
+* *Fix (exercise 4)* — clearing the knob and reverting the image in Git returned the Rollout to Healthy in *~30 seconds* (reverting to the version that is already stable clears the abort without a fresh canary).
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster admin unless noted).
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m10 --user user1
+ws verify m10 --user user1 --entry-only
+----
++
+Expect `✅ all 14 checks passed`: the `user1-gitops` namespace + marker, the student Argo CD instance reachable, `proj-user1`, the `user1/claims-config` fork carrying the `rollouts/` overlay *and* `applicationset.yaml`, the analysis prereqs in `user1-prod` (the `claims-analysis` SA + `m10-canary-control` knob), claims GitOps-managed in `user1-dev`/`user1-stage`, and *no Rollout yet in `user1-prod`* (standing prod up is the lab).
+
+. *The cluster Argo Rollouts controller is serving.*
++
+[source,sh,role=execute]
+----
+oc get rolloutmanager -n openshift-gitops
+oc get pods -n openshift-gitops | grep rollouts
+----
++
+Expect a `RolloutManager` (cluster-scoped) and a running `argo-rollouts` controller pod.
+A `Rollout` only ever goes Healthy if this controller processes it — if it is missing, the `progressive-delivery` platform stack was not applied.
+
+. *The student instance can generate ApplicationSets for attendees.*
++
+[source,sh,role=execute]
+----
+oc get pods -n student-gitops | grep applicationset
+argocd admin settings rbac can user1 create applicationsets 'proj-user1/x' --namespace student-gitops
+----
++
+Expect the `student-gitops-applicationset-controller` pod `Running` and the RBAC check `Yes`.
+Attendees create the ApplicationSet under their own project; both must be in place (see Watchouts for how they create it).
+
+. *The analysis knob is present and defaults to pass.*
++
+[source,sh,role=execute]
+----
+oc get configmap m10-canary-control -n user1-prod -o jsonpath='verdict={.data.verdict}{"\n"}'
+----
++
+Expect `verdict=pass`.
+Exercise 4 flips it to `fail` and back; it is entry-owned and defaults to `pass` on every `ws prep`.
+
+. *(For a demo) pre-solve a sample user — it blocks ~4–6 min by design.*
++
+[source,sh,role=execute]
+----
+ws solve m10 --user user1     # stands prod up as a canary Rollout; BLOCKS until Synced/Healthy
+----
++
+[IMPORTANT]
+.`ws solve m10` blocks for ~4–6 minutes — that is correct, not a hang
+=====
+`ws solve m10` materializes the end state — production running claims as a canary *Rollout* (with the wave-ordered migration) on top of the always-present dev/stage — and *waits* for it to be Synced/Healthy before returning.
+It does not print "demo-ready" until the prod Rollout is actually `4/4` Healthy (image pull + claims-db + the migration Job + the Rollout, all in prod).
+Do not Ctrl-C it thinking it stalled.
+=====
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Pre-solve and pre-sign-in before the room.*
+Run `ws solve m10 --user {user}` early (blocks ~4–6 min) so a finished, Healthy prod Rollout is your opening visual, and sign in to the student Argo CD UI as `{user}` ahead of time — open `claims-prod-{user}` and switch to its *Rollout* view (the canary dashboard) so beats 2–3 are one click away.
+* *Both canaries are fast — the whole arc lands live.*
+The green canary (beat 2) and the aborting canary (beat 3) each take ~2 minutes; there is nothing to wait out.
+Let the Rollout view animate the 25% → 50% → analysis → 100% on screen, then the abort snapping back to stable.
+* *Drive by Git, narrate by terminal.*
+Ship each version with a one-line Gitea edit (the image tag) so the audience sees "GitOps"; keep the terminal poll running so the step/phase is legible while the UI animates.
+For the abort beat, `oc patch … verdict=fail` *before* the commit — the solve prod app is `selfHeal: false`, so the knob holds while you drive.
+* *Have a fallback.*
+If the shared student controller is sluggish and a sync lags, narrate from the Rollout view's history (the previous green canary's revisions) rather than waiting on a fresh one.
+
+== Top questions attendees ask
+
+*1. "Is the canary really sending 25% of requests to the new version?"*::
+Roughly, yes — by *pod ratio*, not by counting requests.
+At `setWeight: 25` with 4 replicas the controller runs *1 canary pod and 3 stable pods*, and the single Service load-balances across all four, so about a quarter of traffic hits the new version.
+*Exact* request percentages, header-based routing, or mirroring need a *traffic router* — an OpenShift Route plugin or a service mesh (the Networking and Service Mesh modules) — which this platform deliberately does not require, so the lab installs cleanly with no external plugin.
+
+*2. "The canary aborted — why didn't production go down?"*::
+Because a Rollout keeps the *stable* ReplicaSet running the whole time and only scales the *canary* up to the current weight.
+When analysis fails, it *aborts*: the canary pods are scaled back to zero and the stable pods — which never stopped serving — carry all traffic again.
+The route answers `200` throughout (the lab proves it).
+"Roll back" here means "the new version never got promoted," not "tear down and redeploy."
+
+*3. "How do I create an ApplicationSet — there's no button I can find / no `argocd` CLI in my terminal?"*::
+You create it in the *Argo CD web UI*, signed in via OpenShift, using your `applicationsets` permission on `proj-{user}` — the same reason as the previous module (the Argo instance is shared and you cannot write to its namespace with `oc`).
+The ApplicationSet YAML is already in your fork (`applicationset.yaml`); create it from the *ApplicationSets* view.
+(Instructor: this is the one seam to confirm on your cluster's Argo version before the room — see Watchouts.)
+
+*4. "Canary or blue-green — which should we actually use?"*::
+Canary when you want to *limit blast radius* and can *measure* health during the rollout (a bad build fails analysis at 50%, not 100%); its cost is a small extra slice.
+Blue-green when you want a *clean instant cutover* after a full pre-flight on a preview URL, and can afford *double capacity* for the switch window.
+Argo Rollouts serves both; the wrap-up has the decision guide, and the Challenge lets them stand up a blue-green Rollout.
+
+*5. "The failing analysis is a knob — isn't that faked?"*::
+The knob makes the failure *deterministic* for a timed lab, but the analysis is real: the same Job also *probes the canary's live readiness endpoint*, so a genuinely broken canary (one that never becomes ready, or whose database wiring is wrong) fails the analysis on its own merits too.
+The knob simply lets you reproduce, on demand, the *signal* a real regression would produce — without shipping a genuinely broken image and hoping it fails the same way every run.
+
+== Watchouts
+
+* *Creating the ApplicationSet is a UI action — confirm the exact affordance on your Argo version.*
+The attendee terminal (the Showroom terminal) has `oc`, `git`, and `helm` but *no `argocd` CLI and no Rollouts plugin*, and attendees have *no k8s write* to the `student-gitops` namespace — so the *only* path to create an ApplicationSet is the *Argo CD UI*, under their `applicationsets` RBAC on `proj-{user}`.
+This was built by driving the control plane as admin (the ApplicationSet's adoption + generation is proven), but the *exact UI create flow on Argo CD 3.4* is the one step to click through on your cluster before the room (it is the highest-priority screenshot in the media manifest).
+If your Argo version has no ApplicationSet-create affordance, the platform team must add the `argocd` CLI to the Showroom terminal image or grant a scoped k8s create — *do not* hand attendees admin on `student-gitops`.
+* *The ApplicationSet outlives a namespace reset — delete it first.*
+`ws reset`/`ws prep` purge the attendee's *Applications* (by project) and namespaces, but *not* the *ApplicationSet* (a different kind, in the shared control plane).
+A surviving ApplicationSet immediately *re-generates* the apps you purged, and will fight the next module's world too.
+Cleanup order is: *delete the `claims-{user}` ApplicationSet in the Argo UI* (which prunes its child apps), *then* `ws prep m10 --yes`.
+This is called out in the lab's cleanup box; until the engine learns to purge ApplicationSets (a known follow-up), it is a manual step.
+* *Watch the canary with `oc get rollout`, not a plugin.*
+There is no Argo Rollouts CLI plugin (`oc argo rollouts`) in the attendee terminal, so the lab observes the canary with plain `oc get rollout … -o jsonpath` (step/phase) plus the *Argo CD Rollout view* for the visual.
+If you demo from your laptop and have the plugin installed, `oc argo rollouts get rollout parasol-claims -n {user}-prod --watch` is a nicer live view — but do not put it in attendee steps; it will not be found.
+* *The analysis knob is entry-owned; a mid-lab `ws start`/`ws prep` resets it to `pass`.*
+`m10-canary-control` is materialized by the entry app (with `selfHeal: false`), so a manual `oc patch … verdict=fail` *holds* through the lab.
+But re-running `ws start`/`ws prep`/a full entry re-sync while a room is mid-exercise-4 will reset it to `pass` and a canary that should abort will instead promote.
+Set the knob and ship within the same exercise; if a canary unexpectedly promotes, re-check `oc get cm m10-canary-control -n {user}-prod -o jsonpath='{.data.verdict}'` before assuming a bug.
+* *`ws prep` reports the M09-end-state workloads as "N workloads but no m10 marker" — cosmetic.*
+Because M10's entry state deploys claims into `{user}-dev`/`{user}-stage` (workloads) while the marker lives in `{user}-gitops`, `ws prep m10` lists those namespaces as "has N workload(s) but no m10 marker."
+It is accurate and harmless — the marker is simply in a different namespace — and `ws prep --yes` proceeds correctly.
+Do not "fix" it by chasing a missing marker in dev/stage.
+* *Per-user prod quota during a canary.*
+A canary transiently runs stable + canary pods (up to ~5 app pods: 4 stable + 1 canary at 25%, or 4 + 2 at 50%) plus a short analysis Job pod, on top of claims-db.
+This fits the `{user}-prod` quota at the shipped replica count (4); if you raise `spec.replicas`, re-check the quota headroom for a full room running canaries at once.
+
+== Provenance
+
+M10 is built fresh on OpenShift GitOps {gitops_version} (Argo CD {argocd_version}) with *Argo Rollouts* (GA, cluster-scoped `RolloutManager`), against the Parasol `claims-config` repo (Kustomize base + dev/stage/prod overlays + a `rollouts/` progressive-delivery overlay + `applicationset.yaml`), on the shared *student* Argo CD instance with per-user AppProjects and `applicationsets` RBAC.
+Every command, output, and timing — the ApplicationSet adopting dev/stage and generating prod (~8s), the wave-ordered convergence (db → migration Job → Rollout, ~50s), the `1.0→1.1` canary (25/50/100 pod-ratio with a green job-provider `AnalysisRun`, ~2 min), the forced abort (`RolloutAborted … Metric "canary-health" assessed Failed`, stable preserved, route `200` throughout, ~90s), the git-revert recovery (~30s), and a scratch blue-green preview/promote — was performed and measured on OpenShift {ocp_version} as `user4` on 2026-07-11.
+The ApplicationSet uses a *list* generator (prod → `rollouts/`) so the fleet is generated from one object and production runs progressive delivery; structure and narrative adapt the OpenShiftDemos advanced-gitops and argo-rollouts workshops (credit per the reuse policy).
+No content ported from stale material.

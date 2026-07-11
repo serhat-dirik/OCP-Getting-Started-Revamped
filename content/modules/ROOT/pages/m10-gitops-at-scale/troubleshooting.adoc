@@ -1,0 +1,122 @@
+= GitOps at Scale & Progressive Delivery: Troubleshooting
+:module-id: m10
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} / OpenShift GitOps {gitops_version}
+// (Argo CD 3.4, Argo Rollouts GA) as user4 on 2026-07-11. Format: Symptom / Cause / Fix. Several are
+// failures actually hit on-cluster during the build (the verdict-knob reset-mid-canary transient, the
+// ApplicationSet surviving a namespace reset, the canary-not-starting-until-Refresh behavior).
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Terminal commands assume you set `DEV={user}-dev`, `STAGE={user}-stage`, `PROD={user}-prod` at the start of the lab.
+
+== I can't find where to create an ApplicationSet in the Argo CD UI
+
+Symptom:: You are signed in to Argo CD as `{user}` but there is no obvious "New ApplicationSet" button, and `oc apply` of the ApplicationSet fails with `Forbidden`.
+Cause:: ApplicationSets must live in the shared `student-gitops` control-plane namespace, which you cannot write to with `oc` (by design).
+They are created through the *Argo CD API*, under your `applicationsets` permission on `proj-{user}` — from the *ApplicationSets* view in the UI, not from the terminal.
+Fix:: In the Argo CD UI, open the *ApplicationSets* view (left nav) and create one there, pasting the `applicationset.yaml` from your fork.
+If your instructor confirms the UI on this cluster has no ApplicationSet-create affordance, this is a platform seam — tell them; they may need to enable a CLI path.
+Do *not* try to `oc apply` it into `student-gitops`.
+
+== My ApplicationSet was created but only prod appeared — dev/stage look unchanged
+
+Symptom:: After creating the ApplicationSet you see the new `claims-prod-{user}`, but `claims-dev-{user}` and `claims-stage-{user}` look the same as before.
+Cause:: That is *correct*.
+The ApplicationSet *adopts* the two Applications that already existed (same names) and *generates* the one that did not (prod).
+Adoption does not redeploy dev/stage — their spec already matches the template — so nothing visibly changes there.
+Fix:: Nothing to fix.
+Confirm ownership moved to the ApplicationSet in the UI (the dev/stage apps now show the ApplicationSet as their owner), and confirm prod stood up: `oc get rollout parasol-claims -n $PROD`.
+
+== The canary never starts after I edited the image in Git
+
+Symptom:: You changed the image tag in `rollouts/claims-rollout.yaml` and committed, but production still runs the old version and no canary appears.
+Cause:: Argo CD has not synced the new commit yet — it re-reads `main` on its reconcile cycle or when you *Refresh*.
+Until it syncs, the Rollout's pod template is unchanged, so the controller has no new version to canary.
+Fix:: In the Argo CD UI, open `claims-prod-{user}` and click *Refresh* (a *hard* refresh forces a re-read).
+Within ~20 seconds it picks up the commit and syncs the new image into the Rollout, which starts the canary.
+Confirm the Rollout spec actually changed: `oc get rollout parasol-claims -n $PROD -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'` should show the new tag.
+
+== I set the analysis verdict to `fail` but the canary promoted anyway
+
+Symptom:: You ran `oc patch configmap m10-canary-control … verdict=fail`, shipped a new version, and the canary *passed* and promoted instead of aborting.
+Cause:: One of two things.
+Most likely the knob was *reset to `pass`* between your patch and the analysis run — the `m10-canary-control` ConfigMap is owned by the entry app, and a mid-lab `ws start`/`ws prep`/entry re-sync re-applies it as `pass`.
+Less likely, the analysis ran *before* your patch landed.
+Fix:: Re-check the value *at the moment the analysis runs*:
++
+[source,sh,role=execute]
+----
+oc get configmap m10-canary-control -n $PROD -o jsonpath='verdict is: {.data.verdict}{"\n"}'
+----
++
+If it reads `pass`, set it to `fail` again and re-ship *promptly* (in the same exercise, without re-running `ws prep` in between).
+The knob holds through a normal lab; it only resets if the entry state is re-materialized under you.
+
+== `oc get rollout` shows nothing in prod (or a canary I can't inspect from the terminal)
+
+Symptom:: `oc get rollout -n $PROD` returns "No resources found," or you want the rich rollout view and `oc argo rollouts` is "command not found."
+Cause:: Two different things.
+"No Rollout" means the prod Application was not created (the ApplicationSet was not applied, or its prod element does not point at `rollouts`).
+"command not found" is expected — the terminal has `oc` but *not* the Argo Rollouts plugin.
+Fix:: For a missing Rollout, confirm the ApplicationSet exists and generated `claims-prod-{user}` (Argo UI), and that its prod element path is `rollouts` (not `overlays/prod`).
+For the rich view, use the *Argo CD Rollout view* in the UI for the visual, and plain `oc` in the terminal:
++
+[source,sh,role=execute]
+----
+oc get rollout parasol-claims -n $PROD \
+  -o jsonpath='phase={.status.phase} step={.status.currentStepIndex}/5 image={.spec.template.spec.containers[0].image}{"\n"}'
+----
+
+== The Rollout is stuck `Progressing` and the canary pods never become ready
+
+Symptom:: A canary starts but never advances; the new pods stay `Pending`/`ContainerCreating`, or the analysis Job pod does not run.
+Cause:: Usually resource pressure — the `{user}-prod` quota is tight and the transient canary pods (stable + canary + the analysis Job) do not all fit — or, cluster-wide, the Argo Rollouts controller is not running.
+Fix:: Check the controller first (an instructor/admin task): `oc get rolloutmanager -n openshift-gitops` and `oc get pods -n openshift-gitops | grep rollouts` — a Rollout only progresses if that controller is up.
+Then check your namespace's events for quota denials:
++
+[source,sh,role=execute]
+----
+oc get events -n $PROD --sort-by=.lastTimestamp | tail -10
+----
++
+If it is quota, wait for the previous canary's pods to drain, or ask your instructor about headroom — the shipped replica count (4) is sized to fit, but a raised count may not.
+
+== After I reset, claims came back in prod / my Applications keep reappearing
+
+Symptom:: You ran `ws prep m10 --yes` (or purged the namespaces) but the claims apps re-appear, or prod keeps redeploying.
+Cause:: The *ApplicationSet still exists*.
+It lives in the shared Argo CD control plane — outside every namespace `ws prep` purges — so it survives the reset and immediately *re-generates* the Applications you just removed.
+Fix:: Delete the ApplicationSet *first*, then reset:
++
+. In the Argo CD UI, delete the `claims-{user}` ApplicationSet (this prunes its three child Applications).
+. Then run `ws prep {module-id} --yes`.
++
+Do it in that order — resetting while the ApplicationSet exists just re-creates what you purged.
+
+== Production is `Healthy` in Argo CD but the route returns 503 for a moment after a promotion
+
+Symptom:: The Rollout shows Healthy/promoted, but `curl …/q/health/ready` returns `503` for a few seconds.
+Cause:: Right after a promotion the new pods are still finishing startup (the claims app boots, connects to `claims-db`, and passes its startup probe), and the Route needs a moment to re-program to the new stable pods.
+Fix:: Give it a few seconds and retry — the startup probe gates the slow first boot:
++
+[source,sh,role=execute]
+----
+ROUTE=$(oc get route parasol-claims -n $PROD -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -w "%{http_code}\n" "http://$ROUTE/q/health/ready"
+----
++
+Expect `200` once the pods are ready.
+If it stays `503`, check the Rollout: `oc get rollout parasol-claims -n $PROD` — all replicas should be Available.
+
+== `ws prep m10` says a namespace "has N workloads but no m10 marker"
+
+Symptom:: Running `ws prep m10` lists `{user}-dev`/`{user}-stage` as "has N workload(s) but no m10 marker."
+Cause:: Cosmetic.
+M10's entry state deploys claims into `dev`/`stage` (workloads), but the module *marker* lives in `{user}-gitops` — so `ws prep` notices the workloads without a co-located marker and says so.
+Fix:: Nothing — it is accurate and harmless.
+`ws prep m10 --yes` proceeds and re-materializes the entry state correctly; the marker is simply in a different namespace by design.
+
+'''
+
+_Last verified on OpenShift {ocp_version} / OpenShift GitOps {gitops_version} (Argo CD {argocd_version}, Argo Rollouts GA) — 2026-07-11._

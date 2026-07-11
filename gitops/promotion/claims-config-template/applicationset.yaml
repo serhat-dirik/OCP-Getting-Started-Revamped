@@ -1,10 +1,14 @@
-# M10 beat 1 — ONE ApplicationSet replaces the hand-created per-env Applications: a git
-# DIRECTORIES generator over overlays/* discovers dev/stage/prod ("folders, not branches") and
-# templates one Application per environment. Applied to the student-gitops instance under the
-# attendee's own project. The repoURL is the CLUSTER-INTERNAL Gitea service (gitea.gitea.svc:3000)
-# so this source file carries no cluster domain — the M10 fork job personalizes only __user__.
+# M10 beat 1 — ONE ApplicationSet replaces the hand-created per-env Applications. A LIST generator
+# enumerates the three environments and, for each, the folder that describes it ("folders, not
+# branches"): dev and stage deploy the plain overlays, and PROD deploys the rollouts/ overlay so it
+# runs progressive delivery (an Argo Rollout) while the lower envs stay plain Deployments — the same
+# ONE object, environments that legitimately differ. Applied to the student-gitops instance under the
+# attendee's own project. The repoURL is the CLUSTER-INTERNAL Gitea service (gitea.gitea.svc:3000) so
+# this source file carries no cluster domain — the M10 fork job personalizes only __user__.
 # Needs the ApplicationSet controller on the student instance (workshop-config student-argocd.yaml
-# spec.applicationSet) + the applicationsets RBAC in the per-user student policy.
+# spec.applicationSet) + the applicationsets RBAC in the per-user student policy. On creation it ADOPTS
+# the two hand-created dev/stage Applications the entry state left (matching names + paths) and
+# generates the new prod Application — three apps managed by one object.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -16,15 +20,22 @@ spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
   generators:
-    - git:
-        repoURL: http://gitea.gitea.svc:3000/__user__/claims-config.git
-        revision: main
-        directories:
-          - path: overlays/*
+    # A LIST generator: each element is one environment and the folder in Git that describes it.
+    # Swap this for a git-directories or cluster generator later — the template below is unchanged.
+    - list:
+        elements:
+          - env: dev
+            path: overlays/dev
+          - env: stage
+            path: overlays/stage
+          # prod points at rollouts/ (the Rollout + analysis + wave-ordered migration), not
+          # overlays/prod — this is how ONE ApplicationSet gives prod progressive delivery.
+          - env: prod
+            path: rollouts
   template:
     metadata:
-      # one Application per env folder: claims-dev-__user__, claims-stage-__user__, claims-prod-__user__
-      name: 'claims-{{.path.basename}}-__user__'
+      # one Application per environment: claims-dev-__user__, claims-stage-__user__, claims-prod-__user__
+      name: 'claims-{{.env}}-__user__'
       labels:
         workshop.redhat.com/user: __user__
     spec:
@@ -32,10 +43,10 @@ spec:
       source:
         repoURL: http://gitea.gitea.svc:3000/__user__/claims-config.git
         targetRevision: main
-        path: '{{.path.path}}'
+        path: '{{.path}}'
       destination:
         server: https://kubernetes.default.svc
-        namespace: '__user__-{{.path.basename}}'
+        namespace: '__user__-{{.env}}'
       syncPolicy:
         automated:
           prune: true

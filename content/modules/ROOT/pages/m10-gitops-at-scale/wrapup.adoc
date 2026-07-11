@@ -1,0 +1,96 @@
+= GitOps at Scale & Progressive Delivery: Wrap-up
+:module-id: m10
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims platform from "GitOps-managed" to "GitOps at scale, delivered safely."
+You replaced the hand-made per-environment Applications with *one ApplicationSet* — a list generator that stamped out `dev`, `stage`, and `prod` from a single template, adopting the two that existed and standing up production.
+You watched production converge in the right order through *sync waves and a migration hook* — database, then migration, then app.
+You shipped a new version to production as a *canary* that earned its traffic in slices (25% → pause → 50% → analysis → 100%), gated by an *automated analysis* check.
+And you shipped a bad release on purpose and watched the canary *abort and roll back on its own* at the failed analysis step — production answering `200` the entire time.
+
+[mermaid]
+....
+flowchart LR
+  GIT[(claims-config repo<br/>overlays + rollouts folder)] --> SET[ApplicationSet<br/>list generator]
+  SET --> DEV[claims-dev<br/>Deployment]
+  SET --> STG[claims-stage<br/>Deployment]
+  SET --> PROD[claims-prod<br/>Rollout]
+  PROD --> CAN{canary and<br/>analysis}
+  CAN -->|pass| OK[promote 100%]
+  CAN -->|fail| RB[abort and<br/>roll back to stable]
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef a fill:#fef5e7,stroke:#b7791f,color:#744210;
+  classDef r fill:#fde8e8,stroke:#c0392b,color:#7b241c;
+  class GIT,DEV,STG,PROD,OK g;
+  class SET,CAN a;
+  class RB r;
+....
+
+// media-pass: recap SVG m10-gitops-at-scale-05-what-you-built.svg (ApplicationSet → 3 apps; prod canary with the pass/rollback fork highlighted).
+
+The idea under all of it: *at scale, the fleet is generated, and delivery is measured.*
+One object describes many Applications so standards apply by construction; and production takes a new version in slices an analysis gate can reject, so a bad release rolls back on its own before it reaches anyone.
+
+== Map to your org
+
+. *How many hand-made deployment definitions are drifting in your org right now?*
+You generated three Applications from one template.
+Pick a service that runs in several environments (or several clusters): is each environment a hand-maintained copy that has quietly diverged, or is it generated from one source the platform team owns?
+What would it take to make "onboard a new service or environment" mean "one line of generator input," not "copy and edit N files"?
+. *When your last bad release reached production, how did you find out — and how long until it was reverted?*
+You watched a canary catch a bad build on evidence and roll back automatically.
+Think of a real incident that started with a deploy that "looked fine": would a canary with an analysis gate have caught it before full rollout, and how much of the mean-time-to-recovery was a human noticing and deciding?
+. *What is your "run the migration in the right place" rule, and where does it live?*
+You encoded database → migration → app as sync waves and a hook, in the same repo as the app.
+In your org, is that ordering a runbook step a human can skip, or is it structural — and what breaks when someone forgets it?
+
+== When *not* to reach for this
+
+Progressive delivery and ApplicationSets are powerful, which means being honest about their edges:
+
+* *Don't put a canary on a change a canary cannot judge.*
+A canary is only as good as its analysis.
+A schema change, a data migration, a change whose failure mode is *slow* or *downstream* (a subtle data corruption, a cache that fills over hours) will pass a short readiness-based analysis and still be wrong.
+Canary the changes whose health you can *measure in the bake window*; gate the rest on tests, review, and manual promotion.
+* *Don't reach for pod-ratio canary when you need exact or rule-based traffic.*
+This module split traffic by *pod ratio* — a quarter of pods, so roughly a quarter of requests.
+If you need *exactly* 5% of requests, header- or user-based routing, or mirrored/shadow traffic, that needs a *traffic router* (an OpenShift Route plugin, or a service mesh — separate modules), not a Rollout alone.
+* *Don't ApplicationSet-generate what genuinely wants to be hand-held.*
+An ApplicationSet is for a *set of like things*.
+A one-of-a-kind Application with bespoke config, a sensitive singleton, or something mid-migration that you want to change and inspect by hand is clearer as its own Application — generating it buys nothing and hides it inside a template.
+* *Don't let auto-promotion outrun your confidence.*
+Automated canary promotion is a feature in a mature pipeline with trustworthy signals and a *tested* rollback — and a foot-gun before you have those.
+Start with a *manual* promotion gate (or blue-green with a human cutover), earn trust in the analysis, and automate promotion only once the gate has proven it catches real regressions.
+* *Blue-green costs double capacity for the cutover window.*
+Two full copies of production is real quota.
+When the environment is large or expensive, a canary (a small extra slice) is kinder to your budget than blue-green (a whole second copy) — pick the strategy your capacity can actually afford.
+
+== Go deeper
+
+* *Networking for Dev & DevOps* and *Service Mesh Zero-to-Hero* — for *request-level* traffic shifting (exact percentages, header routing, mirroring) the pod-ratio canary here cannot do, via an OpenShift Route traffic-router plugin or Istio routing (separate modules).
+* *Serverless Zero-to-Hero* — a *third* way to shift traffic: Knative revisions with tag-based routing, for workloads that scale to zero (a separate module).
+* *Business Continuity & Multi-Cluster* — the *cluster* generator turns the ApplicationSet shape you learned here into "this app on every cluster," the foundation of multi-cluster GitOps with Advanced Cluster Management (a separate module).
+* *GitOps Fundamentals* — the reconcile loop, Applications, drift and self-heal that this module builds on (a separate module).
+* Red Hat documentation: the *OpenShift GitOps* guide for OpenShift {ocp_version} (GitOps {gitops_version} / Argo CD {argocd_version}) — ApplicationSets and generators, sync waves and resource hooks, and *Argo Rollouts* (canary, blue-green, AnalysisTemplates).
+
+[NOTE]
+.Credits
+====
+This module is built fresh on OpenShift GitOps {gitops_version} (Argo CD {argocd_version}) with *Argo Rollouts* (GA, served by a cluster-scoped `RolloutManager`), against the Parasol `claims-config` repository (Kustomize base + overlays + a `rollouts/` progressive-delivery overlay + an `applicationset.yaml`).
+The ApplicationSet-generation, wave-ordered migration, canary steps (pod-ratio 25/50/100), the job-provider AnalysisTemplate, the auto-rollback at a failed analysis step, and the blue-green preview/promote were all performed and measured on OpenShift {ocp_version} as `user4` on 2026-07-11.
+Structure and narrative adapt patterns from the OpenShiftDemos advanced-gitops and argo-rollouts workshops (credit per the reuse policy); no stale technology was ported.
+====
+
+[NOTE]
+.Clean up
+====
+Leave everything running if you are continuing — nothing depends on tearing it down.
+When you want a clean entry state, reset in *this order*, because the ApplicationSet lives in the shared Argo CD control plane and keeps *regenerating* your Applications until it is removed:
+
+. In the *Argo CD UI*, delete the `claims-{user}` ApplicationSet (this prunes the three Applications it generated).
+. Run `ws prep {module-id} --yes` to purge `{user}-dev`, `{user}-stage`, `{user}-prod` and re-materialize the clean entry state (your `claims-config` fork restored, dev/stage back to plain Applications, prod empty).
+
+A plain namespace cleanup is not enough on its own — if you `ws prep` while the ApplicationSet still exists, it re-generates the apps you just purged.
+====
