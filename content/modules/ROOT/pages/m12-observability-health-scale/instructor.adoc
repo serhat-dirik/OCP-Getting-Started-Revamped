@@ -1,0 +1,132 @@
+= Observability, Health & Scale: Instructor Guide
+:module-id: m12
+include::partial$version-attributes.adoc[]
+
+// Instructor runbook for M12. Timings MEASURED performing the lab as user2 on OCP {ocp_version}
+// against the shared COO {cluster_observability_operator_version} / Tempo {tempo_version} / OTel
+// {opentelemetry_version} stack on 2026-07-11. Pre-flight expected outputs are real captures.
+// The signature beat is the DB-break -> alert-fires cycle; the closer is the HPA scaling live.
+
+This module is console-heavy and its drama is *live*, not narrated: an alert that goes red while the room watches, and a pod ring that grows under load. The signature beat is exercise 3 — *break the database, watch the alert fire* — and the closer is exercise 5, the HPA scaling from 2 to 4 pods in under half a minute. Two seams need your attention before you teach: attendees must have the *user-workload-monitoring editor* role in their `-dev` namespace or exercise 2 is a wall (pre-flight item 2), and the alert takes *~3¼ minutes* to fire, so coach attendees to start the break and read the other signals while it cooks.
+
+== Timing
+
+Total hands-on: *~82 minutes* (spec chip: 90). The two long poles are the alert's fire delay (mostly waiting, filled with the logs/metrics reading) and the trace exploration.
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core (as user2, {ocp_version})
+
+| 1 | Read the golden signals + custom metric | ~18 min | `curl /q/metrics` instant; *Observe → Metrics* queries return immediately; the ServiceMonitor scrape interval is *30s* so a just-changed value can lag one interval
+| 2 | Alert on what matters | ~10 min | `oc apply` the PrometheusRule instant; it appears in the thanos-ruler as *Inactive* within *~40s*
+| 3 | Break it, watch the alert catch it | ~12 min | DB scale-to-0 → alert *Pending* at *~77s*, *Firing* at *~195s* (~3¼ min total); recovery needs DB back *plus* an app restart (poisoned connection pool)
+| 4 | Follow a request with a trace | ~15 min | traces present in *Observe → Traces* within seconds of a request; steady-state request durations are single-digit ms (the N+1 cost is structural, not wall-clock — see Q4)
+| 5 | Autoscale under load with an HPA | ~15 min | burst drove CPU to *221%*; HPA scaled *2 → 4 in ~24s*; scale-down held for the *5-min* stabilization window
+| 6 | Survive a node drain with a PDB | ~12 min | PDB create instant; `ALLOWED DISRUPTIONS` reflects `healthy − minAvailable`; the drain itself is your demo
+|===
+
+[NOTE]
+.How this timing was measured
+====
+Every core number above was captured performing the lab as `user2` on 2026-07-11, not estimated. The alert fire timing in particular is real: the rule went *Inactive → Pending (T+77s) → Firing (T+195s)* after the database was scaled to zero. Budget the room a full 4 minutes for exercise 3 to land, and use the wait to walk the three-signals reading.
+====
+
+== Pre-flight checklist
+
+Run these before the session. A sample user (`user1`) is used here; substitute any assigned attendee id.
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m12 --user user1
+ws verify m12 --user user1 --entry-only
+----
++
+Expect `✅ all 15 checks passed`: `user1-dev` with the instrumented `parasol-claims` (OTLP export ON, pointing at the shared collector), an ephemeral `claims-db`, the `claims-load` generator, the `parasol-claims` ServiceMonitor, `/q/metrics` exposing `http_server_requests_seconds*` and `claims_created_total` — and *no HPA / PrometheusRule / PDB yet* (building those is the lab).
+
+. *Attendees can author monitoring objects in their namespace.* *(REQUIRED — exercise 2 depends on it.)*
++
+[source,sh,role=execute]
+----
+oc auth can-i create prometheusrules -n user1-dev --as=user1
+----
++
+[IMPORTANT]
+.If this prints `no`, exercise 2 (and attendee-run `ws verify`) will fail
+=====
+The project `admin` role does *not* include `monitoring.coreos.com`. Attendees need the `monitoring-edit` ClusterRole bound in their `-dev` namespace to create a PrometheusRule (and to read their own ServiceMonitor / rule, which `ws verify m12` also does). This is a *workshop-layer* grant — it belongs in `gitops/workshop-config/templates/per-user-*.yaml`, one RoleBinding per user:
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitoring-edit
+  namespace: <user>-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: monitoring-edit
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: <user>
+----
+Confirm with the platform team that this binding is applied for every attendee before the session.
+=====
+
+. *The shared observability stack is up.*
++
+[source,sh,role=execute]
+----
+oc get pods -n observability-workshop
+----
++
+Expect an `otel-collector-*` pod `1/1 Running` and `tempo-traces-0` `Running` — the collector receives the app's OTLP and forwards to Tempo. If these are down, exercise 4 (traces) has no data; metrics/alerts/HPA/PDB are unaffected (they ride user-workload monitoring, which is independent).
+
+. *The end state solves — for the demo and as a reference.*
++
+[source,sh,role=execute]
+----
+ws solve m12 --user user1
+ws verify m12 --user user1
+----
++
+Expect `✅ all 16 checks passed`: the entry checks *plus* the CPU HPA (≥2 replicas), the `parasol-claims-alerts` PrometheusRule, and the `parasol-claims` PDB. `ws solve` also raises the app to 2 replicas so the HPA floor and PDB quorum are satisfied on first sync. Reset with `ws prep m12 --user user1 --yes` when done.
+
+== Demo-mode notes
+
+* Run `ws solve m12 --user {user}` first so the alert rule, HPA and PDB already exist — the demo *drives* the end state, it does not build it.
+* *Start the database break first* (beat 2 of the arc) and let the ~3-minute fire timer run while you narrate the three signals — do not stand and wait for it.
+* The HPA closer is the crowd-pleaser: the pod ring in *Topology* visibly grows. Have a terminal with `oc get hpa parasol-claims -w` on a second screen so the room sees CPU spike past 60% and replicas climb in real time.
+* Clean up the burst pod between runs (`oc delete pod claims-burst -n {user}-dev`) — a forgotten burst keeps CPU high and the HPA pinned at 4.
+
+== Top questions attendees ask
+
+*1. "The docs show `curl`-ing PromQL against thanos-querier — why do I get `Forbidden`?"*::
+Because the `thanos-querier` route enforces a cluster-monitoring view permission attendees do not have, and this cluster exposes only that route (not the namespaced tenancy port). For *user-defined* metrics the supported developer surface is *Observe → Metrics* in the console, which queries with your identity scoped to your namespace. Treat `curl /q/metrics` as the raw-truth surface and the console as the PromQL surface — that split is intentional in the lab, not a workaround.
+
+*2. "My alert took forever to fire — is it broken?"*::
+No — it is `for: 2m` on a `rate(...[5m])`. The 5-minute rate has to climb past the 0.1/s threshold (about a minute of sustained 5xx), *then* stay above it for the 2-minute `for:` window before it fires. On the build run that was ~77s to *Pending* and ~195s to *Firing*. The delay is a feature: it stops a two-second blip from paging anyone.
+
+*3. "I scaled the database to zero but it came back on its own — and the app kept erroring anyway."*::
+Two separate things. The entry app is GitOps-managed, so Argo reconciles the database deployment back toward its desired replica count within a couple of minutes — that is fine, the point of the beat is the *error window*, not permanent destruction. And the app keeps erroring *after* the database returns because its connection pool is full of dead connections; that is why the fix is database-back *and* `oc rollout restart deploy/parasol-claims`. Both behaviors are real and worth naming out loud.
+
+*4. "The trace doesn't show the N+1 database queries — I just see one span."*::
+Correct, and expected. The claims image emits the *HTTP request* span today; per-query *database* spans need a build-time flag on the image that is tracked as an enhancement. The N+1 is real in the code (one `SELECT` per event), but at a warm in-cluster database it costs only a few milliseconds, so it does not stand out in steady-state timing. Teach it as "the trace tells you *which* endpoint is the outlier; the code tells you *why*," and point at the go-deeper note. Do not promise a database-span staircase this image cannot render.
+
+*5. "Why won't the HPA scale back down after I stop the load?"*::
+The default *5-minute scale-down stabilization window*. The HPA deliberately holds the higher replica count for five minutes after utilization drops, so a brief lull does not trigger a shrink-then-grow flap. You will see `TARGETS` fall below 60% while `REPLICAS` stays at 4 — that is correct. Scale-*up* has no such delay, which is why the burst grew it in ~24s.
+
+== Watchouts
+
+* *The monitoring-edit RBAC grant is the single most likely session-killer.* If it is missing, exercise 2 fails for *everyone* and so does attendee-run `ws verify m12` (it reads the ServiceMonitor and the rule). Confirm pre-flight item 2 prints `yes` for a real attendee id before you start.
+* *Tempo runs a monolithic in-memory backend on the shared cluster.* Traces are *recent-only* — there is no long retention. If exercise 4 shows an empty trace list, drive a request first (the load generator does this continuously) and refresh; do not go hunting for hours-old traces.
+* *`parasol-web` is not OpenTelemetry-instrumented*, so there is no web → claims → db distributed trace yet — the real trace is claims → db, and the objectives' "through web→claims→db" is a future enhancement. Do not demo a front-end hop that does not exist.
+* *The break-fix leaves the app needing a restart.* If an attendee scales the database back but skips the `rollout restart`, their claims API keeps 500-ing and they think they are stuck. That *is* the lesson — but be ready to point at it during the exercise.
+* *Clean up burst pods.* A `claims-burst` pod left running keeps CPU high, pins the HPA at 4, and skews the next attendee's baseline. `oc delete pod claims-burst -n {user}-dev`.
+* *A stray PodDisruptionBudget can survive `ws reset`.* If entry verify reports a leftover PDB after a reset, remove it with `oc delete pdb parasol-claims -n {user}-dev` and re-verify — this is a known reset-purge gap flagged to the platform team.
+
+== Provenance
+
+Built fresh for this workshop; no content was ported from stale material. Every command, output, and timing on this page was produced performing the lab as `user2` on OpenShift {ocp_version} against the shared Cluster Observability Operator {cluster_observability_operator_version} / Tempo {tempo_version} / Red Hat build of OpenTelemetry {opentelemetry_version} stack on 2026-07-11 — the golden signals and `claims_created_total` in user-workload monitoring, the PrometheusRule's Inactive → Pending → Firing progression, the `parasol-claims` traces in Tempo, the CPU HPA's 2 → 4 scale event, and the PodDisruptionBudget's eviction refusal. The HPA-under-load beat adapts the platform-operations autoscaling demonstration from the Advanced Application Platform demo materials.

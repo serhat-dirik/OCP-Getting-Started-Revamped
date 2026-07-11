@@ -1,0 +1,105 @@
+= Observability, Health & Scale: Troubleshooting
+:module-id: m12
+include::partial$version-attributes.adoc[]
+
+// Troubleshooting for M12. Every entry is a real surprise hit performing the lab as user2 on
+// OCP {ocp_version} on 2026-07-11: the monitoring RBAC wall, the alert's fire delay, the poisoned
+// connection pool after the DB returns, the thanos CLI 403, empty/thin traces, and HPA timing.
+
+Each entry is a symptom you (or an attendee) may hit, its cause, and the fix. The first two are the ones that stop the lab cold; the rest are "that's odd" moments with a one-line explanation.
+
+== Creating the PrometheusRule is denied: `Forbidden ... cannot create resource "prometheusrules"`
+
+Symptom:: In exercise 2, `oc apply` (or console *Import YAML*) of the alert rule returns `prometheusrules.monitoring.coreos.com is forbidden: User "<user>" cannot create resource "prometheusrules" in ... namespace "<user>-dev"`.
+Cause:: The project `admin` role does not include the `monitoring.coreos.com` API group. Authoring a `PrometheusRule` (or reading a `ServiceMonitor`) needs the `monitoring-edit` ClusterRole bound in your namespace — a *platform* grant, not something you did wrong.
+Fix:: This is a workshop-layer RoleBinding your platform team applies per attendee; it is not self-service. Flag it to your instructor. For reference, the binding is:
++
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitoring-edit
+  namespace: <user>-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: monitoring-edit
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: <user>
+----
+Once it is in place, `oc auth can-i create prometheusrules -n <user>-dev` prints `yes` and the rule applies. The same grant is what lets `ws verify m12` read your ServiceMonitor and rule.
+
+== My alert never fires even though the app is clearly failing
+
+Symptom:: You scaled the database to zero, the claims API is returning 500s, but `ParasolClaimsErrorRateHigh` sits in *Inactive* or *Pending* far longer than you expected.
+Cause:: The rule is `for: 2m` over a `rate(...[5m])`. The 5-minute rate must first climb past the `0.1/s` threshold — roughly a minute of sustained 5xx — and *then* hold above it for the 2-minute `for:` window before the state becomes *Firing*. It is designed to be slow so a brief blip does not page anyone.
+Fix:: Wait it out — on the build run it reached *Pending* at ~77s and *Firing* at ~195s (about 3¼ minutes total). Two things can stall it: if the database comes back (GitOps reconciles it) the 5xx stop and the rate decays, so keep it down for the full window; and confirm the rule actually loaded with `oc get prometheusrule parasol-claims-alerts -n <user>-dev` before assuming it is broken.
+
+== I brought the database back, but the claims API still returns 500
+
+Symptom:: You ran `oc scale deploy/claims-db --replicas=1`, the database pod is `Running`, but `curl $CLAIMS/api/claims` keeps returning `HTTP 500`.
+Cause:: The claims application is still holding *dead connections* in its Agroal connection pool — they point at the old database pod that no longer exists. A healthy database does not heal a poisoned pool.
+Fix:: Restart the app so it rebuilds the pool against the current database:
++
+[source,sh,role=execute]
+----
+oc rollout restart deploy/parasol-claims -n <user>-dev
+oc rollout status deploy/parasol-claims -n <user>-dev
+----
+Then `curl $CLAIMS/api/claims` returns `HTTP 200`. This "recovery needs a restart" step is a real operational lesson — a dependency coming back does not always heal the caller.
+
+== `curl`-ing PromQL against thanos-querier returns `Forbidden`
+
+Symptom:: Following a generic monitoring how-to, you try `curl -H "Authorization: Bearer $(oc whoami -t)" https://thanos-querier.../api/v1/query ...` and get `Forbidden (user=<user>, verb=get, resource=prometheuses, subresource=api)`.
+Cause:: The `thanos-querier` route enforces a cluster-monitoring view permission attendees do not have, and this cluster exposes only that route (not the per-namespace tenancy endpoint). Ad-hoc PromQL over that route is not an attendee capability here.
+Fix:: Use *Observe → Metrics* in the console for PromQL — it queries with your identity, scoped to your namespace, and needs no extra role. Use `curl $CLAIMS/q/metrics` when you want the raw counter values at the source. That two-surface split (console for queries, `curl` for raw truth) is exactly how the lab is written.
+
+== Observe → Traces is empty
+
+Symptom:: You open *Observe → Traces*, run `{ resource.service.name = "parasol-claims" }`, and get no results.
+Cause:: Usually one of: no recent request has been traced (Tempo runs an in-memory backend on the shared cluster and keeps only *recent* traces), the time range is too narrow, or the shared collector is down.
+Fix:: Drive a request and widen the range. The load generator produces traffic continuously, so a request within the last few minutes should appear — hit the app yourself to be sure:
++
+[source,sh,role=execute]
+----
+curl -s -o /dev/null "$CLAIMS/api/claims/CLM-1001/history"
+----
++
+Then refresh with a *Last 15 minutes* range. If it is still empty, the collector may be down — that is a shared-stack issue for your instructor (`oc get pods -n observability-workshop`), not something in your namespace.
+
+== The trace only shows one span — where are the database queries?
+
+Symptom:: You open a `parasol-claims` trace expecting to see the N+1 database queries, but there is a single HTTP request span and no `SELECT` children.
+Cause:: The claims image emits the *HTTP request* span but not per-query *database* spans — database-span instrumentation is a build-time flag on the image, tracked as an enhancement. The N+1 is real in the code, but invisible in the trace today.
+Fix:: There is nothing to fix in your namespace. Use the trace to identify *which* endpoint is the latency outlier (rank by duration), and read the code to see *why* (`GET /api/claims/\{claimNumber}/history` issues one query per event). The database-span "staircase" appears once the image ships that flag.
+
+== My HPA shows `<unknown>/60%` and is not scaling
+
+Symptom:: Just after `oc autoscale`, `oc get hpa` shows `TARGETS` as `<unknown>/60%` and the app is not scaling.
+Cause:: Two possibilities: the metrics pipeline has not reported CPU for the new HPA yet (it takes a short interval after creation), or the target container has no CPU *request*, so utilization cannot be computed. The entry-state app *does* set a 200m CPU request, so on this lab it is almost always the former.
+Fix:: Wait ~30 seconds and re-check — `TARGETS` resolves to a real percentage (e.g. `18%/60%`) once the first CPU sample lands. If it stays `<unknown>`, confirm the request is present: `oc get deploy parasol-claims -n <user>-dev -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}{"\n"}'` should print `200m`.
+
+== The HPA will not scale back down after I stop the load
+
+Symptom:: You stopped the burst, `TARGETS` fell below 60%, but `REPLICAS` stays at 4 for minutes.
+Cause:: The default *5-minute scale-down stabilization window*. The HPA holds the higher count so a brief lull does not cause a shrink-then-grow flap.
+Fix:: Nothing — this is correct. Wait ~5 minutes and it steps back toward the floor of 2. (Scale-*up* has no such delay, which is why the burst grew it in seconds.)
+
+== `ws verify` reports a leftover PodDisruptionBudget after a reset
+
+Symptom:: After `ws prep m12 --yes`, entry verify fails on `no PodDisruptionBudget yet` because a `parasol-claims` PDB is still present.
+Cause:: A known reset-purge gap — the reset does not always remove a lab-created PDB.
+Fix:: Remove it and re-verify:
++
+[source,sh,role=execute]
+----
+oc delete pdb parasol-claims -n <user>-dev
+ws verify m12 --entry-only
+----
+
+'''
+
+_Last verified on OpenShift {ocp_version} with the Cluster Observability Operator {cluster_observability_operator_version} / Tempo {tempo_version} / Red Hat build of OpenTelemetry {opentelemetry_version} stack — 2026-07-11._

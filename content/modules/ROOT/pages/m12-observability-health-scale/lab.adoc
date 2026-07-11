@@ -1,0 +1,636 @@
+= Observability, Health & Scale: Lab
+:module-id: m12
+include::partial$version-attributes.adoc[]
+
+// Lab page for M12. Holds BOTH the workshop lab (ifndef::demo) and the demo arc (ifdef::demo).
+// Performed end-to-end as user2 on OCP {ocp_version} on 2026-07-11 against the shared observability
+// stack (COO {cluster_observability_operator_version} / Tempo {tempo_version} / OTel
+// {opentelemetry_version}): the /q/metrics golden signals + claims_created_total in Observe -> Metrics,
+// a PrometheusRule that went inactive -> pending -> firing ~3.25 min after the DB was scaled to 0,
+// parasol-claims traces in Observe -> Traces with metric->trace exemplars, a CPU HPA that scaled 1->4
+// in ~24s under a burst, and a PDB that returned "Cannot evict pod as it would violate the pod's
+// disruption budget" on the last eviction. Timings in the chips are measured from that run.
+// Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks
+// using $NS / $CLAIMS shell vars or jsonpath {..} braces omit subs. Console labels I could not ground
+// from a screenshot in the build env are marked // [CAPTURE-VERIFY] for the media pass.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Your claims service is already *instrumented and running under a steady trickle of traffic* — a load generator continuously lists claims, reads a claim's history, files a new claim, and looks up a claim that does not exist. That traffic is what lights up every signal you are about to read. You will consume the three signals, alert on the service, break it on purpose to watch the alert fire, trace a request, then make the service *autoscale* and *survive a node drain*.
+
+[NOTE]
+.Where you work
+====
+Keep two things open: a *terminal* logged in as `{user}` (the CLI tab of each step runs there), and the {ocp_console_url}[OpenShift web console^] (the Console tab). Nearly every step below can be done either way — pick a lane with the *Console / CLI* toggle and it stays put across the page. The *Observe* section of the console (Metrics, Alerting, Targets, Traces, Dashboards) is the home base for this module.
+====
+
+Set two shell variables once so the later command blocks stay copy-paste clean:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+CLAIMS=http://parasol-claims-{user}-dev.{cluster_domain}
+oc project $NS
+----
+
+== 1. Read the golden signals and your custom metric
+⏱ *~18 min* · find request rate, errors and latency — and the business metric the team added
+
+The claims service exposes Prometheus metrics at `/q/metrics`, and a *ServiceMonitor* (shipped with your environment) already tells user-workload monitoring to scrape them. So the same numbers exist in two places: raw at the app, and aggregated-and-queryable in the platform's monitoring. You will look at both — that gap *is* the ServiceMonitor's job.
+
+Start at the source. The raw endpoint is the ground truth every other view is built from.
+
+[source,sh,role=execute]
+----
+curl -s "$CLAIMS/q/metrics" | grep -E '^claims_created_total|http_server_requests_seconds_count' | head
+----
+
+.Expected output (values will differ — the counters climb with traffic)
+[%collapsible]
+====
+[source,texinfo]
+----
+claims_created_total 102.0
+http_server_requests_seconds_count{method="POST",outcome="SUCCESS",status="201",uri="/api/claims"} 102.0
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims"} 104.0
+http_server_requests_seconds_count{method="GET",outcome="CLIENT_ERROR",status="404",uri="/api/claims/{claimNumber}"} 102.0
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims/{claimNumber}/history"} 103.0
+----
+====
+
+Two things to notice. `http_server_requests_seconds_count` is the framework's built-in HTTP timer — one series per method + status + route, which is *traffic* and *errors* in one metric (see the steady stream of `status="404"` from the load generator looking up a claim that does not exist). And `claims_created_total` is a *business* metric the team added by hand — the platform has no idea what a claim is, but a one-line counter in the code makes "claims filed" a first-class, alertable signal.
+
+Now the aggregated view. This is where you *query* — rates, sums, and math the raw endpoint cannot do.
+
+[tabs]
+====
+Console::
++
+--
+. In the {ocp_console_url}[OpenShift web console^], open *Observe* → *Metrics*.
+// [CAPTURE-VERIFY] unified console 4.21 — Observe is a top-level nav group; Metrics opens the PromQL query browser
+. In the query field, paste the *throughput* of the claims-list endpoint and press *Run queries*:
++
+[.copy]
+`sum(rate(http_server_requests_seconds_count{uri="/api/claims"}[5m]))`
++
+A line settles around a fraction of a request per second — the load generator's steady list traffic.
+. Replace it with the *error rate* (the client-error 404s the load generator produces):
++
+[.copy]
+`sum(rate(http_server_requests_seconds_count{status="404"}[5m]))`
+. Replace it with *average latency* of the history endpoint — this app exposes a timer sum and count, not buckets, so latency is `sum ÷ count`:
++
+[.copy]
+`rate(http_server_requests_seconds_sum{uri="/api/claims/\{claimNumber}/history"}[5m]) / rate(http_server_requests_seconds_count{uri="/api/claims/\{claimNumber}/history"}[5m])`
+. Finally, your business metric — plot `claims_created_total` and watch it climb, then wrap it in `rate(...[5m])` to see *claims filed per second*.
+
+// media-pass: screenshot m12-observability-health-scale-01-observe-metrics.png — Observe -> Metrics graphing the claims-created rate: the PromQL query text + rising line graph (HIGH). Alt: "Observe Metrics view with a PromQL query for the claims-created rate and a rising line graph."
+--
+CLI::
++
+--
+The console's query engine is user-workload monitoring's Thanos. From the terminal you read the same raw counters at the source with `curl` — the exposition the ServiceMonitor scrapes:
+
+[source,sh,role=execute]
+----
+# request rate is derivable, but the raw counts are the ground truth the platform aggregates:
+curl -s "$CLAIMS/q/metrics" | grep 'http_server_requests_seconds_count{' | sort
+echo '--- claims filed (custom business counter) ---'
+curl -s "$CLAIMS/q/metrics" | grep '^claims_created_total'
+----
+
+.Expected output
+[%collapsible]
+=====
+[source,texinfo]
+----
+http_server_requests_seconds_count{method="GET",outcome="CLIENT_ERROR",status="404",uri="/api/claims/{claimNumber}"} 102.0
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims"} 104.0
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims/{claimNumber}/history"} 103.0
+http_server_requests_seconds_count{method="POST",outcome="SUCCESS",status="201",uri="/api/claims"} 102.0
+claims_created_total 102.0
+----
+=====
+
+[NOTE]
+.Why PromQL rate math lives in the console, not `curl`
+=====
+`curl` gives you an instantaneous *count*. Turning counts into *rates* over a time window (`rate(...[5m])`), or summing across replicas, is what a query engine does — and on this cluster that engine is reached through *Observe → Metrics* in the console. Running ad-hoc PromQL from the terminal needs a cluster-monitoring view role most attendees do not have, so treat the console as the PromQL surface and `curl /q/metrics` as the raw-truth surface.
+=====
+--
+====
+
+See how the app's metrics reach the platform — the one piece of wiring that makes all of the above work:
+
+[source,sh,role=execute]
+----
+oc get servicemonitor parasol-claims -n $NS -o yaml | grep -A6 'endpoints:'
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+  endpoints:
+  - interval: 30s
+    path: /q/metrics
+    port: http
+----
+====
+
+[.checkpoint]
+****
+✔ *Verify:* you can read the claims service's *request rate*, *error rate* and *average latency* in *Observe → Metrics*, and you plotted the custom `claims_created_total` climbing. You also saw the *ServiceMonitor* that scrapes `/q/metrics` every 30s — the single object that put your app's numbers into the platform's monitoring.
+****
+
+== 2. Alert on what matters
+⏱ *~10 min* · turn "the 5xx rate is too high" into a rule that pages you
+
+A dashboard only helps when someone is looking at it. An *alert* watches a metric for you and fires when it crosses a line. You author it as a *PrometheusRule* in your own namespace — user-workload monitoring scopes it to `{user}-dev`, so it is *your* alert, invisible to other tenants.
+
+The rule below fires when the claims API's *server-error* (5xx) rate stays above 0.1/s for two minutes. At the healthy baseline the load generator produces only 404s (client errors), so the rule loads *armed but inactive* — exactly what you want.
+
+[tabs]
+====
+Console::
++
+--
+. In the masthead, click the *+* (*Import YAML*) button.
+// [CAPTURE-VERIFY] unified console 4.21 — the "+" / Import YAML action is in the masthead
+. Paste the rule, set the namespace to `{user}-dev`, and click *Create*:
++
+[source,yaml,subs="attributes"]
+----
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: parasol-claims-alerts
+  namespace: {user}-dev
+  labels:
+    app: parasol-claims
+spec:
+  groups:
+    - name: parasol-claims.rules
+      rules:
+        - alert: ParasolClaimsErrorRateHigh
+          expr: sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "parasol-claims is returning server errors"
+            description: "The claims API 5xx rate has exceeded 0.1/s for 2m."
+----
+. Open *Observe* → *Alerting* → *Alerting rules* and filter for `ParasolClaimsErrorRateHigh`. Its state is *Inactive* (there are no 5xx yet).
+// [CAPTURE-VERIFY] Observe -> Alerting -> Alerting rules lists the user-defined rule as Inactive
+--
+CLI::
++
+--
+[source,sh,role=execute,subs="attributes"]
+----
+cat <<'EOF' | oc apply -n {user}-dev -f -
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: parasol-claims-alerts
+  labels:
+    app: parasol-claims
+spec:
+  groups:
+    - name: parasol-claims.rules
+      rules:
+        - alert: ParasolClaimsErrorRateHigh
+          expr: sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "parasol-claims is returning server errors"
+            description: "The claims API 5xx rate has exceeded 0.1/s for 2m."
+EOF
+----
+
+.Expected output
+[%collapsible]
+=====
+[source,texinfo]
+----
+prometheusrule.monitoring.coreos.com/parasol-claims-alerts created
+----
+=====
+
+Confirm it loaded and is armed-not-firing:
+
+[source,sh,role=execute]
+----
+oc get prometheusrule parasol-claims-alerts -n $NS
+----
+--
+====
+
+[NOTE]
+.If creating the rule is denied
+====
+If either path returns `Forbidden ... cannot create resource "prometheusrules"`, your namespace is missing the user-workload-monitoring editor role. That is a one-line platform grant, not a mistake on your part — see xref:m12-observability-health-scale/troubleshooting.adoc[the troubleshooting page].
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get prometheusrule -n {user}-dev` lists `parasol-claims-alerts`, and *Observe → Alerting → Alerting rules* shows `ParasolClaimsErrorRateHigh` in the *Inactive* state — loaded and watching, but not firing at the healthy baseline.
+****
+
+== 3. Break it, and watch the alert catch it
+⏱ *~12 min* · take the database away, read all three signals, then recover
+
+Now earn the alert. The claims service depends on its database; take the database away and the API starts returning 500s. You will watch the alert climb from *Inactive* through *Pending* to *Firing*, and see how each of the three signals reads during a real fault.
+
+Break it — scale the database to zero:
+
+[tabs]
+====
+Console::
++
+--
+. Open *Workloads* → *Deployments* → `claims-db`, and use *Actions* → *Edit Pod count* (or the down-arrow on the pod ring) to set it to *0*.
+// [CAPTURE-VERIFY] Deployments -> claims-db -> pod count control sets replicas to 0
+. Watch *Observe* → *Alerting*: within about a minute `ParasolClaimsErrorRateHigh` moves to *Pending*, and after its 2-minute `for:` window, to *Firing*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc scale deploy/claims-db -n $NS --replicas=0
+----
+
+Watch the app start failing and the alert climb (Ctrl-C when you have seen it fire):
+
+[source,sh,role=execute]
+----
+# each request now 500s once the connection pool breaks:
+curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
+# follow the rule's state (Inactive -> Pending -> Firing):
+watch -n 15 "oc get prometheusrule parasol-claims-alerts -n $NS -o jsonpath='state polls below'; echo"
+----
+--
+====
+
+While it climbs, read the *three signals* on the same fault — this is the whole module in ninety seconds:
+
+* *Metrics* say *what*: in *Observe → Metrics*, `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))` rises off zero and keeps climbing. That rising line is what tripped the alert.
+* *Logs* say… almost nothing useful. Run `oc logs deploy/parasol-claims -n $NS --tail=20`. A healthy claims request logs nothing, and even the failures are terse — which is precisely why you do not operate this service by tailing logs.
+* *Traces* say *where* — you will use them in the next exercise; the failing requests are recorded there with their status.
+
+[NOTE]
+.Measured: how long until it fires
+====
+On the build run the alert reached *Pending* about *77 seconds* after the database went down (the 5-minute rate had to build past 0.1/s), and *Firing* about *2 minutes* after that — roughly *3¼ minutes* end to end. The two-minute `for:` window is deliberate: it stops a brief blip from paging anyone.
+====
+
+// media-pass: screenshot m12-observability-health-scale-04-alert-firing.png — Observe -> Alerting, ParasolClaimsErrorRateHigh Firing (HIGH; the signature visual). Alt: "Observe Alerting view showing the ParasolClaimsErrorRateHigh alert Firing with warning severity while claims-db is scaled to zero."
+
+Recover. Bringing the database back is necessary but *not sufficient* — the claims app is still holding dead connections in its pool, so it keeps erroring until you restart it:
+
+[source,sh,role=execute]
+----
+oc scale deploy/claims-db -n $NS --replicas=1
+oc rollout status deploy/claims-db -n $NS
+oc rollout restart deploy/parasol-claims -n $NS
+oc rollout status deploy/parasol-claims -n $NS
+----
+
+Give it a moment, then confirm the service is healthy and the alert stands down:
+
+[source,sh,role=execute]
+----
+curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
+oc get prometheusrule parasol-claims-alerts -n $NS
+----
+
+[.checkpoint]
+****
+✔ *Verify:* you saw `ParasolClaimsErrorRateHigh` go *Firing* while the database was down, watched the 5xx-rate metric climb while the logs stayed nearly silent, and recovered the service (database back *and* app restarted) so the claims list returns *HTTP 200* again. That "restart to drop the poisoned connection pool" step is the fix worth remembering.
+****
+
+== 4. Follow a request with a trace
+⏱ *~15 min* · see the path a request takes, and rank requests by where the time goes
+
+Metrics told you the 5xx rate was up; they cannot tell you *which* request or *where* it spent its time. A *trace* does. The claims service emits an OpenTelemetry trace for every request to the shared collector, which forwards to *Tempo*; the *Cluster Observability Operator*'s distributed-tracing plugin surfaces them in the console.
+
+This is a product-UI beat — reading a trace waterfall has no terminal equivalent — so there is one path: the console.
+
+. In the {ocp_console_url}[OpenShift web console^], open *Observe* → *Traces*.
+// [CAPTURE-VERIFY] COO distributed-tracing UIPlugin adds Observe -> Traces; confirm exact nav label + Tempo/tenant selector
+. Select the `tempo-traces` instance and the `parasol-claims` service, or paste the TraceQL query directly:
++
+[.copy]
+`{ resource.service.name = "parasol-claims" }`
+. You get a stream of recent traces. *Sort by duration* and open the slowest one. Each trace is one request — its HTTP method, route (`/api/claims/\{claimNumber}/history`), status, and total time.
+
+// media-pass: screenshot/gif m12-observability-health-scale-02-observe-traces.png — Observe -> Traces, TraceQL for parasol-claims, sort by duration, open a trace to its HTTP span (HIGH; prefer a <30s gif of the search->open flow). Alt: "Observe Traces view with a TraceQL query for service.name parasol-claims, a trace list sorted by duration, and one trace expanded to its HTTP server span."
+
+[NOTE]
+.The metric that points at its own trace
+====
+Look again at `/q/metrics` from exercise 1: each counter line ends with an *exemplar* — `# {trace_id="…"}`. That is a direct link from an aggregate metric to *one exact trace* that contributed to it. It is how you get from "the latency graph has a spike" to "*this* request is why" in one click, and it is the modern glue between the metrics and traces signals.
+
+[source,sh,role=execute]
+----
+curl -s "$CLAIMS/q/metrics" | grep -m1 'trace_id'
+----
+====
+
+*About the N+1.* The `GET /api/claims/\{claimNumber}/history` endpoint is deliberately inefficient — it loads a claim's audit events with *one database query per event* instead of one query for all of them (a classic *N+1*). At the warm, in-cluster baseline this costs only a few milliseconds, so it hides in the averages; against a remote or loaded database those extra round-trips are exactly the tail latency a trace helps you find. The trace tells you *which* endpoint is the outlier; the code tells you *why*.
+
+[NOTE]
+.Go deeper: seeing each database query as its own span
+====
+With database-span instrumentation enabled in the build, that N+1 renders as a *staircase of `SELECT` spans* under the request — the anti-pattern becomes visible, not inferred. This module's image emits the HTTP request span today; per-query database spans are a build-time flag on the claims image tracked as an enhancement. Until then, rank by duration and confirm the cause in the code.
+====
+
+[.checkpoint]
+****
+✔ *Verify (understanding):* in *Observe → Traces* you found the `parasol-claims` traces, ranked them by duration, and opened a request to read its route, status and timing. You can explain, in one sentence, what a trace tells you that a metric cannot — *where in the request the time went* — and you saw the `trace_id` *exemplar* that links a metric back to a single request.
+****
+
+== 5. Autoscale under load with an HPA
+⏱ *~15 min* · add replicas automatically when CPU climbs, and watch it happen
+
+The claims service runs at a fixed replica count. A *HorizontalPodAutoscaler* changes that: it watches CPU utilization against the container's CPU *request* and adds replicas when the app is busy, removing them when it is idle. The entry state already set a CPU request (200m) on the app — that is the denominator the HPA needs.
+
+Create an HPA that targets *60% CPU utilization*, floor *2* replicas, ceiling *4*:
+
+[tabs]
+====
+Console::
++
+--
+. Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Add HorizontalPodAutoscaler*.
+// [CAPTURE-VERIFY] Deployments -> parasol-claims -> Actions -> Add HorizontalPodAutoscaler form
+. Set *Minimum pods* `2`, *Maximum pods* `4`, *CPU utilization* `60%`, and *Create*. The app immediately scales to the floor of 2.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc autoscale deploy/parasol-claims --cpu-percent=60 --min=2 --max=4 -n $NS
+oc get hpa parasol-claims -n $NS
+----
+
+.Expected output (TARGETS shows current/target utilization)
+[%collapsible]
+=====
+[source,texinfo]
+----
+horizontalpodautoscaler.autoscaling/parasol-claims autoscaled
+NAME             REFERENCE                   TARGETS        MINPODS   MAXPODS   REPLICAS
+parasol-claims   Deployment/parasol-claims   cpu: 18%/60%   2         4         2
+----
+=====
+--
+====
+
+Now *drive load*. The steady trickle from the built-in generator is not enough to move CPU, so add a short burst of concurrent traffic (delete it when you are done):
+
+[source,sh,role=execute]
+----
+oc -n $NS run claims-burst --image=registry.redhat.io/openshift4/ose-cli:latest --restart=Never -- \
+  /bin/bash -c 'for i in $(seq 1 20); do ( while true; do \
+    curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; \
+    curl -s -o /dev/null http://parasol-claims:8080/api/claims; done ) & done; wait'
+----
+
+Watch it scale, in either lane:
+
+[tabs]
+====
+Console::
++
+--
+Open *Topology*, click the `parasol-claims` node, and watch the pod ring grow from 2 toward 4 as the load lands. The *Details* / *Resources* panel lists the new pods appearing.
+// [CAPTURE-VERIFY] Topology parasol-claims pod ring growing 2 -> 4 under load
+
+// media-pass: screenshot/gif m12-observability-health-scale-03-topology-hpa-scale.png — Topology pod ring growing 2->4 under load (HIGH; prefer a <30s gif). Alt: "Topology view of parasol-claims with a pod ring showing four pods after the HPA scaled out under load."
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get hpa parasol-claims -n $NS -w
+----
+
+.Expected output (Ctrl-C to stop; utilization spikes well past 60%, replicas climb to the ceiling)
+[%collapsible]
+=====
+[source,texinfo]
+----
+NAME             REFERENCE                   TARGETS         MINPODS   MAXPODS   REPLICAS
+parasol-claims   Deployment/parasol-claims   cpu: 18%/60%    2         4         2
+parasol-claims   Deployment/parasol-claims   cpu: 221%/60%   2         4         4
+parasol-claims   Deployment/parasol-claims   cpu: 76%/60%    2         4         4
+parasol-claims   Deployment/parasol-claims   cpu: 56%/60%    2         4         4
+----
+=====
+--
+====
+
+On the build run CPU hit *221%* and the HPA scaled to the *ceiling of 4 within about 24 seconds*, then settled around the 60% target spread across four pods. Stop the load and clean up the burst pod:
+
+[source,sh,role=execute]
+----
+oc delete pod claims-burst -n $NS
+----
+
+[NOTE]
+.Scale-down is deliberately slow
+====
+Replicas will *not* drop back to 2 the moment load stops — the HPA holds them for a *5-minute stabilization window* by default, so a brief lull does not trigger a shrink-then-grow flap. Watching `oc get hpa` you will see `TARGETS` fall below 60% while `REPLICAS` stays at 4 for several minutes. That is correct behavior, not a stuck autoscaler.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get hpa parasol-claims -n {user}-dev` shows a CPU-targeted HPA (min 2, max 4), and you watched `parasol-claims` scale *out* under the burst — in Topology the pod ring grew, and on the CLI `REPLICAS` climbed to 4 while `TARGETS` spiked past 60%.
+****
+
+== 6. Survive a node drain with a PodDisruptionBudget
+⏱ *~12 min* · guarantee a minimum of healthy pods through voluntary disruption
+
+Autoscaling handles load. Node *maintenance* is the other thing that moves your pods: every patch cycle, nodes are cordoned and drained. A *PodDisruptionBudget* is the contract that stops a drain from taking your service down — "you may evict my pods, but never leave me fewer than one healthy."
+
+Create the budget:
+
+[tabs]
+====
+Console::
++
+--
+Use *+* (*Import YAML*), paste the budget, set the namespace to `{user}-dev`, and *Create*:
+
+[source,yaml,subs="attributes"]
+----
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: parasol-claims
+  namespace: {user}-dev
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+----
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc create pdb parasol-claims --selector=app=parasol-claims --min-available=1 -n $NS
+oc get pdb parasol-claims -n $NS
+----
+
+.Expected output (ALLOWED DISRUPTIONS = current healthy − minAvailable)
+[%collapsible]
+=====
+[source,texinfo]
+----
+poddisruptionbudget.policy/parasol-claims created
+NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+parasol-claims   1               N/A               1                     3s
+----
+=====
+--
+====
+
+`ALLOWED DISRUPTIONS` is the whole story: with two healthy pods and `minAvailable: 1`, the platform will let *one* pod be evicted at a time — never the last one.
+
+[IMPORTANT]
+.The node drain is an instructor-run demonstration
+====
+Draining a real node moves *every* tenant's pods on it, so it is run once by the instructor against the shared cluster — do not drain a node yourself. Watch what happens to *your* service while they do: `oc get pods -n {user}-dev -w`. As the node drains, one `parasol-claims` pod is evicted and a replacement schedules elsewhere, but a second pod is *held* until the first replacement is healthy — the budget paces the drain so your claims API never drops below one serving pod. The mechanism is the eviction API refusing the disruptive request: on the build run, evicting past the budget returned `Cannot evict pod as it would violate the pod's disruption budget`.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get pdb parasol-claims -n {user}-dev` shows `MIN AVAILABLE 1` and a non-zero `ALLOWED DISRUPTIONS`. You can state what the platform does when a drain would breach that budget — it *waits* rather than evicting the last healthy pod — and why that turns node maintenance from an outage risk into a routine operation.
+****
+
+== Recap
+⏱ *~2 min*
+
+[source,sh,role=execute]
+----
+ws verify {module-id}
+----
+
+You instrumented nothing and consumed everything: the golden signals and a custom business metric in user-workload monitoring, an alert you authored and then *made fire*, a trace that shows a request's path, an HPA that grows the service under load, and a PDB that keeps it alive through maintenance.
+
+[.checkpoint]
+****
+✔ *Verify:* `ws verify {module-id}` passes — the CPU HPA (≥2 replicas), the `parasol-claims-alerts` PrometheusRule, and the `parasol-claims` PodDisruptionBudget all exist in `{user}-dev`, on top of the always-present instrumented app + ServiceMonitor.
+****
+endif::demo[]
+
+ifdef::demo[]
+== Demo arc — break it live, then scale it live (15 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws solve m12 --user {user}` first: it materializes the *end state* — the claims app at 2 replicas with the CPU HPA, the `parasol-claims-alerts` rule, and the PDB already in place — so every signal is live and you only have to *drive* it. Have the console open on *Observe → Metrics* with the 5xx-rate query ready, a second tab on *Observe → Alerting*, and a terminal logged in as `{user}`. The database break fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
+====
+
+[demo-block]
+[TIME 2m]
+Say:: "Parasol's claims service has been running blind all workshop. The platform was already collecting metrics, logs and traces — we just point them at the app. Here are the three signals in one place."
+Show:: *Observe → Metrics*. Plot `sum(rate(http_server_requests_seconds_count[5m]))` (traffic), then `claims_created_total` (the business metric the team added). A steady line, a climbing counter.
+Do:: In the terminal, show the same numbers at the source:
++
+[source,sh,role=execute,subs="attributes"]
+----
+curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics \
+  | grep -E '^claims_created_total|status="404"' | head
+----
++
+"Same numbers, two places — the ServiceMonitor is the bridge. Now let's make it hurt."
+
+[demo-block]
+[TIME 1m]
+Say:: "I'm going to take the database away. Watch the alert — it's armed and inactive right now."
+Show:: *Observe → Alerting*, `ParasolClaimsErrorRateHigh` in *Inactive*.
+Do:: Break it — and note the time; it fires in about three minutes:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc scale deploy/claims-db -n {user}-dev --replicas=0
+----
++
+"Three minutes to fire. While it cooks, let's see what the signals say — and why logs won't save us here."
+
+[demo-block]
+[TIME 3m]
+Say:: "Metrics tell us *what*: the 5xx rate is climbing. Logs tell us almost *nothing* — a healthy app is quiet, and so is this one under load. Traces will tell us *where*."
+Show:: *Observe → Metrics* with `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))` rising off zero. Then `oc logs deploy/parasol-claims -n {user}-dev --tail=15` — terse. Then *Observe → Traces*, `{ resource.service.name = "parasol-claims" }`, open a request and read its route + status.
+Do::
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc logs deploy/parasol-claims -n {user}-dev --tail=15
+----
++
+"This is the argument for observability in one screen: the metric noticed, the trace located, and the logs — which everyone reaches for first — barely helped."
+
+[demo-block]
+[TIME 2m]
+Say:: "There it goes." (The alert should now be *Firing*.) "That's a page. In production this hits the on-call. Let's fix it — and notice the fix is two steps, because the app is holding dead connections."
+Show:: *Observe → Alerting*, `ParasolClaimsErrorRateHigh` now *Firing* (red).
+Do::
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc scale deploy/claims-db -n {user}-dev --replicas=1
+oc rollout restart deploy/parasol-claims -n {user}-dev
+----
++
+"Database back, app restarted to drop the poisoned pool — and the alert stands down. Now the happy problem: too much traffic."
+
+[demo-block]
+[TIME 4m]
+Say:: "The service is at two replicas. I'll hammer it, and the HorizontalPodAutoscaler will add pods on its own — no human, no ticket."
+Show:: *Topology* on `parasol-claims`, the pod ring at 2. Start the burst; within ~25 seconds the ring grows to 4. Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
+Do::
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev run claims-burst --image=registry.redhat.io/openshift4/ose-cli:latest --restart=Never -- \
+  /bin/bash -c 'for i in $(seq 1 20); do ( while true; do curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; done ) & done; wait'
+----
++
+"CPU 221%, scaled to four in under half a minute. When the load drops it holds for five minutes before shrinking — no flapping."
+
+[demo-block]
+[TIME 3m]
+Say:: "Last thing: the platform patches nodes every week. A PodDisruptionBudget means that maintenance never becomes an outage."
+Show:: `oc get pdb parasol-claims -n {user}-dev` — `ALLOWED DISRUPTIONS 1`. Explain: on a node drain, the platform evicts one claims pod, waits for its replacement to be healthy, then takes the next — never the last one. The eviction API literally refuses: `Cannot evict pod as it would violate the pod's disruption budget`.
+Do::
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc get pdb parasol-claims -n {user}-dev
+oc delete pod claims-burst -n {user}-dev
+----
++
+"Metrics noticed, a trace located, an alert paged, the autoscaler absorbed the load, and the budget guards maintenance — that's observability, health and scale, and none of it was a separate product to buy."
+
+[NOTE]
+.Resetting between runs
+====
+`ws solve m12 --user {user}` is idempotent — re-run it to restore the end state (database back to 1, app to 2 replicas, HPA/alert/PDB in place). If you left the burst pod running, `oc delete pod claims-burst -n {user}-dev`.
+====
+endif::demo[]
