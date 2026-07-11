@@ -33,3 +33,12 @@ Extracted from the M01 vertical slice (2026-07-08). Copy `skeleton/` and follow 
 ## Gates
 
 G1 self-audit (DoD in 03-DEV-WORKFLOW §4, output the checklist) → G2 content-editor mechanical pass → G3 sa-smoke-tester cold start (fresh user, follows the lab literally) → wave G4 milestone audit → G5 Serhat.
+14. **Verify scripts are MODE-SPLIT: entry checks never run at completion.** Checks that assert
+    entry-state materialization (a seeded flaw is present, canonical fork content, "no app deployed
+    yet") belong to `--entry-only` mode ONLY. Full/end mode asserts OUTCOMES and must stay green
+    after a correctly completed lab — including states the lab legitimately leaves different from
+    `ws solve`'s (use `>=`-style checks, not `==`; the lab may scale past the solve baseline).
+    Earned twice on 2026-07-11: m09's verify hardcoded stage==2 against a lab that ends at 3, and
+    m08's "seed-vulnerable carries the CVE" entry check fired red after the attendee had correctly
+    REMOVED the CVE — both told successful attendees they failed and hinted at a work-destroying
+    `ws reset`. A false ❌ is the fastest way to lose an attendee's trust in every other ✅.
