@@ -9,7 +9,7 @@ You took the claims service from *running blind* to *observed and self-defending
 * *Metrics* — read the golden signals (rate, errors, latency) and a custom `claims_created_total` in *Observe → Metrics*, scraped into user-workload monitoring by a *ServiceMonitor*.
 * *An alert* — a `PrometheusRule` in your namespace that you *made fire* by breaking the database, then recovered (database back *and* app restarted to drop the dead connection pool).
 * *A trace* — followed a request in *Observe → Traces*, ranked requests by duration, and saw the `trace_id` exemplar that links a metric back to one exact request.
-* *Autoscaling* — a CPU `HorizontalPodAutoscaler` that grew the service from 2 to 4 replicas under load and held steady before shrinking.
+* *Autoscaling* — a CPU `HorizontalPodAutoscaler` (HPA) that grew the service from 2 to 4 replicas under load and held steady before shrinking.
 * *Resilience* — a `PodDisruptionBudget` that keeps a minimum of one healthy pod through a node drain.
 
 [mermaid]
@@ -33,10 +33,12 @@ flowchart LR
 
 . *When your last incident started, how long until someone knew — and was it a customer who told you?*
 You built an alert that pages on the 5xx rate *before* the error budget is gone.
-For a service your team runs: is "it's down" detected by a metric and an alert, or by a support ticket? What is the one golden-signal alert you would add on Monday that would have caught your last incident earlier?
+For a service your team runs: is "it's down" detected by a metric and an alert, or by a support ticket?
+What is the one golden-signal alert you would add on Monday that would have caught your last incident earlier?
 . *In your last "is it us or the database?" bridge call, what would a trace have saved you?*
 You watched metrics say *what* and a trace say *where* — while the logs said almost nothing.
-Think of an incident that burned an hour locating the fault across services. If every request carried a trace id you could search, how much of that hour disappears?
+Think of an incident that burned an hour locating the fault across services.
+If every request carried a trace id you could search, how much of that hour disappears?
 . *What are you paying to have provisioned for a peak that happens twice a day?*
 You made the claims service grow only under real load and shrink when idle.
 Which of your services are sized for peak and idle most of the day — and what changes (a CPU request, an HPA) would let them run lean without a human watching a graph?
@@ -49,29 +51,40 @@ Do your services declare a disruption budget, or does node maintenance quietly d
 Observability and autoscaling are powerful, which means being honest about their edges:
 
 * *Don't alert on causes; alert on symptoms.*
-You alerted on the *5xx rate* — a symptom your users feel. It is tempting to alert on every internal metric (a pool at 80%, a queue at 100), but cause-alerts page constantly and train people to ignore the pager. Alert on the handful of *symptoms* that mean a user is having a bad time, and let metrics and traces explain the cause once you are looking.
+You alerted on the *5xx rate* — a symptom your users feel.
+It is tempting to alert on every internal metric (a pool at 80%, a queue at 100), but cause-alerts page constantly and train people to ignore the pager.
+Alert on the handful of *symptoms* that mean a user is having a bad time, and let metrics and traces explain the cause once you are looking.
 * *Don't put an HPA on a workload that cannot scale horizontally.*
-The claims service is stateless behind a Service, so more replicas means more capacity. A singleton with a leader lock, a StatefulSet whose writes must serialize, or a job that holds a shared file will not go faster — or will corrupt data — when you add pods. Autoscale the things that are *actually* horizontally scalable; right-size the rest.
+The claims service is stateless behind a Service, so more replicas means more capacity.
+A singleton with a leader lock, a StatefulSet whose writes must serialize, or a job that holds a shared file will not go faster — or will corrupt data — when you add pods.
+Autoscale the things that are *actually* horizontally scalable; right-size the rest.
 * *Don't point a VPA and an HPA at the same resource.*
-If a VerticalPodAutoscaler is adjusting CPU requests while an HPA is scaling on CPU utilization, they chase each other. Pick one axis per workload.
+If a VerticalPodAutoscaler is adjusting CPU requests while an HPA is scaling on CPU utilization, they chase each other.
+Pick one axis per workload.
 * *Don't let a PodDisruptionBudget become a drain deadlock.*
-`minAvailable` equal to (or above) the replica count means *zero* allowed disruptions — a node drain then blocks forever, waiting for a headroom that never appears. A budget only protects you if it leaves room for at least one pod to move. Set it below your steady replica count, and pair it with an HPA floor so there is always a spare.
+`minAvailable` equal to (or above) the replica count means *zero* allowed disruptions — a node drain then blocks forever, waiting for a headroom that never appears.
+A budget only protects you if it leaves room for at least one pod to move.
+Set it below your steady replica count, and pair it with an HPA floor so there is always a spare.
 
 == Go deeper
 
 * *Scale on a queue, not CPU* — event- and queue-driven autoscaling with KEDA (the Custom Metrics Autoscaler) is exercised in the Jobs and eventing modules (separate modules).
 * *Scale to zero* — Serverless (Knative) for spiky or rarely-used services (a separate module).
-* *Logs at scale* — this module keeps the Loki log store as an opt-in, instructor-demonstrated tier (the app is deliberately quiet, and a shared log store needs object storage). The always-available baseline is `oc logs` and the console's *Pod → Logs*; centralized log aggregation with the Cluster Observability Operator's logging plugin is the next step where log volume justifies it.
+* *Logs at scale* — this module keeps the Loki log store as an opt-in, instructor-demonstrated tier (the app is deliberately quiet, and a shared log store needs object storage).
+The always-available baseline is `oc logs` and the console's *Pod → Logs*; centralized log aggregation with the Cluster Observability Operator's logging plugin is the next step where log volume justifies it.
 * *Per-query database spans* — enabling database-span instrumentation on the claims image turns the N+1 endpoint into a visible staircase of `SELECT` spans; tracked as an enhancement to the sample app.
 
 [NOTE]
 .Credits
 ====
-Built fresh for this workshop against the current Cluster Observability Operator, Tempo, and Red Hat build of OpenTelemetry story (a fast-moving area — the console navigation was verified live at build). The HorizontalPodAutoscaler-under-load beat adapts the platform-operations autoscaling demonstration from the Advanced Application Platform demo materials.
+Built fresh for this workshop against the current Cluster Observability Operator, Tempo, and Red Hat build of OpenTelemetry story (a fast-moving area — the console navigation was verified live at build).
+The HorizontalPodAutoscaler-under-load beat adapts the platform-operations autoscaling demonstration from the Advanced Application Platform demo materials.
 ====
 
 [NOTE]
 .Clean up
 ====
-Redoing the module, or moving on? `ws prep {module-id} --yes` returns `{user}-dev` to the clean entry state — it removes the HPA, PrometheusRule and PodDisruptionBudget you created and restores the instrumented app at its baseline. If you left a load burst running, `oc delete pod claims-burst -n {user}-dev`.
+Redoing the module, or moving on?
+`ws prep {module-id} --yes` returns `{user}-dev` to the clean entry state — it removes the HPA, PrometheusRule and PodDisruptionBudget you created and restores the instrumented app at its baseline.
+If you left a load burst running, `oc delete pod claims-burst -n {user}-dev`.
 ====

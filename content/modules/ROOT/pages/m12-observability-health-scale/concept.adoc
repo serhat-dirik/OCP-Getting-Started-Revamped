@@ -13,14 +13,17 @@ include::partial$version-attributes.adoc[]
 // Mermaid labels are deliberately attribute-free (the diagram extension mangles {attr}).
 
 [.lead]
-It is 02:00 and Parasol's claims API is throwing errors. The on-call engineer can see *that* something is wrong — a dashboard is red — but not *why*: which request, which dependency, how many users. Every minute spent guessing is a minute the outage runs.
+It is 02:00 and Parasol's claims API is throwing errors.
+The on-call engineer can see *that* something is wrong — a dashboard is red — but not *why*: which request, which dependency, how many users.
+Every minute spent guessing is a minute the outage runs.
 
 *Observability* is how you turn "something is wrong" into "here is the failing request and its slow database call" in seconds instead of hours — and *health and scale* are how the platform rides out the load spikes and node maintenance that cause half those pages in the first place.
 This module wires the claims service to the three signals the platform already collects — *metrics*, *logs*, and *traces* — makes it *alert* when it misbehaves, *autoscale* when it is busy, and *survive* a node drain without dropping requests.
 
 == The three signals, in five minutes
 
-Observability rests on three kinds of telemetry. Each answers a different question, and you need all three because none of them answers the others' questions well.
+Observability rests on three kinds of telemetry.
+Each answers a different question, and you need all three because none of them answers the others' questions well.
 
 [mermaid]
 ....
@@ -39,15 +42,23 @@ flowchart LR
 
 // media-pass: SVG export m12-observability-health-scale-01-three-signals.svg (see media-manifest.md)
 
-* *Metrics* are cheap numbers over time — request rate, error rate, latency, CPU. They are always on, they aggregate across every replica, and they are what you *alert* on. A metric tells you the 5xx rate just tripled; it will not tell you which claim failed.
-* *Logs* are individual events with full detail — the stack trace, the offending claim number. They answer "what exactly happened" for *one* occurrence, but at scale they are a firehose you do not want to read live.
-* *Traces* follow *one* request across every service and database call it touched, and show where the time went. A trace is how you find the slow hop — the N+1 query, the timing out dependency — without reading code first.
+* *Metrics* are cheap numbers over time — request rate, error rate, latency, CPU.
+They are always on, they aggregate across every replica, and they are what you *alert* on.
+A metric tells you the 5xx rate just tripled; it will not tell you which claim failed.
+* *Logs* are individual events with full detail — the stack trace, the offending claim number.
+They answer "what exactly happened" for *one* occurrence, but at scale they are a firehose you do not want to read live.
+* *Traces* follow *one* request across every service and database call it touched, and show where the time went.
+A trace is how you find the slow hop — the N+1 query, the timing out dependency — without reading code first.
 
-The discipline is: *metrics* to notice and alert, *traces* to locate, *logs* to confirm the detail. Parasol's claims service is deliberately quiet at runtime — a healthy request logs nothing — which is exactly why metrics and traces, not log-grepping, are how you operate it.
+The discipline is: *metrics* to notice and alert, *traces* to locate, *logs* to confirm the detail.
+Parasol's claims service is deliberately quiet at runtime — a healthy request logs nothing — which is exactly why metrics and traces, not log-grepping, are how you operate it.
 
 == Observe your app; the platform observes itself
 
-Here is the part that surprises people: you do not install a monitoring stack. OpenShift already runs one — *user-workload monitoring* (Prometheus, cluster-wide) is watching the platform's own health right now. To get *your* app into it, you point it at your app with a *ServiceMonitor* — a small object that says "scrape this Service's `/q/metrics` every 30 seconds." That is the entire integration.
+Here is the part that surprises people: you do not install a monitoring stack.
+OpenShift already runs one — *user-workload monitoring* (Prometheus, cluster-wide) is watching the platform's own health right now.
+To get *your* app into it, you point it at your app with a *ServiceMonitor* — a small object that says "scrape this Service's `/q/metrics` every 30 seconds."
+That is the entire integration.
 
 [mermaid]
 ....
@@ -64,17 +75,23 @@ flowchart LR
 
 // media-pass: SVG export m12-observability-health-scale-02-servicemonitor-bridge.svg (see media-manifest.md)
 
-The claims service already speaks the two languages the platform reads. It exposes Prometheus metrics at `/q/metrics` (the framework's built-in HTTP timers *plus* a business metric the team added, `claims_created_total`), and it emits OpenTelemetry *traces* to a shared collector that forwards them to *Tempo*. Your job in the lab is not to build any of that plumbing — it is to *consume* it: read the signals, alert on them, and act.
+The claims service already speaks the two languages the platform reads.
+It exposes Prometheus metrics at `/q/metrics` (the framework's built-in HTTP timers *plus* a business metric the team added, `claims_created_total`), and it emits OpenTelemetry *traces* to a shared collector that forwards them to *Tempo*.
+Your job in the lab is not to build any of that plumbing — it is to *consume* it: read the signals, alert on them, and act.
 
 [NOTE]
 .One instrumentation, many backends: why OpenTelemetry
 ====
-The claims service does not know or care that traces land in Tempo. It emits *OpenTelemetry* — a vendor-neutral wire format — to a collector, and the *collector* decides where telemetry goes. Instrument once against the standard; swap or add backends (Tempo today, something else tomorrow) without touching application code. That is the whole point of OpenTelemetry, and it is why "add tracing" is a platform decision, not a per-app rewrite.
+The claims service does not know or care that traces land in Tempo.
+It emits *OpenTelemetry* — a vendor-neutral wire format — to a collector, and the *collector* decides where telemetry goes.
+Instrument once against the standard; swap or add backends (Tempo today, something else tomorrow) without touching application code.
+That is the whole point of OpenTelemetry, and it is why "add tracing" is a platform decision, not a per-app rewrite.
 ====
 
 == Scaling is a decision, not a reflex
 
-"It's slow — add replicas" is only sometimes the right answer. OpenShift gives you four scaling tools, and picking the wrong one wastes money or does nothing.
+"It's slow — add replicas" is only sometimes the right answer.
+OpenShift gives you four scaling tools, and picking the wrong one wastes money or does nothing.
 
 [mermaid]
 ....
@@ -91,16 +108,26 @@ flowchart TD
 
 // media-pass: SVG export m12-observability-health-scale-03-scaling-decision-tree.svg (see media-manifest.md)
 
-* *HorizontalPodAutoscaler (HPA)* — more replicas when CPU or memory climbs with traffic. This is the workhorse and what you build in the lab. It needs a resource *request* on the container to compute utilization against.
-* *Serverless (Knative)* — scale to *zero* when idle, back up on the first request. Right for spiky or rarely-used services (cross-referenced in the Serverless module).
-* *KEDA (Custom Metrics Autoscaler)* — scale on an external signal like queue depth, not CPU. Right for the batch and event-driven workloads you met in the Jobs module and will meet again in eventing.
-* *VerticalPodAutoscaler (VPA)* — right-*size* one pod's requests/limits rather than adding pods. Useful, but *never point a VPA and an HPA at the same resource on the same workload* — they fight. VPA is concept-only here.
+* *HorizontalPodAutoscaler (HPA)* — more replicas when CPU or memory climbs with traffic.
+This is the workhorse and what you build in the lab.
+It needs a resource *request* on the container to compute utilization against.
+* *Serverless (Knative)* — scale to *zero* when idle, back up on the first request.
+Right for spiky or rarely-used services (cross-referenced in the Serverless module).
+* *KEDA (Custom Metrics Autoscaler)* — scale on an external signal like queue depth, not CPU.
+Right for the batch and event-driven workloads you met in the Jobs module and will meet again in eventing.
+* *VerticalPodAutoscaler (VPA)* — right-*size* one pod's requests/limits rather than adding pods.
+Useful, but *never point a VPA and an HPA at the same resource on the same workload* — they fight.
+VPA is concept-only here.
 
-Autoscaling handles load. The other half of staying up is *voluntary disruption* — the node reboots and drains that happen every week for patching. A *PodDisruptionBudget (PDB)* is your app's contract with the platform: "you may take my pods for maintenance, but never leave me fewer than N." The drain then proceeds one pod at a time, waiting for a replacement to become healthy — so a routine node drain never becomes a routine outage.
+Autoscaling handles load.
+The other half of staying up is *voluntary disruption* — the node reboots and drains that happen every week for patching.
+A *PodDisruptionBudget (PDB)* is your app's contract with the platform: "you may take my pods for maintenance, but never leave me fewer than N."
+The drain then proceeds one pod at a time, waiting for a replacement to become healthy — so a routine node drain never becomes a routine outage.
 
 == The observability layer over the Parasol platform
 
-Everything you built in earlier modules — the deployment, the config, the pipeline, the GitOps sync — has been running blind. This module adds the layer that lets you *see and steer* it.
+Everything you built in earlier modules — the deployment, the config, the pipeline, the GitOps sync — has been running blind.
+This module adds the layer that lets you *see and steer* it.
 
 [mermaid]
 ....
@@ -128,18 +155,24 @@ flowchart TB
 == How this shows up in real orgs
 
 * *"Is it down?" stops being a debate and becomes a query.*
-Before app metrics, "is the claims service healthy" is answered by someone tailing logs or clicking around. After, it is a dashboard and an alert that pages *before* a customer notices — and the same signal both humans and the autoscaler act on.
+Before app metrics, "is the claims service healthy" is answered by someone tailing logs or clicking around.
+After, it is a dashboard and an alert that pages *before* a customer notices — and the same signal both humans and the autoscaler act on.
 * *Mean-time-to-resolution collapses when you can locate the fault.*
-The expensive part of an incident is rarely the fix; it is finding *where*. A trace that shows the request path and its slow hop turns a multi-team bridge call ("is it us or the database?") into a thirty-second answer.
+The expensive part of an incident is rarely the fix; it is finding *where*.
+A trace that shows the request path and its slow hop turns a multi-team bridge call ("is it us or the database?") into a thirty-second answer.
 * *Capacity becomes elastic instead of a pre-provisioned guess.*
-Sizing for peak means paying for peak all day. An HPA lets the claims service run lean and grow only under real load, and a PDB means the platform team can patch nodes on a Tuesday afternoon without asking every app team for a maintenance window.
+Sizing for peak means paying for peak all day.
+An HPA lets the claims service run lean and grow only under real load, and a PDB means the platform team can patch nodes on a Tuesday afternoon without asking every app team for a maintenance window.
 * *Observability is a platform capability you already own.*
-User-workload monitoring, the Cluster Observability Operator, Tempo, and OpenTelemetry ship with the platform. Teams that treat "add monitoring" as a procurement project are usually re-buying what their OpenShift subscription already includes.
+User-workload monitoring, the Cluster Observability Operator, Tempo, and OpenTelemetry ship with the platform.
+Teams that treat "add monitoring" as a procurement project are usually re-buying what their OpenShift subscription already includes.
 
 ifdef::demo[]
 [NOTE]
 .Presenter framing for the demo arc
 ====
-The lab page carries the timed *Say / Show / Do* demo arc (about 15 minutes) built from a completed end state (`ws solve m12`). The signature beat is *break the database and watch the alert fire live* while you narrate the three signals; the closer is *drive load and watch the HPA scale in real time*. Keep the concept to the three-signals slide and the scaling decision tree — the drama is in the console, not the theory.
+The lab page carries the timed *Say / Show / Do* demo arc (about 15 minutes) built from a completed end state (`ws solve m12`).
+The signature beat is *break the database and watch the alert fire live* while you narrate the three signals; the closer is *drive load and watch the HPA scale in real time*.
+Keep the concept to the three-signals slide and the scaling decision tree — the drama is in the console, not the theory.
 ====
 endif::demo[]
