@@ -64,3 +64,48 @@ a module list in the provisioning values drives per-module AsciiDoc attributes, 
 the nav/library include each module conditionally — one content source, filtered at
 Showroom content-build time. Until that lands, selection is advisory: tell attendees
 which modules their session includes.
+
+## Publishing content updates to a LIVE session (publish runbook)
+
+You author on your laptop and push to `main`. The cluster runs from an **in-cluster
+Gitea mirror** of `main`, and each attendee cockpit has a **pod-local clone** (the `ws`
+CLI + entry states) plus **pre-rendered lab pages**, both built at pod start. Getting a
+fresh push in front of live attendees is two moves — do the first always, the second
+only when readers need the new/changed **pages**:
+
+1. **Advance the mirror + re-run seeds** (always, non-disruptive):
+
+   ```
+   ws git-refresh
+   ```
+
+   Force-syncs the Gitea mirror to your pushed `main` and re-syncs the platform Argo
+   apps (git-localize + workshop-config seeds). It **never restarts pods** — safe to run
+   as often as you like, including mid-session.
+
+   After this, an attendee's **`ws` CLI self-heals**: the next `ws prep|list|verify|reset`
+   notices a just-published module is missing from its clone, pulls the clone up to the
+   mirror, and finds it — **no pod restart needed**. This covers everything the terminal does.
+
+2. **Refresh what attendees READ** (only when pages changed, opt-in, targetable):
+
+   Rendered lab pages are built at pod-init and the CLI self-heal can't touch them, so a
+   running cockpit keeps stale pages until its pod restarts. Restart cockpit pods explicitly:
+
+   ```
+   ws git-refresh --restart-terminals --user user3      # one session
+   ws git-refresh --restart-terminals --all             # whole cohort (spares reserved sessions)
+   ws git-refresh --restart-terminals --all --exclude user2
+   ```
+
+   The fresh pod re-clones to current `main` and re-renders. Best run at a natural break —
+   a restart interrupts whatever the attendee had open in that terminal.
+
+   **Reserved sessions are protected.** `--all` never restarts users in `WS_RESERVED_USERS`
+   (default `user5` — the live demo/test session). To restart a reserved user you must name
+   it explicitly (`--user user5`), which prints a RESERVED warning. Set
+   `WS_RESERVED_USERS="user5 user9"` to protect more.
+
+> **One-time bootstrap caveat:** the self-heal (move 1) only works once a pod is already
+> running the self-healing `ws`. Cockpits provisioned **before** this CLI shipped must be
+> restarted **once** (move 2) to pick it up; from then on move 1 alone keeps their CLI current.

@@ -22,9 +22,13 @@ _ws_complete() {
       mapfile -t COMPREPLY < <(compgen -W "$mods" -- "$cur")
       return
       ;;
+    git-refresh)
+      mapfile -t COMPREPLY < <(compgen -W "--restart-terminals --user --all --exclude" -- "$cur")
+      return
+      ;;
   esac
 
-  # Otherwise offer the common flags.
-  mapfile -t COMPREPLY < <(compgen -W "--user --yes" -- "$cur")
+  # Otherwise offer the common flags (git-refresh adds its own restart flags too).
+  mapfile -t COMPREPLY < <(compgen -W "--user --yes --restart-terminals --all --exclude" -- "$cur")
 }
 complete -F _ws_complete ws

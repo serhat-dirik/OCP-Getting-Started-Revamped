@@ -7,12 +7,20 @@
 #   ws verify <module> [--user U]    run the module's verification script
 #   ws reset  <module> [--user U]    return the user's world to the module's entry state
 #   ws solve  <module> [--user U]    materialize the END state (instructor only)
-#   ws git-refresh                   re-sync the in-cluster Gitea mirrors from upstream
+#   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
 #   ws doctor                        environment sanity: login, argo, gitea, operators
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
 # Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
 # mirror (git-localize) — the public repo stays the upstream source of truth.
+#
+# Publishing content to a LIVE session (commit + push) has two freshness paths:
+#   • the ws CLI SELF-HEALS: when a module's entry state / verify script is absent from this
+#     terminal's pod-local clone, ws pulls the clone up to the mirror and retries once — so a
+#     just-published module becomes runnable on the next `ws` command with NO pod restart.
+#   • rendered lab PAGES build at pod-init, so they refresh only on a pod restart:
+#     ws git-refresh --restart-terminals [--user U | --all] [--exclude U]  (reserved sessions,
+#     WS_RESERVED_USERS default 'user5', are never cycled by --all — name one with --user to override).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -51,6 +59,78 @@ repo_url() {
   else
     echo "https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
   fi
+}
+
+# ── self-heal: keep this terminal's clone current without a pod restart ───────────────────────
+# The attendee terminal runs `ws` from a pod-local clone (~/ocp-getting-started == REPO_ROOT) that
+# the showroom terminal-prep initContainer refreshes ONLY at pod start. A module published AFTER the
+# pod booted is therefore invisible here — its entry state / verify script is absent and every
+# resolver dies "no entry state" (SEV1, M13 G3: `ws prep m13` failed in a live cockpit while the
+# module had already reached the cluster via Argo). On a miss we pull the clone up to its origin —
+# the in-cluster Gitea mirror that `ws git-refresh` advances — and retry the resolution ONCE.
+_ws_healed=0
+heal_clone() {  # → 0 if the clone was refreshed; 1 if we must fall back to the on-disk content
+  [[ "$_ws_healed" == 0 ]] || return 1                                # at most one fetch per run (retry ONCE)
+  _ws_healed=1
+  git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 1 # not a git clone — nothing to heal
+  local origin
+  origin="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  # Guard to a MIRROR clone: a laptop dev tree's origin is GitHub and must never be `reset --hard`
+  # out from under uncommitted work; only the cockpit clone (origin = ${MIRROR_ORG}/${MIRROR_REPO})
+  # is disposable and safe to hard-reset. Also keeps `ws` on a laptop from touching the working tree.
+  [[ "$origin" == *"${MIRROR_ORG}/${MIRROR_REPO}"* ]] || return 1
+  info "content may be missing from this terminal's clone — refreshing from the mirror…"
+  if git -C "$REPO_ROOT" fetch --depth 1 origin "$SOURCE_REVISION" >/dev/null 2>&1 \
+     && git -C "$REPO_ROOT" reset --hard "origin/${SOURCE_REVISION}" >/dev/null 2>&1; then
+    ok "clone refreshed to $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    return 0
+  fi
+  # Network-tolerant: a transient mirror outage must degrade to the normal error, never hard-crash.
+  err "could not refresh the clone from the mirror (transient? try: ws git-refresh) — using on-disk content"
+  return 1
+}
+
+require_entry_dir() {  # module → guarantee its entry-state dir exists, self-healing once on a miss
+  local module="$1"
+  [[ -d "${ENTRY_DIR}/${module}" ]] && return 0
+  heal_clone && [[ -d "${ENTRY_DIR}/${module}" ]] && return 0
+  die "no entry state for ${module} (${ENTRY_DIR}/${module})"
+}
+
+require_verify_script() {  # module → guarantee its verify script exists, self-healing once on a miss
+  local script="${VERIFY_DIR}/${1}.sh"
+  [[ -x "$script" ]] && return 0
+  heal_clone && [[ -x "$script" ]] && return 0
+  die "no verify script for ${1} (${script})"
+}
+
+mirror_head() {  # → the SHA the Gitea mirror serves on ${SOURCE_REVISION}, or empty if unreachable
+  local host origin
+  # Derive the mirror host attendee-safely from the clone's own origin (attendees can't read the
+  # gitea Route cross-namespace, rule 10); fall back to the Route for an operator/admin context.
+  origin="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  if [[ "$origin" == *"${MIRROR_ORG}/${MIRROR_REPO}"* ]]; then
+    host="${origin#https://}"; host="${host%%/*}"
+  else
+    host="$(oc get route gitea -n "${GITEA_NS}" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  fi
+  [[ -n "$host" ]] || return 1
+  curl -ksf --max-time 5 "https://${host}/api/v1/repos/${MIRROR_ORG}/${MIRROR_REPO}/branches/${SOURCE_REVISION}" 2>/dev/null \
+    | sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p' | head -1
+}
+
+heal_if_behind() {  # `ws list` freshness: refresh the clone ONLY when it is behind the mirror (the
+  # "miss" for a command with no module arg), so a just-published module lists without a pod restart.
+  # The compare is one lightweight API GET; the git fetch runs only when actually behind.
+  git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local origin want have
+  origin="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  [[ "$origin" == *"${MIRROR_ORG}/${MIRROR_REPO}"* ]] || return 0     # not a mirror clone → nothing to heal
+  want="$(mirror_head || true)"
+  [[ -n "$want" ]] || return 0                                        # mirror unreachable → list on-disk
+  have="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  [[ "$want" == "$have" ]] && return 0                                # already current → no fetch
+  heal_clone || true
 }
 
 module_arg() {
@@ -322,6 +402,7 @@ wait_healthy() {  # appname [timeout_s]
 }
 
 cmd_list() {
+  heal_if_behind   # a just-published module should list here without a pod restart (mirror-clone only)
   echo "Modules with entry states:"
   local found=0
   for d in "${ENTRY_DIR}"/m*/; do
@@ -338,7 +419,7 @@ cmd_list() {
 cmd_start() {
   local module user="$1" ; module="$2"
   need_oc
-  [[ -d "${ENTRY_DIR}/${module}" ]] || die "no entry state for ${module} (${ENTRY_DIR}/${module})"
+  require_entry_dir "$module"
   # --all-users: instructor convenience — entry states are provisioned by instructors/automation
   # (attendees lack Application-create rights on the platform Argo instance by design, ADR-0002).
   if [[ "$user" == "--all-users" || "$user" == "all" ]]; then
@@ -374,7 +455,7 @@ cmd_prep() {  # ATTENDEE self-service (project directive 2026-07-10): attendees 
   local yes="false"
   [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && yes="true"
   need_oc
-  [[ -d "${ENTRY_DIR}/${module}" ]] || die "no entry state for ${module} (${ENTRY_DIR}/${module})"
+  require_entry_dir "$module"
   local app; app="$(app_name "$module" "$user")"
 
   info "checking your ${module} environment (${user})…"
@@ -442,8 +523,8 @@ cmd_prep() {  # ATTENDEE self-service (project directive 2026-07-10): attendees 
 cmd_verify() {
   local module user="$1"; module="$2"; shift 2 || true
   need_oc
+  require_verify_script "$module"
   local script="${VERIFY_DIR}/${module}.sh"
-  [[ -x "$script" ]] || die "no verify script for ${module} (${script})"
   "$script" --user "$user" "$@"
 }
 
@@ -492,7 +573,7 @@ cmd_reset() {
 cmd_solve() {  # instructor: materialize the module END state (entry chart with solve=true)
   local module user="$1"; module="$2"
   need_oc
-  [[ -d "${ENTRY_DIR}/${module}" ]] || die "no entry state for ${module}"
+  require_entry_dir "$module"
   grep -q '^solve:' "${ENTRY_DIR}/${module}/values.yaml" 2>/dev/null \
     || die "${module}'s chart defines no solve state (values.yaml lacks 'solve:')"
   gc_conflicts "$user" "$module"
@@ -553,8 +634,89 @@ force_mirror_sync() {
   echo "⚠ mirror still behind origin after ~2m (at ${mirror:0:8}); entry apps may briefly serve stale content"
 }
 
+verify_terminal_head() {  # user ns want-sha — confirm the FRESH pod re-cloned to current content (Part 2c)
+  local u="$1" ns="$2" want="$3" pod clone_head
+  pod="$(oc get pods -n "$ns" -l "app.kubernetes.io/name=showroom,workshop.redhat.com/user=${u}" \
+           --field-selector=status.phase=Running --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -1)"
+  pod="${pod#pod/}"
+  [[ -n "$pod" ]] || { info "  ${u}: restarted (new pod not resolvable yet to verify clone)"; return 0; }
+  clone_head="$(oc exec "$pod" -n "$ns" -c terminal -- git -C /home/lab-user/ocp-getting-started rev-parse HEAD 2>/dev/null || true)"
+  if [[ -z "$clone_head" ]]; then
+    info "  ${u}: restarted (clone HEAD not readable yet — pod still initializing)"
+  elif [[ -n "$want" && "$clone_head" != "$want" ]]; then
+    err "  ${u}: pod re-cloned to ${clone_head:0:8} but mirror serves ${want:0:8} — mirror lag? re-check shortly"
+  else
+    ok "  ${u}: pod re-cloned to ${clone_head:0:8}${want:+ (matches mirror)}"
+  fi
+}
+
+restart_terminals() {  # target all-flag [exclude...] — opt-in restart of showroom cockpit pods so LIVE
+  # attendees get re-rendered pages + re-cloned content. Rendered lab pages build at pod-init from the
+  # mirror, so the CLI self-heal can't touch them — only a pod restart re-renders them. Reserved sessions
+  # (WS_RESERVED_USERS, default 'user5' = the project owner's live test) are NEVER cycled by --all;
+  # restarting one requires naming it with --user (i.e. with intent).
+  local target="$1" all="$2"; shift 2
+  local excludes=("$@")
+  local ns="${WS_SHOWROOM_NS:-showroom}"
+  local reserved=" ${WS_RESERVED_USERS:-user5} "
+  local users=() u x skip
+  if [[ -n "$target" ]]; then
+    users=("$target")
+    [[ "$reserved" == *" ${target} "* ]] && err "⚠ ${target} is a RESERVED live session — restarting it because you named it explicitly."
+  elif [[ "$all" == true ]]; then
+    for u in $(oc get deploy -n "$ns" -l app.kubernetes.io/name=showroom \
+                 -o jsonpath='{range .items[*]}{.metadata.labels.workshop\.redhat\.com/user}{"\n"}{end}' 2>/dev/null | sort -u); do
+      [[ -n "$u" ]] || continue
+      [[ "$reserved" == *" ${u} "* ]] && { info "skipping reserved session ${u} (override with: --user ${u})"; continue; }
+      skip=false
+      if [[ ${#excludes[@]} -gt 0 ]]; then
+        for x in "${excludes[@]}"; do [[ "$u" == "$x" ]] && skip=true; done
+      fi
+      [[ "$skip" == true ]] && { info "skipping ${u} (excluded)"; continue; }
+      users+=("$u")
+    done
+    [[ ${#users[@]} -gt 0 ]] || die "no showroom sessions to restart in ns ${ns} (after reserved/exclusions)"
+  else
+    die "restart needs a target: --user <u> (one session) or --all (whole cohort, minus reserved ${WS_RESERVED_USERS:-user5})"
+  fi
+
+  info "restarting showroom terminal(s): ${users[*]}"
+  local want; want="$(mirror_head || true)"
+  local failed=0 dep
+  for u in "${users[@]}"; do
+    dep="showroom-${u}"
+    if ! oc get deploy "$dep" -n "$ns" >/dev/null 2>&1; then
+      err "  ${dep} not found in ${ns} — skipping"; failed=1; continue
+    fi
+    info "  ${dep}: rollout restart…"
+    if ! oc rollout restart "deployment/${dep}" -n "$ns" >/dev/null 2>&1; then
+      err "  ${dep}: restart failed (RBAC? this is an operator/admin action)"; failed=1; continue
+    fi
+    if ! oc rollout status "deployment/${dep}" -n "$ns" --timeout=180s >/dev/null 2>&1; then
+      err "  ${dep}: not ready in 180s — check: oc rollout status deployment/${dep} -n ${ns}"; failed=1; continue
+    fi
+    verify_terminal_head "$u" "$ns" "$want"
+  done
+  echo
+  if (( failed == 0 )); then
+    ok "showroom terminal(s) restarted — attendees now see refreshed pages + content."
+  else
+    err "some restarts had issues — see above"; return 1
+  fi
+}
+
 cmd_git_refresh() {
   need_oc
+  local do_restart=false all=false target="" excludes=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --restart-terminals|--restart) do_restart=true; shift;;
+      --all)                         all=true; shift;;
+      --user)                        target="$2"; shift 2;;
+      --exclude)                     excludes+=("$2"); shift 2;;
+      *) die "git-refresh: unknown option '$1' — see: ws help";;
+    esac
+  done
   # Three layers pull from git: the Gitea pull-mirror (must fetch origin — force + wait FIRST, else
   # the two apps below sync stale content), then pp-git-mirror and workshop-config (whose Sync hooks
   # re-run the user seed AND the app-repo seed — the parasol/* app repos only refresh through THAT
@@ -566,6 +728,19 @@ cmd_git_refresh() {
   info "re-running the workshop-config seed hooks (user seed + app-repo seed)…"
   sync_app_operation workshop-config
   echo "   watch: oc get jobs -n ${GITEA_NS} -w"
+  # Opt-in ONLY: refresh what attendees READ. Bare `ws git-refresh` stays non-disruptive (mirror+Argo
+  # only) — build agents call it constantly, and it must never nuke live sessions. Pods cycle solely
+  # when --restart-terminals is given, and even then --all spares reserved sessions.
+  if [[ "$do_restart" == true ]]; then
+    echo
+    if [[ ${#excludes[@]} -gt 0 ]]; then
+      restart_terminals "$target" "$all" "${excludes[@]}"
+    else
+      restart_terminals "$target" "$all"
+    fi
+  elif [[ "$all" == true || -n "$target" || ${#excludes[@]} -gt 0 ]]; then
+    info "note: --user/--all/--exclude take effect only with --restart-terminals (bare git-refresh never restarts pods)."
+  fi
 }
 
 cmd_doctor() {
@@ -602,6 +777,10 @@ cmd_doctor() {
 
 main() {
   local cmd="${1:-}"; shift || true
+  # git-refresh self-parses its own flags (--restart-terminals/--user/--all/--exclude, where
+  # --exclude takes a value); route its raw args straight through so the generic module parser
+  # below never mis-bins that value as a module. "$@" is set -u-safe when empty (unlike an array).
+  [[ "$cmd" == "git-refresh" ]] && { cmd_git_refresh "$@"; return; }
   local user="" module="" extra=()
   # collect --user anywhere; first bare arg = module
   while [[ $# -gt 0 ]]; do
@@ -619,7 +798,6 @@ main() {
     verify)      cmd_verify "$(user_arg "$user")" "$(module_arg "$module")" ${extra[@]:+"${extra[@]}"};;
     reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;
     solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
-    git-refresh) cmd_git_refresh;;
     doctor)      cmd_doctor;;
     ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,12p';;
     *) die "unknown command '$cmd' — try: ws help";;
