@@ -71,3 +71,50 @@ Spec says "none of the old assets does this well → build fresh." Confirmed.
 **Demo-flavor angle:** "trace-the-slow-request" 10 min — Observe → Traces (COO), drill web→claims→db spans, point at the slow DB span; alert fires live in Observe → Alerting. (spec Demo arc)
 
 **Timing (90 min workshop):** metrics/PromQL/alert ~30 · trace + dashboard ~25 · logs ~10 · scale (HPA+PDB+drain) ~25. Demo flavor 10-15 min.
+
+---
+
+## Install-deltas addendum (platform-engineer, 2026-07-11)
+
+Installed the observability stack live on `ocp-ws-revamped` (OCP 4.21.22) via the portfolio app-of-apps and built + proved the M12 entry state on **user2**. Domains below are placeholders (privacy guard).
+
+### What's live (permanent — the M12 prerequisite)
+
+`./argocd-bootstrap/install.sh --stacks observability` → `pp-observability` app-of-apps → three child apps **Synced/Healthy**:
+
+| Component | Operator CSV (channel) | Instance | State |
+|---|---|---|---|
+| cluster-observability-operator | `cluster-observability-operator.v1.5.1` (stable) | UIPlugins `dashboards`, `distributed-tracing` | reconciled |
+| tempo | `tempo-operator.v0.21.0-2` (stable) | `TempoMonolithic/traces` (memory) in `observability-workshop` | Ready=True |
+| opentelemetry | `opentelemetry-operator.v0.152.0-1` (stable) | `OpenTelemetryCollector/otel` (deployment) in `observability-workshop` | Ready 1/1 |
+
+Stable endpoints (verified): collector `otel-collector.observability-workshop.svc:4317` (gRPC) / `:4318`; Tempo `tempo-traces.observability-workshop.svc:4317`.
+
+### TODO(verify-on-install) resolution table (all 9 resolved, zero remaining)
+
+| # | Marker (file) | Verified value / evidence |
+|---|---|---|
+| 1 | COO `uiplugin-dashboards` spec.type | CRD enum `[Dashboards, TroubleshootingPanel, DistributedTracing, Logging, Monitoring]`; `Dashboards` reconciled with no sub-config |
+| 2 | COO `uiplugin-distributed-tracing` | `DistributedTracing` reconciled with `type` alone — COO auto-discovers Tempo, no sub-ref (`oc get uiplugin distributed-tracing -o` = `{"type":"DistributedTracing"}`) |
+| 3 | Tempo `tempomonolithic` ingestion.otlp | `spec.ingestion.otlp.grpc/http.enabled` correct (CR Ready=True); operator Service `tempo-traces` :4317/:4318 |
+| 4 | OTel `otel-collector` Service/target | operator Service `otel-collector` :4317/:4318; live config exports to `tempo-traces...:4317` tls.insecure; collector Ready 1/1 |
+| 5 | Loki README OBC keys | NooBaa OBC emits cm `BUCKET_NAME`/`BUCKET_HOST`(s3.openshift-storage.svc)/`BUCKET_PORT`(443) + secret `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`; assembled `logging-loki-s3` → LokiStack Ready |
+| 6 | Loki `collector-rbac` ClusterRole names | `collect-application-logs` + `collect-infrastructure-logs` exist (read). **Delta:** also need `logging-collector-logs-writer` (write) — added |
+| 7 | Loki `lokistack` enums | size `[1x.demo,1x.pico,1x.extra-small,1x.small,1x.medium]` (1x.demo smallest); `storage.schemas` required, version `[v11,v12,v13]`; `tenants.mode [static,dynamic,openshift-logging,openshift-network]` — all as authored |
+| 8 | Loki `uiplugin-logging` | spec.type `Logging` (enum) + `spec.logging.lokiStack {name,namespace}` (`oc explain`); reconciled "successfully" |
+
+### End-to-end signal proof (on user2, via the m12 entry state)
+
+- **Trace:** collector `otelcol_receiver_accepted_spans_total{transport="grpc"}=106` and `otelcol_exporter_sent_spans_total{server_address="tempo-traces...",port="4317"}=106`, zero failures. Tempo TraceQL `{ resource.service.name = "parasol-claims" }` returns traces — `GET /api/claims` **94 ms** vs `GET /api/claims/{claimNumber}/history` **995 ms** (the N+1 endpoint is ~10× slower; visible as 6 JDBC spans). `resource.service.name` tag value `parasol-claims` present in Tempo.
+- **Metric:** UWM thanos-querier `claims_created_total{namespace="user2-dev",prometheus="openshift-user-workload-monitoring/user-workload"}=38` and `up{service="parasol-claims"}=1` — the per-user ServiceMonitor is scraped by UWM and queryable.
+
+### Optional Loki/Logging tier — proven, then torn down (stays commented-off by default)
+
+Stood up the full tier transiently to verify (loki-operator 6.5.1, cluster-logging 6.5.1): LokiStack **Ready=True** against NooBaa S3, Vector ClusterLogForwarder **Ready/Authorized/Valid**, DaemonSet **6/6** (one per node), Logging UIPlugin reconciled, and **logs queryable** — 10 application namespaces in Loki incl. a `parasol-claims` line from `user2-dev` (`Installed features: [agroal, cdi, hibernate-orm, ...] / Profile prod activated`). **Two real bugs fixed** (both silent — no CR error, only runtime failure): (a) `ClusterLogForwarder.spec.outputs[].lokiStack.target` needs BOTH `name` and `namespace`; (b) the collector SA needs `logging-collector-logs-writer` (write to LokiStack) or every push 403s. Loki stays **commented out of the stack by default** (hard rule 2 — it needs ODF/NooBaa + the manual `logging-loki-s3` secret, so it cannot "install cleanly on ANY cluster"); opt-in = uncomment `apps/loki-logging.yaml` + assemble the secret (README contract).
+
+### Entry-state design decisions
+
+- **parasol-web omitted.** `apps/parasol-web` ships micrometer only (no `quarkus-opentelemetry`), so it cannot emit trace spans — deploying it adds no trace value. The spec entry-state line is "claims app (instrumented build) under load generator," and the real instrumented trace is claims→db (the N+1 `/history`). The full **web→claims→db** distributed trace the objectives mention needs parasol-web OTel instrumentation = **app-developer backlog** (see Open issues).
+- **Image tag 1.1** (not the 1.0 pins m01–m05 use) — the instrumented build with `/history` N+1, `claims_created_total`, and OTLP auto-instrumentation.
+- **DB ephemeral** (emptyDir, drop-and-create reseed) — M12 is observability, not storage; deterministic 30 claims + 21 events every boot.
+- **Alert** is armed-not-firing at the clean baseline (5xx rate), verified loaded by UWM thanos-ruler (`state=inactive health=ok`); the resilience beat trips it. The `openshift.io/prometheus-rule-evaluation-scope: leaf-prometheus` label is NOT needed (default UWM evaluation works).
