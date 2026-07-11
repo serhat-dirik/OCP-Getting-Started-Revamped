@@ -22,9 +22,9 @@ The same content base doubles as a **presenter-led demo kit** for Red Hat Soluti
 
 ## Module library
 
-27 active modules in four blocks — **A Foundations** (M01–M06) · **B Delivery & Trust** (M07–M13) · **C Platform & Tenancy** (M14–M17) · **D Advanced Electives** (M18–M27). Any module can be someone's first: entry states are materialized per user by automation (`ws start m07`), never by "please complete the previous module."
+27 active modules today in four blocks — **A Foundations** (M01–M06) · **B Delivery & Trust** (M07–M13) · **C Platform & Tenancy** (M14–M17) · **D Advanced Electives** (M18–M27). The catalog is elastic: modules are split, combined, or added when analysis shows it serves attendees better. Any module can be someone's first: entry states are materialized per user by automation (`ws start m07`), never by "please complete the previous module."
 
-Recommended paths: 3-day flagship (`WS-FULL-3D`), 2-day compressed, 1-day developer / DevOps days, and 45-minute demo picks. SAs compose any subset.
+Session composition is a delivery-time choice: recommended enablement paths, module selection, and demo picks live in the [SA provisioning guide](docs/sa-provisioning-guide.md) — attendees see only the modules their session includes.
 
 ## Quickstart
 
@@ -44,6 +44,21 @@ tools/ws/ws start m01 --user user1
 ## Status
 
 Pre-v1.0, under active build. Progress, phase status, and the module state grid live in the project status page (internal).
+
+## Contributing
+
+This project is developed **human + AI**: the content and platform were built by the project owner working with Claude (Claude Code) as PM/tech-lead, and the repo is structured so anyone can continue that way — or work entirely by hand.
+
+**First, the private-material convention (everyone):** create a sibling folder `../Project-Shared/` **outside the repo** for anything private — your cluster credentials, notes, personal backlog. It can never be committed by accident because it isn't in the tree. Then copy `vars.example.yaml` → `vars.yaml` (gitignored) and point it at your cluster. Never put credentials, tokens, or live cluster domains in tracked files — CI has a privacy guard, and reviews enforce it.
+
+**Contributing with Claude Code (or another coding agent):**
+1. Clone, open the repo in Claude Code. [CLAUDE.md](CLAUDE.md) is the agent's operating card — it encodes the project's rules (verify-never-recall, module independence, dual-path tabs, GitOps-only installs) and the hard-earned session practices.
+2. Specialized agent definitions ship in `.claude/agents/` (module-builder, platform-engineer, content-editor, smoke-tester, …) — your session can delegate to them the way the original development did.
+3. Ask for a module build or fix; the agent knows to perform on a cluster first and write second. The module contract is [docs/module-template/README.md](docs/module-template/README.md).
+
+**Contributing manually:** read [docs/authoring-conventions.md](docs/authoring-conventions.md) and the [module template](docs/module-template/README.md); preview with `./utilities/lab-serve` or `cd content && npx antora site-workshop.yml`; lint with `vale content/`, `yamllint .`, `shellcheck`.
+
+**Quality bar for every contribution (AI or human):** every command block shows real captured output; timings are measured; console paths are grounded live; entry states keep modules independent; CI green. External contributions arrive as fork + pull request; maintainers work directly on `main`.
 
 ## Credits
 

@@ -1,52 +1,54 @@
-# CLAUDE.md — OCP-Getting-Started-Revamped
+# CLAUDE.md — OpenShift Application Platform: Getting Started
 
-You are building a modular OpenShift enablement workshop (27 active self-contained modules, dual workshop/demo rendering, Parasol Insurance story). This file is your operating card; the full contract lives in the instruction package.
+You are working on an **established** modular OpenShift enablement workshop: self-contained modules (catalog is elastic — currently ~27 — split/combine when it serves the end-user), a Parasol Insurance story universe, and three renderings (workshop / demo / instructor) from one AsciiDoc source. This file is the operating card for any contributor's coding agent — human newcomers: start at README "Contributing".
 
-**Cluster & MaaS credentials:** `../Project-Shared/cluster-credentials.txt` — read at session start, populate `vars.yaml`, use freely without asking Serhat. NEVER commit or copy into the repo. Rotating (ephemeral RHDP cluster; short-lived MaaS key) — flag expiry in the status report and continue in draft mode.
+## Private material — the `../Project-Shared` convention
 
-## You are the PM / Tech Lead (management by fable)
+Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-Shared/` (credentials, personal notes, private backlogs). It cannot be committed by accident because it is not in the tree. After cloning, create it:
 
-The main session loop acts as **project manager + tech lead** per `../Project-Shared/instructions/07-AGENT-OPERATING-MODEL.md`:
+```
+../Project-Shared/cluster-credentials.txt   # your cluster + model-endpoint credentials
+../Project-Shared/instructions/             # (optional) your private operating overlay
+```
 
-- **Plan & delegate, don't grind.** Decompose backlog items and delegate via the Agent tool to the org in `.claude/agents/`: research-analyst / module-builder / platform-engineer / app-developer (opus), content-editor (sonnet, mechanical only), sa-smoke-tester (opus, gate G3), sa-tester (strongest model, milestone gate G4). Parallelize research/drafting; serialize cluster mutations. Give workers complete briefs (they don't share your context) and demand structured returns.
-- **Keep judgment AND critical-path development at your tier:** architecture/spec interpretation, ADRs, and the fable-owned components — argocd-bootstrap root structure, git-localize flow, entry-state engine, RBAC model, `ws` CLI core — you design and develop these yourself; workers extend them. Plus: QA verdicts acceptance, Decision-Record questions (those go to Serhat), anything irreversible on the cluster.
-- **Quality gates are mandatory:** G1 builder self-check → G2 content-editor → G3 smoke test → per wave G4 sa-tester milestone audit → G5 Serhat sign-off. Testers never fix; builders never self-approve G3/G4.
-- **Report every session:** status report to `../Project-Shared/reports/STATUS-YYYYMMDD[-n].md` (format: 07 §5) + chat summary to Serhat. Milestone test reports at every wave gate.
+- At session start, load credentials from `../Project-Shared/cluster-credentials.txt` into the gitignored `vars.yaml` (copy `vars.example.yaml`) and use them freely without asking the user.
+- **NEVER commit or copy credentials, tokens, private emails, or live cluster domains into the repo.** CI has a privacy guard for known leak patterns, but you are the first line — evidence transcripts in docs must use placeholder domains.
+- **If `../Project-Shared/instructions/` exists** (maintainer setup), read `10-SESSION-OPERATING-CARD.md` there FIRST and follow the package — it extends and overrides this card.
 
-## Read before working (in order)
+## Non-negotiable rules
 
-1. `../Project-Shared/instructions/00-PROJECT-BRIEF.md` — mission, principles, decision record
-2. `../Project-Shared/instructions/09-AUTONOMOUS-RUN-PROTOCOL.md` — **how sessions run**: PLAN → one batched question GATE with Serhat → AUTO (zero further input; park blockers, never stall; process `../Project-Shared/INBOX.md` at every module boundary; honor STOP/PAUSE) → LAND (report + page + push)
-3. `../Project-Shared/instructions/06-BACKLOG.md` — current phase, your queue, "For Serhat" blockers
-4. `../Project-Shared/INBOX.md` — Serhat's async steering channel (process new items, move to Processed with responses)
-5. For the module(s) you're building: its spec in `02-MODULE-SPECS.md` + relevant parts of `01-ARCHITECTURE.md`, `03-DEV-WORKFLOW.md`, `04-STYLE-GUIDE.md`, `05-REFERENCES.md`
+1. **Verify, never recall.** Product versions / UI paths / CR fields come from `versions.yaml` (fresh <60 days) or get re-verified on docs.redhat.com / a live cluster — never from model memory. Mark unverifiable steps `// TODO(verify-on-cluster)`; zero TODOs at Definition of Done.
+2. **Module independence is sacred.** No module assumes another ran. Entry states materialize everything (`gitops/entry-states/mNN/` + `ws start`). Same-namespace modules declare `conflictsWith` in `ws-meta.yaml` (both directions).
+3. **Perform first, write second.** Every command block shows output you actually captured; every timing chip is measured; console click-paths are grounded live (labels you can't ground get `[CAPTURE-VERIFY]` + a CLI alternative).
+4. **One source, three renderings.** Workshop / demo (`ifdef::demo` Say/Show/Do) / instructor. Environment values ONLY via attributes (`{user}`, `{ocp_console_url}`, …) — a hardcoded URL is a CI failure.
+5. **Dual-path CLI|Console tabs are the standard** wherever a step can be done both in the terminal and the OpenShift web console. Labels exactly `Console::` then `CLI::` — site-wide tab sync groups by label text. Single path only where duality is genuinely absent (product UIs like Argo CD/RHDH/Gitea, pure-git steps, IDE-centric modules). Details: `docs/module-template/README.md` rule 12.
+6. **No deprecated tech.** Ban list in `docs/authoring-conventions.md` (DeploymentConfig, RH-SSO, 3scale, AMQ branding, SMCP/SMMR, "master", …).
+7. **GitOps-only installs.** Operators/tools reach clusters ONLY via `platform-portfolio/` stacks (Argo app-of-apps). Imperative install sequences are a defect (exceptions: argocd-bootstrap itself; lab exercises where installing IS the lesson).
+8. **Secrets/endpoints only via gitignored `vars.yaml`** (template: `vars.example.yaml`).
 
-**Status page duty:** keep `../Project-Shared/status/PROJECT-STATUS.html` truthful — update the embedded STATUS JSON at run start (RUNNING + activity), every module state change, and at LAND (IDLE + next-run plan). It is Serhat's window into the project; it must never look rosier than the backlog.
+## Session best practices (hard-earned — trust them)
 
-## Non-negotiable rules (summary — details in the package)
+- **Argo sync discipline:** never start a sync while an operation is Running (the patch is silently swallowed). Flow: mirror-sync → hard refresh → ~10s → sync. Stuck op: patch `status.operationState.phase=Terminating`, then a fresh sync. A poisoned manifest cache survives SHA changes and Redis flushes — **bump the chart version** to bust it.
+- **In-cluster Gitea mirror setups:** after pushing content, sync the mirror and **wait until the mirror's HEAD equals origin's** before restarting Showroom deployments — cockpits build content at pod-init from the mirror; restarting early serves stale content.
+- **`[tabs]` nesting:** a collapsible/NOTE inside a tab needs a 5-`=` delimiter (`=====`); same-length `====` collides ("unterminated open block").
+- **Hook Jobs on OpenShift:** `ose-cli` needs ≥512Mi (oc OOMs at 256Mi); no runtime `dnf` under the restricted SCC — use purpose-built images; memory-backed emptyDir for credential handoff between init and main containers.
+- **CI lint runs SIX checks** (privacy guard, vale, yamllint, shellcheck, helm, kustomize) — read the failing STEP, not just the job name.
+- **Local lint via podman:** the podman machine auto-stops; "connection refused" from a linter means restart it and re-run — treat unrun gates as failed, never as passed.
+- **Verify scripts are mode-split:** entry-state checks never run at completion mode; use `>=` not `==` for lab-exceedable outcomes. A false ❌ destroys attendee trust in every other ✅.
 
-1. **Verify, never recall**: product versions/UI paths/CR fields from `versions.yaml` (fresh <60 days) or re-verify on docs.redhat.com / live cluster. Never from memory. Mark unverifiable steps `// TODO(verify-on-cluster)`; zero TODOs allowed at Definition of Done.
-2. **Module independence is sacred**: no module assumes another ran. Entry states materialize everything (`gitops/entry-states/mNN/` + `ws start`).
-3. **No deprecated tech** — ban list in 04-STYLE-GUIDE §5 (DeploymentConfig, RH-SSO, 3scale, AMQ branding, SMCP/SMMR, master, …).
-4. **One source, three renderings**: workshop / demo (`ifdef::demo` Say/Show/Do blocks) / instructor. Environment values only via attributes (`{user}`, `{cluster_domain}`, …).
-5. **OldContent/ and Project-Shared/ are inputs, never committed here.** Mine ideas, rewrite tech.
-6. **Git flow: commit straight to `main` — no branches, no PRs, start to finish (Serhat decision 2026-07-10).** One module/coherent slice per commit, conventional commits (`feat(m07): …`), CI green on every push, DoD checklist (03-DEV-WORKFLOW §4) satisfied at the G1 gate (agent gates G2–G4 are the review). Update spec + backlog in the same slice when they change. Mirror-sync after every push.
-7. Secrets/endpoints only via `vars.yaml` (gitignored) / `vars.example.yaml`.
-8. **Stay in the project tree; cluster-first execution.** Never read/write outside this repo + `../Project-Shared` + `../OldContent` — one sanctioned exception: the project's kubeconfig is `~/.kube/ocp-ws-revamped.config` (own context `ocp-ws-revamped`; `export KUBECONFIG=~/.kube/ocp-ws-revamped.config` before any cluster command). `~/.kube/config` is SHARED with Serhat and parallel sessions: never log in against it, modify it, or switch its current-context (read-only awareness is fine). The project cluster is dedicated, disposable, and internet-connected: run heavy/risky/experimental work there (in-cluster builds, test workloads, scratch namespaces, big clones via the Gitea mirror); the laptop is for repo/content work only. No `sudo`, no bypass flags — permissions come from `.claude/settings.json`, and anything it doesn't cover is supposed to prompt.
+## Repo map
 
-## Repo map (details: 01-ARCHITECTURE §1)
-
-`content/` Antora (3 site configs; `pages/mNN-<slug>/{concept,lab,wrapup,instructor,troubleshooting}.adoc`) · `apps/` Parasol services (Quarkus-primary) · `platform-portfolio/` standalone GitOps installer (stacks/components/values — workshop-agnostic, PoC-reusable) · `gitops/` workshop layer (workshop-config + entry-states + promotion) · `pipelines/` task library · `slides/outlines/` → PPTX build · `tools/ws` + `tools/verify` · `bootstrap/` thin wrapper (portfolio stacks + workshop layer) · `docs/` contributor docs + ADRs · `.claude/agents/` the dev org.
-
-**GitOps-only installs:** operators/tools/3rd-party products reach clusters ONLY via `platform-portfolio/` stacks (Argo app-of-apps). Imperative install sequences anywhere else are a defect (exceptions: argocd-bootstrap itself; lab exercises where installing is the lesson).
+`content/` Antora, three site configs; pages at `modules/ROOT/pages/mNN-<slug>/{concept,lab,wrapup,instructor,troubleshooting}.adoc` · `apps/` Parasol services (Quarkus-primary) · `platform-portfolio/` standalone GitOps installer (workshop-agnostic, reusable for PoC clusters) · `gitops/` workshop layer (workshop-config + entry-states) · `pipelines/` Tekton task library · `slides/outlines/` → PPTX build · `tools/ws` CLI + `tools/verify` scripts · `bootstrap/` one-command cluster installer · `showroom/` in-cluster cockpit build (its `site.yml` needs the workshop-owned `antora-ext` image — stock antora images fail on it) · `docs/` contributor docs, ADRs, module template, research notes · `.claude/agents/` specialized agent definitions you may delegate to.
 
 ## Frequent commands
 
-- Local content preview: `./utilities/lab-serve` (Showroom template convention) or the podman antora-viewer documented in `docs/`
-- Build all flavors: antora with `site-workshop.yml` / `site-demo.yml` / `site-instructor.yml`
-- Env: `./bootstrap/install.sh --profiles core[,…] --users N --domain …` · `ws start|verify|reset|solve mNN`
-- Lint: `vale content/`, `yamllint`, `shellcheck`, kustomize build over entry-states
+- Preview content: `./utilities/lab-serve`, or build with `cd content && npx antora site-workshop.yml` (also `site-demo.yml` / `site-instructor.yml`)
+- Stand up a cluster: `./bootstrap/install.sh --profiles core[,…] --users N --domain …`
+- Module lifecycle: `tools/ws/ws start|verify|reset|solve mNN [userN]` (attendee-facing text says `ws prep`)
+- Lint locally: `vale content/`, `yamllint .`, `shellcheck`, `helm lint` on charts
 
-## Session protocol
+## Git flow
 
-Start: pull, read backlog, claim items. End: update backlog + "For Serhat" list, summarize spec deltas. When in doubt whether a choice is yours: 03-DEV-WORKFLOW §5 (ask vs decide).
+- Maintainers commit directly to `main`: one coherent slice per commit, conventional commits (`feat(m07): …`), CI green on every push. External contributors: fork + pull request, same quality bar.
+- Update specs/docs in the same slice that changes behavior. Never commit `../Project-Shared` or `OldContent/` material — they are inputs; mine ideas, re-implement, credit via `CREDITS.md`.
+- No `sudo`, no permission-bypass flags. Cluster-first execution: heavy or risky work runs on your disposable cluster, not the laptop.
