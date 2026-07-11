@@ -7,31 +7,27 @@ numbered red circles matching the referenced step. Every screenshot needs alt te
 commented `// media-pass: …` line — replace with the `image::` (screenshot) or the SVG
 `image::` (diagram) when the asset lands.
 
-**Why this module's screenshots are HIGH priority (not enrichment).** M10 is a **UI + terminal**
-module. The **ApplicationSet is created and the canary is watched in the Argo CD web UI**, and those
-control-plane views carry steps the terminal cannot show (attendees cannot `oc apply` to the shared
-Argo instance, and the terminal has no `argocd`/Rollouts plugin). The build was performed by driving
-the Argo control plane the way the UI does (create/refresh the ApplicationSet + Applications as
-admin, ship versions via the Gitea fork) and verifying every **workload outcome** from the terminal
-(the generated Rollout, the wave-ordered migration Job, the canary steps, the failed `AnalysisRun`,
-route 200) — but the **Argo CD UI views themselves were not screen-captured** (no browser in the
-build environment). Capture them in the media pass.
+**Why this module's screenshots matter.** M10 is a **terminal + UI** module. The **ApplicationSet is
+created from the terminal with the served `argocd` CLI** — Argo CD 3.4 has *no ApplicationSet screen*
+in its web UI (neither create nor read), which G3 confirmed live; the CLI is the interface. The
+**canary is watched in the Argo CD Rollout view** (that view *does* exist). The build performed the
+real attendee CLI flow (download + token + `appset create` + `app list`, plus the `PermissionDenied`
+a neighbour's project returns) and verified every **workload outcome** from the terminal (the
+generated Rollout, the wave-ordered migration Job, the canary steps, the failed `AnalysisRun`, route
+200) — but the **browser views were not screen-captured** (no browser in the build environment).
+Capture them in the media pass.
 
-> **⚠ One seam to confirm during capture (highest priority): `01-appset-create`.** The attendee
-> terminal has no `argocd` CLI and no k8s write to `student-gitops`, so the **only** way to create an
-> ApplicationSet is the Argo CD UI (under the per-user `applicationsets` RBAC on `proj-{user}`). The
-> ApplicationSet's *adoption + generation* is proven on-cluster, but the **exact create affordance on
-> Argo CD 3.4** was not clicked through in the build. When you capture `01-appset-create`, confirm the
-> UI create flow end-to-end; if the version has no ApplicationSet-create affordance, flag it — the
-> platform must add a CLI path to the Showroom terminal (do **not** hand attendees admin on
-> `student-gitops`). Tracked as the module's top instructor watchout and a PM platform follow-up.
+> **Note on `01-appset-created`:** the money shot is the **terminal** right after `~/argocd appset
+> create` + `~/argocd app list -p proj-{user}` (the "created" line + the three generated apps) — *not*
+> a UI create form, which does not exist in Argo 3.4. The three-app cards in the Argo CD **Applications**
+> view (`02`) are the UI counterpart (the ApplicationSet detail/read view also does not exist in 3.4).
 
-## Screenshots (Argo CD / Gitea UI views — the view IS the content)
+## Screenshots (terminal + Argo CD Rollout / Gitea UI views — the view IS the content)
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
-| 1 | `m10-gitops-at-scale-01-appset-create.png` | ⬜ NOT CAPTURED — **HIGHEST + CONFIRM FLOW** | **Argo CD → ApplicationSets → create**, `applicationset.yaml` (list generator, 3 env elements) pasted in | the list generator's three env elements, prod → `rollouts`; the create/submit control on Argo CD 3.4 | lab.adoc ex. 1 (create the ApplicationSet) |
-| 2 | `m10-gitops-at-scale-02-appset-three-apps.png` | ⬜ NOT CAPTURED — **HIGH** | **ApplicationSet detail / Applications list** filtered to the user | ONE ApplicationSet owning THREE apps `claims-dev/stage/prod-user1`, all Synced/Healthy — dev/stage adopted, prod new | lab.adoc ex. 1 (after create) |
+| 1 | `m10-gitops-at-scale-01-appset-created.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal** after `~/argocd appset create` + `~/argocd app list -p proj-user1` | the `ApplicationSet 'claims-user1' created` line and the three generated apps (dev/stage Synced, prod Progressing on the `rollouts` path) | lab.adoc ex. 1 (create the ApplicationSet) |
+| 2 | `m10-gitops-at-scale-02-three-app-cards.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Applications view** (the appset detail/read view does NOT exist in 3.4) | the THREE generated app cards `claims-dev/stage/prod-user1`, all Synced/Healthy — dev/stage adopted, prod new | lab.adoc ex. 1 (after create) |
 | 3 | `m10-gitops-at-scale-03-gitea-image-bump.png` | ⬜ NOT CAPTURED | **Gitea editor on `rollouts/claims-rollout.yaml`** | the image tag changed `1.0` → `1.1`, the Commit Changes panel | lab.adoc ex. 3 (ship a new version) |
 | 4 | `m10-gitops-at-scale-04-canary-progressing.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Rollout view, mid-canary** | revision 2 (canary, 1.1) alongside revision 1 (stable, 1.0), SetWeight 25 or 50, the analysis step running — the module's signature visual | lab.adoc ex. 3 (watch the canary) |
 | 5 | `m10-gitops-at-scale-05-canary-aborted.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Rollout view, aborted** | the Rollout Degraded/aborted at the analysis step, the failed AnalysisRun, stable still serving — the payoff | lab.adoc ex. 4 (the auto-rollback) |

@@ -18,9 +18,9 @@ Total hands-on: *~70 min* (spec target 90 min; add ~12–15 min of concept up fr
 
 [cols="1,4,1,2",options="header"]
 |===
-| # | Exercise group | Attendee time | Measured core (as user4, {ocp_version})
+| # | Exercise group | Attendee time | Measured core (as user7, {ocp_version})
 
-| 1 | One ApplicationSet generates the fleet | ~15 min | UI create; generation *~8s*; prod converges (db + migration + Rollout Healthy) in *~50s*
+| 1 | One ApplicationSet generates the fleet | ~15 min | CLI download *~290 MB / ~30–60s* (once) + token + `appset create`; generation *~8s*; prod converges (db + migration + Rollout Healthy) in *~50s*
 | 2 | Sync waves and hooks | ~10 min | read-only (`oc get`/`oc logs`) — seconds
 | 3 | Canary with automated analysis | ~20 min | one Gitea commit + Refresh; canary *25%→pause 20s→50%→analysis ~45s→100%* ≈ *2 min*
 | 4 | Break and fix (auto-rollback) | ~20 min | knob + Gitea commit; canary aborts at analysis in *~90s*; git-revert recovery *~30s*
@@ -30,9 +30,9 @@ Total hands-on: *~70 min* (spec target 90 min; add ~12–15 min of concept up fr
 [NOTE]
 .How this timing was measured
 ====
-Every exercise was performed as `user4` on the build cluster (OCP {ocp_version}, OpenShift GitOps {gitops_version}, Argo CD {argocd_version}, Argo Rollouts GA via a cluster-scoped `RolloutManager`) on 2026-07-11, driving the shared Argo CD control plane the way the UI does (create/refresh the ApplicationSet + Applications) and shipping new versions by committing to the `{user}/claims-config` fork, then timing each operation.
+Every exercise was performed as `user7` on the build cluster (OCP {ocp_version}, OpenShift GitOps {gitops_version}, Argo CD {argocd_version}, Argo Rollouts GA via a cluster-scoped `RolloutManager`) on 2026-07-11, creating the ApplicationSet with the served `argocd` CLI + a per-user token (the way the attendee does — the UI has no appset screen) and shipping new versions by committing to the `{user}/claims-config` fork, then timing each operation.
 
-* *ApplicationSet (exercise 1)* — the three Applications were generated in *~8 seconds* (dev + stage *adopted* by name, prod *created*); production then converged in *~50 seconds* (claims-db, the wave-1 migration Job, then the Rollout to `4/4` Healthy) on a warm image cache.
+* *ApplicationSet (exercise 1)* — the served CLI is *~290 MB* (a one-time ~30–60&nbsp;s fetch); `~/argocd appset create` then generated the three Applications in *~8 seconds* (dev + stage *adopted* by name, prod *created*); production converged in *~50 seconds* (claims-db, the wave-1 migration Job, then the Rollout to `4/4` Healthy) on a warm image cache.
 On a *cold* node add the image pull for the first user of the day.
 * *Canary (exercise 3)* — from the Gitea commit to `100%` Healthy was *~2 minutes*: `setWeight 25` (1 of 4 pods), a *20 s* pause, `setWeight 50` (2 of 4), the job-provider analysis (*~45 s*: two 200-probes at a 15 s interval plus Job startup), then `setWeight 100`.
 * *Break/abort (exercise 4)* — with `m10-canary-control` = `fail`, the canary reached the analysis step and *aborted* about *90 seconds* after the commit; the route answered `200` throughout and the stable ReplicaSet never scaled down.
@@ -64,16 +64,19 @@ oc get pods -n openshift-gitops | grep rollouts
 Expect a `RolloutManager` (cluster-scoped) and a running `argo-rollouts` controller pod.
 A `Rollout` only ever goes Healthy if this controller processes it — if it is missing, the `progressive-delivery` platform stack was not applied.
 
-. *The student instance can generate ApplicationSets for attendees.*
+. *Attendees can create ApplicationSets — controller, RBAC, and the served CLI.*
 +
 [source,sh,role=execute]
 ----
 oc get pods -n student-gitops | grep applicationset
 argocd admin settings rbac can user1 create applicationsets 'proj-user1/x' --namespace student-gitops
+DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+curl -ks -o /dev/null -w 'CLI served: HTTP %{http_code}\n' -r 0-1 \
+  "https://student-gitops-server-student-gitops.${DOMAIN}/download/argocd-linux-amd64"
 ----
 +
-Expect the `student-gitops-applicationset-controller` pod `Running` and the RBAC check `Yes`.
-Attendees create the ApplicationSet under their own project; both must be in place (see Watchouts for how they create it).
+Expect the `student-gitops-applicationset-controller` pod `Running`, the RBAC check `Yes`, and `CLI served: HTTP 206` (the server ships the `argocd` binary the attendee downloads in exercise 1).
+Attendees create the ApplicationSet from the *terminal with the CLI* (the UI has no appset screen — see Watchouts); all three must be in place, and `ws verify m10 --entry-only` gates the CLI-served one.
 
 . *The analysis knob is present and defaults to pass.*
 +
@@ -128,10 +131,10 @@ When analysis fails, it *aborts*: the canary pods are scaled back to zero and th
 The route answers `200` throughout (the lab proves it).
 "Roll back" here means "the new version never got promoted," not "tear down and redeploy."
 
-*3. "How do I create an ApplicationSet — there's no button I can find / no `argocd` CLI in my terminal?"*::
-You create it in the *Argo CD web UI*, signed in via OpenShift, using your `applicationsets` permission on `proj-{user}` — the same reason as the previous module (the Argo instance is shared and you cannot write to its namespace with `oc`).
-The ApplicationSet YAML is already in your fork (`applicationset.yaml`); create it from the *ApplicationSets* view.
-(Instructor: this is the one seam to confirm on your cluster's Argo version before the room — see Watchouts.)
+*3. "How do I create an ApplicationSet — there's no button in the UI?"*::
+You create it from the *terminal with the Argo CD CLI*, not the UI — this Argo CD version (3.4) has no create-ApplicationSet screen (nor a read view for them).
+Exercise 1 downloads the CLI the student server ships (`/download/argocd-linux-amd64`), gets a token from `/api/v1/session` scoped to `proj-{user}` by the attendee's per-user *local Argo account*, then runs `~/argocd appset create applicationset.yaml`.
+The token flow (not `argocd login`) is deliberate: interactive login negotiates gRPC over the edge route and does not complete reliably; `ARGOCD_OPTS='--grpc-web --insecure'` plus a REST token does.
 
 *4. "Canary or blue-green — which should we actually use?"*::
 Canary when you want to *limit blast radius* and can *measure* health during the rollout (a bad build fails analysis at 50%, not 100%); its cost is a small extra slice.
@@ -144,15 +147,14 @@ The knob simply lets you reproduce, on demand, the *signal* a real regression wo
 
 == Watchouts
 
-* *Creating the ApplicationSet is a UI action — confirm the exact affordance on your Argo version.*
-The attendee terminal (the Showroom terminal) has `oc`, `git`, and `helm` but *no `argocd` CLI and no Rollouts plugin*, and attendees have *no k8s write* to the `student-gitops` namespace — so the *only* path to create an ApplicationSet is the *Argo CD UI*, under their `applicationsets` RBAC on `proj-{user}`.
-This was built by driving the control plane as admin (the ApplicationSet's adoption + generation is proven), but the *exact UI create flow on Argo CD {argocd_version}* is the one step to click through on your cluster before the room (it is the highest-priority screenshot in the media manifest).
-If your Argo version has no ApplicationSet-create affordance, the platform team must add the `argocd` CLI to the Showroom terminal image or grant a scoped k8s create — *do not* hand attendees admin on `student-gitops`.
-* *The ApplicationSet outlives a namespace reset — delete it first.*
-`ws reset`/`ws prep` purge the attendee's *Applications* (by project) and namespaces, but *not* the *ApplicationSet* (a different kind, in the shared control plane).
-A surviving ApplicationSet immediately *re-generates* the apps you purged, and will fight the next module's world too.
-Cleanup order is: *delete the `claims-{user}` ApplicationSet in the Argo UI* (which prunes its child apps), *then* `ws prep m10 --yes`.
-This is called out in the lab's cleanup box; until the engine learns to purge ApplicationSets (a known follow-up), it is a manual step.
+* *The ApplicationSet is created from the CLI, not the UI (Argo {argocd_version} has no appset screen).*
+The Showroom terminal has `oc`, `git`, and `helm` but no `argocd`/Rollouts plugin, and attendees cannot `oc apply` into `student-gitops` — so exercise 1 fetches the CLI the student Argo server *serves* (`/download/argocd-linux-amd64`, ~290&nbsp;MB) and authenticates with a per-user *local Argo account* token via `/api/v1/session` (`--grpc-web --insecure`).
+Pre-flight check 3 confirms the server serves the CLI and the account + RBAC exist; the verify's `argocd CLI served` check gates it too.
+The ~290&nbsp;MB download is a one-time ~30–60&nbsp;s wait the first time an attendee runs exercise 1 — set the expectation.
+Do *not* steer attendees to `argocd login` (interactive gRPC over the route is unreliable — the lab uses a REST token) or to `oc apply` into `student-gitops`.
+* *Reset handles the ApplicationSet — `ws prep` is enough.*
+`ws reset`/`ws prep` purge the attendee's *ApplicationSet first* (in the shared control plane), then its Applications, then the namespaces — so a surviving ApplicationSet cannot re-generate what was purged, and a full reset leaves nothing to resurrect (verified).
+Attendees do not need a manual step; if one prefers, `~/argocd appset delete claims-{user}` removes it and prunes its apps in one shot.
 * *Watch the canary with `oc get rollout`, not a plugin.*
 There is no Argo Rollouts CLI plugin (`oc argo rollouts`) in the attendee terminal, so the lab observes the canary with plain `oc get rollout … -o jsonpath` (step/phase) plus the *Argo CD Rollout view* for the visual.
 If you demo from your laptop and have the plugin installed, `oc argo rollouts get rollout parasol-claims -n {user}-prod --watch` is a nicer live view — but do not put it in attendee steps; it will not be found.
@@ -170,7 +172,7 @@ This fits the `{user}-prod` quota at the shipped replica count (4); if you raise
 
 == Provenance
 
-M10 is built fresh on OpenShift GitOps {gitops_version} (Argo CD {argocd_version}) with *Argo Rollouts* (GA, cluster-scoped `RolloutManager`), against the Parasol `claims-config` repo (Kustomize base + dev/stage/prod overlays + a `rollouts/` progressive-delivery overlay + `applicationset.yaml`), on the shared *student* Argo CD instance with per-user AppProjects and `applicationsets` RBAC.
-Every command, output, and timing — the ApplicationSet adopting dev/stage and generating prod (~8s), the wave-ordered convergence (db → migration Job → Rollout, ~50s), the `1.0→1.1` canary (25/50/100 pod-ratio with a green job-provider `AnalysisRun`, ~2 min), the forced abort (`RolloutAborted … Metric "canary-health" assessed Failed`, stable preserved, route `200` throughout, ~90s), the git-revert recovery (~30s), and a scratch blue-green preview/promote — was performed and measured on OpenShift {ocp_version} as `user4` on 2026-07-11.
+M10 is built fresh on OpenShift GitOps {gitops_version} (Argo CD {argocd_version}) with *Argo Rollouts* (GA, cluster-scoped `RolloutManager`), against the Parasol `claims-config` repo (Kustomize base + dev/stage/prod overlays + a `rollouts/` progressive-delivery overlay + `applicationset.yaml`), on the shared *student* Argo CD instance with per-user AppProjects, `applicationsets` RBAC, and per-user *local Argo accounts* + a server-served CLI (Argo {argocd_version} has no ApplicationSet UI).
+Every command, output, and timing — the CLI download (~290 MB), the token-scoped `~/argocd appset create` and the `PermissionDenied` a neighbour's project returns, the ApplicationSet adopting dev/stage and generating prod (~8s), the wave-ordered convergence (db → migration Job → Rollout, ~50s), the `1.0→1.1` canary (25/50/100 pod-ratio with a green job-provider `AnalysisRun`, ~2 min), the forced abort (`RolloutAborted … Metric "canary-health" assessed Failed`, stable preserved, route `200` throughout, ~90s), the git-revert recovery (~24s), and a scratch blue-green preview/promote — was performed and measured on OpenShift {ocp_version} as `user7` (G3 fix round; earlier beats as `user4`) on 2026-07-11.
 The ApplicationSet uses a *list* generator (prod → `rollouts/`) so the fleet is generated from one object and production runs progressive delivery; structure and narrative adapt the OpenShiftDemos advanced-gitops and argo-rollouts workshops (credit per the reuse policy).
 No content ported from stale material.

@@ -10,14 +10,22 @@ include::partial$version-attributes.adoc[]
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 Terminal commands assume you set `DEV={user}-dev`, `STAGE={user}-stage`, `PROD={user}-prod` at the start of the lab.
 
-== I can't find where to create an ApplicationSet in the Argo CD UI
+== I can't create the ApplicationSet — there's no button in the UI, and `oc apply` is Forbidden
 
-Symptom:: You are signed in to Argo CD as `{user}` but there is no obvious "New ApplicationSet" button, and `oc apply` of the ApplicationSet fails with `Forbidden`.
-Cause:: ApplicationSets must live in the shared `student-gitops` control-plane namespace, which you cannot write to with `oc` (by design).
-They are created through the *Argo CD API*, under your `applicationsets` permission on `proj-{user}` — from the *ApplicationSets* view in the UI, not from the terminal.
-Fix:: In the Argo CD UI, open the *ApplicationSets* view (left nav) and create one there, pasting the `applicationset.yaml` from your fork.
-If your instructor confirms the UI on this cluster has no ApplicationSet-create affordance, this is a platform seam — tell them; they may need to enable a CLI path.
-Do *not* try to `oc apply` it into `student-gitops`.
+Symptom:: There is no "New ApplicationSet" screen in the Argo CD web UI, and `oc apply` of the ApplicationSet into `student-gitops` fails with `Forbidden`.
+Cause:: Both are expected.
+This Argo CD version (3.4) has *no create-ApplicationSet view* in its UI, and you cannot write to the shared `student-gitops` control-plane namespace with `oc` (by design).
+ApplicationSets are created through the Argo CD *API/CLI*, under your `applicationsets` permission on `proj-{user}`.
+Fix:: Use the CLI flow from exercise 1: download the CLI the student server ships (`curl … /download/argocd-linux-amd64 -o ~/argocd`), get a token from `/api/v1/session`, then `~/argocd appset create applicationset.yaml`.
+Do *not* `oc apply` it into `student-gitops`, and do not look for a UI button — the CLI is the interface here.
+
+== `argocd login` hangs or errors over the route
+
+Symptom:: Interactive `argocd login student-gitops-server-…` hangs, or fails with a gRPC/connection error, even with the right password.
+Cause:: Interactive `argocd login` negotiates over gRPC through the OpenShift edge route, which does not reliably complete that handshake — this is why the lab authenticates with a *token* instead.
+Fix:: Do not use `argocd login`.
+Use the token flow from exercise 1: `export ARGOCD_OPTS='--grpc-web --insecure'`, POST your credentials to `https://$ARGOCD_SERVER/api/v1/session`, and export the returned token as `ARGOCD_AUTH_TOKEN`.
+Every `~/argocd` command then talks to the server over `--grpc-web` with that token.
 
 == My ApplicationSet was created but only prod appeared — dev/stage look unchanged
 
@@ -26,16 +34,15 @@ Cause:: That is *correct*.
 The ApplicationSet *adopts* the two Applications that already existed (same names) and *generates* the one that did not (prod).
 Adoption does not redeploy dev/stage — their spec already matches the template — so nothing visibly changes there.
 Fix:: Nothing to fix.
-Confirm ownership moved to the ApplicationSet in the UI (the dev/stage apps now show the ApplicationSet as their owner), and confirm prod stood up: `oc get rollout parasol-claims -n $PROD`.
+Confirm all three apps are now managed together — `~/argocd app list -p proj-{user}` lists `claims-dev/stage/prod-{user}` — and that prod stood up: `oc get rollout parasol-claims -n $PROD`.
 
 == The canary never starts after I edited the image in Git
 
 Symptom:: You changed the image tag in `rollouts/claims-rollout.yaml` and committed, but production still runs the old version and no canary appears.
 Cause:: Argo CD has not synced the new commit yet — it re-reads `main` on its reconcile cycle or when you *Refresh*.
 Until it syncs, the Rollout's pod template is unchanged, so the controller has no new version to canary.
-Fix:: In the Argo CD UI, open `claims-prod-{user}` and click *Refresh* (a *hard* refresh forces a re-read).
-Within ~20 seconds it picks up the commit and syncs the new image into the Rollout, which starts the canary.
-Confirm the Rollout spec actually changed: `oc get rollout parasol-claims -n $PROD -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'` should show the new tag.
+Fix:: Argo picks up the commit on its own within a reconcile cycle (up to ~90s) — or, to apply it at once, open `claims-prod-{user}` in the Argo CD UI and click *Refresh*.
+Confirm the Rollout spec actually changed: `oc get rollout parasol-claims -n $PROD -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'` should show the new tag; the canary starts as soon as it does.
 
 == I set the analysis verdict to `fail` but the canary promoted anyway
 
@@ -82,17 +89,12 @@ oc get events -n $PROD --sort-by=.lastTimestamp | tail -10
 +
 If it is quota, wait for the previous canary's pods to drain, or ask your instructor about headroom — the shipped replica count (4) is sized to fit, but a raised count may not.
 
-== After I reset, claims came back in prod / my Applications keep reappearing
+== I deleted the workloads by hand and they keep reappearing
 
-Symptom:: You ran `ws prep m10 --yes` (or purged the namespaces) but the claims apps re-appear, or prod keeps redeploying.
+Symptom:: You purged a namespace (or deleted an Application) by hand and the claims apps re-appear, or prod keeps redeploying.
 Cause:: The *ApplicationSet still exists*.
-It lives in the shared Argo CD control plane — outside every namespace `ws prep` purges — so it survives the reset and immediately *re-generates* the Applications you just removed.
-Fix:: Delete the ApplicationSet *first*, then reset:
-+
-. In the Argo CD UI, delete the `claims-{user}` ApplicationSet (this prunes its three child Applications).
-. Then run `ws prep {module-id} --yes`.
-+
-Do it in that order — resetting while the ApplicationSet exists just re-creates what you purged.
+It lives in the shared Argo CD control plane — outside the namespaces you purged — so it immediately *re-generates* the Applications you removed.
+Fix:: Remove the ApplicationSet, which prunes its Applications with it — either `~/argocd appset delete claims-{user}`, or just `ws prep {module-id} --yes`, which removes the ApplicationSet *before* the Applications it generated (so a full reset never leaves anything to resurrect).
 
 == Production is `Healthy` in Argo CD but the route returns 503 for a moment after a promotion
 

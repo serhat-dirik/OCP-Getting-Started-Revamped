@@ -203,7 +203,7 @@ git clone {gitea_url}/{user}/claims-config 2>/dev/null; cd claims-config
 cat applicationset.yaml
 ----
 
-.Expected output (the YAML below the comment header)
+.Expected output (below the comment header the fork ships)
 [%collapsible]
 ====
 [source,texinfo]
@@ -213,20 +213,30 @@ kind: ApplicationSet
 metadata:
   name: claims-user1
   namespace: student-gitops
+  labels:
+    workshop.redhat.com/user: user1
 spec:
   goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
   generators:
+    # A LIST generator: each element is one environment and the folder in Git that describes it.
+    # Swap this for a git-directories or cluster generator later — the template below is unchanged.
     - list:
         elements:
           - env: dev
             path: overlays/dev
           - env: stage
             path: overlays/stage
+          # prod points at rollouts/ (the Rollout + analysis + wave-ordered migration), not
+          # overlays/prod — this is how ONE ApplicationSet gives prod progressive delivery.
           - env: prod
-            path: rollouts        # prod uses progressive delivery, not a plain Deployment
+            path: rollouts
   template:
     metadata:
+      # one Application per environment: claims-dev-user1, claims-stage-user1, claims-prod-user1
       name: 'claims-{{.env}}-user1'
+      labels:
+        workshop.redhat.com/user: user1
     spec:
       project: proj-user1
       source:
@@ -237,7 +247,9 @@ spec:
         server: https://kubernetes.default.svc
         namespace: 'user1-{{.env}}'
       syncPolicy:
-        automated: {prune: true, selfHeal: true}
+        automated:
+          prune: true
+          selfHeal: true
 ----
 ====
 
@@ -245,17 +257,84 @@ Read what this says: a *list generator* enumerates three environments, and for e
 The `template` is stamped once per element: `claims-dev-{user}`, `claims-stage-{user}`, `claims-prod-{user}`.
 *One object describes the whole fleet* — and `dev`/`stage`/`prod` legitimately differ (prod is a Rollout), yet still come from this single ApplicationSet.
 
-Now create it.
-You do this in the *Argo CD web UI*, signed in as yourself — the same reason as the previous GitOps module: the Argo CD instance is *shared*, you cannot write to its control-plane namespace with `oc`, and Argo CD scopes you (via your `applicationsets` permission on `proj-{user}`) to your own project.
-Open the {student_argo_url}[student Argo CD UI^], *Log in via OpenShift* as `{user}`, go to the *ApplicationSets* view, and *create* an ApplicationSet from the `applicationset.yaml` above.
+Now create it — from the *terminal*, with the Argo CD *CLI*.
+You cannot write to the shared Argo CD instance with `oc` (its control-plane namespace is off-limits to you), and this Argo CD version's *web UI has no "create ApplicationSet" screen* — so ApplicationSets are created through the Argo CD *API*, which the CLI drives.
+The student server ships its own copy of the CLI; fetch it (a one-time ~290 MB download — give it up to a minute):
 
-// media-pass: screenshot m10-gitops-at-scale-01-appset-create.png — the Argo CD ApplicationSet
-// CREATE view with the claims-user1 ApplicationSet YAML (list generator, three env elements) pasted
-// in, before submit. HIGHEST priority + FLAG: confirm the exact 3.4 UI create affordance here (the
-// attendee terminal has no argocd CLI and cannot oc-apply to student-gitops, so the UI is the only
-// create path). See media-manifest.md and the instructor guide.
+[source,sh,role=execute,subs="attributes"]
+----
+ARGO=student-gitops-server-student-gitops.{cluster_domain}
+curl -sSLk "https://$ARGO/download/argocd-linux-amd64" -o ~/argocd && chmod +x ~/argocd
+----
 
-The moment you create it, the ApplicationSet generates its three Applications.
+Point the CLI at the student instance and get a short-lived token *scoped to you*.
+Type *your workshop password* (the same one you use to sign in) at the prompt — it is read silently and never written to a file:
+
+[source,sh,role=execute,subs="attributes"]
+----
+export ARGOCD_SERVER=student-gitops-server-student-gitops.{cluster_domain}
+export ARGOCD_OPTS='--grpc-web --insecure'
+read -rsp "Your workshop password: " PW; echo
+export ARGOCD_AUTH_TOKEN=$(curl -sk -X POST "https://$ARGOCD_SERVER/api/v1/session" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"{user}","password":"'"$PW"'"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+unset PW
+----
+
+Now create the ApplicationSet from your clone (you are already in `claims-config`), and list what it generated:
+
+[source,sh,role=execute,subs="attributes"]
+----
+~/argocd appset create applicationset.yaml
+~/argocd app list -p proj-{user}
+----
+
+.Expected output
+[%collapsible]
+====
+[source,texinfo]
+----
+ApplicationSet 'claims-user1' created
+Name:               student-gitops/claims-user1
+Project:            proj-user1
+Server:             https://kubernetes.default.svc
+Namespace:          user1-{{.env}}
+
+NAME                               PROJECT     STATUS     HEALTH       SYNCPOLICY  PATH
+student-gitops/claims-dev-user1    proj-user1  Synced     Healthy      Auto-Prune  overlays/dev
+student-gitops/claims-prod-user1   proj-user1  OutOfSync  Progressing  Auto-Prune  rollouts
+student-gitops/claims-stage-user1  proj-user1  Synced     Healthy      Auto-Prune  overlays/stage
+----
+====
+
+// media-pass: screenshot m10-gitops-at-scale-01-appset-created.png — the terminal right after
+// `~/argocd appset create` + `~/argocd app list -p proj-user1`: the "ApplicationSet 'claims-user1'
+// created" line and the three generated apps (dev/stage Synced, prod Progressing on the rollouts path).
+// HIGH priority — this is the core action of the module (the Argo 3.4 UI has no appset create OR read
+// view; the CLI is the interface). See media-manifest.md.
+
+[NOTE]
+.Why the CLI, and what "scoped to you" means
+====
+This Argo CD version (3.4) has no *create ApplicationSet* screen in its web UI — here, ApplicationSets are an API/CLI object.
+The CLI you just downloaded talks to the *same Argo CD API* as the UI, and that API enforces your tenancy: your token maps to `proj-{user}`, so you can create and manage only *your* project's objects.
+Prove it — ask the API about a *neighbour's* project and it refuses:
+
+[source,sh,role=execute,subs="attributes"]
+----
+~/argocd app get proj-user2/anything
+----
+
+[source,texinfo]
+----
+FATA[0000] rpc error: code = PermissionDenied desc = permission denied
+----
+
+That `PermissionDenied` is the tenancy boundary doing its job — the same boundary that lets *one* shared Argo CD instance safely serve a whole room.
+====
+
+The ApplicationSet generates its three Applications immediately.
 Two of them — `claims-dev-{user}` and `claims-stage-{user}` — already existed (your hand-made ones); the ApplicationSet *adopts* them by name and now manages them.
 The third — `claims-prod-{user}` — is *new*, and it stands production up.
 Watch production appear from the terminal (it was empty a moment ago):
@@ -279,9 +358,9 @@ done
   ✔ production is up — generated by the ApplicationSet
 ----
 
-// media-pass: screenshot m10-gitops-at-scale-02-appset-three-apps.png — the Argo CD ApplicationSet
-// detail (or Applications list filtered to the user) showing ONE ApplicationSet owning THREE
-// applications claims-dev/stage/prod-user1, all Synced/Healthy. HIGH priority. See media-manifest.md.
+// media-pass: screenshot m10-gitops-at-scale-02-three-app-cards.png — the Argo CD *Applications* view
+// (the appset detail/read view does NOT exist in Argo 3.4 — this is the money shot) showing the THREE
+// generated app cards claims-dev/stage/prod-user1, all Synced/Healthy. HIGH priority. See media-manifest.md.
 
 You created *one* object and it produced *three* Applications — adopting the two that existed and standing up the one that did not.
 Add a fourth environment later and it is one more element in the list; onboard another service and it is another ApplicationSet the platform team owns.
@@ -304,7 +383,7 @@ First, the migration Job — a `Sync` *hook* that Argo ran as part of the sync:
 [source,sh,role=execute]
 ----
 oc get job claims-db-migrate -n $PROD
-oc logs job/claims-db-migrate -n $PROD | tail -8
+oc logs job/claims-db-migrate -n $PROD
 ----
 
 .Expected output
@@ -316,13 +395,14 @@ NAME                STATUS     COMPLETIONS   DURATION   AGE
 claims-db-migrate   Complete   1/1           12s        3m
 ▶ waiting for claims-db:5432 to accept connections…
 claims-db:5432 - accepting connections
+claims-db:5432 - accepting connections
 ▶ applying idempotent schema migration (schema_version marker)…
 CREATE TABLE
 INSERT 0 1
 ✅ migration applied — schema_version:
  version |          applied_at
 ---------+-------------------------------
-       1 | 2026-07-11 02:37:24.182936+00
+       1 | 2026-07-11 05:38:33.805893+00
 (1 row)
 ----
 ====
@@ -394,9 +474,8 @@ Open your fork in the *Gitea* tab at {gitea_url}/{user}/claims-config[{user}/cla
 // rollouts/claims-rollout.yaml with the image tag changed 1.0 -> 1.1, Commit Changes panel visible.
 // See media-manifest.md.
 
-Back in the *Argo CD* tab, open `claims-prod-{user}` and press *Refresh* so Argo re-reads `main` and syncs the new image into the Rollout.
-The Rollout controller sees a new version and starts the canary.
-Switch to the app's *Rollout* view to watch it visually, and poll it from the terminal at the same time:
+Argo CD picks up your commit and syncs the new image into the Rollout on its own within about a minute — or, to apply it at once, open `claims-prod-{user}` in the {student_argo_url}[student Argo CD UI^] and press *Refresh*, then switch to the app's *Rollout* view to watch the canary animate.
+Either way, poll it from the terminal: the loop below *first waits for the canary to actually start* (the Rollout's image flips to `1.1`) so it does not mistake the current steady state for a finished rollout, then follows the steps to 100%.
 
 // media-pass: screenshot m10-gitops-at-scale-04-canary-progressing.png — the Argo CD Rollout view
 // mid-canary: revision 2 (canary, image 1.1) alongside revision 1 (stable, 1.0), SetWeight 25 or 50,
@@ -404,6 +483,12 @@ Switch to the app's *Rollout* view to watch it visually, and poll it from the te
 
 [source,sh,role=execute]
 ----
+echo "waiting for the canary to start (Argo syncing your commit)…"
+for i in $(seq 1 20); do
+  oc get rollout parasol-claims -n $PROD \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' | grep -q ':1.1' && break
+  sleep 6
+done
 for i in $(seq 1 30); do
   S=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.currentStepIndex}')
   P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
@@ -420,12 +505,13 @@ done
 ====
 [source,texinfo]
 ----
-  06:39:38  step 0/5   Progressing   canary-pods:1/4   analysis:none
-  06:40:00  step 1/5   Paused        canary-pods:1/4   analysis:none
-  06:40:21  step 2/5   Progressing   canary-pods:2/4   analysis:none
-  06:40:32  step 3/5   Progressing   canary-pods:2/4   analysis:Running
-  06:41:27  step 4/5   Progressing   canary-pods:4/4   analysis:Successful
-  06:41:41  step 5/5   Healthy       canary-pods:4/4   analysis:Successful
+waiting for the canary to start (Argo syncing your commit)…
+  08:40:51  step 0/5   Progressing   canary-pods:1/4   analysis:none
+  08:41:21  step 1/5   Paused        canary-pods:1/4   analysis:none
+  08:41:41  step 2/5   Progressing   canary-pods:2/4   analysis:none
+  08:42:01  step 3/5   Progressing   canary-pods:2/4   analysis:Running
+  08:43:12  step 4/5   Progressing   canary-pods:4/4   analysis:Successful
+  08:43:19  step 5/5   Healthy       canary-pods:4/4   analysis:Successful
   ✔ promoted to 100%
 ----
 ====
@@ -545,13 +631,15 @@ stable ReplicaSet still serving: 5485b86bcd  (the canary was scaled away)
 Now *fix it*, the GitOps way.
 A real fix is two things: clear the fault, and *revert the bad change in Git*.
 Clear the knob (the regression is "resolved"), then in the *Gitea* tab change the image tag back to `parasol-claims:1.1` and *Commit Changes* to `main` (message e.g. "Revert bad release; restore 1.1").
+Then open `claims-prod-{user}` in the {student_argo_url}[student Argo CD UI^] and press *Refresh* so Argo re-reads the revert.
 Because you are reverting to the version that is *already* the stable one, the Rollout clears the abort and returns to `Healthy` — no new canary needed, because production is already running that version.
 
 [source,sh,role=execute]
 ----
 oc patch configmap m10-canary-control -n $PROD --type merge -p '{"data":{"verdict":"pass"}}'
-# after committing the image revert to 1.1 in Gitea and pressing Refresh in Argo CD:
-for i in $(seq 1 12); do
+# after committing the revert to 1.1 in Gitea and pressing Refresh in Argo CD, watch it recover.
+# Clearing the abort can take up to ~90s; if the loop ends still Degraded, press Refresh again + re-run.
+for i in $(seq 1 22); do
   P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
   echo "  $(date +%T)  rollout: $P"
   [ "$P" = "Healthy" ] && { echo "  ✔ recovered — production Healthy on the good version"; break; }
@@ -563,8 +651,9 @@ done
 [source,texinfo]
 ----
 configmap/m10-canary-control patched
-  06:44:15  rollout: Degraded
-  06:44:38  rollout: Healthy
+  08:50:05  rollout: Degraded
+  08:50:14  rollout: Degraded
+  08:50:22  rollout: Healthy
   ✔ recovered — production Healthy on the good version
 ----
 
@@ -614,16 +703,11 @@ Reason about what would happen if the migration hook were wave `3` instead of `1
 
 When you are done, run `ws verify {module-id}` to confirm production is a healthy Rollout.
 
-[IMPORTANT]
-.Before you leave: delete your ApplicationSet, *then* reset
+[NOTE]
+.Clean up when you are done
 ====
-The ApplicationSet you created lives in the shared Argo CD control plane, and it will keep *regenerating* your Applications until you remove it — a namespace cleanup alone is not enough.
-To reset cleanly, do it in this order:
-
-. In the *Argo CD UI*, delete the `claims-{user}` ApplicationSet (this prunes the three Applications it generated).
-. Then run `ws prep {module-id} --yes` to purge your namespaces and re-materialize the clean entry state (your fork restored, dev/stage back to plain Applications, prod empty).
-
-Do step 1 first: if you `ws prep` while the ApplicationSet still exists, it will re-generate the apps you just purged.
+`ws prep {module-id} --yes` returns everything to a clean entry state: it purges your namespaces, restores your fork, and *removes the ApplicationSet before the Applications it generated* — so nothing gets re-created behind the reset, whatever order things are torn down in.
+If you would rather remove just the ApplicationSet yourself, `~/argocd appset delete claims-{user}` deletes it and prunes its three Applications in one step.
 ====
 
 endif::demo[]
