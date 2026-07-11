@@ -18,6 +18,15 @@ include::partial$version-attributes.adoc[]
 // converged wave-ordered (db -> migrate -> Rollout, ~50s), the 1.0->1.1 canary ran 25%/pause/50%/
 // analysis(green)/100% (~2 min), and with the verdict knob = fail a 1.1->1.0 canary ABORTED at the
 // failed AnalysisRun with stable preserved (route 200 throughout), then a git revert recovered it.
+// Console dual-path retrofit (2026-07-11): the k8s-facing steps in YOUR namespaces carry [tabs]
+// Console|CLI — starting-point deploys, the migration Job + logs, the sync-wave annotations (YAML tab),
+// prod serving (Route), and the analysis-knob ConfigMap edit. Single-path (recorded): the ApplicationSet
+// beat is Argo CLI/API (Argo 3.4 UI has no appset create/read screen — deliberate, no console dual);
+// the git-clone/cat repo tour is pure-git; Gitea image edits are product-UI; and the canary/abort/
+// recovery WATCH loops stay CLI beside the Argo CD Rollout UI because the Argo Rollouts OpenShift-console
+// plugin is NOT enabled here (verified: consoles.operator.openshift.io/cluster .spec.plugins lacks
+// gitops/rollouts), so Rollout/AnalysisRun have no console nav — reachable only via Home>Search
+// (marked [CAPTURE-VERIFY] where a step needs them). Console nav reuses m01/m02 live-grounded 4.21 labels.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -168,6 +177,20 @@ ifndef::demo[]
 Your claims app is GitOps-managed in `dev` and `stage` today — as *two hand-made Applications*.
 Confirm the starting point: dev and stage run the app, and *production is empty* (standing production up is part of this module).
 
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}[OpenShift web console^], open *Workloads* → *Deployments* and step through the *Project* selector:
+
+* `{user}-dev` — `claims-db` and `parasol-claims`, `1/1`.
+* `{user}-stage` — the same two, with `parasol-claims` at `2/2`.
+* `{user}-prod` — *no workloads*: production has not been stood up yet.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get deploy -n $DEV
@@ -177,7 +200,7 @@ oc get deploy,rollout -n $PROD
 
 .Expected output
 [%collapsible]
-====
+=====
 [source,texinfo]
 ----
 NAME             READY   UP-TO-DATE   AVAILABLE   AGE
@@ -188,6 +211,8 @@ claims-db        1/1     1            1           14m
 parasol-claims   2/2     2            2           14m
 No resources found in user1-prod namespace.
 ----
+=====
+--
 ====
 
 Adding production by hand means authoring a *third* Application.
@@ -380,6 +405,17 @@ Look at what ran, in your own prod namespace.
 
 First, the migration Job — a `Sync` *hook* that Argo ran as part of the sync:
 
+[tabs]
+====
+Console::
++
+--
+With the *Project* set to `{user}-prod`, open *Workloads* → *Jobs*: `claims-db-migrate` shows *Complete* (`1/1`).
+Click it, open the *Pods* tab, click its Pod, and read the *Logs* tab — the same wait-for-database then apply-schema output the CLI prints.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get job claims-db-migrate -n $PROD
@@ -388,7 +424,7 @@ oc logs job/claims-db-migrate -n $PROD
 
 .Expected output
 [%collapsible]
-====
+=====
 [source,texinfo]
 ----
 NAME                STATUS     COMPLETIONS   DURATION   AGE
@@ -405,12 +441,29 @@ INSERT 0 1
        1 | 2026-07-11 05:38:33.805893+00
 (1 row)
 ----
+=====
+--
 ====
 
 The Job *waited* for the database, applied an idempotent schema change, and exited.
 It is a *Job*, not a Deployment, because it is an *action that runs once* — not desired state that should keep existing.
 Now see the annotations that *ordered* it — the database is the default wave `0`, the migration is a `Sync` hook at wave `1`, and the app Rollout is wave `2`:
 
+[tabs]
+====
+Console::
++
+--
+Each object carries its wave as an annotation you can read on its *YAML* tab (Project `{user}-prod`):
+
+* `claims-db` (*Workloads* → *Deployments*) has *no* `argocd.argoproj.io/sync-wave` annotation — the default, wave 0.
+* `claims-db-migrate` (*Workloads* → *Jobs*) shows `argocd.argoproj.io/sync-wave: '1'` and `argocd.argoproj.io/hook: Sync`.
+* The `parasol-claims` Rollout is a custom resource with no dedicated nav item here (the Argo Rollouts console plugin is not installed on this cluster), so reach it through *Home* → *Search*, choose the `Rollout` resource, open `parasol-claims`, and its *YAML* shows `argocd.argoproj.io/sync-wave: '2'`.
+// [CAPTURE-VERIFY] Home > Search > Resources kind "Rollout" listing + the Rollout instance YAML/Details rendering (no rollouts/gitops console plugin enabled on this cluster; OCP 4.21) — CLI 'oc get rollout ... -o jsonpath=...sync-wave' beside it is authoritative.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get deploy claims-db -n $PROD \
@@ -428,12 +481,26 @@ claims-db          wave:  (unset = default 0)
 claims-db-migrate  wave: 1  hook: Sync
 parasol-claims     wave: 2
 ----
+--
+====
 
 That is the whole ordering, encoded in the repo next to the app: *wave 0* (database) → *wave 1* (migration hook) → *wave 2* (application).
 Argo applied each wave only after the previous one was healthy, so the app was never created against a database whose schema was not ready.
 It happens the same way on every fresh sync — and because the migration is idempotent, safely on every *re-*sync too.
 Confirm production is actually serving, database-backed:
 
+[tabs]
+====
+Console::
++
+--
+Open *Networking* → *Routes* in `{user}-prod` and click the `parasol-claims` route's *Location* link — appending `/api/claims` shows the seeded claims JSON, and `/q/health/ready` shows the readiness endpoint answering.
+To see the Rollout itself at `4/4`, use *Home* → *Search* and choose the `Rollout` resource (there is no *Rollouts* nav item without the console plugin).
+// [CAPTURE-VERIFY] Home > Search > Resources kind "Rollout" -> parasol-claims replica/AVAILABLE readout (no rollouts/gitops console plugin; OCP 4.21) — CLI 'oc get rollout parasol-claims -n {user}-prod' authoritative.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc get rollout parasol-claims -n $PROD
@@ -450,6 +517,8 @@ parasol-claims   4         4         4            4           4m
 prod health: 200
 [{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview",...
 ----
+--
+====
 
 [.checkpoint]
 ****
@@ -550,6 +619,18 @@ Set it to `fail`, and the next canary's analysis reports a failure *exactly as i
 
 Set the knob (this is in *your* namespace, so plain `oc` works):
 
+[tabs]
+====
+Console::
++
+--
+Open *Workloads* → *ConfigMaps* in `{user}-prod` and click `m10-canary-control`.
+Set `verdict` to `fail` — on the *YAML* tab edit `data.verdict`, or use *Actions* → *Edit ConfigMap* and change the value — then *Save*.
+// [CAPTURE-VERIFY] Workloads > ConfigMaps > m10-canary-control > Actions > "Edit ConfigMap" key/value form label (OCP 4.21) — CLI 'oc patch configmap m10-canary-control ...' authoritative; the YAML tab (data.verdict) is the universal fallback.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
 oc patch configmap m10-canary-control -n $PROD --type merge -p '{"data":{"verdict":"fail"}}'
@@ -562,6 +643,8 @@ oc get configmap m10-canary-control -n $PROD -o jsonpath='analysis verdict is no
 configmap/m10-canary-control patched
 analysis verdict is now: fail
 ----
+--
+====
 
 Now ship the next build.
 In the *Gitea* tab, edit `rollouts/claims-rollout.yaml` again and change the image tag from `parasol-claims:1.1` back to `parasol-claims:1.0` — a stand-in for "the next release candidate" — and *Commit Changes* to `main` (message e.g. "prod: ship next build").
@@ -630,7 +713,7 @@ stable ReplicaSet still serving: 5485b86bcd  (the canary was scaled away)
 
 Now *fix it*, the GitOps way.
 A real fix is two things: clear the fault, and *revert the bad change in Git*.
-Clear the knob (the regression is "resolved"), then in the *Gitea* tab change the image tag back to `parasol-claims:1.1` and *Commit Changes* to `main` (message e.g. "Revert bad release; restore 1.1").
+Clear the knob (the regression is "resolved" — set `verdict` back to `pass`, with the command below or the same *Workloads* → *ConfigMaps* → `m10-canary-control` edit you used above), then in the *Gitea* tab change the image tag back to `parasol-claims:1.1` and *Commit Changes* to `main` (message e.g. "Revert bad release; restore 1.1").
 Then open `claims-prod-{user}` in the {student_argo_url}[student Argo CD UI^] and press *Refresh* so Argo re-reads the revert.
 Because you are reverting to the version that is *already* the stable one, the Rollout clears the abort and returns to `Healthy` — no new canary needed, because production is already running that version.
 
