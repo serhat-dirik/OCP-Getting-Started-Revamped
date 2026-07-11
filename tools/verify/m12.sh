@@ -50,7 +50,7 @@ claims_otel_endpoint() {
 # /q/metrics (scraped by the ServiceMonitor) exposes a given metric name. Retries briefly: a
 # Micrometer counter (claims_created_total) only appears after the load generator's first POST.
 metrics_expose() {
-  local needle="$1" host i out
+  local needle="$1" host out
   host="$(oc get route parasol-claims -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   [[ -n "$host" ]] || return 1
   for _ in $(seq 1 10); do
