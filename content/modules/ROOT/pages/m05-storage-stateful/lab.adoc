@@ -14,12 +14,14 @@ include::partial$prereq-ws-start.adoc[]
 In this lab you take Parasol's claims database from *ephemeral* (data dies with the Pod) to *persistent* (data survives), by hand, one object at a time — then you run a real StatefulSet and operate it: stable identities, a partitioned update, an init-container migration, and an online volume resize.
 Everything happens in your own `{user}-dev` project, so nothing you do affects another attendee.
 
-[NOTE]
-.One terminal — the Showroom terminal
+[TIP]
+.Two ways to do most steps
 ====
-Every command in this lab runs in the *Terminal* tab beside these instructions, logged in as `{user}`.
-The blocks are click-to-run.
-You will use `oc` and `curl` only — no browser IDE this time.
+Most cluster steps below are offered two ways.
+Use the *Console* tab for the graphical workflow in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), or the *CLI* tab for `oc` in the *Terminal* tab beside these instructions — the two paths act on the same objects.
+Pick a path once: the tabs stay in sync across the page.
+Storage is where the console earns its keep — the *Storage* views show the PVC → PV → StorageClass chain at a glance — so this module leans on it.
+A few steps are terminal-only: seeding and reading claims with `curl` (an app API, not a cluster action), the StatefulSet's in-pod `exec`/DNS checks, and the partitioned-update patch; those say so.
 ====
 endif::demo[]
 
@@ -198,14 +200,27 @@ oc -n {user}-dev get deploy claims-db -o jsonpath='{.spec.template.spec.volumes[
 ----
 
 Now do the thing that happens to Pods all the time — a node drain, a cluster upgrade, an OOM kill, a crash.
-Delete the database Pod.
-Its Deployment immediately makes a new one:
+Delete the database Pod; its Deployment immediately makes a new one:
 
+// [CAPTURE-VERIFY] Workloads > Pods > kebab (⋮) > "Delete Pod" (OCP 4.21) — CLI 'oc delete pod' authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Pods*, find the `claims-db-…` Pod, and use its *⋮* (kebab) menu → *Delete Pod* (confirm).
+. The `claims-db` Deployment immediately schedules a replacement — watch it return to *Running* on the Pods list.
+--
+CLI::
++
+--
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev delete pod -l app=claims-db
 oc -n {user}-dev rollout status deploy/claims-db
 ----
+--
+====
 
 The new Pod is `Running` in seconds — but it started with a *fresh, empty* emptyDir.
 Ask the app for your claims:
@@ -260,6 +275,19 @@ You will replace the emptyDir with a *PersistentVolumeClaim* — a request for d
 
 Write the PVC yourself, so you see exactly what you are asking for — 2Gi, `ReadWriteOnce`, on the default StorageClass (omit `storageClassName` and you get the default):
 
+// [CAPTURE-VERIFY] Storage > PersistentVolumeClaims > "Create PersistentVolumeClaim" form fields (Name/Size/Access mode/StorageClass; RWO = "Single user (RWO)") (OCP 4.21) — CLI heredoc authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Storage* → *PersistentVolumeClaims* and click *Create PersistentVolumeClaim*.
+. Name it `claims-db-data`, set *Size* `2` GiB and *Access mode* *Single user (RWO)*, and leave the *StorageClass* at the default. Click *Create*.
+. It appears as *Pending* — that is expected here (the default class waits for the first consumer, the next step).
+--
+CLI::
++
+--
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev apply -f - <<'EOF'
@@ -274,6 +302,8 @@ spec:
       storage: 2Gi
 EOF
 ----
+--
+====
 
 Look at the PVC immediately:
 
@@ -416,11 +446,26 @@ You have a bound PVC.
 Walk the chain from what you asked for to what the platform gave you.
 First the *PVC* — your request, in your namespace:
 
+// [CAPTURE-VERIFY] Storage > PersistentVolumeClaims detail; click-through PVC -> PV -> StorageClass (OCP 4.21) — CLI 'oc get' authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Storage* → *PersistentVolumeClaims* → `claims-db-data`.
+Its detail page shows *Status* `Bound`, *Capacity*, *Access modes*, and a link to the backing *PersistentVolume*.
+. Click that *PersistentVolume* link to see the cluster-scoped PV (capacity, reclaim policy, CSI driver), and from there open its *StorageClass* — the same chain the CLI walks below.
+--
+CLI::
++
+--
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev get pvc claims-db-data \
   -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,PV:.spec.volumeName,CAP:.status.capacity.storage,MODE:.spec.accessModes[0],SC:.spec.storageClassName'
 ----
+--
+====
 
 Take the PV name from that output and look at the *PersistentVolume* — the actual storage the platform provisioned (it is cluster-scoped; you can read it):
 
@@ -521,6 +566,18 @@ That difference is intentional; do not "fix" it.
 The two Pods are *independent* PostgreSQL instances that share a definition — this teaches StatefulSet mechanics (identity, per-Pod storage, DNS), not database replication.
 ====
 
+// [CAPTURE-VERIFY] masthead "+" (Quick create) > "Import YAML" page; Workloads > StatefulSets (OCP 4.21) — CLI heredoc authoritative.
+[tabs]
+====
+Console::
++
+--
+Use the masthead *+* (*Quick create*) → *Import YAML*, paste the manifest from the *CLI* tab, and click *Create*.
+It creates the Secret, the headless Service, and the two-replica StatefulSet in one shot; then watch `pg-sts-0` and `pg-sts-1` come up under *Workloads* → *StatefulSets* → `pg-sts`.
+--
+CLI::
++
+--
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev apply -f - <<'EOF'
@@ -566,6 +623,8 @@ spec:
 EOF
 oc -n {user}-dev rollout status statefulset/pg-sts
 ----
+--
+====
 
 Look at what the StatefulSet created — Pods with *ordinal names*, and one PVC *per Pod*:
 
@@ -763,6 +822,19 @@ Your claims database is on a 2Gi PVC, and the default StorageClass allows expans
 Grow it to 3Gi — *online*, with no restart.
 Note the filesystem size first:
 
+// [CAPTURE-VERIFY] Storage > PVC > Actions > "Expand PVC" dialog (OCP 4.21) — CLI 'oc patch pvc' authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Storage* → *PersistentVolumeClaims* → `claims-db-data` → *Actions* → *Expand PVC*.
+. Enter `3` GiB and *Save*.
+The expansion runs online — the database Pod keeps serving while the volume and its filesystem grow (the next block watches it land).
+--
+CLI::
++
+--
 [source,sh,role=execute,subs="attributes"]
 ----
 DBPOD=$(oc -n {user}-dev get pod -l app=claims-db -o jsonpath='{.items[0].metadata.name}')
@@ -770,6 +842,8 @@ oc -n {user}-dev exec "$DBPOD" -- df -h /var/lib/pgsql/data | tail -1
 oc -n {user}-dev patch pvc claims-db-data --type=merge \
   -p '{"spec":{"resources":{"requests":{"storage":"3Gi"}}}}'
 ----
+--
+====
 
 Watch the resize progress through its conditions, then land at 3Gi:
 
