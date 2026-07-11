@@ -299,6 +299,7 @@ You can re-attach any time with `tkn pipelinerun logs --last -f -n $NS`.
 The build *succeeds* — and then the `acs-scan` step turns the run *red*.
 Read what it says:
 
+.The scan step's output (abridged — the real RHACS table has six columns)
 [source,texinfo]
 ----
 [image-check] ▶ RHACS build-time image check: image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims:latest (categories: Supply Chain Security)
@@ -314,29 +315,37 @@ Read what it says:
 [image-check] ❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell).
 ----
 
-Read it like an SA would.
-RHACS built-time-checked your freshly built image and found *two* policy violations, but only one *breaks the build*: "Block Log4Shell (CVE-2021-44228) at build," `CRITICAL`, `CVSS 10`, in `log4j-core` version `2.14.1`.
+Read it the way a security-minded engineer would.
+*Red Hat Advanced Cluster Security* (RHACS) ran a build-time check on your freshly built image and found *two* policy violations, but only one *breaks the build*: "Block Log4Shell (CVE-2021-44228) at build," `CRITICAL`, `CVSS 10`, in `log4j-core` version `2.14.1`.
 The "Latest tag" violation is `LOW` and does *not* break the build — it is advice, not a gate.
 Because `acs-scan` exited non-zero, the pipeline is `Failed` and the image — though it was built — is flagged as one you must not ship.
 
-Confirm the run's shape:
+// media-pass: screenshot m08-trusted-supply-chain-01-acs-violation.png — the RHACS console view of
+// this violation (CVE-2021-44228, CVSS 10, log4j-core 2.14.1, the "Block Log4Shell at build" policy).
+// The money shot — embed here. See media-manifest.md.
+// media-pass: screenshot m08-trusted-supply-chain-03-pipelinerun-scan-failed.png — the PipelineRun
+// graph with build-image green and acs-scan red (the gate refused a built image). See media-manifest.md.
+
+Confirm the run's shape — every Task's status in one view:
 
 [source,sh,role=execute]
 ----
-tkn pipelinerun describe --last -n $NS | grep -iE 'Status|Message|acs-scan|build-image'
+tkn pipelinerun describe --last -n $NS | sed -n '/^Taskruns/,$p'
 ----
 
-.Expected output
+.Expected output (your run name and relative times differ)
 [source,texinfo]
 ----
-Status
-STARTED         DURATION   STATUS
-9 minutes ago   6m9s       Failed
-Message: Tasks Completed: 4 (Failed: 1, Cancelled 0), Skipped: 0
- ∙ build-image   ...   Succeeded
- ∙ acs-scan      ...   Failed
+Taskruns
+
+ NAME                                  TASK NAME      STARTED         DURATION   STATUS
+ supply-chain-run-xxxxx-acs-scan       acs-scan       2 minutes ago   32s        Failed
+ supply-chain-run-xxxxx-build-image    build-image    6 minutes ago   3m53s      Succeeded
+ supply-chain-run-xxxxx-sbom-report    sbom-report    7 minutes ago   1m39s      Succeeded
+ supply-chain-run-xxxxx-fetch-source   fetch-source   8 minutes ago   14s        Succeeded
 ----
 
+Only `acs-scan` is `Failed`; `fetch-source`, `sbom-report`, and `build-image` all `Succeeded`.
 The build *ran to completion* — this is different from the previous module's failing _test_, which stopped everything before the build.
 Here the image is built and even *signed* (you see that in exercise 4); the *scan* is what refuses it.
 That is deliberate: you cannot scan an image you have not built.
@@ -400,12 +409,18 @@ Read what it reported for your last failed run:
 
 [source,sh,role=execute]
 ----
-oc get taskrun -n $NS -l tekton.dev/pipelineTask=sbom-report \
-  --sort-by=.metadata.creationTimestamp -o name | tail -1 | \
-  xargs -I{} tkn taskrun logs {} -n $NS | grep -iE 'CycloneDX|log4j'
+SBOM_TR=$(oc get taskrun -n $NS -l tekton.dev/pipelineTask=sbom-report \
+  --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+tkn taskrun logs "$SBOM_TR" -n $NS | grep -iE 'Creating BOM|log4j-core'
 ----
 
-You will see the same `Creating BOM ... with 225 component(s)` and a line flagging `log4j-core@2.14.1 — CVE-2021-44228 (Log4Shell)`.
+.Expected output
+[source,texinfo]
+----
+[cyclonedx] [INFO] CycloneDX: Creating BOM version 1.6 with 225 component(s)
+[cyclonedx] ⚠️  the SBOM contains log4j-core@2.14.1 — CVE-2021-44228 (Log4Shell). Fix: drop this dependency.
+----
+
 The pipeline generates the bill of materials on *every* build; you just reproduced it by hand to see what it contains.
 ====
 
@@ -437,6 +452,9 @@ In your *Gitea tab* ({gitea_url}/{user}/parasol-claims[{user}/parasol-claims^]):
     </dependency>
 ----
 . Scroll down and *Commit Changes* directly to the `seed-vulnerable` branch (commit message e.g. "fix: remove vulnerable log4j-core dependency").
+
+// media-pass: screenshot m08-trusted-supply-chain-02-gitea-pom-edit.png — the Gitea pom.xml editor on
+// the seed-vulnerable branch with the log4j-core <dependency> block selected for deletion. See media-manifest.md.
 
 [NOTE]
 .Why remove it, rather than upgrade it
@@ -475,9 +493,17 @@ EOF
 tkn pipelinerun logs --last -f -n $NS
 ----
 
+[TIP]
+.Another full build — use the wait
+====
+This second run is a complete build again (roughly 6–12 minutes).
+While it runs, read ahead to *exercise 4* (signing), which inspects the very image this run produces — then come back to watch the `acs-scan` step turn green.
+====
+
 Watch the `acs-scan` step this time.
 It passes:
 
+.The scan step's output (abridged)
 [source,texinfo]
 ----
 [image-check] ▶ RHACS build-time image check: .../parasol-claims:latest (categories: Supply Chain Security)
@@ -571,6 +597,9 @@ They travel with the image: copy the image to another registry and the signature
 It is not installed in the attendee terminal, so the instructor runs it (see the instructor guide for the one-line verification pod).
 Against the in-namespace public key (`chains-cosign-pub`, copied in by the entry state), verification *passes*:
 
+.cosign verify + verify-attestation output
+[%collapsible]
+=====
 [source,texinfo]
 ----
 $ cosign verify --key cosign.pub <image>@sha256:<digest>
@@ -585,6 +614,7 @@ $ cosign verify-attestation --key cosign.pub --type slsaprovenance <image>@sha25
   buildType:     tekton.dev/v1/TaskRun
   builder.id:    https://tekton.dev/chains/v2
 ----
+=====
 
 The attestation is real *SLSA provenance*: it names the builder (`tekton.dev/chains/v2`), the build type (a Tekton TaskRun), the source, and the start/finish timestamps — a machine-checkable answer to "prove this image came from your pipeline."
 An unsigned image, or one signed with a different key, fails this check with a non-zero exit code — which is exactly what the admission control in exercise 5 relies on.
