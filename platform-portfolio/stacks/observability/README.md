@@ -76,8 +76,9 @@ oc get opentelemetrycollector -n observability-workshop                     # ot
 oc get uiplugin                                                             # dashboards, distributed-tracing
 ```
 
-> Authoring caveat: the four operators were not installed when this stack was written (a QA smoke test held
-> the shared cluster). Operator packages/channels/install-modes are verified against the **live catalog**;
-> config-CR field shapes come from catalog alm-examples + docs, with `TODO(verify-on-install)` markers on the
-> exact fields that need an `oc explain` once the operators are live (UIPlugin `spec.type`, Tempo
-> `spec.ingestion.otlp`, LokiStack enums). Verify on first install.
+> Verified on install 2026-07-11: the full stack was stood up live on OCP 4.21 (COO 1.5.1, Tempo 0.21.0-2,
+> OTel 0.152.0-1, and the optional Loki 6.5.1 / Logging 6.5.1 tier). Every config-CR field that was authored
+> from alm-examples/docs is now confirmed against the live CRDs (UIPlugin `spec.type` enum, Tempo
+> `spec.ingestion.otlp`, LokiStack size/schema/tenants enums, the Logging UIPlugin `lokiStack` ref) and an
+> end-to-end signal was demonstrated: a parasol-claims trace reached Tempo and its custom metric was scraped
+> by UWM. Every install-time verification marker is now resolved in-manifest.

@@ -11,9 +11,12 @@ stack by default** (commented out in `stacks/observability/kustomization.yaml`).
 with spare capacity and ODF/NooBaa object storage. The always-true log baseline without it is `oc logs` /
 the console **Pod -> Logs** tab, so cutting this tier costs the workshop nothing structural.
 
-> Authoring note: none of these operators were installed when this component was written (a QA smoke test
-> held the cluster), so CR shapes come from the live catalog alm-examples + docs. Every field that could not
-> be `oc explain`-verified carries a `TODO(verify-on-install)` in its manifest. Verify on first install.
+> Verified on install 2026-07-11 (loki-operator 6.5.1, cluster-logging 6.5.1): the whole tier was stood up
+> live — LokiStack reconciled Ready against NooBaa S3, and the Vector ClusterLogForwarder shipped
+> application logs into Loki. Two field-level fixes came out of that run: the `ClusterLogForwarder`
+> `lokiStack.target` needs BOTH `name` and `namespace`, and the collector SA needs the
+> `logging-collector-logs-writer` ClusterRole (write to LokiStack) on top of the read roles — without it
+> every push is a silent HTTP 403. Every install-time verification marker is now resolved in-manifest.
 
 ## What's in here
 
@@ -44,7 +47,9 @@ creates it **before** the LokiStack reconciles (mirrors the Lightspeed `credenti
 | Keys | `access_key_id`, `access_key_secret`, `bucketnames`, `endpoint` (NooBaa S3, e.g. `https://s3.openshift-storage.svc:443`) |
 
 ```bash
-# TODO(verify-on-install): confirm the NooBaa OBC output key names + endpoint form against the LokiStack S3 driver.
+# Verified on install 2026-07-11: the NooBaa OBC emits ConfigMap keys BUCKET_NAME / BUCKET_HOST
+# (s3.openshift-storage.svc) / BUCKET_PORT (443) and Secret keys AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY;
+# the four assembled logging-loki-s3 keys below reconcile the LokiStack to Ready against NooBaa S3.
 OBC_CM=logging-loki-bucket; OBC_SECRET=logging-loki-bucket; NS=openshift-logging
 BUCKET=$(oc get cm  "$OBC_CM"     -n "$NS" -o jsonpath='{.data.BUCKET_NAME}')
 AKID=$(  oc get secret "$OBC_SECRET" -n "$NS" -o jsonpath='{.data.AWS_ACCESS_KEY_ID}'     | base64 -d)

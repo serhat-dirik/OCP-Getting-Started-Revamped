@@ -1,6 +1,13 @@
-# Grant the collector SA permission to read application + infrastructure logs. The referenced ClusterRoles are
-# created by the cluster-logging operator (forward reference is valid — the bindings activate once the roles exist).
-# TODO(verify-on-install): confirm ClusterRole names collect-application-logs / collect-infrastructure-logs in Logging 6.5.
+# RBAC for the Vector collector SA (log-collector). TWO grants are needed and both are verified on
+# install 2026-07-11 (Logging 6.5.1 + Loki 6.5.1) — the collector must both READ the log sources and
+# WRITE to the LokiStack gateway, and the write grant is easy to miss (its absence surfaces only as a
+# runtime 403 in the Vector sink, not a CR error — earned live here: logs were silently dropped).
+#
+# 1. READ the log sources — ClusterRoles collect-application-logs / collect-infrastructure-logs
+#    (created by the cluster-logging operator; confirmed live via `oc get clusterroles`).
+# 2. WRITE to the LokiStack tenants — ClusterRole logging-collector-logs-writer grants create on
+#    loki.grafana.com {application,audit,infrastructure} (created by the loki operator; without it the
+#    openshift-logging tenant gateway rejects every push with HTTP 403 Forbidden).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -22,6 +29,21 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: collect-infrastructure-logs
+subjects:
+  - kind: ServiceAccount
+    name: log-collector
+    namespace: openshift-logging
+---
+# The write path to LokiStack (openshift-logging tenant mode) — without this the collector authenticates
+# with its SA token but is authorized for nothing, and every push is dropped with 403 Forbidden.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: log-collector-logs-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logging-collector-logs-writer
 subjects:
   - kind: ServiceAccount
     name: log-collector
