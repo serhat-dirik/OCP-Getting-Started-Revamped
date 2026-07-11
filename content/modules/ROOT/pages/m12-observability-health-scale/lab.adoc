@@ -53,16 +53,16 @@ The raw endpoint is the ground truth every other view is built from.
 curl -s "$CLAIMS/q/metrics" | grep -E '^claims_created_total|http_server_requests_seconds_count' | head
 ----
 
-.Expected output (values will differ — the counters climb with traffic)
+.Expected output (values differ; each line ends with a trace exemplar — that is Ex4's hook)
 [%collapsible]
 ====
 [source,texinfo]
 ----
-claims_created_total 102.0
-http_server_requests_seconds_count{method="POST",outcome="SUCCESS",status="201",uri="/api/claims"} 102.0
-http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims"} 104.0
-http_server_requests_seconds_count{method="GET",outcome="CLIENT_ERROR",status="404",uri="/api/claims/{claimNumber}"} 102.0
-http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims/{claimNumber}/history"} 103.0
+claims_created_total 85.0 # {span_id="2a0044e65e926836",trace_id="9e981f3ddb8c817b4d1ccf2cf5a3afbc"} 1.0 1783788312.313
+http_server_requests_seconds_count{method="POST",outcome="SUCCESS",status="201",uri="/api/claims"} 85.0 # {span_id="2a0044e65e926836",trace_id="9e981f3ddb8c817b4d1ccf2cf5a3afbc"} 1.0 1783788312.319
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims"} 88.0 # {span_id="f9c68f390d890ac5",trace_id="af9f4a294e7f05a20b2e9d914232502f"} 1.0 1783788309.318
+http_server_requests_seconds_count{method="GET",outcome="CLIENT_ERROR",status="404",uri="/api/claims/{claimNumber}"} 84.0 # {span_id="51ab9295657cb7a5",trace_id="84bd2e54a0663cba9ca5b0a0f00133ed"} 1.0 1783788304.414
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims/{claimNumber}/history"} 85.0 # {span_id="745b636b8180f180",trace_id="30b97cae551e620cf899010105281880"} 1.0 1783788312.120
 ----
 ====
 
@@ -112,16 +112,16 @@ echo '--- claims filed (custom business counter) ---'
 curl -s "$CLAIMS/q/metrics" | grep '^claims_created_total'
 ----
 
-.Expected output
+.Expected output (each line carries a trace exemplar suffix — Ex4's hook)
 [%collapsible]
 =====
 [source,texinfo]
 ----
-http_server_requests_seconds_count{method="GET",outcome="CLIENT_ERROR",status="404",uri="/api/claims/{claimNumber}"} 102.0
-http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims"} 104.0
-http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims/{claimNumber}/history"} 103.0
-http_server_requests_seconds_count{method="POST",outcome="SUCCESS",status="201",uri="/api/claims"} 102.0
-claims_created_total 102.0
+http_server_requests_seconds_count{method="GET",outcome="CLIENT_ERROR",status="404",uri="/api/claims/{claimNumber}"} 85.0 # {span_id="928f737e3104281d",trace_id="cb98b918b7fd1605a753cdd3d95df0ff"} 1.0 1783788312.509
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims"} 88.0 # {span_id="f9c68f390d890ac5",trace_id="af9f4a294e7f05a20b2e9d914232502f"} 1.0 1783788309.318
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/claims/{claimNumber}/history"} 85.0 # {span_id="745b636b8180f180",trace_id="30b97cae551e620cf899010105281880"} 1.0 1783788312.120
+http_server_requests_seconds_count{method="POST",outcome="SUCCESS",status="201",uri="/api/claims"} 85.0 # {span_id="2a0044e65e926836",trace_id="9e981f3ddb8c817b4d1ccf2cf5a3afbc"} 1.0 1783788312.319
+claims_created_total 85.0 # {span_id="2a0044e65e926836",trace_id="9e981f3ddb8c817b4d1ccf2cf5a3afbc"} 1.0 1783788312.313
 ----
 =====
 
@@ -204,6 +204,7 @@ spec:
 . Open *Observe* → *Alerting* → *Alerting rules* and filter for `ParasolClaimsErrorRateHigh`.
 Its state is *Inactive* (there are no 5xx yet).
 // [CAPTURE-VERIFY] Observe -> Alerting -> Alerting rules lists the user-defined rule as Inactive
+// media-pass: screenshot m12-observability-health-scale-05-observe-alerting-inactive.png — Observe -> Alerting -> Alerting rules, ParasolClaimsErrorRateHigh Inactive (the "before" to the 04-alert-firing shot). Alt: "Observe Alerting rules list showing the just-created ParasolClaimsErrorRateHigh rule Inactive at the healthy baseline."
 --
 CLI::
 +
@@ -276,9 +277,8 @@ Break it — scale the database to zero:
 Console::
 +
 --
-. Open *Workloads* → *Deployments* → `claims-db`, and use *Actions* → *Edit Pod count* (or the down-arrow on the pod ring) to set it to *0*.
+Open *Workloads* → *Deployments* → `claims-db`, and use *Actions* → *Edit Pod count* (or the down-arrow on the pod ring) to set it to *0*.
 // [CAPTURE-VERIFY] Deployments -> claims-db -> pod count control sets replicas to 0
-. Watch *Observe* → *Alerting*: within about a minute `ParasolClaimsErrorRateHigh` moves to *Pending*, and after its 2-minute `for:` window, to *Firing*.
 --
 CLI::
 +
@@ -287,18 +287,28 @@ CLI::
 ----
 oc scale deploy/claims-db -n $NS --replicas=0
 ----
+--
+====
 
-Watch the app start failing and the alert climb (Ctrl-C when you have seen it fire):
+The database is gone — but the load generator's *steady trickle* barely moves the 5xx rate, and within a minute the failing app trips its own readiness probe, so the platform pulls the pod out of rotation and later requests never reach it to be counted.
+Give the API a *firm push* while it is still failing, so the 5xx rate clearly crosses your alert's `0.1/s` line.
+Run this from the terminal — it works whichever lane you picked — and watch every request fail: *200* while the old connection pool still works, *500* once it breaks, then *503* once the pod is marked NotReady:
 
 [source,sh,role=execute]
 ----
-# each request now 500s once the connection pool breaks:
-curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
-# follow the rule's state (Inactive -> Pending -> Firing):
-watch -n 15 "oc get prometheusrule parasol-claims-alerts -n $NS -o jsonpath='state polls below'; echo"
+# ~90s of load against the failing API — Ctrl-C early once you have seen it failing:
+end=$(( $(date +%s) + 90 )); while [ "$(date +%s)" -lt "$end" ]; do
+  curl -s -o /dev/null -w 'GET /api/claims -> HTTP %{http_code}\n' "$CLAIMS/api/claims"
+done
 ----
---
-====
+
+Now watch the alert catch it.
+The live *Inactive → Pending → Firing* progression lives in the platform's alerting engine, not on the `PrometheusRule` object — the CR carries only your rule's *spec*, and reading the ruler directly needs a cluster-monitoring role you do not have.
+So read the state where the platform exposes it to you — the console:
+
+. Open *Observe* → *Alerting* → *Alerting rules* and find `ParasolClaimsErrorRateHigh`.
+. Within about a minute it moves to *Pending*, and after its 2-minute `for:` window, to *Firing*.
+// [CAPTURE-VERIFY] Observe -> Alerting shows ParasolClaimsErrorRateHigh Pending -> Firing while claims-db is at 0
 
 While it climbs, read the *three signals* on the same fault — this is the whole module in ninety seconds:
 
@@ -312,14 +322,16 @@ A healthy claims request logs nothing, and even the failures are terse — which
 [NOTE]
 .Measured: how long until it fires
 ====
-On the build run the alert reached *Pending* about *77 seconds* after the database went down (the 5-minute rate had to build past 0.1/s), and *Firing* about *2 minutes* after that — roughly *3¼ minutes* end to end.
+With the push of failing load, the alert reached *Pending* about *79 seconds* after the database went down — the 5-minute 5xx rate had to build past `0.1/s` — and *Firing* about two minutes after that, roughly *3¼ minutes* end to end.
 The two-minute `for:` window is deliberate: it stops a brief blip from paging anyone.
+(The steady trickle on its own peaks at only ~0.08/s of 5xx, just under the line — which is why you gave it the push.)
 ====
 
 // media-pass: screenshot m12-observability-health-scale-04-alert-firing.png — Observe -> Alerting, ParasolClaimsErrorRateHigh Firing (HIGH; the signature visual). Alt: "Observe Alerting view showing the ParasolClaimsErrorRateHigh alert Firing with warning severity while claims-db is scaled to zero."
 
 Recover.
-Bringing the database back is necessary but *not sufficient* — the claims app is still holding dead connections in its pool, so it keeps erroring until you restart it:
+Your scale-down stands until you undo it — the entry environment does not auto-heal edits to its own workloads — so bring the database back yourself.
+That is necessary but *not sufficient*: the claims app is still holding dead connections in its pool, so it keeps erroring until you restart it too:
 
 [source,sh,role=execute]
 ----
@@ -329,7 +341,8 @@ oc rollout restart deploy/parasol-claims -n $NS
 oc rollout status deploy/parasol-claims -n $NS
 ----
 
-Give it a moment, then confirm the service is healthy and the alert stands down:
+Give it a moment, then confirm the service is healthy again — *HTTP 200*.
+The alert does not clear the instant you recover: the 5-minute rate has to decay back below the threshold, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for a few minutes after the fix before it returns to *Inactive*.
 
 [source,sh,role=execute]
 ----
@@ -367,7 +380,7 @@ Each trace is one request — its HTTP method, route (`/api/claims/\{claimNumber
 [NOTE]
 .The metric that points at its own trace
 ====
-Look again at `/q/metrics` from exercise 1: each counter line ends with an *exemplar* — `# {trace_id="…"}`.
+Look again at `/q/metrics` from exercise 1: each counter line ends with an *exemplar* — `# {span_id="…",trace_id="…"}`.
 That is a direct link from an aggregate metric to *one exact trace* that contributed to it.
 It is how you get from "the latency graph has a spike" to "*this* request is why" in one click, and it is the modern glue between the metrics and traces signals.
 
@@ -431,7 +444,7 @@ oc get hpa parasol-claims -n $NS
 ----
 horizontalpodautoscaler.autoscaling/parasol-claims autoscaled
 NAME             REFERENCE                   TARGETS        MINPODS   MAXPODS   REPLICAS
-parasol-claims   Deployment/parasol-claims   cpu: 18%/60%   2         4         2
+parasol-claims   Deployment/parasol-claims   cpu: 15%/60%   2         4         2
 ----
 =====
 --
@@ -475,16 +488,17 @@ oc get hpa parasol-claims -n $NS -w
 [source,texinfo]
 ----
 NAME             REFERENCE                   TARGETS         MINPODS   MAXPODS   REPLICAS
-parasol-claims   Deployment/parasol-claims   cpu: 18%/60%    2         4         2
-parasol-claims   Deployment/parasol-claims   cpu: 221%/60%   2         4         4
-parasol-claims   Deployment/parasol-claims   cpu: 76%/60%    2         4         4
-parasol-claims   Deployment/parasol-claims   cpu: 56%/60%    2         4         4
+parasol-claims   Deployment/parasol-claims   cpu: 15%/60%    2         4         2
+parasol-claims   Deployment/parasol-claims   cpu: 118%/60%   2         4         2
+parasol-claims   Deployment/parasol-claims   cpu: 108%/60%   2         4         4
+parasol-claims   Deployment/parasol-claims   cpu: 65%/60%    2         4         4
 ----
 =====
 --
 ====
 
-On the build run CPU hit *221%* and the HPA scaled to the *ceiling of 4 within about 24 seconds*, then settled around the 60% target spread across four pods.
+On this run the burst drove CPU well past the 60% target — peaking around *118%* — and once the load actually landed the HPA scaled to the *ceiling of 4* within about *10 seconds*, then settled toward the 60% target spread across four pods.
+Expect the burst to take up to a minute to bite: its container image must pull and start before it can generate any load, so `REPLICAS` sits at 2 (and `TARGETS` may even dip) for a short while first — the scale-out is fast, the *warm-up* is what you wait on.
 Stop the load and clean up the burst pod:
 
 [source,sh,role=execute]
@@ -544,20 +558,22 @@ oc create pdb parasol-claims --selector=app=parasol-claims --min-available=1 -n 
 oc get pdb parasol-claims -n $NS
 ----
 
-.Expected output (ALLOWED DISRUPTIONS = current healthy − minAvailable)
+.Expected output (ALLOWED DISRUPTIONS = current healthy − minAvailable, so it tracks the live replica count)
 [%collapsible]
 =====
 [source,texinfo]
 ----
 poddisruptionbudget.policy/parasol-claims created
 NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
-parasol-claims   1               N/A               1                     3s
+parasol-claims   1               N/A               3                     1s
 ----
 =====
 --
 ====
 
-`ALLOWED DISRUPTIONS` is the whole story: with two healthy pods and `minAvailable: 1`, the platform will let *one* pod be evicted at a time — never the last one.
+`ALLOWED DISRUPTIONS` is the whole story, and it tracks your *current* healthy pod count.
+The HorizontalPodAutoscaler from the previous exercise is likely still holding *four* replicas (the 5-minute scale-down window), so with `minAvailable: 1` the platform will let *three* be evicted at a time — never the last one.
+As the HPA settles back to the floor of *two*, that number falls to *one*: the budget is a live promise, not a fixed count.
 
 [IMPORTANT]
 .The node drain is an instructor-run demonstration
@@ -596,9 +612,9 @@ ifdef::demo[]
 [NOTE]
 .Before you present
 ====
-Run `ws solve m12 --user {user}` first: it materializes the *end state* — the claims app at 2 replicas with the CPU HPA, the `parasol-claims-alerts` rule, and the PDB already in place — so every signal is live and you only have to *drive* it.
+Run `ws solve m12 --user {user}` first: it materializes the *end state* — the claims app at 2 replicas with the CPU HorizontalPodAutoscaler (HPA), the `parasol-claims-alerts` rule, and the PodDisruptionBudget (PDB) already in place — so every signal is live and you only have to *drive* it.
 Have the console open on *Observe → Metrics* with the 5xx-rate query ready, a second tab on *Observe → Alerting*, and a terminal logged in as `{user}`.
-The database break fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
+The database break plus a short push of failing load fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
 ====
 
 [demo-block]
@@ -619,11 +635,14 @@ curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics \
 [TIME 1m]
 Say:: "I'm going to take the database away. Watch the alert — it's armed and inactive right now."
 Show:: *Observe → Alerting*, `ParasolClaimsErrorRateHigh` in *Inactive*.
-Do:: Break it — and note the time; it fires in about three minutes:
+Do:: Break it, then push a short burst of failing load so the 5xx rate clears the alert's threshold (the steady trickle alone sits just under it) — note the time; it fires in about three minutes:
 +
 [source,sh,role=execute,subs="attributes"]
 ----
 oc scale deploy/claims-db -n {user}-dev --replicas=0
+# ~90s of load against the now-failing API, backgrounded so you can keep narrating:
+END=$((SECONDS+90)); while [ $SECONDS -lt $END ]; do \
+  curl -s -o /dev/null http://parasol-claims-{user}-dev.{cluster_domain}/api/claims; done &
 ----
 +
 "Three minutes to fire. While it cooks, let's see what the signals say — and why logs won't save us here."
@@ -653,12 +672,12 @@ oc scale deploy/claims-db -n {user}-dev --replicas=1
 oc rollout restart deploy/parasol-claims -n {user}-dev
 ----
 +
-"Database back, app restarted to drop the poisoned pool — and the alert stands down. Now the happy problem: too much traffic."
+"Database back, app restarted to drop the poisoned pool — and the alert stands down once the 5-minute rate decays. Now the happy problem: too much traffic."
 
 [demo-block]
 [TIME 4m]
-Say:: "The service is at two replicas. I'll hammer it, and the HorizontalPodAutoscaler will add pods on its own — no human, no ticket."
-Show:: *Topology* on `parasol-claims`, the pod ring at 2. Start the burst; within ~25 seconds the ring grows to 4. Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
+Say:: "The service is at two replicas. I'll hammer it, and the HPA will add pods on its own — no human, no ticket."
+Show:: *Topology* on `parasol-claims`, the pod ring at 2. Start the burst; after its image pulls (~30–60s) the ring grows to 4. Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
 Do::
 +
 [source,sh,role=execute,subs="attributes"]
@@ -667,12 +686,12 @@ oc -n {user}-dev run claims-burst --image=registry.redhat.io/openshift4/ose-cli:
   /bin/bash -c 'for i in $(seq 1 20); do ( while true; do curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; done ) & done; wait'
 ----
 +
-"CPU 221%, scaled to four in under half a minute. When the load drops it holds for five minutes before shrinking — no flapping."
+"CPU past 100%, scaled to four once the load landed. When the load drops it holds for five minutes before shrinking — no flapping."
 
 [demo-block]
 [TIME 3m]
 Say:: "Last thing: the platform patches nodes every week. A PodDisruptionBudget means that maintenance never becomes an outage."
-Show:: `oc get pdb parasol-claims -n {user}-dev` — `ALLOWED DISRUPTIONS 1`. Explain: on a node drain, the platform evicts one claims pod, waits for its replacement to be healthy, then takes the next — never the last one. The eviction API literally refuses: `Cannot evict pod as it would violate the pod's disruption budget`.
+Show:: `oc get pdb parasol-claims -n {user}-dev` — `ALLOWED DISRUPTIONS 3` (the HPA is still holding four replicas from the last beat, so with `minAvailable: 1` three may go at once; it falls to one as the service settles back to two). Explain: on a node drain the platform evicts pods but never the last healthy one — the eviction API literally refuses once the budget is reached: `Cannot evict pod as it would violate the pod's disruption budget`.
 Do::
 +
 [source,sh,role=execute,subs="attributes"]

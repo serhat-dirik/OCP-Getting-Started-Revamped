@@ -39,12 +39,19 @@ The same grant is what lets `ws verify m12` read your ServiceMonitor and rule.
 
 == My alert never fires even though the app is clearly failing
 
-Symptom:: You scaled the database to zero, the claims API is returning 500s, but `ParasolClaimsErrorRateHigh` sits in *Inactive* or *Pending* far longer than you expected.
-Cause:: The rule is `for: 2m` over a `rate(...[5m])`.
-The 5-minute rate must first climb past the `0.1/s` threshold — roughly a minute of sustained 5xx — and *then* hold above it for the 2-minute `for:` window before the state becomes *Firing*.
-It is designed to be slow so a brief blip does not page anyone.
-Fix:: Wait it out — on the build run it reached *Pending* at ~77s and *Firing* at ~195s (about 3¼ minutes total).
-Two things can stall it: if the database comes back (GitOps reconciles it) the 5xx stop and the rate decays, so keep it down for the full window; and confirm the rule actually loaded with `oc get prometheusrule parasol-claims-alerts -n <user>-dev` before assuming it is broken.
+Symptom:: You scaled the database to zero, the claims API is failing, but `ParasolClaimsErrorRateHigh` sits in *Inactive* far longer than you expected — or never leaves it.
+Cause:: Two effects starve the rule of data.
+The load generator's steady trickle produces only ~0.08/s of 5xx while the database is down — just *under* the rule's `0.1/s` threshold — and within ~40–60s the failing app trips its own `/q/health/ready` probe, so the platform pulls the pod out of rotation and the router answers with 503s that never reach the app to be counted.
+With too few recorded 5xx, `rate(...[5m])` never climbs past the line, so the `for: 2m` timer never starts.
+Fix:: Drive a firm push of failing requests during the break — the same thing the lab's failing-load step does — so the 5xx rate clearly clears `0.1/s`:
++
+[source,sh,role=execute]
+----
+END=$((SECONDS+90)); while [ $SECONDS -lt $END ]; do curl -s -o /dev/null -w 'HTTP %{http_code}\n' "$CLAIMS/api/claims"; done
+----
++
+With that load the rule reaches *Pending* at ~79s and *Firing* at ~192s (about 3¼ minutes).
+The `for: 2m` window over a `rate(...[5m])` is deliberately slow so a brief blip does not page anyone — confirm the rule loaded (`oc get prometheusrule parasol-claims-alerts -n <user>-dev`) and give it the full window.
 
 == I brought the database back, but the claims API still returns 500
 
@@ -97,7 +104,7 @@ The database-span "staircase" appears once the image ships that flag.
 == My HPA shows `<unknown>/60%` and is not scaling
 
 Symptom:: Just after `oc autoscale`, `oc get hpa` shows `TARGETS` as `<unknown>/60%` and the app is not scaling.
-Cause:: Two possibilities: the metrics pipeline has not reported CPU for the new HPA yet (it takes a short interval after creation), or the target container has no CPU *request*, so utilization cannot be computed.
+Cause:: Two possibilities: the metrics pipeline has not reported CPU for the new HorizontalPodAutoscaler (HPA) yet (it takes a short interval after creation), or the target container has no CPU *request*, so utilization cannot be computed.
 The entry-state app *does* set a 200m CPU request, so on this lab it is almost always the former.
 Fix:: Wait ~30 seconds and re-check — `TARGETS` resolves to a real percentage (e.g. `18%/60%`) once the first CPU sample lands.
 If it stays `<unknown>`, confirm the request is present: `oc get deploy parasol-claims -n <user>-dev -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}{"\n"}'` should print `200m`.
@@ -110,18 +117,6 @@ The HPA holds the higher count so a brief lull does not cause a shrink-then-grow
 Fix:: Nothing — this is correct.
 Wait ~5 minutes and it steps back toward the floor of 2.
 (Scale-*up* has no such delay, which is why the burst grew it in seconds.)
-
-== `ws verify` reports a leftover PodDisruptionBudget after a reset
-
-Symptom:: After `ws prep m12 --yes`, entry verify fails on `no PodDisruptionBudget yet` because a `parasol-claims` PDB is still present.
-Cause:: A known reset-purge gap — the reset does not always remove a lab-created PDB.
-Fix:: Remove it and re-verify:
-+
-[source,sh,role=execute]
-----
-oc delete pdb parasol-claims -n <user>-dev
-ws verify m12 --entry-only
-----
 
 '''
 
