@@ -1,0 +1,169 @@
+{{- /*
+  Per-user LOCAL Argo CD account passwords for the student-gitops instance — the terminal login path
+  for M10 beat 1 (Argo CD 3.4 has no ApplicationSet UI; Dex SSO login needs a browser). The account
+  CAPABILITY (accounts.{user}: login) is added to argocd-cm by student-argocd.yaml's spec.extraConfig;
+  this Job writes the PASSWORD (bcrypt of the shared workshop password) into argocd-secret so
+  `argocd login --username {user} --password <shared>` works in the Showroom terminal. The account name
+  == the SSO username, so the RBAC policy (g, {user}, role:{user}) authorizes BOTH identities.
+
+  Verified live 2026-07-11: the operator's reconcileExistingArgoSecret only mutates its own keys and
+  never replaces .Data, so custom accounts.{user}.password keys PERSIST. The server serves the CLI at
+  /download/argocd-linux-amd64 (needs glibc >= 2.34 — the Showroom terminal is RHEL10/glibc2.39, and
+  this Job uses that same image so it can both run oc AND run argocd bcrypt; ose-cli is RHEL8 and
+  CANNOT run the binary).
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: student-argo-accounts
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+---
+# why: patch the account-password keys into argocd-secret + read the server route to fetch the CLI.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: student-argo-accounts
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+    resourceNames: ["argocd-secret"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get"]
+    resourceNames: ["student-gitops-server"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: student-argo-accounts
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: student-argo-accounts
+subjects:
+  - kind: ServiceAccount
+    name: student-argo-accounts
+    namespace: student-gitops
+---
+# why (cross-namespace read): the shared workshop password lives in secret workshop-user-creds in the
+# gitea namespace (bootstrap creates it) — same discovery idiom as the showroom terminal-prep Job.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: student-argo-accounts-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["workshop-user-creds"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: student-argo-accounts-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: student-argo-accounts-creds
+subjects:
+  - kind: ServiceAccount
+    name: student-argo-accounts
+    namespace: student-gitops
+---
+# Sync hook: re-runs on every workshop-config sync (BeforeHookCreation clears the prior Job). Set-once
+# + no-op fast path: it skips any account that already has a password (so re-syncs neither churn
+# argocd-secret — which would drop live sessions — nor re-download the ~300MB CLI). Wave 2: after the
+# student ArgoCD CR (and its extraConfig accounts) has been applied.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: student-argo-accounts
+  namespace: student-gitops
+  labels:
+    workshop.redhat.com/layer: workshop-config
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: student-argo-accounts
+    spec:
+      serviceAccountName: student-argo-accounts
+      restartPolicy: Never
+      containers:
+        - name: accounts
+          # Showroom terminal image = RHEL10/glibc2.39 (runs the argocd CLI) + ships oc. ose-cli (RHEL8)
+          # cannot run the downloaded argocd binary (GLIBC_2.34 not found) — verified live.
+          image: quay.io/rhpds/openshift-showroom-terminal-ocp:2026-04-07
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          env:
+            - name: STUDENT_NS
+              value: student-gitops
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: USERS
+              value: "{{- range $i := until (int .Values.userCount) }}{{ $.Values.userPrefix }}{{ add1 $i }} {{ end }}"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # 1. Which accounts still lack a password? (set-once — never re-patch a live one.)
+              DATA="$(oc get secret argocd-secret -n "$STUDENT_NS" -o jsonpath='{.data}' 2>/dev/null || echo '')"
+              todo=""
+              for u in $USERS; do
+                echo "$DATA" | grep -q "accounts.${u}.password:" || todo="${todo} ${u}"
+              done
+              if [[ -z "${todo// }" ]]; then
+                echo "✅ all local Argo accounts already have passwords — nothing to do"
+                exit 0
+              fi
+              echo "▶ accounts to provision:${todo}"
+
+              # 2. Shared workshop password (never echoed).
+              PW="$(oc get secret workshop-user-creds -n "$GITEA_NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+              [[ -n "$PW" ]] || { echo "❌ workshop-user-creds/password missing in ${GITEA_NS} — bootstrap creates it"; exit 1; }
+
+              # 3. Fetch the argocd CLI the server serves (~300MB; only when there is work to do).
+              ROUTE="$(oc get route student-gitops-server -n "$STUDENT_NS" -o jsonpath='{.spec.host}')"
+              [[ -n "$ROUTE" ]] || { echo "❌ student-gitops-server route not found"; exit 1; }
+              echo "▶ downloading argocd CLI from https://${ROUTE}/download/argocd-linux-amd64 …"
+              curl -ksSL --max-time 240 "https://${ROUTE}/download/argocd-linux-amd64" -o /tmp/argocd
+              chmod +x /tmp/argocd
+
+              # 4. bcrypt the shared password per account (argocd's own bcrypt = Argo-compatible $2a$)
+              #    and patch argocd-secret. Hash/password never printed.
+              MTIME="$(date -u +%FT%TZ)"
+              MB="$(printf '%s' "$MTIME" | base64 | tr -d '\n')"
+              for u in $todo; do
+                HB="$(/tmp/argocd account bcrypt --password "$PW" | base64 | tr -d '\n')"
+                oc patch secret argocd-secret -n "$STUDENT_NS" --type merge \
+                  -p "{\"data\":{\"accounts.${u}.password\":\"${HB}\",\"accounts.${u}.passwordMtime\":\"${MB}\"}}" >/dev/null
+                echo "  ✓ set local Argo password for account ${u}"
+              done
+              echo "✅ local Argo accounts ready — attendees can 'argocd login --username <user> --password <shared>'"

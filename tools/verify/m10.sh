@@ -66,6 +66,17 @@ student_argo_up() {
   [[ "$code" == "200" ]]
 }
 
+# The student server serves its own argocd CLI (M10 beat 1 downloads it — Argo 3.4 has no appset UI,
+# so the attendee creates the ApplicationSet via the CLI). A byte-range probe, not a ~300MB pull.
+cli_download_ready() {
+  local domain code
+  domain="$(ingress_domain)"
+  [[ -n "$domain" ]] || return 1
+  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 -r 0-1 \
+    "https://student-gitops-server-student-gitops.${domain}/download/argocd-linux-amd64" || true)"
+  [[ "$code" == "200" || "$code" == "206" ]]
+}
+
 # Deployment has at least one ready replica.
 deploy_ready() {
   local name="$1" ns="$2" ready
@@ -110,6 +121,7 @@ route_ready_200() {
 check "namespace ${GITOPS} exists"                       oc get ns "$GITOPS"                                 || hint "workshop layer not applied — run bootstrap/install.sh"
 check "entry marker ws-entry-m10 in ${GITOPS}"           oc get cm ws-entry-m10 -n "$GITOPS"                 || hint "entry app not synced — ws start m10 --user ${USER_NAME}"
 check "student-gitops Argo CD instance reachable"        student_argo_up                                     || hint "student instance missing — sync workshop-config (student-argocd.yaml)"
+check "argocd CLI served for the appset-create beat"     cli_download_ready                                   || hint "server not serving /download/argocd-linux-amd64 — check the student-gitops server route"
 check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
 check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset m10 --user ${USER_NAME} (or check gitea-fork-m10-${USER_NAME} Job in ns gitea)"
 check "fork carries rollouts/ overlay (prod-personalized)" fork_file_matches "rollouts/kustomization.yaml" "namespace: ${PROD}" || hint "fork missing M10 source — ws reset m10 --user ${USER_NAME}"
