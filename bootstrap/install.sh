@@ -40,6 +40,7 @@ v() { yq "$1" "$VARS" 2>/dev/null || true; }
 # ── read inputs (with safe defaults) ──────────────────────────────────────────
 USERS="$(v '.users')";           [[ "$USERS" =~ ^[0-9]+$ ]] || USERS=5
 LIGHTSPEED="$(v '.lightspeed')"; [[ "$LIGHTSPEED" == "false" ]] || LIGHTSPEED="true"
+AUTH="$(v '.auth')";             [[ "$AUTH" == "true" ]] || AUTH="false"
 REPO_URL="$(v '.repo_url')";     [[ -n "$REPO_URL" && "$REPO_URL" != "null" ]] || REPO_URL="https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
 REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
 DOMAIN="$(v '.cluster_domain')"
@@ -81,7 +82,10 @@ if oc get olsconfig cluster >/dev/null 2>&1; then
   ok "OpenShift Lightspeed pre-installed (provider: ${PROVIDER}) — reusing it; ai-assist stack skipped"
 fi
 STACKS="core-devtools"
-[[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]] && STACKS="core-devtools,ai-assist"
+[[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]] && STACKS="${STACKS},ai-assist"
+# auth stack (Red Hat build of Keycloak) for M13. Workshop-agnostic; per-user realms are seeded by the
+# workshop layer below (sso.enabled). Its own OwnNamespace operator never touches a cluster login IdP.
+[[ "$AUTH" == "true" ]] && STACKS="${STACKS},auth"
 info "[1/6] installing portfolio stacks: ${STACKS}"
 "$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$REPO_URL" --revision "$REVISION"
 
@@ -194,6 +198,9 @@ spec:
           value: "${USERS}"
         - name: clusterDomain
           value: "${DOMAIN}"
+        # Seed per-user realm-{user} imports only when the auth stack is installed (M13).
+        - name: sso.enabled
+          value: "${AUTH}"
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops

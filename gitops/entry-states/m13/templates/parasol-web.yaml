@@ -1,0 +1,113 @@
+# The Parasol web frontend. Shared prebuilt image (tag 1.1 — carries quarkus-oidc, tenant DISABLED).
+# ENTRY: unprotected — the pre-lab world. SOLVE: OIDC web-app protection (auth-code + PKCE against a
+# PUBLIC client, so no client secret is plumbed into the app) — the exact config proved live (an
+# unauthenticated request 302-redirects to Keycloak with response_type=code + PKCE S256, https redirect_uri).
+---
+# why: the running frontend the attendee logs into.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-web
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-web
+    workshop.redhat.com/module: m13
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-web
+  template:
+    metadata:
+      labels:
+        app: parasol-web
+        workshop.redhat.com/module: m13
+    spec:
+      containers:
+        - name: parasol-web
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.1
+          ports:
+            - name: http
+              containerPort: 8080
+          {{- if .Values.solve }}
+          env:
+            # Turn the OIDC tenant ON and point it at this user's realm.
+            - name: QUARKUS_OIDC_TENANT_ENABLED
+              value: "true"
+            - name: QUARKUS_OIDC_AUTH_SERVER_URL
+              value: "https://{{ .Values.ssoRoutePrefix }}.{{ .Values.clusterDomain }}/realms/realm-{{ .Values.user }}"
+            - name: QUARKUS_OIDC_CLIENT_ID
+              value: "parasol-web"
+            # web-app = server-side auth-code flow; PKCE required because the client is public (no secret).
+            - name: QUARKUS_OIDC_APPLICATION_TYPE
+              value: "web-app"
+            - name: QUARKUS_OIDC_AUTHENTICATION_PKCE_REQUIRED
+              value: "true"
+            # Behind the edge Route, honour X-Forwarded-* so the login redirect_uri is built as https
+            # (must match the realm's registered https redirect URI, or Keycloak rejects it).
+            - name: QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING
+              value: "true"
+            # Single-replica workshop on the in-cluster network: skip session-cookie encryption so a pod
+            # restart doesn't force every logged-in attendee to re-authenticate (and silence the warn).
+            - name: QUARKUS_OIDC_TOKEN_STATE_MANAGER_ENCRYPTION_REQUIRED
+              value: "false"
+            # Protect the whole app, but keep /q/* (health probes, metrics) open — else readiness 302s.
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_PUBLIC_PATHS
+              value: "/q/*"
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_PUBLIC_POLICY
+              value: "permit"
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_WEB_PATHS
+              value: "/*"
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_WEB_POLICY
+              value: "authenticated"
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+# why: stable in-cluster address for the frontend.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-web
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-web
+    workshop.redhat.com/module: m13
+spec:
+  selector:
+    app: parasol-web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: publishes the frontend at parasol-web-{user}-dev.{clusterDomain}. EDGE TLS so the host matches the
+# realm's registered https redirect URI (https://parasol-web-{user}-dev.{clusterDomain}/*) and the browser
+# login round-trip works. Host is auto-assigned (no spec.host) — deterministic from route name+ns+domain.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-web
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-web
+    workshop.redhat.com/module: m13
+spec:
+  to:
+    kind: Service
+    name: parasol-web
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

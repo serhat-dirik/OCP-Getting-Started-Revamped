@@ -1,0 +1,117 @@
+# Per-user Keycloak realms (M13, Securing Apps with Keycloak) — one realm-{user} per attendee in the
+# workshop auth namespace, giving each attendee an isolated Parasol realm (own clients/roles/users).
+#
+# WHY the workshop layer (not the portfolio auth stack, not the entry chart):
+#   - Portfolio stays workshop-agnostic (hard rule 2): per-user realms depend on the attendee list, so
+#     they live here alongside per-user-namespaces / per-user-batch, seeded once at bootstrap.
+#   - KeycloakRealmImport is IMPORT-ONCE (verified live 2026-07-11): the operator runs the import Job
+#     once and SKIPS a realm that already exists — a changed CR does NOT re-import. So realms are seeded
+#     complete + stable here and survive `ws reset` (like every other per-user platform object). To
+#     genuinely change a seeded realm you must delete the realm (admin API) AND the import CR+Job; a
+#     `ws sso-reimport` helper is a tracked follow-up.
+#
+# Gated on .Values.sso.enabled (bootstrap sets it true only when the auth stack is installed) so a
+# workshop without Keycloak never renders realm imports into a missing namespace.
+{{- if .Values.sso.enabled }}
+{{- $ns := .Values.sso.namespace }}
+{{- $domain := .Values.clusterDomain }}
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+apiVersion: k8s.keycloak.org/v2beta1
+kind: KeycloakRealmImport
+metadata:
+  name: realm-{{ $user }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    workshop.redhat.com/module: m13
+spec:
+  keycloakCRName: sso-workshop
+  realm:
+    realm: realm-{{ $user }}
+    enabled: true
+    displayName: "Parasol Insurance — {{ $user }}"
+    sslRequired: external
+    # Generous lifetime keeps the clock-skew / expiry beats teachable without surprise expiries.
+    accessTokenLifespan: 1800
+    roles:
+      realm:
+        - name: claims-adjuster
+          description: "Permitted to use the Parasol claims API"
+    users:
+      # The privileged demo login: has claims-adjuster, so the API returns 200.
+      - username: adjuster
+        enabled: true
+        email: adjuster@parasol.example
+        firstName: Ada
+        lastName: Adjuster
+        emailVerified: true
+        credentials: [{type: password, value: parasol, temporary: false}]
+        realmRoles: [claims-adjuster]
+      # The deny case: authenticates but lacks the role, so the API returns 403.
+      - username: viewer
+        enabled: true
+        email: viewer@parasol.example
+        firstName: Val
+        lastName: Viewer
+        emailVerified: true
+        credentials: [{type: password, value: parasol, temporary: false}]
+    clients:
+      # Web frontend: PUBLIC client, auth-code + PKCE (no secret to plumb into the app). The audience
+      # mapper stamps parasol-claims into user tokens so the claims API can validate AND (RFC 8693)
+      # exchange them onward to fraud on the user's behalf.
+      - clientId: parasol-web
+        name: "Parasol Web frontend"
+        enabled: true
+        publicClient: true
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: true
+        redirectUris: ["https://parasol-web-{{ $user }}-dev.{{ $domain }}/*"]
+        webOrigins: ["+"]
+        attributes:
+          pkce.code.challenge.method: S256
+        protocolMappers:
+          - name: claims-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: parasol-claims
+              access.token.claim: "true"
+              id.token.claim: "false"
+      # Claims API: confidential client. Doubles as the RFC 8693 exchange client (calls fraud on the
+      # user's behalf) — hence standard.token.exchange.enabled + the parasol-fraud audience mapper.
+      - clientId: parasol-claims
+        name: "Parasol Claims API"
+        enabled: true
+        publicClient: false
+        secret: parasol-claims-secret
+        standardFlowEnabled: false
+        serviceAccountsEnabled: true
+        directAccessGrantsEnabled: true
+        attributes:
+          standard.token.exchange.enabled: "true"
+        protocolMappers:
+          - name: fraud-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: parasol-fraud
+              access.token.claim: "true"
+              id.token.claim: "false"
+      # Fraud scoring service: bearer-only resource server. The app enforces aud=parasol-fraud, so only
+      # exchanged (re-audienced) tokens are accepted — the "downscope, never escalate" lesson.
+      - clientId: parasol-fraud
+        name: "Parasol Fraud service"
+        enabled: true
+        bearerOnly: true
+      # Headless batch identity (the M06 nightly job gets a machine identity): client-credentials only.
+      - clientId: parasol-batch
+        name: "Parasol Batch (machine-to-machine)"
+        enabled: true
+        publicClient: false
+        secret: parasol-batch-secret
+        standardFlowEnabled: false
+        serviceAccountsEnabled: true
+{{- end }}
+{{- end }}
