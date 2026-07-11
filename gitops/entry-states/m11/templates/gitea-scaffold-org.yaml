@@ -1,0 +1,169 @@
+# Provisions the attendee's scaffold target and keeps it a clean slate. The golden-path scaffolder
+# (publish:gitea) publishes into a Gitea ORGANIZATION, not a personal namespace (verified live —
+# publish:gitea's checkGiteaOrg rejects a user namespace), so each attendee gets a dedicated org
+# {user}-{{ .Values.scaffoldOrgSuffix }} they own. This hook (a) creates that org (idempotent, Sudo
+# {user} so the attendee owns it) and (b) DELETES every repo in it, so re-running the "New Parasol
+# microservice" template never 409s (publish fails if the repo already exists). The org is isolated
+# from the attendee's personal Gitea namespace (seeded forks like {user}/claims-config live there and
+# are never touched). Gitea orgs/repos are not k8s objects, so ws reset's purge_ns can't reach them —
+# this hook is how the scaffold slate is reset. Runs on EVERY entry-state sync (ws start / reset /
+# prep): BeforeHookCreation clears the prior Job so a re-sync always re-fires; every step is
+# idempotent. Same admin-credential-discovery + Sudo idiom as the M04/M09/M10 fork jobs (compose,
+# don't chain). Wave 1 = before the solve hook (wave 2), so solve's demo repo survives the empty pass.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitea-scaffold-org-m11-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m11
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+---
+# why: read the Gitea CR status (admin password) + admin secret + route host to call the API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitea-scaffold-org-m11-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m11
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+rules:
+  - apiGroups: ["pfe.rhpds.com"]
+    # the rhpds CRD's plural is literally "gitea" (not "giteas") — verified live 2026-07-09
+    resources: ["gitea"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitea-scaffold-org-m11-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m11
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gitea-scaffold-org-m11-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: gitea-scaffold-org-m11-{{ .Values.user }}
+    namespace: {{ .Values.giteaNamespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gitea-scaffold-org-m11-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m11
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: gitea-scaffold-org-m11-{{ .Values.user }}
+    spec:
+      serviceAccountName: gitea-scaffold-org-m11-{{ .Values.user }}
+      restartPolicy: Never
+      containers:
+        - name: scaffold-org
+          # ose-cli ships oc + curl + python3 on every connected cluster; no custom image.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: FORK_USER
+              value: {{ .Values.user | quote }}
+            - name: SCAFFOLD_ORG
+              value: {{ printf "%s-%s" .Values.user .Values.scaffoldOrgSuffix | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 5
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 5m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials (CR status is authoritative; secret is a fallback)…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 5
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 5m"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ waiting for the Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 5
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering (or admin creds wrong)"; exit 1; }
+
+              echo "▶ ensuring org ${SCAFFOLD_ORG} (owned by ${FORK_USER}) + clean scaffold slate…"
+              GITEA_URL="$GITEA_URL" AUTH="$AUTH" FORK_USER="$FORK_USER" SCAFFOLD_ORG="$SCAFFOLD_ORG" python3 - <<'PY'
+              import base64, json, os, ssl, urllib.request, urllib.error
+              base = os.environ["GITEA_URL"].rstrip("/"); auth = os.environ["AUTH"]
+              user = os.environ["FORK_USER"]; org = os.environ["SCAFFOLD_ORG"]
+              ctx = ssl._create_unverified_context()
+              def api(method, path, body=None, sudo=False):
+                  h = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(),
+                       "Content-Type": "application/json"}
+                  if sudo: h["Sudo"] = user
+                  data = json.dumps(body).encode() if body is not None else None
+                  req = urllib.request.Request(base + path, data=data, headers=h, method=method)
+                  try:
+                      with urllib.request.urlopen(req, context=ctx) as r:
+                          return r.status, json.loads(r.read().decode() or "[]")
+                  except urllib.error.HTTPError as e:
+                      return e.code, None
+
+              # (a) create the org owned by the attendee (idempotent — 422 = already exists)
+              st, _ = api("GET", f"/api/v1/orgs/{org}")
+              if st == 200:
+                  print(f"  ✓ org {org} already exists")
+              else:
+                  cst, _ = api("POST", "/api/v1/orgs", {"username": org, "visibility": "public"}, sudo=True)
+                  print(f"  {'✓ created' if cst in (201,) else '! create returned HTTP '+str(cst)} org {org} (owner {user})")
+
+              # (b) empty it — delete every repo (dedicated scaffold org → a clean slate for the template)
+              deleted = 0; page = 1
+              while True:
+                  st, repos = api("GET", f"/api/v1/orgs/{org}/repos?limit=50&page={page}")
+                  if st != 200 or not repos:
+                      break
+                  for repo in repos:
+                      name = repo.get("name")
+                      dst, _ = api("DELETE", f"/api/v1/repos/{org}/{name}")
+                      if dst in (204, 200):
+                          deleted += 1; print(f"  ✓ deleted {org}/{name}")
+                  if len(repos) < 50:
+                      break
+              print(f"✅ {org} ready to scaffold into ({deleted} stale repo(s) cleared)")
+              PY
+              echo "✅ ${FORK_USER} can scaffold via the golden path into ${SCAFFOLD_ORG}"
