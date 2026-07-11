@@ -100,6 +100,8 @@ spec:
               value: {{ .Values.user | quote }}
             - name: FORK_REPO
               value: {{ .Values.forkRepo | quote }}
+            - name: STUDENT_WEBHOOK
+              value: "https://student-gitops-server-student-gitops.{{ .Values.clusterDomain }}/api/webhook"
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -229,4 +231,31 @@ spec:
                   print(f"  ✓ asserted canonical {p}")
               print(f"✅ fork factory-fresh ({asserted} file(s) re-asserted)")
               PY
+
+              # --- ensure a per-fork PUSH webhook → student Argo -------------------------------
+              # Kills the ~3-min fork-commit detection latency (verified: ~5s vs >3min). Per-repo hooks
+              # (unlike Gitea 1.26's admin/system hooks) list reliably, so this is idempotent. Argo
+              # parses Gitea via its Gogs parser (type "gogs") and validates the shared secret the
+              # workshop layer mirrored to gitea/argo-webhook-secret (never echoed). If the secret is
+              # not present yet (workshop Job hasn't run), skip rather than register an unsigned hook
+              # Argo would reject.
+              echo "▶ ensuring push webhook → student Argo…"
+              WSECRET="$(oc get secret argo-webhook-secret -n "$NS" -o jsonpath='{.data.secret}' 2>/dev/null | base64 -d || true)"
+              if [[ -z "$WSECRET" ]]; then
+                echo "  ! argo-webhook-secret not present in ${NS} yet — skipping webhook (will register on a later run)"
+              else
+                HAVE="$(curl -ks -u "$AUTH" "${GITEA_URL}/api/v1/repos/${FORK_USER}/${FORK_REPO}/hooks" \
+                  | STUDENT_WEBHOOK="$STUDENT_WEBHOOK" python3 -c 'import sys,json,os; print("yes" if any(h.get("config",{}).get("url")==os.environ["STUDENT_WEBHOOK"] for h in json.load(sys.stdin)) else "no")' 2>/dev/null || echo no)"
+                if [[ "$HAVE" == "yes" ]]; then
+                  echo "  ✓ push webhook already present"
+                else
+                  HC="$(curl -ks -o /dev/null -w '%{http_code}' -u "$AUTH" -X POST \
+                    "${GITEA_URL}/api/v1/repos/${FORK_USER}/${FORK_REPO}/hooks" -H 'Content-Type: application/json' \
+                    -d "{\"type\":\"gogs\",\"config\":{\"url\":\"${STUDENT_WEBHOOK}\",\"content_type\":\"json\",\"secret\":\"${WSECRET}\"},\"events\":[\"push\"],\"active\":true}")"
+                  case "$HC" in
+                    201) echo "  ✓ push webhook created → fork commits now sync in seconds";;
+                    *) echo "  ! push webhook create returned HTTP ${HC} (non-fatal)";;
+                  esac
+                fi
+              fi
               echo "✅ ${FORK_USER}/${FORK_REPO} ready — dev/stage/prod overlays + rollouts/ + applicationset.yaml"

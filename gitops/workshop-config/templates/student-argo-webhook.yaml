@@ -1,18 +1,14 @@
 {{- /*
-  Gitea -> student-Argo push webhook — kills the ~3-minute fork-commit detection latency on the
-  student instance (attendees commit to their claims-config fork and expect their Applications to
-  re-sync in seconds, not on the next poll). Verified live 2026-07-11: with the webhook a fork commit
-  is detected + re-synced in ~5s vs the >3min baseline.
-
-  ONE Gitea SYSTEM webhook (fires for ALL repos incl. every per-user fork — Gitea 1.26 admin
-  /api/v1/admin/hooks) posts to the student server's /api/webhook. Argo CD 3.4 has no dedicated Gitea
-  parser — it parses Gitea via its GOGS parser (type "gogs"; secret key argocd-secret
-  `webhook.gogs.secret`, verified against the 3.4.4 source). Argo matches the payload's ROUTE-based
-  repo URL against each Application's repoURL (host-sensitive), so the dev/stage/prod Applications AND
-  the appset-generated ones all use the Gitea route host (see applicationset.yaml + the fork job).
-  Platform (openshift-gitops) instance deliberately NOT wired: its entry apps source the mirror and
-  ws start/reset/prep force-sync anyway (a system webhook targets one URL; a second hook would be
-  needed — not worth it, PM guidance).
+  Shared secret for the Gitea -> student-Argo push webhooks. The webhooks themselves are PER-FORK,
+  created by the m09/m10 fork jobs (Gitea's admin/system-webhook LIST API is unreliable on 1.26 — it
+  returns [] even for a just-created hook, so system hooks can't be managed idempotently; per-repo
+  hooks list correctly). Argo CD 3.4 parses Gitea via its Gogs parser, so the secret Argo validates
+  against lives in argocd-secret under `webhook.gogs.secret` (verified vs the 3.4.4 source). This Job
+  generates that secret once and mirrors it into a gitea-namespace Secret the fork jobs read (so the
+  fork jobs never need read access to argocd-secret, which also holds the Argo admin password).
+  Verified live 2026-07-11: a secured per-fork webhook re-syncs a fork commit in ~5s vs the >3min
+  baseline. The argocd-server reloads webhook.gogs.secret automatically ("gogs secret modified.
+  restarting"). Secret material is never echoed.
 */ -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -22,7 +18,7 @@ metadata:
   labels:
     workshop.redhat.com/layer: workshop-config
 ---
-# why: store the shared webhook secret in argocd-secret + read the student server route to build the URL.
+# why: store the shared webhook secret in argocd-secret (Argo validates against it).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -35,10 +31,6 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "patch"]
     resourceNames: ["argocd-secret"]
-  - apiGroups: ["route.openshift.io"]
-    resources: ["routes"]
-    verbs: ["get"]
-    resourceNames: ["student-gitops-server"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -56,46 +48,40 @@ subjects:
     name: student-argo-webhook
     namespace: student-gitops
 ---
-# why (cross-namespace): create the Gitea SYSTEM webhook via the admin API — needs the Gitea CR admin
-# password + route host (same discovery idiom as the fork jobs).
+# why: mirror the shared secret into a gitea-namespace Secret the fork jobs read (same-namespace, so
+# they never need access to argocd-secret).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: student-argo-webhook-gitea
+  name: student-argo-webhook-mirror
   namespace: {{ .Values.giteaNamespace }}
   labels:
     workshop.redhat.com/layer: workshop-config
 rules:
-  - apiGroups: ["pfe.rhpds.com"]
-    resources: ["gitea"]
-    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get"]
-  - apiGroups: ["route.openshift.io"]
-    resources: ["routes"]
-    verbs: ["get"]
+    verbs: ["get", "create", "patch"]
+    resourceNames: ["argo-webhook-secret"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: student-argo-webhook-gitea
+  name: student-argo-webhook-mirror
   namespace: {{ .Values.giteaNamespace }}
   labels:
     workshop.redhat.com/layer: workshop-config
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: student-argo-webhook-gitea
+  name: student-argo-webhook-mirror
 subjects:
   - kind: ServiceAccount
     name: student-argo-webhook
     namespace: student-gitops
 ---
-# Sync hook (BeforeHookCreation), wave 2 — after the student ArgoCD CR is applied. Idempotent: the
-# webhook secret in argocd-secret is the source of truth (generated once, reused), and the Gitea
-# system webhook is created once (skipped if a hook for our URL already exists). Secret material is
-# never echoed.
+# Sync hook (BeforeHookCreation), wave 2 — after the student ArgoCD CR. Idempotent: argocd-secret is
+# the source of truth (generate once, reuse); the gitea Secret is (re)applied to match. Fast no-op on
+# re-syncs. Secret value never echoed.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -118,8 +104,7 @@ spec:
       serviceAccountName: student-argo-webhook
       restartPolicy: Never
       containers:
-        - name: webhook
-          # ose-cli ships oc + curl + python3 + openssl — no argocd binary needed here.
+        - name: webhook-secret
           image: registry.redhat.io/openshift4/ose-cli:latest
           resources:
             requests:
@@ -137,43 +122,16 @@ spec:
           args:
             - |
               set -euo pipefail
-              SROUTE="$(oc get route student-gitops-server -n "$STUDENT_NS" -o jsonpath='{.spec.host}')"
-              [[ -n "$SROUTE" ]] || { echo "❌ student-gitops-server route not found"; exit 1; }
-              WURL="https://${SROUTE}/api/webhook"
-
-              # 1. Shared webhook secret — argocd-secret is the single source of truth. Argo parses
-              #    Gitea via its Gogs parser, so the key is webhook.gogs.secret (verified vs 3.4.4).
               SECRET="$(oc get secret argocd-secret -n "$STUDENT_NS" -o jsonpath='{.data.webhook\.gogs\.secret}' 2>/dev/null | base64 -d || true)"
-              REGEN=false
               if [[ -z "$SECRET" ]]; then
                 SECRET="$(openssl rand -hex 24)"
                 SB="$(printf '%s' "$SECRET" | base64 | tr -d '\n')"
                 oc patch secret argocd-secret -n "$STUDENT_NS" --type merge -p "{\"data\":{\"webhook.gogs.secret\":\"${SB}\"}}" >/dev/null
-                REGEN=true
-                echo "▶ generated + stored webhook.gogs.secret in argocd-secret"
+                echo "▶ generated + stored webhook.gogs.secret in argocd-secret (argocd-server reloads it)"
+              else
+                echo "▶ reusing existing webhook.gogs.secret"
               fi
-
-              # 2. Gitea admin creds + route (CR status is authoritative; secret is a fallback).
-              GADMIN_USER="$(oc get gitea gitea -n "$GITEA_NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
-              GADMIN_PASS="$(oc get gitea gitea -n "$GITEA_NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
-              [[ -n "$GADMIN_PASS" ]] || GADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$GITEA_NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
-              [[ -n "$GADMIN_PASS" ]] || { echo "❌ no Gitea admin password"; exit 1; }
-              GHOST="$(oc get route gitea -n "$GITEA_NS" -o jsonpath='{.spec.host}')"
-              AUTH="${GADMIN_USER}:${GADMIN_PASS}"
-
-              # 3. Ensure exactly one system webhook → our student endpoint (idempotent).
-              EXISTING="$(curl -ksf -u "$AUTH" "https://${GHOST}/api/v1/admin/hooks?type=system" \
-                | WURL="$WURL" python3 -c 'import sys,json,os; print(next((str(h["id"]) for h in json.load(sys.stdin) if h.get("config",{}).get("url")==os.environ["WURL"]), ""))')"
-              if [[ -n "$EXISTING" && "$REGEN" == false ]]; then
-                echo "✅ Gitea system webhook already present (id ${EXISTING}) → ${WURL}"
-                exit 0
-              fi
-              # Regenerated secret (or none yet): drop any stale hook for our URL, then (re)create.
-              [[ -n "$EXISTING" ]] && curl -ks -o /dev/null -u "$AUTH" -X DELETE "https://${GHOST}/api/v1/admin/hooks/${EXISTING}" || true
-              CODE="$(curl -ks -o /dev/null -w '%{http_code}' -u "$AUTH" -X POST "https://${GHOST}/api/v1/admin/hooks" \
-                -H 'Content-Type: application/json' \
-                -d "{\"type\":\"gogs\",\"config\":{\"url\":\"${WURL}\",\"content_type\":\"json\",\"secret\":\"${SECRET}\"},\"events\":[\"push\"],\"active\":true}")"
-              case "$CODE" in
-                201) echo "✅ Gitea system webhook created → ${WURL} (fork commits now sync in seconds)";;
-                *) echo "❌ system webhook create failed (HTTP ${CODE})"; exit 1;;
-              esac
+              # Mirror to the gitea-namespace Secret the fork jobs read.
+              oc create secret generic argo-webhook-secret -n "$GITEA_NS" \
+                --from-literal=secret="$SECRET" --dry-run=client -o yaml | oc apply -f - >/dev/null
+              echo "✅ webhook secret ready (argocd-secret + ${GITEA_NS}/argo-webhook-secret) — fork jobs create per-fork hooks"
