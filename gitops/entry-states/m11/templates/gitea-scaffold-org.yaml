@@ -91,6 +91,10 @@ spec:
               value: {{ .Values.user | quote }}
             - name: SCAFFOLD_ORG
               value: {{ printf "%s-%s" .Values.user .Values.scaffoldOrgSuffix | quote }}
+            # In-cluster RHDH base — the cleanup also deregisters the attendee's catalog Location(s) so
+            # a re-prep leaves no orphan Component on the SHARED portal (guest token; svc URL is stable).
+            - name: RHDH_URL
+              value: {{ .Values.rhdhInClusterUrl | quote }}
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -165,5 +169,53 @@ spec:
                   if len(repos) < 50:
                       break
               print(f"✅ {org} ready to scaffold into ({deleted} stale repo(s) cleared)")
+              PY
+
+              # (c) deregister any RHDH catalog Location(s) that point at this org — the scaffolder's
+              # catalog:register step leaves a Location per scaffolded service on the SHARED portal, and
+              # emptying Gitea does NOT remove it (it is a catalog object, not a Gitea repo). Without this
+              # the {user}-svcs Components orphan across ws reset/prep (G3 multi-tenancy FAIL). Best-effort:
+              # a guest token + list/match/DELETE by id; if RHDH is unreachable the Gitea slate is already
+              # clean and the entry verify's clean-slate check flags any lingering orphan.
+              echo "▶ deregistering catalog Location(s) for ${SCAFFOLD_ORG} on the shared RHDH portal…"
+              RHDH_URL="$RHDH_URL" SCAFFOLD_ORG="$SCAFFOLD_ORG" python3 - <<'PY' || echo "  ! catalog dereg errored (non-fatal; entry verify flags any orphan)"
+              import json, os, ssl, urllib.request, urllib.error
+              base = os.environ["RHDH_URL"].rstrip("/"); org = os.environ["SCAFFOLD_ORG"]
+              ctx = ssl._create_unverified_context()
+              def req(method, path, token=None):
+                  h = {}
+                  if token: h["Authorization"] = "Bearer " + token
+                  r = urllib.request.Request(base + path, headers=h, method=method)
+                  try:
+                      with urllib.request.urlopen(r, context=ctx, timeout=20) as resp:
+                          return resp.status, resp.read().decode()
+                  except urllib.error.HTTPError as e:
+                      return e.code, ""
+                  except Exception:
+                      return 0, ""
+              st, body = req("GET", "/api/auth/guest/refresh")
+              tok = ""
+              if st == 200:
+                  try: tok = json.loads(body).get("backstageIdentity", {}).get("token", "")
+                  except Exception: tok = ""
+              if not tok:
+                  print(f"  ! RHDH guest token unavailable (HTTP {st}); skipping catalog dereg")
+              else:
+                  st, body = req("GET", "/api/catalog/locations", tok)
+                  try: locs = json.loads(body) if st == 200 else []
+                  except Exception: locs = []
+                  needle = f"/{org}/"
+                  matched = [((e.get("data", e) or {}).get("id"), (e.get("data", e) or {}).get("target", ""))
+                             for e in locs if isinstance(e, dict) and needle in ((e.get("data", e) or {}).get("target") or "")]
+                  if not matched:
+                      print(f"  ✓ no catalog Location points at {org} — nothing to deregister")
+                  removed = 0
+                  for lid, target in matched:
+                      dst, _ = req("DELETE", f"/api/catalog/locations/{lid}", tok)
+                      if dst in (204, 200):
+                          removed += 1; print(f"  ✓ deregistered {lid} -> {target}")
+                      else:
+                          print(f"  ! HTTP {dst} deregistering {lid} -> {target}")
+                  print(f"✅ catalog dereg for {org}: {removed} Location(s) removed")
               PY
               echo "✅ ${FORK_USER} can scaffold via the golden path into ${SCAFFOLD_ORG}"

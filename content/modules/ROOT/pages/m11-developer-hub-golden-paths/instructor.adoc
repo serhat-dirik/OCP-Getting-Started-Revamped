@@ -81,16 +81,19 @@ curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/entities/b
 Expect `component: parasol-claims` and `template:  parasol-service-template`.
 If either is missing, the catalog wiring (`app-config-rhdh` `catalog.locations`, pointing at the `parasol/*` Gitea repos) or the Gitea seeding needs attention.
 
-. *Each attendee's scaffold org exists and is empty.*
+. *Each attendee's scaffold org exists and is empty — and no orphan catalog entry lingers.*
 +
 [source,sh,role=execute]
 ----
 GITEA="gitea-gitea.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
 curl -sk "https://$GITEA/api/v1/orgs/user1-svcs/repos" | python3 -c 'import sys,json;print("repos in user1-svcs:", len(json.load(sys.stdin)))'
+RHDH="backstage-developer-hub-rhdh.$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
+TOKEN=$(curl -sk "https://$RHDH/api/auth/guest/refresh" | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+curl -sk -H "Authorization: Bearer $TOKEN" "https://$RHDH/api/catalog/locations" | python3 -c 'import sys,json;print("user1-svcs catalog Locations:", sum(1 for e in json.load(sys.stdin) if "/user1-svcs/" in (e.get("data",e).get("target") or "")))'
 ----
 +
-Expect `repos in user1-svcs: 0` on a fresh entry state.
-The org is created (and emptied) by the entry-state hook on every `ws start`/`ws prep`; a non-empty org means a prior scaffold was not cleared — re-run `ws prep m11 --user user1`.
+Expect `repos in user1-svcs: 0` and `user1-svcs catalog Locations: 0` on a fresh entry state.
+Both are reset by the entry-state hook on every `ws start`/`ws prep` — it empties the org *and* deregisters its catalog entry; a non-zero count means a prior scaffold was not cleared, so re-run `ws prep m11 --user user1`.
 
 . *(For a demo) pre-solve a sample user.*
 +
@@ -125,12 +128,12 @@ Open the repo via the Gitea route instead ({gitea_url}/{user}-svcs/parasol-golde
 The workshop portal uses *guest* sign-in: one click, no credentials, everyone is the same guest identity.
 It is the simplest honest auth for a shared teaching portal — no per-attendee login friction.
 A real deployment wires *single sign-on* (OpenShift OAuth or an identity provider) so the catalog and templates run under each engineer's real identity, with role-based access.
-Attendee *isolation* here comes from each person scaffolding into their *own* Gitea org (`{user}-svcs`), not from the portal identity.
+Attendee *isolation* here comes from each person scaffolding into their *own* Gitea org (`{user}-svcs`), not from the portal identity — and because the *catalog* is shared, the scaffolded service name carries the username (`parasol-policy-{user}`) so every attendee registers a *distinct* Component on the one portal (guest identity can't disambiguate them, so the name does). If an attendee drops the suffix and two people use the same bare name, they collide on the shared catalog.
 
 *2. "The 'Open the new repository' link (or the catalog 'source' link) doesn't open."*::
 Those links resolve to Gitea's *in-cluster service address* (`gitea.gitea.svc:3000`) — the address RHDH uses internally to read and write Git.
 Your browser cannot reach that address.
-Open the repo through the Gitea *route* instead: {gitea_url}/{user}-svcs/parasol-policy.
+Open the repo through the Gitea *route* instead: {gitea_url}/{user}-svcs/parasol-policy-{user}.
 This is a known rough edge of the workshop portal's internal wiring; the *Open in the software catalog* link (which stays inside RHDH) works normally.
 
 *3. "The template didn't create a pipeline or an Argo app — where's the rest?"*::
@@ -143,7 +146,8 @@ The point of the module is the *pattern*: standards encoded once, applied on eve
 No — that is the deliberate break-and-fix in exercise 2.
 The `publish:gitea` step refuses to create a repository whose name already exists in your org (a Git server will not hold two repos with the same name).
 Fix it by choosing a *unique* name, or delete the existing repo first.
-The workshop empties your `{user}-svcs` org on every `ws prep m11`, so a fresh run always starts from an empty slate.
+This is the Gitea *publish* 409, not a catalog conflict — the scaffolded name carries the username (`parasol-policy-{user}`), so the *register* step never collides on the shared catalog.
+The workshop empties your `{user}-svcs` org and deregisters its catalog entry on every `ws prep m11`, so a fresh run always starts from an empty slate.
 
 *5. "Why does the build take so long?"*::
 The first in-cluster build pulls the UBI9 Java 21 *builder image* and runs a *full Maven build* (downloading every dependency) — about *8–9 minutes*.
@@ -160,7 +164,7 @@ Budget the module's wall clock around one ~9-minute build, not around the ~49 mi
 * *Guest auth means one shared identity — a portal restart drops sessions.*
 Everyone signs in as the same guest, and the portal is shared and read-mostly.
 If the `backstage-developer-hub` pod restarts mid-session, attendees just click *Enter* again.
-Isolation is by *Gitea org* (`{user}-svcs`), so two attendees scaffolding the *same service name* into *different* orgs is fine; the same name into the *same* org is the `409`.
+Repo isolation is by *Gitea org* (`{user}-svcs`), but the *catalog is shared* and keyed by name — so the scaffolded service carries the username (`parasol-policy-{user}`) to stay a distinct Component. Two attendees using the *same bare name* would publish fine into their different orgs yet *collide on the one catalog*; the per-user name is what prevents that. (Re-running the *same* name into your *own* org is the deliberate Gitea publish `409` in the lab.)
 * *Links inside RHDH point at the internal Gitea address.*
 The catalog `source`/`view`/`edit` links and the scaffolder's "Open the new repository" link resolve to `gitea.gitea.svc:3000` and are not browser-clickable.
 Steer attendees to the Gitea *route* ({gitea_url}) to view repos; set the expectation early so it does not read as "broken."

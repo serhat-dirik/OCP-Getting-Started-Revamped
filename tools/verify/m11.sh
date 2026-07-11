@@ -2,8 +2,9 @@
 # Verify M11 — Developer Hub & Golden Paths.
 #   Entry: {user}-dev + entry marker · the SHARED RHDH portal is reachable · the Parasol software
 #          catalog is populated (parasol-claims Component present) · the golden-path Software Template
-#          is registered · and a CLEAN scaffold slate — the {user} Gitea namespace holds NO
-#          golden-path-scaffolded repos yet (running the template is the lab).
+#          is registered · and a CLEAN scaffold slate — the {user}-svcs scaffold org holds NO
+#          golden-path-scaffolded repos AND no orphan catalog Location points at it yet (running the
+#          template is the lab; the entry hook empties the org AND deregisters its catalog entry).
 #   End:   the SHARED portal + catalog + template are still there AND the {user} Gitea namespace holds
 #          >= 1 golden-path-scaffolded repo (the attendee ran the template; ws solve materializes
 #          {user}/parasol-golden). End checks are outcome-based and pass for BOTH the attendee's own
@@ -93,7 +94,26 @@ except Exception: d=[]
 print(len(d) if isinstance(d,list) else 0)' 2>/dev/null || echo 0
 }
 
-scaffold_slate_clean() { [[ "$(scaffold_repo_count)" == "0" ]]; }
+# Count catalog Locations registered against this user's scaffold org. The golden-path scaffolder's
+# catalog:register step creates one per scaffolded service; the entry cleanup hook deregisters them, so
+# a clean entry slate has ZERO. Guarding the loop the G3 smoke found: after ws reset/prep, no orphan
+# {user}-svcs Location should linger on the SHARED portal (the entity name is per-user, e.g.
+# parasol-policy-{user}, so its Location target is …/{user}-svcs/<svc>/…). RHDH unreachable → 0 (the
+# "portal reachable" check above already fails in that case; don't double-count the outage here).
+user_catalog_location_count() {
+  local h tok; h="$(rhdh_host)"; tok="$(rhdh_guest_token)"
+  [[ -n "$h" && -n "$tok" ]] || { echo 0; return; }
+  curl -ks --max-time 15 -H "Authorization: Bearer ${tok}" "https://${h}/api/catalog/locations" 2>/dev/null \
+    | python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except Exception: d=[]
+org=sys.argv[1]
+print(sum(1 for e in d if isinstance(e,dict) and ("/"+org+"/") in ((e.get("data",e) or {}).get("target") or "")))' "$SCAFFOLD_ORG" 2>/dev/null || echo 0
+}
+
+# A clean scaffold slate = the Gitea org is empty AND no orphan catalog Location points at it. Both are
+# what the entry cleanup hook guarantees; asserting both closes the multi-tenancy loop (G3 FAIL).
+scaffold_slate_clean() { [[ "$(scaffold_repo_count)" == "0" && "$(user_catalog_location_count)" -eq 0 ]]; }
 scaffold_repo_present() { [[ "$(scaffold_repo_count)" -ge 1 ]]; }
 
 # --- entry state (what `ws start m11` materializes) --------------------------
@@ -105,8 +125,9 @@ check "golden-path template registered"                  template_registered    
 check "scaffold org ${SCAFFOLD_ORG} exists"              scaffold_org_exists                       || hint "org hook didn't run — ws reset m11 --user ${USER_NAME} (or check gitea-scaffold-org-m11-${USER_NAME} Job in ns gitea)"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
-  # Entry-only: prove the scaffold slate is clean (running the template is the lab).
-  check "clean scaffold slate (${SCAFFOLD_ORG} empty)"   scaffold_slate_clean                      || hint "prior scaffold left over — ws reset m11 --user ${USER_NAME} for a clean entry"
+  # Entry-only: prove the scaffold slate is clean (running the template is the lab). "Clean" =
+  # empty Gitea org AND no orphan catalog Location on the shared portal (the G3 multi-tenancy fix).
+  check "clean scaffold slate (${SCAFFOLD_ORG} empty, no orphan catalog entry)"   scaffold_slate_clean   || hint "prior scaffold left over (Gitea repo or catalog Location) — ws reset m11 --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "run the 'New Parasol microservice' template in RHDH; ws solve m11 materializes ${SCAFFOLD_ORG}/parasol-golden"
