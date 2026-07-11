@@ -1,0 +1,112 @@
+{{- if .Values.solve }}
+# END state for instructor demos (`ws solve m10`): on TOP of the always-materialized M09 end state
+# (dev + stage), create a THIRD student Application (claims-prod-{user}) that deploys the fork's
+# rollouts/ overlay so {user}-prod runs claims as an Argo Rollout (canary + AnalysisTemplate + the
+# wave-ordered migration hook). The PostSync Job applies it and WAITS until Synced/Healthy, so
+# `ws solve m10` does not print "demo-ready" while the Rollout is still starting. The finished world:
+# dev/stage as plain Deployments + prod as a progressive-delivery Rollout, the M10 demo starting point.
+# The instructor then drives a canary live (update the Rollout, flip m10-canary-control verdict=fail)
+# and watches the auto-rollback — proven live 2026-07-11.
+#
+# Reuses the m10-endstate SA + its cross-namespace application Role in student-gitops (both always
+# created by m09-endstate.yaml). selfHeal:false on THIS app (unlike dev/stage): the canary demo drives
+# the Rollout by hand (oc patch / kubectl-argo-rollouts) and flips the out-of-git verdict knob — with
+# selfHeal on, Argo would revert the manual canary trigger within seconds (the same reasoning as the
+# entry-app selfHeal:false convention, ADR-0001 amendment).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m10-solve-apps-{{ .Values.user }}
+  namespace: {{ .Values.user }}-gitops
+  labels:
+    workshop.redhat.com/module: m10
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+data:
+  prod-app.yaml: |
+    apiVersion: argoproj.io/v1alpha1
+    kind: Application
+    metadata:
+      name: claims-prod-{{ .Values.user }}
+      namespace: {{ .Values.studentArgoNamespace }}
+      labels:
+        workshop.redhat.com/module: m10
+        workshop.redhat.com/user: {{ .Values.user | quote }}
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: proj-{{ .Values.user }}
+      source:
+        repoURL: https://gitea-{{ .Values.giteaNamespace }}.{{ .Values.clusterDomain }}/{{ .Values.user }}/{{ .Values.forkRepo }}.git
+        targetRevision: main
+        path: rollouts
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: {{ .Values.user }}-prod
+      syncPolicy:
+        automated:
+          prune: true
+          # selfHeal OFF: let the instructor drive the canary by hand (see header).
+          selfHeal: false
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m10-solve-{{ .Values.user }}
+  namespace: {{ .Values.user }}-gitops
+  labels:
+    workshop.redhat.com/module: m10
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: m10-solve-{{ .Values.user }}
+    spec:
+      # Reuses the endstate SA (created by m09-endstate.yaml, always present) — same cross-namespace
+      # applications Role in student-gitops.
+      serviceAccountName: m10-endstate-{{ .Values.user }}
+      restartPolicy: Never
+      volumes:
+        - name: apps
+          configMap:
+            name: m10-solve-apps-{{ .Values.user }}
+      containers:
+        - name: solve
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          env:
+            - name: ARGO_NS
+              value: {{ .Values.studentArgoNamespace | quote }}
+          volumeMounts:
+            - name: apps
+              mountPath: /apps
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ creating student-gitops Application claims-prod-{{ .Values.user }} (rollouts/ overlay)…"
+              oc apply -f /apps/prod-app.yaml
+              echo "  ✓ Application applied — waiting for {{ .Values.user }}-prod to run claims as a Rollout…"
+              for i in $(seq 1 80); do
+                h="$(oc get application claims-prod-{{ .Values.user }} -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+                s="$(oc get application claims-prod-{{ .Values.user }} -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+                if [[ "$h" == "Healthy" && "$s" == "Synced" ]]; then
+                  echo "  ✓ claims-prod Synced/Healthy — {{ .Values.user }}-prod runs claims as a canary Rollout"
+                  exit 0
+                fi
+                sleep 10
+              done
+              echo "  ❌ claims-prod not Synced/Healthy after ~13 min — inspect: oc get application claims-prod-{{ .Values.user }} -n ${ARGO_NS}"
+              exit 1
+{{- end }}

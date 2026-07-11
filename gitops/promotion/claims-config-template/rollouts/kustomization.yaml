@@ -1,0 +1,46 @@
+# ROLLOUTS overlay — M10 progressive delivery. The same claims environment as overlays/prod, but the
+# app is an Argo Rollout (canary + automated analysis) instead of a Deployment. Reuses base for the
+# database, config, secret, root Service and Route (promotion changes the delivery mechanism, not the
+# artifact); deletes base's parasol-claims Deployment and adds the Rollout + canary/stable services +
+# the AnalysisTemplate + the wave-1 migration hook. `oc apply -k rollouts` (or an Argo Application
+# pointed at rollouts/) targets YOUR prod namespace. Requires the cluster RolloutManager + the
+# claims-analysis SA / m10-canary-control knob the M10 entry state creates in {user}-prod.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: __user__-prod
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: parasol-claims
+      workshop.redhat.com/module: m10
+    includeSelectors: false
+
+resources:
+  - ../base
+  - claims-rollout.yaml
+  - claims-analysis-template.yaml
+  - db-migration-job.yaml
+
+# Base ships the app as a Deployment; the rollouts overlay replaces it with the Rollout above.
+patches:
+  - target:
+      kind: Deployment
+      name: parasol-claims
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: parasol-claims
+  # Same per-env config discipline as overlays/prod: APP_ENV=prod, quiet logging.
+  - target:
+      kind: ConfigMap
+      name: claims-config
+    patch: |-
+      - op: replace
+        path: /data/APP_ENV
+        value: prod
+      - op: replace
+        path: /data/QUARKUS_LOG_LEVEL
+        value: WARN

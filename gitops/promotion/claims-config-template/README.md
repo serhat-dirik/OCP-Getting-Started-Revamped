@@ -22,7 +22,18 @@ overlays/
   dev/    1 replica · APP_ENV=dev   · log DEBUG
   stage/  2 replicas · APP_ENV=stage · log INFO
   prod/   3 replicas · APP_ENV=prod  · log WARN
+rollouts/                 M10 progressive-delivery form of prod (same artifact, Argo Rollout)
+  claims-rollout.yaml       claims as a Rollout (canary) + canary/stable Services
+  claims-analysis-template.yaml  job-provider AnalysisTemplate (probes the canary + verdict knob)
+  db-migration-job.yaml     wave-ordered pre-app migration hook (db -> migrate -> app)
+  kustomization.yaml        reuses base; swaps the Deployment for the Rollout; APP_ENV=prod
+applicationset.yaml       M10 beat 1 — ONE ApplicationSet (git dirs generator over overlays/*)
 ```
+
+The `rollouts/` overlay and `applicationset.yaml` are **M10 (GitOps at Scale & Progressive
+Delivery)** material — the base + `overlays/` are unchanged and still serve M04/M09. `rollouts/`
+needs the cluster RolloutManager (platform-portfolio `progressive-delivery` stack) plus the
+`claims-analysis` SA and `m10-canary-control` knob the M10 entry state creates in `{user}-prod`.
 
 Each overlay pins its **namespace** with the Kustomize namespace transformer. In your fork the
 `__user__` placeholder is rewritten to your username, so the commands below land in *your*

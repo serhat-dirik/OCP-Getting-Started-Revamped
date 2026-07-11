@@ -1,0 +1,66 @@
+# Synthetic-but-honest DB-migration hook — the M10 "ordered sync" beat (waves: db -> migrate -> app).
+# parasol-claims uses Hibernate auto-DDL + import.sql (no Flyway/Liquibase), so this is a stand-in for
+# a real migration step: an IDEMPOTENT SQL Job that waits for claims-db then applies a versioned
+# schema-marker table. It is a Sync hook at sync-wave "1" so Argo runs it AFTER claims-db (wave 0) is
+# healthy and BEFORE the Rollout (wave 2) — the exact "run migrations between database and app"
+# ordering the lab teaches. BeforeHookCreation clears the prior Job so every re-sync re-fires (Jobs
+# are immutable). Idempotent (CREATE TABLE IF NOT EXISTS + upsert), so re-runs are safe.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: claims-db-migrate
+  labels:
+    app: claims-db-migrate
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: claims-db-migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          # Same PostgreSQL image as claims-db — ships psql + pg_isready, no custom build.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          envFrom:
+            # POSTGRESQL_HOST/PORT/DATABASE (config) + POSTGRESQL_USER/PASSWORD (secret).
+            - configMapRef:
+                name: claims-config
+            - secretRef:
+                name: claims-creds
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              export PGPASSWORD="${POSTGRESQL_PASSWORD}"
+              echo "▶ waiting for ${POSTGRESQL_HOST}:${POSTGRESQL_PORT} to accept connections…"
+              for i in $(seq 1 30); do
+                pg_isready -h "${POSTGRESQL_HOST}" -p "${POSTGRESQL_PORT}" -U "${POSTGRESQL_USER}" && break
+                sleep 5
+              done
+              pg_isready -h "${POSTGRESQL_HOST}" -p "${POSTGRESQL_PORT}" -U "${POSTGRESQL_USER}" \
+                || { echo "❌ claims-db never became ready"; exit 1; }
+              echo "▶ applying idempotent schema migration (schema_version marker)…"
+              psql -h "${POSTGRESQL_HOST}" -p "${POSTGRESQL_PORT}" -U "${POSTGRESQL_USER}" -d "${POSTGRESQL_DATABASE}" -v ON_ERROR_STOP=1 <<'SQL'
+              CREATE TABLE IF NOT EXISTS schema_version (
+                version     INTEGER PRIMARY KEY,
+                applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+              );
+              INSERT INTO schema_version (version) VALUES (1)
+                ON CONFLICT (version) DO NOTHING;
+              SQL
+              echo "✅ migration applied — schema_version:"
+              psql -h "${POSTGRESQL_HOST}" -p "${POSTGRESQL_PORT}" -U "${POSTGRESQL_USER}" -d "${POSTGRESQL_DATABASE}" -c "SELECT version, applied_at FROM schema_version ORDER BY version;"

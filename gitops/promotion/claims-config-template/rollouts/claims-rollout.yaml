@@ -1,0 +1,114 @@
+# The claims app as an Argo Rollout (canary) — the M10 progressive-delivery form of the SAME
+# artifact the other overlays deploy as a Deployment. Pod template mirrors base/claims-app.yaml
+# (same image, config, probes, resources) so "promote the same artifact" still holds; only the
+# controller changes (Deployment -> Rollout). Served by the cluster-scoped RolloutManager
+# (platform-portfolio/components/argo-rollouts). Sync-wave 2: after claims-db (wave 0) and the
+# claims-db-migrate hook (wave 1) — the "db -> migrate -> app" ordering the lab teaches.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: parasol-claims
+  labels:
+    app: parasol-claims
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  # 4 replicas so canary weights map to legible pod counts (25%->1, 50%->2, 100%->4); transient
+  # max during canary is 8 app pods + claims-db, comfortably inside the {user}-prod quota.
+  replicas: 4
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+    spec:
+      containers:
+        - name: parasol-claims
+          # SAME image reference as every other environment — promotion changes config, not artifact.
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: claims-config
+            - secretRef:
+                name: claims-creds
+          startupProbe:
+            httpGet:
+              path: /q/health/started
+              port: 8080
+            periodSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+  strategy:
+    canary:
+      # Two extra services the controller pins to the canary/stable ReplicaSets (it injects the
+      # rollouts-pod-template-hash into their selectors). The base parasol-claims Service stays the
+      # ROOT (Route target) selecting all pods, so traffic splits by pod ratio — no traffic-router
+      # plugin needed (see the progressive-delivery stack README).
+      canaryService: parasol-claims-canary
+      stableService: parasol-claims-stable
+      steps:
+        - setWeight: 25
+        - pause: {duration: 20}
+        - setWeight: 50
+        # Automated analysis at 50%: the job-provider template probes the canary and honors the
+        # deterministic m10-canary-control knob. A failed assessment aborts + auto-rolls-back to the
+        # stable ReplicaSet (the M10 flagship). args pass the canary Service to probe.
+        - analysis:
+            templates:
+              - templateName: claims-canary-analysis
+            args:
+              - name: canary-service
+                value: parasol-claims-canary
+        - setWeight: 100
+---
+# Canary-pinned Service (controller injects the canary pod-hash) — the analysis job probes THIS.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims-canary
+  labels:
+    app: parasol-claims
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# Stable-pinned Service (controller injects the stable pod-hash).
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims-stable
+  labels:
+    app: parasol-claims
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

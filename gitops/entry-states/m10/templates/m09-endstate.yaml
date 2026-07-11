@@ -1,0 +1,188 @@
+# The M09 END STATE, materialized as M10's ENTRY starting point (compose, don't chain — M10 must run
+# without M09 ever having run). Creates the attendee's TWO Argo CD Applications (dev + stage) on the
+# student-gitops instance so claims really exists GitOps-managed in {user}-dev and {user}-stage — the
+# world M10 builds on (convert to ApplicationSet, add prod Rollout). ALWAYS-ON (not solve-gated): this
+# IS the entry state. The PostSync hook Job applies them and WAITS for BOTH to be Synced/Healthy so
+# `ws start m10` does not return "ready" while the student instance is still pulling images and
+# starting claims-db (the fire-and-forget trap). The blocking hook keeps the Argo sync OPERATION
+# Running, which ws's wait gates on (operationState.phase), sized by ws-meta waitSeconds (900).
+#
+# ADR-0002 amendment 1 (option B): the Application CRs live in the student-gitops CONTROL PLANE
+# (studentArgoNamespace), NOT in {user}-gitops. The Job runs in {user}-gitops with a cross-namespace
+# Role in student-gitops. Apps are created IMPERATIVELY (not chart resources) so the PLATFORM entry
+# app never tracks cross-instance health, and so `ws reset` reclaims them via purge_apps (delete by
+# .spec.project == proj-{user}). Job pod templates are immutable, so re-materialize recreates the Job
+# (BeforeHookCreation + -{user} name); `oc apply` of the apps is idempotent. backoffLimit 0: a retry
+# would re-poll a possibly-half-built world — fail loud.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m10-endstate-apps-{{ .Values.user }}
+  namespace: {{ .Values.user }}-gitops
+  labels:
+    workshop.redhat.com/module: m10
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+data:
+  # The two student Applications (dev + stage) — the SAME shape M09 ends at (student instance, project
+  # proj-{user}, the attendee's gitea fork, dev/stage overlays). selfHeal:true matches GitOps semantics.
+  # The resources-finalizer makes deletion CASCADE-prune the claims workloads: `ws reset` runs purge_ns
+  # BEFORE purge_apps, so without the finalizer a selfHeal app re-deploys claims during the namespace
+  # purge and orphans it; with it, purge_apps's `oc delete --wait` prunes claims as the app is removed.
+  apps.yaml: |
+    apiVersion: argoproj.io/v1alpha1
+    kind: Application
+    metadata:
+      name: claims-dev-{{ .Values.user }}
+      namespace: {{ .Values.studentArgoNamespace }}
+      labels:
+        workshop.redhat.com/module: m10
+        workshop.redhat.com/user: {{ .Values.user | quote }}
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: proj-{{ .Values.user }}
+      source:
+        repoURL: https://gitea-{{ .Values.giteaNamespace }}.{{ .Values.clusterDomain }}/{{ .Values.user }}/{{ .Values.forkRepo }}.git
+        targetRevision: main
+        path: overlays/dev
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: {{ .Values.user }}-dev
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+    ---
+    apiVersion: argoproj.io/v1alpha1
+    kind: Application
+    metadata:
+      name: claims-stage-{{ .Values.user }}
+      namespace: {{ .Values.studentArgoNamespace }}
+      labels:
+        workshop.redhat.com/module: m10
+        workshop.redhat.com/user: {{ .Values.user | quote }}
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: proj-{{ .Values.user }}
+      source:
+        repoURL: https://gitea-{{ .Values.giteaNamespace }}.{{ .Values.clusterDomain }}/{{ .Values.user }}/{{ .Values.forkRepo }}.git
+        targetRevision: main
+        path: overlays/stage
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: {{ .Values.user }}-stage
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: m10-endstate-{{ .Values.user }}
+  namespace: {{ .Values.user }}-gitops
+  labels:
+    workshop.redhat.com/module: m10
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+---
+# why: the endstate Job (in {user}-gitops) creates the two Applications and polls their health in the
+# student-gitops control plane — so it needs a CROSS-NAMESPACE Role there over applications. The
+# workshop-entries AppProject lets the entry app create this Role/RoleBinding in student-gitops
+# (namespaced, not blacklisted); the grant is scoped to this one per-user endstate SA.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: m10-endstate-{{ .Values.user }}
+  namespace: {{ .Values.studentArgoNamespace }}
+  labels:
+    workshop.redhat.com/module: m10
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: m10-endstate-{{ .Values.user }}
+  namespace: {{ .Values.studentArgoNamespace }}
+  labels:
+    workshop.redhat.com/module: m10
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: m10-endstate-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: m10-endstate-{{ .Values.user }}
+    namespace: {{ .Values.user }}-gitops
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m10-endstate-{{ .Values.user }}
+  namespace: {{ .Values.user }}-gitops
+  labels:
+    workshop.redhat.com/module: m10
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    # PostSync: run after the marker + fork job have synced, so the fork the apps point at exists.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: m10-endstate-{{ .Values.user }}
+    spec:
+      serviceAccountName: m10-endstate-{{ .Values.user }}
+      restartPolicy: Never
+      volumes:
+        - name: apps
+          configMap:
+            name: m10-endstate-apps-{{ .Values.user }}
+      containers:
+        - name: endstate
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          # Explicit (tiny) resources: the {user}-gitops quota constrains cpu/memory, so a bare
+          # pod is rejected — an oc-polling loop needs almost nothing.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          env:
+            - name: ARGO_NS
+              value: {{ .Values.studentArgoNamespace | quote }}
+          volumeMounts:
+            - name: apps
+              mountPath: /apps
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ creating student-gitops Applications (dev + stage) — the M09 end state M10 starts from…"
+              oc apply -f /apps/apps.yaml
+              echo "  ✓ Applications applied — waiting for the student instance to deploy claims in both envs…"
+              for i in $(seq 1 80); do
+                ok=0
+                for app in claims-dev-{{ .Values.user }} claims-stage-{{ .Values.user }}; do
+                  h="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+                  s="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+                  [[ "$h" == "Healthy" && "$s" == "Synced" ]] && ok=$((ok+1))
+                done
+                if [[ "$ok" == 2 ]]; then
+                  echo "  ✓ both Applications Synced/Healthy — claims deployed in {{ .Values.user }}-dev and {{ .Values.user }}-stage"
+                  exit 0
+                fi
+                sleep 10
+              done
+              echo "  ❌ apps not both Synced/Healthy after ~13 min — inspect: oc get applications -n ${ARGO_NS}"
+              exit 1
