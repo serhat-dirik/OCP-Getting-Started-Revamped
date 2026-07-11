@@ -15,7 +15,7 @@ API shapes (verified 2026-07-09):
 - **Job (batch/v1, `oc explain`):** completions, parallelism, backoffLimit, activeDeadlineSeconds, ttlSecondsAfterFinished, completionMode(Indexed), suspend, podFailurePolicy, backoffLimitPerIndex, maxFailedIndexes — all present.
 - **CronJob (batch/v1):** schedule(req), concurrencyPolicy, startingDeadlineSeconds, suspend, successfulJobsHistoryLimit, failedJobsHistoryLimit, timeZone — all present/GA.
 - **KEDA/CMA CRDs (packagemanifest):** `ScaledJob` & `ScaledObject` at `keda.sh/v1alpha1`; operator config `KedaController` (`keda.sh/v1alpha1`, name `keda`, ns `openshift-keda`); TriggerAuthentication, CloudEventSource, HTTPScaledObject(`http.keda.sh/v1alpha1`). NOT installed.
-- **MaaS egress:** `https://maas-rhdp.apps.maas.redhatworkshops.io/v1/models` reachable FROM cluster pods — **HTTP 200 in 0.38s** (ubi9 pod, 2026-07-09). Auth = Bearer from `secret/credentials` key `apitoken` in `openshift-lightspeed`. Live model: `qwen3-14b` (content stays model-agnostic per M01; recorded for build).
+- **MaaS egress:** `https://<maas-endpoint>/v1/models` reachable FROM cluster pods — **HTTP 200 in 0.38s** (ubi9 pod, 2026-07-09). Auth = Bearer from `secret/credentials` key `apitoken` in `openshift-lightspeed`. Live model: `qwen3-14b` (content stays model-agnostic per M01; recorded for build).
 - **Namespace:** `user1-batch` does NOT exist yet — entry state / batch stack must create it. Namespaces carry `workshop.redhat.com/user` label (usable for ClusterQueue `namespaceSelector`).
 
 ## Spec deltas
