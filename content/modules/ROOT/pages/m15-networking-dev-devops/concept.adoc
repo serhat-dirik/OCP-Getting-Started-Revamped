@@ -1,0 +1,197 @@
+= Networking for Dev & DevOps: Concept
+:module-id: m15
+include::partial$version-attributes.adoc[]
+
+// Concept page for M15. Renders in all three flavors (workshop/demo/instructor). Environment
+// values appear ONLY as attributes; product versions ONLY via version-attributes. Every network
+// behaviour described here was performed on OCP {ocp_version} (OVN-Kubernetes) as user1 on
+// 2026-07-13 — the flat-network reachability, the default-deny break, the DNS-port subtlety, the
+// UDN interface/subnet, the LoadBalancer <pending>, and the GatewayClass state are real captures,
+// not from memory. Networking is core OpenShift, so nothing new lands in versions.yaml; Gateway API
+// and UserDefinedNetwork are GA features of OCP {ocp_version} and are described as GA, not by number.
+
+[.lead]
+Parasol's claims application is three tiers — a web front end, a claims API, and a Postgres database — and right now they sit on a *flat, open* network where any pod can reach any other, and *nothing* is reachable from outside at all.
+This module is how OpenShift turns that network into a *control plane*: you choose exactly what becomes public, and you let only the right pods talk to each other.
+Same cluster, same app — but by the end the database answers *only* the API, and the front end is the *only* door in.
+
+== What you'll learn
+
+* How to *trace a packet* through OpenShift — Service → endpoints → the OVN-Kubernetes data plane → Route — without needing the vendor internals.
+* How to *choose an exposure* correctly: the decision tree from ClusterIP through NodePort, LoadBalancer, *Route*, and the *Gateway API*, and why on this cluster the Route is the workhorse and the Gateway API is the strategic direction.
+* How to *segment east-west traffic* with *NetworkPolicy* — a default-deny baseline plus precise allows — and the one gotcha (DNS) that makes the fix look broken when it isn't.
+* When a *UserDefinedNetwork (UDN)* gives you *native isolation* with no policy at all, and why that sometimes beats a wall of NetworkPolicies.
+* The *honest boundary* of Routes and today's Gateway API — they are HTTP(S)/SNI-centric — and where raw-TCP and TLS-passthrough live instead (a later module).
+
+== Two directions of traffic
+
+Every conversation on a cluster runs in one of two directions, and OpenShift gives you a different tool for each.
+
+*North-south* is traffic crossing the cluster boundary — a browser reaching your front end from the outside world.
+You control it by *choosing what to expose*: most workloads should never be reachable from outside, and the few that should get exactly one deliberate door.
+
+*East-west* is traffic *between* pods inside the cluster — the front end calling the API, the API querying the database.
+By default this is wide open: every pod can reach every other pod, in every namespace, on every port.
+You control it by *writing policy* (or by giving a namespace its own isolated network).
+
+[mermaid]
+....
+graph TB
+  subgraph outside["Outside the cluster"]
+    user["Browser / partner system"]
+  end
+  subgraph ns["Namespace: your app"]
+    web["web tier"]
+    api["api tier"]
+    db[("database")]
+  end
+  user -->|"NORTH-SOUTH<br/>(what you expose:<br/>Route / Gateway API)"| web
+  web -->|"east-west"| api
+  api -->|"east-west"| db
+  note["EAST-WEST<br/>(who may talk to whom:<br/>NetworkPolicy / UDN)"]
+  note -.-> web
+  classDef out fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef app fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef lbl fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class user out;
+  class web,api,db app;
+  class note lbl;
+....
+
+// media-pass: replace/augment with SVG export m15-networking-dev-devops-01-traffic-directions.svg (see media-manifest.md)
+
+Hold onto those two words — *north-south* and *east-west*.
+Every tool in this module is one or the other, and knowing which you need is half the battle.
+
+== A mental model of the OpenShift network
+
+You do not need to know how OVN-Kubernetes (the cluster's default network plugin) is built.
+You need one chain, and it is the same chain whether the traffic is north-south or east-west:
+
+. A *Service* is a stable name and virtual IP for a set of pods. It never moves, even as pods come and go.
+. Behind the Service sit *endpoints* — the actual pod IPs, kept in step with a *label selector*. If the selector matches no pods, the Service resolves to nothing and the connection fails, even though the Service still "exists."
+. The *data plane* (OVN-Kubernetes) programs every node so a packet to the Service's IP is load-balanced to a healthy endpoint. This is where a *NetworkPolicy* is enforced — as flow rules, not a sidecar.
+. For north-south, a *Route* (or a *Gateway*) tells the cluster's *ingress router* to accept outside traffic for a hostname and forward it to a Service.
+
+The single most common "networking bug" in the field is not a firewall — it is a *Service whose selector matches no pods*.
+The Service is green, the DNS name resolves, and every connection fails.
+In the lab you will break exactly that on purpose, watch the endpoints empty out, and fix it — so you recognize it instantly the next time.
+
+== North-south: choosing how to expose
+
+There is a decision tree for "make this reachable," and each rung exists for a reason.
+Walk it top to bottom and stop at the first one that fits:
+
+[mermaid]
+....
+graph TB
+  q0["Should anything outside the cluster reach it?"]
+  q0 -->|no| clusterip["ClusterIP (default)<br/>in-cluster only — most workloads live here"]
+  q0 -->|yes| q1{"What kind of traffic?"}
+  q1 -->|"HTTP(S) / TLS-SNI"| route["Route → the workhorse<br/>external, wildcard DNS, edge TLS<br/>(Gateway API = the strategic direction)"]
+  q1 -->|"raw TCP / UDP / passthrough"| l4["needs a LoadBalancer or the mesh<br/>(L4 — a later module)"]
+  nodeport["NodePort<br/>a port on every node — learn it once,<br/>reach for it almost never"]
+  lb["LoadBalancer<br/>needs a provider (cloud LB / MetalLB);<br/>without one it stays &lt;pending&gt;"]
+  q1 -.->|"low-level / debugging"| nodeport
+  l4 -.-> lb
+  classDef def fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef warn fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef bad fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class clusterip,route def;
+  class nodeport,lb warn;
+  class l4 bad;
+....
+
+// media-pass: replace/augment with SVG export m15-networking-dev-devops-02-exposure-tree.svg (see media-manifest.md)
+
+*ClusterIP* is the default and where the overwhelming majority of workloads should stay — reachable in-cluster, invisible outside.
+*NodePort* opens the same port on *every* node; it is a useful thing to understand once (you will create one in the lab and immediately delete it), and a thing you almost never reach for in production.
+*LoadBalancer* asks the platform for an external IP — and here is the honest part: it only works if a *provider* answers.
+On a cloud that is the cloud's load balancer; on bare metal it is an add-on such as MetalLB.
+This workshop's cluster is bare metal with no such provider, so a `type=LoadBalancer` Service sits at `<pending>` forever — you will create one and watch it hang, which is exactly the lesson: *LoadBalancer is a promise the platform has to be able to keep.*
+
+*Route* is the deterministic external path on OpenShift and the one you will actually use.
+It rides the cluster's wildcard DNS (`\*.{cluster_domain}`), terminates TLS at the router, and needs no provider — create it and it answers.
+
+The *Gateway API* is the newer, portable, role-oriented successor: a *GatewayClass* (the platform's implementation) → a *Gateway* (a listener the platform team owns) → *HTTPRoutes* (routing rules that app teams attach), including *weighted traffic splits* between versions.
+It is GA on OpenShift {ocp_version} and is the strategic direction.
+On *this* cluster its data plane also needs a LoadBalancer to get an address, so its Gateway stays unaddressed for the same bare-metal reason — which is why the Route is what you run in the lab and the Gateway API is what you model.
+
+[NOTE]
+.The honest L4 boundary
+====
+Routes and today's OpenShift Gateway API are *HTTP(S)/SNI-centric* — they route by hostname and path, terminate or pass TLS by SNI, and speak the web.
+They do *not* expose raw TCP, UDP, or TLS-passthrough for arbitrary protocols: on this cluster the experimental `TCPRoute`/`TLSRoute`/`UDPRoute` APIs are deliberately not installed.
+When you need L4 ingress — a database port, a gRPC stream with passthrough, a custom protocol — that is the job of the *service mesh*, covered in the advanced Service Mesh module.
+Knowing this boundary keeps you from fighting the Route to do something it was never meant to do.
+====
+
+== East-west: controlling who may talk to whom
+
+Inside the cluster the default is *allow-all*: every pod can open a connection to every other pod, in any namespace.
+For a three-tier app that means the database will happily accept a connection from the front end, from a debugging pod, from anything.
+OpenShift gives you three layers to fix that, in increasing strength:
+
+[mermaid]
+....
+graph LR
+  npol["1 · NetworkPolicy<br/>default-deny + precise allows<br/>(per-pod, per-port rules)"]
+  udn["2 · UserDefinedNetwork<br/>a namespace's own isolated network<br/>(native — no policy to write)"]
+  mesh["3 · Service Mesh<br/>mTLS identity + L7 policy<br/>(a later module)"]
+  npol --> udn --> mesh
+  classDef a fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class npol,udn,mesh a;
+....
+
+*NetworkPolicy* is the workhorse and the focus of this module.
+The pattern is always the same: apply a *default-deny* to a namespace so nothing may talk, then re-open *only* the flows the app genuinely needs — "the database accepts 5432 only from the API," "the API accepts 8080 only from the web tier."
+It is per-pod and per-port, expressed as labels, enforced in the data plane.
+
+There is one trap everyone hits: a default-deny on *egress* also blocks *DNS*, so the moment you apply it, pods can no longer resolve names and the app looks broken for the wrong reason.
+The fix is a deliberate egress allow to the cluster DNS service — and (a subtlety you will see live) it must name the CoreDNS pods' *actual* port, because the policy is evaluated against the destination pod, not the Service's port 53.
+
+*UserDefinedNetwork* is the stronger, simpler option when a whole namespace should be isolated.
+A *Primary UDN* gives its namespace its *own* pod network — a separate Layer 2 segment — so its pods are isolated from every other namespace *natively*, with *no NetworkPolicy at all*.
+It is GA on OpenShift {ocp_version}.
+The trade-off is a hard rule: a Primary UDN must exist *before* the namespace's first pod (you cannot convert a populated namespace), so it is the platform team's decision at namespace-creation time — which is exactly how the workshop's `{user}-partner` namespace was built.
+Reach for a UDN when isolation is a property of the *whole namespace*; reach for NetworkPolicy when you need *selective* flows within and across namespaces.
+
+The third layer, the *service mesh*, adds workload *identity* (mutual TLS) and L7 policy on top — that is the advanced Service Mesh module, and this module is the foundation it builds on.
+
+== Why egress control and router sharding exist
+
+Two more controls round out the picture; you will see them demonstrated rather than build them, because both are cluster-scoped platform levers.
+
+*Egress control* governs traffic leaving the cluster.
+An *EgressFirewall* limits which external hosts a namespace may reach; an *egress IP* pins a namespace's outbound traffic to a *fixed source IP* so an external firewall or database can allow-list it.
+These answer the compliance question "which of our things is talking to that vendor, and from what address?"
+
+*Router sharding* runs *more than one* ingress router, each serving a different set of Routes (by label or namespace) on its own domain — so a regulated tenant's traffic can ride dedicated ingress nodes, separate from everyone else's.
+It exists for the same reason multi-tenancy does: to draw a hard line between tenants when a shared router is not enough.
+
+// media-pass: the cross-module Parasol platform-accretion diagram with the M15 layer (the network control plane: exposure + NetworkPolicy + UDN around {user}-dev and {user}-partner) highlighted — m15-networking-dev-devops-03-platform-accretion.svg (see media-manifest.md)
+
+== How this shows up in real orgs
+
+* *"Can the database be reached from anywhere it shouldn't be?"* is the question a security review will ask, and on a flat cluster the answer is "yes, from everything."
+The default-deny-plus-allow pattern turns that into "only from the API, on one port" — and it is *auditable*, because the allows are the documentation.
+The org that ships namespaces *born* with a default-deny (via the project template you saw in the multi-tenancy module) never has to retrofit it.
+* *The DNS gotcha is a support ticket waiting to happen.*
+A team applies their first default-deny, the app stops resolving names, and someone spends an hour blaming the app before realizing the policy ate DNS.
+Knowing that default-deny-egress includes DNS — and exactly how to re-open it — is the difference between a five-minute fix and a lost afternoon.
+* *"LoadBalancer is stuck at pending" is the most common bare-metal surprise.*
+Teams coming from a cloud assume `type=LoadBalancer` just works; on bare metal it needs a provider, and the fix is either an add-on such as MetalLB or — usually — *use a Route instead*.
+Recognizing that `<pending>` means "no provider," not "broken," saves the ticket.
+* *Gateway API is where ingress is going, and adopting the mental model now is cheap insurance.*
+Even while Routes remain the workhorse, framing exposure as GatewayClass → Gateway → HTTPRoute — platform-owned listener, app-owned routes, weighted splits — is the portable, multi-tenant shape the ecosystem is standardizing on.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) traffic has *two directions* — north-south is *what you expose* (Route), east-west is *who may talk* (NetworkPolicy/UDN); (2) the *default is wide open*, so security is something you *add* — a default-deny baseline plus precise allows; (3) a *Primary UDN* gives a namespace *native* isolation with *no policy at all*, the punchline against a wall of NetworkPolicies.
+The demo is the twelve-minute story: show the flat network (a debug pod reaching the database), apply default-deny and watch the app break (including DNS), re-open only the flows that matter, prove the debug pod is now *blocked* from the database while the API still reaches it, then reveal the partner namespace already isolated by a UDN with zero policy.
+Close on the punchline: "the database now answers only the API, the front end is the only door in, and the partner workload is on its own network — and none of it was a firewall appliance, it's how OpenShift works."
+====
+endif::demo[]

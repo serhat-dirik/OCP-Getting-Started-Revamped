@@ -1,0 +1,179 @@
+= Networking for Dev & DevOps: Troubleshooting
+:module-id: m15
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (OVN-Kubernetes, 2026-07-13) plus
+// known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use $NS = {user}-dev and
+// $PARTNER = {user}-partner (set them once). Cluster-domain output scrubbed to apps.example.com.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcuts first: `NS={user}-dev` and `PARTNER={user}-partner`.
+
+== DNS is broken after applying a NetworkPolicy, even with an "allow DNS" rule
+
+Symptom:: You applied `default-deny` plus an egress allow for DNS, but pods still can't resolve names — `getent hosts claims-db` times out.
+Cause:: The DNS allow names the *Service* port `53`, but OVN-Kubernetes matches a NetworkPolicy egress port against the *destination pod*. CoreDNS pods listen on *5353* (the `dns-default` Service maps `53 → 5353`), so a rule for `port: 53` never matches and DNS stays denied.
+Fix:: Name the CoreDNS pods' *named ports* (`dns` / `dns-tcp`), or the number `5353`:
++
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns-egress}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}}]
+      ports: [{protocol: UDP, port: dns}, {protocol: TCP, port: dns-tcp}]
+EOF
+oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db && echo RESOLVED'
+----
++
+This is the single most common "correct-looking policy that does nothing." The named ports track the CoreDNS container regardless of number and are what OpenShift's own operators use.
+
+== `parasol-claims` dropped to `0/1` right after I applied default-deny
+
+Symptom:: You applied `default-deny-all` and, without touching the app, `parasol-claims` fell to `0/1` (`Running` but not `Ready`).
+Cause:: This is the *intended* behaviour. `default-deny` denies *egress*, so `parasol-claims` can no longer open its connection to `claims-db:5432`; its readiness probe checks the database, fails, and marks the pod NotReady. It does not crash.
+Fix:: Read the break, then add the database allow pair (ingress on the db, egress on the API):
++
+[source,sh,role=execute]
+----
+oc logs -n $NS deploy/parasol-claims --tail=1   # "Database connections health check ... DOWN ... Acquisition timeout"
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-db-from-claims}
+spec:
+  podSelector: {matchLabels: {app: claims-db}}
+  policyTypes: [Ingress]
+  ingress: [{from: [{podSelector: {matchLabels: {app: parasol-claims}}}], ports: [{protocol: TCP, port: 5432}]}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-claims-to-db-egress}
+spec:
+  podSelector: {matchLabels: {app: parasol-claims}}
+  policyTypes: [Egress]
+  egress: [{to: [{podSelector: {matchLabels: {app: claims-db}}}], ports: [{protocol: TCP, port: 5432}]}]
+EOF
+oc rollout status deploy/parasol-claims -n $NS --timeout=40s
+----
++
+It returns to `1/1` once the flow is allowed. Remember DNS too — without `allow-dns-egress` the app can't resolve `claims-db` in the first place.
+
+== A Service is "up" but nothing connects to it
+
+Symptom:: `oc get svc` shows the Service with a cluster IP, the DNS name resolves, but every connection is refused or hangs.
+Cause:: The Service's *label selector* matches no pods, so it has *no endpoints* — the classic networking bug (often a one-character typo in `spec.selector`).
+Fix:: Check the endpoints; if `<none>`, align the selector with the pods' labels:
++
+[source,sh,role=execute]
+----
+oc get endpoints parasol-claims -n $NS          # ENDPOINTS <none> is the smoking gun
+oc get pods -n $NS --show-labels | grep parasol-claims
+oc patch svc parasol-claims -n $NS --type=merge -p '{"spec":{"selector":{"app":"parasol-claims"}}}'
+oc get endpoints parasol-claims -n $NS          # endpoints return
+----
++
+`ENDPOINTS <none>` almost always means selector-vs-label mismatch, not a firewall.
+
+== The Route stopped working after I applied default-deny
+
+Symptom:: The edge Route served the front end fine, then you applied `default-deny` and now the Route returns an application error.
+Cause:: `default-deny` blocks *ingress* to `parasol-web` too, including from the OpenShift ingress router — so the router can reach the Route but not the pod behind it.
+Fix:: Allow ingress to the front end from the router's namespace (the OVN-sanctioned selector):
++
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-web-from-router}
+spec:
+  podSelector: {matchLabels: {app: parasol-web}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{namespaceSelector: {matchLabels: {policy-group.network.openshift.io/ingress: ""}}}]
+EOF
+ROUTE=$(oc get route parasol-web -n $NS -o jsonpath='{.spec.host}')
+curl -sk --max-time 10 "https://$ROUTE/api/claims" | head -c 60; echo
+----
+
+== An unauthorized pod can *still* reach the database after I wrote my policies
+
+Symptom:: You applied the allows, but `demo-client` still connects to `claims-db:5432` (it should be blocked).
+Cause:: Usually one of: (a) `default-deny-all` is missing, so nothing is denied by default and your allows are additive to a wide-open baseline; (b) the data plane hasn't finished programming (a few seconds); or (c) `demo-client` accidentally carries a label your allow matches.
+Fix:: Confirm the baseline exists, wait a beat, and re-probe:
++
+[source,sh,role=execute]
+----
+oc get networkpolicy default-deny-all -n $NS || echo "MISSING — apply default-deny first"
+oc get pod -n $NS -l app=demo-client --show-labels
+sleep 5
+oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo STILL OPEN' || echo "now blocked"
+----
++
+NetworkPolicy is *additive*: without a default-deny, an "allow" grants access on top of an already-open network. The deny is what makes the allows meaningful.
+
+== `type=LoadBalancer` Service is stuck at `<pending>`
+
+Symptom:: You created a `LoadBalancer` Service and its `EXTERNAL-IP` never leaves `<pending>`.
+Cause:: No load-balancer *provider* is installed. `type=LoadBalancer` needs a cloud LB or a bare-metal add-on (such as MetalLB) to allocate an external IP; this cluster has neither.
+Fix:: For web traffic, use a *Route* (no provider needed). Only pursue LoadBalancer if you genuinely need an L4 external IP *and* can install a provider:
++
+[source,sh,role=execute]
+----
+oc create route edge parasol-web --service=parasol-web --port=http --insecure-policy=Allow -n $NS
+oc get route parasol-web -n $NS -o jsonpath='{.spec.host}{"\n"}'
+----
++
+`<pending>` means "unprovided," not "broken."
+
+== The partner workload can't reach the app — but there's no NetworkPolicy to blame
+
+Symptom:: The `partner-workload` pod in `{user}-partner` can't connect to `parasol-web` in `{user}-dev`, yet `oc get networkpolicy -n {user}-partner` is empty.
+Cause:: This is *native UDN isolation*, working as designed — not a policy and not a bug. The partner namespace has a Layer 2 *Primary* UserDefinedNetwork, so its pods are on their own `10.20.0.0/16` segment and cannot route to pods on the default network.
+Fix:: Nothing to fix — confirm it *is* the UDN:
++
+[source,sh,role=execute]
+----
+oc get userdefinednetwork partner-udn -n $PARTNER -o jsonpath='role={.spec.layer2.role} subnet={.spec.layer2.subnets[0]}{"\n"}'
+oc exec deploy/partner-workload -n $PARTNER -- ip route show default   # default via 10.20.0.1 dev ovn-udn1
+----
++
+If two workloads *must* talk across a UDN boundary, that is an exposure decision (a Route/Service the UDN namespace publishes), not a NetworkPolicy — the UDN isolation is intentional.
+
+== The partner pod has an `eth0` on the cluster network — did the UDN fail?
+
+Symptom:: `ip addr` in the partner pod shows *two* interfaces — `eth0` on a `10.235.x.x` address *and* `ovn-udn1` on `10.20.x.x`. It looks like it's on both networks.
+Cause:: A Primary UDN pod keeps a cluster-network `eth0` for node-level infrastructure (kubelet health probes), but `ovn-udn1` is its *primary* network — the default route leaves through it, and OVN enforces isolation regardless of the extra interface.
+Fix:: No fix needed. Verify the primary is the UDN:
++
+[source,sh,role=execute]
+----
+oc exec deploy/partner-workload -n $PARTNER -- ip route show default
+oc get pod -n $PARTNER -l app=partner-workload -o jsonpath='{.items[0].metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | grep -o '"interface": "ovn-udn1"[^}]*"default": true' || true
+----
++
+The `"default": true` on `ovn-udn1` in the network-status annotation confirms the UDN is the primary network; `eth0` is an infrastructure detail, not a leak.
+
+== The UDN didn't attach — `ovn-udn1` is missing from the partner pod
+
+Symptom:: The `partner-workload` pod has no `ovn-udn1` interface (only `eth0`), or it's stuck `ContainerCreating`.
+Cause:: A Primary UDN must exist *before* the namespace's first pod. If a pod was created before the UDN reconciled (or the namespace lacks the `k8s.ovn.org/primary-user-defined-network` label it needs at creation), the attach fails.
+Fix:: Re-materialize the entry state — it applies the UDN at sync-wave -1, before the workload:
++
+[source,sh,role=execute,subs="attributes"]
+----
+ws prep {module-id} --yes
+oc exec deploy/partner-workload -n $PARTNER -- ip -brief addr show ovn-udn1
+----
++
+You cannot convert a populated namespace to a Primary UDN; the reset deletes the partner pods, prunes and re-applies the UDN into the still-labeled namespace, then re-creates the workload.
+
+'''
+
+_Last verified on OpenShift {ocp_version} (OVN-Kubernetes, 2026-07-13)._

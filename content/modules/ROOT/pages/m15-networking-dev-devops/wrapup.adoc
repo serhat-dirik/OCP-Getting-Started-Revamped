@@ -1,0 +1,83 @@
+= Networking for Dev & DevOps: Wrap-up
+:module-id: m15
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims app from a flat, open network to a controlled one — without a single firewall appliance.
+You traced a packet from Service to endpoints to pod, and broke a Service selector to feel the most common "networking bug" there is (endpoints `<none>`).
+You exposed the front end with an *edge Route* — the deterministic, provider-free path — and saw for yourself why a NodePort is a learn-it-once curiosity and a bare-metal `type=LoadBalancer` hangs at `<pending>`.
+You applied a *default-deny* baseline, watched the app *and* DNS break, then re-opened *only* the flows the app needs — including the CoreDNS named-port subtlety that trips everyone — and proved the payoff: the database now answers *only* the API, while an unauthorized pod is blocked.
+Finally you met a *partner* namespace isolated *natively* by a Layer 2 Primary UserDefinedNetwork, with zero policy to write.
+
+[mermaid]
+....
+graph TB
+  subgraph dev["Namespace: app (NetworkPolicy)"]
+    web["parasol-web"]
+    api["parasol-claims"]
+    db[("claims-db")]
+    dc["demo-client<br/>(blocked from db)"]
+  end
+  subgraph partner["Namespace: partner (UDN)"]
+    pw["partner-workload<br/>ovn-udn1 · 10.20.0.0/16"]
+  end
+  router["ingress router"] -->|"edge Route"| web
+  web -->|"allow 8080"| api
+  api -->|"allow 5432"| db
+  dc -.->|"DENIED"| db
+  pw -.->|"native isolation<br/>(no policy)"| web
+  classDef ok fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef block fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef net fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  class web,api,db ok;
+  class dc,pw block;
+  class router net;
+....
+
+// media-pass: recap SVG m15-networking-dev-devops-04-what-you-built.svg (green = allowed flows; red = denied/isolated; blue = ingress).
+
+The one idea under all of it: *the network is a control plane you configure, not a given you inherit* — you choose what is exposed (north-south) and who may talk (east-west), and everything defaults to open until you say otherwise.
+
+== Map to your org
+
+Take these back to how your teams' apps are wired today:
+
+. *If someone deployed a debug pod in your most sensitive namespace right now, what could it reach?*
+On a flat namespace, the answer is "the database, on the database port." You turned that into "only the API, on one port." For your production namespaces, is there a default-deny baseline — or is east-west still wide open because nobody ever closed it?
+The org that ships namespaces *born* with a default-deny (the project template from the multi-tenancy module) never has to retrofit this under audit pressure.
+. *When your team hits "LoadBalancer stuck at pending," do they know why?*
+You saw `<pending>` means "no provider answered," not "broken." Teams migrating from a cloud assume `type=LoadBalancer` just works; on bare metal it needs an add-on or a Route. Is that written down anywhere your on-call can find it at 2 a.m., or is it tribal knowledge that costs a ticket every time?
+. *Could you produce, on demand, the list of flows your app is actually allowed?*
+Your seven NetworkPolicies *are* that list — the allows are the documentation. For a real app, could you answer "what may talk to the payments database?" by reading policy, or only by reading the code and hoping? An app whose network surface is expressed as policy is an app you can reason about; one that relies on a flat network is one you can only hope about.
+
+== When *not* to reach for this
+
+Network controls are tools, and over-applying them is its own failure mode:
+
+* *Don't hand-write NetworkPolicies where a namespace-wide isolation fits better.*
+If a whole namespace should simply never talk to anything else, a *Primary UDN* gives you that natively, with nothing to maintain — reaching for a wall of NetworkPolicies to approximate it is more code and more ways to be wrong.
+Use NetworkPolicy for *selective* flows; use a UDN for *whole-namespace* isolation.
+* *Don't fight the Route (or Gateway API) to do L4.*
+Routes and today's Gateway API are HTTP(S)/SNI-centric by design. If you need raw TCP, UDP, or TLS-passthrough for a non-web protocol, that is the *service mesh's* job — twisting a Route to fake it leads to brittle workarounds. Know the boundary and cross it deliberately.
+* *Don't reach for LoadBalancer or NodePort when a Route will do.*
+On OpenShift the Route is the default external path for web traffic — no provider, no node-port sprawl, wildcard DNS and TLS handled. NodePort and LoadBalancer exist for specific needs (a non-HTTP protocol, an external LB integration); using them for ordinary web exposure is choosing the harder path for no reason.
+* *Don't default-deny without the DNS allow — and don't debug the app when it's the policy.*
+The single most common self-inflicted outage in this space is a default-deny that silently eats DNS. Bake the CoreDNS egress allow into your baseline (and your project template), so "the app can't resolve names" is never the thing you spend an afternoon on.
+
+== Go deeper
+
+* *About Networking* and *Network security* (NetworkPolicy) documentation — the full policy reference, the ingress/egress selector semantics, and the OVN-Kubernetes model behind them.
+* *Multiple networks* and *Primary networks (UserDefinedNetwork/ClusterUserDefinedNetwork)* — Layer 2 vs Layer 3 topologies, Primary vs Secondary roles, and the namespace-label constraint you saw.
+* *Ingress Gateway API* and *Configuring Routes* — the GatewayClass → Gateway → HTTPRoute model, weighted traffic splits, and how Routes and the Gateway API relate on OpenShift.
+* *cert-manager Operator for Red Hat OpenShift* ({cert_manager_version}) — issuing certificates for a Gateway listener (or a Route), the TLS half of exposure.
+* *Advanced Service Mesh* (a separate module in this workshop) — the third east-west layer: workload identity with mutual TLS, L7 policy, and the raw-TCP/TLS-passthrough ingress the Route deliberately leaves out.
+* *Configuring egress IPs* and *Ingress Controller sharding* — the cluster-scoped controls your instructor demonstrated: pinning a namespace's source IP, and dedicating ingress to a tenant.
+
+[NOTE]
+.Clean up
+====
+To return your world to the flat entry state — no NetworkPolicies, no Route, the `demo-client` free to roam again — run `ws prep {module-id} --yes`.
+It re-materializes the entry state (the three tiers, the probe pod, and the partner UDN) so a re-run starts clean.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

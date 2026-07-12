@@ -1,0 +1,217 @@
+= Networking for Dev & DevOps: Instructor Guide
+:module-id: m15
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, OVN-Kubernetes)
+// as user1 on 2026-07-13 by performing every exercise. The Gateway API segment (exercise 6) is
+// read-only — the GatewayClass state was captured live; a Gateway was deliberately NOT created (it
+// stays Programmed=False on this bare-metal cluster and would install a lightweight Istio in
+// openshift-ingress). Cluster-domain values in output are scrubbed to the placeholder apps.example.com.
+
+This module has two beats that land, and they bracket the hands-on.
+It *opens* on the flat network — a `demo-client` pod that has nothing to do with the app opening a connection straight to the database (exercise 1) — and it *closes* on the reveal that the same pod is now *blocked* while the API still gets through (exercise 4), followed by a partner namespace isolated *natively* by a UserDefinedNetwork with zero policy (exercise 5).
+Everything between is the mechanics — Services/endpoints, the exposure tree, default-deny-then-allow — that makes those beats legible.
+Optimize the room for exercise 4 (let the "same database, two answers" land) and exercise 5 (let "no policy at all" land).
+
+The single most common confusion is *a DNS egress allow written with `port: 53` that does nothing* — OVN-Kubernetes matches the port against the CoreDNS *pod* (5353), so the rule must use the named ports.
+Pre-empt it (see Watchouts); the lab teaches the named-port form directly and explains why.
+
+== Timing
+
+Total hands-on: *~70 min* (spec target 90 min; add ~15 min of concept up front, ~5 min buffer).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Map the network and trace a packet | ~12 min | `oc get svc/endpoints` instant; selector break → endpoints `<none>` in *~2 s*; reachability probes instant (TCP connect)
+| 2 | Expose the front end to the world | ~15 min | edge Route create → external `curl` succeeds in *~2 s*; NodePort create/inspect/delete instant; LoadBalancer `<pending>` visible immediately
+| 3 | Lock the namespace down with default-deny | ~10 min | policy apply instant; `parasol-claims` drops to `0/1` within *~10 s* (readiness period); reading the break is the time cost
+| 4 | Re-open only what the app needs | ~20 min | DNS allow → resolves in *~4 s*; db allow pair → `parasol-claims` back to `1/1` in *~10–20 s*; probes instant; the payoff is the point
+| 5 | Native isolation with a UDN | ~13 min | all `oc exec` reads; the isolation probe *times out by design* (~6 s); reading + the "no policy" reveal
+| 6 | Gateway API `[INSTRUCTOR-DEMO]` | ~10 min | you perform; all read-only; see the script below
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, OVN-Kubernetes) on 2026-07-13, every exercise was performed as `user1` and timed.
+The commands themselves are near-instant — `oc get`, `oc apply`, `oc patch` all return in about a second.
+The genuine waits are: NetworkPolicy taking *~3–9 s* to program the data plane (a probe that should now be blocked keeps succeeding for a few seconds, then starts timing out); `parasol-claims` readiness swinging on its *10 s* probe period (it drops to `0/1` ~10 s after default-deny, and returns to `1/1` ~10–20 s after the db allow); and the reachability probes, which *time out on purpose* (the `timeout 5`/`timeout 6` is the wait, and it is the signal).
+The *Attendee time* is dominated by reading the breaks and the payoff, not by command latency.
+The first pod attach to the partner UDN can take ~30 s on a cold namespace — the entry state already did it, so attendees never wait on it.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster).
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m15 --user user1
+ws verify m15 --user user1 --entry-only
+----
++
+Expect `✅ all 10 checks passed`.
+The checks cover both namespaces: the `{user}-dev` marker + the three tiers (`claims-db` ready, `parasol-web`/`parasol-claims` present) + `demo-client` ready, and the `{user}-partner` UDN + `partner-workload` on it; plus the clean-slate assertions (no default-deny, no Route yet).
+
+. *The parasol app images are present (this cluster has the imagestreams).*
++
+[source,sh,role=execute]
+----
+oc get pods -n user1-dev -l 'app in (parasol-web,parasol-claims)'
+----
++
+Expect both `1/1 Running`.
+If they are `ImagePullBackOff`, the `parasol-images` imagestreams were not loaded on this cluster — the lab's app-tier behaviour (the readiness break/recover in exercises 3–4) needs them; `claims-db`, `demo-client`, and the partner UDN run on always-present platform images and work regardless.
+
+. *The verification substrate is up and tooled.*
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n user1-dev -- sh -c 'command -v curl && command -v openssl && command -v bash'
+----
++
+Expect three paths printed.
+The whole lab leans on `oc exec deploy/demo-client -- bash -c '</dev/tcp/...>'` for its reachability probes; `bash` is required for the `/dev/tcp` pseudo-device.
+
+. *The partner UDN attached (the pod is really on `ovn-udn1`).*
++
+[source,sh,role=execute]
+----
+oc exec deploy/partner-workload -n user1-partner -- ip -brief addr show ovn-udn1
+----
++
+Expect an `ovn-udn1` interface on a `10.20.x.x` address.
+If it is missing, the UDN did not attach before the pod — `ws reset m15 --user user1` (the reset re-applies the UDN at sync-wave -1, before the workload).
+
+. *The GatewayClass is Accepted (for the exercise-6 demo).*
++
+[source,sh,role=execute]
+----
+oc get gatewayclass openshift-default
+----
++
+Expect `ACCEPTED=True`. This is a cluster-wide singleton set up by the platform; you only read it.
+
+== Instructor demo — the Gateway API (exercise 6)
+
+All read-only.
+*Do not create a `Gateway` live:* on this bare-metal cluster it stays `Programmed=False` (no LoadBalancer to give it an address) and creating one makes the ingress operator install a lightweight Istio in `openshift-ingress` — cruft you do not want mid-session.
+Show the *model* and the *boundary* instead.
+
+=== The model is installed and GA
+
+[source,sh,role=execute]
+----
+oc get gatewayclass
+oc get crd | grep -E '^(gateways|httproutes|grpcroutes|referencegrants)\.gateway\.networking\.k8s\.io' | awk '{print $1}'
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME                CONTROLLER                           ACCEPTED   AGE
+openshift-default   openshift.io/gateway-controller/v1   True       52m
+gateways.gateway.networking.k8s.io
+grpcroutes.gateway.networking.k8s.io
+httproutes.gateway.networking.k8s.io
+referencegrants.gateway.networking.k8s.io
+----
+
+Talk track: the portable shape is *GatewayClass* (the platform's implementation, here `openshift-default`) → *Gateway* (a listener the platform team owns) → *HTTPRoute* (routing rules app teams attach, including `backendRefs` with `weight` for a traffic split). It is GA on OpenShift {ocp_version}; the same three-object model runs on any conformant platform.
+
+=== The honest L4 boundary
+
+[source,sh,role=execute]
+----
+for c in tcproutes tlsroutes udproutes; do
+  oc get crd $c.gateway.networking.k8s.io >/dev/null 2>&1 && echo "$c: PRESENT" || echo "$c: ABSENT (not on the supported channel)"
+done
+----
+
+.Expected output
+[source,texinfo]
+----
+tcproutes: ABSENT (not on the supported channel)
+tlsroutes: ABSENT (not on the supported channel)
+udproutes: ABSENT (not on the supported channel)
+----
+
+Talk track: Routes and today's Gateway API are HTTP(S)/SNI-centric. The experimental L4 route types are deliberately not installed (a validating admission policy blocks even cluster-admin from adding them), so raw-TCP/passthrough ingress is the *service mesh's* job — the advanced Service Mesh module. This is the same boundary the spec calls out; don't promise attendees L4 ingress via a Route.
+
+=== The bare-metal gap (and the TLS direction)
+
+Explain, do not perform: creating a `Gateway` on `openshift-default` here leaves it `Programmed=False` because no LoadBalancer provider answers — the same reason the exercise-2 `type=LoadBalancer` sat at `<pending>`.
+On a cluster *with* a provider (a cloud LB, or MetalLB on bare metal), the Gateway gets an address and the model runs end-to-end.
+The TLS direction is a cert-manager-issued certificate ({cert_manager_version}) referenced from the Gateway listener's `certificateRefs` (a self-signed CA issuer for per-user certs, since public ACME is rate-limited at event scale).
+The module's `ws solve` ships that whole end state — Gateway + weighted `HTTPRoute` + cert-manager `Certificate` — behind a `gatewayApi=true` flag that is *off by default* precisely because of this gap; flip it only on a cluster that has an LB provider.
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Run the demo from the entry state, not `ws solve`.*
+The whole story is *building* the controls from a flat network. `ws solve m15` renders the finished end state (policies + Route in place) — use it to *show the destination* or pre-stage, never as the demo's start.
+* *Let the break breathe (beat 2).*
+After `default-deny`, pause on `parasol-claims` at `0/1` and the DB health-`DOWN` log line. This is the moment that makes "the network is a control plane" concrete — the app didn't crash, the *network* stopped it.
+* *Land the payoff line (beat 4).*
+"Same database, same namespace, two pods, two answers." Say it while both probe results are on screen — the API `OPEN`, the `demo-client` `BLOCKED`.
+* *The UDN reveal needs the `oc get networkpolicy` first (beat 5).*
+Show there is *no* policy in the partner namespace *before* the isolation probe, or the punchline ("no policy at all") doesn't register.
+
+== Top questions attendees ask
+
+*1. "My DNS allow uses `port: 53` — why is DNS still broken?"*::
+Because OVN-Kubernetes evaluates a NetworkPolicy egress port against the *destination pod*, and the CoreDNS pods listen on *5353*, not 53 (the `dns-default` Service maps `53 → 5353`).
+A rule for `port: 53` never matches the pod, so DNS stays denied.
+Use the CoreDNS pods' *named ports* `dns` / `dns-tcp` (what OpenShift's own operators do) or the number `5353`.
+This was verified live on the build cluster — `53` fails, `dns`/`dns-tcp` works — and it is the single most common self-inflicted "my policy is correct but nothing works."
+
+*2. "Why is my `type=LoadBalancer` Service stuck at `<pending>`? Is the cluster broken?"*::
+No — `<pending>` means *no provider answered*, not "failed."
+A LoadBalancer Service needs something to hand out external IPs: a cloud load balancer, or an add-on such as MetalLB on bare metal.
+This workshop cluster is bare metal with no such provider, so the external IP never arrives.
+The fix is a *Route* (which needs no provider) or, if you truly need an L4 external IP, install a provider.
+
+*3. "I applied default-deny and `parasol-claims` went `0/1` — I didn't touch it. Why?"*::
+That is the policy working.
+`default-deny-all` denies *egress* too, so `parasol-claims` can no longer open its connection to `claims-db:5432`; its readiness probe checks the database, the check fails, and the pod is marked NotReady (it does *not* crash — status stays `Running`).
+Its log shows `Database connections health check … DOWN … Acquisition timeout`.
+Add the `parasol-claims → claims-db` egress allow (and the matching db ingress allow) and it returns to `1/1`. This is the intended "app breaks, now write the allows" beat.
+
+*4. "The partner workload still has an `eth0` on the cluster network — is it really isolated?"*::
+Yes.
+A Primary UDN pod keeps a cluster-network `eth0` for node-level infrastructure (kubelet health checks and the like), but its *default route* leaves through `ovn-udn1` on the UDN's `10.20.0.0/16` segment — that is its primary network.
+OVN-Kubernetes enforces the isolation regardless of the extra interface: the pod cannot reach workload pods in other namespaces (verified — the connection to `parasol-web` times out), even though it can still resolve DNS via the shared cluster service.
+The presence of `eth0` is an implementation detail, not a leak.
+
+*5. "Can we demonstrate the Gateway API end-to-end here?"*::
+Not on this cluster.
+The OpenShift Gateway API implementation provisions the Gateway behind a LoadBalancer Service, which — as with question 2 — stays `<pending>` on bare metal, so the Gateway never gets an address and never reaches `Programmed=True`.
+Show the *model* (GatewayClass → Gateway → HTTPRoute, weighted splits) and the *boundary* (no L4 route types), and run the end-to-end path on a cluster that has an LB provider. The Route is the runnable exposure here.
+
+== Watchouts
+
+* *The DNS named-port trap (see question 1).*
+Attendees who "fix" DNS with `port: 53` will see it stay broken and blame the cluster. The lab teaches `dns`/`dns-tcp` directly with a NOTE explaining why; if someone is stuck, check their `allow-dns-egress` ports first.
+* *default-deny breaks DNS and the app — that's the lesson, not a bug.*
+Both are expected in exercise 3. Don't let a confused attendee "fix" it by deleting default-deny; the point is to re-open flows deliberately in exercise 4.
+* *The Route needs a router-ingress allow under default-deny.*
+`allow-web-from-router` (namespaceSelector `policy-group.network.openshift.io/ingress: ""`) is what lets the ingress router reach `parasol-web` once default-deny is on. Without it, the Route returns an error even though the Service is fine — a subtle one to debug if an attendee skips it.
+* *The `demo-client` block is over-determined — frame it honestly.*
+Under the end state, `demo-client` is blocked both because default-deny denies its egress (it got no allow) *and* because `claims-db`'s ingress admits only `parasol-claims`. Present it as "no rule lets it through," not "the db ingress policy alone stops it" — both point the same way, and that is the correct mental model.
+* *LoadBalancer `<pending>` and Gateway `Programmed=False` are the same root cause.*
+Bare metal, no LB provider. If asked why the Gateway API isn't hands-on, it is this — not a version or licensing gap.
+* *Don't create a Gateway live.*
+It stays unaddressed *and* triggers a lightweight Istio install in `openshift-ingress`. Keep exercise 6 read-only.
+* *The `EndpointSlice` deprecation warning on `oc get endpoints` is cosmetic.*
+`oc get endpoints` prints `v1 Endpoints is deprecated … use discovery.k8s.io/v1 EndpointSlice`. It is the clearest view for teaching Service→endpoints; the warning is informational and harmless.
+
+== Provenance
+
+M15 is a net-new module (the spec's "fresh for UDN/GwAPI"), built against this repo's live cluster and two mined sources: the *demo-client* verification-pod pattern from `serhat-dirik/ossm-gateway-demo` (D18, Apache-2.0 — credited in `CREDITS.md`), and the *north-south/east-west* traffic-direction mental model from the App Connectivity Workshop framing.
+Every command, output, timing, the default-deny app break (the `parasol-claims` DB health-`DOWN` log), the DNS named-port subtlety (`53` fails / `dns`-`dns-tcp` works), the isolation block, the edge Route, the UDN interface and subnet, the NodePort assignment, the LoadBalancer `<pending>`, and the GatewayClass state were captured on OpenShift {ocp_version} as `user1` on 2026-07-13 during the build.
+The Gateway API segment is read-only by design (no Gateway created — bare-metal gap + Istio side effect); no content was ported from stale material.
