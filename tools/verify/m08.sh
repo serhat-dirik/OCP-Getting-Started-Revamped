@@ -6,8 +6,12 @@
 #          acs-image-check task is reachable. ONLY in --entry-only mode: the fork's seed-vulnerable
 #          branch still carries the seeded log4j-core CVE (the lab's fix removes it, so this check is
 #          NOT run in full mode — it validates entry materialization, not lab completion).
-#   End:   a parasol-claims image was built (ImageStream present) AND Tekton Chains signed a build
-#          TaskRun (chains.tekton.dev/signed=true) — i.e. the pipeline built + signed an image.
+#   End:   a supply-chain PipelineRun reached overall Succeeded — the ACS scan gate ("Block Log4Shell
+#          at build") only passes on a CLEAN source, so this asserts the FIX actually happened — AND
+#          Tekton Chains signed a build TaskRun (chains.tekton.dev/signed=true). NB: "an image was
+#          built" / "a TaskRun is signed" are NOT sufficient on their own — a scan-BLOCKED vulnerable
+#          run still builds + signs an image (only the gate fails it), so those alone false-green an
+#          UNFIXED attendee (G4 SEV2). Succeeded ⟺ log4j-core removed (or `ws solve`'s clean main).
 # End checks are outcome-based (satisfied by an attendee's real pipeline run AND by `ws solve`).
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
 set -euo pipefail
@@ -48,10 +52,19 @@ gitea_raw_contains() {
   curl -ksf "https://${host}/api/v1/repos/${owner}/${repo}/raw/${path}?ref=${ref}" 2>/dev/null | grep -q "$needle"
 }
 
-# Deployment / imagestream / signed-taskrun presence.
-imagestream_exists() { oc get imagestream "$1" -n "$2" >/dev/null 2>&1; }
+# Tekton Chains signed at least one TaskRun in this namespace (signature attached).
 signed_taskrun_exists() {
   oc get taskrun -n "$1" -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' 2>/dev/null | grep -q 'true'
+}
+# A parasol-claims-supply-chain PipelineRun reached overall Succeeded. Tekton labels every run from a
+# pipelineRef with tekton.dev/pipeline=<name>, so this catches the attendee's re-run AND `ws solve`'s
+# run. Succeeded is the definitive fix signal: the ACS gate ("Block Log4Shell at build", CVSS 10) fails
+# the WHOLE run on a vulnerable source even though build-image + Chains-signing still complete — so a
+# proxy like "image built" or "a signed TaskRun exists" greenlights an attendee who never removed
+# log4j-core (G4 SEV2, reproduced on user3-cicd). Overall Succeeded ⟺ the scan passed ⟺ clean source.
+supply_chain_run_succeeded() {
+  oc get pipelinerun -n "$1" -l tekton.dev/pipeline=parasol-claims-supply-chain \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' 2>/dev/null | grep -qx True
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
@@ -72,9 +85,11 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   # The seeded CVE is expected to be GONE here — removing log4j-core IS the lab's fix (success), so
-  # the seeded-CVE check above is deliberately NOT run in this mode.
-  check "parasol-claims image built (ImageStream present)" imagestream_exists parasol-claims "$NS"             || hint "run the pipeline (ws solve m08 --user ${USER_NAME}); build-image pushes here"
-  check "Tekton Chains signed a build TaskRun"             signed_taskrun_exists "$NS"                         || hint "Chains signs a few seconds after the build TaskRun completes — re-check, or run the pipeline"
+  # the seeded-CVE check above is deliberately NOT run in this mode. Assert the ACTUAL fixed outcome
+  # (a run that PASSED the scan gate), not the proxy "an image was built" — a blocked vulnerable run
+  # builds + signs an image too, so the proxy false-greens an attendee who never removed log4j (SEV2).
+  check "supply-chain run PASSED the scan gate (a run Succeeded)" supply_chain_run_succeeded "$NS"             || hint "the ACS gate blocks log4j-core: remove its <dependency> from seed-vulnerable's pom.xml and re-run the pipeline (or ws solve m08 --user ${USER_NAME} builds the clean main). A scan-blocked run stays Failed even though it built + signed an image."
+  check "Tekton Chains signed the build (signed TaskRun present)" signed_taskrun_exists "$NS"                  || hint "Chains signs a few seconds after the build TaskRun completes — re-check, or run the pipeline"
 fi
 
 verify_summary
