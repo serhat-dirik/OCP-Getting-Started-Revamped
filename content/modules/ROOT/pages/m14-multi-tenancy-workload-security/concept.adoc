@@ -1,0 +1,181 @@
+= Multi-Tenancy & Workload Security: Concept
+:module-id: m14
+include::partial$version-attributes.adoc[]
+
+// Concept page for M14. Renders in all three flavors (workshop/demo/instructor). Environment
+// values appear ONLY as attributes; product versions ONLY via version-attributes. Every RBAC/SCC/
+// quota behaviour described here was performed on OCP {ocp_version} as user1 on 2026-07-12 — the
+// admission-rejection strings, UID range, and who-can counts are real captures, not from memory.
+// M14 products are core-OCP behaviours (RBAC, SCC/PSA, ResourceQuota/LimitRange, OAuth/IdPs,
+// projects/templates, ServiceAccounts), so nothing new lands in versions.yaml.
+
+[.lead]
+Parasol is standing up a *payments team*: a few engineers, a CI robot, and three environments — dev, stage, prod — that must be theirs to move fast in, and nobody else's to break.
+The platform team's job is to hand them exactly that: the right people with the right access, workloads that can't quietly run as root, and quota so one team's mistake can't starve the cluster.
+This module is how OpenShift makes a *safe sandbox* — RBAC for who-can-do-what, ResourceQuota and LimitRange for how-much, and the security defaults that keep a container honest.
+
+== What you'll learn
+
+* How *identity* becomes *authority* on OpenShift: the flow from identity provider → user → group → RBAC, and why you bind to groups, not people.
+* How to design *roles and bindings* for a team — the built-in `view`/`edit`/`admin`, a *custom least-privilege Role*, and the escalation rule that stops a sandbox from escaping.
+* How *ResourceQuota* and *LimitRange* shape what a namespace may consume — and what happens the moment a workload asks for too much.
+* Why your containers run *non-root with a random UID* by default — Pod Security Admission and the *restricted-v2* Security Context Constraint — and how a scoped exception is granted when a workload genuinely needs one.
+* How *ServiceAccounts* and *bound tokens* give a workload a safe identity, and how the *tenancy spectrum* (namespace-per-team → cluster-per-team) frames the bigger design choice.
+
+== Identity, then authority
+
+Every request to the cluster answers two questions in order.
+First *authentication* — who are you? — settled by an *identity provider (IdP)* wired into OpenShift's OAuth server: an htpasswd file, an LDAP directory, or (as on this cluster) *Red Hat build of Keycloak*.
+The IdP proves you are `alice`; it says nothing about what you may do.
+Then *authorization* — what may you do? — settled by *RBAC*, which is the subject of most of this module.
+
+The chain from a login to a permission has four links, and the third one is the design lever:
+
+[mermaid]
+....
+graph LR
+  idp["Identity Provider<br/>(htpasswd · Keycloak · LDAP)"] -->|authenticates| user["User<br/>alice"]
+  user -->|member of| grp["Group<br/>payments-team"]
+  grp -->|RoleBinding| role["Role / ClusterRole<br/>verbs on resources"]
+  role -->|grants| act["get/list/create/…<br/>pods, deployments, secrets"]
+  classDef idp fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef sub fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef rb fill:#e00,stroke:#900,color:#fff;
+  class idp idp;
+  class user,grp sub;
+  class role,act rb;
+....
+
+// media-pass: replace/augment with SVG export m14-multi-tenancy-workload-security-01-identity-flow.svg (see media-manifest.md)
+
+The lever is *bind to the group, not the user*.
+When a new engineer joins payments, you add them to the group and they inherit every permission the group already has — no hunt through dozens of individual bindings.
+This is not theory: *you* are governed exactly this way in this workshop.
+Your login belongs to a `workshop-attendees` group; that group is bound to a read-only role for cluster-wide facts, and a separate per-user binding gives you `admin` on your own projects.
+In the lab you will inspect those very bindings — the platform already did to you what you are about to do to the payments team.
+
+== The RBAC object model
+
+RBAC has just four object types, and they compose in a way that is easy once you see the seam:
+
+*Role* / *ClusterRole*::
+A list of *permissions* — "these verbs (`get`, `list`, `create`, `delete`…) on these resources (`pods`, `deployments`, `secrets`…)."
+A `Role` is *namespaced*; a `ClusterRole` is *cluster-wide* and can be reused in any namespace.
+A Role grants nothing until it is bound.
+*RoleBinding* / *ClusterRoleBinding*::
+Ties a Role or ClusterRole to *subjects* — Users, Groups, or ServiceAccounts.
+A `RoleBinding` grants the role's permissions *in one namespace*; a `ClusterRoleBinding` grants them *everywhere*.
+The same ClusterRole (`view`) bound in two namespaces gives two independent, namespaced grants.
+
+OpenShift ships three built-in ClusterRoles you will reach for constantly:
+
+* `view` — read most things in a namespace, *but not Secrets*.
+* `edit` — `view` plus create/change workloads, config, and routes — *and it can read Secrets*.
+* `admin` — `edit` plus manage the namespace's own RBAC (Roles, RoleBindings) and ServiceAccounts.
+
+`admin` sounds like "can do anything," and the honest surprise is that it *cannot*.
+The built-in `admin` role deliberately *omits* applying a `ResourceQuota` or `LimitRange`, *omits* the cluster monitoring CRDs, and has *no rule for Security Context Constraints at all*.
+That is not an oversight — it is the *escalation-prevention* rule at work: RBAC forbids you from granting a permission you do not yourself hold.
+A namespace admin who can't apply quota also can't lift their own quota; one who can't grant an SCC can't smuggle their workload to root.
+The sandbox has walls precisely because "admin" is scoped, and you feel those walls in the lab.
+
+== Quota and limits: the resource guardrails
+
+RBAC governs *what actions* a subject may take; *ResourceQuota* and *LimitRange* govern *how much* a namespace may consume — a different axis, owned by the platform team.
+
+A *ResourceQuota* is a hard ceiling on a namespace: total `requests.cpu`, `requests.memory`, `limits.cpu`, `limits.memory`, and object counts (`pods`, `persistentvolumeclaims`).
+The interplay that trips people up is *requests vs limits*: a *request* is what the scheduler reserves for a Pod (and what the quota's `requests.*` counts); a *limit* is the ceiling the kubelet enforces at runtime (counted by `limits.*`).
+When a namespace has a quota on `requests.memory`, *every* Pod must declare a memory request, or it is refused.
+
+That last rule would make the namespace tedious to use — so a *LimitRange* fills the gap.
+It supplies *default* requests and limits to any container that omits them, and can set floors and ceilings per container.
+Quota sets the team's budget; LimitRange makes sure every Pod arrives with a price tag on it.
+In the lab you read the quota you already live under, deliberately blow past it, read the refusal, and fix it — then watch a LimitRange silently give a bare Pod its defaults.
+
+== Workload security: non-root by default
+
+Here is a fact that surprises everyone the first time: on OpenShift you *cannot* run a container as root just by asking.
+The platform assigns each workload a *random, high-numbered, non-root UID* and rejects anything that demands otherwise — unless a human has explicitly, narrowly, granted an exception.
+
+Two mechanisms enforce this.
+*Pod Security Admission (PSA)* is the upstream Kubernetes gate that labels namespaces `privileged`/`baseline`/`restricted`.
+*Security Context Constraints (SCCs)* are the OpenShift control that actually decides what a Pod's `securityContext` may contain — and on OpenShift, the SCC is the real enforcer.
+The default SCC available to every workload is *restricted-v2*: it drops *all* Linux capabilities, forbids privilege escalation, requires a seccomp profile, and — the beat of this module — pins the UID to a range *assigned to the namespace*, which never includes 0.
+
+That range is not abstract.
+Each project carries an annotation, `openshift.io/sa.scc.uid-range`, and restricted-v2 draws the Pod's UID from it.
+When a Deployment demands `runAsUser: 0`, admission compares 0 against that range and refuses the Pod — the exact rejection you will read in the lab:
+
+[mermaid]
+....
+graph TB
+  pod["Pod spec<br/>runAsUser: 0"] --> gate{"restricted-v2 SCC<br/>UID in namespace range?<br/>[1000960000–1000969999]"}
+  gate -->|"0 is not in range"| rej["REJECTED at admission<br/>'unable to validate against any<br/>security context constraint'"]
+  gate -->|"UID from range"| adm["Admitted<br/>runs as e.g. 1000960000<br/>non-root, no capabilities"]
+  fix["Fix the image<br/>drop runAsUser:0<br/>runAsNonRoot: true"] --> gate
+  scc["OR: scoped SCC grant<br/>RoleBinding → nonroot-v2<br/>for THIS ServiceAccount only"] -.->|"the justified exception"| adm
+  classDef bad fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef good fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef gate fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class rej bad;
+  class adm,fix good;
+  class gate gate;
+  class scc good;
+....
+
+// media-pass: replace/augment with SVG export m14-multi-tenancy-workload-security-02-scc-admission.svg (see media-manifest.md)
+
+There are two honest resolutions, and the lab covers both.
+The *right* fix almost always is *fix the image*: don't demand root — most software doesn't need it, and a container built for OpenShift declares a numeric non-root user and group-writable paths (the discipline introduced when you built images earlier in the workshop).
+When a workload *genuinely* needs a fixed or elevated UID — a legacy database, a monitoring agent — the platform grants a *scoped SCC exception*: a namespaced RoleBinding to a less-restrictive SCC (`nonroot-v2`, or `anyuid` only if root is truly required) targeting *one ServiceAccount*, never the whole namespace.
+Narrow, justified, auditable — the opposite of running everything as root.
+
+== Workload identity: ServiceAccounts and bound tokens
+
+People authenticate through an IdP; *workloads* authenticate as *ServiceAccounts*.
+Every Pod runs as one (the namespace `default` SA if you don't choose), and RBAC governs a ServiceAccount exactly like a user — which is why the payments team's CI robot is modelled as a ServiceAccount you bind a role to.
+
+How a workload proves it *is* that ServiceAccount has changed for the better.
+Older OpenShift auto-generated a long-lived token Secret for every SA — a credential that never expired and sat in the namespace forever.
+Current OpenShift turns that off: a fresh ServiceAccount has *no* token Secret.
+Instead you mint a *bound token* on demand — `oc create token <sa>` — which is time-limited, audience-scoped, and (when mounted in a Pod) invalidated the moment the Pod is deleted.
+In the lab you mint one and read its claims: a bounded lifetime and a subject that names exactly which ServiceAccount in which namespace.
+Short-lived, scoped, revocable — workload identity done right, and the same pattern an AI agent uses to reach the cluster with least privilege in a later module.
+
+== Tenancy models: how far do you split?
+
+"Multi-tenancy" is a spectrum of *blast-radius* choices, and OpenShift supports the whole range:
+
+* *Namespace-per-team* — many teams share one cluster, isolated by RBAC + quota + NetworkPolicy. Cheapest, densest, the default you are using; isolation is logical, so it depends on those guardrails being correct.
+* *Virtual clusters / Hosted Control Planes* — each tenant gets its own API server (its control plane running as Pods on a management cluster) while sharing worker capacity. Stronger isolation, a real option on OpenShift, without a full cluster per team.
+* *Cluster-per-team* — total isolation, total cost and operational multiplier. Reserved for hard regulatory or blast-radius boundaries.
+
+Two cluster-wide levers decide how self-service the namespace-per-team model is, and both are the platform team's to set:
+*self-provisioning* (by default, any authenticated user may create their own projects) and the *project request template* (what every new project is stamped with — a default-deny NetworkPolicy, a starter quota).
+Turning self-provisioning off and baking guardrails into a template is how a platform team moves from "anyone can make a wide-open namespace" to "every namespace is born governed."
+Those levers are cluster singletons — change one and it affects everyone — so in the lab your instructor demonstrates them while you watch.
+
+// media-pass: the cross-module Parasol platform-accretion diagram with the M14 layer (tenant sandbox: RBAC + quota + SCC around {user}-dev/stage/prod) highlighted — m14-multi-tenancy-workload-security-03-platform-accretion.svg (see media-manifest.md)
+
+== How this shows up in real orgs
+
+* *"Who can read the payment secrets?"* is a question a security auditor *will* ask, and `oc adm policy who-can get secrets` answers it — except the raw answer on a real cluster lists *over a hundred* subjects (platform controllers, operators, every namespace's builders).
+The skill is filtering to the subjects you care about; an audit you can't filter is an audit nobody runs.
+* *"admin" is a scoped word, and teams learn it the hard way.*
+The first time a team lead discovers their namespace `admin` can't raise their own quota, it feels like a bug; it is the platform protecting the shared cluster from every team's good intentions.
+Naming that boundary up front — quota is platform-owned, admin is namespace-scoped — turns a support ticket into an architecture conversation.
+* *The root-image fight is a migration tax nobody budgets for.*
+Legacy images that assume UID 0 hit restricted-v2 on day one of a container migration.
+The cheap path is fixing the image; the expensive path is a sprawl of `anyuid` grants that quietly re-open the door the platform closed.
+Knowing the difference — and that a *scoped* SCC to one ServiceAccount is the middle way — is what keeps a migration secure instead of merely done.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) *identity becomes authority* through RBAC, and you bind to *groups* so access scales with the team; (2) the platform enforces *non-root by default* — a container can't demand root without an explicit, scoped exception; (3) *quota and admin-scope are the walls of the sandbox*, and they're the platform team's to set, not the tenant's.
+The demo is the five-minute sandbox: take two ungoverned ServiceAccounts, grant one `edit`-in-dev/`view`-in-prod and the other a custom secrets-blind `deployer` Role, audit with `who-can`, then scale a root-demanding workload and watch restricted-v2 reject it live.
+Close on the punchline: "the platform gave this team speed *and* safety in five minutes, and none of it was a purchase — it's how OpenShift works."
+====
+endif::demo[]

@@ -1,0 +1,755 @@
+= Multi-Tenancy & Workload Security: Lab
+:module-id: m14
+include::partial$version-attributes.adoc[]
+
+// Lab page for M14. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only
+// the presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// [source,sh,role=execute]. To keep AsciiDoc attribute-substitution from eating jsonpath braces,
+// the FIRST block sets NS={user}-dev and PROD={user}-prod (subs=attributes, no braces) and every
+// later block uses $NS/$PROD with NO subs — so `{.status...}` stays literal. All commands + outputs
+// were performed on OCP {ocp_version} as user1 on 2026-07-12; the admission-rejection strings, the
+// UID range, and the who-can counts are real captures. Console click-paths are grounded against the
+// unified console (OCP 4.19+, no perspective switch); labels a build couldn't click get
+// [CAPTURE-VERIFY] + the authoritative CLI beside them.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set two shortcuts you will reuse throughout the lab — your team's dev and prod namespaces:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+PROD={user}-prod
+echo "payments team home: $NS  (+ $PROD, and {user}-stage)"
+----
+
+You are the platform engineer for Parasol's new *payments team*.
+Your `{user}-dev`, `{user}-stage`, and `{user}-prod` projects *are* that team's sandbox, and three ServiceAccounts have been seeded in it: `payments-ci` and `payments-ops` (two teammates you must govern) and `root-demander` (a workload with a security problem you'll meet first).
+In this lab you make that sandbox safe: reject a root-demanding workload and fix it, grant each teammate exactly the right access, author a custom least-privilege Role, live inside the team's quota, and finally inspect how the platform provisioned *you* the same way.
+
+[TIP]
+.Two ways for most steps; a few are terminal-only
+====
+Most steps below are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
+Pick a path once — the tabs stay in sync across the page.
+A few steps are *terminal-only* because the console adds nothing: minting a bound token, `oc adm policy who-can` audits, and the read-only "how you were provisioned" tour.
+Keep the terminal open regardless: the `$NS`/`$PROD` shortcuts you just set live there, and the verify steps rely on them.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 12-minute presenter arc: the five-minute safe sandbox
+// ============================================================================
+ifdef::demo[]
+== Demo arc — A safe sandbox for a team in five minutes (12 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws start m14 --user {user}` a few minutes ahead, and set `NS={user}-dev` and `PROD={user}-prod` in your terminal.
+This demo runs from the *entry* state (ungoverned teammate ServiceAccounts + a root-demanding workload scaled to 0), *not* from `ws solve`.
+The money moment is beat 4 — the live restricted-v2 rejection — so let the audience read the error.
+Keep the terminal font large; this is all CLI.
+====
+
+[demo-block]
+[TIME 2m]
+Say:: "This is Parasol's payments team. Three service accounts live in their project — two teammates and one workload — and right now *none* of them is governed. Let's give them a safe sandbox."
+Show:: The three seeded ServiceAccounts and the not-yet-running workload.
+Do:: Show the ungoverned starting point:
++
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev; PROD={user}-prod
+oc get sa payments-ci payments-ops root-demander -n $NS
+oc adm policy who-can update deployments -n $NS | grep -i payments || echo "payments teammates: UNGOVERNED (no access yet)"
+----
+
+[demo-block]
+[TIME 3m]
+Say:: "First teammate is a developer — full access in dev, read-only in prod. Different access per environment. Watch me grant it and prove it."
+Show:: `payments-ci` gets `edit` in dev and `view` in prod; `can-i` confirms it can change dev but only read prod.
+Do:: Grant per-environment access and verify:
++
+[source,sh,role=execute]
+----
+oc adm policy add-role-to-user edit -z payments-ci -n $NS
+oc adm policy add-role-to-user view system:serviceaccount:$NS:payments-ci -n $PROD
+echo "--- can-i (the proof) ---"
+echo -n "dev  update deployments: "; oc auth can-i update deployments --as=system:serviceaccount:$NS:payments-ci -n $NS
+echo -n "prod update deployments: "; oc auth can-i update deployments --as=system:serviceaccount:$NS:payments-ci -n $PROD
+----
++
+"Edit in dev, read-only in prod — one identity, two levels of access, exactly what an environment promotion needs."
+
+[demo-block]
+[TIME 3m]
+Say:: "Second teammate is the CI robot. It must *ship* deployments but must *never* read the payment secrets. `edit` would let it read secrets — so I write a custom least-privilege Role instead."
+Show:: A `deployer` Role (deployments yes, secrets no) bound to `payments-ops`; `can-i` proves it can deploy but is blind to Secrets.
+Do:: Author and bind the custom Role, then prove the least-privilege boundary:
++
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: deployer}
+rules:
+  - {apiGroups: ["apps"], resources: ["deployments","deployments/scale"], verbs: ["get","list","watch","create","update","patch","delete"]}
+  - {apiGroups: [""], resources: ["pods","pods/log"], verbs: ["get","list","watch"]}
+EOF
+oc adm policy add-role-to-user deployer -z payments-ops --role-namespace=$NS -n $NS
+echo -n "deploy? "; oc auth can-i create deployments --as=system:serviceaccount:$NS:payments-ops -n $NS
+echo -n "read secrets? "; oc auth can-i get secrets --as=system:serviceaccount:$NS:payments-ops -n $NS
+----
++
+"Ships deployments, blind to secrets. That's least privilege as code — and it's the difference between a CI token that's a convenience and one that's a breach."
+
+[demo-block]
+[TIME 3m]
+Say:: "Last thing — the workload. It demands to run as root. Watch the platform refuse it, live. No admission controller I installed; this is how OpenShift ships."
+Show:: Scaling `root-demander` to 1 produces *no Pod* — the ReplicaSet event is a restricted-v2 rejection naming `runAsUser: 0`.
+Do:: Trigger the live rejection and read the decisive line:
++
+[source,sh,role=execute]
+----
+oc scale deploy/root-demander --replicas=1 -n $NS
+sleep 6
+oc get deploy root-demander -n $NS
+RS=$(oc get rs -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
+oc get events -n $NS --field-selector involvedObject.name=$RS -o jsonpath='{.items[-1:].message}' | tr ',' '\n' | grep 'restricted-v2.*runAsUser'
+----
++
+"There it is — `restricted-v2: runAsUser: Invalid value: 0`. The platform gave this team speed *and* safety in five minutes, and none of it was a purchase. The fix is to stop demanding root — which is one line — and I'll show that in the module."
+
+[NOTE]
+.Reset between runs
+====
+`ws prep m14 --yes` returns the world to ungoverned teammates + a not-yet-run workload.
+Note the RBAC you created by hand (`edit`/`view`/`deployer` bindings) is *not* cleared by a plain reset — delete those RoleBindings, or run `ws prep m14 --yes`, before a second run so the "ungoverned" opening lands clean.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. The workload the platform won't run
+⏱ *~15 min* · watch restricted-v2 reject a root-demanding Pod, then fix it
+
+Start where the trouble is loudest.
+Your project has a Deployment called `root-demander`, seeded at *zero replicas* so nothing has tried to schedule yet.
+Its container demands to run as root (`runAsUser: 0`).
+Scale it up and watch what OpenShift does:
+
+// [CAPTURE-VERIFY] Topology/Deployments list → root-demander → scale arrows, or Details > Pods count (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Workloads* → *Deployments* → `root-demander`, and use the *Actions* menu → *Edit Pod count* (or the scale-up arrow) to set it to *1*.
+The Deployment will sit at *0 of 1* — the Pod never appears.
+Open the *Events* tab to see why.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc scale deploy/root-demander --replicas=1 -n $NS
+----
+--
+====
+
+Give it a few seconds, then look at the Deployment — it is stuck at `0/1`, and there are *no Pods*:
+
+[source,sh,role=execute]
+----
+oc get deploy root-demander -n $NS
+oc get pods -l app=root-demander -n $NS
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME            READY   UP-TO-DATE   AVAILABLE   AGE
+root-demander   0/1     0            0           18m
+No resources found in user1-dev namespace.
+----
+
+The Pod was *rejected at admission* — it never got created.
+The reason is on the ReplicaSet's events.
+The full message lists *every* Security Context Constraint on the cluster and why each one refused the Pod (about thirty of them), which is a wall of text — so pull out the one line that matters:
+
+[source,sh,role=execute]
+----
+RS=$(oc get rs -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
+oc get events -n $NS --field-selector involvedObject.name=$RS \
+  -o jsonpath='{.items[-1:].message}' | tr ',' '\n' | grep 'restricted-v2.*runAsUser'
+----
+
+.Expected output
+[source,texinfo]
+----
+ provider restricted-v2: .containers[0].runAsUser: Invalid value: 0: must be in the ranges: [1000960000, 1000969999]
+----
+
+Read that carefully.
+The default SCC, *restricted-v2*, will only admit a Pod whose UID falls in the range `[1000960000, 1000969999]` — and `0` (root) is not in it.
+Those numbers are not random: they are *your namespace's assigned range*, stamped on the project as an annotation.
+Confirm the range is the same one in the error:
+
+[source,sh,role=execute]
+----
+oc get ns $NS -o jsonpath='uid-range={.metadata.annotations.openshift\.io/sa\.scc\.uid-range}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+uid-range=1000960000/10000
+----
+
+`1000960000/10000` means "10000 UIDs starting at 1000960000" — exactly the `[1000960000, 1000969999]` the rejection named.
+Every workload in this namespace gets a UID from that band, and none of them can be root.
+That is the platform's default, and it is doing its job.
+
+Now *fix it*.
+The honest fix is almost always to stop demanding root: drop `runAsUser: 0` and declare the container compliant with the restricted profile.
+Patch the Deployment's security context:
+
+// [CAPTURE-VERIFY] Deployment → Actions → Edit → YAML view, edit securityContext block (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open `root-demander` → *Actions* → *Edit Deployment* → *YAML*.
+In the container's `securityContext`, delete `runAsUser: 0` and replace it with the restricted-compliant block from the *CLI* tab (`runAsNonRoot`, dropped capabilities, seccomp), then *Save*.
+The Deployment rolls out and the Pod appears.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc patch deploy root-demander -n $NS --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","securityContext":{"runAsUser":null,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}}}'
+oc rollout status deploy/root-demander -n $NS --timeout=90s
+----
+--
+====
+
+This time the Pod is admitted and runs.
+See *which UID it landed on* — you never chose one, so restricted-v2 assigned the bottom of the namespace range:
+
+[source,sh,role=execute]
+----
+POD=$(oc get pods -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
+oc get pod $POD -n $NS -o jsonpath='scc={.metadata.annotations.openshift\.io/scc}  phase={.status.phase}{"\n"}'
+oc exec $POD -n $NS -- id
+----
+
+.Expected output
+[source,texinfo]
+----
+scc=restricted-v2  phase=Running
+uid=1000960000(1000960000) gid=0(root) groups=0(root),1000960000
+----
+
+The workload runs as UID `1000960000` — non-root, drawn from the namespace range, under the `restricted-v2` SCC it never had to ask for.
+No image rebuild, no exception, no root.
+
+[NOTE]
+.The other resolution: a scoped SCC exception (instructor demonstrates)
+====
+Sometimes a workload *genuinely* needs a fixed or elevated UID — a legacy database image, a node agent.
+The answer is *not* to run everything as root; it is a *narrowly scoped* exception: a namespaced RoleBinding to a less-restrictive SCC (`nonroot-v2`, or `anyuid` only if UID 0 is truly required) targeting *one ServiceAccount*.
+`oc adm policy add-scc-to-user nonroot-v2 -z root-demander -n {user}-dev` writes exactly that binding.
+Your instructor demonstrates the grant (and its audit trail) live — see the concept page for why "fix the image" almost always wins over "grant the exception."
+====
+
+[.checkpoint]
+****
+✔ *Verify:* Scaling `root-demander` produced *no Pod* and a `restricted-v2 … runAsUser: Invalid value: 0` rejection; after dropping the forced root, the Pod runs as a non-root UID in your namespace range (`uid=1000960000…`) under the `restricted-v2` SCC.
+****
+
+== 2. Give the workload a safe identity
+⏱ *~7 min* · ServiceAccounts and short-lived bound tokens
+
+The Pod you just fixed runs *as a ServiceAccount* — `root-demander` — even though nobody typed a password.
+Workloads authenticate as ServiceAccounts the way people authenticate through an identity provider, and RBAC governs them identically.
+So how does a workload *prove* it is that ServiceAccount?
+
+Not with a long-lived secret.
+Current OpenShift no longer auto-generates a permanent token Secret for each ServiceAccount — check what secrets `payments-ci` actually has:
+
+[source,sh,role=execute]
+----
+oc get sa payments-ci -n $NS -o jsonpath='{range .secrets[*]}{.name}{"\n"}{end}'
+----
+
+.Expected output
+[source,texinfo]
+----
+payments-ci-dockercfg-4cvv9
+----
+
+Only a `dockercfg` pull secret — *no* `service-account-token`.
+Instead you mint a *bound token* on demand, scoped to a lifetime you choose:
+
+[source,sh,role=execute]
+----
+oc create token payments-ci -n $NS --duration=10m >/dev/null && echo "minted a 10-minute bound token for payments-ci"
+----
+
+The token is a JWT you would hand to a workload; *never print or paste it into chat*.
+What matters is its *claims* — decode them (the middle segment) to see the guarantees a bound token gives you:
+
+[source,sh,role=execute]
+----
+oc create token payments-ci -n $NS --duration=10m \
+  | cut -d. -f2 | base64 -d 2>/dev/null | tr ',' '\n' | grep -E '"exp"|"sub"|"namespace"' | head -3
+----
+
+.Expected output (`exp` is a Unix timestamp ~600 s from now)
+[source,texinfo]
+----
+"exp":1783881069
+"kubernetes.io":{"namespace":"user1-dev"
+"sub":"system:serviceaccount:user1-dev:payments-ci
+----
+
+A bounded lifetime (the `exp` timestamp is the 600 seconds you asked for), an audience of the cluster API, and a subject that names *exactly which ServiceAccount in which namespace*.
+Short-lived, scoped, and — when mounted in a Pod — invalidated the moment the Pod is deleted.
+That is workload identity done right, and it is the same least-privilege pattern an AI agent uses to reach the cluster in a later module.
+
+[.checkpoint]
+****
+✔ *Verify:* `payments-ci` has only a `dockercfg` secret (no permanent token); `oc create token payments-ci --duration=10m` mints a JWT whose claims name a bounded lifetime and the subject `system:serviceaccount:{user}-dev:payments-ci`.
+****
+
+== 3. Govern the payments team
+⏱ *~15 min* · grant each teammate exactly the right access, per environment
+
+Now the RBAC that makes the sandbox a *team's* sandbox.
+`payments-ci` is a developer identity: it should have full access in *dev* but be *read-only* in *prod* — the everyday shape of an environment promotion.
+
+First, prove it currently has *nothing* — and meet the audit command you'll use throughout:
+
+[source,sh,role=execute]
+----
+oc adm policy who-can update deployments -n $NS | grep -i payments || echo "payments-ci: ungoverned (no deployment access yet)"
+----
+
+The `who-can` command answers "who is allowed to do X here?" — an auditor's favourite question.
+(You'll see in a moment why the *filter* matters.)
+Now grant `payments-ci` `edit` in dev:
+
+// [CAPTURE-VERIFY] User Management → RoleBindings → Create binding → subject=ServiceAccount payments-ci, role=edit (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+In the console (project `{user}-dev`), go to *User Management* → *RoleBindings* → *Create binding*.
+Set *Binding type* = *Namespace role binding*, *Role name* = `edit`, *Subject* = *ServiceAccount*, subject namespace `{user}-dev`, subject name `payments-ci`, then *Create*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc adm policy add-role-to-user edit -z payments-ci -n $NS
+----
+The `-z` flag means "a ServiceAccount in this namespace."
+--
+====
+
+Then grant the *same* teammate only `view` in prod.
+Because the ServiceAccount lives in `{user}-dev` but the binding goes in `{user}-prod`, name the subject in full:
+
+[source,sh,role=execute]
+----
+oc adm policy add-role-to-user view system:serviceaccount:$NS:payments-ci -n $PROD
+----
+
+Now *prove* the access differs per environment — this is the real skill, verifying outcomes with `oc auth can-i`:
+
+[source,sh,role=execute]
+----
+echo "--- in DEV (edit) ---"
+echo -n "  update deployments: "; oc auth can-i update deployments --as=system:serviceaccount:$NS:payments-ci -n $NS
+echo -n "  delete deployments: "; oc auth can-i delete deployments --as=system:serviceaccount:$NS:payments-ci -n $NS
+echo "--- in PROD (view = read-only) ---"
+echo -n "  get pods:           "; oc auth can-i get pods         --as=system:serviceaccount:$NS:payments-ci -n $PROD
+echo -n "  create deployments: "; oc auth can-i create deployments --as=system:serviceaccount:$NS:payments-ci -n $PROD
+echo -n "  get secrets:        "; oc auth can-i get secrets      --as=system:serviceaccount:$NS:payments-ci -n $PROD
+----
+
+.Expected output
+[source,texinfo]
+----
+--- in DEV (edit) ---
+  update deployments: yes
+  delete deployments: yes
+--- in PROD (view = read-only) ---
+  get pods:           yes
+  create deployments: no
+  get secrets:        no
+----
+
+One identity, two environments, two levels of access — and note that even `view` in prod *cannot* read Secrets.
+Now re-run the audit, and see why the filter is not optional.
+Ask who can read Secrets in dev — *unfiltered first*:
+
+[source,sh,role=execute]
+----
+oc adm policy who-can get secrets -n $NS | grep -c 'system:serviceaccount'
+----
+
+.Expected output
+[source,texinfo]
+----
+101
+----
+
+Over a *hundred* subjects — platform controllers, operators, every namespace's builder — can read Secrets in your namespace.
+An audit that dumps a hundred rows is an audit nobody reads.
+The skill is *always pairing `who-can` with a filter* for the subjects you actually care about:
+
+[source,sh,role=execute]
+----
+oc adm policy who-can get secrets -n $NS | grep payments
+----
+
+.Expected output
+[source,texinfo]
+----
+        system:serviceaccount:user1-dev:payments-ci
+----
+
+There is `payments-ci` — because `edit` (which you granted it in dev) *can* read Secrets.
+Hold that thought: the next teammate must *not*.
+
+[.checkpoint]
+****
+✔ *Verify:* `payments-ci` can `update`/`delete` Deployments in `{user}-dev` (edit) but only `get` in `{user}-prod` (view — no create, no secrets); `who-can get secrets` returns over a hundred subjects unfiltered, and `payments-ci` appears when you filter, confirming `edit` grants Secret reads.
+****
+
+== 4. Author a least-privilege custom Role
+⏱ *~12 min* · a `deployer` Role that ships Deployments but is blind to Secrets
+
+`payments-ops` is the CI robot.
+It must *ship* Deployments — but it must *never* read the payment Secrets.
+The built-in `edit` role would work for deploying, but you just proved `edit` can read Secrets, so it's too much.
+This is exactly when you *write your own Role*.
+
+Create a `deployer` Role: full lifecycle on Deployments, read access to Pods to watch a rollout, and *deliberately no rule for Secrets or ConfigMaps*:
+
+// [CAPTURE-VERIFY] +Add / Import YAML, or User Management → Roles → Create Role (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Use the masthead *+* (*Import YAML*), paste the manifest from the *CLI* tab, and *Create*.
+The Role appears under *User Management* → *Roles* in `{user}-dev`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+rules:
+  # Full lifecycle on Deployments (including scale) — the CI robot's core job.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+  # Read Pods to observe a rollout — and DELIBERATELY no secrets/configmaps rule.
+  - apiGroups: [""]
+    resources: ["pods","pods/log"]
+    verbs: ["get","list","watch"]
+EOF
+----
+--
+====
+
+Bind it to `payments-ops` (referencing the Role by name in this namespace):
+
+[source,sh,role=execute]
+----
+oc adm policy add-role-to-user deployer -z payments-ops --role-namespace=$NS -n $NS
+----
+
+Now prove the least-privilege boundary — it can do its job, and *only* its job:
+
+[source,sh,role=execute]
+----
+echo -n "create deployments: "; oc auth can-i create deployments      --as=system:serviceaccount:$NS:payments-ops -n $NS
+echo -n "scale deployments:  "; oc auth can-i update deployments/scale --as=system:serviceaccount:$NS:payments-ops -n $NS
+echo -n "get secrets:        "; oc auth can-i get secrets             --as=system:serviceaccount:$NS:payments-ops -n $NS
+echo -n "get configmaps:     "; oc auth can-i get configmaps          --as=system:serviceaccount:$NS:payments-ops -n $NS
+----
+
+.Expected output
+[source,texinfo]
+----
+create deployments: yes
+scale deployments:  yes
+get secrets:        no
+get configmaps:     no
+----
+
+That is the whole point of a custom Role: `payments-ops` can ship and scale Deployments all day, and is *completely blind* to the team's Secrets.
+Contrast it with `payments-ci`, which holds `edit` in dev and therefore *can* read Secrets — same team, two different trust levels, expressed precisely in RBAC.
+
+[.checkpoint]
+****
+✔ *Verify:* The custom `deployer` Role lets `payments-ops` `create`/`update`/`scale` Deployments in `{user}-dev` but returns `no` for `get secrets` and `get configmaps` — least privilege, authored by you.
+****
+
+== 5. The quota and limits you live under
+⏱ *~13 min* · read the team's budget, blow past it, and fix it
+
+RBAC is *what actions* are allowed; *ResourceQuota* is *how much* the namespace may consume.
+Your team's quota is standing platform policy — read what budget you have and what you've used:
+
+// [CAPTURE-VERIFY] Administration → ResourceQuotas → workshop-quota (donut gauges) (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Administration* → *ResourceQuotas* → `workshop-quota` in `{user}-dev`.
+The gauges show used-vs-hard for CPU, memory, Pods, and PVCs.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc describe resourcequota workshop-quota -n $NS | sed -n '/Resource/,$p'
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+Resource                Used   Hard
+--------                ----   ----
+limits.cpu              200m   6
+limits.memory           128Mi  12Gi
+persistentvolumeclaims  0      5
+pods                    1      30
+requests.cpu            50m    3
+requests.memory         64Mi   6Gi
+----
+
+Your team may reserve up to `3` cores and `6Gi` of memory in *requests*, cap at `6` cores / `12Gi` in *limits*, and run `30` Pods.
+Note you *cannot create this quota yourself* — a namespace `admin` can read it but not change it, because quota is the platform team's lever, not the tenant's.
+Now *blow past it* on purpose.
+Deploy something that asks for `8Gi` — more than the whole `6Gi` requests budget:
+
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: quota-buster, labels: {app: quota-buster}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: quota-buster}}
+  template:
+    metadata: {labels: {app: quota-buster}}
+    spec:
+      containers:
+        - name: app
+          image: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
+          command: ["sleep","infinity"]
+          resources: {requests: {cpu: 100m, memory: 8Gi}, limits: {cpu: 200m, memory: 8Gi}}
+EOF
+sleep 5
+oc get deploy quota-buster -n $NS
+----
+
+The Deployment is created but stuck at `0/1` — like the SCC rejection in exercise 1, the *Pod* was refused.
+Read why:
+
+[source,sh,role=execute]
+----
+RS=$(oc get rs -n $NS -l app=quota-buster -o jsonpath='{.items[0].metadata.name}')
+oc get events -n $NS --field-selector involvedObject.name=$RS -o jsonpath='{.items[-1:].message}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+(combined from similar events): Error creating: pods "quota-buster-6df5879b69-dw8kj" is forbidden: exceeded quota: workshop-quota, requested: requests.memory=8Gi, used: requests.memory=64Mi, limited: requests.memory=6Gi
+----
+
+`exceeded quota … requested: requests.memory=8Gi … limited: requests.memory=6Gi` — the quota told you exactly what you asked for and what the ceiling is.
+*Fix it* by bringing the request within budget:
+
+[source,sh,role=execute]
+----
+oc set resources deploy/quota-buster -n $NS --requests=cpu=100m,memory=512Mi --limits=cpu=200m,memory=512Mi
+oc rollout status deploy/quota-buster -n $NS --timeout=60s
+----
+
+It schedules.
+Finally, see the *LimitRange* — the quota's partner — in action.
+A quota that enforces `requests.memory` means every Pod *must* declare one; a LimitRange supplies a *default* so a bare Pod isn't refused.
+Create a Pod that declares *no* resources at all:
+
+[source,sh,role=execute]
+----
+oc run no-resources-pod -n $NS --image=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest --command -- sleep infinity
+sleep 4
+oc get pod no-resources-pod -n $NS -o jsonpath='requests={.spec.containers[0].resources.requests}{"\n"}limits={.spec.containers[0].resources.limits}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+requests={"cpu":"100m","memory":"256Mi"}
+limits={"cpu":"500m","memory":"1Gi"}
+----
+
+You declared nothing, yet the Pod arrived with `requests` of `100m`/`256Mi` and `limits` of `500m`/`1Gi` — the LimitRange stamped its defaults so the quota-enforced namespace would accept it.
+Quota is the budget; LimitRange makes sure every Pod shows up with a price tag.
+
+Clean up the two workloads you created here:
+
+[source,sh,role=execute]
+----
+oc delete deploy quota-buster pod/no-resources-pod -n $NS
+----
+
+[.checkpoint]
+****
+✔ *Verify:* You read `workshop-quota` (couldn't change it), watched an `8Gi` Deployment be refused with `exceeded quota … limited: requests.memory=6Gi`, fixed it within budget, and saw a LimitRange inject default `requests`/`limits` onto a Pod that declared none.
+****
+
+== 6. How you were provisioned
+⏱ *~8 min* · the platform did to you exactly what you did to the payments team
+
+Everything you just did to `payments-ci` and `payments-ops`, the platform team already did to *you*.
+Turn the lens around and inspect your own governance — read-only.
+
+You belong to a *group*, and the group carries your cluster-wide read access:
+
+[source,sh,role=execute]
+----
+oc get group workshop-attendees -o jsonpath='members: {.users}{"\n"}'
+oc get clusterrolebinding platform-observer -o jsonpath='role: {.roleRef.name}  bound-to: {.subjects[0].kind}/{.subjects[0].name}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+members: ["user1","user2","user3","user4","user5","user6","user7","user8"]
+platform: Group/workshop-attendees
+----
+
+You are in `workshop-attendees`; that group is bound to a custom `platform-observer` ClusterRole — read-only access to cluster facts.
+So you *can* see the shared infrastructure:
+
+[source,sh,role=execute]
+----
+oc get nodes
+oc get storageclass
+----
+
+Both return results — `platform-observer` grants `get`/`list` on nodes, storage classes, and more.
+But you are *scoped*: try to reach beyond your own projects and RBAC stops you:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS >/dev/null && echo "own namespace: allowed"
+oc get pods -n user2-dev 2>&1 | head -1
+oc get namespaces 2>&1 | head -1
+----
+
+.Expected output (a peer's namespace and the cluster-wide list are forbidden)
+[source,texinfo]
+----
+own namespace: allowed
+Error from server (Forbidden): pods is forbidden: User "user1" cannot list resource "pods" in API group "" in the namespace "user2-dev"
+Error from server (Forbidden): namespaces is forbidden: User "user1" cannot list resource "namespaces" in API group "" at the cluster scope
+----
+
+You can read cluster-wide *facts* (nodes, storage) but not peer *workloads*, and you can't list all namespaces — the platform deliberately did *not* grant you a cluster-wide `namespaces` read, precisely so one tenant can't enumerate everyone else's projects.
+This is the same design you applied: bind to a group, grant the minimum, scope to a namespace.
+
+One last surprise about `admin`.
+You hold `admin` on your own projects — yet you already discovered it can't apply a quota or grant an SCC.
+Confirm the boundary directly:
+
+[source,sh,role=execute]
+----
+echo -n "as namespace admin, can I create a ResourceQuota? "; oc auth can-i create resourcequotas -n $NS
+echo -n "as namespace admin, can I create an SCC?          "; oc auth can-i create securitycontextconstraints
+----
+
+.Expected output
+[source,texinfo]
+----
+as namespace admin, can I create a ResourceQuota? no
+as namespace admin, can I create an SCC?          no
+----
+
+`admin` is a *scoped* word by design.
+You govern your team; the platform governs the cluster; and the wall between them is RBAC's escalation-prevention rule — you cannot grant yourself a power you were not given.
+That is what makes the sandbox safe to hand out.
+
+[.checkpoint]
+****
+✔ *Verify:* You confirmed you're a member of `workshop-attendees` (bound to `platform-observer`), can read cluster nodes/storage but *not* a peer's Pods or the full namespace list, and that your namespace `admin` returns `no` for creating a ResourceQuota or an SCC.
+****
+
+== 7. The platform team's cluster-wide levers (instructor demo)
+⏱ *~12 min* · watch — these change the whole cluster
+
+The last three controls are *cluster singletons*: change one and every tenant feels it.
+So your instructor drives them while you watch — you'll see the same objects you governed at namespace scope, now at cluster scope.
+
+:demo-title: The platform team's cluster-wide levers
+:demo-body: Your instructor performs the next three actions live — each changes a cluster singleton that affects every tenant, so you watch rather than run them.
+include::partial$instructor-demo.adoc[]
+
+Your instructor demonstrates three things (all sequenced and reverted so later modules keep working):
+
+. *Self-provisioning* — by default any authenticated user can create their own projects. The instructor removes that grant (and pins it with an `autoupdate=false` annotation so the cluster doesn't silently restore it), then shows a `new-project` attempt refused with `You may not request a new project via this API.` — then restores it.
+. *A project request template* — a Template in `openshift-config`, wired via the cluster `Project` config, that stamps *every* new project with a default-deny NetworkPolicy and a starter quota. The instructor shows the augmented template rendering `Project` + `RoleBinding` + `NetworkPolicy` + `ResourceQuota` — "every namespace born governed."
+. *The identity provider* — a read-only tour of `oc get oauth cluster -o yaml`, showing this cluster carries *two* IdPs at once: an htpasswd file and *Red Hat build of Keycloak* (OpenID). The punchline: the same Keycloak that secured your application logins earlier in the workshop also backs *cluster* login — one identity system, two jobs.
+
+You'll find the exact commands, expected output, and the cluster-wide watchouts in this module's instructor guide.
+
+[.checkpoint]
+****
+✔ *Verify (observed):* You watched self-provisioning be disabled and restored, a project template render baked-in guardrails, and the live OAuth config show htpasswd + Keycloak side by side — three levers that belong to the platform team, not the tenant.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the mechanics.
+Try these on your own:
+
+* *Scope a Role too widely, then catch it.* Grant `payments-ops` the built-in `admin` role in `{user}-dev` instead of `deployer`, then use `oc adm policy who-can get secrets -n {user}-dev | grep payments` to prove it can now read Secrets — the over-grant you'd flag in a review. Put it back to `deployer`.
+* *Prove the escalation rule.* As your namespace `admin`, try to grant `payments-ci` a *ClusterRoleBinding* to `cluster-admin` (`oc create clusterrolebinding … `) and read the refusal — you can't hand out a power you don't hold.
+* *Mint a token and use it.* Create a bound token for `payments-ci` (`oc create token payments-ci -n {user}-dev`), then use it with `oc --token=… --server=… get pods -n {user}-dev` to act *as the ServiceAccount*, and confirm the same token is denied `get secrets` in `{user}-prod`.
+
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to ungoverned teammates and a not-yet-run workload.
+(Note: RoleBindings you authored by hand are *not* removed by a plain reset — delete them, or use `ws prep --yes`, to return the teammates to fully ungoverned.)
+
+endif::demo[]

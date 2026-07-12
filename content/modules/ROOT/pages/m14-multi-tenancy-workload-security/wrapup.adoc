@@ -1,0 +1,91 @@
+= Multi-Tenancy & Workload Security: Wrap-up
+:module-id: m14
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You turned three empty projects into a governed *payments team* sandbox.
+You met a workload that demanded root and watched *restricted-v2* reject it at admission — then fixed it in one line so it runs as a non-root UID from your namespace range, never root.
+You gave `payments-ci` `edit` in dev and `view` in prod (one identity, two environments), then authored a custom `deployer` Role so `payments-ci`'s CI counterpart `payments-ops` can ship Deployments but is *blind to Secrets* — least privilege you wrote yourself.
+You read the team's ResourceQuota, blew past it on purpose, read the refusal, and fixed it — and watched a LimitRange stamp defaults on a bare Pod.
+Finally you turned the lens around and inspected how the platform provisioned *you*: a group binding for cluster-read, a scoped `admin` on your own projects, and walls you can't climb.
+
+[mermaid]
+....
+graph TB
+  subgraph tenant["Tenant sandbox — dev / stage / prod"]
+    sa1["payments-ci<br/>edit@dev · view@prod"]
+    sa2["payments-ops<br/>custom deployer Role<br/>(no secrets)"]
+    wl["root-demander<br/>non-root UID<br/>restricted-v2"]
+    q["ResourceQuota + LimitRange<br/>(platform-owned)"]
+  end
+  subgraph platform["Platform team — cluster scope"]
+    obs["platform-observer<br/>(read-only facts)"]
+    sp["self-provisioning<br/>+ project template"]
+    idp["OAuth IdPs<br/>htpasswd + Keycloak"]
+  end
+  platform -->|"provisions + governs"| tenant
+  classDef t fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef p fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  class sa1,sa2,wl,q t;
+  class obs,sp,idp p;
+....
+
+// media-pass: recap SVG m14-multi-tenancy-workload-security-04-what-you-built.svg (green = tenant-scoped self-service; blue = platform-owned cluster levers).
+
+The one idea under all of it: *a safe sandbox is RBAC (who), quota (how much), and SCC (how) working together* — and every one of those guardrails belongs to a scope, so a tenant's mistake stays inside the tenant.
+
+== Map to your org
+
+Take these back to how your teams get access today:
+
+. *When a new engineer joins a team, how many places do you touch?*
+You bound access to a *group*, so onboarding is one membership change.
+In your org, is team access expressed as group bindings, or as a pile of per-person grants someone edits by hand?
+If it's the latter, off-boarding is where it bites — the access nobody remembers to remove is the audit finding waiting to happen.
+. *Who can read your production Secrets — and can you answer in one command?*
+You ran `oc adm policy who-can get secrets` and got over a hundred subjects, then filtered to the ones that mattered.
+For your most sensitive namespace, could you produce that filtered list on demand for an auditor?
+If not, that's a `who-can` alias and a runbook entry with a real compliance value.
+. *What happens when a legacy image that assumes root meets your cluster?*
+You watched restricted-v2 refuse UID 0 and fixed the image instead of granting an exception.
+When your teams migrate older workloads, is the default answer "fix the image," "grant `anyuid` and move on," or "nobody knows"?
+The org that has a *policy* for that question — fix first, scope the exception to one ServiceAccount when you must — migrates securely; the one that doesn't accretes root grants it can never take back.
+
+== When *not* to reach for this
+
+Governance is a tool, and over-applying it is its own failure mode.
+Be honest about the edges:
+
+* *Don't write a custom Role when a built-in fits.*
+`view`, `edit`, and `admin` cover the overwhelming majority of team access, and they're maintained for you as APIs evolve.
+Write a custom Role only when you need a *specific* boundary the built-ins don't draw — like "deploy but never read Secrets."
+A namespace full of bespoke Roles that merely re-approximate `edit` is maintenance debt, not security.
+* *Don't reach for cluster-per-team when namespace-per-team is enough.*
+Full cluster isolation multiplies cost and operational load by the number of tenants.
+Most teams are perfectly isolated by RBAC + quota + NetworkPolicy in a shared cluster; step up to Hosted Control Planes or separate clusters only for a *real* boundary — hard regulatory separation, a blast radius you're contractually required to cap — not because it feels safer.
+Density is a feature; pay for isolation only where you must.
+* *Don't grant an SCC exception where fixing the image is cheaper.*
+A scoped `nonroot-v2` grant to one ServiceAccount is legitimate for a workload that genuinely needs a fixed UID.
+But most "needs root" is a Dockerfile that wrote to `/var` as UID 0 out of habit — fixable in minutes, and the fix is permanent.
+Every SCC grant is a door you have to remember you opened; open as few as you can, and never `anyuid` when `nonroot-v2` would do.
+* *Don't turn quota into a straitjacket.*
+Quota exists to stop one team from starving the cluster, not to make engineers file tickets for every Pod.
+Size it with real headroom and let LimitRange defaults do the paperwork; a quota so tight that teams spend their day fighting it is a platform team optimizing the wrong number.
+
+== Go deeper
+
+* *OpenShift Authentication & authorization* documentation — identity providers, the full RBAC reference, `oc adm policy` verbs, and the escalation-prevention rules you bumped into.
+* *Managing Security Context Constraints* — the complete SCC field reference, the built-in SCCs (`restricted-v2`, `nonroot-v2`, `anyuid`…), and how Pod Security Admission and SCCs relate on OpenShift.
+* *Networking for Dev & DevOps* (a separate module in this workshop) — the NetworkPolicy half of multi-tenancy: default-deny and precise allows, the network isolation that complements the RBAC and quota you built here.
+* *Hosted Control Planes* — when namespace-per-team isn't enough and you want a per-tenant API server without a full cluster each; the stronger-isolation rung of the tenancy spectrum.
+* *Securing Apps with Keycloak* (a separate module) — the application-authentication counterpart to this module's cluster-authentication: the same Red Hat build of Keycloak, serving app logins and, as you saw, cluster login too.
+
+[NOTE]
+.Clean up
+====
+To return your world to ungoverned teammates and a not-yet-run workload — the module's entry state — run `ws prep {module-id} --yes`.
+One caveat unique to this module: a plain reset purges workloads but *not* the RoleBindings and Roles you authored by hand (they harmlessly re-bind the same seeded ServiceAccounts).
+`ws prep {module-id} --yes` re-materializes the entry state; to be fully pristine, delete the `edit`/`view`/`deployer` bindings you created (`oc get rolebinding -n {user}-dev`).
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

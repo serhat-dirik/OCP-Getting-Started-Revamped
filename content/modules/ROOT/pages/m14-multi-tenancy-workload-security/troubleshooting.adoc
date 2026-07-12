@@ -1,0 +1,159 @@
+= Multi-Tenancy & Workload Security: Troubleshooting
+:module-id: m14
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (2026-07-12) plus known failure-mode
+// seeds. Format: Symptom / Cause / Fix. Commands use $NS = {user}-dev (set it once: NS={user}-dev).
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the project shortcut first: `NS={user}-dev` (and `PROD={user}-prod`).
+
+== Scaling `root-demander` produces no Pod — the Deployment sits at `0/1`
+
+Symptom:: You scaled `root-demander` to 1, but no Pod appears and `oc get deploy` shows `0/1` indefinitely.
+Cause:: This is the *intended* behaviour of exercise 1 — the Pod was rejected at admission because it demands `runAsUser: 0`, which the default `restricted-v2` SCC forbids.
+Fix:: Read the rejection, then fix the image (drop the forced root):
++
+[source,sh,role=execute]
+----
+RS=$(oc get rs -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
+oc get events -n $NS --field-selector involvedObject.name=$RS -o jsonpath='{.items[-1:].message}' | tr ',' '\n' | grep 'restricted-v2'
+----
++
+The decisive line is `restricted-v2: .containers[0].runAsUser: Invalid value: 0`.
+Patch the Deployment to run non-root (the exercise-1 fix), or, only if the workload genuinely needs a fixed UID, grant a scoped SCC to its ServiceAccount: `oc adm policy add-scc-to-user nonroot-v2 -z root-demander -n {user}-dev`.
+
+== `oc auth can-i --as=<user>` says "no" for something the user can actually do
+
+Symptom:: `oc auth can-i list nodes --as={user}` returns `no`, but when the attendee logs in they *can* list nodes; group-based access seems missing.
+Cause:: `--as=<user>` impersonates the *user identity only* — it does *not* apply the groups that user belongs to.
+Access granted via a group (here `platform-observer`, bound to the `workshop-attendees` group) is therefore invisible to plain `--as`.
+Fix:: Either add the groups to the impersonation, or verify by reading the *bindings*:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc auth can-i list nodes --as={user} --as-group=workshop-attendees --as-group=system:authenticated
+----
++
+For *ServiceAccounts* (`--as=system:serviceaccount:ns:name`), the grants are direct RoleBindings, so impersonation reflects them correctly — which is why the lab's `can-i` proofs target the teammate ServiceAccounts, not the user's group access.
+
+== A teammate ServiceAccount still can't do what you granted
+
+Symptom:: You ran `oc adm policy add-role-to-user …` but `oc auth can-i … --as=system:serviceaccount:…` still says `no`.
+Cause:: Usually the *subject form* is wrong for a cross-namespace grant.
+`-z <name>` means "a ServiceAccount *in the -n namespace*"; if the SA lives in `{user}-dev` but you're binding in `{user}-prod`, `-z` points at the wrong namespace.
+Fix:: For a cross-namespace subject, name it in full:
++
+[source,sh,role=execute]
+----
+# WRONG for prod (looks for the SA in prod, where it doesn't exist):
+#   oc adm policy add-role-to-user view -z payments-ci -n $PROD
+# RIGHT — the SA lives in dev, the binding goes in prod:
+oc adm policy add-role-to-user view system:serviceaccount:$NS:payments-ci -n $PROD
+oc auth can-i get pods --as=system:serviceaccount:$NS:payments-ci -n $PROD
+----
++
+Expect `yes`.
+Also confirm you targeted the ServiceAccount, not a User of the same name.
+
+== A Deployment is stuck at `0/1` with "exceeded quota"
+
+Symptom:: A Deployment is created but never gets a Pod; the ReplicaSet event says `exceeded quota: workshop-quota`.
+Cause:: The Pod's resource *requests* would push the namespace over its ResourceQuota (`requests.cpu 3`, `requests.memory 6Gi`, `pods 30`, …).
+Quota is enforced at *Pod creation*, so the Deployment object is accepted but its Pods are refused.
+Fix:: Read exactly what's short, then bring the request within budget:
++
+[source,sh,role=execute]
+----
+oc describe resourcequota workshop-quota -n $NS | sed -n '/Resource/,$p'
+oc set resources deploy/<name> -n $NS --requests=cpu=100m,memory=512Mi --limits=cpu=200m,memory=512Mi
+----
++
+You *cannot* raise the quota yourself (namespace `admin` can't write `resourcequotas`) — quota is platform-owned.
+Lower the request, reduce replicas, or ask the platform team to raise the team's budget.
+
+== A Pod is refused for a missing resource request even though a LimitRange exists
+
+Symptom:: A bare Pod (no `resources`) is rejected with `must specify requests.memory` (or similar), despite a `LimitRange` in the namespace.
+Cause:: When a quota enforces `requests.<x>`, every Pod must have that request; a `LimitRange` fills it *only if it defines a `defaultRequest` for that resource*.
+If the LimitRange covers CPU but not memory (or vice-versa), the uncovered resource still fails.
+Fix:: Check what defaults the LimitRange actually supplies:
++
+[source,sh,role=execute]
+----
+oc get limitrange workshop-limits -n $NS -o jsonpath='{range .spec.limits[*]}default={.default} defaultRequest={.defaultRequest}{"\n"}{end}'
+----
++
+The workshop LimitRange sets `defaultRequest` `cpu=100m, memory=256Mi` and `default` (limit) `cpu=500m, memory=1Gi`, so a bare Pod is accepted.
+If you author your own LimitRange, make sure its `defaultRequest` covers every resource the quota enforces.
+
+== "Where is the ServiceAccount's token Secret?" — there isn't one
+
+Symptom:: You look for a `payments-ci-token-xxxxx` Secret to use as a credential and can't find one; only a `-dockercfg` Secret exists.
+Cause:: Current OpenShift no longer auto-generates long-lived token Secrets for ServiceAccounts (`LegacyServiceAccountTokenNoAutoGeneration`).
+This is a security improvement — no permanent, never-expiring credential sitting in the namespace.
+Fix:: Mint a *bound* token on demand instead:
++
+[source,sh,role=execute]
+----
+oc create token payments-ci -n $NS --duration=10m
+----
++
+The token is time-limited and audience-scoped; a Pod that mounts a projected SA token gets one that's rotated automatically and invalidated when the Pod is deleted.
+Never print or paste the token into chat.
+
+== Self-provisioning won't stay disabled (it comes back)
+
+Symptom:: You removed the `self-provisioner` grant, but a moment later users can create projects again.
+Cause:: The `self-provisioners` ClusterRoleBinding carries `rbac.authorization.kubernetes.io/autoupdate=true`, so the cluster-policy controller *reconciles it back* to its default (with the group) within seconds.
+Fix:: Pin `autoupdate=false` *before* disabling, and use `oc patch` (the CLI wrappers leave a stray parallel binding):
++
+[source,sh,role=execute]
+----
+oc annotate clusterrolebinding self-provisioners rbac.authorization.kubernetes.io/autoupdate=false --overwrite
+oc patch clusterrolebinding self-provisioners --type=merge -p '{"subjects":[]}'
+# ... demonstrate the block, then restore:
+oc patch clusterrolebinding self-provisioners --type=merge \
+  -p '{"subjects":[{"apiGroup":"rbac.authorization.k8s.io","kind":"Group","name":"system:authenticated:oauth"}]}'
+oc annotate clusterrolebinding self-provisioners rbac.authorization.kubernetes.io/autoupdate=true --overwrite
+----
++
+If you used `oc adm policy remove-cluster-role-from-group`, check for a stray binding: `oc get clusterrolebinding | grep self-provision` should show *one* row.
+
+== A custom Role appears bound but grants nothing (or too much)
+
+Symptom:: A subject bound to your custom Role can't do what you expected, or can do more.
+Cause:: RoleBinding `roleRef` is immutable and easy to mis-target: binding the *ClusterRole* `edit` when you meant your namespaced Role `deployer`, or omitting `--role-namespace` so `oc` looks for a ClusterRole of that name.
+Fix:: Confirm the binding points at your namespaced Role, and re-check the Role's rules:
++
+[source,sh,role=execute]
+----
+oc get rolebinding -n $NS -o custom-columns='NAME:.metadata.name,ROLE-KIND:.roleRef.kind,ROLE:.roleRef.name,SUBJECT:.subjects[0].name'
+oc get role deployer -n $NS -o jsonpath='{range .rules[*]}{.apiGroups}/{.resources}: {.verbs}{"\n"}{end}'
+----
++
+`ROLE-KIND` must be `Role` (not `ClusterRole`) for your custom `deployer`.
+The `deployer` rules must include `apps/deployments` verbs but *no* `secrets` rule — if a subject can unexpectedly read Secrets, an over-broad binding (like `edit` or `admin`) is the cause.
+
+== The teammates aren't "ungoverned" after `ws reset`
+
+Symptom:: After `ws reset m14`, the entry check or a fresh demo shows `payments-ci`/`payments-ops` still holding access.
+Cause:: `ws reset`'s namespace purge clears workloads, Secrets, and ConfigMaps but *not* Roles/RoleBindings — so the bindings you authored by hand in the lab survive.
+They harmlessly re-bind the same seeded ServiceAccounts.
+Fix:: Delete the lab-authored bindings, then re-verify:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc get rolebinding -n {user}-dev
+oc delete rolebinding edit deployer -n {user}-dev --ignore-not-found
+oc delete rolebinding view -n {user}-prod --ignore-not-found
+oc delete role deployer -n {user}-dev --ignore-not-found
+ws verify {module-id} --entry-only
+----
++
+Or run `ws prep {module-id} --yes` for a full re-materialization.
+The impersonation-guarded entry check makes leftover governance visible to CI/instructors.
+
+'''
+
+_Last verified on OpenShift {ocp_version} (2026-07-12)._
