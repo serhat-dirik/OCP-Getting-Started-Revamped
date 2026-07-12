@@ -109,3 +109,54 @@ only when readers need the new/changed **pages**:
 > **One-time bootstrap caveat:** the self-heal (move 1) only works once a pod is already
 > running the self-healing `ws`. Cockpits provisioned **before** this CLI shipped must be
 > restarted **once** (move 2) to pick it up; from then on move 1 alone keeps their CLI current.
+
+## Reserved showrooms — protecting a live session from rollouts
+
+A live cockpit (your own demo/test session, or an attendee mid-exercise) can be disrupted
+two independent ways. Both are guarded, and both default to **`user5`**:
+
+| Vector | What triggers it | Guard | Where |
+|---|---|---|---|
+| **CLI restart** | `ws git-refresh --restart-terminals --all` | `WS_RESERVED_USERS` (env) skips them | `tools/ws/ws` |
+| **Argo self-heal** | a **pod-spec** change to the showroom chart (new env/lifecycle hook/image bump) that Argo Recreate-rolls into every showroom | `.Values.reservedUsers` renders their pod template **without** the change → no diff → no roll | `gitops/workshop-config/values.yaml` |
+
+The second is the subtle one: `workshop-config` has `selfHeal: true`, so a pushed pod-spec
+change reaches the cluster on its own (mirror auto-pull, or your `ws git-refresh`) and rolls
+**all** showrooms — the CLI reserved-list can't stop that, because no `ws` command is involved.
+`reservedUsers` closes it at the chart: for a listed user the roll-inducing block is not
+rendered, so their Deployment's `spec.template` is byte-identical to what's live and Argo has
+nothing to sync. Check the fleet at a glance:
+
+```
+oc get deploy -n showroom -L workshop.redhat.com/reserved-session
+```
+
+`reserved-session=true` = frozen against pod-spec rollouts. Keep a live session in BOTH lists
+(they are independent; both default to `user5`). For a fresh/replicable cluster with no live
+session, set `reservedUsers: []` so every showroom simply tracks the chart.
+
+### Deliberate update — hand a reserved showroom its pending changes
+
+A reserved user stays on the pre-change pod-spec until you release them **on purpose**, during
+their maintenance window:
+
+1. In `gitops/workshop-config/values.yaml`, remove the user from `reservedUsers` (drop
+   `- user5`; leave `reservedUsers: []` if none remain). Bump `version:` in
+   `gitops/workshop-config/Chart.yaml` (busts Argo's manifest cache). Commit and push to `main`.
+2. When the user is free, publish it:
+
+   ```
+   ws git-refresh
+   ```
+
+   `workshop-config` syncs, the user's Deployment now renders the pending pod-spec, and Argo
+   rolls **that one showroom once**. The marker flips to `reserved-session=false`. Confirm:
+
+   ```
+   oc rollout status deploy/showroom-user5 -n showroom
+   ```
+
+A released user takes **all** pending pod-spec changes in that single roll (the guard is not
+per-change). Re-adding them to `reservedUsers` afterward would render their pod-spec back
+without those changes and roll them **again** — only re-reserve a user you intend to freeze at
+the current spec, not one you just updated.
