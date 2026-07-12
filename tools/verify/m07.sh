@@ -46,6 +46,14 @@ gitea_file_exists() {
   curl -ksf -o /dev/null "https://${host}/api/v1/repos/${owner}/${repo}/contents/${path}"
 }
 
+# A raw file on a branch contains a needle — used to assert the Ex3 break-fix TARGET is present
+# (fork liveness alone false-passed a stale fork whose ClaimResourceTest.java lacked the toggle, G4).
+gitea_raw_contains() {
+  local owner="$1" repo="$2" path="$3" ref="$4" needle="$5" host
+  host="$(gitea_host)"; [[ -n "$host" ]] || return 1
+  curl -ksf "https://${host}/api/v1/repos/${owner}/${repo}/raw/${path}?ref=${ref}" 2>/dev/null | grep -q "$needle"
+}
+
 # Deployment has at least one ready replica.
 deploy_ready() {
   local name="$1" ns="$2" ready
@@ -59,6 +67,7 @@ check "entry marker ws-entry-m07 present"                 oc get cm ws-entry-m07
 check "claims-db deployment ready in ${NS}"               deploy_ready claims-db "$NS"                       || hint "the ephemeral DB is entry state — ws reset m07 --user ${USER_NAME}"
 check "Pipeline parasol-claims-build-test-deploy present" oc get pipeline parasol-claims-build-test-deploy -n "$NS" || hint "entry app not synced — ws start m07 --user ${USER_NAME}"
 check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing — re-run: ws start m07 --user ${USER_NAME} (fork job)"
+check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset m07 --user ${USER_NAME} re-asserts the fork's app content from the mirror"
 check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset m07 --user ${USER_NAME}"
 check "curated library task image-size-report reachable"  oc get task image-size-report -n parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 
