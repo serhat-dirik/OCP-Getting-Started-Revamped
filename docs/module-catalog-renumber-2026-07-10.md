@@ -1,5 +1,11 @@
 # Module catalog renumber — 2026-07-10 (project directive: sequential teaching order)
 
+> **Two reorders now exist — this page decodes BOTH.** (1) The **2026-07-10 Gen 1 → Gen 2**
+> sequential renumber (table immediately below). (2) The **2026-07-12 Gen 2 → Gen 3** reorder —
+> drop Virtualization + Block D compaction (section at the bottom). Net after 2026-07-12:
+> **M20 = Eventing** (NOT Virtualization) and **M24 = AI-Assisted Development** (NOT Eventing).
+> Always disambiguate a bare number by TOPIC and by the document's date.
+
 The catalog was renumbered to contiguous M01–M27 in teaching order (commit `74cb405`). Anything
 written before 2026-07-10 (status reports, G3/G4 test reports, research build notes, git history,
 old INBOX entries) uses the OLD numbers. This table is the permanent decoder.
@@ -51,3 +57,49 @@ as content; any old-text reference to them is stale, not remappable.
   research notes + oldcontent-mining-index + app-repo-publishing (consumed inputs) · ADR
   filenames 0003-m16-*/0004-m22-* (their headers carry a renumber note; content already cites
   new numbers where live).
+
+---
+
+## 2026-07-12 reorder (Gen 3): drop Virtualization + Block D compaction
+
+Second directive (2026-07-12): OpenShift Virtualization is **dropped** (no bare-metal/virt
+dependency on any workshop cluster), and Block D is compacted so Eventing sits right behind
+Serverless and the two AI electives stay adjacent. **M01–M17 are unchanged** (Gen 2 = Gen 3 for
+them). Only the Block D tail moves. Net library = **26 modules (M01–M26)**.
+
+**Never blind-remap by number across THIS boundary either** — a pre-2026-07-12 "M20" is
+Virtualization, a post-2026-07-12 "M20" is Eventing; a pre-2026-07-12 "M24" is Eventing, a post
+"M24" is AI-Assisted Development. Decode by TOPIC + date.
+
+| Gen 2 (2026-07-10) | Module (topic) | Gen 3 (2026-07-12) |
+|-----|--------|-----|
+| M18 | Service Mesh 3 & Advanced Gateways | **M18** (unchanged) |
+| M19 | Serverless Zero-to-Hero | **M19** (unchanged) |
+| M20 | OpenShift Virtualization for App Teams | **DROPPED** (retired; ID reused for Eventing) |
+| M21 | Resilience, Multi-Cluster & DR | **M21** (unchanged) |
+| M22 | Application Modernization (MTA + AI) | **M22** (unchanged) |
+| M23 | Agentic AI on OpenShift [ADD-ON] | **M23** (unchanged) |
+| M24 | Eventing Deep-Dive & Serverless Workflows | **M20** (moves up, behind Serverless) |
+| M25 | Packaging & Distributing Your App | **M25** (unchanged) |
+| M26 | Operator Development Deep-Dive | **M26** (unchanged) |
+| M27 | AI-Assisted Development (MCP) [ADD-ON] | **M24** (moves up, beside Agentic AI) |
+
+The three real changes: (1) **drop Virtualization**, (2) **Eventing M24 → M20**, (3)
+**AI-Assisted Dev M27 → M24**. Everything else keeps its number.
+
+Final Block D order (Gen 3): **M18** Service Mesh · **M19** Serverless · **M20** Eventing ·
+**M21** Resilience · **M22** Modernization · **M23** Agentic AI · **M24** AI-Assisted Dev ·
+**M25** Packaging · **M26** Operator Dev.
+
+### Renumber state — COMPLETE (2026-07-12)
+
+- Docs-only pass (no built content moved — only M01–M14 are built, none change number). Landed:
+  repo catalog roadmap (`content/…/index.adoc`), navs (`nav-workshop`/`nav-instructor`/`nav-demo`
+  Block-D "coming soon" placeholder), this decoder, m18/m19/m20 research build notes de-hedged,
+  m14 note `M27`→`M24` by topic. Private specs (`02-MODULE-SPECS`, `08-MODULE-CATALOG`,
+  `06-BACKLOG`, `00-PROJECT-BRIEF`, `01-ARCHITECTURE`, `05-REFERENCES`) renumbered by topic +
+  Virtualization dropped.
+- Deliberately NOT touched: the Gen 1 → Gen 2 table above and its dated notes (historical);
+  `oldcontent-mining-index.md` (consumed input, decode via tables); ADR headers; built M01–M14
+  content pages (any Virtualization prose in m01/m03 built pages = a **separate** virt-cleanup
+  follow-up, tracked with the M03 VM-showcase swap).

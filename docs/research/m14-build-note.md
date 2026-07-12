@@ -59,7 +59,7 @@ Cluster reality (verified live 2026-07-12, read-only):
 - `per-user-limits.yaml` → the exact **ResourceQuota** (`requests.cpu:3`, `requests.memory:6Gi`, `limits.cpu:6`, `limits.memory:12Gi`, `pvc:5`, `pods:30`) + **LimitRange** (default `500m/1Gi`, request `100m/256Mi`) the attendee reads and bumps into.
 - `per-user-batch.yaml` → the **Kueue admin-role gap** (admin lacks the `kueue.x-k8s.io` CRDs — no aggregate-to-admin label → bind `kueue-batch-user-role`): same "why doesn't admin cover this?" lesson, plus generous-vs-constraining quota framing.
 - `group-workshop-attendees.yaml` → the **IdP→group→RBAC** flow made concrete (bind to the group, not to N users).
-- `gitops/entry-states/m06/templates/maas-credentials.yaml` → **least-privilege ServiceAccount + `resourceNames`-scoped Role** doing cross-namespace work: the "workload identity / scoped credentials" exemplar (also seeds M27's agent-SA story).
+- `gitops/entry-states/m06/templates/maas-credentials.yaml` → **least-privilege ServiceAccount + `resourceNames`-scoped Role** doing cross-namespace work: the "workload identity / scoped credentials" exemplar (also seeds M24's agent-SA story — AI-Assisted Development, renumbered from M27 in the 2026-07-12 Block-D reorder).
 - `docs/adr/0002-argocd-topology-two-instances.md` → **per-user AppProject RBAC** + the "split the failure domain so one tenant's slip can't reach the platform" tenancy principle (a namespace-per-team-vs-blast-radius talking point).
 - `bootstrap/install.sh` (lines ~95-121, 174) → htpasswd IdP mechanics + the **OAuth-singleton merge hazard** (why GitOps can't own `oauth/cluster`).
 

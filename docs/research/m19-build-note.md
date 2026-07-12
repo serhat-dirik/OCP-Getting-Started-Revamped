@@ -33,20 +33,20 @@ Cluster reality (verified live 2026-07-12, read-only):
 
 ## Spec deltas
 
-- **Task brief says "M20 Eventing (M19 precedes it)" — WRONG per current specs.** M20 is **OpenShift Virtualization** (02-MODULE-SPECS line 252); the eventing deep-dive + Serverless Logic is **M24** (line 295: "Eventing Deep-Dive & Serverless Workflows"), and M19's own text says "the deep eventing + workflows story is **M24**". `content/…/index.adoc` also lists M24 as the eventing module. The M19 handoff target is **M24**, not M20. (Old standalone Kafka M18 was RETIRED 2026-07-08, folded into M24.)
+- **M19's handoff target is M20 Eventing** — the 2026-07-12 Block-D reorder has landed. Eventing = **M20** now sits right after M19 Serverless (02-MODULE-SPECS §M20 "Eventing Deep-Dive & Serverless Workflows"); that is where the deep eventing + workflows story lives, and M19's own "the deep eventing + workflows story is M20" pointer + the `content/…/index.adoc` roadmap both now read M20. Virtualization (old M20) is dropped; AI-Assisted Dev moved M27 → M24. (Old standalone Kafka M18 was RETIRED 2026-07-08, folded into the Eventing module now at M20.)
 - **Entry-state "Serverless installed" is net-new platform work** (see Cluster reality) — operator + `KnativeServing` + `KnativeEventing` via a new `platform-portfolio/components/serverless` and a `core+serverless` stack; none exists today.
 - **"claims-processor container image ready" is also net-new.** No m19 entry-state chart exists; the image must be materialized (hook Job building `apps/parasol-claims` into the internal registry, or an `oc import-image` of a prebuilt tag) — do **not** assume M02/M07 ran (module-independence rule 2). M17's "internal registry has no external route, build route-free via the API" applies here.
 - **Routing: a ksvc is NOT published with `oc create route edge`.** The project's standing "browser Routes must be `oc create route edge … --insecure-policy=Allow`" rule (MEMORY `browser-routes-need-edge`, M01/M02) **does not apply to Knative**: the Serverless operator **auto-creates the external edge-terminated OpenShift Route** (ns `knative-serving-ingress`, backed by Kourier) and the browser URL is `ksvc.status.url` (HTTPS by default). Hand-rolling a Route for a ksvc is wrong and will fight the operator. This is the "how Knative's routing interacts" answer the brief asked for.
 - **`kn func` local-build path is infeasible in the cockpit.** Local `kn func build/deploy` needs podman >=3.4.7 + push access to a registry; the Showroom **ttyd terminal has neither** (same constraint M17 recorded for the internal registry). The workshop func beat must use the **on-cluster build path**, which **requires OpenShift Pipelines** — so the `core+serverless` profile must also carry the `openshift-pipelines` component (M07's stack), or the func beat is `[INSTRUCTOR-DEMO]`/pre-built.
 - **Cold-start expectation for a JVM Quarkus ksvc is multi-second.** `parasol-claims` is JVM Quarkus (not native); scale-from-zero cold start is realistically ~2-5 s. That is *fine as the teaching moment* for the demo arc, but latency-sensitive beats should set `autoscaling.knative.dev/min-scale: "1"` and the note should be honest (contrast Quarkus native / cost-vs-latency tradeoff), not hide it.
-- **"eventing taste" default broker needs no Streams.** The PingSource->Broker->Trigger beat runs on the **default in-memory (MTChannelBasedBroker)** broker from `KnativeEventing` — no Kafka/Streams subscription (consistent with M24's subscription-free default). Per-user broker footprint is small but ×30 (see risks).
+- **"eventing taste" default broker needs no Streams.** The PingSource->Broker->Trigger beat runs on the **default in-memory (MTChannelBasedBroker)** broker from `KnativeEventing` — no Kafka/Streams subscription (consistent with M20's subscription-free default). Per-user broker footprint is small but ×30 (see risks).
 
 ## Approach recommendations
 
 1. **Build the GitOps install first** (rule 7 — imperative installs are a defect): net-new `platform-portfolio/components/serverless` modeled on `components/keda` = ns `openshift-serverless` + OperatorGroup + Subscription (`serverless-operator`, pin channel **`stable-1.37`**, `redhat-operators`) + **`KnativeServing`** (ns `knative-serving`) + **`KnativeEventing`** (ns `knative-eventing`); add a `serverless` stack and wire the `core+serverless` profile. Mine the redhat-cop base (below) for the CR/kustomize shape.
 2. **Ksvc arc = deploy -> observe revisions -> scale 0->N -> tune concurrency**, all namespaced in `{user}-dev` against the pre-built `parasol-claims` image on port 8080; watch `ksvc.status.url` (operator-managed edge Route) — **never** `oc create route edge` for the ksvc. Load via a small in-cluster hey/curl-loop pod (no external LB dependency, the project demo-client pattern), watching `oc get pods -w` scale from zero.
 3. **Traffic beat = tag-based blue/green on revisions** (`spec.traffic[]` with `tag`+`percent`, `latestRevision:false`), explicitly **contrasting M10 Argo Rollouts** (deployment-driven, metric-gated) — reuse the in-repo framing already in `m10-gitops-at-scale/concept.adoc`+`wrapup.adoc` so the three traffic-shift stories (Rollouts / mesh / Knative revisions) stay consistent.
-4. **Eventing taste stays a taste** (deep story = M24): PingSource -> default in-memory Broker -> Trigger -> the `parasol-claims` ksvc `ClaimEvent` sink, in one diagram; close with an explicit "the broker-vs-channel decision, DLQ and SonataFlow are **M24**" pointer.
+4. **Eventing taste stays a taste** (deep story = M20): PingSource -> default in-memory Broker -> Trigger -> the `parasol-claims` ksvc `ClaimEvent` sink, in one diagram; close with an explicit "the broker-vs-channel decision, DLQ and SonataFlow are **M20**" pointer.
 5. **Functions via on-cluster build only** (Pipelines dependency): `kn func create` a small `premium-calculator` (quarkus or node, `http` template) -> `kn func deploy` using the on-cluster/Pipelines build -> deploys as a ksvc. If Pipelines isn't in the profile, make this `[INSTRUCTOR-DEMO]` + a pre-built image; wrap with the honest **serverless-vs-Deployment decision matrix** (align with `m06 wrapup`).
 
 ## Mining results
@@ -82,7 +82,7 @@ Cluster reality (verified live 2026-07-12, read-only):
 | Tag-based traffic | new revision (change `spec.template`) -> `spec.traffic[]` tag+percent blue/green; contrast M10 | namespaced | **CLI \| Console** |
 | Eventing taste | PingSource -> Broker (in-memory) -> Trigger -> `parasol-claims` ksvc (`ClaimEvent`) | namespaced | **CLI** (+ Console view) |
 | Build a Function | `kn func create premium-calculator` -> **on-cluster** `kn func deploy` (Pipelines) | namespaced | **CLI** (IDE/product-UI beat) |
-| Wrap | serverless-vs-Deployment decision matrix + pointer to **M24** | — | — |
+| Wrap | serverless-vs-Deployment decision matrix + pointer to **M20** | — | — |
 
 Demo arc (spec): scale-from-zero under sudden load + revision rollback, 10 min.
 
@@ -101,11 +101,11 @@ Demo arc (spec): scale-from-zero under sudden load + revision rollback, 10 min.
 
 ### Concept diagram (>=1, per style guide)
 
-Request-driven compute on one page: **client -> (auto edge Route in `knative-serving-ingress`, Kourier) -> Route/Config -> Revision(s) -> KPA (scale 0<->N on concurrency)**, with a side panel for the **eventing taste** (PingSource -> Broker -> Trigger -> ksvc) and a callout box "traffic split by revision tag — the third way (M10 = Rollouts, M16 = mesh, here = Knative)". Editable Mermaid in-repo (style-guide §1).
+Request-driven compute on one page: **client -> (auto edge Route in `knative-serving-ingress`, Kourier) -> Route/Config -> Revision(s) -> KPA (scale 0<->N on concurrency)**, with a side panel for the **eventing taste** (PingSource -> Broker -> Trigger -> ksvc) and a callout box "traffic split by revision tag — the third way (M10 = Rollouts, M18 = mesh, here = Knative)". Editable Mermaid in-repo (style-guide §1).
 
 ### Cross-module fit (no overlap)
 
 - **M06** owns batch Jobs/Kueue and the async-spectrum decision table (already names Serverless as the request/event-driven counterpart) — M19 is the "request-driven" leg, don't re-teach batch.
 - **M10** owns Argo Rollouts progressive delivery — M19's traffic beat is the *revision-tag* contrast, cross-referenced, not a re-teach.
 - **M12/M06** own KEDA/Custom Metrics Autoscaler (event/queue-driven scale) — M19 owns KPA (request-driven, scale-to-zero); name the distinction, don't overlap.
-- **M24** owns the eventing deep-dive + Serverless Logic (SonataFlow) + optional Kafka — M19 gives only the source->broker->trigger taste and hands off. M24's entry-state is "claims-processor ksvc deployed (M19-equivalent end state)".
+- **M20** owns the eventing deep-dive + Serverless Logic (SonataFlow) + optional Kafka — M19 gives only the source->broker->trigger taste and hands off. M20's entry-state is "claims-processor ksvc deployed (M19-equivalent end state)".
