@@ -434,9 +434,6 @@ spec:
             # Without this override the ttyd shell opened as the showroom ServiceAccount and `ws` was
             # absent (found in the first live test, 2026-07-11). Point HOME at the PVC so shells open
             # as {user} with `ws` on PATH — realizing the intent the comment above always claimed.
-            # NOTE: this fixes the SHELL's $HOME only. Java reads user.home from PASSWD, not $HOME, so
-            # `mvn`/java still resolve ~/.m2 under /data (unwritable) until the passwd home is corrected
-            # — that root-fix is the lifecycle.postStart below (G4 SEV1-C).
             - name: HOME
               value: /home/lab-user
             - name: NAMESPACE
@@ -456,34 +453,6 @@ spec:
             limits:
               cpu: {{ $.Values.showroom.terminalResources.limits.cpu | quote }}
               memory: {{ $.Values.showroom.terminalResources.limits.memory | quote }}
-          # G4 SEV1-C root-fix: align the passwd home to $HOME so user.home==$HOME for the JVM. The
-          # image's runttyd rewrites /etc/passwd on every start with home=/data (nonexistent + unwritable),
-          # so `mvn`/java read user.home=/data → LocalRepositoryNotAccessibleException (/data/.m2). We
-          # can't rebuild the image this round, but the /etc/passwd FILE is group-writable (root-group,
-          # the arbitrary-UID pattern) so a postStart hook corrects the home to the persistent PVC.
-          # NOTE: `sed -i` FAILS here — it writes its temp file into /etc/ (the target's dir), which is
-          # NOT group-writable ("Permission denied"); only the file itself is. So rewrite via a /tmp temp
-          # + cat-back (cat > opens the existing file for write, needing only file perms). runttyd writes
-          # the /data line at startup and we race it, so wait until it appears, fix it once, and always
-          # exit 0 (a failing postStart would kill the container). Idempotent: after the fix the guard no
-          # longer matches; on a restart runttyd re-writes /data and this re-corrects it. Leaves runttyd's
-          # own setup (UID entry, bashrc, ttyd flags) untouched — this only edits the home field.
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/bash
-                  - -c
-                  - |
-                    for _ in $(seq 1 20); do
-                      if grep -q '^lab-user:.*:/data:/sbin/nologin$' /etc/passwd; then
-                        sed 's#^\(lab-user:[^:]*:[^:]*:[^:]*:[^:]*\):/data:/sbin/nologin$#\1:/home/lab-user:/bin/bash#' /etc/passwd > /tmp/passwd.ws \
-                          && cat /tmp/passwd.ws > /etc/passwd && rm -f /tmp/passwd.ws
-                        break
-                      fi
-                      sleep 0.5
-                    done
-                    true
       volumes:
         - name: showroom-files
           emptyDir: {}
