@@ -1,0 +1,65 @@
+# The batch component — the "dedicated pool" beat. A trivial always-running worker (monthly-statement
+# processor, Parasol framing) on the always-present tools image. ENTRY (solve=false): NO toleration and
+# NO nodeSelector, so it schedules on any general node. The attendee then ADDS a toleration + the
+# {{ .Values.batchPoolLabelKey }}={{ .Values.batchPoolLabelValue }} nodeSelector to pin it onto the
+# dedicated batch pool (the bootstrap-labeled+tainted worker). Teaching point (docs.redhat.com Nodes): a
+# toleration only PERMITS the tainted node, the nodeSelector is what ATTRACTS the pod there — you need
+# both, else the pod lands anywhere. ws solve renders the pinned end state.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statement-batch
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: statement-batch
+    workshop.redhat.com/module: m16
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: statement-batch
+  template:
+    metadata:
+      labels:
+        app: statement-batch
+        workshop.redhat.com/module: m16
+    spec:
+      {{- if .Values.solve }}
+      # SOLVE — pin to the dedicated batch pool: the toleration PERMITS the tainted node, the nodeSelector
+      # ATTRACTS the pod onto it (both required — a toleration alone lets it land anywhere).
+      tolerations:
+        - key: {{ .Values.batchPoolLabelKey }}
+          operator: Equal
+          value: {{ .Values.batchPoolLabelValue }}
+          effect: NoSchedule
+      nodeSelector:
+        {{ .Values.batchPoolLabelKey }}: {{ .Values.batchPoolLabelValue }}
+      {{- end }}
+      containers:
+        - name: batch
+          image: {{ .Values.toolsImage }}
+          # A believable, tiny batch loop — enough to be a schedulable, always-Ready workload to place.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "▶ statement-batch worker — monthly claim statements (Parasol)"
+              while true; do
+                echo "  processing statement batch $(date -u +%H:%M:%S)"
+                sleep 30
+              done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # restricted-v2 compliant (random non-root UID) so it admits with no SCC exception.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

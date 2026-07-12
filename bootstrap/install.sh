@@ -71,6 +71,43 @@ if [[ -z "$WS_PASS" || "$WS_PASS" == "null" || "$WS_PASS" == "generate" || "$WS_
   info "generated a random shared workshop password (recorded in ${CREDS_FILE})"
 fi
 
+# ── workshop node substrate (M16 scheduling / M21 resilience) ─────────────────
+# Cluster-scoped, one-time, idempotent node shaping the per-user entry charts must NOT own (ADR-0001
+# Rule 13 — entry charts never own cluster policy). Two pieces, both workshop-specific substrate:
+#   • a dedicated BATCH POOL: one worker labeled+tainted workshop.redhat.com/pool=batch so M16's
+#     toleration+nodeSelector beat is real (a toleration only PERMITS the tainted node; the nodeSelector
+#     ATTRACTS the pod — you need both). NoSchedule evicts nothing; it only blocks NEW untolerated pods.
+#   • synthetic FAILURE-DOMAIN labels workshop.redhat.com/zone={a,b,c} for M16's optional zone-spread
+#     narrative and M21's chaos drill. Deliberately workshop-namespaced — NOT the well-known
+#     topology.kubernetes.io/zone, which volume/scheduler controllers would treat as a real cloud AZ on
+#     this single-AZ bare-metal cluster. Inert metadata: nothing keys on it unless a workload's
+#     topologySpreadConstraints opts in.
+# Idempotent: --overwrite makes a re-run a no-op. This is bootstrap (not the portfolio) because node
+# objects can't be cleanly GitOps-reconciled and this is workshop substrate, not an operator install.
+info "shaping workshop node substrate (M16 batch pool + M16/M21 synthetic zones)"
+POOL_LABEL="workshop.redhat.com/pool=batch"
+ZONE_KEY="workshop.redhat.com/zone"
+# Pick a real worker (worker role, NOT also control-plane) as the batch pool node; deterministic (first
+# by name). Fall back to any node if a cluster has no pure-worker split (so the beat always has a target).
+BATCH_NODE="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
+[[ -n "$BATCH_NODE" ]] || BATCH_NODE="$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
+if [[ -n "$BATCH_NODE" ]]; then
+  oc label node "$BATCH_NODE" "$POOL_LABEL" --overwrite >/dev/null
+  oc adm taint nodes "$BATCH_NODE" "${POOL_LABEL}:NoSchedule" --overwrite >/dev/null
+  ok "batch pool: worker ${BATCH_NODE} labeled+tainted ${POOL_LABEL}:NoSchedule"
+else
+  err "no nodes found to shape a batch pool — M16's dedicated-pool beat will have no target"
+fi
+# Synthesize zones a/b/c round-robin across all nodes (idempotent --overwrite).
+read -ra SHAPE_NODES <<<"$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
+ZONES=(a b c)
+zi=0
+for n in "${SHAPE_NODES[@]}"; do
+  oc label node "$n" "${ZONE_KEY}=${ZONES[zi % 3]}" --overwrite >/dev/null
+  zi=$((zi + 1))
+done
+ok "synthetic ${ZONE_KEY} labels applied across ${#SHAPE_NODES[@]} node(s) (a/b/c round-robin)"
+
 # ── 1. portfolio stacks ───────────────────────────────────────────────────────
 # Pre-installed detection: managed/demo clusters (RHDP) often ship Lightspeed already wired
 # to their own LLM. Fighting that wiring breaks a working assistant (duplicate OperatorGroup
