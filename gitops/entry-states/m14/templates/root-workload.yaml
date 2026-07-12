@@ -1,0 +1,62 @@
+# The workload-security centrepiece. ENTRY (solve=false): a Deployment that DEMANDS root
+# (securityContext.runAsUser: 0) under its own least-privilege SA (root-demander), which can use only
+# restricted-v2 — so the pod is REJECTED at admission ("unable to validate against any security context
+# constraint"). It ships at replicas: 0 so the entry Argo app is HEALTHY (a 0-replica Deployment is
+# Healthy; nothing is scheduled yet) and `ws prep` converges; the attendee then `oc scale --replicas=1`
+# and reads the deterministic admission failure (selfHeal is off, so the scale sticks). SOLVE
+# (solve=true): the FIXED variant — no forced root, restricted-v2-compliant, scaled to 1 and running
+# (the honest "fix the image" resolution; the scoped-SCC grant is the [INSTRUCTOR-DEMO] alternative,
+# taught in content, not shipped here to avoid contradicting the fix).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: root-demander
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: root-demander
+    workshop.redhat.com/module: m14
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+spec:
+  # Entry: 0 (nothing scheduled → app Healthy; attendee scales up to see the rejection).
+  # Solve: 1 (the fixed image actually runs).
+  replicas: {{ if .Values.solve }}1{{ else }}0{{ end }}
+  selector:
+    matchLabels:
+      app: root-demander
+  template:
+    metadata:
+      labels:
+        app: root-demander
+        workshop.redhat.com/module: m14
+    spec:
+      # Dedicated workload SA so the [INSTRUCTOR-DEMO] scoped-SCC grant targets exactly this identity.
+      serviceAccountName: root-demander
+      containers:
+        - name: app
+          # Internal imagestream (RHEL-based tools image) — always present, no external pull secret,
+          # handles an arbitrary assigned UID (the fixed variant runs as a random non-root UID).
+          image: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+          {{- if .Values.solve }}
+            # FIXED: run as a non-root UID (restricted-v2 assigns one from the namespace range) and
+            # satisfy the restricted profile — this admits and runs cleanly.
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          {{- else }}
+            # DEMANDS root — restricted-v2 (MustRunAsRange, no uid 0) rejects this pod at admission.
+            # This is the failure the attendee reads; the fix is the solve variant above (or a scoped SCC).
+            runAsUser: 0
+          {{- end }}
