@@ -317,21 +317,24 @@ Notice the three Pods landed on *three different worker nodes* — the scheduler
 This is the deliberate break-and-fix of the module.
 You are going to delete a running Pod — the exact event that used to mean a 2 a.m. page — and watch the platform absorb it.
 
-First, in a *second* terminal (or the console Topology), keep an eye on the Pods:
+This is the classic *watch-in-one, act-in-the-other* beat, so use *both* cockpit terminals.
 
-[source,sh,role=execute]
+First, switch to *Terminal 2* (the second terminal tab) and start watching the Pods — copy the command below, paste it into Terminal 2, and leave it running:
+
+[source,sh]
 ----
 oc get pods -w
 ----
 
-Then, in your main terminal, delete one Pod:
+Then come back to *Terminal 1* and delete one Pod (click *Run*):
 
 [source,sh,role=execute]
 ----
 oc delete pod "$(oc get pods -l deployment=parasol-web -o jsonpath='{.items[0].metadata.name}')"
 ----
 
-In the watch window you see it happen in real time: the deleted Pod goes `Terminating`, and *before it is even gone* a new Pod appears in `ContainerCreating` and then `Running`.
+Watch *Terminal 2*: the deleted Pod goes `Terminating`, and *before it is even gone* a new Pod appears in `ContainerCreating` and then `Running`.
+When you have seen it, press *Ctrl+C* in Terminal 2 to stop the watch.
 Your desired state is three; actual briefly dropped to two; the ReplicaSet reconciled it back to three.
 
 Confirm with the events:
@@ -387,7 +390,8 @@ Console::
 +
 --
 . In the navigation, open *Networking* → *Routes* and click *Create Route*.
-. Name the Route `parasol-web`, select the `parasol-web` *Service*, set *Target port* to *8080*, and click *Create*.
+. Name the Route `parasol-web`, select the `parasol-web` *Service*, and set *Target port* to *8080*.
+. Check *Secure Route*, set *TLS termination* to *Edge* and *Insecure traffic* to *Allow*, then click *Create*.
 . Go back to *Topology* (under *Workloads*), click the `parasol-web` node, and click the *Open URL* arrow that now appears on the top-right of the node.
 +
 NOTE: In this console version you create a Route from *Networking → Routes* — there is no *Actions → Create Route* item on the Topology node, and a workload with no Route shows "No Routes found for this resource." in its side-panel *Resources* tab.
@@ -395,11 +399,11 @@ NOTE: In this console version you create a Route from *Networking → Routes* �
 CLI::
 +
 --
-The Service exposes two ports (8080 for HTTP, 8443 for HTTPS), so tell `oc expose` which one to publish:
+The Service exposes two ports (8080 for HTTP, 8443 for HTTPS). Publish it over TLS with an *edge* Route: the router terminates HTTPS with the cluster's certificate and forwards to the app's HTTP port 8080.
 
 [source,sh,role=execute]
 ----
-oc expose service/parasol-web --port=8080
+oc create route edge parasol-web --service=parasol-web --port=8080 --insecure-policy=Allow
 ----
 
 [source,sh,role=execute]
@@ -410,21 +414,22 @@ oc get route parasol-web
 .Expected output
 [source,texinfo,subs="attributes"]
 ----
-NAME          HOST/PORT                                        SERVICES      PORT   TERMINATION
-parasol-web   parasol-web-{user}-dev.{cluster_domain}          parasol-web   8080
+NAME          HOST/PORT                                 PATH   SERVICES      PORT   TERMINATION   WILDCARD
+parasol-web   parasol-web-{user}-dev.{cluster_domain}          parasol-web   8080   edge/Allow    None
 ----
 
 [NOTE]
-.Why `--port=8080`
+.Why an edge Route (and `--port=8080`)
 =====
-Because the Service has more than one port, `oc expose` cannot guess which to publish.
-`--port=8080` picks the HTTP port explicitly.
+Browsers reach anything on `*.apps` over HTTPS, so a plain HTTP Route lands on the router's "Application is not available" page.
+An *edge* Route terminates TLS at the router with the cluster's wildcard certificate, so `https://…` just works; `--insecure-policy=Allow` also answers plain `http://` (instead of redirecting), which keeps the `curl` below simple.
+Because the Service has more than one port, `--port=8080` picks the HTTP port the router forwards to.
 The Route's host is built from the Route name and your project — `parasol-web-{user}-dev.{cluster_domain}` — so it is unique to you; no two attendees collide.
 =====
 --
 ====
 
-Open your app at http://parasol-web-{user}-dev.{cluster_domain}/[the claims portal^].
+Open your app at https://parasol-web-{user}-dev.{cluster_domain}/[the claims portal^].
 You should see the *Parasol Insurance — Claims Portal* landing page.
 The seeded claims data is served at `/api/claims`:
 
@@ -544,7 +549,7 @@ oc delete "$(oc get pod -l deployment=parasol-web -o name -n {user}-dev | head -
 [source,sh]
 ----
 # 5. publish it at a URL — already ran in exercise 4
-oc expose service/parasol-web --port=8080
+oc create route edge parasol-web --service=parasol-web --port=8080 --insecure-policy=Allow
 ----
 
 [source,sh,role=execute]
@@ -613,7 +618,7 @@ Try this on your own:
 * Delete the *Deployment* (`oc delete deployment parasol-web`) and then check `oc get pods`.
 What happens to the Pods, and why?
 (Contrast this with deleting a single Pod in exercise 3.)
-* Re-deploy the app and re-create the Route in a *single* `oc new-app` command by adding `--labels` and then one `oc expose`.
+* Re-deploy the app and re-create the Route in a *single* `oc new-app` command by adding `--labels` and then one `oc create route edge`.
 How few commands can you get to a published app?
 * Ask Lightspeed to explain the difference between a *Service* and a *Route*, then verify its answer against what you built.
 
