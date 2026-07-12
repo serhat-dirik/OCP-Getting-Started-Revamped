@@ -29,6 +29,7 @@ VERIFY_DIR="${REPO_ROOT}/tools/verify"
 ARGO_NS="${WS_ARGO_NS:-openshift-gitops}"
 ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"
 GITEA_NS="${WS_GITEA_NS:-gitea}"
+STUDENT_ARGO_NS="${WS_STUDENT_ARGO_NS:-student-gitops}"
 MIRROR_ORG="${WS_MIRROR_ORG:-parasol}"
 MIRROR_REPO="${WS_MIRROR_REPO:-ocp-getting-started}"
 SOURCE_REVISION="${WS_REVISION:-main}"
@@ -287,20 +288,113 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   ok "purge requested in ${ns}"
 }
 
-purge_apps() {  # module user [keep-module] — delete the user's Application CRs for this module.
-  # These live in a control-plane namespace (ws-meta purgeAppsNamespace, e.g. student-gitops), NOT
-  # in the module's purge namespaces, so purge_ns never sees them. Selected by .spec.project (the
-  # per-user AppProject, e.g. proj-user7) — attendees create apps via the Argo UI and cannot be
-  # relied on to label them. keep-module (M10 G1 engine flag #1): a module's OWN chart-materialized
-  # apps carry workshop.redhat.com/module=<module> and share the same project as a conflicting
-  # module's — on a bare re-start, gc must not purge the TARGET's own world (it would never
-  # re-sync: the unchanged entry app is not recycled when nothing was evicted).
+# ── student-gitops attendee-app cleanup (SEV1-A) ──────────────────────────────────────────────────
+# Attendee-created apps live in the student-gitops CONTROL PLANE, where attendees have ZERO k8s RBAC
+# (only ARGO RBAC via proj-{user}, ADR-0002). So `oc delete application -n student-gitops` as an
+# attendee is Forbidden and the old `2>/dev/null` swallowed it into a silent no-op — a selfHeal
+# survivor (m09/m10 claims-*) then re-deployed into the just-purged namespace and prep/reset never
+# converged (SEV1-A). We instead delete through the STUDENT ARGO API as the attendee: the per-user
+# local account's token maps to role:{user} → proj-{user}, so Argo RBAC bounds every delete to the
+# user's OWN apps (a cross-project delete returns permission denied — the SAME boundary M10's negative
+# test proves). A namespace-wide k8s `delete applications` grant would be a cross-tenant hole and is
+# deliberately NOT used. Admin/instructor keep the direct k8s path (they can delete cross-namespace).
+_student_argo_host() {  # → student Argo server route host, derived from the ingress domain (attendee-
+  # safe: attendees cannot read the student-gitops route cross-namespace — the verify scripts' idiom).
+  local domain
+  domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
+  [[ -n "$domain" ]] || return 1
+  echo "student-gitops-server-${STUDENT_ARGO_NS}.${domain}"
+}
+_shared_password() {  # → the SHARED workshop password (non-secret). WS_WORKSHOP_PASSWORD overrides
+  # for CI; otherwise the gitea workshop-user-creds secret (workshop-config grants attendees a
+  # resourceName-scoped read on JUST that secret — attendee-argo-password-read.yaml).
+  if [[ -n "${WS_WORKSHOP_PASSWORD:-}" ]]; then printf '%s' "$WS_WORKSHOP_PASSWORD"; return 0; fi
+  oc get secret workshop-user-creds -n "${GITEA_NS}" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d
+}
+_json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+_argo_token() {  # user → a student-Argo session JWT for the per-user local account, or empty on failure
+  local user="$1" host pw
+  host="$(_student_argo_host)" || return 1
+  pw="$(_shared_password)"; [[ -n "$pw" ]] || return 1
+  curl -ksf --max-time 15 -X POST "https://${host}/api/v1/session" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$(_json_escape "$user")\",\"password\":\"$(_json_escape "$pw")\"}" 2>/dev/null \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1
+}
+_argo_list() {  # host token kind proj → "name<TAB>module-label" per item in proj (Argo RBAC also filters)
+  curl -ksf --max-time 15 "https://${1}/api/v1/${3}" -H "Authorization: Bearer ${2}" 2>/dev/null \
+    | WS_PROJ="$4" python3 -c '
+import json, os, sys
+proj = os.environ["WS_PROJ"]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for it in (d.get("items") or []):
+    spec = it.get("spec", {}) or {}
+    p = spec.get("project") or ((spec.get("template", {}) or {}).get("spec", {}) or {}).get("project")
+    if p != proj:
+        continue
+    md = it.get("metadata", {}) or {}
+    lbl = (md.get("labels") or {}).get("workshop.redhat.com/module", "")
+    print((md.get("name") or "") + "\t" + lbl)
+' 2>/dev/null
+}
+argo_purge_apps() {  # user proj [keep] — delete the user's OWN proj apps/appsets via the student Argo
+  # API. appsets FIRST (they regenerate deleted apps — M10 G1 flag #2). keep = a module label to
+  # preserve (the TARGET's own chart apps on a bare re-start). Best-effort + non-fatal: a token or
+  # reachability failure warns and returns (the k8s entry-app deletion still runs). Isolation is
+  # enforced by Argo — this token cannot see, let alone delete, another user's apps.
+  local user="$1" proj="$2" keep="${3:-}" host token name mod t=0
+  host="$(_student_argo_host)" || { info "student Argo host unknown — skipping attendee-app cleanup (${proj})"; return 0; }
+  curl -ksf --max-time 5 "https://${host}/healthz" >/dev/null 2>&1 \
+    || { info "student Argo unreachable — skipping attendee-app cleanup (${proj})"; return 0; }
+  token="$(_argo_token "$user")"
+  [[ -n "$token" ]] || { err "could not authenticate ${user} to student Argo — attendee apps in ${proj} NOT cleaned"; \
+    echo "   fix: workshop-config must grant attendees read on gitea/workshop-user-creds, or set WS_WORKSHOP_PASSWORD"; return 0; }
+  while IFS=$'\t' read -r name mod; do
+    [[ -n "$name" ]] || continue
+    [[ -n "$keep" && "$mod" == "$keep" ]] && continue
+    info "deleting attendee ApplicationSet ${name} (project ${proj}) via student Argo…"
+    # Content-Type is REQUIRED even on a body-less DELETE — the Argo gRPC-gateway 415s without it
+    # (the delete then silently no-ops and the survivor lives on — the exact SEV1-A failure mode).
+    curl -ksf --max-time 30 -X DELETE "https://${host}/api/v1/applicationsets/${name}" \
+      -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' >/dev/null 2>&1 || true
+  done < <(_argo_list "$host" "$token" applicationsets "$proj")
+  while IFS=$'\t' read -r name mod; do
+    [[ -n "$name" ]] || continue
+    [[ -n "$keep" && "$mod" == "$keep" ]] && continue
+    info "deleting attendee Argo app ${name} (project ${proj}) via student Argo…"
+    curl -ksf --max-time 30 -X DELETE "https://${host}/api/v1/applications/${name}?cascade=true" \
+      -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' >/dev/null 2>&1 || true
+  done < <(_argo_list "$host" "$token" applications "$proj")
+  # Wait until the user's apps clear (cascade prune honors the resources-finalizer) so the caller's
+  # namespace purge does not race a still-selfHealing app. Bounded + non-fatal: issuing the DELETE
+  # already stops selfHeal; the wait just lets the finalizer prune claims before purge_ns runs.
+  while (( t < 90 )); do
+    [[ -n "$(_argo_list "$host" "$token" applications "$proj")" ]] || break
+    sleep 5; t=$((t+5))
+  done
+}
+
+purge_apps() {  # module user [keep-module] — delete the user's Application/ApplicationSet CRs for this
+  # module's control plane (ws-meta purgeApps*). These live OUTSIDE the module's purge namespaces, so
+  # purge_ns never sees them; selected by .spec.project (proj-{user}). keep-module (M10 G1 engine flag
+  # #1): a module's OWN chart apps carry workshop.redhat.com/module=<module> and share proj-{user} with
+  # a conflicting module's — on a bare re-start gc must not purge the TARGET's own world. Admin/
+  # instructor delete via k8s directly; attendees (no k8s RBAC here) delete via the student Argo API,
+  # bounded to proj-{user} by Argo RBAC (SEV1-A — see argo_purge_apps).
   local module="$1" user="$2" keep="${3:-}" pair ns proj name mod
   pair="$(meta_apps "$module" "$user")"
   [[ -n "$pair" ]] || return 0
   ns="${pair%% *}"; proj="${pair##* }"
-  # ApplicationSets FIRST: an attendee's appset (M10 beat 1) re-generates any Application we
-  # delete, so purging apps before their generator is a self-defeating loop (M10 G1 flag #2).
+  if ! oc auth can-i delete applications.argoproj.io -n "$ns" >/dev/null 2>&1; then
+    # Attendee: no k8s delete in the control plane → go through Argo (proj-scoped, isolation-safe).
+    argo_purge_apps "$user" "$proj" "$keep"
+    return 0
+  fi
+  # Privileged (admin/instructor) k8s path. ApplicationSets FIRST: an attendee's appset (M10 beat 1)
+  # re-generates any Application we delete, so purging apps before their generator is self-defeating.
   for name in $(oc get applicationsets.argoproj.io -n "$ns" \
       -o jsonpath="{range .items[?(@.spec.template.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
     if [[ -n "$keep" ]]; then
