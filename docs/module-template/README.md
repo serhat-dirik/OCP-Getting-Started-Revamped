@@ -23,7 +23,7 @@ Extracted from the M01 vertical slice (2026-07-08). Copy `skeleton/` and follow 
 5. **Runnable blocks:** `[source,sh,role=execute]` — that's what makes click-to-run work in Showroom.
 6. **Console labels you can't ground from the CLI** get a `[CAPTURE-VERIFY]` marker + a grounded CLI alternative beside them; the smoke tester confirms the labels in a browser.
 7. **Environment values only via attributes** (`{user}`, `{ocp_console_url}`, `{cluster_domain}`, version attributes from `partial$version-attributes.adoc`). A hardcoded URL is a CI failure.
-8. **Entry chart conventions:** marker ConfigMap `ws-entry-mNN` in the primary namespace (verify scripts check it); `ws-meta.yaml` lists purge namespaces for reset; every template carries a one-line "why" comment; secrets only by reference.
+8. **Entry chart conventions:** marker ConfigMap `ws-entry-mNN` in the primary namespace (verify scripts check it); `ws-meta.yaml` lists purge namespaces for reset; every template carries a one-line "why" comment; secrets only by reference. **Optional `smokeCommands:` key** — a `ws-meta.yaml` list of 1–3 representative attendee commands the module genuinely leans on (an in-terminal `mvn …`, an `argocd app delete`); `ws smoke mNN` runs each as `{user}` inside the live cockpit and asserts exit 0 (`${USER}` resolves to the target user). Default empty — the generic smoke battery already covers the cockpit/identity class, so add only load-bearing commands (YAGNI). Example: `smokeCommands:` then `  - "oc get deployment claims-analysis -n ${USER}-prod"`.
 9. **Measure timings while performing** — the instructor table and `[~N min]` chips are measured, never guessed.
 10. **Verify scripts run as the attendee**: no reads outside the user's namespaces (e.g. derive the Gitea host from the ingress domain instead of reading the route cross-namespace).
 11. **Naming/acronym house convention** (resolves the 04-STYLE-GUIDE §1-vs-§5 ambiguity): full product name at first PROSE use per page ("Red Hat OpenShift Dev Spaces", then "Dev Spaces"); workshop-concept acronyms (S2I, UDI, ESO…) expanded at first use per page; ubiquitous tech acronyms (DNS, API, JSON, CPU, URL, JVM, PVC, RBAC…) never expanded (RBAC ruled in 2026-07-11 — mixed precedent resolved). Page titles and `//` comments don't count as first use.
@@ -33,6 +33,8 @@ Extracted from the M01 vertical slice (2026-07-08). Copy `skeleton/` and follow 
 ## Gates
 
 G1 self-audit (DoD in 03-DEV-WORKFLOW §4, output the checklist) → G2 content-editor mechanical pass → G3 sa-smoke-tester cold start (fresh user, follows the lab literally) → wave G4 milestone audit → G5 project-owner sign-off.
+
+G1 additionally requires the **attendee-cockpit gate**: `ws smoke mNN [userN]` green — it runs the attendee path (ws-on-PATH, `$HOME`/JVM `user.home`, isolation, freshness, in-cockpit `ws prep`/`verify`, plus any `smokeCommands`) from inside the live cockpit as `{user}`, never the admin kubeconfig. Paste its output as G1 evidence. Runs from admin/builder context after you've materialized the module (`ws prep mNN --user userN`, then `ws git-refresh --restart-terminals --user userN` so the cockpit clone is fresh).
 14. **Verify scripts are MODE-SPLIT: entry checks never run at completion.** Checks that assert
     entry-state materialization (a seeded flaw is present, canonical fork content, "no app deployed
     yet") belong to `--entry-only` mode ONLY. Full/end mode asserts OUTCOMES and must stay green
