@@ -5,6 +5,7 @@
 #   ws prep   <module> [--yes]       ATTENDEE self-service: detect leftovers, offer wipe, prepare
 #   ws start  <module> [--user U]    materialize the module's entry state for a user
 #   ws verify <module> [--user U]    run the module's verification script
+#   ws smoke  <module> [userN]       G1 attendee-cockpit gate: run the attendee path IN the live cockpit
 #   ws reset  <module> [--user U]    return the user's world to the module's entry state
 #   ws solve  <module> [--user U]    materialize the END state (instructor only)
 #   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
@@ -33,6 +34,14 @@ STUDENT_ARGO_NS="${WS_STUDENT_ARGO_NS:-student-gitops}"
 MIRROR_ORG="${WS_MIRROR_ORG:-parasol}"
 MIRROR_REPO="${WS_MIRROR_REPO:-ocp-getting-started}"
 SOURCE_REVISION="${WS_REVISION:-main}"
+SHOWROOM_NS="${WS_SHOWROOM_NS:-showroom}"
+
+# `ws smoke` targets the LIVE cockpit pod (showroom-<user>) and its ttyd shell container. SMOKE_POD/
+# SMOKE_NS are resolved per-run in cmd_smoke; declared here so the pod_i/pod_x exec helpers (dynamic
+# scope) reference an assigned global (shellcheck-clean) rather than an unset one.
+SMOKE_NS=""
+SMOKE_POD=""
+SMOKE_CONTAINER="terminal"
 
 ok()   { echo "✅ $*"; }
 err()  { echo "❌ $*" >&2; }
@@ -238,6 +247,16 @@ meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); 
   local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
   [[ -f "$meta" ]] || return 0
   awk '$1=="waitSeconds:"{print $2; exit}' "$meta"
+}
+
+meta_smoke_cmds() {  # module → ws-meta smokeCommands list (OPTIONAL, default empty). Each entry is a
+  # representative attendee command a module genuinely leans on (an in-terminal `mvn …`, an `argocd app
+  # delete`); `ws smoke` runs each as {user} in the live cockpit and asserts exit 0. ${USER} is resolved
+  # by the caller. The generic battery already catches most of the cockpit/identity class — declare only
+  # 1–3 load-bearing commands (YAGNI).
+  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
+  [[ -f "$meta" ]] || return 0
+  meta_list "$meta" smokeCommands
 }
 
 meta_apps() {  # module user → "namespace project" if the module declares attendee-created Argo
@@ -622,6 +641,106 @@ cmd_verify() {
   "$script" --user "$user" "$@"
 }
 
+# ── ws smoke — the G1 attendee-cockpit gate ───────────────────────────────────────────────────────
+# Runs the attendee path FROM the real cockpit terminal as {user} (never the admin kubeconfig), to
+# catch the recurring cockpit/identity defect class (ws-not-on-PATH, HOME=/data, JVM user.home,
+# isolation leaks, stale-pod, prep/verify RBAC) at the CHEAPEST gate. See docs/plans/2026-07-12-
+# cockpit-smoke-gate-design.md.
+smoke_pod() {  # user ns → newest Running showroom terminal pod name (bare, no pod/ prefix), or empty
+  local p
+  p="$(oc get pods -n "$2" -l "app.kubernetes.io/name=showroom,workshop.redhat.com/user=${1}" \
+        --field-selector=status.phase=Running --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -1)"
+  echo "${p#pod/}"
+}
+# pod_i: run a command EXACTLY as the attendee does — an INTERACTIVE ttyd shell that sources ~/.bashrc,
+# so `ws` is on PATH and the oc identity is {user}. A bare (non-interactive) exec would MISS the PATH
+# export (skel .bashrc early-returns for non-interactive shells) — that is a test artifact, not the
+# attendee's reality; the whole point of the gate is to test the interactive path. The greeting/MOTD
+# .bashrc prints lands on stdout but never enters a command's pipeline, and `check` discards stdout.
+pod_i() { oc exec "$SMOKE_POD" -n "$SMOKE_NS" -c "$SMOKE_CONTAINER" -- bash -ic "$1"; }
+# pod_x: bare (non-interactive) exec — no ~/.bashrc, no greeting; for CLEAN captures (e.g. clone HEAD).
+pod_x() { oc exec "$SMOKE_POD" -n "$SMOKE_NS" -c "$SMOKE_CONTAINER" -- bash -c "$1"; }
+
+# SC2016 is disabled for this whole function ON PURPOSE: the single-quoted $HOME/$uh/$(…) inside the
+# pod_i/pod_x command strings must stay UNEXPANDED host-side and evaluate in the attendee's pod shell.
+# shellcheck disable=SC2016
+cmd_smoke() {
+  local module user="$1"; module="$2"; shift 2 || true
+  # Accept a positional userN (ws smoke m09 user1) in addition to --user, resolved like other verbs.
+  local a
+  for a in "$@"; do [[ "$a" =~ ^user[0-9]+$ ]] && user="$a"; done
+  need_oc
+  # Reuse the verify scripts' ✅/❌ + hint idiom verbatim (check/hint/VERIFY_PASS/VERIFY_FAIL).
+  # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
+  source "${VERIFY_DIR}/_lib.sh"
+
+  SMOKE_NS="$SHOWROOM_NS"
+  SMOKE_POD="$(smoke_pod "$user" "$SMOKE_NS")"
+  [[ -n "$SMOKE_POD" ]] || die "no Running showroom cockpit for ${user} in ns ${SMOKE_NS} — provision the session first (oc get pods -n ${SMOKE_NS} -l workshop.redhat.com/user=${user})"
+  info "smoke ${module} from ${user}'s cockpit (pod ${SMOKE_POD}) — running the attendee path as ${user}…"
+  echo
+
+  # ── identity & environment (the cockpit-identity class) ─────────────────────────────────────────
+  check "ws is on the attendee's interactive PATH (as typed in ttyd)" pod_i 'command -v ws' \
+    || hint "ws missing from the interactive PATH — check the WS_WORKSHOP_PROFILE block in ~/.bashrc (showroom terminal-prep)"
+  check "\$HOME is /home/lab-user (persistent PVC, not /data)" pod_i '[[ "$HOME" == /home/lab-user ]]' \
+    || hint "terminal HOME wrong — the showroom terminal container needs env HOME=/home/lab-user"
+  check "JVM user.home == \$HOME (Maven/.m2 not stranded on /data)" pod_i 'uh=$(java -XshowSettings:properties 2>&1 | sed -n "s/^.*user\.home = //p" | tr -d "[:space:]"); [[ -n "$uh" && "$uh" == "$HOME" ]]' \
+    || hint "passwd home != \$HOME — the terminal postStart must rewrite /etc/passwd home to /home/lab-user (the JVM reads user.home from passwd, not \$HOME)"
+  check "shell identity is ${user} (not the showroom ServiceAccount)" pod_i "[[ \"\$(oc whoami 2>/dev/null)\" == \"${user}\" ]]" \
+    || hint "terminal is not logged in as ${user} — terminal-prep's oc login failed; inspect the showroom pod"
+  check "attendee is NOT cluster-admin (no privileged context reachable)" pod_i '! oc auth can-i "*" "*" --all-namespaces --quiet 2>/dev/null' \
+    || hint "attendee has cluster-admin rights — a privileged-context leak; the cockpit must run as the unprivileged {user}"
+
+  # ── isolation (attendee sees ONLY their own world) ──────────────────────────────────────────────
+  check "peer projects invisible (own namespaces only)" pod_i "oc get projects -o name 2>/dev/null | sed 's#.*/##' | grep -E '^user[0-9]+-' | grep -vq '^${user}-' && exit 1 ; exit 0" \
+    || hint "attendee can see another user's namespaces — a per-user RBAC leak (workshop-config per-user rolebindings)"
+  check "system 'openshift' project invisible to the attendee" pod_i '! oc get project openshift >/dev/null 2>&1' \
+    || hint "attendee can read the openshift project — namespace isolation leak"
+  check "cluster-scope 'oc get namespaces' is Forbidden" pod_i '! oc get namespaces >/dev/null 2>&1' \
+    || hint "attendee can list all namespaces cluster-wide — a cluster-scope RBAC leak"
+
+  # ── freshness (the stale-pod class: a cockpit serving content behind the mirror) ────────────────
+  local want have
+  want="$(mirror_head || true)"
+  have="$(pod_x 'git -C "$HOME/ocp-getting-started" rev-parse HEAD 2>/dev/null' 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -z "$want" ]]; then
+    info "mirror HEAD unreadable (gitea down?) — skipping the freshness check"
+  else
+    check "cockpit clone HEAD matches the mirror (${want:0:8})" test "$have" = "$want" \
+      || hint "pod serves ${have:0:8}, mirror ${want:0:8} — a stale cockpit: ws git-refresh --restart-terminals --user ${user}"
+  fi
+
+  # ── lifecycle FROM the cockpit (the attendee's real prep/verify entrypoints) ────────────────────
+  check "ws prep ${module} converges from the cockpit (attendee self-service)" pod_i "ws prep ${module}" \
+    || hint "attendee 'ws prep ${module}' did not converge — materialize it first: ws prep ${module} --user ${user}, then re-smoke"
+  # --entry-only on purpose: the smoke targets a freshly-materialized ENTRY state; a completed lab's
+  # END checks legitimately go red on an entry state (verify scripts are mode-split, template rule 14).
+  check "ws verify ${module} --entry-only passes N/N in the cockpit" pod_i "ws verify ${module} --entry-only" \
+    || hint "entry checks are red in the cockpit — inspect: ws verify ${module} --user ${user}"
+
+  # ── per-module hook: representative click-to-run blocks (ws-meta smokeCommands, optional) ────────
+  local sc had_sc=0
+  while IFS= read -r sc; do
+    [[ -n "$sc" ]] || continue
+    had_sc=1
+    sc="${sc//\$\{USER\}/${user}}"
+    check "smokeCommand: ${sc}" pod_i "$sc" \
+      || hint "a representative attendee command failed in the cockpit — run it in ${user}'s terminal to debug"
+  done < <(meta_smoke_cmds "$module")
+  [[ "$had_sc" == 1 ]] || info "(no ws-meta smokeCommands for ${module} — generic battery only)"
+
+  # ── summary (N/N, non-zero exit on any failure so the gate can fail CI/agent briefs) ────────────
+  echo
+  local total=$((VERIFY_PASS + VERIFY_FAIL))
+  if (( VERIFY_FAIL == 0 )); then
+    ok "smoke ${module} @ ${user}: ${VERIFY_PASS}/${total} attendee-cockpit checks passed"
+  else
+    err "smoke ${module} @ ${user}: ${VERIFY_FAIL} of ${total} attendee-cockpit checks FAILED — do not pass G1 until green"
+    exit 1
+  fi
+}
+
 cmd_reset() {
   local module user="$1"; module="$2"
   need_oc
@@ -890,6 +1009,7 @@ main() {
     prep)        cmd_prep "$(user_arg "$user")" "$(module_arg "$module")" ${extra[@]:+"${extra[@]}"};;
     start)       cmd_start "$(user_arg "$user")" "$(module_arg "$module")";;
     verify)      cmd_verify "$(user_arg "$user")" "$(module_arg "$module")" ${extra[@]:+"${extra[@]}"};;
+    smoke)       cmd_smoke "$(user_arg "$user")" "$(module_arg "$module")" ${extra[@]:+"${extra[@]}"};;
     reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;
     solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
     doctor)      cmd_doctor;;
