@@ -81,7 +81,12 @@ if oc get olsconfig cluster >/dev/null 2>&1; then
   PROVIDER="$(oc get olsconfig cluster -o jsonpath='{.spec.llm.providers[0].type}' 2>/dev/null || echo '?')"
   ok "OpenShift Lightspeed pre-installed (provider: ${PROVIDER}) — reusing it; ai-assist stack skipped"
 fi
-STACKS="core-devtools"
+# batch stack (Kueue + KEDA) is a HARD baseline dependency, NOT optional: the workshop-config
+# layer below unconditionally ships per-user Kueue queues (kueue-queues + per-user-batch). Omit
+# batch and workshop-config's sync dies on missing kueue.x-k8s.io CRDs — which also aborts the
+# in-app Gitea/Argo seed hooks riding the same Application, blocking the whole workshop. M06 also
+# teaches Kueue. Verified: a clean bootstrap without it broke cluster-km7vw's seed (2026-07-12).
+STACKS="core-devtools,batch"
 [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]] && STACKS="${STACKS},ai-assist"
 # auth stack (Red Hat build of Keycloak) for M13. Workshop-agnostic; per-user realms are seeded by the
 # workshop layer below (sso.enabled). Its own OwnNamespace operator never touches a cluster login IdP.
