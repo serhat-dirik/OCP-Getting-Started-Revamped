@@ -1,0 +1,76 @@
+# The native-isolation half of M15's east-west story: a Layer2 Primary UserDefinedNetwork gives the
+# {user}-partner namespace its OWN pod network — pods here are isolated from {user}-dev with NO
+# NetworkPolicy at all (the punchline vs the netpol sprawl in {user}-dev). The namespace itself is
+# workshop-layer (per-user-partner.yaml) because a Primary UDN REQUIRES the label
+# k8s.ovn.org/primary-user-defined-network at namespace-creation time (cannot be added later) — see
+# gitops/workshop-config/templates/per-user-partner.yaml. This chart owns only the in-namespace UDN
+# and its workload.
+---
+# why: the primary network for {user}-partner. sync-wave 0 so it exists BEFORE the workload (wave 1)
+# — the UDN hard rule "the UDN must exist before any pods" (you cannot convert a populated namespace).
+# Layer2 + role Primary is confirmed supported on the live CRD enum/CEL (versions.yaml udn; the
+# `oc explain layer2.role` description text is stale — trust the enum).
+apiVersion: k8s.ovn.org/v1
+kind: UserDefinedNetwork
+metadata:
+  name: partner-udn
+  namespace: {{ .Values.user }}-partner
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    workshop.redhat.com/module: m15
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+spec:
+  topology: Layer2
+  layer2:
+    # Primary = replaces the default pod network for this namespace (native isolation, no netpol).
+    role: Primary
+    subnets:
+      - {{ .Values.partnerSubnet | quote }}
+---
+# why: a workload living ON the partner UDN — proof that the isolated L2 segment carries real pods.
+# It auto-attaches to the primary UDN (no annotation needed for Primary). sync-wave 1 so it is created
+# only after the UDN reconciles. restricted-v2 compliant so it admits with no SCC exception.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: partner-workload
+  namespace: {{ .Values.user }}-partner
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: partner-workload
+    workshop.redhat.com/module: m15
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: partner-workload
+  template:
+    metadata:
+      labels:
+        app: partner-workload
+        workshop.redhat.com/module: m15
+    spec:
+      containers:
+        - name: workload
+          # RHEL tools imagestream — always present; carries curl so the isolation probe can run
+          # both directions (dev↔partner) from the pod itself.
+          image: {{ .Values.demoClientImage }}
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

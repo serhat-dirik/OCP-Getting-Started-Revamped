@@ -24,6 +24,10 @@ check() {  # check "<description>" <command...>  — pass/fail one assertion
 
 hint() { echo "   ↳ fix: $*"; }
 
+# Neutral note (skipped/context lines) — matches ws's own info style so smoke output is unchanged
+# when a verify script shadows it. Standalone verify scripts (m14/m15) rely on this being defined.
+info() { echo "▶ $*"; }
+
 verify_summary() {  # call at end of every script
   echo
   if (( VERIFY_FAIL == 0 )); then

@@ -1,0 +1,72 @@
+# Per-user PARTNER namespaces ({user}-partner, M15) — owned by the workshop layer like
+# dev/stage/prod/cicd/batch, and for a UDN-specific reason ON TOP of the usual one (the
+# workshop-entries AppProject blacklists ResourceQuota/LimitRange, so an entry chart cannot ship
+# them): a Primary UserDefinedNetwork REQUIRES the label k8s.ovn.org/primary-user-defined-network
+# to be present AT namespace-creation time and it cannot be added to a populated namespace later.
+# Creating the namespace here (labeled) lets the M15 entry chart own only the in-namespace UDN +
+# workload; everything here SURVIVES ws reset, so the label is set once and never toggled.
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $user }}-partner
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    # Load-bearing (verified on-cluster, M15 build): OVN-Kubernetes only lets a namespace host a
+    # Primary UserDefinedNetwork if it carries this opt-in label from creation. Empty value is valid.
+    k8s.ovn.org/primary-user-defined-network: ""
+---
+# The attendee is admin on their own partner namespace (same as the standard four).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-admin
+  namespace: {{ $user }}-partner
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+---
+# Modest quota so the isolated partner segment can't be used to escape the per-user footprint.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-partner
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    limits.cpu: "4"
+    limits.memory: 8Gi
+    pods: "20"
+---
+# Default container requests/limits so bare pods (the isolation-probe pods the attendee runs) get
+# sane values and don't trip the quota.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-partner
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: 512Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+{{- end }}

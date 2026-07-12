@@ -1,0 +1,94 @@
+# PostgreSQL for the claims API — the "db" tier of the 3-tier app whose east-west path M15 locks
+# down. Deliberately EPHEMERAL (emptyDir): M15 is the networking module, not storage (that is M05),
+# so the claims image reseeds fixed sample data on boot — reproducible with zero PVC footprint.
+# Uses the internal openshift/postgresql imagestream (always present, no external pull secret).
+---
+# why: the claims datasource credentials, consumed by BOTH the DB (to init) and the app (to connect).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m15
+type: Opaque
+stringData:
+  POSTGRESQL_USER: parasol
+  POSTGRESQL_PASSWORD: parasol
+  POSTGRESQL_DATABASE: parasol
+---
+# why: the PostgreSQL 15 server the claims app reads/writes; env-driven from the Secret above.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m15
+spec:
+  replicas: 1
+  # Recreate: a single writer to one volume — never run two Pods on the same data dir at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claims-db
+  template:
+    metadata:
+      labels:
+        app: claims-db
+        workshop.redhat.com/module: m15
+    spec:
+      containers:
+        - name: postgresql
+          # Internal imagestream tag (RHEL9 PostgreSQL 15) — already cached, no external pull secret.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: data
+          # Ephemeral on purpose — M15 needs a reproducible seed, not persistence (that is M05).
+          emptyDir: {}
+---
+# why: the stable in-cluster address the app resolves — claims-db.{user}-dev.svc:5432. The "db only
+# from api" NetworkPolicy the attendee writes in the lab guards exactly this Service's port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m15
+spec:
+  selector:
+    app: claims-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
