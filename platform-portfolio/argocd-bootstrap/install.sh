@@ -75,6 +75,12 @@ else
   # so the default instance's application-controller needs cluster-admin.
   oc apply -f "${SCRIPT_DIR}/operator/controller-rbac.yaml"
   echo "  ✓ controller RBAC applied"
+
+  # The operator-default controller memory (2Gi) OOM-wedges under cohort-scale concurrent
+  # entry-state materializations; raise it to 6Gi. The operator reconciles this CR override
+  # and rolls the application-controller StatefulSet (works even if the controller is down).
+  oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
+  echo "  ✓ controller resources raised (6Gi limit / 2Gi request)"
 fi
 
 # ── 2. Stack Applications ─────────────────────────────────────────────────────
