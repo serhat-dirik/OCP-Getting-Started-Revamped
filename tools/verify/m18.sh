@@ -46,14 +46,17 @@ ns_not_injection_labeled() {
   [[ -z "$(oc get ns "$NS" -o jsonpath='{.metadata.labels.istio-injection}' 2>/dev/null || true)" ]]
 }
 
-# Is a pod for app=$1 MESHED? OSSM3 1.28 native sidecar → istio-proxy is an initContainer; the
+# Is the app=$1 tier MESHED? Returns 0 if ANY pod for app=$1 carries the istio-proxy sidecar. Scans ALL
+# matching pods (not head -1) on purpose: app=parasol-fraud matches BOTH the v1 and v2 Deployments, and a
+# rolling update can briefly leave an old un-injected ReplicaSet pod alongside the new injected one — a
+# head -1 check would flake on either. OSSM3 1.28 native sidecar → istio-proxy is an initContainer; the
 # sidecar.istio.io/status annotation is the most robust signal (present iff injected).
 pod_meshed() {
   local app="$1" pod
-  pod="$(oc get pod -n "$NS" -l "app=${app}" -o name 2>/dev/null | head -1)"
-  [[ -n "$pod" ]] || return 1
-  oc get "$pod" -n "$NS" -o jsonpath='{.metadata.annotations.sidecar\.istio\.io/status}' 2>/dev/null | grep -q istio-proxy && return 0
-  oc get "$pod" -n "$NS" -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}' 2>/dev/null | grep -q istio-proxy && return 0
+  for pod in $(oc get pod -n "$NS" -l "app=${app}" -o name 2>/dev/null); do
+    oc get "$pod" -n "$NS" -o jsonpath='{.metadata.annotations.sidecar\.istio\.io/status}' 2>/dev/null | grep -q istio-proxy && return 0
+    oc get "$pod" -n "$NS" -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}' 2>/dev/null | grep -q istio-proxy && return 0
+  done
   return 1
 }
 
