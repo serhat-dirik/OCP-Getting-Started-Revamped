@@ -1,0 +1,142 @@
+= Serverless Zero-to-Hero: Instructor Guide
+:module-id: m19
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34)
+// against a live OpenShift Serverless {serverless_version} control plane (Knative Serving + Eventing) in
+// namespace user6-dev on 2026-07-13 by performing every exercise: the scale-from-zero cold start 15.27s;
+// warm 0.106s; concurrency autoscale 0->2 (t+6s)->3 (t+10s), held at max-scale; scale-to-zero ~60-90s
+// after the last request; revision creation (kn service update) ~1s command + ~20-40s rollout; the 80/20
+// split + rollback instant; the eventing wiring Ready in seconds; the event delivery returning HTTP 404.
+// The shared control plane (KnativeServing/KnativeEventing) is platform substrate and was NOT mutated.
+// KNOWN ENTRY-STATE FRAGILITY captured at build and flagged below (Watchouts): re-applying the entry ksvc
+// (pinned revision name + unset readinessProbe.successThreshold) can trip Knative's immutable-revision
+// webhook on `ws reset`/`ws prep` — pre-flight check #4. NAMESPACE in output is the sample user user6-dev.
+
+This module has one spine and it builds: *a service that holds zero pods → wake it and feel the cold start → autoscale it on concurrency → split traffic across revisions → wake it on an event*.
+The beat that lands hardest is the *cold start* (exercise 2): a real *15-second* first request, then a tenth of a second warm. It makes the whole scale-to-zero tradeoff concrete, and the deliberate `-m5` break-and-fix turns it into a lesson instead of a surprise.
+The beat to frame most carefully is the *eventing taste* (exercise 5): the delivery is *real* and the service *wakes from zero*, but it returns an honest `404` — the app has no CloudEvents handler, and *processing* is the next module. Do not let it read as a failure.
+
+The single most useful thing to internalize before delivering: *the entry state ships the `ksvc` already deployed and scaled to zero.* Exercise 1 is *observe*, not *deploy from scratch* — the teaching starts from a running (idle) service, which is the honest serverless picture.
+
+== Timing
+
+Total core (exercises 1–6): *~75 min*; with ~15 min of concept up front that lands inside the spec's 75-min hands-on target for a 90-min slot. The command latencies are small; the real clock is the *waits* — the ~15 s cold start, the ~60–90 s scale-to-zero settle, and the ~20–40 s revision rollouts.
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Observe your deployed ksvc | ~10 min | all reads, instant; time is spent *orienting* on the Configuration/Route/Revision model
+| 2 | Scale to zero and back (cold start) | ~12 min | cold start *15.27 s*; warm *0.106 s*; the scale-to-zero wait *~60–90 s*; the `-m5` trap is instant
+| 3 | Autoscale + tune concurrency | ~15 min | revision rollout *~20–40 s*; a scale-to-zero settle *~60–90 s*; the burst climbs *0→3 in ~10 s*
+| 4 | Split traffic between revisions | ~15 min | split + rollback instant; the two direct curls + the 50-request batch instant
+| 5 | Eventing taste (source→broker→trigger) | ~15 min | broker/trigger/pingsource Ready in *seconds*; the delivery `404` instant
+| 6 | Build a Function `[INSTRUCTOR-DEMO]` | ~8 min | reading only — no cluster step (build path infeasible in the cockpit)
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-13, every exercise was performed against the live OpenShift Serverless {serverless_version} control plane in `user6-dev` and timed.
+The `kn`/`oc` commands are fast: creating or re-weighting a `ksvc` is a sub-second command; a new revision reaches Ready in *~20–40 s* (schedule + JVM boot + probe pass). The genuine time-sinks are the *scale-from-zero cold start* (*15.27 s* measured — a JVM boot, not a hang) and the *scale-to-zero settle* (*~60–90 s* of no traffic, the Knative default stable window plus grace period). Budget for those waits and for *reading* — the revision model, the split, the eventing 404 — not for command latency.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user4` (use any real attendee user).
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m19 --user user4
+ws verify m19 --user user4 --entry-only
+----
++
+Expect all entry checks green: the `user4-dev` marker, the `claims-db` and `demo-client` Deployments, the `parasol-claims` `ksvc` *Ready* with an auto-created `status.url`, and the clean-slate assertions (no traffic split, no eventing objects yet).
+
+. *The shared Serverless control plane is healthy.*
++
+[source,sh,role=execute]
+----
+oc get knativeserving knative-serving -n knative-serving -o jsonpath='serving {.status.version} {.status.conditions[?(@.type=="Ready")].status}{"\n"}'
+oc get knativeeventing knative-eventing -n knative-eventing -o jsonpath='eventing {.status.version} {.status.conditions[?(@.type=="Ready")].status}{"\n"}'
+----
++
+Expect both *Ready = True*. If they're missing, the `serverless` platform stack (`platform-portfolio/stacks/serverless`) isn't synced — this module can't run without it.
+
+. *`kn` is on the attendee cockpit terminal PATH.*
++
+The lab's primary CLI is `kn`. Confirm it's in the cockpit image (verified present at build — `kn v1.15.0`):
++
+[source,sh,role=execute]
+----
+oc exec deploy/showroom-user4 -n showroom -c terminal -- sh -lc 'command -v kn && kn version | head -1'
+----
++
+If `kn` is absent, the CLI tabs won't run; the Console tabs (Serverless / Import YAML) are the fallback, and you should flag the cockpit image to the platform team.
+
+. *[FRAGILITY] The entry ksvc re-syncs cleanly.*
++
+[source,sh,role=execute]
+----
+ws reset m19 --user user4
+ws verify m19 --user user4 --entry-only
+----
++
+This *must* end green. A known fragility: the entry `ksvc` pins its revision name (`parasol-claims-v1`) and leaves `readinessProbe.successThreshold` unset, so a *patch*-style re-apply over a surviving revision can trip Knative's immutable-revision webhook (`Saw the following changes without a name change … successThreshold`) and the Argo sync won't converge. `ws prep`/`ws reset` purge-then-recreate the `ksvc`, which sidesteps it — but if you see a reset stuck retrying with that webhook message, it's this. *Permanent fix* (platform action): set `readinessProbe.successThreshold: 1` explicitly in `gitops/entry-states/m19/templates/parasol-claims-ksvc.yaml` (so the applied spec matches Knative's defaulted stored spec), or let Knative auto-generate the revision name. See *Watchouts*.
+
+== Instructor demo — the 10-minute arc (demo flavor)
+
+The demo flavor renders a three-beat Say/Show/Do arc: *wake from zero + cold start* (3 min), *sudden burst + autoscale to the ceiling and back to zero* (3 min), *80/20 revision split + one-line rollback* (4 min).
+
+* *Run it from the entry state, not `ws solve`.* The story is *building* the split live. `ws solve m19 --user user4` renders the finished end state (a second revision, the 80/20 split, and the eventing wiring); use it to *pre-stage* or to show the destination, never as the demo's start.
+* *Put `oc get pods -w` on screen.* The visual for beats 1–2 is *pods appearing and vanishing*. A second pane running `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w` next to the terminal is the whole show.
+* *Land the cold start (beat 1).* Say "watch the clock" while the first `curl` hangs for ~15 seconds and returns `200`, then run the warm one for the tenth-of-a-second contrast. That number *is* the tradeoff — don't hide it, sell it.
+* *The rollback is the closer (beat 3).* "One line, a hundred percent back to stable — because the old revision never went away." Then re-weight to 80/20 to show it's a dial, not a door.
+
+== Demo-mode notes
+
+* *Pre-warm nothing; pre-settle everything.* Let the service reach *zero* pods before beat 1 (about a minute of no traffic) so the cold start actually fires. If you've been poking it, wait for the pod to disappear first.
+* *Create v2 off-screen for the split beat.* The demo's split assumes a second revision exists. Before the split beat, run `kn service update parasol-claims -n $NS --revision-name parasol-claims-v2 --concurrency-limit 2 --scale-max 3 --no-wait` so both revisions are present.
+* *Drive traffic from inside the cluster.* Every load command is `oc exec deploy/demo-client -- … curl …`. The `demo-client` is CPU-capped (200 m), so use `containerConcurrency: 2` (as the lab does) to make the autoscale to the `max-scale` ceiling *deterministic* — a soft target may not visibly climb from the constrained client.
+* *Be honest about the eventing 404.* If you show the eventing closer, say "the delivery is real and the service woke from zero — the `404` is because the app has no event handler yet, which is the next module." Never add a handler to force a `200`.
+
+== Top questions attendees ask
+
+*1. "My first request is slow — or it timed out. Is something broken?"*::
+No — that's the *cold start*, and it's the point of the exercise. A scaled-to-zero service holds no pods; the first request waits (~15 s for this JVM service) while Knative schedules a pod, boots the JVM, and hands the request through the activator. Every warm request after is ~0.1 s. If a client *times out* (the deliberate `-m5` trap), the fix is a realistic client timeout or a `min-scale: 1` warm floor — the latter gives up scale-to-*zero* to remove the cold start from the critical path. This is a tuning decision per service, not a defect.
+
+*2. "Why is a pod still running when there's no traffic — or why did it take so long to scale to zero?"*::
+Two Knative defaults add up: the *stable window* (~60 s the autoscaler averages over) plus the *scale-to-zero grace period* (~30 s), so a service settles to zero roughly a minute or a minute-and-a-half after the *last* request. In the eventing exercise, the `PingSource` fires *every minute*, so the service may never fully rest — that's expected (the events keep waking it). To see a clean scale-to-zero, stop all traffic (and, if needed, the PingSource) and wait.
+
+*3. "The eventing delivery returned `404` — did the wiring fail?"*::
+No — the wiring *worked*. The `PingSource` emitted, the `Broker` received, the `Trigger` delivered to the `ksvc`, and the service *woke from zero* to receive it. The `404` is because the claims-processor has *no CloudEvents handler* — the event lands on `/`, a path the app doesn't serve. The taste proves *source → broker → trigger → scale-up*; *processing* the event (parsing the CloudEvent, branching, replying) is the *Eventing Deep-Dive* module (M20), which starts from this exact end state. Don't add a fake handler to force a `200`.
+
+*4. "Where's the Route? Can I `oc create route edge` for the service like the other modules?"*::
+No — for a `ksvc` that's wrong, and it will fight the operator. The Serverless operator *auto-creates* an edge-terminated OpenShift Route (backed by the Kourier ingress) in the `knative-serving-ingress` namespace, and publishes the address on the service as `status.url`. Attendees can't read that ingress namespace (cross-namespace), which is *why* the lab uses `ksvc.status.url` everywhere — it's the attendee-readable proof the Route exists. This is the documented exception to the project's standing "browser Routes must be `oc create route edge`" rule.
+
+*5. "Why does it scale on concurrency and not CPU? What's KPA vs HPA?"*::
+Knative's default is the *Knative Pod Autoscaler* (KPA), which scales on *concurrency* (in-flight requests) and — uniquely — can scale *to zero*. The *Horizontal Pod Autoscaler* (HPA) scales a normal Deployment on *CPU or memory* and has a floor of at least one pod. You *can* attach an HPA to a Knative revision (for CPU-based scaling), but the KPA is the default and the only path to scale-to-zero, which is the whole reason to use Serverless. Concurrency is usually the better signal for a request-driven service anyway — it tracks *offered load* directly, not its CPU side effect.
+
+== Watchouts
+
+* *[FRAGILITY] Entry ksvc re-sync + the immutable-revision webhook.*
+The entry `ksvc` pins its revision name (`parasol-claims-v1`) and omits `readinessProbe.successThreshold`. Knative defaults the stored value to `1`; a *patch*-style re-apply sends `0`, and because the revision name is unchanged, the validation webhook rejects it (`Saw the following changes without a name change … successThreshold`) — a `ws reset`/`ws prep` Argo sync can then hang retrying. Purge-then-recreate avoids it, which is the normal path, but flag it to the platform team. *Permanent fix:* add `readinessProbe.successThreshold: 1` to `gitops/entry-states/m19/templates/parasol-claims-ksvc.yaml`, or drop the pinned revision name.
+* *Cold-start expectation — set it up front.*
+The JVM cold start is ~15 s. Attendees who don't expect it read it as a hang. The lab measures it and includes the `-m5` break-and-fix on purpose; reinforce that it's honest and tunable (`min-scale`, native builds). Don't let anyone "fix" it by assuming the cluster is broken.
+* *Per-user eventing footprint.*
+The lab's `PingSource` fires *every minute* (`* * * * *`) so the delivery is observable in the session; the `ws solve` reference uses *every five minutes* (`*/5`). Across a full cohort that's a per-minute event per user waking a `ksvc` — light, but it multiplies. If the cluster is busy, prefer `*/5` or have attendees delete the `PingSource` after the beat.
+* *Autoscale visibility depends on the load client.*
+The `demo-client` is CPU-capped (200 m), so it can only offer modest concurrency. The lab uses a *hard* `containerConcurrency: 2` so the scale-up to `max-scale` is *deterministic*; a *soft* target may plateau at 1–2 pods from this client. If you demo a soft target, say so — the mechanism is the same, the visible curve is gentler.
+* *max-scale ceiling times the cohort.*
+Each attendee's `ksvc` can burst to its `max-scale` (3–5). Across many users bursting at once that's real scheduler and quota pressure; the per-user quota is sized for it, but watch a busy cluster during the autoscale beat.
+* *Don't tune the shared autoscaler ConfigMap.*
+`config-autoscaler` in `knative-serving` is cluster-wide. All attendee tuning is *per-`ksvc`* (annotations + `containerConcurrency`); never point an attendee at the shared ConfigMap.
+
+== Provenance
+
+M19 is a net-new module built against this repo's live cluster.
+Everything it teaches for the attendee was *performed* on OpenShift {ocp_version} (Kubernetes 1.34) against a live OpenShift Serverless {serverless_version} control plane (Knative Serving + Eventing) in namespace `user6-dev` on 2026-07-13: the deployed scale-to-zero `ksvc` and its auto-created edge Route read via `status.url`; the scale-from-zero *cold start* (`HTTP 200 in 15.27 s`) against the warm request (`0.106 s`); the concurrency-driven autoscale (`0 → 2 → 3`, held at the `max-scale` ceiling, then back to zero); the 80/20 tag-based revision split (both sub-routes `200`, both revision Deployments woken by the main route) and the one-line rollback; and the eventing taste — a `PingSource` → in-memory `Broker` → `Trigger` all *Ready*, a real delivery *waking the `ksvc` from zero* and returning an honest `HTTP 404` because the app has no CloudEvents handler.
+Two honesty notes are carried into the content as explicit limitations, not open items: the JVM cold start is ~15 s (measured, and taught via a break-and-fix, not hidden), and the eventing delivery returns `404` (the wiring and scale-up are real; event *processing* is M20). `kn func` is presented as concept + instructor demo because the cockpit has no local container engine/registry and the on-cluster build needs OpenShift Pipelines. The known entry-state re-sync fragility (`readinessProbe.successThreshold`) is flagged in pre-flight and watchouts for a platform fix.

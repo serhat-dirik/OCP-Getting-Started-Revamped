@@ -1,0 +1,105 @@
+= Serverless Zero-to-Hero: Wrap-up
+:module-id: m19
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims-processor from a *scaled-to-zero Knative Service* to a *tuned, split, and event-wired* one — without ever writing a Deployment, a Service, or a Route by hand.
+You *observed* the `ksvc` Knative had already expanded into a Configuration, a Route, and a Revision, and read its *auto-created* HTTPS `status.url`.
+You *woke it from zero* and *measured* the honest JVM cold start (~15 s) against a warm request (~0.1 s), and hit — then fixed — the cold-start-vs-client-timeout trap.
+You *tuned* concurrency, minting a second revision, and watched the autoscaler climb *0 → 2 → 3* on concurrency and *melt back to zero*.
+You *split traffic* 80/20 across two revisions by *tag*, addressed each revision through its own sub-route, and *rolled back* to 100% stable in one line.
+And you wired a *taste of eventing* — a `PingSource` → in-memory `Broker` → `Trigger` — that woke the service *on an event*, meeting the honest `404` boundary where *processing* the event begins.
+
+[mermaid]
+....
+graph TB
+  subgraph ns["{user}-dev — after the lab"]
+    subgraph ksvc["parasol-claims (ksvc)"]
+      route["Route<br/>(auto edge, Kourier)<br/>80% stable / 20% candidate"]
+      v1["Revision v1<br/>#stable"]
+      v2["Revision v2<br/>#candidate · CC=2 · max-scale 3"]
+    end
+    ping["PingSource<br/>claim-ticker"] --> broker[("Broker<br/>default (in-memory)")]
+    broker --> trig["Trigger<br/>claims-processor"]
+  end
+  client(["client"]) -->|"HTTPS"| route
+  route -->|"80%"| v1
+  route -->|"20%"| v2
+  kpa{{"KPA · scale 0..3<br/>on concurrency"}} -.-> v1
+  kpa -.-> v2
+  trig -->|"wakes on event -> 404 (M20)"| route
+  classDef svc fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef ctl fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef evt fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class v1,v2 svc; class route,kpa ctl; class ping,broker,trig evt;
+....
+
+// media-pass: recap SVG m19-serverless-zero-to-hero-03-what-you-built.svg (green = the two revisions; blue = the Route + autoscaler Knative manages; amber = the eventing taste wiring).
+
+The one idea under all of it: *serverless turns "always-on capacity" into "pay for requests."* You describe *one* object — a Knative Service — and the platform owns the scaling decision all the way down to zero, mints an immutable revision on every change, auto-publishes the Route, and (with a trigger) wakes the service on an event. Rollout, rollback, and canary become *Route weights over revisions that already exist*.
+
+== Map to your org
+
+Take these back to how your own services run today:
+
+. *Which of your services sit idle a meaningful part of the day — and what do the always-on pods cost?*
+You watched a service hold *zero* pods while quiet and wake on one request. For your internal tools, nightly feeds, or spiky endpoints, is the capacity reserved 24/7 for a load that only shows up part of the time — and would scale-to-zero give that reservation back?
+. *When you say "cold start," is it a number or a fear?*
+You *measured* it: ~15 s for this JVM service from zero, ~0.1 s warm. For your equivalent service, do you know the actual cold start — and for the paths that can't tolerate it, would a `min-scale` warm floor (or a natively-compiled build) be an acceptable trade?
+. *Can you canary — and roll back — a new version without a redeploy?*
+You shifted 80/20 and rolled back to 100% in *one line*, against a revision that already existed. Is that a one-command change in your environment, or a second-Deployment dance and a load-balancer ticket every time?
+. *Do you have a place for event-driven work, or is everything a request?*
+You wired source → broker → trigger and woke a service on an event. Where do your "when X happens, do Y" flows live today — cron jobs, polling loops, bespoke queues — and would a broker/trigger model be cleaner?
+. *Would serverless actually fit — or are you reaching for it because it's new?*
+The honest answer is a checklist (below). For each candidate service, is it bursty, idle sometimes, request- or event-driven, and cold-start-tolerant? If not all four, a plain Deployment may be the better tool.
+
+== When *not* to reach for this
+
+Serverless is powerful, and over-reaching with it is its own failure mode:
+
+* *Don't put a steadily-busy service on scale-to-zero.*
+If a service is always handling traffic, it never scales to zero anyway — so you get the cold-start risk and the extra autoscaler/ingress layer for *no* idle savings. A plain Deployment with an HPA is simpler and has no cold start. Serverless earns its keep on *bursty or idle* workloads.
+* *Don't put a latency-critical path on a cold start you won't pay to avoid.*
+A ~15 s first request is fine for a nightly feed and unacceptable for a checkout call. If the path is latency-critical, either keep a warm floor (`min-scale`, giving up scale-to-*zero*) or use a native build — and if neither is worth it, a normal Deployment is the honest choice.
+* *Don't force a long-running or stateful workload into a request-driven model.*
+Knative Serving is for *short, stateless* request handling. Long jobs, streaming, and stateful services fight the autoscaler and the request-timeout model — batch work is the Jobs/Kueue module, stateful work is the storage module. Use the right tool.
+* *Don't mistake the eventing taste for eventing.*
+The source → broker → trigger wiring you built *delivers and scales up*, but the service returned `404` because it doesn't *process* events. Shipping "we have eventing" on the strength of the wiring, without a real CloudEvents handler, delivery guarantees, filtering, and dead-letter handling, will disappoint the first team that needs them — that's the next module, on purpose.
+* *Don't tune the shared autoscaler config for one service.*
+The knobs you reach for are *per-`ksvc`* annotations (`target`, `min-scale`, `max-scale`) and `containerConcurrency`. The cluster-wide autoscaler ConfigMap affects *everyone* — leave it to the platform team and tune your own service.
+
+.Serverless vs. Deployment — the honest decision matrix
+[cols="1,2,2",options="header"]
+|===
+| Question | Lean serverless (`ksvc`) | Lean Deployment (+ HPA)
+
+| Traffic shape | *Bursty / spiky / idle sometimes* | *Steady, always-busy*
+| Latency budget | Tolerant of a cold start (or worth a warm floor) | Cold start unacceptable and no warm floor wanted
+| Invocation | Request- or *event-driven*, short and stateless | Long-running, streaming, or stateful
+| Rollout need | Canary/rollback as a *Route weight over revisions* | Standard rolling update (or Argo Rollouts for metric-gated)
+| Cost model | *Pay for requests* — zero when idle | Pay for reserved capacity, busy or not
+|===
+
+== Go deeper
+
+* *Knative Serving* — the `ksvc`, the Configuration/Route/Revision model, and the full autoscaler surface: soft `target` vs `containerConcurrency`, `min-scale`/`max-scale`, the stable window, and the scale-to-zero grace period.
+* *Cold-start engineering* — warm floors (`min-scale`), natively-compiled runtimes (Quarkus native) for tens-of-milliseconds starts, and where the activator sits in the request path.
+* *Traffic management on revisions* — tag-based blue/green and canary splits, per-tag sub-routes, and how this compares to Argo Rollouts (M10) and service-mesh routing (M18).
+* *Knative Eventing* — sources, brokers, triggers, and the *CloudEvents* envelope: the model whose *processing* half is the *Eventing Deep-Dive & Serverless Workflows* module.
+* *Knative Functions (`kn func`)* — language templates for HTTP and CloudEvents handlers, and the local-vs-on-cluster build paths (Podman + registry, or OpenShift Pipelines).
+
+[NOTE]
+.Where this goes next — the Eventing Deep-Dive (M20)
+====
+This module gave you the *request-driven* half of serverless and a *taste* of the event-driven half. The next module, *Eventing Deep-Dive & Serverless Workflows*, starts from *exactly this end state* — a claims-processor `ksvc` with a broker and a trigger — and builds the real thing: a CloudEvents *handler* (so the delivery you saw return `404` returns a real result), trigger *filters*, *dead-letter* handling, the *broker-vs-channel* decision, and multi-step *workflows* with OpenShift Serverless Logic. The `404` you met here is where that module's first exercise begins.
+====
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — one scale-to-zero revision, no traffic split, no eventing — run `ws prep {module-id} --yes`.
+It removes the extra revision, the traffic split, and the `Broker`/`Trigger`/`PingSource` you created, and re-materializes the clean single-revision service so a re-run starts fresh.
+The shared OpenShift Serverless control plane (Knative Serving and Eventing) is platform substrate — it's untouched; only your `{user}-dev` namespace resets.
+Leave everything running if you are continuing to M20 — its entry state is this module's end state.
+====

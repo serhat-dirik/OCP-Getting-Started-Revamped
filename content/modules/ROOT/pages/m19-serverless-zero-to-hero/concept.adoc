@@ -1,0 +1,188 @@
+= Serverless Zero-to-Hero: Concept
+:module-id: m19
+include::partial$version-attributes.adoc[]
+
+// Concept page for M19. Renders in all three flavors (workshop/demo/instructor). Environment values
+// appear ONLY as attributes; the product version ONLY via version-attributes (OpenShift Serverless
+// {serverless_version}). Everything described here was performed on OCP {ocp_version} (Kubernetes 1.34)
+// against a live OpenShift Serverless control plane (Knative Serving + Eventing) in the {user}-dev
+// namespace on 2026-07-13: the scale-to-zero ksvc, the ~15 s JVM cold start, the concurrency-driven
+// autoscale to the max-scale ceiling, the 80/20 tag-based revision split, and the source->broker->trigger
+// eventing taste (a real delivery that returns 404 because the app has no event handler yet) are real
+// captures, not from memory. Knative auto-creates the ksvc's edge Route — the content NEVER hand-rolls
+// `oc create route edge` for a ksvc (the documented exception to the project's edge-route rule). Prose
+// expands workshop-concept acronyms (ksvc, KPA, HPA) on first use; ubiquitous acronyms (API, HTTP, HTTPS,
+// TLS, CPU, JVM, URL, YAML, JSON, DNS) are never expanded.
+
+[.lead]
+Parasol's claims-processor is busy at 9am and idle at 3am — but a normal Deployment keeps its pods (and their CPU and memory reservation) running *all night* for requests that never come, and still has to be sized for the morning spike.
+*Serverless* flips that: the service scales *to zero* when no one is calling and *bursts* up when traffic arrives, so you pay for requests, not for idle capacity.
+This module takes that claims-processor onto Red Hat OpenShift Serverless — you meet it as a *Knative Service* already scaled to zero, wake it with a single request, watch it autoscale under load and melt back to zero, split traffic between two revisions, and wire a first taste of event-driven delivery.
+
+== What you'll learn
+
+* What *request-driven (serverless) compute* is, the *scale-to-zero* economics behind it, and the honest test for when it beats a plain Deployment.
+* What a *Knative Service* (`ksvc`) is, how it differs from a Deployment, and how Knative *auto-creates its edge Route* so you never hand-roll one.
+* The Knative *revision model* — how one `ksvc` becomes a *Configuration*, a *Route*, and an immutable *Revision* per change — and why that makes rollout and rollback cheap.
+* How the *Knative Pod Autoscaler* (KPA) scales on *concurrency* (not just CPU), how *scale-to-zero* and *cold start* really behave, and how a JVM cold start is an honest multi-second cost you plan around.
+* How to *split traffic* between revisions by *tag* (a blue/green split) — the *third* way to shift traffic in this workshop, next to Argo Rollouts and the service mesh.
+* A *taste* of Knative *Eventing* — a *source → broker → trigger* wiring that wakes the service on an event — and where the deep eventing story picks up.
+* Where *Functions* (`kn func`) fit, and the honest *serverless-vs-Deployment* decision you can take back to your own services.
+
+== The problem serverless solves
+
+A normal Kubernetes Deployment is *always on*. You pick a replica count, and those pods sit there — holding their CPU and memory requests against the cluster's quota — whether they are serving thousands of requests a second or none at all.
+For a steady, always-busy service that is exactly right.
+For Parasol's claims-processor, which is hammered during business hours and quiet overnight, it means *paying for capacity you aren't using* for most of the day, while *still* having to size the Deployment for the busiest minute.
+
+Serverless answers with *request-driven compute*: the platform runs your service *only when there is work*.
+
+* *No requests?* The service scales to *zero* pods — it holds no CPU or memory, just its configuration.
+* *A request arrives?* The platform starts a pod, sends the request through, and the service is live — the *cold start*.
+* *Load climbs?* It adds pods in proportion to *concurrency*, up to a ceiling you set.
+* *Load falls?* It removes pods, back down to zero after a quiet period.
+
+You still deploy a container image with health probes — nothing exotic — but the platform owns the *scaling decision*, driven by traffic, all the way down to nothing. That is the whole idea, and everything else in this module is a consequence of it.
+
+== A Knative Service is not a Deployment
+
+On OpenShift Serverless you don't create a Deployment and a Service and a Route. You create *one* object — a *Knative Service*, `serving.knative.dev/v1`, called a `ksvc` — and Knative materializes the rest:
+
+[cols="1,2,2",options="header"]
+|===
+| You create | Knative creates | So you get
+
+| A `ksvc` (image + config) | A *Deployment* + *Pod Autoscaler* | Pods that scale on traffic, *including to zero*
+| — | A Kubernetes *Service* | In-cluster addressing
+| — | An *edge OpenShift Route* (via Kourier) | A ready HTTPS URL — `ksvc.status.url`
+| — | A *Configuration* + a *Revision* | An immutable snapshot of this version, for rollout/rollback
+|===
+
+The most important consequence for this workshop: *Knative creates the Route for you.*
+Other modules teach you to publish a browser-facing app with `oc create route edge`. *Not here* — for a `ksvc` that is *wrong*: the Serverless operator auto-creates an edge-terminated Route (backed by the Kourier ingress) in a namespace you don't manage, and hands you the URL on the `ksvc` itself as `status.url`. Hand-rolling a Route for a `ksvc` fights the operator. Throughout this module, the service's address is whatever `oc get ksvc … -o jsonpath='{.status.url}'` returns.
+
+== The revision model — why rollout and rollback are cheap
+
+Every time you change a `ksvc`'s template — a new image, a new environment variable, a tuned concurrency setting — Knative stamps out a new, *immutable* *Revision* and leaves the old ones in place. Two objects sit above the revisions:
+
+* A *Configuration* — the "latest desired version" of the service. Editing the `ksvc` updates it, which mints the next Revision.
+* A *Route* — the "where does traffic go" of the service. By default it sends 100% to the latest Revision, but you can point it at *named* revisions with *weights and tags* — which is exactly how you split traffic later in the lab.
+
+[mermaid]
+....
+graph LR
+  client(["client / browser"])
+  subgraph ksvc["Knative Service: parasol-claims"]
+    route["Route<br/>(auto edge Route, Kourier)<br/>ksvc.status.url"]
+    config["Configuration<br/>(latest desired version)"]
+    subgraph revs["Revisions (immutable)"]
+      v1["Revision v1<br/>#stable · 80%"]
+      v2["Revision v2<br/>#candidate · 20%"]
+    end
+    kpa{{"KPA<br/>scale 0..N<br/>on concurrency"}}
+  end
+  subgraph evt["Eventing taste (source -> broker -> trigger)"]
+    ping["PingSource"] --> broker[("Broker<br/>in-memory")]
+    broker --> trig["Trigger"]
+  end
+  client -->|"HTTPS"| route
+  route -->|"80%"| v1
+  route -->|"20%"| v2
+  config -.->|"mints"| v2
+  kpa -.->|"0..N pods"| revs
+  trig -->|"delivers event,<br/>wakes the ksvc"| route
+  classDef svc fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef ctl fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef evt fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class v1,v2 svc; class route,config,kpa ctl; class ping,broker,trig evt;
+....
+
+// media-pass: replace/augment with SVG export m19-serverless-zero-to-hero-01-request-driven-compute.svg (see media-manifest.md)
+
+The *green* boxes are the immutable revisions — the versions of your service. The *blue* control objects (Route, Configuration, the autoscaler) are what Knative manages for you: the Route splits traffic, the Configuration mints new revisions, and the *KPA* scales every revision between zero and its ceiling. The *amber* side panel is the eventing taste — an event *source* feeding a *broker*, a *trigger* delivering to the service and *waking it from zero*.
+
+Because a revision is a *frozen, addressable version*, rolling back is not a redeploy — it's re-pointing the Route's weight at an older revision that is *already there*. That is the same idea behind the traffic split you'll build.
+
+== The autoscaler: concurrency, scale-to-zero, and the honest cold start
+
+A normal Deployment scales with the *Horizontal Pod Autoscaler* (HPA), which reacts to *CPU or memory*. Knative's default *Knative Pod Autoscaler* (KPA) scales on *concurrency* — how many requests are *in flight* at once — and, crucially, it can scale *to zero*.
+
+* *Target concurrency* is the dial: "how many simultaneous requests should one pod handle before I add another?" A *soft target* (`autoscaling.knative.dev/target`) is the KPA's goal; a *hard limit* (`containerConcurrency`) is a ceiling the pod will not exceed. Lower it and the service scales out sooner; raise it and each pod absorbs more.
+* *Scale bounds* cap the range: `min-scale` (default `0` — the source of scale-to-zero) and `max-scale` (the ceiling, so one bursting tenant can't exhaust the cluster).
+* *Scale-to-zero* removes the last pod after a quiet period (the Knative default is on the order of a minute of no traffic). The service stays *Ready* — its Route and config live on — it just holds zero pods.
+
+The catch is the *cold start*. When a request arrives at a scaled-to-zero service, Knative's *activator* buffers it while a pod starts, then forwards it. That first request pays the full startup cost.
+
+[NOTE]
+.Cold start is real — plan for it, don't hide it
+====
+Parasol's claims-processor is a JVM application (Quarkus on the JVM). Its *first* request from zero — measured on this cluster — took *about 15 seconds*: pod schedule, JVM boot, Hibernate schema check, then the activator hands the request through. Every *subsequent* request, while the pod is warm, returns in about *a tenth of a second*.
+That 15 seconds is not a bug — it's the honest cost of trading idle capacity for scale-to-zero, and you plan around it:
+
+* For a *latency-sensitive* path, set `min-scale: "1"` so one pod is always warm — you give up scale-to-*zero* but keep autoscaling above the floor.
+* For a *bursty, latency-tolerant* path (a nightly feed, an internal tool), scale-to-zero is a clear win and the cold start is acceptable.
+* A *natively-compiled* build (Quarkus native) starts in tens of milliseconds — the same pattern, a far smaller cold start. Choosing the runtime is choosing the cold start.
+
+The lab has you *measure* the cold start yourself, so the tradeoff is a number you've seen, not a slogan.
+====
+
+== Shifting traffic by revision — the third way
+
+Because revisions are addressable and the Route carries weights, shifting traffic between two versions is a *one-object change*: tag revision v1 `stable` at 80% and revision v2 `candidate` at 20%, and Knative also gives each tag its *own* sub-route (`stable-…`, `candidate-…`) so you can hit either version directly.
+
+This is the *third* traffic-shifting tool this workshop has shown you, and it's worth holding them apart:
+
+[cols="1,2,2",options="header"]
+|===
+| Tool | Shifts traffic by | Best when
+
+| *Argo Rollouts* (M10) | *Deployment* strategy, *metric-gated* steps | Progressive delivery with automated analysis and rollback
+| *Service mesh* (M18) | Sidecar *routing rules* (weights, headers) | Identity, resilience, and L7 policy across many services
+| *Knative revisions* (here) | The `ksvc` *Route* over immutable revisions | Request-driven services where a revision *is* the rollback target
+|===
+
+None replaces the others — they operate at different layers. Knative's version is the cheapest when the workload is already a `ksvc`: the old revision is *right there*, so "roll back 20% to stable" is a weight change, not a deploy.
+
+== A taste of eventing — source, broker, trigger
+
+Everything so far is *request-driven*: a client calls the service. Knative *Eventing* adds the other half — *event-driven* delivery, where something *happens* and the service is invoked without a caller waiting on it. The three primitives you'll wire are:
+
+* A *Source* — something that emits events. You'll use a *PingSource*, which emits a small event on a schedule.
+* A *Broker* — an event hub that receives events and fans them out. The default is *in-memory* (no external messaging system required).
+* A *Trigger* — a subscription that routes broker events to a *sink* — here, the claims-processor `ksvc`, which *scales up from zero* to receive them.
+
+[NOTE]
+.What the eventing taste proves — and what it doesn't
+====
+This is a *taste*, on purpose. You will wire *source → broker → trigger → service* and see the delivery genuinely happen: the trigger POSTs each event to the `ksvc`, which *wakes from zero* to receive it. What you will *also* see is an honest *`HTTP 404`* — because the claims-processor has *no CloudEvents handler* yet, the delivered event lands on a path the app doesn't serve.
+That is the correct teaching boundary: the *wiring and the scale-up on an event are real*; *processing* the event — parsing the CloudEvent, branching on its data, replying — is the deep story, and it belongs to the *Eventing Deep-Dive & Serverless Workflows* module that follows. Don't read the 404 as a failure; read it as "the plumbing works, the business logic is the next module."
+====
+
+== Where Functions fit
+
+`kn func` lets you deploy a *single function* — a small handler from a language template (Node, Python, Quarkus, Go, …) for HTTP or CloudEvents — without writing a Dockerfile or a `ksvc` by hand; it builds an image and deploys it *as* a `ksvc`, so it inherits scale-to-zero and revisions for free.
+The honest constraint in this environment: `kn func` needs a container build, and the workshop terminal has no local container engine or registry, so the build must run *on-cluster* (which needs OpenShift Pipelines). In this module Functions are a *concept and an instructor demo*, not a graded exercise — the lab points you at the pattern and the wrap-up places it in the decision matrix.
+
+== When serverless is — and isn't — worth it
+
+Serverless is powerful and it is *not free*: the cold start is a real latency cost, and the autoscaler and Kourier ingress are one more layer to understand and operate.
+Reach for it when a service is *bursty or spiky*, *idle a meaningful fraction of the time*, *request- or event-driven*, and *tolerant of an occasional cold start* (or cheap enough to keep one warm) — that's when scale-to-zero and pay-for-use earn their keep.
+Don't reach for it for a *steadily busy* service (a plain Deployment with an HPA is simpler and has no cold start), a *latency-critical* path that can't tolerate a cold start *and* isn't worth a warm floor, or a *long-running or stateful* workload (serverless is for short, stateless request handling — batch and stateful work are other modules). The wrap-up returns to this with a sharper decision matrix.
+
+== How this shows up in real orgs
+
+* *"We're paying for pods that sit idle all night."* This is the scale-to-zero pitch in one sentence: a bursty internal service or a nightly feed can hold *zero* capacity when quiet and still be one request away from live. Serverless turns "always-on reservation" into "pay for requests."
+* *"Cold starts scare us."* A fair worry, and the honest answer is a *number and a dial*: measure the cold start (you will), and for the paths that can't tolerate it, set a warm floor with `min-scale` — you keep autoscaling and give up only scale-to-*zero*. It's a tradeoff you tune per service, not an all-or-nothing.
+* *"Can we canary a new version cheaply?"* With a `ksvc` the old version is a *revision that already exists*, so a canary — or a rollback — is a weight change on one Route, no second Deployment and no load-balancer ticket.
+* *"We want to react to events, not just serve requests."* The source → broker → trigger wiring is the entry point, and it scales the handler *from zero* on an event. Where the real event *processing* and workflows live is the next module — this one gets you to the wiring honestly.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) a *Knative Service* scales *to zero* when idle and *bursts* on traffic — you pay for requests, not idle pods — and Knative *auto-creates its Route*, so `ksvc.status.url` is the address; (2) every change mints an *immutable revision*, which makes a traffic split (and a rollback) a *weight change* on one Route, not a redeploy; (3) the *cold start is real and honest* — about 15 seconds for this JVM service from zero, a tenth of a second warm — and you plan around it with `min-scale` or a native build.
+The demo is the ten-minute arc: wake the service from zero and *feel* the cold start, burst load and watch it autoscale to the ceiling then melt back to zero, then flip an 80/20 revision split and roll it back live.
+Close on the punchline: "scale-to-zero economics, revisions you can split and roll back in one line, and an honest cold start you plan for — request-driven compute, owned by the platform."
+====
+endif::demo[]

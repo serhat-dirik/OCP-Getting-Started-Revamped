@@ -1,0 +1,693 @@
+= Serverless Zero-to-Hero: Lab
+:module-id: m19
+include::partial$version-attributes.adoc[]
+
+// Lab page for M19. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes); every later block uses
+// $NS / $URL with NO subs so jsonpath braces stay literal. All commands + outputs + timings were performed
+// on OCP {ocp_version} (Kubernetes 1.34) against a live OpenShift Serverless control plane (Knative Serving
+// + Eventing) as the sample user in namespace user6-dev on 2026-07-13: the ksvc inspection, the ~15 s JVM
+// cold start (HTTP 200 in 15.27s) vs the warm 0.106 s, the concurrency-driven autoscale 0->2->3 (max-scale
+// ceiling), the 80/20 tag-based revision split (both sub-routes 200; both revision Deployments woken), and
+// the source->broker->trigger eventing taste (Broker/Trigger/PingSource Ready; a real delivery returning
+// HTTP 404 because the app has no CloudEvents handler) are REAL captures. NAMESPACE in output is the sample
+// user user6-dev (yours is {user}-dev); the cluster domain in output is a generic placeholder (yours is
+// {cluster_domain}). Knative AUTO-CREATES the ksvc edge Route — the lab NEVER runs `oc create route edge`
+// for a ksvc (documented exception). kn (confirmed in the cockpit) is the primary CLI; CR steps are
+// dual-path [tabs] Console(Serverless / Import YAML)::CLI(kn). The cold-start honesty and the eventing 404
+// are explicit NOTEs, never // TODO.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcuts you'll reuse throughout the lab — your dev namespace, and the auto-created service URL:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "dev namespace: $NS"
+----
+
+You are the platform engineer for Parasol's *claims-processor*.
+It is already deployed in `{user}-dev` — but *not* as an ordinary Deployment. It's a *Knative Service* (`ksvc`): a scale-to-zero, request-driven service that Knative fronts with an auto-created edge Route.
+Right now it is holding *zero pods*.
+In this lab you *observe* the deployed service, *wake it from zero* and feel the cold start, *autoscale* it under load and watch it melt back to zero, *tune* its concurrency, *split traffic* between two revisions, and wire a first *taste of eventing* — a source → broker → trigger that wakes the service on an event.
+
+[TIP]
+.Two ways for the config steps; driving traffic is terminal-only
+====
+Where you create or change a Knative object, you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) — the *Serverless* area of the navigation, or *+Add → Import YAML* — and the *CLI* tab uses `kn` (the Knative CLI) in the *Terminal* tab beside these instructions.
+Pick a path once — the tabs stay in sync across the page.
+Two things are terminal-only on purpose: *driving traffic* from inside the cluster is an `oc exec … curl`, and *watching pods scale* is a `oc get pods -w` (the console *Topology* view shows the same scale-to-zero, but the numbers you'll read are from the terminal).
+The namespace in the output below is the sample user `user6-dev`; *yours* is `{user}-dev`, and the cluster domain shown is a placeholder — read the *shape*, not the exact values.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — ~10-minute presenter arc: wake -> burst -> split -> roll back
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Scale-to-zero, burst, and a one-line rollback (10 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws start m19 --user {user}` a few minutes ahead, set `NS={user}-dev` and `URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')`, and let the service settle back to *zero* pods (about a minute of no traffic).
+This demo runs from the *entry* state (a single scale-to-zero revision) — the story is *building* the split live, not starting from `ws solve`.
+Keep a terminal with large font on screen and a second pane running `oc get pods -n $NS -w` so the audience *sees* pods appear and vanish.
+The money moment is beat 1: the *15-second cold start* on screen, then a warm request in a tenth of a second — the tradeoff made visceral.
+====
+
+[demo-block]
+[TIME 3m]
+Say:: "Parasol's claims-processor is running, but it's holding *zero* pods — it costs nothing while it's idle. Watch what happens when the first request arrives: the platform starts a pod, and that first caller pays the cold start. Then watch the second request."
+Show:: `oc get pods` showing *no* claims pod; then a `curl` that hangs ~15 s and returns `200`; a pod appearing; a second `curl` returning in a tenth of a second.
+Do:: Wake the service from zero and contrast cold vs warm:
++
+[source,sh,role=execute]
+----
+NS=user6-dev
+URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims    # none — scaled to zero
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "warm:       HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+----
++
+"Fifteen seconds cold, a tenth of a second warm. That 15 seconds is the honest cost of scale-to-zero — and if a path can't tolerate it, I set a warm floor with `min-scale: 1`. Nothing hidden."
+
+[demo-block]
+[TIME 3m]
+Say:: "Now a sudden burst. Knative scales on *concurrency* — in-flight requests — and I've capped this service at three pods. Watch it climb from zero to the ceiling, then melt back down when the load stops."
+Show:: `oc get pods -w` going `0 → 2 → 3`, holding at 3, then dropping back to `0` after the load ends.
+Do:: Drive a burst from the in-cluster client and watch the autoscaler:
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c '
+  end=$(( $(date +%s) + 35 ))
+  for i in $(seq 1 12); do
+    ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'$URL'/api/claims"; done ) &
+  done; wait' &
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
+----
++
+"Zero to three in about ten seconds, held at the ceiling I set, and — once the burst is over — back to zero. Pay for the burst, nothing for the quiet."
+
+[demo-block]
+[TIME 4m]
+Say:: "Parasol wants to ship a v2 of the claims-processor — carefully, 20% of traffic first. With a Knative Service the old version is a *revision that already exists*, so the split — and the rollback — is a *one-line* change to one Route. No second Deployment, no load-balancer ticket."
+Show:: A tuned v2 revision; an 80/20 tag split read straight from `kn`; then a *rollback* to 100% stable in one command.
+Do:: Split 80/20, then roll back to 100% stable (v2 was created off-screen with `kn service update … --revision-name parasol-claims-v2`):
++
+[source,sh,role=execute]
+----
+# 80/20 blue-green split across the two revisions, each tag also gets its own sub-route:
+kn service update parasol-claims -n $NS \
+  --tag parasol-claims-v1=stable --tag parasol-claims-v2=candidate \
+  --traffic stable=80 --traffic candidate=20 --no-wait
+kn revision list -n $NS
+# ...and the rollback: 100% back to stable, in one line
+kn service update parasol-claims -n $NS --traffic stable=100 --traffic candidate=0 --no-wait
+kn revision list -n $NS
+----
++
+"Eighty/twenty, then — one line — a hundred percent back to stable. The candidate revision is still there, ready to re-weight. That's rollout *and* rollback as a Route weight, because a revision is a frozen version that never went away."
+
+[NOTE]
+.Optional closer + reset between runs
+====
+If the room is engaged, the *eventing taste* is a strong closer: `kn broker create default`, a `PingSource`, and a `Trigger` to the `ksvc` — the service *wakes from zero on an event*. Be honest that the delivery returns `HTTP 404` (the app has no event handler yet — that's the next module), so frame it as "the plumbing works; the processing is M20."
+`ws prep m19 --yes` returns the world to the entry state (one scale-to-zero revision, no split, no eventing).
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Observe your deployed Knative Service
+⏱ *~10 min* · meet the ksvc, its auto-created Route, and its revision
+
+Start by looking at what's already running. The claims-processor is a *Knative Service* — one object that Knative expands into a Deployment, a Service, a Route, a Configuration, and a Revision.
+
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Serverless → Services* and select *parasol-claims*. Note its *URL* (a ready HTTPS address), its single *Revision*, and — in *Topology* — that it currently shows *0* pods (a dashed ring), because it's scaled to zero.
+The *CLI* tab reads the same facts from the terminal — use it to capture the exact fields.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+kn service list -n $NS
+kn revision list -n $NS
+----
+--
+====
+
+.Expected output (one Ready service, one Ready revision at 100% traffic — scaled to zero)
+[source,texinfo]
+----
+NAME             URL                                                            LATEST              AGE   CONDITIONS   READY   REASON
+parasol-claims   https://parasol-claims-user6-dev.<cluster-domain>              parasol-claims-v1   6m    3 OK / 3     True
+
+NAME                SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITIONS   READY   REASON
+parasol-claims-v1   parasol-claims   100%             1            6m    3 OK / 4     True
+----
+
+The service is *Ready* and its whole address is that `URL` — *Knative created it for you*. There is *no* `oc create route edge` here: for a `ksvc`, the Serverless operator auto-creates an edge-terminated OpenShift Route (backed by the Kourier ingress) and publishes it as `status.url`. Read it once and save it — it's how you reach the service for the rest of the lab:
+
+[source,sh,role=execute]
+----
+URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')
+echo "service URL: $URL"
+oc get ksvc parasol-claims -n $NS -o jsonpath='ready={.status.conditions[?(@.type=="Ready")].status}  latestReady={.status.latestReadyRevisionName}{"\n"}'
+----
+
+.Expected output (an HTTPS URL Knative published; the ksvc is Ready even at zero pods)
+[source,texinfo]
+----
+service URL: https://parasol-claims-user6-dev.<cluster-domain>
+ready=True  latestReadyRevisionName=parasol-claims-v1
+----
+
+Confirm the scale-to-zero claim directly — with no traffic, the service holds *no* pods (only the always-on database and load client run):
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS
+----
+
+.Expected output (no parasol-claims pod — it's scaled to zero; claims-db + demo-client are always-on)
+[source,texinfo]
+----
+NAME                           READY   STATUS    RESTARTS   AGE
+claims-db-...                  1/1     Running   0          8m
+demo-client-...                1/1     Running   0          8m
+----
+
+[NOTE]
+.What Knative built under the one object you see
+====
+The `parasol-claims` `ksvc` is the *only* object you'd author. Behind it, `oc get` shows the machinery Knative manages: a `configuration.serving.knative.dev` (the latest desired version), a `route.serving.knative.dev` (whose `URL` matches the `ksvc`), and a `revision.serving.knative.dev` (the immutable snapshot the traffic points at). When a pod *is* running, it carries *two* containers — your `parasol-claims` app *and* a `queue-proxy` sidecar Knative injects to meter concurrency and buffer during scale-up. You'll see that pod appear in the next exercise.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You found the `parasol-claims` *Knative Service* — *Ready*, one *Revision* (`parasol-claims-v1`) at 100% traffic — read its *auto-created* HTTPS `status.url` (no hand-rolled Route), and confirmed it is holding *zero pods* while idle.
+****
+
+== 2. Scale to zero and back — feel the cold start
+⏱ *~12 min* · wake the service with one request, and measure the honest cost
+
+The service is at zero. Send it a request and *time it* — the first caller pays the *cold start* while Knative schedules a pod, boots the JVM, and hands the request through the activator. Drive the request from the in-cluster `demo-client`:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+----
+
+.Expected output (a real, honest JVM cold start — around 15 seconds)
+[source,texinfo]
+----
+cold start: HTTP 200 in 15.269703s
+----
+
+That is *not* a hang — it's the cold start, and it's the whole tradeoff of scale-to-zero made concrete. A pod is now running; send a *second* request and watch it return warm:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "warm:       HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims
+----
+
+.Expected output (warm is ~150x faster; the pod carries the app + the queue-proxy sidecar)
+[source,texinfo]
+----
+warm:       HTTP 200 in 0.105721s
+NAME                                            READY   STATUS    RESTARTS   AGE
+parasol-claims-v1-deployment-...                2/2     Running   0          20s
+----
+
+The pod is `2/2` — your `parasol-claims` container plus the `queue-proxy` sidecar. The service really works; confirm it's serving real claims data:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k "'$URL'/api/claims" | head -c 160; echo'
+----
+
+.Expected output (the seeded Parasol claims)
+[source,texinfo]
+----
+[{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,...
+----
+
+Now the deliberate *break-and-fix*, because it teaches the cold start the hard way. Let the service scale back to zero, then hit it with a client timeout *shorter than the cold start*:
+
+[source,sh,role=execute]
+----
+# wait for scale-to-zero (about a minute of no traffic), then confirm no pod:
+sleep 90
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers | grep -c . || echo 0
+# now a request with a 5-second timeout — SHORTER than the ~15s cold start:
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null -w "with -m5: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims" || echo "curl gave up (exit $?) — the cold start outran the 5s timeout"
+----
+
+.Expected output (the request is abandoned before the cold start finishes)
+[source,texinfo]
+----
+0
+with -m5: HTTP 000 in 5.001s
+curl gave up (exit 28) — the cold start outran the 5s timeout
+----
+
+The client gave up at 5 seconds, before the ~15-second cold start could complete — a classic "why does my first request fail?" trap. *Fix it* the way you would in production: either give the client a realistic timeout, or keep one pod warm so there's *no* cold start on the critical path.
+
+[source,sh,role=execute]
+----
+# fix option A — a realistic client timeout that allows for the cold start:
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 30 -o /dev/null -w "with -m30: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+# fix option B — pin a warm floor so scale-from-zero never hits the critical path:
+kn service update parasol-claims -n $NS --scale-min 1 --no-wait
+----
+
+.Expected output (option A rides out the cold start; option B keeps one pod always warm)
+[source,texinfo]
+----
+with -m30: HTTP 200 in 15.140s
+Service 'parasol-claims' updated in namespace 'user6-dev'.
+----
+
+[NOTE]
+.min-scale is a tradeoff, not a fix-all
+====
+`--scale-min 1` gives up scale-to-*zero* (you now always pay for one pod) in exchange for *no cold start* on the critical path — the right call for a latency-sensitive service. For a bursty, latency-tolerant one, leave `min-scale` at `0` and let the cold start happen. To finish this exercise as a scale-to-zero service, put the floor back to zero:
+
+[source,sh,role=execute]
+----
+kn service update parasol-claims -n $NS --scale-min 0 --no-wait
+----
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You woke the service from zero and *measured* the cold start (`HTTP 200` in ~15 s) against a warm request (~0.1 s), saw the `2/2` pod (app + `queue-proxy`) serve real claims, and hit — then fixed — the cold-start-vs-client-timeout trap (a 5 s timeout fails; a realistic timeout or a `min-scale` warm floor succeeds).
+****
+
+== 3. Autoscale under load, and tune concurrency
+⏱ *~15 min* · watch it climb from zero to the ceiling on concurrency, then melt back down
+
+Knative's autoscaler scales on *concurrency* — how many requests are in flight at once — not on CPU. To make that visible, first *tune* the service: cap each pod at a *hard* concurrency of `2` and a *max-scale* of `3`. Changing the template mints a new revision — name it `parasol-claims-v2`:
+
+[tabs]
+====
+Console::
++
+--
+In *Serverless → Services → parasol-claims → YAML*, set the revision name and the concurrency knobs under `spec.template`, then *Save*:
+
+[source,yaml]
+----
+spec:
+  template:
+    metadata:
+      name: parasol-claims-v2          # a fresh, named revision
+      annotations:
+        autoscaling.knative.dev/max-scale: "3"
+    spec:
+      containerConcurrency: 2          # hard cap: 2 in-flight requests per pod
+----
+
+Saving mints the `parasol-claims-v2` revision. The *CLI* tab does the same in one command.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+kn service update parasol-claims -n $NS \
+  --revision-name parasol-claims-v2 \
+  --concurrency-limit 2 \
+  --scale-max 3 --no-wait
+----
+--
+====
+
+.Expected output (a second revision is minted; traffic moves to it as it becomes Ready)
+[source,texinfo]
+----
+Service 'parasol-claims' updated in namespace 'user6-dev'.
+----
+
+Confirm the two revisions now exist, and let the service settle back to zero:
+
+[source,sh,role=execute]
+----
+kn revision list -n $NS
+# wait for scale-to-zero so the burst starts from a clean zero:
+sleep 90; oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers | grep -c . || echo 0
+----
+
+.Expected output (v2 is latest at 100%; v1 retained; then zero pods)
+[source,texinfo]
+----
+NAME                SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITIONS   READY   REASON
+parasol-claims-v2   parasol-claims   100%             2            1m    3 OK / 4     True
+parasol-claims-v1   parasol-claims                    1            13m   3 OK / 4     True
+0
+----
+
+Now the payoff. With a hard limit of *2 requests per pod*, a burst of concurrent traffic *forces* Knative to add pods to keep up — up to your ceiling of 3. Drive a burst from the `demo-client` in the background and *watch the pods climb from zero*:
+
+[source,sh,role=execute]
+----
+# 12 parallel request loops for ~35s, in the background:
+oc exec deploy/demo-client -n $NS -- sh -c '
+  end=$(( $(date +%s) + 35 ))
+  for i in $(seq 1 12); do
+    ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'$URL'/api/claims"; done ) &
+  done; wait' &
+# ...and watch the autoscaler react (Ctrl-C once you have seen it reach 3):
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
+----
+
+.Expected output (zero → the max-scale ceiling in about ten seconds)
+[source,texinfo]
+----
+NAME                                            READY   STATUS              AGE
+parasol-claims-v2-deployment-...                0/2     Pending             1s
+parasol-claims-v2-deployment-...                2/2     Running             6s
+parasol-claims-v2-deployment-xxxxx-...          2/2     Running             8s
+parasol-claims-v2-deployment-yyyyy-...          2/2     Running             10s
+----
+
+You saw the replica count go *0 → 2 → 3* within about ten seconds, then hold at *3* — the `max-scale` ceiling you set, so a single bursting service can't exhaust the cluster. When the burst ends, the autoscaler drains back down; watch it return to zero:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
+# after the load stops you'll see 3 -> 1 -> 0 over roughly half a minute; Ctrl-C when it reaches 0
+----
+
+.Expected output (idle → the pods are removed, back to zero)
+[source,texinfo]
+----
+parasol-claims-v2-deployment-yyyyy-...          2/2     Terminating         ...
+parasol-claims-v2-deployment-xxxxx-...          2/2     Terminating         ...
+parasol-claims-v2-deployment-...                2/2     Terminating         ...
+----
+
+[NOTE]
+.Why concurrency, and why the *hard* limit here
+====
+Knative's default target is a *soft* concurrency goal (`autoscaling.knative.dev/target`, default ~100 in-flight requests per pod). We used the *hard* `containerConcurrency: 2` for this exercise because it makes the scale-up *deterministic and visible from a small, CPU-limited load client* — with only two requests allowed per pod, even a modest burst *must* fan out to the ceiling. In production you'd usually tune the *soft target* to your service's real capacity and set `max-scale` for safety; the mechanism — *replicas track concurrency* — is identical.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You *tuned* concurrency (minting revision `parasol-claims-v2` with `containerConcurrency: 2` and `max-scale: 3`), drove a concurrent burst, and watched the autoscaler climb *0 → 2 → 3* on concurrency and hold at the `max-scale` ceiling — then melt back to *zero* when the load stopped.
+****
+
+== 4. Split traffic between revisions
+⏱ *~15 min* · an 80/20 blue-green split, and a one-line rollback
+
+You now have *two* revisions — `v1` and `v2`. Because a revision is a frozen, addressable version, shifting traffic between them is a *one-object change* on the Route: tag `v1` as `stable` at 80% and `v2` as `candidate` at 20%.
+
+[tabs]
+====
+Console::
++
+--
+In *Serverless → Services → parasol-claims → YAML*, set the `traffic` block, then *Save*:
+
+[source,yaml]
+----
+spec:
+  traffic:
+    - revisionName: parasol-claims-v1
+      tag: stable
+      percent: 80
+    - revisionName: parasol-claims-v2
+      tag: candidate
+      percent: 20
+----
+
+Saving re-weights the Route and gives each tag its own sub-route. The *CLI* tab does the same with `kn`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+kn service update parasol-claims -n $NS \
+  --tag parasol-claims-v1=stable \
+  --tag parasol-claims-v2=candidate \
+  --traffic stable=80 --traffic candidate=20 --no-wait
+----
+--
+====
+
+Read the split back — Knative reports the weights *and* the per-tag sub-routes it created:
+
+[source,sh,role=execute]
+----
+kn revision list -n $NS
+oc get ksvc parasol-claims -n $NS -o jsonpath='{range .status.traffic[*]}tag={.tag} rev={.revisionName} percent={.percent}{"\n"}  url={.url}{"\n"}{end}'
+----
+
+.Expected output (80% stable / 20% candidate, each with its own sub-route)
+[source,texinfo]
+----
+NAME                SERVICE          TRAFFIC   TAGS        GENERATION   AGE   CONDITIONS   READY   REASON
+parasol-claims-v2   parasol-claims   20%       candidate   2            6m    3 OK / 4     True
+parasol-claims-v1   parasol-claims   80%       stable      1            18m   3 OK / 4     True
+
+tag=stable rev=parasol-claims-v1 percent=80
+  url=https://stable-parasol-claims-user6-dev.<cluster-domain>
+tag=candidate rev=parasol-claims-v2 percent=20
+  url=https://candidate-parasol-claims-user6-dev.<cluster-domain>
+----
+
+The two *tagged sub-routes* let you address either revision *directly* — hit each and confirm it serves:
+
+[source,sh,role=execute]
+----
+STABLE=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.traffic[?(@.tag=="stable")].url}')
+CAND=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.traffic[?(@.tag=="candidate")].url}')
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "stable    (v1) direct: HTTP %{http_code}\n" "$STABLE/api/claims"
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "candidate (v2) direct: HTTP %{http_code}\n" "$CAND/api/claims"
+----
+
+.Expected output (both revisions are independently reachable)
+[source,texinfo]
+----
+stable    (v1) direct: HTTP 200
+candidate (v2) direct: HTTP 200
+----
+
+Now prove the *main* URL really splits across both revisions — send a batch through it, then confirm *both* revision Deployments were woken:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 50); do curl -s -k -o /dev/null "'$URL'/api/claims"; done; echo "sent 50"'
+oc get deploy -n $NS -l serving.knative.dev/service=parasol-claims \
+  -o custom-columns='REVISION-DEPLOYMENT:.metadata.name,READY:.status.readyReplicas'
+----
+
+.Expected output (both revisions received traffic and scaled up)
+[source,texinfo]
+----
+sent 50
+REVISION-DEPLOYMENT             READY
+parasol-claims-v1-deployment    1
+parasol-claims-v2-deployment    1
+----
+
+Finally, the *rollback* — the reason this model is cheap. Send *100%* back to `stable` in one line; the candidate revision stays put, ready to re-weight:
+
+[source,sh,role=execute]
+----
+kn service update parasol-claims -n $NS --traffic stable=100 --traffic candidate=0 --no-wait
+kn revision list -n $NS
+----
+
+.Expected output (all traffic back on stable; candidate retained at 0%)
+[source,texinfo]
+----
+NAME                SERVICE          TRAFFIC   TAGS        GENERATION   AGE   CONDITIONS   READY   REASON
+parasol-claims-v2   parasol-claims   0%        candidate   2            8m    3 OK / 4     True
+parasol-claims-v1   parasol-claims   100%      stable      1            20m   3 OK / 4     True
+----
+
+That's rollout *and* rollback as a *Route weight*. Re-apply the 80/20 split before moving on, so the module ends in its split end state:
+
+[source,sh,role=execute]
+----
+kn service update parasol-claims -n $NS --traffic stable=80 --traffic candidate=20 --no-wait
+----
+
+[NOTE]
+.The third way to shift traffic
+====
+This is the same outcome as an Argo Rollouts canary (M10) or a service-mesh weighted route (M18), at a *different layer*: here the split lives on the `ksvc`'s own *Route*, over *immutable revisions*, and the rollback target is a revision that *already exists*. Reach for Knative's version when the workload is already a `ksvc`; reach for Rollouts when you want metric-gated, automated promotion; reach for the mesh when the split is one of many L7 policies across services.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You split traffic *80/20* across two revisions with tags (`stable`/`candidate`), read the weights *and* the per-tag sub-routes from Knative, hit each revision directly (both `200`), confirmed the main URL woke *both* revision Deployments, and *rolled back* to 100% stable in one line — then re-applied the split.
+****
+
+== 5. A taste of eventing — source, broker, trigger
+⏱ *~15 min* · wake the service on an event, and meet the honest boundary
+
+So far everything has been *request-driven*. Knative *Eventing* adds *event-driven* delivery: a *source* emits events into a *broker*, and a *trigger* routes them to a *sink* — your `ksvc`, which *wakes from zero* to receive them. Wire all three.
+
+First, an in-memory *Broker* (no external messaging system needed) and a *Trigger* pointing at the claims-processor:
+
+[tabs]
+====
+Console::
++
+--
+In *Serverless → Eventing*, create a *Broker* named `default`, then a *Trigger* named `claims-processor` whose subscriber is the *parasol-claims* Service. Or use *+Add → Import YAML* with the manifests from the *CLI* tab.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+kn broker create default -n $NS
+kn trigger create claims-processor -n $NS --broker default --sink ksvc:parasol-claims
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+Broker 'default' successfully created in namespace 'user6-dev'.
+Trigger 'claims-processor' successfully created in namespace 'user6-dev'.
+----
+
+Now a *Source* — a `PingSource` that emits a small event into the broker on a schedule (every minute):
+
+[tabs]
+====
+Console::
++
+--
+In *Serverless → Eventing → Create → Event Source → Ping Source*, set the schedule `* * * * *`, a small JSON data payload, and the *Broker* `default` as the sink. Or *+Add → Import YAML* with the manifest from the *CLI* tab.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: sources.knative.dev/v1
+kind: PingSource
+metadata:
+  name: claim-ticker
+spec:
+  schedule: "* * * * *"
+  contentType: application/json
+  data: '{"source":"claim-ticker","note":"eventing taste - deep story is M20"}'
+  sink:
+    ref:
+      apiVersion: eventing.knative.dev/v1
+      kind: Broker
+      name: default
+EOF
+----
+--
+====
+
+Confirm the whole chain is *Ready* — source, broker, and trigger:
+
+[source,sh,role=execute]
+----
+oc get pingsource,broker,trigger -n $NS
+----
+
+.Expected output (source → broker → trigger, all Ready and wired to the ksvc)
+[source,texinfo]
+----
+NAME                                          SINK                                    SCHEDULE    READY
+pingsource.sources.knative.dev/claim-ticker   ...broker-ingress.../user6-dev/default  * * * * *   True
+
+NAME                                  URL                                      READY
+broker.eventing.knative.dev/default   ...broker-ingress.../user6-dev/default   True
+
+NAME                                            BROKER    SUBSCRIBER_URI                              READY
+trigger.eventing.knative.dev/claims-processor   default   http://parasol-claims...svc.cluster.local   True
+----
+
+The wiring is live: every minute the `PingSource` emits an event, the `Broker` receives it, and the `Trigger` delivers it to the claims-processor — which *wakes from zero* to receive it. See the delivery for yourself by sending one event exactly as the trigger does — a CloudEvents POST to the service:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c '
+  curl -s -k -o /dev/null -w "event delivered to ksvc: HTTP %{http_code}\n" \
+    -X POST -H "Content-Type: application/json" \
+    -H "ce-specversion: 1.0" -H "ce-type: dev.knative.sources.ping" \
+    -H "ce-source: /apis/v1/namespaces/'$NS'/pingsources/claim-ticker" -H "ce-id: demo-1" \
+    -d "{\"source\":\"claim-ticker\"}" "'$URL'/"'
+----
+
+.Expected output (the delivery is real — and honestly returns 404)
+[source,texinfo]
+----
+event delivered to ksvc: HTTP 404
+----
+
+[NOTE]
+.Read the 404 correctly — the plumbing works; the processing is the next module
+====
+That `404` is *expected*, and it's the honest boundary of this taste. The event was *genuinely delivered*: the trigger POSTed it to the `ksvc`, which *woke from zero* to receive it. But the claims-processor has *no CloudEvents handler* — the event lands on `/`, a path the app doesn't serve, so it answers `404`. What you have proved is real and valuable: *source → broker → trigger → scale-up on an event*. What you have *not* done is *process* the event — parse the CloudEvent, branch on its data, reply. That is the whole subject of the *Eventing Deep-Dive & Serverless Workflows* module (M20), which starts from exactly this end state. Don't add a fake handler to force a `200`; the `404` is the truth, and the next module is where the handler lives.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You wired *source → broker → trigger* — a `PingSource` into an in-memory `Broker`, a `Trigger` delivering to the `parasol-claims` `ksvc` — confirmed all three *Ready*, and saw a real event delivery *wake the service from zero* and return an honest `HTTP 404` (the app has no event handler yet — that's M20).
+****
+
+== 6. Build a Function (concept + instructor demo)
+⏱ *~8 min* · where `kn func` fits — and why it's a demo here, not a graded step
+
+`kn func` deploys a *single function* — a small handler from a language template — without you writing a Dockerfile or a `ksvc` by hand. It builds a container image and deploys it *as* a Knative Service, so the function inherits scale-to-zero and revisions automatically. A premium-calculator function would look like:
+
+[source,sh]
+----
+# create from a template (Quarkus, HTTP), then deploy:
+kn func create -l quarkus -t http premium-calculator
+cd premium-calculator
+# ... edit the handler ...
+kn func deploy --registry image-registry.openshift-image-registry.svc:5000/{user}-dev
+----
+
+[NOTE]
+.Why this is an instructor demo, not a hands-on step here
+====
+`kn func deploy` needs to *build a container image*. That build runs either *locally* (needs a container engine like Podman *and* push access to a registry) or *on-cluster* (needs OpenShift Pipelines). The workshop terminal has *no local container engine or registry*, so the local path can't run here, and the on-cluster path depends on a Pipelines install outside this module's scope. So Functions are presented as a *concept and an instructor demo* — the pattern is what matters: `kn func` gives you a `ksvc` from a code template, with the *same* scale-to-zero, revision, and traffic-split behavior you exercised above. When you *do* have a build path, everything you learned in exercises 1–5 applies to the function unchanged.
+====
+
+This section is reading only — there is no checkpoint to verify.
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the mechanics. Try these on your own:
+
+* *Prove scale-to-zero timing.* Drive one request, then run `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w` and *time* how long after the last request the pod is removed. Reason about the two Knative defaults that add up to it (the stable window and the scale-to-zero grace period).
+* *Tune the soft target instead of the hard limit.* Re-tune the service with `--concurrency-target 5` (a soft goal) instead of `--concurrency-limit 2` (a hard cap), drive the same burst, and reason about why the scale-up curve differs — and which knob you'd reach for in production.
+* *Mirror the traffic decision.* You split 80/20 with revision tags here, an Argo Rollouts canary in M10, and a mesh weighted route in M18. Write two sentences on which you'd choose for (a) a request-driven `ksvc` and (b) a service that's one of many in an mTLS mesh — and why.
+
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (one scale-to-zero revision, no split, no eventing).
+
+endif::demo[]

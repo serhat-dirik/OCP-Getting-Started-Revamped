@@ -1,0 +1,131 @@
+= Serverless Zero-to-Hero: Troubleshooting
+:module-id: m19
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-13) against a live
+// OpenShift Serverless {serverless_version} control plane (Knative Serving + Eventing) in user6-dev, plus
+// known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use $NS = {user}-dev and $URL =
+// ksvc.status.url (set them once). NAMESPACE in output is the sample user user6-dev. Every entry below was
+// either hit while building the module or is a known trap.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcuts first: `NS={user}-dev` and `URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')`.
+
+== My first request hangs for ~15 seconds (or a short-timeout curl fails)
+
+Symptom:: The first request to the service takes about 15 seconds, or a `curl -m 5` returns `HTTP 000` / exit `28` ("timed out").
+Cause:: This is the *cold start*, not a fault. The service was scaled to *zero*; the first request waits while Knative schedules a pod, boots the JVM, checks the database, and hands the request through the activator. A client timeout *shorter* than the cold start abandons the request before it finishes.
+Fix:: Use a realistic client timeout, or keep one pod warm so there's no cold start on the critical path:
++
+[source,sh,role=execute]
+----
+# a timeout that allows for the cold start:
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 30 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+# or pin a warm floor (gives up scale-to-zero, removes the cold start):
+kn service update parasol-claims -n $NS --scale-min 1 --no-wait
+----
++
+The warm request after the first is ~0.1 s. Put the floor back with `--scale-min 0` to return to scale-to-zero.
+
+== The service never scales back to zero — a pod stays running
+
+Symptom:: `oc get pods` keeps showing a `parasol-claims` pod even after you stop sending requests.
+Cause:: Either traffic is still arriving, or something is *waking it on a schedule*. The most common cause in this lab is the eventing `PingSource` (`* * * * *`), which delivers an event *every minute* — each delivery wakes the `ksvc`, so it never sits idle long enough (the Knative stable window + grace period is ~60–90 s) to scale to zero.
+Fix:: Stop the traffic source, then wait out the settle window. If it's the PingSource, delete it (or check for stray load):
++
+[source,sh,role=execute]
+----
+oc get pingsource -n $NS                                   # is claim-ticker firing every minute?
+oc exec deploy/demo-client -n $NS -- pgrep -f curl || echo "no stray load"
+# to let it rest, remove the ticker (recreate it later if you still need the eventing beat):
+oc delete pingsource claim-ticker -n $NS
+----
++
+After the last event/request, the pod is removed in ~60–90 s. That delay is the Knative default, not a hang.
+
+== The eventing delivery returns `HTTP 404`
+
+Symptom:: The `Trigger` is `Ready`, the event is delivered, the `ksvc` wakes — but the delivery returns `404`.
+Cause:: This is *expected and correct*. The `parasol-claims` app has *no CloudEvents handler*: the event is POSTed to `/`, a path the app doesn't serve, so it answers `404`. The wiring (source → broker → trigger) and the scale-up are real; only *processing* the event is missing.
+Fix:: Nothing to fix — the `404` is the honest boundary of the eventing *taste*. Confirm the delivery genuinely happened (a `404`, not a `000`/timeout, proves the request reached the app):
++
+[source,sh,role=execute]
+----
+oc get trigger claims-processor -n $NS -o jsonpath='ready={.status.conditions[?(@.type=="Ready")].status} sink={.status.subscriberUri}{"\n"}'
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "delivery: HTTP %{http_code}\n" -X POST -H "ce-id: t1" -H "ce-source: /t" -H "ce-type: t" -H "ce-specversion: 1.0" "$URL/"
+----
++
+Processing the event — parsing the CloudEvent, branching on its data, replying — is the *Eventing Deep-Dive* module (M20). Don't add a handler to force a `200` here.
+
+== `kn service update` is rejected: revision already exists with different spec
+
+Symptom:: A `kn service update … --revision-name parasol-claims-v2 …` fails with a validation error mentioning `revisions.serving.knative.dev "parasol-claims-v2" … immutable` or `Saw the following changes without a name change`.
+Cause:: Knative revisions are *immutable*. You reused a revision *name* (`parasol-claims-v2`) with a *different* spec than the revision already stored under that name. You can't edit a revision — you can only create a new, differently-named one.
+Fix:: Give the new revision a *fresh* name (or omit `--revision-name` to let Knative auto-generate one):
++
+[source,sh,role=execute]
+----
+kn revision list -n $NS                                    # see which names are taken
+kn service update parasol-claims -n $NS --revision-name parasol-claims-v3 --concurrency-limit 2 --no-wait
+----
++
+The same rule is why a raw re-apply of the entry `ksvc` can trip the webhook — pin a *new* name whenever the template spec changes.
+
+== The service won't scale past 1–2 pods under load
+
+Symptom:: You drive a burst but the replica count plateaus at 1 or 2, never reaching `max-scale`.
+Cause:: The autoscaler scales on *concurrency*, and the in-cluster `demo-client` is CPU-capped (200 m), so it can only offer modest in-flight load. With a *soft* target (default ~100), that load rarely justifies more than a pod or two.
+Fix:: Use a *hard* `containerConcurrency` limit so a small burst *must* fan out (the lab uses `2`), and drive parallel loops (not a sequential one):
++
+[source,sh,role=execute]
+----
+kn service update parasol-claims -n $NS --concurrency-limit 2 --scale-max 3 --revision-name parasol-claims-v2 --no-wait
+oc exec deploy/demo-client -n $NS -- sh -c 'end=$(( $(date +%s)+35 )); for i in $(seq 1 12); do ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'$URL'/api/claims"; done ) & done; wait' &
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
+----
++
+With two requests allowed per pod, a 12-loop burst climbs to the `max-scale` ceiling (3) in about ten seconds.
+
+== I tried to give the ksvc a Route and it fought me (or there's no Route to find)
+
+Symptom:: You looked for an OpenShift `Route` for the service and didn't find one in your namespace, or you tried `oc create route edge parasol-claims` and it conflicts / doesn't take effect.
+Cause:: A `ksvc` does *not* use a hand-rolled Route. Knative auto-creates an edge-terminated Route (backed by Kourier) in the `knative-serving-ingress` namespace — which you can't read cross-namespace — and publishes the address on the service as `status.url`.
+Fix:: Never create a Route for a `ksvc`. Read the address Knative published:
++
+[source,sh,role=execute]
+----
+oc get ksvc parasol-claims -n $NS -o jsonpath='url={.status.url}{"\n"}'
+oc get route.serving.knative.dev -n $NS               # the Knative Route object (mirrors status.url)
+----
++
+That HTTPS `url` is the service's address for everything in this module. (This is the documented exception to the project's "browser Routes use `oc create route edge`" rule — it applies to plain Deployments, not to Knative Services.)
+
+== `curl` to the service URL fails with a certificate error
+
+Symptom:: A `curl` to `$URL` from the `demo-client` fails with `SSL certificate problem` / `unable to get local issuer certificate`.
+Cause:: The auto-created edge Route serves the cluster's default ingress certificate, whose CA isn't in the minimal `tools` image's trust store. This is a *client trust* issue, not a service problem.
+Fix:: The lab drives traffic with `curl -k` (skip verification) precisely for this reason — the service and its TLS are fine; only the client's trust store is minimal:
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "HTTP %{http_code}\n" "$URL/api/claims"
+----
++
+In a real client you'd trust the cluster ingress CA; for the lab's in-cluster test client, `-k` is the intended path.
+
+== `kn` is not found in the terminal
+
+Symptom:: `kn service list` (or any `kn …`) returns `command not found`.
+Cause:: The Knative CLI isn't on this cockpit terminal's PATH.
+Fix:: Every `kn` step in the lab has an equivalent Console path (the *Serverless* area, or *+Add → Import YAML*) and can be done with `oc` on the underlying `serving.knative.dev`/`eventing.knative.dev` objects. Confirm the CLI and, if it's genuinely missing, tell your instructor (it should be in the cockpit image):
++
+[source,sh,role=execute]
+----
+command -v kn && kn version | head -1
+# oc-only equivalent of `kn revision list`:
+oc get revision.serving.knative.dev -n $NS
+----
+
+'''
+
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-13) against OpenShift Serverless {serverless_version} (Knative Serving + Eventing)._
