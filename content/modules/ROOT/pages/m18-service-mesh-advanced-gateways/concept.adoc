@@ -1,0 +1,183 @@
+= Service Mesh 3 & Advanced Gateways: Concept
+:module-id: m18
+include::partial$version-attributes.adoc[]
+
+// Concept page for M18. Renders in all three flavors (workshop/demo/instructor). Environment values
+// appear ONLY as attributes; product versions ONLY via version-attributes (OSSM {service_mesh_version},
+// Kiali {kiali_version}). Everything described here was performed on OCP {ocp_version} (Kubernetes 1.34)
+// against a live OpenShift Service Mesh 3 control plane as user4 on 2026-07-13 — sidecar injection, STRICT
+// mTLS, the Kiali graph traffic, the weighted/header VirtualService, fault injection, the AuthorizationPolicy
+// allow/deny, and the raw-TCP + rate-limit gateway encore are real captures, not from memory. OSSM3 uses the
+// Sail operator and upstream Istio CRs (Istio, IstioCNI, VirtualService, DestinationRule, AuthorizationPolicy,
+// PeerAuthentication) — the 2.x control-plane/member-roll CRs do not exist in 3.x (04-STYLE-GUIDE §6 ban; the
+// migration story is told without the banned acronyms). Prose expands mTLS/SPIFFE/mesh-concept acronyms on
+// first use; ubiquitous acronyms (API, TLS, TCP, HTTP, DNS, CPU) are never expanded.
+
+[.lead]
+One slow dependency can take down a whole application: when Parasol's *claims* service calls a *fraud-scoring* service that suddenly hangs, the claims threads pile up waiting, the web tier's calls to claims pile up behind them, and a single sluggish service cascades into a site-wide outage.
+A *service mesh* is the platform's answer — it puts a proxy beside every workload so encryption, traffic routing, resilience, and access control become *configuration* the platform enforces, not code every team rewrites.
+This module takes the Parasol claims chain into OpenShift Service Mesh {service_mesh_version}: you enroll it, get mutual TLS and a live service graph for free, shift traffic between versions, inject faults, lock down who may call whom, and finish at the ingress edge where Routes can't follow.
+
+== What you'll learn
+
+* What a service mesh *is* — the *data plane* (a sidecar proxy per pod) and the *control plane* (istiod) — and the honest test for when a mesh is, and isn't, worth its cost.
+* How to *enroll* a workload — the sidecar injection label, why a namespace tenant enrolls *per workload*, and how the native sidecar shows up as an init container.
+* How *mutual TLS* arrives "for free" between meshed workloads, and how a *STRICT* policy proves it by refusing a plaintext client.
+* How the *Kiali* console turns live traffic into a *service graph* with health and security badges — the picture you can't get from `oc get pods`.
+* How to *shift traffic* between service versions with a *VirtualService* and *DestinationRule* — a weighted split and a header route — and how to read the split from the mesh's own telemetry.
+* How to *inject faults* and set *timeouts, retries, and a circuit breaker*, and the honest truth about what each one does (and doesn't) protect you from.
+* How to *secure* a call path with an *AuthorizationPolicy* scoped to a workload's identity — "only claims may call fraud."
+* What OpenShift Service Mesh 3 *is* (upstream Istio on the Sail operator), what changed from 2.x (the question every migrating customer asks), and where the *L4 ingress boundary* sits — the raw-TCP and TLS-passthrough paths that Routes and HTTP-only Gateway API can't serve.
+
+== The problem a mesh solves
+
+Parasol's application is a chain: the *web* tier calls the *claims* API, and claims calls a *fraud-scoring* service before it approves a payout.
+Every link in that chain needs the same things — the traffic should be *encrypted*, you should be able to *see* it, a bad release should be *shiftable* without a redeploy, a slow dependency should *fail fast* instead of hanging, and *only* the right caller should be allowed through.
+
+Without a mesh, every one of those is *application code*: each team wires TLS, adds a metrics library, writes retry loops, and re-implements auth — differently, in a different language, with different bugs.
+A *service mesh* moves all of it *out* of the app and *into* a proxy that sits beside each workload.
+The app keeps making plain HTTP calls to `parasol-fraud:8080`; the proxy transparently encrypts them, measures them, routes them, retries them, and enforces who's allowed.
+
+[mermaid]
+....
+graph TB
+  subgraph cp["Control plane — istio-system"]
+    istiod["istiod<br/>config + identity (mTLS certs)<br/>OSSM Sail operator"]
+    kiali["Kiali console<br/>graph · health · mTLS badges"]
+  end
+  subgraph mesh["Data plane — your {user}-mesh namespace"]
+    subgraph webpod["web pod"]
+      web["parasol-web"] --- wsc(("proxy"))
+    end
+    subgraph claimspod["claims pod"]
+      claims["parasol-claims"] --- csc(("proxy"))
+    end
+    subgraph fraudpod["fraud pod"]
+      fraud["parasol-fraud"] --- fsc(("proxy"))
+    end
+  end
+  client["demo-client<br/>(un-meshed · no proxy)"]
+  istiod -.->|"pushes config + certs"| wsc
+  istiod -.->|"pushes config + certs"| csc
+  istiod -.->|"pushes config + certs"| fsc
+  wsc ==>|"mTLS"| csc
+  csc ==>|"mTLS"| fsc
+  client -.->|"plaintext<br/>(blocked under STRICT)"| wsc
+  kiali -.->|"reads telemetry"| csc
+  classDef cp fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef app fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef proxy fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef ext fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class istiod,kiali cp; class web,claims,fraud app; class wsc,csc,fsc proxy; class client ext;
+....
+
+// media-pass: replace/augment with SVG export m18-service-mesh-advanced-gateways-01-mesh-architecture.svg (see media-manifest.md)
+
+The *green* boxes are your application containers — unchanged.
+The *amber* circles are the sidecar proxies the mesh injects beside them; together they are the *data plane*, the thing that actually carries and controls traffic.
+The *blue* control plane (`istiod` and Kiali) never touches a packet — it *configures* the proxies and hands them the certificates that make mutual TLS work.
+The *red* client is deliberately outside the mesh, so you can prove what the mesh does by watching it get *refused*.
+
+== The data plane and the control plane
+
+Two halves, and the split is the whole mental model:
+
+* The *data plane* is the fleet of *sidecar proxies* — one Envoy proxy injected into every meshed pod. All of a pod's inbound and outbound traffic is transparently redirected through its proxy. This is where encryption, routing, retries, and access checks actually happen. On OpenShift Service Mesh 3 the proxy is injected as a *native sidecar* — a Kubernetes init container with an always-on restart policy, so it starts *before* your app and shuts down *after* it, closing the startup/shutdown gaps older sidecars had.
+* The *control plane* is *istiod*, running in the `istio-system` namespace. It watches your Kubernetes resources and the mesh custom resources you create, compiles them into proxy configuration, and *pushes* that config — plus a short-lived identity certificate — to every sidecar. It is not in the request path; if istiod restarts, traffic keeps flowing on the last config the proxies received.
+
+You configure the mesh by creating *custom resources* — `VirtualService`, `DestinationRule`, `AuthorizationPolicy`, `PeerAuthentication` — and istiod turns them into proxy behavior. You never edit a proxy directly.
+
+== What you get the moment you enroll
+
+Enrolling a workload (adding one label and letting it restart) buys three things with *no application change*:
+
+* *Mutual TLS between meshed workloads.* Each sidecar gets an identity certificate from istiod encoding a *SPIFFE* identity — a verifiable name of the form `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`. When two meshed pods talk, their proxies authenticate each other and encrypt the connection automatically. You'll read that exact identity off a live workload certificate in the lab.
+* *A service graph and golden signals.* Because every request passes through a proxy, the mesh emits consistent telemetry for *all* traffic — request rate, error rate, latency — without instrumenting the app. Kiali renders it as a live graph.
+* *A control point.* Once traffic flows through the proxies, you can *change* its behavior — route it, secure it, slow it, retry it — by applying a resource, not by shipping code.
+
+By default the mesh runs mutual TLS in *PERMISSIVE* mode: meshed-to-meshed traffic is encrypted, but a proxy will still *accept* plaintext from an un-meshed client (so nothing breaks the moment you enroll). Flipping a *PeerAuthentication* to *STRICT* makes the proxy *refuse* plaintext — which is exactly how you prove the encryption is real.
+
+== OpenShift Service Mesh 3 — and the question every 2.x customer asks
+
+OpenShift Service Mesh 3 is *upstream Istio*, packaged and lifecycle-managed by the *Sail operator*.
+That is the single biggest change from the 2.x line, and it's the first thing a migrating customer will ask about, so know the answer:
+
+* In *2.x*, you configured the control plane through a dedicated Red Hat control-plane custom resource and declared mesh membership through a separate member-roll object. *Those two resources do not exist in 3.x.*
+* In *3.x*, the control plane is upstream Istio's own `Istio` resource (managed by Sail), and membership is by the *discovery* and *injection* labels you use in this lab. It's standard Istio — the same `VirtualService`, `DestinationRule`, `Gateway`, and `AuthorizationPolicy` the whole Istio ecosystem uses.
+
+The practical migration message: *"the 2.x control-plane and member-roll CRs are gone; it's upstream Istio now, on the Sail operator, so your Istio knowledge transfers directly."*
+On this cluster the control plane reports itself as Istio `v1.28.6` — you'll read that from the `Istio` resource in the lab.
+
+[NOTE]
+.Sidecar today, ambient tomorrow
+====
+Istio now offers two data-plane modes.
+*Sidecar* mode — the one this workshop uses — injects a proxy into every pod: mature, per-pod, and the right default for learning the mesh.
+*Ambient* mode splits the data plane into a per-node component (for mutual TLS and L4) plus an optional per-namespace *waypoint* proxy (for L7 policy), so pods carry *no* sidecar — lower overhead at scale, at the cost of a newer operational model.
+The tradeoff is real: sidecars cost you a proxy (and its memory) *per pod*; ambient trades that for shared components and "pay for L7 only where you need it." Ambient is generally available in Service Mesh 3; this module teaches sidecar mode and flags ambient as the direction to evaluate for large fleets.
+====
+
+== Where the mesh sits next to the network layers you already know
+
+The Networking module drew a layered picture; the mesh is the *top* layer:
+
+[cols="1,2,2",options="header"]
+|===
+| Layer | What it controls | Identity model
+
+| *NetworkPolicy / UDN* | Which pods may *connect* to which, by namespace/label/IP | Network location (IP, namespace)
+| *Routes / Gateway API* | *North-south* HTTP(S) ingress into the cluster | Hostname / path
+| *Service mesh* | *East-west* traffic between services: mTLS, routing, resilience, L7 authorization | *Workload identity* (SPIFFE / ServiceAccount)
+|===
+
+The key difference is *identity*.
+A NetworkPolicy says "pods in namespace A may reach pods in namespace B." An `AuthorizationPolicy` says "the workload whose cryptographic identity is `sa/parasol-claims` may call fraud — and nothing else may, even from the same namespace." That's a stronger and more portable statement, and it's what makes "only claims may call fraud" enforceable rather than aspirational.
+Use them together: NetworkPolicy for a coarse default-deny at the network layer, the mesh for identity-based L7 policy on top.
+
+== The honest L4 ingress boundary
+
+Getting traffic *into* the mesh from outside is the job of an *ingress gateway* — an Istio proxy at the edge, driven by a `Gateway` resource.
+Here's the boundary worth carrying to a customer:
+
+* *HTTP(S) ingress* — an OpenShift *Route* or the newer *Gateway API* handles it well. For most web traffic, you don't need the mesh's gateway at all.
+* *Raw TCP and TLS passthrough (by SNI)* — a Route can't route an arbitrary TCP protocol, and on supported OpenShift channels the experimental L4 Gateway API resources (`TCPRoute`, `TLSRoute`) are *not available* (they were absent on this cluster at build). When Parasol's *legacy partner bureaus* send claim feeds over *raw TCP*, the *Istio ingress Gateway* — with a `TCP` or `TLS`-passthrough listener and a `VirtualService` — is the supported way to serve them.
+
+So the decision guide is: *Gateway API (or Routes) for HTTP(S); Istio Gateway/VirtualService for raw-TCP and TLS-passthrough today.* You'll build exactly that raw-TCP path in the optional advanced-gateway section, and add native, gateway-level *rate limiting* with an `EnvoyFilter` — framed honestly as a *platform capability*, not a substitute for a full API-management product.
+
+== When a mesh is — and isn't — worth it
+
+A mesh is powerful and it is *not free*: every meshed pod carries a proxy, and the control plane is one more thing to run and upgrade.
+Reach for it when you have *many services talking to each other* and you need *identity-based security* (mTLS + authorization), *traffic control* (canary, mirroring, resilience) and *uniform observability* — and you want those as platform policy rather than per-app code.
+Don't reach for it for a *single* app with no east-west calls (a Route and a metrics endpoint are enough), when a *NetworkPolicy* already expresses all the control you need, or when your team can't yet absorb the operational cost of running one. The wrap-up returns to this with a sharper "when *not* to use it."
+
+[NOTE]
+.What's real in this lab, and what's simulated — read this once
+====
+The Parasol services here are deliberately simple: `parasol-web` serves claims data directly, and the app does *not* yet make live server-to-server calls down the chain (no automatic web→claims→fraud cascade), and the fraud *v2* you deploy runs the *same image* as v1 with a version label.
+That shapes how you'll observe some beats *honestly*:
+
+* You *generate* the east-west traffic yourself — running `curl` from *inside* a meshed pod (`oc exec`) so the request egresses through that pod's real sidecar. The mesh applies exactly the same routing, mTLS, and policy it would to app-originated traffic; only the *trigger* is manual.
+* Because v1 and v2 return *identical* response bodies, you read the weighted split from the mesh's *own telemetry* (and the Kiali graph), not by counting different responses.
+* Everything the *mesh* does — sidecar injection, mTLS, the graph, routing, authorization, the gateway — is *fully real and verifiable*. Where an observation depends on richer app behavior the sample app doesn't have yet, the lab says so plainly and shows you the real signal to read instead.
+
+This is the same honesty the other Parasol modules apply to the shared sample app; none of it changes what the mesh itself does.
+====
+
+== How this shows up in real orgs
+
+* *"A slow dependency took down the whole site."* This is the cascading-failure story, and it's the classic mesh entry point. Timeouts, retries, and circuit breaking — applied uniformly by the platform — turn "one hung service hangs everything" into "one service degrades and the rest fail fast." You'll set all three in the lab and see the honest limits of each.
+* *"Is our internal traffic actually encrypted?"* Many teams assume east-west traffic is safe because it's "inside the cluster." A mesh makes it *provably* mutual-TLS encrypted between workloads, with a STRICT mode that *refuses* anything unauthenticated — an answer you can put in a compliance review instead of a hope.
+* *"Who can call this service?"* — and can you prove it? Network policies answer by location; a mesh answers by *identity*. "Only the claims workload may call fraud" is enforceable by SPIFFE identity, and violations are denied with a `403` you can see.
+* *"We need to canary the new version to 10% of traffic."* Without a mesh that's a load-balancer change or a second Deployment dance; with one it's a weighted `VirtualService` — and you can pin *test users* to the new version by a header while everyone else stays on the old one.
+* *"Our partners send us a raw-TCP feed and Routes can't handle it."* The honest L4 boundary is a real field conversation: Routes and HTTP-only Gateway API stop at HTTP(S)/SNI, and the Istio Gateway is the supported path for raw-TCP and passthrough — worth knowing *before* a partner integration forces the question.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) a mesh is a *sidecar proxy per workload* (data plane) driven by *istiod* (control plane), so encryption/routing/resilience/authz become *configuration*, not app code; (2) you get *mutual TLS + a service graph for free* the moment you enroll — and STRICT mode *proves* it by refusing a plaintext client; (3) OpenShift Service Mesh 3 is *upstream Istio on the Sail operator* — the 2.x control-plane and member-roll CRs are *gone*, which is the first thing a migrating customer asks.
+The demo is the fifteen-minute arc: watch the Kiali graph light up as traffic flows, shift 90/10 to a new fraud version and read the split from telemetry, break the call path with a fault and show the resilience policy, then lock it down so *only claims* may call fraud — a live `403` for anyone else.
+Close on the punchline: "encrypted, observable, shiftable, and locked to identity — none of it in the app, all of it platform policy."
+====
+endif::demo[]

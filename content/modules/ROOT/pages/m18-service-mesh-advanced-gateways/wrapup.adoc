@@ -1,0 +1,93 @@
+= Service Mesh 3 & Advanced Gateways: Wrap-up
+:module-id: m18
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims chain from *three naked services* to a *governed mesh*.
+You *enrolled* `parasol-web`, `parasol-claims`, and `parasol-fraud` per-workload and watched the native-sidecar proxy appear beside each app — while the database and the test client stayed out.
+You proved *mutual TLS* is real by flipping a `PeerAuthentication` to STRICT and watching a plaintext client get *refused*, and you read a workload's *SPIFFE identity* (`sa/parasol-claims`) straight off its certificate.
+You made the traffic *visible* in Kiali, then *shiftable* — a 90/10 weighted `VirtualService` with a header route to a new fraud version, measured from the mesh's own telemetry.
+You added *resilience* — a fault, a timeout, retries, and a circuit breaker — and learned the honest boundary of each.
+You *secured* the call path so that *only* `sa/parasol-claims` may call fraud, with a live `403` for everyone else.
+And in the encore you served a *raw-TCP* partner feed through an Istio ingress *Gateway* and *rate-limited* it with an `EnvoyFilter` — the ingress paths Routes can't take.
+
+[mermaid]
+....
+graph TB
+  subgraph ns["{user}-mesh — after the lab"]
+    web["parasol-web<br/>(meshed)"]
+    claims["parasol-claims<br/>(meshed · sa/parasol-claims)"]
+    fraud["parasol-fraud v1 + v2<br/>(meshed)"]
+    db[("claims-db<br/>un-meshed")]
+  end
+  subgraph policy["Mesh policy you applied"]
+    vs["VirtualService<br/>90/10 + header route"]
+    dr["DestinationRule<br/>subsets + circuit breaker"]
+    ap["AuthorizationPolicy<br/>only claims -> fraud"]
+    gw["Istio Gateway<br/>raw-TCP + rate limit"]
+  end
+  web ==>|"mTLS"| claims
+  claims ==>|"mTLS · 90/10 · authz"| fraud
+  claims --> db
+  vs -.->|"routes"| fraud
+  dr -.->|"resilience"| fraud
+  ap -.->|"guards"| fraud
+  gw -.->|"ingress"| ns
+  classDef app fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef pol fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef db fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  class web,claims,fraud app; class vs,dr,ap,gw pol; class db db;
+....
+
+// media-pass: recap SVG m18-service-mesh-advanced-gateways-03-what-you-built.svg (green = meshed workloads; amber = the mesh policy you applied; blue = the un-meshed database).
+
+The one idea under all of it: *a mesh turns cross-service concerns into platform policy* — encryption, observability, traffic control, and access are *configuration istiod pushes to proxies*, not code every team rewrites, and every one of them is bound to *workload identity* rather than network location.
+
+== Map to your org
+
+Take these back to how your services talk to each other today:
+
+. *Is your east-west traffic provably encrypted — or just assumed safe because it's "internal"?*
+You flipped STRICT and watched a plaintext caller get refused. Could you make the same statement about your production namespaces — that service-to-service traffic is mutual-TLS encrypted and unauthenticated callers are *rejected* — and prove it in an audit, or is "it's inside the cluster" the whole answer today?
+. *When a dependency gets slow, does it fail fast — or take the caller down with it?*
+You watched a 5-second hang land on the caller and configured timeouts, retries, and a circuit breaker. Do your services have those *anywhere* — in code, inconsistently, per team — or would one slow downstream still pile up threads until the whole path falls over? A mesh makes it uniform platform policy.
+. *Can you canary a new version to 10% of traffic without a redeploy?*
+You shifted 90/10 with one `VirtualService` and pinned test users with a header. Is that a one-resource change in your environment, or a load-balancer ticket and a second-Deployment dance every time?
+. *Who is allowed to call your most sensitive service — and can you prove it by identity?*
+"Only claims may call fraud" was enforced by SPIFFE identity, not IP. For your equivalent of the fraud service — the one that moves money or touches PII — is access controlled by *who the workload is*, or just by *where it sits* on the network?
+. *When a partner needs raw TCP or TLS passthrough, do you have an answer?*
+You served a raw-TCP feed through an Istio Gateway where a Route couldn't. When a partner integration needs a non-HTTP protocol or SNI passthrough, is that a known, supported path in your platform — or a scramble?
+
+== When *not* to reach for this
+
+A mesh is powerful, and over-reaching with it is its own failure mode:
+
+* *Don't mesh a single app with no east-west calls.*
+If a service just receives HTTP from a Route and talks to a database, a mesh adds a proxy per pod and a control plane to run for *nothing* it needs — a Route, a NetworkPolicy, and a metrics endpoint already cover it. The mesh earns its cost when *many services call each other* and you need identity, traffic control, and uniform observability *across* them.
+* *Don't use an `AuthorizationPolicy` where a NetworkPolicy is the right tool.*
+Coarse "namespace A can't reach namespace B" is a *NetworkPolicy* — cheaper, enforced at the network layer, no mesh required. Reserve `AuthorizationPolicy` for *identity-based* L7 rules ("only this workload, on this path, with this method"). Use both as layers; don't make the mesh do the network layer's job.
+* *Don't reach for an `EnvoyFilter` when a first-class resource exists.*
+`EnvoyFilter` patches the proxy's internal config directly — powerful, but version-fragile and easy to break on upgrade. If a `VirtualService`, `DestinationRule`, or `Gateway` field does what you need, use it. Save `EnvoyFilter` for genuine gaps (the local rate limit in the encore), and treat each one as tech debt to re-verify on every mesh upgrade.
+* *Don't treat a gateway rate limit as API management.*
+The `EnvoyFilter` local rate limit is per-proxy, coarse protection — great for shielding a backend from a flood. Per-consumer quotas, plans, keys, and analytics are a *different* product (a full API-management platform). Framing a gateway rate limit as "we have API management" will disappoint the first team that needs a per-customer quota.
+* *Don't keep mutual TLS at PERMISSIVE forever.*
+PERMISSIVE is the *on-ramp* — it lets you enroll without breaking un-meshed callers. Leaving it there permanently means plaintext is still accepted, so the encryption you "have" isn't actually *enforced*. The production target is STRICT, with external traffic entering through an ingress gateway; PERMISSIVE is a migration state, not a destination.
+
+== Go deeper
+
+* *OpenShift Service Mesh 3 — architecture and the Sail operator* — how upstream Istio is packaged, the `Istio`/`IstioCNI` control-plane resources, and the 2.x→3.x migration path (the control-plane and member-roll resources are gone; it's upstream Istio now).
+* *Sidecar and ambient data planes* — the injection model you used, the native-sidecar init container, and *ambient* mode (per-node ztunnel + optional waypoint) as the lower-overhead direction for large fleets.
+* *Traffic management* — `VirtualService` and `DestinationRule` in depth: weighted routing, header/URI matching, mirroring (dark launch), timeouts, retries, and outlier detection (the circuit breaker).
+* *Security* — `PeerAuthentication` (mesh-wide and per-workload mutual TLS modes), `AuthorizationPolicy` (ALLOW/DENY, source principals, operations), and the SPIFFE identity model behind them.
+* *Observability* — Kiali (the graph, health, and validation), and wiring mesh metrics and *distributed tracing* (Tempo/OpenTelemetry) so a request is one trace across the mesh — the tie-in to the observability module.
+* *Ingress gateways and the L4 boundary* — the Istio `Gateway` for HTTP(S), raw-TCP, and TLS passthrough; the current status of the experimental L4 Gateway API resources; and `EnvoyFilter` as the low-level escape hatch, used sparingly.
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — the un-meshed app with no mesh custom resources — run `ws prep {module-id} --yes`.
+It strips the injection labels and mesh resources you added and re-materializes the clean, un-meshed chain so a re-run starts fresh.
+The shared control plane (istiod and Kiali in `istio-system`) is platform substrate — it's untouched; only your `{user}-mesh` namespace resets.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

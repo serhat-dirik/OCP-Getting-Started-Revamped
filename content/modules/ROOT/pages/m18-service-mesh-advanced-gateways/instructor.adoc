@@ -1,0 +1,145 @@
+= Service Mesh 3 & Advanced Gateways: Instructor Guide
+:module-id: m18
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34)
+// against OpenShift Service Mesh {service_mesh_version} / Istio v1.28.6 as user4 on 2026-07-13 by performing
+// every exercise: injected rollouts ~30-40s each on a cache-warm node; a 200-request in-pod loop 6.1s; the
+// fault call 5.0s; policy propagation ~5s. The shared control plane (istiod + Kiali in istio-system) is
+// platform substrate and was NOT mutated. KNOWN PLATFORM BLOCKER captured at build and flagged below: the
+// parasol-images image-puller RoleBinding omits {user}-mesh SAs, so a meshed rollout onto a cache-miss node
+// fails ImagePull — pre-flight check #3. NAMESPACE in output is the sample user user4-mesh.
+
+This module has one arc and it builds: *naked services → meshed → encrypted → visible → shiftable → resilient → locked to identity → served at the edge*.
+The two beats that land hardest bracket the middle.
+The *mutual-TLS proof* (exercise 2) — a plaintext client *refused* the moment STRICT is on — makes "encryption for free" concrete instead of a slogan.
+The *authorization* beat (exercise 6) — `claims` allowed, the `web` tier refused with `403`, both healthy pods — makes "identity, not location" undeniable.
+Everything between is the traffic-management and resilience toolkit that makes those two legible.
+
+The single most useful thing to internalize before delivering: *the sample app does not auto-call down the chain*, so *all* east-west traffic is driven by hand with `oc exec … curl` from inside a meshed pod. That's not a hack — the request egresses through the pod's real sidecar, so the mesh routes, encrypts, and authorizes it exactly as it would an app call. The lab says so at every beat; reinforce it if an attendee expects the app to generate its own traffic.
+
+== Timing
+
+Total core (exercises 1–6): *~73 min*; with ~15 min of concept up front that's ~88 min, and the optional advanced-gateway encore adds ~15 min — landing inside the spec's 90–105 min window (core) / at the top of it (with the encore).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Enroll the app into the mesh | ~12 min | 3 injected rollouts *~30–40 s each* (cache-warm node); the namespace-label `Forbidden` is instant; the rest is reading the native-sidecar structure
+| 2 | Prove mutual TLS (STRICT) | ~12 min | `PeerAuthentication` apply + *~5 s* proxy pickup; the curl block/allow and the SPIFFE cert read are instant
+| 3 | See the mesh in Kiali | ~12 min | traffic generation *~10 s*; the rest is opening Kiali and orienting on the graph
+| 4 | Shift traffic between versions | ~15 min | v2 rollout *~30–40 s*; the 200-request measurement loop *6.1 s*; `istioctl` reads instant
+| 5 | Resilience: faults, timeouts, breaker | ~12 min | the faulted call *5.0 s* (the injected delay); `istioctl` cluster read instant
+| 6 | Secure with AuthorizationPolicy | ~10 min | policy apply + *~5 s* pickup; the three curls instant
+| 7 | Advanced gateways `[OPTIONAL ENCORE]` | ~15 min | gateway rollout *~30–40 s*; the raw-TCP and rate-limit tests instant
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-13, every exercise was performed as `user4` against the live OpenShift Service Mesh {service_mesh_version} control plane and timed.
+The `oc` commands themselves are fast: applying a mesh custom resource is instant; a proxy picks up a new policy in about 5 seconds; a 200-request in-pod loop runs in *6.1 s*; the injected 5-second fault call takes *5.0 s* on the nose.
+The real time-sink is the *rollouts*: each enrolled tier restarts to gain its sidecar (*~30–40 s* on a cache-warm node), and exercises 1, 4, and 7 each roll at least one Deployment. Budget for the rollouts and for *reading* — the SPIFFE identity, the Kiali graph, the telemetry split — not for command latency.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user4`.
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m18 --user user4
+ws verify m18 --user user4 --entry-only
+----
++
+Expect all entry checks green: the `user4-mesh` marker, the `istio-discovery=enabled` label, the un-meshed `parasol-web/claims/fraud` + `claims-db`, the `demo-client` and `partner-tcp-backend`, and the clean-slate assertions (namespace *not* injection-labelled, claims *not* meshed, no mesh custom resources).
+
+. *The shared control plane is healthy.*
++
+[source,sh,role=execute]
+----
+oc get istio default -o jsonpath='istio {.spec.version} {.status.state}{"\n"}'
+oc get pods -n istio-system -l app.kubernetes.io/name=istiod
+oc get kiali kiali -n istio-system -o jsonpath='kiali {.status.conditions[?(@.type=="Successful")].status}{"\n"}'
+----
++
+Expect `istio v1.28.6 Healthy`, a running `istiod`, and a healthy Kiali. If the control plane is missing, the `service-mesh` and `kiali` platform stacks (`platform-portfolio/stacks/mesh`) aren't synced — this module can't run without them.
+
+. *[BLOCKER] The image-pull grant covers `{user}-mesh` ServiceAccounts.*
++
+[source,sh,role=execute]
+----
+oc auth can-i get imagestreams/layers -n parasol-images \
+  --as=system:serviceaccount:user4-mesh:default
+----
++
+This *must* print `yes`. If it prints `no`, the `parasol-images` image-puller RoleBinding does not include the `{user}-mesh` ServiceAccounts, and *every* enrollment rollout that lands a pod on a node without the image cached will fail `ImagePullBackOff` (`authentication required`). The app appears to work at entry only because the initial pods were scheduled onto nodes that had the images cached. *Fix before delivery* (platform action): add `"mesh"` to the suffix list in `gitops/workshop-config/templates/parasol-images-pull.yaml` and sync the workshop-config layer. See *Watchouts*.
+
+. *Kiali is reachable at its route.*
++
+[source,sh,role=execute]
+----
+oc get route kiali -n istio-system -o jsonpath='https://{.spec.host}{"\n"}'
+----
++
+Expect `https://kiali-istio-system.<cluster-domain>`. Attendees open this in exercise 3 and sign in with their cluster identity; Kiali scopes visible namespaces to their OpenShift RBAC, so `user4` sees `user4-mesh`.
+
+. *`istioctl` is available in the attendee terminal (grounding commands).*
++
+Exercises 2–5 use `istioctl proxy-config` / `istioctl version` to *ground* what the proxies are doing (the SPIFFE cert, the weighted route, the circuit-breaker config). If `istioctl` isn't on the cockpit terminal PATH, those grounding reads won't run — the lab still teaches from the curl-based observations, but you lose the "here's the proxy's own view" confirmations. Confirm `istioctl version` returns a control-plane version.
+
+== Instructor demo — the 15-minute arc (demo flavor)
+
+The demo flavor renders a four-beat Say/Show/Do arc: *enroll + graph* (4 min), *weighted shift + read the split* (4 min), *fault + resilience* (3 min), *authorization lockdown + live 403* (4 min).
+
+* *Run it from the entry state, not `ws solve`.* The story is *building* the mesh live — enrolling naked services and watching the graph appear. `ws solve m18 --user user4` renders the finished end state (meshed app, v2, the routing/resilience/authz resources); use it to *pre-stage* or to show the destination, never as the demo's start.
+* *Pre-open Kiali* (`https://kiali-istio-system.<cluster-domain>`, signed in, `user4-mesh` selected) on a second screen. The graph is the visual for beats 1–2 — enroll, generate traffic, and watch nodes and mutual-TLS padlocks appear.
+* *Land the 403 (beat 4).* Say "the web tier is a perfectly healthy pod, one identity away from allowed — watch it get refused" while the `403 RBAC: access denied` is on screen. That denial *is* "identity, not location."
+* *The encore is optional.* If the room is engaged and time allows, the raw-TCP gateway + `429` rate limit is a strong closer; otherwise stop at beat 4 and point to the workshop lab's exercise 7.
+
+== Demo-mode notes
+
+* *Drive traffic from inside a meshed pod.* Every traffic-generating command is `oc exec <pod> -c <app> -- curl …` (or `oc exec deploy/demo-client -- …`). Do it in a single `sh -c 'for i in …; do curl; done'` so the loop runs *inside* the pod (fast) rather than one `oc exec` per request (slow). The lab is already written this way.
+* *Read the split from telemetry, not bodies.* fraud v1 and v2 run the same image, so responses are identical. Show the split with the `istio_requests_total` breakdown (or the Kiali versioned graph), and *say* why — a genuinely distinct v2 would let you count responses too.
+* *Be honest about fault injection vs. timeout.* The injected 5-second delay returns a `200` after 5 s, *not* a timeout at 3 s — because Istio applies fault injection ahead of the router. If someone asks "why didn't the timeout fire?", that's the answer, and it's a great teaching moment (question 4 below).
+* *Revert STRICT before moving on.* The mTLS beat leaves the mesh at PERMISSIVE (delete the `PeerAuthentication`) so the un-meshed `demo-client` can keep driving traffic and the module's end state matches `ws solve` (which deliberately leaves mTLS at PERMISSIVE — a STRICT default would block the demo-client with no ingress gateway to route through).
+
+== Top questions attendees ask
+
+*1. "Where did the 2.x control-plane and member-roll resources go?"*::
+They're gone — that's the headline change, and it's the first thing a migrating customer asks (often by the old resource's acronym). OpenShift Service Mesh 3 is *upstream Istio* on the *Sail operator*: the control plane is Istio's own `Istio` resource (you read `istio v1.28.6 Healthy` in exercise 1), and mesh membership is by the discovery and injection labels, not a member-roll object. The 2.x control-plane and member-roll custom resources don't exist in 3.x. The migration message for customers: "your Istio knowledge now applies directly; the Red Hat-specific 2.x control-plane resources are replaced by standard Istio." (Those 2.x resource names are on the workshop's banned-terms list precisely because they're deprecated — don't reintroduce them as recommended.)
+
+*2. "Why can't I just label the namespace `istio-injection=enabled` like the Istio docs show?"*::
+Because that's a *cluster-scoped* edit to the Namespace object, and an attendee is admin only *within* their namespace — exercise 1 shows the exact `Forbidden`. A namespace tenant enrolls *per workload* with `sidecar.istio.io/inject: "true"` on the pod template, which is finer-grained anyway. The namespace *is* already a discovered mesh tenant (the platform set `istio-discovery=enabled`); discovery is what scopes istiod to the namespace, injection is the separate per-workload toggle.
+
+*3. "The pull-secret / my meshed pod is stuck on `ImagePullBackOff` — what's wrong?"*::
+Almost certainly the pre-flight blocker (#3): the `parasol-images` image-puller RoleBinding doesn't cover the `{user}-mesh` ServiceAccounts, so when an enrollment rollout schedules a pod onto a node that doesn't already have the image cached, the pull fails with `authentication required`. The fix is platform-side (add `{user}-mesh` to the puller grant). If you hit it live before the fix lands, the pod will recover once it reschedules onto a cache-warm node, or you can pin the Deployment to such a node as a stopgap. This is *not* an attendee error — check it in pre-flight.
+
+*4. "I set `timeout: 3s` but the faulted call took 5 seconds — is the timeout broken?"*::
+No — it's correct Istio behavior and a genuinely useful thing to know. Istio applies *fault injection* in a filter that runs *ahead* of the router, so an injected delay (or abort) is *not* subject to that same route's `timeout` or `retries`. Fault injection tests *how the caller copes* with a slow dependency; it doesn't exercise the route's own timeout. To see the timeout fire you need a genuinely slow *upstream* (a real slow endpoint), which the sample fraud service isn't. The timeout/retry/circuit-breaker config is real and applied (confirm it with `istioctl proxy-config cluster`); observing it trip live waits on a slower upstream.
+
+*5. "Why read mesh telemetry for the 90/10 split instead of just counting the responses?"*::
+Because fraud v1 and v2 run the *same image* in this lab (v2 carries a `version` label and a `FRAUD_VERSION` marker but no distinct build yet), so their HTTP bodies are byte-identical — you can't tell them apart by reading the response. The *routing* is completely real, so you read the split from the mesh's own `istio_requests_total` metric broken down by `destination_version` (which is also what colors Kiali's versioned graph): ~185 to v1 and ~15 to v2 over 200 requests. When a genuinely distinct v2 image ships, you can count responses too; the routing you configured is unchanged.
+
+== Watchouts
+
+* *[BLOCKER] `{user}-mesh` image-pull grant.*
+The `parasol-images` `workshop-image-pullers` RoleBinding lists `{user}-dev/-stage/-prod/-cicd` ServiceAccounts but *not* `{user}-mesh` (the mesh namespaces are net-new for this module). Result: every enrollment rollout that lands a pod on a cache-miss node fails `ImagePullBackOff`. Entry looks fine only because the initial pods were cache-warm. *Permanent fix:* add `"mesh"` to the suffix `list` in `gitops/workshop-config/templates/parasol-images-pull.yaml` and sync workshop-config. Pre-flight check #3 catches it.
+* *Revert STRICT mutual TLS before the rest of the lab.*
+The mTLS beat applies a namespace-wide STRICT `PeerAuthentication`, which blocks the un-meshed `demo-client` from *everything* — and the demo-client drives traffic in later exercises. The lab deletes the policy at the end of exercise 2; if an attendee's later traffic-driving `curl`s all fail with connection resets, check for a leftover STRICT `PeerAuthentication`.
+* *Sidecar overhead scales with users.*
+Each meshed pod carries an Envoy proxy (~100 m CPU / 128 Mi request, and up to the tier's limit). With the app tier meshed across many users, that's a real footprint on a shared cluster. The per-user quota is sized for it, but watch scheduling on a busy cluster; ambient mode is the direction to evaluate if the sidecar footprint becomes the constraint.
+* *`EnvoyFilter` in the encore is version-sensitive.*
+The rate-limit `EnvoyFilter` patches Envoy's config directly; its `typed_config` is tied to the proxy's Envoy version and can break on a mesh upgrade. It's verified against Istio v1.28.6 here. If the encore's `429` beat doesn't fire after a control-plane bump, re-verify the `local_ratelimit` `typed_config` against the new Envoy version. It's the escape hatch, not a first-class resource — frame it accordingly.
+* *Kiali needs traffic *and* a moment.*
+The Kiali graph draws from recent telemetry; if an attendee opens it before generating traffic (or picks too-narrow a time range), it looks empty. Generate the traffic first (exercise 3 does), then select a recent range. The `istioctl` grounding in the lab confirms traffic flowed regardless of what the console shows.
+
+== Provenance
+
+M18 is a net-new module built against this repo's live cluster.
+Everything it teaches for the attendee was *performed* on OpenShift {ocp_version} (Kubernetes 1.34) against a live OpenShift Service Mesh {service_mesh_version} (Istio v1.28.6, Sail operator) control plane with Kiali {kiali_version}, as `user4` on 2026-07-13: the per-workload sidecar injection and native-sidecar init-container structure; the namespace-label `Forbidden` (RBAC reality); the STRICT `PeerAuthentication` block-and-allow and the SPIFFE workload identity read off the certificate; the weighted/header `VirtualService` + `DestinationRule` split *measured from `istio_requests_total`* (v1≈185 / v2≈15 over 200 requests, and +30-to-v2 for the header route); the fault injection (5-second delay returning `200` in 5.0 s — the honest fault-vs-router-timeout behavior) and the live circuit-breaker config; the `AuthorizationPolicy` giving `claims → fraud 200` while `web → fraud` and the un-meshed `demo-client` get `403 RBAC: access denied`; and the advanced-gateway encore — a raw-TCP feed served end-to-end through an Istio `Gateway` (`PARASOL-PARTNER-FEED-ACK`) and a `429` gateway rate limit via `EnvoyFilter`.
+OpenShift Service Mesh 3 is named as *upstream Istio on the Sail operator* throughout; the 2.x control-plane and member-roll resources appear only as the *replaced* predecessors (04-STYLE-GUIDE §6 ban), never as a recommended path.
+Two honesty notes are carried into the content as explicit limitations, not open items: the sample app does not auto-generate the web→claims→fraud cascade (all east-west traffic is driven by hand through the real sidecars), and fraud v1/v2 share an image (the split is read from mesh telemetry, not response bodies). The known platform blocker — the `{user}-mesh` image-pull grant — is flagged in pre-flight and watchouts for a platform fix.

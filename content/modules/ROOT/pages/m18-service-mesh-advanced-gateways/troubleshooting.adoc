@@ -1,0 +1,155 @@
+= Service Mesh 3 & Advanced Gateways: Troubleshooting
+:module-id: m18
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-13 as user4)
+// against OpenShift Service Mesh {service_mesh_version} / Istio v1.28.6, plus known failure-mode seeds.
+// Format: Symptom / Cause / Fix. Commands use $NS = {user}-mesh (set it once). NAMESPACE in output is the
+// sample user user4-mesh. Every entry below was either hit while building the module or is a known trap.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcut first: `NS={user}-mesh`.
+
+== A meshed pod is stuck in `ImagePullBackOff` after I enrolled it
+
+Symptom:: You added the injection label, and the new pod is `ImagePullBackOff` / `ErrImagePull`; `oc describe pod` shows `authentication required` pulling `parasol-images/parasol-...`.
+Cause:: The pod's namespace ServiceAccount can't pull the shared image from `parasol-images` — the image-puller grant doesn't cover your `{user}-mesh` namespace. The app ran *before* enrollment only because those pods were scheduled onto nodes that already had the image cached; the rollout's new pod landed on a node that must pull afresh, and the pull is unauthenticated.
+Fix:: This is a *platform* gap, not something to fix in your namespace — tell your instructor. Confirm the cause, and note the pod usually recovers if it reschedules onto a node that has the image cached:
++
+[source,sh,role=execute]
+----
+oc get pods -n $NS -o wide | grep -i pull        # which pod + node
+oc describe pod -n $NS <pod> | grep -A2 -i 'failed to pull'
+----
++
+The permanent fix is to add the `{user}-mesh` ServiceAccounts to the `parasol-images` image-puller grant (workshop-config). Until that lands, an instructor can pin the affected Deployment to a node that has the image cached as a stopgap.
+
+== `oc label namespace ... istio-injection=enabled` is Forbidden
+
+Symptom:: You tried to enroll by labelling the namespace and got `Error from server (Forbidden): namespaces "...-mesh" is forbidden: User "..." cannot patch resource "namespaces"`.
+Cause:: The Namespace object is *cluster-scoped*, and you're admin only *within* your namespace — you can't edit the namespace's own labels. That's expected, not a misconfiguration.
+Fix:: Enroll *per workload* instead — add the injection label to each Deployment's *pod template* (which you *are* allowed to do):
++
+[source,sh,role=execute]
+----
+oc patch deploy parasol-web -n $NS --type=merge \
+  -p '{"spec":{"template":{"metadata":{"labels":{"sidecar.istio.io/inject":"true"}}}}}'
+----
++
+Your namespace is already a *discovered* mesh tenant (the platform set `istio-discovery=enabled`); the per-workload injection label is the separate, tenant-allowed toggle.
+
+== I enrolled a Deployment but the pod is still `1/1` with no sidecar
+
+Symptom:: After patching, `oc get pods` still shows `1/1` and `initContainers` has no `istio-proxy`.
+Cause:: Either the label landed on the *Deployment* metadata instead of the *pod template* (`spec.template.metadata.labels`), or the workload is one that's pinned *out* of the mesh (`demo-client` and `partner-tcp-backend` carry `sidecar.istio.io/inject: "false"` on purpose and must stay un-meshed).
+Fix:: Confirm the label is on the *pod template*, and that you're enrolling an app tier (not the demo-client/db):
++
+[source,sh,role=execute]
+----
+oc get deploy parasol-web -n $NS -o jsonpath='pod-template inject label = {.spec.template.metadata.labels.sidecar\.istio\.io/inject}{"\n"}'
+oc get pods -n $NS -o custom-columns='POD:.metadata.name,INIT:.spec.initContainers[*].name'
+----
++
+The label must read `true` on the *pod template*. The proxy is a *native sidecar*, so look for `istio-proxy` under `initContainers` (not `containers`). If the label is right but no rollout happened, force one: `oc rollout restart deploy/parasol-web -n $NS`.
+
+== All my traffic-driving `curl`s suddenly fail with "Connection reset"
+
+Symptom:: Commands that drive traffic from `demo-client` (or any un-meshed source) fail with `curl: (56) Recv failure: Connection reset by peer`, even though they worked earlier.
+Cause:: A *STRICT* `PeerAuthentication` is still in place. STRICT makes every meshed proxy *refuse* plaintext, so the un-meshed `demo-client` is blocked from all meshed workloads. The mTLS exercise applies STRICT to *prove* encryption, then removes it — if you skipped the removal, it's still enforcing.
+Fix:: Delete the STRICT policy to return to PERMISSIVE (the module's working default):
++
+[source,sh,role=execute]
+----
+oc get peerauthentication -n $NS
+oc delete peerauthentication default -n $NS      # remove the STRICT policy
+sleep 3
+oc exec deploy/demo-client -n $NS -- curl -s -m5 -o /dev/null -w "demo-client -> web: HTTP %{http_code}\n" http://parasol-web:8080/api/claims
+----
++
+The un-meshed client works again once mutual TLS is back to PERMISSIVE. (Meshed-to-meshed traffic works under STRICT *or* PERMISSIVE — only the un-meshed client is affected.)
+
+== The 90/10 split reads ~50/50 when I drive it from the demo-client
+
+Symptom:: You send traffic from `demo-client` to `parasol-fraud` and the two versions get roughly equal traffic, not 90/10.
+Cause:: A `VirtualService` weighted route is applied by the *caller's* sidecar. The `demo-client` is *un-meshed* (no sidecar), so its request isn't subject to the VirtualService at all — it hits the Service and is load-balanced evenly across the v1 and v2 pods (~50/50).
+Fix:: Drive the split from a *meshed* caller so its sidecar applies the route. Send from inside the claims pod and read the mesh telemetry:
++
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 200); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
+  | grep reporter.source | grep response_code.200 | sed -nE 's/.*destination_version\.(v[12])\..*: ([0-9]+)/\1 \2/p'
+----
++
+From the meshed caller the split lands ~90/10. This is *by design*: routing follows the client-side sidecar, which is exactly why the lab drives traffic from inside meshed pods.
+
+== I injected a 5-second fault but the `timeout: 3s` didn't fire
+
+Symptom:: With a `fault.delay` of 5 s and a route `timeout: 3s`, the call returns `HTTP 200` after ~5 s instead of a timeout at 3 s.
+Cause:: This is correct Istio behavior. Fault injection runs in a filter *ahead* of the router, so an injected delay (or abort) is *not* clipped by that same route's `timeout` or retried by its `retries`. Fault injection tests how the *caller* copes with a slow dependency; it doesn't exercise the route's own timeout.
+Fix:: Nothing to fix — that's the expected behavior, and a useful thing to teach. To see the *timeout* actually fire, the *upstream* must be genuinely slow (a real slow endpoint), which the sample fraud service isn't. Confirm the timeout/retry/circuit-breaker policy is nonetheless *applied* to the proxy:
++
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+istioctl proxy-config cluster $CLAIMS.$NS --fqdn parasol-fraud.$NS.svc.cluster.local --subset v1 -o json \
+  | grep -E 'consecutive5xx|maxConnections|baseEjectionTime'
+----
++
+The policy is real and live; only *observing it trip* waits on a genuinely slow upstream.
+
+== After the AuthorizationPolicy, even `claims` gets `403`
+
+Symptom:: You applied `fraud-allow-claims`, and now *every* caller — including `claims` — is refused with `403 RBAC: access denied`.
+Cause:: The `principals` value doesn't match the claims workload's real identity. An ALLOW policy denies everyone who isn't listed, so a wrong principal denies the intended caller too. The claims pod's identity is `cluster.local/ns/{user}-mesh/sa/parasol-claims` — a wrong namespace or ServiceAccount in the policy breaks it.
+Fix:: Read the claims workload's actual SPIFFE identity and make the policy's `principals` match it exactly:
++
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc get pod $CLAIMS -n $NS -o jsonpath='SA = {.spec.serviceAccountName}{"\n"}'
+oc get authorizationpolicy fraud-allow-claims -n $NS -o jsonpath='principals = {.spec.rules[0].from[0].source.principals}{"\n"}'
+----
++
+The principal must be `cluster.local/ns/$NS/sa/parasol-claims`. (Note the claims Deployment runs under its own `parasol-claims` ServiceAccount; the web and fraud tiers run as `default`, which is why the web tier is correctly denied.)
+
+== The gateway rate-limit test returns all `000` (nothing connects)
+
+Symptom:: In the advanced-gateway encore, hammering `http://parasol-partner-gw:8080/...` returns `000` for every request — no `200`s, no `429`s.
+Cause:: The gateway has no HTTP listener on `8080`. A common trap is `oc patch gateway ...`, which resolves to the *Gateway API* kind (`gateway.networking.k8s.io`), *not* the Istio `Gateway` (`gateway.networking.istio.io`) — so the patch fails with `NotFound` and the listener is never added.
+Fix:: Confirm the Istio `Gateway` has the `8080` server, using the *fully-qualified* resource name, and that the Service exposes `8080`:
++
+[source,sh,role=execute]
+----
+oc get gateway.networking.istio.io parasol-partner-gw -n $NS -o jsonpath='{range .spec.servers[*]}{.port.number}/{.port.protocol} {end}{"\n"}'
+oc get svc parasol-partner-gw -n $NS -o jsonpath='ports: {range .spec.ports[*]}{.port} {end}{"\n"}'
+----
++
+You should see `9000/TCP 8080/HTTP` on the Gateway and `9000 8080` on the Service. Always address the Istio Gateway as `gateway.networking.istio.io` (a bare `gateway` is ambiguous with the Gateway API).
+
+== The Kiali graph is empty
+
+Symptom:: Kiali's Traffic Graph shows no nodes or edges for `{user}-mesh`.
+Cause:: No recent traffic, or the time range is too narrow. Kiali draws from the proxies' telemetry over a selected window — no requests in that window, no graph.
+Fix:: Generate traffic first, then widen the time range. Confirm from the CLI that traffic actually flowed through the mesh (the authoritative signal):
++
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 40); do curl -s -o /dev/null http://parasol-web:8080/api/claims; done'
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 40); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null | grep -c parasol-fraud
+----
++
+A non-zero count confirms traffic flowed; refresh Kiali with a "Last 5m" range selected on the `{user}-mesh` namespace.
+
+== `istioctl` is not found in the terminal
+
+Symptom:: The grounding commands (`istioctl proxy-config …`, `istioctl version`) return `command not found`.
+Cause:: `istioctl` isn't on the cockpit terminal's PATH on this cluster.
+Fix:: The lab's core observations don't require it — every routing/mTLS/authz result is also visible from the `curl`-based tests and, for the split, from the sidecar's telemetry (which you can read with `oc exec … pilot-agent request GET stats`). Use those; the `istioctl` reads are *grounding* confirmations of what the proxy sees, not the only signal. If you want `istioctl`, download the client matching the control-plane version (`1.28.x`).
+
+'''
+
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-13) against OpenShift Service Mesh {service_mesh_version} / Istio v1.28.6._

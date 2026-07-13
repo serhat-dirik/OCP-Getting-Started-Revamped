@@ -1,0 +1,1071 @@
+= Service Mesh 3 & Advanced Gateways: Lab
+:module-id: m18
+include::partial$version-attributes.adoc[]
+
+// Lab page for M18. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// [source,sh,role=execute]. The FIRST block sets NS={user}-mesh (subs=attributes); every later block uses
+// $NS / $CLAIMS / $WEB with NO subs so jsonpath braces stay literal. All commands + outputs + timings were
+// performed on OCP {ocp_version} (Kubernetes 1.34) against OpenShift Service Mesh {service_mesh_version}
+// (Istio v1.28.6) as user4 on 2026-07-13: sidecar injection (native-sidecar init container), the namespace-
+// label RBAC break-and-fix, STRICT mTLS block/allow + the SPIFFE identity, the weighted/header split read
+// from istio_requests_total telemetry (v1=185/v2=15 over 200 reqs), fault injection (5s delay -> 200 in 5.0s;
+// abort -> 503), the AuthorizationPolicy 200/403/403, and the raw-TCP + rate-limit gateway encore
+// (5x200 then 429) are REAL captures. NAMESPACE in output is the sample user user4-mesh (yours is
+// {user}-mesh). Kiali is a product UI -> single-path; its graph is [CAPTURE-VERIFY] + a CLI telemetry
+// grounding. CR-application steps are dual-path [tabs] Console(Import YAML)::CLI(oc). Honest app-substrate
+// gaps (no auto web->claims->fraud cascade; identical v1/v2 bodies; timeout/CB firing needs a slow upstream)
+// are flagged inline as NOTEs — they are documented limitations, never // TODO.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcut you'll reuse throughout the lab — your mesh namespace:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-mesh
+echo "mesh namespace: $NS"
+----
+
+You are the platform engineer for Parasol's *claims* application.
+Its services — `parasol-web` → `parasol-claims` → `parasol-fraud` (with a `claims-db`) — are already running in `{user}-mesh`, but *un-meshed*: no proxies, no mutual TLS, no traffic control.
+A shared OpenShift Service Mesh {service_mesh_version} control plane is waiting in `istio-system`, and your namespace is already a *discovered* mesh tenant.
+In this lab you *enroll* the app, prove *mutual TLS*, watch the *Kiali* graph, *shift traffic* to a new fraud version, add *resilience*, lock the call path to *identity*, and — optionally — serve a *raw-TCP partner feed* through an Istio ingress gateway with *rate limiting*.
+
+[TIP]
+.Two ways for CR steps; Kiali and traffic-driving are terminal/UI-only
+====
+Where you apply a mesh custom resource, you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) to import/edit YAML, the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
+Pick a path once — the tabs stay in sync across the page.
+Two things are single-path on purpose: *Kiali* is its own product console (there's no console-tab equivalent), and *driving traffic* from inside a meshed pod is a terminal `oc exec` — the console can't do it.
+The namespace in the output below is the sample user `user4-mesh`; *yours* is `{user}-mesh` — read the *shape*, not the exact name.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 15-minute presenter arc: enroll -> graph -> shift -> chaos -> lock
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Encrypted, observable, shiftable, locked to identity (15 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws start m18 --user {user}` a few minutes ahead, set `NS={user}-mesh`, and pre-open the *Kiali* console (`\https://kiali-istio-system.{cluster_domain}`, sign in with your cluster identity, select the `{user}-mesh` namespace).
+This demo runs from the *entry* state (un-meshed app), *not* from `ws solve` — the story is *building* the mesh live.
+Keep a terminal with large font on screen; the Kiali graph is the visual for beats 1–2, the `403` denial and the `429` rate-limit are the visuals for beats 4–5.
+The money moment is beat 4: `only claims may call fraud`, and a live `403` for the web tier.
+====
+
+[demo-block]
+[TIME 4m]
+Say:: "Parasol's claims app is running, but it's naked — no encryption, no traffic control, no picture of what's talking to what. Watch me enroll it into the mesh: I add one label, the pods restart with a proxy beside them, and the graph lights up on its own."
+Show:: The app pods going from `1/1` to `2/2` (a sidecar appears); then the Kiali graph drawing `demo-client → web → claims → fraud` as traffic flows.
+Do:: Enroll the three app tiers and drive traffic:
++
+[source,sh,role=execute]
+----
+NS=user4-mesh
+for d in parasol-web parasol-claims parasol-fraud; do
+  oc patch deploy $d -n $NS --type=merge \
+    -p '{"spec":{"template":{"metadata":{"labels":{"sidecar.istio.io/inject":"true"}}}}}'
+done
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+# drive traffic so Kiali has something to draw:
+oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 40); do curl -s -o /dev/null http://parasol-web:8080/api/claims; done'
+----
++
+"Two-of-two — that second container is the Envoy proxy the mesh injected. Flip to Kiali: there's the graph, drawn from real traffic, with a padlock on every edge. That padlock is *mutual TLS*, and I wrote *zero* lines of code to get it."
+
+[demo-block]
+[TIME 4m]
+Say:: "Parasol wants to ship fraud-scoring v2, but carefully — 10% of traffic first. No load balancer, no second rollout dance. One resource."
+Show:: `oc apply` of a `DestinationRule` + weighted `VirtualService`; then the split read straight from the mesh's telemetry — roughly 90/10.
+Do:: Deploy v2 and shift 90/10, then read the split (v2 Deployment + DestinationRule + VirtualService are the exercise-4 manifests):
++
+[source,sh,role=execute]
+----
+# apply the exercise-4 manifests: parasol-fraud-v2 Deployment, then the v1/v2 DestinationRule + 90/10 VirtualService
+oc rollout status deploy/parasol-fraud-v2 -n $NS --timeout=120s
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 100); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+----
++
+"I sent a hundred requests from the claims pod. The mesh's own metrics show about ninety went to v1 and ten to v2 — the exact split I asked for, and I can pin *test users* to v2 with a header while everyone else stays on v1."
+
+[demo-block]
+[TIME 3m]
+Say:: "Now the nightmare: the fraud service gets slow. Watch what a hanging dependency does — and what the mesh gives me to survive it."
+Show:: A 5-second fault delay injected on the fraud route; the claims→fraud call now taking 5 seconds; the resilience policy (timeout, retry, circuit breaker) that's already in place.
+Do:: Inject a fault and show the caller feel it (add a 100%/5s `fault.delay` to the fraud VirtualService — the exercise-5 manifest):
++
+[source,sh,role=execute]
+----
+# re-apply the fraud VirtualService with a 5s fault.delay (exercise 5), then send one call:
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "claims felt: %{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+# then re-apply the clean (fault-free) route
+----
++
+"Five seconds — the caller *feels* every bit of that hang. This is why the route carries a timeout, a retry, and a circuit breaker: so a slow dependency fails *fast* instead of taking the caller's threads down with it. And note the honest bit — Istio injects the fault *ahead* of the router, so it tests how the *caller* copes; the timeout fires on a genuinely slow upstream."
+
+[demo-block]
+[TIME 4m]
+Say:: "Last and most important: who is even allowed to call fraud? Right now, anyone in the mesh. Watch me lock it to *one* identity — the claims workload — and watch the web tier get refused."
+Show:: An `AuthorizationPolicy` applied; then `claims → fraud` succeeding (`200`) while `web → fraud` and the un-meshed client are refused with a `403`.
+Do:: Lock the call path to identity (apply the exercise-6 `fraud-allow-claims` AuthorizationPolicy):
++
+[source,sh,role=execute]
+----
+# apply the AuthorizationPolicy that ALLOWs only sa/parasol-claims (exercise 6), then test two callers:
+WEB=$(oc get pod -n $NS -l app=parasol-web -o jsonpath='{.items[0].metadata.name}')
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
+----
++
+"Claims gets a `200`. The web tier — a perfectly valid pod, one namespace over from nothing — gets `403 RBAC: access denied`. Not by IP, not by namespace: by *cryptographic identity*. That's 'only claims may call fraud,' enforced."
+
+[NOTE]
+.Optional encore + reset between runs
+====
+If you have time, the *advanced-gateway* encore serves a *raw-TCP* partner feed through an Istio ingress Gateway (the path Routes can't take) and adds a gateway *rate limit* — hammer it, watch the `429`s. It's in the workshop lab's optional section.
+`ws prep m18 --yes` returns the world to the entry state (un-meshed app, no mesh CRs).
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Enroll the app into the mesh
+⏱ *~12 min* · add the injection label, watch the native sidecar appear
+
+Start by confirming the world you're in: a shared control plane, and your app running *without* proxies.
+
+[source,sh,role=execute]
+----
+oc get istio default -o jsonpath='control plane: Istio {.spec.version}  status={.status.state}{"\n"}'
+oc get pods -n $NS -o custom-columns='POD:.metadata.name,READY:.status.containerStatuses[*].ready,CONTAINERS:.spec.containers[*].name'
+----
+
+.Expected output (a healthy control plane; one container per pod — no sidecars yet)
+[source,texinfo]
+----
+control plane: Istio v1.28.6  status=Healthy
+POD                                    READY   CONTAINERS
+claims-db-...                          true    postgresql
+demo-client-...                        true    client
+parasol-claims-...                     true    parasol-claims
+parasol-fraud-...                      true    parasol-fraud
+parasol-web-...                        true    parasol-web
+partner-tcp-backend-...                true    tcp-backend
+----
+
+Every app pod has *one* container — your application, and nothing else.
+Your namespace is already a *discovered* mesh tenant (the platform labelled it `istio-discovery=enabled`), so istiod is watching it — but discovery isn't injection. To get a proxy, a workload needs the *injection label* `sidecar.istio.io/inject: "true"` on its *pod template*.
+
+[NOTE]
+.Why per-workload, not "label the namespace"?
+====
+You may have seen mesh tutorials that enroll by labelling the *namespace* `istio-injection=enabled`. That's a *cluster-scoped* edit to the Namespace object, which a namespace tenant isn't allowed to make — try it and you'll be refused:
+
+[source,sh,role=execute]
+----
+oc label namespace $NS istio-injection=enabled
+----
+
+[source,texinfo]
+----
+Error from server (Forbidden): namespaces "user4-mesh" is forbidden: User "user4"
+cannot patch resource "namespaces" in API group "" in the namespace "user4-mesh"
+----
+
+That's expected, not a problem. As a namespace owner you enroll *per workload* — the injection label on each Deployment's pod template — which is finer-grained anyway: you choose exactly which workloads join the mesh. That's the path below.
+====
+
+Enroll the three app tiers by adding the injection label to their pod templates.
+`claims-db` (a database, no mesh benefit) and `demo-client` (your external test client) stay *out*.
+
+// [CAPTURE-VERIFY] Console: Workloads -> Deployments -> parasol-web -> YAML, add sidecar.istio.io/inject:"true" under spec.template.metadata.labels, Save (OCP 4.21) -- CLI authoritative and does all three at once.
+[tabs]
+====
+Console::
++
+--
+For each of `parasol-web`, `parasol-claims`, `parasol-fraud`: open *Workloads* → *Deployments* → the Deployment → *YAML*, add under `spec.template.metadata.labels`:
+
+[source,yaml]
+----
+sidecar.istio.io/inject: "true"
+----
+
+then *Save*. Saving the pod template triggers a rollout that injects the proxy.
+The *CLI* tab patches all three in one loop — reach for it here.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+for d in parasol-web parasol-claims parasol-fraud; do
+  oc patch deploy $d -n $NS --type=merge \
+    -p '{"spec":{"template":{"metadata":{"labels":{"sidecar.istio.io/inject":"true"}}}}}'
+done
+oc rollout status deploy/parasol-web -n $NS --timeout=120s
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+oc rollout status deploy/parasol-fraud -n $NS --timeout=120s
+----
+--
+====
+
+.Expected output (each patched Deployment rolls a new, injected pod)
+[source,texinfo]
+----
+deployment.apps/parasol-web patched
+deployment.apps/parasol-claims patched
+deployment.apps/parasol-fraud patched
+deployment "parasol-web" successfully rolled out
+deployment "parasol-claims" successfully rolled out
+deployment "parasol-fraud" successfully rolled out
+----
+
+Now look at what changed — the app pods are `2/2`, and the extra container is the mesh proxy:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS -o custom-columns='POD:.metadata.name,READY:.status.containerStatuses[*].ready,INIT:.spec.initContainers[*].name'
+----
+
+.Expected output (meshed tiers gain istio-proxy; demo-client + db stay single-container)
+[source,texinfo]
+----
+POD                                    READY   INIT
+claims-db-...                          true    <none>
+demo-client-...                        true    <none>
+parasol-claims-...                     true    istio-validation,istio-proxy
+parasol-fraud-...                      true    istio-validation,istio-proxy
+parasol-web-...                        true    istio-validation,istio-proxy
+----
+
+Notice `istio-proxy` is an *init container*, not a regular one — that's the OpenShift Service Mesh 3 *native sidecar*.
+Confirm its always-on restart policy (what makes it start before your app and stop after it):
+
+[source,sh,role=execute]
+----
+POD=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc get pod $POD -n $NS -o jsonpath='{range .spec.initContainers[*]}{.name}{" restartPolicy="}{.restartPolicy}{"\n"}{end}'
+----
+
+.Expected output (istio-proxy is a native sidecar — an init container that never exits)
+[source,texinfo]
+----
+istio-validation restartPolicy=
+istio-proxy restartPolicy=Always
+----
+
+The `restartPolicy: Always` on an init container is the Kubernetes native-sidecar pattern: the proxy runs for the whole life of the pod, but starts *first* so no app traffic escapes unproxied.
+
+[.checkpoint]
+****
+✔ *Verify:* You confirmed a healthy Istio `v1.28.6` control plane, learned that a namespace tenant enrolls *per workload* (the namespace label is cluster-admin only — you saw the `Forbidden`), added the `sidecar.istio.io/inject: "true"` label to the three app tiers, and watched them come back `2/2` with `istio-proxy` as an *always-on native sidecar* init container — while `demo-client` and `claims-db` stayed out of the mesh.
+****
+
+== 2. Prove mutual TLS with a STRICT policy
+⏱ *~12 min* · encryption you can prove by watching a plaintext client get refused
+
+Meshed workloads now talk over *mutual TLS* automatically — but the default mode is *PERMISSIVE*, which still *accepts* plaintext from outside the mesh so nothing breaks on day one.
+See that first: your un-meshed `demo-client` can still reach the meshed `parasol-web`.
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- curl -s -m5 -o /dev/null -w "demo-client -> web: HTTP %{http_code}\n" http://parasol-web:8080/api/claims
+----
+
+.Expected output (PERMISSIVE accepts the plaintext client)
+[source,texinfo]
+----
+demo-client -> web: HTTP 200
+----
+
+Now require encryption. A `PeerAuthentication` in `STRICT` mode tells every proxy in the namespace to *refuse* any connection that isn't mutual TLS:
+
+// [CAPTURE-VERIFY] Console: +Add (or Import YAML) -> paste the PeerAuthentication -> Create (OCP 4.21) -- CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *+Add* → *Import YAML* (project `{user}-mesh`), paste the manifest from the *CLI* tab, and *Create*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+spec:
+  mtls:
+    mode: STRICT
+EOF
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+peerauthentication.security.istio.io/default created
+----
+
+Give the proxies a few seconds to pick up the new policy, then try the un-meshed client again — it now gets *refused* at the connection level:
+
+[source,sh,role=execute]
+----
+sleep 5
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -sS -m5 http://parasol-web:8080/api/claims; echo "curl exit=$?"'
+----
+
+.Expected output (plaintext is now rejected — the proxy resets the connection)
+[source,texinfo]
+----
+curl: (56) Recv failure: Connection reset by peer
+curl exit=56
+----
+
+That reset *is* the proof: the `parasol-web` proxy now demands mutual TLS and drops a plaintext caller.
+Meanwhile a *meshed* caller — whose proxy speaks mutual TLS — sails through. Drive a call from *inside* the claims pod so it egresses through claims' real sidecar:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud (meshed): HTTP %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+----
+
+.Expected output (mesh-to-mesh over mutual TLS still works)
+[source,texinfo]
+----
+claims -> fraud (meshed): HTTP 200
+----
+
+The encryption is identity-bound. Read the *workload identity* off the claims sidecar's certificate — a *SPIFFE* URI naming the namespace and ServiceAccount, the name the mesh authenticates:
+
+[source,sh,role=execute]
+----
+istioctl proxy-config secret $CLAIMS.$NS -o json \
+  | oc exec -i deploy/demo-client -n $NS -- sh -c 'cat > /tmp/c.json; python3 -c "import json,base64;d=json.load(open(\"/tmp/c.json\"));c=[x for x in d[\"dynamicActiveSecrets\"] if x[\"name\"]==\"default\"][0][\"secret\"][\"tlsCertificate\"][\"certificateChain\"][\"inlineBytes\"];open(\"/tmp/c.pem\",\"wb\").write(base64.b64decode(c))"; openssl x509 -in /tmp/c.pem -noout -ext subjectAltName'
+----
+
+.Expected output (the claims workload's cryptographic identity)
+[source,texinfo]
+----
+X509v3 Subject Alternative Name: critical
+    URI:spiffe://cluster.local/ns/user4-mesh/sa/parasol-claims
+----
+
+Keep that identity in mind — `sa/parasol-claims` is exactly what the AuthorizationPolicy in exercise 6 will allow.
+
+Finally, *revert to PERMISSIVE* by removing the STRICT policy. The rest of the lab uses the un-meshed `demo-client` to drive traffic, and (like the module's end state) leaves mutual TLS at its automatic default:
+
+[source,sh,role=execute]
+----
+oc delete peerauthentication default -n $NS
+sleep 3
+oc exec deploy/demo-client -n $NS -- curl -s -m5 -o /dev/null -w "demo-client -> web after revert: HTTP %{http_code}\n" http://parasol-web:8080/api/claims
+----
+
+.Expected output (plaintext accepted again under PERMISSIVE)
+[source,texinfo]
+----
+demo-client -> web after revert: HTTP 200
+----
+
+[.checkpoint]
+****
+✔ *Verify:* Under PERMISSIVE you saw the un-meshed client reach the meshed web tier; applying a *STRICT* `PeerAuthentication` made the proxy *refuse* that plaintext client (`curl (56) Connection reset`), while a meshed caller still succeeded over mutual TLS; you read the claims workload's *SPIFFE identity* (`sa/parasol-claims`) off its certificate; then you reverted to PERMISSIVE for the rest of the lab.
+****
+
+== 3. See the mesh in Kiali
+⏱ *~12 min* · turn live traffic into a service graph — the picture `oc get` can't give you
+
+Kiali is the mesh's console: it reads the proxies' telemetry and draws a live *graph* of what's calling what, with health and mutual-TLS badges.
+A graph needs *traffic*, so first generate some. Because the sample app doesn't yet make its own downstream calls, *you* drive the chain — `demo-client → web`, and `claims → fraud` from inside the meshed claims pod:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+# 60 requests into the front door, and 60 on the claims->fraud hop (each loop runs inside the pod):
+oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 60); do curl -s -o /dev/null http://parasol-web:8080/api/claims; done'
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 60); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+echo "traffic sent"
+----
+
+Ground that the traffic really flowed *through the mesh* before you open the console — the data plane reports three proxies and their live request counts:
+
+[source,sh,role=execute]
+----
+istioctl version
+oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null | grep -c parasol-fraud
+----
+
+.Expected output (a 3-proxy data plane; many recorded requests to fraud)
+[source,texinfo]
+----
+client version: 1.16.7
+control plane version: 1.28.6_ossm
+data plane version: 1.28.6 (3 proxies)
+...
+6
+----
+
+Now open Kiali and *see* it.
+
+[NOTE]
+.Kiali is a product console — open it directly (single path)
+====
+Kiali has no OpenShift-console equivalent, so this step is UI-only.
+Open `\https://kiali-istio-system.{cluster_domain}` in a new tab and sign in with your cluster identity (`{user}`). Kiali scopes what you see to your OpenShift permissions, so you'll see *your* `{user}-mesh` namespace.
+====
+
+// [CAPTURE-VERIFY] Kiali {kiali_version}: Traffic Graph -> namespace {user}-mesh -> shows nodes parasol-web/parasol-claims/parasol-fraud(+v2) with edges from traffic, per-edge mTLS padlock, and green health. Confirm labels/menu names against the live console; the CLI telemetry above is the authoritative "traffic flowed" signal.
+In Kiali's *Traffic Graph*, select the `{user}-mesh` namespace and a recent time range. You'll see:
+
+* *Nodes* for `parasol-web`, `parasol-claims`, and `parasol-fraud` (and `parasol-fraud-v2` once exercise 4 deploys it), plus an *unknown/`demo-client`* source feeding the web tier.
+* *Edges* drawn from the traffic you just generated, each carrying a *request rate* and a *mutual-TLS padlock* icon.
+* *Health* coloring — green while calls succeed — which turns to red the moment a call path starts failing (you'll cause exactly that in exercises 5 and 6).
+
+[NOTE]
+.What's real here, and what you're driving by hand
+====
+The graph, the rates, the health, and the mTLS badges are *real mesh telemetry*.
+The one thing that's manual is the *traffic itself*: the sample app doesn't auto-call down the chain yet, so you generated the requests with `oc exec … curl`. Each request still egresses through the caller's real sidecar, so the mesh measures and secures it exactly as it would an app-originated call — which is why the graph and the padlocks are genuine.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You generated live traffic through the mesh, grounded it with `istioctl` (a 3-proxy data plane and recorded requests to fraud), and read the Kiali *Traffic Graph* for `{user}-mesh` — nodes, traffic-driven edges, mutual-TLS padlocks, and green health — the live picture of your service-to-service traffic.
+****
+
+== 4. Shift traffic between service versions
+⏱ *~15 min* · a weighted canary and a header route — with two custom resources
+
+Parasol wants to roll out fraud-scoring *v2* carefully: 10% of traffic at first, and a way for *test users* to hit v2 explicitly.
+First, deploy a *v2* of the fraud service alongside v1. Both are labelled `app: parasol-fraud` (so the one Service fronts both) but carry distinct `version` labels the mesh will route by.
+
+// [CAPTURE-VERIFY] Console: +Add -> Import YAML -> paste the v2 Deployment -> Create (OCP 4.21) -- CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *+Add* → *Import YAML* (project `{user}-mesh`), paste the `parasol-fraud-v2` Deployment from the *CLI* tab, and *Create*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-fraud-v2
+  labels: {app: parasol-fraud, version: v2}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: parasol-fraud, version: v2}}
+  template:
+    metadata:
+      labels: {app: parasol-fraud, version: v2, sidecar.istio.io/inject: "true"}
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-fraud:1.0
+          ports: [{name: http, containerPort: 8080}]
+          env: [{name: FRAUD_VERSION, value: v2}]
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 500m, memory: 512Mi}}
+          readinessProbe: {httpGet: {path: /q/health/ready, port: 8080}, initialDelaySeconds: 5, periodSeconds: 10}
+EOF
+oc rollout status deploy/parasol-fraud-v2 -n $NS --timeout=120s
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+deployment.apps/parasol-fraud-v2 created
+deployment "parasol-fraud-v2" successfully rolled out
+----
+
+Now define *subsets* (a `DestinationRule` naming the v1/v2 pools) and a *route* (a `VirtualService` splitting traffic 90/10, plus a header rule sending `x-parasol-test: true` straight to v2). Apply both:
+
+// [CAPTURE-VERIFY] Console: +Add -> Import YAML -> paste both resources -> Create (OCP 4.21) -- CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *+Add* → *Import YAML*, paste *both* resources from the *CLI* tab (separated by `---`), and *Create*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: parasol-fraud
+spec:
+  host: parasol-fraud
+  subsets:
+    - {name: v1, labels: {version: v1}}
+    - {name: v2, labels: {version: v2}}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: parasol-fraud
+spec:
+  hosts: [parasol-fraud]
+  http:
+    - match: [{headers: {x-parasol-test: {exact: "true"}}}]
+      route: [{destination: {host: parasol-fraud, subset: v2}}]
+    - route:
+        - {destination: {host: parasol-fraud, subset: v1}, weight: 90}
+        - {destination: {host: parasol-fraud, subset: v2}, weight: 10}
+EOF
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+destinationrule.networking.istio.io/parasol-fraud created
+virtualservice.networking.istio.io/parasol-fraud created
+----
+
+Confirm the mesh programmed the split into the *claims* sidecar (the caller). `istioctl` shows the weighted route and the header rule as the proxy sees them:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+istioctl proxy-config route $CLAIMS.$NS --name 8080 -o json \
+  | grep -E 'weight|"cluster"|x-parasol-test' | grep -Eo 'v[12]\|parasol-fraud[^"]*|"weight": [0-9]+|x-parasol-test' | head
+----
+
+.Expected output (a 90/10 weighted route + a header match to v2 — programmed into the proxy)
+[source,texinfo]
+----
+x-parasol-test
+v2|parasol-fraud.user4-mesh.svc.cluster.local
+"weight": 90
+v1|parasol-fraud.user4-mesh.svc.cluster.local
+"weight": 10
+v2|parasol-fraud.user4-mesh.svc.cluster.local
+----
+
+Now *drive* the split and *measure* it. Send 200 requests from the meshed claims pod (no header) and read how the mesh actually distributed them — from its own `istio_requests_total` telemetry, broken down by destination version:
+
+[source,sh,role=execute]
+----
+split() { oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
+  | grep reporter.source | grep response_code.200 \
+  | sed -nE 's/.*destination_version\.(v[12])\..*: ([0-9]+)/\1 \2/p' \
+  | awk '{s[$1]+=$2} END{printf "v1=%d v2=%d\n", s["v1"], s["v2"]}'; }
+B=$(split)
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 200); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+A=$(split)
+echo "before: $B"; echo "after:  $A"
+----
+
+.Expected output (roughly 90/10 — statistical, not exact)
+[source,texinfo]
+----
+before: v1=88 v2=34
+after:  v1=273 v2=49
+----
+
+The *delta* is what matters: about *185* of the 200 requests went to v1 and about *15* to v2 — the 90/10 split you configured, measured from the mesh's own metrics.
+
+[NOTE]
+.Why read telemetry instead of "counting the responses"?
+====
+In this lab, fraud *v1* and *v2* run the *same image* (v2 is seeded with a `version` label and a `FRAUD_VERSION=v2` marker, but no genuinely different build yet), so their HTTP responses are *byte-identical* — you can't tell them apart by reading the body.
+The *routing is completely real* — the proxy really did send ~90% to the v1 pool and ~10% to the v2 pool — so you read the split from the mesh telemetry (`istio_requests_total` by `destination_version`, which is also what colors the Kiali versioned graph). When a genuinely distinct v2 image ships, the *responses* differ too and you can count them directly; the routing you configured here is unchanged.
+====
+
+Finally, the *header route* — pin test users to v2. Send 30 requests *with* the header and watch the delta land entirely on v2:
+
+[source,sh,role=execute]
+----
+B=$(split)
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 30); do curl -s -o /dev/null -H "x-parasol-test: true" http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+A=$(split)
+echo "before: $B"; echo "after:  $A   (all +30 on v2)"
+----
+
+.Expected output (the header route sends every test request to v2)
+[source,texinfo]
+----
+before: v1=273 v2=49
+after:  v1=273 v2=79   (all +30 on v2)
+----
+
+`v1` didn't move; all 30 header-tagged requests went to v2 — a deterministic override on top of the weighted split.
+
+[.checkpoint]
+****
+✔ *Verify:* You deployed `parasol-fraud-v2`, defined v1/v2 *subsets* (`DestinationRule`) and a *route* (`VirtualService`) with a 90/10 weighted split and an `x-parasol-test` header rule, confirmed the weights were programmed into the claims proxy with `istioctl`, and *measured* the real split from mesh telemetry — ~185/15 for the weighted path and a clean +30-to-v2 for the header path.
+****
+
+== 5. Add resilience: faults, timeouts, and a circuit breaker
+⏱ *~12 min* · make a slow dependency fail fast instead of hanging the caller
+
+A slow `parasol-fraud` is the cascading-failure trigger. The mesh lets you *simulate* that failure and *configure* the defenses against it. First, baseline the healthy latency:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "healthy: HTTP %{http_code} in %{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+----
+
+.Expected output (fast and healthy)
+[source,texinfo]
+----
+healthy: HTTP 200 in 0.017s
+----
+
+Now *inject a 5-second delay* on the fraud route with a `VirtualService` fault, and add the resilience policy — a request *timeout*, *retries*, and (on the `DestinationRule`) a *circuit breaker* via connection limits and outlier detection:
+
+// [CAPTURE-VERIFY] Console: edit the VirtualService/DestinationRule YAML (Networking -> VirtualServices / DestinationRules) or +Add -> Import YAML (OCP 4.21) -- CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Edit the two resources (via *Import YAML* / the resource's *YAML* tab), replacing them with the versions in the *CLI* tab, and *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: parasol-fraud
+spec:
+  host: parasol-fraud
+  trafficPolicy:
+    connectionPool:
+      tcp: {maxConnections: 10}
+      http: {http1MaxPendingRequests: 10, maxRequestsPerConnection: 1}
+    outlierDetection: {consecutive5xxErrors: 3, interval: 10s, baseEjectionTime: 30s, maxEjectionPercent: 50}
+  subsets:
+    - {name: v1, labels: {version: v1}}
+    - {name: v2, labels: {version: v2}}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: parasol-fraud
+spec:
+  hosts: [parasol-fraud]
+  http:
+    - match: [{headers: {x-parasol-test: {exact: "true"}}}]
+      route: [{destination: {host: parasol-fraud, subset: v2}}]
+    - fault:
+        delay: {percentage: {value: 100}, fixedDelay: 5s}
+      route:
+        - {destination: {host: parasol-fraud, subset: v1}, weight: 90}
+        - {destination: {host: parasol-fraud, subset: v2}, weight: 10}
+      timeout: 3s
+      retries: {attempts: 2, perTryTimeout: 1s, retryOn: "5xx,reset,connect-failure"}
+EOF
+----
+--
+====
+
+Send a request and watch the caller *feel* the 5-second hang:
+
+[source,sh,role=execute]
+----
+sleep 3
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "faulted: HTTP %{http_code} in %{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+----
+
+.Expected output (the injected delay lands on the caller)
+[source,texinfo]
+----
+faulted: HTTP 200 in 5.017s
+----
+
+Five seconds — exactly the cascading-failure trigger. This is the moment a caller's threads pile up.
+
+[NOTE]
+.The honest truth about fault injection vs. the route timeout
+====
+You set `timeout: 3s`, yet the faulted call returned after *5* seconds, not 3. That's *correct* Istio behavior, and it's worth knowing: Istio applies *fault injection* in a filter that runs *ahead* of the router, so an injected delay (or abort) is *not* subject to that same route's `timeout` or `retries`. Fault injection is a tool to test *how your caller copes* with a slow/failing dependency — not a way to exercise the route's own timeout.
+
+To see the *timeout* actually fire, the *upstream* has to be genuinely slow (a real slow endpoint), which the sample fraud service isn't. So in this lab the timeout/retry/circuit-breaker settings are *real and applied* (you'll confirm them below), and *observing them fire live* is the piece that waits on a slower upstream. That's the honest boundary — the policy is real; the live "watch it trip" needs app behavior the sample doesn't have yet.
+====
+
+Confirm the *circuit breaker* is really programmed into the caller's proxy — the outlier-detection and connection-pool settings that would eject a failing fraud pod and bound in-flight load:
+
+[source,sh,role=execute]
+----
+istioctl proxy-config cluster $CLAIMS.$NS --fqdn parasol-fraud.$NS.svc.cluster.local --subset v1 -o json \
+  | grep -E 'consecutive5xx|maxConnections|baseEjectionTime|interval' | head
+----
+
+.Expected output (the circuit-breaker policy is live on the fraud cluster)
+[source,texinfo]
+----
+"maxConnections": 10,
+"consecutive5xx": 3,
+"interval": "10s",
+"baseEjectionTime": "30s",
+----
+
+That's a real circuit breaker: after *3* consecutive 5xx errors the proxy ejects the offending fraud pod for *30s*, and `maxConnections: 10` caps concurrent connections so a slow dependency can't exhaust the caller.
+
+Now *fix the break* — remove the fault, restoring the clean weighted route (the module's end state):
+
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: parasol-fraud}
+spec:
+  hosts: [parasol-fraud]
+  http:
+    - match: [{headers: {x-parasol-test: {exact: "true"}}}]
+      route: [{destination: {host: parasol-fraud, subset: v2}}]
+    - route:
+        - {destination: {host: parasol-fraud, subset: v1}, weight: 90}
+        - {destination: {host: parasol-fraud, subset: v2}, weight: 10}
+      timeout: 3s
+      retries: {attempts: 2, perTryTimeout: 1s, retryOn: "5xx,reset,connect-failure"}
+EOF
+sleep 3
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "restored: HTTP %{http_code} in %{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+----
+
+.Expected output (fast again — the fault is gone, the resilience policy stays)
+[source,texinfo]
+----
+restored: HTTP 200 in 0.013s
+----
+
+[.checkpoint]
+****
+✔ *Verify:* You injected a *5-second fault* and watched the caller feel it (`HTTP 200 in 5.0s`), learned the honest boundary — Istio's fault filter sits ahead of the router, so an injected delay isn't clipped by the route timeout — confirmed the *circuit breaker* (`consecutive5xx: 3`, `baseEjectionTime: 30s`, `maxConnections: 10`) is live on the caller's proxy, then removed the fault to restore the healthy route.
+****
+
+== 6. Secure the call path with an AuthorizationPolicy
+⏱ *~10 min* · "only claims may call fraud" — enforced by identity, not location
+
+The mesh can decide *who is allowed to call whom* by *workload identity*.
+Right now, under PERMISSIVE mutual TLS, *any* meshed workload can reach fraud. Prove it — the *web* tier (a different identity, `sa/default`) can call fraud today:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+WEB=$(oc get pod -n $NS -l app=parasol-web -o jsonpath='{.items[0].metadata.name}')
+oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -o /dev/null -w "web -> fraud (before policy): HTTP %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+----
+
+.Expected output (no policy yet — anyone in the mesh may call fraud)
+[source,texinfo]
+----
+web -> fraud (before policy): HTTP 200
+----
+
+Now apply an `AuthorizationPolicy` on the fraud workload that *ALLOWs only* the claims identity (`sa/parasol-claims`, the SPIFFE name you read in exercise 2). An ALLOW rule creates an *implicit deny* for everyone else:
+
+// [CAPTURE-VERIFY] Console: +Add -> Import YAML -> paste the AuthorizationPolicy -> Create (OCP 4.21) -- CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *+Add* → *Import YAML* (project `{user}-mesh`), paste the manifest from the *CLI* tab, and *Create*.
+--
+CLI::
++
+--
+[source,sh,role=execute,subs="attributes"]
+----
+oc apply -n $NS -f - <<EOF
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: fraud-allow-claims
+spec:
+  selector:
+    matchLabels: {app: parasol-fraud}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/{user}-mesh/sa/parasol-claims"]
+EOF
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+authorizationpolicy.security.istio.io/fraud-allow-claims created
+----
+
+Give the proxies a moment, then test *three* callers — the allowed identity, a different meshed identity, and the un-meshed client:
+
+[source,sh,role=execute]
+----
+sleep 5
+oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud:       HTTP %{http_code}  (allowed)\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
+oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud:          HTTP %{http_code}  (denied)\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
+oc exec deploy/demo-client -n $NS -- curl -s -m5 -w "demo-client -> fraud:  HTTP %{http_code}  (denied)\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
+----
+
+.Expected output (only the claims identity is allowed; everyone else gets 403)
+[source,texinfo]
+----
+claims -> fraud:       HTTP 200  (allowed)
+RBAC: access denied
+web -> fraud:          HTTP 403  (denied)
+RBAC: access denied
+demo-client -> fraud:  HTTP 403  (denied)
+----
+
+That's the whole point: `claims` (identity `sa/parasol-claims`, over mutual TLS) is allowed; the `web` tier — a perfectly healthy pod with a *different* identity — is refused with `403 RBAC: access denied`; and the un-meshed `demo-client` (no mesh identity at all) is refused too.
+Not by IP, not by namespace — by *cryptographic identity*. "Only claims may call fraud," enforced.
+
+[NOTE]
+.Driving the callers by hand (the honest bit)
+====
+The sample app doesn't auto-call fraud, so you *simulated* a rogue caller by running `curl` from inside the `web` pod. That request carried the web tier's *real* mutual-TLS identity, and the fraud proxy denied it for real — the `403` is a genuine authorization decision, only the *trigger* is manual.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You showed that before any policy the web tier could call fraud, applied an `AuthorizationPolicy` ALLOWing only `sa/parasol-claims`, and then saw *claims* allowed (`200`) while the *web* tier and the un-meshed *demo-client* were both refused (`403 RBAC: access denied`) — identity-based authorization, the implicit-deny that "only claims may call fraud" requires.
+****
+
+== 7. Advanced gateways: raw-TCP ingress + rate limiting (optional encore)
+⏱ *~15 min* · go where Routes can't — a raw-TCP partner feed, and a native gateway rate limit
+
+_This is the deep-dive encore. If you're short on time, skim it — the core module is complete at exercise 6._
+
+Parasol's *legacy partner bureaus* send claim feeds over *raw TCP* — not HTTP. An OpenShift Route can't route an arbitrary TCP protocol, and the experimental L4 Gateway API resources aren't available here. Confirm that boundary:
+
+[source,sh,role=execute]
+----
+oc get crd tcproutes.gateway.networking.k8s.io 2>&1 | tail -1
+----
+
+.Expected output (the L4 Gateway API resource isn't installed — the honest boundary)
+[source,texinfo]
+----
+Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "tcproutes.gateway.networking.k8s.io" not found
+----
+
+The seeded `partner-tcp-backend` is a raw-TCP server that ACKs each connection. It's already reachable *in-cluster* — prove it from the demo-client:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'printf "CLAIM-FEED-42\n" | timeout 5 python3 -c "import socket,sys;s=socket.create_connection((\"partner-tcp-backend\",9000),5);s.sendall(sys.stdin.buffer.read());print(repr(s.recv(200)))"'
+----
+
+.Expected output (the raw-TCP backend answers with its banner)
+[source,texinfo]
+----
+b'PARASOL-PARTNER-FEED-ACK '
+----
+
+Now serve it through an *Istio ingress gateway* — the supported path for raw TCP. First deploy a small gateway proxy (the `image: auto` is replaced by the injector with the Istio proxy):
+
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-partner-gw
+  labels: {app: parasol-partner-gw, istio: parasol-partner-gw}
+spec:
+  replicas: 1
+  selector: {matchLabels: {istio: parasol-partner-gw}}
+  template:
+    metadata:
+      annotations: {inject.istio.io/templates: gateway}
+      labels: {app: parasol-partner-gw, istio: parasol-partner-gw, sidecar.istio.io/inject: "true"}
+    spec:
+      containers:
+        - name: istio-proxy
+          image: auto
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {cpu: 200m, memory: 256Mi}}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: parasol-partner-gw, labels: {istio: parasol-partner-gw}}
+spec:
+  selector: {istio: parasol-partner-gw}
+  ports:
+    - {name: tcp-partner, port: 9000, targetPort: 9000}
+    - {name: http-web, port: 8080, targetPort: 8080}
+EOF
+oc rollout status deploy/parasol-partner-gw -n $NS --timeout=120s
+----
+
+.Expected output (the injector turns image:auto into a real gateway proxy)
+[source,texinfo]
+----
+deployment.apps/parasol-partner-gw created
+deployment "parasol-partner-gw" successfully rolled out
+----
+
+Bind the gateway to the backends with an Istio `Gateway` (a raw-`TCP` listener on 9000 and an `HTTP` listener on 8080) and two `VirtualService`s:
+
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata: {name: parasol-partner-gw}
+spec:
+  selector: {istio: parasol-partner-gw}
+  servers:
+    - port: {number: 9000, name: tcp-partner, protocol: TCP}
+      hosts: ["*"]
+    - port: {number: 8080, name: http-web, protocol: HTTP}
+      hosts: ["*"]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: partner-feed}
+spec:
+  hosts: ["*"]
+  gateways: [parasol-partner-gw]
+  tcp:
+    - match: [{port: 9000}]
+      route: [{destination: {host: partner-tcp-backend, port: {number: 9000}}}]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: web-via-gw}
+spec:
+  hosts: ["*"]
+  gateways: [parasol-partner-gw]
+  http:
+    - match: [{port: 8080}]
+      route: [{destination: {host: parasol-web, port: {number: 8080}}}]
+EOF
+----
+
+Send the raw-TCP feed *through the gateway* now (to the gateway Service on 9000, which forwards to the backend):
+
+[source,sh,role=execute]
+----
+sleep 5
+oc exec deploy/demo-client -n $NS -- sh -c 'printf "CLAIM-FEED-99\n" | timeout 6 python3 -c "import socket,sys;s=socket.create_connection((\"parasol-partner-gw\",9000),5);s.sendall(sys.stdin.buffer.read());print(\"gateway reply:\",repr(s.recv(200)))"'
+----
+
+.Expected output (raw TCP, end-to-end through the Istio gateway)
+[source,texinfo]
+----
+gateway reply: b'PARASOL-PARTNER-FEED-ACK CLAIM-FEED-99\n'
+----
+
+That's raw TCP served through the mesh's ingress — the path a Route can't take.
+
+Finally, add a *native gateway rate limit* with an `EnvoyFilter` — a token bucket of *5 requests per minute* on the gateway's HTTP path — and hammer it:
+
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata: {name: partner-gw-ratelimit}
+spec:
+  workloadSelector: {labels: {istio: parasol-partner-gw}}
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener: {filterChain: {filter: {name: envoy.filters.network.http_connection_manager}}}
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.local_ratelimit
+          typed_config:
+            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
+            type_url: type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+            value:
+              stat_prefix: partner_gw_rl
+              token_bucket: {max_tokens: 5, tokens_per_fill: 5, fill_interval: 60s}
+              filter_enabled: {default_value: {numerator: 100, denominator: HUNDRED}}
+              filter_enforced: {default_value: {numerator: 100, denominator: HUNDRED}}
+EOF
+sleep 6
+oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 12); do curl -s -o /dev/null -w "%{http_code} " http://parasol-partner-gw:8080/api/claims; done; echo'
+----
+
+.Expected output (5 tokens, then the bucket is empty — 429 Too Many Requests)
+[source,texinfo]
+----
+200 200 200 200 200 429 429 429 429 429 429 429
+----
+
+Exactly five requests through, then `429` for the rest — a gateway-level rate limit enforced by the proxy.
+
+[NOTE]
+.Honest framing: a platform capability, not API management
+====
+`EnvoyFilter` is the *low-level escape hatch* — it patches the proxy's Envoy config directly, so it's powerful but version-sensitive (Red Hat flags it as internal-implementation surface). A *local* rate limit like this is per-proxy and great for coarse protection. A *full* API-management product (quotas per consumer, plans, analytics, a global counter) is a different tool with its own workshop — frame this as "the platform can rate-limit at the gateway," not "the mesh replaces API management."
+====
+
+Clean up the encore's extra objects (they're not part of the graded end state):
+
+[source,sh,role=execute]
+----
+oc delete envoyfilter partner-gw-ratelimit -n $NS
+oc delete virtualservice partner-feed web-via-gw -n $NS
+oc delete gateway.networking.istio.io parasol-partner-gw -n $NS
+oc delete deploy,svc parasol-partner-gw -n $NS
+----
+
+[.checkpoint]
+****
+✔ *Verify:* You confirmed the L4 Gateway API boundary (`TCPRoute` absent), served a *raw-TCP* partner feed end-to-end through an Istio ingress *Gateway* (`PARASOL-PARTNER-FEED-ACK`), and added a native *gateway rate limit* with an `EnvoyFilter` (5 requests, then `429`) — the ingress paths that Routes and HTTP-only Gateway API can't serve.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the mechanics. Try these on your own:
+
+* *Mirror instead of split.* Change the fraud `VirtualService` to `mirror` 100% of traffic to v2 while still serving v1 (a "dark launch"). Reason about how mirroring differs from a weighted split, and read the mirrored traffic in the mesh telemetry.
+* *Tighten mutual TLS permanently.* You reverted STRICT to keep the un-meshed client working. Reason about how a *production* mesh would keep STRICT *and* still let an external client in — where would that client's traffic have to enter (hint: the ingress gateway you built in exercise 7), and what identity would it carry?
+* *Deny by exception.* The `AuthorizationPolicy` you wrote is an ALLOW list. Write the same "only claims may call fraud" outcome as a *DENY* policy instead, and reason about which is safer to operate — and why an empty ALLOW list denies everything while an empty DENY list denies nothing.
+
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (the un-meshed app, no mesh custom resources).
+
+endif::demo[]
