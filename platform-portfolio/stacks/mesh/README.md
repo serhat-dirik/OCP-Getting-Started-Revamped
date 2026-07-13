@@ -31,8 +31,16 @@ component). OSSM3 installs a **second, independent** istiod (revision `default`,
 `istio-system`. They coexist cleanly — verified live 2026-07-13, before + after installing OSSM3:
 
 - **Only OSSM 2.x conflicts with the Gateway API, never 3.x** (Red Hat docs + live check). The shared
-  `*.istio.io` CRDs (owned by the ingress operator, `ingress.operator.openshift.io/owned=true`) are
-  applied **server-side** by OSSM3 so both control planes share field ownership without a revert war.
+  `*.istio.io` CRDs (previously `ingress.operator.openshift.io/owned=true`) are applied **server-side**,
+  so after OSSM3 installs they carry **mixed ownership** (some `ManagedByOLM`, some `ManagedByCIO`) —
+  both managers apply the identical Istio v1 schema, so there is no value conflict and no revert war.
+- **Expected benign warning:** the `openshift-default` GatewayClass reports `CRDsReady=False` with
+  message *"CRDs have mixed ownership"* once OSSM3 is installed. This is a **warning, not a failure** —
+  the ingress `ClusterOperator` stays `Available=True / Degraded=False`, the GatewayClass stays
+  `Accepted=True / ControllerInstalled=True`, and the ingress istiod never restarts (verified live: 0
+  restarts across the OSSM3 install). The ingress operator is designed to *detect and warn* about this
+  coexistence rather than error. Do not treat `CRDsReady=False` as a broken Gateway API on a
+  mesh+gateway cluster.
 - **No double sidecar injection.** The ingress injector webhook requires `istio-injection DoesNotExist`
   and matches only revision `openshift-gateway`; an OSSM3 mesh namespace labelled `istio-injection=enabled`
   is therefore never touched by it. Different namespace, different revision, different webhook.
