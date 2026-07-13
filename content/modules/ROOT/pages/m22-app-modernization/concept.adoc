@@ -1,0 +1,154 @@
+= Application Modernization with MTA and Developer Lightspeed: Concept
+:module-id: m22
+include::partial$version-attributes.adoc[]
+
+// Concept page for M22. Renders in all three flavors (workshop/demo/instructor). Environment values
+// appear ONLY as attributes ({user}, {mta_url}, {maas_model}, {maas_endpoint}, {devspaces_url}); product
+// versions ONLY via version-attributes (Migration Toolkit for Applications {mta_version}; Dev Spaces
+// {devspaces_version}). Everything described was performed on OCP {ocp_version} (Kubernetes 1.34) against a
+// live MTA {mta_version} Hub in openshift-mta on 2026-07-13: the portfolio analysis of the seeded
+// parasol-legacy-claims fork (analyzer addon, source mode, targets cloud-readiness/linux/openjdk/
+// jakarta-ee/jws) returned 24 story points across 6 mandatory + 1 potential issues + 15 technology tags;
+// the modern Quarkus counterpart analyzed identically returned 1; and a real Developer Lightspeed for MTA
+// completion against the {maas_model} MaaS endpoint rewrote a hardcoded JDBC URL to System.getenv(...) —
+// all real captures, not from memory. The entitlement split is stated plainly: the [OCP] assess/analyze/
+// replatform core stands alone; the AI refactor is [ADS] Developer Lightspeed for MTA (graceful
+// degradation to a manual fix when it is absent). Prose expands workshop-concept acronyms (MTA, WAR, JPA,
+// S2I) on first use; ubiquitous acronyms (API, HTTP, JSON, URL, JDK, JVM, IP, YAML) are never expanded.
+
+[.lead]
+Parasol's original claims service still runs the business — and it is a Java 8 *WAR* (a Web Application aRchive) bolted to a Tomcat server, with the database IP address, password, and an audit-log file path *baked into the build*.
+You cannot simply drop it on OpenShift: the container filesystem is ephemeral and non-root, the config belongs in a Secret, and the servlet-era runtime expects an app server that isn't there.
+This module runs the *Migration Toolkit for Applications* (MTA) 8 over that app to *measure* exactly what blocks containerization, fixes the top issues — with *Red Hat Developer Lightspeed for MTA* assisting in the IDE — then containerizes and deploys the modernized service, so "modernize the monolith" becomes a scoped, evidence-driven plan instead of a scary rewrite.
+
+== What you'll learn
+
+* The *6 Rs* of application modernization — retain, retire, rehost, replatform, refactor, repurchase — as a *pragmatic decision*, not a slogan, and where a Parasol app lands on each.
+* How MTA *analysis* works: rule-based static analysis against *migration targets* (containerization, OpenJDK, Jakarta EE), producing *issues* with a *category* (mandatory / optional / potential) and an *effort* score in story points.
+* How to *read an analysis report like a consultant* — separate the mandatory blockers from the noise, group by fix, and turn a wall of findings into a short work list.
+* What *Developer Lightspeed for MTA* does and, just as important, what it *doesn't* — an AI assistant that *proposes* a code change for a specific issue, which *you* review, never a hands-off auto-migration.
+* Why modernization is a *funnel, not a big bang*: assess the portfolio, analyze the candidates, fix and ship the ones that pay off, and leave the rest — with the *strangler pattern* as the incremental path.
+
+== Why not just "lift and shift" the WAR onto OpenShift?
+
+The tempting move is to wrap the existing WAR in a container image and call it modernized.
+It fails for reasons that are *structural*, not cosmetic, and MTA exists to find each one *before* you hit it in production:
+
+* *Config is compiled in.* The datasource URL — `jdbc:oracle:thin:@10.14.221.9:1521/CLAIMSDB` — the username, and the password live in a properties file *inside the WAR*. On OpenShift that belongs in a ConfigMap and a Secret injected as environment variables, so the same image can run in dev, test, and prod. A hardcoded IP has no DNS, no service discovery, and no per-environment override.
+* *The filesystem isn't yours.* The app writes an audit log to `/opt/parasol/logs/claims-audit.log`. Containers run as a random non-root user on an ephemeral, read-only-by-default filesystem — that write fails, and even if it didn't, the file vanishes on restart. Logs belong on stdout; state belongs in a volume or a database.
+* *The runtime assumption is wrong.* A WAR expects a servlet container (Tomcat / JBoss Web Server) to be *there*. The cloud-native shape is an *embedded* runtime — the app *is* the process. Moving from `javax.*` to `jakarta.*` and off a provided servlet API is part of that shift.
+
+None of this is visible from the outside. MTA reads the *source* and tells you precisely which of these — and how much effort each — *before* you commit a sprint to it.
+
+== The 6 Rs — a decision, not a slogan
+
+Every legacy app gets one of six dispositions. The skill is choosing honestly, per app, on cost and value:
+
+[cols="1,3,2",options="header"]
+|===
+| R | What it means | When it's right for a Parasol app
+
+| *Retain* | Leave it where it is (for now) | A stable mainframe integration nobody touches this year
+| *Retire* | Turn it off | A reporting app superseded by a dashboard
+| *Rehost* | "Lift and shift" — same app, new infra | A VM-bound app you move as-is to buy time (no code change)
+| *Replatform* | Small changes to fit the platform | Externalize config + logs, containerize — *most of this module*
+| *Refactor* | Rework the code/architecture | Break the monolith, adopt an embedded runtime, move to Quarkus
+| *Repurchase* | Replace with SaaS/COTS | Swap a bespoke CRM for a bought one
+|===
+
+`parasol-legacy-claims` is a *replatform-leaning-refactor* candidate: the fixes MTA flags (externalize config, drop the filesystem write, move `javax`→`jakarta`, leave the servlet container) are exactly the replatform boundary, and the *strangler pattern* (below) is how you'd take it the rest of the way to a refactor without a big-bang rewrite.
+
+== How MTA analysis works
+
+MTA {mta_version} is a *rule-based static analyzer*. You point it at an application's *source* (or a built archive), select one or more *migration targets*, and it runs a large library of rules — the live Hub ships *39 rulesets* — reporting every place your code trips a rule.
+
+[mermaid]
+....
+graph LR
+  repo["parasol-legacy-claims<br/>(source in Git)"]
+  subgraph hub["MTA 8 Hub (shared, openshift-mta)"]
+    an["analyzer addon<br/>(analyzer-lsp + YAML rules)"]
+    rep[("Report<br/>issues + effort")]
+  end
+  targets["Migration targets<br/>cloud-readiness · linux<br/>openjdk · jakarta-ee · jws"]
+  dev["You<br/>triage the report"]
+  ide["Dev Spaces + Developer<br/>Lightspeed for MTA [ADS]<br/>proposes a fix"]
+  repo --> an
+  targets --> an
+  an --> rep --> dev
+  dev --> ide --> repo
+  classDef src fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef hubc fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef tri fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef sink fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+  class repo src; class an,rep hubc; class targets tri; class dev,ide sink;
+....
+
+// media-pass: replace/augment with SVG export m22-app-modernization-01-mta-flow.svg (see media-manifest.md)
+
+Three ideas make the report usable:
+
+* *Targets are goals.* You don't ask "is my code bad?"; you ask "what stops this from reaching *this* target?" The targets for containerizing a legacy Java app are *cloud-readiness* and *linux* (the OpenShift-readiness rules), *openjdk* (move off older/proprietary JDKs), *jakarta-ee* (the `javax`→`jakarta` namespace move), and *jws* (JBoss Web Server / Tomcat runtime rules). (In the console these appear under friendly names like *Containerization* and *OpenShift*; the underlying rule *labels* are the ones above.)
+* *Issues have a category.* Every finding is *mandatory* (must fix to reach the target), *optional* (should fix), or *potential* (investigate — might not apply). Triage starts with *mandatory*.
+* *Effort is a number.* Each issue carries an *effort* in *story points* — a relative estimate of the work to fix it. Summed across the app, effort turns "this feels hard" into "24 points," and a *re-analysis after fixing* shows the number *drop* — a measurable modernization signal.
+
+[NOTE]
+.What the seeded app actually scores — the real numbers you'll see
+====
+This isn't hypothetical. Analyzed live against those five targets, `parasol-legacy-claims` reports *24 story points* across *6 mandatory* issues, *1 potential*, and *15 technology tags* (Spring MVC, Spring DI, Spring Web, Spring Data JPA, Java Servlet — MTA also *inventories* what your app uses). The mandatory issues are the whole modernization story in one screen: _Spring version not compatible with Jakarta EE 9_ (effort 3), _Hardcoded IP address_, _File system - Java IO_, _the `javax` package replaced by `jakarta`_, _`javax.activation` replaced_, and _the Tomcat artifact not compatible with JBoss Web Server_ (effort 1 each), plus a _potential_ `java.io` UTF-8 default under OpenJDK 21.
+For contrast, Parasol's *modern* Quarkus claims service — the same domain, already modernized — scores *1*. That gap, 24 down to a handful, is what this module teaches you to *earn* and *measure*.
+====
+
+== AI-assisted refactoring — what Developer Lightspeed for MTA does, and doesn't
+
+Reading the report tells you *what* to fix. *Red Hat Developer Lightspeed for MTA* helps you *do* it, in the IDE.
+
+First, disambiguate — there are three "Lightspeeds," and this is the third: *OpenShift Lightspeed* is the web-console assistant; *Developer Lightspeed for Red Hat Developer Hub* answers questions in the developer portal; *Developer Lightspeed for MTA* is a feature of the *MTA extension for VS Code / Dev Spaces* that, given a specific analysis issue, calls a large language model and *proposes a concrete code change* to resolve it.
+
+It is genuinely useful and genuinely bounded — set expectations honestly:
+
+* *What it does:* takes one issue ("hardcoded IP at `persistence.properties`"), the surrounding code, and the migration target, and returns a *diff* — e.g. reading the value from an environment variable instead of a literal. It is model-agnostic: on this workshop it is wired to an OpenAI-compatible *Models-as-a-Service* endpoint serving the `{maas_model}` model.
+* *What it does not:* migrate your app for you, guarantee a correct or compilable result, or understand your business rules. The output is a *suggestion from a probabilistic model* — sometimes perfect, sometimes subtly wrong, occasionally confidently wrong.
+
+[NOTE]
+.The one rule that makes AI-assisted refactoring safe
+====
+*Read every diff as if a junior engineer wrote it under time pressure.* The model that rewrote our hardcoded datasource URL to `dataSource.setUrl(System.getenv("CLAIMS_DB_URL"));` got it exactly right — but the *only* reason we know that is that we read it, understood it, and re-ran the analysis to confirm the issue was gone. AI accelerates the typing; it does not transfer the *accountability*. This same skepticism carries into the AI modules later in the catalog — the assistant proposes, the engineer disposes.
+====
+
+[NOTE]
+.Entitlement — [OCP] core, [ADS] the AI beat (and it degrades gracefully)
+====
+The MTA *assess / analyze / replatform* core is available with OpenShift `[OCP]`.
+*Developer Lightspeed for MTA* — the AI-assisted refactor — is part of the *Red Hat Advanced Developer Suite* `[ADS]`. This module is built so the AI beat is a clearly-marked `[ADS]` section: where it is entitled, you use it; where it isn't, the lab *degrades gracefully* to a manual fix of the same issue, and the analyze → fix → re-analyze loop is identical either way. The platform wires the model key only when the entitlement is present; when it isn't, the `[OCP]` flow is completely unaffected.
+====
+
+== Modernization is a funnel, not a big bang
+
+You do not modernize a portfolio by rewriting all of it at once. You run a *funnel*:
+
+. *Assess* the whole portfolio (a questionnaire per app: business value, risk, technical fit) → rank candidates.
+. *Analyze* the candidates with MTA → get effort and blockers per app.
+. *Fix and ship* the ones where effort is low and value is high → bank the win, learn the pattern.
+. *Repeat*, and *retain/retire* the rest deliberately.
+
+The incremental path for a big monolith is the *strangler pattern*: stand the modern service up *beside* the legacy one, route a slice of traffic to it, and grow that slice until the legacy app is "strangled" — off, with no big-bang cutover. That routing/coexistence is a *connectivity* problem — exactly what *Service Interconnect* solves across clusters and sites, covered in module M21 — Resilience, Multi-Cluster & DR (a separate module). Modernization and connectivity are two halves of the same story: MTA tells you *what* to build next; the strangler pattern and L7 connectivity let you ship it *without* a flag day.
+
+== How this shows up in real orgs
+
+* *"We have 400 apps and a mandate to get to the cloud."* You cannot eyeball 400 apps. MTA *assessment* ranks them and *analysis* prices them, so the migration plan is a spreadsheet of effort and value, not a vibe. The funnel is the operating model.
+* *"Our estimate for modernizing this app was three months; it took nine."* Unmeasured modernization is guesswork. An MTA effort score — and the *drop* on re-analysis — turns the estimate into evidence and gives you a burn-down.
+* *"Can't the AI just modernize it for us?"* No, and anyone selling that is selling risk. AI *proposes* per-issue fixes that a human reviews; it compresses the *typing*, not the *judgement*. The teams that win treat every diff as a code review.
+* *"We tried a big-bang rewrite and it failed."* Most do. The funnel plus the strangler pattern is the antidote: ship the modern service beside the old one, move traffic incrementally, and never bet the business on a single cutover.
+* *"Which apps do we even start with?"* The ones MTA scores *low effort, high value* — the config-externalization and namespace-migration wins like this one. Early, cheap wins build the muscle and the credibility for the hard refactors later.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) *MTA measures the blockers* — analysis turns "this feels hard to containerize" into a *report* of mandatory issues and a *story-point* effort score; (2) *Developer Lightspeed proposes, the engineer disposes* — the AI returns a *diff* for one issue, which you *read and accept* — it is not an auto-migrator; (3) *the effort score drops on re-analysis* — modernization becomes *measurable*.
+The demo is the twelve-minute arc: open the real report on `parasol-legacy-claims` (24 story points, mandatory issues visible), let Developer Lightspeed rewrite the *hardcoded datasource URL* into an environment-variable read, accept the diff, re-analyze, and show the number *fall*.
+Close on the honest frame: "the AI got this one exactly right — and we only trust it because we read the diff and the re-analysis *proved* the issue is gone. That's the discipline; the tool is just fast."
+====
+endif::demo[]

@@ -1,0 +1,136 @@
+= Application Modernization with MTA and Developer Lightspeed: Instructor Guide
+:module-id: m22
+include::partial$version-attributes.adoc[]
+
+// Instructor runbook for M22. Timings MEASURED on OCP {ocp_version} / MTA {mta_version} on 2026-07-13
+// (ws lifecycle + a real Hub analysis), not guessed. Pre-flight commands show captured expected output
+// (domains scrubbed to placeholders). Environment values via attributes only.
+
+== Timing (measured)
+
+Total module budget *~90 min*. Exercise timings from a live run; MTA analysis and the `ws` lifecycle are measured against MTA {mta_version} on OCP {ocp_version}.
+
+[cols="3,1,4",options="header"]
+|===
+| Segment | Time | Notes
+
+| Concept (6 Rs, how MTA works, AI expectation-setting) | ~15 min | ≤15-min read; slides carry it
+| 1. Meet the migration target | ~6 min | Terminal-only; `git clone` + read three files
+| 2. Add the app + run analysis | ~12 min | Console; the analysis itself is *~90 s* live (small source app)
+| 3. Triage the report | ~10 min | Discussion-heavy; the real 24-point report is on screen
+| 4. Fix with Developer Lightspeed `[ADS]` | ~12 min | Dev Spaces workspace start is the long pole (~2–3 min first time)
+| 5. Re-analyze, effort drops | ~6 min | Another ~90 s analysis run
+| 6. Containerize + deploy (break-and-fix) | ~12 min | Dual-path; the probe break-and-fix is the teaching beat
+| Wrap-up + org mapping | ~15 min | Funnel + strangler discussion
+|===
+
+Measured `ws` lifecycle (admin/builder context, for prep and reset between cohorts):
+
+[cols="2,1,3",options="header"]
+|===
+| Command | Time | What it does
+
+| `ws verify m22 --user <u> --entry-only` | ~8 s | 5/5 entry checks
+| `ws smoke m22 <u>` | ~41 s | 12/12 attendee-cockpit checks
+| `ws solve m22 --user <u>` | ~76 s | materializes `parasol-claims-modernized`
+| `ws reset m22 --user <u>` | ~2 min | purge + re-materialize entry (Argo sync)
+|===
+
+== Pre-flight checklist
+
+Run these from an admin context *before* the session. Each shows the captured expected output (domains shown as placeholders).
+
+*1. MTA Hub is healthy.*
+
+[source,sh]
+----
+oc get pods -n openshift-mta
+----
+
+[source,texinfo]
+----
+NAME                            READY   STATUS    RESTARTS   AGE
+mta-hub-...                     1/1     Running   0          ...
+mta-operator-...                1/1     Running   0          ...
+mta-ui-...                      1/1     Running   0          ...
+rhbk-operator-...               1/1     Running   0          ...
+----
+
+*2. The MTA console route answers (this is the URL attendees use).*
+
+[source,sh]
+----
+oc get route mta -n openshift-mta -o jsonpath='{.spec.host}{"\n"}'
+# -> mta-openshift-mta.apps.<cluster-domain>   (edge/Redirect, HTTP 200)
+----
+
+*3. Each attendee's entry state is clean.* For a sample user:
+
+[source,sh]
+----
+ws verify m22 --user user2 --entry-only
+----
+
+[source,texinfo]
+----
+✅ namespace user2-modernize exists
+✅ entry marker ws-entry-m22 present
+✅ MaaS config present (endpoint + model)
+✅ legacy fork parasol-legacy-claims reachable in Gitea
+▶ [ADS] maas-credentials present — Developer Lightspeed for MTA is wired ...
+✅ no modernized service deployed yet (attendee builds it)
+
+✅ all 5 checks passed
+----
+
+*4. The AI wiring works `[ADS]`.* Confirm the model is the one this cluster's key is scoped to, and that a real completion returns. For a sample user:
+
+[source,sh]
+----
+oc get cm maas-config -n user2-modernize -o jsonpath='{.data.model}{"\n"}'
+# -> the model your cluster's MaaS key is scoped to (e.g. the cluster-specific model)
+----
+
+[NOTE]
+.The per-cluster model is sourced on-cluster — a fixed defect
+====
+The M22 entry state *sources the model and endpoint from the platform Lightspeed secret* (`openshift-lightspeed/credentials` keys `model`/`endpoint`) at sync time, falling back to the chart default when those keys are absent. This is why a cluster whose MaaS key is scoped to a *different* model still gets the *right* model in `maas-config` and in the workspace's `GENAI_MODEL` — without a code change. If `maas-config` shows the wrong model, the platform Lightspeed secret is missing its `model` key; fix the secret, then `ws reset m22 --user <u>`.
+====
+
+*5. The attendee-facing repo URL clones over HTTPS.* MTA analyzes the HTTPS Gitea *route* (recorded in the entry marker), which clones cleanly with the Hub's secure default — no `git.insecure` change needed. If you instead drive the Hub API directly against the *internal* `http` Gitea service address, you will hit `http URL used with git.insecure.enabled = FALSE` — use the HTTPS route.
+
+== Demo-mode notes (beyond Say/Show/Do)
+
+* *Pre-run one analysis the day before.* A live analysis is ~90 s — fine in the lab, awkward in a demo. Have the `parasol-legacy-claims` report already on screen; run a *fresh* one only if you want to show the progress-to-complete transition.
+* *Warm the Dev Spaces workspace.* First workspace start pulls the universal developer image and can take 2–3 minutes. Start it before the demo so the MTA extension view is already open.
+* *Have the modern app's report open in a second tab* — the *24 → 1* contrast is the strongest single visual in the module.
+* *Rehearse the AI beat once.* The model is deterministic at temperature 0, but rehearse so you can narrate the diff confidently and land the "read it before you accept it" point.
+
+== Top 5 questions attendees ask
+
+. *"Is this the AI that auto-migrates my app?"* +
+No. Developer Lightspeed for MTA proposes a *per-issue diff* that you review and accept. It compresses the typing, not the judgement. The Hub also has a separate agentic component (the Kai solution server) that is *not* configured in this workshop — the AI you use here is the *VS Code / Dev Spaces extension* feature.
+
+. *"Why not just wrap the WAR in a container and ship it?"* +
+Because the config is compiled in (a hardcoded DB IP and password), the app writes to a host filesystem path a container can't provide, and it expects a servlet container that isn't there. MTA finds each of these *before* they become a 2 a.m. incident. Lift-and-shift (rehost) buys time but pays no modernization debt down.
+
+. *"What do the effort story points actually mean?"* +
+A *relative* estimate of the work to fix an issue, summed across the app. Use them to *rank* apps and *track a burn-down* (the number drops as you fix), not to promise hours to management. `parasol-legacy-claims` scores 24; the modern Quarkus equivalent scores 1.
+
+. *"Do all thirty attendees hammer the same Hub?"* +
+Yes — the MTA Hub is *shared*, with a per-user Application in the portfolio. Each analysis runs as its own task pod; a small source app is ~90 s, so staggered starts are fine. There is no per-user MTA instance (that would be heavy); portfolio isolation is by Application, not by RBAC.
+
+. *"What if my cluster doesn't have the Advanced Developer Suite?"* +
+The AI section is `[ADS]` and *degrades gracefully*: you make the same config-externalization fix by hand, and the analyze → fix → re-analyze loop is identical. The `[OCP]` MTA core (assess / analyze / replatform) is fully functional without `[ADS]`.
+
+== Watchouts
+
+* *LLM nondeterminism.* The demo issue (hardcoded IP → `System.getenv`) has a stable suggestion at temperature 0, but a different issue may yield a different phrasing. Stick to the rehearsed issue for the demo; in the lab, the *review-the-diff* discipline covers any variation.
+* *Dev Spaces first-start latency.* The universal developer image pull dominates the AI section's clock. Pre-warm.
+* *Shared-Hub portfolio hygiene.* Attendees creating an Application named `parasol-legacy-claims` all land in the same portfolio. That's fine (each is a distinct entry), but if you re-run a cohort, delete stale Applications in the console — portfolio state lives in the Hub DB, not in `{user}-modernize`, so `ws reset` does *not* remove it.
+* *The Kai solution server shows "not ready."* On a stock install the Hub's `KaiSolutionServerReady` condition is `False` (no Kai secret). That is expected and *out of scope* — do not send attendees into the Hub's not-ready AI feature; the AI beat is the *extension* in Dev Spaces.
+* *Analysis returns zero issues?* The target *labels* matter. In the console the friendly targets (*Containerization*, *OpenShift*, *OpenJDK*) map to rule labels `cloud-readiness`/`linux`/`openjdk`/`jakarta-ee`/`jws`; if a run reports nothing, the target selection didn't resolve to any ruleset — re-select the targets.
+
+== Provenance
+
+The legacy app `parasol-legacy-claims` is adapted from the Apache-2.0 *Konveyor `customers-tomcat-legacy`* demo (used in the Red Hat Modern Application Development workshop), re-themed to the Parasol claims domain — Spring-on-Tomcat structure and hardcoded-config anti-patterns ported, insurance domain original. Credited in the wrap-up and `CREDITS.md` per the project's reuse policy.

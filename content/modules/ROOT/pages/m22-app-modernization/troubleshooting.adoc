@@ -1,0 +1,93 @@
+= Application Modernization with MTA and Developer Lightspeed: Troubleshooting
+:module-id: m22
+include::partial$version-attributes.adoc[]
+
+// Troubleshooting for M22. Every entry is a real failure mode seen while performing the module live on
+// OCP {ocp_version} / MTA {mta_version} (2026-07-13). symptom -> cause -> fix. Environment values via
+// attributes only.
+
+Each entry is symptom → cause → fix. All were seen (or deliberately induced) while performing this module on OpenShift {ocp_version} with Migration Toolkit for Applications (MTA) {mta_version}.
+
+== The analysis finishes instantly and reports zero issues
+
+*Symptom:* The analysis task completes in a second or two and the report is empty — no issues, effort 0.
+
+*Cause:* No ruleset was selected. The chosen *migration targets* didn't resolve to any rules, so the analyzer ran with an empty rule set. This happens if you pick a target that isn't a real rule label (for example, "containerization" and "openshift" are *display* names, not rule labels).
+
+*Fix:* Re-run the analysis and select targets that map to shipped rule labels — *Containerization* / *OpenShift* / *OpenJDK* in the console resolve to `cloud-readiness`, `linux`, `openjdk`, `jakarta-ee`, `jws`. A real run on this app takes about *90 seconds* and returns *6 mandatory* issues; an instant, empty result means the rules never loaded.
+
+== Analysis fails: "http URL used with git.insecure.enabled = FALSE"
+
+*Symptom:* The analysis task fails almost immediately; the task error reads `http URL used with git.insecure.enabled = FALSE`.
+
+*Cause:* The application's repository was configured with an insecure `http` Git URL (for example the internal `gitea` service address on port 3000 rather than the HTTPS route), and the Hub refuses insecure Git by default.
+
+*Fix:* Use the *HTTPS* Gitea *route* URL — the one recorded in your entry marker (`{gitea_url}/{user}/parasol-legacy-claims`). It clones cleanly with the Hub's secure default. (Only an operator maintaining the Hub would instead flip `git.insecure.enabled`; attendees should just use the HTTPS route.)
+
+== The MTA console shows an AI feature that says "not ready"
+
+*Symptom:* Somewhere in the Hub UI there's an AI/solution-server feature that appears disabled or reports "not ready."
+
+*Cause:* That is the Hub-level *Kai solution server*, which needs its own configuration (a Kai secret) that this workshop does not install — its readiness condition is `False` by design.
+
+*Fix:* Ignore it — it is *out of scope*. The AI-assisted refactoring in this module is *Developer Lightspeed for MTA*, which lives in the *MTA extension for VS Code / Dev Spaces*, not in the Hub. Do your AI fix there.
+
+== `maas-config` shows the wrong model (or the AI path is "not wired")
+
+*Symptom:* The pre-flight check prints a model name you didn't expect, or the lab's `[ADS]` check reports "Manual path" even though the cluster is entitled.
+
+*Cause:* The entry state *sources* the model, endpoint, and key from the platform Lightspeed secret (`openshift-lightspeed/credentials`) at sync time. If that secret is missing its `model`/`endpoint` keys, the chart *falls back* to its default model; if the whole secret is unreadable, no `maas-credentials` Secret is created (graceful degradation).
+
+*Fix:* Confirm the platform secret carries `apitoken` + `model` + `endpoint`, then `ws reset m22 --user <u>` to re-run the copy. After reset, `oc get cm maas-config -n <u>-modernize -o jsonpath='{.data.model}'` shows the effective model, and `oc get secret maas-credentials -n <u>-modernize` exists with `GENAI_API_KEY`/`GENAI_MODEL`/`GENAI_ENDPOINT`.
+
+== The AI section is unavailable ("Manual path")
+
+*Symptom:* The lab's entitlement check reports the *Manual path*; there is no `maas-credentials` Secret.
+
+*Cause:* The cluster has no readable Models-as-a-Service credential — typically because the *Advanced Developer Suite* `[ADS]` entitlement (and its key) isn't present. This is *expected* on an `[OCP]`-only cluster.
+
+*Fix:* Follow the *Manual path* — make the same config-externalization edit by hand. The `[OCP]` MTA analyze → fix → re-analyze loop is unaffected; only the typing assistant is absent.
+
+== Developer Lightspeed proposes a fix that's wrong (or won't compile)
+
+*Symptom:* The AI's suggested diff changes behavior unexpectedly, references something that doesn't exist, or wouldn't compile.
+
+*Cause:* The output is a *probabilistic model's suggestion*, not a verified change. Models are sometimes wrong — occasionally confidently so.
+
+*Fix:* This is the lesson, not a bug — *read every diff before accepting it*. Reject a bad proposal, refine the issue context, or fix it by hand. Then *re-analyze*: a correct fix removes the issue and drops the effort; if the issue is still there, the fix didn't land. The analysis is your test.
+
+== The modernized pod runs but never becomes Ready
+
+*Symptom:* After deploying `parasol-claims-modernized`, the pod is `Running` but `0/1` ready; `oc get pods` shows it never passes readiness.
+
+*Cause:* The readiness probe points at the wrong path. The lab deliberately starts with `/health`, which the Quarkus service returns `404` for.
+
+*Fix:* Point the readiness probe at the real endpoint, `/q/health/ready` (Quarkus health lives under `/q/health/...`). After the patch, `oc rollout status deploy/parasol-claims-modernized` reports available and the pod turns `1/1`.
+
+== The modernized pod is ImagePullBackOff
+
+*Symptom:* `parasol-claims-modernized` won't start; events show `ImagePullBackOff` on the `parasol-claims` image.
+
+*Cause:* The modernized image isn't present in the cluster's internal registry (`parasol-images`) yet — it's populated by the workshop image-load step, and on a fresh cluster it may not be loaded.
+
+*Fix:* This is an environment provisioning gap, not a lab error — tell your instructor. The verify script treats the modernized Deployment as *present* (not necessarily *ready*) for exactly this reason; the deploy step's *shape* is correct even when the image is still loading.
+
+== Dev Spaces takes minutes to open the workspace
+
+*Symptom:* The Dev Spaces workspace spins for 2–3 minutes on first start.
+
+*Cause:* First start pulls the universal developer image (with the JDK, Maven, and the MTA extension). It's a one-time cost per workspace.
+
+*Fix:* Wait it out; subsequent starts are fast. Instructors: pre-warm a workspace before a demo so the MTA extension view is already open.
+
+== `ws smoke` fails only on "cockpit clone HEAD matches the mirror"
+
+*Symptom:* `ws smoke m22 <u>` reports 11/12, failing only the freshness check ("pod serves ..., mirror ...").
+
+*Cause:* The attendee's cockpit pod holds a Git clone from *before* the latest content push — a stale cockpit, not a module defect.
+
+*Fix:* `ws git-refresh --restart-terminals --user <u>` re-clones the cockpit to the mirror HEAD; re-run `ws smoke` for 12/12. (Every other check — identity, isolation, `ws prep`/`verify`, the smoke command — passes independently of this one.)
+
+'''
+
+_Last verified on OpenShift {ocp_version}, Migration Toolkit for Applications {mta_version}, Dev Spaces {devspaces_version} — 2026-07-13._
