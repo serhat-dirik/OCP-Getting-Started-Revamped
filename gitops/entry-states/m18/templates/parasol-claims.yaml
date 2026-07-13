@@ -1,0 +1,100 @@
+# The claims REST API — the "api" tier. Shared prebuilt image (tag 1.1). ENTRY: reachable only on its
+# ClusterIP Service, UN-MESHED. Wired to BOTH downstreams so the mesh has a real chain to route/secure:
+# the db (POSTGRESQL_HOST=claims-db) and the fraud service (FRAUD_SERVICE_URL → parasol-fraud). SOLVE:
+# per-pod injection annotation meshes it. (The live claims→fraud HTTP hop is app-work — m18 build note;
+# this entry state materializes the topology + wiring the mesh acts on.)
+---
+# why: a DISTINCT workload identity for claims so the mesh AuthorizationPolicy "only claims may call fraud"
+# is principal-based and real — under mTLS, claims presents SPIFFE id cluster.local/ns/{user}-mesh/sa/
+# parasol-claims, which the fraud authz allows; web (default SA) and the un-meshed demo-client are denied.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m18
+---
+# why: the running claims API; fronted by parasol-web, calls parasol-fraud and claims-db.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m18
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        version: v1
+        workshop.redhat.com/module: m18
+      {{- if .Values.solve }}
+      annotations:
+        sidecar.istio.io/inject: "true"
+      {{- end }}
+    spec:
+      # Distinct identity for the claims→fraud AuthorizationPolicy (see the ServiceAccount above).
+      serviceAccountName: parasol-claims
+      containers:
+        - name: parasol-claims
+          image: {{ .Values.claimsImage }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POSTGRESQL_HOST
+              value: claims-db
+            # The fraud hop the mesh routes (weighted shift), secures (AuthorizationPolicy: only claims may
+            # call fraud), and makes resilient (timeout/retry/circuit-breaker) in the lab.
+            - name: FRAUD_SERVICE_URL
+              value: http://parasol-fraud:8080
+          envFrom:
+            # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+# why: stable in-cluster address for the claims API — parasol-web calls parasol-claims.{user}-mesh.svc:8080.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m18
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

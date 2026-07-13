@@ -1,0 +1,80 @@
+# Per-user MESH namespaces ({user}-mesh, M18) — owned by the workshop layer like dev/stage/prod/cicd/
+# partner (the workshop-entries AppProject blacklists ResourceQuota/LimitRange, so an entry chart cannot
+# ship them), and for a mesh-specific reason ON TOP: the shared OSSM3 istiod is scoped by
+# meshConfig.discoverySelectors to namespaces carrying istio-discovery=enabled. Setting that label here
+# (at creation, stable, SURVIVES ws reset) makes every {user}-mesh a discovered tenant of the one shared
+# control plane — the coexistence + multi-tenant-scoping contract (platform-portfolio/stacks/mesh).
+#
+# The SEPARATE istio-injection=enabled label (which actually triggers native-sidecar injection) is NOT set
+# here — M18's first lab beat is the attendee enrolling the namespace, so entry ships it un-injected. ws
+# reset strips istio-injection/istio.io/rev (ws purge_ns) so a re-materialized entry state is un-meshed again.
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $user }}-mesh
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    # Load-bearing (verified live 2026-07-13): the shared OSSM3 istiod's meshConfig.discoverySelectors
+    # matches istio-discovery=enabled, so this namespace is in-mesh. Stable — never toggled by the lab.
+    istio-discovery: enabled
+---
+# The attendee is admin on their own mesh namespace (same as the standard four).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-admin
+  namespace: {{ $user }}-mesh
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+---
+# Quota sized for the MESHED app: web/claims/fraud/db + demo-client + a partner-TCP backend, each meshed
+# pod carrying an istio-proxy native sidecar (OSSM3 1.28 default ~100m/128Mi req, up to 2 CPU/1Gi limit) +
+# a transient istio-validation init. Higher than the dev quota because of the ×sidecar overhead; limits are
+# caps (not reservations). The ×30-users concern is the ADR-0003 revisit trigger (flip to ambient), not a
+# per-namespace fix.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-mesh
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "16"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "3"
+    pods: "40"
+---
+# Default container requests/limits so bare pods (the attendee's lab pods) get sane values and don't trip
+# the quota. Sidecars set their own resources, so these defaults mainly bound app/lab containers.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-mesh
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+{{- end }}

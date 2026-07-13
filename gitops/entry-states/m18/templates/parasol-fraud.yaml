@@ -1,0 +1,82 @@
+# The fraud-scoring service — the NEW M18 tier that parasol-claims calls (the hop the mesh graph, weighted
+# shift, fault injection, and AuthorizationPolicy beats all act on). Shared prebuilt image (parasol-fraud
+# tag 1.0). ENTRY: reachable only on its ClusterIP Service, UN-MESHED. SOLVE: per-pod injection annotation
+# meshes it (v1 subset); solve-endstate.yaml adds the v2 Deployment for the 90/10 weighted shift.
+---
+# why: the running fraud API; claims calls it, and the mesh routes/secures that hop.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-fraud
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    app: parasol-fraud
+    workshop.redhat.com/module: m18
+    # Version label — the weighted-VirtualService split (solve) routes between v1 and v2 by this subset.
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-fraud
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: parasol-fraud
+        version: v1
+        workshop.redhat.com/module: m18
+      {{- if .Values.solve }}
+      annotations:
+        # solve: mesh this tier per-pod (no namespace label needed — leaves the workshop-owned namespace
+        # untouched; the attendee's lab path instead labels the namespace + rollout-restarts).
+        sidecar.istio.io/inject: "true"
+      {{- end }}
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: {{ .Values.fraudImage }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Visible version marker so the weighted-shift / header-route beats can tell v1 from v2.
+            - name: FRAUD_VERSION
+              value: v1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+# why: stable in-cluster address for the fraud API — claims resolves parasol-fraud.{user}-mesh.svc:8080.
+# selector is app-only so a weighted split (solve) can front both v1 and v2 subsets through one Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-fraud
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    app: parasol-fraud
+    workshop.redhat.com/module: m18
+spec:
+  selector:
+    app: parasol-fraud
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
