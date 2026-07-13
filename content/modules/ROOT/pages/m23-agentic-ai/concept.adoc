@@ -1,0 +1,197 @@
+= Agentic AI on OpenShift: Concept
+:module-id: m23
+include::partial$version-attributes.adoc[]
+
+// Concept page for M23. Renders in all three flavors (workshop/demo/instructor). Environment values
+// appear ONLY as attributes ({user}, {ocp_console_url}, {cluster_domain}, {maas_model}, {maas_endpoint}).
+// Product NAMES appear plain, with NO version numbers in prose (course standard — no version anchoring).
+// Everything described was PERFORMED against the LIVE parasol-agent in the user2-ai namespace 2026-07-13, model
+// {maas_model} (llama-scout-17b) on the workshop Models-as-a-Service endpoint: the agent called the
+// claims-db get_claim / list_claims_by_status / get_claim_history tools and the policy-docs
+// search_policies tool, returned grounded answers matching the seeded CLM-1001..CLM-1030 dataset and the
+// 8-document policy corpus (deductible 500 USD from POL-AUTO-01; CLM-1004 = Tom Becker, home, Denied,
+// 8400 USD, Angela Davis), cited policy ids, and answered an unknown claim honestly (CLM-9999 not found) —
+// all real captures, not from memory. The GRADED path is the deployed Quarkus LangChain4j direct-to-MaaS
+// agent + MCP tool servers. The ADVANCED capabilities (Llama Stack as an agent runtime, TrustyAI FMS
+// guardrails, a production vector database) are marked [ADD-ON] and taught as CONCEPT — they are the next
+// platform layer, not deployed on this cluster. Prose expands workshop-concept acronyms (MCP, RAG, LLM,
+// MaaS, PII, OTel) on first use; ubiquitous acronyms (AI, API, HTTP, JSON, URL, GPU) are never expanded.
+
+[.lead]
+Parasol's support staff keep asking the same two questions all day: _"what's the status of this claim?"_ and _"what does our policy say about this?"_
+A large language model on its own can talk fluently about insurance and be *confidently wrong* about *your* claims — it has never seen claim `CLM-1004`, and it will happily invent a plausible answer.
+This module builds the honest version: an *agent* that answers those questions by *calling your systems as tools* and *grounding* itself in your policy documents — and ships on OpenShift with the exact same probes, metrics, and delivery path as every other Parasol service, because *an AI app is just an app*.
+
+== What you'll learn
+
+* The *anatomy of an agent* — model plus instructions plus *tools* plus memory — and why the tools, not the model, are where the real answers come from.
+* Why *MCP tools are your APIs*: the *Model Context Protocol* (MCP) lets a model call your claims database and your policy search as ordinary services, so the agent reads *live* data instead of hallucinating it.
+* *Retrieval-Augmented Generation* (RAG) *honestly* — how grounding an answer in retrieved policy passages works, when it helps, and how it fails.
+* That *grounding is engineered, not guaranteed* — the model *decides* whether to call a tool, and how you *ask* changes whether it does.
+* Where *guardrails*, a *Llama Stack* agent runtime, and a production *vector database* fit — the `[ADD-ON]` platform layer above the graded path — and *when* to reach for each.
+* The thesis that ties the whole week together: *the same platform disciplines apply* — health, config, metrics, tracing, and the golden path are identical for an AI app.
+
+== Why not just ask the model?
+
+The tempting move is to send the question straight to a model: _"What is the status of claim CLM-1004?"_
+It fails for reasons that are *structural*, not cosmetic — and each one is why an *agent* exists:
+
+* *The model has never seen your data.* Claim `CLM-1004` lives in Parasol's claims system, not in the model's training set. Asked directly, the model *guesses* — it produces a fluent, plausible, *wrong* status. This is *hallucination*, and for a claim, a policy, or a payout it is worse than useless.
+* *Your data changes; the model is frozen.* Even if a claim were somehow in the training data, it was `Submitted` last week and `Approved` today. A model is a snapshot; your systems are live. Answers about live state must come from *live systems*.
+* *"Just paste it into the prompt" does not scale.* You could stuff all thirty claims and eight policies into every prompt, but real Parasol has millions of claims and thousands of documents. You cannot prompt-stuff a database. You need the model to *fetch* the few relevant facts *on demand*.
+
+An agent solves all three the same way: it *calls tools*. The model does the language; your systems provide the *facts*.
+
+== The anatomy of an agent
+
+An "agent" is not magic and not a model. It is four parts working together:
+
+[mermaid]
+....
+graph TD
+  subgraph agent["parasol-agent (a Quarkus service)"]
+    instr["Instructions<br/>(system prompt:<br/>'use your tools, never guess,<br/>cite the policy id')"]
+    model["Model<br/>(reasons + decides<br/>which tool to call)"]
+    mem["Memory<br/>(per-request:<br/>holds the tool round-trip)"]
+    tools["Tools<br/>(the MCP servers:<br/>claims-db · policy-docs)"]
+  end
+  q["Staff question"] --> model
+  instr --> model
+  model <--> mem
+  model -->|"decides to call"| tools
+  tools -->|"grounded facts"| model
+  model --> a["Grounded answer<br/>+ which tools it called<br/>+ tokens used"]
+  classDef svc fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef io fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef tool fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class instr,model,mem svc; class q,a io; class tools tool;
+....
+
+// media-pass: replace/augment with SVG export m23-agentic-ai-01-agent-anatomy.svg (see media-manifest.md)
+
+* *Model* — the reasoning engine. On this workshop it is `{maas_model}`, served over an OpenAI-compatible *Models-as-a-Service* (MaaS) endpoint. The agent is *model-agnostic*: the same code runs against any served model; only an environment value changes.
+* *Instructions* — the *system prompt* that sets the agent's job and its rules: _use your tools instead of guessing, never invent claim details, cite the policy id you relied on._ This is where you encode *behaviour*, and it is ordinary text you can read and change.
+* *Tools* — the functions the model may call. For Parasol these are the two *MCP servers*: `claims-db` (look up a claim, list by status, fetch history) and `policy-docs` (search the policy corpus). The tools are the whole point: they are how the agent touches *your* world.
+* *Memory* — where the multi-step tool conversation is held. Parasol's agent uses a *fresh, per-request* memory: it remembers within a single answer (question → tool call → tool result → answer) but shares nothing between requests, which — with *temperature 0* — keeps answers reproducible.
+
+== MCP tools are your APIs
+
+The single most important idea in this module: *the tools an agent calls are just your services, behind a small standard adapter.*
+
+*MCP* — the Model Context Protocol — is that standard. An MCP *server* advertises a set of *tools* (a name, the arguments, and what it returns); an MCP *client* (here, the agent) discovers them and lets the model call them. Parasol wraps its claims data and its policy search as two MCP servers, and the agent connects to both over HTTP:
+
+[mermaid]
+....
+graph LR
+  user["Support staff"] -->|"POST /agent/ask"| agent
+  subgraph ns["user-ai namespace (all just Deployments + Services)"]
+    agent["parasol-agent<br/>(MCP client)"]
+    claims["claims-db (MCP server)<br/>get_claim · list_claims_by_status<br/>get_claim_history"]
+    policy["policy-docs (MCP server)<br/>search_policies · get_policy<br/>list_policies"]
+  end
+  agent -->|"tool call (HTTP-SSE)"| claims
+  agent -->|"tool call (HTTP-SSE)"| policy
+  agent -->|"chat + tool schema"| maas["MaaS model endpoint<br/>(OpenAI-compatible)"]
+  claims -.->|"seeded CLM-1001..1030"| agent
+  policy -.->|"8-doc policy corpus"| agent
+  classDef svc fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef tool fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef ext fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+  class agent svc; class claims,policy tool; class maas,user ext;
+....
+
+// media-pass: replace/augment with SVG export m23-agentic-ai-02-mcp-tools.svg (see media-manifest.md)
+
+Three things follow, and they are why MCP matters to a platform team:
+
+* *A tool is a contract, not a model concern.* `get_claim(claimNumber)` returns one grounded sentence about a real claim. The model does not know or care whether that comes from H2, PostgreSQL, or a mainframe behind three hops — it calls the tool and gets a fact. *You* own the tool; the model just uses it.
+* *Tools are ordinary services on the platform.* `claims-db` and `policy-docs` are plain OpenShift Deployments with Services, health probes, and metrics — *exactly* like any Parasol microservice. "Give the agent a new capability" means "deploy another service and register it as a tool," not "retrain a model."
+* *The same tool serves any MCP-capable client.* The `claims-db` server you build here is reused, unchanged, in module M24 — AI-Assisted Development on OpenShift (a separate module) by a coding assistant. Write the tool once; every agent can call it.
+
+== RAG, honestly
+
+`policy-docs` is a *RAG* tool. *Retrieval-Augmented Generation* means: before the model answers, *retrieve* the few relevant documents and let the model *generate* its answer *from those passages* — not from its memory.
+
+When a staffer asks about the auto deductible, the agent calls `search_policies("auto collision deductible")`, gets back the `POL-AUTO-01` passage, and answers from it: _"500 USD per incident, as stated in policy POL-AUTO-01."_ The citation is the tell — a grounded answer can *point at its source*.
+
+Be honest about what RAG does and does not do:
+
+* *It helps when the answer is written down somewhere* and the query can find it. Policy terms, deductibles, documentation requirements, service levels — RAG shines.
+* *It fails when retrieval fails.* If the search misses the right passage, the model answers from a *worse* context, or from its own memory again — grounding is only as good as the retrieval. Garbage retrieval, confident garbage answer.
+* *It is not a database query.* RAG finds *relevant text*; it does not compute _"the average payout for denied home claims."_ That is what the `claims-db` *structured* tools are for. A good agent uses RAG for prose and structured tools for facts — and Parasol's agent *combines* them (below).
+
+[NOTE]
+.Deterministic retrieval now; a vector database later `[ADD-ON]`
+====
+Parasol's `policy-docs` uses a small, *deterministic keyword* retriever over eight fixed documents — no embeddings, no vector database, no GPU — so the lab's grounding is reproducible and runs anywhere.
+Production RAG replaces that retriever with a *vector database* (Milvus or PostgreSQL/pgvector) holding *embeddings* of thousands of documents, for semantic search at scale. That is a real and important upgrade — and it slots in *behind the same `search_policies` tool contract*, so the agent does not change. Keeping the app-layer retriever simple here is deliberate; the vector database is the `[ADD-ON]` platform layer, covered below and in the wrap-up.
+====
+
+== Grounding is engineered, not guaranteed
+
+Here is the part most demos hide: *the model decides whether to call a tool*, and that decision is not always the one you want.
+
+Performed live against `{maas_model}`, the *same* claim gets two very different outcomes depending only on *how you ask*:
+
+[cols="1,3",options="header"]
+|===
+| You ask | What the model does
+
+| _"What is the status of claim CLM-1001?"_ (terse) | On this cluster's model, it prints the tool call as *text* — `[get_claim(claimNumber=CLM-1001)]` — and calls *nothing*. The answer is *ungrounded*: it never touched your data.
+| _"Use your tools to look up claim CLM-1001 and report its status."_ (imperative) | It *executes* `get_claim`, gets the real record, and answers _"...is UnderReview"_ — *grounded*.
+|===
+
+Both are reproducible at temperature 0. The lesson is not "the model is broken" — it is that *grounding is something you engineer*: through the *system prompt*, through *clear phrasing*, and (in production) through model choice and tool-forcing settings. Different models behave differently — this is exactly why the module keeps the code *model-agnostic* and pins *temperature 0* and *seeded data* for reproducibility. When you see an agent give a grounded answer, someone *made* it ground; it did not happen for free.
+
+== Guardrails are a platform concern `[ADD-ON]`
+
+An agent that reads live claims can also *leak* them, or be *steered* into answering something it should not. You do not want that protection scattered through every agent's code — you want it as a *platform layer* the request passes through, the same way a service mesh handles TLS or a gateway handles rate limits.
+
+On Red Hat OpenShift AI that layer is the *TrustyAI FMS Guardrails Orchestrator* (generally available). Its lightweight, GPU-free option is a *regex-detector sidecar*: a `GuardrailsOrchestrator` with `enableBuiltInDetectors` scans inputs and outputs for patterns like Social Security numbers, credit-card numbers, and emails, and *blocks* or *masks* the message before it reaches — or leaves — the model.
+
+* *Input guardrail:* a staffer pastes a claimant's Social Security number into a question → the detector blocks it before the model ever sees the *personally identifiable information* (PII).
+* *Output guardrail:* the model is about to emit something off-limits → the detector filters it on the way out.
+
+Guardrails are *not deployed on this cluster* — they are the `[ADD-ON]` layer. The point for now is *where the responsibility lives*: a policy the platform enforces, not code every team re-invents. Reach for it the moment an agent touches regulated data.
+
+== The Red Hat AI stack — what runs where
+
+The graded path you build is deliberately the *simplest thing that teaches the ideas*. It helps to see it against the full stack, so you know what the `[ADD-ON]` layers add and when to adopt them:
+
+[cols="2,2,3",options="header"]
+|===
+| Layer | This workshop (graded) | The `[ADD-ON]` production layer
+
+| *Model serving* | *Models-as-a-Service* — a shared, OpenAI-compatible endpoint serving `{maas_model}`, off-cluster, GPU-free for you | In-cluster serving on Red Hat OpenShift AI (KServe/vLLM) when you must host the model yourself
+| *Agent runtime* | *Quarkus LangChain4j*, calling the model directly — the reproducible, GA-grade spine | *Llama Stack* (Technology Preview) as a shared agent runtime with the Responses API — a product surface for agents, MCP registries, and RAG
+| *Retrieval (RAG)* | Deterministic keyword search over 8 docs, in-memory | A *vector database* (Milvus / pgvector) of embeddings for semantic search at scale
+| *Guardrails* | — (concept) | *TrustyAI FMS Guardrails Orchestrator* (GA) — regex-detector sidecar for PII/safety
+| *Observability* | Health, Prometheus metrics, per-answer token + tool-call reporting | The same, plus OpenTelemetry traces to *Tempo* (ties module M12 — Observability, a separate module)
+|===
+
+The whole right-hand column is *additive*: each piece slots in behind an interface the agent already uses, so you adopt them when the need is real — not on day one. That restraint *is* the engineering.
+
+== Same platform disciplines apply
+
+Step back and notice what the agent *is*: a Quarkus Deployment with a Service, an edge Route, a readiness probe (which pings both MCP servers, so a *Ready* agent has *proven* its tool wiring), a liveness probe, Prometheus metrics, and a container image pulled from the shared registry — *identical in shape to every other Parasol service you have deployed this week*.
+
+That is the thesis. An AI app is *not* a special snowflake that needs a parallel platform. It needs config in a ConfigMap and a key in a Secret (module M04), health probes (module M11), metrics and traces (modules M11–M12), and delivery through Source-to-Image, pipelines, and GitOps (modules M02, M07, M09) — *the golden path you already know*. The model is new; the *disciplines* are not.
+
+== How this shows up in real orgs
+
+* *"Our chatbot confidently gave a customer the wrong claim status."* A model without tools *hallucinates* live data. The fix is not a better prompt alone — it is *grounding*: make the agent call the system of record, and make it *cite* what it used. If it can't point at a source, don't trust it.
+* *"Every team is building its own AI integration to the same backend."* MCP is the antidote: wrap the backend as *one* MCP server and every agent — and every coding assistant — calls the *same* tool. Tools are shared platform capability, not per-app glue.
+* *"How do we stop an agent leaking PII?"* Not in each agent's code. A *guardrail* layer the platform enforces (regex detectors today, richer models later) blocks it once, for everyone. Security that depends on every developer remembering is security you don't have.
+* *"Is this a whole new platform to run?"* No — and be suspicious of anyone who says it is. The agent is a Deployment with a Route and probes; it rides your existing pipelines and GitOps. *AI apps are apps.* The new part is the model endpoint and the tools, and both are just services.
+* *"Can we make the demo reproducible?"* Only with discipline: *temperature 0*, *seeded data*, and *deterministic tools*. A live agent at temperature 0.7 over a production database is a great way to be surprised on stage. Pin the variables you can.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) *tools are the point* — the model does language, but the *facts* come from MCP tools that are just your services (`get_claim`, `search_policies`); (2) *grounding is engineered* — the agent *cites* its source, and how you ask changes whether it grounds at all (the terse-vs-imperative beat is the honest money moment); (3) *AI apps are apps* — this is a Quarkus Deployment with a Route and probes, shipped the same way as everything else.
+The demo is the ~15-minute arc: ask a claim question imperatively and watch `get_claim` execute and the answer land grounded; ask a policy question and watch `search_policies` cite `POL-AUTO-01`; combine both on a denied claim; then show the honest edges — an unknown claim answered _"not found,"_ the terse phrasing that *doesn't* ground, and the token/tool-call report — and close on _"it's a Deployment with a Route; guardrails and a vector database are the next layer."_
+Close on the honest frame: "the model is impressive, but the trust comes from the tools and the grounding — and it ships like any other app."
+====
+endif::demo[]

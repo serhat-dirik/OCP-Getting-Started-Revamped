@@ -1,0 +1,499 @@
+= Agentic AI on OpenShift: Lab
+:module-id: m23
+include::partial$version-attributes.adoc[]
+
+// Lab page for M23. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Commands run in the Showroom terminal as {user}, so blocks are [source,sh,role=execute].
+// The FIRST block sets NS={user}-ai + AGENT route (subs=attributes); later blocks use $NS/$AGENT with NO
+// subs so the curl JSON braces stay literal. Everything was PERFORMED against the
+// live parasol-agent in user2-ai on 2026-07-13, model {maas_model} (llama-scout-17b): get_claim on
+// CLM-1001 (UnderReview) and CLM-1004 (Tom Becker / home / Denied / 8400 USD / Angela Davis);
+// list_claims_by_status Denied = CLM-1004/1011/1018/1025; get_claim_history CLM-1001 (5 events);
+// search_policies "auto collision deductible" -> POL-AUTO-01 (500 USD); combined CLM-1004 + POL-CLAIM-01;
+// CLM-9999 -> not found. The terse-vs-imperative grounding difference is REAL and deterministic at
+// temperature 0 on this model (the deliberate break-and-fix). Expected-output blocks show representative
+// JSON with the cluster-specific model value genericized to <maas-model> (model-agnostic); the grounded
+// FACTS and toolCalls are what the checkpoints verify. The MCP/model/curl steps are single-path (POSTing
+// JSON is a terminal job); viewing the running workloads, pod logs and metrics is genuine dual-path
+// [tabs] Console::/CLI::. NAMESPACE/domain in output are placeholders (yours are {user}-ai / {cluster_domain}).
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcuts you'll reuse throughout the lab — your AI namespace and the agent's public address:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-ai
+AGENT=https://parasol-agent-{user}-ai.{cluster_domain}
+echo "namespace: $NS"
+echo "agent:     $AGENT"
+----
+
+You are a Parasol platform engineer, and the *claims assistant* is live in your `{user}-ai` namespace: a Quarkus + LangChain4j agent (`parasol-agent`) wired to a `{maas_model}` model over *Models-as-a-Service* (MaaS), with two *Model Context Protocol* (MCP) tool servers — `claims-db` and `policy-docs` — already deployed and Ready.
+In this lab you *drive* the agent, watch it *call tools* to answer real claim questions, *ground* its answers in the policy corpus with citations, see where grounding *breaks* and how to *fix* it, *observe* its tokens and tool calls, and confirm the punchline: *an AI app is just an app*.
+
+[TIP]
+.Where the paths are single vs dual — and why
+====
+*Asking the agent* means POSTing JSON to its `/agent/ask` endpoint — a terminal job, so those steps are single-path `curl`.
+*Everything around the agent* — seeing the three pods running, reading the pod log, viewing metrics — is genuine dual-path: a `Console::` tab (the OpenShift web console) and a `CLI::` tab (`oc` / `curl`). Pick either.
+The agent has no login; it answers over its public edge Route. You never handle the MaaS key — the *agent* holds it and calls the model for you.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — ~15-minute presenter arc: grounded tools -> RAG -> honest edges
+// ============================================================================
+ifdef::demo[]
+== Demo arc — A grounded agent with tools, and the honesty that earns trust (15 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws verify m23 --user {user}` a few minutes ahead to confirm the agent answered a tool-grounded query (7/7), and open two things: a *terminal* in `{user}-ai`, and the OpenShift *Topology* for `{user}-ai` (three pods: `parasol-agent`, `claims-db`, `policy-docs`).
+Set `NS={user}-ai` and `AGENT=https://parasol-agent-{user}-ai.{cluster_domain}` in the terminal.
+The MaaS key is short-lived — if a call returns `502 authFailure`, the key expired; re-run `ws prep m23 --yes` or ask the platform team to refresh it.
+The money moment is beat 3: the agent that *cites its source* and says _"not found"_ is the one people trust — and it's just a Deployment with a Route.
+====
+
+[demo-block]
+[TIME 5m]
+Say:: "Parasol's staff ask two things all day: what's the status of this claim, and what does our policy say. A model alone will answer both — and be confidently wrong about *our* claims, because it has never seen them. So we don't ask the model; we ask an *agent* that calls our systems as *tools*. Watch: I'll ask about a real claim, and tell it to use its tools."
+Show:: The terminal, then the `POST /agent/ask` response with a populated `toolCalls` array.
+Do:: Run the imperative claim query and point at `toolCalls`:
++
+[source,sh]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools to look up claim CLM-1004 and give me a full summary."}' | jq
+----
++
+"See the `toolCalls` block — the agent called `get_claim` on `CLM-1004` and answered from the *real* record: Tom Becker, home, *Denied*, 8400 dollars, adjuster Angela Davis. The model wrote the sentence; the *facts* came from our claims service."
+
+[demo-block]
+[TIME 5m]
+Say:: "Now policy. When I ask about coverage, it uses a *different* tool — a search over our policy documents — and it *cites* the document it used. That citation is how you know it's grounded and not improvising."
+Show:: A RAG answer citing `POL-AUTO-01`, then a combined answer citing `POL-CLAIM-01`.
+Do:: Run the policy query, then the combined one:
++
+[source,sh]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Search the policies for the auto collision deductible and cite the policy id."}' | jq -r '.answer'
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools: look up claim CLM-1004 status, then explain what that status means and whether it could still be paid. Cite policy ids."}' | jq -r '.answer'
+----
++
+"Five hundred dollars, per `POL-AUTO-01`. And on the denied claim it called *both* tools — the claim record *and* the policy — and cited `POL-CLAIM-01`. That's the pattern: structured tools for facts, RAG for the prose, both grounded."
+
+[demo-block]
+[TIME 5m]
+Say:: "Here's what earns trust — the honest edges. Ask about a claim that doesn't exist, and it says *not found* instead of inventing one. And watch this: if I ask *casually*, this model prints the tool call as text and never runs it — an ungrounded answer. Grounding is something we *engineer*. Finally: this whole thing is a Deployment with a Route and health probes. An AI app is just an app."
+Show:: The `not found` answer; the terse question returning `[get_claim(...)]` with an empty `toolCalls`; then the Topology view of the three pods.
+Do:: Run the not-found and the terse queries, then flip to Topology:
++
+[source,sh]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools to look up claim CLM-9999 and report its status."}' | jq -r '.answer'
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"What is the status of claim CLM-1001?"}' | jq '{answer, toolCalls}'
+----
++
+"_Not found_ — honest. And the casual question? It printed `[get_claim(...)]` as *text*, empty `toolCalls` — ungrounded. Same claim, different ask. In production you fix that with the system prompt and tool-forcing. Guardrails for PII and a vector database for real-scale RAG are the next platform layer — but the spine is this: a Quarkus service, three pods, one Route."
++
+[NOTE]
+.Reset between runs
+====
+`ws prep m23 --yes` returns the world to the entry state. Nothing to clean in the namespace beyond that — the agent and both MCP servers are stateless.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Meet the running agent
+⏱ *~6 min* · confirm the agent and its two tool servers are live, without spending a token
+
+Before you ask anything, meet the world `ws prep` built for you: three pods, and an agent that has already *proven* its tool wiring.
+
+Ask the agent what it is wired to — `GET /agent/info` makes *no* model call, so it costs nothing:
+
+[source,sh,role=execute]
+----
+curl -ksS "$AGENT/agent/info" | jq
+----
+
+.Expected output (the model + both MCP tool servers the agent is configured with)
+[source,json]
+----
+{
+  "model": "<maas-model>",
+  "claimsDbMcpUrl": "http://claims-db:8080/mcp/sse",
+  "policyDocsMcpUrl": "http://policy-docs:8080/mcp/sse"
+}
+----
+
+The `model` field echoes this cluster's model (`{maas_model}`); the two URLs are the MCP servers the agent calls as tools.
+Now confirm the agent is *Ready* — and here is the elegant part: its readiness probe *pings both MCP servers*, so a Ready agent has *already proven* it can reach its tools.
+
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}/topology/ns/{user}-ai[OpenShift *Topology* for `{user}-ai`^], you should see three workloads — `parasol-agent`, `claims-db`, and `policy-docs` — each with a dark-blue "Ready" ring.
+Click `parasol-agent`, then the *Resources* tab, and open the *Route* — its `/q/health/ready` is what the ring is reading. [CAPTURE-VERIFY: the Topology node labels + Route panel on this OpenShift build.]
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get deploy -n $NS
+curl -ksS "$AGENT/q/health/ready" | jq
+----
+
+.Expected output (agent readiness = both MCP clients reachable)
+[source,json]
+----
+{
+  "status": "UP",
+  "checks": [
+    { "name": "MCP clients health check", "status": "UP",
+      "data": { "claims-db": "OK", "policy-docs": "OK" } }
+  ]
+}
+----
+--
+====
+
+[.checkpoint]
+====
+✔ *Verify:* All three deployments (`parasol-agent`, `claims-db`, `policy-docs`) are `1/1` in `{user}-ai`, and `GET /q/health/ready` reports `status: UP` with both MCP clients `OK`. The agent has proven its tool wiring before you've spent a single token.
+====
+
+== 2. Ask the agent — and watch grounding depend on how you ask
+⏱ *~12 min* · the deliberate break-and-fix: an ungrounded answer, then a grounded one
+
+Ask about a real claim the way a person naturally would — a plain question:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"What is the status of claim CLM-1001?"}' | jq '{answer, toolCalls}'
+----
+
+.What you'll see on this cluster's model (the *break* — an ungrounded answer)
+[source,json]
+----
+{
+  "answer": "[get_claim(claimNumber=CLM-1001)]",
+  "toolCalls": []
+}
+----
+
+Look closely: `toolCalls` is *empty*, and the "answer" is the model *printing the tool call as text* instead of *running* it. The agent never touched your claims data — this answer is *ungrounded*. (This is model-dependent and deterministic at temperature 0: some models call the tool even for a terse question; this one does not.)
+
+Now *fix* it by asking *imperatively* — tell the agent to use its tools:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools to look up claim CLM-1001 and report its status."}' | jq '{answer, toolCalls}'
+----
+
+.The *fix* — a grounded answer, from a real tool call
+[source,json]
+----
+{
+  "answer": "The current status of claim CLM-1001 is UnderReview.",
+  "toolCalls": [
+    { "tool": "get_claim", "arguments": "{\"claimNumber\": \"CLM-1001\"}", "result": null }
+  ]
+}
+----
+
+Same claim, same model, *different phrasing* — and now `toolCalls` shows `get_claim` actually *ran*, and the answer (`UnderReview`) is the *real* seeded record. The lesson is the whole point of agentic AI: *the model decides whether to call a tool*, and *grounding is something you engineer* — through the system prompt and clear phrasing here, through model choice and tool-forcing in production. When an agent gives a grounded answer, someone *made* it ground.
+
+[NOTE]
+.Why `result` is `null` in `toolCalls`
+====
+The agent records *which* tool the model chose and with *what* arguments (that is the visibility that matters — you can see it called `get_claim` on `CLM-1001`).
+The tool's return value is folded straight back into the model's context to produce the answer, so it shows as `null` in the report rather than being duplicated.
+The *answer* is your proof the tool ran: `UnderReview` is the seeded truth for `CLM-1001`, not something the model could have invented.
+====
+
+[.checkpoint]
+====
+✔ *Verify:* With the *imperative* phrasing, `POST /agent/ask` returns a non-empty `toolCalls` containing `get_claim`, and the `answer` reports `CLM-1001` as `UnderReview`. You saw an ungrounded answer (empty `toolCalls`, tool call printed as text) become a grounded one by changing *how you asked* — grounding is engineered, not guaranteed.
+====
+
+== 3. MCP tools are your APIs
+⏱ *~15 min* · watch the agent call your claims service three different ways
+
+The `claims-db` MCP server exposes three tools — `get_claim`, `list_claims_by_status`, and `get_claim_history`. To the model they are just callable functions; to you they are *your claims API* behind a small standard adapter. Ask three questions that each drive a different tool.
+
+*A full claim summary* — the model calls `get_claim` and reports every field:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your claims tools to look up claim CLM-1004 and give me a full summary: claimant, type, status, amount and adjuster."}' \
+  | jq -r '.answer, (.toolCalls[] | .tool + " " + .arguments)'
+----
+
+.Expected output (grounded in the real record for CLM-1004)
+[source,texinfo]
+----
+Claim CLM-1004 is a home insurance claim with a claimant named Tom Becker. The claim was
+denied and the amount claimed was $8400.00 USD. The adjuster assigned to the claim is
+Angela Davis, and the incident date was April 22, 2026.
+get_claim {"claimNumber": "CLM-1004"}
+----
+
+*A list by status* — the model calls `list_claims_by_status`:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools to list every claim whose status is Denied, then tell me how many there are."}' \
+  | jq -r '.answer, (.toolCalls[] | .tool + " " + .arguments)'
+----
+
+The agent calls `list_claims_by_status` with `{"status": "Denied"}` and returns the four denied claims — `CLM-1004`, `CLM-1011`, `CLM-1018`, `CLM-1025` — with a count. Every figure is from the tool, not the model.
+
+*An audit history* — the model calls `get_claim_history`:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools to fetch the full history of claim CLM-1001 and summarize what happened in order."}' \
+  | jq -r '.answer, (.toolCalls[] | .tool + " " + .arguments)'
+----
+
+The agent calls `get_claim_history` and narrates the real timeline — submitted, adjuster assigned, documents requested, documents received, review started — in order.
+
+Now *see the tool call from the tool's side*. The agent logs the model traffic, so you can watch the raw reasoning:
+
+[tabs]
+====
+Console::
++
+--
+In {ocp_console_url}/topology/ns/{user}-ai[*Topology*^], click `parasol-agent`, open the *Resources* tab, and click the pod, then *View logs*.
+Scroll to the most recent request: you'll see the *system prompt*, the *tool definitions* (`get_claim`, `list_claims_by_status`, `get_claim_history`, `search_policies`), and the model's response choosing a tool. [CAPTURE-VERIFY: the *View logs* control on this OpenShift build.]
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-agent -n $NS --tail=200 | grep -iE '"name" : "(get_claim|search_policies)"' | head
+----
+
+You'll see the tool definitions the agent hands the model on every call — proof that "the agent has tools" is literally a list of function schemas sent to the model, which it then chooses from.
+--
+====
+
+[.checkpoint]
+====
+✔ *Verify:* You drove three different `claims-db` tools — `get_claim` (CLM-1004 = Tom Becker, home, *Denied*, $8400, Angela Davis), `list_claims_by_status` (four denied claims), and `get_claim_history` (CLM-1001's ordered timeline) — and each answer's `toolCalls` names the tool the model chose. You also saw the tool *schemas* in the agent log. The MCP server is your claims API; the agent is just a client.
+====
+
+== 4. Ground answers with RAG over policy docs
+⏱ *~15 min* · retrieval, citations, combining tools, and an honest "I don't know"
+
+Coverage questions need a *different* kind of tool: `search_policies` on the `policy-docs` server does *Retrieval-Augmented Generation* (RAG) — it retrieves the relevant policy passage, and the model answers *from it* and *cites* it.
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Search the policy documents and tell me the deductible for an auto collision claim. Cite the policy id you used."}' \
+  | jq -r '.answer, (.toolCalls[] | .tool + " " + .arguments)'
+----
+
+.Expected output (grounded in POL-AUTO-01, with the citation)
+[source,texinfo]
+----
+The standard deductible for an auto collision claim is 500 USD per incident, as stated in
+policy POL-AUTO-01. This means that the policyholder pays the deductible, and Parasol pays
+the remaining approved repair cost.
+search_policies {"query": "auto collision deductible", "maxResults": 3}
+----
+
+The citation `POL-AUTO-01` is the *tell*: a grounded answer can point at its source. That is what makes RAG trustworthy — and what makes an *un*cited answer suspect.
+
+Now the pattern that needs *both* kinds of tool — a fact *and* a rule. Ask about the denied claim from the last exercise and *why* it matters:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools: look up claim CLM-1004 to get its status, then search the policies to explain what that status means and whether such a claim could still be paid. Cite the policy ids."}' \
+  | jq -r '.answer, "--- tools called ---", (.toolCalls[] | .tool + " " + .arguments)'
+----
+
+.Expected output (both tools — a claim fact grounded by a policy rule)
+[source,texinfo]
+----
+Claim CLM-1004, filed by Tom Becker for a home-related issue, has a status of "Denied".
+According to policy POL-CLAIM-01, a "Denied" status means the claim was rejected, likely
+because the loss falls outside policy coverage. A denied claim like CLM-1004 would not be
+paid...
+--- tools called ---
+get_claim {"claimNumber": "CLM-1004"}
+search_policies {"query": "meaning of claim status and payout eligibility", "maxResults": 3}
+----
+
+Two tools, one grounded answer: the *structured* tool for the claim's status, the *RAG* tool for what the status means — cited to `POL-CLAIM-01`. This is a real agent doing real work.
+
+Finally, the most important behaviour of all — *honesty*. Ask about a claim that does not exist:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools to look up claim CLM-9999 and report its status."}' | jq -r '.answer'
+----
+
+The agent calls `get_claim`, the tool returns *not found*, and the agent says so — _"The claim number CLM-9999 was not found in our system."_ — instead of inventing a plausible claim. An agent that says _"I don't know"_ when the tool says so is worth ten that never do.
+
+[.checkpoint]
+====
+✔ *Verify:* The auto-deductible answer is grounded in `POL-AUTO-01` (500 USD); the combined `CLM-1004` answer calls *both* `get_claim` and `search_policies` and cites `POL-CLAIM-01`; and `CLM-9999` is answered _"not found"_ rather than hallucinated. You can name the tell of a grounded answer: it *cites its source*.
+====
+
+== 5. Observe the agent — tokens, latency, tool calls
+⏱ *~10 min* · the "observe the agent" beat — every answer is measurable
+
+An agent that calls a metered model needs the same observability as any service, plus two AI-specific signals: *tokens* (what you pay) and *tool calls* (what it did). All of it ships on by default.
+
+Every `/agent/ask` response already carries its own accounting — ask for the full envelope:
+
+[source,sh,role=execute]
+----
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"Use your tools to look up claim CLM-1005 and report its status and amount."}' \
+  | jq '{answer, toolCalls: [.toolCalls[].tool], tokenUsage}'
+----
+
+.Expected output (the answer, the tools it used, and the token cost)
+[source,json]
+----
+{
+  "answer": "Claim CLM-1005 has a status of \"Approved\" and an amount of $25,000.00 USD.",
+  "toolCalls": [ "get_claim" ],
+  "tokenUsage": { "inputTokens": 2333, "outputTokens": 39, "totalTokens": 2372 }
+}
+----
+
+The `inputTokens` are large because the *tool definitions* travel with every request — that is the real cost of giving a model many tools, and exactly the kind of thing you watch. Now the fleet-level view via Prometheus metrics:
+
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}/monitoring/query-browser?query0=gen_ai_client_token_usage_total[console *Observe -> Metrics*^], run the query `gen_ai_client_token_usage_total` to chart tokens by type (input/output) and model, or `langchain4j_aiservices_timed_seconds_count` for per-call latency counts. [CAPTURE-VERIFY: the Observe -> Metrics query browser on this OpenShift build.]
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+curl -ksS "$AGENT/q/metrics" \
+  | grep -E '^(gen_ai_client_token_usage_total|langchain4j_aiservices_timed_seconds_count)' | head
+----
+
+.Expected output (GenAI token metrics + LangChain4j call timing, per model)
+[source,texinfo]
+----
+gen_ai_client_token_usage_total{gen_ai_request_model="<maas-model>",gen_ai_token_type="input"} 19204.0
+gen_ai_client_token_usage_total{gen_ai_request_model="<maas-model>",gen_ai_token_type="output"} 438.0
+langchain4j_aiservices_timed_seconds_count{aiservice="ClaimsAssistant",method="ask"} 9.0
+----
+--
+====
+
+[NOTE]
+.The trace to Tempo is the M12 tie — and it's one env var away `[ADD-ON]`
+====
+The agent also creates an *OpenTelemetry* (OTel) span for the model call and each tool call. On this cluster the OTel *exporter is off* (there is no trace backend here), so the spans stay in-process — you can even see their ids as *exemplars* on the metrics above.
+Turn on the export with two environment values — `QUARKUS_OTEL_SDK_DISABLED=false` and `OTEL_EXPORTER_OTLP_ENDPOINT` pointing at a collector — and each answer becomes a distributed trace in *Tempo*, showing the model call and every tool call as timed spans. That is the observability from module M12 — Observability (a separate module), applied unchanged to an agent: *AI apps are apps*.
+====
+
+[.checkpoint]
+====
+✔ *Verify:* A single `/agent/ask` response reports its `tokenUsage` and which tools it called, and `GET /q/metrics` exposes `gen_ai_client_token_usage_total` (tokens by type and model) and `langchain4j_aiservices_timed_seconds_count`. You can point to what an answer *cost* and what it *did*.
+====
+
+== 6. AI apps are apps — the golden path, unchanged
+⏱ *~10 min* · confirm the agent is an ordinary Deployment, and prove its self-healing tool wiring
+
+Strip away the word "AI" and look at what the agent *is* on the platform:
+
+[tabs]
+====
+Console::
++
+--
+In {ocp_console_url}/topology/ns/{user}-ai[*Topology*^], click `parasol-agent` and read the side panel: a *Deployment* with one pod, a *Service*, an edge *Route*, *Readiness* and *Liveness* health checks, and an image pulled from the internal registry. Compare it to any other Parasol service you've deployed this week — the shape is identical. [CAPTURE-VERIFY: the Deployment side-panel fields on this OpenShift build.]
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get deploy parasol-agent -n $NS -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+oc get route parasol-agent -n $NS -o jsonpath='TLS: {.spec.tls.termination}/{.spec.tls.insecureEdgeTerminationPolicy}{"\n"}'
+oc get deploy parasol-agent -n $NS -o jsonpath='readiness: {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}'
+----
+
+.Expected output (a plain Deployment: registry image, edge Route, health probe)
+[source,texinfo]
+----
+image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-agent:1.0
+TLS: edge/Redirect
+readiness: /q/health/ready
+----
+--
+====
+
+An image from the shared registry, an edge Route, a readiness probe on `/q/health/ready` — this is the *golden path* from modules M02, M07, and M09 (separate modules), not a parallel "AI platform." Now prove the wiring is *self-healing* the same way every Deployment is — restart it and watch readiness re-establish the tool connections:
+
+[source,sh,role=execute]
+----
+oc rollout restart deploy/parasol-agent -n $NS
+oc rollout status deploy/parasol-agent -n $NS --timeout=120s
+curl -ksS "$AGENT/q/health/ready" | jq -r '.status'
+----
+
+The new pod comes up, its readiness probe pings *both* MCP servers again, and only when both answer `OK` does it report `UP` and start taking traffic. A *Ready* agent is one that has re-proven its tool wiring — no special handling, just probes doing their job.
+
+[.checkpoint]
+====
+✔ *Verify:* `parasol-agent` is a plain Deployment (registry image, edge Route, `/q/health/ready` probe), and after `oc rollout restart` it returns to `Ready` (`status: UP`) with both MCP clients reachable. The agent rides the same golden path — probes, registry, Route, GitOps — as every other app.
+====
+
+== The next platform layer `[ADD-ON]`
+⏱ *~5 min* · read — the production pieces above the graded path
+
+You built and drove the *graded* path: a Quarkus LangChain4j agent, MCP tool servers, deterministic RAG. Three `[ADD-ON]` layers turn it into a production system — *not deployed here* (they need a separate subscription and, in places, a GPU), but know what they add and when to reach for them:
+
+* *Guardrails* — the *TrustyAI FMS Guardrails Orchestrator* (generally available) puts a *regex-detector sidecar* in front of the model to block or mask *personally identifiable information* (PII) and unsafe content, as a *platform policy* rather than per-agent code. Reach for it the moment an agent touches regulated data.
+* *A Llama Stack runtime* — Red Hat OpenShift AI's *Llama Stack* (Technology Preview) offers a shared agent runtime and the Responses API, with MCP registries and RAG as first-class providers. Reach for it when you want a *product surface* for agents instead of hand-wiring each one.
+* *A vector database* — Milvus or PostgreSQL/pgvector holding document *embeddings* for semantic search at scale, slotting in behind the same `search_policies` contract. Reach for it when your corpus outgrows a handful of documents.
+
+There is nothing to run in this section — see the *concept* page for the stack map and the *wrap-up* for where each fits. The discipline is knowing these exist and adopting them *when the need is real*.
+
+== Challenge (optional)
+⏱ *~10 min* · no hand-holding
+
+* *Engineer the grounding.* Take the terse question from exercise 2 (`"What is the status of claim CLM-1001?"`) and find the *minimal* phrasing change that makes this model actually call the tool. What words tip it from printing the call to running it?
+* *Force a two-tool answer.* Craft a single question that makes the agent call *both* a `claims-db` tool and `search_policies` — for a claim you choose. Confirm both appear in `toolCalls`.
+* *Read the cost.* Ask three questions of increasing tool use and compare `tokenUsage.totalTokens`. Where does the cost come from — the question, the answer, or the tool definitions?
+* *Design the guardrail.* On paper: where in the `POST /agent/ask` path would a PII input-guardrail sit, and what would it do to a question containing a Social Security number *before* the model saw it? (The deployed answer is the `[ADD-ON]` FMS Orchestrator sidecar.)
+
+endif::demo[]

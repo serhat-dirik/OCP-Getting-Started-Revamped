@@ -1,0 +1,155 @@
+= Agentic AI on OpenShift: Instructor Guide
+:module-id: m23
+include::partial$version-attributes.adoc[]
+
+// Instructor runbook for M23. Timings MEASURED on the live cluster on 2026-07-13/14 (ws lifecycle +
+// real agent tool-grounded calls against the {maas_model} MaaS endpoint), not guessed. Pre-flight
+// commands show captured expected output (domains scrubbed to placeholders). Product NAMES appear plain,
+// with NO version numbers in prose (course standard). Environment values via attributes only.
+
+== Timing (measured)
+
+Total module budget *~90–120 min*. Exercise timings are from a live run driving the agent; the `ws`
+lifecycle numbers are measured on the workshop cluster against the `{maas_model}` MaaS endpoint.
+
+[cols="3,1,4",options="header"]
+|===
+| Segment | Time | Notes
+
+| Concept (agent anatomy, MCP, RAG, grounding, the stack map) | ~20 min | ≤15-min core read; slides carry it, the `[ADD-ON]` stack map is discussion
+| 1. Meet the running agent | ~6 min | `GET /agent/info` + readiness; no token spent
+| 2. Ask the agent — grounding depends on how you ask | ~12 min | The break-and-fix; the terse→imperative contrast is the teaching beat
+| 3. MCP tools are your APIs | ~15 min | Three claims tools + reading the tool schemas in the pod log
+| 4. Ground answers with RAG | ~15 min | RAG citation, a two-tool answer, and the honest "not found"
+| 5. Observe the agent | ~10 min | Per-answer tokens/tool-calls + the GenAI Prometheus metrics
+| 6. AI apps are apps | ~10 min | Deployment shape + the rollout-restart self-heal of the tool wiring
+| The next platform layer (reading) | ~5 min | `[ADD-ON]` — guardrails, Llama Stack, vector DB; no hands-on
+| Wrap-up + org mapping | ~10 min | Discussion + when-not-to-use
+|===
+
+Each `/agent/ask` call returns in *1–4 seconds* live at temperature 0; the exercise times are dominated by reading and discussion, not the calls.
+
+Measured `ws` lifecycle (admin/builder context, for prep and reset between cohorts):
+
+[cols="2,1,3",options="header"]
+|===
+| Command | Time | What it does
+
+| `ws verify m23 --user <u> --entry-only` | ~9 s | 6/6 entry checks (no model call)
+| `ws verify m23 --user <u>` | ~10 s | 7/7 — adds the end check: a real tool-grounded answer (spends a token)
+| `ws smoke m23 <u>` | ~44 s | 12/12 attendee-cockpit checks
+| `ws reset m23 --user <u>` | ~90 s to converge | purge + re-materialize; the client waits up to its sync window while three JVM apps + the MaaS hook come up
+|===
+
+== Pre-flight checklist
+
+Run these from an admin context *before* the session. Each shows the captured expected output (domains shown as placeholders).
+
+*1. The agent world is healthy.* Three pods Running and the MaaS copy hook Completed:
+
+[source,sh]
+----
+oc get pods -n user2-ai
+----
+
+[source,texinfo]
+----
+NAME                            READY   STATUS      RESTARTS   AGE
+claims-db-...                   1/1     Running     0          ...
+maas-copy-m23-user2-...         0/1     Completed   0          ...
+parasol-agent-...               1/1     Running     0          ...
+policy-docs-...                 1/1     Running     0          ...
+----
+
+*2. The agent answers and reports its wiring* (this is the URL attendees use; `/agent/info` spends no token):
+
+[source,sh]
+----
+curl -ksS "https://parasol-agent-user2-ai.apps.<cluster-domain>/agent/info"
+# -> {"model":"<your MaaS model>","claimsDbMcpUrl":"http://claims-db:8080/mcp/sse",
+#     "policyDocsMcpUrl":"http://policy-docs:8080/mcp/sse"}
+----
+
+*3. Each attendee's entry state is clean.* For a sample user:
+
+[source,sh]
+----
+ws verify m23 --user user2 --entry-only
+----
+
+[source,texinfo]
+----
+✅ namespace user2-ai exists
+✅ entry marker ws-entry-m23 present
+✅ MaaS config present (endpoint + model)
+✅ MCP server claims-db deployed + ready
+✅ MCP server policy-docs deployed + ready
+✅ parasol-agent deployed + Ready (both MCP clients OK)
+▶ agent model (maas-config): <your MaaS model>
+✅ all 6 checks passed
+----
+
+*4. The tool-grounded end-state works* (needs a live MaaS key — spends one token). For a sample user:
+
+[source,sh]
+----
+ws verify m23 --user user2
+# -> ...adds: ✅ agent executed a tool-grounded query (get_claim on CLM-1001)
+#    -> all 7 checks passed
+----
+
+[NOTE]
+.The MaaS key is short-lived — plan for it
+====
+The agent's key is copied at materialization time from the platform Lightspeed secret, and workshop MaaS keys expire (they are provisioned per-event).
+If `/agent/ask` starts returning `502` with `"authFailure": true`, the key expired: re-run `ws prep m23 --yes` for the affected user (or ask the platform team to refresh the source key, then `ws reset m23 --user <u>`).
+The *entry* checks never call the model, so a Ready agent with an expired key still shows 6/6 `--entry-only` green — only the 7th (end) check and live `/agent/ask` need a working key. Confirm a fresh key the morning of the session.
+====
+
+*5. The per-cluster model is sourced on-cluster.* Confirm the model this cluster's key is scoped to:
+
+[source,sh]
+----
+oc get cm maas-config -n user2-ai -o jsonpath='{.data.model}{"\n"}'
+# -> the model your cluster's MaaS key is scoped to (e.g. the cluster-specific model)
+----
+
+[NOTE]
+.The model is converged per cluster — a fixed defect, and why grounding phrasing matters
+====
+The entry state *sources the model and endpoint from the platform Lightspeed secret* at sync time, falling back to the chart default when those keys are absent — so one chart renders the right model on a cluster whose MaaS key is scoped to a *different* one, without a code change.
+This matters pedagogically: different models behave differently at temperature 0. On some models a *terse* claim question executes the tool; on others it prints the tool call as *text* (ungrounded). The lab's exercise 2 is built around this — always demonstrate the *imperative* phrasing as the reliable path, and treat the terse outcome as "what your model does."
+====
+
+== Demo-mode notes (beyond Say/Show/Do)
+
+* *Confirm a live key first.* The whole demo is live model calls. Run `ws verify m23 --user {user}` a few minutes ahead; if the 7th check is red, refresh the key before you present — do not discover it on stage.
+* *Keep `jq` handy.* The `toolCalls` array is the star of the demo; pipe every call through `jq` so the audience sees *which* tool ran, not a wall of JSON.
+* *Rehearse the terse-vs-imperative beat.* It is the most honest and memorable moment, but only if you land it cleanly: ask the terse question, point at the *empty* `toolCalls` and the tool call printed as text, then ask imperatively and point at the populated `toolCalls`. Same claim, same model.
+* *Have Topology open in a second tab.* The closing line — "it's just a Deployment with a Route and probes" — needs the three-pod Topology on screen to land.
+* *Guardrails are concept here.* The spec's demo arc mentions a guardrail block; on this cluster guardrails are the `[ADD-ON]` layer and are *not deployed*. Narrate them as "the next layer" — do not promise a live PII block you cannot show.
+
+== Top 5 questions attendees ask
+
+. *"Why did it print `[get_claim(...)]` instead of answering?"* +
+The model *decided to describe* the tool call rather than *make* it — an ungrounded answer. This is model- and phrasing-dependent at temperature 0. Ask imperatively ("use your tools to look up…") and it executes the tool. The lesson: *grounding is engineered* through the system prompt and phrasing, not guaranteed.
+
+. *"Where does the agent keep the MaaS key, and is it safe?"* +
+In a Secret (`maas-credentials`), injected as the `GENAI_API_KEY` environment value — the attendee never sees it, and `curl`-ing the agent never exposes it (the agent calls the model server-side). Endpoint and model are non-secret and live in the `maas-config` ConfigMap.
+
+. *"Is this Llama Stack? Where's the vector database?"* +
+No — the graded path is *Quarkus LangChain4j* calling the model directly, with *deterministic* keyword RAG. Llama Stack (a shared agent runtime) and a vector database (Milvus/pgvector) are the `[ADD-ON]` production layer, taught as concept. They slot in behind the same contracts the agent already uses.
+
+. *"Can I see the trace for a request in Tempo?"* +
+Not on this cluster — the OpenTelemetry *exporter is off* (there's no trace backend here), so spans stay in-process (you can see their ids as exemplars on the metrics). Turning on `QUARKUS_OTEL_SDK_DISABLED=false` plus an OTLP endpoint sends them to Tempo — that's the module M12 — Observability tie, applied unchanged.
+
+. *"All thirty attendees hit the same model endpoint — will it hold?"* +
+Yes, at temperature 0 with short questions the calls are 1–4 s and cheap. The `inputTokens` are large because tool schemas travel with each request; that's the real cost signal to watch on the `gen_ai_client_token_usage_total` metric. Per-key quotas are an `[ADD-ON]` MaaS governance feature.
+
+== Watchouts
+
+* *Expired MaaS key.* The single most likely failure. Symptom: `/agent/ask` returns `502 authFailure`. It is *not* a lab bug — the key is short-lived. `ws prep m23 --yes` re-copies a fresh key. Entry checks stay green because they don't call the model.
+* *Model-dependent grounding.* The terse question that fails to ground on this cluster's model may *succeed* on another model. Frame exercise 2 as "watch what *your* model does," and always show the imperative phrasing as the reliable path — never rely on the terse failure reproducing everywhere.
+* *`toolCalls[].result` is `null`.* This is expected — the agent records the tool *name and arguments* (the visibility that matters); the result is folded into the answer. Attendees sometimes read `null` as "the tool failed." The *answer* is the proof the tool ran.
+* *ImagePullBackOff on a fresh cluster.* The three images are pulled from the shared `parasol-images` registry; on a cold cluster the first pull can be slow. The pods become Ready once pulled — `ws reset` waits for it. If it never clears, the shared images aren't loaded — a provisioning gap, not a lab error.
+* *"OutOfSync" on the entry app is expected.* The MaaS copy hook patches `maas-config`, so the entry Application shows *OutOfSync / Healthy* with self-heal off — the same cosmetic drift as module M22. Do not "fix" it with a sync; it is by design.

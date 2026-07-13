@@ -1,0 +1,86 @@
+= Agentic AI on OpenShift: Troubleshooting
+:module-id: m23
+include::partial$version-attributes.adoc[]
+
+// Troubleshooting for M23. Every entry is a real failure mode seen (or deliberately induced) while
+// performing the module live on the workshop cluster (2026-07-13/14). symptom -> cause -> fix. Product
+// NAMES appear plain, with NO version numbers in prose (course standard). Environment values via
+// attributes only.
+
+Each entry is symptom → cause → fix. All were seen (or deliberately induced) while performing this module live against the running `parasol-agent` on the workshop cluster.
+
+== The agent answers with `[get_claim(...)]` and an empty `toolCalls`
+
+*Symptom:* You ask a claim question and the `answer` is literally `[get_claim(claimNumber=CLM-1001)]` (or similar), and `toolCalls` is `[]`.
+
+*Cause:* The model *described* the tool call as text instead of *executing* it — an ungrounded answer. Whether this happens depends on the model and on how you phrase the question; it is deterministic at temperature 0 for a given model and prompt.
+
+*Fix:* Ask *imperatively* — tell the agent to use its tools: _"Use your tools to look up claim CLM-1001 and report its status."_ The tool then executes and `toolCalls` is populated. This is the module's core lesson (exercise 2): *grounding is engineered*, through the system prompt and clear phrasing, not guaranteed.
+
+== `POST /agent/ask` returns `502` with `"authFailure": true`
+
+*Symptom:* Every question returns HTTP `502` and a body like `{"error":"model authentication failed - check the MaaS key ...","authFailure":true,...}`.
+
+*Cause:* The agent's MaaS key (the `GENAI_API_KEY` in the `maas-credentials` Secret) has *expired* — workshop MaaS keys are short-lived, provisioned per event. The agent catches the model's `401` and *degrades gracefully* to a clean `502` instead of a stack trace.
+
+*Fix:* Refresh the key: `ws prep m23 --yes` re-copies a fresh key from the platform Lightspeed secret into your namespace (or ask your instructor to refresh the source key). Note the *entry* checks still pass 6/6 with an expired key — only live `/agent/ask` and the 7th (end) check need a working key, because only they call the model.
+
+== `POST /agent/ask` returns `400` "question is required"
+
+*Symptom:* The call returns HTTP `400` and `{"error":"question is required",...}`.
+
+*Cause:* The request body had no `question`, or it was blank/whitespace. The agent validates input before spending a token.
+
+*Fix:* Send a non-empty question: `-d '{"question":"Use your tools to look up claim CLM-1001 and report its status."}'`. Check your quoting — a shell that ate the JSON braces sends an empty body.
+
+== The `toolCalls` show `"result": null` — did the tool fail?
+
+*Symptom:* A grounded answer is correct, but each entry in `toolCalls` has `"result": null`.
+
+*Cause:* This is *expected*, not a failure. The agent reports *which* tool the model chose and with *what* arguments — the visibility that matters. The tool's return value is folded straight into the model's context to produce the answer, so it is not duplicated in the report.
+
+*Fix:* Nothing to fix. The *answer* is your proof the tool ran: a grounded fact (e.g. `CLM-1001` is `UnderReview`) is something the model could not have invented. To see the raw tool result, read the agent pod log (exercise 3).
+
+== The agent is not Ready (`/q/health/ready` is DOWN)
+
+*Symptom:* `oc get deploy parasol-agent` shows `0/1`; `GET /q/health/ready` reports `status: DOWN`, or the Route returns "Application is not available."
+
+*Cause:* The agent's readiness probe *pings both MCP servers*, so a Ready agent has proven its tool wiring. If either `claims-db` or `policy-docs` is not up, the agent stays *not Ready* on purpose — it will not take traffic it cannot serve.
+
+*Fix:* Check the tool servers: `oc get pods -n {user}-ai`. If `claims-db` or `policy-docs` is not `1/1`, that is the real problem — describe it (`oc describe pod ...`) or `ws reset m23 --user <u>` to re-materialize. Once both MCP servers are `OK`, the agent's readiness flips to `UP` on its own.
+
+== There are no traces in Tempo
+
+*Symptom:* You expected the model call and tool calls to appear as spans in a tracing backend, but nothing shows up.
+
+*Cause:* On this cluster the agent's OpenTelemetry *exporter is disabled* (`QUARKUS_OTEL_SDK_DISABLED=true`) — there is no trace backend wired here, so the spans stay in-process. You can still see their ids as *exemplars* attached to the Prometheus metrics.
+
+*Fix:* This is expected on the workshop cluster — tracing is the `[ADD-ON]` observability tie to module M12 — Observability (a separate module). To send traces, set `QUARKUS_OTEL_SDK_DISABLED=false` and `OTEL_EXPORTER_OTLP_ENDPOINT` to a collector, and each answer becomes a distributed trace. The *metrics* (`/q/metrics`) and the per-answer `toolCalls`/`tokenUsage` are the live observability here.
+
+== A pod is `ImagePullBackOff`
+
+*Symptom:* `parasol-agent`, `claims-db`, or `policy-docs` won't start; events show `ImagePullBackOff`.
+
+*Cause:* The image isn't present in the shared internal registry (`parasol-images`) yet, or the per-user pull permission hasn't propagated. The three images are built once into `parasol-images` and pulled cross-namespace.
+
+*Fix:* On a freshly provisioned cluster this usually clears once the images finish loading — `ws reset m23 --user <u>` waits for readiness. If it never clears, the shared images aren't loaded: that is an environment provisioning gap, not a lab error — tell your instructor.
+
+== `ws smoke` fails only on "cockpit clone HEAD matches the mirror"
+
+*Symptom:* `ws smoke m23 <u>` reports 11/12, failing only the freshness check ("pod serves ..., mirror ...").
+
+*Cause:* The attendee's cockpit pod holds a Git clone from *before* the latest content push — a stale cockpit, not a module defect.
+
+*Fix:* `ws git-refresh --restart-terminals --user <u>` re-clones the cockpit to the mirror HEAD; wait for the pod to come back, then re-run `ws smoke` for 12/12. Every other check — identity, isolation, `ws prep`/`verify`, the `oc auth can-i` smoke command — passes independently of this one.
+
+== The entry Application shows "OutOfSync"
+
+*Symptom:* In Argo CD, `entry-m23-user2` is *OutOfSync* (but *Healthy*).
+
+*Cause:* The MaaS copy hook *patches* the `maas-config` ConfigMap (converging it to the per-cluster model/endpoint) after the initial sync, so the live state legitimately differs from the rendered chart. Self-heal is off, so Argo reports the drift without reverting it.
+
+*Fix:* Nothing — this is *expected* cosmetic drift, the same pattern as module M22. The agent world is fully functional; do not trigger a sync to "fix" it (that would just re-run the hook).
+
+'''
+
+_Last verified live against the running agent on the workshop cluster — 2026-07-14._
