@@ -1,0 +1,118 @@
+# The parasol-agent (Quarkus + LangChain4j, direct-to-MaaS graded path) from the shared parasol-images
+# (tag 1.0). sync-wave "2" puts it AFTER the MCP servers (wave 1) and the maas-credentials Secret
+# (created by the wave-1 hook), so both are present when the pod starts: the agent reads GENAI_API_KEY
+# from the Secret and GENAI_ENDPOINT/GENAI_MODEL from the maas-config ConfigMap (converged per-cluster
+# → llama-scout-17b on C2), and its readiness pings both MCP servers. Model-agnostic env contract:
+# GENAI_ENDPOINT / GENAI_API_KEY / GENAI_MODEL / CLAIMS_DB_MCP_URL / POLICY_DOCS_MCP_URL.
+---
+# why: the running agent the attendee asks claims/policy questions (POST /agent/ask).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-agent
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    app: parasol-agent
+    app.kubernetes.io/component: agent
+    workshop.redhat.com/module: m23
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-agent
+  template:
+    metadata:
+      labels:
+        app: parasol-agent
+        workshop.redhat.com/module: m23
+    spec:
+      containers:
+        - name: parasol-agent
+          image: {{ .Values.agentImage }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # The MaaS Bearer key — copied from openshift-lightspeed/credentials into maas-credentials
+            # by the wave-1 hook (real token on C2, empty on a MaaS-less cluster → graceful 401).
+            - name: GENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: maas-credentials
+                  key: GENAI_API_KEY
+            # endpoint + model from the attendee-readable maas-config ConfigMap the hook converged to the
+            # per-cluster values (C2 → llama-scout-17b). Not secret; editable by the lab.
+            - name: GENAI_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: maas-config
+                  key: endpoint
+            - name: GENAI_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: maas-config
+                  key: model
+            # The two MCP servers as the agent's tools (in-cluster SSE Services on 8080).
+            - name: CLAIMS_DB_MCP_URL
+              value: {{ .Values.claimsDbMcpUrl | quote }}
+            - name: POLICY_DOCS_MCP_URL
+              value: {{ .Values.policyDocsMcpUrl | quote }}
+          # Readiness pings BOTH MCP servers, so a Ready agent has proven its tool wiring; it does NOT
+          # call the model, so an expired MaaS key does not block readiness (only /agent/ask 502s).
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 768Mi}
+---
+# why: stable in-cluster address for the agent.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-agent
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    app: parasol-agent
+    workshop.redhat.com/module: m23
+spec:
+  selector:
+    app: parasol-agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: publishes the agent at parasol-agent-{user}-ai.{clusterDomain}. EDGE TLS (never plain oc expose)
+# so the browser/curl path is HTTPS and the host is deterministic (route name + ns + domain) — the
+# verify script and lab POST /agent/ask here. Host auto-assigned (no spec.host).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-agent
+  namespace: {{ include "m23.namespace" . }}
+  labels:
+    app: parasol-agent
+    workshop.redhat.com/module: m23
+spec:
+  to:
+    kind: Service
+    name: parasol-agent
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

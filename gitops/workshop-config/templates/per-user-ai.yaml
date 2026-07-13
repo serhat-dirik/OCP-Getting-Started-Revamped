@@ -1,0 +1,70 @@
+# Per-user AI namespaces ({user}-ai, M23) — owned by the workshop layer like
+# dev/stage/prod/cicd/batch/mesh/modernize, and for the same reason: the workshop-entries AppProject
+# deliberately blacklists ResourceQuota/LimitRange (quotas belong to the platform and must survive ws
+# reset), so an entry chart CANNOT create them. The m23 entry chart owns only in-namespace state (marker,
+# MaaS credentials, the two MCP servers + parasol-agent); everything here survives ws reset. This is
+# where the attendee deploys/inspects the agent world, so the quota is sized for three small JVM services.
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $user }}-ai
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+---
+# The attendee is admin on their own AI namespace (same as the standard four dev/stage/prod/cicd).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-admin
+  namespace: {{ $user }}-ai
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+---
+# Modest quota so a runaway agent world can't consume the cluster; generous relative to the M23 workload
+# (two MCP servers + parasol-agent, all small JVM services; the later Llama-Stack/vector-db phase sizes
+# its own footprint separately).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-ai
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "5"
+    pods: "50"
+---
+# Default container requests/limits so bare pods get sane values and don't trip quota.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-ai
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 1Gi
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+{{- end }}
