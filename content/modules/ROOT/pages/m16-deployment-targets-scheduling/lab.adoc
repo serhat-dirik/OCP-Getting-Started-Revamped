@@ -1,0 +1,767 @@
+= Deployment Targets & Scheduling: Lab
+:module-id: m16
+include::partial$version-attributes.adoc[]
+
+// Lab page for M16. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes) and every later block
+// uses $NS with NO subs so jsonpath braces stay literal. All commands + outputs + timings were
+// performed on OCP {ocp_version} (Kubernetes 1.34) as user2 on 2026-07-13: the FailedScheduling events,
+// the anti-affinity spread, the batch-pool break-and-fix, the maxUnavailable=0 capacity samples, the
+// PDB eviction 429, the DaemonSet inventory, and the hollow MachineSet are real captures. NODE NAMES in
+// output are scrubbed to generic worker-N / control-plane-N (they differ per cluster). Console
+// click-paths are grounded against the unified console (OCP 4.19+, no perspective switch); labels a
+// build couldn't click get [CAPTURE-VERIFY] + the authoritative CLI.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcut you'll reuse throughout the lab — your app namespace:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "app namespace: $NS"
+----
+
+You are the platform engineer for Parasol's *claims* application.
+It runs in `{user}-dev`: `parasol-web` (front end), `parasol-claims` (the API, 2 replicas), `claims-db` (Postgres), a `statement-batch` worker that churns monthly statements, and a `claims-load` generator driving steady traffic at the API.
+Right now *nothing* about where these pods run is under your control — the scheduler dropped them wherever they fit.
+In this lab you take that control: spread the API across nodes so one failure can't sink it, pin the batch worker onto a *dedicated pool*, make a rollout *zero-downtime*, and protect the service with a disruption budget.
+
+[TIP]
+.Two ways for most steps; a few are terminal-only
+====
+Most steps are offered two ways: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), the *CLI* tab uses `oc` in the *Terminal* tab beside these instructions.
+Pick a path once — the tabs stay in sync across the page.
+A few steps are *terminal-only* because the console adds nothing: the scheduler-event reads, the rollout measurements, and the eviction probes are quickest in the terminal.
+Keep the terminal open regardless — the `$NS` shortcut you just set lives there.
+Node names in the output below (`worker-2`, `control-plane-1`, …) are illustrative; *your* cluster's nodes are named differently — read the *shape*, not the exact names.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 10-minute presenter arc: dedicated pool + zero-downtime roll
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Dedicated nodes and a zero-downtime roll in ten minutes (10 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws start m16 --user {user}` a few minutes ahead, and set `NS={user}-dev` in your terminal.
+This demo runs from the *entry* state (default scheduling, batch worker unpinned), *not* from `ws solve`.
+The money moment is beat 1 — the batch pod stuck *Pending* on an untolerated taint, then *snapping* onto the batch node the instant you add the toleration.
+Keep the terminal font large and `oc get pods -o wide` handy; node placement is the whole visual.
+====
+
+[demo-block]
+[TIME 3m]
+Say:: "Parasol's monthly-statement *batch* job is running on the same nodes as the live claims API — fighting it for CPU. We have a *dedicated* pool of nodes for batch work. Watch me move it there — and watch it refuse, first, for a reason worth understanding."
+Show:: `statement-batch` on a general node; the batch pool node (labelled + tainted); then the pod going *Pending* on `nodeSelector` alone, and *scheduling* once the toleration is added.
+Do:: Pin the batch worker onto its pool:
++
+[source,sh,role=execute]
+----
+NS=user2-dev
+oc get pods -n $NS -l app=statement-batch -o wide
+oc get nodes -l workshop.redhat.com/pool=batch
+# nodeSelector ALONE — the pod is attracted but not permitted (the taint blocks it)
+oc patch deploy statement-batch -n $NS --type=merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"workshop.redhat.com/pool":"batch"}}}}}'
+sleep 10
+oc get pods -n $NS -l app=statement-batch
+oc get events -n $NS --field-selector reason=FailedScheduling | tail -1
+----
++
+"'Untolerated taint' — the selector *sent* it to the batch node, but the node *repels* it. A selector attracts; it doesn't permit."
+
+[demo-block]
+[TIME 2m]
+Say:: "One toleration — 'this pod is allowed on the batch node' — and it snaps into place. Selector to *send* it, toleration to *permit* it. You need both."
+Show:: The toleration added; the pod now *Running* on the batch pool node.
+Do:: Add the toleration and confirm the pin:
++
+[source,sh,role=execute]
+----
+oc patch deploy statement-batch -n $NS --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"workshop.redhat.com/pool","operator":"Equal","value":"batch","effect":"NoSchedule"}]}}}}'
+oc rollout status deploy/statement-batch -n $NS --timeout=60s
+oc get pods -n $NS -l app=statement-batch -o wide
+----
++
+"On its own nodes now — the API never has to share a CPU with a statement run again."
+
+[demo-block]
+[TIME 3m]
+Say:: "Now the claims API. I'm going to redeploy it *under live traffic* and the load generator will not lose a request — because `maxUnavailable: 0` surges a new pod before it retires an old one. Capacity never dips."
+Show:: The hardened strategy applied; `availableReplicas` holding flat at 3 through a rollout restart while the load generator keeps a clean tally.
+Do:: Roll under load with capacity held:
++
+[source,sh,role=execute]
+----
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"terminationGracePeriodSeconds":45,"containers":[{"name":"parasol-claims","lifecycle":{"preStop":{"exec":{"command":["/bin/sh","-c","sleep 10"]}}}}]}}}}'
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+oc rollout restart deploy/parasol-claims -n $NS
+for i in $(seq 1 10); do oc get deploy parasol-claims -n $NS -o jsonpath='available={.status.availableReplicas}/{.spec.replicas}{"\n"}'; sleep 4; done
+----
++
+"`available=3/3` the whole way through — a mid-day redeploy the customers never felt."
+
+[demo-block]
+[TIME 2m]
+Say:: "Last piece: protect it during a *drain*. A disruption budget says 'never take me below one healthy pod.' An admin draining nodes has to *wait its turn* instead of evicting my last replica."
+Show:: The PDB created; an eviction *allowed*, then — with the budget exhausted — *denied* with the exact message a node drain hits.
+Do:: Show the budget in force:
++
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: parasol-claims}
+spec: {minAvailable: 1, selector: {matchLabels: {app: parasol-claims}}}
+EOF
+oc get pdb parasol-claims -n $NS
+POD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":3}}'
+sleep 3
+echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - || true
+oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
+----
++
+"'Cannot evict pod as it would violate the pod's disruption budget' — that's a node patch politely waiting instead of taking the service down."
+
+[NOTE]
+.Reset between runs
+====
+`ws prep m16 --yes` returns the world to the entry state — default scheduling, the batch worker unpinned, no PDB.
+Run it before a second demo so beat 1 lands clean.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. See where pods land — and why
+⏱ *~8 min* · read placement, requests, and the scheduler's own decision
+
+Start by seeing what the scheduler did *for* you, with no input from you.
+`-o wide` adds the *node* each pod landed on:
+
+// [CAPTURE-VERIFY] Workloads → Pods with the Node column shown, project {user}-dev (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Workloads* → *Pods*.
+The list shows each pod's *Node* — note that the two `parasol-claims` pods, `parasol-web`, and `statement-batch` are scattered across whatever nodes had room.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get pods -n $NS -o wide
+----
+--
+====
+
+.Expected output (your node names differ; the scatter is the point)
+[source,texinfo]
+----
+NAME                              READY   STATUS    NODE              NOMINATED NODE
+claims-db-8976f6bdb-wkh4r         1/1     Running   worker-3          <none>
+claims-load-6dd4499cbd-qj2px      1/1     Running   worker-2          <none>
+parasol-claims-74b5d4fb86-4cl9x   1/1     Running   worker-2          <none>
+parasol-claims-74b5d4fb86-q7gnw   1/1     Running   control-plane-1   <none>
+parasol-web-bf7d5f795-f7r4z       1/1     Running   control-plane-2   <none>
+statement-batch-db8794f7c-88cvm   1/1     Running   worker-2          <none>
+----
+
+The scheduler placed each pod by its *resource requests* — the CPU and memory it reserves.
+Look at what `parasol-claims` asks for, and the *Quality of Service* class that follows from it:
+
+[source,sh,role=execute]
+----
+oc get deploy parasol-claims -n $NS -o jsonpath='requests={.spec.template.spec.containers[0].resources.requests} limits={.spec.template.spec.containers[0].resources.limits}{"\n"}'
+oc get pods -n $NS -l app=parasol-claims -o jsonpath='{range .items[*]}{.metadata.name}{"  qos="}{.status.qosClass}{"\n"}{end}'
+----
+
+.Expected output
+[source,texinfo]
+----
+requests={"cpu":"200m","memory":"256Mi"} limits={"cpu":"500m","memory":"512Mi"}
+parasol-claims-74b5d4fb86-4cl9x  qos=Burstable
+parasol-claims-74b5d4fb86-q7gnw  qos=Burstable
+----
+
+Requests below limits makes this pod *Burstable* — it's guaranteed its 200m/256Mi and may burst toward the limit if a node has spare.
+The scheduler placed it against that *200m*, not against what it actually uses.
+
+Now read the scheduler's *own account* of one placement — every pod carries a `Scheduled` event that names the node it chose:
+
+[source,sh,role=execute]
+----
+POD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc get events -n $NS --field-selector involvedObject.name=$POD,reason=Scheduled -o custom-columns='REASON:.reason,MESSAGE:.message'
+----
+
+.Expected output
+[source,texinfo]
+----
+REASON      MESSAGE
+Scheduled   Successfully assigned user2-dev/parasol-claims-74b5d4fb86-4cl9x to worker-2
+----
+
+One node in the cluster is deliberately *held back* from ordinary pods — a *taint*.
+This is the dedicated *batch pool* you'll use later; peek at it now so you know it's there:
+
+[source,sh,role=execute]
+----
+oc get nodes -l workshop.redhat.com/pool=batch -o name
+oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath='{.items[0].spec.taints}{"\n"}'
+----
+
+.Expected output
+[source,texinfo]
+----
+node/worker-1
+[{"effect":"NoSchedule","key":"workshop.redhat.com/pool","value":"batch"}]
+----
+
+`NoSchedule` means "no pod lands here unless it explicitly tolerates `workshop.redhat.com/pool=batch`."
+That's *why* none of your app's pods are on `worker-1` — none of them tolerate it.
+
+[.checkpoint]
+****
+✔ *Verify:* You saw the six pods scattered across nodes (`-o wide`), confirmed `parasol-claims` is scheduled against its *requests* (200m/256Mi → `Burstable`), read a `Scheduled` event naming the chosen node, and found the *batch pool* node held back by a `NoSchedule` taint.
+****
+
+== 2. Direct the API with pod anti-affinity
+⏱ *~14 min* · force the replicas apart, read a scheduler refusal, watch a reschedule
+
+Your two `parasol-claims` replicas *happen* to be on different nodes — but that's the scheduler's *soft preference*, not a guarantee.
+On a busy cluster both could land on one node, and one node failure would take the whole API down.
+Turn "prefers apart" into *required* apart with `podAntiAffinity` on `kubernetes.io/hostname` (no two claims pods on the same node):
+
+// [CAPTURE-VERIFY] Workloads → Deployments → parasol-claims → Actions → Edit Deployment (YAML) exposes spec.template.spec.affinity (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit Deployment* (YAML).
+Under `spec.template.spec`, add an `affinity.podAntiAffinity` with a `requiredDuringSchedulingIgnoredDuringExecution` rule matching `app: parasol-claims` on `topologyKey: kubernetes.io/hostname`, then *Save* — the same object the CLI tab patches.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spec":{"affinity":{"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"labelSelector":{"matchLabels":{"app":"parasol-claims"}},"topologyKey":"kubernetes.io/hostname"}]}}}}}}'
+oc rollout status deploy/parasol-claims -n $NS --timeout=90s
+----
+--
+====
+
+.Expected output (the roll takes ~40 s — anti-affinity makes it deliberate)
+[source,texinfo]
+----
+deployment.apps/parasol-claims patched
+Waiting for deployment "parasol-claims" rollout to finish: 1 out of 2 new replicas have been updated...
+deployment "parasol-claims" successfully rolled out
+----
+
+Confirm the replicas are now on *distinct* nodes — guaranteed, not lucky:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l app=parasol-claims -o wide
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME                              READY   STATUS    NODE
+parasol-claims-585785cf56-464cj   1/1     Running   control-plane-3
+parasol-claims-585785cf56-5jwzr   1/1     Running   control-plane-2
+----
+
+Now *kill* one pod and watch the scheduler honour the rule again — the replacement lands on a node that has *no* other claims pod:
+
+[source,sh,role=execute]
+----
+VICTIM=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc delete pod $VICTIM -n $NS
+sleep 12
+oc get pods -n $NS -l app=parasol-claims -o wide
+----
+
+.Expected output (a fresh pod, still on a distinct node)
+[source,texinfo]
+----
+pod "parasol-claims-585785cf56-464cj" deleted
+NAME                              READY   STATUS    NODE
+parasol-claims-585785cf56-5jwzr   1/1     Running   control-plane-2
+parasol-claims-789ff476b-jkb6t    1/1     Running   worker-3
+----
+
+Finally, see what happens when the scheduler *can't* satisfy the rule.
+Ask for *more* replicas than there are eligible nodes (the batch node is tainted off, so only the rest are available), and one pod has nowhere to go:
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims -n $NS --replicas=6
+sleep 12
+oc get pods -n $NS -l app=parasol-claims -o wide | grep -E 'NAME|Pending|Running' | head -8
+----
+
+.Expected output (one pod stuck `Pending`)
+[source,texinfo]
+----
+NAME                              READY   STATUS    NODE
+parasol-claims-585785cf56-hhcs9   0/1     Pending   <none>
+parasol-claims-585785cf56-prjvp   1/1     Running   control-plane-1
+parasol-claims-585785cf56-5jwzr   1/1     Running   control-plane-2
+parasol-claims-585785cf56-464cj   1/1     Running   control-plane-3
+parasol-claims-585785cf56-cj784   1/1     Running   worker-2
+parasol-claims-585785cf56-bhjcd   1/1     Running   worker-3
+----
+
+The scheduler tells you *exactly* why — read its refusal:
+
+[source,sh,role=execute]
+----
+oc get events -n $NS --field-selector reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tail -1
+----
+
+.Expected output
+[source,texinfo]
+----
+0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match pod anti-affinity rules. ...
+----
+
+Six nodes, none available: *one* is the tainted batch node, and the other *five* already hold a claims pod, so the anti-affinity rule rejects them.
+That single line is the answer to almost every "why is my pod Pending?" — always read it first.
+Scale back to three (a good spread, room for the disruption budget later):
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims -n $NS --replicas=3
+oc rollout status deploy/parasol-claims -n $NS --timeout=90s
+----
+
+[.checkpoint]
+****
+✔ *Verify:* Required `podAntiAffinity` put the replicas on *distinct* nodes; deleting one rescheduled it onto another distinct node; scaling past the available-node count left a pod `Pending` with a `FailedScheduling` event reading *"untolerated taint … didn't match pod anti-affinity rules"*; and you scaled back to three.
+****
+
+== 3. Spread evenly with topology spread constraints
+⏱ *~8 min* · even distribution across a domain — nodes, and (the knob) zones
+
+Anti-affinity says "never two on a node." `topologySpreadConstraints` says the stronger thing — "keep them *evenly* spread across a domain."
+Add one on `kubernetes.io/hostname`, `maxSkew: 1`, `ScheduleAnyway` (a strong preference that never blocks a deploy):
+
+[source,sh,role=execute]
+----
+oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app":"parasol-claims"}}}]}}}}'
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+oc get pods -n $NS -l app=parasol-claims -o wide
+----
+
+.Expected output (three replicas, three distinct nodes)
+[source,texinfo]
+----
+deployment "parasol-claims" successfully rolled out
+NAME                             READY   STATUS    NODE
+parasol-claims-...-drrr4         1/1     Running   control-plane-2
+parasol-claims-...-pfnj6         1/1     Running   control-plane-1
+parasol-claims-...-xrcc7         1/1     Running   control-plane-3
+----
+
+The topology key is a *knob*.
+Point it at a *zone* label instead of the hostname, and the same constraint spreads your replicas across *failure zones* — one per zone:
+
+[source,sh,role=execute]
+----
+oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"workshop.redhat.com/zone","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app":"parasol-claims"}}}]}}}}'
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+oc get pods -n $NS -l app=parasol-claims --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | while read n; do echo "$n zone=$(oc get node $n -o jsonpath='{.metadata.labels.workshop\.redhat\.com/zone}')"; done
+----
+
+.Expected output (one replica per zone)
+[source,texinfo]
+----
+control-plane-2 zone=b
+control-plane-1 zone=a
+control-plane-3 zone=c
+----
+
+[NOTE]
+.These zones are synthetic — real ones ride the provider
+====
+This bare-metal cluster has no real failure zones, so the workshop *synthesized* `workshop.redhat.com/zone={a,b,c}` on the nodes to make the spread visible.
+On a cloud cluster you'd point `topologyKey` at the provider's real `topology.kubernetes.io/zone` and the same one-per-zone spread would protect you from a whole *zone* outage.
+The `kubernetes.io/hostname` spread, by contrast, is *always* true — every node carries that label on every cluster — so put the topology key back to hostname for the rest of the lab:
+====
+
+[source,sh,role=execute]
+----
+oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app":"parasol-claims"}}}]}}}}'
+----
+
+[.checkpoint]
+****
+✔ *Verify:* A `topologySpreadConstraints` on `kubernetes.io/hostname` spread the three replicas evenly across nodes; flipping the topology key to `workshop.redhat.com/zone` spread them one-per-zone (synthetic here, real on a cloud); and you set the key back to hostname.
+****
+
+== 4. Reserve a dedicated pool for the batch worker
+⏱ *~12 min* · the break-and-fix: a selector attracts, but a toleration is what permits
+
+The `statement-batch` worker churns monthly statements and shouldn't compete with the live API for CPU.
+You have a *dedicated pool* — the tainted `worker-1` from exercise 1 — and now you'll pin the batch worker onto it.
+It's on a general node today:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l app=statement-batch -o wide
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME                              READY   STATUS    NODE
+statement-batch-db8794f7c-88cvm   1/1     Running   worker-2
+----
+
+The instinct is "add a `nodeSelector` for the pool label and I'm done."
+Do exactly that — *only* the selector — and watch it *fail*, on purpose:
+
+[source,sh,role=execute]
+----
+oc patch deploy statement-batch -n $NS --type=merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"workshop.redhat.com/pool":"batch"}}}}}'
+sleep 10
+oc get pods -n $NS -l app=statement-batch
+----
+
+.Expected output (the new pod is stuck `Pending`)
+[source,texinfo]
+----
+deployment.apps/statement-batch patched
+NAME                               READY   STATUS    NODE
+statement-batch-64b4659bdf-2l2tp   0/1     Pending   <none>
+statement-batch-db8794f7c-88cvm    1/1     Running   worker-2
+----
+
+Read the refusal — it names *both* halves of the problem:
+
+[source,sh,role=execute]
+----
+BATCHPOD=$(oc get pods -n $NS -l app=statement-batch --field-selector=status.phase=Pending -o jsonpath='{.items[0].metadata.name}')
+oc get events -n $NS --field-selector involvedObject.name=$BATCHPOD,reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tail -1
+----
+
+.Expected output
+[source,texinfo]
+----
+0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match Pod's node affinity/selector. ...
+----
+
+Read it carefully — this is the whole lesson.
+The *one* node your selector points at (the batch pool) has an *untolerated taint* — the selector *sent* the pod there, but the node *repels* it.
+The other *five* don't match the selector at all.
+So the pod has nowhere to go.
+
+The fix is the *toleration* — the pod's permission slip for the tainted node.
+Add it, and the selector and toleration together do the job:
+
+// [CAPTURE-VERIFY] Workloads → Deployments → statement-batch → Actions → Edit Deployment (YAML) exposes spec.template.spec.tolerations (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Workloads* → *Deployments* → `statement-batch` → *Actions* → *Edit Deployment* (YAML).
+Under `spec.template.spec`, add a `tolerations` entry for key `workshop.redhat.com/pool`, value `batch`, effect `NoSchedule` (the `nodeSelector` is already there), then *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc patch deploy statement-batch -n $NS --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"workshop.redhat.com/pool","operator":"Equal","value":"batch","effect":"NoSchedule"}]}}}}'
+oc rollout status deploy/statement-batch -n $NS --timeout=60s
+----
+--
+====
+
+Confirm it landed on the batch pool node — and that the node it landed on really is the tainted one:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l app=statement-batch -o wide
+BN=$(oc get pods -n $NS -l app=statement-batch --field-selector=status.phase=Running -o jsonpath='{.items[0].spec.nodeName}')
+echo "landed on: $BN  pool-label=$(oc get node $BN -o jsonpath='{.metadata.labels.workshop\.redhat\.com/pool}')"
+----
+
+.Expected output
+[source,texinfo]
+----
+NAME                               READY   STATUS    NODE
+statement-batch-667dc64bc7-zcjxm   1/1     Running   worker-1
+landed on: worker-1  pool-label=batch
+----
+
+There it is: *selector to send it, toleration to permit it — you need both.*
+A toleration without a selector would *allow* the batch node but not *choose* it; a selector without a toleration is exactly the `Pending` you just fixed.
+
+[.checkpoint]
+****
+✔ *Verify:* The `nodeSelector` alone left `statement-batch` `Pending` with an *"untolerated taint … didn't match node selector"* event; adding the matching *toleration* let it schedule *onto the dedicated batch pool node* (`worker-1`, `pool=batch`). Selector attracts, toleration permits — both required.
+****
+
+== 5. Make the rollout zero-downtime
+⏱ *~15 min* · measure a default roll, hold capacity flat, and protect it with a PDB
+
+A rollout replaces every API pod. Done carelessly it drops requests; done right a customer never notices.
+First, *measure* a default roll. This one-shot block drives a fast probe at the API from the load generator while a rollout runs, and tallies any request that isn't a clean `2xx`:
+
+[source,sh,role=execute]
+----
+( oc exec deploy/claims-load -n $NS -- bash -c '
+ok=0; bad=0; SECONDS=0
+while [ $SECONDS -lt 55 ]; do
+  c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 http://parasol-claims:8080/api/claims 2>/dev/null || echo 000)
+  [ "${c:0:1}" = "2" ] && ok=$((ok+1)) || bad=$((bad+1))
+  sleep 0.05
+done
+echo "default roll: ok=$ok dropped=$bad"' ) &
+sleep 6
+oc rollout restart deploy/parasol-claims -n $NS >/dev/null
+wait
+----
+
+.Expected output (your exact counts vary — the point is `dropped` is *not zero*)
+[source,texinfo]
+----
+default roll: ok=260 dropped=2
+----
+
+A couple of dropped requests, every deploy.
+Now harden the Deployment. `maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one; a `preStop` sleep holds the pod briefly so it's pulled from the Service *before* it stops; and a generous `terminationGracePeriodSeconds` covers the drain:
+
+// [CAPTURE-VERIFY] Workloads → Deployments → parasol-claims → Actions → Edit Deployment (YAML) exposes spec.strategy + spec.template.spec.containers[].lifecycle (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit Deployment* (YAML).
+Set `spec.strategy.rollingUpdate` to `maxSurge: 1`, `maxUnavailable: 0`; add `spec.template.spec.terminationGracePeriodSeconds: 45`; and add a `lifecycle.preStop.exec.command` of `["/bin/sh","-c","sleep 10"]` to the `parasol-claims` container, then *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"terminationGracePeriodSeconds":45,"containers":[{"name":"parasol-claims","lifecycle":{"preStop":{"exec":{"command":["/bin/sh","-c","sleep 10"]}}}}]}}}}'
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+----
+--
+====
+
+[IMPORTANT]
+.Use a *strategic* patch for the container change
+====
+`--type=merge` (JSON merge) *replaces* the whole `containers` list, which drops the image and fails with `spec.containers[0].image: Required value`.
+`--type=strategic` understands the container `name` as a merge key, so it edits *into* the existing container.
+Reach for strategic merge whenever you patch a single field inside a named list element.
+====
+
+Now prove the load-bearing win: during a rollout, the number of *available* (ready) replicas never dips below your desired count.
+Trigger a roll and sample it:
+
+[source,sh,role=execute]
+----
+oc rollout restart deploy/parasol-claims -n $NS
+for i in $(seq 1 18); do
+  oc get deploy parasol-claims -n $NS -o jsonpath='available={.status.availableReplicas}/{.spec.replicas}{"\n"}'
+  sleep 4
+done | sort | uniq -c
+----
+
+.Expected output (every sample shows full capacity — `maxUnavailable: 0` holds the floor)
+[source,texinfo]
+----
+  18 available=3/3
+----
+
+Capacity never dropped below 3 — the Deployment surged a replacement to `Ready` *before* retiring each old pod.
+
+[NOTE]
+.The last few drops are the application's job
+====
+`maxUnavailable: 0` guarantees *capacity*; the `preStop` hook narrows the *connection-reset* window by draining the endpoint before `SIGTERM`.
+But closing the *last* dropped requests needs the *app* to handle `SIGTERM` gracefully — fail readiness, finish in-flight requests, then exit (for Quarkus, `quarkus.shutdown.timeout`).
+The `parasol-claims` image doesn't yet do that half, so a tight probe can still catch an occasional reset during a roll — the honest boundary between what the *Deployment* controls and what the *developer* must add.
+True zero-downtime is a *two-sided* recipe.
+====
+
+Finally, protect the service during *voluntary* disruptions (node drains, upgrades) with a *PodDisruptionBudget* — "never below one healthy pod":
+
+// [CAPTURE-VERIFY] Workloads → PodDisruptionBudgets → Create shows ALLOWED DISRUPTIONS once created (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Workloads* → *PodDisruptionBudgets* → *Create PodDisruptionBudget* → *YAML view*, paste the manifest from the *CLI* tab, and *Create*.
+The list shows *ALLOWED DISRUPTIONS* — with 3 healthy pods and `minAvailable: 1`, that's *2*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: parasol-claims
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+EOF
+sleep 3
+oc get pdb parasol-claims -n $NS
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+NAME             MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+parasol-claims   1               N/A               2                     3s
+----
+
+`ALLOWED DISRUPTIONS: 2` — 3 healthy minus the 1 you must keep.
+The eviction API that `oc adm drain` uses checks this budget. Prove it: *exhaust* the budget (tighten `minAvailable` to 3, so *zero* disruptions are allowed) and try to evict a pod — the API *refuses*, with the exact message a node drain hits:
+
+[source,sh,role=execute]
+----
+oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":3}}'
+sleep 3
+POD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - || true
+# restore the sensible budget
+oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
+----
+
+.Expected output
+[source,texinfo]
+----
+poddisruptionbudget.policy/parasol-claims patched
+Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+poddisruptionbudget.policy/parasol-claims patched
+----
+
+That refusal is exactly what makes a node drain *wait its turn* instead of taking your last replica.
+Back at `minAvailable: 1`, a drain can evict one claims pod (the reschedule respects your anti-affinity), then the next — one at a time, service up throughout.
+
+[.checkpoint]
+****
+✔ *Verify:* A default roll dropped a non-zero request count; `maxUnavailable: 0` held *available replicas flat at 3* through a rollout (18/18 samples); and a `PodDisruptionBudget` reported `ALLOWED DISRUPTIONS: 2`, then *blocked* an eviction with *"Cannot evict pod as it would violate the pod's disruption budget"* once the budget was exhausted.
+****
+
+== 6. Read how the platform shapes the cluster (instructor demo)
+⏱ *~8 min* · watch — the node agents, native sidecars, and the pools you targeted
+
+The pools and node agents you've been working around are *built* with the same primitives you just used.
+Read them live (the `platform-observer` role grants you cluster-wide *read*).
+First, the *DaemonSets* — the "one pod per node" agents that are the cluster's own plumbing:
+
+[source,sh,role=execute]
+----
+oc get ds -A | awk 'NR==1 || $4>=6' | head -8
+----
+
+.Expected output (each runs on every node — `DESIRED = 6`)
+[source,texinfo]
+----
+NAMESPACE                                NAME                    DESIRED   CURRENT   READY   NODE SELECTOR
+openshift-cluster-node-tuning-operator   tuned                   6         6         6       kubernetes.io/os=linux
+openshift-dns                            node-resolver           6         6         6       kubernetes.io/os=linux
+openshift-machine-config-operator        machine-config-daemon   6         6         6       kubernetes.io/os=linux
+openshift-monitoring                     node-exporter           6         6         6       kubernetes.io/os=linux
+openshift-multus                         multus                  6         6         6       kubernetes.io/os=linux
+openshift-ovn-kubernetes                 ovnkube-node            6         6         6       kubernetes.io/os=linux
+----
+
+The CNI (`ovnkube-node`), the monitoring agent (`node-exporter`), the machine-config daemon — all DaemonSets, one on every node.
+Some target only a *subset* of nodes using the very `nodeSelector` + `tolerations` you learned — a control-plane-only agent, for instance:
+
+[source,sh,role=execute]
+----
+oc get ds -n openshift-machine-config-operator machine-config-server -o jsonpath='desired={.status.desiredNumberScheduled} nodeSelector={.spec.template.spec.nodeSelector}{"\n"}'
+----
+
+.Expected output (three — it targets only the control-plane nodes)
+[source,texinfo]
+----
+desired=3 nodeSelector={"node-role.kubernetes.io/master":""}
+----
+
+That agent runs only on the three control-plane nodes — the label in its selector is the legacy control-plane role label the platform still sets.
+Finally, the *MachineSets* — how a platform team *creates* the pools you targeted (scale a MachineSet, label + taint its nodes):
+
+[source,sh,role=execute]
+----
+oc get machineset -A
+oc get machineautoscaler,clusterautoscaler -A 2>&1 | head -2
+----
+
+.Expected output (a placeholder here — bare metal; on a cloud it would have replicas you scale)
+[source,texinfo]
+----
+NAMESPACE               NAME                           DESIRED   CURRENT   READY   AVAILABLE   AGE
+openshift-machine-api   cluster-...-worker-0           0         0                             4d
+No resources found
+----
+
+On a cloud cluster that MachineSet would carry the replica count a platform team scales to grow a pool, with a *MachineAutoscaler* sizing it to demand.
+Here it's a stub — the nodes are bare metal — but the *shape* is the same: this is the object platform teams edit to create the batch and GPU pools your workloads pin onto.
+
+:demo-title: Taint a pool live, and drain a node through a PDB
+:demo-body: Your instructor labels + taints a node into a pool with `oc adm taint`, then drains a node and shows the PodDisruptionBudget forcing the eviction to wait — the cluster-wide operations you just read the results of.
+include::partial$instructor-demo.adoc[]
+
+Your instructor demonstrates the two *cluster-wide* operations you only read above (they affect every tenant, so they're not hands-on):
+
+. *Creating a pool.* `oc label node <worker> workshop.redhat.com/pool=batch` + `oc adm taint node <worker> workshop.redhat.com/pool=batch:NoSchedule` — exactly how *your* batch pool was made.
+. *Draining through a PDB.* `oc adm drain <node> --ignore-daemonsets --delete-emptydir-data` on a node hosting a claims pod — the drain evicts it (your PDB allows one), it reschedules on a distinct node (anti-affinity), and if the budget were exhausted the drain would *wait*, printing the same *"Cannot evict pod"* message you saw.
+
+You'll find the exact commands and expected output in this module's instructor guide.
+
+[.checkpoint]
+****
+✔ *Verify (observed):* You read the platform's own `DaemonSet` node agents (`DESIRED = 6`, one per node), saw a control-plane-only DaemonSet target a node subset with a `nodeSelector`, and inspected the `MachineSet` that platform teams scale to build the pools your workloads target.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the mechanics.
+Try these on your own:
+
+* *Guarantee a QoS class.* Edit `parasol-web` so its requests *equal* its limits, roll it, and confirm its pod reports `qosClass: Guaranteed` (`oc get pod -o jsonpath='{.status.qosClass}'`). Explain why `Guaranteed` pods are the *last* to be evicted under node memory pressure.
+* *Make the spread a hard rule.* Change the `parasol-claims` `topologySpreadConstraints` `whenUnsatisfiable` from `ScheduleAnyway` to `DoNotSchedule`, scale to 6, and predict-then-verify which pods go `Pending` and what the event says. Then reason about why `DoNotSchedule` can *block a deploy* where `ScheduleAnyway` wouldn't.
+* *Deadlock a drain on purpose.* Set the PDB `minAvailable` equal to the replica count, and explain (from the eviction behaviour you saw) why a node drain would now hang forever. What `minAvailable` keeps the service up *and* lets maintenance proceed?
+
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (default scheduling, batch worker unpinned, no PDB).
+
+endif::demo[]

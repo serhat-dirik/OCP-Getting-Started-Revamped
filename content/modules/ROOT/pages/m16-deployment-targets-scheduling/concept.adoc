@@ -1,0 +1,187 @@
+= Deployment Targets & Scheduling: Concept
+:module-id: m16
+include::partial$version-attributes.adoc[]
+
+// Concept page for M16. Renders in all three flavors (workshop/demo/instructor). Environment
+// values appear ONLY as attributes; product versions ONLY via version-attributes. Every scheduling
+// behaviour described here was performed on OCP {ocp_version} (Kubernetes 1.34) as user2 on
+// 2026-07-13 — the FailedScheduling events, the anti-affinity spread, the batch-pool pin, the
+// maxUnavailable=0 capacity guarantee, the PDB eviction block, the DaemonSet inventory, and the
+// hollow MachineSet are real captures, not from memory. Scheduling is core Kubernetes, so nothing
+// new lands in versions.yaml; native sidecar containers are GA on OCP {ocp_version} and are
+// described as GA, not by number. Prose says "control plane" throughout; the legacy
+// node-role.kubernetes.io/master LABEL appears only inside captured CLI output (04-STYLE-GUIDE §5).
+
+[.lead]
+Parasol's claims API lands wherever the scheduler happens to drop it, a monthly-statement *batch* job elbows the live API off the same CPUs, and a routine rollout quietly drops a handful of customer requests every time it runs.
+This module is how you take *control* of that: where each pod lands, how replicas spread so one dead node can't take the service with it, which workloads get *dedicated* capacity, and how a deploy finishes without a customer noticing.
+Same app, same cluster — but by the end the API is spread across the cluster, the batch job runs on its own nodes, and a rollout keeps serving throughout.
+
+== What you'll learn
+
+* How the *scheduler* actually places a pod — *filter* then *score* — and why *resource requests*, not usage, are the currency it spends.
+* How to *direct* pods with `nodeSelector`, node/pod *affinity*, and *anti-affinity*, and the one distinction that trips everyone: *affinity attracts, a taint repels* — and a toleration only *permits*.
+* How to *spread* replicas across failure domains with `topologySpreadConstraints`, and read the `FailedScheduling` event when the scheduler can't.
+* How to reserve a *dedicated pool* (batch, GPU, licensed software) with a *taint + toleration + nodeSelector*, and why you need all three.
+* How to make a rollout *zero-downtime* — the `RollingUpdate` knobs, the *graceful-shutdown* half the Deployment can't do alone, and a *PodDisruptionBudget* that a drain must respect.
+
+== The scheduler in one mental model
+
+You do not need the scheduler's internals.
+You need one two-step pipeline, and it runs for *every* pod:
+
+[mermaid]
+....
+graph LR
+  pod["Pending pod<br/>(requests: cpu/mem,<br/>tolerations, selectors)"]
+  subgraph sched["kube-scheduler"]
+    filter["1 · FILTER<br/>which nodes CAN run it?<br/>enough free requests · taints tolerated ·<br/>nodeSelector/affinity match"]
+    score["2 · SCORE<br/>which survivor is BEST?<br/>most room · best spread ·<br/>anti-affinity honoured"]
+  end
+  bind["BIND to the winning node"]
+  fail["no node survives →<br/>Pending + FailedScheduling event"]
+  pod --> filter --> score --> bind
+  filter -. "0 survive" .-> fail
+  classDef p fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef s fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef b fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef f fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class pod p; class filter,score s; class bind b; class fail f;
+....
+
+// media-pass: replace/augment with SVG export m16-deployment-targets-scheduling-01-scheduler-pipeline.svg (see media-manifest.md)
+
+. *Filter* throws out every node that *cannot* run the pod: not enough unreserved CPU or memory (measured by the pod's *requests*), a taint the pod doesn't tolerate, a `nodeSelector` or affinity rule that doesn't match.
+. *Score* ranks the survivors — most free room, best spread, anti-affinity satisfied — and the scheduler *binds* the pod to the winner.
+. If *no* node survives the filter, the pod stays *Pending* and the scheduler writes a `FailedScheduling` event that names the reason, node by node. Reading that event is the whole skill.
+
+The currency in the filter is *requests*, not usage and not limits.
+A pod that *requests* 200m CPU is placed as if it will always use 200m, even while idle; a pod that requests *nothing* can be packed onto a node that is already at its limit, because the scheduler thinks it costs nothing.
+Requests are also what set a pod's *Quality of Service* class — `Guaranteed` (requests == limits), `Burstable` (requests < limits), or `BestEffort` (none) — which decides who gets evicted first when a node runs out of memory.
+Get requests right and scheduling and eviction both behave; get them wrong and the scheduler is working from fiction.
+
+== Directing pods: who seeks, who repels
+
+There are two families of placement control, and confusing them is the most common scheduling mistake there is.
+
+[mermaid]
+....
+graph TB
+  subgraph seek["AFFINITY — the POD seeks (attract)"]
+    p1["pod: nodeSelector / nodeAffinity<br/>'put me on a node like this'"]
+    n1["node with matching label"]
+    p1 -->|"pulls toward"| n1
+  end
+  subgraph repel["TAINT — the NODE repels"]
+    n2["node: taint<br/>'keep pods off me'"]
+    p2["pod without toleration"]
+    p3["pod WITH toleration"]
+    n2 -.->|"pushes away"| p2
+    p3 -->|"tolerated → permitted<br/>(but not attracted)"| n2
+  end
+  classDef a fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef r fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class p1,n1 a; class n2,p2,p3 r;
+....
+
+// media-pass: replace/augment with SVG export m16-deployment-targets-scheduling-02-seek-vs-repel.svg (see media-manifest.md)
+
+*Affinity is the pod reaching toward a node.*
+`nodeSelector` is the blunt form — "only schedule me where the label `disktype=ssd` exists."
+`nodeAffinity` is the same idea with `required` (hard) and `preferred` (soft) rules.
+*`podAntiAffinity`* points at *other pods* instead of nodes — "never put two of me on the same node" — which is how you spread replicas so a single node failure can't take out the whole service.
+
+*A taint is the node pushing pods away.*
+`oc adm taint node worker-1 workload=batch:NoSchedule` says "no pod may land here unless it explicitly tolerates `workload=batch`." A matching *toleration* on a pod lifts that block — but here is the trap that catches everyone: a toleration only *permits*, it does not *attract*.
+A pod that tolerates the batch taint *may* land on the batch node, but the scheduler is just as happy to put it anywhere else.
+To actually *pin* a workload to a dedicated pool you need *both*: a *toleration* (so it's allowed on the tainted node) *and* a `nodeSelector` (so it's sent there). You will feel exactly this in the lab — add the selector alone and the pod goes *Pending*.
+
+== Spreading across failure domains
+
+Anti-affinity is a blunt "no two on one node." `topologySpreadConstraints` is the precise version: keep replicas *evenly* spread across a *domain*, where the domain is any node label — `kubernetes.io/hostname` (spread across nodes), a zone label (spread across failure zones), a region.
+
+* *`maxSkew`* is how uneven you'll tolerate: `maxSkew: 1` means no domain may hold more than one pod above the least-loaded domain.
+* *`whenUnsatisfiable`* is the teeth: `DoNotSchedule` makes the spread a hard requirement (a pod that would break it stays Pending); `ScheduleAnyway` makes it a strong preference (spread if you can, but never block a deploy).
+
+The honest note for this workshop: real *zones* need real failure domains, which a single bare-metal cluster does not have.
+Spreading across `kubernetes.io/hostname` is the *always-true* story — every node carries that label, on every cluster.
+Where you see a zone label in the lab, it was *synthesized* on the workshop nodes so you can watch a one-per-zone spread; on a cloud cluster the same constraint would ride the provider's real `topology.kubernetes.io/zone`.
+
+== Choosing a rollout strategy
+
+A Deployment doesn't just run pods — it *replaces* them, and *how* it replaces them is a design choice with a downtime consequence.
+
+[cols="1,3,2",options="header"]
+|===
+| Strategy | What it does | Reach for it when
+
+| `RollingUpdate` (default) | Brings up new pods and retires old ones gradually, tuned by `maxSurge` (how many *extra* during the roll) and `maxUnavailable` (how many *below* desired) | Almost always — a stateless replicated service. `maxUnavailable: 0` never dips below capacity.
+| `Recreate` | Kills *all* old pods, then starts new ones — a deliberate gap | A single-writer that must never run two copies at once (a database on one volume). Downtime is the *correct* trade.
+| Canary / blue-green | Shifts a *fraction* of traffic to a new version, then ramps — beyond what a Deployment strategy alone expresses | Progressive delivery — Argo Rollouts, cross-referenced in the GitOps at Scale module.
+|===
+
+`maxUnavailable: 0` is the load-bearing zero-downtime setting: the Deployment *surges* a new pod, waits for it to pass readiness, and only *then* retires an old one — so the number of *ready* pods never dips below what you asked for.
+You will watch this hold at a steady count throughout a roll in the lab.
+
+== The missing half of zero-downtime: graceful shutdown
+
+`maxUnavailable: 0` guarantees *capacity* — enough ready pods at all times.
+It does *not* guarantee that the pods being *retired* let go of their in-flight requests cleanly, and that's where a "zero-downtime" rollout still drops connections.
+
+When a pod is deleted, two things race: the endpoints controller pulls it out of the Service, and the kubelet sends it `SIGTERM`.
+If the process exits *instantly* on `SIGTERM` while the data plane still lists it for a moment, requests routed in that window get a reset.
+The fix is a *two-sided* recipe:
+
+* *The Deployment's half* (you set this): a `preStop` hook that sleeps a few seconds so the endpoint removal propagates *before* the process is told to stop, and a `terminationGracePeriodSeconds` long enough to cover the drain.
+* *The app's half* (the developer sets this): handle `SIGTERM` by *failing readiness first*, then *finishing in-flight requests* before exiting — for a Quarkus service, `quarkus.shutdown.timeout`.
+
+Miss either half and a rollout still leaks a few requests.
+In the lab you'll *measure* this: a default roll drops a couple of requests, `maxUnavailable: 0` holds capacity flat, and the `preStop`/grace hook narrows the window — while staying honest that closing the *last* drops is the application's job, not the Deployment's.
+
+[NOTE]
+.Native sidecar containers are GA
+====
+An *init container* with `restartPolicy: Always` doesn't run-and-exit like a normal init container — it starts first and *keeps running* alongside your app for the pod's whole life, then shuts down after the main containers finish.
+That's the *native sidecar* pattern (a service mesh proxy, a log shipper), and it is *GA* on OpenShift {ocp_version} — no feature gate, part of the stable `apps/v1` schema.
+You don't build one here; you just need to know the pattern exists and is supported when a mesh or agent asks for it.
+====
+
+== Protecting availability with a PodDisruptionBudget
+
+Nodes go down two ways.
+*Involuntary* — hardware dies, a kernel panics — and there's nothing to budget; the pod just reschedules.
+*Voluntary* — an admin drains a node to patch it, the cluster autoscaler compacts capacity, an upgrade rolls the fleet — and *these* you can put a floor under.
+
+A *PodDisruptionBudget* says "never let a *voluntary* disruption take me below `minAvailable` healthy pods."
+The eviction API that `oc adm drain` uses *checks the PDB first*: if evicting one more pod would breach the budget, the eviction is *denied* and the drain waits.
+That's what turns "drain three nodes at once" from an outage into an orderly, one-at-a-time reschedule.
+
+The subtlety to respect: `minAvailable` *equal to* the replica count leaves *zero* room, so a drain can never evict a single pod and *deadlocks* forever.
+For a 3-replica service, `minAvailable: 1` (or `2`) lets a drain proceed while keeping the service up — you'll see the eviction API allow, then *block*, exactly on that math.
+
+== How platform teams shape the cluster
+
+The pools you target don't appear by magic — a platform team *creates* them, and the same primitives you're learning are how.
+
+* *DaemonSets* run *one pod per node* — the node-agent pattern. The cluster's own plumbing is built this way: the CNI, the monitoring node-exporter, the machine-config daemon are all DaemonSets, one on every node. Some target only a *subset* of nodes using the very `nodeSelector` + `tolerations` you're learning — e.g. a control-plane-only agent.
+* *MachineSets* are the declarative "how many nodes of this shape" object. On a cloud a platform team scales a MachineSet to grow a pool, labels and taints those nodes, and lets a *MachineAutoscaler* size it to demand. That is how the batch pool you'll pin onto was made — labelled and tainted at cluster build.
+
+You'll *read* these live via the read-only `platform-observer` role; creating and tainting a pool is the instructor's segment, because it's cluster-wide.
+
+== How this shows up in real orgs
+
+* *"Why is our GPU node running a web server?"* is a real, expensive question. A node your finance team pays a premium for — a GPU box, a node licensed for a commercial database — earns its keep only if it runs *the* workload it was bought for and *nothing else*. A taint keeps the freeloaders off; a toleration + selector puts the right workload on. Without the pair, the premium node schedules whatever fits, and the workload it was for ends up somewhere generic.
+* *"The deploy dropped a few hundred requests again"* is tribal knowledge on a lot of teams, quietly accepted as the cost of shipping. It isn't: `maxUnavailable: 0` plus a graceful-shutdown recipe makes a mid-day rollout invisible to customers — and the teams that *haven't* done it usually don't know the drops are self-inflicted, not inherent.
+* *"The 2 a.m. node patch took the service down"* happens when an admin drains a node with no PDB in the way. The budget is a one-line insurance policy: the drain still happens, it just waits its turn instead of taking your last replica.
+* *"Both replicas were on the same node when it died."* Default scheduling *prefers* to spread, but doesn't *guarantee* it — and "prefers" is exactly the word you don't want in an incident review. Required anti-affinity turns a soft preference into a promise you can put in a design doc.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) the scheduler places by *requests* through a *filter → score* pipeline, and a `FailedScheduling` event tells you *exactly* why a pod won't fit; (2) *affinity attracts, a taint repels, a toleration only permits* — a dedicated pool needs a *taint + toleration + nodeSelector*, all three; (3) zero-downtime is *two-sided* — `maxUnavailable: 0` holds capacity, but the *app* must drain gracefully to close the last drops.
+The demo is the ten-minute story: pin the batch worker onto its dedicated pool (add the selector, watch it go *Pending* on the untolerated taint, add the toleration, watch it *snap* onto the batch node), then roll the claims API under load with `maxUnavailable: 0` and watch capacity stay flat while a PodDisruptionBudget makes a drain wait its turn.
+Close on the punchline: "the batch job is on its own nodes, the API is spread so no single node can take it down, and the rollout kept serving — none of it a bigger cluster, all of it the scheduler doing what you told it."
+====
+endif::demo[]

@@ -1,0 +1,85 @@
+= Deployment Targets & Scheduling: Wrap-up
+:module-id: m16
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims app from *scheduled-wherever-it-fit* to *placed on purpose* — without adding a single node.
+You read how the scheduler *filters then scores* by resource *requests*, and confirmed it against a `Scheduled` event.
+You turned the API's soft "prefers apart" into a *required* `podAntiAffinity` so no single node failure can take it down, spread it evenly with `topologySpreadConstraints` (across hostnames, and — with one changed key — across zones), and read the `FailedScheduling` event the scheduler writes when it can't oblige.
+You pinned the `statement-batch` worker onto a *dedicated pool* the honest way — feeling the `Pending` that a `nodeSelector` alone earns, then fixing it with the *toleration* that permits the tainted node.
+You made a rollout *zero-downtime* where the Deployment can — `maxUnavailable: 0` holding capacity flat through a roll — and protected the service with a *PodDisruptionBudget* that blocks an eviction rather than breach its floor.
+Finally you read how the platform itself is shaped: the *DaemonSet* node agents, the *MachineSet* that builds the pools.
+
+[mermaid]
+....
+graph TB
+  subgraph pool["Dedicated batch pool (tainted)"]
+    batch["statement-batch<br/>toleration + nodeSelector"]
+  end
+  subgraph general["General nodes (spread)"]
+    c1["parasol-claims"]
+    c2["parasol-claims"]
+    c3["parasol-claims"]
+    web["parasol-web"]
+    db[("claims-db")]
+  end
+  pdb["PodDisruptionBudget<br/>minAvailable 1"]
+  c1 -.->|"anti-affinity:<br/>distinct nodes"| c2
+  c2 -.-> c3
+  pdb -->|"protects"| c1
+  classDef ok fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef pool fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef guard fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  class c1,c2,c3,web,db ok;
+  class batch pool;
+  class pdb guard;
+....
+
+// media-pass: recap SVG m16-deployment-targets-scheduling-03-what-you-built.svg (green = spread app tier; amber = dedicated pool; blue = the PDB guard).
+
+The one idea under all of it: *placement is a decision you make, not a lottery you accept* — the scheduler does exactly what you tell it, and everything defaults to "wherever it fits" until you say otherwise.
+
+== Map to your org
+
+Take these back to how your teams' workloads are placed today:
+
+. *If the node under your busiest service died right now, would a replica already be running elsewhere — guaranteed, or just probably?*
+Default scheduling *prefers* to spread, but "probably" is not a word you want in a post-incident review. You turned that into a *required* rule. For your production services, is anti-affinity (or a topology spread) actually set — or is the spread you rely on just luck that has held so far?
+. *Is your expensive hardware running the workload you bought it for — and nothing else?*
+A GPU node, a node licensed for a commercial database, a high-memory box — each earns its premium only if it runs *the* workload and freeloaders stay off. That's a taint (keep others off) plus a toleration and selector (put the right one on). Could you point, in your cluster, to the pool your most expensive workload runs on, and prove nothing else can land there?
+. *Do your deploys drop requests — and does anyone know?*
+You measured a default roll dropping a couple of requests and held capacity flat with `maxUnavailable: 0`. Many teams accept mid-day-deploy blips as inherent; they're usually self-inflicted. Is `maxUnavailable: 0` plus a graceful-shutdown recipe part of your deployment template, or is "we deploy after hours to be safe" doing the job a config field should?
+. *When maintenance drains a node, what stops it taking your last replica?*
+A `PodDisruptionBudget` is a one-line floor that makes a drain *wait its turn*. For your critical services, is that floor written down — or does a 2 a.m. node patch depend on the on-call remembering not to drain two nodes at once?
+
+== When *not* to reach for this
+
+Scheduling controls are tools, and over-applying them is its own failure mode:
+
+* *Don't use `Recreate` — or `maxUnavailable > 0` — for a service that must stay up.*
+`Recreate` is *correct* for a single-writer database on one volume (never two copies at once), and a deliberate downtime window is the right trade there. For a stateless replicated API it's an outage you chose by accident. Match the strategy to the workload, don't default it.
+* *Don't over-constrain placement until pods can't schedule.*
+Required anti-affinity plus `DoNotSchedule` spread plus a narrow nodeSelector can leave the scheduler with *no* legal node — a `Pending` pod and a stalled deploy. Reach for `required`/`DoNotSchedule` when the guarantee is worth a possible block; prefer `preferred`/`ScheduleAnyway` when availability matters more than perfect placement. A `FailedScheduling` event that reads "0/N nodes available" is usually over-constraint, not a capacity problem.
+* *Don't set a PDB `minAvailable` equal to the replica count.*
+It leaves *zero* eviction room and *deadlocks* every drain — maintenance can never proceed. `minAvailable` must be strictly less than the replicas (`1` of `3`, `2` of `3`) so a disruption can take one pod while the service stays up.
+* *Don't reach for a dedicated pool when requests and limits would do.*
+Tainting a pool to isolate a workload is the heavy tool. If two workloads just need to not starve each other, correct *resource requests* (so the scheduler reserves what each needs) and *limits* (so neither runs away) often solve it without carving out nodes. Save dedicated pools for genuinely special hardware or hard isolation — GPUs, licensed software, compliance boundaries.
+
+== Go deeper
+
+* *Controlling pod placement onto nodes (scheduling)* — the full reference for `nodeSelector`, node and pod affinity/anti-affinity, taints and tolerations, and `topologySpreadConstraints`, with the `required`-vs-`preferred` semantics you exercised.
+* *Deployment strategies* and *Argo Rollouts* — `RollingUpdate` (`maxSurge`/`maxUnavailable`) vs `Recreate`, and where *canary* and *blue-green* live (the progressive-delivery module cross-referenced in this workshop).
+* *Graceful application shutdown* — `terminationGracePeriodSeconds`, `preStop` hooks, and `SIGTERM` handling; for Quarkus services, `quarkus.shutdown.timeout` — the *application* half of the zero-downtime recipe you saw the Deployment can't finish alone.
+* *Specifying a disruption budget for your application* — `PodDisruptionBudget`, `minAvailable`/`maxUnavailable`, the eviction API, and `unhealthyPodEvictionPolicy` for the PDB-during-a-rolling-update edge.
+* *DaemonSets* and *sidecar containers* — the node-agent pattern, and the GA native-sidecar lifecycle (an init container with `restartPolicy: Always`) you read about.
+* *Machine management (MachineSets, MachineAutoscaler)* and *Cluster Autoscaler* — how platform teams *create* and *size* the pools your workloads target; the object behind the batch pool you pinned onto.
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — default scheduling on the claims API, the `statement-batch` worker unpinned, no PodDisruptionBudget — run `ws prep {module-id} --yes`.
+It re-materializes the entry state (the multi-component app, the batch worker, the load generator) so a re-run starts clean.
+The batch-pool node label and taint are *cluster* substrate — they stay put; only your namespace's workloads reset.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

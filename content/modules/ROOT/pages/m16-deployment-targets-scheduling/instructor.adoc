@@ -1,0 +1,203 @@
+= Deployment Targets & Scheduling: Instructor Guide
+:module-id: m16
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34)
+// as user2 on 2026-07-13 by performing every exercise. The instructor-demo drain was NOT run against a
+// shared node (it would evict other tenants' pods); the PDB-block message is captured from the eviction
+// API directly (identical to what a drain surfaces). Node names in output are scrubbed to generic
+// worker-N / control-plane-N. Prose says "control plane"; the legacy master role label appears only
+// inside captured CLI output.
+
+This module has two beats that land, and they bracket the hands-on.
+The *break-and-fix* is exercise 4 — the batch pod stuck `Pending` on an untolerated taint, then *snapping* onto the batch node the instant the toleration is added — which makes the single most important distinction concrete: *a selector attracts, a taint repels, a toleration only permits*.
+The *proof* is exercise 5 — `maxUnavailable: 0` holding available replicas flat at 3 through a live rollout, and a PodDisruptionBudget *refusing* an eviction rather than breach its floor.
+Everything between is the mechanics — requests/QoS, anti-affinity, topology spread — that make those beats legible.
+
+The single most common confusion is *"I set a nodeSelector for the pool and my pod won't schedule."*
+It's the exercise-4 lesson: the pool node is tainted, and a selector doesn't carry permission.
+The lab teaches the break directly (add the selector alone, read the `Pending`), so pre-empt it only if someone skips ahead.
+
+== Timing
+
+Total hands-on: *~65 min* (spec target 75 min total; add ~12 min of concept up front, ~5 min buffer).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | See where pods land — and why | ~8 min | all reads — `oc get pods -o wide`, requests/QoS, the `Scheduled` event — instant; the time is reading
+| 2 | Direct the API with pod anti-affinity | ~14 min | anti-affinity roll *~38 s* (2 replicas); delete → reschedule *~12 s*; scale-to-6 → `Pending` + `FailedScheduling` event in *~3 s*
+| 3 | Spread with topology spread constraints | ~8 min | each roll *~40–120 s* — required anti-affinity makes the rollout *sequential* (the surge pod waits for a node to free); reading the spread is the point
+| 4 | Reserve a dedicated pool (break-and-fix) | ~12 min | `nodeSelector` alone → `Pending` in *~10 s*; the event is immediate; toleration → lands on the pool node in *~8 s*
+| 5 | Make the rollout zero-downtime | ~15 min | default-roll probe runs *55 s* (dropped *~2/260*); capacity sample *18 × 4 s*; PDB eviction block *instant* (429)
+| 6 | Read how the platform shapes the cluster `[INSTRUCTOR-DEMO]` | ~8 min | all read-only; you perform the taint/drain segment — see the script below
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-13, every exercise was performed as `user2` and timed.
+The `oc patch`/`oc get`/`oc scale` commands themselves return in about a second.
+The genuine waits are all *rollouts*: a `parasol-claims` roll takes *~38 s* at 2 replicas and *longer at 3* because *required anti-affinity makes the roll sequential* — with `maxSurge: 1` the surge pod must find a node that has no other claims pod, so it waits for an old pod to vacate before the next step (this is expected, not a stall).
+The `FailedScheduling` events appear within *~3 s* of a pod going `Pending`.
+The zero-downtime measurements are the longest single blocks: the default-roll probe runs a fixed *55 s*, the capacity sampler *~72 s* (18 samples × 4 s).
+*Attendee time* is dominated by reading the events and the placement changes, not command latency.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user2`.
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m16 --user user2
+ws verify m16 --user user2 --entry-only
+----
++
+Expect all entry checks green.
+They cover the `{user}-dev` marker, the multi-component app (`claims-db` ready, `parasol-web`/`parasol-claims` present, `statement-batch`/`claims-load` ready), the batch pool existing, and the clean-slate assertions (batch worker *not* pinned, no anti-affinity, no PDB).
+
+. *The parasol app images are present (this cluster has the imagestreams).*
++
+[source,sh,role=execute]
+----
+oc get pods -n user2-dev -l 'app in (parasol-web,parasol-claims)'
+----
++
+Expect `parasol-web` `1/1` and both `parasol-claims` `1/1 Running`.
+If they are `ImagePullBackOff`, the `parasol-images` imagestreams weren't loaded — the node-spread and rollout beats (exercises 2, 3, 5) need `parasol-claims` running; `statement-batch`, `claims-load`, and `claims-db` run on always-present platform images and work regardless.
+
+. *The dedicated batch pool exists (label + taint on one worker).*
++
+[source,sh,role=execute]
+----
+oc get nodes -l workshop.redhat.com/pool=batch -o name
+oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath='{.items[0].spec.taints}{"\n"}'
+----
++
+Expect one node and a `workshop.redhat.com/pool=batch:NoSchedule` taint.
+This is *cluster-scoped bootstrap substrate* — if it's missing (a node was recycled/relabelled), exercise 4's pin has nowhere to land; re-run the bootstrap node-shaping step. `ws verify … --entry-only` also fails closed on this.
+
+. *The synthetic zone labels are present (for the exercise-3 zone knob).*
++
+[source,sh,role=execute]
+----
+oc get nodes -L workshop.redhat.com/zone
+----
++
+Expect `a`/`b`/`c` spread across the nodes. If absent, the zone-knob step still runs but shows all pods with an empty zone — mention it's optional and the hostname spread is the real lesson.
+
+. *The read-only role grants nodes + daemonsets (exercise 6).*
++
+[source,sh,role=execute]
+----
+oc get clusterrole platform-observer -o jsonpath='{range .rules[*]}{.apiGroups}:{.resources}{"\n"}{end}' | grep -E 'daemonset|nodes'
+----
++
+Expect both `["apps"]:["daemonsets"]` and a rule covering `nodes`. Without the daemonsets grant, attendees can't `oc get ds -A` and exercise 6 becomes instructor-only.
+
+== Instructor demo — taint a pool, and drain through a PDB (exercise 6)
+
+Both operations are *cluster-wide* — they affect every tenant on a shared cluster — so keep them instructor-performed.
+*Do the drain on a disposable or clearly-safe node only*; on a shared workshop cluster a real `oc adm drain` evicts other users' pods.
+
+=== Create a pool (how the batch pool was made)
+
+[source,sh,role=execute]
+----
+oc label node <a-worker> workshop.redhat.com/pool=batch
+oc adm taint node <a-worker> workshop.redhat.com/pool=batch:NoSchedule
+oc get nodes -l workshop.redhat.com/pool=batch
+----
+
+Talk track: the label is the *attractor* (a `nodeSelector` target), the taint is the *repeller* (`NoSchedule` keeps untolerated pods off). Together they make a dedicated pool. The label evicts nothing; `NoSchedule` only blocks *new* untolerated pods. This is exactly the pair a platform team applies — often via a MachineSet's `spec.template.spec.metadata.labels` and a machine-config — to build GPU/batch/licensed pools.
+
+=== Drain a node through the PodDisruptionBudget
+
+With a claims pod on `<node>` and the exercise-5 PDB (`minAvailable: 1`) in place:
+
+[source,sh,role=execute]
+----
+oc adm drain <node> --ignore-daemonsets --delete-emptydir-data --pod-selector app=parasol-claims
+----
+
+Talk track: the drain *evicts* the claims pod (the budget allows one — `ALLOWED DISRUPTIONS: 2`), and it reschedules on a *distinct* node because the anti-affinity still holds. If you first exhaust the budget (`oc patch pdb parasol-claims --type=merge -p '{"spec":{"minAvailable":3}}'`), the same drain *waits*, printing:
+
+[source,texinfo]
+----
+error when evicting pods/"parasol-claims-..." -n "user2-dev" (will retry after 5s):
+Cannot evict pod as it would violate the pod's disruption budget.
+----
+
+That message — captured directly from the eviction API on the build cluster — is the whole point of a PDB: a voluntary disruption blocks rather than breaches. Restore `minAvailable: 1` afterwards.
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Run the demo from the entry state, not `ws solve`.*
+The whole story is *building* the controls from default scheduling. `ws solve m16` renders the finished end state (spread + pinned + PDB) — use it to *show the destination* or pre-stage, never as the demo's start.
+* *Let the `Pending` breathe (beat 1).*
+After the `nodeSelector`-only patch, pause on `statement-batch` at `Pending` and read the `FailedScheduling` event aloud. "Untolerated taint" is the line that makes "a selector attracts, a toleration permits" land. Then the toleration snaps it into place — that contrast is the beat.
+* *Land the capacity line (beat 3).*
+"`available=3/3` the whole way through." Say it while the sample loop scrolls `available=3/3` repeatedly. That's the visible proof `maxUnavailable: 0` never dropped the floor.
+* *Be honest about the last drops.*
+If asked "so it's *zero* dropped now?" — the capacity is guaranteed, the connection-reset window is narrowed by `preStop`, but literal zero needs the app's `SIGTERM` handling. Don't over-claim; the honesty is part of the lesson.
+
+== Top questions attendees ask
+
+*1. "My pod is `Pending` — how do I find out why?"*::
+Read the `FailedScheduling` event: `oc get events -n <ns> --field-selector reason=FailedScheduling`.
+It names the reason *node by node* — `untolerated taint(s)`, `didn't match Pod's node affinity/selector`, `didn't match pod anti-affinity rules`, `Insufficient cpu/memory`.
+On the build cluster the anti-affinity case read `0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match pod anti-affinity rules` — one tainted node plus five already holding a claims pod.
+That one line answers almost every "why won't it schedule," and it's always the first thing to read.
+
+*2. "I added a `nodeSelector` for the pool and my pod won't schedule."*::
+The pool node is *tainted*, and a `nodeSelector` doesn't carry permission.
+A selector *attracts* (sends the pod at the node); a *toleration* *permits* (lets it past the taint). You need *both* — the selector to choose the node and the toleration to be allowed on it.
+This is exercise 4's break-and-fix: `nodeSelector` alone → `Pending` with "untolerated taint"; add the matching toleration → it schedules.
+A toleration *without* a selector is the opposite mistake — the pod is *allowed* on the tainted node but just as likely lands anywhere else.
+
+*3. "Why did my rollout still drop a couple requests even with `maxUnavailable: 0`?"*::
+`maxUnavailable: 0` guarantees *capacity* — the count of *ready* pods never dips (verified: 18/18 samples at `3/3` through a roll).
+It does *not* guarantee a *terminating* pod releases in-flight connections cleanly.
+The `preStop` sleep narrows the connection-reset window (endpoints drain before `SIGTERM`), but closing the *last* drops needs the *app* to handle `SIGTERM` gracefully — fail readiness, finish in-flight, then exit (Quarkus: `quarkus.shutdown.timeout`).
+Zero-downtime is a *two-sided* recipe; the `parasol-claims` image doesn't yet do its half, so a tight probe can still catch an occasional reset. That's the honest boundary, not a bug.
+
+*4. "The node drain is hanging and won't evict anything."*::
+Two possibilities, both PDB-related.
+Either the budget is *exhausted* and the drain is *correctly waiting* (evicting more would breach `minAvailable`) — that's the feature working; the other node(s) will free up.
+Or someone set `minAvailable` *equal to* the replica count, which leaves *zero* eviction room and *deadlocks* the drain forever.
+Check `oc get pdb -n <ns>`: `ALLOWED DISRUPTIONS: 0` with `minAvailable == replicas` is the deadlock; lower `minAvailable` below the replica count.
+
+*5. "The anti-affinity rollout is really slow — is it stuck?"*::
+No — required `podAntiAffinity` makes a rolling update *sequential*.
+With `maxSurge: 1`, each new pod must find a node with no other claims pod, so it waits for an old pod to vacate before the next replica rolls.
+It's deliberate, not stuck (watch `oc rollout status` progress one replica at a time).
+The one real trap: if replicas *equal* the number of eligible nodes, the surge pod has *nowhere* to go and the roll wedges — keep replicas below the eligible-node count (here: ≤4 of the 5 non-batch nodes) so there's always a free node to surge onto.
+
+== Watchouts
+
+* *Required anti-affinity + rolling update = sequential, and can wedge.*
+The roll is slow by design (see question 5). It *wedges* only if replicas == eligible nodes (the surge pod can't place). The lab scales to 6 *deliberately* to show the `Pending`, then back to 3; don't leave a user at 6 with `maxUnavailable: 0` or their next roll can't surge.
+* *Use a `--type=strategic` patch for container-level edits.*
+`--type=merge` replaces the whole `containers` list and fails with `spec.containers[0].image: Required value`. The lab flags this in an IMPORTANT block; if a user hits it on the `preStop` step, that's the cause.
+* *The drop measurement is noisy — don't promise "0 after".*
+The entry load generator polls at 1 req/s and misses most drop windows; even the tight probe varies run to run (2 drops one roll, 0 the next, sometimes more under the longer hardened roll). Frame the win as *capacity held flat* (deterministic) plus *the app half still needed* (honest), never "before N, after 0."
+* *The `master` role label shows on screen — say "control plane".*
+`oc get ds … nodeSelector` prints `node-role.kubernetes.io/master` for the control-plane-only agent. It's the legacy role label Kubernetes still sets; refer to those nodes as *control plane* in prose, and don't try to rename the label.
+* *The batch pool is one node shared by all users.*
+Each `statement-batch` is tiny (50m/64Mi), so ~30 users' batch pods fit comfortably. If a user scales `statement-batch` up hard, it could crowd the node — the `{user}-dev` quota keeps it bounded. Don't add a second dedicated pool per user; it's shared substrate by design.
+* *Never run a real `oc adm drain` on the shared cluster hands-on.*
+It evicts *every* tenant's pods on that node, not just the demo user's. Keep the drain instructor-only, on a disposable or clearly-safe node; the PDB-block message can be shown safely via the eviction API (exercise 5) without draining anything.
+
+== Provenance
+
+M16 is a net-new module (the spec's "fresh; fragments in old ops decks" — the ops decks yielded nothing portable for scheduling), built against this repo's live cluster.
+Everything M16 teaches is *core* OpenShift/Kubernetes — GA on the cluster, no operator or subscription.
+Every command, output, and timing — the `Scheduled`/`FailedScheduling` events, the anti-affinity node spread, the delete-and-reschedule, the topology-spread hostname *and* synthetic-zone results, the `nodeSelector`-alone `Pending` and the toleration fix, the default-roll drop tally, the `maxUnavailable: 0` capacity samples (18/18 at `3/3`), the PDB `ALLOWED DISRUPTIONS: 2` and the eviction `429`, the DaemonSet node-agent inventory, and the hollow bare-metal MachineSet — was captured on OpenShift {ocp_version} as `user2` on 2026-07-13 during the build.
+The instructor drain is described from the verified eviction-API behaviour (a real `oc adm drain` was *not* run against the shared cluster).
+The zero-downtime *application* half (graceful `SIGTERM` handling / `quarkus.shutdown.timeout`) is flagged as app-developer work, not built here — see the module's troubleshooting page and the build note.
