@@ -1,5 +1,8 @@
-{{/* The resilient-stack namespace this chart's main workloads live in (workshop-layer owned). */}}
-{{- define "m21.resilienceNs" -}}{{ .Values.user }}-resilience{{- end -}}
+{{/* The external-CLIENT namespace: the curl-loop client + the mesh ingress gateway (the stable endpoint). */}}
+{{- define "m21.clientNs" -}}{{ .Values.user }}-client{{- end -}}
 
-{{/* The simulated remote-site namespace (standalone claims Postgres for the RHSI Connector beat). */}}
+{{/* SITE A — the PRIMARY resilient claims service (co-located with the gateway's locality). */}}
+{{- define "m21.siteANs" -}}{{ .Values.user }}-site-a{{- end -}}
+
+{{/* SITE B — the SECONDARY / failover resilient claims service. */}}
 {{- define "m21.siteBNs" -}}{{ .Values.user }}-site-b{{- end -}}

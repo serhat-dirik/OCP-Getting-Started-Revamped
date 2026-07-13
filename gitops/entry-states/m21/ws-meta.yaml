@@ -1,32 +1,32 @@
 # ws reset purges user-created leftovers from these namespaces before re-materializing.
-# M21's in-namespace state spans {user}-resilience (the resilient claims stack + persistent seeded DB) and
-# {user}-site-b (the standalone remote Postgres). `oc delete all,pvc --all` clears Deployments/Services and
-# — critically for M21 — the PERSISTENT claims-DB PVC, so a reset re-seeds a factory-fresh DB (else stale
-# post-restore rows would survive and confuse the next run). The ws engine's purge_ns ALSO prunes the CR
-# types M21's lab creates that `oc delete all` misses: Velero backups/restores.velero.io, the OADP
-# nonadmin*.oadp.openshift.io self-service CRs, and the Skupper skupper.io v2 CRs (sites/links/listeners/
-# connectors/accessgrants/accesstokens) — see the ws purge_ns comment block. Otherwise a leftover Site or
-# Backup would red-fail the next entry verify (the sibling of the PDB/NetworkPolicy/istio purge gaps).
-# NOTE: the {user}-resilience / {user}-site-b NAMESPACES, their quota, LimitRange and RBAC are
-# WORKSHOP-LAYER-owned (gitops/workshop-config/templates/per-user-resilience.yaml — the workshop-entries
-# AppProject blacklists ResourceQuota/LimitRange). Like {user}-dev/mesh/partner they SURVIVE reset with the
-# same UID; the entry Application owns only the in-namespace objects.
+# M21's in-namespace state spans THREE namespaces: {user}-client (the external client + the mesh ingress
+# gateway), {user}-site-a and {user}-site-b (the two resilient claims services). `oc delete all,pvc --all`
+# clears the Deployments/Services/Gateway; the ws engine's purge_ns ALSO prunes the istio CR types the M21
+# lab creates that `oc delete all` misses — virtualservices/destinationrules/serviceentries/gateways
+# /sidecars/envoyfilters + authorizationpolicies/peerauthentications (the failover routing) — AND the
+# skupper.io v2 CRs of the RHSI section (sites/links/listeners/connectors/accessgrants/accesstokens), and it
+# STRIPS the istio-injection / istio.io/rev namespace labels the attendee may have added. Otherwise a
+# leftover ServiceEntry or Skupper Site would red-fail the next entry verify.
+# NOTE: the {user}-client / {user}-site-a / {user}-site-b NAMESPACES, their quota, LimitRange, RBAC and the
+# stable istio-discovery=enabled label are WORKSHOP-LAYER-owned (gitops/workshop-config/templates/
+# per-user-resilience.yaml — the workshop-entries AppProject blacklists ResourceQuota/LimitRange, and a
+# discovery-scoped shared istiod needs the label stable). Like {user}-dev/mesh/partner they SURVIVE reset
+# with the same UID and keep their mesh label; the entry Application owns only the in-namespace objects.
 purgeNamespaces:
-  - "${USER}-resilience"
+  - "${USER}-client"
+  - "${USER}-site-a"
   - "${USER}-site-b"
-# NO conflictsWith: M21 is the ONLY module that materializes into {user}-resilience / {user}-site-b
-# (dedicated namespaces, like m06's {user}-batch and m18's {user}-mesh). It shares no namespace with any
-# other module, so its entry app coexists with every dev-namespace module untouched — no reciprocal edits
-# needed (ADR-0001 same-namespace policy). Key omitted deliberately (meta_list returns empty).
-# Representative M21 muscle the generic battery does NOT cover: query the PERSISTENT seeded claims DB — the
-# restore-verification anchor the whole backup/delete/restore arc leans on — as {user}, and assert the
-# deterministic row count. Touches only {user}-resilience (attendee is admin) and the always-present
-# postgresql image, so it stays green regardless of the parasol-image build state. ${USER} resolves per-run.
-# QUOTING CONSTRAINT (G1 smoke defect, 2026-07-13): the ws meta_list parser strips EVERY double-quote AND
-# reads the raw line (no YAML unescaping), so a smokeCommand must contain NO double-quotes and — since a
-# quoted YAML scalar's escapes would diverge between meta_list's raw read and yamllint's parse — must be a
-# PLAIN (unquoted) scalar. The prior `psql -tAc "select count(*) …"` lost its quoting → psql saw a bare
-# `select` and failed. This form nests the SQL in shell single-quotes via '\'' (literal in a plain scalar,
-# so meta_list and PyYAML/yamllint agree), keeping a real representative attendee query of the restore anchor.
+# NO conflictsWith: M21 is the ONLY module that materializes into {user}-client / {user}-site-a /
+# {user}-site-b (dedicated namespaces, like m06's {user}-batch and m18's {user}-mesh). It shares no
+# namespace with any other module, so its entry app coexists with every dev-namespace module untouched — no
+# reciprocal edits needed (ADR-0001 same-namespace policy). Key omitted deliberately (meta_list returns empty).
+# Representative M21 muscle the generic battery does NOT cover: exec the external client (the substrate every
+# failover probe leans on) as {user} and prove it can reach the PRIMARY site's claims responder cross-namespace
+# over the mesh (HTTP 200). Touches only namespaces the attendee is admin on, and the responder runs on the
+# always-present nodejs imagestream, so it stays green regardless of any parasol-image build state. ${USER}
+# resolves per-run.
+# QUOTING CONSTRAINT (prior G1 smoke defect): the ws meta_list parser STRIPS every double-quote and reads the
+# raw line, so a smokeCommand must contain NO double-quotes and be a PLAIN (unquoted) scalar — single-quotes
+# only. This form uses single-quoted -w '%{http_code}' and no double-quotes anywhere.
 smokeCommands:
-  - oc exec deploy/claims-db -n ${USER}-resilience -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -tAc '\''select count(id) from parasol_claims_seed'\''' | grep -qw 25
+  - oc exec deploy/claims-client -n ${USER}-client -- curl -s -m5 -o /dev/null -w '%{http_code}' http://claims.${USER}-site-a.svc.cluster.local:8080/ | grep -qw 200

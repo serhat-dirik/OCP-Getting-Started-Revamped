@@ -1,30 +1,39 @@
 # Per-user RESILIENCE namespaces (M21) — owned by the workshop layer like dev/stage/prod/cicd/mesh/partner
 # (the workshop-entries AppProject blacklists ResourceQuota/LimitRange, so an entry chart cannot ship them;
-# Rule 13). TWO namespaces per user:
-#   • {user}-resilience — the resilient claims stack (multi-replica app + PDB + HPA + spread) and the
-#     PERSISTENT, seeded claims-DB PVC that is the OADP backup/restore anchor. This is the namespace the
-#     M21 lab BACKS UP, DELETES, and RESTORES, so it must be dedicated (never {user}-dev, shared by other
-#     modules) — the entry chart owns only the in-namespace workloads and re-materializes on ws reset.
-#   • {user}-site-b — a standalone "remote site" claims Postgres exposed via an RHSI Connector in the
-#     optional cross-site section. Disjoint from {user}-resilience, so M21 needs no reciprocal conflictsWith.
-# Both SURVIVE ws reset with a stable UID (the entry Application prunes only in-namespace objects).
-{{- range $i := until (int .Values.userCount) }}
+# Rule 13). M21 teaches APPLICATION-LEVEL cross-site failover on a SINGLE cluster, so a real multi-site
+# topology is SIMULATED with THREE per-user namespaces, all enrolled in the shared OSSM3 mesh
+# (istio-discovery=enabled — matched by the control plane's meshConfig.discoverySelectors, verified live
+# 2026-07-13):
+#   • {user}-client — the external CLIENT: a curl-loop pod that continuously calls the claims service via
+#     the STABLE endpoint (a mesh ingress Gateway) and logs which SITE served each response. Also home to
+#     the ingress gateway (the stable endpoint) the lab fails traffic over.
+#   • {user}-site-a — a RESILIENT claims service (multi-replica + PDB + topologySpread + HPA + probes),
+#     env SITE=A. The PRIMARY site (the gateway is co-located with it, so the mesh prefers it).
+#   • {user}-site-b — the same resilient claims service, env SITE=B. The SECONDARY / failover site.
+# The three namespaces are disjoint from every other module's, so M21 needs no reciprocal conflictsWith.
+# All three SURVIVE ws reset with a stable UID and keep their istio-discovery label (the entry Application
+# prunes only in-namespace objects; a discovery-scoped shared istiod needs the label stable).
+{{- range $ns := list (dict "suffix" "client" "cpu" "2" "mem" "4Gi" "lcpu" "6" "lmem" "8Gi" "pvc" "2" "pods" "20") (dict "suffix" "site-a" "cpu" "4" "mem" "8Gi" "lcpu" "12" "lmem" "12Gi" "pvc" "2" "pods" "30") (dict "suffix" "site-b" "cpu" "4" "mem" "8Gi" "lcpu" "12" "lmem" "12Gi" "pvc" "2" "pods" "30") }}
+{{- range $i := until (int $.Values.userCount) }}
 {{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
-{{- range $suffix := list "resilience" "site-b" }}
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ $user }}-{{ $suffix }}
+  name: {{ $user }}-{{ $ns.suffix }}
   labels:
     workshop.redhat.com/user: {{ $user | quote }}
+    # Load-bearing (verified live 2026-07-13): the shared OSSM3 istiod's meshConfig.discoverySelectors
+    # matches istio-discovery=enabled, so all three M21 namespaces are in-mesh tenants of the one shared
+    # control plane. Stable — set at creation, survives ws reset, never toggled by the lab.
+    istio-discovery: enabled
 ---
 # The attendee is admin on their own namespace (same as the standard four).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ $user }}-admin
-  namespace: {{ $user }}-{{ $suffix }}
+  namespace: {{ $user }}-{{ $ns.suffix }}
   labels:
     workshop.redhat.com/user: {{ $user | quote }}
 roleRef:
@@ -35,32 +44,34 @@ subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: {{ $user | quote }}
-{{- end }}
 ---
-# Quota for {user}-resilience: sized for parasol-claims at HPA max (6 replicas × 500m/512Mi limit) + the
-# claims-DB Postgres + a transient seed Job. Higher than the site-b quota because the resilient tier scales.
+# Quota sized per role: the site namespaces run the resilient claims tier at HPA max (2x replicas) with a
+# native istio-proxy sidecar per pod (OSSM3 1.28 ~100m/128Mi req each), so they get mesh-grade headroom;
+# the client namespace runs one client pod + the ingress gateway, so it is smaller. limits are caps, not
+# reservations.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
   name: workshop-quota
-  namespace: {{ $user }}-resilience
+  namespace: {{ $user }}-{{ $ns.suffix }}
   labels:
     workshop.redhat.com/user: {{ $user | quote }}
 spec:
   hard:
-    requests.cpu: "3"
-    requests.memory: 4Gi
-    limits.cpu: "8"
-    limits.memory: 10Gi
-    persistentvolumeclaims: "3"
-    pods: "25"
+    requests.cpu: {{ $ns.cpu | quote }}
+    requests.memory: {{ $ns.mem }}
+    limits.cpu: {{ $ns.lcpu | quote }}
+    limits.memory: {{ $ns.lmem }}
+    persistentvolumeclaims: {{ $ns.pvc | quote }}
+    pods: {{ $ns.pods | quote }}
 ---
-# Default container requests/limits so bare lab pods get sane values and don't trip the quota.
+# Default container requests/limits so bare lab pods get sane values and don't trip the quota. Sidecars set
+# their own resources, so these defaults mainly bound the app/lab containers.
 apiVersion: v1
 kind: LimitRange
 metadata:
   name: workshop-limits
-  namespace: {{ $user }}-resilience
+  namespace: {{ $user }}-{{ $ns.suffix }}
   labels:
     workshop.redhat.com/user: {{ $user | quote }}
 spec:
@@ -72,39 +83,5 @@ spec:
       defaultRequest:
         cpu: 100m
         memory: 128Mi
----
-# Modest quota for {user}-site-b: one standalone Postgres + a seed Job (the "remote site").
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: workshop-quota
-  namespace: {{ $user }}-site-b
-  labels:
-    workshop.redhat.com/user: {{ $user | quote }}
-spec:
-  hard:
-    requests.cpu: "1"
-    requests.memory: 2Gi
-    limits.cpu: "2"
-    limits.memory: 4Gi
-    persistentvolumeclaims: "1"
-    pods: "10"
----
-# Default container requests/limits for {user}-site-b.
-apiVersion: v1
-kind: LimitRange
-metadata:
-  name: workshop-limits
-  namespace: {{ $user }}-site-b
-  labels:
-    workshop.redhat.com/user: {{ $user | quote }}
-spec:
-  limits:
-    - type: Container
-      default:
-        cpu: 500m
-        memory: 512Mi
-      defaultRequest:
-        cpu: 50m
-        memory: 128Mi
+{{- end }}
 {{- end }}

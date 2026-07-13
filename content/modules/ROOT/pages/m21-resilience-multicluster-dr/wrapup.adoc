@@ -4,94 +4,90 @@ include::partial$version-attributes.adoc[]
 
 == What you built
 
-You took Parasol's claims platform from *single-cluster resilient* to *disaster-recoverable* — and proved it by destroying a namespace and bringing its data back.
-You *inspected* the resilient tier — three replicas, a `PodDisruptionBudget`, `topologySpreadConstraints`, and an `HorizontalPodAutoscaler` — and named exactly which failures it absorbs (pod, node, zone) and which it can't (deleted data, dead cluster).
-You *backed up* the namespace with OpenShift API for Data Protection — objects *and* the database's persistent data, via a CSI snapshot and the Data Mover into an in-cluster object store — after proving, with `oc auth can-i`, that backup is a *platform* operation, not namespace-admin self-service.
-You *destroyed* the namespace's contents and felt the loss, then *restored* it and confirmed the *25 seeded rows survived byte-for-byte* — the difference between resilience and disaster recovery made concrete.
-As a flagged `[ADD-ON]`, you linked a *remote site* with Red Hat Service Interconnect — a Skupper v2 Virtual Application Network — and read its database through a local address with the app unchanged and *no VPN*.
-And you *decided* — a DR-tier tabletop that sized backup-and-restore vs active-passive vs active-active per Parasol system, with GitOps as the superpower that re-materializes a platform anywhere.
+You took Parasol's claims service from *resilient in one site* to *surviving the loss of a whole site* — and proved it by scaling an entire site to zero and watching the client never notice.
+You *inspected* the resilient primary — three replicas, a `PodDisruptionBudget`, spread across nodes, a `HorizontalPodAutoscaler` — and *killed a pod* to watch in-site resiliency absorb it.
+You *wired cross-site failover* on OpenShift Service Mesh: a `ServiceEntry` declaring both sites with localities, a `DestinationRule` (locality-aware load balancing + outlier detection), and a `VirtualService` with retries on the ingress gateway — then *failed the entire primary site* and watched the external client *flip from `SITE=A` to `SITE=B` with every request still `200`*, and *return* to A on recovery.
+As a flagged `[ADD-ON]`, you linked two simulated *data centers* into a Skupper v2 *Virtual Application Network* and read a remote site's service through a *local* address, with no VPN.
+And you placed all of it on the *resilience ladder*: your job is in-site resilience and failover; the platform's job is the DR safety net (OADP + GitOps).
 
 [mermaid]
 ....
 graph TB
-  subgraph ladder["The resilience ladder — what absorbs what"]
+  subgraph you["What you built (application level)"]
     direction BT
-    r1["pod / node / zone loss"] -->|"replicas · PDB · spread · HPA<br/>(single-cluster resilience)"| r2["namespace / data destroyed"]
-    r2 -->|"OADP backup → restore<br/>(data survives, from object store)"| r3["cluster / region lost"]
-    r3 -->|"GitOps re-materialize + OADP data<br/>· RHSI cross-site connectivity"| r4["recovered elsewhere"]
+    r1["pod / node loss"] -->|"replicas · PDB · spread · HPA<br/>(in-site resiliency — ex 1)"| r2["a whole SITE lost"]
+    r2 -->|"Service Mesh cross-site failover<br/>(stable endpoint · locality · outlier · retries — ex 2)"| r3["sites in different DCs"]
+    r3 -->|"RHSI VAN links the sites<br/>(Site · Connector · Listener · Link — ex 3)"| r4["survives a site loss"]
   end
+  net["platform DR net (concept): OADP restores data · GitOps re-materializes the platform"]
+  r4 -.->|"catastrophe beyond failover"| net
   classDef a fill:#e6f4ea,stroke:#137333,color:#0d652d;
   classDef b fill:#fef7e0,stroke:#b06000,color:#7a4100;
   classDef c fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
-  class r1 a; class r2,r3 b; class r4 c;
+  class r1 a; class r2,r3 b; class r4 c; class net c;
 ....
 
-// media-pass: recap SVG m21-resilience-multicluster-dr-04-what-you-built.svg (green = single-cluster resilience absorbing pod/node/zone; amber = the DR rungs — OADP restore for destroyed data, GitOps+OADP for a lost cluster; blue = recovered elsewhere; annotate each edge with the mechanism).
+// media-pass: recap SVG m21-resilience-multicluster-dr-05-what-you-built.svg (green = in-site resiliency absorbing pod/node loss; amber = the failover rungs — mesh failover for a lost site, RHSI to link real DCs; blue = survives + the platform DR net; annotate each edge with the mechanism).
 
-The one idea under all of it: *resilience keeps you up; disaster recovery brings you back — and the two are different disciplines.* Replicas, probes, PDBs, and spread absorb the *common* failures automatically and touch neither your *data* nor a *lost cluster*. For those you need a *copy that lives somewhere else* — OADP's backup in an object store, RHSI's link to another site, and above all your *platform declared in Git* so Argo CD can rebuild it anywhere. Untested backups and un-sized RPO/RTO are where DR plans die; you tested a restore end-to-end and sized the tiers.
+The one idea under all of it: *resilience keeps a site up; failover keeps the service up when a site goes down — and they are different disciplines.* Replicas, probes, PDBs, and spread absorb the common failures *inside* a site automatically. For the loss of the *whole* site you need a *second site and automatic failover to it* — which the mesh gives you for a few small resources and zero application code — and, when the sites are real and distant, a *fabric to connect them* (RHSI). Under all of it sits the platform's DR net (OADP for data, GitOps for the platform) for the catastrophes even failover can't cover.
 
 == Map to your org
 
-Take these back to how your own platform handles failure today:
+Take these back to how your own services handle a site outage today:
 
+. *Do you fail over to your second site automatically — or is it a 3-a.m. runbook?*
+You scaled a whole site to zero and watched the client keep working with no change. In your systems, is cross-site failover a *tested, automatic* capability, or a warm standby nobody has ever actually cut over to? An untested failover is a hope.
 . *Which rung does each of your "resilience" measures actually absorb?*
-You named the ladder — replicas for a pod, PDB + spread for a node or zone, OADP + GitOps for a cluster. In your systems, is there a measure for the *data* and *cluster* rungs, or does "we have replicas" quietly stand in for a DR plan you don't have?
-. *When did you last restore a backup — not take one, restore one?*
-You ran the full delete-and-restore drill and watched the data come back. Do your teams *test* restores on a schedule, or are your green backups an untested hope that fails exactly when the disaster hits?
-. *Can you state RPO and RTO for each system — as two numbers?*
-You sized three Parasol systems. For your own, can each owner state "we can lose at most X and be down at most Y"? If not, your DR spend is guesswork — over-protecting a rebuildable cache and under-protecting a system of record.
-. *Who runs backup/restore — and is that a bottleneck?*
-You proved a namespace-admin can't create a Velero `Backup`. Is DR a platform-team capability app teams *consume and verify*, or a bottleneck only two people understand? Would enabling self-service (NonAdminBackup, when it's GA) change how often teams actually test recovery?
-. *How much of your DR runbook is a document versus reconciled from Git?*
-You saw that a GitOps-declared platform re-materializes with Argo CD, not a 40-page runbook. How much of your recovery depends on humans executing steps under pressure — and how much could become "Argo converges the platform, OADP restores the data"?
+You named the ladder — replicas for a pod, PDB + spread for a node, mesh failover for a whole site. For your services, is there a measure for the *site* rung, or does "we have replicas" quietly stand in for a failover story you don't have?
+. *Where's the line between the app team's job and the platform's?*
+You built the failover; the OADP/GitOps DR net is the platform's. In your org, is that line clear — app teams own in-site resilience and failover, the platform owns backup/restore and re-materialization — or do teams either over-rely on an untested backup or hand-roll DR the platform already provides?
 
 == When *not* to reach for this
 
-DR is powerful, and mis-applying it is its own expensive failure mode:
+Cross-site failover and cross-site connectivity are powerful, and mis-applying them is its own expensive failure mode:
 
-* *Don't reach for DR when the failure is a resilience gap.*
-If your app falls over on a *single node drain*, the fix is a `PodDisruptionBudget` and spread (M16), *not* a backup-restore runbook. DR is the break-glass for catastrophes (lost data, lost cluster); using it to paper over rungs your replicas should absorb hides a bug you'll hit constantly.
-* *Don't buy active-active for everything.*
-A rebuildable cache does not need a hot cross-region twin; a nightly backup — or *no* backup, just re-seed from source — is the right, cheap answer. Applying system-of-record DR to every workload is one of the most common and expensive platform mistakes. Size RPO/RTO *per system*.
-* *Don't trust a backup you've never restored.*
-An untested backup is a hope. If the restore path isn't drilled, assume it's broken — restore semantics, PV data movement, and CRD ordering all have edge cases that only a real restore surfaces. Schedule the drill.
-* *Don't use RHSI where a plain Route or Service would do.*
-A VAN is for linking services *across sites/clusters without a flat network*. For two services *in the same cluster*, a `Service` (or a `Route` for external) is simpler and faster — reaching for an interconnect there adds moving parts for nothing.
-* *Don't confuse "the platform is in Git" with "the data is safe."*
-GitOps re-materializes *namespaces, operators, and config* — not your database's rows. GitOps + OADP (or replication) together are a DR strategy; GitOps *alone* rebuilds an *empty* platform. Keep both halves.
+* *Don't reach for failover when the failure is an in-site resilience gap.*
+If your service falls over on a *single node drain*, the fix is a `PodDisruptionBudget` and spread (M16), *not* a second site. Cross-site failover is for the loss of the *whole* site; using it to paper over rungs your replicas should absorb hides a bug you'll hit constantly.
+* *Don't run a second site for a service that doesn't need one.*
+A rebuildable cache or a stateless internal tool does not need a hot second site with automatic failover; a single resilient site (and the platform's backup net) is the right, cheap answer. Standing up cross-site failover for everything is a real and common over-spend — reserve it for the services whose downtime genuinely costs.
+* *Don't use RHSI where a plain Service or the mesh would do.*
+A VAN is for linking services *across sites/clusters/organizations without a flat network*. For two services *in the same cluster*, a `Service` (and the mesh for policy) is simpler and faster — reaching for an interconnect there adds moving parts for nothing.
+* *Don't confuse "we have failover" with "we have DR".*
+Failover keeps the service up when a site goes down; it does *not* bring back *corrupted or deleted data* — for that you need OADP (or replication) and a *tested restore*. Failover + a DR net together are a strategy; failover alone leaves your data unprotected.
+* *Don't let the failover primary flap.*
+Tuning `outlierDetection` too aggressively (a tiny `baseEjectionTime`) makes the mesh re-probe a dead primary constantly, producing brief blips; too conservative and failback is slow. Size it to your outage profile, and *test it* — a failover you've never triggered is untuned.
 
-.DR decision guide — what each tool is *for*
+.Failover & connectivity decision guide — what each tool is *for*
 [cols="1,2,2",options="header"]
 |===
 | Need | Reach for | Not
 
-| Survive a pod / node / zone loss | *Replicas + PDB + spread + HPA* (M12/M16) | A backup (wrong layer — this is resilience)
-| Recover destroyed data or a deleted namespace | *OADP backup → restore* (object store) | Replicas (they can't bring data back)
+| Survive a pod / node / zone loss | *Replicas + PDB + spread + HPA* (M12/M16) | A second site (wrong layer — this is in-site resilience)
+| Survive the loss of a whole site/cluster | *Mesh cross-site failover* (stable endpoint + locality + outlier + retries) | More replicas in the same site (they die with it)
+| Connect real sites/DCs/clusters with no flat network | *RHSI / Service Interconnect* `[ADD-ON]` | A VPN or flattened network (heavier, cross-boundary-hostile)
+| Recover destroyed or corrupted *data* | *OADP backup → restore* (platform) | Failover (it moves traffic, not lost data)
 | Stand a platform back up on a new cluster | *GitOps re-materialize* (Argo CD, M10) *+ OADP data* | A hand-built runbook
-| Reach a service at another site/cluster, no VPN | *RHSI / Service Interconnect* `[ADD-ON]` | A flat network or VPN (heavier, cross-boundary-hostile)
-| Near-zero RPO/RTO for the crown jewels | *Active-passive or active-active* replication | Backup & restore (RPO = last backup)
-| Most apps, most of the time | *Backup & restore* + GitOps | Active-active (over-buying DR)
-| Automate DR across a fleet of clusters | *Advanced Cluster Management* (ACM) | Per-cluster hand-rolling
+| Automate resilience + DR across a fleet | *Advanced Cluster Management* (ACM) | Per-cluster hand-rolling
 |===
 
 == Go deeper
 
-* *OADP / Velero* — `Schedule` for periodic backups (your cadence *is* your RPO), backup/restore *hooks* (quiesce a database before snapshot), `Restore` filters (selective/partial restore), and the File System Backup (Kopia) alternative to CSI snapshots for storage without a CSI snapshotter.
-* *Non-admin self-service* — `NonAdminBackup` / `NonAdminRestore` (Technology Preview): the namespaced CRs and the `DataProtectionApplication` `nonAdmin.enable` switch that lets project-admins run their own backups when your platform team turns it on.
-* *Red Hat Service Interconnect* `[ADD-ON]` — Skupper v2 `Site` high-availability, `RouterAccess`, multi-key listeners, and *cross-cluster* links (the same CRs you used, pointed at a second cluster instead of a second namespace).
-* *GitOps as DR* — Argo CD app-of-apps re-materialization (M10), and how a Git-declared platform turns "stand up the DR site" into a convergence, not a runbook.
-* *Advanced Cluster Management (ACM)* — fleet-scale DR: cluster backup/restore built on OADP, cross-cluster networking (Submariner / RHSI), and GitOps-everywhere policy — the platform-team's next step beyond this module.
+* *Service Mesh failover* — `localityLbSetting` `distribute`/`failover`/`failoverPriority` for explicit region→region rules, active-active `distribute` weights, and the `outlierDetection` knobs (`splitExternalLocalOriginErrors`, ejection back-off) that shape how fast a site is ejected and re-admitted.
+* *Red Hat Service Interconnect* `[ADD-ON]` — Skupper v2 `Site` high-availability (`ha: true`), multi-key `Listener`s, `Connector` load-balancing across a routing key, and *cross-cluster* links (the same CRs you used, pointed at a real second cluster instead of a second namespace).
+* *OADP / Velero* (the DR net) — `Backup`/`Restore` of an app's objects and persistent-volume data to an object store, `Schedule` for periodic backups, and the discipline of *drilling the restore* so a green backup is a tested capability, not a hope.
+* *GitOps as DR* — Argo CD app-of-apps re-materialization (M10): a Git-declared platform stands the DR site up as a convergence, not a runbook.
+* *Advanced Cluster Management (ACM)* — fleet-scale resilience + DR: cluster backup/restore built on OADP, cross-cluster networking (Submariner / RHSI), and GitOps-everywhere policy — the platform-team's next step beyond this module.
 
 [NOTE]
-.The next real step — schedule and drill your recovery
+.The next real step — make the failover a scheduled game-day
 ====
-This module ran a *manual* backup and restore once. The natural next moves in a real Parasol build are to (1) put the backup on a `Schedule` so the cadence *is* the RPO, (2) add a backup *hook* that quiesces Postgres for a consistent snapshot, and (3) *drill the restore on a schedule* — a game-day where you actually delete and recover, because a backup you've never restored is a hope, not a capability. Pair that with a GitOps-declared platform (M10) and you have the honest core of a modern DR strategy: the platform rebuilds from Git, the data restores from the object store, and you've *tested* both.
+This module triggered *one* failover by hand. The natural next moves in a real Parasol build are to (1) *schedule a game-day* where you actually fail a site and confirm the cutover, (2) tune `outlierDetection` to your real outage profile so failback is neither flappy nor slow, and (3) pair the failover with the platform DR net — OADP-restore drills and a GitOps-declared platform (M10) — so you can recover not just from a site outage but from lost data and a lost cluster. A failover you've never triggered, like a backup you've never restored, is a hope, not a capability.
 ====
 
 [NOTE]
 .Clean up
 ====
-To return your world to the entry state — a fresh resilient stack, a re-seeded database, and the RHSI objects removed — run `ws prep {module-id} --yes`.
-It purges and re-materializes `{user}-resilience` and `{user}-site-b`, clearing any Velero backup/restore leftovers, the `NonAdminBackup` you may have tried, and the Skupper `Site`/`Link`/`Connector`/`Listener`/`AccessGrant`/`AccessToken` objects, then re-seeds a clean 25-row database so a re-run starts fresh.
-The shared OADP and Red Hat Service Interconnect operators are platform substrate — they're untouched; only your namespaces reset.
+To return your world to the entry state — the resilient sites and the client up, the failover routing and any RHSI objects removed — run `ws prep {module-id} --yes`.
+It purges and re-materializes `{user}-client`, `{user}-site-a`, and `{user}-site-b`, clearing the `ServiceEntry`/`DestinationRule`/`VirtualService` failover routing and the Skupper `Site`/`Link`/`Connector`/`Listener`/`AccessGrant`/`AccessToken` objects, then brings the resilient sites back fresh so a re-run starts clean.
+The shared Service Mesh and Red Hat Service Interconnect operators are platform substrate — they're untouched; only your namespaces reset.
 ====
