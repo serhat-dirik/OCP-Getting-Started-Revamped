@@ -1,0 +1,70 @@
+# Per-user MODERNIZE namespaces ({user}-modernize, M22) — owned by the workshop layer like
+# dev/stage/prod/cicd/batch/mesh, and for the same reason: the workshop-entries AppProject deliberately
+# blacklists ResourceQuota/LimitRange (quotas belong to the platform and must survive ws reset), so an
+# entry chart CANNOT create them. The m22 entry chart owns only in-namespace state (marker, MaaS
+# credentials, and — at solve — the modernized claims Deployment); everything here survives ws reset.
+# This is where the attendee containerizes + deploys the modernized service (S2I build → run), so the
+# quota is sized for a build + a small app, generous relative to that workload.
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $user }}-modernize
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+---
+# The attendee is admin on their own modernize namespace (same as the standard four dev/stage/prod/cicd).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-admin
+  namespace: {{ $user }}-modernize
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+---
+# Modest quota so a runaway modernization build can't consume the cluster; generous relative to the
+# M22 workload (an S2I build + one small modernized service + an ephemeral DB if used).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-modernize
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "5"
+    pods: "50"
+---
+# Default container requests/limits so bare pods (and S2I build pods) get sane values and don't trip quota.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-modernize
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 1Gi
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+{{- end }}
