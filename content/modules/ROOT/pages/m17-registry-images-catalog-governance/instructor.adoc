@@ -1,0 +1,223 @@
+= Registry, Images & Catalog Governance: Instructor Guide
+:module-id: m17
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34)
+// as user3 on 2026-07-13 by performing every exercise. The cluster-wide governance mutations
+// (allowedRegistriesForImport / registrySources / IDMS-ITMS / samples-skip / ConsoleSample) were NOT
+// applied on the shared build cluster — they are singletons that affect every tenant, and the build
+// harness (correctly) blocks shared-singleton writes. Their commands are grounded from the field
+// structure + OCP docs; the exact apiserver denial string is marked [CAPTURE-VERIFY] to confirm on a
+// disposable cluster. IDMS/ITMS are the CURRENT mirroring APIs; ICSP is named only as the deprecated
+// predecessor. NAMESPACE in output is the sample user user3-dev.
+
+This module has two beats that land, and they bracket the hands-on.
+The *promotion by digest* is exercise 2 — `prod` and `1.0` resolving to the *identical* `sha256` — which makes "an ImageStream pins a tag to immutable content" concrete and provable, not abstract.
+The *governance read* is exercise 6 — the whole cluster-wide surface (where images may come from, what's pruned, what the catalog offers) read live through `platform-observer`, then demonstrated by you.
+Everything between is the image lifecycle — scheduled imports, pull secrets, a namespaced Template — that makes those two beats legible.
+
+The single most common confusion is *"my scheduled-import stream isn't in my project."*
+It's the exercise-3 gotcha: `oc import-image {user}-dev/ext-ubi` doesn't parse the `namespace/` prefix (unlike `oc tag`) — it creates the stream in the user's *current* project. The lab flags this in an IMPORTANT block and uses `-n $NS`; pre-empt it only if someone strays from the written command.
+
+== Timing
+
+Total hands-on: *~67 min* (spec target 75 min total; add ~8 min of concept up front — the two-supply-chains diagram — and the numbers land on 75).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Tour the registry and your ImageStream | ~10 min | all reads — registry hostname, `oc describe is`, digest + `referencePolicy`, the `java-21` peek — instant; the time is reading and orienting
+| 2 | Tag and promote an image | ~10 min | `oc tag` *~0.9 s*; the digest-equality read is instant — the *point* is reading that `prod` == `1.0` by `sha256`
+| 3 | Scheduled import + break-and-fix | ~13 min | `oc import-image --scheduled` *~1.5 s*; the bad-ref import returns its error in *~1 s*; re-import *~1.5 s*
+| 4 | Pull from a private registry | ~12 min | `oc secrets link` instant; the pull-secret Deployment rolls out in *~1.5 s* (internal image, pull-through cached)
+| 5 | Publish a catalog Template | ~12 min | `oc apply` the Template *~4 s*; `oc process \| oc apply` + rollout *~5 s*
+| 6 | Read the governance surface `[INSTRUCTOR-DEMO]` | ~10 min | all read-only, instant; you perform the cluster-wide segment — see the script below
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-13, every attendee exercise was performed as `user3` and timed.
+The `oc` commands themselves return in about a second — `oc tag` in *~0.9 s*, `oc import-image` in *~1.5 s*, the pull-secret Deployment rollout in *~1.5 s* (the internal claims image is already pull-through-cached), the Template `oc apply` in *~4 s* and `oc process | oc apply` + rollout in *~5 s*.
+There are *no* long waits in this module — nothing reboots, nothing drains. *Attendee time is dominated by reading*: the digests, the import status, the governance objects. Budget the time for comprehension, not command latency.
+The cluster-wide governance segment (exercise 6) was *not* mutated on the shared build cluster; its commands are grounded from the object schema and docs, with the exact denial string marked to capture on a disposable cluster.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user3`.
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m17 --user user3
+ws verify m17 --user user3 --entry-only
+----
++
+Expect all entry checks green: the `{user}-dev` marker, the seeded `parasol-claims` stream with *only* its `1.0` tag, the sample `parasol-registry-creds` pull secret, and the clean-slate assertions (no `prod` tag, no `ext-ubi`, no custom Template, the secret unreferenced).
+
+. *The seeded ImageStream resolves its digest (the shared build is loaded).*
++
+[source,sh,role=execute]
+----
+oc get is parasol-claims -n user3-dev -o jsonpath='{.status.tags[0].items[0].dockerImageReference}{"\n"}'
+----
++
+Expect a `…/parasol-images/parasol-claims@sha256:…` digest. If it's empty, the shared `parasol-images` build wasn't loaded — exercise 1's "resolve to an immutable digest" read shows nothing and exercise 2's promote has no source. Re-run the workshop image-load step.
+
+. *The read-only role grants the governance reads (exercise 6).*
++
+[source,sh,role=execute]
+----
+oc get clusterrole platform-observer -o jsonpath='{range .rules[*]}{.apiGroups}:{.resources}{"\n"}{end}' | grep -iE 'image|sample|catalog|console'
+----
++
+Expect rules covering `config.openshift.io` `images`/`imagedigestmirrorsets`/`imagetagmirrorsets`/`operatorhubs`, `samples.operator.openshift.io` `configs`, `imageregistry.operator.openshift.io` `configs`/`imagepruners`, `operators.coreos.com` `catalogsources`, and `console.openshift.io` `consolesamples`. Without these, exercise 6's cluster reads fail closed and it becomes instructor-only. (The `ws smoke m17` `smokeCommands` also fail loud if this extension never landed.)
+
+. *The shared curated builder stream exists (the exercise-1 peek).*
++
+[source,sh,role=execute]
+----
+oc get is java-21 -n openshift -o jsonpath='scheduled={.spec.tags[0].importPolicy.scheduled} refPolicy={.spec.tags[0].referencePolicy.type}{"\n"}'
+----
++
+Expect `scheduled=true refPolicy=Local`. This is the "platform curates your catalog" worked example in exercise 1; if it's absent the peek still teaches from prose but loses the live object.
+
+. *The internal registry is route-free (the exercise-1 framing).*
++
+[source,sh,role=execute]
+----
+oc get route -n openshift-image-registry
+----
++
+Expect `No resources found` — the lab's whole "route-free, work through the API" framing depends on it. If a route *has* been added on your cluster, adjust the exercise-1 narration accordingly (the mechanics are unchanged).
+
+== Instructor demo — govern the cluster-wide supply (exercise 6)
+
+All four operations are *cluster singletons* — they affect *every* tenant on a shared cluster.
+*Only mutate a disposable or clearly-safe cluster*; on a shared workshop cluster, announce a tight window and revert immediately, or use a pre-recorded capture.
+
+=== Block a registry for import (instant, live-safe with care)
+
+`allowedRegistriesForImport` is admission-level — it limits which registries a *normal user* may import from, with *no* node reboot. It's the one cluster-wide control safe to toggle live in a tight window (it blocks imports for *all* concurrent users, so announce it).
+
+[source,sh,role=execute]
+----
+oc patch image.config.openshift.io/cluster --type=merge \
+  -p '{"spec":{"allowedRegistriesForImport":[{"domainName":"registry.redhat.io"},{"domainName":"registry.access.redhat.com"}]}}'
+# now attempt an unapproved import as a normal-user action:
+oc import-image demo-blocked -n user3-dev --from=docker.io/library/nginx:latest --confirm
+----
+
+// [CAPTURE-VERIFY] exact apiserver denial on OCP 4.21 — a Forbidden admission error stating the docker.io registry is not permitted by the import policy. Capture the precise string on your demo cluster; it was NOT applied on the shared build cluster (singleton).
+Talk track: the import is *refused* by admission with a `Forbidden` error naming `docker.io` as a registry the import policy doesn't allow — *instantly*, with no node change. Cluster-admins are exempt (the policy limits normal users), so demonstrate the denial from a user context or note the exemption. Then revert:
+
+[source,sh,role=execute]
+----
+oc patch image.config.openshift.io/cluster --type=json -p '[{"op":"remove","path":"/spec/allowedRegistriesForImport"}]'
+oc delete is demo-blocked -n user3-dev 2>/dev/null
+----
+
+=== Mirror for disconnected — talk-through / pre-recorded
+
+`registrySources.allowedRegistries` (pull/push enforcement on every node) and an *ImageDigestMirrorSet (IDMS)* / *ImageTagMirrorSet (ITMS)* are how an air-gapped cluster runs — every image reference is mirror-served.
+
+[source,sh,role=execute]
+----
+# DO NOT run live on a shared cluster — this re-renders /etc/containers/registries.conf on EVERY
+# node via the Machine Config Operator and ROLLS THE POOL (drain/reboot). Show the manifest, explain it.
+cat <<'EOF'
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: parasol-mirror
+spec:
+  imageDigestMirrors:
+    - source: registry.redhat.io/ubi9
+      mirrors:
+        - mirror.internal.parasol.example.com/ubi9
+EOF
+----
+
+Talk track: applying `registrySources` or an IDMS/ITMS triggers the Machine Config Operator to re-render every node and roll the pool — minutes of disruption that reschedules every tenant's pods, so it's *never* run mid-event. IDMS mirrors *by digest*, ITMS *by tag*. The older `ImageContentSourcePolicy` did this before OpenShift 4.13 and is *deprecated* — convert it with `oc adm migrate icsp`. Frame this as the disconnected-install mechanism; pre-record it or show it on a scratch cluster.
+
+=== Curate the catalog — skip a sample, add a ConsoleSample
+
+[source,sh,role=execute]
+----
+# Disable ONE stock sample (scalpel — NEVER managementState: Removed, which deletes all 60 IS + 51 templates):
+oc patch configs.samples.operator.openshift.io/cluster --type=merge \
+  -p '{"spec":{"skippedImagestreams":["dotnet"]}}'
+# Add a cluster sample to the Developer Catalog:
+oc apply -f - <<'EOF'
+apiVersion: console.openshift.io/v1
+kind: ConsoleSample
+metadata:
+  name: parasol-claims-starter
+spec:
+  title: Parasol Claims Starter
+  abstract: The blessed starting point for a Parasol claims service.
+  description: A curated cluster sample published by the platform team.
+  type: Source
+  source:
+    type: GitImport
+    gitImport:
+      repository:
+        url: https://github.com/parasol-insurance/claims-starter
+EOF
+----
+
+Talk track: `skippedImagestreams`/`skippedTemplates` remove *one* sample from the catalog; `managementState: Removed` would delete *all* of them and break every module that uses the catalog (never do it on a shared cluster). A `ConsoleSample` is how the platform publishes a blessed cluster-wide starter — the cluster-scoped sibling of the namespaced Template attendees published in exercise 5. Revert the skip afterwards (`oc patch … -p '{"spec":{"skippedImagestreams":[]}}'`).
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Run the demo from the entry state, not `ws solve`.*
+The story is *building* the governed supply chain from the seeded stream. `ws solve m17` renders the finished end state (promoted tag, scheduled import, Template, pull-secret Deployment) — use it to *show the destination* or pre-stage, never as the demo's start.
+* *Land the digest-equality line (beat 1).*
+"Same `sha256` on both — production runs the image we tested, and I can prove it." Say it while the two identical digest lines are on screen. That equality *is* the point of an ImageStream promotion.
+* *Announce and revert the allowed-registries beat (beat 2).*
+It blocks imports for *every* concurrent user for as long as it's set. Announce a tight window, apply, show the denial, revert *immediately*, and confirm `allowedRegistriesForImport` is empty again. On any shared cluster, prefer a pre-recorded capture.
+* *Keep the Template beat namespaced.*
+"One Template, one namespace" is the contrast with the cluster-wide samples operator. If asked "could I do this for everyone?" — yes, that's a `ConsoleSample` (cluster-scoped), which is the instructor segment, not a namespaced Template.
+
+== Top questions attendees ask
+
+*1. "Why use an ImageStream at all — why not just reference the image directly?"*::
+Three reasons you can point at from the lab: it *pins a moving tag to an immutable digest* (so `prod` is provably the bits you tested — you saw `prod` and `1.0` share a `sha256`), it can *re-import on a schedule* (the `ext-ubi` stream stays current on its own), and `referencePolicy: Local` makes it a *pull-through cache* (workloads pull from the internal registry, not the source). A bare image reference gives you none of those — the tag can silently move, nothing re-imports, and every pod pulls from the source.
+
+*2. "My scheduled-import stream isn't in my project — where did it go?"*::
+`oc import-image` does *not* read a `namespace/name` positional prefix the way `oc tag` does. `oc import-image {user}-dev/ext-ubi …` creates the stream in your *current* project (whatever `oc project` shows), not `{user}-dev`. Always pass `-n $NS` with a *bare* stream name. On the build cluster, running it from the `default` project created `ext-ubi` in `default`; with `-n user3-dev` it landed correctly. This is exercise 3's IMPORTANT block.
+
+*3. "Can I push to the internal registry from my laptop with `podman push`?"*::
+Not on this cluster — the registry has *no external route* (`defaultRoute` is off), so it's reachable only in-cluster. Everything runs through the API: `oc tag`, `oc import-image`, in-cluster builds. Enabling `defaultRoute` is possible but adds an internet-facing surface and TLS/pull-secret handling — a deliberate platform decision, not a default. The route-free posture is the common one for shared and locked-down clusters.
+
+*4. "The pull-secret step didn't actually pull from the private registry — is it broken?"*::
+No — the sample host (`registry.parasol.example.com`) is an *inert placeholder* that doesn't resolve, so a real external pull can't happen. The lab teaches the *mechanics* — linking a secret to a ServiceAccount `--for=pull` and naming it in a pod's `imagePullSecrets` — which are identical for a *real* private registry (or Quay). The demo Deployment runs the *internal* claims image so the pod is genuinely `Ready`; the pull-secret reference is the artifact being wired, not a live external pull. That honesty is deliberate — the transferable skill is the wiring.
+
+*5. "The allowed-registries policy is cluster-wide — how do I demo it without breaking everyone?"*::
+`allowedRegistriesForImport` is admission-level and *instant* (no node reboot), but it *does* apply to every concurrent user's imports while it's set. Announce a tight window, apply, show one denied `oc import-image`, and revert immediately — or use a pre-recorded capture. *Never* demo `registrySources` or IDMS/ITMS live: those re-render every node and roll the pool, disrupting every tenant. Those are talk-through / pre-recorded only.
+
+== Watchouts
+
+* *`oc import-image` uses the current project, not a `namespace/` prefix.*
+The single most common stumble (question 2). The lab uses `-n $NS`; if a user's stream vanishes, check `oc get is ext-ubi -n default` (or wherever their `oc project` points). Harmless, but confusing — pre-empt it if you see it.
+* *Never mutate a cluster singleton on a shared cluster without a plan.*
+`allowedRegistriesForImport`, `registrySources`, IDMS/ITMS, the samples `Config`, `ConsoleSample` — all singletons. The build harness blocks these writes for good reason. On a shared workshop cluster, keep exercise 6 *read-only* for attendees and revert any instructor change immediately.
+* *`managementState: Removed` on the samples operator is a foot-gun.*
+It deletes *all* 60 image streams and 51 templates — the catalog the Build & Deliver and other modules depend on. The disable-a-sample demo MUST use `skippedImagestreams`/`skippedTemplates`. Never `Removed` on a shared cluster.
+* *The nightly pruner can delete unreferenced images mid-event.*
+`ImagePruner/cluster` runs daily at midnight, keeping 3 tag revisions and sparing images younger than an hour. On a multi-day event, entry-state images that aren't referenced by a running workload can vanish overnight. Mitigation is an ops decision: keep them referenced, raise `keepTagRevisions`, or suspend the pruner for the event.
+* *Registry storage is one RWO PVC.*
+Thirty users' multi-day image churn lands on a single volume with a `Recreate` (one-pod) registry. A full registry blocks *every* push and build cluster-wide. Monitor fill on long events; size the PVC accordingly at bootstrap.
+
+== Provenance
+
+M17 is a net-new module (the spec's "fresh; MAD provisioning guide hints; docs" — the old content yielded no portable registry/pruning/catalog material), built against this repo's live cluster.
+Everything M17 teaches for the attendee is *core* OpenShift — GA on the cluster, no operator or subscription.
+Every attendee command, output, and timing — the registry hostname and route-free check, the `parasol-claims` digest resolution and `referencePolicy: Local` pull-through, the `oc tag` promote proving `prod` == `1.0` by `sha256`, the `oc import-image --scheduled` and the "name unknown: Repo not found" break-and-fix, the `oc secrets link` and pod-level `imagePullSecrets` wiring, the namespaced Template create + `oc process` deploy, and the whole governance-surface read (empty `allowedRegistriesForImport`/mirrors, the `keepTagRevisions=3` daily pruner and its `0 0 * * *` CronJob, the `Managed` samples operator with 60 image streams + 51 templates, and the five catalog sources including the curated `redhat-rhpds-gitea`) — was captured on OpenShift {ocp_version} as `user3` on 2026-07-13 during the build.
+The *cluster-wide governance mutations* (`allowedRegistriesForImport` block, `registrySources`/IDMS/ITMS mirroring, samples-skip, `ConsoleSample`) were *not* applied on the shared build cluster — they are singletons affecting every tenant, and the build harness blocks shared-singleton writes. Their commands are grounded from the object schema and OCP docs; the exact apiserver *denial string* for the allowed-registries block is marked `[CAPTURE-VERIFY]` to confirm on a disposable cluster.
+IDMS/ITMS are named as the *current* mirroring APIs throughout; `ImageContentSourcePolicy` appears only as the *deprecated predecessor* (convert with `oc adm migrate icsp`), never as a recommended path.

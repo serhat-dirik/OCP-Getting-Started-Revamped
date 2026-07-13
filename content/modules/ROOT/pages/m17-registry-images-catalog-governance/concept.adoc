@@ -1,0 +1,166 @@
+= Registry, Images & Catalog Governance: Concept
+:module-id: m17
+include::partial$version-attributes.adoc[]
+
+// Concept page for M17. Renders in all three flavors (workshop/demo/instructor). Environment
+// values appear ONLY as attributes; product versions ONLY via version-attributes. Every registry,
+// ImageStream, and governance behaviour described here was performed on OCP {ocp_version}
+// (Kubernetes 1.34) as user3 on 2026-07-13 — the pull-through digest resolution, the tag/promote,
+// the scheduled import, the pull-secret link, the namespaced Template, and the whole cluster-wide
+// governance surface (image.config, samples Config, ImagePruner, IDMS/ITMS, OperatorHub sources) are
+// real reads, not from memory. The internal registry has NO external route on this cluster
+// (defaultRoute unset, verified live) — the whole image arc is taught route-free via the API. IDMS/
+// ITMS are the CURRENT mirroring APIs; ICSP is named only as the deprecated predecessor (04-STYLE-
+// GUIDE §6 ban — it never appears as a recommended path). Prose expands "IDMS"/"ITMS"/"IDMS-ITMS"
+// on first use; ubiquitous acronyms (API, CPU, PVC, TLS, DNS) are never expanded.
+
+[.lead]
+The shiny developer catalog in the Build & Deliver module — the builder images, the one-click samples, the operators — did not appear by magic: a platform team *curated* every entry, and decided which registries an image may even come from.
+This module is the layer *underneath* that catalog: how the internal registry stores your images, why an ImageStream is still worth using, and how platform engineers govern *where images come from* and *what developers can run and offer*.
+Same Parasol claims image, same cluster — but by the end you can promote it by immutable digest, re-import a base image on a schedule, deploy it with a private-registry pull secret, publish your own catalog entry, and read the cluster-wide controls that decide the rest.
+
+== What you'll learn
+
+* How the *internal registry* is wired on this cluster — an in-cluster Service, backed by one volume, with a nightly *pruner* — and why it has no external route here.
+* Why an *ImageStream* still earns its place: it pins a moving tag to an *immutable digest*, gives you a stable in-cluster name, and can *re-import* an external image on a schedule.
+* How to *tag and promote* an image across environments (`1.0` → `prod`) so a promotion is a pointer move, not a rebuild — and why the promoted tag resolves to the *exact same bits*.
+* How to pull from an *external or private registry* with a *pull secret*, linked to a ServiceAccount or named on a pod — the mechanics that let a workload authenticate to a registry it doesn't own.
+* The *trust boundary*: where images may come from — *allowed registries*, *import restrictions*, and *IDMS/ITMS mirroring* — and how it complements the *signature* trust from the Trusted Supply Chain module.
+* How platform teams *feed the catalog*: OperatorHub sources, the *samples operator*, cluster *ConsoleSamples*, your own namespaced *Templates*, and where devfiles come from.
+
+== Two supply chains on one page
+
+Everything in this module is one of *two* supply chains that meet at the developer.
+The *image supply* decides which bits run; the *catalog supply* decides what a developer can pick from.
+A platform team governs both.
+
+[mermaid]
+....
+graph LR
+  subgraph ext["External registries"]
+    q["registry.redhat.io<br/>quay.io · docker.io"]
+  end
+  subgraph gov["Platform governance (where images may come from)"]
+    allow["allowedRegistriesForImport<br/>· registrySources<br/>· IDMS / ITMS mirror"]
+  end
+  subgraph cluster["This cluster"]
+    reg["Internal registry<br/>svc:5000 + one PVC<br/>+ nightly pruner"]
+    is["ImageStream<br/>immutable digest ·<br/>scheduled import ·<br/>referencePolicy Local"]
+    wl["Your workload"]
+  end
+  q --> allow --> reg --> is --> wl
+  subgraph catalog["Catalog supply (what developers can run + offer)"]
+    src["OperatorHub sources · samples operator ·<br/>ConsoleSample · namespaced Template · devfiles"]
+  end
+  src -->|"feeds"| dcat["Developer Catalog"]
+  dcat --> wl
+  classDef e fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef g fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef c fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef k fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  class q e; class allow,src g; class reg,is,wl,dcat c;
+....
+
+// media-pass: replace/augment with SVG export m17-registry-images-catalog-governance-01-two-supply-chains.svg (see media-manifest.md)
+
+The *red* boxes are outside your trust boundary; the *amber* boxes are the governance controls a platform team sets; the *green* boxes are what you work with hands-on.
+The whole left-to-right flow is the image supply; the bottom branch is the catalog supply.
+You'll drive the green boxes in the lab and *read* the amber ones — creating them is cluster-wide, so it's the instructor's segment.
+
+== The internal registry, honestly
+
+Every OpenShift cluster ships an *integrated container registry*.
+On this cluster it lives at `image-registry.openshift-image-registry.svc:5000` — an in-cluster Service, reachable only from *inside* the cluster.
+It is where your builds push and where the platform caches images it pulls through on your behalf.
+
+Two facts about *this* cluster shape the whole lab, and both are deliberate:
+
+* *There is no external route.* The registry's `defaultRoute` is off, so you cannot `podman login` and push to it from your laptop.
+Everything you do with images here runs *through the API* — `oc tag`, `oc import-image`, in-cluster builds — never a `docker push`.
+That's the common posture for a shared workshop or a locked-down production cluster: the registry is an *internal* service, not an internet-facing one.
+* *Storage is one volume, and a pruner runs nightly.* The registry is backed by a single read-write-once PVC with a `Recreate` rollout (one registry pod at a time), and an *image pruner* runs on a schedule — on this cluster daily at midnight, keeping the last 3 tag revisions and sparing anything younger than an hour.
+On a multi-day event that matters: an unreferenced image can be *pruned overnight*. Keep what you need *referenced* — by a running workload or a tag — and it stays.
+
+[NOTE]
+.Quay is the registry you'd reach for at scale
+====
+The integrated registry is perfect for in-cluster builds and caching.
+When an organization needs a *shared*, multi-cluster registry with vulnerability scanning, geo-replication, and fine-grained access control, that's *Red Hat Quay* — a separate product, mentioned here so you know where the internal registry stops and a full enterprise registry begins.
+This module uses the *internal* registry throughout.
+====
+
+== Why an ImageStream still matters
+
+A container image reference like `parasol-claims:prod` is a *moving target* — whoever pushes that tag next changes what it points to.
+An *ImageStream* is OpenShift's answer: a stable, in-cluster name that *tracks* image tags and *records the immutable digest* behind each one.
+
+Three properties earn it a place in your workflow:
+
+* *It pins a tag to a digest.* When you tag or import, the ImageStream records the `sha256:…` digest the tag resolved to. A digest is *content-addressed* — it can never point at different bits. So "promote `1.0` to `prod`" becomes a pointer to an *exact image*, not a hope that nobody re-pushed the tag.
+* *It can re-import on a schedule.* Mark a tag `scheduled` and OpenShift periodically re-checks the source registry and pulls the new digest when the upstream tag moves — a base image that stays current without a human watching it.
+* *`referencePolicy: Local` turns it into a pull-through cache.* With Local reference, workloads pull the image *from the internal registry* rather than the source. The registry fetches and caches the bits once; every pod after that pulls locally — faster, and resilient to the source being briefly unreachable.
+
+That last one is how the seeded `parasol-claims` stream works in the lab: its `1.0` tag references a shared build via `referencePolicy: Local`, so the internal registry serves the bits and no per-pod pull secret is needed.
+ImageStreams also drive *triggers* — a Deployment can watch a stream and roll automatically when the tag's digest changes — the mechanism behind "rebuild pushes, app redeploys" in the build modules.
+
+== The trust boundary: where images may come from
+
+Two different questions decide whether an image is allowed to run, and they're *complementary*:
+
+* *Is this image trusted?* — is it *signed* by someone you trust? That's the *sigstore signature admission* you met in the Trusted Supply Chain module (`ImagePolicy` / `ClusterImagePolicy`). A *different* axis, not repeated here.
+* *May images come from this registry at all?* — that's *this* module's boundary, and it's set cluster-wide on the `Image` config object:
+
+[cols="1,2,2",options="header"]
+|===
+| Control | What it governs | Blast radius
+
+| `allowedRegistriesForImport` | Which registries a *normal user* may `oc import-image` / tag from | *Instant*, admission-level — no node change; blocks *imports*, not running pods
+| `registrySources.allowedRegistries` / `blockedRegistries` | Which registries *any pod or build* may pull/push, enforced by the container runtime on *every* node | *Heavy* — the Machine Config Operator re-renders every node and *rolls the pool*
+| *IDMS / ITMS* (ImageDigestMirrorSet / ImageTagMirrorSet) | Redirect pulls of a registry to a *mirror* — the heart of *disconnected* installs | *Heavy* — also re-rendered onto every node
+|===
+
+*IDMS* and *ITMS* are the *current* mirroring APIs — an IDMS redirects pulls *by digest*, an ITMS *by tag*, to a mirror registry inside your network.
+This is how a disconnected (air-gapped) cluster runs: every image reference is transparently mirror-served.
+(An older object, `ImageContentSourcePolicy`, did this before OpenShift 4.13 and is *deprecated* — you convert it to IDMS with `oc adm migrate icsp`; it is not a path you'd choose today.)
+
+The honest operational note, and why the lab *reads* these rather than *sets* them: changing `registrySources` or applying an IDMS/ITMS re-renders `/etc/containers/registries.conf` on *every* node and *reboots the pool* — minutes of churn that reschedules every tenant's pods.
+`allowedRegistriesForImport`, by contrast, is admission-only and *instant* — which is why it's the one control your instructor can safely toggle live.
+
+== The catalog supply: what developers can run and offer
+
+The Developer Catalog you browsed in the Build & Deliver module is *fed* from several sources, each a governance lever a platform team pulls:
+
+* *OperatorHub sources & `CatalogSource`s* — the operators offered in OperatorHub come from catalog sources. The default four (Red Hat, Certified, Community, Marketplace) can be trimmed on the `OperatorHub` config, and an organization can *add* its own `CatalogSource` — this cluster has one, a curated internal catalog alongside the defaults.
+* *The samples operator* — the builder images and quickstart templates in the catalog (60 image streams and 51 templates on this cluster) are managed by one operator. A platform team can *skip* an individual sample it doesn't want offered, using `skippedImagestreams` / `skippedTemplates` — a scalpel, never the all-or-nothing `managementState: Removed`, which would delete *every* sample.
+* *`ConsoleSample`* — a cluster-scoped object that adds a *sample* to the catalog (from a Git import or a container image) — how an organization publishes "here's our blessed starting point."
+* *Namespaced `Template`s* — the one catalog lever *you* control. A `Template` you create in your *own* project appears in *your* Developer Catalog and nobody else's — a self-service catalog entry with no cluster-admin needed. You'll publish one in the lab.
+* *Devfiles* — the "Import from Git" devfile samples come from a devfile registry (the community `registry.devfile.io`, plus any private one). A *private* devfile registry is a Dev Spaces (CheCluster) configuration — the same idea, governed in the workspaces module — so here it's a *peek*, not a cluster API you set.
+
+The through-line: *the platform team decides what developers can run and offer.* Most of that is cluster-wide and governed centrally; the one piece you own is a Template in your own namespace.
+
+== Who runs what
+
+Because so much of this surface is a *cluster singleton*, the module splits cleanly:
+
+* *Hands-on, in your own namespace (non-disruptive):* tour the registry and the `parasol-claims` stream, tag/promote, scheduled import, link a pull secret, publish a namespaced Template, and *read* the governance objects.
+* *Instructor demo (cluster-wide):* blocking imports with `allowedRegistriesForImport` (instant, live), `registrySources` + IDMS/ITMS mirroring (talk-through — they reboot nodes), disabling a stock sample, and adding a `ConsoleSample`. You'll *read* the results of these; *setting* them affects every tenant.
+
+You read the cluster-wide objects through the read-only `platform-observer` role — the same pattern as the other platform modules.
+
+== How this shows up in real orgs
+
+* *"Which promotion is running in prod — and is it the image we tested?"* If "promote to prod" means re-pushing a tag, you're trusting that nobody changed it in between. Promoting by *digest* through an ImageStream makes the answer provable: `prod` and the tested `1.0` resolve to the *same* `sha256`, or they don't. That's the difference between a release you can audit and one you hope about.
+* *"A developer pulled a random image off the internet into production."* Without an allowed-registries policy, any `oc import-image docker.io/whatever` succeeds. `allowedRegistriesForImport` is the instant, low-risk floor; `registrySources` and mirroring are the heavier, disconnected-grade controls. Most breaches of this kind are *policy not set*, not policy defeated.
+* *"Our air-gapped cluster can't reach the internet — how does anything pull?"* Every image is mirror-served through IDMS/ITMS to an internal registry. Teams that haven't set this up discover it the hard way during their first disconnected install; the mechanism is worth understanding *before* you need it.
+* *"Why is our catalog full of things we don't allow, and missing the one blessed starter we do?"* The catalog is *curated*, not fixed. Skipping the samples you don't want and publishing a `ConsoleSample` (or a namespaced Template) for the one you do is a half-hour of platform work that saves every developer the guesswork.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) an ImageStream *pins a moving tag to an immutable digest*, so a promotion is a provable pointer move — `prod` and `1.0` are the *same* `sha256`; (2) the *trust boundary* is "where images may come from" — `allowedRegistriesForImport` is instant, `registrySources`/IDMS/ITMS reboot nodes, and signatures (from the supply-chain module) are the *complementary* axis; (3) the catalog is *curated* — OperatorHub sources, the samples operator, `ConsoleSample`, and a namespaced Template are the levers, and "the platform team decides what developers can run and offer."
+The demo is the ten-minute governance story: promote the claims image by digest, block a `docker.io` import live with `allowedRegistriesForImport` and revert it, then publish a namespaced Template so it shows up in *one* developer's catalog and nobody else's.
+Close on the punchline: "the image that ships is the one we tested, it can only come from a registry we allow, and the catalog offers exactly what we chose — none of it luck, all of it governance."
+====
+endif::demo[]

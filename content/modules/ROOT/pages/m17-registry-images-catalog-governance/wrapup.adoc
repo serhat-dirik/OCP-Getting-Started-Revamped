@@ -1,0 +1,90 @@
+= Registry, Images & Catalog Governance: Wrap-up
+:module-id: m17
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims image from *a tag in a registry* to *a governed part of a supply chain*.
+You toured the internal registry — an in-cluster Service on `:5000`, backed by one volume, pruned nightly, with no external route — and read the seeded `parasol-claims` ImageStream resolving its `1.0` tag to an immutable `sha256` through a `referencePolicy: Local` pull-through.
+You *promoted* `1.0` to `prod` by digest and proved the two names point at the *exact same bits* — a promotion you could put in an audit.
+You made an external base image stay current on its own with a *scheduled import*, and read a real import failure — *"name unknown: Repo not found"* — instead of guessing at it.
+You wired a *pull secret* to a workload two ways — linked to a ServiceAccount and named on a pod — the mechanics that authenticate to a private registry.
+You *published* a namespaced `Template` that appears in your Developer Catalog alone, and deployed from it.
+Finally you *read* the cluster-wide governance surface: where images may come from (`allowedRegistriesForImport`, IDMS/ITMS), what's retained (the nightly pruner), and what the catalog offers (the samples operator's 60 image streams and 51 templates, five catalog sources).
+
+[mermaid]
+....
+graph TB
+  subgraph you["Yours (namespaced)"]
+    is["parasol-claims<br/>1.0 → prod (same digest)"]
+    ext["ext-ubi<br/>scheduled import"]
+    tmpl["namespaced Template<br/>your catalog entry"]
+    sec["pull secret<br/>→ SA / pod"]
+  end
+  subgraph platform["Platform (cluster-wide — you read)"]
+    allow["allowedRegistriesForImport<br/>IDMS / ITMS"]
+    prune["nightly pruner<br/>keep 3 revisions"]
+    samples["samples operator<br/>ConsoleSample · catalog sources"]
+  end
+  reg[("Internal registry<br/>svc:5000")]
+  is --> reg
+  ext --> reg
+  allow -->|"governs"| reg
+  prune -->|"reclaims"| reg
+  samples -->|"feeds"| dcat["Developer Catalog"]
+  tmpl -->|"feeds (your ns only)"| dcat
+  classDef ok fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef gov fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef reg fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  class is,ext,tmpl,sec ok;
+  class allow,prune,samples gov;
+  class reg,dcat reg;
+....
+
+// media-pass: recap SVG m17-registry-images-catalog-governance-03-what-you-built.svg (green = your namespaced work; amber = cluster-wide governance you read; blue = the registry + catalog they meet at).
+
+The one idea under all of it: *an image reference is a promise, and this whole layer is how you make it provable* — the promoted image is the one you tested (by digest), it can only come from a registry you allow, and the catalog offers exactly what the platform chose.
+
+== Map to your org
+
+Take these back to how your teams' images and catalog are governed today:
+
+. *When you "promote to prod," can you prove it's the image you tested?*
+You promoted by digest and showed `prod` and `1.0` are the same `sha256`. If your promotion is a re-pushed tag, you're trusting nobody swapped it. Could you point at a production workload and prove — by digest — that it's the artifact that passed your tests, or only the tag that was pointed at it?
+. *Where can images in your cluster come from — and who decided?*
+`allowedRegistriesForImport` is an instant floor; `registrySources` and IDMS/ITMS are the heavier, disconnected-grade controls. Is there a written policy for which registries your clusters trust, or could a developer `import-image` from anywhere on the public internet today? For a regulated workload, "anywhere" is usually the wrong default nobody chose on purpose.
+. *If your registry filled up overnight, would you know why — and would a build fail?*
+The registry is one volume with a nightly pruner. On a long-running cluster, storage and retention are real operational concerns: a full registry blocks *every* push and build. Do you know your pruner's schedule and `keepTagRevisions`, or is retention something you'll discover during an incident?
+. *Who curates your Developer Catalog — and is the "blessed starter" actually in it?*
+You published a namespaced Template and read the cluster-wide samples operator. Many orgs leave the catalog at its defaults: full of samples they don't sanction, missing the one golden-path starter they do. Is your catalog a *decision* — skipped samples, a `ConsoleSample` or Template for the blessed path — or just whatever shipped?
+
+== When *not* to reach for this
+
+These controls are powerful, and over-reaching with them is its own failure mode:
+
+* *Don't set `registrySources` or an IDMS/ITMS to solve an *import* problem.*
+Those re-render every node and roll the pool — minutes of cluster-wide disruption. If you just want to stop *users* importing from an untrusted registry, `allowedRegistriesForImport` does it instantly with no reboot. Save `registrySources`/mirroring for pull-time enforcement and disconnected installs, where the node change is the point.
+* *Don't disable samples with `managementState: Removed`.*
+That deletes *all* 60 image streams and 51 templates at once — the catalog other modules depend on. To drop *one* sample, use the samples operator's `skippedImagestreams` / `skippedTemplates`. `Removed` is for a cluster that genuinely wants *no* Red Hat samples, not a scalpel.
+* *Don't expose the internal registry with a route unless you need to.*
+Turning on `defaultRoute` adds an internet-facing attack surface and TLS/pull-secret handling. If your workflow is in-cluster builds and pull-through (as this lab's was), the route-free posture is simpler *and* safer. Add the route only when an external client genuinely must push or pull directly — and then treat it like any other exposed endpoint.
+* *Don't reach for a private-registry pull secret when pull-through would do.*
+If the image lives in a registry the cluster already mirrors or caches (via `referencePolicy: Local` or an IDMS), workloads pull it locally with no per-workload credential. Reserve pull secrets for registries the cluster genuinely can't reach without authenticating — not as a default on every Deployment.
+
+== Go deeper
+
+* *Image configuration resources* — the `Image` config object: `allowedRegistriesForImport` (admission-level import control) and `registrySources` (node-enforced allow/block lists), including the field structure and blast radius you read.
+* *Configuring image registry settings* and *Automatically pruning images* — the internal registry's storage, `defaultRoute`, and the `ImagePruner` (`schedule`, `keepTagRevisions`, `keepYoungerThan`) behind the nightly pruner.
+* *Managing image streams* — tags, scheduled imports (`importPolicy.scheduled`), `referencePolicy: Local` pull-through, and image-change *triggers* that redeploy on a new digest.
+* *Using image pull secrets* — `oc create secret docker-registry`, linking to a ServiceAccount `--for=pull`, and pod-level `imagePullSecrets` — for a real private registry or *Red Hat Quay*.
+* *Mirroring images for a disconnected installation* — *ImageDigestMirrorSet* / *ImageTagMirrorSet*, the mirroring workflow, and `oc adm migrate icsp` (converting the deprecated predecessor) — the air-gapped supply chain.
+* *Configuring the Cluster Samples Operator* and *Creating cluster samples (ConsoleSample)* — curating the catalog with `skippedImagestreams`/`skippedTemplates` and cluster samples; *Templates* for the namespaced catalog entry you published.
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — only the seeded `parasol-claims:1.0` stream and the sample pull secret, nothing promoted, imported, or published — run `ws prep {module-id} --yes`.
+It re-materializes the entry state so a re-run starts clean.
+The cluster-wide governance objects you *read* (image config, samples operator, pruner, catalog sources) are platform substrate — they're untouched; only your namespace resets.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

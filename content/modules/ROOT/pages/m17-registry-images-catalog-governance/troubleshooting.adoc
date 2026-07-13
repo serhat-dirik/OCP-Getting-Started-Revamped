@@ -1,0 +1,124 @@
+= Registry, Images & Catalog Governance: Troubleshooting
+:module-id: m17
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-13 as user3)
+// plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use $NS = {user}-dev (set it
+// once). NAMESPACE in output is the sample user user3-dev.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcut first: `NS={user}-dev`.
+
+== My scheduled-import stream isn't in my project
+
+Symptom:: You ran `oc import-image {user}-dev/ext-ubi …` and the stream is nowhere in `{user}-dev` — or it landed in a different project.
+Cause:: `oc import-image` does *not* parse a `namespace/name` positional prefix the way `oc tag` does. It creates the stream in your *current* project (whatever `oc project` shows) and treats the argument as a bare name — so the `{user}-dev/` prefix is ignored.
+Fix:: Always pass `-n $NS` with a *bare* stream name; delete the misplaced one if it landed elsewhere:
++
+[source,sh,role=execute]
+----
+oc get is ext-ubi --all-namespaces 2>/dev/null | grep ext-ubi   # find where it actually landed
+oc import-image ext-ubi -n $NS --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm | head -3
+----
++
+On the build cluster, running the command from the `default` project created `ext-ubi` in `default`; with `-n user3-dev` it landed correctly. `oc tag` *does* take `namespace/name` — the two commands differ here, which is the trap.
+
+== An import fails with "name unknown: Repo not found"
+
+Symptom:: `oc import-image` returns `error: Import failed (InternalError): … name unknown: Repo not found` and `error: imported completed with errors`.
+Cause:: The `--from` reference points at a repository the registry doesn't have — a typo in the path, a wrong tag, or a repo that needs credentials you didn't supply.
+Fix:: Read the import status (it names the cause), then import the *correct* reference:
++
+[source,sh,role=execute]
+----
+oc get is <stream> -n $NS -o jsonpath='{range .status.tags[*].conditions[*]}{.message}{"\n"}{end}'
+oc delete is <stream> -n $NS          # remove the broken stream
+oc import-image ext-ubi -n $NS --from=registry.access.redhat.com/ubi9/ubi:latest --confirm | grep -i imported
+----
++
+The import *status* is always the first thing to read — it distinguishes a bad repo (`Repo not found`) from a private repo needing a pull secret from a registry the *policy* blocks (exercise 6).
+
+== `oc tag` fails: "not currently pointing to an image"
+
+Symptom:: `oc tag $NS/parasol-claims:9.9 $NS/parasol-claims:prod` errors with `"…:9.9" is not currently pointing to an image, cannot use it as the source of a tag`.
+Cause:: The *source* tag doesn't exist (or hasn't resolved to a digest yet). You can only promote *from* a tag that already points at a real image.
+Fix:: List the tags that actually exist, and promote from one of those:
++
+[source,sh,role=execute]
+----
+oc get is parasol-claims -n $NS -o jsonpath='available tags: {.spec.tags[*].name}{"\n"}'
+oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:prod
+----
++
+Nothing is created when the source is missing — the command guards you, so just re-run with a real source tag.
+
+== The pull-secret Deployment stays Ready but never uses the private registry
+
+Symptom:: The `parasol-registry-demo` Deployment is `Running`, but you expected it to *pull* from `registry.parasol.example.com` and it clearly didn't.
+Cause:: This is *by design*. The sample pull secret's host (`registry.parasol.example.com`) is an *inert placeholder* that doesn't resolve — there is no real private registry behind it. The Deployment runs the *internal* claims image (which is pullable) so the pod is genuinely `Ready`; the `imagePullSecrets` reference is the artifact being wired, not a live external pull.
+Fix:: Nothing to fix — confirm the reference is present (that's the graded outcome); on a *real* private registry the same wiring performs a real pull:
++
+[source,sh,role=execute]
+----
+oc get deploy parasol-registry-demo -n $NS -o jsonpath='imagePullSecrets={.spec.template.spec.imagePullSecrets[*].name}{"\n"}'
+----
++
+For a real registry, create the secret with genuine credentials (`oc create secret docker-registry … --docker-server=<real-host>`) and point the container `image` at that host — the `imagePullSecrets` / `oc secrets link` mechanics are identical.
+
+== My promoted `prod` tag shows `referencePolicy: Source`, not `Local`
+
+Symptom:: The seed `1.0` tag has `referencePolicy: Local`, but after `oc tag …:1.0 …:prod` the new `prod` tag reads `referencePolicy: Source`.
+Cause:: `oc tag` defaults to `--reference-policy=source`. That's *not* a problem for the promotion — `prod` still resolves to the *same immutable digest* as `1.0` (promotion by digest is intact). `referencePolicy` only affects *where* a workload pulls the bits from (the internal registry pull-through for `Local`, the recorded source for `Source`).
+Fix:: If you want the promoted tag to *also* pull through the internal registry, tag with `--reference-policy=local` (or enable local name lookup on the stream):
++
+[source,sh,role=execute]
+----
+oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:prod --reference-policy=local
+oc get is parasol-claims -n $NS -o jsonpath='{range .status.tags[*]}{.tag}={.items[0].dockerImageReference}{"\n"}{end}'
+----
++
+Either way, `prod` and `1.0` share the same `sha256` — the promotion is honest; `referencePolicy` is a pull-source detail, not the identity.
+
+== The governance reads are "Forbidden" (exercise 6)
+
+Symptom:: `oc get image.config.openshift.io/cluster` (or the samples/pruner/catalogsource reads) returns `Error … "…" is forbidden`.
+Cause:: The read-only `platform-observer` role isn't granting those resources — the M17 extension (image config, samples, pruner, catalog sources, ConsoleSample) didn't land on this cluster, or your user isn't in the `workshop-attendees` group bound to it.
+Fix:: This is a *platform* gap, not something to fix in your namespace — confirm the grant and tell your instructor if it's missing:
++
+[source,sh,role=execute]
+----
+oc get clusterrole platform-observer -o jsonpath='{range .rules[*]}{.apiGroups}:{.resources}{"\n"}{end}' | grep -iE 'image|sample|catalog'
+----
++
+Expect rules covering `config.openshift.io` `images`, `imageregistry.operator.openshift.io` `imagepruners`/`configs`, `samples.operator.openshift.io` `configs`, and `operators.coreos.com` `catalogsources`. If they're absent, the workshop-config `platform-observer` extension needs to be applied (an instructor/platform action).
+
+== My namespaced Template doesn't appear in the Developer Catalog
+
+Symptom:: You applied the `parasol-claims-quickstart` Template but don't see it under *+Add → Developer Catalog → Template*.
+Cause:: Either you're looking at a *different* project in the console (a namespaced Template only shows in *its own* project's catalog), or the console list needs a refresh.
+Fix:: Confirm the Template is in *your* project via the CLI (the source of truth), then check the console is scoped to the same project:
++
+[source,sh,role=execute]
+----
+oc get templates -n $NS
+----
++
+If `oc get templates -n $NS` lists it, it *is* registered — switch the console's project selector to `{user}-dev` and filter the Developer Catalog to *Template*. It will never appear in another project's catalog; that namespacing is the whole point.
+
+== I can't `podman push` to the internal registry
+
+Symptom:: `podman login` / `podman push` to the internal registry fails to connect from your laptop.
+Cause:: This cluster's internal registry has *no external route* (`defaultRoute` is off) — it's an in-cluster Service reachable only from inside the cluster.
+Fix:: Use the API-based image flows this module teaches — `oc tag`, `oc import-image`, in-cluster builds — which need no route:
++
+[source,sh,role=execute]
+----
+oc get route -n openshift-image-registry           # confirms: no route
+oc get image.config.openshift.io/cluster -o jsonpath='internal: {.status.internalRegistryHostname}{"\n"}'
+----
++
+Direct `podman push` needs `defaultRoute: true` on the registry config (a platform decision that adds an external surface). The route-free posture is intentional for shared and locked-down clusters.
+
+'''
+
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-13)._
