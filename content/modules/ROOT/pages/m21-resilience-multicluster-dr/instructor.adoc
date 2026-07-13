@@ -19,7 +19,7 @@ This module has one spine and it climbs: *prove in-site resiliency (kill a pod, 
 The beat that lands hardest is the *failover* (exercise 2): the attendee scales the whole primary site to *zero* and the client's live log *keeps printing `200`* while the site marker flips to `B`. It makes "cross-site failover" concrete instead of a slide — hold on it, and keep the client log tailing on screen the whole time.
 The reframe to state plainly: this module's *graded work is application-level failover* — designing a service to survive a whole-site loss. Platform backup/restore (OADP) and GitOps re-materialization are the *DR safety net* underneath, covered as a *concept* (an instructor mention is fine; there is no hands-on backup lab).
 
-The single most useful thing to internalize before delivering: *the failover is driven by three mesh resources plus the gateway's locality.* The `ServiceEntry` declares both sites, the `DestinationRule` prefers the local (primary) site and ejects a failing one, the `VirtualService` retries so failover is seamless — and the *ingress gateway is pinned to site A's locality*, which is what makes A the primary and B the failover. If traffic ever splits A/B instead of preferring A, the gateway lost its `istio-locality` label.
+The single most useful thing to internalize before delivering: *the failover is driven by three mesh resources plus the gateway's locality.* The `ServiceEntry` declares both sites, the `DestinationRule` prefers the local (primary) site and ejects a failing one, the `VirtualService` retries so failover drops no requests — and the *ingress gateway is pinned to site A's locality*, which is what makes A the primary and B the failover. If traffic ever splits A/B instead of preferring A, the gateway lost its `istio-locality` label.
 
 == Timing
 
@@ -109,7 +109,7 @@ The demo flavor renders a three-beat Say/Show/Do arc: *show the resilient primar
 == Top questions attendees ask
 
 *1. "The whole primary site went to zero — how did the client not drop a single request?"*::
-Two mesh features cooperate. *Outlier detection* on the `DestinationRule` notices site A's requests failing and *ejects* it from the load-balancing pool, so new requests go to site B. And *retries* on the `VirtualService` catch the handful of in-flight requests that raced the ejection — a request that lands on the just-failed site is retried and lands on site B, returning `200`. The client sees a clean flip from A to B, not an outage. Without the retries you'd see a brief burst of errors at the moment of failure; with them, the failover is seamless.
+Two mesh features cooperate. *Outlier detection* on the `DestinationRule` notices site A's requests failing and *ejects* it from the load-balancing pool, so new requests go to site B. And *retries* on the `VirtualService` catch the handful of in-flight requests that raced the ejection — a request that lands on the just-failed site is retried and lands on site B, returning `200`. The client sees a clean flip from A to B, not an outage. Without the retries you'd see a brief burst of errors at the moment of failure; with them, the failover drops no requests.
 
 *2. "Why does traffic prefer site A instead of splitting 50/50 across A and B?"*::
 Because the ingress gateway is *pinned to site A's locality* (an `istio-locality` label on the gateway pod), and the `DestinationRule` turns on `localityLbSetting`. Istio's locality-aware load balancing sends traffic to the *nearest* locality first — site A is priority 0, site B is the failover at priority 1 — so you get *primary/backup*, not active-active. Remove the locality pin and the same resources would round-robin both sites. This is the one deliberate "the gateway lives at the primary site" choice.
@@ -134,7 +134,7 @@ Each Skupper `Site` adds a router pod (~1 CPU) to a site namespace that already 
 * *The responder dies fast on "scale to 0" by design.*
 The claims responder handles `SIGTERM` and its pod has a short `terminationGracePeriodSeconds`, so `--replicas=0` removes the site *promptly* and the failover is crisp. A workload that ignores `SIGTERM` would linger through its grace period and the failover would look delayed — worth knowing if you swap the responder image.
 * *`baseEjectionTime` tuning is a trade-off.*
-The `DestinationRule` uses `baseEjectionTime: 30s` — a middle ground. Shorter (e.g. `5s`) fails *back* to the primary faster but re-probes the dead site during a longer outage (a brief blip); longer (e.g. `120s`) is seamless during the outage but slow to fail back. The challenge section has attendees feel both.
+The `DestinationRule` uses `baseEjectionTime: 30s` — a middle ground. Shorter (e.g. `5s`) fails *back* to the primary faster but re-probes the dead site during a longer outage (a brief blip); longer (e.g. `120s`) keeps the service available during the outage but slow to fail back. The challenge section has attendees feel both.
 * *`ws reset m21` is slow — run it before the session.*
 Reset re-materializes all three namespaces via Argo; the CLI waits for the sync. It always completes, but don't run it live mid-session — prep worlds ahead of time.
 
