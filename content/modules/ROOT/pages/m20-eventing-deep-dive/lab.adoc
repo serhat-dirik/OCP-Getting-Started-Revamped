@@ -1,0 +1,718 @@
+= Eventing Deep-Dive & Serverless Workflows: Lab
+:module-id: m20
+include::partial$version-attributes.adoc[]
+
+// Lab page for M20. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes); every later block uses
+// $NS / $BROKER / $CONSUMER with NO subs so jsonpath braces stay literal. All commands + outputs + timings
+// were performed on OCP {ocp_version} (Kubernetes 1.34) against a live OpenShift Serverless Eventing
+// control plane as the sample user in namespace user7-dev on 2026-07-13: the substrate inspection, the
+// showcase consumer HTTP 200 (14.28 s cold / 0.04 s warm) and 204 CloudEvents POST that DISPLAYS the
+// envelope, the broker POST (202 in 13.8 s cold — wakes the consumer from zero — / ~0.3-0.8 s warm),
+// attribute-filtered routing (submitted displayed 2x via catch-all+filter, rejected 1x, high-priority 3x),
+// the retries+dead-letter beat (a failing /process subscriber dead-letters with knativeerrorcode:404 in
+// ~7.9 s of exp backoff), and the scheduled PingSource (fires */5, displayed with claimpriority=high) are
+// REAL captures. NAMESPACE in output is the sample user user7-dev (yours is {user}-dev); the cluster domain
+// is a generic placeholder (yours is {cluster_domain}). kn is the primary CLI; config steps are dual-path
+// [tabs] Console(Serverless / Eventing / Import YAML)::CLI(kn/oc). The showcase event-display UI is a
+// product UI (single-path). The seeded-source honesty (the app doesn't emit yet) and the DLQ knativeerror
+// attributes are explicit NOTEs, not unverified placeholders.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcuts you'll reuse throughout the lab — your dev namespace:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "dev namespace: $NS"
+----
+
+You are the platform engineer wiring *event-driven* integration for Parasol's claims flow.
+Your world in `{user}-dev` is already stood up: an in-memory *Broker*, a real CloudEvents *consumer* (`claims-consumer`) that returns `HTTP 200`/`204` and *displays* every event it receives, a *dead-letter sink* (`claims-dlq`), a seeded event *source* (a `PingSource`), and one *baseline Trigger* routing the source's events to the consumer.
+In this lab you *inspect* that working `source → broker → trigger → sink` path, send your *own* CloudEvents through the broker and watch the consumer *wake from zero and display them*, *route by attribute filter*, *survive a failing consumer* with retries and a dead-letter sink, and meet the *broker-backing* and *workflow* decisions.
+
+[TIP]
+.Two ways for the wiring steps; the event-display UI is one way
+====
+Where you create or change an eventing object, you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) — the *Serverless → Eventing* area, or *+Add → Import YAML* — and the *CLI* tab uses `kn`/`oc` in the *Terminal* tab beside these instructions.
+Pick a path once — the tabs stay in sync across the page.
+One thing is single-path on purpose: reading what the consumer *displays* is done in its *event-display* UI (the `showcase` app's own web page) and in its pod logs — that is the product's UI, not something with a console-vs-CLI choice.
+The namespace in the output below is the sample user `user7-dev`; *yours* is `{user}-dev`, and the cluster domain shown is a placeholder — read the *shape*, not the exact values.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — ~12-minute presenter arc: route -> filter -> break -> dead-letter
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Filtered routing, a woken consumer, and a dead-letter catch (12 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws solve m20 --user {user}` a few minutes ahead so the *end state* is materialized: the Broker, the seeded `PingSource`, the `claims-consumer` and `claims-dlq` services, and the filtered Triggers (`claims-fraud-review` on `type`, `claims-audit` on `claimpriority`) are all present.
+Set `NS={user}-dev`, `BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')`, and open the `claims-consumer` *event-display* page (`oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}'`) and the `claims-dlq` page in two browser tabs — the *displayed CloudEvent envelope* is the whole visual.
+Warm both services once (a `curl` to each URL) so the demo isn't waiting on a cold start mid-sentence; the *first* broker POST still shows the ~14 s wake if you let a service settle back to zero, which is a great beat if you want it.
+The money moment is beat 3: a *deliberately broken* consumer whose events *retry and dead-letter*, and you *open the dead event* and read `knativeerrorcode: 404`.
+====
+
+[demo-block]
+[TIME 4m]
+Say:: "Parasol's claim events land in a *broker* — a hub. Nobody calls a consumer directly. Instead, *triggers* subscribe with a *filter*: this one wants `claim.submitted`, that one wants high-priority claims. Watch me drop one claim event into the broker and see it *routed*, and see the consumer *wake from zero* to display the full CloudEvents envelope."
+Show:: The `claims-consumer` event-display page; a `curl` POST to the broker returning `202`; the consumer page showing a new `☁️ cloudevents.Event` with `type`, `source`, and the claim `Data`.
+Do:: Send a claim event through the broker and show it displayed:
++
+[source,sh,role=execute]
+----
+NS=user7-dev
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "claim -> broker: HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: claim-9001" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /demo/claims" -H "Content-Type: application/json" \
+  -d "{\"claimId\":\"CLM-9001\",\"amount\":7300,\"fraudScore\":0.91}" "'$BROKER'"'
+----
++
+"Two-oh-two — accepted. The trigger routed it, and the consumer woke from zero to *display* it — envelope and all. The producer never knew a consumer existed."
+
+[demo-block]
+[TIME 4m]
+Say:: "Filters decide *who cares*. I'll send two events: a `claim.submitted` and an unrelated `claim.rejected`. The fraud-review trigger filters on `type=claim.submitted` — so the rejected one is simply *dropped* by that trigger. Routing lives in the trigger, not in anyone's code."
+Show:: `kn trigger list` with the filters; two POSTs; the consumer displaying the `submitted` event but *not* the filtered-out one on the fraud path.
+Do:: Show attribute filtering — matching delivered, non-matching dropped:
++
+[source,sh,role=execute]
+----
+kn trigger list -n $NS
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 20 -o /dev/null -w "rejected (filtered out): HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: rej-1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.rejected" \
+  -H "Ce-Source: /demo/claims" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-REJ\"}" "'$BROKER'"'
+----
++
+"The rejected event got a `202` too — the broker accepted it — but the fraud-review trigger's filter *dropped* it in a tenth of a second: no delivery, no woken consumer. Change routing by editing a trigger, never by redeploying an app."
+
+[demo-block]
+[TIME 4m]
+Say:: "Now the hard part: what happens when a consumer *fails*? I'll point the fraud-review trigger at an endpoint the consumer *rejects*, so every delivery 404s. Watch Knative *retry with backoff*, then *dead-letter* the exhausted event to a separate sink — and watch me *open the dead event* and read exactly why it died."
+Show:: A re-applied trigger pointing at `/process`; a POST that takes ~8 s (the retries); the `claims-dlq` page showing the dead event with `knativeerrorcode: 404` and `knativeerrordest`.
+Do:: Break the consumer, watch the retries and the dead-letter, then read the dead event:
++
+[source,sh,role=execute]
+----
+# repoint fraud-review's delivery at a path the consumer 404s, keeping retries + the dead-letter sink:
+oc apply -n $NS -f - <<'EOF'
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-fraud-review
+spec:
+  broker: default
+  filter: { attributes: { type: com.parasol.claim.submitted } }
+  subscriber: { uri: http://claims-consumer.user7-dev.svc.cluster.local/process }
+  delivery:
+    retry: 3
+    backoffPolicy: exponential
+    backoffDelay: PT1S
+    deadLetterSink: { ref: { apiVersion: serving.knative.dev/v1, kind: Service, name: claims-dlq } }
+EOF
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "fails -> retries -> DLQ: HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: dead-99" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /demo/claims" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-DEAD-99\"}" "'$BROKER'"'
+oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=20 | grep -iE 'id:|knativeerror'
+----
++
+"Eight seconds — that's *one try plus three retries* with exponential backoff. The event failed every time, so instead of *dropping* it, Knative dead-lettered it to `claims-dlq` — stamped `knativeerrorcode: 404` and the destination that kept failing. No event silently lost, and a diagnosable record of why."
+
+[NOTE]
+.Optional closer + reset between runs
+====
+Restore the consumer with one re-apply (subscriber back to `claims-consumer`), and the fraud path is healthy again — the dead-letter sink is *insurance*, not a normal path.
+`ws prep m20 --yes` returns the world to the entry state (baseline Trigger only, no filtered/DLQ triggers).
+If the room is engaged, `oc get pingsource claim-ticker -n $NS -o yaml` shows the *seeded source* firing every 5 minutes — a good segue to "the real move is to make the *app* emit these events, and repoint the triggers at them."
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Inspect the eventing substrate
+⏱ *~8 min* · meet the broker, the baseline trigger, the seeded source, and the consumer
+
+Start by looking at what's already wired. Knative Eventing is four parts — a *source*, a *broker*, a *trigger*, and a *sink* — and all four are running.
+
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Serverless → Eventing*. You'll see the *Broker* `default`, one *Trigger* `claims-events`, and — under *Event Sources* — a *PingSource* `claim-ticker`. Note the Trigger's *subscriber* is the `claims-consumer` service.
+The *CLI* tab reads the same facts from the terminal — use it to capture the exact fields.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+kn broker list -n $NS
+kn trigger list -n $NS
+kn source list -n $NS
+----
+--
+====
+
+.Expected output (an in-memory Broker, one unfiltered baseline Trigger, a scheduled PingSource — all Ready)
+[source,texinfo]
+----
+NAME      URL                                                                          AGE   CONDITIONS   READY   REASON
+default   http://broker-ingress.knative-eventing.svc.cluster.local/user7-dev/default   85m   7 OK / 7     True
+
+NAME            BROKER    SINK                   AGE   CONDITIONS   READY   REASON
+claims-events   default   ksvc:claims-consumer   85m   7 OK / 7     True
+
+NAME           TYPE         RESOURCE                          SINK             READY
+claim-ticker   PingSource   pingsources.sources.knative.dev   broker:default   True
+----
+
+Read that as a sentence: the `claim-ticker` *PingSource* emits into the `default` *Broker*; the `claims-events` *Trigger* (no filter yet) routes *every* broker event to the `claims-consumer` service. Confirm the broker's address — where producers POST events — and that the consumer is a scale-to-zero Knative Service holding *zero* pods while idle:
+
+[source,sh,role=execute]
+----
+BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
+echo "broker ingress: $BROKER"
+oc get ksvc claims-consumer claims-dlq -n $NS
+oc get pods -n $NS -l 'app in (claims-consumer,claims-dlq)' --no-headers | grep -c . || echo 0
+----
+
+.Expected output (the broker's internal address; two Ready scale-to-zero consumers; zero pods while idle)
+[source,texinfo]
+----
+broker ingress: http://broker-ingress.knative-eventing.svc.cluster.local/user7-dev/default
+NAME              URL                                                       LATESTREADY          READY
+claims-consumer   https://claims-consumer-user7-dev.<cluster-domain>        claims-consumer-v1   True
+claims-dlq        https://claims-dlq-user7-dev.<cluster-domain>             claims-dlq-v1        True
+0
+----
+
+[NOTE]
+.The seeded source is a ticker — and that's honest
+====
+The event *source* here is a `PingSource` — a scheduled *ticker* that emits a claim-shaped event every five minutes — *not* a real `POST /api/claims` on the app. That's because `parasol-claims` doesn't yet *emit* CloudEvents; adding that is net-new application work, out of scope for this module.
+Everything *downstream* is real: the broker, the triggers, the filtering, the consumer that genuinely receives and *displays* each event, the retries, and the dead-letter sink. You'll also send your *own* CloudEvents by hand — exactly as a real producer would. Repointing the triggers from the seeded `dev.knative.sources.ping` events to real `com.parasol.claim.submitted` events is one app change away (the wrap-up says where). Read the ticker as "the plumbing and the processing are real; the app-side emit is next," not as a shortcut.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You found the four eventing primitives — the in-memory `default` *Broker* (Ready), the unfiltered `claims-events` *Trigger* routing to `claims-consumer`, the seeded `claim-ticker` *PingSource*, and two scale-to-zero consumer services (`claims-consumer`, `claims-dlq`) holding *zero* pods while idle — and read the broker's ingress address.
+****
+
+== 2. The consumer is a real CloudEvents processor
+⏱ *~10 min* · send it an event directly, and watch it display the envelope
+
+Before routing anything, meet the consumer. Unlike the M19 eventing *taste* — where the app had no handler and every delivery returned `404` — `claims-consumer` is a *real* CloudEvents consumer (the OpenShift Serverless `showcase` / *event-display*): it returns `HTTP 200` on a plain `GET`, `204` on a CloudEvents `POST`, and *displays* every event it receives.
+
+First, a plain `GET` — this *wakes it from zero*, so the first request pays a cold start (the M19 lesson, still true). Drive traffic from the in-cluster `demo-client`:
+
+[source,sh,role=execute]
+----
+CONSUMER=$(oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}')
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "GET cold: HTTP %{http_code} in %{time_total}s\n" "$CONSUMER"
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "GET warm: HTTP %{http_code} in %{time_total}s\n" "$CONSUMER"
+----
+
+.Expected output (a real HTTP 200 — a cold start on the first request, then warm)
+[source,texinfo]
+----
+GET cold: HTTP 200 in 14.280834s
+GET warm: HTTP 200 in 0.039679s
+----
+
+That `200` is the first honest difference from M19: this consumer *serves*. Now send it a *CloudEvent* directly — a binary-mode `POST` with the `Ce-*` headers that carry the envelope — and watch the response code:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -o /dev/null -w "POST CloudEvent: HTTP %{http_code} in %{time_total}s\n" \
+  -X POST \
+  -H "Ce-Id: direct-1" -H "Ce-Specversion: 1.0" \
+  -H "Ce-Type: com.parasol.claim.submitted" -H "Ce-Source: /demo/direct" \
+  -H "Content-Type: application/json" \
+  -d "{\"claimId\":\"CLM-9001\",\"amount\":7300,\"fraudScore\":0.91}" "'"$CONSUMER"'"'
+----
+
+.Expected output (204 No Content — the CloudEvent was accepted and processed)
+[source,texinfo]
+----
+POST CloudEvent: HTTP 204 in 0.406753s
+----
+
+`204` means "processed, nothing to return" — the consumer *received and handled* the event. Now *see* what it did with it. The consumer *displays* every event; read its log (its *event-display* page shows the same thing in the browser):
+
+[source,sh,role=execute]
+----
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=20 | grep -A12 'Received event'
+----
+
+.Expected output (the consumer displays the full CloudEvents envelope — attributes + your data)
+[source,texinfo]
+----
+Received event:
+☁️  cloudevents.Event
+Validation: valid
+Context Attributes,
+  datacontenttype: application/json
+  specversion: 1.0
+  id: direct-1
+  source: /demo/direct
+  type: com.parasol.claim.submitted
+Data,
+  {
+    "claimId": "CLM-9001",
+    "amount": 7300,
+    "fraudScore": 0.91
+  }
+----
+
+There is the *CloudEvents envelope*: the *context attributes* (`type`, `source`, `id`, `specversion`) that make the event routable, and your `Data` payload. `Validation: valid` means it is a well-formed CloudEvent. This is what "processing an event" looks like — and it's exactly what M19's taste *couldn't* do.
+
+[.checkpoint]
+****
+✔ *Verify:* You confirmed `claims-consumer` is a *real* CloudEvents processor — `HTTP 200` on `GET` (with a ~14 s cold start, then warm), `HTTP 204` on a CloudEvents `POST` — and you *read the CloudEvents envelope* it displayed (the `type`/`source`/`id` context attributes plus your claim `Data`, `Validation: valid`).
+****
+
+== 3. Route an event through the Broker — and wake a consumer from zero
+⏱ *~12 min* · POST to the broker, watch it route to the consumer, which scales up on the event
+
+In exercise 2 you called the consumer *directly*. That's not eventing — that's a direct call. Now do it *properly*: POST the event to the *Broker*, and let the `claims-events` *Trigger* route it to the consumer. The producer (you) touches only the broker; the trigger owns delivery.
+
+Let the consumer settle back to *zero* first, so you can watch it *wake on the event*:
+
+[source,sh,role=execute]
+----
+# wait for scale-to-zero (about a minute of no traffic), then confirm no consumer pod:
+sleep 90
+oc get pods -n $NS -l app=claims-consumer --no-headers | grep -c . || echo 0
+----
+
+.Expected output (the consumer is holding zero pods)
+[source,texinfo]
+----
+0
+----
+
+Now POST a CloudEvent to the *broker ingress* — not the consumer. Because the in-memory broker delivers *synchronously*, the `202` comes back only after the trigger delivers the event — and delivery has to *wake the consumer from zero*, so this first POST takes about *fourteen seconds* (the M19 cold start, now on the delivery path). Give `curl` room with `-m 30`:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "claim -> broker (cold): HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: broker-1" -H "Ce-Specversion: 1.0" \
+  -H "Ce-Type: com.parasol.claim.submitted" -H "Ce-Source: /demo/broker" \
+  -H "Content-Type: application/json" \
+  -d "{\"claimId\":\"CLM-7777\",\"amount\":5100}" "'"$BROKER"'"'
+# the consumer woke to receive it:
+oc get pods -n $NS -l app=claims-consumer
+----
+
+.Expected output (202 Accepted — after the consumer cold-started to receive the delivery)
+[source,texinfo]
+----
+claim -> broker (cold): HTTP 202 in 13.814156s
+NAME                                             READY   STATUS    RESTARTS   AGE
+claims-consumer-v1-deployment-...                2/2     Running   0          14s
+----
+
+The consumer *woke from zero on an event* — no client was waiting on it directly; the trigger's delivery scaled it up. Send a *second* event now that the consumer is warm, and watch the difference:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "claim -> broker (warm): HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: broker-2" -H "Ce-Specversion: 1.0" \
+  -H "Ce-Type: com.parasol.claim.submitted" -H "Ce-Source: /demo/broker" \
+  -H "Content-Type: application/json" \
+  -d "{\"claimId\":\"CLM-7778\",\"amount\":9200}" "'"$BROKER"'"'
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=40 | grep -E 'id: broker-'
+----
+
+.Expected output (warm delivery is sub-second; both broker-routed events reached the consumer)
+[source,texinfo]
+----
+claim -> broker (warm): HTTP 202 in 0.639711s
+  id: broker-1
+  id: broker-2
+----
+
+[NOTE]
+.Why the first broker POST is slow — the in-memory broker is *synchronous*
+====
+The default `MTChannelBasedBroker` is backed by an *in-memory channel*, and it delivers *synchronously*: your POST's `202` comes back only after the trigger *completes* delivery. When the consumer is scaled to zero, that means waiting for its cold start (~14 s here) — the same JVM cold start from M19, now paid on the delivery path. Warm, it's sub-second.
+This synchronous, in-memory behavior is exactly why the *Kafka* broker exists (durable, buffered, asynchronous) for events you can't afford to lose — the broker-backing decision you'll meet in exercise 6. One practical consequence: never give the producer a `curl` timeout *shorter* than a possible cold start, or you'll cancel a delivery that was about to succeed.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You sent CloudEvents to the *Broker* (not the consumer), watched the `claims-events` Trigger route them, and saw the consumer *wake from zero on an event* — the first (cold) POST returning `202` in ~14 s as the consumer cold-started, the second (warm) in under a second, with both events landing in the consumer's log.
+****
+
+== 4. Route by attribute — trigger filters
+⏱ *~15 min* · add filtered triggers, and watch matching events delivered while non-matching are dropped
+
+The baseline `claims-events` trigger is a *catch-all* — no filter, so it delivers *every* broker event to the consumer. Real routing is *selective*: fraud-review wants `claim.submitted` events; an audit path wants only *high-priority* claims. That selection is an *attribute filter* on a trigger — and each trigger filters *independently*.
+
+Add a *fraud-review* trigger that filters on the CloudEvent `type`, and an *audit* trigger that filters on the `claimpriority` *extension attribute* the seeded source stamps:
+
+[tabs]
+====
+Console::
++
+--
+In *Serverless → Eventing*, create two *Triggers* on the `default` broker, each with a *subscriber* of `claims-consumer`:
+
+* `claims-fraud-review` — filter *attribute* `type` = `com.parasol.claim.submitted`
+* `claims-audit` — filter *attribute* `claimpriority` = `high`
+
+Or use *+Add → Import YAML* with the manifests from the *CLI* tab.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+# fraud-review: route claim-submitted events (filter on the CloudEvent type)
+kn trigger create claims-fraud-review -n $NS --broker default \
+  --filter type=com.parasol.claim.submitted --sink ksvc:claims-consumer
+# audit: route only high-priority claims (filter on a business extension attribute)
+kn trigger create claims-audit -n $NS --broker default \
+  --filter claimpriority=high --sink ksvc:claims-consumer
+----
+--
+====
+
+.Expected output (two filtered triggers created, alongside the baseline catch-all)
+[source,texinfo]
+----
+Trigger 'claims-fraud-review' successfully created in namespace 'user7-dev'.
+Trigger 'claims-audit' successfully created in namespace 'user7-dev'.
+----
+
+Confirm all three triggers and their filters. The consumer displays an event *once per trigger that matches it*, so you can *count* the matches to see filtering at work:
+
+[source,sh,role=execute]
+----
+oc get trigger -n $NS -o custom-columns='NAME:.metadata.name,FILTER:.spec.filter.attributes,SINK:.spec.subscriber.ref.name'
+----
+
+.Expected output (a catch-all plus two attribute-filtered triggers, all to claims-consumer)
+[source,texinfo]
+----
+NAME                  FILTER                                  SINK
+claims-audit          map[claimpriority:high]                 claims-consumer
+claims-events         <none>                                  claims-consumer
+claims-fraud-review   map[type:com.parasol.claim.submitted]   claims-consumer
+----
+
+Now prove the filters. Send *three* events and count how many triggers each one matches (the consumer displays it once per match):
+
+* a plain `claim.submitted` — matches the catch-all *and* fraud-review → *2*
+* a `claim.rejected` — matches *only* the catch-all; both filters drop it → *1*
+* a high-priority `claim.submitted` — matches all three → *3*
+
+[source,sh,role=execute]
+----
+for kind in "cnt-submitted:com.parasol.claim.submitted:" \
+            "cnt-rejected:com.parasol.claim.rejected:" \
+            "cnt-highval:com.parasol.claim.submitted:high"; do
+  id=${kind%%:*}; rest=${kind#*:}; typ=${rest%%:*}; prio=${rest##*:}
+  ph=""; [ -n "$prio" ] && ph="-H ce-claimpriority:$prio"
+  oc exec deploy/demo-client -n $NS -- sh -c "curl -s -k -m 30 -o /dev/null -w '$id: HTTP %{http_code}\n' \
+    -X POST -H 'Ce-Id: $id' -H 'Ce-Specversion: 1.0' -H 'Ce-Type: $typ' $ph \
+    -H 'Ce-Source: /demo' -H 'Content-Type: application/json' -d '{\"claimId\":\"$id\"}' '$BROKER'"
+done
+sleep 5
+for id in cnt-submitted cnt-rejected cnt-highval; do
+  echo "$id displayed: $(oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -c "id: $id")x"
+done
+----
+
+.Expected output (the match count = how many triggers' filters the event satisfied)
+[source,texinfo]
+----
+cnt-submitted: HTTP 202
+cnt-rejected: HTTP 202
+cnt-highval: HTTP 202
+cnt-submitted displayed: 2x
+cnt-rejected displayed: 1x
+cnt-highval displayed: 3x
+----
+
+Read the counts. The `rejected` event was *accepted* by the broker (`202`) but *dropped* by both filters — it reached the consumer *only* through the catch-all (once). The `submitted` event matched the catch-all *and* fraud-review (twice). The high-priority one matched *all three* (three times). *The filter is each trigger's "what do I care about" rule*, evaluated independently — that's how one broker fans an event out to exactly the consumers that want it.
+
+[NOTE]
+.In production, each trigger routes to a *different* consumer
+====
+Here all three triggers point at the *same* `claims-consumer` so you can *see and count* the filtering with one display. In a real Parasol flow, `claims-fraud-review` would route to a *fraud-scoring* service, `claims-audit` to an *audit* service, and so on — one event fanning out to *distinct* consumers, each getting only the events its filter matches. The mechanism is identical; only the sinks differ.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You added two *attribute-filtered* Triggers (`claims-fraud-review` on `type`, `claims-audit` on the `claimpriority` extension attribute) and proved filtering by *match count*: a `claim.submitted` event displayed *2×* (catch-all + type filter), a `claim.rejected` *1×* (both filters dropped it), and a high-priority `claim.submitted` *3×* (all three matched).
+****
+
+== 5. Survive a failing consumer — retries and a dead-letter sink
+⏱ *~15 min* · add delivery guarantees, break the consumer, and catch the dead events
+
+Routing works — but what happens when a consumer *fails*? By default, a failed delivery is *retried a few times and then dropped*. For events you can't afford to lose, a trigger's `delivery` spec adds *retries with backoff* and a *dead-letter sink* (DLQ): the events that still fail land in a separate sink, *stamped with why*.
+
+Give the `claims-fraud-review` trigger a delivery spec — retry three times with exponential backoff, and dead-letter to `claims-dlq`. Delivery guarantees aren't a `kn trigger` flag, so apply the trigger as YAML:
+
+[tabs]
+====
+Console::
++
+--
+In *Serverless → Eventing → Triggers*, edit `claims-fraud-review` (or *+Add → Import YAML*) and set its `spec.delivery`: `retry: 3`, `backoffPolicy: exponential`, `backoffDelay: PT1S`, and a `deadLetterSink` referencing the `claims-dlq` service — the manifest is in the *CLI* tab.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-fraud-review
+spec:
+  broker: default
+  filter:
+    attributes:
+      type: com.parasol.claim.submitted
+  subscriber:
+    uri: http://claims-consumer.user7-dev.svc.cluster.local     # the working consumer
+  delivery:
+    retry: 3                       # try 3 more times before giving up
+    backoffPolicy: exponential     # 1s, 2s, 4s between tries
+    backoffDelay: PT1S
+    deadLetterSink:                # where exhausted events go instead of being dropped
+      ref:
+        apiVersion: serving.knative.dev/v1
+        kind: Service
+        name: claims-dlq
+EOF
+----
+NOTE: replace `user7-dev` with your `{user}-dev` in the subscriber URI.
+--
+====
+
+Confirm the trigger is Ready and its dead-letter sink resolved, and that normal delivery still works (a matching event is displayed by the consumer):
+
+[source,sh,role=execute]
+----
+oc get trigger claims-fraud-review -n $NS -o jsonpath='ready={.status.conditions[?(@.type=="Ready")].status}  deadLetterSink={.status.deadLetterSinkUri}{"\n"}'
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "healthy claim: HTTP %{http_code}\n" \
+  -X POST -H "Ce-Id: healthy-1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /demo" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-OK\"}" "'"$BROKER"'"'
+----
+
+.Expected output (Ready, dead-letter sink resolved; a healthy claim is delivered normally)
+[source,texinfo]
+----
+ready=True  deadLetterSink=http://claims-dlq.user7-dev.svc.cluster.local
+healthy claim: HTTP 202
+----
+
+Now the deliberate *break-and-fix*. Simulate the consumer *failing* — repoint the trigger's delivery at the consumer's `/process` endpoint, which the consumer *doesn't serve*, so every delivery gets a `404`. Re-apply the trigger with the broken path (everything else unchanged):
+
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-fraud-review
+spec:
+  broker: default
+  filter:
+    attributes:
+      type: com.parasol.claim.submitted
+  subscriber:
+    uri: http://claims-consumer.user7-dev.svc.cluster.local/process   # BROKEN: consumer 404s this path
+  delivery:
+    retry: 3
+    backoffPolicy: exponential
+    backoffDelay: PT1S
+    deadLetterSink:
+      ref:
+        apiVersion: serving.knative.dev/v1
+        kind: Service
+        name: claims-dlq
+EOF
+----
+
+Send a claim event. It will fail, retry three times with backoff, then dead-letter. Because the broker is *synchronous*, the `202` returns only after all of that completes (~8 s) — so give `curl` a *generous* `-m 90` and *don't* let it cancel:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "failing claim -> retries -> DLQ: HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: dead-99" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /demo/fraud" -H "Content-Type: application/json" \
+  -d "{\"claimId\":\"CLM-DEAD-99\",\"fraudScore\":0.99}" "'"$BROKER"'"'
+----
+
+.Expected output (202 after ~8 s — one try plus three retries at 1s/2s/4s backoff — then dead-lettered)
+[source,texinfo]
+----
+failing claim -> retries -> DLQ: HTTP 202 in 7.867066s
+----
+
+That ~8 seconds *is* the retry policy: the initial attempt plus three retries with 1s, 2s, 4s exponential backoff. The event failed every time — so instead of being *dropped*, it was *dead-lettered*. Open the dead-letter sink and read the dead event — Knative stamps it with *why* it died:
+
+[source,sh,role=execute]
+----
+oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=40 | grep -A16 'dead-99'
+----
+
+.Expected output (the dead event, with knativeerror* extension attributes recording the failure)
+[source,texinfo]
+----
+  id: dead-99
+  source: /demo/fraud
+  type: com.parasol.claim.submitted
+Extensions,
+  knativeerrorcode: 404
+  knativeerrordata:
+  knativeerrordest: http://claims-consumer.user7-dev.svc.cluster.local/process
+Data,
+  {
+    "claimId": "CLM-DEAD-99",
+    "fraudScore": 0.99
+  }
+----
+
+There is the payoff: the event *wasn't lost*. It's in the dead-letter sink, carrying `knativeerrorcode: 404` and `knativeerrordest` — the exact destination that kept failing. A dead-letter sink is a *diagnosable record*, not a black hole: "here are the events we couldn't deliver, and here's why."
+
+Now *fix* it — repoint delivery back at the working consumer (drop the `/process` path):
+
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-fraud-review
+spec:
+  broker: default
+  filter:
+    attributes:
+      type: com.parasol.claim.submitted
+  subscriber:
+    uri: http://claims-consumer.user7-dev.svc.cluster.local     # FIXED: back to the working consumer
+  delivery:
+    retry: 3
+    backoffPolicy: exponential
+    backoffDelay: PT1S
+    deadLetterSink:
+      ref:
+        apiVersion: serving.knative.dev/v1
+        kind: Service
+        name: claims-dlq
+EOF
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "recovered claim: HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: recovered-1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /demo" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-OK2\"}" "'"$BROKER"'"'
+----
+
+.Expected output (delivery is healthy again; no dead-letter, sub-second)
+[source,texinfo]
+----
+recovered claim: HTTP 202 in 0.212295s
+----
+
+[NOTE]
+.The dead-letter sink is insurance, not a normal path
+====
+A healthy trigger *never* uses its dead-letter sink — events flow straight to the subscriber. The DLQ only catches events that *exhaust their retries*, which means a dead-letter sink filling up is a *signal*: a consumer is failing. In production you'd *alert* on dead-letter arrivals and *drain* the sink (re-process the events once the consumer is healthy). The retry count and backoff are tunable per trigger; three retries with exponential backoff is a sane default, not a law.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You gave `claims-fraud-review` a *delivery spec* (retry 3× with exponential backoff + a `deadLetterSink` to `claims-dlq`), confirmed healthy delivery, then *broke* the consumer (pointed delivery at a `404` path) and watched a claim *retry for ~8 s and dead-letter* — reading `knativeerrorcode: 404` and `knativeerrordest` off the dead event in `claims-dlq` — and finally *fixed* it back to healthy delivery.
+****
+
+== 6. Broker backing, channels, and workflows
+⏱ *~10 min* · the decisions — in-memory vs Kafka, broker vs channel, choreography vs orchestration
+
+You've built the eventing core on the *in-memory* broker. Two decisions and one deep dive round out the picture — this exercise is *reading and one observation*, no new graded wiring.
+
+First, *see the seeded source on its schedule*. The `claim-ticker` PingSource fires every five minutes; watch a scheduled tick arrive at the consumer (it carries `claimpriority: high`, so your `claims-audit` trigger routes it):
+
+[source,sh,role=execute]
+----
+oc get pingsource claim-ticker -n $NS -o jsonpath='schedule={.spec.schedule}  data={.spec.data}{"\n"}'
+# a recent scheduled ping the consumer displayed (type dev.knative.sources.ping, claimpriority high):
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -A10 'dev.knative.sources.ping' | head -14
+----
+
+.Expected output (the seeded ticker's event: the ping type, the claimpriority extension, the seeded claim data)
+[source,texinfo]
+----
+schedule=*/5 * * * *  data={"claimId":"CLM-0000","amount":4200,"fraudScore":0.82,"note":"seeded claim event — M20 eventing"}
+  type: dev.knative.sources.ping
+Extensions,
+  claimpriority: high
+  knativearrivaltime: 2026-07-13T11:00:00.159629391Z
+Data,
+  {
+    "claimId": "CLM-0000",
+    "amount": 4200,
+    "fraudScore": 0.82,
+    "note": "seeded claim event — M20 eventing"
+  }
+----
+
+That's the *whole loop* running unattended: a scheduled source → the broker → a filtered trigger → the consumer displaying the event. (If no ping is in the log yet, wait for the next five-minute tick, or send one yourself as in exercise 4.)
+
+Now the decisions, which you take back to your own systems:
+
+*Broker vs Channel.* You used a *Broker + Triggers* — the right tool for *distributing events to many consumers with filtering*. Knative's other primitive, a *Channel + Subscriptions*, is a *linear pipe* with no per-subscriber filter — reach for it for an *ordered processing pipeline*, not fan-out. A broker is built *on* a channel, so this is a choice of the abstraction you program against.
+
+*In-memory vs Kafka `[ADD-ON]`.* Your broker is *in-memory*: free with Serverless, synchronous, and *not durable* (events are lost if the broker restarts) — perfect for dev and best-effort internal events. For events you *cannot lose*, the *Kafka-backed broker* (from *Streams for Apache Kafka* {streams_kafka_version}, a *separate subscription*) adds durability, replay, and ordering.
+
+[cols="1,2,2",options="header"]
+|===
+| | *In-memory broker* (this lab) | *Kafka broker* `[ADD-ON]`
+| Durability | None — lost on restart | Persistent — survives restarts
+| Replay | No | Yes
+| Reach for it when | Dev, demos, best-effort events | Events you can't lose; replay/audit; high throughput
+|===
+
+[NOTE]
+.`[ADD-ON]` — the Kafka path (only if you own a Streams subscription)
+====
+Swapping to a Kafka broker is a broker-class change, not an app change: create a `KnativeKafka` custom resource (enabling the Kafka broker), then create a broker with the Kafka broker class instead of the in-memory default. Your *triggers, filters, and consumers are unchanged* — that's the point of the broker abstraction. The durable, replayable Kafka path adds a topic per broker, a `Topic` custom resource for direct produce/consume, and lag-based autoscaling (KEDA) for consumers. It requires the Streams subscription, so it's entirely optional and never on the default path.
+====
+
+*Choreography vs Orchestration — workflows with SonataFlow `[ADD-ON]`.* Everything you built is *choreography*: each consumer reacts to events on its own, with no conductor. That's beautifully decoupled and *hard to reason about* once a business process has branches, retries across steps, and timeouts. *Orchestration* adds a conductor: *OpenShift Serverless Logic* {serverless_logic_version} (a *SonataFlow* runtime on Knative) runs a declarative *workflow* — a Parasol claims-approval flow would auto-approve below a threshold, route the rest to review, and take a *timeout* branch if review is slow — with a queryable instance per claim.
+
+[NOTE]
+.Why SonataFlow is a concept here, not a graded step
+====
+OpenShift Serverless Logic is *generally available* (since OpenShift Serverless 1.33) with a console, a `kn-workflow` CLI, and a VS Code extension. It's presented here as a *concept and `[ADD-ON]`* for one honest reason: a per-user SonataFlow platform (the workflow runtime *plus its own state database*) is significant footprint for every seat, and the graded core of this module is the *eventing* substrate. The decision is what matters and travels with you: *choreography* (triggers) for decoupled fan-out; *orchestration* (SonataFlow) when a *process* needs a conductor that can branch, call services, and time out. The wrap-up's decision guide places it against Pipelines (M07) and Jobs (M06).
+====
+
+This exercise is reading and one observation — there is no new checkpoint to verify beyond the scheduled ping you watched arrive.
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the mechanics. Try these on your own:
+
+* *Route to two different sinks.* Repoint `claims-audit` at `claims-dlq` (as a stand-in "audit sink") instead of `claims-consumer`, send a high-priority and a normal claim, and confirm *only* the high-priority one reaches the audit sink — real fan-out to *distinct* consumers.
+* *Tune the retry policy.* Change `claims-fraud-review`'s `delivery` to `retry: 5` with `backoffDelay: PT0.5S`, break the consumer again, and reason about the total time before dead-letter from the backoff series — then decide what retry budget a real fraud path should have.
+* *Make the drop visible.* Delete the catch-all `claims-events` trigger, send a `claim.rejected` event, and confirm the consumer *never* sees it (no trigger matches) — then recreate `claims-events` so your world matches the module's end state.
+* *Argue the broker backing.* In two sentences, decide in-memory vs Kafka for (a) a "claim viewed" analytics event and (b) a "payment authorized" event — and defend each on durability.
+
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (the baseline Trigger only, no filtered or dead-letter Triggers).
+
+endif::demo[]

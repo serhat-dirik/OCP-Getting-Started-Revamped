@@ -1,0 +1,108 @@
+= Eventing Deep-Dive & Serverless Workflows: Wrap-up
+:module-id: m20
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims flow from a *taste* of eventing to a *real, decoupled, failure-surviving* event pipeline — without the producing app ever knowing who consumes its events.
+You *inspected* the four primitives — a seeded `PingSource`, an in-memory `Broker`, a baseline `Trigger`, and a scale-to-zero consumer — and confirmed the `source → broker → trigger → sink` loop runs unattended.
+You met a *real CloudEvents consumer* that returns `HTTP 200`/`204` and *displays the envelope* — the honest difference from M19's `404`.
+You POSTed CloudEvents to the *Broker* and watched a trigger route them, *waking the consumer from zero on an event*.
+You *routed by attribute filter* — proving, by match count, that matching events are delivered and non-matching are *dropped*, independently, per trigger.
+You made delivery *survive failure* — retries with backoff and a *dead-letter sink* — then *broke* the consumer and read `knativeerrorcode: 404` off the dead event Knative refused to lose.
+And you met the decisions that travel with you: *broker vs channel*, *in-memory vs Kafka*, and *choreography vs orchestration*.
+
+[mermaid]
+....
+graph TB
+  subgraph ns["{user}-dev — after the lab"]
+    src["PingSource<br/>claim-ticker (seeded)"]
+    broker[("Broker: default<br/>in-memory · synchronous")]
+    t1{"claims-events<br/>(catch-all)"}
+    t2{"claims-fraud-review<br/>filter type · retry 3 + DLQ"}
+    t3{"claims-audit<br/>filter claimpriority=high"}
+    consumer["claims-consumer (ksvc)<br/>200/204 · displays envelope<br/>scales 0..N on event"]
+    dlq["claims-dlq (ksvc)<br/>dead-letter sink<br/>knativeerrorcode / dest"]
+  end
+  you(["you: POST a CloudEvent"]) -->|"202"| broker
+  src -->|"every 5 min"| broker
+  broker --> t1 --> consumer
+  broker --> t2 --> consumer
+  t2 -.->|"on exhausted retries"| dlq
+  broker --> t3 --> consumer
+  classDef src fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef hub fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef trig fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef sink fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+  class src,you src; class broker hub; class t1,t2,t3 trig; class consumer,dlq sink;
+....
+
+// media-pass: recap SVG m20-eventing-deep-dive-03-what-you-built.svg (amber = seeded source; blue = in-memory broker; green = the three triggers incl. the filtered + DLQ one; light-blue = the consumer + dead-letter sink).
+
+The one idea under all of it: *emitting a fact decouples a producer from its consumers.* You describe *one* event — a CloudEvent with a routable envelope — and the platform owns delivery: triggers filter it to exactly the consumers that care, retries and a dead-letter sink keep it from being silently lost, and a new consumer is a *trigger*, never a producer change. Routing, fan-out, and failure handling become *declarative infrastructure*, not application `if` statements.
+
+== Map to your org
+
+Take these back to how your own services integrate today:
+
+. *Where does adding a consumer force a change to the producer?*
+You added fraud-review and audit routing without touching the event source. In your systems, when a new team needs to react to "an order shipped" or "a claim submitted," do they get a *trigger* — or a change request against the producing service and a redeploy?
+. *Which of your synchronous calls shouldn't be synchronous?*
+You saw a producer emit a fact and return immediately, with the consumer processing on its own clock. Which of your call chains fail the user because a *downstream* service is slow or down — and would emitting an event (with retries and a dead-letter sink behind it) break that coupling?
+. *Where is your routing logic — in triggers, or in `if` statements?*
+You routed by `type` and by a business `claimpriority` attribute, changing routing by editing a trigger. In your apps, how much routing lives in application code that has to be redeployed to change — and could it move into declarative filters?
+. *How would you know you were silently losing events?*
+You read a dead event's `knativeerrorcode`. Do your event flows have a dead-letter sink and an alert on it — or would a failing consumer drop events with no one noticing until a customer calls?
+. *Which of your events actually need Kafka — and do you know it's a separate subscription?*
+You ran everything on the free in-memory broker and saw why it's not durable. For each of your event types, is it best-effort (in-memory is fine) or unloseable (Kafka, a Streams subscription)? Deciding *before* the first dropped payment event is the point.
+
+== When *not* to reach for this
+
+Eventing is powerful, and over-reaching with it is its own failure mode:
+
+* *Don't event-ify a simple request/reply.*
+If a caller needs an *answer now* — "score this claim and give me the number" — a direct, synchronous call is simpler and clearer than emitting an event and correlating a reply. Eventing shines for *notify-and-fan-out* and *decoupling*, not for RPC with a return value. Using a broker where a function call would do adds latency and moving parts for nothing.
+* *Don't ship "we have eventing" on an in-memory broker for events you can't lose.*
+The in-memory broker is *not durable* — a broker restart drops in-flight events. That's fine for best-effort internal signals and a disaster for a payment or a legal record. If losing an event is unacceptable, that's a Kafka broker (a separate subscription), not a config tweak — decide it up front.
+* *Don't skip the dead-letter sink and call it done.*
+A trigger without a `deadLetterSink` *drops* events once retries exhaust — silently. If the events matter enough to route, they matter enough to dead-letter and alert on. "It worked in the demo" hides the failure path; wire the DLQ before you rely on the flow.
+* *Don't reach for orchestration when choreography is enough — or the reverse.*
+A simple "when X happens, notify Y and Z" is *choreography* (triggers) and needs no workflow engine. A multi-step business process with branches, cross-step retries, and timeouts is *orchestration* (SonataFlow) and will be a tangle of triggers if you force it into choreography. Match the tool to the shape of the process.
+* *Don't confuse a broker with a channel.*
+A *Broker + Triggers* is for filtered fan-out; a *Channel + Subscriptions* is for a linear pipeline. Using a channel where you need per-consumer filtering means routing logic leaks back into your consumers.
+
+.Eventing decision guide — what each tool is *for*
+[cols="1,2,2",options="header"]
+|===
+| Need | Reach for | Not
+
+| React to a fact, fan out to many, filter per consumer | *Broker + Triggers* (this module) | A channel (no filtering) or direct calls (coupling)
+| An ordered, linear processing pipeline | *Channel + Subscriptions* | A broker (fan-out you don't need)
+| Events you cannot afford to lose | *Kafka broker* `[ADD-ON]` (Streams subscription) | In-memory (not durable)
+| A multi-step process with branches + timeouts | *Orchestration* — SonataFlow `[ADD-ON]` | A web of triggers (choreography that's hard to trace)
+| A step-by-step CI/CD build-and-deploy | *Pipelines* (M07) | Eventing (wrong tool)
+| Bulk/parallel work with admission control | *Jobs + Kueue* (M06) | Eventing (wrong tool)
+| An answer *now* from one service | A *direct synchronous call* | Eventing (latency + reply correlation for nothing)
+|===
+
+== Go deeper
+
+* *Knative Eventing* — the full `source → broker → trigger → sink` model, the `Sources` catalog (`ApiServerSource`, `SinkBinding`, `KafkaSource`), and `Trigger` filters beyond exact-match (the CloudEvents SQL/`cesql` expression filter).
+* *CloudEvents* — the envelope spec, binary vs structured content modes, and extension attributes as first-class routing keys.
+* *Delivery guarantees* — `retry`, `backoffPolicy`/`backoffDelay`, `deadLetterSink`, and *draining* a dead-letter sink (re-processing dead events once a consumer is healthy).
+* *Kafka-backed eventing* `[ADD-ON]` — the `KnativeKafka` custom resource, the Kafka broker class, `Topic` CRs, Quarkus producer/consumer, and KEDA lag-based scaling — on *Streams for Apache Kafka* {streams_kafka_version} (a separate subscription).
+* *OpenShift Serverless Logic (SonataFlow)* {serverless_logic_version} — the CNCF Serverless Workflow spec on Knative: branching on event data, calling services, timeout branches, the workflow console, and the `kn-workflow` CLI.
+
+[NOTE]
+.The next real step — make the *app* emit events
+====
+This module's *source* was a seeded `PingSource` ticker, on purpose: `parasol-claims` doesn't yet *emit* CloudEvents. The natural next move in a real Parasol build is to give the app an *emit handler* — on `POST /api/claims`, emit a `com.parasol.claim.submitted` CloudEvent to the broker (a Quarkus reactive-messaging or CloudEvents-SDK change) — and then *repoint your triggers* from the seeded `dev.knative.sources.ping` events to the real `com.parasol.claim.submitted` events. Nothing you built changes: the broker, the filters, the retries, the dead-letter sink, the consumers all keep working — only the *source* becomes real. That's the honest boundary of this module, and it's one app change from closed.
+====
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — the baseline Trigger only, no filtered or dead-letter Triggers — run `ws prep {module-id} --yes`.
+It removes the `claims-fraud-review` and `claims-audit` Triggers (and any delivery/DLQ wiring) you created and restores the clean single-Trigger substrate so a re-run starts fresh.
+The shared OpenShift Serverless Eventing control plane is platform substrate — it's untouched; only your `{user}-dev` namespace resets.
+====

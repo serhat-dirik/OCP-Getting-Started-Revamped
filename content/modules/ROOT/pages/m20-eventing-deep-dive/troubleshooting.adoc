@@ -1,0 +1,176 @@
+= Eventing Deep-Dive & Serverless Workflows: Troubleshooting
+:module-id: m20
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-13) against a live
+// OpenShift Serverless Eventing {serverless_version} (Knative Eventing 1.17) control plane in user7-dev,
+// plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use $NS = {user}-dev, $BROKER =
+// broker.status.address.url, $CONSUMER = ksvc claims-consumer status.url (set them once). NAMESPACE in
+// output is the sample user user7-dev. Every entry below was either hit while building the module or is a
+// known trap.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcuts first: `NS={user}-dev`, `BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')`, and `CONSUMER=$(oc get ksvc claims-consumer -n $NS -o jsonpath='{.status.url}')`.
+
+== My first POST to the broker takes ~14 seconds (or a short-timeout curl fails)
+
+Symptom:: The first `curl` POST to the broker hangs for about 14 seconds before returning `202`, or a `curl -m 5` returns `HTTP 000` / exit `28`.
+Cause:: This is the *consumer cold start on the delivery path*, not a fault. The default in-memory broker (`MTChannelBasedBroker`) delivers *synchronously* — the `202` comes back only after the trigger *completes* delivery — and if the consumer is scaled to *zero* it must cold-start first (~14 s for this JVM consumer). A client timeout *shorter* than the cold start abandons the request before it finishes.
+Fix:: Give the producer a realistic timeout (the lab uses `-m 30` for the cold path). The next POST, with the consumer warm, is sub-second:
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: t1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /t" -H "Content-Type: application/json" -d "{}" "'"$BROKER"'"'
+----
++
+The cold start is the same JVM wake from M19, now on the delivery path. It's honest — plan the timeout around it.
+
+== A POST to the broker hangs to a timeout and *no* consumer ever wakes
+
+Symptom:: Every POST to the broker returns `HTTP 000` (timeout) no matter how long you wait, the scheduled `PingSource` events never arrive, and the consumer never even cold-starts.
+Cause:: The broker's in-memory channel is *poisoned by a stale subscriber* — a subscriber for a Trigger that was *deleted* but never removed from the channel's `spec.subscribers`. The `imc-dispatcher` returns `500` to the broker ingress for *every* event, so nothing is delivered. The Broker still shows `Ready` (its objects are fine); only *delivery* is broken. This was hit at build time after a `ws solve`/reset cycle left a `claims-audit` subscriber behind.
+Fix:: Confirm the stale subscriber, then re-materialize a clean Broker with `ws reset`:
++
+[source,sh,role=execute]
+----
+# the Triggers that actually exist:
+oc get trigger -n $NS
+# the channel's subscriber list — a name here that ISN'T a Trigger above is stale:
+oc get imc default-kne-trigger -n $NS -o jsonpath='{range .spec.subscribers[*]}{.name}{"\n"}{end}'
+# re-materialize a clean Broker + channel (instructor verb):
+# ws reset m20 --user {user}
+----
++
+`ws reset m20 --user {user}` deletes and recreates the Broker, rebuilding the channel from the current Triggers. (Reported to the platform team — the channel's subscriber list can outlive the Trigger that owned it.)
+
+== My event returned `202` but the consumer never processed it
+
+Symptom:: A `curl` POST to the broker returned `202`, but the event never appears in the consumer's display.
+Cause:: `202` means the *broker accepted* the event — it says nothing about whether a *trigger* delivered it. If *no* trigger's filter matches the event, it is *dropped* (correctly). The most common case: you sent a `type` that no trigger filters for, and there's no catch-all trigger.
+Fix:: Check which triggers exist and what they filter on; send an event whose attributes match one:
++
+[source,sh,role=execute]
+----
+oc get trigger -n $NS -o custom-columns='NAME:.metadata.name,FILTER:.spec.filter.attributes,SINK:.spec.subscriber.ref.name'
+# send an event whose type matches a trigger's filter:
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "HTTP %{http_code}\n" \
+  -X POST -H "Ce-Id: m1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /t" -H "Content-Type: application/json" -d "{}" "'"$BROKER"'"'
+----
++
+A `202` with no delivery is usually a *filter miss*, not a failure. It's only wrong if you *expected* a match.
+
+== The dead-letter sink never receives the dead event
+
+Symptom:: You broke the consumer and sent an event, but `claims-dlq` shows nothing — even though the trigger has a `deadLetterSink`.
+Cause:: Two common causes. (1) The producer `curl` *canceled* the request before the retries finished — because the in-memory broker is *synchronous*, a `-m` timeout shorter than the retry sequence (~8 s) *cancels the delivery*, and the event never reaches the dead-letter sink ("context canceled"). (2) The `claims-dlq` sink was scaled to zero and hasn't cold-started yet — give it a moment.
+Fix:: Use a *generous* timeout (`-m 90`) so the synchronous retry-and-dead-letter completes, then read the sink after a beat:
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+  -X POST -H "Ce-Id: dead-1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /t" -H "Content-Type: application/json" -d "{}" "'"$BROKER"'"'
+sleep 4
+oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=30 | grep -A12 'dead-1'
+----
++
+The dead event carries `knativeerrorcode` and `knativeerrordest` — proof it was dead-lettered, not dropped.
+
+== `kn trigger create` rejects `--retry` or `--dead-letter-sink`
+
+Symptom:: `kn trigger create … --retry 3` (or `--dead-letter-sink …`) fails with `unknown flag`.
+Cause:: `kn trigger create` supports `--filter` and `--sink` only — it has *no* flags for the `delivery` spec (retries, backoff, dead-letter sink). This is a `kn` limitation, not a lab error.
+Fix:: Author the delivery Trigger as YAML (`oc apply`) or the console's Import YAML / Trigger editor:
++
+[source,sh,role=execute]
+----
+oc apply -n $NS -f - <<'EOF'
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-fraud-review
+spec:
+  broker: default
+  filter: { attributes: { type: com.parasol.claim.submitted } }
+  subscriber: { uri: http://claims-consumer.CHANGE-ME-dev.svc.cluster.local }
+  delivery:
+    retry: 3
+    backoffPolicy: exponential
+    backoffDelay: PT1S
+    deadLetterSink: { ref: { apiVersion: serving.knative.dev/v1, kind: Service, name: claims-dlq } }
+EOF
+----
++
+Replace `CHANGE-ME-dev` with your `{user}-dev`. The *filtering* triggers (no delivery) can still use `kn`.
+
+== `oc apply` on a Trigger fails: "Absolute URI is not allowed when Ref … is present"
+
+Symptom:: `oc apply` of a Trigger fails with `admission webhook … denied the request: Absolute URI is not allowed when Ref or [apiVersion, kind, name] is present: spec.subscriber`.
+Cause:: The Trigger already has a `subscriber.ref` (for example it was created by `kn trigger create`, which sets `ref`), and your YAML sets `subscriber.uri`. A subscriber must have *either* `ref` *or* `uri`, never both — and `oc apply` *merges*, leaving both.
+Fix:: Delete and recreate the Trigger so the subscriber is cleanly one form, or edit in place to the single form you want:
++
+[source,sh,role=execute]
+----
+oc delete trigger claims-fraud-review -n $NS
+oc apply -n $NS -f - <<'EOF'
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata: { name: claims-fraud-review }
+spec:
+  broker: default
+  filter: { attributes: { type: com.parasol.claim.submitted } }
+  subscriber: { uri: http://claims-consumer.CHANGE-ME-dev.svc.cluster.local }
+EOF
+----
++
+Pick `ref` *or* `uri` and stick with it for that Trigger across edits.
+
+== The consumer returns `404` for my CloudEvent POST
+
+Symptom:: A direct `curl` POST of a CloudEvent to the consumer returns `404`, not `204`.
+Cause:: You POSTed to a *path* the consumer doesn't serve. The `showcase` consumer accepts CloudEvents at its *root* (`/`); any other path (`/process`, `/badpath`, …) returns `404`. (This is exactly the "break" the DLQ exercise uses *deliberately* — a `404` from a wrong path.)
+Fix:: POST to the consumer's root URL (no trailing path):
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -o /dev/null -w "HTTP %{http_code}\n" \
+  -X POST -H "Ce-Id: d1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
+  -H "Ce-Source: /t" -H "Content-Type: application/json" -d "{}" "'"$CONSUMER"'"'
+----
++
+Expect `204`. When a trigger delivers, it targets the subscriber's root automatically — the `404` only happens when *you* (or a broken subscriber URI) add a path.
+
+== The scheduled PingSource event never shows up at the consumer
+
+Symptom:: You're waiting for the `*/5` PingSource tick, but nothing appears in the consumer's display.
+Cause:: Two possibilities. (1) The consumer is scaled to *zero* and no trigger matched the ping (the ping's `type` is `dev.knative.sources.ping`, and it carries `claimpriority: high` — it matches the catch-all or a `claimpriority` filter, not a `type=claim.submitted` filter). (2) You're between ticks — `*/5` fires on the 5-minute boundary, so you may wait up to 5 minutes.
+Fix:: Confirm a trigger matches the ping, and check the schedule / recent deliveries:
++
+[source,sh,role=execute]
+----
+oc get pingsource claim-ticker -n $NS -o jsonpath='schedule={.spec.schedule}  ext={.spec.ceOverrides.extensions}{"\n"}'
+oc get trigger -n $NS -o custom-columns='NAME:.metadata.name,FILTER:.spec.filter.attributes'
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -c 'dev.knative.sources.ping'
+----
++
+The seeded ping carries `claimpriority: high`, so the `claims-audit` trigger (filter `claimpriority=high`) or the catch-all delivers it. If you don't want to wait for a tick, send a matching event yourself.
+
+== `curl` to a service URL fails with a certificate error
+
+Symptom:: A `curl` to `$CONSUMER` (or `$BROKER` over HTTPS) fails with `SSL certificate problem` / `unable to get local issuer certificate`.
+Cause:: The auto-created edge Route serves the cluster's default ingress certificate, whose CA isn't in the minimal `demo-client` image's trust store. This is a *client trust* issue, not a service problem. (The broker's *internal* ingress URL is plain HTTP over the cluster network, so it's unaffected.)
+Fix:: The lab drives traffic with `curl -k` (skip verification) precisely for this reason:
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "HTTP %{http_code}\n" "$CONSUMER"
+----
++
+In a real client you'd trust the cluster ingress CA; for the lab's in-cluster test client, `-k` is the intended path.
+
+'''
+
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-13) against OpenShift Serverless Eventing {serverless_version} (Knative Eventing 1.17)._
