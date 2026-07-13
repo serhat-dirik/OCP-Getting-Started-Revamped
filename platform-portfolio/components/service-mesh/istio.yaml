@@ -1,0 +1,41 @@
+# The shared mesh control plane (istiod in istio-system). Cluster-scoped Sail CR (sailoperator.io/v1
+# Istio, name 'default' == revision 'default'). Sidecar-default per ADR-0003. sync-wave 1 so it applies
+# AFTER the operator Subscription (wave 0) has installed the CRD; SkipDryRunOnMissingResource because the
+# sailoperator.io CRD only exists post-operator-install.
+#
+# VERSION: spec.version pins the Istio build. versions.yaml service_mesh.istio_version = v1.28.6 (ADR-0003
+# / ossm-gateway-demo). NOTE the live v3.3.5 CSV alm-example defaults to v1.28.8 — the Sail operator ships
+# a RANGE of Istio builds, so the pin must be one it still supports; verified Ready on-cluster at build
+# (2026-07-13). If a future operator bump drops 1.28.6, bump this + versions.yaml together.
+#
+# COEXISTENCE (the C1 risk): the ingress-operator runs its OWN istiod (revision 'openshift-gateway') in
+# openshift-ingress for the Gateway API. This istiod uses revision 'default' in istio-system — different
+# namespace, different revision, different injection webhook. meshConfig.discoverySelectors scopes THIS
+# istiod to only watch namespaces labelled istio-discovery=enabled (the {user}-mesh namespaces, labelled
+# by the workshop layer) so the shared control plane never builds config for system/Gateway/other-tenant
+# namespaces. Verified live: the ingress injector webhook requires istio-injection DoesNotExist, so an
+# istio-injection=enabled mesh namespace is NEVER double-injected.
+apiVersion: sailoperator.io/v1
+kind: Istio
+metadata:
+  name: default
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  labels:
+    portfolio.redhat.com/component: service-mesh
+spec:
+  namespace: istio-system
+  version: v1.28.6
+  # InPlace = upgrade the single control plane in-place (no revision canary) — simplest for a shared
+  # teaching cluster; revision-based upgrades (IstioRevisionTag) are an M18 concept, not the platform default.
+  updateStrategy:
+    type: InPlace
+  values:
+    meshConfig:
+      # Scope the shared istiod to mesh namespaces only (coexistence + multi-tenant hygiene). The
+      # workshop layer labels every {user}-mesh namespace istio-discovery=enabled at creation (stable,
+      # survives ws reset); the istio-injection=enabled toggle (attendee-added) is separate.
+      discoverySelectors:
+        - matchLabels:
+            istio-discovery: enabled
