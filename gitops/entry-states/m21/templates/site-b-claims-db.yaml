@@ -1,0 +1,155 @@
+# The simulated REMOTE SITE ("site B") claims Postgres in {user}-site-b — the DB the optional RHSI section
+# exposes across a Skupper v2 Connector so the app on the main cluster consumes it transparently (App
+# Connectivity M1 pattern, re-homed to Parasol claims). Deliberately EPHEMERAL: this is a connectivity demo
+# target, not the restore anchor (that is the persistent {user}-resilience DB). Seeded with a SITE-B marker
+# row so the cross-site read is visibly "site B's data". Comes up on ANY cluster; the RHSI CRs that link it
+# are the lab / a v2-capable cluster (C2's catalog lacks Skupper v2 — see components/service-interconnect).
+---
+# why: the site-B datasource credentials (same shape as the main DB so the app connects unchanged).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claims-db
+  namespace: {{ include "m21.siteBNs" . }}
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m21
+type: Opaque
+stringData:
+  POSTGRESQL_USER: parasol
+  POSTGRESQL_PASSWORD: parasol
+  POSTGRESQL_DATABASE: parasol
+---
+# why: the site-B PostgreSQL server. Ephemeral (emptyDir) — reseeded on boot; persistence is the main DB's job.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-db
+  namespace: {{ include "m21.siteBNs" . }}
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m21
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claims-db
+  template:
+    metadata:
+      labels:
+        app: claims-db
+        workshop.redhat.com/module: m21
+    spec:
+      containers:
+        - name: postgresql
+          image: {{ .Values.dbImage }}
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: data
+          # Ephemeral on purpose — connectivity demo, not persistence.
+          emptyDir: {}
+---
+# why: the stable in-cluster address a Skupper v2 Connector binds to — claims-db.{user}-site-b.svc:5432.
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-db
+  namespace: {{ include "m21.siteBNs" . }}
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m21
+spec:
+  selector:
+    app: claims-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+---
+# Sync-hook Job: seeds a small SITE-B-marked dataset so the cross-site read is identifiable. Idempotent
+# (ON CONFLICT DO NOTHING); BeforeHookCreation re-fires it on each sync. Wave 1 = after the DB Deployment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: site-b-seed-m21-{{ .Values.user }}
+  namespace: {{ include "m21.siteBNs" . }}
+  labels:
+    workshop.redhat.com/module: m21
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 420
+  template:
+    metadata:
+      labels:
+        app: site-b-seed
+        workshop.redhat.com/module: m21
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: {{ .Values.dbImage }}
+          envFrom:
+            - secretRef:
+                name: claims-db
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "waiting for site-B claims-db to accept connections…"
+              for _ in $(seq 1 60); do
+                if PGPASSWORD="$POSTGRESQL_PASSWORD" psql -h claims-db -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -tAc 'select 1' >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 5
+              done
+              PGPASSWORD="$POSTGRESQL_PASSWORD" psql -h claims-db -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -v ON_ERROR_STOP=1 <<'SQL'
+              CREATE TABLE IF NOT EXISTS parasol_claims_seed (
+                id         int PRIMARY KEY,
+                claimant   text NOT NULL,
+                claim_type text NOT NULL,
+                amount     int  NOT NULL
+              );
+              -- SITE-B marker rows: distinct claimants so a cross-site read is visibly "site B's" data.
+              INSERT INTO parasol_claims_seed (id, claimant, claim_type, amount)
+              SELECT g,
+                     'SITE-B-CLAIMANT-' || lpad(g::text, 4, '0'),
+                     (ARRAY['auto','home','life','travel','commercial'])[1 + (g % 5)],
+                     1000 + (g * 211) % 40000
+              FROM generate_series(1, 10) AS g
+              ON CONFLICT (id) DO NOTHING;
+              SQL
+              echo "✅ site-B parasol_claims_seed seeded"

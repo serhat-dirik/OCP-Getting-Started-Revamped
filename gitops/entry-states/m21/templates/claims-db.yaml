@@ -1,0 +1,178 @@
+# The PERSISTENT claims database in {user}-resilience — the restore-verification anchor. Unlike M18's
+# ephemeral claims-db, this one is PVC-backed on purpose: the M21 arc backs the namespace up, DELETES it,
+# restores it, and proves the seeded rows SURVIVED. A sync-hook Job seeds a deterministic parasol_claims_seed
+# table; the verify script (and ws smoke) assert the exact row count before and after restore.
+---
+# why: the claims datasource credentials, consumed by the DB (to init), the seed Job, and parasol-claims.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claims-db
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m21
+type: Opaque
+stringData:
+  POSTGRESQL_USER: parasol
+  POSTGRESQL_PASSWORD: parasol
+  POSTGRESQL_DATABASE: parasol
+---
+# why: the persistent volume that must survive a namespace delete+restore. RWO block (default SC) is correct
+# for a single Postgres writer; empty storageClassName uses the cluster default (portable across clusters).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claims-db-data
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m21
+spec:
+  accessModes:
+    - {{ .Values.dbAccessMode }}
+  {{- if .Values.dbStorageClass }}
+  storageClassName: {{ .Values.dbStorageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.dbSize }}
+---
+# why: the PostgreSQL 15 server, data on the persistent PVC above; env-driven from the Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-db
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m21
+spec:
+  replicas: 1
+  # Recreate: a single writer to one volume — never run two Pods on the same data dir at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claims-db
+  template:
+    metadata:
+      labels:
+        app: claims-db
+        workshop.redhat.com/module: m21
+    spec:
+      containers:
+        - name: postgresql
+          image: {{ .Values.dbImage }}
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: claims-db-data
+---
+# why: the stable in-cluster address parasol-claims (and the seed Job) resolve — claims-db.{user}-resilience.svc:5432.
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-db
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: m21
+spec:
+  selector:
+    app: claims-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+---
+# Sync-hook Job: seeds the deterministic parasol_claims_seed table (the restore anchor). Runs on every
+# entry-state sync (ws start / reset); BeforeHookCreation clears the prior Job so a re-sync re-fires, and the
+# INSERT is idempotent (ON CONFLICT DO NOTHING), so re-runs are safe. Wave 1 = after the DB Deployment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: claims-seed-m21-{{ .Values.user }}
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    workshop.redhat.com/module: m21
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 420
+  template:
+    metadata:
+      labels:
+        app: claims-seed
+        workshop.redhat.com/module: m21
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          # Same postgresql image as the server — ships psql, already cached, no external pull secret.
+          image: {{ .Values.dbImage }}
+          envFrom:
+            - secretRef:
+                name: claims-db
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "waiting for claims-db to accept connections…"
+              for _ in $(seq 1 60); do
+                if PGPASSWORD="$POSTGRESQL_PASSWORD" psql -h claims-db -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -tAc 'select 1' >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 5
+              done
+              PGPASSWORD="$POSTGRESQL_PASSWORD" psql -h claims-db -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -v ON_ERROR_STOP=1 <<'SQL'
+              CREATE TABLE IF NOT EXISTS parasol_claims_seed (
+                id         int PRIMARY KEY,
+                claimant   text NOT NULL,
+                claim_type text NOT NULL,
+                amount     int  NOT NULL
+              );
+              -- Deterministic rows via generate_series: byte-identical every seed, so a restored DB is
+              -- verifiably identical to the pre-backup DB (the "data survived restore" checkpoint).
+              INSERT INTO parasol_claims_seed (id, claimant, claim_type, amount)
+              SELECT g,
+                     'CLAIMANT-' || lpad(g::text, 4, '0'),
+                     (ARRAY['auto','home','life','travel','commercial'])[1 + (g % 5)],
+                     500 + (g * 137) % 49500
+              FROM generate_series(1, {{ .Values.seedRows }}) AS g
+              ON CONFLICT (id) DO NOTHING;
+              SQL
+              COUNT=$(PGPASSWORD="$POSTGRESQL_PASSWORD" psql -h claims-db -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -tAc 'select count(*) from parasol_claims_seed')
+              echo "✅ parasol_claims_seed now holds ${COUNT} rows"

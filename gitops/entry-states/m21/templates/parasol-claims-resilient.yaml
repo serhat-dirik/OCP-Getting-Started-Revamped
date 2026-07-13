@@ -1,0 +1,141 @@
+# The resilient claims tier — the workload the M21 chaos drill kills and PDB/spread/HPA absorb. Recap of
+# M12/M16 primitives made concrete: {{ .Values.claimsReplicas }} replicas + PodDisruptionBudget +
+# topologySpreadConstraints + HorizontalPodAutoscaler. parasol-claims reads the PERSISTENT claims-DB, so a
+# restore brings both the app and its data back together.
+---
+# why: the running claims API at N replicas so a single-pod kill never breaches the PDB.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m21
+spec:
+  replicas: {{ .Values.claimsReplicas }}
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: m21
+    spec:
+      # Soft anti-affinity: prefer spreading replicas across nodes so a node loss can't take them all.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: parasol-claims
+      # Spread across nodes AND synthetic zones. BOTH ScheduleAnyway (soft) so scheduling NEVER blocks on a
+      # cluster lacking workshop.redhat.com/zone labels (portable) — the zone spread becomes real once the
+      # bootstrap node-shaping labels them; the hostname spread works everywhere.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: parasol-claims
+        - maxSkew: 1
+          topologyKey: workshop.redhat.com/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: parasol-claims
+      containers:
+        - name: parasol-claims
+          image: {{ .Values.claimsImage }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POSTGRESQL_HOST
+              value: claims-db
+          envFrom:
+            # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+# why: stable in-cluster address for the claims API.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m21
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: keep a quorum during voluntary disruptions (node drain / chaos drill) — the beat where attendees
+# watch the PDB hold the line. minAvailable = replicas-1 so exactly one pod may be evicted at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: parasol-claims
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m21
+spec:
+  minAvailable: {{ sub (int .Values.claimsReplicas) 1 }}
+  selector:
+    matchLabels:
+      app: parasol-claims
+---
+# why: the autoscale beat — HPA holds the replica floor and bursts under load. minReplicas = the resilient
+# floor; CPU target is modest so a load generator visibly triggers a scale-up.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: parasol-claims
+  namespace: {{ include "m21.resilienceNs" . }}
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: m21
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: parasol-claims
+  minReplicas: {{ .Values.claimsReplicas }}
+  maxReplicas: {{ mul (int .Values.claimsReplicas) 2 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80

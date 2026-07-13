@@ -1,0 +1,26 @@
+# ws reset purges user-created leftovers from these namespaces before re-materializing.
+# M21's in-namespace state spans {user}-resilience (the resilient claims stack + persistent seeded DB) and
+# {user}-site-b (the standalone remote Postgres). `oc delete all,pvc --all` clears Deployments/Services and
+# — critically for M21 — the PERSISTENT claims-DB PVC, so a reset re-seeds a factory-fresh DB (else stale
+# post-restore rows would survive and confuse the next run). The ws engine's purge_ns ALSO prunes the CR
+# types M21's lab creates that `oc delete all` misses: Velero backups/restores.velero.io, the OADP
+# nonadmin*.oadp.openshift.io self-service CRs, and the Skupper skupper.io v2 CRs (sites/links/listeners/
+# connectors/accessgrants/accesstokens) — see the ws purge_ns comment block. Otherwise a leftover Site or
+# Backup would red-fail the next entry verify (the sibling of the PDB/NetworkPolicy/istio purge gaps).
+# NOTE: the {user}-resilience / {user}-site-b NAMESPACES, their quota, LimitRange and RBAC are
+# WORKSHOP-LAYER-owned (gitops/workshop-config/templates/per-user-resilience.yaml — the workshop-entries
+# AppProject blacklists ResourceQuota/LimitRange). Like {user}-dev/mesh/partner they SURVIVE reset with the
+# same UID; the entry Application owns only the in-namespace objects.
+purgeNamespaces:
+  - "${USER}-resilience"
+  - "${USER}-site-b"
+# NO conflictsWith: M21 is the ONLY module that materializes into {user}-resilience / {user}-site-b
+# (dedicated namespaces, like m06's {user}-batch and m18's {user}-mesh). It shares no namespace with any
+# other module, so its entry app coexists with every dev-namespace module untouched — no reciprocal edits
+# needed (ADR-0001 same-namespace policy). Key omitted deliberately (meta_list returns empty).
+# Representative M21 muscle the generic battery does NOT cover: query the PERSISTENT seeded claims DB — the
+# restore-verification anchor the whole backup/delete/restore arc leans on — as {user}, and assert the
+# deterministic row count. Touches only {user}-resilience (attendee is admin) and the always-present
+# postgresql image, so it stays green regardless of the parasol-image build state. ${USER} resolves per-run.
+smokeCommands:
+  - "oc exec deploy/claims-db -n ${USER}-resilience -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -tAc \"select count(*) from parasol_claims_seed\"' | grep -qw 25"

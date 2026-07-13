@@ -1,0 +1,110 @@
+# Per-user RESILIENCE namespaces (M21) — owned by the workshop layer like dev/stage/prod/cicd/mesh/partner
+# (the workshop-entries AppProject blacklists ResourceQuota/LimitRange, so an entry chart cannot ship them;
+# Rule 13). TWO namespaces per user:
+#   • {user}-resilience — the resilient claims stack (multi-replica app + PDB + HPA + spread) and the
+#     PERSISTENT, seeded claims-DB PVC that is the OADP backup/restore anchor. This is the namespace the
+#     M21 lab BACKS UP, DELETES, and RESTORES, so it must be dedicated (never {user}-dev, shared by other
+#     modules) — the entry chart owns only the in-namespace workloads and re-materializes on ws reset.
+#   • {user}-site-b — a standalone "remote site" claims Postgres exposed via an RHSI Connector in the
+#     optional cross-site section. Disjoint from {user}-resilience, so M21 needs no reciprocal conflictsWith.
+# Both SURVIVE ws reset with a stable UID (the entry Application prunes only in-namespace objects).
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+{{- range $suffix := list "resilience" "site-b" }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $user }}-{{ $suffix }}
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+---
+# The attendee is admin on their own namespace (same as the standard four).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-admin
+  namespace: {{ $user }}-{{ $suffix }}
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}
+---
+# Quota for {user}-resilience: sized for parasol-claims at HPA max (6 replicas × 500m/512Mi limit) + the
+# claims-DB Postgres + a transient seed Job. Higher than the site-b quota because the resilient tier scales.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-resilience
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  hard:
+    requests.cpu: "3"
+    requests.memory: 4Gi
+    limits.cpu: "8"
+    limits.memory: 10Gi
+    persistentvolumeclaims: "3"
+    pods: "25"
+---
+# Default container requests/limits so bare lab pods get sane values and don't trip the quota.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-resilience
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+---
+# Modest quota for {user}-site-b: one standalone Postgres + a seed Job (the "remote site").
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-site-b
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 2Gi
+    limits.cpu: "2"
+    limits.memory: 4Gi
+    persistentvolumeclaims: "1"
+    pods: "10"
+---
+# Default container requests/limits for {user}-site-b.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-site-b
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+{{- end }}
