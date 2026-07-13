@@ -2,7 +2,7 @@
 
 Date: 2026-07-12 · Author: research-analyst · Spec: `Project-Shared/instructions/02-MODULE-SPECS.md` **§M21 "Resilience, Multi-Cluster & DR"** (Gen3 catalog; Eventing is M20, Virtualization dropped). Entitlement: **[OCP]** for OADP + single-cluster resilience; **[ADD-ON]** for the RHSI section; ACM mention-only.
 
-Method: READ-ONLY on **two** live clusters as `admin` (never `oc login`) — `ocp-ws-revamped` (cluster-qvkd5, `~/.kube/ocp-ws-revamped.config`) and `cluster2` (cluster-km7vw, `~/.kube/cluster2.config`), both OCP **4.21.22 / k8s 1.34.8**: `oc get packagemanifest/csv/crd/storageclass/volumesnapshotclass/csidriver` only, no mutations. Neither OADP nor RHSI is installed → product facts verified via **live OLM packagemanifests (owned-CRD apiVersions, channels)** + docs.redhat.com/developers.redhat.com (docs.redhat.com 403s on direct fetch → reached via WebSearch) + `OldContent/repos/app-connectivity-workshop` + `gitops-catalog`. `versions.yaml` `oadp` (1.5.7) and `rhsi` (2.2.1-rh-1) **re-confirmed live today**; both verified 2026-07-08 (4 days — fresh, <60d); **not edited** per instruction.
+Method: READ-ONLY on **two** live clusters as `admin` (never `oc login`) — the primary build cluster (`~/.kube/ocp-ws-revamped.config`) and a second cluster (`~/.kube/cluster2.config`), both OCP **4.21.22 / k8s 1.34.8**: `oc get packagemanifest/csv/crd/storageclass/volumesnapshotclass/csidriver` only, no mutations. Neither OADP nor RHSI is installed → product facts verified via **live OLM packagemanifests (owned-CRD apiVersions, channels)** + docs.redhat.com/developers.redhat.com (docs.redhat.com 403s on direct fetch → reached via WebSearch) + `OldContent/repos/app-connectivity-workshop` + `gitops-catalog`. `versions.yaml` `oadp` (1.5.7) and `rhsi` (2.2.1-rh-1) **re-confirmed live today**; both verified 2026-07-08 (4 days — fresh, <60d); **not edited** per instruction.
 
 ## Verified versions
 
@@ -114,7 +114,7 @@ Method: READ-ONLY on **two** live clusters as `admin` (never `oc login`) — `oc
 - Portfolio stacks + values: `platform-portfolio/stacks/`
 - Versions source of truth (oadp / rhsi / ocp_scheduling): `versions.yaml`
 - Templates followed: `docs/research/m14-build-note.md`, `docs/research/m18-build-note.md`, `docs/research/m20-build-note.md`
-- Kubeconfigs used (read-only): `~/.kube/ocp-ws-revamped.config` (qvkd5), `~/.kube/cluster2.config` (km7vw)
+- Kubeconfigs used (read-only): `~/.kube/ocp-ws-revamped.config` (primary), `~/.kube/cluster2.config` (second cluster)
 
 Sources:
 - Live packagemanifests/CRDs/storage on `ocp-ws-revamped` + `cluster2` (`oc get packagemanifest redhat-oadp-operator|skupper-operator|advanced-cluster-management|multicluster-engine|submariner`, `oc get crd`, `oc get storageclass/volumesnapshotclass/csidriver`) — 2026-07-12
