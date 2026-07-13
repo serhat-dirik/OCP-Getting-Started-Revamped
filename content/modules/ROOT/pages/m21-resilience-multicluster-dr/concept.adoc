@@ -1,0 +1,217 @@
+= Resilience, Multi-Cluster & DR: Concept
+:module-id: m21
+include::partial$version-attributes.adoc[]
+
+// Concept page for M21. Renders in all three flavors (workshop/demo/instructor). Environment values appear
+// ONLY as attributes; product versions ONLY via version-attributes (OADP {oadp_version} wrapping Velero
+// 1.16; Red Hat Service Interconnect / Skupper v2 {rhsi_version}; OpenShift GitOps {gitops_version}).
+// Everything described was PERFORMED on OCP {ocp_version} (Kubernetes 1.34) against a live cluster in the
+// {user}-resilience + {user}-site-b namespaces on 2026-07-13: the resilient claims stack (3 replicas +
+// PodDisruptionBudget minAvailable 2 + topologySpreadConstraints across 3 nodes + HPA 3–6); an OADP
+// Backup of the namespace with CSI snapshot + Data Mover to the in-cluster NooBaa object store (203 items,
+// ~59 s, a 48 MB DataUpload of the claims-DB PVC); the namespace contents deleted; an OADP Restore that
+// brought the stack back and the 25 seeded rows SURVIVED byte-for-byte; and the RHSI cross-site link
+// (Skupper v2 Site/Connector/Listener/AccessGrant→AccessToken) letting the app read a remote-site Postgres
+// transparently. The honest central constraint — attendees are namespace-admins, so Velero Backup/Restore
+// is a cluster-admin / platform operation (NonAdminBackup is Tech Preview and off here) — is stated plainly,
+// not hidden. Prose expands workshop-concept acronyms (DR, RPO, RTO, OADP, RHSI, VAN, BSL, DPA, CSI) on
+// first use; ubiquitous acronyms (API, DNS, PVC, RBAC, TLS, HTTP) are never expanded.
+
+[.lead]
+Parasol's claims platform survives a crashing pod and a lost node without anyone paging — you built that reflex in M01, M12, and M16. But a fat-fingered `oc delete`, a corrupt database, a failed cluster, or a region outage are a *different* class of problem, and "we have three replicas" does nothing for any of them.
+This module is about the rungs *above* single-cluster resilience: *backing up and restoring* an app's data with OpenShift API for Data Protection (OADP), *connecting services across sites* without a VPN using Red Hat Service Interconnect (RHSI), and reasoning honestly about *disaster-recovery (DR) tiers* — with GitOps as the quiet superpower that lets you re-materialize a whole platform anywhere.
+
+== What you'll learn
+
+* The *resilience ladder* — pod → node → zone → cluster → region — and exactly which mechanism absorbs each rung, so you can say where "more replicas" stops helping and *DR* begins.
+* *RPO* and *RTO* in plain terms — the two numbers that decide how much DR you actually need, and what they cost.
+* How *OADP* (Velero) *backs up and restores* an application namespace *including its persistent-volume data* — CSI snapshots moved to an object store — and why the restored data is byte-for-byte the pre-backup data.
+* The honest *platform-vs-app-team split*: namespace backup/restore is a *cluster-admin / platform* capability, not something a namespace-admin self-serves today — and what that means for how you design DR runbooks.
+* *Red Hat Service Interconnect* as *Layer-7 connectivity without a VPN or a flat network* — a Virtual Application Network (VAN) that lets an app on one cluster consume a service on another site as if it were local `[ADD-ON]`.
+* The *DR-tier decision* — backup-and-restore vs active-passive vs active-active — on RPO/RTO and cost, not slogans, and where *GitOps* (ties M10) makes "re-materialize anywhere" the cheapest strong option.
+
+== The resilience ladder — where replicas stop and DR begins
+
+Every resilience mechanism absorbs a *specific* failure. Stack them and you climb a ladder; the higher the rung, the bigger the blast radius and the more it costs to survive.
+
+[mermaid]
+....
+graph BT
+  pod["① Pod fails / crashes"]
+  node["② Node fails / is drained"]
+  zone["③ Zone (AZ) fails"]
+  cluster["④ Cluster fails / data is destroyed"]
+  region["⑤ Region fails"]
+  pod -->|"Deployment replicas + readiness/liveness probes<br/>(M01, M12)"| node
+  node -->|"PodDisruptionBudget + topologySpreadConstraints<br/>+ anti-affinity + HPA headroom (M16)"| zone
+  zone -->|"spread across AZs + capacity headroom"| cluster
+  cluster -->|"OADP backup/restore · active-passive ·<br/>GitOps re-materialize (this module)"| region
+  region -->|"active-active / multi-region"| top["survives"]
+  classDef single fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef dr fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef top fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+  class pod,node,zone single; class cluster,region dr; class top top;
+....
+
+// media-pass: replace/augment with SVG export m21-resilience-multicluster-dr-01-resilience-ladder.svg (see media-manifest.md)
+
+Read the ladder bottom-up. The *green* rungs — a pod crash, a node drain, a zone loss — are *single-cluster resilience*, and you already own them: a Deployment's replicas and probes restart a dead pod (M01); a `PodDisruptionBudget`, `topologySpreadConstraints`, anti-affinity, and an `HorizontalPodAutoscaler` keep a quorum alive through a node or zone loss (M12, M16). Parasol's claims tier in this module runs *exactly* that way — three replicas, a PDB that keeps two available, spread across nodes, an HPA holding the floor.
+
+The *amber* rungs are where replicas stop helping. If someone *deletes the namespace*, if the *database is corrupted*, or if the *whole cluster* is gone, no number of replicas brings the *data* back — because the thing you lost is the data (and the cluster) itself. That is *disaster recovery*, and it needs a *copy that lives somewhere else*: a backup in an object store, a standby cluster, or a Git repository that can re-materialize the platform. This module is the amber rungs.
+
+[NOTE]
+.Single-cluster resilience is a *prerequisite* for DR, not a substitute
+====
+DR does not replace replicas, probes, PDBs, and spread — it sits *on top* of them. A well-run platform absorbs the common failures (rungs 1–3) automatically and *never invokes DR for them*; DR is the break-glass for the rare, catastrophic ones (rungs 4–5). If your app falls over on a single node drain, fix *that* first (M16) — you are not ready to reason about region failover while a node reboot takes you down.
+====
+
+== RPO and RTO — the two numbers that size your DR
+
+Before choosing *any* DR mechanism, you answer two questions about each application:
+
+* *RPO — Recovery Point Objective:* how much *data* can you afford to lose, measured in *time*? An RPO of "24 hours" means a nightly backup is fine — you might lose up to a day of writes. An RPO of "zero" means you cannot lose a single committed transaction, which forces synchronous replication and a much bigger bill.
+* *RTO — Recovery Time Objective:* how long can you afford to be *down* while you recover? An RTO of "4 hours" tolerates a restore-from-backup; an RTO of "60 seconds" demands a hot standby already running.
+
+[cols="1,2,2",options="header"]
+|===
+| | *RPO* (data loss tolerance) | *RTO* (downtime tolerance)
+
+| Question | "How much data can we lose?" | "How long can we be down?"
+| Measured in | Time since the last good copy | Time to get back to serving
+| "Cheap" answer | Nightly backup (lose ≤ a day) | Restore on demand (down for hours)
+| "Expensive" answer | Synchronous replication (lose nothing) | Hot standby (down for seconds)
+| Drives | *How often* you copy data | *How ready* the recovery target is
+|===
+
+The trap is treating every app the same. Parasol's *claims-of-record database* might need a tight RPO (losing claims is a legal and financial problem); a *read-only rate-lookup cache* can be rebuilt from source and needs almost no DR at all. Sizing RPO/RTO *per application* is what stops you from paying active-active prices to protect a cache — and from protecting a system of record with a weekly backup.
+
+== OADP — backing up an app, data and all
+
+The backup-and-restore tier is made concrete by *OADP* — OpenShift API for Data Protection, the Red Hat-supported packaging of the open-source *Velero* project (OADP {oadp_version} wraps Velero 1.16). OADP backs up *Kubernetes objects* (Deployments, Services, Secrets, the works) *and* the *data inside persistent volumes*, and stores both in an S3-compatible *object store*.
+
+Two custom resources define an OADP install, and two more drive every backup:
+
+* A *DataProtectionApplication* (DPA) — the install CR that configures Velero: which plugins, which object store, whether the node agent runs. Your platform team owns this; it is already reconciled on this cluster.
+* A *BackupStorageLocation* (BSL) — *where* backups go. On this cluster it is an in-cluster *NooBaa* bucket (from OpenShift Data Foundation), so *no external AWS S3 is required* — the object store is part of the platform.
+* A *Backup* and a *Restore* — the two verbs. A `Backup` snapshots a set of namespaces to the BSL; a `Restore` reconstitutes them from a named backup.
+
+The interesting part is the *persistent-volume data*. Parasol's claims database lives on a Ceph-RBD block PVC, and OADP captures its bytes with *CSI snapshots plus the Data Mover*: Velero takes a Container Storage Interface (CSI) volume snapshot, then a *DataUpload* copies that snapshot's data into the NooBaa object store. That last step is what makes the backup *survive the namespace's deletion* — the data now lives in the bucket, independent of the volume it came from.
+
+[mermaid]
+....
+graph LR
+  subgraph ns["{user}-resilience (the app)"]
+    dep["claims-db + parasol-claims<br/>(objects)"]
+    pvc[("claims-db PVC<br/>(seeded data)")]
+  end
+  velero["Velero<br/>(openshift-adp)"]
+  subgraph store["NooBaa object store (in-cluster S3)"]
+    objs["backed-up objects"]
+    data["DataUpload:<br/>PVC snapshot data"]
+  end
+  dep -->|"Backup CR"| velero
+  pvc -->|"CSI snapshot"| velero
+  velero -->|"object manifests"| objs
+  velero -->|"Data Mover"| data
+  objs -.->|"Restore CR"| dep2["objects recreated"]
+  data -.->|"DataDownload"| pvc2[("PVC repopulated<br/>data survives")]
+  classDef app fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef v fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef s fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef out fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+  class dep,pvc app; class velero v; class objs,data s; class dep2,pvc2 out;
+....
+
+// media-pass: replace/augment with SVG export m21-resilience-multicluster-dr-02-oadp-flow.svg (see media-manifest.md)
+
+The *restore* runs the arrows in reverse: a `Restore` recreates the objects and a *DataDownload* repopulates a *fresh* persistent volume from the object store. The lab does exactly this — backs up the namespace, *deletes* it, restores it, and confirms the 25 seeded claim rows came back *byte-for-byte identical*. That "the data survived" moment is the whole point of the backup tier.
+
+[NOTE]
+.The honest constraint — backup/restore is a *platform* operation, not self-service (today)
+====
+Velero's `Backup` and `Restore` objects live in the platform's `openshift-adp` namespace, and creating them requires access there. Workshop attendees — like most app teams — are *namespace-admins* of their *own* project, *not* cluster-admins: on this cluster, a namespace-admin *cannot* create a Velero `Backup` (`oc auth can-i create backups.velero.io -n openshift-adp` returns *no*). So *namespace backup and restore is a cluster-admin / platform-team job*, and the lab performs those steps as the *instructor/admin* while you drive the parts that are genuinely yours (inspect the stack, *destroy* it, *verify* the data survived).
+
+OADP does ship a self-service path — *NonAdminBackup* / *NonAdminRestore*, namespaced CRs a project-admin can create in their own namespace — but it is *Technology Preview* and requires the platform team to *enable the Non-Admin Controller* in the DPA (which is off on this cluster). Treat it as "the future of self-service DR," not something to gate a production runbook on. The lab shows it as a clearly-flagged optional beat.
+====
+
+== RHSI — Layer-7 connectivity without a VPN `[ADD-ON]`
+
+DR is not only about *data*; it is about *reaching services that live somewhere else*. When Parasol's claims app on the main cluster needs a Postgres that runs at a *different site* — a legacy data center, a second cluster, a partner's environment — the old answer is a *VPN* or a *flattened network*: heavyweight, security-team-owned, and often impossible across organizational boundaries.
+
+*Red Hat Service Interconnect* (RHSI {rhsi_version}, built on *Skupper v2*) is the modern answer. It creates a *Virtual Application Network* (VAN): a dedicated, mutual-TLS Layer-7 overlay that links *specific services* across sites, with *no VPN, no shared subnet, and no firewall holes* beyond a single outbound connection. Each participating namespace becomes a *Site*; you *expose* a service on one site with a *Connector*, *consume* it on another with a *Listener*, and *link* the sites by redeeming a short-lived token.
+
+[mermaid]
+....
+graph LR
+  subgraph appsite["Site: claims-app (main cluster)"]
+    app["parasol-claims"]
+    listener["Listener<br/>claims-db-siteb:5432<br/>routingKey: claims-db"]
+  end
+  subgraph van["Virtual Application Network<br/>(mutual-TLS L7 overlay)"]
+    link{{"Link<br/>(AccessGrant→AccessToken)"}}
+  end
+  subgraph bsite["Site: site-b (remote)"]
+    connector["Connector<br/>selector app=claims-db<br/>routingKey: claims-db"]
+    db[("claims-db<br/>(SITE-B data)")]
+  end
+  app --> listener
+  listener --- link
+  link --- connector
+  connector --> db
+  classDef a fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef v fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef b fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class app,listener a; class link v; class connector,db b;
+....
+
+// media-pass: replace/augment with SVG export m21-resilience-multicluster-dr-03-rhsi-van.svg (see media-manifest.md)
+
+The magic is that the app is *unchanged*: it connects to a *local* address (`claims-db-siteb`) that only *exists because the VAN provides it*, and traffic is carried — encrypted — over the link to the remote site's real database. In the lab you watch a `psql` from the main cluster *fail* (the name doesn't resolve) *before* the VAN, and *succeed against the remote site's data* after. The same mechanism links two namespaces on one cluster (the lab's self-contained simulation) or two clusters in two regions (the real cross-site case) — the CRs are identical.
+
+[NOTE]
+.Why RHSI is a flagged `[ADD-ON]`
+====
+Red Hat Service Interconnect is a *separate subscription* from OpenShift. This module's *graded core* — the resilience recap, the OADP backup/restore, and the DR-tier reasoning — runs entirely *without* it, and no `[OCP]` beat depends on it. The whole cross-site section is flagged `[ADD-ON]` and skippable. It is included, hands-on and fully verified, because the "connect services across sites without a VPN" story is the connectivity half of a real multi-site DR strategy — but it is optional.
+====
+
+== The DR tiers — a decision, not a slogan
+
+There are three broad DR postures, and choosing among them is an RPO/RTO-and-cost decision made *per application*:
+
+[cols="1,2,2,2",options="header"]
+|===
+| Tier | *Backup & restore* | *Active-passive* | *Active-active*
+
+| How | Periodic backup to an object store; restore on disaster | A standby cluster kept warm (data replicated); fail over on disaster | Two+ clusters both serving; traffic shifts on disaster
+| RPO | Since the last backup (minutes–hours) | Replication lag (seconds–minutes) | ~Zero
+| RTO | Restore time (minutes–hours) | Failover time (minutes) | ~Zero (already serving)
+| Cost | Lowest — object storage + a runbook | Medium — a second cluster mostly idle | Highest — full duplicate capacity + data sync
+| Reach for it when | Most apps; anything rebuildable or tolerant of some loss | Systems of record with tight RTO | Only the crown jewels that cannot blink
+|===
+
+Most applications belong in *backup & restore* — it is cheap, it is what OADP gives you, and "we can restore in an hour and lose at most last night's writes" is a perfectly good answer for the majority of systems. Reserve active-passive and active-active for the few workloads whose RPO/RTO genuinely justify the cost. Over-buying DR is a real and common waste.
+
+[NOTE]
+.GitOps is the DR superpower — re-materialize *anywhere* (ties M10)
+====
+There is a fourth ingredient that changes the economics of every tier: *GitOps*. If your entire platform — namespaces, operators, apps, config — is declared in Git and reconciled by Argo CD (M10), then "stand up the environment on a new cluster" is not a heroic runbook; it is *point Argo CD at a fresh cluster and let it converge*. The *data* still needs OADP (or replication), but the *platform* re-materializes from Git in minutes. That is why "GitOps everywhere" turns active-passive from "maintain a hand-built twin" into "keep a second cluster and let Git rebuild it," and it is the honest reason a modern DR strategy starts with *everything in Git*, not with a backup tool. Advanced Cluster Management (ACM) automates this across a fleet — orchestrating OADP backups, cross-cluster networking (Submariner/RHSI), and GitOps-everywhere policy — and is the platform-team's next step beyond this module.
+====
+
+== How this shows up in real orgs
+
+* *"We have three replicas, so we're covered."* You are covered for a pod or node loss — rungs 1–3. You are *not* covered for a deleted namespace, a corrupt database, or a lost cluster. Name which rung each of your "resilience" measures actually absorbs, and you will find the gap is almost always at the *data* and *cluster* level.
+* *"Our backups are green — but have we ever restored one?"* A backup you have never restored is a *hope*, not a capability. The lab's "delete it, restore it, verify the data survived" arc is exactly the drill every team should run on a schedule. Untested backups fail exactly when you need them.
+* *"What's our RPO/RTO?" — met with a shrug.* If nobody can state the two numbers *per application*, DR spend is guesswork. The exercise of assigning RPO/RTO to each Parasol system (claims-of-record vs a rebuildable cache) is the single most valuable DR conversation a team can have.
+* *"Connecting to the DR site means a VPN ticket and a three-week wait."* Network-level DR coupling is where multi-site projects die. A service-level VAN (RHSI) links *just the services that need it*, over one outbound connection, without touching the network team's VPN — which is why it crosses cluster and organizational boundaries that a flat network never could.
+* *"Our DR plan is a 40-page Word document."* If recovery depends on humans executing a long runbook under pressure, RTO is whatever the most stressed engineer can manage at 3 a.m. GitOps turns most of that document into `Argo CD converges the platform; OADP restores the data` — a plan you can *test* instead of *read*.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) *the resilience ladder* — replicas and PDBs absorb pod/node/zone loss, but a deleted namespace or a dead cluster is a *data and DR* problem replicas can't touch; (2) *OADP backs up data, not just objects* — a CSI snapshot moved to an object store *survives the namespace's deletion*, which is why the restored rows come back byte-for-byte; (3) *DR is a tier decision on RPO/RTO and cost*, and *GitOps* makes "re-materialize anywhere" the cheapest strong option.
+The demo is the twelve-minute arc: back up the claims namespace, *delete it* (feel the loss — the database is gone), *restore it*, and show the *25 seeded rows survived*; then, as the `[ADD-ON]` flourish, link a remote site with RHSI and read its database over the VAN with the app unchanged.
+Close on the honest frame: "backup/restore is a *platform* operation — app teams consume and verify it — and with everything in Git, standing the platform back up anywhere is Argo CD's job, not a runbook's."
+====
+endif::demo[]

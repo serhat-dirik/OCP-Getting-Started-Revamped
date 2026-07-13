@@ -1,0 +1,97 @@
+= Resilience, Multi-Cluster & DR: Wrap-up
+:module-id: m21
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took Parasol's claims platform from *single-cluster resilient* to *disaster-recoverable* — and proved it by destroying a namespace and bringing its data back.
+You *inspected* the resilient tier — three replicas, a `PodDisruptionBudget`, `topologySpreadConstraints`, and an `HorizontalPodAutoscaler` — and named exactly which failures it absorbs (pod, node, zone) and which it can't (deleted data, dead cluster).
+You *backed up* the namespace with OpenShift API for Data Protection — objects *and* the database's persistent data, via a CSI snapshot and the Data Mover into an in-cluster object store — after proving, with `oc auth can-i`, that backup is a *platform* operation, not namespace-admin self-service.
+You *destroyed* the namespace's contents and felt the loss, then *restored* it and confirmed the *25 seeded rows survived byte-for-byte* — the difference between resilience and disaster recovery made concrete.
+As a flagged `[ADD-ON]`, you linked a *remote site* with Red Hat Service Interconnect — a Skupper v2 Virtual Application Network — and read its database through a local address with the app unchanged and *no VPN*.
+And you *decided* — a DR-tier tabletop that sized backup-and-restore vs active-passive vs active-active per Parasol system, with GitOps as the superpower that re-materializes a platform anywhere.
+
+[mermaid]
+....
+graph TB
+  subgraph ladder["The resilience ladder — what absorbs what"]
+    direction BT
+    r1["pod / node / zone loss"] -->|"replicas · PDB · spread · HPA<br/>(single-cluster resilience)"| r2["namespace / data destroyed"]
+    r2 -->|"OADP backup → restore<br/>(data survives, from object store)"| r3["cluster / region lost"]
+    r3 -->|"GitOps re-materialize + OADP data<br/>· RHSI cross-site connectivity"| r4["recovered elsewhere"]
+  end
+  classDef a fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef b fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef c fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+  class r1 a; class r2,r3 b; class r4 c;
+....
+
+// media-pass: recap SVG m21-resilience-multicluster-dr-04-what-you-built.svg (green = single-cluster resilience absorbing pod/node/zone; amber = the DR rungs — OADP restore for destroyed data, GitOps+OADP for a lost cluster; blue = recovered elsewhere; annotate each edge with the mechanism).
+
+The one idea under all of it: *resilience keeps you up; disaster recovery brings you back — and the two are different disciplines.* Replicas, probes, PDBs, and spread absorb the *common* failures automatically and touch neither your *data* nor a *lost cluster*. For those you need a *copy that lives somewhere else* — OADP's backup in an object store, RHSI's link to another site, and above all your *platform declared in Git* so Argo CD can rebuild it anywhere. Untested backups and un-sized RPO/RTO are where DR plans die; you tested a restore end-to-end and sized the tiers.
+
+== Map to your org
+
+Take these back to how your own platform handles failure today:
+
+. *Which rung does each of your "resilience" measures actually absorb?*
+You named the ladder — replicas for a pod, PDB + spread for a node or zone, OADP + GitOps for a cluster. In your systems, is there a measure for the *data* and *cluster* rungs, or does "we have replicas" quietly stand in for a DR plan you don't have?
+. *When did you last restore a backup — not take one, restore one?*
+You ran the full delete-and-restore drill and watched the data come back. Do your teams *test* restores on a schedule, or are your green backups an untested hope that fails exactly when the disaster hits?
+. *Can you state RPO and RTO for each system — as two numbers?*
+You sized three Parasol systems. For your own, can each owner state "we can lose at most X and be down at most Y"? If not, your DR spend is guesswork — over-protecting a rebuildable cache and under-protecting a system of record.
+. *Who runs backup/restore — and is that a bottleneck?*
+You proved a namespace-admin can't create a Velero `Backup`. Is DR a platform-team capability app teams *consume and verify*, or a bottleneck only two people understand? Would enabling self-service (NonAdminBackup, when it's GA) change how often teams actually test recovery?
+. *How much of your DR runbook is a document versus reconciled from Git?*
+You saw that a GitOps-declared platform re-materializes with Argo CD, not a 40-page runbook. How much of your recovery depends on humans executing steps under pressure — and how much could become "Argo converges the platform, OADP restores the data"?
+
+== When *not* to reach for this
+
+DR is powerful, and mis-applying it is its own expensive failure mode:
+
+* *Don't reach for DR when the failure is a resilience gap.*
+If your app falls over on a *single node drain*, the fix is a `PodDisruptionBudget` and spread (M16), *not* a backup-restore runbook. DR is the break-glass for catastrophes (lost data, lost cluster); using it to paper over rungs your replicas should absorb hides a bug you'll hit constantly.
+* *Don't buy active-active for everything.*
+A rebuildable cache does not need a hot cross-region twin; a nightly backup — or *no* backup, just re-seed from source — is the right, cheap answer. Applying system-of-record DR to every workload is one of the most common and expensive platform mistakes. Size RPO/RTO *per system*.
+* *Don't trust a backup you've never restored.*
+An untested backup is a hope. If the restore path isn't drilled, assume it's broken — restore semantics, PV data movement, and CRD ordering all have edge cases that only a real restore surfaces. Schedule the drill.
+* *Don't use RHSI where a plain Route or Service would do.*
+A VAN is for linking services *across sites/clusters without a flat network*. For two services *in the same cluster*, a `Service` (or a `Route` for external) is simpler and faster — reaching for an interconnect there adds moving parts for nothing.
+* *Don't confuse "the platform is in Git" with "the data is safe."*
+GitOps re-materializes *namespaces, operators, and config* — not your database's rows. GitOps + OADP (or replication) together are a DR strategy; GitOps *alone* rebuilds an *empty* platform. Keep both halves.
+
+.DR decision guide — what each tool is *for*
+[cols="1,2,2",options="header"]
+|===
+| Need | Reach for | Not
+
+| Survive a pod / node / zone loss | *Replicas + PDB + spread + HPA* (M12/M16) | A backup (wrong layer — this is resilience)
+| Recover destroyed data or a deleted namespace | *OADP backup → restore* (object store) | Replicas (they can't bring data back)
+| Stand a platform back up on a new cluster | *GitOps re-materialize* (Argo CD, M10) *+ OADP data* | A hand-built runbook
+| Reach a service at another site/cluster, no VPN | *RHSI / Service Interconnect* `[ADD-ON]` | A flat network or VPN (heavier, cross-boundary-hostile)
+| Near-zero RPO/RTO for the crown jewels | *Active-passive or active-active* replication | Backup & restore (RPO = last backup)
+| Most apps, most of the time | *Backup & restore* + GitOps | Active-active (over-buying DR)
+| Automate DR across a fleet of clusters | *Advanced Cluster Management* (ACM) | Per-cluster hand-rolling
+|===
+
+== Go deeper
+
+* *OADP / Velero* — `Schedule` for periodic backups (your cadence *is* your RPO), backup/restore *hooks* (quiesce a database before snapshot), `Restore` filters (selective/partial restore), and the File System Backup (Kopia) alternative to CSI snapshots for storage without a CSI snapshotter.
+* *Non-admin self-service* — `NonAdminBackup` / `NonAdminRestore` (Technology Preview): the namespaced CRs and the `DataProtectionApplication` `nonAdmin.enable` switch that lets project-admins run their own backups when your platform team turns it on.
+* *Red Hat Service Interconnect* `[ADD-ON]` — Skupper v2 `Site` high-availability, `RouterAccess`, multi-key listeners, and *cross-cluster* links (the same CRs you used, pointed at a second cluster instead of a second namespace).
+* *GitOps as DR* — Argo CD app-of-apps re-materialization (M10), and how a Git-declared platform turns "stand up the DR site" into a convergence, not a runbook.
+* *Advanced Cluster Management (ACM)* — fleet-scale DR: cluster backup/restore built on OADP, cross-cluster networking (Submariner / RHSI), and GitOps-everywhere policy — the platform-team's next step beyond this module.
+
+[NOTE]
+.The next real step — schedule and drill your recovery
+====
+This module ran a *manual* backup and restore once. The natural next moves in a real Parasol build are to (1) put the backup on a `Schedule` so the cadence *is* the RPO, (2) add a backup *hook* that quiesces Postgres for a consistent snapshot, and (3) *drill the restore on a schedule* — a game-day where you actually delete and recover, because a backup you've never restored is a hope, not a capability. Pair that with a GitOps-declared platform (M10) and you have the honest core of a modern DR strategy: the platform rebuilds from Git, the data restores from the object store, and you've *tested* both.
+====
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — a fresh resilient stack, a re-seeded database, and the RHSI objects removed — run `ws prep {module-id} --yes`.
+It purges and re-materializes `{user}-resilience` and `{user}-site-b`, clearing any Velero backup/restore leftovers, the `NonAdminBackup` you may have tried, and the Skupper `Site`/`Link`/`Connector`/`Listener`/`AccessGrant`/`AccessToken` objects, then re-seeds a clean 25-row database so a re-run starts fresh.
+The shared OADP and Red Hat Service Interconnect operators are platform substrate — they're untouched; only your namespaces reset.
+====

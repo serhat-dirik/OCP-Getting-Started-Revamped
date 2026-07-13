@@ -1,0 +1,743 @@
+= Resilience, Multi-Cluster & DR: Lab
+:module-id: m21
+include::partial$version-attributes.adoc[]
+
+// Lab page for M21. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Attendee steps that run in the Showroom terminal as {user} are [source,sh,role=execute];
+// the OADP Backup/Restore steps run against the platform openshift-adp namespace and require CLUSTER-ADMIN
+// (namespace-admin attendees CANNOT create Velero Backups — proven with oc auth can-i in exercise 2), so
+// those blocks are plain [source,sh] (copy-enabled) framed as instructor/admin steps. The FIRST block sets
+// RES={user}-resilience / SITEB={user}-site-b (subs=attributes); later blocks use $RES/$SITEB with NO subs
+// so jsonpath braces stay literal. All commands + outputs + timings were PERFORMED on OCP {ocp_version}
+// (Kubernetes 1.34) against a live cluster on 2026-07-13 in namespaces user1-resilience / user1-site-b:
+// the resilient stack inspection (3 replicas, PDB minAvailable 2, HPA 3–6, spread over 3 nodes, 25 seeded
+// rows); the OADP Backup (CSI snapshot + Data Mover, 203 items, ~59 s, a 48 MB DataUpload to NooBaa); the
+// destroy (oc delete all,pvc — DB gone, query fails); the OADP Restore (~60 s, DataDownload, the 25 rows
+// SURVIVED byte-for-byte); the NonAdminBackup Tech-Preview beat (created but never reconciled — NAC off);
+// and the RHSI cross-site link (Skupper v2 Site/Connector/Listener/AccessGrant→AccessToken, Link Ready in
+// ~40 s, the app reading site-b's 10 SITE-B-CLAIMANT rows over the VAN, distinct from its local 25). The
+// sample user in output is user1 (yours is {user}); the cluster domain is a generic placeholder
+// (apps.example.com; yours is {cluster_domain}). Console click-paths for OADP and Service Interconnect are
+// [CAPTURE-VERIFY] with the authoritative CLI beside them.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcuts you'll reuse throughout the lab — your resilient-app namespace and the simulated remote site:
+
+[source,sh,role=execute,subs="attributes"]
+----
+RES={user}-resilience
+SITEB={user}-site-b
+echo "resilient app: $RES   ·   remote site: $SITEB"
+----
+
+You are the platform engineer responsible for Parasol's claims platform *resilience and disaster recovery*.
+Your world is already stood up: in `{user}-resilience`, a genuinely *resilient* claims tier — `parasol-claims` at *three replicas* with a `PodDisruptionBudget`, `topologySpreadConstraints`, and an `HorizontalPodAutoscaler` — fronting a *persistent, seeded* claims database (the restore anchor). In `{user}-site-b`, a standalone claims Postgres stands in for a *remote site*.
+In this lab you *recap* what single-cluster resilience already buys you, *back up* the claims namespace with OpenShift API for Data Protection (OADP) *including its database*, *destroy* it and feel the loss, *restore* it and prove the data survived, then — as a flagged `[ADD-ON]` — *link a remote site* with Red Hat Service Interconnect and read its database over a Virtual Application Network with the app unchanged. You finish with a *DR-tier tabletop*.
+
+[TIP]
+.Two ways for most steps; some are single-path on purpose
+====
+Where a step can be done both ways you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) and the *CLI* tab uses `oc` in the *Terminal* beside these instructions. Pick a path once — the tabs stay in sync across the page.
+Three things are single-path on purpose: the *OADP Backup and Restore* run against the platform's `openshift-adp` namespace and need *cluster-admin* (your instructor runs them — exercise 2 proves why); the *token-redemption* step in the RHSI section is a scripted CLI copy; and the `psql` reads are terminal-only.
+The namespace in the output below is the sample user `user1`; *yours* is `{user}`, and the cluster domain shown is a placeholder — read the *shape*, not the exact values.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — ~12-minute presenter arc: back up -> delete -> restore -> data survives (+ RHSI flourish)
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Delete the namespace, restore it, prove the data survived (12 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws solve m21 --user {user}` a few minutes ahead so the resilient stack and the seeded database are up, and set `RES={user}-resilience`.
+Have a *cluster-admin* `KUBECONFIG` ready in the terminal — the Backup and Restore run against `openshift-adp`. Pre-create one Backup so you are not waiting on it live, *or* let the ~1-minute backup run as a beat (it is fast).
+The money moment is beat 2: you *delete the whole namespace's contents* — the database and its volume — narrate the loss, then *restore* and show the *25 seeded rows come back byte-for-byte*.
+Keep the `[ADD-ON]` RHSI flourish (beat 3) only if the room is engaged and RHSI is enabled; it is skippable.
+====
+
+[demo-block]
+[TIME 4m]
+Say:: "Parasol's claims tier is *resilient* — three replicas, a disruption budget, spread across nodes. That survives a pod or a node dying. It does *nothing* if someone deletes the namespace or the database corrupts. For *that* you need a backup that lives somewhere else. Watch me take one — objects *and* the database's data — into an in-cluster object store."
+Show:: The resilient stack (`oc get deploy,pdb,hpa -n $RES`), the 25 seeded rows, then a `Backup` completing with a `DataUpload` moving the PVC data to NooBaa.
+Do:: Show the stack and back it up (cluster-admin):
++
+[source,sh]
+----
+RES=user1-resilience
+oc get deploy,pdb,hpa -n $RES
+oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -tAc "select count(*) from parasol_claims_seed"'
+oc apply -f - <<EOF
+apiVersion: velero.io/v1
+kind: Backup
+metadata: { name: claims-backup-$RES, namespace: openshift-adp }
+spec:
+  includedNamespaces: [ "$RES" ]
+  storageLocation: parasol-dpa-1
+  snapshotMoveData: true
+EOF
+oc wait --for=jsonpath='{.status.phase}'=Completed backups.velero.io/claims-backup-$RES -n openshift-adp --timeout=300s
+----
++
+"Completed — two hundred-plus objects, and a Data Mover upload of the database volume into the object store. That backup now lives *independently* of this namespace."
+
+[demo-block]
+[TIME 5m]
+Say:: "Now the disaster. I delete *everything* in the namespace — the app, the database, and the persistent volume with all the data. This is the fat-fingered `oc delete`, the corrupt cluster, the bad day. The data is *gone*. Then I restore from the backup — and watch the *exact* 25 rows come back."
+Show:: `oc delete all,pvc --all` emptying the namespace; a failed query; then a `Restore` completing with a `DataDownload`, and the 25 seeded rows displayed again.
+Do:: Destroy, then restore (cluster-admin for the restore):
++
+[source,sh]
+----
+oc delete all,pvc --all -n $RES
+oc exec deploy/claims-db -n $RES -- true 2>&1 | head -1     # fails: the DB is gone
+oc apply -f - <<EOF
+apiVersion: velero.io/v1
+kind: Restore
+metadata: { name: claims-restore-$RES, namespace: openshift-adp }
+spec: { backupName: claims-backup-$RES, restorePVs: true }
+EOF
+oc wait --for=jsonpath='{.status.phase}'=Completed restores.velero.io/claims-restore-$RES -n openshift-adp --timeout=300s
+oc rollout status deploy/claims-db -n $RES
+oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -c "select id, claimant, amount from parasol_claims_seed order by id limit 5"'
+----
++
+"There they are — `CLAIMANT-0001`, `0002`, `0003`… the *same* 25 rows, byte-for-byte. The namespace was empty a minute ago. That is the difference between resilience and disaster recovery: the copy lived somewhere else, and OADP brought the *data* back, not just the objects."
+
+[demo-block]
+[TIME 3m]
+Say:: "One more — the *connectivity* half of multi-site. Parasol's claims app needs a database at a *remote site*. No VPN, no shared network. Red Hat Service Interconnect builds a Layer-7 link between the two sites, and the app reads the remote database through a *local* name — as if it were next door."
+Show:: The two Skupper `Site`s Ready, the `Link` Ready, and a `psql` from the app namespace returning the *remote* site-b rows (`SITE-B-CLAIMANT-*`).
+Do:: Show the already-linked VAN reading the remote database:
++
+[source,sh]
+----
+oc get site -n user1-resilience; oc get site -n user1-site-b; oc get link -n user1-site-b
+oc exec deploy/claims-db -n user1-resilience -- sh -c 'PGPASSWORD=parasol psql -h claims-db-siteb -p 5432 -U parasol -d parasol -c "select claimant from parasol_claims_seed limit 3"'
+----
++
+"`SITE-B-CLAIMANT` — that data lives at the *other* site, and the app read it over the interconnect through a local address. No VPN ticket, no flat network. That is the connectivity foundation of a multi-site DR strategy."
+
+[NOTE]
+.Reset between runs
+====
+`ws prep m21 --yes` returns the world to the entry state (fresh resilient stack + re-seeded database, RHSI objects removed). The platform's OADP and Skupper operators are shared substrate and are untouched.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Inspect what single-cluster resilience already buys you
+⏱ *~12 min* · meet the resilient claims tier and the seeded database it protects
+
+Before you can reason about *disaster* recovery, be clear about what you *already* survive. The `parasol-claims` tier in `{user}-resilience` is built for resilience — the M12/M16 primitives, made concrete.
+
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}[OpenShift web console^] (project `{user}-resilience`), open *Workloads → Deployments*. You'll see `parasol-claims` at *3 of 3* pods and `claims-db` at *1 of 1*. Open `parasol-claims` and note its *Pods* land on *different nodes*. Under *Workloads*, the `parasol-claims` *HorizontalPodAutoscaler* and *PodDisruptionBudget* show the resilience policy.
+The *CLI* tab reads the same facts — use it to capture the exact fields.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get deploy,pdb,hpa -n $RES
+----
+--
+====
+
+.Expected output (a 3-replica claims tier, a PDB keeping 2 available, an HPA holding the floor at 3)
+[source,texinfo]
+----
+NAME                             READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/claims-db        1/1     1            1           32m
+deployment.apps/parasol-claims   3/3     3            3           32m
+
+NAME                                        MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+poddisruptionbudget.policy/parasol-claims   2               N/A               1                     32m
+
+NAME                                                 REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS
+horizontalpodautoscaler.autoscaling/parasol-claims   Deployment/parasol-claims   cpu: 1%/80%   3         6         3
+----
+
+Read that as a resilience posture: *three* replicas so losing one is a non-event; a `PodDisruptionBudget` that keeps *two* available during any voluntary disruption (a node drain evicts *at most one* at a time — `ALLOWED DISRUPTIONS: 1`); and an `HorizontalPodAutoscaler` that holds the floor at three and bursts to six under load. Confirm the replicas are *spread across nodes* — so one node loss can't take them all:
+
+[source,sh,role=execute]
+----
+oc get pods -n $RES -l app=parasol-claims -o custom-columns='POD:.metadata.name,STATUS:.status.phase,NODE:.spec.nodeName'
+----
+
+.Expected output (three replicas on three distinct nodes — topology spread + anti-affinity at work)
+[source,texinfo]
+----
+POD                               STATUS    NODE
+parasol-claims-596bcf67f4-97xnh   Running   control-plane-cluster-example-1
+parasol-claims-596bcf67f4-bmw67   Running   control-plane-cluster-example-3
+parasol-claims-596bcf67f4-lg9qk   Running   worker-cluster-example-2
+----
+
+Now meet the thing DR actually protects — the *data*. The claims database is a *persistent* PVC seeded with 25 deterministic rows (your restore anchor). Look at the volume, then read the rows:
+
+[source,sh,role=execute]
+----
+oc get pvc claims-db-data -n $RES -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,SC:.spec.storageClassName,MODE:.spec.accessModes[0],SIZE:.spec.resources.requests.storage'
+oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -c "select id, claimant, claim_type, amount from parasol_claims_seed order by id limit 5"'
+----
+
+.Expected output (a Bound RWO block PVC, and the first 5 of 25 deterministic claim rows)
+[source,texinfo]
+----
+NAME             STATUS   SC                                     MODE            SIZE
+claims-db-data   Bound    ocs-external-storagecluster-ceph-rbd   ReadWriteOnce   1Gi
+
+ id |   claimant    | claim_type | amount
+----+---------------+------------+--------
+  1 | CLAIMANT-0001 | home       |    637
+  2 | CLAIMANT-0002 | life       |    774
+  3 | CLAIMANT-0003 | travel     |    911
+  4 | CLAIMANT-0004 | commercial |   1048
+  5 | CLAIMANT-0005 | auto       |   1185
+----
+
+Remember those first rows — `CLAIMANT-0001 / home / 637`, and so on. After you *destroy and restore* this namespace, you'll check the *exact same rows* came back.
+
+[NOTE,role=instructor-demo]
+.`[INSTRUCTOR-DEMO]` — the chaos drill: kill a pod, drain a node; the PDB holds the line
+====
+A great five-minute live beat: the instructor *deletes a `parasol-claims` pod* (`oc delete pod -n {user}-resilience <one-pod>`) and the Deployment replaces it within seconds — the service never dips below the PodDisruptionBudget's *two available*. Then the instructor *cordons and drains a node* the tier runs on (`oc adm drain <node> --ignore-daemonsets --delete-emptydir-data`) and the PDB *paces* the eviction — one pod at a time — so a quorum stays up throughout. Attendees watch `oc get pods -n {user}-resilience -w` and see the tier *absorb* both failures with no outage. The lesson to name out loud: *this* is what replicas + PDB + spread buy you — and it is precisely what a backup does *not* do. The next exercises are for the failures this drill can't survive.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You found the resilient claims tier — `parasol-claims` at *3/3* with a `PodDisruptionBudget` (min available 2), an `HorizontalPodAutoscaler` (floor 3, ceiling 6), and replicas *spread across three nodes* — and you read the *25 seeded rows* (starting `CLAIMANT-0001 / home / 637`) from the persistent claims-DB PVC that DR will protect.
+****
+
+== 2. Back up the namespace with OADP — data and all
+⏱ *~15 min* · snapshot the app and its database into an in-cluster object store
+
+Resilience survives a pod or node loss. It does *nothing* for a deleted namespace or a corrupt database. For those you need a *backup that lives elsewhere* — and that is OADP.
+
+First, an honest reality check. Backups are a *platform* capability: Velero's `Backup` objects live in the platform's `openshift-adp` namespace, and — like most app teams — *you are a namespace-admin, not a cluster-admin*. Prove it:
+
+[source,sh,role=execute]
+----
+oc auth can-i create backups.velero.io -n openshift-adp
+oc auth can-i delete pvc -n $RES
+----
+
+.Expected output (you cannot create a platform Backup; you *can* manage your own namespace)
+[source,texinfo]
+----
+no
+yes
+----
+
+That `no` is the lesson: *namespace backup and restore is a cluster-admin / platform-team operation*. So the two `Backup`/`Restore` steps below are run by your *instructor* (or by you, if this is a self-paced lab where you hold cluster-admin). Everything *else* in this module — inspect, destroy, verify, and the whole RHSI section — is yours to run.
+
+[NOTE]
+.Where the backup goes — an in-cluster object store, already configured
+====
+The platform's `DataProtectionApplication` points Velero at a `BackupStorageLocation` named `parasol-dpa-1` — an *in-cluster NooBaa bucket* (from OpenShift Data Foundation), so *no external AWS S3 is needed*. A cluster-admin can confirm it's ready with `oc get backupstoragelocation -n openshift-adp` (expect `Available`). This is platform substrate; you don't configure it.
+====
+
+Now the backup itself (cluster-admin / instructor step). It captures every object in the namespace *and* moves the database volume's data to the object store with a *CSI snapshot + Data Mover* (`snapshotMoveData: true`) — the step that makes the backup survive the namespace's deletion:
+
+[tabs]
+====
+Console::
++
+--
+// [CAPTURE-VERIFY] OADP console: Operators -> Installed Operators -> OADP Operator (project openshift-adp)
+// -> the Velero "Backup" tab -> Create Backup, or +Add -> Import YAML with the CLI manifest. Confirm the
+// snapshotMoveData toggle / field is present. CLI tab is authoritative.
+As a *cluster-admin*, in *Operators → Installed Operators → OADP Operator* (project `openshift-adp`), open the *Backup* tab and *Create Backup* (or *+Add → Import YAML*) with the manifest from the *CLI* tab. Watch the Backup move to *Completed*.
+--
+CLI::
++
+--
+[source,sh]
+----
+oc apply -f - <<'EOF'
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: claims-backup-user1
+  namespace: openshift-adp
+spec:
+  includedNamespaces:
+    - user1-resilience            # the attendee's {user}-resilience namespace
+  storageLocation: parasol-dpa-1  # the in-cluster NooBaa BSL
+  snapshotMoveData: true          # CSI snapshot -> DataUpload (Data Mover) -> object store
+  ttl: 720h0m0s
+EOF
+----
+--
+====
+
+[WARNING]
+.`oc get backup` is ambiguous — use the full resource name
+====
+OpenShift Data Foundation ships its *own* `backups` CRD (`backups.postgresql.cnpg.noobaa.io`), so a bare `oc get backup` may resolve to the *wrong* kind (`Error … "…" not found`). Always qualify Velero's backups as `backups.velero.io` (and restores as `restores.velero.io`).
+====
+
+Watch the backup complete (a cluster-admin runs this; it takes about a minute). It captures the objects, then a *DataUpload* moves the PVC snapshot data to the object store:
+
+[source,sh]
+----
+oc get backups.velero.io claims-backup-user1 -n openshift-adp \
+  -o jsonpath='phase={.status.phase}  items={.status.progress.itemsBackedUp}/{.status.progress.totalItems}{"\n"}'
+oc get datauploads.velero.io -n openshift-adp -l velero.io/backup-name=claims-backup-user1 \
+  -o jsonpath='dataUpload={.items[0].status.phase}  bytes={.items[0].status.progress.totalBytes}  pvc={.items[0].spec.sourcePVC}{"\n"}'
+----
+
+.Expected output (Completed — every object backed up, and the database volume's ~48 MB moved to the object store)
+[source,texinfo]
+----
+phase=Completed  items=203/203
+dataUpload=Completed  bytes=48078617  pvc=claims-db-data
+----
+
+`Completed`, 203 objects, and a `DataUpload` of the `claims-db-data` volume into NooBaa. The transient CSI VolumeSnapshot is deleted once the upload finishes — the *data now lives in the object store*, independent of the namespace it came from. That independence is what the next two exercises rely on.
+
+[.checkpoint]
+****
+✔ *Verify:* You proved a namespace-admin *cannot* create a platform `Backup` (`oc auth can-i` → `no`), understood *why backup/restore is a platform operation*, and (via the instructor / cluster-admin) took an OADP `Backup` of `{user}-resilience` that reached *Completed* with a *Data Mover `DataUpload`* of the claims-DB volume to the in-cluster object store.
+****
+
+== 3. Delete it — and feel the loss
+⏱ *~8 min* · destroy the namespace's contents; watch the database disappear
+
+Here is the disaster. You *can* destroy your own namespace's contents — you're its admin — so *you* run this one. Delete every workload *and the persistent volume* holding the claims data:
+
+[tabs]
+====
+Console::
++
+--
+In the web console (project `{user}-resilience`), delete the `claims-db` and `parasol-claims` *Deployments* (*Workloads → Deployments → ⋮ → Delete*) and the `claims-db-data` *PersistentVolumeClaim* (*Storage → PersistentVolumeClaims → ⋮ → Delete*). The *CLI* tab does it in one command.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc delete all,pvc --all -n $RES
+----
+--
+====
+
+.Expected output (workloads and the persistent volume deleted — the data is gone)
+[source,texinfo]
+----
+pod "claims-db-f8bf7d9f8-hlxrx" deleted
+pod "parasol-claims-596bcf67f4-97xnh" deleted
+...
+service "claims-db" deleted
+service "parasol-claims" deleted
+deployment.apps "claims-db" deleted
+deployment.apps "parasol-claims" deleted
+horizontalpodautoscaler.autoscaling "parasol-claims" deleted
+job.batch "claims-seed-m21-user1" deleted
+Warning: apps.openshift.io/v1 DeploymentConfig is deprecated in v4.14+, unavailable in v4.10000+
+persistentvolumeclaim "claims-db-data" deleted
+----
+
+(The deprecation warning is just the `all` alias listing a legacy type the namespace doesn't use — ignore it.) Now feel the loss — try to reach the database:
+
+[source,sh,role=execute]
+----
+oc exec deploy/claims-db -n $RES -- sh -c 'echo reachable' 2>&1 | head -1
+oc get deploy,pvc -n $RES
+----
+
+.Expected output (there is no database — and no volume)
+[source,texinfo]
+----
+Error from server (NotFound): deployments.apps "claims-db" not found
+No resources found in user1-resilience namespace.
+----
+
+The database, the app, and *the persistent volume with all 25 rows* are gone. This is the failure no number of replicas survives — the data itself is destroyed. Your resilient tier could not save you here; only the *backup* can.
+
+[NOTE]
+.Safety net — you can always re-materialize
+====
+If you are in a self-paced lab and *cannot* run the cluster-admin restore in the next exercise, `ws prep m21 --yes` rebuilds the entry state (a fresh resilient stack and a *re-seeded* database). Note the difference the next exercise makes concrete: `ws prep` gives you a *fresh* copy; an OADP *restore* brings back *your actual backed-up data*. For DR, that distinction is everything.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You *destroyed* the contents of `{user}-resilience` — the `claims-db` and `parasol-claims` Deployments, their Services, and the *persistent `claims-db-data` volume* — and confirmed the database is unreachable (`deployments.apps "claims-db" not found`) and the volume is gone. The data now exists *only* in the backup.
+****
+
+== 4. Restore — and prove the data survived
+⏱ *~15 min* · reconstitute the namespace from the backup; confirm the exact rows came back
+
+Now recover. The `Restore` (cluster-admin / instructor step) recreates every object *and* repopulates a *fresh* volume from the object store with a *DataDownload* — the reverse of the backup's Data Mover:
+
+[tabs]
+====
+Console::
++
+--
+// [CAPTURE-VERIFY] OADP console: Operators -> Installed Operators -> OADP Operator (project openshift-adp)
+// -> the "Restore" tab -> Create Restore referencing the backup, or +Add -> Import YAML. CLI authoritative.
+As a *cluster-admin*, in *Operators → Installed Operators → OADP Operator* (project `openshift-adp`), open the *Restore* tab and *Create Restore* referencing `claims-backup-user1` (or *+Add → Import YAML* with the *CLI* manifest). Watch it reach *Completed*.
+--
+CLI::
++
+--
+[source,sh]
+----
+oc apply -f - <<'EOF'
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: claims-restore-user1
+  namespace: openshift-adp
+spec:
+  backupName: claims-backup-user1
+  existingResourcePolicy: update
+  restorePVs: true                # repopulate the PVC from the object store (DataDownload)
+EOF
+----
+--
+====
+
+Watch the restore complete (about a minute; a cluster-admin runs it):
+
+[source,sh]
+----
+oc get restores.velero.io claims-restore-user1 -n openshift-adp -o jsonpath='restore={.status.phase}{"\n"}'
+oc get datadownloads.velero.io -n openshift-adp -l velero.io/restore-name=claims-restore-user1 \
+  -o jsonpath='dataDownload={.items[0].status.phase}{"\n"}'
+----
+
+.Expected output (the restore and the volume DataDownload both Completed)
+[source,texinfo]
+----
+restore=Completed
+dataDownload=Completed
+----
+
+Now the payoff — and this part is *yours*. Confirm the stack came back and the database rolled out, then read the rows:
+
+[source,sh,role=execute]
+----
+oc get deploy,pvc -n $RES
+oc rollout status deploy/claims-db -n $RES --timeout=120s
+oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -tAc "select count(*) from parasol_claims_seed"'
+oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -c "select id, claimant, claim_type, amount from parasol_claims_seed order by id limit 5"'
+----
+
+.Expected output (the stack is back on a fresh volume; the 25 rows survived, byte-for-byte identical to exercise 1)
+[source,texinfo]
+----
+NAME                             READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/claims-db        1/1     1            1           68s
+deployment.apps/parasol-claims   3/3     3            3           68s
+persistentvolumeclaim/claims-db-data   Bound   pvc-afd9cb63-...   1Gi   RWO
+
+deployment "claims-db" successfully rolled out
+25
+ id |   claimant    | claim_type | amount
+----+---------------+------------+--------
+  1 | CLAIMANT-0001 | home       |    637
+  2 | CLAIMANT-0002 | life       |    774
+  3 | CLAIMANT-0003 | travel     |    911
+  4 | CLAIMANT-0004 | commercial |   1048
+  5 | CLAIMANT-0005 | auto       |   1185
+----
+
+There it is: the *exact same 25 rows* — `CLAIMANT-0001 / home / 637` and all — on a *fresh* persistent volume (note the new `pvc-…` UID; the Data Mover restored the data into a new PV). The namespace was empty ninety seconds ago. *That* is disaster recovery: the copy lived in the object store, and OADP brought the *data* back, not just the objects.
+
+[NOTE]
+.`[ADD-ON]` — self-service backup with NonAdminBackup (Tech Preview)
+====
+Wouldn't it be better if *you* — the namespace-admin — could run that backup yourself? OADP ships exactly that: *NonAdminBackup* / *NonAdminRestore*, namespaced CRs you create in your *own* namespace. Try it:
+
+[source,sh,role=execute]
+----
+oc apply -f - <<EOF
+apiVersion: oadp.openshift.io/v1alpha1
+kind: NonAdminBackup
+metadata: { name: selfservice-test, namespace: $RES }
+spec:
+  backupSpec:
+    includedNamespaces: [ "$RES" ]
+EOF
+sleep 20
+oc get nonadminbackup selfservice-test -n $RES
+----
+
+You can *create* it — but watch the status stay *empty*: on this cluster it never reconciles, because *NonAdminBackup is Technology Preview* and the platform team has not enabled the *Non-Admin Controller* in the `DataProtectionApplication`. Clean it up with `oc delete nonadminbackup selfservice-test -n $RES`. Treat this as "the future of self-service DR," not something to build a production runbook on — the GA path is the cluster-admin `Backup`/`Restore` you just used.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* The OADP `Restore` reached *Completed* with a *`DataDownload`*, the `claims-db` + `parasol-claims` stack came back on a *fresh* persistent volume, and — the graded outcome — the *25 seeded rows SURVIVED the restore*, byte-for-byte identical to what you read in exercise 1 (`CLAIMANT-0001 / home / 637`, …). The data survived a full destroy.
+****
+
+== 5. `[ADD-ON]` Connect a remote site with Red Hat Service Interconnect
+⏱ *~20 min* · link two sites over a VAN and read a remote database with the app unchanged
+
+[NOTE]
+.This whole exercise is a flagged, skippable `[ADD-ON]`
+====
+Red Hat Service Interconnect is a *separate subscription*. Nothing earlier in this module depends on it, and nothing later does either. Skip it freely if RHSI isn't part of your engagement. It is included, fully hands-on, because "connect services across sites without a VPN" is the connectivity half of a real multi-site DR strategy.
+====
+
+DR is not only about restoring *data* — it's about *reaching services that live somewhere else*. Parasol's claims app needs a Postgres at a *remote site* (`{user}-site-b`, standing in for a legacy data center or a second cluster). The old answer is a VPN or a flattened network. The modern answer is a *Virtual Application Network* (VAN): a mutual-TLS Layer-7 overlay that links *just the services that need it*.
+
+First, prove the problem. The app is written to reach its remote database at a *stable local name*, `claims-db-siteb` — which doesn't exist yet:
+
+[source,sh,role=execute]
+----
+oc get svc claims-db-siteb -n $RES 2>&1 | head -1
+oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=parasol psql -h claims-db-siteb -p 5432 -U parasol -d parasol -tAc "select count(*) from parasol_claims_seed" 2>&1' | head -1
+----
+
+.Expected output (no such service, so the name doesn't resolve — the remote DB is unreachable)
+[source,texinfo]
+----
+Error from server (NotFound): services "claims-db-siteb" not found
+psql: error: could not translate host name "claims-db-siteb" to address: Name or service not known
+----
+
+Now build the VAN. Each namespace becomes a *Site*; the app side (`{user}-resilience`) is *linkable* (`linkAccess: default`) so the remote site can connect to it:
+
+[source,sh,role=execute]
+----
+oc apply -f - <<EOF
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata: { name: claims-app, namespace: $RES }
+spec:
+  linkAccess: default
+---
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata: { name: site-b, namespace: $SITEB }
+spec: {}
+EOF
+oc wait --for=condition=Ready site/claims-app -n $RES --timeout=180s
+oc wait --for=condition=Ready site/site-b -n $SITEB --timeout=180s
+----
+
+.Expected output (both sites Ready; a Skupper router pod starts in each namespace)
+[source,texinfo]
+----
+site.skupper.io/claims-app condition met
+site.skupper.io/site-b condition met
+----
+
+Expose site-b's database with a *Connector* (it binds the local `claims-db` pods to a *routing key*), and consume it on the app side with a *Listener* (a local endpoint `claims-db-siteb:5432` bound to the *same* routing key):
+
+[tabs]
+====
+Console::
++
+--
+// [CAPTURE-VERIFY] Console -> Networking -> Service Interconnect (the RHSI console plugin) -> the site's
+// Connectors/Listeners; or the site YAML. The CLI tab (oc apply of the Connector + Listener CRs) is
+// authoritative — the Service Interconnect console view is for visualizing, not required for the wiring.
+Open *Networking → Service Interconnect* (the Red Hat Service Interconnect console plugin). Select the `site-b` site and add a *Connector* (selector `app=claims-db`, routing key `claims-db`, port `5432`); select the `claims-app` site and add a *Listener* (host `claims-db-siteb`, routing key `claims-db`, port `5432`). Or apply the CRs from the *CLI* tab.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+# expose site-b's DB (Connector), consume it on the app side (Listener) — same routingKey binds them
+oc apply -f - <<EOF
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata: { name: claims-db, namespace: $SITEB }
+spec:
+  routingKey: claims-db
+  selector: app=claims-db
+  port: 5432
+---
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata: { name: claims-db-siteb, namespace: $RES }
+spec:
+  routingKey: claims-db
+  host: claims-db-siteb
+  port: 5432
+EOF
+----
+--
+====
+
+Now *link* the two sites. This is the step the field warns about — it's a *token exchange*: the linkable site issues an *AccessGrant* (a short-lived, redeemable token), and the other site *redeems* it with an *AccessToken* to form the `Link`. Issue the grant on the app side:
+
+[source,sh,role=execute]
+----
+oc apply -f - <<EOF
+apiVersion: skupper.io/v2alpha1
+kind: AccessGrant
+metadata: { name: claims-grant, namespace: $RES }
+spec:
+  redemptionsAllowed: 10
+  expirationWindow: 1h
+EOF
+oc wait --for=condition=Ready accessgrant/claims-grant -n $RES --timeout=60s
+----
+
+The grant publishes its *url*, *code*, and *ca* into its `status`. *Script the redemption* — copy those three fields into an `AccessToken` in site-b (doing this by hand is the classic RHSI footgun; the multi-line CA in particular):
+
+[source,sh,role=execute]
+----
+URL=$(oc get accessgrant claims-grant -n $RES -o jsonpath='{.status.url}')
+CODE=$(oc get accessgrant claims-grant -n $RES -o jsonpath='{.status.code}')
+CA=$(oc get accessgrant claims-grant -n $RES -o jsonpath='{.status.ca}')
+{
+  echo "apiVersion: skupper.io/v2alpha1"
+  echo "kind: AccessToken"
+  echo "metadata: { name: claims-token, namespace: $SITEB }"
+  echo "spec:"
+  echo "  url: $URL"
+  echo "  code: $CODE"
+  echo "  ca: |"
+  echo "$CA" | sed 's/^/    /'
+} | oc apply -f -
+oc wait --for=condition=Ready link/claims-token -n $SITEB --timeout=120s
+----
+
+.Expected output (the token is redeemed and the Link forms — the two sites are now interconnected)
+[source,texinfo]
+----
+accesstoken.skupper.io/claims-token created
+link.skupper.io/claims-token condition met
+----
+
+Confirm the VAN is wired end-to-end — the Connector and Listener found each other across the link:
+
+[source,sh,role=execute]
+----
+oc get listener claims-db-siteb -n $RES
+oc get connector claims-db -n $SITEB
+oc get link claims-token -n $SITEB
+----
+
+.Expected output (Listener and Connector matched across a Ready link; 2 sites in the network)
+[source,texinfo]
+----
+NAME              ROUTING KEY   PORT   HOST              STATUS   HAS MATCHING CONNECTOR
+claims-db-siteb   claims-db     5432   claims-db-siteb   Ready    true
+
+NAME       ROUTING KEY   PORT   SELECTOR        STATUS   HAS MATCHING LISTENER
+claims-db  claims-db     5432   app=claims-db   Ready    true
+
+NAME          STATUS   REMOTE SITE   MESSAGE
+claims-token  Ready    claims-app    OK
+----
+
+Now the payoff — read the *remote* database through the *local* name, with the app completely unchanged:
+
+[source,sh,role=execute]
+----
+oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=parasol psql -h claims-db-siteb -p 5432 -U parasol -d parasol -c "select id, claimant, claim_type, amount from parasol_claims_seed order by id limit 3"'
+----
+
+.Expected output (SITE-B rows — the app on the main cluster is reading the remote site's database over the VAN)
+[source,texinfo]
+----
+ id |       claimant       | claim_type | amount
+----+----------------------+------------+--------
+  1 | SITE-B-CLAIMANT-0001 | home       |   1211
+  2 | SITE-B-CLAIMANT-0002 | life       |   1633
+  3 | SITE-B-CLAIMANT-0003 | travel     |   1844
+----
+
+`SITE-B-CLAIMANT` — *that* is the remote site's data (site-b seeds distinct claimants), reached through the local `claims-db-siteb` endpoint over a mutual-TLS Layer-7 link. Prove the two databases are genuinely distinct — local vs remote-over-the-VAN:
+
+[source,sh,role=execute]
+----
+echo -n "remote via VAN (claims-db-siteb): "; oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=parasol psql -h claims-db-siteb -p 5432 -U parasol -d parasol -tAc "select count(*) from parasol_claims_seed"'
+echo -n "local (claims-db):                "; oc exec deploy/claims-db -n $RES -- sh -c 'PGPASSWORD=$POSTGRESQL_PASSWORD psql -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE -tAc "select count(*) from parasol_claims_seed"'
+----
+
+.Expected output (10 remote rows over the link vs 25 local rows — two distinct databases, one local address each)
+[source,texinfo]
+----
+remote via VAN (claims-db-siteb): 10
+local (claims-db):                25
+----
+
+[NOTE]
+.Visualize the network — the Service Interconnect console
+====
+// [CAPTURE-VERIFY] Console -> Networking -> Service Interconnect shows the two-site topology (claims-app <-> site-b),
+// the link, and the exposed service. If the console plugin isn't installed, the CLI network view below is authoritative.
+The {ocp_console_url}[web console^] *Networking → Service Interconnect* view draws the topology — the two Sites, the Link between them, and the exposed `claims-db` service. The same picture from the CLI lists *both* sites (`claims-app`, `site-b`) — proof they're in one network:
+
+[source,sh,role=execute]
+----
+oc get site claims-app -n $RES -o jsonpath='{range .status.network[*]}{.name}{"\n"}{end}'
+----
+
+On the same cluster this VAN links two *namespaces*; across two clusters the *identical* CRs link two *regions*. That is the multi-site DR connectivity story.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* You built a Skupper v2 VAN — two `Site`s (Ready), a `Connector` exposing site-b's database and a `Listener` on the app side (matched on routing key `claims-db`), linked by an `AccessGrant`→`AccessToken` (`Link` Ready, remote site `claims-app`) — and read the *remote* site-b database (`SITE-B-CLAIMANT-*`, 10 rows) through the local `claims-db-siteb` endpoint, distinct from the local 25-row database, with the app unchanged and *no VPN*.
+****
+
+== 6. DR-tier tabletop — pick the tier for three Parasol systems
+⏱ *~10 min* · a time-boxed decision exercise — no cluster wiring
+
+You've now used the *backup-and-restore* tier hands-on and seen the *connectivity* that multi-site needs. Close by *deciding* — because the most expensive DR mistake is applying the same tier to everything.
+
+For each Parasol system below, pick a DR tier — *backup & restore*, *active-passive*, or *active-active* — and justify it on *RPO* (data-loss tolerance) and *RTO* (downtime tolerance). There is no single right answer; the *reasoning* is the deliverable. Time-box it to ten minutes.
+
+[cols="1,3,2",options="header"]
+|===
+| Parasol system | What it is | Your call (tier + why)
+
+| *Claims system-of-record DB* | The authoritative store of every filed claim. Losing a claim is a legal and financial problem; downtime blocks new claims. | ?
+| *Rate-lookup cache* | A read-only cache of insurance rates, *rebuildable in minutes* from an upstream source of truth. | ?
+| *Customer-facing quote portal* | The public site customers use to get a quote. Revenue-generating; a few minutes down is tolerable, hours are not. | ?
+|===
+
+Some prompts to argue about with the room:
+
+* Which of these has an RPO near *zero* (cannot lose data) versus one where *any* backup is fine because it *rebuilds*?
+* Where does *GitOps* change your answer? If the *platform* re-materializes from Git in minutes (M10), does the quote portal still need a hot active-active twin, or does *active-passive with GitOps + OADP* meet its RTO for far less money?
+* For the system-of-record DB, is *backup & restore* (last night's backup) actually acceptable — or does "we cannot lose a claim" force replication and a tighter tier?
+* Which of these would you *not* spend a cent of DR budget on beyond a nightly backup — and can you defend that to an auditor?
+
+[NOTE]
+.The honest guidance to land
+====
+Most systems belong in *backup & restore* — it's cheap, it's what OADP gives you, and "restore in an hour, lose at most last night's writes" is a fine answer for the majority. Reserve active-passive and active-active for the *few* workloads whose RPO/RTO genuinely justify the cost, and let *GitOps* (platform-from-Git) plus *OADP* (data-from-object-store) be your default strong posture — it re-materializes anywhere and costs a fraction of a hand-built hot twin. Over-buying DR is a real, common, and expensive mistake; sizing it *per system* is the skill.
+====
+
+This exercise is a decision, not a deployment — there's no cluster state to verify beyond the conversation you just had.
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the mechanics. Try these on your own:
+
+* *Selective restore.* Take a fresh backup, then restore *only* the database (`--include-resources` or a label selector on the `Restore`) into the namespace — and reason about when a *partial* restore is safer than a full one.
+* *Break the token redemption on purpose.* In the RHSI section, create the `AccessToken` with a *truncated* `ca` and watch the `Link` fail to reach `Ready` — then fix it. This is the single most common RHSI support case; feel it once.
+* *Schedule the backup.* Author a Velero `Schedule` (cluster-admin) that backs up `{user}-resilience` nightly, and reason about how the schedule's cadence *is* your RPO for this app.
+* *Argue the tiers in writing.* For each of the three tabletop systems, write the *two sentences* you'd put in a DR runbook — the RPO/RTO commitment and the mechanism — and defend the cheapest tier that meets each requirement.
+
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (a fresh resilient stack, a re-seeded database, and the RHSI objects removed).
+
+endif::demo[]

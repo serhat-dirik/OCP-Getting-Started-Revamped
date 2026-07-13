@@ -1,0 +1,163 @@
+= Resilience, Multi-Cluster & DR: Instructor Guide
+:module-id: m21
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34) by
+// performing every step in namespaces user1-resilience / user1-site-b on 2026-07-13: OADP Backup Completed
+// in 59 s (203 items; a 48 MB DataUpload of the claims-DB PVC via CSI snapshot + Data Mover to NooBaa);
+// the destroy instant; OADP Restore Completed in ~60 s (DataDownload; the 25 rows survived byte-for-byte);
+// NonAdminBackup created but NEVER reconciled (NAC off — Tech Preview); RHSI Sites Ready in ~20 s, Link
+// Ready in ~40 s after token redemption, a torn-down Listener re-matched + reachable in ~9 s, the app
+// reading site-b's 10 SITE-B-CLAIMANT rows over the VAN. The shared OADP + Skupper operators are platform
+// substrate and were NOT mutated. KNOWN BUILD-TIME SURPRISES flagged in Watchouts: (1) `oc get backup`
+// collides with OpenShift Data Foundation's backups.postgresql.cnpg.noobaa.io CRD; (2) two entry-state
+// defects fixed during build (a missing site-b ws-entry marker broke `ws prep`; the smokeCommand's
+// double-quotes broke the ws parser). NAMESPACE in output is user1; cluster domain is a placeholder.
+
+This module has one spine and it climbs: *recap what single-cluster resilience already survives → back up an app's data with OADP → destroy the namespace and feel the loss → restore it and prove the data survived → (add-on) link a remote site with RHSI → decide the DR tiers*.
+The beat that lands hardest is the *restore* (exercise 4): the namespace was *empty* ninety seconds ago, and the *exact* 25 rows come back byte-for-byte. It makes "disaster recovery" concrete instead of a slide — hold on it.
+The beat to frame most carefully is the *platform-vs-app-team split* (exercise 2): attendees are *namespace-admins* and *cannot* create a Velero `Backup` (`oc auth can-i` proves it), so the Backup and Restore are *cluster-admin / instructor* steps. Do not let this read as a gap — it's the honest reality of DR ownership, and it's the whole reason the lab hands attendees the inspect/destroy/verify steps and keeps the platform steps with you.
+
+The single most useful thing to internalize before delivering: *you need a cluster-admin `KUBECONFIG` for the Backup and Restore.* Everything else the attendee runs; those two you (or a scripted admin step) run. Test the *round-trip* in pre-flight — a backup that Completes but won't restore is the failure that matters.
+
+== Timing
+
+Total core (exercises 1–6): *~80 min*; with ~12–15 min of concept up front that lands inside the spec's 90-min slot, and the `[ADD-ON]` RHSI section (~20 min) is the first thing to cut if you're tight. The command latencies are small; the real clock is *reading and deciding* plus two ~1-minute waits (the backup and the restore).
+
+[cols="1,4,1,2",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Inspect the resilient stack (+ chaos-drill `[INSTRUCTOR-DEMO]`) | ~12 min | all reads instant; the optional node-drain drill is the time sink
+| 2 | Back up the namespace with OADP | ~15 min | `oc auth can-i` instant; the Backup *Completes in ~59 s* (203 items + a 48 MB DataUpload)
+| 3 | Delete it — feel the loss | ~8 min | the destroy is instant; time is spent *narrating the loss*
+| 4 | Restore — prove the data survived | ~15 min | the Restore *Completes in ~60 s* (DataDownload); the surviving-rows read is instant
+| 5 | `[ADD-ON]` RHSI cross-site link | ~20 min | Sites Ready *~20 s*; Link Ready *~40 s* after redemption; the remote read instant
+| 6 | DR-tier tabletop | ~10 min | discussion; *time-box it* or it sprawls
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-13, every exercise was performed in `user1-resilience` / `user1-site-b` and timed.
+The `oc` commands are fast. The genuine waits are two: the OADP *Backup* (measured *59 s* — 203 objects plus the CSI-snapshot Data Mover `DataUpload` of the ~48 MB database volume to the NooBaa object store) and the *Restore* (measured *~60 s* — object recreation plus the `DataDownload` that repopulates a fresh PV). The RHSI waits are shorter: both Skupper `Site`s Ready in *~20 s*, and the `Link` Ready in *~40 s* after the AccessToken is redeemed. Budget for those, and for the *reading and deciding* — the resilience recap, the RPO/RTO framing, and the DR-tier tabletop are the real time, not command latency.
+Note: `ws reset m21` re-materializes via Argo and can take up to the CLI's *300 s* sync-wait (the entry app re-syncs both namespaces and re-seeds the database) — run it *before* the session, not during.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user1` (use any real attendee user).
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m21 --user user1
+ws verify m21 --user user1 --entry-only
+----
++
+Expect all entry checks green: the `user1-resilience` marker, the `claims-db` Deployment ready, the *persistent* `claims-db-data` PVC *Bound*, the seeded `parasol_claims_seed` at *25 rows*, `parasol-claims` present with its `PodDisruptionBudget` + `HorizontalPodAutoscaler`, the `user1-site-b` claims-db ready, and the clean-slate assertion (no `ws-solve-m21` marker yet).
+
+. *OADP is healthy and the backup target is Available.*
++
+[source,sh,role=execute]
+----
+oc get dpa parasol-dpa -n openshift-adp -o jsonpath='DPA reconciled={.status.conditions[?(@.type=="Reconciled")].status}{"\n"}'
+oc get backupstoragelocation parasol-dpa-1 -n openshift-adp -o jsonpath='BSL={.status.phase} default={.spec.default}{"\n"}'
+----
++
+Expect `DPA reconciled=True` and `BSL=Available default=true`. If the BSL isn't `Available`, the NooBaa bucket or its credentials aren't ready — no backup will complete.
+
+. *A backup actually ROUND-TRIPS (not just "the operator is installed").*
++
+[source,sh,role=execute]
+----
+oc apply -f - <<'EOF'
+apiVersion: velero.io/v1
+kind: Backup
+metadata: { name: preflight-user1, namespace: openshift-adp }
+spec: { includedNamespaces: [ "user1-resilience" ], storageLocation: parasol-dpa-1, snapshotMoveData: true, ttl: 2h0m0s }
+EOF
+oc wait --for=jsonpath='{.status.phase}'=Completed backups.velero.io/preflight-user1 -n openshift-adp --timeout=300s
+oc get datauploads.velero.io -n openshift-adp -l velero.io/backup-name=preflight-user1 -o jsonpath='dataUpload={.items[0].status.phase}{"\n"}'
+oc delete backups.velero.io preflight-user1 -n openshift-adp
+----
++
+Expect the Backup `Completed` and `dataUpload=Completed`. *This is the check that matters* — a "Ready" operator with a broken Data Mover passes every object check but fails the restore. If the DataUpload hangs `InProgress`, check the node-agent pods and NooBaa.
+
+. *Skupper (RHSI) is healthy — only if you're running the `[ADD-ON]`.*
++
+[source,sh,role=execute]
+----
+oc get pods -n skupper -l app.kubernetes.io/name=skupper-controller
+oc get crd sites.skupper.io -o jsonpath='RHSI CRDs present: {.spec.versions[0].name}{"\n"}'
+----
++
+Expect the `skupper-controller` *Running* and `v2alpha1`. If absent, the `components/service-interconnect` stack isn't synced — the RHSI section can't run (skip it; it's an `[ADD-ON]`).
+
+. *A sample attendee is a namespace-admin — not cluster-admin.*
++
+[source,sh,role=execute]
+----
+oc auth can-i create backups.velero.io -n openshift-adp --as=user1   # expect: no
+oc auth can-i delete pvc -n user1-resilience --as=user1              # expect: yes
+----
++
+The lab's framing depends on this: `no` to platform backups, `yes` to managing their own namespace. If a "namespace-admin" can create backups, someone over-granted RBAC — flag it (and note the lab's `oc auth can-i` teaching beat will read wrong).
+
+== Instructor demo — the 12-minute arc (demo flavor)
+
+The demo flavor renders a three-beat Say/Show/Do arc: *back up the namespace* (4 min), *delete it and restore it — the data survives* (5 min), *link a remote site with RHSI and read its DB over the VAN* (3 min, `[ADD-ON]`).
+
+* *Run it from `ws solve m21 --user user1`* so the resilient stack + seeded database are up before you start.
+* *Have a cluster-admin `KUBECONFIG` in the terminal* — the Backup and Restore need it. Either pre-take one Backup so beat 2 is instant, or let the ~1-minute backup run as a beat (it's fast and the DataUpload is a nice thing to narrate).
+* *The money moment is beat 2:* delete `all,pvc` — narrate "the database and its volume are *gone*" — then restore and show the *25 rows come back byte-for-byte*. Let the empty-namespace-to-restored-data contrast breathe.
+* *Keep beat 3 (RHSI) only if the room is engaged and RHSI is enabled.* It's a flourish, not the point; the `SITE-B-CLAIMANT` rows arriving through a local address are the payoff.
+
+== Demo-mode notes
+
+* *You need cluster-admin for backup/restore; the attendee doesn't for the rest.* Don't demo the whole thing from a namespace-admin context — the `Backup`/`Restore` will be Forbidden. Switch contexts, or make it explicit that those two steps are the platform team's.
+* *Qualify `oc get backup`.* OpenShift Data Foundation ships its own `backups` CRD; a bare `oc get backup` can resolve to the wrong kind mid-demo. Always type `backups.velero.io` / `restores.velero.io`.
+* *The `oc delete all` deprecation warning is harmless.* The `all` alias lists a legacy type the namespace doesn't use, so a deprecation line prints. Say "ignore that — it's the alias, not our app" and move on.
+* *Don't hand-type the RHSI token.* Beat 3's `AccessToken` copies a *multi-line CA* from the grant's status — do it with the scripted `sed` copy from the lab, never by hand, or the `Link` silently won't reach `Ready`.
+
+== Top questions attendees ask
+
+*1. "Why can't I run the backup myself? I'm an admin of my namespace."*::
+Because Velero's `Backup` objects live in the platform's `openshift-adp` namespace, and namespace-admin doesn't grant access *there* — `oc auth can-i create backups.velero.io -n openshift-adp` returns `no`. Backup/restore is a *cluster-admin / platform-team* capability today. OADP *does* ship a self-service path — `NonAdminBackup`/`NonAdminRestore`, namespaced CRs you create in your own project — but it's *Technology Preview* and requires the platform team to enable the Non-Admin Controller in the `DataProtectionApplication` (off on this cluster; the CR you create just sits there, never reconciled). So the GA answer is: the platform team runs it, and you consume and verify it.
+
+*2. "The restored PVC has a different name/UID than the original. Did the restore go wrong?"*::
+No — that's correct Data Mover behavior. The backup moved the volume's *data* into the object store (a `DataUpload`); the restore repopulates a *fresh* PersistentVolume from that copy (a `DataDownload`). The PV is new; the *data in it* is byte-for-byte the backup. What you verify is the *rows*, not the volume identity — and the 25 rows come back identical. A new PV UID is expected, not a failure.
+
+*3. "`oc get backup` says 'not found' or shows something weird. Where's my backup?"*::
+OpenShift Data Foundation ships its *own* `backups` CRD (`backups.postgresql.cnpg.noobaa.io`), so a bare `oc get backup` may resolve to *that* kind instead of Velero's. Always qualify: `oc get backups.velero.io -n openshift-adp` (and `restores.velero.io`). This is a CRD name collision, not a missing backup.
+
+*4. "My RHSI `AccessToken` didn't form a `Link`. What broke?"*::
+Almost always the *token redemption*. The `AccessToken` needs the grant's *url*, *code*, and *ca* copied exactly — and the `ca` is a *multi-line* PEM certificate that's easy to truncate or mis-indent by hand. Use the scripted `sed`-based copy from the lab (it re-indents the CA correctly), and check `oc get link -n {user}-site-b` reaches `Ready`. A truncated CA is the single most common RHSI support case; the lab's challenge deliberately breaks it so attendees feel it once.
+
+*5. "Is site-b a real remote cluster, or a fake?"*::
+It's a *second namespace* simulating a remote site — an honest, deliberate simplification (there's no second cluster in this workshop's footprint). What's *real* is the mechanism: the Skupper v2 `Site`, `Connector`, `Listener`, and `AccessGrant`→`AccessToken` link, the mutual-TLS VAN, and the app reading the remote database through a local address. The *identical* CRs link two real clusters in two regions — you'd just point the `AccessToken` at a grant on the other cluster instead of another namespace. The lab teaches the multi-site pattern; the topology is simulated, the plumbing is real.
+
+== Watchouts
+
+* *[BUILD SURPRISE] `oc get backup` collides with OpenShift Data Foundation's CRD.*
+Hit at build time: `oc get backup claims-backup-user1 -n openshift-adp` returned `Error … backups.postgresql.cnpg.noobaa.io "…" not found` — the cluster has *two* `backups` kinds and the short name resolved to NooBaa's CNPG one. *Fix:* always use the fully-qualified `backups.velero.io` / `restores.velero.io` (the lab and this guide do). Called out in a `[WARNING]` in the lab and in question 3.
+* *[FRAGILITY — flag to platform] NonAdminBackup is Tech Preview AND the controller is off.*
+The `nonadminbackups.oadp.openshift.io` CRDs are present, and a namespace-admin *can* create a `NonAdminBackup` — but with no `nonAdmin.enable: true` in the DPA (and no non-admin-controller pod), it *never reconciles* (status stays empty). The lab shows this deliberately as the "why it's instructor-driven" beat. *Decision for the owner:* enabling the Non-Admin Controller would make the OADP arc fully self-service per attendee (Tech Preview) — a nice UX win, but don't gate the graded lab on TP. Flagged for a product decision.
+* *You need cluster-admin for the backup/restore steps.*
+The two OADP steps are Forbidden for a namespace-admin. In an instructor-led session you run them; in self-paced, the attendee needs cluster-admin or falls back to `ws prep m21` (which re-seeds a *fresh* DB, not their backed-up data). Set expectations up front so the destroy step in exercise 3 isn't a trap for a namespace-admin who then can't restore.
+* *The `oc delete all` deprecation warning is expected.*
+`oc delete all,pvc --all` prints a `Warning: … is deprecated …` line for a legacy workload type the `all` alias enumerates but the namespace doesn't use. It's harmless; the lab keeps the literal line in the captured output block and tells attendees to ignore it.
+* *`ws reset m21` is slow — run it before the session.*
+Reset re-materializes both namespaces via Argo and re-seeds the database; the CLI waits up to *300 s* for the sync. It always completes, but don't run it live mid-session — prep worlds ahead of time.
+* *[ENTRY-STATE FIXES made during build.]* Two defects were fixed in `gitops/entry-states/m21/` while building: (1) `ws prep` flagged `{user}-site-b` as foreign because the `ws-entry-m21` marker existed only in `{user}-resilience` — M21 is the first *two-namespace* module, so the marker is now materialized in *both* namespaces; (2) the `ws-meta.yaml` `smokeCommand` used double-quotes, which the ws parser strips — rewritten as a single-quote-only plain scalar. Both are in the committed entry state; no action needed, noted for provenance.
+* *Backup storage sizing across a cohort.*
+Every attendee's backup is a `DataUpload` into the one NooBaa bucket (~48 MB per claims-DB here). Across 30 seats that's real I/O and storage; set a backup `ttl` (the lab uses 30 days — shorten for a class), and note that `ws prep`/`ws reset` purges the user-namespace Velero `Backup`/`Restore` CRs but the *object-store data* ages out by TTL. Watch bucket capacity on a large cohort.
+* *DR-tier tabletop sprawls if you let it.*
+Exercise 6 is a decision, not a deployment. Time-box it to ten minutes and drive to "most things are backup-and-restore; reserve the expensive tiers." Don't let a keen attendee try to stand up active-active mid-session.
+
+== Provenance
+
+M21 is a net-new module built against this repo's live cluster.
+Everything it teaches for the attendee was *performed* on OpenShift {ocp_version} (Kubernetes 1.34) in namespaces `user1-resilience` / `user1-site-b` on 2026-07-13: the resilient tier (`parasol-claims` 3/3 + `PodDisruptionBudget` min-available 2 + `topologySpreadConstraints` across three distinct nodes + `HorizontalPodAutoscaler` 3–6) fronting a persistent, 25-row-seeded claims database; the OADP `Backup` with `snapshotMoveData: true` (Velero via OADP {oadp_version}) reaching *Completed* (203 items, *59 s*) with a *48 MB* `DataUpload` of the `claims-db-data` PVC to the in-cluster NooBaa `BackupStorageLocation`; the destroy (`oc delete all,pvc --all` — the database and volume gone, a query failing `deployments.apps "claims-db" not found`); the OADP `Restore` reaching *Completed* (*~60 s*) with a `DataDownload` that repopulated a *fresh* PV and the *25 seeded rows surviving byte-for-byte* (`CLAIMANT-0001 / home / 637`, …); the namespace-admin RBAC proof (`oc auth can-i create backups.velero.io -n openshift-adp` → `no`; `delete pvc` → `yes`); the `NonAdminBackup` Tech-Preview beat (created by `user1`, never reconciled — NAC off); and the RHSI cross-site link (Skupper v2 {rhsi_version}: two `Site`s Ready in *~20 s*, a `Connector` on site-b + a `Listener` on the app side matched on routing key `claims-db`, an `AccessGrant`→`AccessToken` `Link` Ready in *~40 s*, and the app reading site-b's *10* `SITE-B-CLAIMANT` rows through the local `claims-db-siteb` endpoint, distinct from its local 25).
+Two honesty notes are carried into the content as explicit framing, not open items: backup/restore is a *cluster-admin / platform* operation (namespace-admins can't create Velero `Backup`s — proven, and the lab hands them the inspect/destroy/verify steps instead), and site-b is a *second namespace* simulating a remote site (the Skupper CRs are identical across real clusters). Two build-time surprises are flagged for delivery: the `oc get backup` CRD collision with OpenShift Data Foundation, and the two entry-state fixes (two-namespace marker; smokeCommand quoting). The OADP and Service Interconnect console click-paths are `[CAPTURE-VERIFY]` (Operators → OADP Backup/Restore tabs; Networking → Service Interconnect) with the CLI authoritative; the ~48 MB DataUpload size and the ~59 s / ~60 s backup/restore timings are the measured evidence.

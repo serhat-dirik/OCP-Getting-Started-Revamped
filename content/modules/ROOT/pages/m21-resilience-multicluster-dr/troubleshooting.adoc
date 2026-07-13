@@ -1,0 +1,154 @@
+= Resilience, Multi-Cluster & DR: Troubleshooting
+:module-id: m21
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-13) in
+// user1-resilience / user1-site-b, plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands
+// use $RES = {user}-resilience and $SITEB = {user}-site-b (set them once). NAMESPACE in output is the
+// sample user user1. Several entries below were hit while building the module (the backup CRD collision;
+// the namespace-admin Forbidden; the NonAdmin no-reconcile; the RHSI token redemption); the rest are known
+// traps. OADP Backup/Restore steps need cluster-admin.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcuts first: `RES={user}-resilience` and `SITEB={user}-site-b`.
+
+== `oc get backup` says "not found" or shows the wrong thing
+
+Symptom:: After creating a Velero `Backup`, `oc get backup <name> -n openshift-adp` returns `Error from server (NotFound): backups.postgresql.cnpg.noobaa.io "<name>" not found` — a *different* CRD than you expected.
+Cause:: The cluster has *two* `backups` kinds. OpenShift Data Foundation ships `backups.postgresql.cnpg.noobaa.io` (its embedded CloudNativePG), and the short name `backup` can resolve to *that* instead of Velero's `backups.velero.io`. Your backup exists; you're querying the wrong kind.
+Fix:: Always fully-qualify Velero's resources:
++
+[source,sh]
+----
+oc get backups.velero.io -n openshift-adp
+oc get backups.velero.io claims-backup-user1 -n openshift-adp -o jsonpath='phase={.status.phase}{"\n"}'
+oc get restores.velero.io -n openshift-adp
+----
++
+Use `backups.velero.io` and `restores.velero.io` everywhere — the short forms are ambiguous on a cluster with OpenShift Data Foundation.
+
+== Creating a `Backup` or `Restore` is Forbidden
+
+Symptom:: `oc apply` of a Velero `Backup` (or `Restore`) fails with `... is forbidden: User "user1" cannot create resource "backups" in API group "velero.io" in the namespace "openshift-adp"`.
+Cause:: You're acting as a *namespace-admin*, not a cluster-admin. Velero's objects live in the platform's `openshift-adp` namespace, and namespace-admin grants nothing there. This is *by design* — backup/restore is a platform operation.
+Fix:: Run the Backup/Restore as a *cluster-admin* (your instructor, or a cluster-admin `KUBECONFIG`). Confirm your level, and note what you *can* do:
++
+[source,sh,role=execute]
+----
+oc auth can-i create backups.velero.io -n openshift-adp    # expect: no  (namespace-admin)
+oc auth can-i delete pvc -n $RES                            # expect: yes (your namespace)
+----
++
+The inspect, destroy, and verify steps — and the whole RHSI section — are yours; the two OADP steps are the platform team's.
+
+== The backup stays `InProgress` / the `DataUpload` never completes
+
+Symptom:: The `Backup` sits at `WaitingForPluginOperations` and its `DataUpload` stays `InProgress` (or `Accepted`) for minutes.
+Cause:: The Data Mover moves the volume snapshot to the object store via the *node agent*; if the node-agent pods aren't healthy, or the NooBaa `BackupStorageLocation` isn't `Available`, the upload stalls. The Kubernetes objects back up fine (the object count completes); only the *volume data* hangs.
+Fix:: Check the backup target and the node agent (cluster-admin):
++
+[source,sh]
+----
+oc get backupstoragelocation parasol-dpa-1 -n openshift-adp -o jsonpath='BSL={.status.phase}{"\n"}'   # want Available
+oc get pods -n openshift-adp -l name=node-agent                                                       # want Running
+oc get datauploads.velero.io -n openshift-adp -l velero.io/backup-name=claims-backup-user1 -o jsonpath='{.items[0].status.phase}{"\n"}'
+----
++
+If the BSL isn't `Available`, the NooBaa bucket/credentials aren't ready. If node-agent pods are missing, the DPA's `nodeAgent.enable` is off. Pre-flight check 3 (a real round-trip) catches this before a session.
+
+== The restore Completed, but the database has no rows
+
+Symptom:: The `Restore` reached `Completed` and the `claims-db` pod is running, but `select count(*) from parasol_claims_seed` returns `0` (or the table is missing).
+Cause:: The objects were restored but the *volume data* wasn't — usually because the original `Backup` didn't move the data (`snapshotMoveData` was not set, so only the *empty* PVC object was backed up), or the `Restore` didn't request PV restoration.
+Fix:: The data path must be end-to-end. Back up with `snapshotMoveData: true` *and* restore with `restorePVs: true`, and confirm both the `DataUpload` (backup) and `DataDownload` (restore) Completed:
++
+[source,sh]
+----
+oc get datauploads.velero.io   -n openshift-adp -l velero.io/backup-name=claims-backup-user1   -o jsonpath='dataUpload={.items[0].status.phase}{"\n"}'
+oc get datadownloads.velero.io -n openshift-adp -l velero.io/restore-name=claims-restore-user1 -o jsonpath='dataDownload={.items[0].status.phase}{"\n"}'
+----
++
+Both must read `Completed`. If the `DataUpload` is absent, the *backup* never captured the data — re-take it with `snapshotMoveData: true`, then restore again.
+
+== The restored pods are stuck `Pending` / the PVC won't bind
+
+Symptom:: After a restore, `claims-db` (or `parasol-claims`) pods are `Pending`, and `oc get pvc -n $RES` shows `claims-db-data` `Pending`.
+Cause:: A restored PVC needs its storage class to provision a fresh volume for the `DataDownload`. On a `WaitForFirstConsumer` class (the default Ceph-RBD here), the PVC stays `Pending` until a pod schedules — normal briefly — but it stays stuck if the storage class is missing or capacity is exhausted.
+Fix:: Give it a moment (WaitForFirstConsumer binds when the pod schedules), then check the PVC events:
++
+[source,sh,role=execute]
+----
+oc get pvc claims-db-data -n $RES
+oc describe pvc claims-db-data -n $RES | sed -n '/Events/,$p'
+oc rollout status deploy/claims-db -n $RES --timeout=120s
+----
++
+If it never binds, the default `StorageClass` changed or storage is full — a cluster/storage issue, not a restore bug.
+
+== `NonAdminBackup` I created just sits there — status is empty
+
+Symptom:: You created a `NonAdminBackup` in your own namespace (it was accepted), but after a minute its `REQUEST-PHASE` and `VELERO-PHASE` are blank and nothing happens.
+Cause:: *NonAdminBackup is Technology Preview*, and it only works when the platform team enables the *Non-Admin Controller* in the `DataProtectionApplication` (`nonAdmin.enable: true`). On this cluster it's *off* — the CRDs exist (so the object is accepted), but no controller reconciles it.
+Fix:: This is expected on this cluster — the self-service path is a *preview* of a future capability, not the graded path. Clean up and use the cluster-admin `Backup`/`Restore` instead:
++
+[source,sh,role=execute]
+----
+oc get nonadminbackup -n $RES
+oc delete nonadminbackup selfservice-test -n $RES 2>/dev/null || true
+----
++
+A cluster-admin can confirm the switch with `oc get dpa parasol-dpa -n openshift-adp -o jsonpath='{.spec.nonAdmin.enable}'` (empty = off).
+
+== The RHSI `AccessToken` won't form a `Link`
+
+Symptom:: You created the `AccessToken` in site-b, but `oc get link -n $SITEB` never reaches `Ready` (stays blank or `False`).
+Cause:: The token redemption is incomplete or wrong. The `AccessToken` needs the grant's *url*, *code*, and *ca* copied *exactly* — and the `ca` is a *multi-line* PEM certificate that's easily truncated or mis-indented when copied by hand.
+Fix:: Confirm the grant is `Ready` and re-run the *scripted* copy (it re-indents the CA correctly), then wait on the link:
++
+[source,sh,role=execute]
+----
+oc get accessgrant claims-grant -n $RES -o jsonpath='grant Ready={.status.conditions[?(@.type=="Ready")].status}{"\n"}'
+URL=$(oc get accessgrant claims-grant -n $RES -o jsonpath='{.status.url}')
+CODE=$(oc get accessgrant claims-grant -n $RES -o jsonpath='{.status.code}')
+CA=$(oc get accessgrant claims-grant -n $RES -o jsonpath='{.status.ca}')
+{ echo "apiVersion: skupper.io/v2alpha1"; echo "kind: AccessToken"; echo "metadata: { name: claims-token, namespace: $SITEB }";
+  echo "spec:"; echo "  url: $URL"; echo "  code: $CODE"; echo "  ca: |"; echo "$CA" | sed 's/^/    /'; } | oc apply -f -
+oc get link claims-token -n $SITEB
+----
++
+Never hand-type the CA. If the grant has *expired* (past its `expirationWindow`) or hit `redemptionsAllowed`, recreate the `AccessGrant` first.
+
+== `psql` to `claims-db-siteb` fails even though the sites are linked
+
+Symptom:: The `Link` is `Ready`, but `psql -h claims-db-siteb` fails — either `could not translate host name` or `Connection refused`.
+Cause:: Two possibilities. (1) The `Listener` isn't created yet, so its local `claims-db-siteb` Service doesn't exist (name doesn't resolve). (2) The `Connector` and `Listener` don't share a *routing key*, so they never matched — the endpoint exists but routes nowhere.
+Fix:: Confirm the Listener's Service exists and that Connector/Listener matched on the *same* routing key:
++
+[source,sh,role=execute]
+----
+oc get svc claims-db-siteb -n $RES                                     # the Listener's local endpoint must exist
+oc get listener claims-db-siteb -n $RES -o jsonpath='matched={.status.hasMatchingConnector}  key={.spec.routingKey}{"\n"}'
+oc get connector claims-db -n $SITEB -o jsonpath='matched={.status.hasMatchingListener}  key={.spec.routingKey}{"\n"}'
+----
++
+Both `matched` must be `true` and both `key` must be identical (`claims-db`). A routing-key typo is the usual cause — the objects are `Ready` individually but never bind.
+
+== `ws prep m21` won't converge / flags `{user}-site-b` as leftovers
+
+Symptom:: `ws prep m21` reports `{user}-site-b has N workload(s) but no m21 marker` and wants to wipe, even on a freshly-materialized entry state.
+Cause:: M21 is the first module to own *two* namespaces. `ws prep` flags any purged namespace that has workloads but no `ws-entry-m21` marker; if the marker exists only in `{user}-resilience`, site-b trips the heuristic. (This was an entry-state defect fixed during build — the marker is now materialized in *both* namespaces.)
+Fix:: Re-materialize a clean entry state so both markers are present:
++
+[source,sh]
+----
+# instructor verb — re-syncs the entry app, which now creates the marker in BOTH namespaces:
+# ws reset m21 --user {user}
+oc get cm ws-entry-m21 -n {user}-resilience -o name
+oc get cm ws-entry-m21 -n {user}-site-b -o name
+----
++
+Both `configmap/ws-entry-m21` must exist. If site-b's is missing, the entry app is stale — `ws reset` (or `ws git-refresh` then reset) re-materializes both.
+
+'''
+
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-13) against OADP {oadp_version} (Velero 1.16) and Red Hat Service Interconnect {rhsi_version} (Skupper v2)._
