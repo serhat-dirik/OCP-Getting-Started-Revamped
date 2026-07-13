@@ -1,0 +1,73 @@
+# RBAC for the BSL glue Job (bsl-glue.yaml): read the OBC-emitted S3 creds + write the Velero
+# `cloud-credentials` Secret (namespaced), and label a CSI VolumeSnapshotClass (cluster-scoped).
+---
+# why: the identity the glue Job runs as (least-privilege, scoped to openshift-adp + two cluster reads).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oadp-bsl-glue
+  namespace: openshift-adp
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+---
+# why: read the OBC Secret/ConfigMap and create/patch the derived cloud-credentials Secret, all in openshift-adp.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: oadp-bsl-glue
+  namespace: openshift-adp
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+# why: bind the namespaced read/write role to the glue ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oadp-bsl-glue
+  namespace: openshift-adp
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oadp-bsl-glue
+subjects:
+  - kind: ServiceAccount
+    name: oadp-bsl-glue
+    namespace: openshift-adp
+---
+# why: label the CSI VolumeSnapshotClass velero.io/csi-volumesnapshot-class=true (cluster-scoped objects);
+# read StorageClasses to auto-detect the default provisioner's snapclass (portable — no hardcoded driver).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: oadp-bsl-glue-vsc
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotclasses"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
+---
+# why: bind the VSC-labeling cluster role to the glue ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oadp-bsl-glue-vsc
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: oadp-bsl-glue-vsc
+subjects:
+  - kind: ServiceAccount
+    name: oadp-bsl-glue
+    namespace: openshift-adp

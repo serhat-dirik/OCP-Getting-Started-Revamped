@@ -41,6 +41,7 @@ v() { yq "$1" "$VARS" 2>/dev/null || true; }
 USERS="$(v '.users')";           [[ "$USERS" =~ ^[0-9]+$ ]] || USERS=5
 LIGHTSPEED="$(v '.lightspeed')"; [[ "$LIGHTSPEED" == "false" ]] || LIGHTSPEED="true"
 AUTH="$(v '.auth')";             [[ "$AUTH" == "true" ]] || AUTH="false"
+RESILIENCE="$(v '.resilience')"; [[ "$RESILIENCE" == "true" ]] || RESILIENCE="false"
 REPO_URL="$(v '.repo_url')";     [[ -n "$REPO_URL" && "$REPO_URL" != "null" ]] || REPO_URL="https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
 REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
 DOMAIN="$(v '.cluster_domain')"
@@ -128,6 +129,9 @@ STACKS="core-devtools,batch"
 # auth stack (Red Hat build of Keycloak) for M13. Workshop-agnostic; per-user realms are seeded by the
 # workshop layer below (sso.enabled). Its own OwnNamespace operator never touches a cluster login IdP.
 [[ "$AUTH" == "true" ]] && STACKS="${STACKS},auth"
+# resilience stack (OADP/Velero + in-cluster NooBaa S3) for M21. Opt-in; PREREQ ODF/MCG for the S3 target.
+# The RHSI (Skupper v2) add-on stays commented out in the stack unless the catalog offers channel stable-2.
+[[ "$RESILIENCE" == "true" ]] && STACKS="${STACKS},resilience"
 info "[1/6] installing portfolio stacks: ${STACKS}"
 "$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$REPO_URL" --revision "$REVISION"
 

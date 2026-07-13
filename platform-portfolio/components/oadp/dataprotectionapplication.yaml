@@ -1,0 +1,43 @@
+# The OADP install CR — reconciles Velero + the node-agent DaemonSet and wires the in-cluster NooBaa BSL.
+# defaultPlugins: openshift (OCP-aware backup/restore) + csi (CSI-snapshot Data Mover) + aws — the `aws`
+# plugin is the velero-plugin-for-aws that speaks the S3 protocol, and NooBaa IS an S3 endpoint, so it is
+# REQUIRED even though the target is in-cluster (build-note said [openshift,csi]; corrected to include aws,
+# else the provider:aws BSL has no object-store plugin). nodeAgent (Kopia) enables File System Backup — the
+# driver-agnostic PVC-data path used for the "verify data survived restore" checkpoint (works on RWO RBD).
+apiVersion: oadp.openshift.io/v1alpha1
+kind: DataProtectionApplication
+metadata:
+  name: parasol-dpa
+  namespace: openshift-adp
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    # The DPA CRD arrives with the operator CSV (wave 0) — skip client dry-run until it is registered.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  configuration:
+    velero:
+      defaultPlugins:
+        - openshift
+        - csi
+        - aws
+    nodeAgent:
+      enable: true
+      uploaderType: kopia
+  backupLocations:
+    - velero:
+        provider: aws
+        default: true
+        credential:
+          name: cloud-credentials
+          key: cloud
+        objectStorage:
+          bucket: parasol-oadp-backups
+          prefix: velero
+        config:
+          # region is arbitrary for an S3-compatible target but the aws plugin requires it be set.
+          region: noobaa
+          # In-cluster NooBaa S3 Service (always openshift-storage/s3) — no external route, no live domain.
+          s3Url: https://s3.openshift-storage.svc
+          s3ForcePathStyle: "true"
+          # NooBaa's internal endpoint serves a self-signed cert — skip TLS verify on the in-cluster hop.
+          insecureSkipTLSVerify: "true"

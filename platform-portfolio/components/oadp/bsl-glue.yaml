@@ -1,0 +1,76 @@
+# Glue between the NooBaa OBC and Velero's BackupStorageLocation. The OBC emits S3 keys as a Secret with
+# keys AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, but Velero wants a single `cloud` key in AWS-INI format —
+# an unavoidable format transform GitOps can't express declaratively. This idempotent Sync-hook Job does
+# exactly two things: (1) write the `cloud-credentials` Secret the DPA's BSL references, (2) best-effort
+# label the default StorageClass's CSI VolumeSnapshotClass so Velero can take CSI snapshots (portable —
+# auto-detects the driver, never hardcodes one). Re-fires on every sync (BeforeHookCreation), safe to repeat.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: oadp-bsl-glue
+  namespace: openshift-adp
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: oadp-bsl-glue
+        portfolio.redhat.com/component: oadp
+    spec:
+      serviceAccountName: oadp-bsl-glue
+      restartPolicy: Never
+      containers:
+        - name: glue
+          # Internal openshift/cli imagestream — has oc + coreutils, no external pull secret, restricted-SCC safe.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+          resources:
+            # oc OOMs at 256Mi (hard-won: session best practices) — give the client 512Mi.
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -eu
+              NS=openshift-adp
+              OBC=oadp-backups
+              echo "waiting for the OBC ${OBC} S3 credentials (bucket provisioning is async)…"
+              for _ in $(seq 1 60); do
+                oc get secret "${OBC}" -n "${NS}" >/dev/null 2>&1 && break
+                sleep 5
+              done
+              if ! oc get secret "${OBC}" -n "${NS}" >/dev/null 2>&1; then
+                echo "❌ OBC Secret ${NS}/${OBC} absent after ~5m — is ODF/MCG (NooBaa) installed? (StorageClass openshift-storage.noobaa.io)"
+                exit 1
+              fi
+              AK=$(oc get secret "${OBC}" -n "${NS}" -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d)
+              SK=$(oc get secret "${OBC}" -n "${NS}" -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 -d)
+              if [ -z "${AK}" ] || [ -z "${SK}" ]; then
+                echo "❌ OBC Secret ${NS}/${OBC} is missing AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
+                exit 1
+              fi
+              printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "${AK}" "${SK}" > /tmp/cloud
+              oc create secret generic cloud-credentials -n "${NS}" --from-file=cloud=/tmp/cloud \
+                --dry-run=client -o yaml | oc apply -f -
+              echo "✅ cloud-credentials Secret written (Velero BSL credential)"
+              # Best-effort: label the CSI VolumeSnapshotClass for the DEFAULT StorageClass's provisioner.
+              PROV=$(oc get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.provisioner}{"\n"}{end}' 2>/dev/null | head -1)
+              if [ -n "${PROV}" ]; then
+                VSC=$(oc get volumesnapshotclass -o custom-columns=NAME:.metadata.name,DRIVER:.driver --no-headers 2>/dev/null | awk -v p="${PROV}" '$2==p{print $1; exit}')
+                if [ -n "${VSC}" ]; then
+                  oc label volumesnapshotclass "${VSC}" velero.io/csi-volumesnapshot-class=true --overwrite
+                  echo "✅ labeled VolumeSnapshotClass ${VSC} (velero.io/csi-volumesnapshot-class=true)"
+                else
+                  echo "▶ no VolumeSnapshotClass for provisioner ${PROV} — CSI snapshots unavailable; File System Backup (Kopia) still works"
+                fi
+              else
+                echo "▶ no default StorageClass detected — skipping VolumeSnapshotClass labeling"
+              fi
