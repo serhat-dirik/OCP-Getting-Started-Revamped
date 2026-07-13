@@ -40,7 +40,8 @@ values/             # per-cluster inputs where auto-detection isn't possible (se
 | `trust` | RHACS (Central + SecuredCluster), trust-signing (Tekton Chains cosign key), RHTAS (Securesign) | The M08 Trusted Software Supply Chain prerequisites: scan gate + image signing + keyless demo. See `stacks/trust/README.md`. Optional `trust-demo` adds RHTPA (default off). |
 | `observability` | COO, Tempo, OpenTelemetry (+ optional Loki) | M12 tracing/logging — see `stacks/observability/README.md` |
 | `batch` | Kueue, KEDA | M06 batch admission + autoscaling |
-| *(coming)* `portal`, `mesh`, `serverless`, `auth`, `virt`, `resilience`, `modernize`, `ai` | per cluster-profile map | Added wave by wave |
+| `serverless` | OpenShift Serverless (Knative Serving + Eventing) | M19 request-driven compute / scale-to-zero + M20 eventing — see `stacks/serverless/README.md` |
+| *(coming)* `portal`, `mesh`, `auth`, `virt`, `resilience`, `modernize`, `ai` | per cluster-profile map | Added wave by wave |
 
 ## Design rules
 
