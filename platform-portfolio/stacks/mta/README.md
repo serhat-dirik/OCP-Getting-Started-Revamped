@@ -40,7 +40,7 @@ extension per workspace (MaaS endpoint/model + key), by the M22 entry state.
 
 | Namespace | Holds |
 |---|---|
-| `openshift-mta` | the mta-operator + the whole Tackle Hub (UI, hub, keycloak, postgres, pathfinder) |
+| `openshift-mta` | the mta-operator + the Tackle Hub: `mta-hub` + `mta-ui` pods, DB embedded on a PVC. No separate Postgres; no Keycloak pod while `feature_auth_required: false` (the RHBK operator installs as a dependency but runs no instance); the server-side Kai/AI solution server stays gated (`KaiSolutionServerReady=False`) until its API-keys Secret exists. Verified v8.1.2 on-cluster 2026-07-13 (no `pathfinder` — that was MTA 6). |
 
 ## The M22 entry-state seam (NOT installed here)
 
