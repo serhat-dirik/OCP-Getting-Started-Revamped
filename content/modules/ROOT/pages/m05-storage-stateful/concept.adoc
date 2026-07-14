@@ -19,7 +19,7 @@ This module is about the difference between storage that dies with a Pod and sto
 * What *access modes* (RWO, RWX, ROX) mean, and which ones your cluster's storage actually offers — measured, not assumed.
 * Why a *StatefulSet* is not just "a Deployment that keeps its data": stable network identity, a headless Service, per-Pod volumes (`volumeClaimTemplates`), and controlled *partitioned* updates.
 * How an *init container* runs a schema migration to completion before your app is allowed to start.
-* When an in-cluster database is the right call — and the honest cases where a managed data service beats it.
+* How real databases run *on* the platform through Operators — and the honest Day-2 questions (who operates it, backup/restore, storage performance) you answer before production.
 
 == The storage abstraction chain
 
@@ -42,11 +42,11 @@ You ask (PVC); the platform provisions (PV) according to a recipe (SC); the PV i
 
 [mermaid]
 ....
-graph LR
-  app["Pod<br/>(your database)"] -->|mounts| pvc["PersistentVolumeClaim<br/>claims-db-data · 2Gi · RWO<br/>(your namespace)"]
-  pvc -->|bound to| pv["PersistentVolume<br/>pvc-0dcf… · 2Gi · RWO<br/>(cluster-scoped)"]
-  pv -->|provisioned per| sc["StorageClass<br/>(default) · dynamic provisioner<br/>binding · expansion · reclaim"]
-  sc -->|carves from| backend[("Cluster storage backend<br/>(here: ODF / Ceph)")]
+graph TB
+  app["Pod<br/>your database"] -->|mounts| pvc["PersistentVolumeClaim<br/>what you ask for (your namespace)"]
+  pvc -->|bound to| pv["PersistentVolume<br/>what the platform gives you (cluster-scoped)"]
+  pv -->|created from| sc["StorageClass<br/>the recipe the platform follows"]
+  sc -->|carves real disk from| backend[("Cluster storage backend")]
   classDef ask fill:#e00,stroke:#900,color:#fff;
   classDef plat fill:#f3f3f3,stroke:#888,color:#333;
   class pvc ask;
@@ -97,9 +97,18 @@ When `pg-sts-0` is rescheduled, it re-attaches to *its* PVC, so its data follows
 Ordered lifecycle::
 Pods are created and scaled in order (0, then 1, …), which matters when members must join a cluster in sequence.
 Controlled updates::
-Beyond the ordering, you can stage an update with a *partition*: set `rollingUpdate.partition: 1` and only Pods with ordinal ≥ 1 roll to the new spec — a built-in canary.
-Move the partition to 0 to finish.
-(The alternative strategy, `OnDelete`, updates a Pod only when you delete it — fully manual.)
+Change the Pod template — a new image, a new setting — and a StatefulSet does *not* replace every Pod at once.
+By default (the `RollingUpdate` strategy) it updates them one at a time, highest ordinal first, and waits for each Pod to go `Ready` before it touches the next.
++
+A *partition* turns that automatic rollout into a staged canary.
+The partition is a stop line: only Pods whose ordinal is *at or above* it take the new version; Pods below it stay on the old one.
+Say you have three replicas `db-0`, `db-1`, `db-2`.
+Set `rollingUpdate.partition: 2` and change the image — only `db-2` rolls to the new version; `db-0` and `db-1` are left untouched.
+Verify `db-2` is healthy on the new version; if the image is bad you have lost exactly one member, and reverting the template rolls it back.
+Once you trust it, drop the partition to `0` and the rest follow, `db-1` then `db-0`.
+(You do exactly this in the lab with two replicas: `partition: 1` rolls `pg-sts-1` first, then `partition: 0` finishes `pg-sts-0`.)
++
+The other strategy, `OnDelete`, updates *nothing* on its own: a Pod picks up the new template only when *you* delete it — a fully manual rollout you drive one Pod at a time.
 
 [mermaid]
 ....
@@ -125,18 +134,30 @@ graph TB
 
 == Stateful workloads on Kubernetes, honestly
 
-The platform can absolutely run stateful software — you will make it do so in the lab, and it will survive restarts.
-But "it can" is not "you always should."
-A production database needs backups you have *restored from*, monitoring, failover, version upgrades, and connection management.
-A StatefulSet gives you stable identity and storage; it does *not* give you any of that operational machinery for free.
+Running databases on Kubernetes is not a compromise — it is how modern data software is built to run.
+The datastores you would reach for run *on* the platform through *Operators*: the EDB and CloudNativePG Operators for PostgreSQL, or the CockroachDB, MongoDB, and Couchbase Operators — and for big data, Streams for Apache Kafka.
+An Operator is what makes this safe in production: it wraps the same StatefulSets, Services, and PersistentVolumeClaims you build by hand in this lab into a single custom resource, then keeps running them — provisioning replicas, failing over, taking and restoring backups, and rolling minor-version upgrades.
+The hand-built StatefulSet here teaches you the primitives; an Operator is what you actually run.
 
-The honest decision comes down to who runs the database:
+So the honest question is not "in the cluster or out of it" — it is the set of Day-2 things you decide *before* you go to production:
 
-* *In-cluster (StatefulSet or an Operator)* fits when you want it close to the app, portable across clouds, and inside one security and networking perimeter — and when your team (or a database Operator) will own backup, failover, and upgrades.
-* *A managed data service* fits when you would rather pay someone else to run undifferentiated database plumbing, and your app just needs a connection string.
+Who operates it::
+Someone owns the Operator and the database's lifecycle — usually a platform or data team.
+Choosing a database Operator is choosing who has encoded that operational knowledge.
+(If you would rather not run it at all, a managed cloud database is a legitimate alternative — you trade control and portability for someone else carrying the pager.)
+Backup and restore::
+Persistence survives a Pod restart; it does *not* survive a deleted PVC, a corrupt volume, or a bad migration.
+You need backups you have actually *restored from* — through the Operator's own backup resources or OpenShift API for Data Protection (its own module).
+Storage performance::
+Databases are latency-sensitive.
+Give them fast block storage (RWO) close to the Pod through the right StorageClass — not a generic shared file volume — and size IOPS for the workload.
+Day-2 operations::
+Failover, minor-version upgrades, connection pooling, monitoring.
+A bare StatefulSet gives you none of these and a mature Operator gives you all of them; running `replicas: 2` by hand is two independent instances, not a replicated database.
 
-The wrap-up returns to this with a concrete decision guide.
-Where *backup* fits — for the in-cluster case — is a platform capability of its own (OpenShift API for Data Protection), covered in the backup-and-restore module (a separate module).
+One more decision that costs nothing to get right: give the database its *own* project, not the application's.
+A datastore has a different lifecycle, backup policy, quota, and access list than the app that reads it, and a dedicated namespace keeps those boundaries — and its blast radius — clean.
+The wrap-up returns to all of this with a concrete decision guide.
 
 == How this shows up in real orgs
 
@@ -144,13 +165,13 @@ Where *backup* fits — for the in-cluster case — is a platform capability of 
 App teams should write a PVC and get storage, without filing a ticket or knowing which array is behind it.
 The StorageClass is the contract between the platform team (who picks and tunes the backend) and app teams (who just ask).
 When that contract is clean, storage stops being a project.
-* *The RWX temptation is a design smell.*
-Teams reach for ReadWriteMany to let many Pods share a directory — and often it is papering over missing object storage or a missing database.
-Sometimes shared files are genuinely right; frequently the better fix is an S3-compatible bucket or a real datastore.
-Reaching for RWX should trigger a design conversation, not a reflex.
-* *StatefulSet is not a database strategy by itself.*
-A StatefulSet is plumbing — identity and volumes.
-Running PostgreSQL well in-cluster means an Operator that handles failover, backup, and upgrades, or a managed service.
+* *Match the access mode to the workload.*
+ReadWriteMany is the right — and sometimes required — answer when Pods genuinely share files: the internal image registry scaled across nodes needs RWX, as do a shared media or content directory and a primary/standby pair that coordinates through lock files on shared storage.
+It becomes a crutch only when it stands in for a different tool — many writers hammering one file as if it were a queue or a database, or blobs dropped on a filesystem instead of an object store.
+So ask what the data really is — shared files (RWX is correct), a single writer (RWO), or objects and records (a bucket or a datastore) — and confirm your cluster even offers RWX before you design around it.
+* *A StatefulSet is plumbing, not a database strategy by itself.*
+It gives you identity and volumes — the primitives.
+Running PostgreSQL well in-cluster means pairing it with an Operator that owns failover, backup, and upgrades; a managed service is the alternative when you would rather not operate it at all.
 Presenting "we run a StatefulSet" as "we run a resilient database" is how teams get surprised at 3 a.m.
 
 ifdef::demo[]

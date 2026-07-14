@@ -41,7 +41,7 @@ Visual: Two identical DB Pods side by side — one on emptyDir (restart → empt
 - Not every backend offers RWX
 - Read your StorageClasses, don't guess
 
-Notes: Access modes, taught against reality instead of a single-cloud mental model. RWO (single-writer, right for a database) is universal; RWX (shared multi-writer files) exists on some backends and not others; ROX is niche. The rule: do not assume RWX exists — an app that quietly relies on shared volumes fails to schedule where the backend is block-only. On this cluster the default class is RWO and a separate file class offers RWX; you confirm which by reading the StorageClasses. Reaching for RWX is often a design smell.
+Notes: Access modes, taught against reality instead of a single-cloud mental model. RWO (single-writer, right for a database) is universal; RWX (shared multi-writer files) exists on some backends and not others; ROX is niche. The rule: do not assume RWX exists — an app that quietly relies on shared volumes fails to schedule where the backend is block-only. On this cluster the default class is RWO and a separate file class offers RWX; you confirm which by reading the StorageClasses. RWX is the right tool for genuinely shared files (a scaled image registry, a shared content directory) and only a problem when it stands in for a database or an object store.
 Visual: RWO/RWX/ROX three-panel with node/Pod icons; a checklist "what does MY cluster support? → oc get sc".
 
 ## Slide: StatefulSet — identity and storage travel together
@@ -70,9 +70,9 @@ Visual: Numbered arc strip: seed → lose → add PVC → survive → inspect �
 
 - Which of your "databases" are actually ephemeral?
 - Who owns backup and failover?
-- StatefulSet is not a managed database
-- RWX is often a design smell
+- Run databases with an Operator (not a bare StatefulSet)
+- RWX: for shared files, not a DB substitute
 - Not every workload needs persistence
 
-Notes: Land the transfer and stay honest. Discussion prompts: which dev/test datastores are secretly ephemeral; who restores your in-cluster data and when they last tested it; whether your StorageClass is a clean self-service contract. Then the credibility close — a StatefulSet gives identity and storage, not backup/failover/upgrades, so a managed service or a mature Operator often wins for a system of record; RWX is frequently a workaround for a missing object store or database; and caches belong on emptyDir. Backup is its own capability (OADP, a later module).
-Visual: Two-column decision card "in-cluster StatefulSet / managed data service", with a footnote pointer to the backup module.
+Notes: Land the transfer and stay honest. Discussion prompts: which dev/test datastores are secretly ephemeral; who restores your in-cluster data and when they last tested it; whether your StorageClass is a clean self-service contract. Then the credibility close — production databases run on the platform through Operators (EDB/CloudNativePG, CockroachDB, MongoDB, Couchbase) that own backup, failover, and upgrades, ideally in their own project; a bare StatefulSet is only the plumbing, and a managed service is the hands-off alternative. RWX is the right tool for genuinely shared files but a poor stand-in for a datastore or object store; and caches belong on emptyDir. Backup is its own capability (OADP, a later module).
+Visual: Decision card — raw StatefulSet (primitives) → database Operator (production, its own project), with a managed data service as the hands-off alternative; footnote pointer to the backup module.
