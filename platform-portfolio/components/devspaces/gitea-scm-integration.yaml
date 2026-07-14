@@ -1,0 +1,158 @@
+# Registers the in-cluster Gitea as a KNOWN SCM server for OpenShift Dev Spaces.
+#
+# Without this, the Che factory resolver does not recognise gitea-gitea.apps.<domain> as a
+# Gitea host, so to fetch a repo's devfile.yaml it GUESSES a raw-content host by prefixing
+# "raw." → raw.gitea-gitea.apps.<domain>. That host sits TWO labels deep under apps.<domain>,
+# so the router's *.apps.<domain> wildcard cert (single-label SAN) can never match it, and
+# workspace creation dies with:
+#   (certificate_unknown) No subject alternative DNS name matching raw.gitea-gitea.apps.<domain> found
+# (killed the whole M03 lab — SW-1). Once Gitea is registered, Che uses Gitea's real,
+# wildcard-covered PATH raw URL (…/OWNER/REPO/raw/branch/<branch>/devfile.yaml) AND returns
+# scm_info so the workspace clones the user's fork. Attendee factory URL is unchanged.
+#
+# The endpoint carries the cluster domain, which the portfolio deliberately never hardcodes
+# (see components/keycloak) — so a Sync-hook Job discovers the live Gitea route at apply time.
+# Workshop-agnostic: any cluster with both portfolio components (Gitea + Dev Spaces) gets the
+# integration; a Dev-Spaces-only cluster is skipped cleanly. Idempotent: re-applies safely.
+---
+# why: identity for the registration Job (writes the SCM secret in the Dev Spaces namespace).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: devspaces-gitea-scm
+  namespace: openshift-devspaces
+---
+# why: the Job writes the oauth-scm-configuration Secret that the Dev Spaces operator reconciles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: devspaces-gitea-scm
+  namespace: openshift-devspaces
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+---
+# why: bind the write-secrets Role to the registration Job's ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: devspaces-gitea-scm
+  namespace: openshift-devspaces
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: devspaces-gitea-scm
+subjects:
+  - kind: ServiceAccount
+    name: devspaces-gitea-scm
+    namespace: openshift-devspaces
+---
+# why: let the Job read the Gitea route host from the gitea namespace (runtime domain discovery).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: devspaces-gitea-scm-routeread
+  namespace: gitea
+rules:
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+# why: bind the gitea-namespace route-read Role to the Job's SA (which lives in openshift-devspaces).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: devspaces-gitea-scm-routeread
+  namespace: gitea
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: devspaces-gitea-scm-routeread
+subjects:
+  - kind: ServiceAccount
+    name: devspaces-gitea-scm
+    namespace: openshift-devspaces
+---
+# why: Sync-hook Job registers (or refreshes) the Gitea SCM endpoint on every portfolio sync.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: devspaces-gitea-scm-register
+  namespace: openshift-devspaces
+  annotations:
+    # Re-run on every sync (like git-mirror); BeforeHookCreation clears the prior Job so a
+    # re-sync always re-fires. Wave 3 = after the CheCluster (wave 2) and its namespace exist.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: devspaces-gitea-scm-register
+    spec:
+      serviceAccountName: devspaces-gitea-scm
+      restartPolicy: Never
+      containers:
+        - name: register
+          # why ose-cli: ships oc on every connected cluster; no custom image to maintain.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              # oc OOMs at 256Mi under the restricted SCC; give the client headroom.
+              memory: 512Mi
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              GITEA_NS="gitea"
+              CHE_NS="openshift-devspaces"
+              SECRET="gitea-oauth-config"
+
+              echo "▶ discovering the in-cluster Gitea route (the external host attendees' factory URLs use)…"
+              HOST=""
+              for _ in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$GITEA_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 5
+              done
+              if [[ -z "$HOST" ]]; then
+                echo "✅ no Gitea route in ns/${GITEA_NS} — this cluster runs Dev Spaces without the in-cluster Gitea; nothing to register."
+                exit 0
+              fi
+              ENDPOINT="https://${HOST}"
+              echo "  ✓ Gitea endpoint: ${ENDPOINT}"
+
+              echo "▶ registering Gitea as a known SCM server (devfiles resolve over the wildcard-covered path host, not raw.<host>)…"
+              # Build the oauth-scm-configuration secret without a heredoc (avoids indentation
+              # traps inside this YAML block scalar); labels/annotations are what the operator keys on.
+              oc create secret generic "$SECRET" -n "$CHE_NS" \
+                --from-literal=id=openshift-devspaces \
+                --from-literal=secret=unused-public-repo-devfile-resolution \
+                --dry-run=client -o yaml \
+              | oc label --local -f - -o yaml \
+                  app.kubernetes.io/part-of=che.eclipse.org \
+                  app.kubernetes.io/component=oauth-scm-configuration \
+              | oc annotate --local -f - -o yaml \
+                  che.eclipse.org/oauth-scm-server=gitea \
+                  che.eclipse.org/scm-server-endpoint="$ENDPOINT" \
+              | oc apply -f -
+
+              echo "▶ verifying the registration…"
+              ANNOT='{.metadata.annotations.che\.eclipse\.org/scm-server-endpoint}'
+              GOT="$(oc get secret "$SECRET" -n "$CHE_NS" -o jsonpath="$ANNOT" 2>/dev/null || true)"
+              if [[ "$GOT" != "$ENDPOINT" ]]; then
+                echo "❌ SCM registration secret missing/incorrect (got '${GOT}', want '${ENDPOINT}')."
+                echo "   Fix: oc auth can-i create secret -n ${CHE_NS} --as=system:serviceaccount:${CHE_NS}:devspaces-gitea-scm"
+                exit 1
+              fi
+              echo "✅ Gitea registered with Dev Spaces (${ENDPOINT})."
+              echo "   The Dev Spaces operator reconciles this secret into the Che server (one rolling restart of"
+              echo "   deploy/devspaces if the endpoint changed). Factory URLs <devspaces>/#${ENDPOINT}/<user>/<repo>"
+              echo "   now clone + start with no certificate error."
