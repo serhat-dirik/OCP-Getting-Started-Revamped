@@ -9,6 +9,7 @@ Small enough to read in ten minutes: two entities, one resource class.
 
 | Method + path                          | Purpose                                                        |
 |----------------------------------------|----------------------------------------------------------------|
+| `GET /`                                | Service landing (JSON: what this is + links to API/health); carries a compact `"site":"<SITE>"` marker when `SITE` is set. Database-free, so it doubles as a probe target |
 | `GET /api/claims`                      | List claims (optional `?page=` & `?size=`); `X-Total-Count` header |
 | `GET /api/claims/{claimNumber}`        | One claim by its number, or 404                                |
 | `GET /api/claims/{claimNumber}/history`| A claim's audit timeline (**deliberate N+1** — see below)      |
@@ -19,6 +20,27 @@ Small enough to read in ten minutes: two entities, one resource class.
 
 The 30 seeded claims (`CLM-1001..CLM-1030`) and the `claim_event` timeline are
 deterministic so lab text can reference exact values.
+
+## Site awareness & the M21 cross-site drop-in
+
+`GET /` returns a small JSON landing so clicking the Route in the console shows
+something real. When the `SITE` env var is set, the body also carries a **compact**
+`"site":"<SITE>"` marker:
+
+```bash
+$ SITE=A curl -s localhost:8080/
+{"service":"parasol-claims","description":"...","site":"A","links":{...}}
+```
+
+The root **never touches the database**, so it stays a valid liveness/readiness
+target even with the datasource down, and the whole app can serve `/` **without a
+PostgreSQL** when both `QUARKUS_DATASOURCE_ACTIVE=false` and
+`QUARKUS_HIBERNATE_ORM_ACTIVE=false` are set (the `/api/claims` data endpoints are
+inactive in that mode). That combination — a self-identifying site marker plus a
+DB-free boot — lets **M21** run the *real* `parasol-claims` image as its per-site
+failover responder. Its client greps this root once a second for `"site":"A"` vs
+`"site":"B"`; `quarkus.shutdown.timeout=2S` keeps a scaled-to-zero pod dying crisply
+so failover is quick. The default configuration (datasource URL set) is unchanged.
 
 ## Tech
 
