@@ -10,34 +10,36 @@ include::partial$version-attributes.adoc[]
 // content stays model-agnostic ("the cluster's configured model") per the M01 convention.
 
 [.lead]
-Parasol runs its claims work in two speeds: the API that answers a customer in milliseconds, and the *batch* that grinds through every open claim overnight — statements, fraud scoring, actuarial rollups.
-The overnight work has quietly grown until one team's month-end run can starve everyone else's jobs off the cluster.
-This module is about running that batch tier *well* on the platform: Jobs and CronJobs for the work itself, and admission control so no single team's batch can crowd out the rest — including the newest batch of all, AI inference.
+Parasol runs its claims work at two speeds: an API that answers a customer in milliseconds, and a *batch* tier that grinds through every open claim overnight — statements, fraud scoring, actuarial rollups.
+That overnight work has quietly grown until one team's month-end run can starve everyone else off the cluster.
+This module is about running batch *well*: Jobs and CronJobs for the work itself, plus admission control so no single team can crowd out the rest — including the newest kind of batch, AI inference.
 
 == What you'll learn
 
-* Where *batch* sits on the async spectrum next to request-driven and event-driven work, and when a Job is the right tool.
-* How the *Job controller* actually behaves — `completions`, `parallelism`, `backoffLimit`, `activeDeadlineSeconds`, and *Indexed* Jobs that shard a dataset.
-* How to schedule recurring work with a *CronJob* (`concurrencyPolicy`, `startingDeadlineSeconds`, `suspend`) without piling runs on top of each other.
-* Why org-scale batch needs *admission control*, and how *Red Hat build of Kueue* adds quotas, priorities, and preemption on top of plain Jobs.
-* Why *AI batch is just batch* — an inference or evaluation Job is admitted, queued, and preempted by exactly the same machinery, and GPU quotas are governed the same way.
+* What *batch* work is, how it differs from a web request, and when a *Job* is the right tool for it.
+* How a *Job* runs one-off work to completion — and the few fields (`completions`, `parallelism`, `backoffLimit`) that steer it.
+* How an *Indexed* Job splits a dataset so each Pod processes its own slice, with no central coordinator.
+* How a *CronJob* runs batch on a schedule without letting slow runs pile up on each other.
+* Why sharing a cluster fairly needs *admission control*, and how *Red Hat build of Kueue* adds quotas, priorities, and preemption on top of plain Jobs.
+* Why *AI batch is just batch* — an inference Job is queued and preempted by exactly the same machinery, which is how teams end up sharing scarce GPUs.
 
 == The async spectrum: request, event, batch
 
 Not all work is a web request.
-It helps to place workloads on a spectrum by *what triggers them* and *how you wait for the result*:
+A useful way to sort workloads is by two questions: *what triggers them*, and *how you wait for the result*.
 
 Request-driven::
 A caller is waiting *right now*.
-A Deployment behind a Service answers in milliseconds and holds a connection open.
-Latency is the metric; you scale replicas to keep it low.
-(That is the world of the first modules.)
+A Deployment behind a Service answers in milliseconds and holds the connection open.
+Latency is what you optimize; you add replicas to keep it low.
+This is the world of the earlier modules.
 Event-driven::
-Something *happened* — a message on a queue, a file landed, a webhook fired — and a handler reacts, usually within seconds.
-No human is holding a connection, but the work is still small and per-event.
+Something *happened* — a message arrived, a file landed, a webhook fired — and a handler reacts, usually within seconds.
+No human waits on a connection, but the work is still small and per-event.
 Batch::
-A *bounded* body of work runs to completion and then stops — "process all 40,000 open claims," "score last night's transactions," "roll up the quarter."
-Nobody waits on a socket; you care that it *finishes*, correctly and within a window, not that it answers in 50&nbsp;ms.
+A *bounded* pile of work runs start to finish, then stops: "process all 40,000 open claims", "score last night's transactions", "roll up the quarter".
+Nobody waits on a socket.
+What matters is that it *finishes* — correctly, and inside its window — not that it replies in 50&nbsp;ms.
 
 [mermaid]
 ....
@@ -62,68 +64,106 @@ graph LR
 
 The platform has a purpose-built object for the batch end of that spectrum: the *Job*.
 
-== The Job controller, honestly
+== A Job runs to completion, then stops
 
-A *Job* creates one or more Pods and keeps them running until a set number succeed — then it stops.
-That "then it stops" is the whole difference from a Deployment, which exists to keep Pods running forever.
-Four fields do most of the work, and getting them right is the lesson:
+A *Deployment* keeps Pods running forever — kill one and it is replaced.
+A *Job* is the opposite: it starts one or more Pods, waits until a set number of them *succeed*, and then it stops.
+That "then it stops" is the whole idea of batch.
+The work is finite, and finishing it is the goal.
+
+Four fields do most of the steering, and getting them right is the lesson:
 
 `completions`::
-How many Pods must *succeed* for the Job to be done.
+How many Pods must *succeed* before the Job is done.
 `completions: 6` means six successful runs.
 `parallelism`::
-How many Pods may run *at once*.
-With `completions: 6, parallelism: 3`, the Job runs three Pods, waits for them, then runs three more — two waves.
+How many Pods may run *at the same time*.
+With `completions: 6` and `parallelism: 3`, the Job runs three Pods, waits for them, then runs three more — two waves.
 `backoffLimit`::
 How many times a failed Pod is *retried* before the Job gives up and is marked `Failed`.
-Retries are *exponentially* backed off (roughly 10&nbsp;s, then 20&nbsp;s, then 40&nbsp;s…), so a crash-looping Job fails slowly, on purpose.
+Retries back off *exponentially* (roughly 10&nbsp;s, then 20&nbsp;s, then 40&nbsp;s), so a crash-looping Job fails slowly, on purpose.
 `activeDeadlineSeconds`::
-A wall-clock cap on the whole Job — a runaway is killed even if it never crashes.
+A wall-clock time limit on the whole Job.
+A runaway is killed even if it never actually crashes.
 
-Two shapes of Job matter for real data work:
+One caveat you will feel in the lab: *a Job's Pod template is immutable*.
+You cannot edit the command of a Job that already exists — you delete it and create it again.
+That sounds annoying, but it is the platform pushing batch definitions into files and Git, where they belong, and out of live hand-edits.
 
-* An *Indexed* Job (`completionMode: Indexed`) gives each Pod a fixed index, `0 … completions-1`, in the `$JOB_COMPLETION_INDEX` environment variable.
-That index is how you *shard*: Pod 3 processes shard 3 of the dataset, deterministically, with no coordinator.
-It is map/reduce's "map" step with nothing but the Job controller.
-* A *CronJob* wraps a Job template on a schedule (standard cron syntax).
-It is how "nightly batch" actually runs.
-Three fields keep it sane:
-`concurrencyPolicy: Forbid` refuses to start a run while the previous one is still going (no overlap);
-`startingDeadlineSeconds` says "if you missed the tick by more than this, skip it — don't pile up";
-`suspend: true` pauses scheduling entirely without deleting anything.
+== Indexed Jobs: split the data, no coordinator
 
-One honest caveat you will feel in the lab: *a Job's Pod template is immutable*.
-You cannot edit the command of a running Job — you delete it and re-create it.
-That is why batch belongs in Git and in pipelines, not in hand-edits.
+`parallelism` runs several Pods at once, but by default every Pod runs the *same* command.
+That is fine when each Pod does identical work — and useless when you want to *split a dataset* so each Pod handles a different part.
 
-== Why org-scale batch needs admission control
+An *Indexed* Job (`completionMode: Indexed`) is how you split it.
+Kubernetes gives each Pod a number — its *index*, from `0` to `completions - 1` — in the environment variable `$JOB_COMPLETION_INDEX`.
+Your script reads that number and works out which slice of the data is its own.
 
-Plain Jobs have one glaring gap at organization scale: *nothing arbitrates between them*.
-Every Job the scheduler can place, it runs.
-A namespace `ResourceQuota` caps one team, but it cannot express "the actuarial month-end run may use the cluster's spare capacity, but if the fraud team submits an urgent scoring job, it goes first."
-Left alone, the biggest, greediest batch wins, and everyone else waits — the *starvation* problem.
+Here is the whole idea in one example.
+Say you have a 10,000-row file and you set `completions: 10`.
+Pod 0 takes rows 0–999, Pod 3 takes rows 3000–3999, Pod 9 takes the last thousand.
+Nobody hands out those assignments — *the index is the assignment*.
+Each Pod works out its own slice from its own number and never has to talk to the others.
 
-*Red Hat build of Kueue* fills that gap.
-It sits *above* the Job controller as an *admission* layer: a Job opts in with a label, and Kueue decides *when* it may start — holding it *suspended* until there is quota, then releasing it.
+That last part is the point: there is *no coordinator*.
+No manager Pod divides the work and deals it out.
+Picture a mailroom with numbered pigeonholes: the clerk on slot 3 handles everything for slot 3, and knows it is theirs from the number alone — no supervisor stands at the door dealing out letters.
+Hand ten clerks their numbers and the mail sorts itself, all at once.
+
+This is exactly the *map* step of map/reduce, built from nothing but the Job controller: partition the data by index, then process each part on its own.
+In the lab you will watch five Pods each take a clean fifth of the claims — their Pod names even carry the index, `...-0` through `...-4`.
+
+== CronJobs: batch on a schedule
+
+Most "nightly batch" is not launched by hand — it runs on a clock.
+A *CronJob* wraps a Job template in standard cron syntax (`0 2 * * *` reads as "02:00 every day") and creates a fresh Job on each tick.
+
+Three fields keep a schedule out of trouble:
+
+`concurrencyPolicy: Forbid`::
+Do not start a new run while the previous one is still going — no overlap.
+`startingDeadlineSeconds`::
+If a tick is missed by more than this many seconds, skip it rather than build a backlog.
+`suspend: true`::
+Pause the schedule without deleting anything; flip it back to resume.
+
+Everything you learned about Jobs still applies — each run *is* a Job, with its own `completions`, `backoffLimit`, and immutable template.
+A CronJob just decides *when* they start.
+
+== Why batch needs a referee: admission control
+
+Plain Jobs share a cluster badly.
+Nothing *arbitrates between them*: every Job the scheduler can place, it runs.
+A namespace `ResourceQuota` can cap one team's total, but it cannot say "the actuarial month-end run may use spare capacity — but if the fraud team submits an urgent job, that goes first".
+Left alone, the biggest, greediest batch wins and everyone else waits.
+That is the *starvation* problem, and at organization scale it is a recurring incident, not a hypothetical.
+
+Think of a busy restaurant with more parties than tables.
+With no host, the pushiest crowd grabs every table and everyone else stands at the door.
+A *maître d'* fixes that: seat parties as tables free up, keep a waiting list, and — when a VIP reservation arrives to a full room — ask one walk-in party to give up its table.
+*Red Hat build of Kueue* is that maître d' for batch.
+
+It sits *above* the Job controller as an *admission* layer.
+A Job opts in with a label; Kueue then decides *when* it may start, holding it *suspended* until there is room and releasing it once there is.
 Four objects express the policy:
 
 ResourceFlavor::
-A class of capacity ("this kind of node / these resources").
-One flavor covers the whole cluster here.
+A class of capacity ("this kind of node, these resources").
+One flavor covers the whole cluster in this workshop.
 ClusterQueue::
-Where the *quota* lives — "this queue may run 500m CPU and 512Mi of memory of admitted work at a time."
-Cluster-scoped, owned by the platform team.
+Where the *quota* lives — "this queue may run 500m CPU and 512Mi of admitted work at a time".
+It is cluster-scoped and owned by the platform team.
 In this workshop *each user gets their own* ClusterQueue, so one attendee's batch cannot starve another's.
 LocalQueue::
 A namespaced pointer from your project to a ClusterQueue.
-It holds *no* quota; it is how your Jobs reach the cluster queue.
+It holds *no* quota of its own; it is simply how your Jobs reach the cluster queue.
 A Job joins it with the label `kueue.x-k8s.io/queue-name`.
 WorkloadPriorityClass::
 A priority number.
-A higher-priority Job can *preempt* a lower-priority one — evict it back into the queue — when the quota is full.
+When the quota is full, a higher-priority Job can *preempt* a lower-priority one — evict it back into the queue and take its place.
 
-When you submit a labeled Job, Kueue creates a *Workload* object that tracks it through admission: `Pending` → `QuotaReserved` → `Admitted` (or, if a higher-priority Workload needs the room, `Evicted`/`Preempted` and back to `Pending`).
-Reading Workloads is how you *see* the queue working.
+Behind the scenes, Kueue tracks each labeled Job with a *Workload* object as it moves through admission: `Pending` → `QuotaReserved` → `Admitted` (or, when a higher-priority Workload needs the room, `Evicted`/`Preempted` and back to `Pending`).
+Reading Workloads is how you *watch the queue work*.
 
 [mermaid]
 ....
@@ -143,19 +183,22 @@ graph TB
 
 // media-pass: replace/augment with SVG export m06-jobs-batch-kueue-02-kueue-admission.svg (see media-manifest.md)
 
-The sizing in this workshop is deliberately tiny — a ClusterQueue that fits about *two* sample Pods — so the queue is *visible*: submit five jobs and you watch two admitted and three pending; submit one high-priority job and you watch it *preempt* a running low-priority one.
-On a real cluster the numbers are bigger, but the mechanism is identical.
+The quota in this workshop is deliberately tiny — a ClusterQueue that fits about *two* sample Pods — so the queue is easy to *see*.
+Submit five jobs and you watch two get admitted and three sit pending.
+Submit one high-priority job and you watch it *preempt* a running low-priority one.
+On a real cluster the numbers are bigger; the mechanism is identical.
 
-== The AI angle: batch inference is this decade's nightly report
+== AI batch is just batch
 
 Here is the payoff.
-A *batch inference* job — score every claim for fraud risk overnight, run an evaluation suite against a new model, generate embeddings for a document set — is *a Job*.
+A *batch-inference* job — score every claim for fraud risk overnight, run an evaluation suite against a new model, generate embeddings for a set of documents — is *a Job*.
 It reads its input, calls a model, writes its output, and stops.
 It carries the same `kueue.x-k8s.io/queue-name` label, becomes the same Workload, and is admitted, queued, and preempted by the same ClusterQueue as the statement run.
 
-That is not a coincidence; it is the point.
-The industry is converging on Kueue precisely because *GPU* capacity is scarce and expensive, and the same quota-and-priority machinery that keeps a claims batch fair is what keeps a fleet of teams from fighting over GPUs.
-A ResourceFlavor can describe GPU nodes; a ClusterQueue can hold `nvidia.com/gpu` quota; a high-priority eval job can preempt a low-priority training run.
+That is not a coincidence — it is the whole point.
+The industry is converging on Kueue precisely because *GPU* capacity is scarce and expensive.
+The same quota-and-priority machinery that keeps a claims batch fair is what stops a fleet of teams from fighting over GPUs.
+A ResourceFlavor can describe GPU nodes; a ClusterQueue can hold `nvidia.com/gpu` quota; a high-priority evaluation job can preempt a low-priority training run.
 Everything you learn here on tiny CPU Jobs is the same control plane that governs AI batch at scale — which is why distributed-training and model-evaluation stacks on OpenShift are built on Kueue.
 
 In the lab you run a fraud-scoring inference Job against a *Models-as-a-Service (MaaS)* endpoint, through your LocalQueue, and watch it queue exactly like the statement run.
@@ -163,15 +206,15 @@ In the lab you run a fraud-scoring inference Job against a *Models-as-a-Service 
 
 == How this shows up in real orgs
 
-* *"Who owns the batch quota?"* is a real org question with a real owner.
-The ClusterQueue is the platform team's lever: it decides how much of the cluster the batch tier may use and how teams share it.
-When that lever exists, "the month-end run took down the cluster" stops being a quarterly incident.
+* *"Who owns the batch quota?"* is a real question with a real owner.
+The ClusterQueue is the platform team's lever: it sets how much of the cluster the batch tier may use, and how teams share it.
+Once that lever exists, "the month-end run took down the cluster" stops being a quarterly event.
 * *Cron sprawl is technical debt.*
-Teams accumulate dozens of CronJobs nobody owns, half of them overlapping, some that should have been event-driven the day a queue became available.
-A CronJob you can't name the owner of is a 2&nbsp;a.m. page waiting to happen.
-* *AI workloads will force the conversation whether you plan for it or not.*
-The first time two teams want the same GPUs at the same time, someone invents an admission policy — usually a spreadsheet and a Slack argument.
-Kueue is that policy as code, and adopting it *before* the GPU crunch is far cheaper than during it.
+Teams pile up dozens of CronJobs nobody owns — half of them overlapping, some that should have become event-driven the day a queue appeared.
+A CronJob you cannot name the owner of is a 2&nbsp;a.m. page waiting to happen.
+* *AI workloads force the conversation whether you plan for it or not.*
+The first time two teams want the same GPUs at once, someone invents an admission policy — usually a spreadsheet and a Slack argument.
+Kueue is that policy written as code, and adopting it *before* the GPU crunch is far cheaper than during it.
 
 // media-pass: the cross-module Parasol platform-accretion diagram (v23) with the M06 layer ({user}-batch namespace, LocalQueue → ClusterQueue) highlighted — m06-jobs-batch-kueue-03-platform-accretion-v23.svg (see media-manifest.md)
 
