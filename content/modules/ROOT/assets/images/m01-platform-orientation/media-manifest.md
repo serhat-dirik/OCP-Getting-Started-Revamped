@@ -13,15 +13,17 @@ exports remain the deferred media pass.
 
 ## Screenshots (console views — the view IS the content)
 
-All four console screenshots were **captured on the live 4.21 console (2026-07-10)** during the
-browser-verification pass and are embedded in `lab.adoc`. Status: **DONE**.
+Screenshots 1–3 were **captured on the live console (2026-07-10)** during the browser-verification
+pass and are embedded in `lab.adoc`. **Screenshot 4 must be RE-SHOT** (owner review 2026-07-14):
+the committed file was taken as `user5` and predates the Pipelines/GitOps/ACS console plugins and
+the newly-enabled Developer perspective, so the nav it shows is stale.
 
 | # | Filename | Status | Console view | Notice | Embed point |
 |---|----------|--------|--------------|--------|-------------|
 | 1 | `m01-platform-orientation-01-topology-3pods.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, `parasol-web` scaled to 3 | the Pod donut showing 3/3; the node title; the Open-URL arrow | lab.adoc ex. 3 (scale) |
 | 2 | `m01-platform-orientation-02-deploy-image-dialog.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Container images** form, registry reference pasted and **Validated** | the *Image name from external registry* field, the green *Validated*, the auto-filled Name, Resource type = Deployment; Target port and *Create a route* live under *Advanced options* | lab.adoc ex. 2 (Console tab) |
 | 3 | `m01-platform-orientation-03-lightspeed-answer.png` | ✅ DONE 2026-07-10 | OpenShift Lightspeed panel after asking "Why is my pod restarting?" | the Lightspeed **chat bubble at bottom-right**; the bulleted causes; the suggested `oc` commands; the doc citations | lab.adoc ex. 7 |
-| 4 | `m01-platform-orientation-04-unified-console-landmarks.png` | ✅ DONE 2026-07-10 | Unified console, project `user1-dev` selected | (1) project selector, (2) masthead **Quick create (+)** menu, (3) Topology under **Workloads**, (4) masthead terminal icon, (5) Lightspeed **chat bubble (bottom-right)** | lab.adoc ex. 1 |
+| 4 | `m01-platform-orientation-04-unified-console-landmarks.png` | ⚠️ RE-SHOOT as `user1` (owner review 2026-07-14) | Unified console, project `user1-dev` selected, on the CURRENT nav (with the Pipelines/GitOps/ACS plugins present) | (1) project selector on `user1-dev`, (2) masthead **Quick create (+)** menu, (3) Topology under **Workloads**, (4) Lightspeed **chat bubble (bottom-right)**; if the Developer perspective is enabled, include the perspective switcher at the top of the nav. The web-terminal masthead icon is **no longer a landmark** (the lab dropped that step). | lab.adoc ex. 1 |
 
 **4.21 console reality confirmed during the pass (corrections applied to `lab.adoc`):** there is
 **no `+Add` nav item** — the deploy flows (Import YAML / Import from Git / Container images) live
@@ -32,6 +34,13 @@ confirmed, with **Create a route** (default checked) under *Advanced options*; t
 up/down controls and **Edit Pod count** action are confirmed. **There is no *Actions → Create
 Route*** and the side-panel *Resources* tab has no Create-Route button — Routes are created from
 **Networking → Routes → Create Route** (the CLI `oc expose` path is unchanged).
+
+**2026-07 owner review — nav has since changed:** the Pipelines, GitOps and ACS console plugins are
+now enabled (new nav groups appear under *Ecosystem* / *Core platform*), and the Developer
+perspective is enabled on the workshop cluster (`consoles.operator.openshift.io/cluster`
+`spec.customization.perspectives` carries `dev`/Enabled), so a perspective switcher shows at the top
+of the nav. The landmarks re-shoot (screenshot 4) must reflect this current nav. The lab also
+**dropped the web-terminal step**, so the masthead terminal icon is no longer called out.
 
 ## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
 
