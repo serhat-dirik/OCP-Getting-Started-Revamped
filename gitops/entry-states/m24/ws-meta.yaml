@@ -1,0 +1,50 @@
+# ws reset purges user-created leftovers from these namespaces before re-materializing.
+# M24's in-namespace state lives entirely in {user}-dev: the entry marker, the mcp-agent SA + view
+# RoleBinding, the digest-pinned MCP server (Deployment/Service), the seeded broken parasol-claims
+# (Deployment/Service), the MaaS credentials (ConfigMap + hook-created Secret), and the DevWorkspace.
+# `oc delete all,pvc` clears the Deployments/Services; the ws engine's purge also deletes the
+# hook-created maas-credentials Secret (secret sweep), the DevWorkspace (M03+ idiom), and — because the
+# SA + RoleBindings are user-scoped, not system objects — the mcp-agent SA and its bindings, so the
+# next start re-materializes a clean read-only sandbox and re-runs the copy hook.
+# NOTE: the {user}-dev NAMESPACE, its quota, LimitRange and RBAC are WORKSHOP-LAYER-owned
+# (gitops/workshop-config/templates/per-user-namespaces.yaml); like M02/M25 this chart only fills it.
+purgeNamespaces:
+  - "${USER}-dev"
+
+# Modules whose entry/solve charts materialize into the SAME namespace ({user}-dev). Coexisting Argo
+# apps that own workloads in one namespace deadlock (SharedResourceWarning, both OutOfSync), so
+# `ws start`/`ws solve` evicts the conflicting module before materializing (gc_conflicts). M24 joins
+# the {user}-dev cohort (same as M02/M25). Cross-namespace modules (m06 {user}-batch, m07 {user}-cicd,
+# m18 {user}-mesh, m22 {user}-modernize, m23 {user}-ai) are NOT conflicts and coexist untouched.
+# ⚠ RECIPROCAL EDITS REQUIRED (both directions): each module below must add `m24` to ITS conflictsWith.
+# Those edits touch files outside this chart and are handled by PM integration — this file sets only
+# the m24→others direction.
+conflictsWith:
+  - m01
+  - m02
+  - m03
+  - m04
+  - m05
+  - m09
+  - m10
+  - m11
+  - m12
+  - m13
+  - m14
+  - m15
+  - m16
+  - m17
+  - m19
+  - m20
+  - m25
+
+# The MaaS copy hook (up to ~60s of source-secret retries) plus a cold-node pull of the ghcr MCP
+# server image and the shared parasol-claims image take longer than a single-app entry state — widen
+# the sync-wait window so `ws start` blocks until the world is genuinely up (no sleep-and-hope).
+waitSeconds: 360
+
+# Representative M24 attendee muscle the generic battery (cockpit/identity/isolation) does NOT cover:
+# the MCP server world materialized into the attendee's own {user}-dev and the attendee (namespace
+# admin) can read it. ${USER} resolves per-run; ws smoke runs it as {user} in the live cockpit.
+smokeCommands:
+  - "oc get deployment kubernetes-mcp-server -n ${USER}-dev"
