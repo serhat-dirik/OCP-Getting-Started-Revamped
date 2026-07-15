@@ -17,6 +17,7 @@ lab text can reference exact values.
 | **parasol-legacy-claims** | Legacy Java on JWS/Tomcat | Deliberately un-modern (servlet-era patterns, hardcoded config) — the modernization target. | M21 |
 | **parasol-agent** | Quarkus + LangChain4j | Agentic AI service: model calls, RAG, MCP tool use. | M23 |
 | **mcp-servers/** | Quarkus (MCP servers) | MCP servers for the agent: `claims-db` (claims dataset as tools), `policy-docs` (RAG-style policy retrieval). | M23, M24 |
+| **mcp-agent-cli** | Quarkus + LangChain4j (picocli) | Assistant-neutral MCP client: prompts a MaaS model with cluster MCP tools bound and prints the full tool-call trace. Read-only by default. | M24 |
 
 Plus **`parasol-service-template/`** — not a running service but the M10
 golden-path Backstage Software Template (a `template.yaml` + a buildable Quarkus

@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.parasol</groupId>
+  <artifactId>mcp-agent-cli</artifactId>
+  <version>1.0.0</version>
+  <name>mcp-agent-cli</name>
+  <description>Assistant-neutral MCP client CLI (Quarkus command-mode + LangChain4j): takes a natural-language prompt, connects to a configured MCP server, sends the prompt to an OpenAI-compatible MaaS model with the MCP tools bound, prints the full tool-call trace and the final answer. Read-only-first. The provided neutral client for M24 - AI-Assisted Development on OpenShift.</description>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <!-- Quarkus LangChain4j resolves AI-service method parameters by name, so it asks javac to keep
+         parameter names (-parameters). Harmless everywhere else. -->
+    <maven.compiler.parameters>true</maven.compiler.parameters>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <!-- Quarkus current LTS: 3.33 (same BOM as every other Parasol service). -->
+    <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+    <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+    <quarkus.platform.version>3.33.2.1</quarkus.platform.version>
+
+    <!-- Quarkiverse LangChain4j extensions BOM. 1.10.0 is the exact version M23's
+         parasol-agent proved against Quarkus 3.33 LTS; it manages the openai + mcp
+         extensions below. We reuse M23's wiring verbatim, only re-pointed from the
+         claims-db MCP server to the platform (kubernetes-mcp-server). -->
+    <quarkus-langchain4j.version>1.10.0</quarkus-langchain4j.version>
+
+    <compiler-plugin.version>3.13.0</compiler-plugin.version>
+    <surefire-plugin.version>3.5.2</surefire-plugin.version>
+    <skipITs>true</skipITs>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>${quarkus.platform.group-id}</groupId>
+        <artifactId>${quarkus.platform.artifact-id}</artifactId>
+        <version>${quarkus.platform.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>io.quarkiverse.langchain4j</groupId>
+        <artifactId>quarkus-langchain4j-bom</artifactId>
+        <version>${quarkus-langchain4j.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Model provider: OpenAI-compatible client. MaaS (LiteLLM/vLLM) speaks this API,
+         so the SAME code is model-agnostic across qwen3-14b, llama-scout-17b, etc. -
+         only the base-url / api-key / model-name env change (see application.properties).
+         Reused verbatim from apps/parasol-agent. -->
+    <dependency>
+      <groupId>io.quarkiverse.langchain4j</groupId>
+      <artifactId>quarkus-langchain4j-openai</artifactId>
+    </dependency>
+    <!-- MCP client: connects to a configured MCP server (here the platform
+         kubernetes-mcp-server) over HTTP/SSE and binds its tools to the model.
+         Same extension apps/parasol-agent uses; the transport + config keys are
+         identical, only the target URL differs. -->
+    <dependency>
+      <groupId>io.quarkiverse.langchain4j</groupId>
+      <artifactId>quarkus-langchain4j-mcp</artifactId>
+    </dependency>
+
+    <!-- CLI surface: Quarkus command mode via picocli. No HTTP server is started -
+         this is a one-shot terminal tool an attendee runs from the Dev Spaces
+         terminal (M24), not a long-running service. -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-picocli</artifactId>
+    </dependency>
+
+    <!-- Distributed tracing: the model call and each MCP tool call become spans, so
+         M24 can optionally inspect the agent's run in Tempo (the "observe the agent"
+         beat, same as M23). Exporter is OFF by default until a collector exists;
+         turned on via OTEL_EXPORTER_OTLP_ENDPOINT. The always-on audit surface,
+         however, is the tool-call trace this CLI prints to stdout - no collector
+         needed. (Health probes + a /metrics scrape are intentionally absent: a
+         one-shot CLI serves no HTTP endpoint to expose them on.) -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-opentelemetry</artifactId>
+    </dependency>
+
+    <!-- Test-only: fast, offline unit tests that MOCK the model + MCP server to prove
+         the tool-call orchestration and trace formatting, with no live MaaS or cluster.
+         Plain JUnit 5 (no @QuarkusTest) - see the tests for why. Feeds the CI "apps" job. -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>${quarkus.platform.group-id}</groupId>
+        <artifactId>quarkus-maven-plugin</artifactId>
+        <version>${quarkus.platform.version}</version>
+        <extensions>true</extensions>
+        <executions>
+          <execution>
+            <goals>
+              <goal>build</goal>
+              <goal>generate-code</goal>
+              <goal>generate-code-tests</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>${compiler-plugin.version}</version>
+      </plugin>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire-plugin.version}</version>
+        <configuration>
+          <systemPropertyVariables>
+            <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

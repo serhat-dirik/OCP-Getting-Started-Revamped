@@ -1,0 +1,47 @@
+# Parasol Insurance - mcp-agent-cli (Quarkus command-mode + LangChain4j, JVM fast-jar)
+#
+# Multi-stage, UBI9-based. Builds fully in-cluster via either the binary Docker
+# build used to publish the prebuilt image or the Git BuildConfig in
+# openshift/buildconfig.yaml. Same pattern as every other Parasol service.
+#
+# Base images pinned to the highest tag present in BOTH the builder and runtime
+# streams (1.23) so the two stages stay matched and the build is reproducible.
+#
+# This is a one-shot CLI, not a server: there is no EXPOSE. Container ARGS become
+# the agent's prompt + flags, e.g.
+#   podman run --rm -e GENAI_ENDPOINT=... -e GENAI_API_KEY=... -e GENAI_MODEL=... \
+#     -e MCP_SERVER_URL=http://platform:8080/mcp/sse \
+#     mcp-agent-cli "diagnose why parasol-claims is not Ready in user1-dev"
+# In M24 it is normally run from the Dev Spaces terminal against the in-cluster
+# MCP server; the image is handy for a Job or `oc run`.
+#
+# The runtime stage runs as numeric non-root UID 185 under OpenShift's
+# restricted-v2 SCC (arbitrary UID, GID 0): the app writes nothing outside /tmp,
+# and /deployments is owned by group 0 so an injected random UID can still read it.
+
+## --- Build stage: JDK 21 + Maven (UBI9 builder image). Runs as root; discarded. ---
+FROM registry.access.redhat.com/ubi9/openjdk-21:1.23 AS build
+USER root
+WORKDIR /build
+
+COPY pom.xml ./
+COPY src ./src
+
+# Produce the Quarkus fast-jar under target/quarkus-app/. Tests run in CI, not here.
+RUN mvn -B -ntp -DskipTests clean package
+
+## --- Runtime stage: JRE-only UBI9 image, non-root. ---
+FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.23
+ENV LANGUAGE='en_US:en'
+
+# Copy the fast-jar layout in cache-friendly order (libs change least, app most).
+# --chown=185:0 + group-readable perms keep the app runnable under any random UID.
+COPY --from=build --chown=185:0 /build/target/quarkus-app/lib/      /deployments/lib/
+COPY --from=build --chown=185:0 /build/target/quarkus-app/*.jar     /deployments/
+COPY --from=build --chown=185:0 /build/target/quarkus-app/app/      /deployments/app/
+COPY --from=build --chown=185:0 /build/target/quarkus-app/quarkus/  /deployments/quarkus/
+
+USER 185
+
+# CLI entrypoint: everything after the image name is parsed by picocli (the prompt + flags).
+ENTRYPOINT [ "java", "-jar", "/deployments/quarkus-run.jar" ]
