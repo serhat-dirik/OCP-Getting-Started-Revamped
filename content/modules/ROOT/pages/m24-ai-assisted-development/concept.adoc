@@ -1,0 +1,185 @@
+= AI-Assisted Development on OpenShift: Concept
+:module-id: m24
+include::partial$version-attributes.adoc[]
+
+// Concept page for M24. Renders in all three flavors (workshop/demo/instructor). Environment values
+// appear ONLY as attributes ({user}, {ocp_console_url}, {maas_model}, {maas_endpoint}); product NAMES
+// appear plain, with NO version numbers in prose (course standard CC-1 — no version anchoring).
+// Everything described was PERFORMED against the LIVE entry state in a {user}-dev namespace on
+// 2026-07-15: the OpenShift/Kubernetes MCP server running as the scoped mcp-agent ServiceAccount over
+// SSE, the neutral mcp-agent-cli connecting to it and to the cluster's served model (the captured
+// traces are that cluster's configured model — model-agnostic), the read-only diagnosis of the seeded
+// broken parasol-claims deployment, the scoped-write fix, and the cross-namespace RBAC denial — all
+// real captures, not from memory. Live infra strings (cluster domain, MaaS host, model key) are
+// scrubbed to attributes/placeholders. Acronyms: MCP/SA(ServiceAccount)/MaaS/CVE/PII expanded on first
+// use per page; ubiquitous acronyms (AI, API, HTTP, JSON, URL, RBAC, YAML) are never expanded.
+
+[.lead]
+An AI coding assistant that can *read and change your cluster* is the most useful — and the most dangerous — tool you will wire up this week.
+Point one at OpenShift and it will happily list your pods, read your logs, patch a broken deployment, and, if you let it, delete a namespace it was never meant to touch.
+This module is about the one question that makes that safe: *what is the agent actually allowed to do* — and the honest answer is that the boundary is not the assistant's "read-only" setting, it is *RBAC on the ServiceAccount the agent acts as*.
+
+== Why this matters
+
+Parasol's engineers are already pasting cluster YAML into chat assistants and asking "why is this pod not ready?"
+The moment that assistant can *call the cluster itself* instead of guessing, it stops hallucinating and starts helping — it reads the *live* deployment, the *real* events, the *actual* logs.
+That is a genuine productivity jump. It is also the moment the assistant becomes an *actor* on your platform, with whatever powers you handed it.
+
+[IMPORTANT]
+.The business hook
+====
+*An AI agent with cluster access is a junior engineer you hired in thirty seconds and gave your keys to.*
+It is fast, tireless, and occasionally confidently wrong — so the question is never "do I trust the model," it is "what can the identity it runs as actually do."
+Scope that identity with *least privilege*, make every action *auditable*, and require a *human* for anything that writes — and vibe coding becomes safe to bring to work.
+====
+
+== What you'll learn
+
+* How an AI assistant reaches a cluster at all: the *Model Context Protocol* (MCP), an *MCP server* that exposes cluster operations as tools, and the *ServiceAccount* that server runs as.
+* Why the *ServiceAccount's RBAC is the security boundary* — not the MCP server's `--read-only` flag, and not the client's read-only setting. Both flags are seatbelts; a real read-only bypass (CVE-2026-46519) proves why you never rely on them.
+* *Read-only first*: give the agent eyes before hands, and grant a *scoped write* only when a task needs it — namespaced, never cluster-wide.
+* Why the *tool-call trace* is the point: you must be able to *see every call the agent made* and verify its claims, because an agent that can't show its work can't be trusted with your cluster.
+* Where the *Red Hat Lightspeed* family fits — the assistants Red Hat ships for the console, the developer portal, and modernization — and when each applies.
+* The team-level version: a *policy checklist* for letting AI agents operate your platform without letting them operate it *badly*.
+
+== Why give an agent cluster access at all?
+
+The tempting alternative is copy-paste: an engineer runs `oc get`, pastes the output into an assistant, reads the suggestion, and runs it by hand.
+That works, barely, and it breaks for the same structural reasons a model without tools always breaks:
+
+* *The context is stale the moment it's pasted.* The pod you copied was `CrashLoopBackOff` a minute ago; it may be `Running` now. An assistant reasoning over a paste is reasoning over a photograph, not the cluster.
+* *The human is the integration, and the human is slow.* Every question becomes run-a-command, copy, paste, read, run-the-fix-by-hand. The assistant can't follow its own diagnosis with the next lookup, so multi-step reasoning falls back on you.
+* *There is no record of what was actually done.* The fix that worked lives in someone's terminal history. Nothing captured which commands ran against which cluster, or why.
+
+Connect the assistant to the cluster *through a tool interface* and all three change: it reads live state, it chains its own lookups, and — done right — every call it makes is *recorded*.
+The price of that power is that the assistant is now acting with a real identity, and you own what that identity can do.
+
+== How an assistant reaches the cluster: MCP + a ServiceAccount
+
+An AI assistant does not speak to the Kubernetes API directly.
+It speaks *MCP* — the Model Context Protocol, the same open standard the claims assistant used to reach its data tools in the Agentic AI module (a separate module).
+Here the MCP *server* is pointed at the platform: it advertises cluster operations — list pods, read events, get a deployment, read logs — as *tools* the model can call.
+
+The single most important fact in this module is *how that server authenticates to the cluster*:
+
+[mermaid]
+....
+graph LR
+  cli["AI assistant / CLI<br/>(the MCP client)<br/><b>holds NO kubeconfig</b>"]
+  subgraph ns["your {user}-dev namespace"]
+    mcp["MCP server<br/>runs as ServiceAccount<br/><b>mcp-agent</b>"]
+  end
+  api["Kubernetes API server"]
+  rbac{"RBAC check:<br/>what may<br/>mcp-agent do?"}
+  cli -->|"tool call (HTTP/SSE)"| mcp
+  mcp -->|"acts as mcp-agent's<br/>projected token"| rbac
+  rbac -->|"allowed → do it"| api
+  rbac -.->|"denied → 403"| mcp
+  cli -->|"chat + tool schema"| model["your cluster's served model<br/>(MaaS, OpenAI-compatible)"]
+  classDef client fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef server fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef gate fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef ext fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class cli client; class mcp server; class rbac gate; class api,model ext;
+....
+
+// media-pass: replace/augment with SVG export m24-ai-assisted-development-01-mcp-sa-boundary.svg (blue = the client that holds no cluster credential; amber = the MCP server = the only thing with a token; red = the RBAC gate that is the actual boundary; green = external API + model). See media-manifest.md.
+
+Read the chain:
+
+* *The client holds no cluster credential.* The assistant (in this module, a small neutral command-line client) knows only two things: the address of the MCP server, and a key for the model endpoint. It has *no kubeconfig and no cluster token*. It cannot touch the API server except by asking the MCP server to.
+* *The MCP server runs as a dedicated ServiceAccount* — here, `mcp-agent`. Its pod mounts that ServiceAccount's projected token, and *every* call it makes to the Kubernetes API is made *as `mcp-agent`*. That token is the only cluster credential in the whole system.
+* *The API server enforces RBAC on that identity.* When the model calls "list pods in namespace X," the MCP server asks the API server *as `mcp-agent`*, and the API server checks: is `mcp-agent` allowed to list pods in X? If yes, it happens; if no, it is a `403` the agent reads back and reports.
+
+So the agent's powers are *exactly* `mcp-agent`'s powers — no more. Give that ServiceAccount a namespaced read-only role and the agent can look but not touch, in one namespace only. That is the whole design.
+
+== Read-only first — and why the flag is not the boundary
+
+The MCP server ships with a `--read-only` flag, and the neutral client has its own read-only setting that hides mutating tools from the model. Use both — they are good *defense in depth*. But do not mistake either for the security boundary.
+
+[NOTE]
+.The `--read-only` flag is a seatbelt; RBAC is the boundary (CVE-2026-46519)
+====
+A sibling open-source MCP server had a read-only mode that filtered the *list* of tools it advertised but *not* the tools it would actually *execute* — so a caller who named a mutating tool directly could still run it, bypassing "read-only" entirely (tracked as CVE-2026-46519, fixed upstream).
+The lesson is not "that project was careless." It is that a *flag in the agent's own software* is only as trustworthy as that software. The identity's *RBAC* is enforced by the Kubernetes API server, *underneath* the agent — so even a buggy or malicious client that tries a forbidden write gets a `403`.
+Set the read-only flags, and *also* scope the ServiceAccount so that if the flags fail, nothing bad is actually permitted. Belt, suspenders, and a locked door.
+====
+
+This gives a clean two-phase model you will perform in the lab:
+
+[mermaid]
+....
+graph TD
+  subgraph p1["Phase 1 — read-only (eyes)"]
+    v["mcp-agent → ClusterRole 'view'<br/>(RoleBinding, namespaced)<br/>list/get pods, events, deployments, logs<br/><b>no secrets, no writes, one namespace</b>"]
+  end
+  subgraph p2["Phase 2 — scoped write (hands)"]
+    e["+ a small 'deployer' Role<br/>patch/update deployments in THIS namespace only<br/><b>still no secrets, still one namespace</b>"]
+  end
+  diag["Agent DIAGNOSES the broken app"] --> p1
+  p1 --> grant["You grant the scoped write<br/>(a human decision)"]
+  grant --> p2
+  p2 --> fix["Agent FIXES the one field"]
+  p2 --> forbidden["Agent asked to touch another namespace<br/>→ <b>RBAC denies it (403)</b>"]
+  classDef ro fill:#e8f0fe,stroke:#1967d2,color:#174ea6;
+  classDef rw fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef deny fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  class v ro; class e rw; class forbidden deny;
+....
+
+// media-pass: replace/augment with SVG export m24-ai-assisted-development-02-two-phase-rbac.svg (blue = read-only view; amber = the attendee-granted scoped write; red = the cross-namespace denial that is the climax). See media-manifest.md.
+
+The scoped-write grant is *always a human action*. The platform does not pre-grant it; you decide, per task, to give the agent hands — and you give it the *smallest* hands that do the job (patch one kind of resource, in one namespace, never secrets).
+
+== The tool-call trace is the point
+
+An agent that fixes your deployment but can't tell you *how* is not a colleague, it is a liability.
+The neutral client this module uses prints, on every run, a *tool-call trace*: each tool the model invoked, the arguments it passed, and the result it got back — followed by the final answer.
+
+That trace is the auditable artifact, and the lab has you *read it and verify the agent's claims yourself*:
+
+* When the agent says "the readiness probe points at the wrong path," the trace shows it actually *called* `resources_get` on the deployment and got that path back — so you can trust the claim, and re-run the same `oc` command to confirm it.
+* When the agent is *denied*, the trace shows the exact `403` the API server returned — proof that the boundary held, not a story the model told.
+
+The discipline is the same one that makes any AI answer trustworthy: *make it show its sources*. For an agent operating your cluster, the sources are the tool calls, and "trust but verify" means reading the trace.
+
+== The Red Hat Lightspeed family — where this fits `[ADS]`
+
+The neutral client here is deliberately generic, so the lesson is about the *platform boundary*, not any one product. In practice Red Hat ships a family of *Lightspeed* assistants, and it helps to know which is which:
+
+[cols="2,1,4",options="header"]
+|===
+| Assistant | Status | What it does
+
+| *OpenShift Lightspeed* | GA | A cluster-console assistant for OpenShift itself — ask it about cluster state and operations in plain language. It can act as an MCP *host*, wiring in MCP servers like the one you use here.
+| *Developer Lightspeed for Red Hat Developer Hub* `[ADS]` | Developer Preview | An in-portal assistant for *non-coding* developer tasks — finding docs, understanding a service, troubleshooting — inside the developer hub.
+| *Developer Lightspeed for MTA* `[ADS]` | GA | In-IDE generative help for *Java modernization* — the assistant that suggests refactors in the Migration Toolkit for Applications (the tool used in the Application Modernization module).
+|===
+
+They differ in *surface* (console vs portal vs IDE) and *job* (operate the cluster vs answer developer questions vs modernize code), but they share this module's spine: an assistant is only ever as powerful as the identity it acts through, and every one of them is governed by the same RBAC you are about to scope by hand.
+
+[NOTE]
+.`[ADD-ON: hosted model usage]`
+====
+The agent needs a *model* to reason. This module reaches one over *Models-as-a-Service* (MaaS) — a shared, OpenAI-compatible endpoint — so nothing runs on a GPU in your cluster.
+That hosted-model dependency is an *add-on*: it is why this module is marked `[ADD-ON]`, and no core `[OCP]` module is allowed to require it. The whole lab is *model-agnostic* — the same client and the same MCP server run against whatever model your cluster serves; only an environment value changes. The captured traces in these pages are from *this cluster's configured model* (`{maas_model}`); yours may differ, and the lesson does not.
+====
+
+== How this shows up in real orgs
+
+* *"Our AI assistant deleted a resource it shouldn't have."* Then it was running as an identity that *could* delete it. The fix is not a better prompt or a stricter setting in the assistant — it is a ServiceAccount scoped so the delete is a `403`. Give agents the least privilege that does the job, and the blast radius is bounded by the platform, not by the model's good behavior.
+* *"We gave the assistant `cluster-admin` to make the demo work."* The single most common mistake. The recipes online often grant `cluster-reader` or worse *cluster-wide*; this module scopes to *one namespace* with a *RoleBinding*, because a shared cluster with per-team tenancy is the real world. If your agent has cluster-wide power, every namespace is one hallucinated tool call from a bad day.
+* *"How do we know what the agent actually did?"* If you can't answer that, you can't run agents in production. Insist on a *tool-call trace* (or server-side audit) for every run, and treat "the agent says it fixed it" as a claim to *verify*, never a fact.
+* *"Read-only mode makes it safe, right?"* No — read-only mode makes it *safer*. A flag in the client is defense in depth; the boundary is the ServiceAccount's RBAC, enforced by the API server underneath the agent. Set the flag *and* scope the identity.
+* *"Should a human still be in the loop?"* For anything that *writes*, yes — and the platform can make that non-negotiable by simply not granting write RBAC until a human decides a task needs it. Read-only agents can run wide; writing agents earn narrow, reviewed grants.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) *the boundary is the ServiceAccount's RBAC*, not the agent's read-only flag — the flag is a seatbelt (name-drop CVE-2026-46519: a sibling server's read-only mode was bypassable), the RBAC is the locked door the API server enforces; (2) *read-only first, scoped write on purpose* — the agent gets eyes for free and hands only when a human grants a namespaced, secret-free write; (3) *the tool-call trace is the audit* — you watch every call and verify the agent's claims yourself.
+The demo is the ~12-minute arc: the agent diagnoses a broken deployment from read-only tools (watch the trace); you grant a scoped write and it patches the one bad field to green; then you ask it to touch a *neighbouring* namespace and *RBAC denies it* on screen — the money moment.
+Close on the line: "your agent is a junior engineer with root, unless you stop it — so you scope it with RBAC, not trust."
+====
+endif::demo[]

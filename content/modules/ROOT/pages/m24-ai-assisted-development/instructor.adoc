@@ -1,0 +1,141 @@
+= AI-Assisted Development on OpenShift: Instructor Guide
+:module-id: m24
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34)
+// in a user3-dev namespace on 2026-07-15 by performing every exercise with the neutral mcp-agent-cli
+// against this cluster's served model: the read-only diagnosis (3 real tool calls), the scoped-write
+// grant + fix, the client read-only filter hiding 6 mutating tools, and the cross-namespace RBAC
+// denial (2 real tool calls, both `is forbidden`) are real captures. Two realities are flagged in
+// Watchouts and reported to the PM: (a) on the build cluster's model the agent NARRATES the large
+// resources_create_or_update write as text instead of executing it — the lab ships a reviewed-and-apply
+// fallback and frames it as the "review the agent" lesson; (b) the optional in-IDE Dev Spaces beat does
+// NOT start cleanly on the build cluster (editor plugin registryUrl) — kept optional, platform follow-up.
+
+This module has two movements, and the join is the whole point.
+The *read-only movement* (exercises 1-2) is *the agent as a diagnostician* — it calls the cluster, you watch the tool-call trace, and you *verify its claims yourself*. Nothing it does can break anything, because the ServiceAccount it acts through can only read.
+The *governed-write movement* (exercises 3-4) is *the agent as an operator under control* — you grant a *scoped* write and it fixes the fault, then you ask it to overstep and *RBAC denies it*. Exercise 4 is the climax the whole module builds to: the denial is enforced by the platform, underneath the agent, not by the agent's own settings.
+
+The single most valuable thing you can reinforce is the *boundary claim*: the security guarantee is *RBAC on the ServiceAccount*, and the agent's read-only flag is defense in depth. Attendees arrive thinking "read-only mode = safe"; the module's job is to move them to "the identity's RBAC = safe, the flag is a bonus."
+
+== Timing
+
+Total hands-on: *~60 min* (spec target 75-90 min; add ~15 min of concept up front — the MCP+ServiceAccount boundary and the two-phase RBAC diagrams — and it lands mid-range).
+
+[cols="1,4,1,3",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Meet the MCP server + connect the agent | ~12 min | reading the scoped SA/RBAC + building the `ask-agent` helper; all `oc` reads *instant*
+| 2 | Diagnose read-only | ~15 min | one `ask-agent` run — the *model round-trip is the wait* (~20-40 s); reading the trace + `oc` verification is the rest
+| 3 | Scoped write + fix + audit | ~18 min | the RBAC grant + server flip are *instant*/~15 s rollout; the fix `ask-agent` run ~30-60 s; reading the audit trail
+| 4 | The forbidden test | ~10 min | one `ask-agent` run (~20-40 s) + the `oc auth can-i --as` matrix (*instant*); the denial is the payoff
+| 5 | In-IDE preview | ~5 min | reading only — optional, no checkpoint
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-15, every exercise was performed in a `user3-dev` namespace with the neutral `mcp-agent-cli` against the cluster's served model.
+The mechanics are *instant*: `oc get`/`auth can-i`/`apply` return in well under a second, and the agent's container image is pull-through-cached (pull ~0.2 s), so each `ask-agent` pod starts immediately.
+*The only real wait is the model round-trip.* A read-only diagnosis (three tool calls) took roughly 20-40 s end to end; the fix and the forbidden test are similar. Budget each `ask-agent` call at up to a minute and tell attendees so they don't think it hung.
+The dominant *attendee* time is reading — the tool-call trace, the `managedFields` audit, and the `is forbidden` denial — not waiting on commands.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user3`.
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m24 --user user3
+ws verify m24 --user user3 --entry-only
+----
++
+Expect the `ws-entry-m24` marker in `user3-dev`; `kubernetes-mcp-server` *1/1*, started `--read-only`, running as the `mcp-agent` ServiceAccount; `parasol-claims` *0/1* with `readinessProbe.httpGet.path=/q/health/reddy`; `mcp-agent` bound *only* to `view` in `user3-dev`; and the `parasol-ai-assist` DevWorkspace `started: false`.
+
+. *The MaaS key is present and valid — the agent needs a model.* *This is the module's one hard runtime dependency (it is why M24 is `[ADD-ON]`).*
++
+[source,sh,role=execute]
+----
+oc get secret maas-credentials -n user3-dev -o jsonpath='has GENAI_API_KEY: {.data.GENAI_API_KEY}{"\n"}' | sed 's/:.*/: (present)/'
+oc get cm maas-config -n user3-dev -o jsonpath='model={.data.model}  endpoint={.data.endpoint}{"\n"}'
+----
++
+Expect a non-empty key and the cluster's model/endpoint. If the key is empty or expired, every `ask-agent` run ends in `error: model authentication failed - check the MaaS key (GENAI_API_KEY); it may be expired.` — re-source the key before the session (the entry-state hook copies it from the platform Lightspeed secret).
+
+. *The neutral CLI image exists in the shared registry.*
++
+[source,sh,role=execute]
+----
+oc get istag mcp-agent-cli:1.0 -n parasol-images -o jsonpath='{.image.dockerImageReference}{"\n"}'
+----
++
+Expect a `…/parasol-images/mcp-agent-cli@sha256:…` digest. If it's missing, the app build hasn't published it; `ask-agent` will `ImagePullBackOff`.
+
+. *Know your cluster's served model — and that tool-calling reliability varies by model.*
++
+[source,sh,role=execute]
+----
+ws smoke m24 --user user3     # runs a read-only ask-agent diagnosis in the live cockpit
+----
++
+The module is *model-agnostic*, but models differ in how reliably they *execute* tool calls versus *narrating* them (see Watchouts). Do a dry run of exercises 2-4 on *your* cluster's model before the session so you know whether the fix in exercise 3 executes directly or lands on the reviewed-and-apply fallback.
+
+. *`mcp-agent` is scoped to ONE namespace — the forbidden test depends on it.*
++
+[source,sh,role=execute]
+----
+oc auth can-i get pods -n user1-dev --as=system:serviceaccount:user3-dev:mcp-agent   # expect: no
+----
++
+Expect *`no`*. If a prior module or a stray `ClusterRoleBinding` gave `mcp-agent` broader reach, exercise 4's denial won't fire — the whole climax depends on the binding being namespaced.
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Run the demo from the entry state, not `ws solve`.*
+The story is *diagnosing and fixing* a broken app. `ws solve m24` renders the finished end state (`parasol-claims` already `1/1`) — use it to *show the destination* or pre-stage, never as the demo's start.
+* *Pre-warm the model.* The first `ask-agent` call of the day can be slower (cold model, key fetch). Run one throwaway diagnosis a minute before you present so the live one is snappy.
+* *Land the denial beat.* Exercise 4 is the whole demo. Read the `is forbidden` line out loud, then the identity in it — `system:serviceaccount:user3-dev:mcp-agent` — and say "it *tried*; the platform said no." Follow with the `oc auth can-i --as` matrix so they see it's the API server, not the agent's manners.
+* *If the model narrates the fix, use it.* When the agent prints the `resources_create_or_update` call as text instead of running it (common on smaller models), don't treat it as a failure — narrate it: "it proposed the exact right patch; now *I* review and apply it." That *is* the human-in-the-loop lesson.
+
+== Top questions attendees ask
+
+*1. "The agent printed the fix as text and made zero tool calls — is it broken?"*::
+No — this is *model behavior*, not a bug, and it's a teaching moment. Models *decide* whether to emit a tool call through the function-calling channel or just describe it in prose; smaller models, and large structured arguments (like a whole deployment manifest), make some of them narrate. The lab anticipates this: you *reviewed* the agent's proposed change, so you apply it with the scoped write you granted. Imperative, decomposed prompts ("get the deployment, then update the path, then confirm") ground far more reliably than terse ones — that's exercise 2's note, made real.
+
+*2. "Why not just give the assistant a kubeconfig or `cluster-admin` so it always works?"*::
+Because then the agent's power is *your* power, and a model that can be wrong or prompt-injected now has it. The entire module is the alternative: a dedicated ServiceAccount, read-only by default, a namespaced write granted per task. The online recipes that grant `cluster-reader` cluster-wide are teaching a *convenience*, not a *posture* — on a shared, multi-team cluster that convenience is an incident waiting to happen.
+
+*3. "Isn't the `--read-only` flag enough to keep it safe?"*::
+It's a seatbelt, not the boundary. A sibling MCP server's read-only mode filtered the *list* of tools but not their *execution* (CVE-2026-46519), so it was bypassable. The durable guarantee is RBAC on the ServiceAccount, enforced by the API server *underneath* the agent — which is why exercise 4's cross-namespace read is a `403` even with writes fully enabled. Set the flag *and* scope the identity.
+
+*4. "The cross-namespace test returned data instead of being denied — what went wrong?"*::
+`mcp-agent` has more than the intended `view`-in-one-namespace binding. Check `oc auth can-i get pods -n <neighbour> --as=system:serviceaccount:<user>-dev:mcp-agent` (pre-flight #5) — it must be `no`. A stray `ClusterRoleBinding`, or a neighbour namespace that granted `mcp-agent` access, breaks the denial. The forbidden test only works because the binding is namespaced and scoped to the attendee's own namespace.
+
+*5. "Which model is this, and will my cluster's model behave the same?"*::
+The module is *model-agnostic* — it runs against whatever model your cluster serves over Models-as-a-Service (surface it with `oc get cm maas-config`). The *security* behavior (RBAC denials, the audit trail, read-only) is identical on every model. What varies is *tool-calling reliability* — how consistently the model executes calls versus narrating them. Do a dry run on your cluster's model (pre-flight #4) so you know whether exercise 3's fix executes directly or uses the reviewed-and-apply fallback.
+
+== Watchouts
+
+* *The fix may narrate instead of execute — plan for it.*
+On the build cluster's model, the agent reliably *diagnoses* (small-argument read calls) but *narrates* the large `resources_create_or_update` write as text — zero executed calls, the correct manifest printed in the answer. The lab ships a reviewed-and-apply fallback and frames it as the review lesson, so the exercise always *completes*; just don't promise attendees the agent will always click "apply" itself. Imperative prompts help; a bigger/better tool-calling model helps more. *This is the module's top delivery variable — dry-run your cluster's model first.*
+* *The in-IDE Dev Spaces beat is an optional preview and may not start.*
+On the build cluster the `parasol-ai-assist` DevWorkspace fails to start with `Error processing devfile: plugin editor does not specify a registryUrl` — the editor is referenced by bare plugin id and needs a `registryUrl`. Exercise 5 is deliberately *read-only, no checkpoint* for this reason; the whole security lesson is exercised from the terminal. *Reported to the PM as a platform-engineer follow-up* (the in-cluster plugin registry `plugin-registry.openshift-devspaces.svc:8080` is available for the fix).
+* *The read-only note changes wording after you flip the server — that's correct.*
+While the server is `--read-only` (entry state), the client filter reports `no mutating tools were offered by the server` (the server never advertised them). Only *after* exercise 3 flips the server off `--read-only` does the client report `hid 6 mutating tools`. Both are right; the client filter only has something to hide once the server offers writes. Don't let attendees think the filter is broken at entry.
+* *MaaS key expiry and quota under an agentic loop.*
+Each `ask-agent` run re-sends the full tool schema and may take several model turns; the per-user MaaS key is short-lived. If a run ends in `model authentication failed`, the key expired — re-source it (pre-flight #2). The `MCP_MAX_STEPS` cap (default 10) bounds runaway loops.
+* *A pushed fix advances the deployment revision counter across a fix/reset cycle.*
+Cosmetic only — `parasol-claims` may show revision 2/3 after a fix or a re-run. The *spec* (the bad probe at entry, the good probe after the fix) is what matters; `ws prep m24 --yes` fully re-materializes.
+
+== Provenance
+
+M24 is a net-new module (spec: "fresh; MCP + kubernetes-mcp-server + Lightspeed docs; ties Multi-Tenancy & Workload Security for the RBAC spine").
+It is marked `[ADD-ON]` for one reason: the agent needs a model, reached over Models-as-a-Service — a hosted-model dependency no core `[OCP]` module may require. Everything *else* it teaches (MCP, ServiceAccounts, RBAC, the internal registry, Dev Spaces) is core OpenShift.
+
+The lab was performed in a `user3-dev` namespace on OpenShift {ocp_version} on 2026-07-15 with the neutral `mcp-agent-cli` against the cluster's served model (model-agnostic; live infra scrubbed): the read-only diagnosis is a real three-tool-call trace (`pods_list_in_namespace` → `resources_get` → `events_list`) that named the wrong probe path `/q/health/reddy`, confirmed against the live `Readiness probe failed … statuscode: 404` event; the scoped `deployer` grant made `oc auth can-i patch deployments --as=…:mcp-agent` flip to `yes` while `get secrets` stayed `no`; with the server flipped off `--read-only` the client filter hid *6* mutating tools; the fix was applied through the `mcp-agent` identity's `resources_create_or_update` (server-side Apply, recorded in `managedFields` as `manager: kubernetes-mcp-server`), taking `parasol-claims` to `1/1`; and the forbidden test is a real two-tool-call trace against `user1-dev`, both returning `pods is forbidden` / `events is forbidden` for `system:serviceaccount:user3-dev:mcp-agent`, with the agent reporting the denial. The MCP server image is digest-pinned; the `--read-only` bypass cited is CVE-2026-46519 (a different, sibling project — not the server used here). The "tools are your APIs / read the tool-call trace / review the agent critically" framing is adapted from `agentops-in-prod-showroom` (credited in `CREDITS.md`); none of its implementation was ported.

@@ -1,0 +1,98 @@
+= AI-Assisted Development on OpenShift: Wrap-up
+:module-id: m24
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You connected an AI assistant to a live OpenShift namespace and *governed* it.
+You met an *OpenShift/Kubernetes MCP server* running as a dedicated, scoped *ServiceAccount* (`mcp-agent`) whose only grant was the read-only `view` role in one namespace — and a *neutral command-line agent* that held no kubeconfig, reaching the cluster only through that server.
+You had the agent *diagnose* a broken claims service *read-only* — and watched it *call the cluster* (`pods_list_in_namespace`, `resources_get`, `events_list`) instead of guessing, then *verified its claims yourself*.
+You made a *human decision* to grant a *scoped write* — patch deployments in one namespace, no secrets, no scale — watched the client's read-only filter *hide the mutating tools* as a seatbelt, and let the agent *fix the one bad field* to green, with an *audit trail* naming exactly who wrote what.
+Then you asked it to reach into a *neighbouring* namespace and watched *RBAC deny it* — the platform, not trust, holding the line.
+
+[mermaid]
+....
+graph LR
+  subgraph eyes["Read-only (eyes)"]
+    d["diagnose the broken app<br/>view role, one namespace<br/>watch the tool-call trace"]
+  end
+  subgraph hands["Scoped write (hands)"]
+    g["you grant patch-deployments<br/>agent fixes one field → 1/1<br/>managedFields audit"]
+  end
+  subgraph wall["The boundary"]
+    f["ask for a neighbour namespace<br/><b>RBAC → 403</b>"]
+  end
+  d --> g --> f
+  note["the flag is a seatbelt · RBAC is the boundary · the trace is the audit"]
+  f -.-> note
+  classDef ro fill:#e8f0fe,stroke:#1967d2,color:#174ea6;
+  classDef rw fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef deny fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef n fill:#f1f3f4,stroke:#5f6368,color:#202124;
+  class d ro; class g rw; class f deny; class note n;
+....
+
+// media-pass: recap SVG m24-ai-assisted-development-03-what-you-built.svg (blue = read-only diagnose; amber = the scoped-write fix; red = the cross-namespace denial). See media-manifest.md.
+
+The one idea under all of it: *an agent's power is the identity it acts through*. Scope that identity with least-privilege RBAC, make every action auditable, and keep a human in the loop for writes — and an AI assistant becomes a safe, useful operator on your platform.
+
+== A team policy for AI agents on your platform
+
+Take this back as the checklist your team applies *before* any AI assistant touches a cluster. Every line is something you performed today.
+
+[cols="1,4",options="header"]
+|===
+| Rule | Why — and how you did it here
+
+| *Read-only first* | Give agents eyes before hands. An assistant that can only `get`/`list`/`watch` can diagnose all day and break nothing. You diagnosed the whole fault before a single write was possible.
+| *The identity is the boundary, not the flag* | Scope a dedicated *ServiceAccount* with least-privilege RBAC; treat the agent's own read-only setting as *defense in depth*. A read-only flag is bypassable (CVE-2026-46519); the API server's RBAC check is not.
+| *Namespace allowlists, never cluster-wide* | Bind roles with *RoleBindings* (namespaced), never `ClusterRoleBinding`/`cluster-reader`. On a shared cluster the agent's blast radius must be one namespace — you watched the neighbour-namespace read get a `403`.
+| *No secrets, ever, unless a task truly needs them* | The `view` role and your `deployer` role both *excluded* Secrets. An agent that can read credentials can leak them; keep that door shut by default.
+| *Writes are a human decision, granted per task* | The scoped write was never pre-granted — *you* added it, deliberately, and gave the *smallest* write that fixed the problem (patch deployments, not `edit`, not scale, not delete).
+| *Every action is auditable* | Insist on a *tool-call trace* (or server-side audit) and read it. You verified the agent's claims with `oc`, and the `managedFields` recorded exactly which manager made each write.
+| *Bound, short-lived credentials* | The only cluster token in the system was the MCP server pod's *projected ServiceAccount token* — automatically rotated, never a long-lived static secret handed to the assistant.
+| *Trust, but verify* | An agent that can't show its work can't be trusted with your cluster. Treat "the agent says it fixed it" as a claim to confirm — you re-ran the `oc` command every time.
+|===
+
+== Map to your org
+
+Take these questions back to how your teams are already using AI assistants:
+
+. *When your engineers paste cluster YAML into a chat assistant, what could that assistant do if it were connected directly?*
+Today it can only read what they paste. The moment it's wired to the cluster, it acts with an identity. Which identity — and is it scoped, or is it whatever kubeconfig happened to be handy?
+. *If an AI assistant made a change to your cluster right now, could you find out what it did?*
+You read a tool-call trace and a `managedFields` audit. Could your team answer "what did the agent change, and when" — or would it be archaeology through someone's terminal history?
+. *Is any assistant in your estate running with more power than its task needs?*
+You gave the agent read-only by default and a single-namespace, single-verb write on purpose. Is there an automation or assistant somewhere with `cluster-admin` "to make it work" — one hallucinated call from a bad day?
+. *Who signs off before an agent writes?*
+Your scoped write was a human decision. Is "an agent may change production" a grant someone reviews, or a default nobody remembers turning on?
+
+== When *not* to reach for this
+
+Connecting an agent to your cluster has failure modes of its own — most of them are over-reach:
+
+* *Don't hand an agent a broad kubeconfig or `cluster-admin` "just for the demo."*
+The most common and most dangerous shortcut. A powerful identity plus a model that can be wrong or *steered* (prompt injection through a log line it reads) is a real incident waiting to happen. Scope a dedicated ServiceAccount; if the demo needs cluster-admin, the demo is wrong.
+* *Don't rely on the assistant's read-only mode as your safety.*
+It is a seatbelt, not a locked door. If read-only is the *only* thing standing between the agent and a delete, you have no boundary — you have a setting. Back every flag with RBAC that makes the forbidden action a `403`.
+* *Don't give an agent write access it doesn't currently need.*
+Read-only agents can run wide and often. A *writing* agent earns a narrow, reviewed, per-task grant — and gives it back. Standing write access to a shared cluster, held by an automated assistant, is the thing to avoid.
+* *Don't let an agent operate without an audit trail.*
+If you can't reconstruct what the agent did, you can't run it in production, full stop. No trace, no server-side audit, no accountability — no agent.
+* *Don't skip the human for irreversible actions.*
+Deleting namespaces, rotating secrets, scaling production to zero — these are not "let the agent try it." Keep a person in the loop, and let the platform enforce it by simply not granting that RBAC to the agent's identity.
+
+== Go deeper
+
+* *The Model Context Protocol* — how an MCP server advertises *tools* (name, arguments, result) and how a client discovers and calls them; the community *kubernetes-mcp-server* and Red Hat's *MCP server for OpenShift* (its read-only-by-default, `denied_resources`, and OAuth/token-exchange direction).
+* *Kubernetes RBAC for non-human identities* — ServiceAccounts, `Role` vs `ClusterRole`, `RoleBinding` vs `ClusterRoleBinding`, the built-in `view`/`edit`/`admin` roles, custom least-privilege roles with `resourceNames`, and projected bound ServiceAccount tokens (ties the Multi-Tenancy & Workload Security module).
+* *The Red Hat Lightspeed family* — *OpenShift Lightspeed* for the cluster console (and as an MCP host), *Developer Lightspeed for Red Hat Developer Hub* `[ADS]` for in-portal developer questions, and *Developer Lightspeed for MTA* `[ADS]` for in-IDE Java modernization — same RBAC-governed spine, different surfaces.
+* *Prompt injection and agent safety* — how untrusted content an agent reads (a log line, an annotation, a file) can try to steer it, and why least-privilege RBAC plus human-in-the-loop for writes is the durable defense, not prompt hygiene alone.
+* *Agent observability* — turning each model call and MCP tool call into an OpenTelemetry span for a Tempo trace, the production version of the printed tool-call trace (ties the Observability module).
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — the broken `parasol-claims` (probe `/q/health/reddy`, `0/1`), the MCP server back to `--read-only`, and `mcp-agent` back to `view`-only (your `deployer` grant removed) — run `ws prep {module-id} --yes`.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

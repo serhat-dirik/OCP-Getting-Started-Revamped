@@ -1,0 +1,102 @@
+= AI-Assisted Development on OpenShift: Troubleshooting
+:module-id: m24
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-15 in a
+// user3-dev namespace) plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use
+// $NS = {user}-dev (set it once). NAMESPACE in output is the sample user user3-dev.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcuts first: `NS={user}-dev` and `export AGENT_CLI_IMAGE=$(oc get cm ws-entry-m24 -n $NS -o jsonpath='{.data.agentCliImage}')`.
+
+== The agent answered but made *zero* tool calls (a tool call appears as text)
+
+Symptom:: `TOOL-CALL TRACE (0 calls)  (the model answered without calling any tools)`, and the `ANSWER` contains something like `[pods_list_in_namespace(namespace="user3-dev"),]` — a tool call printed as *text* instead of executed.
+Cause:: The model *narrated* the call rather than emitting it through the function-calling channel. Models decide whether to call a tool, and terse phrasing ("why is X broken?") or a large structured argument (a whole deployment manifest) make some models describe the call instead of making it. This is model behavior, not a broken agent — it's the "grounding is engineered, not guaranteed" lesson.
+Fix:: Phrase the prompt *imperatively and decomposed* — tell it what to inspect, in order:
++
+[source,sh,role=execute]
+----
+ask-agent "Inspect namespace $NS. List the pods in that namespace, get the parasol-claims deployment, and read the recent events. Then explain in one sentence why parasol-claims is not Ready."
+----
++
+For a *write* the model narrates (it prints a `resources_create_or_update(...)` block and changes nothing), you've *reviewed* the proposed change — apply it with the scoped write you granted: `oc patch deploy parasol-claims -n $NS --type=json -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/q/health/ready"}]'`.
+
+== `ask-agent: command not found`, or the pod fails with an empty image
+
+Symptom:: `ask-agent: command not found`, or the agent pod won't schedule because its image is empty.
+Cause:: The helper isn't on `PATH` for this shell, or `AGENT_CLI_IMAGE` wasn't exported (a new terminal tab doesn't inherit it).
+Fix:: Re-establish both in the current shell:
++
+[source,sh,role=execute]
+----
+export AGENT_CLI_IMAGE=$(oc get cm ws-entry-m24 -n $NS -o jsonpath='{.data.agentCliImage}')
+export PATH="$PWD:$PATH"        # ask-agent lives in the directory you created it in
+ask-agent "list the pods in $NS"
+----
++
+Confirm the image resolved: `echo "$AGENT_CLI_IMAGE"` should print a `…/parasol-images/mcp-agent-cli:…` reference, not an empty line.
+
+== `error: model authentication failed - check the MaaS key`
+
+Symptom:: An `ask-agent` run prints its (possibly empty) trace, then `error: model authentication failed - check the MaaS key (GENAI_API_KEY); it may be expired.` and exits non-zero.
+Cause:: The Models-as-a-Service key the agent uses (mounted from the `maas-credentials` Secret) is *empty or expired*. Per-user MaaS keys are short-lived; the agent degrades gracefully to this one clean line instead of a stack trace.
+Fix:: Confirm the key is present, then re-materialize it if needed (the entry-state hook re-sources it from the platform):
++
+[source,sh,role=execute]
+----
+oc get secret maas-credentials -n $NS -o jsonpath='{.data.GENAI_API_KEY}' | wc -c   # 0 or 1 = empty
+ws prep {module-id}     # re-runs the credential hook to refresh the key
+----
++
+If the key is present and still 401s, the platform's MaaS entitlement or endpoint changed — tell your instructor; this is the module's one `[ADD-ON]` (hosted-model) dependency.
+
+== The forbidden test returned data instead of `is forbidden`
+
+Symptom:: In exercise 4, the agent *successfully* lists the neighbouring namespace's pods instead of being denied — no `is forbidden` in the trace.
+Cause:: `mcp-agent` has *broader* RBAC than the intended single-namespace `view` — usually a stray `ClusterRoleBinding`, or the neighbour namespace granted it access. The denial only fires because the binding is namespaced to *your* namespace.
+Fix:: Ask the API server directly what `mcp-agent` can reach, and inspect its bindings:
++
+[source,sh,role=execute]
+----
+oc auth can-i get pods -n user1-dev --as=system:serviceaccount:$NS:mcp-agent   # expect: no
+oc get clusterrolebindings -o json | jq -r '.items[] | select(.subjects[]?.name=="mcp-agent") | .metadata.name'
+----
++
+`oc auth can-i` must print `no`. If it prints `yes`, or the second command lists a `ClusterRoleBinding`, the scope is too wide — this is a platform/entry-state issue (the entry state binds `mcp-agent` to `view` with a *namespaced* RoleBinding only); tell your instructor rather than editing cluster-wide RBAC.
+
+== The read-only note says "no mutating tools were offered by the server"
+
+Symptom:: In exercise 2 the read-only note reads `read-only: no mutating tools were offered by the server.` — but you expected it to say `hid 6 mutating tools`.
+Cause:: This is *correct* at entry. The MCP server starts `--read-only`, so it never *advertises* mutating tools — the client filter has nothing to hide. The `hid 6 mutating tools` message only appears *after* exercise 3 flips the server off `--read-only`, when the server offers writes and the client's filter hides them.
+Fix:: Nothing to fix — it's the two-layer design showing through. To see the `hid 6` message, complete exercise 3's server flip (`oc patch deploy kubernetes-mcp-server …` removing `--read-only`) and re-run a read-only `ask-agent`.
+
+== The agent's write was denied with `cannot update resource "deployments/scale"`
+
+Symptom:: You asked the agent (`--allow-writes`) to *scale* `parasol-claims` and the trace shows `resources_scale` returning `... cannot update resource "deployments/scale" in API group "apps" ...`.
+Cause:: This is *correct* least-privilege. The `deployer` Role you granted covers `update`/`patch` on `deployments`, but *not* the `deployments/scale` subresource — scaling is a distinct RBAC action. A write grant is granular, not a blank cheque.
+Fix:: Nothing to fix — it's the boundary working *inside* your own namespace. Fix the probe (a `patch` on the deployment, which *is* granted) instead of scaling. If you genuinely want the agent to scale, add `resources: ["deployments/scale"]` to the `deployer` Role — deliberately, as another human grant.
+
+== `parasol-claims` is still `0/1` right after the fix (two ReplicaSets)
+
+Symptom:: The fix applied, but `oc get pods` briefly shows *two* `parasol-claims` pods — one `0/1` and one `1/1` — and the deployment hovers.
+Cause:: A rolling update: the new (fixed-probe) pod must pass readiness before the old (bad-probe) pod is retired. For a few seconds both exist.
+Fix:: Wait for the rollout to settle, then confirm a single Ready pod:
++
+[source,sh,role=execute]
+----
+oc rollout status deploy/parasol-claims -n $NS --timeout=90s
+oc get pods -n $NS -l app=parasol-claims
+----
++
+You should end with one `1/1 Running` pod. If the *new* pod stays `0/1`, the probe path is still wrong — re-check `oc get deploy parasol-claims -n $NS -o jsonpath='{.spec.template.spec.containers[0].readinessProbe.httpGet.path}'` reads `/q/health/ready`.
+
+== The Dev Spaces workspace won't start (`plugin editor does not specify a registryUrl`)
+
+Symptom:: In the optional exercise 5, starting the `parasol-ai-assist` DevWorkspace fails with `Error processing devfile: plugin editor does not specify a registryUrl`.
+Cause:: The workspace's editor is referenced by bare plugin id, and this cluster's DevWorkspace controller needs an explicit plugin `registryUrl` to resolve it.
+Fix:: This is a *platform* gap, not something to fix in your namespace — the in-IDE beat is an *optional preview*, and the entire security lesson is exercised from the terminal (exercises 1-4). Tell your instructor; the fix (adding the Dev Spaces plugin-registry URL to the workspace's editor contribution) is a platform-engineer action, not an attendee one.
+
+'''
+
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-15)._
