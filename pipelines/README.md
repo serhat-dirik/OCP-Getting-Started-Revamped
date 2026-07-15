@@ -57,12 +57,15 @@ namespace. The run builds from the shared `parasol/parasol-claims` repo in the i
 
 ## Notes verified on-cluster (OCP 4.21.22 / OpenShift Pipelines 1.22.4)
 
-- **Memory:** the Maven-heavy steps (`unit-test`, `build-image`) get 1.5Gi/2Gi via the PipelineRun's
-  `taskRunSpecs` — above the 1Gi namespace LimitRange default — so the Quarkus build does not OOMKill.
+- **Memory:** the `-cicd` namespace default container limit is sized (2Gi) for the Maven-heavy steps
+  (`unit-test`, `build-image`) in `gitops/workshop-config/templates/per-user-limits.yaml`, so a plain
+  run — the console *Actions → Start* form, `tkn pipeline start`, or a PaC push — needs no per-task
+  `taskRunSpecs` and does not OOMKill. (Historically these steps carried per-run `taskRunSpecs`.)
 - **JDK:** the bundled `maven` task is pinned to a JDK 17 image with no image param, so it cannot
   build this JDK 21 app; the curated `maven-jdk21` library Task is why.
-- **Deploy target:** the pipeline deploys into its own `-cicd` namespace to stay self-contained. The
-  parasol-claims prod profile needs a PostgreSQL datasource, so the M07 entry state must provide a
+- **Deploy target + Route:** the pipeline deploys into its own `-cicd` namespace to stay self-contained,
+  and its `deploy` step creates the Service and an edge-terminated Route itself (no hand `oc expose`).
+  The parasol-claims prod profile needs a PostgreSQL datasource, so the M07 entry state must provide a
   `claims-db` in the target namespace (reuse the M04/M05 pattern) for a healthy end state.
 - **PaC `pipelineRef` must use the cluster resolver.** `.tekton/pull-request.yaml` resolves the
   in-namespace Pipeline via `resolver: cluster` (kind/name/namespace=`{{ target_namespace }}`), NOT a

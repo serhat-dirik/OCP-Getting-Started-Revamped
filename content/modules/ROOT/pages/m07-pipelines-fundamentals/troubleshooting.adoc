@@ -22,9 +22,11 @@ You can confirm progress at any point with `tkn pipelinerun describe --last -n $
 == The build dies mid-`mvn` with `OutOfMemoryError` / the Task is `OOMKilled`
 
 Symptom:: `unit-test` or `build-image` fails partway through the Maven build; `oc describe` on the Pod shows `Reason: OOMKilled`.
-Cause:: The build Pod inherited the namespace's default memory limit (1 Gi from the workshop LimitRange), and the Quarkus/Maven build needs more.
-This happens if you write your *own* PipelineRun and leave out the memory overrides.
-Fix:: Set more memory for the Maven-heavy Tasks in the PipelineRun's `taskRunSpecs` (the lab's PipelineRun already does this):
+Cause:: A build Pod hit its memory limit before the Quarkus/Maven build finished.
+The `{user}-cicd` namespace default container limit is sized for these builds, so a normal run — the console *Actions → Start* form, `tkn pipeline start`, or a Pipelines-as-Code push — does *not* OOM.
+You only see this if a run *lowered* a Task's memory below what the build needs (an explicit `taskRunSpecs`/`computeResources` set too small), or the pipeline ran in a different namespace that is not sized for builds.
+Fix:: Start the run the normal way — *Actions → Start*, or `tkn pipeline start … --use-param-defaults` — and let each Task inherit the namespace default; do not add a smaller per-Task memory override.
+If you must run the pipeline in a namespace that is not build-sized, raise the Maven-heavy Tasks in the PipelineRun's `taskRunSpecs`:
 +
 [source,yaml]
 ----
@@ -142,6 +144,22 @@ oc get pvc -n $NS
 ws reset {module-id}     # clears PipelineRuns, their PVCs, and the deployed app
 ----
 
+== The app has no Route after a green run
+
+Symptom:: The pipeline finished `Succeeded` and `parasol-claims` is deployed, but `oc get route parasol-claims` finds nothing (or the browser URL does not resolve).
+Cause:: The `deploy` step creates the Service and the edge Route at the *very end*, after `oc rollout status`.
+If the rollout timed out, or you are looking in a different namespace, the Route-creation line may not have run.
+Fix:: The `deploy` step prints `parasol-claims is live at https://…` when it created the Route — read that step's log, then confirm the Route:
++
+[source,sh,role=execute]
+----
+tkn pipelinerun logs --last -n $NS | sed -n '/parasol-claims is live/p'
+oc get route parasol-claims -n $NS
+----
++
+If the Route is genuinely absent, re-run the pipeline (*Actions → Start*); the `deploy` step is idempotent and creates it.
+You never run `oc expose` by hand — the pipeline owns the Route.
+
 == The deployed `parasol-claims` Pod is `CrashLoopBackOff` after a run
 
 Symptom:: The `deploy` Task finished, but the `parasol-claims` Pod restarts; its logs mention a datasource or connection error.
@@ -158,4 +176,4 @@ The pipeline's `deploy` step wires the app to `claims-db` automatically when the
 
 '''
 
-_Last verified on OpenShift {ocp_version} / OpenShift Pipelines {pipelines_version} (2026-07-10)._
+_Last verified on OpenShift {ocp_version} / OpenShift Pipelines {pipelines_version} (2026-07-15)._

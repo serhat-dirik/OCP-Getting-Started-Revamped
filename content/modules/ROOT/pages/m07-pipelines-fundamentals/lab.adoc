@@ -6,10 +6,12 @@ include::partial$version-attributes.adoc[]
 // presenter arc. Every command runs in the Showroom Terminal as {user}, so blocks are
 // [source,sh,role=execute]. To avoid AsciiDoc attribute-substitution eating jsonpath braces, the
 // FIRST block sets NS={user}-cicd (subs=attributes, no braces) and later oc/tkn blocks use $NS with
-// NO subs — so `{.status...}` stays literal (same idiom as m06). All commands, outputs, and timings
-// were performed on OCP {ocp_version} / OpenShift Pipelines {pipelines_version} as user6 on
-// 2026-07-10: anatomy run 12m54s Succeeded (image 391 MB), break-fix RED at unit-test in 2m47s with
-// build SKIPPED, revert GREEN, and a live PaC git-push fire.
+// NO subs — so `{.status...}` stays literal (same idiom as m06). The console-first rework was
+// re-grounded on user2 (OCP {ocp_version} / OpenShift Pipelines {pipelines_version}): the console
+// Actions -> Start path (a plain run, no taskRunSpecs) OOMed at unit-test under the old 1Gi -cicd
+// default and Succeeded through the build under the 2Gi default now in per-user-limits.yaml
+// (unit-test 5m34s, build-image 6m56s, image-report 10s); the deploy step creates the app's edge
+// Route itself, so the attendee never runs oc expose.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -132,7 +134,7 @@ endif::demo[]
 // ============================================================================
 ifndef::demo[]
 
-== 1. Run the build-test-deploy pipeline
+== 1. Run the build-test-deploy pipeline from the console
 ⏱ *~20 min* · start it early, then read how it is wired while it builds
 
 Your project already has a Pipeline — `parasol-claims-build-test-deploy` — that the platform team seeded.
@@ -214,69 +216,71 @@ deploy -> resolver=cluster openshift-client/openshift-pipelines
 Every Task is a `resolver: cluster` reference: three from the shipped catalog (`openshift-pipelines`) and two from Parasol's curated library (`parasol-tasks`).
 That is the three reuse layers from the concept, in one output — and you explore both libraries in the next exercise.
 
-Now *run* it.
-A PipelineRun is one execution; this one attaches a fresh PersistentVolumeClaim as the shared workspace and raises memory for the two Maven-heavy steps above the namespace default (a Quarkus build needs more than the 1&nbsp;Gi a container gets by default, or it is killed mid-build):
+Now *run* it — straight from the console, no hand-built YAML.
+A PipelineRun is one execution: the *Start* form pre-fills the Pipeline's four parameters and asks only for the shared *workspace* — a fresh PersistentVolumeClaim that carries the checkout from one Task to the next.
 
-// [CAPTURE-VERIFY] masthead "+" (Quick create) > "Import YAML"; Pipelines > PipelineRuns list + PipelineRun graph/Logs (OCP 4.21) — CLI heredoc authoritative.
+// [CAPTURE-VERIFY] Pipelines > Pipelines > parasol-claims-build-test-deploy > Actions > Start: the Start form pre-fills git-url/git-revision/image/max-size-mb and a Workspaces section; set shared-workspace = VolumeClaimTemplate; Start — CLI 'tkn pipeline start' authoritative.
 [tabs]
 ====
 Console::
 +
 --
-Use the masthead *+* (*Quick create*) → *Import YAML*, paste the PipelineRun manifest from the *CLI* tab, and click *Create*.
-Then open *Pipelines* → *PipelineRuns* and click the new `parasol-claims-run-…` run: the five Tasks fill in as a graph, and clicking any Task node streams its *Logs*.
+. With the `parasol-claims-build-test-deploy` Pipeline open, click *Actions* → *Start*.
+. The *Start Pipeline* form opens with every parameter *already filled in* — leave them as they are:
++
+* *git-url* — the shared Parasol repo,
+* *git-revision* — `main`,
+* *image* — your namespace's registry path,
+* *max-size-mb* — `500`.
+. Under *Workspaces*, set *shared-workspace* to *VolumeClaimTemplate* — a fresh PVC for this run, pruned when the run is deleted.
+. Click *Start*.
++
+The console opens the new PipelineRun and draws it as a *graph*; the five Tasks fill in left to right as they run.
+--
+CLI::
++
+--
+`tkn pipeline start` is the CLI twin of *Actions → Start* — `--use-param-defaults` takes the same pre-filled parameters:
 
-[NOTE]
-.Import YAML, not the *Start* button
-=====
-Create the run from *Import YAML* (which takes the whole manifest), *not* from the Pipeline's *Actions → Start* form.
-This run raises per-Task memory for the Maven steps (the `taskRunSpecs` in the manifest), and the *Start* form cannot set that — a run started without it is killed mid-build.
-=====
+[source,sh,role=execute]
+----
+# a small file describing this run's shared workspace (a fresh per-run PVC)
+cat > /tmp/vct.yaml <<'EOF'
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 1Gi}
+EOF
+tkn pipeline start parasol-claims-build-test-deploy -n $NS \
+  --use-param-defaults \
+  --serviceaccount pipeline \
+  --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
+  --showlog
+----
+--
+====
+
+The first run downloads Maven dependencies *twice* — once for the test, once inside the image build — so expect *roughly 10–14 minutes*.
+Watch it fill in on the console graph, or stream the step logs from the terminal — clicking a Task node shows exactly what that Task is doing:
+
+// [CAPTURE-VERIFY] Pipelines > PipelineRuns > <run>: the graph; clicking a Task node opens that Task's step Logs — CLI 'tkn pipelinerun logs' authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Pipelines* → *PipelineRuns* and click your run.
+The graph shows the five Tasks; click any Task node to stream that Task's *step logs* in place.
 --
 CLI::
 +
 --
 [source,sh,role=execute]
 ----
-oc create -n $NS -f - <<'EOF'
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  generateName: parasol-claims-run-
-spec:
-  pipelineRef:
-    name: parasol-claims-build-test-deploy
-  taskRunTemplate:
-    serviceAccountName: pipeline      # operator-provided SA: can push images + deploy here
-  workspaces:
-    - name: shared-workspace
-      volumeClaimTemplate:            # one PVC per run, auto-pruned with the run
-        spec:
-          accessModes: [ReadWriteOnce]
-          resources:
-            requests:
-              storage: 1Gi
-  taskRunSpecs:                       # more memory than the 1Gi namespace default for the builds
-    - pipelineTaskName: unit-test
-      computeResources:
-        requests: {memory: 1Gi}
-        limits: {memory: 1536Mi}
-    - pipelineTaskName: build-image
-      computeResources:
-        requests: {memory: 1536Mi}
-        limits: {memory: 2Gi}
-EOF
+tkn pipelinerun logs --last -f -n $NS
 ----
 --
 ====
-
-Follow it live.
-The first run downloads Maven dependencies *twice* — once for the test, once inside the image build — so expect it to take *roughly 10–14 minutes*; the logs stream the whole way:
-
-[source,sh,role=execute]
-----
-tkn pipelinerun logs --last -f -n $NS
-----
 
 [TIP]
 .Use the wait — do exercise 2 now
@@ -287,16 +291,16 @@ Come back when the logs show `deploy` finishing.
 You can re-attach any time with `tkn pipelinerun logs --last -f -n $NS`, or watch the steps in the console under *Pipelines → PipelineRuns*.
 ====
 
-When the run finishes, read what it produced.
+When the run finishes, read what it produced — you never leave the run's page.
 First the *results* — the data the pipeline published, not just the image:
 
-// [CAPTURE-VERIFY] Pipelines > PipelineRuns > <run> Details "Results" section listing image-size-mb / image-within-budget (OCP 4.21) — CLI 'tkn pipelinerun describe' authoritative.
+// [CAPTURE-VERIFY] Pipelines > PipelineRuns > <run> Details: the "Results" section lists image-size-mb / image-within-budget — CLI 'tkn pipelinerun describe' authoritative.
 [tabs]
 ====
 Console::
 +
 --
-On your finished run's page (*Pipelines* → *PipelineRuns* → your run), the *Results* section lists what the Pipeline published: `image-size-mb` = `391` and `image-within-budget` = `true`.
+On your finished run's *Details* page (*Pipelines* → *PipelineRuns* → your run), the *Results* section lists what the Pipeline published: `image-size-mb` and `image-within-budget` = `true`.
 --
 CLI::
 +
@@ -318,33 +322,45 @@ Results
 --
 ====
 
-The `image-report` Task measured your freshly built image at 391&nbsp;MB and confirmed it fits the 500&nbsp;MB budget — a *fact the pipeline computed*, surfaced at the run level.
-Now confirm the app the `deploy` step rolled out is real and database-backed.
-The pipeline created the Deployment and wired it to the `claims-db` in your project; expose it and call it:
+The `image-report` Task measured your freshly built image and confirmed it fits the 500&nbsp;MB budget — a *fact the pipeline computed*, surfaced at the run level.
 
+Now reach the app — and notice you do *nothing* to publish it.
+The `deploy` step already created the Deployment, wired it to the `claims-db` in your project, *and published it for the browser*: a Service and an edge-terminated Route.
+There is no `oc expose` to run — the pipeline owns the Route.
+Read the Route the pipeline created and call the app:
+
+// [CAPTURE-VERIFY] Networking > Routes > parasol-claims: Location is the HTTPS URL — CLI 'oc get route' authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Networking* → *Routes* (project `{user}-cicd`) and click `parasol-claims`; its *Location* is the app's HTTPS URL.
+Open it and append `/api/claims` to see the seeded claims.
+--
+CLI::
++
+--
 [source,sh,role=execute]
 ----
-oc expose deployment/parasol-claims -n $NS
-oc create route edge parasol-claims --service=parasol-claims -n $NS --port=8080 --insecure-policy=Allow
 ROUTE=$(oc get route parasol-claims -n $NS -o jsonpath='{.spec.host}')
-# --retry-all-errors also rides the brief 503 while the router programs the Route and the app
-# finishes its cold start (up to ~2 minutes on the first deploy)
-curl -s --retry 30 --retry-connrefused --retry-all-errors --retry-delay 3 --retry-max-time 120 "http://$ROUTE/api/claims" | head -c 200; echo
+# --retry-all-errors rides the brief 503 while the router programs the Route
+curl -sk --retry 20 --retry-connrefused --retry-all-errors --retry-delay 3 --retry-max-time 90 "https://$ROUTE/api/claims" | head -c 200; echo
 ----
 
 .Expected output
 [source,texinfo]
 ----
-service/parasol-claims exposed
-route.route.openshift.io/parasol-claims created
 [{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,...
 ----
+--
+====
 
-A service that you built, tested, and deployed with *one pipeline* is now serving Parasol's seeded claims.
+A service that you built, tested, and deployed with *one pipeline* — and that the pipeline itself published — is now serving Parasol's seeded claims, with no `oc expose` from you.
 
 [.checkpoint]
 ****
-✔ *Verify:* `tkn pipelinerun list -n $NS` shows your run `Succeeded`; `tkn pipelinerun describe --last` shows `image-within-budget: true`; and `curl .../api/claims` returns the seeded claims (the deployed app is up and database-backed).
+✔ *Verify:* Your run shows `Succeeded` (*PipelineRuns*, or `tkn pipelinerun list -n $NS`); its *Results* show `image-within-budget: true`; and the *pipeline-created* Route serves the seeded claims (`curl .../api/claims`, or open the Route under *Networking → Routes*) — you never ran `oc expose`.
 ****
 
 == 2. Explore the company task library
@@ -443,7 +459,7 @@ The point is that it lives in the *shared library*, so every Parasol pipeline ge
 .`ClusterTask` is gone — the resolver is how you share Tasks now
 ====
 Older Tekton shared Tasks cluster-wide with a `ClusterTask` kind.
-It was removed in OpenShift Pipelines 1.17 (this cluster runs {pipelines_version}), so it does not exist here.
+It has since been removed from OpenShift Pipelines (this cluster runs {pipelines_version}), so it does not exist here.
 The *cluster resolver* you have been reading — `resolver: cluster` with `name` and `namespace` — is its supported replacement, and it is strictly better: Tasks live in a normal namespace with normal RBAC, and you reference the exact one you want.
 ====
 
@@ -487,14 +503,15 @@ If you did the Dev Spaces module you can make the same edit there and `git push`
 Now run the pipeline against *your fork* (not the shared default).
 This is why `git-url` is a parameter — the same Pipeline builds any repository:
 
-// [CAPTURE-VERIFY] "Import YAML"; Pipelines > PipelineRuns graph goes red at unit-test (OCP 4.21) — CLI heredoc authoritative.
+// [CAPTURE-VERIFY] Pipelines > parasol-claims-build-test-deploy > Actions > Start: change the git-url param to the fork URL; Start; PipelineRuns graph goes red at unit-test — CLI 'tkn pipeline start -p git-url=…' authoritative.
 [tabs]
 ====
 Console::
 +
 --
-Use the masthead *+* (*Quick create*) → *Import YAML* and paste the manifest from the *CLI* tab, but set the `git-url` value to your fork's in-cluster address: `http://gitea.gitea.svc:3000/{user}/parasol-claims.git`.
-Click *Create*, then open the new run under *Pipelines* → *PipelineRuns*: the graph goes *red at `unit-test`* and never reaches the build.
+Open the `parasol-claims-build-test-deploy` Pipeline → *Actions* → *Start* again.
+This time change the *git-url* parameter to your fork's in-cluster address — `http://gitea.gitea.svc:3000/{user}/parasol-claims.git` — set *shared-workspace* to *VolumeClaimTemplate*, and click *Start*.
+Open the new run under *Pipelines* → *PipelineRuns*: the graph goes *red at `unit-test`* and never reaches the build.
 --
 CLI::
 +
@@ -503,30 +520,18 @@ CLI::
 ----
 # your fork's in-cluster URL, derived from $NS — no typing your username
 FORK="http://gitea.gitea.svc:3000/${NS%-cicd}/parasol-claims.git"
-oc create -n $NS -f - <<EOF
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  generateName: parasol-claims-fork-
+cat > /tmp/vct.yaml <<'EOF'
 spec:
-  pipelineRef:
-    name: parasol-claims-build-test-deploy
-  params:
-    - {name: git-url, value: "$FORK"}
-  taskRunTemplate:
-    serviceAccountName: pipeline
-  workspaces:
-    - name: shared-workspace
-      volumeClaimTemplate:
-        spec:
-          accessModes: [ReadWriteOnce]
-          resources: {requests: {storage: 1Gi}}
-  taskRunSpecs:
-    - pipelineTaskName: unit-test
-      computeResources: {requests: {memory: 1Gi}, limits: {memory: 1536Mi}}
-    - pipelineTaskName: build-image
-      computeResources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
 EOF
+# same Actions -> Start, with the git-url param pointed at your fork
+tkn pipeline start parasol-claims-build-test-deploy -n $NS \
+  --use-param-defaults \
+  -p git-url="$FORK" \
+  --serviceaccount pipeline \
+  --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
+  --showlog
 ----
 --
 ====
@@ -596,13 +601,13 @@ The broken change could not become a running image.
 Back in the Gitea tab, edit `ClaimResourceTest.java` again, flip the toggle from `false` back to `true`, and *Commit Changes* to `main`.
 Then re-run against your fork:
 
-// [CAPTURE-VERIFY] "Import YAML"; Pipelines > PipelineRuns graph goes green through deploy (OCP 4.21) — CLI heredoc authoritative.
+// [CAPTURE-VERIFY] Pipelines > parasol-claims-build-test-deploy > Actions > Start: git-url = fork URL; Start; PipelineRuns graph goes green through deploy — CLI 'tkn pipeline start -p git-url=…' authoritative.
 [tabs]
 ====
 Console::
 +
 --
-As before, *+* (*Quick create*) → *Import YAML*, paste the manifest from the *CLI* tab with `git-url` set to `http://gitea.gitea.svc:3000/{user}/parasol-claims.git`, and *Create*.
+As before, open the Pipeline → *Actions* → *Start*, set *git-url* to `http://gitea.gitea.svc:3000/{user}/parasol-claims.git`, set *shared-workspace* to *VolumeClaimTemplate*, and *Start*.
 Watch the new run under *Pipelines* → *PipelineRuns*: this time `unit-test` goes *green* and the graph continues into `build-image`.
 --
 CLI::
@@ -611,30 +616,17 @@ CLI::
 [source,sh,role=execute]
 ----
 FORK="http://gitea.gitea.svc:3000/${NS%-cicd}/parasol-claims.git"
-oc create -n $NS -f - <<EOF
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  generateName: parasol-claims-fork-
+cat > /tmp/vct.yaml <<'EOF'
 spec:
-  pipelineRef:
-    name: parasol-claims-build-test-deploy
-  params:
-    - {name: git-url, value: "$FORK"}
-  taskRunTemplate:
-    serviceAccountName: pipeline
-  workspaces:
-    - name: shared-workspace
-      volumeClaimTemplate:
-        spec:
-          accessModes: [ReadWriteOnce]
-          resources: {requests: {storage: 1Gi}}
-  taskRunSpecs:
-    - pipelineTaskName: unit-test
-      computeResources: {requests: {memory: 1Gi}, limits: {memory: 1536Mi}}
-    - pipelineTaskName: build-image
-      computeResources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
 EOF
+tkn pipeline start parasol-claims-build-test-deploy -n $NS \
+  --use-param-defaults \
+  -p git-url="$FORK" \
+  --serviceaccount pipeline \
+  --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
+  --showlog
 ----
 --
 ====

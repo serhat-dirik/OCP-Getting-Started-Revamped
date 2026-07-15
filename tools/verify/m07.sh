@@ -6,7 +6,8 @@
 #          library is reachable (image-size-report present).
 #   End:   parasol-claims Deployment ready (the pipeline built it AND it is wired to
 #          claims-db, so it is up — no CrashLoop) · a parasol-claims image was built
-#          (ImageStream present).
+#          (ImageStream present) · the pipeline created the browser Route itself
+#          (edge Route present — the attendee never runs `oc expose`).
 # End checks are outcome-based (satisfied by an attendee's real pipeline run AND by
 # `ws solve`'s launched run) — they assert a running, DB-backed, pipeline-built app.
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
@@ -75,6 +76,7 @@ if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / solve looks like) -------------------
   check "parasol-claims deployment ready in ${NS}"        deploy_ready parasol-claims "$NS"                  || hint "run the pipeline (ws solve m07 --user ${USER_NAME}); it deploys + wires the app to claims-db"
   check "parasol-claims image built (ImageStream present)" oc get imagestream parasol-claims -n "$NS"        || hint "the build-image step pushes here — run the build-test-deploy pipeline"
+  check "parasol-claims Route created by the pipeline in ${NS}" oc get route parasol-claims -n "$NS"         || hint "the deploy step creates the edge Route itself — run the pipeline (ws solve m07 --user ${USER_NAME}); attendees never run oc expose"
 fi
 
 verify_summary

@@ -20,7 +20,7 @@ In this module you turn that manual sequence into a *pipeline* — a versioned, 
 * The *anatomy of a pipeline* — Tasks, a Pipeline, and a PipelineRun — and the three inputs/outputs that make Tasks reusable: *parameters*, *workspaces*, and *results*.
 * The three *reuse layers* — shipped catalog Tasks, a curated *organization library*, and your app's own Pipeline — and how the *cluster resolver* wires them together.
 * *Why platform teams curate a task library*, shown by a concrete gap: the shipped `maven` Task cannot build this app, so Parasol curated one that can.
-* *Pipelines-as-Code* — the pipeline definition lives *with the code*, and a Git push fires it — so every change is built the same way, automatically.
+* That *how a pipeline runs is a set of deliberate choices* — who owns it, what triggers it (every push versus a nightly schedule), and where its definition lives — and you wire one of them, *Pipelines-as-Code*, where a Git push builds the pushed commit.
 * That *pipelines produce data, not just artifacts*: a Task can emit results (here, an image's size and whether it fits a budget) that surface at the run level.
 
 == Anatomy of a pipeline
@@ -114,7 +114,7 @@ taskRef:
 .The cluster resolver is the modern replacement for `ClusterTask`
 ====
 Older Tekton had a `ClusterTask` kind — a Task installed cluster-wide.
-It was *removed* in OpenShift Pipelines 1.17, and this cluster runs {pipelines_version}, so `ClusterTask` does not exist here.
+It has since been *removed* from OpenShift Pipelines (this cluster runs {pipelines_version}), so `ClusterTask` does not exist here.
 The *cluster resolver* is its supported successor: reference any Task in any namespace you can read, by name.
 If you find a tutorial that tells you to create a `ClusterTask`, it is out of date — use a resolver reference like the one above.
 ====
@@ -146,30 +146,89 @@ Publish the correct Task once; every pipeline references it by cluster resolver;
 The lab has you read both `maven-jdk21` and the flagship `image-size-report` Task from the `parasol-tasks` namespace — the curated library you *use* is the same kind you will *contribute to* on a real platform team.
 ====
 
-== Pipelines-as-Code: the pipeline lives with the code
+== Pipelines-as-Code is one pattern, not the only way
 
-Running a Pipeline by hand — the way you start the first run in the lab — proves it works.
-But a pipeline someone has to remember to run is a pipeline that will drift from the code it builds.
-*Pipelines-as-Code* (PaC) closes that gap: the PipelineRun definition lives in a `.tekton/` directory *inside the application's own Git repository*, and a *push* to the repository fires it.
+Running a Pipeline by hand — the way you start the first run in the lab — proves it works, but someone has to remember to run it.
+*Pipelines-as-Code* (PaC) is one answer: the PipelineRun definition lives in a `.tekton/` directory *inside the application's own Git repository*, and a *push* to the repository fires it.
+You wire exactly this in the lab, because it is the most direct way to watch a commit build and test itself — a *webhook* on the repo POSTs to the PaC controller on every push, and a `Repository` custom resource in your namespace tells PaC which namespace to run in.
+
+But PaC is a *choice*, and on a real platform it is often not the only one — or even one a single team gets to make alone.
+Three questions decide how a pipeline actually runs, and each has more than one defensible answer:
+
+Who owns it, and how far does it reach?::
+A dev team usually owns its *CI* — build, test, and package the image.
+Whether that same pipeline may *deploy* is an org-policy question, not a technical one: promotion into shared *stage* and *production* environments is frequently *not* permitted to dev teams — a separate platform or DevOps team owns that path.
+So a dev pipeline often stops at "publish a trustworthy image" and hands off, while a platform team's pipeline carries it the rest of the way.
+"CI only" versus "all the way to production" is a boundary someone drew on purpose.
+
+What triggers it — every push, or a schedule?::
+Firing on *every push* (what PaC does) gives the fastest feedback, but it is also the most expensive: a full build per commit spends compute a busy team may not want to.
+Many teams trigger deliberately instead — a *nightly* build, a run before a release, or a run on a tag.
+A scheduled nightly build is just a Kubernetes `CronJob` that starts the same Pipeline:
++
+[source,yaml]
+----
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: parasol-claims-nightly
+spec:
+  schedule: "0 20 * * *"          # 20:00 every day — not on every commit
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: pipeline
+          restartPolicy: Never
+          containers:
+            - name: start-nightly-build
+              image: registry.redhat.io/openshift4/ose-cli:latest
+              command: ["oc", "create", "-f", "/runs/pipelinerun.yaml"]
+              # /runs/pipelinerun.yaml is the very PipelineRun you start by hand,
+              # mounted from a ConfigMap — same Pipeline, fired at 20:00 instead of on a push.
+----
++
+Same Pipeline, a different *trigger*.
+
+Where does the definition live?::
+PaC keeps the pipeline *with the app*, in the app's own repo — a good fit when the team that writes the app also owns its CI.
+But a platform or DevOps team running delivery for *many* applications often keeps its pipelines in a *separate* repository, versioned and reviewed on its own, pointed at each app.
+Pipeline-in-the-app and pipeline-in-a-separate-repo are both normal; which fits depends on *who owns the pipeline*.
 
 [mermaid]
 ....
 flowchart LR
-  DEV([You push to your fork]) --> GIT[(Gitea repo<br/>.tekton/pull-request.yaml)]
-  GIT -->|webhook| PAC[Pipelines-as-Code<br/>controller]
-  PAC -->|matches Repository CR| RUN[New PipelineRun<br/>builds the pushed commit]
-  classDef n fill:#e6f4ea,stroke:#137333,color:#0d652d;
-  class GIT,PAC,RUN n;
+  subgraph OWN["Who owns it?"]
+    direction TB
+    O1["dev team — CI only<br/>build · test · package"]:::pick
+    O2["platform/DevOps team —<br/>promote to stage · prod"]
+  end
+  subgraph TRIG["What triggers it?"]
+    direction TB
+    T1["every push"]:::pick
+    T2["nightly · tag · manual"]
+  end
+  subgraph PLACE["Where does it live?"]
+    direction TB
+    P1["in the app repo<br/>.tekton/"]:::pick
+    P2["a separate<br/>pipelines repo"]
+  end
+  classDef pick fill:#e6f4ea,stroke:#137333,color:#0d652d;
 ....
 
-// media-pass: SVG export m07-pipelines-fundamentals-02-pac-flow.svg (see media-manifest.md)
+// media-pass: SVG export m07-pipelines-fundamentals-02-pipeline-choices.svg — the three-axes
+// choice space, green = the corner the lab wires (Pipelines-as-Code). See media-manifest.md.
 
-Two things make this work, and you set up both in the lab:
+[NOTE]
+.Not every pipeline is build-test-deploy
+====
+The pipeline you run here builds, tests, and ships an image — but that is not the only job pipelines do.
+Plenty exist only to *tag a release and package artifacts*: cut a version, tag the commit, publish the built artifacts to a registry, with no deploy at all.
+"Pipeline" means "an automated, repeatable sequence" — delivery is the most common one, not the only one.
+====
 
-* A *webhook* on the Git repository that POSTs to the PaC controller on every push.
-* A `Repository` custom resource in your namespace that PaC matches to the incoming webhook by URL, telling it *which* namespace to run the pipeline in.
-
-The payoff is that the build is *versioned with the app*: the `.tekton/` file is reviewed, diffed, and rolled back like any other code, and every push — yours or a teammate's — is built and tested the same way, with no one remembering to press a button.
+The lab wires the *dev-owned, push-triggered, in-the-app-repo* corner of that space (the green path above), because it is the most hands-on way to feel a pipeline fire on its own: the `.tekton/` file is reviewed, diffed, and rolled back like any other code, and every push is built the same way with no one pressing a button.
+Recognize it for what it is — one sensible default among several, chosen on purpose, not the one true way to run a pipeline.
 
 == Pipelines produce data, not just artifacts
 

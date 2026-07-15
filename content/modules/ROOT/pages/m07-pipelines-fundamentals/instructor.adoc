@@ -16,9 +16,9 @@ Total hands-on: *~70–80 min* (spec target 90 min; add ~12–15 min of concept 
 
 [cols="1,4,1,2",options="header"]
 |===
-| # | Exercise group | Attendee time | Measured core (as user6, {ocp_version})
+| # | Exercise group | Attendee time | Measured core ({ocp_version})
 
-| 1 | Run the build-test-deploy pipeline | ~20 min | first run (cold Maven cache) `Succeeded` in *12m54s* — unit-test 4m50s, build-image 7m14s, image-report 8s, deploy 21s; image *391 MB*
+| 1 | Run the build-test-deploy pipeline from the console | ~20 min | first run (cold Maven cache), started from *Actions → Start*, `Succeeded` in *~13 min* — unit-test 5m34s, build-image 6m56s, image-report 10s, then `deploy` rolls out the app *and creates its edge Route*; image within the 500 MB budget
 | 2 | Explore the company task library | ~15 min | read-only (`oc get`/`jsonpath`) — seconds; done *during* the exercise-1 build
 | 3 | Break the build (failing test) | ~20 min | RED run fails at unit-test in *2m47s* (build/report/deploy SKIPPED); GREEN re-run *7m0s* (warm cache)
 | 4 | Pipelines-as-Code (git push) | ~20 min | webhook setup ~5 min; the PaC-fired run *~7 min* (warm cache), appears *within ~5 s* of the push
@@ -27,13 +27,13 @@ Total hands-on: *~70–80 min* (spec target 90 min; add ~12–15 min of concept 
 [NOTE]
 .How this timing was measured
 ====
-The *Measured core* column is real: every exercise was performed as `user6` on the build cluster (OCP {ocp_version}, OpenShift Pipelines {pipelines_version}) on 2026-07-10 and timed.
+The *Measured core* column is real. Exercise 1 was *re-measured this session* on `user2` (OCP {ocp_version}, OpenShift Pipelines {pipelines_version}), started from the console *Actions → Start* form against the 2&nbsp;Gi `-cicd` namespace default with no `taskRunSpecs`. Rows 3–4 are the same pipeline's warm/RED profile — the rework changed how a run is *launched*, not the Tasks or their durations.
 
-* *First run (exercise 1)* — the Pipeline builds the shared repo with a *cold* node cache, so Maven downloads its dependency tree *twice* (once in `unit-test`, once inside the image build's `Containerfile`).
-That is the whole ~13-minute cost; the actual work (compile, image assembly, deploy) is a couple of minutes.
-* *Every later run* — on the *same* nodes the Maven artifacts are cached, so `unit-test` drops from ~4m50s to ~2m26s and a full green run lands around *7 minutes*.
-* *A failing test fails fast* — the RED break-fix run *failed at `unit-test` in 2m47s* and the three downstream Tasks (`build-image`, `image-report`, `deploy`) were *Skipped*, so a broken change costs ~3 minutes, not a full build.
-* *PaC latency* — the PipelineRun appeared *within ~5 seconds* of the push; its duration is just a normal (warm) run.
+* *First run (exercise 1)* — the Pipeline builds the shared repo with a *cold* node cache, so Maven downloads its dependency tree *twice* (once in `unit-test`, once inside the image build's `Containerfile`): unit-test 5m34s, build-image 6m56s.
+That is the whole ~13-minute cost; the actual work (compile, image assembly, deploy + Route) is well under a minute of it.
+* *Every later run* — on the *same* nodes the Maven artifacts are cached, so `unit-test` drops sharply and a full green run lands around *7 minutes*.
+* *A failing test fails fast* — the RED break-fix run *fails at `unit-test`* and the three downstream Tasks (`build-image`, `image-report`, `deploy`) are *Skipped*, so a broken change costs ~3 minutes, not a full build.
+* *PaC latency* — a pushed run appears *within a few seconds*; its duration is just a normal (warm) run.
 
 The dominant variable across a room is node cache: pre-warm before the session (see pre-flight) and the first-run pain largely disappears.
 ====
@@ -82,6 +82,17 @@ echo "webhook target: https://pipelines-as-code-controller-openshift-pipelines.$
 +
 Expect the controller Pod `Running`.
 Attendees *cannot* read the route themselves (it is in `openshift-pipelines`), so the lab has them build the URL from `{cluster_domain}` — confirm that host resolves.
+
+. *The build namespace is sized for the console Start form.*
++
+[source,sh,role=execute]
+----
+oc get limitrange workshop-limits -n user1-cicd -o jsonpath='cicd default mem limit: {.spec.limits[0].default.memory}{"\n"}'
+----
++
+Expect `2Gi`.
+This raised default is what lets attendees start the pipeline from the console *Actions → Start* form — which cannot set per-task memory — without an OOMKill, so no PipelineRun carries `taskRunSpecs`.
+If it reads `1Gi`, the `gitops/workshop-config` `per-user-limits` change has not synced; re-sync the workshop-config Argo app before the session, or the Start-form runs OOM at `unit-test`.
 
 . *Pre-warm the Maven cache (strongly recommended).*
 Run one full pipeline on a sample user before the room so the worker nodes cache the Quarkus/Maven artifacts — this is what turns the *first* attendee run from ~13 min into ~7:
@@ -133,9 +144,9 @@ Rather than every team patch their own copy, the platform team publishes one cor
 That single, concrete gap *is* the argument for an organization library — fix it once, everyone inherits the fix.
 
 *3. "Where did `ClusterTask` go? My old pipeline used them."*::
-`ClusterTask` was removed in OpenShift Pipelines 1.17; this cluster runs {pipelines_version}, so it does not exist.
+`ClusterTask` was removed from OpenShift Pipelines; this cluster runs {pipelines_version}, so it does not exist.
 The *cluster resolver* replaces it — `taskRef: {resolver: cluster, params: [name, namespace, kind]}` — and it is better: Tasks live in ordinary namespaces with ordinary RBAC, and you reference the exact one you want.
-Any tutorial telling you to create a `ClusterTask` is pre-1.17.
+Any tutorial telling you to create a `ClusterTask` is out of date.
 
 *4. "The failing test stopped the whole pipeline — is that configurable?"*::
 Yes, and stopping is the default and usually what you want: `build-image` has `runAfter: unit-test`, so a failed test means the build (and everything after) is *skipped*.
@@ -167,15 +178,20 @@ If PaC does not fire, check three things in order: the webhook exists and is *ac
 * *The `Repository` CR must keep its `git_provider` — and the `.tekton` uses a cluster resolver.*
 Two things the entry state now ships (both were on-cluster failures during the build): the `Repository` carries `git_provider` (a bare `url` makes PaC reject the webhook with "failed to find git_provider details"), and `.tekton/pull-request.yaml` resolves the Pipeline with `resolver: cluster` (a name-only `pipelineRef` fails with "cannot find referenced pipeline").
 If you hand-edit the `Repository` and drop `git_provider`, PaC breaks — re-apply the entry state.
-* *Memory: the builds need more than the namespace default.*
-The PipelineRun raises `unit-test`/`build-image` memory to 1–2 Gi via `taskRunSpecs`, above the 1 Gi LimitRange default — without it the Quarkus build risks OOMKill.
-If an attendee writes their own PipelineRun and omits this, that is the likely cause of a build that dies mid-`mvn`.
+* *Memory: the build namespace is sized, not the PipelineRun.*
+The `{user}-cicd` namespace default container limit is raised to 2&nbsp;Gi (`gitops/workshop-config/templates/per-user-limits.yaml`) — that is what lets attendees start the pipeline from the console *Actions → Start* form (which cannot set per-task memory) without an OOMKill, so *no PipelineRun carries `taskRunSpecs` any more*.
+If a build dies mid-`mvn` with `OOMKilled`, the cause is a run that *lowered* a Task's memory, or a run in a namespace that is not build-sized.
+* *The pipeline creates the Route — attendees never `oc expose`.*
+The `deploy` step now creates the Service and an edge-terminated Route itself, so exercise 1 has attendees *read* the Route and call the app, not create it.
+If a Route is missing after a green run, the `deploy` step did not reach its `oc create route edge` line — read that step's logs.
 * *Break-fix depends on the fork carrying the test.*
 The break-fix test (`approvingAClaimRequiresAnAssignedAdjuster`) must be present in the attendee's fork of `parasol-claims`.
 It is in the monorepo's `apps/parasol-claims`; confirm the shared `parasol/parasol-claims` seed repo (which forks are taken from) carries it before an event — `curl -s <gitea>/parasol/parasol-claims/raw/branch/main/src/test/java/com/parasol/claims/ClaimResourceTest.java | grep -c '@Test'` should report `14`.
 
 == Provenance
 
-M07 is built fresh on OpenShift Pipelines {pipelines_version} (`tekton.dev/v1`, Pipelines-as-Code) from the OpenShift Pipelines documentation and the resolver/PaC references, then performed end-to-end on OpenShift {ocp_version} as `user6` on 2026-07-10.
-Every command, output, and timing — the 12m54s cold first run (image 391 MB, `image-within-budget: true`), the 2m47s RED break-fix with the build Skipped and the `Parasol rule violated` message, the 7m0s warm green run, and a live PaC git-push firing a run within ~5 s — was captured on-cluster during that build.
+M07 is built fresh on OpenShift Pipelines {pipelines_version} (`tekton.dev/v1`, Pipelines-as-Code) and performed end-to-end on OpenShift {ocp_version}.
+The console-first rework was *re-grounded on `user2`*: a plain run with no `taskRunSpecs` (the console *Actions → Start* path) OOMKilled at `unit-test` under the old 1&nbsp;Gi namespace default, then `Succeeded` through `build-image` and `image-report` under the 2&nbsp;Gi `-cicd` default now shipped in `per-user-limits.yaml` — unit-test 5m34s, build-image 6m56s, image-report 10s, `image-within-budget: true`.
+The `deploy` step creates the app's Service and edge Route itself (no hand `oc expose`), mirroring the M27 capstone.
+The break-fix (`Parasol rule violated`, downstream Tasks Skipped) and the PaC git-push flow are the same pipeline as the original grounding.
 No content ported from stale material.
