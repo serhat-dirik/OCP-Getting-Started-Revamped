@@ -29,7 +29,7 @@ $ mcp-agent-cli "diagnose why parasol-claims is not Ready in user1-dev"
 
 mcp-agent-cli
   model:     qwen3-14b
-  mcp server: http://kubernetes-mcp-server:8080/mcp/sse  (1 wired)
+  mcp server: http://kubernetes-mcp-server:8080/sse  (1 wired)
   mode:      READ-ONLY (mutating tools hidden from the model)
 
 TOOL-CALL TRACE (2 calls)
@@ -87,7 +87,7 @@ placeholders, **never** workshop infra and never a real key.
 | `GENAI_ENDPOINT`    | `quarkus.langchain4j.openai.base-url`                | `https://maas-example.apps.<domain>/v1`          |
 | `GENAI_API_KEY`     | `quarkus.langchain4j.openai.api-key`                 | the MaaS virtual key (short-lived)               |
 | `GENAI_MODEL`       | `quarkus.langchain4j.openai.chat-model.model-name`   | `qwen3-14b` / `llama-scout-17b`                  |
-| `MCP_SERVER_URL`    | `quarkus.langchain4j.mcp.platform.url`               | `http://kubernetes-mcp-server:8080/mcp/sse`      |
+| `MCP_SERVER_URL`    | `quarkus.langchain4j.mcp.platform.url`               | `http://kubernetes-mcp-server:8080/sse`      |
 | `MCP_READ_ONLY`     | `mcp-agent.read-only` (default `true`)               | `false` to allow writes                          |
 | `MCP_MAX_STEPS`     | `mcp-agent.max-steps` (default `10`)                 | caps the agentic loop (bounds MaaS token spend)  |
 | `MCP_MUTATING_TOKENS` | `mcp-agent.mutating-tokens` (blank = built-in list) | `delete,scale,exec` to override the write verbs  |
@@ -144,7 +144,7 @@ Needs an OpenAI-compatible endpoint and a reachable MCP server.
 export GENAI_ENDPOINT=http://localhost:11434/v1   # e.g. a local Ollama, or a MaaS URL
 export GENAI_API_KEY=sk-local-dev                  # your key
 export GENAI_MODEL=llama3.2                         # any served model
-export MCP_SERVER_URL=http://localhost:8080/mcp/sse # a local kubernetes-mcp-server (npx/binary/container)
+export MCP_SERVER_URL=http://localhost:8080/sse # a local kubernetes-mcp-server (npx/binary/container)
 
 # Run once (Quarkus command mode passes the args straight to the CLI):
 ./mvnw -q quarkus:dev -Dquarkus.args='"list the pods in user1-dev"'
@@ -176,10 +176,13 @@ filtering:
 ```bash
 oc new-build --binary --strategy=docker --name=mcp-agent-cli -n parasol-images
 oc start-build mcp-agent-cli --from-dir=apps/mcp-agent-cli --follow -n parasol-images
+# Immutable release tag, matching the parasol-claims:1.0 convention:
+oc tag parasol-images/mcp-agent-cli:latest parasol-images/mcp-agent-cli:1.0
 ```
 
 `openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig` (`mcp-agent-cli-git`) for later
-CI rebuilds. Image tags are immutable per release.
+CI rebuilds. Image tags are immutable per release: the binary build publishes `:latest`, then
+`oc tag` pins `:1.0`.
 
 ## Container notes (OpenShift restricted-v2)
 

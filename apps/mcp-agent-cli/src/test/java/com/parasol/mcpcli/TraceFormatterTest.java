@@ -60,11 +60,11 @@ class TraceFormatterTest {
 
     @Test
     void headerReflectsReadOnlyPosture() {
-        String ro = TraceFormatter.header("qwen3-14b", "http://platform:8080/mcp/sse", true, 1);
+        String ro = TraceFormatter.header("qwen3-14b", "http://platform:8080/sse", true, 1);
         assertTrue(ro.contains("qwen3-14b"));
         assertTrue(ro.contains("READ-ONLY"));
 
-        String rw = TraceFormatter.header("qwen3-14b", "http://platform:8080/mcp/sse", false, 1);
+        String rw = TraceFormatter.header("qwen3-14b", "http://platform:8080/sse", false, 1);
         assertTrue(rw.contains("WRITES ALLOWED"));
         assertTrue(rw.contains("RBAC is the boundary"));
     }
