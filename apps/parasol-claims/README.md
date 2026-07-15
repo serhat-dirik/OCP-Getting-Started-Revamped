@@ -109,8 +109,13 @@ oc tag parasol-images/parasol-claims:latest parasol-images/parasol-claims:1.1
 
 ## Container notes (OpenShift restricted-v2)
 
-- UBI9 multi-stage `Containerfile`: `ubi9/openjdk-21:1.23` (build) →
+- UBI9 multi-stage build: `ubi9/openjdk-21:1.23` (build) →
   `ubi9/openjdk-21-runtime:1.23` (runtime).
+- The repo ships the recipe under **both** names — `Dockerfile` and the
+  vendor-neutral `Containerfile` — kept byte-for-byte identical. `Dockerfile`
+  lets `oc new-app --strategy=docker <repo>` auto-detect it (M02 exercise 2);
+  `Containerfile` is what the M07/M08 pipelines and the `parasol-images` binary
+  build reference. Edit one, edit both.
 - Runtime runs as numeric non-root **USER 185**, port **8080**; files are copied
   `--chown=185:0` and group-readable, so it runs under an arbitrary injected UID.
 

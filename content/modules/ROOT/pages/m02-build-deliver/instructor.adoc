@@ -18,7 +18,7 @@ Total hands-on: *~50–58 min* (spec target 75 min), leaving room for ~15 min of
 | # | Exercise group | Attendee time | Measured core (as user2, {ocp_version})
 
 | 1 | Import claims from Git (S2I) | ~15 min | first S2I build (java-21) → `Complete` *~4–4.5 min* (Maven download + Quarkus augmentation), then push
-| 2 | The Dockerfile way + compare | ~10 min | Docker/Containerfile build *~95 s* (multi-stage, JDK 21)
+| 2 | The Dockerfile way + compare | ~10 min | Docker build of the repo `Dockerfile` *~95 s* (multi-stage, JDK 21)
 | 3 | Polyglot notifications (Node.js) | ~10 min | Node S2I build *~45 s* (zero dependencies, no npm registry)
 | 4 | Browse catalog + deploy database | ~10 min | PostgreSQL 15 rollout *~15–20 s*
 | 5 | Wire claims to its database | ~8 min | rollout to Ready *~15 s*; Route answers 200 immediately
@@ -68,6 +68,17 @@ oc get template parasol-postgresql-ephemeral -n openshift
 +
 Expect one row.
 Attendees read this template from the `openshift` namespace; it renders a Deployment on `postgresql:15-el9`.
+
+. *The `parasol-claims` fork carries a `Dockerfile`* (exercise 2's Docker-strategy build auto-detects it):
++
+[source,sh,role=execute]
+----
+curl -sf -o /dev/null -w '%{http_code}\n' \
+  "https://$(oc get route gitea -n gitea -o jsonpath='{.spec.host}')/user1/parasol-claims/raw/branch/main/Dockerfile"
+----
++
+Expect `200`.
+The source repo ships both `Dockerfile` and the identical `Containerfile`; if this `404`s, the app-repo seed predates the `Dockerfile` — re-sync the mirror and re-seed (`ws git-refresh`) so forks carry it, or exercise 2 falls back to naming the `Containerfile` path (troubleshooting).
 
 . *A user can build* (warms the builder image and Maven cache on a node):
 +
@@ -142,12 +153,15 @@ Build Pods inherit the namespace LimitRange default (1 Gi).
 The current `java-21` (UBI 9) builder completes there; note for your own awareness that the *older* stock `java` stream (OpenJDK 17, UBI 8) has hit `OutOfMemoryError` under that 1 Gi default on this same source, and a larger app can too.
 The fix is `oc patch bc/<name> --type=merge -p '{"spec":{"resources":{"limits":{"memory":"3Gi"}}}}'` then rebuild.
 (This is also a nice governance teaser — the platform team owns both the builder images and the default limits.)
-* *`Containerfile`, not `Dockerfile`.*
-`oc new-app --strategy=docker` refuses the repo ("No Dockerfile was found") because the file is named `Containerfile`.
-Attendees must set the Dockerfile path explicitly (console) or create a BuildConfig with `dockerStrategy.dockerfilePath: Containerfile` (CLI).
-Expect this question; it is in the lab and the troubleshooting guide.
+* *Exercise 2 leads with a working `Dockerfile`.*
+The `parasol-claims` repo now ships both a `Dockerfile` and the identical vendor-neutral `Containerfile`, so `oc new-app --strategy=docker` auto-detects the `Dockerfile` and builds with no path to set — the exercise is a clean happy path.
+The old "refuses because it is named `Containerfile`" behavior is now a documented *fallback* (lab NOTE + troubleshooting) for repos that ship only a `Containerfile`: name it with `dockerStrategy.dockerfilePath: Containerfile`.
+* *The exercise-5 topology grouping is deliberate.*
+The exercise ends by labelling the two S2I workloads `app.kubernetes.io/part-of=parasol` and annotating `parasol-claims` with `app.openshift.io/connects-to=["claims-db"]`.
+Before that, Topology looks scattered — the catalog template groups `claims-db` under a *parasol* application, but `oc new-app` leaves the two services ungrouped and nothing connects claims to its database, which surprised early testers.
+The two commands make Topology match the recap diagram and teach how `part-of` (grouping) and `connects-to` (the connector arrow) work; they touch only labels/annotations, so `ws verify` is unaffected.
 * *Claims crash-loops until wired.*
-Between exercises 1 and 5 the `parasol-claims` Pod is red in Topology.
+Between exercises 1 and 5 the `parasol-claims` Pod is red in Topology (and briefly `claims-docker` too, in exercise 2).
 Tell attendees up front that this is expected and gets fixed at the end, or the noise reads as "broken."
 * *Per-user build concurrency.*
 When a whole room starts the claims build at once, node CPU and the internal registry take the load; builds queue and run slower than the solo timing.
@@ -158,6 +172,6 @@ If a fork is missing, `ws start m02 --user <user>` re-runs the fork job (idempot
 
 == Provenance
 
-The Source-to-Image narrative (source → builder image → running app, and the S2I-versus-Dockerfile framing) is adapted from Red Hat's *OpenShift starter-guides* S2I walkthrough (credited in the wrap-up per the reuse policy).
+The Source-to-Image narrative (source → builder image → running app, and the S2I-versus-Dockerfile framing) is adapted from Red Hat's *OpenShift starter-guides* S2I walkthrough (credited in the repo-level `CREDITS.md` per the reuse policy).
 All technical steps, the Parasol applications, the PostgreSQL catalog template, and the build flows are freshly built and verified on OpenShift {ocp_version} (2026-07-09).
 No content ported from the 2020-era labs.

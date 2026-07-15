@@ -128,6 +128,29 @@ That is a small taste of a bigger idea: platform teams *curate* which builder im
 Who owns that list — and how they keep it current — is the subject of the *Platform-as-a-Product / golden paths* module (a separate module).
 ====
 
+== Build-time images vs runtime images: chained builds
+
+Here is a distinction that saves you size, CVEs, and audit pain: *the image you build in is not the image you run in.*
+
+Building a Java app needs a *fat* toolchain — a full JDK, Maven, and every library it downloads.
+Running that app needs almost none of that — just a JRE and your compiled artifact.
+If you ship the build image, you also ship the compiler, the build tool, and the whole Maven cache: a bigger image, a slower pull, and a much larger attack surface for a security scan to flag.
+
+The fix is a *chained build* (a *multi-stage* build, in `Dockerfile`/`Containerfile` terms): compile in a fat *build-time* image, then copy only the finished artifact into a lean *runtime* image and throw the builder away.
+`parasol-claims` does exactly this — two `FROM` lines, two different base images:
+
+[source,dockerfile]
+----
+FROM registry.access.redhat.com/ubi9/openjdk-21:1.23 AS build   # fat: JDK + Maven
+RUN mvn -B -ntp -DskipTests clean package
+FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.23     # lean: JRE only
+COPY --from=build /build/target/quarkus-app/ /deployments/       # just the artifact
+----
+
+The shipped image is the second stage only — no Maven, no compiler, no build cache.
+This is not a Dockerfile-only trick: *Source-to-Image already works this way* — the builder image compiles your source, and the *output* image it produces is a separate, leaner runtime image.
+Whether you reach for S2I or a multi-stage `Containerfile`, the principle is the same: *build-time and runtime are two images, and only the lean one reaches production.*
+
 == Containers run as a random non-root user
 
 In the first module you saw your Pod run as a high, random user ID like `1000920000` instead of root.

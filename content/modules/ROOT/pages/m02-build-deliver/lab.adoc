@@ -19,7 +19,7 @@ Everything you create lives in your own project, `{user}-dev`, and everything yo
 ====
 Most steps are offered two ways.
 Use the *Console* tab to learn the graphical workflow, or the *CLI* tab to learn `oc` — the two paths create the same objects.
-The console labels below were confirmed on the live 4.21 console; if a label reads slightly differently on your cluster, the CLI command beside it is the source of truth.
+The console labels below were confirmed on a current OpenShift console; if a label reads slightly differently on your cluster, the CLI command beside it is the source of truth.
 ====
 
 [NOTE]
@@ -48,7 +48,7 @@ Run `ws solve m02 --user {user}` *before the session* so a finished, database-ba
 *Do not delete anything*: you will build a second copy live under the name `claims-live`, beside the pre-staged one.
 A Quarkus S2I build takes *~4–5 minutes*; the catalog tour and trusted-content talk track below are timed to cover it, so the build finishes while you talk.
 Have the {gitea_url}/{user}/parasol-claims[parasol-claims repo^] open in a browser tab.
-The console labels below were confirmed on the {ocp_version} unified console during the build.
+The console labels below were confirmed on a current OpenShift console during the build.
 Note that the console's *Import from Git* cannot reach the in-cluster Gitea host, so it does not auto-detect the builder — you select *Java 21* yourself (rehearse this so the warning does not surprise you live).
 ====
 
@@ -204,6 +204,21 @@ Push successful
 ----
 ====
 
+[TIP]
+.Why the first build is slow — and how real orgs speed it up
+====
+Almost all of that wait is *Maven downloading the dependency tree from the public internet* (`repo1.maven.org`), not compiling — a cold build with an empty cache fetches hundreds of jars.
+Two techniques an organization uses to make this fast, neither of which changes your code:
+
+* *An internal artifact repository (Maven mirror).*
+A platform team runs a repository manager — Sonatype Nexus or JFrog Artifactory — inside the network and points builds at it with a `settings.xml` `<mirror>` (baked into the builder image or mounted from a ConfigMap).
+Dependencies then come from the LAN cache at wire speed, and the build no longer depends on the public internet being up.
+* *Incremental builds.*
+Source-to-Image can *reuse* the previous build's artifacts (the `.m2` repository) instead of downloading them again — set `spec.strategy.sourceStrategy.incremental: true` on the BuildConfig, and the second build onward skips most of the download.
+
+Slow builds read as "the platform is inefficient," but the real cause is dependency egress — and both fixes are platform-team decisions, not app changes.
+====
+
 Now look at *how* the platform recorded the build — a first-class object, not a shell script:
 
 [source,sh,role=execute]
@@ -245,18 +260,19 @@ If the build fails to clone, see xref:m02-build-deliver/troubleshooting.adoc[the
 ****
 
 == 2. The same app, the Dockerfile way — and why you'd choose it
-⏱ *~10 min* · full control, at the cost of owning a Containerfile
+⏱ *~10 min* · full control, at the cost of owning the build recipe
 
 S2I built the image *for* you from a builder image you did not write.
 Sometimes you need control S2I does not give — a specific base image, a system package, an exact build.
-Your `parasol-claims` repo also ships a `Containerfile` (the vendor-neutral name for a Dockerfile), so you can build the *same source* with the *Docker* strategy and compare.
+Your `parasol-claims` repo ships a `Dockerfile` — a multi-stage build recipe (a fat build stage, a lean runtime stage) — so you can build the *same source* with the *Docker* strategy and compare the two on-ramps.
 
 [NOTE]
-.`Containerfile`, not `Dockerfile`
+.`Dockerfile` or `Containerfile`?
 ====
-The Docker build strategy looks for a file named `Dockerfile` by default.
-Parasol's repo uses the vendor-neutral name `Containerfile`, so you must point the build at it explicitly.
-This is a real, common gotcha — `oc new-app --strategy=docker` will refuse the repo ("No Dockerfile was found") until you tell it the path.
+The Docker build strategy looks for a file named `Dockerfile` by default, so the command below just works.
+`Containerfile` is Red Hat's vendor-neutral name for the very same file, and this repo ships both (identical) so either tool finds a recipe.
+If a repo has *only* a `Containerfile`, the Docker strategy will not auto-detect it — you point the build at it explicitly with a BuildConfig `dockerfilePath: Containerfile` (or the console's *Dockerfile path* field).
+The xref:m02-build-deliver/troubleshooting.adoc[troubleshooting page] shows that fallback.
 ====
 
 [tabs]
@@ -267,65 +283,31 @@ Console::
 . Open the masthead *Quick create* (+) menu → *Import from Git* again.
 . Paste the same URL: `{gitea_url}/{user}/parasol-claims`.
 The same *unreachable-repository* warning appears — ignore it and choose the strategy yourself, exactly as in exercise 1.
-. Under *Import Strategy*, choose *Dockerfile*, and set the *Dockerfile path* field (it renders empty) to `Containerfile`.
+. Under *Import Strategy*, choose *Dockerfile*.
+The *Dockerfile path* field defaults to `Dockerfile` — the exact file in the repo, so leave it.
 . Set the *Name* to `claims-docker` (so it does not collide with your S2I app), and click *Create*.
 --
 CLI::
 +
 --
-`oc new-app --strategy=docker` inspects the repo first and refuses it, because the file is named `Containerfile`:
+Because the repo has a `Dockerfile`, `--strategy=docker` finds it and builds — nothing else to specify:
 
 [source,sh,role=execute,subs="attributes"]
 ----
 oc new-app --strategy=docker {gitea_url}/{user}/parasol-claims.git --name=claims-docker
 ----
 
-.Expected output
-[source,texinfo]
-----
-error: No Dockerfile was found in the repository and the requested build strategy is 'docker'
-----
-
-Create the build the explicit way — a BuildConfig that names the `Containerfile`.
-This applies an ImageStream to hold the result and a Docker-strategy BuildConfig whose
-`dockerfilePath` points at `Containerfile`:
-
-[source,sh,role=execute,subs="attributes"]
-----
-oc apply -f - <<'EOF'
-apiVersion: image.openshift.io/v1
-kind: ImageStream
-metadata:
-  name: claims-docker
----
-apiVersion: build.openshift.io/v1
-kind: BuildConfig
-metadata:
-  name: claims-docker
-spec:
-  source:
-    type: Git
-    git:
-      uri: "{gitea_url}/{user}/parasol-claims.git"
-  strategy:
-    type: Docker
-    dockerStrategy:
-      dockerfilePath: Containerfile
-  output:
-    to:
-      kind: ImageStreamTag
-      name: claims-docker:latest
-EOF
-----
-
-Start the build and watch the multi-stage `Containerfile` run:
+Like the S2I import, this creates four objects — an ImageStream, a *Docker*-strategy BuildConfig, a Deployment, and a Service — and schedules the build.
+Follow the multi-stage build (it compiles in the JDK 21 build stage, then copies the artifact into the lean runtime stage):
 
 [source,sh,role=execute]
 ----
-oc start-build claims-docker && oc logs -f bc/claims-docker
+oc logs -f bc/claims-docker
 ----
 --
 ====
+
+Like your S2I app in exercise 1, the `claims-docker` Deployment will crash-loop until it has a database — expected, and it does not affect the build you came here to compare.
 
 Now compare the two BuildConfigs side by side:
 
@@ -344,13 +326,13 @@ claims-docker    Docker
 
 Same source, two strategies.
 The *Source* (S2I) build used the platform's Java 21 builder — you conform to its runtime.
-The *Docker* build ran the repo's `Containerfile`, which pins its *own* base image (`ubi9/openjdk-21`) — you control the runtime, and you own that file forever.
+The *Docker* build ran the repo's own multi-stage recipe, which pins its *own* base images (`ubi9/openjdk-21` to build, `ubi9/openjdk-21-runtime` to run) — you control the runtime, and you own that file forever.
 
 [TIP]
 .Which did you just prove you'd rather maintain?
 ====
 Both produced a working image.
-S2I needed *nothing* from you but the source; the Docker path needed a hand-written, hand-patched `Containerfile`.
+S2I needed *nothing* from you but the source; the Docker path needed a hand-written, hand-patched build recipe.
 For most services, that is the whole argument for S2I — and the wrap-up returns to when the Docker path genuinely earns its keep.
 ====
 
@@ -358,13 +340,13 @@ You do not need `claims-docker` past this comparison — clean it up so it does 
 
 [source,sh,role=execute]
 ----
-oc delete bc,is claims-docker
+oc delete all -l app=claims-docker
 ----
 
 [.checkpoint]
 ****
 ✔ *Verify:* `oc get bc` showed `parasol-claims` as `Source` and `claims-docker` as `Docker` before you deleted the latter.
-You understand the trade-off: S2I = the platform owns the build; Dockerfile = you own the base image and the file.
+You understand the trade-off: S2I = the platform owns the build; Dockerfile = you own the base image and the recipe.
 ****
 
 == 3. Polyglot: import the notifications service (Node.js)
@@ -501,7 +483,32 @@ oc get deployment claims-db -o jsonpath='{.spec.template.spec.containers[0].imag
 image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
 ----
 
-The template also created a *Secret* named `claims-db` holding the database host, name, user, and password — you wire the claims service to it next.
+The template also created a *Secret* named `claims-db`.
+Before you bind it to anything, look at what is inside — this is exactly what your claims service will consume:
+
+[source,sh,role=execute]
+----
+oc describe secret claims-db
+----
+
+.Expected output (abbreviated)
+[source,texinfo,subs="attributes"]
+----
+Name:         claims-db
+Namespace:    {user}-dev
+Type:  Opaque
+
+Data
+====
+POSTGRESQL_DATABASE:  8 bytes
+POSTGRESQL_HOST:      9 bytes
+POSTGRESQL_PASSWORD:  16 bytes
+POSTGRESQL_USER:      6 bytes
+----
+
+`describe` shows the *keys* and their sizes, never the values — the password does not print.
+Those four keys — `POSTGRESQL_HOST`, `POSTGRESQL_DATABASE`, `POSTGRESQL_USER`, `POSTGRESQL_PASSWORD` — are the exact environment variables the claims image reads for its datasource.
+That match is the whole reason wiring is a single command in the next exercise: you hand the Deployment the Secret, and every key lands as an environment variable under the name the app already expects.
 
 [.checkpoint]
 ****
@@ -548,6 +555,25 @@ oc rollout status deployment/parasol-claims
 --
 ====
 
+The rollout replaces the crash-looping Pod with one that carries the database environment.
+Read its log — the same image that could not resolve `parasol-db` a moment ago now boots cleanly:
+
+[source,sh,role=execute]
+----
+oc logs deployment/parasol-claims --tail=6
+----
+
+.Expected output
+[source,texinfo,subs="attributes"]
+----
+INFO  [io.quarkus] (main) parasol-claims 1.0.0 on JVM (powered by Quarkus {quarkus_version}) started in 23.3s. Listening on: http://0.0.0.0:8080
+INFO  [io.quarkus] (main) Profile prod activated.
+INFO  [io.quarkus] (main) Installed features: [agroal, cdi, hibernate-orm, hibernate-orm-panache, jdbc-postgresql, micrometer, narayana-jta, ..., smallrye-health, vertx]
+----
+
+`agroal` (the JDBC connection pool) and `jdbc-postgresql` are active, and Quarkus reached *started* — which happens only after Hibernate connected to PostgreSQL, created the schema, and loaded the seed data.
+The `UnknownHostException` / `connection attempt failed` you saw in exercise 1 is gone: the app has its database.
+
 Publish the claims API over TLS with an edge Route and prove it works end to end:
 
 [source,sh,role=execute]
@@ -555,22 +581,57 @@ Publish the claims API over TLS with an edge Route and prove it works end to end
 oc create route edge parasol-claims --service=parasol-claims --insecure-policy=Allow
 ----
 
+Click the Route's *Open URL* arrow in Topology — or curl its root — and you land on a real service page, not a 404:
+
 [source,sh,role=execute,subs="attributes"]
 ----
-# the app has no readiness probe yet (that's next module) — retry while Quarkus finishes starting
-curl -s --retry 10 --retry-connrefused --retry-delay 2 --retry-all-errors http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | head -c 200
+# no readiness probe yet (that's the next module) — retry while Quarkus finishes starting
+curl -s --retry 10 --retry-connrefused --retry-delay 2 --retry-all-errors http://parasol-claims-{user}-dev.{cluster_domain}/
 ----
 
 .Expected output
 [source,texinfo]
 ----
-[{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,...}]
+{"service":"parasol-claims","description":"Parasol Insurance claims service (REST + PostgreSQL, Quarkus)","links":{"claims":"/api/claims","metrics":"/q/metrics","health":"/q/health"}}
+----
+
+That landing is your own built image answering its `GET /` root — it names the service and points at the API.
+Follow the `claims` link to the data itself:
+
+[source,sh,role=execute,subs="attributes"]
+----
+curl -s http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | head -c 200
+----
+
+.Expected output
+[source,texinfo]
+----
+[{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,"incidentDate":"2026-05-14","adjuster":"Rebecca Torres"},...]
 ----
 
 There it is: a service that arrived as *source code* is now a running, database-backed API you built yourself — and the crash loop is gone because you gave it what it declared it needed.
 
-.Topology at the end of the module: claims wired to its database, alongside notifications
-image::m02-build-deliver/m02-build-deliver-04-topology-built-and-wired.png[Topology in the user's project: the parasol-claims node connected to claims-db, the parasol-notifications service, all healthy, with the Open-URL arrow on parasol-claims]
+Now open *Topology* and make it match the picture in your head.
+By default it looks scattered: `claims-db` sits inside an application group named *parasol* (its catalog template stamped the `app.kubernetes.io/part-of=parasol` label), while `parasol-claims` and `parasol-notifications` — which `oc new-app` labelled only with their own names — float as separate, ungrouped nodes, and nothing draws the line from the claims service to the database it depends on.
+Two labels fix that, and they are worth knowing because this is exactly how the console decides what to group and what to connect:
+
+[source,sh,role=execute]
+----
+# group all three under one "parasol" application, and draw claims -> claims-db
+oc label deploy/parasol-claims deploy/parasol-notifications svc/parasol-claims svc/parasol-notifications \
+  app.kubernetes.io/part-of=parasol --overwrite
+oc annotate deploy/parasol-claims app.openshift.io/connects-to='["claims-db"]' --overwrite
+----
+
+Refresh *Topology*: one *parasol* application now holds all three workloads, with an arrow from `parasol-claims` to `claims-db`.
+The `part-of` label groups; the `connects-to` annotation connects — your topology finally matches your mental model.
+
+// media-pass: capture m02-build-deliver-04-topology-built-and-wired.png fresh — the grouped
+// "parasol" application containing parasol-claims (Open-URL arrow), parasol-notifications, and
+// claims-db, with the parasol-claims -> claims-db connector, all Ready. The prior asset was stale
+// (only parasol-claims + claims-db, ungrouped, no notifications) and was removed rather than ship a
+// screenshot that contradicts the grouped-topology step above. Capture via the password-free
+// attendee cockpit (showroom-{user}) after running the grouping commands.
 
 [NOTE]
 .You just previewed two later modules
