@@ -1,5 +1,11 @@
 # M25 build note — Packaging & Distributing Your App (Helm, Operators, OLM)
 
+> **⚠ UPDATE 2026-07-15 — M26 (Operator Development) was CUT by the owner.** M25 now stands ALONE on the
+> packaging spectrum. When building M25, drop every "M26 builds the bundle" / "align spectrum with M26"
+> forward-reference below: teach operators at **consumer depth only** (what an OLM bundle is, how to read
+> one, and *when NOT to write an operator*), with no pointer to a producer module. The operator row stays
+> at the top of the day-2 axis — just without the "M26 builds one" tie.
+
 Date: 2026-07-15 · Author: research-analyst · Spec: `Project-Shared/instructions/02-MODULE-SPECS.md` **§M25 (lines 303-312)** · Entitlement: **[OCP]** (core OpenShift — no add-on SKU; 02-MODULE-SPECS line 13 lists M25-M26 as `[OCP]`) · 90 min · profile `core`.
 
 Method: READ-ONLY live build cluster `ocp-ws-revamped` (C1; OCP 4.21.22 / k8s 1.34.8) as `admin`, no mutations — `oc api-resources` / `oc get` on OLM v0 (`operators.coreos.com`) + OLM v1 (`olm.operatorframework.io`) objects, CSVs, subscriptions, packagemanifests, catalogsources, the image-registry config/route, and `platform-observer`. No `helm push`/`oc registry login` run (those mutate the registry). Repo inspection: `apps/`, `gitops/entry-states/`, `platform-portfolio/`, `versions.yaml`. Product facts via docs.redhat.com / developers.redhat.com / connect.redhat.com (WebSearch; docs.redhat.com 403s on direct fetch). Cross-checked `docs/research/m17-build-note.md` (shared internal-registry reality) and §M26 (spectrum/OLM-v1 alignment). Live infra strings scrubbed to placeholders per the CI privacy guard.

@@ -89,7 +89,12 @@ The three real changes: (1) **drop Virtualization**, (2) **Eventing M24 → M20*
 
 Final Block D order (Gen 3): **M18** Service Mesh · **M19** Serverless · **M20** Eventing ·
 **M21** Resilience · **M22** Modernization · **M23** Agentic AI · **M24** AI-Assisted Dev ·
-**M25** Packaging · **M26** Operator Dev.
+**M25** Packaging · ~~**M26** Operator Dev~~.
+
+> **M26 Operator Development — CUT 2026-07-15** (owner directive: "too advanced," before any content or
+> entry-state was built). The Block-D tail is now **M24** AI-Assisted Dev · **M25** Packaging. The AppSec
+> module remains at **M27** (built), leaving a gap at M26 unless the owner elects to renumber M27→M26.
+> `docs/adr/0006-*` and `docs/research/m26-build-note.md` are retained as retired research records.
 
 ### Renumber state — COMPLETE (2026-07-12)
 

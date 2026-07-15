@@ -1,5 +1,10 @@
 # M26 build note — Operator Development Deep-Dive
 
+> **⚠ MODULE CUT 2026-07-15 — do NOT build.** The owner dropped M26 (Operator Development Deep-Dive) as
+> too advanced, before any content or entry-state existed. This note is retained only as a research record
+> (and the rationale behind the now-retired ADR-0006). If M26 is ever revived, re-verify everything below —
+> the operator-sdk / OLM-v1 facts were current 2026-07-15 and this is a fast-moving area.
+
 Date: 2026-07-15 · Author: research-analyst · Spec: `Project-Shared/instructions/02-MODULE-SPECS.md` **§M26 (lines 314-323)** · Entitlement: **[OCP]** (core OCP; the SDK itself is upstream OSS, **not** a Red Hat-supported SKU on 4.21 — see below). Profile: `core` + an operator-dev workspace image. 120 min (double slot).
 
 Method: READ-ONLY live build cluster `ocp-ws-revamped` (OCP 4.21.22 / k8s 1.34.8) as `admin` (no mutations) — `oc get/explain/api-resources`, `oc auth can-i --as=user1` impersonation for the attendee RBAC boundary. Product facts via github.com/operator-framework, sdk.operatorframework.io, book.kubebuilder.io, quarkiverse, redhat.com/blog, docs.redhat.com (403 on direct fetch → WebSearch). Repo inspection: `gitops/entry-states`, `platform-portfolio`, `gitops/workshop-config`, `versions.yaml`, `docs/adr`. Cross-checked M03 (Dev Spaces), M05 (Storage), M06 (Jobs/CronJob) build notes. **No `docs/research/m25-build-note.md` exists yet** — OLM v1 verified independently here; M25 dependency noted. `versions.yaml` left unedited per task constraint (proposed `operator_sdk`/`olm_v1` blocks in the appendix).

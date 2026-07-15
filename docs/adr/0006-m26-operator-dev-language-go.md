@@ -1,11 +1,11 @@
 # ADR-0006: M26 Operator Development — Go (operator-sdk) for the graded lab, Java as take-home
 
-Date: 2026-07-15 · Status: accepted (research-stage decision) — flagged for owner ratification · Owner: PM (research by research-analyst)
+Date: 2026-07-15 · Status: **RETIRED 2026-07-15** — M26 (Operator Development) cut by owner before any build; this decision is moot, kept only as a research record · Owner: PM (research by research-analyst)
 
-> **Owner ratification flagged.** This workshop is Quarkus/Java-primary, and M26 is the one module that
-> deliberately teaches Go. The reasons are tooling-forced (below), not preference — but if you want the
-> graded path to stay Java, see "Rejected: Java-first" for what that costs. Nothing else depends on this
-> ADR yet (M26 is not built), so reversing it is cheap until content lands.
+> **RETIRED — M26 was cut.** The owner dropped M26 (Operator Development Deep-Dive) on 2026-07-15 as too
+> advanced, before any content or entry-state was built. This ADR's Go-vs-Java decision is therefore moot
+> and retained only as a record of the research. If M26 is ever revived, re-open and re-verify (the tooling
+> facts below were current 2026-07-15). Original intent: the reasons for Go were tooling-forced, not preference.
 
 ## Context
 
