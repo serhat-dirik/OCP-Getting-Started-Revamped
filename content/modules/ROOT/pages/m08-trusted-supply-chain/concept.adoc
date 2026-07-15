@@ -14,7 +14,7 @@ Parasol just failed a supplier security audit: nobody could prove which build pr
 
 The pipeline from the previous work builds and deploys `parasol-claims` reliably — but "it builds" is not the same as "it is trustworthy."
 The auditor asked three questions Parasol could not answer: _what dependencies are in this image, who built it, and can you prove the running image is the one your pipeline produced?_
-In this module you add the three controls that answer those questions — a *vulnerability scan gate*, *image signing with provenance*, and a *software bill of materials* — and you make the cluster *refuse to run* anything that is not signed.
+In this module you add the controls that answer those questions — a *software bill of materials* (what is inside), *image signing with SLSA provenance* (who built it, and proof the running image is intact), and *signature admission* — so the cluster will *refuse to run* anything that is not signed.
 
 [NOTE]
 .What "[ADS]" means, and what is actually included
@@ -25,26 +25,35 @@ Two of the controls you use, though — *Tekton Chains* image signing and the na
 The lab flags which control is which as you go.
 ====
 
+[NOTE]
+.Two halves of DevSecOps — scanning and trust
+====
+*Scanning* your code and images for known flaws — SAST (static analysis), SCA (dependency CVEs), DAST (the running app), configuration, and image risk — is its own module, *Application Security Testing* (a separate module).
+*This* module is the other half: proving *provenance* and *signing and verifying* what you ship, so only *trusted* artifacts run.
+Put plainly: that module asks _"is it free of known flaws?"_; this one asks _"is it provably ours?"_ — and a mature pipeline does *both*.
+The pipeline here includes a scan step only as *context* — the place trust controls attach — so the scan _technique_ stays the other module's subject.
+====
+
 == What you'll learn
 
-* The *supply-chain threat model* in plain words — "you ship your dependencies" — and what the *SLSA* (Supply-chain Levels for Software Artifacts) levels actually ask of you.
+* The *supply-chain threat model* in plain words — "you ship your dependencies" — and what the *SLSA* (Supply-chain Levels for Software Artifacts) levels actually ask of your build _process_.
 * The *signature / attestation / SBOM* (software bill of materials) *triangle*: three different facts about an image, and why you need all three.
-* How a *scan gate* fails a build on a known vulnerability (RHACS), and why scoping the gate to a policy category makes it *deterministic*.
 * How *Tekton Chains* signs every pipeline-built image and emits *SLSA provenance* — with no per-build wiring — and how you verify it with `cosign`.
-* The difference between *policy-as-gate* (fail the build) and *policy-as-admission* (refuse to run), and how a native OpenShift `ImagePolicy` enforces "only signed images run."
+* The difference between a *build-time gate* (fail the build) and *run-time admission* (refuse to run) — and how a native OpenShift `ImagePolicy` enforces "only signed images run," so a signature is *checked*, not merely produced.
+* Where trust ends and *scanning* begins: catching flaws with SAST, SCA, DAST, and image risk is a separate module (*Application Security Testing*); here you prove *provenance* and *sign and verify* what you ship.
 
 == You ship your dependencies
 
 The single idea under this whole module: *the code your team wrote is a small fraction of what you deploy.*
 The `parasol-claims` image is mostly other people's code — the Quarkus runtime, its transitive libraries, the base operating-system layers — pulled in at build time.
 That is normal and good; it is also the attack surface.
-When a critical flaw is found in a widely used library (Log4Shell in `log4j-core`, in December 2021, is the canonical example), the question is not "did we write the bug" — it is *"is it in anything we ship, and can we find out in minutes?"*
+When a critical flaw is found in a widely used library (Log4Shell in `log4j-core`, in December 2021, is the canonical example), the hard questions are not about the code you wrote — they are *whether you can prove what is in each image, who built it, and that the one running in production is the one your pipeline shipped.*
 
 A trusted software supply chain answers three questions about every artifact you build:
 
 Provenance:: _Where did this come from?_ Who built it, from which source, with which builder — and can you prove the running image is that exact build, not a substitute.
 Integrity:: _Has it been tampered with?_ A cryptographic *signature* that the image you run is byte-for-byte the image your pipeline produced.
-Contents:: _What is inside?_ A *software bill of materials* (SBOM) — the itemized list of every component and version — so that when the next Log4Shell lands, "are we affected?" is a query, not an archaeology project.
+Contents:: _What is inside?_ A *software bill of materials* (SBOM) — the itemized list of every component and version, produced at build time and _attestable_ so it travels with the signed image. (Turning that list into a vulnerability answer — "are we affected by the flaw that just broke the internet?" — is *scanning*, the subject of the Application Security Testing module; here the SBOM is the trust artifact that records _what shipped_.)
 
 [TIP]
 .SLSA, in one paragraph
@@ -102,59 +111,55 @@ flowchart LR
 There are two places to stop a bad image, and they are not interchangeable — a mature supply chain uses *both*.
 
 Policy-as-gate (build time)::
-A *scan gate* runs inside the pipeline: build the image, scan it, and *fail the build* if it violates policy.
-This is where you catch a vulnerable dependency _before_ the image is ever published.
-In the lab, RHACS runs `roxctl image check` as a pipeline task; a critical CVE returns a non-zero exit code, the task fails, and the pipeline stops.
-The gate's value is *shift-left*: the developer who introduced the flaw finds out in their own pipeline run, not in production.
+A gate runs *inside the pipeline*: build the image, check it, and *fail the build* if it violates policy.
+Scanning gates — a vulnerable dependency, a hard-coded secret, an insecure manifest — are the subject of the Application Security Testing module (a separate module); the lab here includes one scan step only as the pipeline context that trust attaches to.
+The gate's value is *shift-left*: the flaw is caught in the developer's own pipeline run, not in production.
 
 Policy-as-admission (run time)::
-A gate only helps if _every_ image goes through the pipeline.
-*Admission* closes that gap by enforcing a rule at the cluster: OpenShift's native `ImagePolicy` tells the node to *verify a signature before it will pull an image* into a namespace.
+A gate only helps if _every_ image goes through the pipeline — and this run-time control is where *this* module lives.
+*Admission* closes the gap by enforcing a rule at the cluster: OpenShift's native `ImagePolicy` tells the node to *verify a signature before it will pull an image* into a namespace.
 An unsigned image — one that never went through your signing pipeline — is *refused at pull time*.
 The gate is a policy you _run_; admission is a policy the platform _enforces_ whether or not anyone remembered to run the gate.
+Note this is a *different* check from a scanner's deploy-time policy: the Application Security Testing module gates an insecure _manifest_ with `roxctl deployment check`, while admission here verifies the image's _signature_ — is it provably ours? — not its configuration.
 
 [NOTE]
-.Why the scan gate keys on a specific policy — determinism
+.The scan in this lab is deliberately minimal
 ====
-A default RHACS build policy like "Fixable Severity at least Important" fires on *any* fixable CVE in the image — including base-operating-system CVEs that appear and disappear as the vulnerability feed updates.
-That is correct for a real security program, but it makes a _teaching_ gate non-deterministic: the same image can pass on Monday and fail on Friday.
-So the lab's gate is scoped to a *single policy category* ("Supply Chain Security") containing one deterministic, enforced policy — "Block Log4Shell (CVE-2021-44228) at build."
-The gate then fires on exactly one thing: the seeded `log4j-core` dependency.
-Remove that dependency and the gate goes green — reliably, every time.
+The lab's one scan step is scoped to a single enforced policy so it fires *deterministically* on a known-bad dependency — just enough to give the trust controls a realistic pipeline to attach to.
+Tuning scan gates so they fire on the right things without crying wolf — and the SAST/SCA/DAST layers that catch what an image scan cannot — is its own craft, and its own module (*Application Security Testing*).
 ====
 
 == Red Hat trusted content and the base image
 
 The base image is the largest single source of what you ship, and it is the thread from the earlier build module.
 `parasol-claims` builds `FROM` a Red Hat *Universal Base Image* (UBI) OpenJDK layer.
-Trusted content matters here for two reasons.
-First, *provenance*: UBI images are built and signed by Red Hat, so the bottom of your image has a supply chain you did not have to assemble.
-Second, *currency*: a UBI tag is patched over time, so an _older_ tag carries known base-OS CVEs that a _newer_ tag has fixed.
-The lab's seeded image pins an older UBI tag on purpose — bumping it is *complementary hardening* (fewer base-OS CVEs), and the lab treats it as exactly that: a good habit, but *not* the thing that turns the scan gate green.
-The gate is about the vulnerable dependency you _added_; the base image is about keeping the foundation current.
+For a *trust* story, the point is *provenance*: UBI images are built and signed by Red Hat, so the bottom of your image already has a supply chain you did not have to assemble — a signed foundation you can verify rather than take on faith.
+Keeping that base image *current* matters too, but for a different reason: an older tag carries known base-operating-system CVEs a newer tag has fixed.
+That currency is a *scanning* concern (the Application Security Testing module), and the lab treats a base-image bump as exactly that — complementary hardening, a good habit, but *not* part of proving the image is yours.
 
 == How this shows up in real orgs
 
-* *"Are we affected by <the CVE that just broke the internet>?" becomes a query.*
-Before SBOMs, that question triggers a fire drill: every team greps their build files by hand.
-After, you search your stored bills of materials for the component and get a list of affected images in minutes.
-The SBOM is boring infrastructure until the day it saves you a weekend.
-* *The pipeline is where security shifts left.*
-A scan gate in the pipeline means the person who added the vulnerable dependency is the person who sees it fail — in their own run, with the CVE named.
-That is far cheaper than a security team finding it in production and filing a ticket back to a developer who has moved on to something else.
+* *When the next big CVE lands, having the receipts is what saves the weekend.*
+Before SBOMs, "are we affected?" triggers a fire drill.
+After, you have a stored, itemized record of what every image contains — the SBOM this pipeline attaches to each build.
+_Querying_ those records at scale to find an affected component is the scanning story (the Application Security Testing module, and Red Hat Trusted Profile Analyzer); the *trust* story is that the record exists, is accurate, and travels with a signed image.
 * *Signing is only half the story; enforcement is the other half.*
 Plenty of organizations sign their images and then never check the signature at run time.
 Admission control (`ImagePolicy` here, or RHACS's cluster-wide admission) is what turns "we sign our images" into "the cluster will not run an unsigned one" — the difference between a policy on a wiki and a policy the platform enforces.
 * *Provenance is what an auditor actually asks for.*
 "Show me that the image in production came from this commit through this pipeline" is a real audit question.
 A signed SLSA attestation is a machine-checkable answer — and because Tekton Chains produces it automatically, you get the answer without anyone writing it up.
+* *Trust and scanning are complementary, not the same thing.*
+A scanned-clean image that isn't signed can still be swapped for another; a signed image full of known CVEs is authentically vulnerable.
+This module makes an image *provably yours*; the Application Security Testing module (a separate module) makes it *provably free of known flaws* — you want both, and they run in the same pipeline.
 
 [NOTE]
-.Where this sits relative to the pipeline and GitOps modules
+.Where this sits — pipelines, scanning, and GitOps
 ====
 The previous module gave you a pipeline that produces an image and *data* (results).
-This module adds the *trust* controls to that pipeline — a scan that can fail the build, a signature and provenance on every image, and an SBOM.
-The GitOps modules that follow take the *trustworthy, signed* image this pipeline produces and reconcile it into each environment — so admission control (only-signed-runs) and GitOps promotion are the two halves of "the right image, and only the right image, reaches production" (both are separate modules).
+This module adds the *trust* controls to that pipeline — a signature and SLSA provenance on every image, an attestable SBOM, and admission that refuses anything unsigned.
+Its sibling, *Application Security Testing* (a separate module), adds the *scanning* controls — SAST, SCA, DAST, and image-risk gates that prove the image is free of known flaws.
+The GitOps modules that follow take the *trustworthy, signed* image and reconcile it into each environment — so admission control (only-signed-runs) and GitOps promotion are the two halves of "the right image, and only the right image, reaches production" (all separate modules).
 ====
 
 // media-pass: the cross-module Parasol platform-accretion diagram with the M08 trust layer highlighted — m08-trusted-supply-chain-04-platform-accretion.svg (see media-manifest.md)
@@ -164,7 +169,8 @@ ifdef::demo[]
 .Presenter framing
 ====
 Spend no more than five minutes here before the live demo.
-Two ideas must land: (1) *three artifacts, three questions* — signature (intact + ours), attestation (how it was built), SBOM (what is inside); (2) *gate vs admission* — the pipeline can _fail_ a bad build, and the cluster can _refuse to run_ an unsigned one.
-The live demo (the scan gate catching Log4Shell, then the fix, then the signature) is the payoff — keep the concept tight so there is time for it.
+Two ideas must land: (1) *three artifacts, three questions* — signature (intact + ours), attestation (how it was built), SBOM (what is inside); (2) *sign in the pipeline, enforce at the cluster* — Tekton Chains signs every build automatically, and admission (`ImagePolicy`) refuses anything unsigned.
+The payoff is the *trust* beat — the signature and SLSA provenance sitting beside the image, and the cluster refusing an unsigned one.
+The demo uses a scan-and-fix loop to reach a clean image, but keep the spotlight on what makes that image *trustworthy*; scanning for flaws is the other module's show.
 ====
 endif::demo[]
