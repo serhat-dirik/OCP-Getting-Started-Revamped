@@ -10,8 +10,8 @@ This module is where configuration stops being an afterthought and becomes a dis
 The two ideas that must land are *"the same image runs everywhere; config is what changes"* and *"readiness holds traffic away from a pod that is not ready."*
 The three deliberate breaks — a bad datasource URL, a broken readiness probe, and a quota-busting request — are the spine; each one is a "read the error, then fix it" beat, not a detour.
 
-The biggest delivery subtlety is that two of the breaks do *not* behave the naive way, and attendees will notice: a bad config `CrashLoop`s only after a ~20 s boot (so the pod flickers `Running`), and a broken readiness probe does *not* immediately `503` because the rolling update keeps the old pod serving.
-Both are covered in the lab, but expect questions — they are in the Top-5 below.
+The biggest delivery subtlety is the readiness gate, which now drives *both* the exercise-1 and exercise-4 breaks and does *not* behave the naive way: in exercise 1 the bad datasource makes the new pod fail readiness, so it is held at `0/1` while the *old* pod keeps serving (the Route stays `200`, not `503`); in exercise 4 the same gate only forces a `503` once you scale the deployment 0→1 so there is no ready pod left.
+Attendees expect a bad config to "take the app down" and are surprised the old pod keeps serving — that surprise *is* the lesson, and it is in the Top-5 below.
 
 == Timing
 
@@ -22,7 +22,7 @@ Add ~10–12 min of in-room concept discussion up front.
 |===
 | # | Exercise group | Attendee time | Measured core
 
-| 1 | Break the app with a bad setting | ~10 min | `CrashLoopBackOff` settles in *~90 s* (2 restarts; each boot-then-die *~22 s*)
+| 1 | Break the app with a bad setting | ~10 min | new pod `0/1` within *~1–2 s* (readiness); old pod keeps serving (Route `200`); `CrashLoopBackOff` at *~90 s*
 | 2 | Fix it via a ConfigMap | ~10 min | each `oc set env` rollout *~15–40 s*
 | 3 | Secret + mounted-file config | ~15 min | mount takes effect on next rollout; access-log line immediate
 | 4 | Add probes; break/fix readiness | ~15 min | new pod NotReady in *~30 s*; stable Route `503` after scale 0→1; recovery *~15 s*
@@ -35,10 +35,10 @@ Add ~10–12 min of in-room concept discussion up front.
 .How this timing was measured
 ====
 The *Measured core* column is real.
-On the build cluster (OCP {ocp_version}, Quarkus {quarkus_version}) on 2026-07-09, every exercise was performed as `user6` from the Showroom-terminal commands in the lab:
+On the build cluster on 2026-07-09 (with the exercise-1 readiness-gate rework re-measured on 2026-07-15), every exercise was performed from the Showroom-terminal commands in the lab:
 
-* *Config `CrashLoop`* — a bad `QUARKUS_DATASOURCE_JDBC_URL` makes the app fail at boot (Hibernate needs the DB for schema init).
-Each attempt boots for ~22 s, throws `UnknownHostException`, exits `1`, and restarts — reaching `CrashLoopBackOff` after 2 restarts (~90 s).
+* *Config break (exercise 1)* — with a readiness probe added first, a bad `QUARKUS_DATASOURCE_JDBC_URL` makes the new pod fail readiness *immediately* (`0/1` within ~1–2 s) instead of flashing a deceptive `1/1 Running`.
+The rolling update is gated, so the old pod keeps serving (Route `200`); the new pod boots (~22 s), throws `UnknownHostException`, exits `1`, and reaches `CrashLoopBackOff` after ~90 s.
 * *Readiness break* — pointing readiness at a `404` path makes the *new* pod NotReady in ~30 s while the old pod keeps serving (the rolling update protects users).
 Only after the last ready pod is removed does the Route `503`.
 Fix + recovery is ~15 s.
@@ -119,11 +119,11 @@ If someone notices prod logs almost nothing, that is the `WARN` log level from i
 
 == Top questions attendees ask
 
-*1. "It said `Running`, then `CrashLoopBackOff`. Which is it?"*::
-Both, in sequence.
-The container boots (so it shows `Running` for ~20 s), then Hibernate tries to reach the database for schema init, fails on the bad host, and the process exits `1` — so Kubernetes restarts it on a back-off timer.
-The signal that it is broken is the *restart count climbing* and the `CrashLoopBackOff` status, not a single snapshot.
-Always read `oc logs --previous`.
+*1. "Exercise 1 shows *two* pods and the app still answers — did the break fail?"*::
+No — that is the readiness gate working.
+Because the attendee adds a readiness probe *before* breaking the datasource, the new (broken) pod never passes readiness, so the rolling update is *gated*: the new pod is held at `0/1` while the old, healthy pod keeps serving (the Route stays `200`).
+Tell the room to watch the `READY` column (`0/1`), not `STATUS` — `STATUS` oscillates `Running`/`Error`/`CrashLoopBackOff` as the container boots and dies, but the pod is never actually ready.
+For the root cause, read the *newest* pod's `--previous` logs by name (as the lab does): a plain `oc logs -l app=parasol-claims --previous` *errors* here, because the healthy old pod has no previous container.
 
 *2. "Why did `oc set env --from=configmap/...` not error when those variables already existed inline?"*::
 `oc set env --from` defaults to *overwrite*: for each key in the ConfigMap that matches an existing inline variable, it replaces the inline value with a reference to the ConfigMap.
@@ -136,8 +136,8 @@ A Secret's values are *base64-encoded*, which is trivially reversible — the la
 What a Secret buys you is *separate RBAC* (deploy without read-credentials) and one place to rotate.
 Encryption of the source of truth is what a real secrets manager (Vault, cloud KMS, via the External Secrets Operator) adds — the optional section covers it.
 
-*4. "When I broke readiness, why didn't the Route `503` right away?"*::
-Because a probe change triggers a *rolling update*, and the rollout is itself gated by readiness: the new (broken) pod never becomes Ready, so it is held out of the Service while the old, healthy pod keeps serving.
+*4. "When I broke readiness in exercise 4, why didn't the Route `503` right away?"*::
+For the same reason the bad datasource in exercise 1 did not take the app down: a probe change triggers a *rolling update*, and the rollout is itself gated by readiness, so the new (broken) pod never becomes Ready and is held out of the Service while the old, healthy pod keeps serving.
 That is the platform protecting users.
 You only see the `503` once there is *no* ready pod at all — which is why the lab scales the deployment to zero and back to one, so the *only* pod uses the broken probe.
 (Deleting individual pods does not work: the old ReplicaSet keeps recreating a ready pod, so the Route recovers to `200`.)
@@ -156,9 +156,9 @@ Do not tighten these for the workshop.
 * *Quota headroom across three namespaces.*
 Each of `{user}-dev/-stage/-prod` has its *own* `requests.cpu=3` / `pods=30` quota, so the promotion (1 + 2 + 3 claims replicas plus a DB each) is comfortable.
 The only place a user hits the quota is the *deliberate* bust in exercise 5 — that is the lesson, not a problem.
-* *The `CrashLoop` boot-then-die confuses people.*
-Expect "it says Running" during exercise 1.
-Tell the room to watch the restart count, not a single `get pods`.
+* *Two pods in exercise 1 confuse people.*
+Because a readiness probe is added before the break, the gated rollout leaves *two* pods on screen — the old one `1/1` (still serving) and the broken new one `0/1`.
+Tell the room to watch the `READY` column, not `STATUS` (which oscillates), and that the app staying up is the point, not a sign the break failed.
 * *Rapid `oc set env`/`oc set probe` cause several quick rollouts.*
 Between rollouts the Route can briefly `503`.
 The lab waits for the *final* `oc rollout status`; attendees who curl mid-rollout will see a transient `503` — that is normal, have them wait for the rollout to finish.
@@ -168,5 +168,5 @@ If a proxy or TLS interception is in play, the clone can fail where `oc` succeed
 
 == Provenance
 
-All hands-on steps were freshly built and performed on OpenShift {ocp_version} / Quarkus {quarkus_version} (2026-07-09) as `user6`; every command and output in the lab is captured from that run.
+All hands-on steps were freshly built and performed on the build cluster (2026-07-09), with the exercise-1 readiness-gate rework re-measured on 2026-07-15; every command and output in the lab is captured from those runs.
 The multi-environment narrative arc is adapted from the *Modern App Development* multi-env module (credited per the reuse policy); no content was ported from stale material, and the ConfigMap/Secret/probe mechanics were verified live against the current `parasol-claims` service.

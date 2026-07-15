@@ -22,7 +22,7 @@ Most steps below are offered two ways.
 Use the *Console* tab for the graphical workflow in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), or the *CLI* tab for `oc` in the *Terminal* tab beside these instructions — the two paths create the same objects.
 Pick a path once: the tabs stay in sync across the page.
 A few steps are CLI-only — promoting with Kustomize, delivering config as a mounted file, and reading a crash-looping pod's _previous_ logs — and say so where they appear.
-The console click-paths follow the {ocp_version} unified console; if a label reads slightly differently on your cluster, the `oc` command beside it is the source of truth.
+The console click-paths follow the OpenShift web console; if a label reads slightly differently on your cluster, the `oc` command beside it is the source of truth.
 ====
 endif::demo[]
 
@@ -37,7 +37,7 @@ ifdef::demo[]
 ====
 Run `ws solve m04 --user {user}` a few minutes ahead so the end state is up: the claims app fully configured in `{user}-dev`, and promoted to `{user}-stage` (2 replicas) and `{user}-prod` (3 replicas).
 Have a terminal logged in as `{user}` and the web console *Topology* for `{user}-dev` open.
-All values below were measured on {ocp_version} / Quarkus {quarkus_version}.
+The command outputs below were captured from a live run; your pod names and image digests will differ.
 ====
 
 [demo-block]
@@ -120,7 +120,7 @@ endif::demo[]
 ifndef::demo[]
 
 == 1. Break the app with a bad setting — and read the failure
-⏱ *~10 min* · the deliberate break: configuration can take a running app down
+⏱ *~10 min* · the first deliberate break: a bad setting fails loudly and safely
 
 Your claims service is running in `{user}-dev`, but it is configured the *naive* way: every setting, including the database password, is hardcoded inline in the Deployment.
 See for yourself:
@@ -144,10 +144,38 @@ POSTGRESQL_PASSWORD=parasol
 
 Everything — including `POSTGRESQL_PASSWORD` — is sitting in plain text in the Deployment.
 We will fix that.
-But first, feel *why* configuration matters: change one setting to a bad value and watch the app fall over.
-Point the datasource at a database host that does not exist:
+But first, feel *why* configuration matters: change one setting to a bad value and watch what the platform does about it.
 
-// [CAPTURE-VERIFY] Deployment > Environment tab: the "Single values (env)" add-row label (OCP 4.21) — CLI 'oc set env' beside it is authoritative.
+To *see* a bad setting the moment it lands, first give the platform a way to judge the app's health.
+Add a *readiness probe* — the platform's "can this pod serve traffic *right now*?" check — pointed at the health endpoint the claims service already exposes.
+Without one, the platform counts a container as ready the instant its process starts, even while it is seconds from crashing; with one, a pod that cannot serve is held out of rotation.
+(You add the full set of probes — startup and liveness too — in exercise 4; this one readiness check is what makes the next failure visible.)
+
+// [CAPTURE-VERIFY] Deployment > Actions > "Add Health Checks" > Readiness probe (HTTP GET :8080 /q/health/ready) — CLI 'oc set probe --readiness' authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Add Health Checks*.
+. Add a *Readiness* probe — an *HTTP GET* on port `8080`, path `/q/health/ready` — and click *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set probe deploy/parasol-claims --readiness \
+  --get-url=http://:8080/q/health/ready --period-seconds=10 --failure-threshold=3
+oc rollout status deploy/parasol-claims
+----
+--
+====
+
+The app is still healthy — one pod, `1/1` ready.
+Now break it: point the datasource at a database host that does not exist.
+
+// [CAPTURE-VERIFY] Deployment > Environment tab: the "Single values (env)" add-row label — CLI 'oc set env' beside it is authoritative.
 [tabs]
 ====
 Console::
@@ -170,34 +198,70 @@ oc set env deploy/parasol-claims \
 ====
 
 `QUARKUS_DATASOURCE_JDBC_URL` is the environment-variable form of the app's datasource URL, and it *overrides* the correct value the image ships with.
-Watch the rollout: the new pod starts, tries to reach the database at boot, fails, and the container exits — over and over.
-Give it about a minute, then look:
+Because this is a rolling update — the same strategy you met in *Platform Orientation & First App* — the platform brings up a *new* pod alongside the old one and holds off retiring the old one until the new pod passes readiness.
+It never will.
+Look right away:
 
 [source,sh,role=execute]
 ----
 oc get pods -l app=parasol-claims
 ----
 
-.Expected output (the deliberate failure)
+.Expected output (the broken pod is held at `0/1`; the old one still serves)
 [source,texinfo]
 ----
 NAME                              READY   STATUS             RESTARTS      AGE
-parasol-claims-5f7d47fdbd-9pxbt   0/1     CrashLoopBackOff   2 (16s ago)   94s
+parasol-claims-6764c459d6-dgmsm   1/1     Running            0             11m
+parasol-claims-7874794948-pw8lr   0/1     CrashLoopBackOff   3 (19s ago)   2m20s
 ----
 
+The new pod is `0/1` — *NotReady* — almost immediately: it cannot reach the database, so its readiness check never passes and the platform refuses to put it into service.
+The old, healthy pod keeps running and keeps serving.
+That is the readiness gate doing its job: a broken new version is *held back*, not shipped.
+(Without the probe you just added, the platform would have swapped straight to the broken pod, which would have reported a reassuring `1/1 Running` for the better part of a minute before it finally started crash-looping — the failure would have been invisible exactly when you needed to see it.)
+
 [NOTE]
-.The pod may flicker "Running" before it dies
+.Watch the READY column, not STATUS
 ====
-The container needs about twenty seconds to boot before it hits the database and fails, so a quick look can catch it briefly `Running`.
-The truth is in the *restart count* climbing and the `CrashLoopBackOff` status — the pod is booting, failing, and being restarted on a back-off timer.
+The `STATUS` column oscillates — `Running`, `Error`, `CrashLoopBackOff` — as the container boots, fails, and is restarted on a back-off timer.
+Ignore it.
+The honest signal is the `READY` column: it stays `0/1` the whole time, because the pod never once passes its readiness check.
 ====
 
-Now do the thing this whole module is about: *read the logs.*
-A `CrashLoopBackOff` pod has no current logs (the container keeps exiting), so ask for the *previous* container's logs:
+The rollout is now stuck on that unready pod — confirm it, without waiting forever:
 
 [source,sh,role=execute]
 ----
-oc logs -l app=parasol-claims --previous --tail=40 | grep -A2 -iE 'Failed to start|UnknownHost'
+oc rollout status deploy/parasol-claims --timeout=15s
+----
+
+.Expected output
+[source,texinfo]
+----
+Waiting for deployment "parasol-claims" rollout to finish: 1 old replicas are pending termination...
+error: timed out waiting for the condition
+----
+
+And because the old pod is still in the Service, your users are unaffected — the Route keeps answering:
+
+[source,sh,role=execute]
+----
+curl -s -o /dev/null -w "Route: %{http_code}\n" "http://$(oc get route parasol-claims -o jsonpath='{.spec.host}')/api/claims"
+----
+
+.Expected output
+[source,texinfo]
+----
+Route: 200
+----
+
+Now do the thing this whole module is about: *read the logs.*
+The broken pod is the *newest* one, so grab its name; then ask for its *previous* container's logs, because a crash-looping container has no current ones (targeting the newest pod also avoids the healthy old pod, which has no previous container to read):
+
+[source,sh,role=execute]
+----
+BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+oc logs "$BAD" --previous --tail=40 | grep -A2 -iE 'Failed to start|UnknownHost'
 ----
 
 .Expected output
@@ -215,7 +279,7 @@ The lesson is not the fix — it is the *habit*: when a pod will not start, the 
 
 [.checkpoint]
 ****
-✔ *Verify:* `oc get pods -l app=parasol-claims` shows `CrashLoopBackOff`, and the previous-container logs end with `UnknownHostException: wrong-db-host`.
+✔ *Verify:* `oc get pods -l app=parasol-claims` shows the new pod held at `0/1` and crash-looping while the old pod still serves (the Route still answers `200`), and the newest pod's previous-container logs end with `UnknownHostException: wrong-db-host`.
 Leave it broken — you fix it, properly, in the next exercise.
 ****
 
@@ -227,14 +291,16 @@ The quick fix is to remove the bad override:
 [source,sh,role=execute]
 ----
 oc set env deploy/parasol-claims QUARKUS_DATASOURCE_JDBC_URL-
+oc rollout status deploy/parasol-claims
 ----
 
 (The trailing `-` on a variable name *removes* it.)
-The app recovers — but you have just proved the deeper problem: configuration is scattered inline in the Deployment, where it is easy to fat-finger and hard to manage.
+Now the new pod can reach the database, passes its readiness check, and the rollout finally completes — the old pod steps aside.
+But you have just proved the deeper problem: configuration is scattered inline in the Deployment, where it is easy to fat-finger and hard to manage.
 Externalize it.
 Create a *ConfigMap* — a named object that holds *non-secret* configuration — for the environment name, host, port, database name, and log level:
 
-// [CAPTURE-VERIFY] Workloads > ConfigMaps > "Create ConfigMap" form/YAML view (OCP 4.21) — CLI 'oc create configmap' authoritative.
+// [CAPTURE-VERIFY] Workloads > ConfigMaps > "Create ConfigMap" form/YAML view — CLI 'oc create configmap' authoritative.
 [tabs]
 ====
 Console::
@@ -341,7 +407,7 @@ Look again at the last output: `POSTGRESQL_PASSWORD=parasol` is still sitting in
 Anyone who can read the Deployment can read the password.
 Move the credentials into a *Secret*, which is stored and access-controlled separately:
 
-// [CAPTURE-VERIFY] Workloads > Secrets > "Create" > "Key/value secret" form (OCP 4.21) — CLI 'oc create secret generic' authoritative.
+// [CAPTURE-VERIFY] Workloads > Secrets > "Create" > "Key/value secret" form — CLI 'oc create secret generic' authoritative.
 [tabs]
 ====
 Console::
@@ -475,17 +541,18 @@ Both are first-class; the choice is about size and rotation, not correctness.
 == 4. Add probes — and watch a readiness gate hold traffic
 ⏱ *~15 min* · the platform learns your app's health; the second deliberate break
 
-Your app runs, but the platform has *no idea* whether it is healthy — it has no probes.
-Add all three, pointed at the health endpoints the claims service already exposes:
+Your app already carries a *readiness* probe — you added it in exercise 1, and it is what caught the bad datasource.
+Now complete the set: add a *startup* and a *liveness* probe alongside it, so the platform can also tell a slow boot from a failure and restart a container that has wedged.
+All three point at health endpoints the claims service already exposes:
 
-// [CAPTURE-VERIFY] Deployment > Actions > "Add Health Checks" flow (Startup/Readiness/Liveness, HTTP GET, port 8080) (OCP 4.21) — CLI 'oc set probe' authoritative.
+// [CAPTURE-VERIFY] Deployment > Actions > "Add Health Checks" flow (Startup/Readiness/Liveness, HTTP GET, port 8080) — CLI 'oc set probe' authoritative.
 [tabs]
 ====
 Console::
 +
 --
 . Go to *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Add Health Checks*.
-. Add a *Startup*, a *Readiness*, and a *Liveness* probe — each an *HTTP GET* on port `8080`, with paths `/q/health/started`, `/q/health/ready`, and `/q/health/live` respectively (leave the periods and failure thresholds at the values shown in the CLI tab).
+. Add a *Startup* and a *Liveness* probe — each an *HTTP GET* on port `8080`, with paths `/q/health/started` and `/q/health/live` (your *Readiness* probe on `/q/health/ready` is already there from exercise 1; leave the periods and failure thresholds at the values shown in the CLI tab).
 . *Save*, then wait for the rollout to finish.
 --
 CLI::
@@ -494,7 +561,7 @@ CLI::
 [source,sh,role=execute]
 ----
 oc set probe deploy/parasol-claims --startup   --get-url=http://:8080/q/health/started --period-seconds=3  --failure-threshold=30
-oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready   --period-seconds=10 --failure-threshold=3
+oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready   --period-seconds=10 --failure-threshold=3   # already set in exercise 1; re-applying is a no-op
 oc set probe deploy/parasol-claims --liveness  --get-url=http://:8080/q/health/live    --period-seconds=10 --failure-threshold=3
 oc rollout status deploy/parasol-claims
 ----
@@ -516,32 +583,16 @@ readiness=/q/health/ready
 liveness=/q/health/live
 ----
 
-Now break *readiness* on purpose — point it at a path that returns `404` — and watch the platform's reaction.
+Now break *readiness* a different way — point it at a path that returns `404`:
 
 [source,sh,role=execute]
 ----
 oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
 ----
 
-Because readiness gates a *rollout*, the first thing you see is the platform *protecting* users: the new pod comes up but never passes readiness, so it is held out of rotation while the old, healthy pod keeps serving.
-Wait about thirty seconds, then look:
-
-[source,sh,role=execute]
-----
-oc get pods -l app=parasol-claims
-----
-
-.Expected output (rollout gated — new pod NotReady, old pod still serving)
-[source,texinfo]
-----
-NAME                              READY   STATUS    RESTARTS   AGE
-parasol-claims-6b94df5d7b-4qrfs   0/1     Running   0          31s
-parasol-claims-d4f69cc5c-vwz2w    1/1     Running   0          3m8s
-----
-
-A broken new version that *never receives traffic* is exactly what you want.
-(While the old pod is still serving, the Route stays `200` — that is the rollout being *gated* by readiness.)
-Now see the other half — what happens when there is *no* ready pod at all.
+You saw this gate in exercise 1: the probe change triggers a rolling update, the new pod never passes readiness, so it is held out of rotation while the old, healthy pod keeps serving — the Route stays `200`.
+Breaking the probe *path* (rather than the database) proves the gate reacts to the probe's verdict itself, not just to the app's dependencies.
+Now see the *other* half — what happens when there is *no* ready pod at all.
 Roll the *whole* deployment onto the broken probe by scaling it to zero and back to one, so the only pod uses the failing readiness check:
 
 [source,sh,role=execute]
@@ -560,7 +611,7 @@ NAME             ENDPOINTS   AGE
 parasol-claims   <none>      ...
 ----
 
-(The deprecation warning is normal on OpenShift {ocp_version} — the classic Endpoints view is still the quickest way to see the readiness gate; EndpointSlice is its long-form successor.)
+(The deprecation warning is expected — the classic Endpoints view is still the quickest way to see the readiness gate; EndpointSlice is its long-form successor.)
 With no ready pods, the Service has *no endpoints*, and the Route has nowhere to send traffic:
 
 [source,sh,role=execute]
@@ -600,10 +651,11 @@ Route: 200
 == 5. Set requests and limits — and bump into the quota
 ⏱ *~12 min* · resource governance; the third deliberate break
 
-Your app has been inheriting *default* requests and limits from the namespace *LimitRange*.
-See those defaults, then set *explicit* values on the claims app:
+You met resource *requests* and *limits* — and how the namespace *LimitRange* fills in defaults for a container that declares none — when you deployed your first app in *Platform Orientation & First App*.
+Your claims app has been running on exactly those inherited defaults; this exercise adds the *namespace* guardrail on top.
+First, see the defaults it inherits, then pin *explicit* values on the claims app:
 
-// [CAPTURE-VERIFY] Administration > LimitRanges detail; Deployment > Actions > "Edit resource limits" (OCP 4.21) — CLI 'oc get limitrange'/'oc set resources' authoritative.
+// [CAPTURE-VERIFY] Administration > LimitRanges detail; Deployment > Actions > "Edit resource limits" — CLI 'oc get limitrange'/'oc set resources' authoritative.
 [tabs]
 ====
 Console::
@@ -820,7 +872,7 @@ All three environments answer on their own Route with the same 30 seeded claims.
 You saw it plainly: a Kubernetes Secret is base64, not encryption, and it lives in the cluster.
 For anything beyond a workshop, the *source of truth* for a credential belongs in a dedicated secrets manager — HashiCorp Vault, or a cloud provider's secrets service — and should be *synced* into the cluster on demand, never copied by hand.
 
-On OpenShift the tool for that is the *External Secrets Operator* (ESO) {external_secrets_version}.
+On OpenShift the tool for that is the *External Secrets Operator* (ESO).
 You write a small `ExternalSecret` object that names a key in the external manager; the operator fetches it and produces an ordinary Kubernetes Secret that your app consumes *unchanged* — the app never knows the difference.
 A minimal `ExternalSecret` looks like this:
 

@@ -7,21 +7,22 @@ include::partial$version-attributes.adoc[]
 
 Every entry below was hit while building the module on the cluster, or is a known failure mode the lab deliberately produces.
 
-== The pod shows `Running`, then `CrashLoopBackOff` — which is it?
+== Exercise 1 shows *two* pods, and `oc logs --previous` errors
 
-Symptom:: After a bad config change (exercise 1), `oc get pods` sometimes shows the pod `Running`, sometimes `CrashLoopBackOff`, with a climbing restart count.
-Cause:: The container boots successfully (so it is briefly `Running`), but the claims app needs the database at startup to initialize its schema.
-With a bad datasource it fails after ~20 seconds, the process exits, and Kubernetes restarts it on a back-off timer.
-Fix:: This is expected during the deliberate break.
-Read the *previous* container's logs (the current one keeps exiting):
+Symptom:: After the exercise-1 break, `oc get pods -l app=parasol-claims` shows *two* pods — one `1/1 Running` and one `0/1` whose `STATUS` flips between `Running`, `Error`, and `CrashLoopBackOff` — and a plain `oc logs -l app=parasol-claims --previous` errors with `previous terminated container "…" not found`.
+Cause:: The readiness probe you add first *gates* the rolling update: the new pod cannot reach the database, never passes readiness, and is held at `0/1`, while the old, healthy pod keeps serving.
+So there are two pods, and `oc logs -l …` matches *both* — but the healthy old pod has no previous (crashed) container, which is exactly what triggers the error.
+The `STATUS` column oscillates because the broken container keeps booting, failing, and restarting; the honest signal is the `READY` column staying `0/1`.
+Fix:: Read the *newest* (broken) pod by name instead of by label:
 +
 [source,sh,role=execute]
 ----
-oc logs -l app=parasol-claims --previous --tail=40 | grep -iE 'Failed to start|Caused by'
+BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+oc logs "$BAD" --previous --tail=40 | grep -iE 'Failed to start|Caused by'
 ----
 +
 The last `Caused by:` is the real cause (here, `UnknownHostException: wrong-db-host`).
-Remove the bad override to recover: `oc set env deploy/parasol-claims QUARKUS_DATASOURCE_JDBC_URL-`.
+Remove the bad override to recover: `oc set env deploy/parasol-claims QUARKUS_DATASOURCE_JDBC_URL-` (then `oc rollout status deploy/parasol-claims`).
 
 == I removed an environment variable and the app broke
 
@@ -139,4 +140,4 @@ If it is missing, the fork job has not run; ask your instructor to `ws reset {mo
 
 '''
 
-_Last verified on OpenShift {ocp_version} / Quarkus {quarkus_version} (2026-07-09)._
+_Last verified on the build cluster (2026-07-09; exercise-1 readiness-gate rework re-verified 2026-07-15)._
