@@ -1,0 +1,139 @@
+= Packaging & Distributing Your App: Concept
+:module-id: m25
+include::partial$version-attributes.adoc[]
+
+// Concept page for M25. Renders in all three flavors (workshop/demo/instructor). Environment values
+// appear ONLY as attributes; product versions ONLY via version-attributes (CC-1: no version anchors in
+// prose). Every claim about Helm behaviour was performed on OCP {ocp_version} (Kubernetes 1.34) in a
+// {user}-dev namespace on 2026-07-16 — the create/lint/template/install/upgrade/rollback/test/package
+// and the OCI push+pull round-trip are real captures. The OLM dissection facts (channels, CSV, owned
+// CRDs, CatalogSource, InstallPlan, ClusterCatalogs) are real read-only reads of the LIVE Pipelines
+// operator on the same cluster. Live infra strings are scrubbed to attributes/placeholders.
+
+[.lead]
+Everything you have deployed this week arrived as *packaged software* — the Pipelines operator that ran your builds, the GitOps operator that reconciled your apps, the Helm-shaped entry states that materialized each module.
+None of it was hand-applied YAML.
+This module is about the other side of that: turning *your* application into something a colleague — or a customer — can install, upgrade, and roll back without reading your mind.
+You will package the Parasol notifications service as a *Helm chart*, push it to the registry as an *OCI artifact*, and then take apart a *real operator's OLM bundle* to see exactly what happens when someone clicks "Install" on your tile.
+
+== Why packaging is a product decision
+
+A running application is not a shippable one.
+When Parasol's platform team hands the notifications service to a dozen internal teams, the question is not "does it run?" — it is "how does each of those teams *install* it, and what happens when you ship version two?"
+Hand them a folder of YAML and every team edits it differently, nobody can tell you which version is in production, and an upgrade is a diff nobody reviews.
+Package it as a versioned chart and the same teams run one command to install, one to upgrade, and one to roll back to the exact bits that worked yesterday.
+
+[IMPORTANT]
+.The business hook
+====
+*Your product's user experience is its install and upgrade, not just its runtime.*
+The difference between "here is some YAML, good luck" and "here is a versioned artifact you can install, upgrade, and roll back" is the difference between a support queue and a self-service platform.
+Packaging is where operability gets *encoded once* so every consumer inherits it.
+====
+
+== The packaging spectrum
+
+There is no single right way to package an app — there is a *spectrum*, and the axis that orders it is *how much day-2 responsibility the package takes off the human*.
+At one end you own everything by hand; at the other, a controller owns upgrades, backup, and failover for you — at a real authoring and lifetime cost.
+
+[mermaid]
+....
+graph LR
+  m["Raw manifests<br/>oc apply"] --> t["OpenShift Template<br/>oc process"] --> k["Kustomize<br/>overlays + patches"] --> h["Helm<br/>chart · values · OCI"] --> o["Operator<br/>CRD + controller"]
+  m -.->|"day-2 responsibility encoded IN the package increases →"| o
+  classDef low fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef mid fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef high fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class m,t low; class k,h mid; class o high;
+....
+
+// media-pass: replace/augment with SVG export m25-packaging-distributing-01-spectrum.svg (green = low authoring cost / you own day-2; blue = versioned templating; amber = a controller owns day-2 at high cost). See media-manifest.md.
+
+Read it left to right:
+
+* *Raw manifests* (`oc apply -f`) — no templating, no versioned artifact. You own *everything*: every environment is a hand-edited copy, and an upgrade is whatever you remember to change. Authoring cost ~zero; day-2 cost all yours.
+* *OpenShift Template* (`oc process`) — parameters and a one-shot instantiate. Good for a catalog "click to create," but it does not *upgrade* an existing instance — it stamps out a new one.
+* *Kustomize* — base plus overlays and patches, declarative and Git-friendly (the shape GitOps loves). No release hooks, no rollback command, no continuous reconcile — it renders YAML, nothing watches it.
+* *Helm* — Go-templated manifests driven by a `values.yaml`, packaged into a *versioned chart* you can store as an OCI artifact. `helm upgrade`, `helm rollback`, lifecycle hooks, and `helm test` give you real release management — but it is *client-side*: Helm acts when you run it, then stops. *This module's focus.*
+* *Operator* — a *custom resource* plus a *controller* that runs forever, continuously reconciling your app: upgrades, backup, failover, all encoded in the controller. The most operability per install — and the highest authoring cost and lifetime commitment.
+
+The move down the spectrum is a trade: *more day-2 behaviour lives in the package (off the human), at the cost of more to author and maintain*.
+Most applications are happiest in the middle — a Helm chart is plenty.
+
+== When *not* to write an operator
+
+The honest rule, stated up front because it is the one most teams get wrong:
+
+[NOTE]
+.If `helm upgrade` covers your day-2, you do not need a reconcile loop
+====
+An operator earns its cost when your software needs *continuous* action a human or a one-shot install cannot give: it repairs drift the moment it happens, orchestrates a stateful upgrade with ordering and backups, fails over across sites, or manages dozens of instances from one spec.
+If your "day-2" is "occasionally run `helm upgrade` with new values," a chart already does that — an operator would be a reconcile loop with nothing to reconcile, plus a controller to build, certify, and keep alive for the life of the product.
+Write the operator when the *reconcile* is the value; reach for Helm the rest of the time.
+====
+
+You will read a real operator's bundle in the lab precisely so this judgement is *grounded* — you will see what an operator actually ships (a controller Deployment, custom resource definitions, RBAC, an upgrade channel) and can weigh that against a chart honestly.
+
+== OLM anatomy: what happens when a customer clicks "Install"
+
+When you installed the Pipelines operator — or any operator — from OperatorHub, a specific chain of objects ran.
+This is the *classic OLM* (Operator Lifecycle Manager) model, and on this cluster it is what installed *every* operator you used all week.
+
+[mermaid]
+....
+graph TB
+  cat["CatalogSource<br/>(a catalog index image)"] --> pm["PackageManifest<br/>(the operator's channels)"]
+  pm --> sub["Subscription<br/>you pick a channel"]
+  sub --> ip["InstallPlan<br/>Automatic or Manual approval"]
+  ip --> csv["ClusterServiceVersion (CSV)<br/>owned CRDs + controller Deployment + RBAC"]
+  csv --> pod["Operator Pod<br/>reconciles your custom resources"]
+  classDef cat fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  classDef pick fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  classDef run fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class cat,pm cat; class sub,ip pick; class csv,pod run;
+....
+
+// media-pass: replace/augment with SVG export m25-packaging-distributing-02-olm-anatomy.svg (blue = the catalog supply; amber = the choices you make; green = what runs). See media-manifest.md.
+
+* A *CatalogSource* is a catalog index (a container image) listing operators the cluster can install.
+* A *PackageManifest* is one operator's entry in that catalog, exposing its *channels* — named upgrade streams like `latest` or a version-pinned line.
+* You create a *Subscription* naming the package, a channel, and the catalog. That is the "I want this operator, on this upgrade stream" declaration.
+* OLM resolves it into an *InstallPlan* — the concrete set of objects to create — which is approved *automatically* or held for a *manual* click (the control an admin uses to gate upgrades).
+* The InstallPlan installs a *ClusterServiceVersion (CSV)* — the heart of the bundle. The CSV declares the *custom resource definitions the operator owns*, the *controller Deployment* to run, the *RBAC* it needs, and its *install mode*.
+* That Deployment is the *operator Pod*, which then watches and reconciles the custom resources you create.
+
+The vocabulary — *bundle, channel, subscription, catalog, CSV* — is the same whether you are *reading* an operator (this module) or *shipping* one. In the lab you will pull this chain apart on the live Pipelines operator: its Subscription, its channels, its CSV and the custom resource definitions it owns, the catalog it came from, and its InstallPlan.
+
+=== Where OLM is going
+
+A newer generation, *OLM v1*, is generally available and running on this cluster — you will see its catalogs *serving* — but nothing is installed through it yet, and the current web console does not surface it.
+It reshapes the same idea into two cluster-scoped objects: a *ClusterCatalog* (the catalog) and a *ClusterExtension* (your installed operator, with a ServiceAccount and RBAC you supply explicitly).
+The classic model is what drives OperatorHub today and what you will dissect; OLM v1 is a five-minute "here is the direction" read at the end of the lab.
+
+== The ISV road (a peek, not a lab)
+
+If you package software to *ship to customers* — an Independent Software Vendor — packaging is only half the story; *distribution and certification* are the rest:
+
+* A *Helm chart* is certified with the *chart-verifier* and published to the `openshift-helm-charts` repository, landing it in the Red Hat Ecosystem Catalog.
+* An *operator bundle* runs through *Preflight* and Red Hat Partner Connect, and appears in *OperatorHub* / the certified catalog.
+* *Disconnected customers* expect your artifacts to *mirror* — the internal-registry and mirroring governance from the Registry & Catalog Governance module is exactly what they run, and your packaging has to survive it.
+
+You will not certify anything today; the point is to know the road exists so your packaging choices are made with the destination in view.
+
+== How this shows up in real orgs
+
+* *"Which version of the shared service is in team X's cluster?"* If the answer is "whatever YAML they copied," you cannot answer it. A chart's release history (`helm history`) makes version and rollback a fact, not an archaeology project.
+* *"The upgrade broke prod and we couldn't get back."* A `helm rollback` to the last good revision is one command — you will break a release on purpose and recover it in the lab. Hand-edited YAML has no such undo.
+* *"Should we write an operator for this?"* Most of the time, no. Teams reach for an operator because it feels powerful, then spend a quarter building a reconcile loop a Helm chart would have covered. The spectrum, weighed honestly, saves that quarter.
+* *"How does a customer even install our product?"* If you sell software that runs on OpenShift, your install *is* your first impression. A certified chart or bundle is the difference between a smooth proof-of-concept and a week of email.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Spend no more than five minutes here before the live demo.
+Three ideas must land: (1) packaging is a *spectrum ordered by day-2 cost* — manifests → Template → Kustomize → Helm → operator — and *most apps want Helm*; (2) an operator is a *CRD + a controller that reconciles forever*, worth its cost only when the reconcile is the value — "if `helm upgrade` covers day-2, you don't need one"; (3) OLM is *what happens when a customer clicks your tile* — CatalogSource → Subscription → InstallPlan → CSV → operator Pod — the exact chain that installed every operator they used this week.
+The demo is the ten-minute arc: install the notifications chart, upgrade it, *break* it with a bad probe and *roll back*, then dissect the live Pipelines operator's bundle — "the platform runs on the exact packaging you just learned."
+Close on the punchline: "you ship install and upgrade, not just runtime — and you almost never need to write an operator to do it well."
+====
+endif::demo[]

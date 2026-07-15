@@ -1,0 +1,110 @@
+= Packaging & Distributing Your App: Troubleshooting
+:module-id: m25
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-16 in a
+// {user}-dev namespace) plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use
+// $NS = {user}-dev (set it once). NAMESPACE in output is the sample user user2-dev.
+
+Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
+Set the shortcut first: `NS={user}-dev`.
+
+== `helm push` to a `.../charts/...` path fails with `401 Unauthorized`
+
+Symptom:: `helm push … oci://…/$NS/charts --ca-file …` fails with `failed to authorize: … GET …/openshift/token?scope=repository%3A…charts…: 401 Unauthorized`, even though `helm registry login` said `Login Succeeded`.
+Cause:: The OpenShift *integrated* registry maps every OCI repository to an ImageStream — exactly `<namespace>/<name>`. A three-segment path like `<namespace>/charts/<name>` is not a valid ImageStream, so the registry refuses to issue a push token for it.
+Fix:: Push into your namespace directly — the chart's own name and version tag keep it distinct from the app image:
++
+[source,sh,role=execute]
+----
+helm push parasol-notifications-0.1.0.tgz oci://image-registry.openshift-image-registry.svc:5000/$NS --ca-file /tmp/service-ca.crt
+----
++
+The chart lands at `$NS/parasol-notifications:0.1.0`. On a general-purpose OCI registry (Quay, Harbor) a `charts/` prefix works; the integrated registry is the special case.
+
+== `oc get subscription` shows a Knative object, not my operator
+
+Symptom:: `oc get subscription` returns a `messaging.knative.dev` object (or something unexpected), not the operator you're dissecting.
+Cause:: Several APIs define a `Subscription` kind, so the bare name is *ambiguous* — the API server resolves it to whichever is registered first, usually not OLM's.
+Fix:: Always *fully-qualify* the OLM kind (and use `--field-selector` for the equally-ambiguous `packagemanifest`):
++
+[source,sh,role=execute]
+----
+oc api-resources | awk 'NR==1 || tolower($0) ~ /subscription/'   # see the competing kinds
+oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh
+----
++
+The `.operators.coreos.com` suffix is the difference between reading your operator and reading a Knative channel.
+
+== The operator dissection reads return `Forbidden` (exercises 7-8)
+
+Symptom:: `oc get csv …`, `oc get subscriptions.operators.coreos.com …`, or `oc get crd …` returns `Error … is forbidden`, while `oc get packagemanifests` and `oc get catalogsource` work.
+Cause:: The read-only `platform-observer` role's *OLM-read extension* (ClusterServiceVersion, Subscription, InstallPlan, OperatorGroup, CustomResourceDefinition, ClusterCatalog, ClusterExtension) has not synced to this cluster — the `packagemanifests`/`catalogsources` reads are granted separately and work regardless.
+Fix:: This is a *platform* gap, not something to fix in your namespace — confirm the grant and tell your instructor if it's missing:
++
+[source,sh,role=execute]
+----
+oc auth can-i get clusterserviceversions.operators.coreos.com -n openshift-operators
+----
++
+If it prints `no`, the workshop-config `platform-observer` extension (in `gitops/workshop-config/templates/platform-observer-clusterrole.yaml`) needs to be synced to the cluster — an instructor/platform action. Once synced, the CSV/Subscription/InstallPlan/CRD/ClusterCatalog reads work read-only.
+
+== `helm install` leaves the pod in `ImagePullBackOff`
+
+Symptom:: After `helm install`, the pod never becomes Ready; `oc get pods` shows `ImagePullBackOff` or `ErrImagePull`.
+Cause:: The chart's `image.repository` doesn't point at a real, pullable tag in *your* namespace — usually the wrong namespace baked into `values.yaml`, or the entry-state build hasn't produced the `parasol-notifications:1.0` ImageStream tag yet.
+Fix:: Confirm the prebuilt tag exists, and that the chart references *your* namespace:
++
+[source,sh,role=execute]
+----
+oc get istag parasol-notifications:1.0 -n $NS -o jsonpath='{.image.dockerImageReference}{"\n"}'
+grep repository parasol-notifications/values.yaml
+----
++
+The `istag` must resolve to a `…/$NS/parasol-notifications@sha256:…` digest, and `values.yaml` `image.repository` must end in `/$NS/parasol-notifications`. If the tag is missing, re-run `ws prep {module-id}` to rebuild the entry-state image.
+
+== `helm upgrade --wait` fails with `context deadline exceeded`
+
+Symptom:: An upgrade returns `Error: UPGRADE FAILED: context deadline exceeded` and never completes.
+Cause:: With `--wait`, Helm holds the release open until the new pods are *Ready*; if they never become Ready — a bad probe path, a bad image, a failing container — Helm times out and reports the upgrade failed. (In exercise 4 this is *deliberate*; in the wild it means a genuinely broken change.)
+Fix:: Read *why* the new pod isn't Ready, then either fix the value and re-upgrade or roll back:
++
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l app.kubernetes.io/instance=parasol-notifications
+oc get events -n $NS --field-selector reason=Unhealthy | tail -3
+helm rollback parasol-notifications -n $NS      # back to the last good revision
+----
++
+The old pods keep serving during a failed `--wait` upgrade (the rollout won't retire them for a not-Ready pod), so there's no outage — you have time to read the events and decide.
+
+== The Route shows "Application is not available"
+
+Symptom:: The chart installed, the pod is Ready, but opening the Route in a browser shows the router's "Application is not available" page (or an empty response over HTTP).
+Cause:: A plain HTTP Route (or `oc expose`) gets HSTS-upgraded by the router and can dead-end in the browser. The chart's Route must be *edge*-terminated with `insecureEdgeTerminationPolicy: Allow`.
+Fix:: Confirm the Route the chart created is edge/Allow (the shipped `route.yaml` sets this):
++
+[source,sh,role=execute]
+----
+oc get route parasol-notifications -n $NS -o jsonpath='termination={.spec.tls.termination} insecure={.spec.tls.insecureEdgeTerminationPolicy}{"\n"}'
+----
++
+Expect `termination=edge insecure=Allow`. If it's blank, `templates/route.yaml` wasn't applied (or an Ingress is still present) — re-check exercise 2's Route step.
+
+== `helm registry login` fails, or push says `unauthorized`
+
+Symptom:: `helm registry login` fails with a TLS/certificate error, or a subsequent `push` returns `unauthorized`.
+Cause:: Either the service-CA bundle wasn't supplied (`--ca-file`), so the registry's certificate isn't trusted, or the OpenShift token used as the password is stale.
+Fix:: Re-fetch the CA and log in fresh with a current token; the internal registry is in-cluster only, so run this in the *cockpit* terminal (not a laptop):
++
+[source,sh,role=execute]
+----
+oc get configmap openshift-service-ca.crt -n $NS -o jsonpath='{.data.service-ca\.crt}' > /tmp/service-ca.crt
+oc whoami -t | helm registry login image-registry.openshift-image-registry.svc:5000 -u $(oc whoami) --password-stdin --ca-file /tmp/service-ca.crt
+----
++
+`Login Succeeded` confirms both the CA trust and the token. If `oc whoami -t` is empty, your session token expired — re-open the cockpit (it re-authenticates you).
+
+'''
+
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-16)._

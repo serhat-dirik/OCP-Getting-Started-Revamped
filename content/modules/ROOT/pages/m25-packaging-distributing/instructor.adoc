@@ -1,0 +1,156 @@
+= Packaging & Distributing Your App: Instructor Guide
+:module-id: m25
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34)
+// in a {user}-dev namespace on 2026-07-16 by performing every exercise: helm create with the cockpit's
+// helm, the values-driven chart, lint/template, install, upgrade, the wrong-probe break-and-fix +
+// rollback, helm test, package, and the OCI push+pull round-trip (matching digest). The OLM dissection
+// (exercises 7-8) is a real read-only read of the live Pipelines operator's bundle. Two build-time
+// gaps are flagged in Pre-flight and Watchouts and reported to the PM: (a) the workshop-config
+// platform-observer OLM-read extension is in the repo but must be synced to the cluster before ex 7-8
+// work read-only for attendees; (b) the integrated registry rejects a `charts/` OCI sub-path (it maps
+// repos to <namespace>/<name>) — the lab teaches the push to oci://<registry>/<namespace> accordingly.
+
+This module has two halves that mirror each other, and the join is the whole point.
+The *Helm half* (exercises 1-6) is *you shipping software* — scaffold, template, install, and then the beat that lands: a *deliberately broken probe* that fails the upgrade while the app stays up, recovered with one `helm rollback`. That undo is what "packaged" means, made physical.
+The *OLM half* (exercises 7-8) is *you reading someone else's shipped software* — the live Pipelines operator's bundle, the exact chain behind "click Install." The two halves are the ends of one spectrum, and exercise 8 makes attendees *place their own app on it* and conclude — out loud — that Helm is usually the answer.
+
+The single most valuable thing you can reinforce is the *honesty rule*: most teams should not write an operator.
+Attendees arrive assuming operators are the "advanced, correct" choice; the module's job is to give them the vocabulary to *read* one and the judgement to *not build* one when a chart covers their day-2.
+
+== Timing
+
+Total hands-on: *~85 min* (spec target 90 min; add ~5 min of concept up front — the spectrum + OLM-anatomy diagrams — and it lands on 90).
+
+[cols="1,4,1,3",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Scaffold with `helm create` | ~8 min | `helm create` *<1 s*; the time is *reading* the chart tree and what each piece is for
+| 2 | Template the notifications service | ~12 min | the edits; `helm lint` and `helm template` *<1 s* each; time is understanding *values → manifests*
+| 3 | Install and reach it | ~8 min | `helm install` + rollout *~15 s* (image is pull-through-cached); `curl` instant
+| 4 | Upgrade, break, rollback | ~15 min | `upgrade` *~2 s* + rollout; the break is a *deliberate 90 s `--wait` timeout*; `rollback` *~2 s* + rollout
+| 5 | Test and hooks | ~7 min | the `post-upgrade` seed hook fires on `helm upgrade` (*~5 s*); `helm test` *~5 s* (the test Pod runs the round-trip)
+| 6 | Package + OCI push/pull | ~12 min | `package` *<1 s*; `registry login`/`push`/`pull` *~2 s* each; time is reading the digest match
+| 7 | Dissect the operator | ~15 min | all reads *instant*; comprehension-heavy — the CSV/CRDs/CatalogSource chain
+| 8 | OLM v1 + spectrum | ~8 min | reads *instant*; the spectrum decision is discussion, not commands
+|===
+
+[NOTE]
+.How this timing was measured
+====
+On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-16, every exercise was performed in a `{user}-dev` namespace and timed.
+The `helm` commands return in about a second — `create`, `lint`, `template`, `package` are all *sub-second*; `install`/`upgrade` return once the rollout settles (*~15 s* for install; the image is pull-through-cached so no long pull); the exercise-5 `post-upgrade` seed hook adds *~5 s* to that upgrade (Helm waits for the hook Job); `helm test` runs its Pod in *~5 s*; the OCI `login`/`push`/`pull` are *~2 s* each.
+The *only* real wait is *engineered*: the break in exercise 4 uses `helm upgrade --wait --timeout=90s`, which blocks for the full 90 s because the bad probe never passes — that pause *is* the lesson (Helm refusing to call a broken release done), so do not let attendees think it hung.
+Everything else is dominated by *reading*: the chart tree, the render, the failed-then-rolled-back history, and the operator bundle.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user2`.
+
+. *A sample user's entry state materializes and verifies.*
++
+[source,sh,role=execute]
+----
+ws start m25 --user user2
+ws verify m25 --user user2 --entry-only
+----
++
+Expect the `ws-entry-m25` marker in `user2-dev`, the seeded `user2/parasol-notifications` fork in Gitea, and the prebuilt `parasol-notifications:1.0` ImageStream tag — the image `helm install` pulls.
+
+. *The prebuilt image tag resolves (so `helm install` has something to pull).*
++
+[source,sh,role=execute]
+----
+oc get istag parasol-notifications:1.0 -n user2-dev -o jsonpath='{.image.dockerImageReference}{"\n"}'
+----
++
+Expect an `…/user2-dev/parasol-notifications@sha256:…` digest. If it's empty, the entry-state S2I build hasn't completed — check the `notifications-build-m25-user2` Job; exercise 3's install will `ImagePullBackOff` without it.
+
+. *The `platform-observer` role grants the OLM dissection reads (exercises 7-8).* *This is the module's known dependency — verify it explicitly.*
++
+[source,sh,role=execute]
+----
+oc auth can-i get clusterserviceversions.operators.coreos.com -n openshift-operators \
+  --as=user2 --as-group=workshop-attendees
+oc auth can-i get customresourcedefinitions.apiextensions.k8s.io \
+  --as=user2 --as-group=workshop-attendees
+----
++
+Expect *`yes`* for both, plus `subscriptions.operators.coreos.com`, `installplans`, `operatorgroups`, `clustercatalogs`/`clusterextensions`.
+If either returns *`no`*, the workshop-config `platform-observer` *OLM-read extension has not synced to this cluster* — exercises 7-8 fail closed with `Forbidden` for attendees.
+The extension is defined in `gitops/workshop-config/templates/platform-observer-clusterrole.yaml`; syncing the workshop-config Argo app applies it (a platform action). `packagemanifests` and `catalogsources` reads (exercise 7's channel list, exercise 8's catalog list) are granted independently and work regardless — but the CSV/Subscription/InstallPlan/CRD/ClusterCatalog reads are the extension.
+
+. *The cockpit ships an OCI-capable `helm` (exercise 6).*
++
+[source,sh,role=execute]
+----
+ws smoke m25 --user user2      # runs `helm version --short` and the OLM read in the live cockpit
+----
++
+Expect an *OCI-capable* Helm 3 (the cockpit ships a current release; OCI push/pull has been standard in Helm for several releases). The internal registry is in-cluster only — the OCI push in exercise 6 works *because the cockpit terminal is in-cluster*; it cannot be done from a laptop.
+
+. *The live Pipelines operator is present and healthy (the dissection target).*
++
+[source,sh,role=execute]
+----
+oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh \
+  -o jsonpath='installedCSV={.status.installedCSV}{"\n"}'
+----
++
+Expect a `openshift-pipelines-operator-rh.v…` CSV name. Exercise 7 reads this operator's bundle; if your cluster installed Pipelines differently, adjust the target (GitOps operator works identically — it's the challenge task).
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Run the demo from the entry state, not `ws solve`.*
+The story is *building* the release. `ws solve m25` renders the finished end state (the notifications app already deployed) — use it to *show the destination* or pre-stage, never as the demo's start.
+* *Pre-stage the chart.*
+`helm create` + the chart edits take a few minutes of typing that don't demo well. Have the edited chart ready in the terminal so the demo *opens* on `helm install`. Keep the edits visible to explain if asked.
+* *Land the break beat.*
+The `--wait` upgrade blocks for 90 s — narrate it: "Helm is *waiting* for the new pod to pass its probe; it never will, so Helm will refuse the upgrade." While it waits, `curl` the app in a second terminal to show it's still up. Then the failed `helm history` line and the one-command rollback are the payoff.
+* *Keep the operator beat to "read, don't build."*
+The dissection is impressive; resist turning it into "and here's how you'd write one." The module's thesis is the *opposite* — most teams shouldn't. Close on the spectrum.
+
+== Top questions attendees ask
+
+*1. "Why package with Helm at all — why not just `oc apply` the YAML?"*::
+Three things you can point at from the lab: a *versioned release* with an auditable `helm history`, an *upgrade/rollback* lifecycle (you broke a release and recovered in one command), and *tests + hooks* the consumer inherits. `oc apply` over the top of the last deploy has no revision to roll back to and no record of what changed. Helm is the difference between "a running app" and "a release you can operate."
+
+*2. "My `helm push` to a `.../charts/parasol-notifications` path fails with a 401 — is the registry broken?"*::
+No — the *integrated* registry maps every OCI repository to an ImageStream, i.e. exactly `<namespace>/<name>`. A three-segment `<namespace>/charts/<name>` path is rejected at the registry's token endpoint (the `401`). Push to `oci://<registry>/<your-namespace>` and the chart lands as `<namespace>/parasol-notifications:<chart-version>` — distinct from the app image by its version tag. On a general-purpose registry (Quay, Harbor) the `charts/` prefix works; the integrated registry is the special case. This is the NOTE in exercise 6.
+
+*3. "The operator dissection reads return `Forbidden` — did I do something wrong?"*::
+No — this is a *platform* gap, not an attendee mistake. The read-only `platform-observer` role needs its OLM-read extension synced to the cluster (pre-flight #3). Until then, `oc get csv`/`subscriptions.operators.coreos.com`/`crd` return `Forbidden` for attendees (the `packagemanifests` and `catalogsources` reads work regardless). Confirm the grant with the pre-flight `oc auth can-i` and have the workshop-config Argo app synced; it is not something an attendee fixes in their namespace.
+
+*4. "`oc get subscription` shows a Knative object (or nothing) — where's my operator?"*::
+Several APIs define a `Subscription` kind (Knative messaging, OLM, and others), so a bare `oc get subscription` resolves to whichever the API server picks — usually *not* OLM's. Always *fully-qualify* `subscriptions.operators.coreos.com`. The same trap bites `packagemanifest` — enumerate it with `--field-selector=metadata.name=…`. Exercise 7 opens with the `oc api-resources` proof so attendees see *why*.
+
+*5. "Should we write an operator for our service?"*::
+Almost always no — this is the module's thesis. An operator earns its cost only when *continuous reconcile* is the value: it repairs drift instantly, orchestrates stateful upgrades, fails over, or manages many instances from one spec. If your day-2 is "occasionally `helm upgrade` with new values," a chart already does that, and an operator is a reconcile loop with nothing to reconcile plus a controller to build, certify, and maintain forever. Point back to exercise 8: the notifications service wants Helm, and saying so is the senior call.
+
+== Watchouts
+
+* *The 90-second break is engineered, not a hang.*
+Exercise 4's `helm upgrade --wait --timeout=90s` blocks for the full window because the bad probe never passes. Tell attendees up front so they don't Ctrl-C it — the wait *is* the lesson (Helm refusing a broken release). It ends in `Error: UPGRADE FAILED: context deadline exceeded`, which is the expected, correct outcome.
+* *`platform-observer` must be synced for exercises 7-8.*
+The module's one hard platform dependency. The OLM-read rules are in `gitops/workshop-config/templates/platform-observer-clusterrole.yaml`; if the workshop-config app hasn't synced them, the dissection fails closed. Verify with pre-flight #3 and the `ws smoke m25` OLM read. This is a platform action — never grant it ad hoc per user.
+* *The OCI push only works in-cluster.*
+The internal registry (`image-registry.openshift-image-registry.svc:5000`) has no external route; the push in exercise 6 succeeds because the cockpit terminal is *inside* the cluster. If an attendee tries it from a laptop it will not resolve — that's expected, and the in-cluster posture is the point.
+* *A pushed chart is an unreferenced artifact — the pruner can reclaim it.*
+The chart tag (`parasol-notifications:0.1.0`) is not referenced by any running workload, so on a multi-day event the internal registry's nightly pruner can remove it overnight. For a single session it's fine; on a long event, either have attendees push-and-pull in one sitting or note that a re-push is expected.
+* *Keep Helm scope tight.*
+Subcharts and shipping CRDs inside a chart are real features and real rabbit holes. The lab deliberately stops at values + Route + test + hook. If an attendee asks about subcharts, answer briefly and steer back — the module's depth is *consumer-grade*, not chart-library engineering.
+
+== Provenance
+
+M25 is a net-new module (spec: "fresh; Helm/OLM docs; Red Hat software certification docs" — no OldContent maps to it).
+Everything M25 teaches the attendee is *core* OpenShift — Helm is a client tool, OLM ships with the platform, and the internal registry is GA; no add-on subscription is required.
+
+The *Helm half* was performed in a `{user}-dev` namespace on OpenShift {ocp_version} on 2026-07-16, with the chart shaped to the cockpit's `helm` (its `helm create` skeleton uses values-driven probes, matched in the lab): `helm create`, the values + template edits (image, port 8080, `/health` probes, `SITE` env, an edge Route replacing the Ingress), `helm lint` (clean) and `helm template`, `helm install` (revision 1), `helm upgrade --set replicaCount=2` (revision 2), the *wrong-probe break* (`--set …path=/healthz --wait` → `UPGRADE FAILED: context deadline exceeded`, the new pod failing its probe with a 404 while the old pods kept serving `{"status":"UP"}`), `helm rollback 2` (revision 4, recovered), a `post-install,post-upgrade` seed hook (it seeds a welcome notification — verified firing on the upgrade), a `helm test` (`Phase: Succeeded`, the `notify`→`notifications` round-trip), `helm package`, and the *OCI round-trip* — `helm registry login` with the service-CA bundle and an OpenShift token, `helm push` to `oci://…/{user}-dev` (a three-segment `charts/` path was rejected `401`, confirming the `<namespace>/<name>` mapping), and `helm pull` returning the *same `sha256` digest* — are real captures.
+
+The *OLM half* is a real read-only read of the *live Pipelines operator's bundle* on the same cluster: its `subscriptions.operators.coreos.com` (channel `latest`, source `redhat-operators`), the PackageManifest channel list, the installed CSV (14 owned CRDs, a controller Deployment, `AllNamespaces`), the Tekton CRDs it added (30 on the cluster), the `redhat-operators` CatalogSource (a `registry.redhat.io/redhat/redhat-operator-index` image) and its `Automatic`-approval InstallPlan, and *OLM v1* — four `ClusterCatalog`s `Serving`, zero `ClusterExtension`s (present, idle, console-invisible).
+The `platform-observer` OLM-read extension that grants attendees these reads read-only is defined in `gitops/workshop-config/templates/platform-observer-clusterrole.yaml`; verify it is synced to the cluster (pre-flight #3) — at build time the already-synced `packagemanifests`/`catalogsources` reads worked for a `workshop-attendees` member while the CSV/Subscription/CRD reads were pending the sync.

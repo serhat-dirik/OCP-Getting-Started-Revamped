@@ -1,0 +1,76 @@
+= Packaging & Distributing Your App: Wrap-up
+:module-id: m25
+include::partial$version-attributes.adoc[]
+
+== What you built
+
+You took the Parasol notifications service from *a running pod* to *a distributable product*.
+You scaffolded a chart with `helm create`, then made it *yours* — the seeded image, port `8080`, `/health` probes, a `SITE` env, and an OpenShift *edge Route* in place of the stock Ingress — and read the render with `helm template` before applying a thing.
+You *installed* it as a versioned release and reached its landing page in the browser.
+You gave the release a *lifecycle*: an upgrade to two replicas, then a *deliberately broken* probe path that made `helm upgrade --wait` *fail* while the old pods kept serving — no outage — and a one-command `helm rollback` back to health.
+You added a *lifecycle hook* that seeds a welcome notification and a `helm test` that proved the release with a real `notify` → `notifications` round-trip, *packaged* the chart, and *pushed it to the cluster registry as an OCI artifact* — then `helm pull` returned a *matching digest*, a verified round-trip.
+Finally you crossed to the other end of the spectrum and *dissected a live operator's OLM bundle* — the Pipelines operator's Subscription, channels, CSV, owned CRDs, CatalogSource, and InstallPlan — and read *OLM v1* serving in the wings.
+
+[mermaid]
+....
+graph LR
+  subgraph helm["You packaged (Helm)"]
+    c["helm create"] --> tmpl["values + templates<br/>image · /health · SITE · Route"]
+    tmpl --> rel["install → upgrade →<br/>break → rollback → test"]
+    rel --> oci["package + push<br/>OCI artifact (matching digest)"]
+  end
+  subgraph olm["You dissected (OLM)"]
+    sub["Subscription<br/>(channel · catalog)"] --> csv["CSV<br/>owned CRDs + controller"]
+    csv --> direction["OLM v1<br/>ClusterCatalog · ClusterExtension"]
+  end
+  oci -.->|"the spectrum: most apps stop at Helm"| sub
+  classDef h fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef o fill:#fef7e0,stroke:#b06000,color:#7a4100;
+  class c,tmpl,rel,oci h; class sub,csv,direction o;
+....
+
+// media-pass: recap SVG m25-packaging-distributing-03-what-you-built.svg (green = the Helm packaging arc you performed; amber = the operator bundle you read). See media-manifest.md.
+
+The one idea under all of it: *you ship install and upgrade, not just runtime* — and packaging is where that operability gets encoded once so every consumer inherits it.
+
+== Map to your org
+
+Take these back to how your teams package and hand off software today:
+
+. *When a colleague installs your service, what do you actually hand them?*
+You handed over a versioned chart with an install, an upgrade, a test, and a rollback. If your teams hand over a folder of YAML each consumer edits by hand, every install drifts and no two are alike. Could a new team stand up your service with *one command* — and could you tell them which *version* they're running?
+. *When an upgrade goes wrong, can you get back?*
+You broke a release on purpose and recovered with one `helm rollback`. If your deploys are `oc apply` over the top of the last one, there is no revision to return to — the previous state is gone. Is "roll back the release" a command your teams can run, or a scramble to remember what the YAML used to say?
+. *Do you know which version of a shared component is where?*
+`helm history` and `helm list` make version and revision a fact. Many orgs cannot answer "which version of the shared auth chart is in team X's cluster" without archaeology. Is your answer a query, or a guess?
+. *Have you written an operator you didn't need?*
+You placed the notifications service on the spectrum and concluded *Helm*, not an operator. Teams reach for operators because they feel powerful, then maintain a reconcile loop a chart would have covered. Is there something in your estate that's an operator today but should have been a chart — a controller with nothing to continuously reconcile?
+
+== When *not* to reach for this
+
+Packaging choices have failure modes of their own — over-reaching is one:
+
+* *Don't write an operator when Helm covers your day-2.*
+The headline honesty rule. If your operational need is "occasionally upgrade with new values," a chart already does that. An operator adds a controller to build, certify, and keep alive for the life of the product — pay that cost only when *continuous reconcile* (drift repair, stateful upgrade, failover, many-instances-from-one-spec) is the actual value.
+* *Don't push charts to the app's image tag on the integrated registry.*
+The internal registry maps OCI repos to `<namespace>/<name>`, so a chart pushed as `<namespace>/parasol-notifications` shares a repository with the app image. Keep them distinct by *version tag* (the chart's semver vs the image's tag), and on a general-purpose registry (Quay, Harbor) use a dedicated `charts/` prefix — which the integrated registry does not accept.
+* *Don't cram subcharts and CRDs into a chart to look thorough.*
+A single-service chart with values, a Route, a test, and a hook is the shape most apps want. Subcharts (packaging *other* apps as dependencies) and shipping CRDs inside a chart are real features with real sharp edges — reach for them when you genuinely package a *stack*, not to make one service look impressive.
+* *Don't hand-roll an installer that reinvents Helm or OLM.*
+A bash script that `oc apply`s in a loop with "if not exists" checks is an operator costume with none of the safety. If you need install/upgrade/rollback, that's Helm; if you need continuous reconcile, that's an operator. The imperative installer in between is the anti-pattern both were built to replace.
+
+== Go deeper
+
+* *Helm charts* — the chart structure, `values.yaml`, Go templating, `_helpers.tpl`, `helm lint`/`template`/`install`/`upgrade`/`rollback`/`history`, `helm test`, and *chart hooks* (the `helm.sh/hook` annotations you used).
+* *Helm and OCI registries* — `helm registry login`, `helm push`/`pull` as OCI artifacts, and installing a chart directly from `oci://…` — the distribution path you proved through the cluster registry.
+* *Operator Lifecycle Manager (classic)* — `CatalogSource`, `PackageManifest` and *channels*, `Subscription`, `InstallPlan` (Automatic vs Manual approval), and the `ClusterServiceVersion` (owned CRDs, install modes, install strategy) — the bundle you dissected.
+* *OLM v1 (Operator Controller)* — `ClusterCatalog` and `ClusterExtension`, the `registry+v1` bundle format, and the explicit ServiceAccount/RBAC model — the direction of travel.
+* *The ISV road* — the Helm *chart-verifier* and the `openshift-helm-charts` repository; operator *Preflight* and Red Hat Partner Connect; and how both land in the Red Hat Ecosystem Catalog for customers (including disconnected ones — which is where the registry and mirroring governance you met elsewhere comes back).
+
+[NOTE]
+.Clean up
+====
+To return your world to the entry state — the seeded notifications fork, the prebuilt image, and the marker, with nothing installed — run `ws prep {module-id} --yes`.
+It uninstalls your Helm release, clears anything you pushed, and re-materializes a clean entry state so a re-run starts fresh.
+Leave everything running if you are continuing to another module — each module materializes its own world.
+====

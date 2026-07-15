@@ -1,0 +1,968 @@
+= Packaging & Distributing Your App: Lab
+:module-id: m25
+include::partial$version-attributes.adoc[]
+
+// Lab page for M25. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes); later blocks use
+// $NS with NO subs so Helm's {{ }} and jsonpath braces stay literal. All Helm commands, outputs, and
+// timings were performed on OCP {ocp_version} (Kubernetes 1.34) in a {user}-dev namespace on
+// 2026-07-16: helm create (the cockpit's helm), the values-driven chart, lint/template, install,
+// upgrade, the wrong-probe break-and-fix + rollback, helm test, package, and the OCI push+pull
+// round-trip (matching digest) are real captures. The OLM dissection (exercises 7-8) is a real
+// read-only read of the LIVE Pipelines operator's bundle. NAMESPACE in output is the sample user
+// user2-dev (yours is {user}-dev); the cluster domain is scrubbed to a placeholder. Console click-
+// paths are grounded against the unified console (OCP 4.19+, no perspective switch); labels a build
+// couldn't click carry [CAPTURE-VERIFY] + the authoritative CLI.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcut you'll reuse throughout the lab — your app namespace:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+echo "app namespace: $NS"
+----
+
+You are shipping Parasol's *notifications service* to the rest of the engineering org.
+It already runs — a prebuilt image sits in your namespace's registry — but "it runs on my machine" is not a way to hand software to a dozen teams.
+In this lab you *package* it as a Helm chart, `install`/`upgrade`/`rollback` it like a real release, *break* it on purpose and recover, push it to the registry as an *OCI artifact*, and then take apart a *live operator's OLM bundle* to see the other end of the spectrum.
+
+[TIP]
+.Most steps are terminal-first; a few are also shown in the console
+====
+Helm is a command-line tool, so the chart authoring, install, upgrade, package, and OCI push are done in the *Terminal* tab beside these instructions — there is no console equivalent for `helm install ./localchart`.
+Where the console *does* add a view — the installed release, a rollback, the operator bundle — you'll get a *Console* tab too; pick a path and the tabs stay in sync.
+The sample namespace in the output below is `user2-dev`; *yours* is `{user}-dev` — read the *shape*, not the exact name.
+Keep the terminal open throughout — the `$NS` shortcut lives there.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 10-minute presenter arc: package, break, recover, dissect
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Package it, break it, recover it, then read a real operator (10 min)
+
+[NOTE]
+.Before you present
+====
+Run `ws start m25 --user {user}` a few minutes ahead and set `NS={user}-dev`, `helm create parasol-notifications`, and apply the chart edits (values + Route) so you start from a chart ready to install — this demo runs from the *entry* state, not `ws solve`.
+The money moment is beat 2 — a bad probe path that *fails the upgrade* while the app *stays up on the old pods*, then a one-command rollback.
+Keep the terminal font large; the failed `helm history` line and the digest match are the whole visual.
+====
+
+[demo-block]
+[TIME 3m]
+Say:: "Parasol's notifications service runs. But 'it runs' isn't shippable. Watch me turn it into a *versioned artifact* anyone can install with one command — and reach it in a browser."
+Show:: `helm install`, the release `deployed`, the pod Ready, and the Route landing page echoing the site marker.
+Do:: Install the chart and open it:
++
+[source,sh,role=execute]
+----
+NS=user2-dev
+helm install parasol-notifications ./parasol-notifications -n $NS
+oc rollout status deploy/parasol-notifications -n $NS --timeout=90s
+oc get route parasol-notifications -n $NS -o jsonpath='{"https://"}{.spec.host}{"\n"}'
+----
++
+"One command, a running release, a URL. That's the difference between a folder of YAML and a product."
+
+[demo-block]
+[TIME 4m]
+Say:: "Now the scary part — an upgrade. I'll ship a *broken* config: a probe pointing at a health path that doesn't exist. Watch Helm *refuse to call it done*, watch the old pods *keep serving*, and watch me roll back in one command."
+Show:: `helm upgrade --wait` failing; `helm history` showing revision 3 `failed`; the app still returning `{"status":"UP"}`; then `helm rollback` and green.
+Do:: Break it, prove no outage, recover:
++
+[source,sh,role=execute]
+----
+helm upgrade parasol-notifications ./parasol-notifications -n $NS \
+  --set replicaCount=2 \
+  --set 'livenessProbe.httpGet.path=/healthz' \
+  --set 'readinessProbe.httpGet.path=/healthz' --wait --timeout=90s
+----
++
+"`UPGRADE FAILED` — the new pod never passed its probe, so Helm never promoted it. The app never went down. Now —"
++
+[source,sh,role=execute]
+----
+helm rollback parasol-notifications -n $NS
+helm history parasol-notifications -n $NS | tail -3
+----
++
+"— one command back to the last good revision. That undo is what packaging buys you."
+
+[demo-block]
+[TIME 3m]
+Say:: "Helm is one end of a spectrum. The other end is an *operator*. Every operator you used this week installed the same way — let me show you the bundle behind the Pipelines operator you ran your builds on."
+Show:: The Pipelines Subscription, its channels, and the CSV's owned CRDs — the "what happens when you click Install" chain.
+Do:: Dissect the live operator:
++
+[source,sh,role=execute]
+----
+oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh
+CSV=$(oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh -o jsonpath='{.status.installedCSV}')
+oc get csv "$CSV" -n openshift-operators -o jsonpath='owned CRDs: {range .spec.customresourcedefinitions.owned[*]}{.kind}{" "}{end}{"\n"}'
+----
++
+"A Subscription picked a channel, OLM installed a CSV, the CSV owns those CRDs and runs a controller. That's an operator — and it's worth its cost only when the reconcile is the value. Most of the time, the chart you just shipped is the right answer."
+
+[NOTE]
+.Reset between runs
+====
+`ws prep m25 --yes` returns the world to the entry state (the seeded fork + prebuilt image + marker, nothing installed).
+If a run left a failed release, `helm uninstall parasol-notifications -n {user}-dev` first.
+====
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Scaffold a chart with `helm create`
+⏱ *~8 min* · read what a chart actually is
+
+`helm create` scaffolds a working chart you then shape to your app.
+Generate one for the notifications service and read the tree:
+
+[source,sh,role=execute]
+----
+helm create parasol-notifications
+find parasol-notifications -type f | sort
+----
+
+.Expected output (a complete, installable chart skeleton)
+[source,texinfo]
+----
+parasol-notifications/.helmignore
+parasol-notifications/Chart.yaml
+parasol-notifications/templates/NOTES.txt
+parasol-notifications/templates/_helpers.tpl
+parasol-notifications/templates/deployment.yaml
+parasol-notifications/templates/hpa.yaml
+parasol-notifications/templates/ingress.yaml
+parasol-notifications/templates/service.yaml
+parasol-notifications/templates/serviceaccount.yaml
+parasol-notifications/templates/tests/test-connection.yaml
+parasol-notifications/values.yaml
+----
+
+Four pieces carry the whole idea:
+
+* *`Chart.yaml`* — the chart's identity: its `name`, its `version` (the chart's own semver), and `appVersion` (the app it ships).
+* *`values.yaml`* — the *inputs*. Everything a consumer might change — image, replica count, ports, probes — has a default here, overridable at install with `--set` or `-f`.
+* *`templates/`* — Go-templated Kubernetes manifests. `{{ .Values.image.repository }}` in a template pulls from `values.yaml`. `_helpers.tpl` holds reusable naming/label snippets.
+* *`templates/tests/`* — a `helm test` hook (exercise 5) that proves a release actually works.
+
+The skeleton ships an `nginx` Deployment on port 80 with an Ingress — a generic starting point.
+Your job in the next exercise is to make it *your* app.
+
+[.checkpoint]
+****
+✔ *Verify:* `helm create` produced a `parasol-notifications/` chart with `Chart.yaml`, `values.yaml`, and a `templates/` directory (Deployment, Service, Ingress, NOTES, `_helpers.tpl`, a test) — a complete, installable skeleton you will now shape to the notifications service.
+****
+
+== 2. Template the notifications service
+⏱ *~12 min* · values drive the manifests — image, port, probes, env, an OpenShift Route
+
+Shape the chart to the real app.
+The prebuilt notifications image sits in *your* registry namespace as an ImageStream tag — the entry state records it in a marker.
+First set the chart's *values* — image, the service's real port (`8080`), health probes on `/health`, a small resource footprint, the `SITE` env marker, and a flag to publish an OpenShift Route:
+
+[source,sh,role=execute]
+----
+cd parasol-notifications
+cat > values.yaml <<EOF
+replicaCount: 1
+
+image:
+  # The prebuilt notifications image seeded into your namespace as an ImageStream tag.
+  repository: image-registry.openshift-image-registry.svc:5000/$NS/parasol-notifications
+  pullPolicy: IfNotPresent
+  tag: "1.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+serviceAccount: {create: true, automount: true, annotations: {}, name: ""}
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8080          # the service listens on 8080; containerPort follows this value
+
+route:
+  enabled: true       # publish an OpenShift edge Route (replaces the stock Ingress)
+
+site: "$NS"           # origin-site marker the service echoes on GET /
+
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: 200m, memory: 128Mi}
+
+livenessProbe:
+  httpGet: {path: /health, port: http}
+readinessProbe:
+  httpGet: {path: /health, port: http}
+
+autoscaling: {enabled: false, minReplicas: 1, maxReplicas: 100, targetCPUUtilizationPercentage: 80}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+EOF
+echo "values.yaml written"
+----
+
+The image and probe defaults now describe the notifications service, not nginx.
+Two template edits finish the job.
+First, the app reads a `SITE` env var — add it to the container by editing `templates/deployment.yaml` so the container block carries an `env`:
+
+[source,sh,role=execute]
+----
+cat > templates/deployment.yaml <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "parasol-notifications.fullname" . }}
+  labels:
+    {{- include "parasol-notifications.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "parasol-notifications.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "parasol-notifications.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "parasol-notifications.serviceAccountName" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: SITE
+              value: {{ .Values.site | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+EOF
+echo "deployment.yaml updated (SITE env + values-driven probes)"
+----
+
+Second — and this is the OpenShift-specific move — *replace the stock Ingress with an edge Route*.
+An Ingress is generic Kubernetes; on OpenShift a browser-facing app wants a *Route*, and an *edge* Route with `insecureEdgeTerminationPolicy: Allow` serves the landing page cleanly over both HTTP and HTTPS:
+
+[source,sh,role=execute]
+----
+rm -f templates/ingress.yaml
+cat > templates/route.yaml <<'EOF'
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "parasol-notifications.fullname" . }}
+  labels:
+    {{- include "parasol-notifications.labels" . | nindent 4 }}
+spec:
+  to:
+    kind: Service
+    name: {{ include "parasol-notifications.fullname" . }}
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow
+{{- end }}
+EOF
+echo "ingress.yaml removed, route.yaml added"
+----
+
+[NOTE]
+.Why a Route, not an Ingress
+====
+A plain HTTP Route (or `oc expose`) gets HSTS-upgraded by the router and can dead-end in the browser; an *edge* Route with `insecureEdgeTerminationPolicy: Allow` terminates TLS at the router and serves both schemes.
+This is the workshop-wide rule for any browser-facing app — the chart bakes it in so every install gets it right.
+====
+
+Now *lint* the chart (catches structural mistakes) and *render* it locally without installing (so you see exactly what will be applied):
+
+[source,sh,role=execute]
+----
+cd ..
+helm lint parasol-notifications
+----
+
+.Expected output (a clean chart; the icon note is advisory)
+[source,texinfo]
+----
+==> Linting parasol-notifications
+
+1 chart(s) linted, 0 chart(s) failed
+----
+
+[source,sh,role=execute]
+----
+helm template parasol-notifications ./parasol-notifications | grep -E 'kind:|image:|containerPort|path: /health|name: SITE|termination:'
+----
+
+.Expected output (your values, rendered into real manifests — image, port 8080, /health probes, SITE, an edge Route)
+[source,texinfo]
+----
+kind: ServiceAccount
+kind: Service
+kind: Deployment
+          image: "image-registry.openshift-image-registry.svc:5000/user2-dev/parasol-notifications:1.0"
+            - name: SITE
+              containerPort: 8080
+              path: /health
+              path: /health
+kind: Route
+    termination: edge
+----
+
+`helm template` is the render-without-installing button: what you see is what `helm install` will apply.
+The image points at *your* registry, the port is `8080`, the probes hit `/health`, the `SITE` env is wired, and the Ingress is gone — replaced by an edge Route.
+
+[.checkpoint]
+****
+✔ *Verify:* Your `values.yaml` drives the image (your namespace's `parasol-notifications:1.0`), `service.port: 8080`, `/health` probes, and the `SITE` marker; the Deployment template carries the `SITE` env; the Ingress is replaced by an edge `Route`. `helm lint` passes and `helm template` renders all of it — the chart now describes *your* app, not nginx.
+****
+
+== 3. Install the release and reach it
+⏱ *~8 min* · one command to a running, browsable app
+
+Install the chart into your namespace.
+Helm applies the rendered manifests and records a *release* (revision 1):
+
+[source,sh,role=execute]
+----
+helm install parasol-notifications ./parasol-notifications -n $NS
+----
+
+.Expected output (a deployed release, revision 1, with the chart's NOTES)
+[source,texinfo]
+----
+NAME: parasol-notifications
+LAST DEPLOYED: Thu Jul 16 00:21:03 2026
+NAMESPACE: user2-dev
+STATUS: deployed
+REVISION: 1
+NOTES:
+Thanks for installing parasol-notifications (release parasol-notifications).
+Reach the notifications service in your browser:
+
+  oc get route parasol-notifications -n user2-dev -o jsonpath='{"https://"}{.spec.host}{"\n"}'
+...
+----
+
+Wait for the rollout, then reach the app.
+
+[tabs]
+====
+Console::
++
+--
+// [CAPTURE-VERIFY] Helm → Helm Releases → parasol-notifications (project {user}-dev, OCP 4.21) shows Revision 1 / Deployed and the resources; the Route opens from Networking → Routes. CLI authoritative.
+In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Helm* → *Helm Releases* → `parasol-notifications`.
+You see revision *1*, status *Deployed*, and the resources the chart created (Deployment, Service, Route).
+Open *Networking* → *Routes* → `parasol-notifications` and click the *Location* URL — the landing page shows the service JSON, including `"site":"{user}-dev"`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc rollout status deploy/parasol-notifications -n $NS --timeout=90s
+ROUTE=$(oc get route parasol-notifications -n $NS -o jsonpath='{.spec.host}')
+curl -sk "https://$ROUTE/" | grep -o '"site":"[^"]*"'
+----
+--
+====
+
+.Expected output (the app is up and echoing your site marker from the SITE env)
+[source,texinfo]
+----
+deployment "parasol-notifications" successfully rolled out
+"site":"user2-dev"
+----
+
+The `"site"` marker proves the `SITE` env you templated reached the running container.
+The notifications store starts *empty* — nothing has been recorded yet (you'll add a lifecycle hook in exercise 5 that seeds a welcome entry here):
+
+[source,sh,role=execute]
+----
+ROUTE=$(oc get route parasol-notifications -n $NS -o jsonpath='{.spec.host}')
+curl -sk "https://$ROUTE/api/notifications"; echo
+----
+
+.Expected output (an empty store on a fresh install)
+[source,texinfo]
+----
+[]
+----
+
+[.checkpoint]
+****
+✔ *Verify:* `helm install` created release *revision 1* (`STATUS: deployed`); the Deployment rolled out; and the edge Route serves the landing page echoing `"site":"{user}-dev"` (your `SITE` env). One command took the app from a chart to a browsable release.
+****
+
+== 4. Upgrade, break it on purpose, and roll back
+⏱ *~15 min* · a release has history — and an undo
+
+A packaged app has a *lifecycle*.
+Change an input and `helm upgrade` — here, scale to two replicas:
+
+[source,sh,role=execute]
+----
+helm upgrade parasol-notifications ./parasol-notifications -n $NS --set replicaCount=2
+oc rollout status deploy/parasol-notifications -n $NS --timeout=60s
+helm history parasol-notifications -n $NS
+----
+
+.Expected output (revision 2, and a history you can audit)
+[source,texinfo]
+----
+deployment "parasol-notifications" successfully rolled out
+REVISION  UPDATED                   STATUS      CHART                        APP VERSION  DESCRIPTION
+1         Thu Jul 16 00:21:03 2026  superseded  parasol-notifications-0.1.0  1.0          Install complete
+2         Thu Jul 16 00:21:40 2026  deployed    parasol-notifications-0.1.0  1.0          Upgrade complete
+----
+
+Two revisions, each recorded — *which* config is live is now a fact, not a memory.
+
+*Now the deliberate break.* Ship a bad config the way a real mistake arrives: point the probes at a health path the app doesn't serve (`/healthz` instead of `/health`).
+`--wait` tells Helm to *hold the release open until the new pods are healthy* — so a bad probe makes the upgrade *fail loudly* instead of silently:
+
+[source,sh,role=execute]
+----
+helm upgrade parasol-notifications ./parasol-notifications -n $NS \
+  --set replicaCount=2 \
+  --set 'livenessProbe.httpGet.path=/healthz' \
+  --set 'readinessProbe.httpGet.path=/healthz' \
+  --wait --timeout=90s
+----
+
+.Expected output (Helm waited, the probe never passed, the upgrade is refused)
+[source,texinfo]
+----
+Error: UPGRADE FAILED: context deadline exceeded
+----
+
+That is the safety net working.
+Look at what actually happened — the new pod never became ready, but the *old* pods kept serving:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l app.kubernetes.io/instance=parasol-notifications
+oc get events -n $NS --field-selector reason=Unhealthy | grep 404 | tail -2
+----
+
+.Expected output (the new pod fails its probe with 404; the old pods stay Ready)
+[source,texinfo]
+----
+NAME                                     READY   STATUS    RESTARTS      AGE
+parasol-notifications-79cbd49cc6-q727r   0/1     Running   3 (12s ago)   103s
+parasol-notifications-7f69567464-h5hf5   1/1     Running   0             2m49s
+parasol-notifications-7f69567464-l5cwz   1/1     Running   0             4m31s
+...  Liveness probe failed: HTTP probe failed with statuscode: 404
+...  Readiness probe failed: HTTP probe failed with statuscode: 404
+----
+
+The `/healthz` path returns 404, so the new pod (`79cbd49cc6-…`) never passes its probe and the rolling update *stalls* — it will not retire the healthy old pods (`7f69567464-…`) for a pod that isn't ready.
+Prove the app never went down:
+
+[source,sh,role=execute]
+----
+curl -sk "https://$ROUTE/health"; echo
+----
+
+.Expected output (still serving — no outage during the failed upgrade)
+[source,texinfo]
+----
+{"status":"UP"}
+----
+
+`helm history` now shows revision 3 as `failed`.
+*Roll back* to the last good revision — one command, and you're recovered.
+
+[tabs]
+====
+Console::
++
+--
+// [CAPTURE-VERIFY] Helm → Helm Releases → parasol-notifications → Revision history → revision 2 → Roll back (project {user}-dev, OCP 4.21). CLI authoritative.
+In the {ocp_console_url}[web console^], open *Helm* → *Helm Releases* → `parasol-notifications` → the *Revision history* tab.
+Revision 3 shows *Failed*. Select revision *2*, choose *Roll back*, and confirm.
+The release returns to the two healthy `/health` pods.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+helm rollback parasol-notifications 2 -n $NS
+oc rollout status deploy/parasol-notifications -n $NS --timeout=60s
+helm history parasol-notifications -n $NS | tail -3
+----
+--
+====
+
+.Expected output (rolled back; a new revision 4 that is a copy of the good revision 2)
+[source,texinfo]
+----
+Rollback was a success! Happy Helming!
+deployment "parasol-notifications" successfully rolled out
+2  Thu Jul 16 00:21:40 2026  superseded  parasol-notifications-0.1.0  1.0  Upgrade complete
+3  Thu Jul 16 00:22:11 2026  failed      parasol-notifications-0.1.0  1.0  Upgrade "parasol-notifications" failed: context deadline exceeded
+4  Thu Jul 16 00:23:02 2026  deployed    parasol-notifications-0.1.0  1.0  Rollback to 2
+----
+
+Revision 4 is the *good* config again — Helm rolls *forward to a copy of* revision 2 rather than deleting history, so the failed revision 3 stays on the record.
+That is the whole value of a packaged release: the bad change was caught by probes, never took traffic, and the undo was one command.
+
+[.checkpoint]
+****
+✔ *Verify:* You upgraded to revision 2 (two replicas), shipped a *broken probe path* that made `helm upgrade --wait` *fail* (`context deadline exceeded`) while the old pods kept serving `{"status":"UP"}` — no outage — then `helm rollback` recovered to a healthy revision 4. `helm history` records install → upgrade → *failed* → rollback.
+****
+
+== 5. Test the release and understand hooks
+⏱ *~7 min* · a chart that proves itself, and lifecycle actions
+
+A chart can run actions at defined points in a release's life — *lifecycle hooks* — and prove itself with a *test*.
+First, add a *post-install / post-upgrade hook* that seeds a welcome notification once the service is up.
+Two annotations turn an ordinary Job into a hook:
+
+[source,sh,role=execute]
+----
+cat > parasol-notifications/templates/hooks-seed.yaml <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ include "parasol-notifications.fullname" . }}-seed"
+  labels:
+    {{- include "parasol-notifications.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              BASE="http://{{ include "parasol-notifications.fullname" . }}:{{ .Values.service.port }}"
+              for i in $(seq 1 30); do curl -sf "$BASE/health" >/dev/null 2>&1 && break; sleep 2; done
+              curl -sf -X POST "$BASE/api/notify" -H 'content-type: application/json' \
+                -d '{"claimNumber":"CLM-0000","message":"notifications service online"}'
+              echo "seeded welcome notification"
+EOF
+echo "seed hook added"
+----
+
+`helm.sh/hook: post-install,post-upgrade` runs the Job *after* every install and upgrade (not as part of the release's normal objects); `hook-delete-policy` cleans the Job up when it succeeds.
+Now *add a test* — a Pod under `templates/tests/` that `helm test` runs on demand, here a real `notify` → `notifications` round-trip:
+
+[source,sh,role=execute]
+----
+cat > parasol-notifications/templates/tests/test-connection.yaml <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "parasol-notifications.fullname" . }}-test"
+  labels:
+    {{- include "parasol-notifications.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  restartPolicy: Never
+  containers:
+    - name: api-test
+      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          BASE="http://{{ include "parasol-notifications.fullname" . }}:{{ .Values.service.port }}"
+          echo "1) health check"
+          curl -sf "$BASE/health" | grep -q '"status":"UP"'
+          echo "2) POST a notification"
+          curl -sf -X POST "$BASE/api/notify" -H 'content-type: application/json' \
+            -d '{"claimNumber":"CLM-TEST","message":"helm test round-trip"}' | grep -q 'CLM-TEST'
+          echo "3) read it back"
+          curl -sf "$BASE/api/notifications" | grep -q 'CLM-TEST'
+          echo "PASS: health + notify round-trip"
+EOF
+echo "test added"
+----
+
+Upgrade to apply both — the *post-upgrade hook fires* and seeds the welcome notification into the store that was empty in exercise 3:
+
+[source,sh,role=execute]
+----
+helm upgrade parasol-notifications ./parasol-notifications -n $NS >/dev/null && echo "upgraded"
+curl -sk "https://$ROUTE/api/notifications" | grep -o 'CLM-0000'
+----
+
+.Expected output (the hook ran — the store now carries the seeded welcome)
+[source,texinfo]
+----
+upgraded
+CLM-0000
+----
+
+Now run the *test* — Helm launches the test Pod and reports pass/fail:
+
+[source,sh,role=execute]
+----
+helm test parasol-notifications -n $NS --logs
+----
+
+.Expected output (the test Pod runs the round-trip and passes)
+[source,texinfo]
+----
+Phase:          Succeeded
+...
+POD LOGS: parasol-notifications-test
+1) health check
+2) POST a notification
+3) read it back
+PASS: health + notify round-trip
+----
+
+`Phase: Succeeded` means the release is not just *running* but *working* — health plus a real write-then-read a consumer can run after *their* install, on *their* cluster.
+`helm.sh/hook: test` (the test Pod) and `helm.sh/hook: post-install,post-upgrade` (the seed Job) are the *same mechanism* at different moments.
+*Stop here* — that is as far into Helm as this module goes.
+Subcharts and shipping CRDs inside a chart are real features, but they are rabbit holes; a single-service chart with values, a Route, a test, and a hook is the shape most applications want.
+
+[.checkpoint]
+****
+✔ *Verify:* You added a `post-install,post-upgrade` *hook* (it seeded `CLM-0000` on the upgrade — the store was empty in exercise 3) and a `helm test` *round-trip* that reported `Phase: Succeeded`. You can name the two lifecycle hooks by their `helm.sh/hook` annotations — same mechanism, different moments.
+****
+
+== 6. Package and push the chart as an OCI artifact
+⏱ *~12 min* · a chart is a versioned artifact you can store in the registry
+
+A chart you can `install` from a *directory* is useful; a chart you can *distribute* is a product.
+`helm package` bundles the chart into a versioned `.tgz`:
+
+[source,sh,role=execute]
+----
+helm package parasol-notifications
+ls parasol-notifications-*.tgz
+----
+
+.Expected output (a versioned chart archive, named `chart-version.tgz`)
+[source,texinfo]
+----
+Successfully packaged chart and saved it to: .../parasol-notifications-0.1.0.tgz
+parasol-notifications-0.1.0.tgz
+----
+
+Modern Helm speaks *OCI* — the same artifact format as container images — so a chart can live in any OCI registry, including the cluster's *internal registry*.
+The registry is an in-cluster Service (`image-registry.openshift-image-registry.svc:5000`) with a certificate signed by the cluster's *service CA*, so you log in with your OpenShift token and trust that CA.
+Grab the CA bundle, log in, and push:
+
+[source,sh,role=execute]
+----
+oc get configmap openshift-service-ca.crt -n $NS -o jsonpath='{.data.service-ca\.crt}' > /tmp/service-ca.crt
+REG=image-registry.openshift-image-registry.svc:5000
+oc whoami -t | helm registry login $REG -u $(oc whoami) --password-stdin --ca-file /tmp/service-ca.crt
+----
+
+.Expected output
+[source,texinfo]
+----
+Login Succeeded
+----
+
+Now push the packaged chart.
+The internal registry maps every OCI repository to *`<namespace>/<name>`*, so you push into *your* namespace and the chart lands as a tag there:
+
+[source,sh,role=execute]
+----
+helm push parasol-notifications-0.1.0.tgz oci://$REG/$NS --ca-file /tmp/service-ca.crt
+----
+
+.Expected output (pushed as an OCI artifact; note the sha256 digest)
+[source,texinfo]
+----
+Pushed: image-registry.openshift-image-registry.svc:5000/user2-dev/parasol-notifications:0.1.0
+Digest: sha256:ab9cc8033b1bf5be306912262264ea43626b49c37ba2f6e48b5e75b8c637204a
+----
+
+The chart is now a *`0.1.0` tag* on a `parasol-notifications` repository in your namespace — an OCI artifact sitting alongside the app image (which is tag `1.0` on the same path), distinguished by its version tag and artifact type.
+
+[NOTE]
+.The integrated registry uses `<namespace>/<name>` — no deeper paths
+====
+On a general-purpose OCI registry (Quay, Harbor) you would push charts under a tidy prefix like `oci://registry/{user}-dev/charts`.
+The OpenShift *integrated* registry maps repositories to ImageStreams — exactly `<namespace>/<name>` — so a deeper `.../charts/parasol-notifications` path is *rejected* (a `401` from the registry's token endpoint).
+Push to `oci://<registry>/<your-namespace>` and let the chart's own name and version tag keep it distinct from the app image.
+====
+
+*Prove the round-trip* — pull the chart back and confirm the digest matches what you pushed:
+
+[source,sh,role=execute]
+----
+mkdir -p /tmp/pulled && cd /tmp/pulled
+helm pull oci://$REG/$NS/parasol-notifications --version 0.1.0 --ca-file /tmp/service-ca.crt
+cd - >/dev/null
+----
+
+.Expected output (the same sha256 digest — a verified round-trip)
+[source,texinfo]
+----
+Pulled: image-registry.openshift-image-registry.svc:5000/user2-dev/parasol-notifications:0.1.0
+Digest: sha256:ab9cc8033b1bf5be306912262264ea43626b49c37ba2f6e48b5e75b8c637204a
+----
+
+Push digest and pull digest match — the artifact in the registry is exactly the chart you packaged.
+Anyone with pull access to your namespace can now `helm install oci://$REG/$NS/parasol-notifications --version 0.1.0` — install-from-registry, no chart directory needed.
+
+[NOTE]
+.Your digest will differ — that's the point
+====
+A `sha256` digest is a *content hash*: any change to the chart produces a different digest.
+Yours will not be the `ab9cc8…` shown above, and that's correct — what matters is that *your* push digest and *your* pull digest are *identical*, proving the bytes made the round-trip intact.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `helm package` produced `parasol-notifications-0.1.0.tgz`; you logged in to the internal registry with your OpenShift token and the service-CA bundle, `helm push`ed the chart as an OCI artifact to `<your-namespace>/parasol-notifications:0.1.0`, and `helm pull` returned the *same sha256 digest* — a verified distribution round-trip through the cluster registry.
+****
+
+== 7. Dissect a live operator's OLM bundle
+⏱ *~15 min* · what actually happens when a customer clicks "Install"
+
+Helm is one end of the packaging spectrum; an *operator* is the other.
+You don't have to imagine one — the *Pipelines operator* that ran your builds all week is installed on this cluster, and you can read its bundle *read-only* (the `platform-observer` role grants cluster-wide *read*; you never mutate it).
+
+First, a *trap* worth knowing: several APIs define a `Subscription` kind, so a bare `oc get subscription` resolves to the *wrong* one.
+
+[source,sh,role=execute]
+----
+oc api-resources | awk 'NR==1 || tolower($0) ~ /subscription/'
+----
+
+.Expected output (more than one `subscriptions` kind — the bare name is ambiguous)
+[source,texinfo]
+----
+NAME            SHORTNAMES   APIVERSION                      NAMESPACED   KIND
+subscriptions   sub          messaging.knative.dev/v1        true         Subscription
+subscriptions   sub,subs     operators.coreos.com/v1alpha1   true         Subscription
+...
+----
+
+Always *fully-qualify* `subscriptions.operators.coreos.com` for OLM.
+Read the Pipelines operator's Subscription — the "I want this operator, on this channel, from this catalog" declaration:
+
+[tabs]
+====
+Console::
++
+--
+// [CAPTURE-VERIFY] Operators → Installed Operators → Red Hat OpenShift Pipelines → Subscription tab (project openshift-operators, OCP 4.21) shows Channel / Update approval / Catalog. CLI authoritative.
+In the {ocp_console_url}[web console^], open *Operators* → *Installed Operators*, select *Red Hat OpenShift Pipelines*, and open its *Subscription* tab.
+It shows the *Update channel* (`latest`), the *Update approval* (Automatic), and the *Catalog source* (Red Hat Operators) — the same fields the CLI prints.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh
+----
+--
+====
+
+.Expected output (the Subscription: package, catalog source, chosen channel)
+[source,texinfo]
+----
+NAME                              PACKAGE                           SOURCE             CHANNEL
+openshift-pipelines-operator-rh   openshift-pipelines-operator-rh   redhat-operators   latest
+----
+
+The *channels* are the operator's upgrade streams — you subscribe to one.
+List them from the PackageManifest (using `--field-selector` to avoid another bare-name trap):
+
+[source,sh,role=execute]
+----
+oc get packagemanifests --field-selector=metadata.name=openshift-pipelines-operator-rh -n openshift-marketplace -o json \
+  | jq -r '.items[0].status | "default channel: \(.defaultChannel)", "channels: \([.channels[].name] | join(", "))"'
+----
+
+.Expected output (a default channel plus version-pinned streams)
+[source,texinfo]
+----
+default channel: latest
+channels: latest, pipelines-1.15, pipelines-1.16, pipelines-1.17, pipelines-1.18, pipelines-1.19, pipelines-1.20, pipelines-1.21, pipelines-1.22
+----
+
+Now the *heart of the bundle* — the *ClusterServiceVersion (CSV)*.
+The Subscription resolved to an installed CSV; read what it declares:
+
+[source,sh,role=execute]
+----
+CSV=$(oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh -o jsonpath='{.status.installedCSV}')
+echo "installed CSV: $CSV"
+oc get csv "$CSV" -n openshift-operators -o json | jq -r '
+  "owned CRDs: \(.spec.customresourcedefinitions.owned | length)",
+  "install strategy: \(.spec.install.strategy)",
+  "install modes: \([.spec.installModes[] | select(.supported) | .type] | join(", "))"'
+----
+
+.Expected output (the CSV: the CRDs it owns, the controller it installs, its scope)
+[source,texinfo]
+----
+installed CSV: openshift-pipelines-operator-rh.v1.22.4
+owned CRDs: 14
+install strategy: deployment
+install modes: AllNamespaces
+----
+
+A CSV declares the *custom resource definitions the operator owns*, the *controller Deployment* to run (`install strategy: deployment`), and its *install mode*.
+See the CRDs it owns — these are the API types the operator adds to the cluster:
+
+[source,sh,role=execute]
+----
+oc get csv "$CSV" -n openshift-operators -o jsonpath='{range .spec.customresourcedefinitions.owned[*]}{.kind}{"\n"}{end}' | head -6
+echo "--- and now live on the cluster: ---"
+oc get crd | grep -c tekton
+----
+
+.Expected output (owned API types; and the CRDs the operator installed cluster-wide)
+[source,texinfo]
+----
+ManualApprovalGate
+OpenShiftPipelinesAsCode
+TektonChain
+TektonConfig
+TektonPipeline
+TektonTrigger
+--- and now live on the cluster: ---
+30
+----
+
+Those `Tekton…` kinds are what let you write a `Pipeline` or a `TektonConfig` — *the operator extended the Kubernetes API*.
+Finally, trace *where the bundle came from* and *how it was approved*:
+
+[source,sh,role=execute]
+----
+oc get catalogsource redhat-operators -n openshift-marketplace -o jsonpath='catalog: {.spec.displayName}  image: {.spec.image}{"\n"}'
+oc get installplan -n openshift-operators -o custom-columns='NAME:.metadata.name,APPROVAL:.spec.approval,APPROVED:.spec.approved,CSV:.spec.clusterServiceVersionNames[0]' | grep pipelines
+----
+
+.Expected output (the catalog index image, and the InstallPlan that approved the install)
+[source,texinfo]
+----
+catalog: Red Hat Operators  image: registry.redhat.io/redhat/redhat-operator-index:v4.21
+install-hrcwp   Automatic   true   openshift-pipelines-operator-rh.v1.22.4
+----
+
+That is the whole chain, read backwards from a running operator: a *CatalogSource* (an index image) offered the package; a *Subscription* picked the `latest` channel; an *InstallPlan* approved it *automatically*; a *CSV* installed the controller and 14 owned CRDs.
+*That is what happened when someone clicked "Install."*
+
+[.checkpoint]
+****
+✔ *Verify:* You read the live Pipelines operator's bundle end to end — its `subscriptions.operators.coreos.com` (channel `latest`, source `redhat-operators`), its channel list from the PackageManifest, its CSV (14 owned CRDs, a controller Deployment, `AllNamespaces`), the Tekton CRDs it added, and the CatalogSource + InstallPlan behind it — all read-only. You know the trap that a bare `subscription` resolves to the wrong kind.
+****
+
+== 8. Where OLM is going, and map your product onto the spectrum
+⏱ *~8 min* · the direction of travel, then a decision with a straight face
+
+Everything in exercise 7 was *classic OLM* — the model that installed every operator on this cluster.
+A newer generation, *OLM v1*, is generally available and *running here*, reshaped into two cluster-scoped objects.
+Read them:
+
+[source,sh,role=execute]
+----
+oc get clustercatalog
+echo "--- installed the new way: ---"
+oc get clusterextension
+----
+
+.Expected output (the new catalogs are serving; nothing is installed through them yet)
+[source,texinfo]
+----
+NAME                            LASTUNPACKED   SERVING   AGE
+openshift-certified-operators   ...            True      ...
+openshift-community-operators   ...            True      ...
+openshift-redhat-marketplace    ...            True      ...
+openshift-redhat-operators      ...            True      ...
+--- installed the new way: ---
+No resources found
+----
+
+Four *ClusterCatalogs* are *serving*, but there are *zero ClusterExtensions* — OLM v1 is present and ready, yet nothing uses it here and the current web console does not surface it.
+Classic OLM (a `Subscription` → `CSV`) is what drives OperatorHub today and what you dissected; OLM v1 (a `ClusterCatalog` + a `ClusterExtension` with a ServiceAccount and RBAC you supply) is the *direction*.
+Reading `oc get clustercatalog` returning four `Serving` entries is enough to know it is real and coming.
+
+*Now the decision, made honestly.*
+You have now seen both ends of the spectrum — you *shipped a Helm chart* and *dissected an operator*.
+For a service you own, place it:
+
+[cols="1,3,3",options="header"]
+|===
+| Package | Day-2 it covers | Reach for it when…
+
+| Raw manifests | none — you own every change | it's a throwaway or a one-off
+| Kustomize | environment overlays, GitOps diffs | Git is your control plane and there's no release lifecycle
+| *Helm* | install / upgrade / rollback / test / hooks | you want *versioned releases* with an undo — *most apps*
+| Operator | *continuous reconcile* — repair, stateful upgrade, failover | the *reconcile itself is the value*, not just install/upgrade
+|===
+
+[NOTE]
+.The honest line: when *not* to write an operator
+====
+If your day-2 is "occasionally `helm upgrade` with new values," a *chart already does that* — an operator would be a reconcile loop with nothing to reconcile, plus a controller to build, certify, and keep alive for the product's life.
+Write the operator when it must *continuously* act — repair drift the instant it happens, orchestrate a stateful upgrade, fail over across sites, or manage many instances from one spec.
+The notifications service you packaged today wants *Helm*, and saying so out loud is the senior move.
+====
+
+[.checkpoint]
+****
+✔ *Verify (observed):* You read OLM v1 live — four `ClusterCatalog`s `Serving`, zero `ClusterExtension`s (present, idle, console-invisible) — and placed the notifications service on the packaging spectrum, concluding a *Helm chart* is the right tool and an operator would be cost without payoff. You can now choose template vs Kustomize vs Helm vs operator with a straight face.
+****
+
+== Challenge (optional)
+⏱ *no hand-holding*
+
+You have the mechanics. Try these on your own:
+
+* *Bump the chart version and re-push.* Edit `Chart.yaml` `version` to `0.2.0`, `helm package`, and push again. Then `oc get istag parasol-notifications -n $NS` — reason about how the registry now holds *two* chart versions (and the app image) as distinct tags on one repository.
+* *Install straight from the registry.* `helm uninstall` your release, then `helm install parasol-notifications oci://$REG/$NS/parasol-notifications --version 0.1.0 -n $NS --ca-file /tmp/service-ca.crt` — prove a chart in the registry installs with no local directory. What does that enable for a consumer on another team?
+* *Read a different operator's bundle.* Pick the GitOps operator (`openshift-gitops-operator`) and repeat exercise 7 against it — its Subscription, channels, CSV, and owned CRDs. Compare its channel naming to Pipelines' and reason about what an operator's *channels* commit its author to.
+
+When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the entry state (the seeded fork + prebuilt image + marker, nothing installed).
+
+endif::demo[]
