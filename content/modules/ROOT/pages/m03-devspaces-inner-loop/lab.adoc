@@ -14,7 +14,7 @@ ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
 
 In this lab you take the developer inner loop into the cluster.
-You open Parasol's claims service in a browser IDE that starts in under two minutes, run it in Quarkus dev mode against the *real* in-cluster database, change a live endpoint and watch it hot-reload, extend the workspace definition with a Redis cache, push your change to Git, and step through a running request in a debugger.
+You open Parasol's claims service in a browser IDE that starts in under two minutes, run it in Quarkus dev mode against the *real* in-cluster database, change a live endpoint and watch it hot-reload, extend the workspace definition with a Valkey cache, push your change to Git, step through a running request in a debugger, and reach past the workspace to port-forward the database and ship your change as a running Deployment.
 Everything happens in your own projects — `{user}-devspaces` for the workspace, `{user}-dev` for the app and database — so nothing you do can affect another attendee.
 
 [IMPORTANT]
@@ -32,17 +32,17 @@ Those are click-to-run.
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — 8–10 minute presenter arc (topology -> one-click IDE -> live change -> Android closer)
+// DEMO FLAVOR — ~8 minute presenter arc (topology -> one-click IDE -> live change)
 // ============================================================================
 ifdef::demo[]
-== Demo arc — One click from topology to a live change (8–10 min)
+== Demo arc — One click from topology to a live change (~8 min)
 
 [NOTE]
 .Before you present
 ====
 Run `ws start m03 --user {user}` well before the session and *open the workspace once* so the universal developer image is already pulled on a node — a cold first start is ~85 s of image pull and kills the pacing (a warm start is ~20 s).
-Have three things ready: the *web console* Topology in `{user}-dev`, the *Dev Spaces* dashboard signed in, and the Android showcase video cued.
-The workspace opens from a *factory URL* (there is no "edit source code" link on the Topology node in this console version); the labels below were confirmed on {ocp_version} / Dev Spaces {devspaces_version} during the build.
+Have two things ready: the *web console* Topology in `{user}-dev`, and the *Dev Spaces* dashboard signed in.
+The workspace opens from a *factory URL* (there is no "edit source code" link on the Topology node in this console version); the labels below were confirmed during the build.
 ====
 
 [demo-block]
@@ -74,11 +74,11 @@ On the next request the change is live — narrate the "Live reload" line in the
 "No rebuild, no redeploy, no restart. That's the inner loop — and it's talking to the real in-cluster PostgreSQL, not a fake."
 
 [demo-block]
-[TIME 2m]
-Say:: "And this isn't just for Java web services."
-Show:: The Android-in-Dev-Spaces showcase video (recorded): a full Android build and a live device screen, in the same browser IDE.
-Do:: Play the ~60–90 s clip.
-"Same platform, same one-click workspace — an Android app building against an on-cluster device. The inner loop, in the cluster, for whatever you build."
+[TIME 1m]
+Say:: "And the moment I'm happy, one command hands this off."
+Show:: The workspace terminal, then the fork in the Git server with the new commit.
+Do:: Commit and `git push` the change to the fork.
+"That push is the seam. Everything before it was the inner loop — seconds, in my browser. Everything after it — pipelines, scanning, GitOps — is the outer loop the rest of the day builds. Same code, one push between them."
 
 [NOTE]
 .If a workspace is slow to start live
@@ -103,7 +103,11 @@ Open your workspace:
 
 . Open the {devspaces_url}[Dev Spaces dashboard^] and sign in as `{user}` (same credentials as the console).
 The first sign-in provisions your workspace project, `{user}-devspaces`, automatically.
-. Open your workspace with this factory URL (it clones *your* fork):
+. Open your workspace from this *factory URL* — it clones *your* fork and opens the workspace in a *new browser tab*, so these instructions stay put:
++
+{devspaces_url}/#{gitea_url}/{user}/parasol-claims[Open your parasol-claims workspace^]
++
+If your browser blocks the new tab, copy this URL into one yourself:
 +
 [.copy]
 `{devspaces_url}/#{gitea_url}/{user}/parasol-claims`
@@ -298,11 +302,18 @@ Your new claim, written by the workspace dev instance, is visible through the se
 ✔ *Verify:* `curl .../api/claims/ping` returns your string, the dev-mode terminal shows a `Live reload` line, and the claim you POSTed appears through the deployed Route.
 ****
 
-== 4. Extend the workspace: add a Redis cache to the devfile
+== 4. Extend the workspace: add a Valkey cache to the devfile
 ⏱ *~15 min* · the devfile is yours to change — restart the workspace from it
 
 A workspace is not fixed — it is whatever its devfile says.
-Add a second container (a Redis cache the app could use) and a command to talk to it, then restart the workspace *from the devfile* so the new container appears.
+Add a second container (a Valkey cache the app could use) and a command to talk to it, then restart the workspace *from the devfile* so the new container appears.
+
+[NOTE]
+.Why Valkey, not Redis
+====
+*Valkey* is the Linux Foundation's BSD-licensed continuation of Redis, created after Redis changed its license.
+Red Hat ships a supported *Valkey* image and it is a drop-in for the same in-memory cache role — the wire protocol and the client commands (`PING`, `SET`, `GET`, …) are unchanged, so what you learn here transfers directly.
+====
 
 Stop dev mode (*Ctrl+C*).
 In the IDE Explorer, open `devfile.yaml` at the repository root.
@@ -314,10 +325,10 @@ Under `components:`, add a `cache` component, and under `commands:`, add a `cach
   - name: cache
     container:
       # pinned by digest: tags move, digests don't — a devfile exists to be reproducible
-      image: registry.redhat.io/rhel9/redis-7@sha256:4e9f428f53b7ee73796aa398f3c9fb340a43453685b2042baba6f9b782fc1467
+      image: registry.redhat.io/rhel9/valkey-8@sha256:21f04dd3590cbb3561af0ced8e0e1e8cc1039023d808adcbb0c1cf10dca5b6fa
       memoryLimit: 256Mi
       endpoints:
-        - name: redis
+        - name: valkey
           targetPort: 6379
           exposure: internal
 ----
@@ -327,9 +338,9 @@ Under `components:`, add a `cache` component, and under `commands:`, add a `cach
   # add under commands:
   - id: cache-ping
     exec:
-      label: Ping the Redis cache
+      label: Ping the Valkey cache
       component: cache
-      commandLine: redis-cli ping
+      commandLine: valkey-cli ping
 ----
 
 Save the file.
@@ -339,8 +350,8 @@ Now restart the workspace so Dev Spaces rebuilds it from the updated devfile:
 . Run *Dev Spaces: Restart Workspace from Local Devfile*.
 
 When the workspace comes back, the `cache` container is part of it.
-Confirm it by running the devfile command you just declared: open the command palette (*F1*) → *Tasks: Run Task* → *devfile: Ping the Redis cache*.
-It executes `redis-cli ping` *inside the `cache` container* (the `redis-cli` binary lives there, not in your `tools` terminal).
+Confirm it by running the devfile command you just declared: open the command palette (*F1*) → *Tasks: Run Task* → *devfile: Ping the Valkey cache*.
+It executes `valkey-cli ping` *inside the `cache` container* (the `valkey-cli` binary lives there, not in your `tools` terminal).
 
 .Expected output
 [source,texinfo]
@@ -348,8 +359,8 @@ It executes `redis-cli ping` *inside the `cache` container* (the `redis-cli` bin
 PONG
 ----
 
-The two containers share the workspace Pod's network, so your app — and your terminal — can reach Redis at `localhost:6379`.
-Prove it from the *workspace terminal* without any Redis tooling, using bash's built-in TCP support:
+The two containers share the workspace Pod's network, so your app — and your terminal — can reach Valkey at `localhost:6379`.
+Prove it from the *workspace terminal* without any Valkey tooling, using bash's built-in TCP support:
 
 [source,sh]
 ----
@@ -366,7 +377,7 @@ No service, no route — just a sidecar you declared in Git.
 
 [.checkpoint]
 ****
-✔ *Verify:* After the restart, the *devfile: Ping the Redis cache* task returns `PONG`, and the workspace now runs a `cache` container (the terminal TCP probe answers `+PONG` too).
+✔ *Verify:* After the restart, the *devfile: Ping the Valkey cache* task returns `PONG`, and the workspace now runs a `cache` container (the terminal TCP probe answers `+PONG` too).
 If the restart fails, your devfile has a YAML error — check the indentation of the two blocks you added (see xref:m03-devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
 ****
 
@@ -529,40 +540,142 @@ Same idea as the IDE debugger — a debugger attached to a live in-cluster reque
 If neither attaches, confirm dev mode is running and printed the `Listening for transport dt_socket at address: 5005` line.
 ****
 
-== 7. Showcase — beyond Java: Android in Dev Spaces
-⏱ *~5 min* · watch and discuss (recorded demo)
+== 7. Beyond dev mode: reach the database and ship a container
+⏱ *~15 min* · port-forward an internal service, then deploy your change as a real Deployment
 
-Everything you did today was a Java web service, but the inner-loop-in-the-cluster idea is not language-specific.
+Dev mode is the fast heart of the inner loop, but two everyday developer moves live just past it: reaching a cluster service directly with your own tools, and turning a change into a running Deployment the platform manages.
+Both are the bridge from the inner loop to the outer loop.
 
-Watch the recorded showcase: a full *Android* application developed in Dev Spaces — the same one-click browser IDE — building against an on-cluster Android device whose screen streams into a browser tab.
-
-// media-pass: embed narrated video m03-devspaces-inner-loop-showcase-android.mp4 (recorded in Phase 6) — see media-manifest.md
-
-What to notice, and why it matters for how you think about the platform:
-
-* *One devfile, more than one target.*
-The showcase workspace uses a devfile with multiple build targets (a `devfile.yaml` and a registry-specific variant) — the same contract idea you used, scaled to a bigger toolchain.
-* *Declarative tasks.*
-Build, run, and test are devfile *commands* with task groups — there is no magic "Run" button, just named tasks anyone can discover, exactly like your `cache-ping`.
-* *The device is a governed workload.*
-The Android device runs as a virtual machine on the cluster; the workspace's service account has *no* rights to create VMs, so the device lifecycle is a governed, separate concern — a preview of how the platform keeps blast radius small (covered in the Virtualization and Multi-Tenancy modules — separate modules).
-
-[NOTE]
-.Why this is a recorded demo, not hands-on here
+[IMPORTANT]
+.These steps run in the *Showroom terminal*, not the workspace
 ====
-The Android device streams from a virtual machine, which needs OpenShift Virtualization (bare-metal nodes).
-This workshop's cluster does not run it, so the showcase is a video by default; where a `virt`-capable cluster exists, it can be run live.
-The take-home below gives you a purely local way to explore the same inner-loop idea.
+The `oc` inside the *workspace* terminal is authenticated as the workspace's *ServiceAccount*, scoped to your `{user}-devspaces` project — it cannot read or change anything in `{user}-dev` (run `oc whoami` in the workspace terminal and you will see a `system:serviceaccount:…` identity, not `{user}`).
+So the cluster-side steps below run in the *Showroom terminal*, where you are signed in as `{user}` with full rights in your own `{user}-dev` project.
 ====
+
+=== Port-forward the database to your localhost
+
+The `claims-db` PostgreSQL database has *no Route* — it is internal-only, reachable inside the cluster by DNS (that is the `claims-db.{user}-dev.svc` name your dev instance used).
+To reach it from a database tool on your own machine — `psql`, a GUI client, or your IDE's database panel — bridge it to a local port with `oc port-forward`.
+In the *Showroom terminal*:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev port-forward svc/claims-db 5432:5432
+----
+
+.Expected output (it keeps running — leave it)
+[source,texinfo]
+----
+Forwarding from 127.0.0.1:5432 -> 5432
+Forwarding from [::1]:5432 -> 5432
+----
+
+`localhost:5432` in your environment is now the in-cluster database: point any PostgreSQL client at it and you are querying the real `claims-db`, through a temporary tunnel that closes when you press *Ctrl+C*.
+
+[TIP]
+.Prove the tunnel carries PostgreSQL (optional)
+====
+The Showroom terminal ships no `psql`, but bash can speak enough of the wire protocol to prove what is on the other end — the same TCP trick you used for the cache.
+In a second terminal tab, send a PostgreSQL SSL-negotiation request and read the one-byte reply:
+
+[source,sh]
+----
+exec 3<>/dev/tcp/localhost/5432
+printf '\x00\x00\x00\x08\x04\xd2\x16\x2f' >&3
+read -t 3 -n1 reply <&3 && echo "claims-db answered on localhost:5432 with: $reply"
+----
+
+A reply of `N` (SSL off) or `S` (SSL on) is PostgreSQL's own answer — you have reached the database through the tunnel.
+Press *Ctrl+C* on the port-forward when you are done.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc port-forward` prints `Forwarding from 127.0.0.1:5432 -> 5432` and holds the terminal — the internal database is now on your `localhost:5432`.
+****
+
+=== Ship your pushed change as a running Deployment
+
+Dev mode is for iterating; it is not where the app runs for real.
+The `/api/claims/ping` endpoint you pushed to your fork in exercise 5 is only source right now — turn it into a running container the platform builds, runs, and heals.
+`oc new-app` does the whole source-to-Deployment step from your fork in one command (the same on-ramp the *Ways to Build & Deliver Apps* module covers in depth).
+
+In a *fresh Showroom terminal tab* (so the port-forward keeps running):
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev new-app java-21~{gitea_url}/{user}/parasol-claims.git --name=parasol-claims-mine
+----
+
+That creates a BuildConfig, an ImageStream, a Deployment, and a Service — all named `parasol-claims-mine`, so they sit *beside* the pre-staged `parasol-claims`, not on top of it.
+Wire it to the shared database (the same Secret the pre-staged app uses) and wait for the build and rollout:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev set env deploy/parasol-claims-mine \
+  --from=secret/claims-db \
+  POSTGRESQL_HOST=claims-db \
+  QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update
+oc -n {user}-dev logs -f buildconfig/parasol-claims-mine
+oc -n {user}-dev rollout status deploy/parasol-claims-mine
+----
+
+The S2I build takes a few minutes the first time — Maven resolves dependencies and compiles your fork.
+The `update` schema strategy is the same one you used in dev mode: your new instance *uses* the existing tables instead of dropping and reseeding the shared database.
+When `rollout status` reports the Deployment available, give it a browser-reachable Route (edge TLS) and call *your* endpoint on the running container:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev create route edge parasol-claims-mine \
+  --service=parasol-claims-mine --insecure-policy=Redirect
+MINE=$(oc -n {user}-dev get route parasol-claims-mine -o jsonpath='{.spec.host}')
+curl -s https://$MINE/api/claims/ping; echo
+----
+
+.Expected output
+[source,texinfo]
+----
+parasol-claims dev mode: hot reload works
+----
+
+The exact string you wrote in dev mode is now served by a container the platform runs — replicated, health-checked, restarted for you if it dies.
+That is the outer loop taking your change: from here a pipeline and GitOps would build and promote it (later modules), instead of you running `oc new-app` by hand.
+
+[.checkpoint]
+****
+✔ *Verify:* `oc -n {user}-dev get deploy parasol-claims-mine` shows the Deployment available, and `curl https://$MINE/api/claims/ping` returns your `/ping` string from the *deployed* container (not dev mode).
+****
+
+=== Going further: debug and hot-reload the running container
+
+You attached a debugger to dev mode in exercise 6; the same attach works against a *deployed* container once you open its debug port.
+Turn JDWP on for your Deployment and forward the port from the *Showroom terminal*:
+
+[source,sh,subs="attributes"]
+----
+oc -n {user}-dev set env deploy/parasol-claims-mine \
+  JAVA_TOOL_OPTIONS='-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005'
+oc -n {user}-dev rollout status deploy/parasol-claims-mine
+oc -n {user}-dev port-forward deploy/parasol-claims-mine 5005:5005
+----
+
+// [CAPTURE-VERIFY] The final debugger *attach* is driven from a graphical IDE or a JDK shell on
+// the host holding the forwarded port; it cannot be exercised headlessly here. The oc scaffolding
+// above (JDWP env + rollout + port-forward) is grounded on-cluster; the attach mirrors exercise 6.
+With `5005` forwarded, attach a debugger to `localhost:5005` from a client that can reach that port — `jdb -attach localhost:5005`, or your IDE's *Attach* configuration from exercise 6 — and you are stepping through the *deployed* container instead of dev mode.
+
+For a live *edit-and-see* loop against a running Pod (not just local dev mode), Quarkus offers *remote development mode*: you run a mutable build in the cluster with `QUARKUS_LAUNCH_DEVMODE=true` and connect to it with `./mvnw quarkus:remote-dev`, so a saved file hot-reloads straight into the Pod.
+It is an advanced pattern — the Quarkus link in the wrap-up has the details.
 
 == 8. Take-home: the same loop, locally
 ⏱ *~3 min* · read
 
 In-cluster workspaces are one end of a spectrum.
-When you want the inner loop entirely on your own machine — on a plane, air-gapped, or just offline — two Red Hat tools give you the same shape:
+When you want the inner loop entirely on your own machine — on a plane, air-gapped, or just offline — two Red Hat tools give you the same shape (both free for development, on macOS, Windows, and Linux):
 
-* *Podman Desktop* — build and run containers (and small Kubernetes/Pod setups) locally; the natural home for the container half of the inner loop without a cluster.
-* *Red Hat OpenShift Local* — a single-node OpenShift on your laptop, for when you need the *platform* (Routes, operators, the console) and not just containers.
+* https://developers.redhat.com/products/podman-desktop[Podman Desktop^] — build and run containers (and small Kubernetes/Pod setups) locally; the natural home for the container half of the inner loop without a cluster.
+* https://developers.redhat.com/products/openshift-local[Red Hat OpenShift Local^] — a single-node OpenShift on your laptop, for when you need the *platform* (Routes, operators, the console) and not just containers.
 
 Both run the same images and, in OpenShift Local's case, the same objects you have been using all along — the skills transfer directly.
 When you are done for the day, your Dev Spaces workspace idles automatically after 30 minutes of inactivity to free cluster resources, and resumes where you left off.

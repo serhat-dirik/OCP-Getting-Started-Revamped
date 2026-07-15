@@ -41,7 +41,7 @@ Visual: Three-icon row — a clock (onboarding time), two mismatched laptops wit
 - Endpoints: ports the gateway publishes
 - Change the toolchain = a pull request
 
-Notes: The devfile (devfile.yaml, schema 2.2.0) is the contract that makes a workspace reproducible for everyone. Introduce its three parts at consumer depth — components (containers), commands (named tasks), endpoints (published ports). The punchline: "upgrade everyone to JDK 21" is a one-line diff the pipeline and every developer inherit together, not a laptop-by-laptop chase. In the lab they edit this file to add a Redis cache.
+Notes: The devfile (devfile.yaml, schema 2.2.0) is the contract that makes a workspace reproducible for everyone. Introduce its three parts at consumer depth — components (containers), commands (named tasks), endpoints (published ports). The punchline: "upgrade everyone to JDK 21" is a one-line diff the pipeline and every developer inherit together, not a laptop-by-laptop chase. In the lab they edit this file to add a Valkey cache.
 Visual: A devfile.yaml snippet with components/commands/endpoints annotated, arrow to a running workspace Pod (tools + cache containers) behind the che-gateway.
 
 ## Slide: The workspace talks to real services
@@ -60,11 +60,11 @@ Visual: Reuse concept diagram m03-...-02-workspace-gateway-services.svg — brow
 - Open the claims service from a link
 - Run dev mode against the real database
 - Change an endpoint; watch it hot-reload
-- Add a Redis cache to the devfile
-- Push, debug, and see Android in Dev Spaces
+- Add a Valkey cache to the devfile
+- Push, debug, port-forward, and ship a container
 
-Notes: Set expectations for the hands-on. Attendees open a one-click workspace, wire dev mode to the in-cluster database (a deliberate break-and-fix), change a live endpoint with hot reload, extend the devfile with a Redis sidecar and restart from it, push to their fork, attach a debugger to a running request, and close with the Android-in-Dev-Spaces showcase. Everything is in their own projects.
-Visual: Numbered arc strip: link → dev mode → hot reload → devfile edit → push → debug → showcase.
+Notes: Set expectations for the hands-on. Attendees open a one-click workspace, wire dev mode to the in-cluster database (a deliberate break-and-fix), change a live endpoint with hot reload, extend the devfile with a Valkey sidecar and restart from it, push to their fork, attach a debugger to a running request, and finally reach past the workspace — port-forward the internal database and ship their pushed change as a running Deployment (the bridge to the outer loop). Everything is in their own projects.
+Visual: Numbered arc strip: link → dev mode → hot reload → devfile edit → push → debug → port-forward → ship.
 
 ## Slide: Map to your org — and when not
 
