@@ -6,6 +6,69 @@ instructor / troubleshooting) lands with the M01 build. Rules here implement
 `04-STYLE-GUIDE.md` and `01-ARCHITECTURE.md` §2; Vale + yamllint + shellcheck enforce
 the automatable ones in CI.
 
+## Course-wide content standards (CC-1…CC-5)
+
+Five editorial standards apply to **every** module, from the owner's hands-on Foundations
+review (2026-07). They are the reading-experience contract every module-builder inherits;
+sweep them whenever a module reaches Definition of Done and when auditing the catalog. Vale
+covers some mechanically (noted per rule); the rest are reviewer-checked.
+
+### CC-1 — No version anchoring in prose
+
+Don't write product version numbers into prose — not "Dev Spaces 3.29.0", not "the 4.21.22
+unified console". Name the product plainly ("Dev Spaces", "the OpenShift console"). When a
+version genuinely changes what the reader does, pull it from a `{<key>_version}` attribute
+(see [Product versions](#product-versions--generated-attributes)), never a typed literal.
+
+*Why:* prose version anchors rot within a release, add nothing the reader can act on, and
+fork the truth away from `versions.yaml`. *Sweep:* grep prose for `\b\d+\.\d+(\.\d+)?\b`
+outside `source`/`texinfo` blocks and attribute definitions; most hits are anchors to remove.
+
+### CC-2 — Credits live only in `CREDITS.md`
+
+All attribution lives in the repo-level `CREDITS.md` (with the README pointer). **No module
+page carries a Credits or Attribution section** — not concept, lab, wrapup, instructor, or
+troubleshooting. When a module reuses a source, add a row to `CREDITS.md`; never a per-module
+credits block.
+
+*Why:* (owner decision, 2026-07-14) credit is a project-level acknowledgement, not per-module
+chrome — consolidating keeps it complete, consistent, and out of the attendee's reading flow.
+*Sweep:* grep module pages for `^==* *Credits`/`Attribution`/`Acknowledge` headings — there
+should be zero.
+
+### CC-3 — Terminal-output hygiene
+
+Command blocks produce clean output. Every `echo` ends its line with a newline (no trailing
+`-n`; add a closing `echo` after a multi-line print if the last line would otherwise glue to
+the prompt). No ragged, run-together output in a captured block.
+
+*Why:* attendees copy-run these; no-newline or ragged output reads as broken and erodes trust
+in the lab — a false "this is wrong" costs you every real signal after it. *Sweep:* flag
+`echo -n` and `printf` without a trailing `\n` inside `role=execute` blocks.
+
+### CC-4 — External links open in a new tab
+
+Every link that leaves the guide — console, Gitea, Dev Spaces factory/workspace, Argo CD,
+`docs.redhat.com`, `developers.redhat.com` — uses Antora's new-window flag: the trailing `^`
+inside the macro, `{ocp_console_url}[web console^]`, `https://developers.redhat.com/…[Podman
+Desktop^]`. An external link must never replace the instruction window.
+
+*Why:* a factory/workspace URL that hijacks the current tab drops the attendee out of the lab
+and loses their place. *Sweep:* flag external `link:`/`url[text]` macros whose bracket text
+lacks a `^`.
+
+### CC-5 — Diagram legibility (size + lightbox)
+
+Every diagram is readable in-flow and enlargeable. Author/export at a size where labels are
+legible without zooming, and make it click-to-enlarge (lightbox). A diagram nobody can read
+is decoration, not documentation.
+
+*How:* the lightbox helper ships via `content/supplemental-ui` — remember `ui.supplemental_files`
+must be a **single bare directory string** (a list or a `./`-prefix silently injects nothing);
+verify the CSS/JS in the **served** page, not just the repo. Mermaid sizing and the tab-overlap
+fix live in the supplemental head-styles. Export image diagrams large enough that the lightbox
+has real resolution to show.
+
 ## Build & preview
 
 One Antora component (`modules`, versionless) renders three ways from the same source,
@@ -83,8 +146,8 @@ parasol-web-...  1/1     Running
 ## Links & environment values — attributes only
 
 Never hardcode a cluster URL, user, or password (Vale error `HardcodedURL`). Build every
-environment-facing link from an attribute, opening in a new tab and deep-linking the exact
-view where possible:
+environment-facing link from an attribute, opening in a new tab (the `^` flag — CC-4) and
+deep-linking the exact view where possible:
 
 ```asciidoc
 Open the {ocp_console_url}[web console^] and switch to the *Developer* perspective.
@@ -98,7 +161,8 @@ deploy time): `{user}`, `{password}`, `{ocp_console_url}`, `{cluster_domain}`,
 ## Product versions — generated attributes
 
 Product versions come from `versions.yaml` (the single source of truth) through generated
-attributes — never typed literally:
+attributes — never typed literally, and never anchored in prose where the version doesn't
+change what the reader does (CC-1):
 
 ```asciidoc
 \include::partial$version-attributes.adoc[]
@@ -142,7 +206,7 @@ Attribute names are `<key>_version` for every product entry in `versions.yaml`
 Two Antora extensions are enabled in every playbook:
 
 - **Mermaid** (`@sntke/antora-mermaid-extension`) — inline diagrams. Every concept section
-  ships at least one diagram (`04-STYLE-GUIDE §4`):
+  ships at least one diagram (`04-STYLE-GUIDE §4`), sized and lightboxed per CC-5:
 
   ```asciidoc
   [mermaid]
