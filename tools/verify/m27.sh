@@ -20,21 +20,21 @@ NS="${USER_NAME}-cicd"
 # pipelineRef with tekton.dev/pipeline=<name>, so this catches the attendee's run AND `ws solve`'s run.
 # Succeeded ⟺ EVERY gate passed (any red gate fails the whole run) ⟺ a clean, fully-secured build.
 devsecops_run_succeeded() {
-  oc get pipelinerun -n "$1" -l tekton.dev/pipeline=parasol-claims-devsecops \
+  oc get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-devsecops \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' 2>/dev/null | grep -qx True
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
 check "namespace ${NS} exists"                              oc get ns "$NS"                                        || hint "run: ws start m27 --user ${USER_NAME}"
 check "entry marker ws-entry-m27 present"                   oc get cm ws-entry-m27 -n "$NS"                        || hint "entry app not synced — ws start m27 --user ${USER_NAME}"
-check "Pipeline parasol-claims-devsecops present"           oc get pipeline parasol-claims-devsecops -n "$NS"      || hint "entry app not synced — ws start m27 --user ${USER_NAME}"
+check "Pipeline parasol-claims-devsecops present"           oc get pipelines.tekton.dev parasol-claims-devsecops -n "$NS"      || hint "entry app not synced — ws start m27 --user ${USER_NAME}"
 check "sonar-auth copied into ${NS} (SAST-gate secret)"     oc get secret sonar-auth -n "$NS"                      || hint "the secrets hook copies it from sonarqube/sonar-ci-token — ws reset m27 --user ${USER_NAME} (needs the appsec stack)"
 check "rox-api-token copied into ${NS} (scan-gate secret)"  oc get secret rox-api-token -n "$NS"                   || hint "the secrets hook copies it from stackrox — ws reset m27 --user ${USER_NAME} (needs the trust stack)"
 check "ephemeral claims-db present (deploy target)"         oc get deploy claims-db -n "$NS"                       || hint "entry app not synced — ws start m27 --user ${USER_NAME}"
-check "curated task sonar-scan reachable"                   oc get task sonar-scan -n parasol-tasks                || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
-check "curated task trivy-scan reachable"                   oc get task trivy-scan -n parasol-tasks                || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
-check "curated task roxctl-deployment-check reachable"      oc get task roxctl-deployment-check -n parasol-tasks   || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
-check "curated task zap-baseline reachable"                 oc get task zap-baseline -n parasol-tasks              || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
+check "curated task sonar-scan reachable"                   oc get tasks.tekton.dev sonar-scan -n parasol-tasks                || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
+check "curated task trivy-scan reachable"                   oc get tasks.tekton.dev trivy-scan -n parasol-tasks                || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
+check "curated task roxctl-deployment-check reachable"      oc get tasks.tekton.dev roxctl-deployment-check -n parasol-tasks   || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
+check "curated task zap-baseline reachable"                 oc get tasks.tekton.dev zap-baseline -n parasol-tasks              || hint "parasol-tasks library missing the M27 tasks — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   :  # entry-only stops here — no PipelineRun has run yet on a fresh entry state.

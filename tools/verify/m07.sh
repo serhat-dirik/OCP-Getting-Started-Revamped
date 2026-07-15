@@ -66,11 +66,11 @@ deploy_ready() {
 check "namespace ${NS} exists"                            oc get ns "$NS"                                    || hint "run: ws start m07 --user ${USER_NAME}"
 check "entry marker ws-entry-m07 present"                 oc get cm ws-entry-m07 -n "$NS"                    || hint "entry app not synced — ws start m07 --user ${USER_NAME}"
 check "claims-db deployment ready in ${NS}"               deploy_ready claims-db "$NS"                       || hint "the ephemeral DB is entry state — ws reset m07 --user ${USER_NAME}"
-check "Pipeline parasol-claims-build-test-deploy present" oc get pipeline parasol-claims-build-test-deploy -n "$NS" || hint "entry app not synced — ws start m07 --user ${USER_NAME}"
+check "Pipeline parasol-claims-build-test-deploy present" oc get pipelines.tekton.dev parasol-claims-build-test-deploy -n "$NS" || hint "entry app not synced — ws start m07 --user ${USER_NAME}"
 check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing — re-run: ws start m07 --user ${USER_NAME} (fork job)"
 check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset m07 --user ${USER_NAME} re-asserts the fork's app content from the mirror"
 check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset m07 --user ${USER_NAME}"
-check "curated library task image-size-report reachable"  oc get task image-size-report -n parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"
+check "curated library task image-size-report reachable"  oc get tasks.tekton.dev image-size-report -n parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / solve looks like) -------------------

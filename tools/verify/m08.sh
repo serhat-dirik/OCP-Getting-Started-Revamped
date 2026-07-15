@@ -54,7 +54,7 @@ gitea_raw_contains() {
 
 # Tekton Chains signed at least one TaskRun in this namespace (signature attached).
 signed_taskrun_exists() {
-  oc get taskrun -n "$1" -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' 2>/dev/null | grep -q 'true'
+  oc get taskruns.tekton.dev -n "$1" -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' 2>/dev/null | grep -q 'true'
 }
 # A parasol-claims-supply-chain PipelineRun reached overall Succeeded. Tekton labels every run from a
 # pipelineRef with tekton.dev/pipeline=<name>, so this catches the attendee's re-run AND `ws solve`'s
@@ -63,19 +63,19 @@ signed_taskrun_exists() {
 # proxy like "image built" or "a signed TaskRun exists" greenlights an attendee who never removed
 # log4j-core (G4 SEV2, reproduced on user3-cicd). Overall Succeeded ⟺ the scan passed ⟺ clean source.
 supply_chain_run_succeeded() {
-  oc get pipelinerun -n "$1" -l tekton.dev/pipeline=parasol-claims-supply-chain \
+  oc get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-supply-chain \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' 2>/dev/null | grep -qx True
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
 check "namespace ${NS} exists"                             oc get ns "$NS"                                     || hint "run: ws start m08 --user ${USER_NAME}"
 check "entry marker ws-entry-m08 present"                  oc get cm ws-entry-m08 -n "$NS"                     || hint "entry app not synced — ws start m08 --user ${USER_NAME}"
-check "Pipeline parasol-claims-supply-chain present"       oc get pipeline parasol-claims-supply-chain -n "$NS" || hint "entry app not synced — ws start m08 --user ${USER_NAME}"
+check "Pipeline parasol-claims-supply-chain present"       oc get pipelines.tekton.dev parasol-claims-supply-chain -n "$NS" || hint "entry app not synced — ws start m08 --user ${USER_NAME}"
 check "rox-api-token copied into ${NS} (scan-gate secret)" oc get secret rox-api-token -n "$NS"                || hint "the secrets hook copies it from stackrox — ws reset m08 --user ${USER_NAME} (needs the trust stack)"
 check "chains-cosign-pub copied into ${NS} (verify key)"   oc get cm chains-cosign-pub -n "$NS"                || hint "the secrets hook copies it from openshift-pipelines — needs the trust-signing component"
 check "Gitea fork ${USER_NAME}/parasol-claims answers"     gitea_repo_exists "$USER_NAME" parasol-claims       || hint "fork missing — re-run: ws start m08 --user ${USER_NAME} (fork job)"
 check "fork branch seed-vulnerable exists"                 gitea_branch_exists "$USER_NAME" parasol-claims seed-vulnerable || hint "re-run the fork/seed job: ws reset m08 --user ${USER_NAME}"
-check "curated library task acs-image-check reachable"     oc get task acs-image-check -n parasol-tasks        || hint "parasol-tasks library missing — sync the workshop-config Argo app"
+check "curated library task acs-image-check reachable"     oc get tasks.tekton.dev acs-image-check -n parasol-tasks        || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: the seeded flaw exists ONLY in the fresh entry state. The M08 lab's fix REMOVES
