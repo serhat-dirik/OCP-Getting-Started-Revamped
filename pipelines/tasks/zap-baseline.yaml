@@ -1,0 +1,77 @@
+# zap-baseline — curated Parasol "company task library" Task (M27 DevSecOps DAST gate).
+#
+# WHY THIS EXISTS: the org's dynamic-analysis step. Runs ZAP (Zed Attack Proxy, formerly OWASP ZAP)
+# zap-baseline.py against the DEPLOYED, RUNNING app over its in-cluster Service DNS and GATES on ZAP
+# FAIL rules. The reliable console surface is the TaskRun WARN/FAIL summary; the HTML/Markdown reports
+# are written to the zap-work workspace as an artifact.
+#
+# By default (FAIL_ON_WARN=false) ZAP runs with -I so WARN rules (e.g. missing security headers on a
+# not-yet-hardened app) do NOT fail the build — only FAIL rules do. Flip FAIL_ON_WARN=true (or promote
+# specific header rules to FAIL via a ZAP config) to make the header gate bite once the app is seeded.
+#
+# CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
+# workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — keep the two in lockstep.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: zap-baseline
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs a ZAP baseline (passive) DAST scan against a running app's in-cluster Service DNS and fails the
+    build on ZAP FAIL rules. Writes HTML/Markdown reports to the zap-work workspace.
+  params:
+    - name: TARGET_URL
+      type: string
+      description: In-cluster URL of the running app (Service DNS), e.g. http://parasol-claims:8080.
+      default: "http://parasol-claims:8080"
+    - name: FAIL_ON_WARN
+      type: string
+      description: '"false" runs ZAP with -I so only FAIL rules gate; "true" also gates on WARN rules.'
+      default: "false"
+  workspaces:
+    # ZAP writes its session + reports to /zap/wrk, which must be writable — mount a run-provided
+    # (empty) workspace there (the image /zap/wrk is not writable under the restricted-v2 random UID).
+    - name: zap-work
+      mountPath: /zap/wrk
+  results:
+    - name: dast-passed
+      description: '"true" if ZAP reported no gating alert, else "false".'
+  steps:
+    - name: zap-baseline
+      # ZAP stable, digest-pinned via GHCR (verified live 2026-07-15). Third-party OSS. The old
+      # owasp/zap2docker-* images are deprecated.
+      image: ghcr.io/zaproxy/zaproxy:stable@sha256:c558ee87358911ab17278c70991e856f57793e115d9cd0f88ca475cf82907a1a
+      workingDir: /zap/wrk
+      env:
+        - name: TARGET_URL
+          value: $(params.TARGET_URL)
+        - name: FAIL_ON_WARN
+          value: $(params.FAIL_ON_WARN)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        echo "▶ ZAP baseline (DAST) against ${TARGET_URL}"
+        FLAGS=(-t "${TARGET_URL}" -r zap-report.html -w zap-report.md)
+        # -I: do NOT fail the exit code on WARN rules (only FAIL rules gate) — the default.
+        [ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)
+        zap-baseline.py "${FLAGS[@]}"
+        RC=$?
+        # zap-baseline.py exit codes: 0 = clean, 1 = a FAIL rule fired, 2 = only WARN rules, 3 = error.
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ DAST passed — no gating alerts (reports in the zap-work workspace)"
+          printf 'true' > "$(results.dast-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.dast-passed.path)"
+        if [ "$RC" -eq 2 ] && [ "${FAIL_ON_WARN}" = "false" ]; then
+          echo "⚠️  DAST found WARN-level issues only (not gating) — review the report."
+          printf 'true' > "$(results.dast-passed.path)"
+          exit 0
+        fi
+        echo "❌ DAST FAILED — ZAP reported a gating alert on the running app."
+        echo "   fix: add the missing security headers (CSP / X-Content-Type-Options / HSTS) and re-run."
+        exit "$RC"

@@ -1,0 +1,114 @@
+# roxctl-deployment-check — curated Parasol "company task library" Task (M27 DevSecOps config-security
+# gate). Where acs-image-check gates IMAGE trust (M08), this gates the DEPLOYMENT CONFIG: it runs
+# `roxctl deployment check` (RHACS) against the deployment manifest and FAILS the build on a deploy-time
+# ENFORCED policy violation (missing resource limits, excess capabilities, host mounts…), emitting a
+# JUnit report. Renders a minimal parasol-claims Deployment for IMAGE when no FILE is given, so it runs
+# standalone and matches what the pipeline's deploy stage rolls out.
+#
+# CONTRACT: a Secret named `rox-api-token` in the run namespace (keys rox-api-token +
+# rox-central-endpoint) — the SAME contract as acs-image-check. The trust stack mints it in stackrox;
+# the M27 entry state copies it per-user into {user}-cicd. The token value is never echoed.
+#
+# CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
+# workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — keep the two in lockstep.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: roxctl-deployment-check
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs an RHACS deploy-time check (roxctl deployment check) against a Kubernetes Deployment manifest
+    and fails the build on an enforced policy violation (the M27 config-security gate). Emits JUnit.
+    Reads Central's endpoint + a CI token from the rox-api-token Secret in the run namespace.
+  params:
+    - name: IMAGE
+      type: string
+      description: Image the rendered Deployment runs (used when FILE is empty).
+    - name: FILE
+      type: string
+      description: >-
+        Path (in /tmp) to a Deployment manifest to check. Empty = render a minimal parasol-claims
+        Deployment for IMAGE (matches the pipeline's deploy stage).
+      default: ""
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: '"true" gates the build on an enforced violation; "false" reports only.'
+      default: "true"
+  results:
+    - name: check-passed
+      description: '"true" if no enforced deploy policy was violated, else "false".'
+  steps:
+    - name: deployment-check
+      # RHACS roxctl image (digest-pinned, same as acs-image-check — RHACS 4.11.1). Refresh together.
+      image: registry.redhat.io/advanced-cluster-security/rhacs-roxctl-rhel9@sha256:979f329cbe0d0dd1c41e63b471c246294780c5daf029c239ebd7d48129e75a15
+      env:
+        - name: ROX_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-central-endpoint
+        - name: ROX_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-api-token
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: FILE
+          value: $(params.FILE)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        MANIFEST="${FILE}"
+        if [ -z "${MANIFEST}" ]; then
+          # Render the minimal Deployment the pipeline's deploy stage creates (oc create deployment
+          # parasol-claims --image=IMAGE --port=8080) so the check evaluates the real deploy shape.
+          MANIFEST=/tmp/parasol-claims-deploy.yaml
+          cat > "${MANIFEST}" <<EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: parasol-claims
+          labels:
+            app: parasol-claims
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: parasol-claims
+          template:
+            metadata:
+              labels:
+                app: parasol-claims
+            spec:
+              containers:
+                - name: parasol-claims
+                  image: ${IMAGE}
+                  ports:
+                    - containerPort: 8080
+        EOF
+        fi
+        echo "▶ RHACS deploy-time check on ${MANIFEST}"
+        # --insecure-skip-tls-verify: Central serves its own service cert; the call is cluster-internal.
+        roxctl deployment check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify \
+          --file "${MANIFEST}" -o junit | tee /tmp/deployment-check.junit.xml
+        RC="${PIPESTATUS[0]}"
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ deployment check passed — no enforced deploy-time policy violations"
+          printf 'true' > "$(results.check-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.check-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  deploy policy violation(s) found (reporting only — FAIL_ON_VIOLATION=false)"
+          exit 0
+        fi
+        echo "❌ deployment check FAILED — an enforced deploy policy was violated."
+        echo "   fix: set resource requests/limits, drop excess capabilities / host mounts, then re-run."
+        exit "$RC"

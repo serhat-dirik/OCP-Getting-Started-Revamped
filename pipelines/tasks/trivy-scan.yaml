@@ -1,0 +1,94 @@
+# trivy-scan — curated Parasol "company task library" Task (M27 DevSecOps SCA gate: deps + licenses).
+#
+# WHY THIS EXISTS: the org's software-composition-analysis step. Runs a Trivy filesystem scan of the
+# source and GATES on HIGH/CRITICAL dependency vulnerabilities AND copyleft (restricted/forbidden)
+# licenses (--scanners vuln,license --exit-code 1 --severity …). Trivy maps license categories to
+# severities (forbidden→CRITICAL, restricted/copyleft e.g. GPL→HIGH), so the same gate covers both. It
+# also emits a CycloneDX SBOM artifact into the workspace.
+#
+# TRIVY HYGIENE (2026 teaching point): Trivy's GitHub Action was compromised (Mar 2026); pin the
+# CONTAINER image by digest and NEVER use the Action. Trivy pulls its vuln DB at scan time — override
+# TRIVY_DB_REPOSITORY to a mirror to avoid ×N-user rate limits (see the appsec/M27 notes).
+#
+# CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
+# workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — keep the two in lockstep.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: trivy-scan
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs a Trivy filesystem scan (dependency CVEs + license policy) and fails the build on
+    HIGH/CRITICAL findings; writes a CycloneDX SBOM artifact to the workspace. Digest-pinned image
+    (never the compromised GitHub Action).
+  params:
+    - name: SUBDIRECTORY
+      type: string
+      description: Path within the workspace to scan (holds the pom.xml).
+      default: "."
+    - name: SEVERITY
+      type: string
+      description: Comma-separated severities that gate the build.
+      default: "HIGH,CRITICAL"
+    - name: SCANNERS
+      type: string
+      description: Trivy scanners to run — "vuln,license" for SCA + copyleft policy.
+      default: "vuln,license"
+    - name: EXIT_CODE
+      type: string
+      description: '"1" gates the build on a finding; "0" reports only.'
+      default: "1"
+    - name: TRIVY_DB_REPOSITORY
+      type: string
+      description: OCI repo for the Trivy vuln DB — point at a mirror to avoid rate limits at scale.
+      default: "ghcr.io/aquasecurity/trivy-db:2"
+  workspaces:
+    # The source checkout (git-clone writes here); Trivy scans it in place and writes the SBOM here.
+    - name: source
+  results:
+    - name: scan-passed
+      description: '"true" if no gating finding, else "false".'
+  steps:
+    - name: trivy-scan
+      # Trivy 0.67.0, digest-pinned via GHCR (verified live 2026-07-15). Third-party OSS. NOT the Action.
+      image: ghcr.io/aquasecurity/trivy:0.67.0@sha256:de2ab931243c724bc5ea97f22027d5cf38f953dd7e806ad3976a42dc5b0174c4
+      workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      env:
+        - name: SEVERITY
+          value: $(params.SEVERITY)
+        - name: SCANNERS
+          value: $(params.SCANNERS)
+        - name: EXIT_CODE
+          value: $(params.EXIT_CODE)
+        - name: TRIVY_DB_REPOSITORY
+          value: $(params.TRIVY_DB_REPOSITORY)
+        # Writable DB/cache dir under restricted-v2 SCC (random UID cannot write the image HOME).
+        - name: TRIVY_CACHE_DIR
+          value: /tmp/trivycache
+      script: |
+        #!/bin/sh
+        # POSIX sh: the Trivy image is alpine-based and ships NO bash (only /bin/sh).
+        set -u
+        echo "▶ generating a CycloneDX SBOM artifact…"
+        # Report pass (never gates): a bill of materials surfacing every dependency for the attendee.
+        trivy fs --quiet --scanners "${SCANNERS}" --format cyclonedx --output ./trivy-sbom.json . || true
+        [ -f ./trivy-sbom.json ] && echo "  ✓ SBOM written to the workspace: trivy-sbom.json"
+
+        echo "▶ SCA scan (deps + licenses): severity=${SEVERITY} scanners=${SCANNERS} db=${TRIVY_DB_REPOSITORY}"
+        # Gating pass: HIGH/CRITICAL vulns OR copyleft (restricted/forbidden) licenses → non-zero exit.
+        trivy fs --scanners "${SCANNERS}" --severity "${SEVERITY}" --exit-code "${EXIT_CODE}" \
+          --db-repository "${TRIVY_DB_REPOSITORY}" .
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ SCA scan passed — no ${SEVERITY} vulnerabilities or copyleft licenses"
+          printf 'true' > "$(results.scan-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.scan-passed.path)"
+        echo "❌ SCA scan FAILED — a ${SEVERITY} dependency CVE or copyleft license was found."
+        echo "   fix: bump/remove the flagged dependency (e.g. log4j-core 2.14.1) or swap the copyleft dep."
+        exit "$RC"

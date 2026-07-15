@@ -1,0 +1,125 @@
+# External PostgreSQL for SonarQube. The SonarSource chart bundles NO database (H2 is unsupported for
+# a shared server), so the chart's jdbcOverwrite points here. PERSISTENT (PVC): the code-quality
+# history + minted CI tokens must survive a Sonar/DB pod restart. Same shape as the keycloak-db and
+# entry-state claims-db precedents.
+---
+# why: the DB credentials, consumed by BOTH the postgres container (POSTGRESQL_* init) and the
+# SonarQube chart (jdbcSecretName=sonar-db, jdbcSecretPasswordKey=database-password). Internal-only,
+# disposable workshop DB never reachable off-cluster — a fixed value is fine (keycloak-db precedent).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sonar-db
+  namespace: sonarqube
+  labels:
+    app: sonar-db
+    portfolio.redhat.com/component: sonarqube
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+type: Opaque
+stringData:
+  database-user: sonarqube
+  database-password: sonar-workshop-db
+  database-name: sonarqube
+---
+# why: 5Gi persistent volume on the cluster default StorageClass (auto-detected — no storageClassName,
+# so the portfolio installs on any cluster). Holds the SonarQube schema (projects, issues, tokens).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sonar-db
+  namespace: sonarqube
+  labels:
+    app: sonar-db
+    portfolio.redhat.com/component: sonarqube
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+# why: the PostgreSQL 15 server. Internal OpenShift imagestream (openshift/postgresql:15-el9) — cached
+# on every cluster, no external pull secret needed (replicable). Env mapped from the sonar-db Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sonar-db
+  namespace: sonarqube
+  labels:
+    app: sonar-db
+    portfolio.redhat.com/component: sonarqube
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  replicas: 1
+  # Recreate: one writer to one PVC — never two pods on the same data dir.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sonar-db
+  template:
+    metadata:
+      labels:
+        app: sonar-db
+        portfolio.redhat.com/component: sonarqube
+    spec:
+      containers:
+        - name: postgresql
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef: {name: sonar-db, key: database-user}
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: sonar-db, key: database-password}
+            - name: POSTGRESQL_DATABASE
+              valueFrom:
+                secretKeyRef: {name: sonar-db, key: database-name}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: sonar-db
+---
+# why: stable in-cluster address the SonarQube chart resolves — sonar-db.sonarqube.svc:5432.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sonar-db
+  namespace: sonarqube
+  labels:
+    app: sonar-db
+    portfolio.redhat.com/component: sonarqube
+spec:
+  selector:
+    app: sonar-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432

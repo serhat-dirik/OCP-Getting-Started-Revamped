@@ -1,0 +1,97 @@
+# SonarQube non-interactive bootstrap (build-note flag): SonarQube forces the admin password away from
+# the default admin/admin, and the pipeline SAST gate needs a CI analysis token — both are only doable
+# against the live web API. This hook Job (a) changes the admin password to the sonarqube-admin Secret
+# value (idempotent: skips if already changed), (b) mints a GLOBAL_ANALYSIS_TOKEN and stores it in
+# sonar-ci-token (idempotent: skips if the Secret already exists — re-minting would orphan a token),
+# (c) creates the base parasol-claims project. Never logs a secret value. Same idiom as the RHACS
+# init-bundle Job. Sync hook at wave 1: the chart's StatefulSet (wave 0) is Healthy (web API UP) first.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sonar-bootstrap
+  namespace: sonarqube
+  labels:
+    portfolio.redhat.com/component: sonarqube
+  annotations:
+    # Re-runs on every sync; BeforeHookCreation clears the previous Job. Wave 1 = after the SonarQube
+    # StatefulSet + external DB (waves -1/0) are Healthy, so the web API is already answering.
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 1200
+  template:
+    metadata:
+      labels:
+        app: sonar-bootstrap
+    spec:
+      serviceAccountName: sonar-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: bootstrap
+          # ose-cli ships oc + curl + base64 + grep/sed — no jq needed for these flat JSON responses.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: SONAR
+              # In-cluster web service (fullnameOverride=sonarqube); plain HTTP on 9000, cluster-internal.
+              value: "http://sonarqube.sonarqube.svc:9000"
+            - name: NEWPASS
+              # The target admin password (never echoed). Read from the Secret, not hard-coded here.
+              valueFrom:
+                secretKeyRef: {name: sonarqube-admin, key: password}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS=sonarqube
+
+              echo "▶ waiting for the SonarQube web API…"
+              for i in $(seq 1 90); do
+                S="$(curl -sf "${SONAR}/api/system/status" 2>/dev/null | grep -oE '"status":"[A-Z_]+"' | head -1 || true)"
+                [[ "$S" == '"status":"UP"' ]] && break
+                sleep 10
+              done
+              [[ "${S:-}" == '"status":"UP"' ]] || { echo "❌ SonarQube API not UP after 15m (status: ${S:-none})"; exit 1; }
+
+              # --- 1) force the admin password away from the default (idempotent) --------------------
+              valid() { curl -s -u "admin:$1" "${SONAR}/api/authentication/validate" | grep -q '"valid":true'; }
+              if valid "$NEWPASS"; then
+                echo "  ✓ admin password already set — skip"
+              elif valid admin; then
+                echo "▶ changing the admin password from the default…"
+                CODE="$(curl -s -o /dev/null -w '%{http_code}' -u "admin:admin" -X POST \
+                  "${SONAR}/api/users/change_password" \
+                  --data-urlencode "login=admin" --data-urlencode "previousPassword=admin" \
+                  --data-urlencode "password=${NEWPASS}")"
+                [[ "$CODE" == "204" ]] || { echo "❌ change_password failed (HTTP ${CODE})"; exit 1; }
+                echo "  ✓ admin password changed (value not shown)"
+              else
+                echo "❌ neither the new nor the default admin password authenticates — manual check needed"; exit 1
+              fi
+
+              # --- 2) mint a CI analysis token (idempotent: skip if the Secret already exists) --------
+              if oc get secret sonar-ci-token -n "$NS" >/dev/null 2>&1; then
+                echo "  ✓ sonar-ci-token already present — skip"
+              else
+                echo "▶ minting a GLOBAL_ANALYSIS_TOKEN for the SAST gate…"
+                # Revoke any stale token of this name first, so generate never 400s on a duplicate.
+                curl -s -o /dev/null -u "admin:${NEWPASS}" -X POST "${SONAR}/api/user_tokens/revoke" \
+                  --data-urlencode "name=parasol-ci" || true
+                TRESP="$(curl -s -u "admin:${NEWPASS}" -X POST "${SONAR}/api/user_tokens/generate" \
+                  --data-urlencode "name=parasol-ci" --data-urlencode "type=GLOBAL_ANALYSIS_TOKEN")"
+                TOKEN="$(printf '%s' "$TRESP" | grep -oE '"token":"[^"]*"' | sed 's/^"token":"//; s/"$//')"
+                [[ -n "$TOKEN" ]] || { echo "❌ no token in response"; exit 1; }
+                # value never echoed; the in-cluster host is stored alongside so the scan task self-configures.
+                oc create secret generic sonar-ci-token -n "$NS" \
+                  --from-literal=sonar-token="$TOKEN" \
+                  --from-literal=sonar-host-url="${SONAR}" \
+                  --dry-run=client -o yaml | oc apply -f - >/dev/null
+                echo "  ✓ sonar-ci-token secret created (value not shown)"
+              fi
+
+              # --- 3) create the base parasol-claims project (tolerate already-exists) ---------------
+              echo "▶ ensuring the parasol-claims project exists…"
+              curl -s -o /dev/null -u "admin:${NEWPASS}" -X POST "${SONAR}/api/projects/create" \
+                --data-urlencode "project=parasol-claims" --data-urlencode "name=Parasol Claims" || true
+              echo "✅ SonarQube bootstrap complete — admin secured, CI token minted, project ready"

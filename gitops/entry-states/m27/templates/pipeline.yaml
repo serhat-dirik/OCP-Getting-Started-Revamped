@@ -1,0 +1,241 @@
+# The M27 DevSecOps capstone Pipeline, materialized per-user in {user}-cicd so the attendee can
+# run/read/edit it. Builds the shared parasol-claims repo's clean main by default (every gate passes —
+# the entry state); the M27 content/app pass adds the seeded-vulnerable fork + break-fix seeds and
+# points git-revision at them. Tasks are CLUSTER RESOLVER references (bundled + the curated
+# parasol-tasks library, incl. the four M27 tasks) — no task bodies copied except the tiny inline
+# sign-check step.
+#
+# LOCKSTEP: byte-identical to the canonical pipelines/pipeline/parasol-claims-devsecops.yaml (the
+# module's readable artifact) except for the added namespace — kept in sync by hand (Helm cannot read
+# files outside its chart; ADR-0001 blesses intentional duplication).
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: parasol-claims-devsecops
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    app.kubernetes.io/part-of: parasol-claims
+    workshop.redhat.com/module: m27
+spec:
+  params:
+    - name: git-url
+      type: string
+      description: Source repository (defaults to the in-cluster Gitea shared repo).
+      default: http://gitea.gitea.svc:3000/parasol/parasol-claims.git
+    - name: git-revision
+      type: string
+      description: Branch, tag, or commit to build.
+      default: main
+    - name: image
+      type: string
+      description: Fully-qualified target image reference (registry/namespace/name:tag).
+      # Own-namespace registry path, so this Pipeline is portable across every {user}-cicd with no edit.
+      default: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:latest
+    - name: sonar-project-key
+      type: string
+      description: SonarQube project key (per-user recommended, e.g. parasol-claims-user1).
+      default: parasol-claims
+    - name: max-size-mb
+      type: string
+      description: Image size budget in MB, enforced (as a report) by image-size-report.
+      default: "500"
+  workspaces:
+    # One shared PVC carries the checkout from git-clone through SAST/SCA/unit-test and the image build.
+    - name: shared-workspace
+    # ZAP writes its session + reports here (mounted at /zap/wrk by the zap-baseline task).
+    - name: zap-work
+  results:
+    - name: sast-passed
+      value: $(tasks.sast-sonar.results.quality-gate-passed)
+    - name: sca-passed
+      value: $(tasks.sca-trivy.results.scan-passed)
+    - name: image-scan-passed
+      value: $(tasks.image-scan.results.check-passed)
+    - name: config-check-passed
+      value: $(tasks.deployment-check.results.check-passed)
+    - name: dast-passed
+      value: $(tasks.dast-zap.results.dast-passed)
+  tasks:
+    # 1) Clone the app source into the shared workspace (bundled task, cluster resolver).
+    - name: fetch-source
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: git-clone}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - {name: URL, value: $(params.git-url)}
+        - {name: REVISION, value: $(params.git-revision)}
+      workspaces:
+        - {name: output, workspace: shared-workspace}
+
+    # 2) SAST: SonarQube analysis + quality-gate gate (runs in parallel with the SCA scan).
+    - name: sast-sonar
+      runAfter: [fetch-source]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: sonar-scan}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - {name: SONAR_PROJECT_KEY, value: $(params.sonar-project-key)}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+
+    # 3) SCA: Trivy filesystem scan (dependency CVEs + copyleft licenses) + CycloneDX SBOM artifact.
+    - name: sca-trivy
+      runAfter: [fetch-source]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: trivy-scan}
+          - {name: namespace, value: parasol-tasks}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+
+    # 4) Unit tests (H2-backed, self-contained) — after the source gates pass. Curated maven-jdk21.
+    - name: unit-test
+      runAfter: [sast-sonar, sca-trivy]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: maven-jdk21}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - name: GOALS
+          value: ["-B", "-ntp", "test"]
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+
+    # 5) Build the image from the Containerfile; Tekton Chains SIGNS this TaskRun's image automatically.
+    - name: build-image
+      runAfter: [unit-test]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: buildah}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - {name: IMAGE, value: $(params.image)}
+        - {name: DOCKERFILE, value: ./Containerfile}
+        - {name: TLS_VERIFY, value: "false"}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
+
+    # 6) Image scan GATE: RHACS build-time check (the M08 Block-Log4Shell policy) on the built image.
+    - name: image-scan
+      runAfter: [build-image]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: acs-image-check}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - {name: IMAGE, value: $(params.image)}
+
+    # 7) Image size report (report-only) — the curated org library Task in action.
+    - name: image-report
+      runAfter: [build-image]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: image-size-report}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - {name: IMAGE, value: $(params.image)}
+        - {name: MAX_SIZE_MB, value: $(params.max-size-mb)}
+
+    # 8) Sign + attest: wait for Tekton Chains to sign the build TaskRun (async) and GATE if unsigned.
+    #    Inline taskSpec — a small oc poll needs no curated task. cosign verify --key is the richer
+    #    attendee terminal beat (M08); the signed annotation is the authoritative in-pipeline signal.
+    - name: sign-check
+      runAfter: [build-image]
+      taskSpec:
+        steps:
+          - name: verify-signed
+            image: registry.redhat.io/openshift4/ose-cli:latest
+            env:
+              - name: PR_NAME
+                value: $(context.pipelineRun.name)
+            script: |
+              #!/usr/bin/env bash
+              set -uo pipefail
+              echo "▶ waiting for Tekton Chains to sign + attest the build image (async)…"
+              for i in $(seq 1 18); do
+                SIGNED="$(oc get taskrun -l tekton.dev/pipelineRun=${PR_NAME},tekton.dev/pipelineTask=build-image \
+                  -o jsonpath='{.items[0].metadata.annotations.chains\.tekton\.dev/signed}' 2>/dev/null || true)"
+                if [ "$SIGNED" = "true" ]; then
+                  echo "✅ build image signed + in-toto attested by Tekton Chains"
+                  exit 0
+                fi
+                sleep 10
+              done
+              echo "❌ build image not signed after ~3m — is trust-signing (Tekton Chains cosign key) installed?"
+              exit 1
+
+    # 9) Config-security GATE: RHACS deploy-time check on the rendered Deployment manifest (JUnit).
+    - name: deployment-check
+      runAfter: [image-scan, sign-check]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: roxctl-deployment-check}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - {name: IMAGE, value: $(params.image)}
+
+    # 10) Deploy the scanned/signed image AND create the browser-facing edge Route (no manual oc expose).
+    - name: deploy
+      runAfter: [deployment-check]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: openshift-client}
+          - {name: namespace, value: openshift-pipelines}
+      params:
+        - name: SCRIPT
+          value: |
+            if oc get deployment parasol-claims >/dev/null 2>&1; then
+              oc set image deployment/parasol-claims parasol-claims="$(params.image)"
+            else
+              # --port=8080 puts a containerPort on the Deployment so `oc expose deployment` can
+              # introspect it into a Service (the app listens on 8080).
+              oc create deployment parasol-claims --image="$(params.image)" --port=8080
+            fi
+            # Wire the app to the ephemeral claims-db the M27 entry state provides (tolerant if absent).
+            if oc get secret claims-db >/dev/null 2>&1; then
+              oc set env deployment/parasol-claims --from=secret/claims-db --containers=parasol-claims
+            fi
+            # Readiness probe so the Service/Route only front a LISTENING pod (Quarkus boots ~20-30s).
+            oc set probe deployment/parasol-claims --readiness \
+              --get-url=http://:8080/q/health/ready --initial-delay-seconds=5 --period-seconds=5
+            oc rollout status deployment/parasol-claims --timeout=300s
+            # Service first (the Route targets it), then the edge Route (edge + Allow = browser-reachable
+            # over HTTPS; a plain oc expose serves HTTP-only and trips the router HSTS upgrade).
+            oc get service parasol-claims >/dev/null 2>&1 || oc expose deployment parasol-claims --port=8080
+            oc get route parasol-claims >/dev/null 2>&1 || \
+              oc create route edge parasol-claims --service=parasol-claims --insecure-policy=Allow
+            echo "▶ parasol-claims Route: https://$(oc get route parasol-claims -o jsonpath='{.spec.host}')"
+
+    # 11) DAST GATE: ZAP baseline against the RUNNING app over the in-cluster Service DNS.
+    - name: dast-zap
+      runAfter: [deploy]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: zap-baseline}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - {name: TARGET_URL, value: "http://parasol-claims.$(context.pipelineRun.namespace).svc:8080"}
+      workspaces:
+        - {name: zap-work, workspace: zap-work}

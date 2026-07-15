@@ -1,0 +1,35 @@
+# Node prereq for SonarQube's embedded Elasticsearch: vm.max_map_count >= 262144. In OpenShift mode the
+# chart's privileged sysctl initContainer is disabled (restricted-v2 SCC), so a NODE-level Tuned profile
+# carries the sysctl. Tuned applies it at RUNTIME with NO node reboot (unlike a MachineConfig).
+#
+# DELIBERATELY NOT in kustomization.yaml: this is a cluster-scoped node-config change and must be a
+# CONSCIOUS cluster-admin action, not something the appsec Argo app silently rolls out under a live
+# cohort. Apply it ONCE, before/with the appsec stack, only if the worker default is below 262144:
+#
+#   oc get nodes -o name | head -1 | xargs -I{} oc debug {} -q -- chroot /host sysctl vm.max_map_count
+#   # if < 262144:
+#   oc apply -f platform-portfolio/components/sonarqube/node-tuning/sonarqube-vm-max-map-count.yaml
+#
+# Many clusters already satisfy this (e.g. ODF/Ceph nodes ship 262144) — check first; the SonarQube
+# pod's Elasticsearch will CrashLoop with "max virtual memory areas vm.max_map_count [65530] is too low"
+# until the node value is raised.
+apiVersion: tuned.openshift.io/v1
+kind: Tuned
+metadata:
+  name: sonarqube-vm-max-map-count
+  namespace: openshift-cluster-node-tuning-operator
+  labels:
+    portfolio.redhat.com/component: sonarqube
+spec:
+  profile:
+    - name: sonarqube-vm-max-map-count
+      data: |
+        [main]
+        summary=Raise vm.max_map_count for SonarQube embedded Elasticsearch
+        [sysctl]
+        vm.max_map_count=262144
+  recommend:
+    - match:
+        - label: node-role.kubernetes.io/worker
+      priority: 20
+      profile: sonarqube-vm-max-map-count

@@ -231,6 +231,365 @@ spec:
         echo "   fix: remove the vulnerable dependency / bump the base image, then re-run."
         exit "$RC"
 ---
+# sonar-scan — curated Task: the SonarQube (Community Build) SAST gate (M27 DevSecOps).
+# LOCKSTEP with pipelines/tasks/sonar-scan.yaml. Contract: a `sonar-auth` Secret (keys sonar-token +
+# sonar-host-url) in the run namespace — the appsec stack mints it in sonarqube/sonar-ci-token, the
+# M27 entry state copies it per-user into {user}-cicd.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sonar-scan
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs a SonarQube (Community Build) SAST analysis of a Maven project and fails the build on a red
+    quality gate (sonar.qualitygate.wait=true). Reads the SonarQube endpoint + analysis token from the
+    sonar-auth Secret in the run namespace.
+  params:
+    - name: SONAR_PROJECT_KEY
+      type: string
+      description: SonarQube project key. Per-user is recommended (e.g. parasol-claims-user1).
+      default: parasol-claims
+    - name: SONAR_PROJECT_NAME
+      type: string
+      description: Human-readable project name shown on the dashboard.
+      default: "Parasol Claims"
+    - name: SUBDIRECTORY
+      type: string
+      description: Path within the workspace that holds the pom.xml.
+      default: "."
+    - name: QUALITY_GATE_WAIT
+      type: string
+      description: '"true" blocks on the quality gate and exits non-zero when it is red (the SAST gate).'
+      default: "true"
+  workspaces:
+    # The source checkout (git-clone writes here); compile + scan run against it in place.
+    - name: source
+  results:
+    - name: quality-gate-passed
+      description: '"true" if the SonarQube quality gate passed, else "false".'
+  steps:
+    - name: compile
+      # SonarQube Java rules need compiled bytecode (sonar.java.binaries) — produce target/classes with
+      # the same UBI9 OpenJDK 21 runner as the parasol-tasks maven-jdk21 Task.
+      image: registry.access.redhat.com/ubi9/openjdk-21:latest
+      workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "▶ compiling for SonarQube analysis (Java rules require bytecode)…"
+        /usr/bin/mvn -B -ntp -DskipTests compile
+    - name: sonar-scanner
+      # SonarScanner CLI 12.x, digest-pinned (verified live 2026-07-15). Third-party OSS.
+      image: docker.io/sonarsource/sonar-scanner-cli:12@sha256:23ca0f137965d9dff2198074043fd48d386280bc5d0ccac8c8349cea4cf096a9
+      workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      env:
+        # Endpoint + token from the run-namespace secret; the token value is never echoed.
+        - name: SONAR_HOST_URL
+          valueFrom:
+            secretKeyRef:
+              name: sonar-auth
+              key: sonar-host-url
+        - name: SONAR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sonar-auth
+              key: sonar-token
+        # Writable scanner cache/home under restricted-v2 SCC (random UID cannot write the image HOME).
+        - name: SONAR_USER_HOME
+          value: /tmp/.sonar
+        - name: PROJECT_KEY
+          value: $(params.SONAR_PROJECT_KEY)
+        - name: PROJECT_NAME
+          value: $(params.SONAR_PROJECT_NAME)
+        - name: QUALITY_GATE_WAIT
+          value: $(params.QUALITY_GATE_WAIT)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        echo "▶ SonarQube analysis: ${PROJECT_KEY} → ${SONAR_HOST_URL}"
+        # sonar-scanner reads SONAR_HOST_URL + SONAR_TOKEN from env. qualitygate.wait=true polls the
+        # compute engine and returns a non-zero exit on a RED gate — this is the SAST gate.
+        sonar-scanner \
+          -Dsonar.projectKey="${PROJECT_KEY}" \
+          -Dsonar.projectName="${PROJECT_NAME}" \
+          -Dsonar.sources=src/main \
+          -Dsonar.java.binaries=target/classes \
+          -Dsonar.qualitygate.wait="${QUALITY_GATE_WAIT}"
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ SonarQube quality gate PASSED"
+          printf 'true' > "$(results.quality-gate-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.quality-gate-passed.path)"
+        echo "❌ SonarQube quality gate FAILED (or analysis error)."
+        echo "   dashboard: ${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}"
+        echo "   fix: resolve the new issues (e.g. remove the hardcoded credential — rule S2068), then re-run."
+        exit "$RC"
+
+---
+# trivy-scan — curated Task: the Trivy SCA gate (dependency CVEs + copyleft licenses; M27).
+# LOCKSTEP with pipelines/tasks/trivy-scan.yaml. No auth; digest-pinned image (never the Trivy Action).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: trivy-scan
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs a Trivy filesystem scan (dependency CVEs + license policy) and fails the build on
+    HIGH/CRITICAL findings; writes a CycloneDX SBOM artifact to the workspace. Digest-pinned image
+    (never the compromised GitHub Action).
+  params:
+    - name: SUBDIRECTORY
+      type: string
+      description: Path within the workspace to scan (holds the pom.xml).
+      default: "."
+    - name: SEVERITY
+      type: string
+      description: Comma-separated severities that gate the build.
+      default: "HIGH,CRITICAL"
+    - name: SCANNERS
+      type: string
+      description: Trivy scanners to run — "vuln,license" for SCA + copyleft policy.
+      default: "vuln,license"
+    - name: EXIT_CODE
+      type: string
+      description: '"1" gates the build on a finding; "0" reports only.'
+      default: "1"
+    - name: TRIVY_DB_REPOSITORY
+      type: string
+      description: OCI repo for the Trivy vuln DB — point at a mirror to avoid rate limits at scale.
+      default: "ghcr.io/aquasecurity/trivy-db:2"
+  workspaces:
+    # The source checkout (git-clone writes here); Trivy scans it in place and writes the SBOM here.
+    - name: source
+  results:
+    - name: scan-passed
+      description: '"true" if no gating finding, else "false".'
+  steps:
+    - name: trivy-scan
+      # Trivy 0.67.0, digest-pinned via GHCR (verified live 2026-07-15). Third-party OSS. NOT the Action.
+      image: ghcr.io/aquasecurity/trivy:0.67.0@sha256:de2ab931243c724bc5ea97f22027d5cf38f953dd7e806ad3976a42dc5b0174c4
+      workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      env:
+        - name: SEVERITY
+          value: $(params.SEVERITY)
+        - name: SCANNERS
+          value: $(params.SCANNERS)
+        - name: EXIT_CODE
+          value: $(params.EXIT_CODE)
+        - name: TRIVY_DB_REPOSITORY
+          value: $(params.TRIVY_DB_REPOSITORY)
+        # Writable DB/cache dir under restricted-v2 SCC (random UID cannot write the image HOME).
+        - name: TRIVY_CACHE_DIR
+          value: /tmp/trivycache
+      script: |
+        #!/bin/sh
+        # POSIX sh: the Trivy image is alpine-based and ships NO bash (only /bin/sh).
+        set -u
+        echo "▶ generating a CycloneDX SBOM artifact…"
+        # Report pass (never gates): a bill of materials surfacing every dependency for the attendee.
+        trivy fs --quiet --scanners "${SCANNERS}" --format cyclonedx --output ./trivy-sbom.json . || true
+        [ -f ./trivy-sbom.json ] && echo "  ✓ SBOM written to the workspace: trivy-sbom.json"
+
+        echo "▶ SCA scan (deps + licenses): severity=${SEVERITY} scanners=${SCANNERS} db=${TRIVY_DB_REPOSITORY}"
+        # Gating pass: HIGH/CRITICAL vulns OR copyleft (restricted/forbidden) licenses → non-zero exit.
+        trivy fs --scanners "${SCANNERS}" --severity "${SEVERITY}" --exit-code "${EXIT_CODE}" \
+          --db-repository "${TRIVY_DB_REPOSITORY}" .
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ SCA scan passed — no ${SEVERITY} vulnerabilities or copyleft licenses"
+          printf 'true' > "$(results.scan-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.scan-passed.path)"
+        echo "❌ SCA scan FAILED — a ${SEVERITY} dependency CVE or copyleft license was found."
+        echo "   fix: bump/remove the flagged dependency (e.g. log4j-core 2.14.1) or swap the copyleft dep."
+        exit "$RC"
+
+---
+# roxctl-deployment-check — curated Task: the RHACS deploy-time config-security gate (M27).
+# LOCKSTEP with pipelines/tasks/roxctl-deployment-check.yaml. Reuses the rox-api-token Secret (same
+# contract as acs-image-check); the M27 entry state copies it per-user into {user}-cicd.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: roxctl-deployment-check
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs an RHACS deploy-time check (roxctl deployment check) against a Kubernetes Deployment manifest
+    and fails the build on an enforced policy violation (the M27 config-security gate). Emits JUnit.
+    Reads Central's endpoint + a CI token from the rox-api-token Secret in the run namespace.
+  params:
+    - name: IMAGE
+      type: string
+      description: Image the rendered Deployment runs (used when FILE is empty).
+    - name: FILE
+      type: string
+      description: >-
+        Path (in /tmp) to a Deployment manifest to check. Empty = render a minimal parasol-claims
+        Deployment for IMAGE (matches the pipeline's deploy stage).
+      default: ""
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: '"true" gates the build on an enforced violation; "false" reports only.'
+      default: "true"
+  results:
+    - name: check-passed
+      description: '"true" if no enforced deploy policy was violated, else "false".'
+  steps:
+    - name: deployment-check
+      # RHACS roxctl image (digest-pinned, same as acs-image-check — RHACS 4.11.1). Refresh together.
+      image: registry.redhat.io/advanced-cluster-security/rhacs-roxctl-rhel9@sha256:979f329cbe0d0dd1c41e63b471c246294780c5daf029c239ebd7d48129e75a15
+      env:
+        - name: ROX_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-central-endpoint
+        - name: ROX_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: rox-api-token
+              key: rox-api-token
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: FILE
+          value: $(params.FILE)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        MANIFEST="${FILE}"
+        if [ -z "${MANIFEST}" ]; then
+          # Render the minimal Deployment the pipeline's deploy stage creates (oc create deployment
+          # parasol-claims --image=IMAGE --port=8080) so the check evaluates the real deploy shape.
+          MANIFEST=/tmp/parasol-claims-deploy.yaml
+          cat > "${MANIFEST}" <<EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: parasol-claims
+          labels:
+            app: parasol-claims
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: parasol-claims
+          template:
+            metadata:
+              labels:
+                app: parasol-claims
+            spec:
+              containers:
+                - name: parasol-claims
+                  image: ${IMAGE}
+                  ports:
+                    - containerPort: 8080
+        EOF
+        fi
+        echo "▶ RHACS deploy-time check on ${MANIFEST}"
+        # --insecure-skip-tls-verify: Central serves its own service cert; the call is cluster-internal.
+        roxctl deployment check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify \
+          --file "${MANIFEST}" -o junit | tee /tmp/deployment-check.junit.xml
+        RC="${PIPESTATUS[0]}"
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ deployment check passed — no enforced deploy-time policy violations"
+          printf 'true' > "$(results.check-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.check-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  deploy policy violation(s) found (reporting only — FAIL_ON_VIOLATION=false)"
+          exit 0
+        fi
+        echo "❌ deployment check FAILED — an enforced deploy policy was violated."
+        echo "   fix: set resource requests/limits, drop excess capabilities / host mounts, then re-run."
+        exit "$RC"
+
+---
+# zap-baseline — curated Task: the ZAP (Zed Attack Proxy) DAST gate against the running app (M27).
+# LOCKSTEP with pipelines/tasks/zap-baseline.yaml. Digest-pinned image; targets in-cluster Service DNS.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: zap-baseline
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs a ZAP baseline (passive) DAST scan against a running app's in-cluster Service DNS and fails the
+    build on ZAP FAIL rules. Writes HTML/Markdown reports to the zap-work workspace.
+  params:
+    - name: TARGET_URL
+      type: string
+      description: In-cluster URL of the running app (Service DNS), e.g. http://parasol-claims:8080.
+      default: "http://parasol-claims:8080"
+    - name: FAIL_ON_WARN
+      type: string
+      description: '"false" runs ZAP with -I so only FAIL rules gate; "true" also gates on WARN rules.'
+      default: "false"
+  workspaces:
+    # ZAP writes its session + reports to /zap/wrk, which must be writable — mount a run-provided
+    # (empty) workspace there (the image /zap/wrk is not writable under the restricted-v2 random UID).
+    - name: zap-work
+      mountPath: /zap/wrk
+  results:
+    - name: dast-passed
+      description: '"true" if ZAP reported no gating alert, else "false".'
+  steps:
+    - name: zap-baseline
+      # ZAP stable, digest-pinned via GHCR (verified live 2026-07-15). Third-party OSS. The old
+      # owasp/zap2docker-* images are deprecated.
+      image: ghcr.io/zaproxy/zaproxy:stable@sha256:c558ee87358911ab17278c70991e856f57793e115d9cd0f88ca475cf82907a1a
+      workingDir: /zap/wrk
+      env:
+        - name: TARGET_URL
+          value: $(params.TARGET_URL)
+        - name: FAIL_ON_WARN
+          value: $(params.FAIL_ON_WARN)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        echo "▶ ZAP baseline (DAST) against ${TARGET_URL}"
+        FLAGS=(-t "${TARGET_URL}" -r zap-report.html -w zap-report.md)
+        # -I: do NOT fail the exit code on WARN rules (only FAIL rules gate) — the default.
+        [ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)
+        zap-baseline.py "${FLAGS[@]}"
+        RC=$?
+        # zap-baseline.py exit codes: 0 = clean, 1 = a FAIL rule fired, 2 = only WARN rules, 3 = error.
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ DAST passed — no gating alerts (reports in the zap-work workspace)"
+          printf 'true' > "$(results.dast-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.dast-passed.path)"
+        if [ "$RC" -eq 2 ] && [ "${FAIL_ON_WARN}" = "false" ]; then
+          echo "⚠️  DAST found WARN-level issues only (not gating) — review the report."
+          printf 'true' > "$(results.dast-passed.path)"
+          exit 0
+        fi
+        echo "❌ DAST FAILED — ZAP reported a gating alert on the running app."
+        echo "   fix: add the missing security headers (CSP / X-Content-Type-Options / HSTS) and re-run."
+        exit "$RC"
+
+---
 # Read grant for the cluster resolver: a pipeline can only resolve a Task it can `get`. This Role
 # (get/list/watch tasks in parasol-tasks) is bound to every attendee's -cicd ServiceAccounts below.
 apiVersion: rbac.authorization.k8s.io/v1

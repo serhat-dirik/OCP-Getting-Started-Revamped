@@ -1,0 +1,73 @@
+# SonarQube shared service (SAST) — the SonarSource Helm chart inflated by kustomize (helmCharts +
+# the Argo instance's `--enable-helm`), NOT a native Helm-source Argo Application. WHY: the fable-owned
+# stack-app template rewrites every child Application's spec.source.repoURL to the monorepo, which would
+# clobber a chart-repo source. Sourcing this component from the monorepo path keeps that rewrite a
+# harmless no-op and follows the "every component is a kustomize dir" portfolio convention.
+#
+# Community Build (LGPLv3): community.enabled=true, no `edition`. OpenShift.enabled + createSCC=false =>
+# restricted-v2 SCC, so the chart's privileged sysctl initContainer (initSysctl) and the UID-0 initFs
+# chown are DISABLED — the ES vm.max_map_count>=262144 prereq must be met by the NODE (see
+# node-tuning/README.md; on a low-default cluster apply the shipped Tuned first). External PostgreSQL
+# (postgresql.yaml) via jdbcOverwrite. Chart pinned to 2026.3.1 -> Community Build image
+# sonarqube:26.5.0.122743-community (deterministic via the chart pin).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - postgresql.yaml
+  - bootstrap-rbac.yaml
+  - route.yaml
+  - bootstrap-job.yaml
+helmCharts:
+  - name: sonarqube
+    repo: https://SonarSource.github.io/helm-chart-sonarqube
+    version: 2026.3.1
+    releaseName: sonarqube
+    namespace: sonarqube
+    # Drop the chart's Helm test Pod (helm.sh/hook: test) — Argo would create it as a stray resource.
+    skipTests: true
+    valuesInline:
+      # Community Build (free; quality gates + dashboard, no PR decoration). Do NOT also set `edition`.
+      community:
+        enabled: true
+      # Run under OpenShift's restricted-v2 SCC (no custom SCC created).
+      OpenShift:
+        enabled: true
+        createSCC: false
+      # Privileged sysctl initContainer — cannot run under restricted-v2; the node carries the sysctl.
+      initSysctl:
+        enabled: false
+      # UID-0 chown initContainer — blocked by restricted-v2; OpenShift's fsGroup makes the PVC writable.
+      initFs:
+        enabled: false
+      # OpenShift needs the pod's ServiceAccount created explicitly.
+      serviceAccount:
+        create: true
+      # Stable names so the Route/Service/bootstrap Job resolve `sonarqube` (not `sonarqube-sonarqube`).
+      fullnameOverride: sonarqube
+      # Web systempasscode for the liveness probe (internal, non-attendee — fixed value is fine).
+      monitoringPasscode: "sonar-workshop-monitor"
+      # External PostgreSQL (postgresql.yaml); password read from the sonar-db Secret's database-password.
+      jdbcOverwrite:
+        enabled: true
+        jdbcUrl: "jdbc:postgresql://sonar-db:5432/sonarqube"
+        jdbcUsername: sonarqube
+        jdbcSecretName: sonar-db
+        jdbcSecretPasswordKey: database-password
+      # Persist projects/issues/tokens across restarts; default StorageClass (RWO), auto-detected.
+      persistence:
+        enabled: true
+        accessMode: ReadWriteOnce
+        size: 5Gi
+      # Override the chart default (which sets a 512GB ephemeral-storage LIMIT that makes the pod
+      # unschedulable). SonarQube web + embedded ES fits in ~2-4Gi.
+      resources:
+        requests:
+          cpu: 500m
+          memory: 2Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      # Attendees read the SAST dashboard without logging in (the CI token still gates writes/analysis).
+      sonarProperties:
+        sonar.forceAuthentication: "false"

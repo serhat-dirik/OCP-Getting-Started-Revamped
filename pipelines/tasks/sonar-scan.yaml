@@ -1,0 +1,109 @@
+# sonar-scan — curated Parasol "company task library" Task (M27 DevSecOps SAST gate).
+#
+# WHY THIS EXISTS: the org's SAST step. Runs a SonarQube (Community Build) analysis of a Maven service
+# and GATES the pipeline on a red quality gate — sonar.qualitygate.wait=true polls the compute-engine
+# task and returns a NON-ZERO exit on a red gate, so the pipeline fails when new issues cross the gate
+# (e.g. a hardcoded credential, rule S2068). Two steps: compile (Java rules need bytecode) then scan.
+#
+# CONTRACT: a Secret `sonar-auth` in the run namespace with keys `sonar-token` (a SonarQube analysis
+# token) and `sonar-host-url` (the in-cluster web URL). The appsec stack mints it in
+# sonarqube/sonar-ci-token; the M27 entry state copies it per-user into {user}-cicd. The token is never
+# echoed. The community edition has no branch/PR analysis — this is main-revision analysis + a gate.
+#
+# CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
+# workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — keep the two in lockstep.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sonar-scan
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs a SonarQube (Community Build) SAST analysis of a Maven project and fails the build on a red
+    quality gate (sonar.qualitygate.wait=true). Reads the SonarQube endpoint + analysis token from the
+    sonar-auth Secret in the run namespace.
+  params:
+    - name: SONAR_PROJECT_KEY
+      type: string
+      description: SonarQube project key. Per-user is recommended (e.g. parasol-claims-user1).
+      default: parasol-claims
+    - name: SONAR_PROJECT_NAME
+      type: string
+      description: Human-readable project name shown on the dashboard.
+      default: "Parasol Claims"
+    - name: SUBDIRECTORY
+      type: string
+      description: Path within the workspace that holds the pom.xml.
+      default: "."
+    - name: QUALITY_GATE_WAIT
+      type: string
+      description: '"true" blocks on the quality gate and exits non-zero when it is red (the SAST gate).'
+      default: "true"
+  workspaces:
+    # The source checkout (git-clone writes here); compile + scan run against it in place.
+    - name: source
+  results:
+    - name: quality-gate-passed
+      description: '"true" if the SonarQube quality gate passed, else "false".'
+  steps:
+    - name: compile
+      # SonarQube Java rules need compiled bytecode (sonar.java.binaries) — produce target/classes with
+      # the same UBI9 OpenJDK 21 runner as the parasol-tasks maven-jdk21 Task.
+      image: registry.access.redhat.com/ubi9/openjdk-21:latest
+      workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "▶ compiling for SonarQube analysis (Java rules require bytecode)…"
+        /usr/bin/mvn -B -ntp -DskipTests compile
+    - name: sonar-scanner
+      # SonarScanner CLI 12.x, digest-pinned (verified live 2026-07-15). Third-party OSS.
+      image: docker.io/sonarsource/sonar-scanner-cli:12@sha256:23ca0f137965d9dff2198074043fd48d386280bc5d0ccac8c8349cea4cf096a9
+      workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      env:
+        # Endpoint + token from the run-namespace secret; the token value is never echoed.
+        - name: SONAR_HOST_URL
+          valueFrom:
+            secretKeyRef:
+              name: sonar-auth
+              key: sonar-host-url
+        - name: SONAR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sonar-auth
+              key: sonar-token
+        # Writable scanner cache/home under restricted-v2 SCC (random UID cannot write the image HOME).
+        - name: SONAR_USER_HOME
+          value: /tmp/.sonar
+        - name: PROJECT_KEY
+          value: $(params.SONAR_PROJECT_KEY)
+        - name: PROJECT_NAME
+          value: $(params.SONAR_PROJECT_NAME)
+        - name: QUALITY_GATE_WAIT
+          value: $(params.QUALITY_GATE_WAIT)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        echo "▶ SonarQube analysis: ${PROJECT_KEY} → ${SONAR_HOST_URL}"
+        # sonar-scanner reads SONAR_HOST_URL + SONAR_TOKEN from env. qualitygate.wait=true polls the
+        # compute engine and returns a non-zero exit on a RED gate — this is the SAST gate.
+        sonar-scanner \
+          -Dsonar.projectKey="${PROJECT_KEY}" \
+          -Dsonar.projectName="${PROJECT_NAME}" \
+          -Dsonar.sources=src/main \
+          -Dsonar.java.binaries=target/classes \
+          -Dsonar.qualitygate.wait="${QUALITY_GATE_WAIT}"
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ SonarQube quality gate PASSED"
+          printf 'true' > "$(results.quality-gate-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.quality-gate-passed.path)"
+        echo "❌ SonarQube quality gate FAILED (or analysis error)."
+        echo "   dashboard: ${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}"
+        echo "   fix: resolve the new issues (e.g. remove the hardcoded credential — rule S2068), then re-run."
+        exit "$RC"

@@ -1,0 +1,63 @@
+# parasol-claims-devsecops-run — an ad-hoc PipelineRun for the M27 DevSecOps capstone. `oc create -f`
+# this in a {user}-cicd namespace that has the sonar-auth + rox-api-token Secrets (the M27 entry state
+# copies them), or `tkn pipeline start parasol-claims-devsecops`.
+#
+# It carries the pieces that keep the capstone building inside a workshop namespace:
+#   * a per-run shared-workspace PVC (volumeClaimTemplate) — carries the checkout through SAST/SCA/build;
+#   * a zap-work emptyDir workspace — ZAP's writable /zap/wrk (reports live only for the run);
+#   * taskRunSpecs memory for the Maven-heavy steps (sast-sonar compile, unit-test, build-image) ABOVE
+#     the namespace LimitRange 1Gi default, so the Quarkus build/analysis does not OOMKill.
+#
+# The image target is derived from the run's own namespace, so this file works unchanged in any
+# {user}-cicd namespace. git-revision defaults to main (clean → gates pass); point it at the seeded
+# fork branch to exercise the break-fix path.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: parasol-claims-devsecops-run-
+  labels:
+    app.kubernetes.io/part-of: parasol-claims
+    workshop.redhat.com/module: m27
+spec:
+  pipelineRef:
+    name: parasol-claims-devsecops
+  taskRunTemplate:
+    # The operator-provisioned per-namespace SA: bound to edit + system:image-builder, so it pushes,
+    # deploys, creates the Route, and reads sibling TaskRuns (sign-check) in its own namespace.
+    serviceAccountName: pipeline
+  params:
+    # image is intentionally omitted: the Pipeline defaults it to this run's own namespace path.
+    - name: git-revision
+      value: main
+    - name: max-size-mb
+      value: "500"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+    - name: zap-work
+      emptyDir: {}
+  taskRunSpecs:
+    - pipelineTaskName: sast-sonar
+      computeResources:
+        requests:
+          memory: 1Gi
+        limits:
+          memory: 1536Mi
+    - pipelineTaskName: unit-test
+      computeResources:
+        requests:
+          memory: 1Gi
+        limits:
+          memory: 1536Mi
+    - pipelineTaskName: build-image
+      computeResources:
+        requests:
+          memory: 1536Mi
+        limits:
+          memory: 2Gi
