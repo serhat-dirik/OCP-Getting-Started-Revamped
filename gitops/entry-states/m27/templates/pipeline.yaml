@@ -70,7 +70,8 @@ spec:
       workspaces:
         - {name: output, workspace: shared-workspace}
 
-    # 2) SAST: SonarQube analysis + quality-gate gate (runs in parallel with the SCA scan).
+    # 2) SAST: SonarQube analysis + quality-gate gate. Runs before SCA so the gauntlet surfaces one red
+    #    security gate at a time (the source-analysis gates are sequential beats).
     - name: sast-sonar
       runAfter: [fetch-source]
       taskRef:
@@ -84,9 +85,9 @@ spec:
       workspaces:
         - {name: source, workspace: shared-workspace}
 
-    # 3) SCA: Trivy filesystem scan (dependency CVEs + copyleft licenses) + CycloneDX SBOM artifact.
+    # 3) SCA: Trivy filesystem scan (dependency CVEs) + CycloneDX SBOM artifact. runAfter sast-sonar.
     - name: sca-trivy
-      runAfter: [fetch-source]
+      runAfter: [sast-sonar]
       taskRef:
         resolver: cluster
         params:
@@ -180,7 +181,9 @@ spec:
               echo "❌ build image not signed after ~3m — is trust-signing (Tekton Chains cosign key) installed?"
               exit 1
 
-    # 9) Config-security GATE: RHACS deploy-time check on the rendered Deployment manifest (JUnit).
+    # 9) Config-security GATE: RHACS deploy-time check on the COMMITTED Deployment manifest (JUnit). The
+    #    task reads deploy/parasol-claims-deployment.yaml from the checkout (source workspace) and fails
+    #    on a deploy-policy violation — the seeded insecure manifest trips it; the hardened one passes.
     - name: deployment-check
       runAfter: [image-scan, sign-check]
       taskRef:
@@ -191,6 +194,8 @@ spec:
           - {name: namespace, value: parasol-tasks}
       params:
         - {name: IMAGE, value: $(params.image)}
+      workspaces:
+        - {name: source, workspace: shared-workspace}
 
     # 10) Deploy the scanned/signed image AND create the browser-facing edge Route (no manual oc expose).
     - name: deploy
@@ -218,6 +223,10 @@ spec:
             # Readiness probe so the Service/Route only front a LISTENING pod (Quarkus boots ~20-30s).
             oc set probe deployment/parasol-claims --readiness \
               --get-url=http://:8080/q/health/ready --initial-delay-seconds=5 --period-seconds=5
+            # Force a fresh rollout: the image tag is :latest, so `oc set image` to the same string is a
+            # no-op and a re-run's new image would never be pulled — the DAST fix (or any code fix) would
+            # never reach the running pod. rollout restart pulls the new :latest every run.
+            oc rollout restart deployment/parasol-claims
             oc rollout status deployment/parasol-claims --timeout=300s
             # Service first (the Route targets it), then the edge Route (edge + Allow = browser-reachable
             # over HTTPS; a plain oc expose serves HTTP-only and trips the router HSTS upgrade).
@@ -226,7 +235,9 @@ spec:
               oc create route edge parasol-claims --service=parasol-claims --insecure-policy=Allow
             echo "▶ parasol-claims Route: https://$(oc get route parasol-claims -o jsonpath='{.spec.host}')"
 
-    # 11) DAST GATE: ZAP baseline against the RUNNING app over the in-cluster Service DNS.
+    # 11) DAST GATE: ZAP baseline against the RUNNING app over the in-cluster Service DNS. FAIL_ON_WARN
+    #     is true so missing security headers (a WARN-level finding) gate the build — the seeded app
+    #     ships without them (red), the fix adds the Quarkus headers (green).
     - name: dast-zap
       runAfter: [deploy]
       taskRef:
@@ -237,5 +248,6 @@ spec:
           - {name: namespace, value: parasol-tasks}
       params:
         - {name: TARGET_URL, value: "http://parasol-claims.$(context.pipelineRun.namespace).svc:8080"}
+        - {name: FAIL_ON_WARN, value: "true"}
       workspaces:
         - {name: zap-work, workspace: zap-work}

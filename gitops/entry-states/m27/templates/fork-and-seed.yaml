@@ -1,0 +1,341 @@
+# Forks parasol/parasol-claims into THIS attendee's Gitea account AND makes the fork's `seed-appsec`
+# branch carry the FOUR M27 DevSecOps flaws, so each gate in the capstone has something to fail on:
+#   • SAST   — a new PartnerGateway.java with a HARD-CODED credential (Sonar rule S2068 → red gate)
+#   • SCA    — commons-collections 3.2.1 in pom.xml (CVE-2015-7501, InvokerTransformer RCE, CRITICAL)
+#   • image  — a Containerfile step that bakes log4j-core 2.14.1 (CVE-2021-44228) straight into the image
+#              (a SOURCE scan can't see it — only the RHACS image scan does: defense-in-depth)
+#   • config — a deploy/parasol-claims-deployment.yaml that runs privileged + CAP_SYS_ADMIN + no limits
+#   • DAST   — no HTTP security headers in application.properties (ZAP baseline WARN → red gate)
+# Each flaw carries an "Intentional flaws — do not fix on this branch" marker. Same Gitea route +
+# admin-credential discovery + Sudo-as-the-user idiom as gitops/entry-states/m08/templates/fork-and-seed.yaml,
+# but a DISTINCT branch (`seed-appsec`, not m08's `seed-vulnerable`) so M27 is fully independent of M08.
+# Idempotent: re-running re-asserts the same seeded state. All names are -{user} suffixed.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: m27-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m27
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+---
+# why: read the Gitea CR status + operator admin secret + route host to reach the API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: m27-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m27
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+rules:
+  - apiGroups: ["pfe.rhpds.com"]
+    resources: ["gitea"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: m27-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m27
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: m27-fork-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: m27-fork-{{ .Values.user }}
+    namespace: {{ .Values.giteaNamespace }}
+---
+# The two NEW whole files the seed publishes (Java + violating manifest). Kept out of the Job script so
+# their content stays readable and unescaped; the Job base64s each and PUTs it via the Gitea API.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m27-seed-files-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m27
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+data:
+  PartnerGateway.java: |
+    package com.parasol.claims;
+
+    import jakarta.enterprise.context.ApplicationScoped;
+
+    /**
+     * Intentional flaws — do not fix on this branch (M27 SAST seed).
+     *
+     * A thin client for Parasol's partner claims-exchange API. The password below is HARD-CODED into the
+     * source (and therefore into the image), so SonarQube rule S2068 ("Credentials should not be
+     * hard-coded") flags it as a Vulnerability and the SAST quality gate turns red. The fix is to inject
+     * it from configuration with @ConfigProperty — exactly the config-externalization pattern M04 teaches
+     * for the datasource password.
+     */
+    @ApplicationScoped
+    public class PartnerGateway {
+
+        // FLAW (S2068): a secret compiled into the artifact, readable by anyone who unpacks the jar.
+        private final String partnerApiPassword = "P@rasol-Partner-2026!";
+
+        private final String partnerEndpoint = "https://partners.example.com/claims";
+
+        public String endpoint() {
+            return partnerEndpoint;
+        }
+
+        public String credential() {
+            return partnerApiPassword;
+        }
+    }
+  deployment-violating.yaml: |
+    # Intentional flaws — do not fix on this branch (M27 config-security seed). This Deployment runs
+    # PRIVILEGED, adds the CAP_SYS_ADMIN + CAP_NET_ADMIN capabilities, allows privilege escalation, runs
+    # as UID 0, and sets NO resource requests/limits — RHACS deploy-time policies flag every one. The fix
+    # restores the hardened manifest (least-privilege securityContext + resource limits).
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: parasol-claims
+      labels:
+        app: parasol-claims
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: parasol-claims
+      template:
+        metadata:
+          labels:
+            app: parasol-claims
+        spec:
+          containers:
+            - name: parasol-claims
+              image: image-registry.openshift-image-registry.svc:5000/parasol/parasol-claims:latest
+              ports:
+                - containerPort: 8080
+              securityContext:
+                privileged: true
+                allowPrivilegeEscalation: true
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - SYS_ADMIN
+                    - NET_ADMIN
+---
+# Argo Sync hook (BeforeHookCreation): re-runs on every ws start / ws reset so the fork + its seed-appsec
+# branch are (re)made idempotently; a pre-existing fork/branch is tolerated.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m27-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: m27
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: m27-fork-{{ .Values.user }}
+    spec:
+      serviceAccountName: m27-fork-{{ .Values.user }}
+      restartPolicy: Never
+      volumes:
+        - name: seed-files
+          configMap:
+            name: m27-seed-files-{{ .Values.user }}
+      containers:
+        - name: fork
+          # why ose-cli: ships oc + curl + base64 + sed/awk on every connected cluster; no custom image.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          volumeMounts:
+            - name: seed-files
+              mountPath: /seed
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: TARGET_USER
+              value: {{ .Values.user | quote }}
+            - name: UPSTREAM_ORG
+              value: {{ .Values.upstreamOrg | quote }}
+            - name: REPO
+              value: "parasol-claims"
+            - name: BRANCH
+              value: "seed-appsec"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 10
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials (retry loop — operator writes them post-setup)…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 10
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 10m"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ waiting for the Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 10
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
+
+              # --- 1) fork parasol/parasol-claims into the attendee's account -----------------
+              if curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}"; then
+                echo "  ✓ ${TARGET_USER}/${REPO} already exists"
+              else
+                CODE="$(curl -ks -o /tmp/fork.json -w '%{http_code}' -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                  -X POST "${GITEA_URL}/api/v1/repos/${UPSTREAM_ORG}/${REPO}/forks" \
+                  -H 'Content-Type: application/json' -d '{}')"
+                case "$CODE" in
+                  201|202) echo "  ✓ ${TARGET_USER}/${REPO} fork requested (${CODE})";;
+                  409|422) echo "  ✓ ${TARGET_USER}/${REPO} already exists (${CODE})";;
+                  *) echo "  ❌ fork ${REPO} failed (HTTP ${CODE}): $(cat /tmp/fork.json)"; exit 1;;
+                esac
+              fi
+              # Fork copies git data asynchronously: wait until main is POPULATED before branching.
+              for i in $(seq 1 30); do
+                curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/pom.xml?ref=main" && break
+                sleep 4
+              done
+              curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/pom.xml?ref=main" \
+                || { echo "❌ ${TARGET_USER}/${REPO} main never became ready"; exit 1; }
+
+              # --- 2) ensure the seed-appsec branch exists (from main) --------------------
+              if curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/branches/${BRANCH}"; then
+                echo "  ✓ branch ${BRANCH} already exists"
+              else
+                CODE="$(curl -ks -o /tmp/br.json -w '%{http_code}' -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                  -X POST "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/branches" \
+                  -H 'Content-Type: application/json' -d "{\"new_branch_name\":\"${BRANCH}\",\"old_branch_name\":\"main\"}")"
+                case "$CODE" in
+                  201) echo "  ✓ branch ${BRANCH} created from main";;
+                  *) echo "  ❌ create branch ${BRANCH} failed (HTTP ${CODE}): $(cat /tmp/br.json)"; exit 1;;
+                esac
+              fi
+
+              # helper: PUT a path's new content (base64) onto the branch (idempotent — needs the blob sha)
+              put_b64() {  # $1=path $2=base64content $3=commit_message
+                local path="$1" b64="$2" msg="$3" sha body code
+                sha="$(curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/${path}?ref=${BRANCH}" 2>/dev/null \
+                  | grep -oE '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' | head -1 | grep -oE '[0-9a-f]{40}' || true)"
+                body="$(printf '{"message":"%s","branch":"%s","content":"%s","sha":"%s"}' "$msg" "$BRANCH" "$b64" "$sha")"
+                code="$(curl -ks -o /tmp/put.json -w '%{http_code}' -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                  -H 'Content-Type: application/json' -X PUT \
+                  "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/${path}" -d "$body")"
+                case "$code" in
+                  200|201) return 0;;
+                  *) echo "  ❌ PUT ${path} failed (HTTP ${code}): $(cat /tmp/put.json)"; return 1;;
+                esac
+              }
+              raw() { curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/raw/$1?ref=${BRANCH}"; }
+
+              # --- 3) SAST seed: publish the hard-coded-credential class -----------------------
+              echo "▶ SAST seed: src/main/java/com/parasol/claims/PartnerGateway.java (hard-coded credential)…"
+              put_b64 "src/main/java/com/parasol/claims/PartnerGateway.java" \
+                "$(base64 -w0 /seed/PartnerGateway.java)" "M27 SAST seed: hard-coded credential (S2068)"
+              echo "  ✓ PartnerGateway.java published"
+
+              # --- 4) config seed: publish the insecure Deployment manifest --------------------
+              echo "▶ config seed: deploy/parasol-claims-deployment.yaml (privileged + CAP_SYS_ADMIN + no limits)…"
+              put_b64 "deploy/parasol-claims-deployment.yaml" \
+                "$(base64 -w0 /seed/deployment-violating.yaml)" "M27 config seed: insecure Deployment manifest"
+              echo "  ✓ violating Deployment manifest published"
+
+              # --- 5) SCA seed: inject commons-collections 3.2.1 into pom.xml ------------------
+              echo "▶ SCA seed: commons-collections 3.2.1 (CVE-2015-7501) in pom.xml…"
+              POM="$(raw pom.xml)"
+              if printf '%s' "$POM" | grep -q 'commons-collections'; then
+                echo "  ✓ pom.xml already carries commons-collections"
+              else
+                # Inject before the LAST </dependencies> (the real block; the first closes
+                # <dependencyManagement>, which sets versions only and never pulls the jar).
+                POM_NEW="$(printf '%s' "$POM" | awk '
+                  { lines[NR]=$0; if ($0 ~ /<\/dependencies>/) last=NR }
+                  END {
+                    for (i=1;i<=NR;i++) {
+                      if (i==last) {
+                        print "    <!-- Intentional flaw - do not fix on this branch (M27 SCA seed):";
+                        print "         commons-collections 3.2.1 = CVE-2015-7501 (InvokerTransformer RCE). -->";
+                        print "    <dependency>";
+                        print "      <groupId>commons-collections</groupId>";
+                        print "      <artifactId>commons-collections</artifactId>";
+                        print "      <version>3.2.1</version>";
+                        print "    </dependency>";
+                      }
+                      print lines[i];
+                    }
+                  }')"
+                put_b64 "pom.xml" "$(printf '%s' "$POM_NEW" | base64 -w0)" "M27 SCA seed: commons-collections 3.2.1 (CVE-2015-7501)"
+                echo "  ✓ commons-collections 3.2.1 injected"
+              fi
+
+              # --- 6) image seed: bake log4j-core 2.14.1 into the image via the Containerfile --
+              echo "▶ image seed: Containerfile bakes log4j-core 2.14.1 (CVE-2021-44228) into the image…"
+              CF="$(raw Containerfile)"
+              if printf '%s' "$CF" | grep -q 'log4j-core:2.14.1'; then
+                echo "  ✓ Containerfile already bakes log4j-core 2.14.1"
+              else
+                # Insert a dependency:copy step right AFTER the build stage's `mvn ... package` line, so the
+                # jar lands in the runtime lib dir the next COPY pulls into the image. Trivy (source) can't
+                # see it; RHACS (image) can — that's the defense-in-depth beat.
+                CF_NEW="$(printf '%s' "$CF" | awk '
+                  { print }
+                  /RUN[ ]+mvn[ ].*package/ && !done {
+                    print "";
+                    print "# Intentional flaw - do not fix on this branch (M27 image-scan seed): bake a vulnerable";
+                    print "# log4j-core 2.14.1 (CVE-2021-44228 Log4Shell) straight into the runtime lib dir. A SOURCE";
+                    print "# dependency scan (Trivy on pom.xml) cannot see it - only the RHACS IMAGE scan catches it.";
+                    print "RUN mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \\";
+                    print "    -Dartifact=org.apache.logging.log4j:log4j-core:2.14.1 \\";
+                    print "    -DoutputDirectory=/build/target/quarkus-app/lib/main";
+                    done=1
+                  }')"
+                put_b64 "Containerfile" "$(printf '%s' "$CF_NEW" | base64 -w0)" "M27 image seed: bake log4j-core 2.14.1 (CVE-2021-44228)"
+                echo "  ✓ Containerfile log4j-core 2.14.1 step injected"
+              fi
+
+              # --- 7) DAST seed: strip HTTP security headers from application.properties -------
+              echo "▶ DAST seed: remove HTTP security headers from application.properties…"
+              AP="$(raw src/main/resources/application.properties)"
+              if printf '%s' "$AP" | grep -q 'quarkus.http.header.'; then
+                AP_NEW="$(printf '%s' "$AP" | grep -v 'quarkus.http.header.')"
+                put_b64 "src/main/resources/application.properties" "$(printf '%s' "$AP_NEW" | base64 -w0)" "M27 DAST seed: remove HTTP security headers"
+                echo "  ✓ security headers stripped"
+              else
+                echo "  ✓ application.properties already has no security headers"
+              fi
+
+              echo "✅ ${TARGET_USER}/${REPO} forked; ${BRANCH} carries the 4 M27 flaws at ${GITEA_URL}/${TARGET_USER}/${REPO}/src/branch/${BRANCH}"

@@ -1,0 +1,166 @@
+= Application Security Testing (SAST · SCA · DAST): Instructor Guide
+:module-id: m27
+include::partial$version-attributes.adoc[]
+
+// Instructor runbook for M27. Timings MEASURED on OCP {ocp_version} against the live appsec + trust stacks
+// on 2026-07-15 (the seeded capstone run to each gate, and the ws lifecycle), not guessed. Pre-flight
+// commands show captured expected output (domains scrubbed to placeholders). Environment values via
+// attributes only.
+
+== Timing (measured)
+
+Total module budget *~120 min* (double slot). Exercise timings from a live run of the seeded capstone on OCP {ocp_version}; each *re-run* of the pipeline to the next gate is the pacing unit, and the *build* stage (Quarkus fast-jar under buildah) is the long pole at *~6–8 min*.
+
+[cols="3,1,4",options="header"]
+|===
+| Segment | Time | Notes
+
+| Concept (five pillars, shift-left/right, defense-in-depth, reporting) | ~15 min | ≤15-min read; slides carry it
+| 1. Meet the seeded app + start the capstone | ~12 min | Read five flaws; start from console; fails at SAST in ~3 min (fetch + compile + scan)
+| 2. SAST gate — externalize the credential | ~12 min | Fix commit + re-run; SonarQube re-analysis ~2–3 min
+| 3. SCA gate — drop the vulnerable dep | ~10 min | Fix + re-run; the re-run now builds the image (~6–8 min) to reach the image gate
+| 4. Image scan — log4shell + defense-in-depth | ~12 min | The key beat; RHACS console read; full rebuild each re-run
+| 5. Config check — harden the manifest | ~10 min | roxctl deployment check; deploy + Route created on pass
+| 6. DAST — add the security headers | ~12 min | ZAP baseline ~1–2 min; final rebuild → whole run green
+| 7. Read the whole green run in the consoles | ~6 min | The reporting takeaway
+| Wrap-up + org mapping | ~15 min | Reporting, break-glass, pin-vs-float discussion
+|===
+
+Because each re-run rebuilds the image, the lab is *build-bound*. If you are tight on time, run the *demo* flavor (one narrated red-to-green, ~15 min) instead of six attendee re-runs, or pre-warm by having attendees start their first run *before* the concept discussion so the SAST failure is waiting when they return.
+
+Measured `ws` lifecycle (admin/builder context on OCP {ocp_version}, 2026-07-15):
+
+[cols="2,1,3",options="header"]
+|===
+| Command | Time | What it does
+
+| `ws verify m27 --user <u> --entry-only` | ~8 s | 10/10 entry checks
+| `ws verify m27 --user <u>` | ~11 s | 12/12 (10 entry + 2 end) once a capstone run has Succeeded
+| `ws smoke m27 <u>` | ~55 s | 11/11 attendee-cockpit gate (ws-on-PATH, identity, isolation, prep convergence)
+| `ws reset m27 --user <u>` | ~2–2.5 min | purge `<u>-cicd` + re-materialize entry (Argo sync)
+| `ws solve m27 --user <u>` | ~13–15 min | runs the capstone on clean `main` (every gate passes) — blocks while it runs
+|===
+
+A full capstone run was measured end-to-end at *~13 min* (the image build alone is 6–10 min depending on
+cluster load and Maven cache warmth). `ws smoke` needs the entry state materialized first; if the
+attendee-`ws prep` convergence check fails, run `ws reset m27 --user <u>` (or `ws git-refresh
+--restart-terminals --user <u>` for a stale cockpit) and re-smoke.
+
+`ws solve` is *slow by design*: it runs the real eleven-stage pipeline to completion so the green end state genuinely exists. Start it *well before* a demo.
+
+== Pre-flight checklist
+
+Run these from an admin context *before* the session. Each shows the captured expected output (domains shown as placeholders).
+
+*1. The appsec stack (SonarQube) is healthy.*
+
+[source,sh]
+----
+oc get pods -n sonarqube
+----
+
+[source,texinfo]
+----
+NAME                          READY   STATUS      RESTARTS   AGE
+sonar-bootstrap-...           0/1     Completed   0          ...
+sonar-db-...                  1/1     Running     0          ...
+sonarqube-0                   1/1     Running     0          ...
+----
+
+*2. The trust stack (RHACS) is healthy* (the image + config gates need Central + Scanner).
+
+[source,sh]
+----
+oc get pods -n stackrox | grep -E 'central|scanner'
+----
+
+[source,texinfo]
+----
+central-...                    1/1   Running   ...
+central-db-...                 2/2   Running   ...
+scanner-...                    1/1   Running   ...
+scanner-v4-indexer-...         1/1   Running   ...
+scanner-v4-matcher-...         1/1   Running   ...
+----
+
+*3. The four M27 tasks are in the curated library.*
+
+[source,sh]
+----
+oc get task -n parasol-tasks | grep -E 'sonar-scan|trivy-scan|roxctl-deployment-check|zap-baseline'
+----
+
+[source,texinfo]
+----
+roxctl-deployment-check   ...
+sonar-scan                ...
+trivy-scan                ...
+zap-baseline              ...
+----
+
+*4. The SonarQube default quality gate is the security-focused one.* The SAST gate depends on it — the built-in "Sonar way" gate is Clean-as-You-Code and would *not* fail a fresh per-user project on the first scan.
+
+[source,sh]
+----
+oc -n sonarqube exec deploy/sonarqube -- sh -lc \
+  'curl -s -u admin:$SONAR_ADMIN "http://localhost:9000/api/qualitygates/list" | grep -o "\"name\":\"[^\"]*\",\"isDefault\":true"' 2>/dev/null \
+  || echo "check via the SonarQube UI: Quality Gates -> the default is 'Parasol AppSec Gate'"
+----
+
+The default gate must be *Parasol AppSec Gate* (condition: `vulnerabilities` is greater than `0`). If it is *Sonar way*, the SAST gate will pass even with the seeded credential — re-run the `sonar-bootstrap` Job to install it.
+
+*5. A sample attendee's entry state is clean.*
+
+[source,sh]
+----
+ws verify m27 --user user2 --entry-only
+----
+
+[source,texinfo]
+----
+✔ namespace user2-cicd exists
+✔ Pipeline parasol-claims-devsecops present
+✔ sonar-auth copied into user2-cicd (SAST-gate secret)
+✔ rox-api-token copied into user2-cicd (scan-gate secret)
+✔ curated task sonar-scan reachable
+... 10/10 entry checks pass
+----
+
+*6. The seeded fork exists* (the lab's build target). For a sample user, the `seed-appsec` branch carries the flaws:
+
+[source,sh]
+----
+oc get job -n gitea -l workshop.redhat.com/module=m27 -o name
+# the m27-fork-<user> hook creates <user>/parasol-claims and its seed-appsec branch
+----
+
+== Top 5 questions attendees ask
+
+*1. "Trivy found log4shell too, didn't it? Why is the image scan a separate failure?"*
+
+No — and that is the whole defense-in-depth point. In this lab, log4shell is *not* a declared dependency in `pom.xml`; the seeded `Containerfile` bakes the `log4j-core` 2.14.1 jar into the image at build time. Trivy scans the *source tree*, so it has nothing to find — its scan is genuinely clean of log4shell. RHACS scans the *assembled image* and catches it. If you *had* declared log4shell in `pom.xml`, Trivy *would* catch it at the SCA stage — try it and see. The lesson is that *where* you scan decides *what* you can catch.
+
+*2. "Why a custom SonarQube quality gate instead of the default?"*
+
+SonarQube's built-in "Sonar way" gate is Clean-as-You-Code: every condition is "on *new* code", and a project's *first* analysis has no new-code baseline — so a brand-new per-user project passes even *with* a hard-coded credential. The workshop installs a *Parasol AppSec Gate* keyed on *overall* `vulnerabilities > 0`, which fails on the first scan and passes when the vulnerability is gone. In your own SonarQube you'd typically keep the CAYC gate *and* seed a baseline analysis; we chose the simpler, deterministic gate for a first-run lab.
+
+*3. "The pipeline creates the Route — do I still need `oc expose`?"*
+
+No. The `deploy` stage runs `oc create route edge parasol-claims --insecure-policy=Allow` for you (edge-terminated so it is browser-reachable over HTTPS). Attendees never run `oc expose`; the Route appears automatically after the deploy stage passes.
+
+*4. "Each fix means a full rebuild — can't I skip ahead?"*
+
+The re-runs are sequential by design: each gate must pass before the next runs, so you can't reach the image gate without fixing SAST and SCA first. That is the *point* — security is layered. If time is short, run the demo flavor (one narrated pass) rather than six attendee rebuilds, or split the double slot so the slow re-runs overlap the discussion.
+
+*5. "Is this the same as M08?"*
+
+Complementary. M08 — Trusted Software Supply Chain proves the image is *provably yours*: signed, attested, SBOM-verified, admission-controlled. M27 proves the image is *free of known flaws*: scanned at five layers. You want *both* — a scanned-clean image that isn't signed could be swapped; a signed image full of CVEs is authentically vulnerable.
+
+== Watchouts
+
+* *SonarQube first-analysis behavior (the #1 gotcha).* If the default gate is "Sonar way", the seeded credential *passes* on a fresh project (no new-code baseline). Verify pre-flight step 4 — the default must be *Parasol AppSec Gate*. This surprised the build itself: the credential fires the S2068 rule (`vulnerabilities=1`) but the CAYC gate reports empty conditions on the first run.
+* *Per-user Sonar project keys are mandatory.* Community Build has no branch analysis, so every attendee must scan into `parasol-claims-<user>` (set in the Start form / PipelineRun param). A shared key means user A's fix greens the project while user B still has the credential — confusing everyone. The `ws solve` PipelineRun already sets the per-user key.
+* *The cluster-resolver task cache.* The pipeline references tasks by cluster resolver, which caches resolved Tasks briefly. If you *update* a curated task (e.g. `roxctl-deployment-check`), a run started within the cache TTL may still use the old body. Re-run after a minute, or bump nothing mid-session.
+* *`git push` prompts once.* The lab's fixes push to the attendee's fork; the first push prompts for their Gitea login. The lab sets `git config --global credential.helper store` so subsequent pushes are silent. If a push errors with "could not read Username", that helper line is the fix (also in Troubleshooting).
+* *ZAP gate is `FAIL_ON_WARN=true`.* The pipeline promotes missing-header *warnings* to build failures so the DAST gate bites. That means the *clean* app must set its headers or `ws solve` (clean `main`) would also fail DAST — the hardened `application.properties` on `main` carries them. If you fork the app, keep the headers.
+* *Build-bound lab.* Every re-run rebuilds the image (~6–8 min). Budget the double slot accordingly, or pre-warm the first run.

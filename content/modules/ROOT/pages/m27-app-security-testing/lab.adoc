@@ -1,0 +1,482 @@
+= Application Security Testing (SAST · SCA · DAST): Lab
+:module-id: m27
+include::partial$version-attributes.adoc[]
+
+// Lab page for M27. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
+// presenter arc. Commands run in the Showroom terminal as {user}, so blocks are [source,sh,role=execute].
+// The capstone is DRIVEN FROM THE OPENSHIFT PIPELINES CONSOLE (Actions -> Start / Rerun); a tkn/oc CLI
+// alternative is given. Findings are read dual-path: the SonarQube dashboard / RHACS console / TaskRun
+// logs (Console) and oc/curl (CLI). Fixes are REAL COMMITS to the fork's seed-appsec branch. Every gate
+// fail-then-pass was performed on OCP {ocp_version} against the live appsec + trust stacks on 2026-07-15:
+// SAST caught a hard-coded credential (SonarQube S2068, vulnerabilities=1, gate ERROR); SCA caught
+// commons-collections 3.2.1 (CVE-2015-7501 CRITICAL + CVE-2015-6420 HIGH); the image scan caught log4shell
+// baked into the image; roxctl deployment check caught the insecure manifest; the ZAP baseline caught
+// missing security headers. Console button labels carry [CAPTURE-VERIFY] on the OCP {ocp_version} build;
+// every command output shown is a real capture with domains scrubbed to placeholders.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+Set the shortcuts you'll reuse throughout the lab — your CI/CD project and your seeded fork:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-cicd
+FORK={gitea_url}/{user}/parasol-claims
+echo "project: $NS"
+echo "seeded fork (the lab's build target): $FORK  (branch: seed-appsec)"
+----
+
+You are a Parasol platform engineer, and the `parasol-claims` build is *green* — it compiles, its tests pass, it deploys.
+It is also *insecure*: a colleague's `seed-appsec` branch has shipped five security regressions, and the old pipeline waved every one of them through.
+Your job is to run the *DevSecOps capstone* — an eleven-stage pipeline with a security gate at every layer — and drive it from *red to green*, fixing each finding *and reading it in its own console* along the way.
+
+[TIP]
+.How this lab is driven — console for the pipeline, terminal for the fixes
+=====
+You *start the pipeline* from the *OpenShift Pipelines console* (a real button, with a `tkn`/`oc` alternative beside it). You *read each finding* in its native console — the *SonarQube dashboard*, the *RHACS console*, the *TaskRun logs* — with a command-line alternative every time. And you *fix* each finding with a *real commit* to your `seed-appsec` branch from the terminal. Five gates, five fixes, one green run.
+=====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — ~15-minute presenter arc: the red-to-green security gauntlet
+// ============================================================================
+ifdef::demo[]
+== Demo arc — Five gates, five fixes, one green run (15 min)
+
+[NOTE]
+.Before you present
+=====
+Run `ws solve m27 --user {user}` a few minutes ahead so the *green end state* exists (the capstone run against clean `main` Succeeded, `parasol-claims` deployed with its Route). Open four tabs: the *OpenShift Pipelines* console on `parasol-claims-devsecops`, the *SonarQube* dashboard ({sonarqube_url}[SonarQube^]), the *RHACS* console ({acs_console_url}[RHACS^]) on Violations, and a terminal in `{user}-cicd`.
+Pre-run *one* seeded pipeline the day before so a *red* PipelineRun graph is already on screen — the build is ~12 minutes and you don't want to narrate a progress bar. The money moment is beat 5: the *whole graph goes green* and the app's Route opens in the browser.
+=====
+
+[demo-block]
+[TIME 3m]
+Say:: "This is Parasol's claims service, and the build is green — it compiles, tests pass. Watch what 'green' *doesn't* tell you. I start the DevSecOps capstone against a branch a colleague pushed, and the very first security gate — *SAST*, static analysis — stops the line. SonarQube found a *hard-coded password* in the source. The build was always going to ship it; the gate won't."
+Show:: The Pipelines console graph with `sast-sonar` red; then the SonarQube dashboard showing the quality gate *ERROR* and the S2068 rule on `PartnerGateway.java`.
+Do:: Open the failed run, click `sast-sonar`, then flip to the SonarQube dashboard and point at the failing condition (`vulnerabilities is greater than 0`) and the hard-coded-credential issue.
+
+[demo-block]
+[TIME 3m]
+Say:: "I externalize the secret — read it from configuration, exactly like we do the database password — commit, and re-run. SAST goes green, and the *next* gate fires: *SCA*, software composition analysis. Trivy found a *critical* remote-code-execution hole in a five-year-old library we pulled in. The code we wrote is fine; the code we *borrowed* is not."
+Show:: `sast-sonar` green, `sca-trivy` red; the TaskRun log with `commons-collections 3.2.1  CVE-2015-7501  CRITICAL`.
+Do:: Show the commit that removed the hard-coded credential, the green SAST re-run, then the SCA failure and the CVE in the log.
+
+[demo-block]
+[TIME 3m]
+Say:: "I drop the bad dependency, re-run — and here is the most important beat. The *image scan* fails on *log4shell*, the famous Log4j flaw. But log4shell was *never in our dependencies* — a source scan couldn't see it. It was baked straight into the *image* at build time. RHACS caught it because it scans the *assembled image*, not the source. That is *defense in depth*: the layer that a source scan misses, the image scan covers."
+Show:: `sca-trivy` green, `image-scan` red; the RHACS console Violations entry for `CVE-2021-44228`.
+Do:: Open the RHACS console, show the log4shell violation on the built image, and contrast with the earlier Trivy source scan that was clean of it.
+
+[demo-block]
+[TIME 3m]
+Say:: "Stop baking it in, re-run — and the *config* gate fires. The Deployment we were about to apply runs *privileged*, as *root*, with *SYS_ADMIN* and *no resource limits*. RHACS checked the manifest *before* it reached the cluster. I restore the hardened manifest — least privilege, dropped capabilities, real limits — and re-run."
+Show:: `image-scan` green, `deployment-check` red; the TaskRun log listing the violated deploy policies (Privileged, CAP_SYS_ADMIN, no limits).
+Do:: Show the violating manifest, the failed check, then the hardened manifest that passes.
+
+[demo-block]
+[TIME 3m]
+Say:: "Last gate. The app *deploys* — the pipeline even creates its Route — and then *DAST* exercises the *running* service. ZAP found the app never sets its security headers: it lets a browser MIME-sniff it, frame it, leak it. I add the headers in Quarkus config, commit, and re-run one final time. And *there* — every gate green, the image scanned and signed and deployed, and the Route opens in the browser. Green now means *safe*, because we made it mean that."
+Show:: The full graph green; the app's Route open; a quick pass across SonarQube (passed), RHACS (no violations), Tekton Results (the green run).
+Do:: Trigger the final run (or open the pre-run green one), open the Route, and tour the four consoles showing green.
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Meet the seeded app and start the capstone
+⏱ *~12 min* · see the five flaws, then start the pipeline from the console and watch it fail fast
+
+First, look at what your colleague shipped. Clone the `seed-appsec` branch and read the five regressions — each carries an "Intentional flaws — do not fix on this branch" marker:
+
+[source,sh,role=execute]
+----
+git clone -b seed-appsec $FORK ~/parasol-claims 2>/dev/null || (cd ~/parasol-claims && git fetch && git checkout seed-appsec && git pull)
+cd ~/parasol-claims
+git config --global credential.helper store   # store your Gitea login once, so later pushes don't re-prompt
+echo "--- SAST: a hard-coded credential ---";        grep "partnerApiPassword" src/main/java/com/parasol/claims/PartnerGateway.java
+echo "--- SCA: a vulnerable dependency ---";          grep "commons-collections" pom.xml
+echo "--- image: log4shell baked into the image ---"; grep "log4j-core:2.14.1" Containerfile
+echo "--- config: an insecure Deployment ---";        grep -E "privileged|SYS_ADMIN" deploy/parasol-claims-deployment.yaml
+echo "--- DAST: no security headers ---";             grep -c "quarkus.http.header" src/main/resources/application.properties
+----
+
+.Expected output (the five seeded flaws — the pipeline will fail on each in turn)
+[source,texinfo]
+----
+--- SAST: a hard-coded credential ---
+    private final String partnerApiPassword = "P@rasol-Partner-2026!";
+--- SCA: a vulnerable dependency ---
+      <artifactId>commons-collections</artifactId>
+--- image: log4shell baked into the image ---
+RUN mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+--- config: an insecure Deployment ---
+                privileged: true
+                    - SYS_ADMIN
+--- DAST: no security headers ---
+0
+----
+
+Now start the pipeline. Open the OpenShift Pipelines console and run the capstone against your seeded branch.
+
+// [CAPTURE-VERIFY] Pipelines console: Pipelines > parasol-claims-devsecops > Actions > Start; the Start form param fields (OCP 4.21). CLI alternative authoritative.
+[tabs]
+====
+Console::
++
+--
+In the OpenShift *Developer* perspective, project `{user}-cicd`, go to *Pipelines* → *parasol-claims-devsecops* → *Actions* → *Start*.
+Fill the parameters:
+
+* *git-url* → `http://gitea.gitea.svc:3000/{user}/parasol-claims.git`
+* *git-revision* → `seed-appsec`
+* *sonar-project-key* → `parasol-claims-{user}`
+
+For *Workspaces*, set *shared-workspace* to *VolumeClaimTemplate* (1 GiB) and *zap-work* to *Empty Directory*, then click *Start*.
+Watch the graph: `fetch-source` goes green, then `sast-sonar` turns *red* and the run stops.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+cat <<'EOF' | oc create -n $NS -f -
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: gauntlet-
+  labels: {workshop.redhat.com/module: m27}
+spec:
+  pipelineRef: {name: parasol-claims-devsecops}
+  params:
+    - {name: git-url, value: "http://gitea.gitea.svc:3000/USER/parasol-claims.git"}
+    - {name: git-revision, value: "seed-appsec"}
+    - {name: sonar-project-key, value: "parasol-claims-USER"}
+  taskRunTemplate: {serviceAccountName: pipeline}
+  workspaces:
+    - {name: shared-workspace, volumeClaimTemplate: {spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}}}
+    - {name: zap-work, emptyDir: {}}
+EOF
+----
+
+Replace `USER` with your `{user}`, then follow the run: `tkn pipelinerun logs -f -n $NS --last`.
+--
+====
+
+The run *stops at `sast-sonar`* — the first security gate. That is the point: a green *build* is not a green *security* posture, and the pipeline now proves it.
+
+[.checkpoint]
+====
+✔ *Verify:* You saw the five seeded flaws in the source, started `parasol-claims-devsecops` against `seed-appsec`, and the run *failed at the `sast-sonar` stage* (not at build or test). The pipeline graph shows `fetch-source` green and `sast-sonar` red.
+====
+
+== 2. Gate 1 — SAST: the hard-coded credential
+⏱ *~12 min* · read the SonarQube finding, externalize the secret, watch the gate go green
+
+SAST (Static Application Security Testing) analyzes the *source you wrote*. Read *why* it failed — in SonarQube's own dashboard, then confirm from the terminal.
+
+[tabs]
+====
+Console::
++
+--
+Open {sonarqube_url}[the SonarQube dashboard^] and select the *parasol-claims-{user}* project.
+The quality gate shows *Failed*, with the failing condition *Vulnerabilities is greater than 0*.
+Open *Issues* → the one *Vulnerability*: rule *S2068 — "Credentials should not be hard-coded"*, on `PartnerGateway.java`, flagging the `partnerApiPassword` literal. [CAPTURE-VERIFY: exact dashboard labels on SonarQube {sonarqube_version}.]
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get taskrun -n $NS -l tekton.dev/pipelineTask=sast-sonar --sort-by=.metadata.creationTimestamp \
+  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "QUALITY GATE|S2068|dashboard"
+----
+
+.Expected output (the SonarQube gate failed on the credential)
+[source,texinfo]
+----
+QUALITY GATE STATUS: FAILED - View details on http://sonarqube.../dashboard?id=parasol-claims-user1
+   fix: resolve the new issues (e.g. remove the hardcoded credential — rule S2068), then re-run.
+----
+--
+====
+
+The finding is exact: a password *compiled into the source*. The fix is the one M04 teaches — *externalize it to configuration*, so the value comes from a Secret or environment variable, never a literal. Apply the fix and commit it to `seed-appsec`:
+
+[source,sh,role=execute]
+----
+cd ~/parasol-claims
+cat > src/main/java/com/parasol/claims/PartnerGateway.java <<'EOF'
+package com.parasol.claims;
+
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+import jakarta.enterprise.context.ApplicationScoped;
+
+/** The partner API credential is read from configuration (a Secret / env var in production),
+ *  never hard-coded — the config-externalization pattern from M04. */
+@ApplicationScoped
+public class PartnerGateway {
+
+    @ConfigProperty(name = "partner.api.password", defaultValue = "")
+    String partnerApiPassword;
+
+    private final String partnerEndpoint = "https://partners.example.com/claims";
+
+    public String endpoint() { return partnerEndpoint; }
+    public String credential() { return partnerApiPassword; }
+}
+EOF
+git commit -am "fix(SAST): externalize the partner API credential (@ConfigProperty)"
+git push origin seed-appsec
+----
+
+Now *re-run* the pipeline (Pipelines console → the last run → *Actions* → *Rerun*, or `oc create` the PipelineRun again). SAST re-analyzes: with no literal secret, `vulnerabilities` drops to *0* and the quality gate passes — so the run advances to the *next* gate, `sca-trivy`, which now fails.
+
+[.checkpoint]
+====
+✔ *Verify:* The SonarQube quality gate for `parasol-claims-{user}` is now *Passed* (0 vulnerabilities). On the re-run, `sast-sonar` is *green* and the pipeline advanced — it now fails at `sca-trivy`.
+====
+
+== 3. Gate 2 — SCA: the vulnerable dependency
+⏱ *~10 min* · read the Trivy finding, drop the dependency, re-run
+
+SCA (Software Composition Analysis) checks the *dependencies you pulled in*. Read the Trivy finding from the TaskRun log:
+
+[source,sh,role=execute]
+----
+oc get taskrun -n $NS -l tekton.dev/pipelineTask=sca-trivy --sort-by=.metadata.creationTimestamp \
+  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "commons-collections|CVE-2015|CRITICAL|HIGH|SCA scan FAILED"
+----
+
+.Expected output (Trivy flags a critical RCE in a transitive-era library)
+[source,texinfo]
+----
+Total: 2 (HIGH: 1, CRITICAL: 1)
+│ commons-collections:commons-collections │ CVE-2015-7501 │ CRITICAL │ ... 3.2.1 → 3.2.2 │ InvokerTransformer ...
+│                                         │ CVE-2015-6420 │ HIGH     │ ...               │ Insecure Deserialization ...
+❌ SCA scan FAILED — a HIGH,CRITICAL dependency CVE was found.
+----
+
+`commons-collections` 3.2.1 carries *CVE-2015-7501* — the infamous *InvokerTransformer* deserialization *RCE* (Remote Code Execution) gadget. Your code never calls it; it's a landmine you inherited by declaring the dependency. The fix is to *remove it*. Trivy also wrote a *CycloneDX SBOM* (`trivy-sbom.json`) into the workspace — the full bill of materials for the build. Drop the dependency and commit:
+
+[source,sh,role=execute]
+----
+cd ~/parasol-claims
+# remove the seeded commons-collections block from pom.xml
+awk '/M27 SCA seed/{skip=1} skip&&/<\/dependency>/{skip=0;next} skip{next} {print}' pom.xml > pom.xml.new && mv pom.xml.new pom.xml
+grep -q commons-collections pom.xml && echo "STILL PRESENT" || echo "commons-collections removed"
+git commit -am "fix(SCA): remove vulnerable commons-collections 3.2.1 (CVE-2015-7501)"
+git push origin seed-appsec
+----
+
+*Re-run* the pipeline. SCA is now clean, the build proceeds — and fails at the *next* gate, `image-scan`.
+
+[.checkpoint]
+====
+✔ *Verify:* `pom.xml` no longer declares `commons-collections`. On the re-run, `sca-trivy` is *green*, the image builds, and the pipeline now fails at `image-scan` (RHACS).
+====
+
+== 4. Gate 3 — Image scan: log4shell, and defense in depth
+⏱ *~12 min* · read the RHACS finding, stop baking the flaw in, understand why a source scan missed it
+
+This is the module's key beat. The *image scan* (RHACS, shift-right) failed on *log4shell* — but your *SCA* scan (Trivy, shift-left) was *clean*. How? Because log4shell is *not in `pom.xml`*: the seeded `Containerfile` bakes a vulnerable `log4j-core` 2.14.1 jar *directly into the image* at build time. A source scan has nothing to find; the image scan inspects the *assembled image* and catches it. That gap is exactly why you scan at *both* layers.
+
+Read the finding — in the RHACS console, then the TaskRun log:
+
+[tabs]
+====
+Console::
++
+--
+Open {acs_console_url}[the RHACS console^] → *Violations*. Find the `parasol-claims` image violation for policy *"Block Log4Shell (CVE-2021-44228) at build"*, severity *Critical*. Open it to see the CVE, the component (`log4j-core` 2.14.1), and the image digest. [CAPTURE-VERIFY: exact Violations column labels on RHACS {acs_version}.]
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get taskrun -n $NS -l tekton.dev/pipelineTask=image-scan --sort-by=.metadata.creationTimestamp \
+  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "log4|CVE-2021-44228|Block Log4Shell|FAIL"
+----
+
+.Expected output (the image scan blocks log4shell — the SCA source scan two stages earlier was clean of it)
+[source,texinfo]
+----
+Policy check results for image: ...parasol-claims:latest
+(TOTAL: 2, LOW: 1, MEDIUM: 0, HIGH: 0, CRITICAL: 1)
+| Block Log4Shell (CVE-2021-44228) at build | CRITICAL | X (BREAKS BUILD) |
+|   - CVE-2021-44228 (CVSS 10) (severity Critical) found in component
+|     'org.apache.logging.log4j:log4j-core' (version 2.14.1)                |
+ERROR: failed policies found: 1 policies violated that are failing the check
+❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell).
+----
+--
+====
+
+Now *stop baking it in* — remove the seeded `Containerfile` step — and commit:
+
+[source,sh,role=execute]
+----
+cd ~/parasol-claims
+# remove the seeded log4j-copy step from the Containerfile
+awk '/M27 image-scan seed/{skip=1} skip&&/outputDirectory/{skip=0;next} skip{next} {print}' Containerfile > Containerfile.new && mv Containerfile.new Containerfile
+grep -q "log4j-core:2.14.1" Containerfile && echo "STILL PRESENT" || echo "log4j-copy step removed"
+git commit -am "fix(image): stop baking log4j-core 2.14.1 into the image"
+git push origin seed-appsec
+----
+
+*Re-run.* The rebuilt image has no log4shell, RHACS passes, and the pipeline fails at the *next* gate, `deployment-check`.
+
+[NOTE]
+.Why this beats "just run a dependency scanner"
+====
+If you *only* ran SCA on the source, this vulnerable image would have shipped — the flaw was invisible there. If you *only* scanned the image, you'd miss things a source scan catches cheaply (a declared-but-transitive CVE, before you ever build). *Defense in depth* is running both, so a blind spot in one layer is covered by the next. Same idea, applied again in M08: the image is also *signed and attested*, so it must be both *scanned clean* and *provably yours*.
+====
+
+[.checkpoint]
+====
+✔ *Verify:* The `Containerfile` no longer copies `log4j-core` 2.14.1. On the re-run, `image-scan` is *green*, and you can explain why Trivy (source) was clean while RHACS (image) caught it — defense in depth. The pipeline now fails at `deployment-check`.
+====
+
+== 5. Gate 4 — Config check: the insecure Deployment
+⏱ *~10 min* · read the roxctl violations, restore the hardened manifest, re-run
+
+Config security checks the *manifest you're about to apply*, before it reaches the cluster. The seeded `deploy/parasol-claims-deployment.yaml` runs *privileged*, as *root*, adds *SYS_ADMIN* and *NET_ADMIN*, and sets *no resource limits*. RHACS `roxctl deployment check` flagged every one. Read the finding:
+
+[source,sh,role=execute]
+----
+oc get taskrun -n $NS -l tekton.dev/pipelineTask=deployment-check --sort-by=.metadata.creationTimestamp \
+  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "POLICY|Privileged|CAP_SYS_ADMIN|limit|TOTAL|deployment check FAILED"
+----
+
+.Expected output (RHACS deploy-time policies flag the insecure manifest)
+[source,texinfo]
+----
+|         CAP_SYS_ADMIN capability added          |  MEDIUM  | ... parasol-claims ...
+|   Container with privilege escalation allowed   |  MEDIUM  | ... parasol-claims ...
+|    No CPU request or memory limit specified     |  MEDIUM  | ... parasol-claims ...
+|              Privileged Container               |  MEDIUM  | ... parasol-claims ...
+(TOTAL: 6, LOW: 1, MEDIUM: 5, HIGH: 0, CRITICAL: 0)
+❌ deployment check FAILED — 5 MEDIUM+ deploy-policy violation(s).
+----
+
+"You ship your configuration, not just your code." The fix is to *restore the hardened manifest* — least-privilege securityContext (non-root, drop `ALL` capabilities, no privilege escalation, read-only root filesystem), real resource requests and limits, and no auto-mounted service-account token:
+
+[source,sh,role=execute]
+----
+cd ~/parasol-claims
+cat > deploy/parasol-claims-deployment.yaml <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  labels: {app: parasol-claims}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: parasol-claims}}
+  template:
+    metadata: {labels: {app: parasol-claims}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: parasol-claims
+          image: image-registry.openshift-image-registry.svc:5000/parasol/parasol-claims:1.0.0
+          ports: [{containerPort: 8080}]
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+EOF
+git commit -am "fix(config): restore the hardened Deployment manifest"
+git push origin seed-appsec
+----
+
+*Re-run.* The hardened manifest passes the check, the pipeline *deploys the image and creates the Route for you* (no manual `oc expose`) — and then hits the *final* gate, `dast-zap`.
+
+[.checkpoint]
+====
+✔ *Verify:* The hardened `deploy/parasol-claims-deployment.yaml` is committed. On the re-run, `deployment-check` is *green*, the `deploy` stage runs, and `parasol-claims` plus its Route now exist in `{user}-cicd` (`oc get route parasol-claims -n $NS`). The pipeline now fails at `dast-zap`.
+====
+
+== 6. Gate 5 — DAST: the missing security headers
+⏱ *~12 min* · read the ZAP finding, add the headers, and watch the whole run go green
+
+DAST (Dynamic Application Security Testing) exercises the *running* app — something you can only do *after* deploy. The `zap-baseline` stage ran a ZAP (Zed Attack Proxy) scan against the live service and found it never sets its HTTP security headers, so a browser is free to MIME-sniff it, frame it, and leak its URLs. Read the finding:
+
+[source,sh,role=execute]
+----
+oc get taskrun -n $NS -l tekton.dev/pipelineTask=dast-zap --sort-by=.metadata.creationTimestamp \
+  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "WARN-NEW|FAIL-NEW|DAST FAILED"
+----
+
+.Expected output (ZAP flags the missing headers on the RUNNING app — a check only possible post-deploy)
+[source,texinfo]
+----
+WARN-NEW: Content Security Policy (CSP) Header Not Set [10038] x 3
+WARN-NEW: Storable and Cacheable Content [10049] x 3
+WARN-NEW: Permissions Policy Header Not Set [10063] x 3
+FAIL-NEW: 0   WARN-NEW: 3   INFO: 0   IGNORE: 0   PASS: 64
+❌ DAST FAILED — ZAP reported a gating alert on the running app.
+----
+
+The `dast-zap` stage runs with `FAIL_ON_WARN=true`, so these *warnings* fail the build. ZAP found three missing response headers: no Content-Security-Policy, no Permissions-Policy, and cacheable responses (claim data a browser could store). The fix is to *set the headers* in Quarkus configuration — one line per header, applied to every response. Append them to `application.properties` and commit:
+
+[source,sh,role=execute]
+----
+cd ~/parasol-claims
+cat >> src/main/resources/application.properties <<'EOF'
+
+# HTTP security response headers (M27 DAST fix)
+quarkus.http.header."X-Content-Type-Options".value=nosniff
+quarkus.http.header."Content-Security-Policy".value=default-src 'self'; frame-ancestors 'none'
+quarkus.http.header."X-Frame-Options".value=DENY
+quarkus.http.header."Referrer-Policy".value=no-referrer
+quarkus.http.header."Permissions-Policy".value=geolocation=(), camera=(), microphone=()
+quarkus.http.header."Strict-Transport-Security".value=max-age=31536000; includeSubDomains
+quarkus.http.header."Cache-Control".value=no-store
+EOF
+git commit -am "fix(DAST): add HTTP security response headers"
+git push origin seed-appsec
+----
+
+*Re-run one final time.* The rebuilt app sets its headers, ZAP finds nothing to warn about, and — for the first time — *every gate is green*: SAST, SCA, unit test, build, image scan, sign, config check, deploy, DAST. The scanned, signed image is deployed with its Route.
+
+[.checkpoint]
+====
+✔ *Verify:* `application.properties` now sets the `quarkus.http.header.*` values. On the final re-run, the *entire pipeline Succeeded* — every security gate green — and the app's Route serves the headers (`curl -sI https://$(oc get route parasol-claims -n $NS -o jsonpath='{.spec.host}') | grep -iE 'content-security|x-content-type'`). You drove five gates from red to green with five real commits.
+====
+
+== 7. Read the whole green run — where every finding lives
+⏱ *~6 min* · tour the four consoles so a red build is never a mystery again
+
+The point of the gauntlet was not just to make it green — it was to *read each finding where it lives*. Confirm you can find all five:
+
+[cols="2,3",options="header"]
+|===
+| Gate | Open it and confirm green
+
+| SAST | {sonarqube_url}[SonarQube^] → `parasol-claims-{user}` → quality gate *Passed*
+| SCA | Pipelines console → the green run → `sca-trivy` TaskRun → *0 findings*, and the `trivy-sbom.json` artifact
+| Image scan | {acs_console_url}[RHACS^] → *Violations* → no `parasol-claims` log4shell violation on the new image
+| Config check | Pipelines console → `deployment-check` TaskRun → *0 MEDIUM+ violations*, JUnit clean
+| DAST | Pipelines console → `dast-zap` TaskRun → *no gating alerts*; the ZAP HTML report in the `zap-work` workspace
+| The whole run | Pipelines console *graph* all green, and *Tekton Results* has the historical red-then-green runs
+|===
+
+[.checkpoint]
+====
+✔ *Verify:* You can open each of the five findings in its native console and show it *green*, and you can point at *Tekton Results* to see the whole red-to-green history. That fluency — "a red gate means *this*, and I read it *here*" — is the takeaway.
+====
+
+endif::demo[]

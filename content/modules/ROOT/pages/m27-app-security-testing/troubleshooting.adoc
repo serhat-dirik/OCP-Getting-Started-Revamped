@@ -1,0 +1,81 @@
+= Application Security Testing (SAST · SCA · DAST): Troubleshooting
+:module-id: m27
+include::partial$version-attributes.adoc[]
+
+// Troubleshooting for M27. Every entry is a real failure mode seen (or deliberately induced) while
+// performing this module live on OCP {ocp_version} against the appsec + trust stacks on 2026-07-15.
+// symptom -> cause -> fix. Environment values via attributes only.
+
+Each entry is symptom → cause → fix. All were seen while performing this module on OpenShift {ocp_version} with OpenShift Pipelines {pipelines_version}, RHACS {acs_version}, SonarQube Community Build {sonarqube_version}, and Trivy {trivy_version}.
+
+== The SAST gate PASSES even though the credential is still there
+
+*Symptom:* The `seed-appsec` branch still has the hard-coded `partnerApiPassword`, but `sast-sonar` is *green* and the pipeline sails past it.
+
+*Cause:* The SonarQube project's quality gate is the built-in *"Sonar way"* gate, not *Parasol AppSec Gate*. "Sonar way" is Clean-as-You-Code — every condition is "on *new* code" — and a project's *first* analysis has no new-code baseline, so *all* conditions report empty and the gate passes regardless of issues. The credential *is* detected (rule S2068, `vulnerabilities=1`), but the default gate never evaluates it.
+
+*Fix:* Make *Parasol AppSec Gate* the default. It is created by the `sonar-bootstrap` Job; if it is missing or not default, re-run that Job (or set it in the SonarQube UI: *Quality Gates* → *Parasol AppSec Gate* → *Set as Default*). Confirm with the instructor pre-flight check. The gate's condition is `vulnerabilities` is greater than `0` — an *overall* metric, so it fires on the first scan.
+
+== The pipeline fails at `sast-sonar` with "sonar-auth" errors
+
+*Symptom:* `sast-sonar` fails early; the log mentions a missing `sonar-auth` secret or an unauthorized call to SonarQube.
+
+*Cause:* The per-user hook did not copy the shared CI token into `{user}-cicd`. That hook reads `sonarqube/sonar-ci-token` (minted by the appsec stack) and writes `{user}-cicd/sonar-auth`. If the appsec stack isn't installed, or the token wasn't minted, there is nothing to copy.
+
+*Fix:* Confirm the source token exists (`oc get secret sonar-ci-token -n sonarqube`), then `ws reset m27 --user <u>` to re-run the copy hook. After reset, `oc get secret sonar-auth -n <u>-cicd` should exist (two keys: `sonar-token`, `sonar-host-url`; values never printed).
+
+== My fix didn't take — the same gate fails on the re-run
+
+*Symptom:* You edited a file, but the re-run fails at the *same* gate with the *same* finding.
+
+*Cause:* One of three things: (a) you didn't `git push` (the commit is local only), (b) you pushed to the wrong branch (the pipeline builds `seed-appsec`, not `main`), or (c) the re-run started before the push landed.
+
+*Fix:* Confirm the push reached `seed-appsec`: `git -C ~/parasol-claims log --oneline -1 origin/seed-appsec`. The top commit should be your fix. Then start a *fresh* run (not a cached one). The pipeline's `git-revision` param must be `seed-appsec`.
+
+== `git push` fails with "could not read Username"
+
+*Symptom:* `git push origin seed-appsec` fails with `fatal: could not read Username for 'https://...'` or an `askpass` error.
+
+*Cause:* The terminal has no way to prompt for your Gitea credentials, and none are stored.
+
+*Fix:* Run `git config --global credential.helper store` (the lab does this in exercise 1), then push again and enter your workshop username (`{user}`) and password once — it is stored for the rest of the lab. If a push still hangs, set the remote to the HTTPS route explicitly: `git remote set-url origin {gitea_url}/{user}/parasol-claims.git`.
+
+== The image scan is GREEN but you expected log4shell
+
+*Symptom:* `image-scan` passes on the seeded branch, when it should fail on log4shell.
+
+*Cause:* Either the seeded `Containerfile` step was already removed (check `grep log4j-core:2.14.1 Containerfile`), or the build stage could not resolve the `log4j-core` artifact from the Maven repository (the `mvn dependency:copy` step needs registry access), so nothing was baked into the image.
+
+*Fix:* Confirm the seed is present on `seed-appsec` (`git checkout seed-appsec -- Containerfile; grep log4j-core:2.14.1 Containerfile`). If the build log shows a Maven resolution error on `org.apache.logging.log4j:log4j-core:2.14.1`, the builder can't reach the artifact — the same repository the normal build uses. Re-run once the registry is reachable. (`ws reset m27 --user <u>` re-asserts the seed.)
+
+== `roxctl deployment check` reports violations but the gate seemed to pass before
+
+*Symptom:* You recall an earlier version where the config check "passed" despite an insecure manifest.
+
+*Cause:* `roxctl deployment check` only sets a *non-zero exit code* when a violated policy has *deploy enforcement* — and enabling deploy enforcement would engage the cluster admission controller (which we deliberately don't do, to avoid blocking real workloads). So the raw command exits `0` even on violations.
+
+*Fix:* Nothing to fix — this is by design. The `roxctl-deployment-check` task reads roxctl's *violation summary* and fails the build when the manifest trips any policy at or above `FAIL_SEVERITY` (default MEDIUM). The hardened manifest trips *zero*; the seeded one trips five MEDIUM policies. If you want stricter/looser gating, set the task's `FAIL_SEVERITY` param.
+
+== The SCA scan lists a copyleft license but doesn't fail on it
+
+*Symptom:* Trivy's output shows a restricted/forbidden license (e.g. an AGPL dependency), but the SCA gate doesn't fail because of it.
+
+*Cause:* Trivy's `--exit-code` is driven by *vulnerabilities*, not licenses, and a source-only filesystem scan cannot reliably classify a Maven dependency's license without the built jars. The license scanner still *runs* and its findings appear in the SBOM/report — but the hard *gate* here is the CVE gate.
+
+*Fix:* This is expected. The SCA gate fails on *HIGH/CRITICAL dependency CVEs* (the seeded `commons-collections` 3.2.1 is CVE-2015-7501, CRITICAL). Treat the license output as *review material* in the CycloneDX SBOM. Enforcing a copyleft-license *gate* is an organization decision you'd apply against built artifacts or a dedicated license service.
+
+== The DAST gate passes on an app with no headers
+
+*Symptom:* `dast-zap` is green even though the app doesn't set security headers.
+
+*Cause:* The `dast-zap` stage isn't running with `FAIL_ON_WARN=true`. By default the ZAP baseline treats missing headers as *warnings*, which don't gate. The M27 pipeline sets `FAIL_ON_WARN=true` on the `dast-zap` stage so warnings become failures.
+
+*Fix:* Confirm the pipeline's `dast-zap` task params include `FAIL_ON_WARN: "true"` (`oc get pipeline parasol-claims-devsecops -n <u>-cicd -o yaml | grep -A2 FAIL_ON_WARN`). If you re-authored the pipeline, add it back — otherwise the header gate never bites.
+
+== The whole run is slow / a re-run seems stuck
+
+*Symptom:* A re-run takes 12–15 minutes; the graph sits on `build-image` for several minutes.
+
+*Cause:* Not stuck — *build-bound*. Every re-run rebuilds the Quarkus fast-jar under buildah (~6–8 min), plus the image scan, sign wait, deploy, and DAST. This is normal.
+
+*Fix:* Nothing — wait it out, or watch progress with `tkn pipelinerun logs -f -n <u>-cicd --last`. For a faster classroom, use the *demo* flavor (one narrated red-to-green) instead of six attendee rebuilds, or pre-warm the first run before the concept discussion.

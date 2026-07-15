@@ -1,0 +1,72 @@
+# parasol-claims Deployment — the manifest the org keeps under version control and ships to OpenShift.
+#
+# WHY THIS FILE EXISTS (curriculum: M27 DevSecOps config-security gate). The M27 capstone runs
+# `roxctl deployment check` (RHACS) against THIS committed manifest before it ever reaches the cluster —
+# "you ship your configuration, not just your code". This hardened version passes the gate with ZERO
+# policy violations: resource requests+limits, a locked-down securityContext (non-root, drop ALL
+# capabilities, no privilege escalation, read-only root fs, RuntimeDefault seccomp), no auto-mounted
+# service-account token, and a pinned (non-`latest`) image tag. The seeded-vulnerable branch replaces it
+# with an insecure variant (privileged, CAP_SYS_ADMIN, no limits) that the gate rejects — the lab's fix
+# is to restore this hardened shape.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  labels:
+    app: parasol-claims
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+    spec:
+      # Don't hand the pod a Kubernetes API token it never uses.
+      automountServiceAccountToken: false
+      containers:
+        - name: parasol-claims
+          # Pinned tag (not :latest) so the running workload is traceable to a build.
+          image: image-registry.openshift-image-registry.svc:5000/parasol/parasol-claims:1.0.0
+          ports:
+            - containerPort: 8080
+          # Right-sized requests + hard limits: the scheduler can place it and a runaway pod can't
+          # starve its neighbours (the "No CPU request or memory limit" deploy policy stays green).
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          # Least-privilege securityContext — every field here clears an RHACS deploy policy.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # Quarkus writes only to /tmp; a small emptyDir keeps the root filesystem read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: tmp
+          emptyDir: {}

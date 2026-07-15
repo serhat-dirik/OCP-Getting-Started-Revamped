@@ -55,7 +55,17 @@ spec:
         #!/usr/bin/env bash
         set -uo pipefail
         echo "▶ ZAP baseline (DAST) against ${TARGET_URL}"
-        FLAGS=(-t "${TARGET_URL}" -r zap-report.html -w zap-report.md)
+        # -c makes ZAP use its Automation Framework, which writes $HOME/zap.yaml; the image HOME isn't
+        # writable under the restricted-v2 random UID, so point HOME at the writable workspace (workingDir).
+        export HOME="$(pwd)"
+        # Tune the gate: IGNORE ZAP's informational passive rules that are NOT "missing security header"
+        # findings, so the DAST gate keys on the headers the app must set (CSP 10038, Permissions-Policy
+        # 10063, X-Content-Type-Options 10021, anti-clickjacking 10020, HSTS 10035) and NOT on cache
+        # storability (10015/10049), suspicious comments (10027), CSP directive-completeness (10055), or
+        # timestamp disclosure (10096). A real CI ZAP baseline is always tuned like this — otherwise
+        # informational noise makes a clean, hardened app fail. Config format: <ruleId>\t<action>\t<note>.
+        printf '10015\tIGNORE\tcache-control\n10027\tIGNORE\tcomments\n10049\tIGNORE\tcacheable\n10055\tIGNORE\tcsp-directives\n10096\tIGNORE\ttimestamp\n' > zap.conf
+        FLAGS=(-t "${TARGET_URL}" -c zap.conf -r zap-report.html -w zap-report.md)
         # -I: do NOT fail the exit code on WARN rules (only FAIL rules gate) — the default.
         [ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)
         zap-baseline.py "${FLAGS[@]}"

@@ -401,18 +401,19 @@ spec:
         [ -f ./trivy-sbom.json ] && echo "  ✓ SBOM written to the workspace: trivy-sbom.json"
 
         echo "▶ SCA scan (deps + licenses): severity=${SEVERITY} scanners=${SCANNERS} db=${TRIVY_DB_REPOSITORY}"
-        # Gating pass: HIGH/CRITICAL vulns OR copyleft (restricted/forbidden) licenses → non-zero exit.
+        # Gating pass: HIGH/CRITICAL dependency vulnerabilities → non-zero exit (the CVE gate). The
+        # license scanner also runs; its findings are surfaced in the SBOM/report, not the exit code.
         trivy fs --scanners "${SCANNERS}" --severity "${SEVERITY}" --exit-code "${EXIT_CODE}" \
           --db-repository "${TRIVY_DB_REPOSITORY}" .
         RC=$?
         if [ "$RC" -eq 0 ]; then
-          echo "✅ SCA scan passed — no ${SEVERITY} vulnerabilities or copyleft licenses"
+          echo "✅ SCA scan passed — no ${SEVERITY} dependency vulnerabilities"
           printf 'true' > "$(results.scan-passed.path)"
           exit 0
         fi
         printf 'false' > "$(results.scan-passed.path)"
-        echo "❌ SCA scan FAILED — a ${SEVERITY} dependency CVE or copyleft license was found."
-        echo "   fix: bump/remove the flagged dependency (e.g. log4j-core 2.14.1) or swap the copyleft dep."
+        echo "❌ SCA scan FAILED — a ${SEVERITY} dependency CVE was found."
+        echo "   fix: bump or remove the flagged dependency (e.g. commons-collections 3.2.1 → CVE-2015-7501), then re-run."
         exit "$RC"
 
 ---
@@ -429,26 +430,37 @@ metadata:
     workshop.redhat.com/library: parasol-tasks
 spec:
   description: >-
-    Runs an RHACS deploy-time check (roxctl deployment check) against a Kubernetes Deployment manifest
-    and fails the build on an enforced policy violation (the M27 config-security gate). Emits JUnit.
-    Reads Central's endpoint + a CI token from the rox-api-token Secret in the run namespace.
+    Runs an RHACS deploy-time check (roxctl deployment check) against a committed Kubernetes Deployment
+    manifest and fails the build when it violates a deploy policy at/above FAIL_SEVERITY (the M27
+    config-security gate). Emits JUnit. Reads Central's endpoint + a CI token from the rox-api-token
+    Secret in the run namespace.
   params:
     - name: IMAGE
       type: string
-      description: Image the rendered Deployment runs (used when FILE is empty).
+      description: Image the rendered Deployment runs (used only when no manifest is found at FILE).
     - name: FILE
       type: string
       description: >-
-        Path (in /tmp) to a Deployment manifest to check. Empty = render a minimal parasol-claims
-        Deployment for IMAGE (matches the pipeline's deploy stage).
-      default: ""
+        Path to the Deployment manifest to check. Relative paths resolve against the source workspace
+        (e.g. deploy/parasol-claims-deployment.yaml); an absolute path is used as-is. If it does not
+        exist, a minimal parasol-claims Deployment for IMAGE is rendered instead.
+      default: "deploy/parasol-claims-deployment.yaml"
+    - name: FAIL_SEVERITY
+      type: string
+      description: 'Lowest violation severity that gates the build: LOW, MEDIUM, HIGH, or CRITICAL.'
+      default: "MEDIUM"
     - name: FAIL_ON_VIOLATION
       type: string
-      description: '"true" gates the build on an enforced violation; "false" reports only.'
+      description: '"true" gates the build on a gating violation; "false" reports only.'
       default: "true"
+  workspaces:
+    # The source checkout (git-clone writes it); the committed manifest at FILE is read from here.
+    # Optional so the Task still runs standalone (rendering a minimal Deployment when unbound).
+    - name: source
+      optional: true
   results:
     - name: check-passed
-      description: '"true" if no enforced deploy policy was violated, else "false".'
+      description: '"true" if no gating deploy-policy violation, else "false".'
   steps:
     - name: deployment-check
       # RHACS roxctl image (digest-pinned, same as acs-image-check — RHACS 4.11.1). Refresh together.
@@ -468,15 +480,25 @@ spec:
           value: $(params.IMAGE)
         - name: FILE
           value: $(params.FILE)
+        - name: FAIL_SEVERITY
+          value: $(params.FAIL_SEVERITY)
         - name: FAIL_ON_VIOLATION
           value: $(params.FAIL_ON_VIOLATION)
+        - name: WS_BOUND
+          value: $(workspaces.source.bound)
+        - name: WS_PATH
+          value: $(workspaces.source.path)
       script: |
         #!/usr/bin/env bash
         set -uo pipefail
-        MANIFEST="${FILE}"
-        if [ -z "${MANIFEST}" ]; then
-          # Render the minimal Deployment the pipeline's deploy stage creates (oc create deployment
-          # parasol-claims --image=IMAGE --port=8080) so the check evaluates the real deploy shape.
+
+        # Resolve the manifest: FILE in the source workspace, an absolute FILE, or a rendered fallback.
+        if [ "${WS_BOUND}" = "true" ] && [ -f "${WS_PATH}/${FILE}" ]; then
+          MANIFEST="${WS_PATH}/${FILE}"
+        elif [ -n "${FILE}" ] && [ -f "${FILE}" ]; then
+          MANIFEST="${FILE}"
+        else
+          echo "ℹ️  no manifest at '${FILE}' — rendering a minimal Deployment for ${IMAGE}"
           MANIFEST=/tmp/parasol-claims-deploy.yaml
           cat > "${MANIFEST}" <<EOF
         apiVersion: apps/v1
@@ -502,24 +524,39 @@ spec:
                     - containerPort: 8080
         EOF
         fi
-        echo "▶ RHACS deploy-time check on ${MANIFEST}"
+
+        echo "▶ RHACS deploy-time check on ${MANIFEST} (gates at ${FAIL_SEVERITY}+)"
         # --insecure-skip-tls-verify: Central serves its own service cert; the call is cluster-internal.
+        # Human-readable table (parsed for the gate) + a JUnit artifact of the same run.
         roxctl deployment check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify \
-          --file "${MANIFEST}" -o junit | tee /tmp/deployment-check.junit.xml
-        RC="${PIPESTATUS[0]}"
-        if [ "$RC" -eq 0 ]; then
-          echo "✅ deployment check passed — no enforced deploy-time policy violations"
+          --file "${MANIFEST}" -o table 2>&1 | tee /tmp/deployment-check.txt
+        roxctl deployment check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify \
+          --file "${MANIFEST}" -o junit > /tmp/deployment-check.junit.xml 2>/dev/null || true
+
+        # roxctl prints a summary line: "(TOTAL: 6, LOW: 1, MEDIUM: 5, HIGH: 0, CRITICAL: 0)".
+        SUMMARY="$(grep -oE '\(TOTAL: [0-9]+, LOW: [0-9]+, MEDIUM: [0-9]+, HIGH: [0-9]+, CRITICAL: [0-9]+\)' /tmp/deployment-check.txt | tail -1)"
+        sev() { echo "${SUMMARY}" | grep -oE "$1: [0-9]+" | grep -oE '[0-9]+' || echo 0; }
+        LOW="$(sev LOW)"; MED="$(sev MEDIUM)"; HIGH="$(sev HIGH)"; CRIT="$(sev CRITICAL)"
+        case "${FAIL_SEVERITY}" in
+          CRITICAL) GATING=$(( CRIT ));;
+          HIGH)     GATING=$(( HIGH + CRIT ));;
+          LOW)      GATING=$(( LOW + MED + HIGH + CRIT ));;
+          *)        GATING=$(( MED + HIGH + CRIT ));;   # MEDIUM (default)
+        esac
+
+        if [ "${GATING:-0}" -eq 0 ]; then
+          echo "✅ deployment check passed — no ${FAIL_SEVERITY}+ deploy-policy violations"
           printf 'true' > "$(results.check-passed.path)"
           exit 0
         fi
         printf 'false' > "$(results.check-passed.path)"
         if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
-          echo "⚠️  deploy policy violation(s) found (reporting only — FAIL_ON_VIOLATION=false)"
+          echo "⚠️  ${GATING} ${FAIL_SEVERITY}+ deploy-policy violation(s) found (reporting only — FAIL_ON_VIOLATION=false)"
           exit 0
         fi
-        echo "❌ deployment check FAILED — an enforced deploy policy was violated."
-        echo "   fix: set resource requests/limits, drop excess capabilities / host mounts, then re-run."
-        exit "$RC"
+        echo "❌ deployment check FAILED — ${GATING} ${FAIL_SEVERITY}+ deploy-policy violation(s)."
+        echo "   fix: set resource requests/limits, drop excess capabilities, disable privileged, then re-run."
+        exit 1
 
 ---
 # zap-baseline — curated Task: the ZAP (Zed Attack Proxy) DAST gate against the running app (M27).
@@ -568,7 +605,17 @@ spec:
         #!/usr/bin/env bash
         set -uo pipefail
         echo "▶ ZAP baseline (DAST) against ${TARGET_URL}"
-        FLAGS=(-t "${TARGET_URL}" -r zap-report.html -w zap-report.md)
+        # -c makes ZAP use its Automation Framework, which writes $HOME/zap.yaml; the image HOME isn't
+        # writable under the restricted-v2 random UID, so point HOME at the writable workspace (workingDir).
+        export HOME="$(pwd)"
+        # Tune the gate: IGNORE ZAP's informational passive rules that are NOT "missing security header"
+        # findings, so the DAST gate keys on the headers the app must set (CSP 10038, Permissions-Policy
+        # 10063, X-Content-Type-Options 10021, anti-clickjacking 10020, HSTS 10035) and NOT on cache
+        # storability (10015/10049), suspicious comments (10027), CSP directive-completeness (10055), or
+        # timestamp disclosure (10096). A real CI ZAP baseline is always tuned like this — otherwise
+        # informational noise makes a clean, hardened app fail. Config format: <ruleId>\t<action>\t<note>.
+        printf '10015\tIGNORE\tcache-control\n10027\tIGNORE\tcomments\n10049\tIGNORE\tcacheable\n10055\tIGNORE\tcsp-directives\n10096\tIGNORE\ttimestamp\n' > zap.conf
+        FLAGS=(-t "${TARGET_URL}" -c zap.conf -r zap-report.html -w zap-report.md)
         # -I: do NOT fail the exit code on WARN rules (only FAIL rules gate) — the default.
         [ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)
         zap-baseline.py "${FLAGS[@]}"

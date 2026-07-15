@@ -94,4 +94,34 @@ spec:
               echo "▶ ensuring the parasol-claims project exists…"
               curl -s -o /dev/null -u "admin:${NEWPASS}" -X POST "${SONAR}/api/projects/create" \
                 --data-urlencode "project=parasol-claims" --data-urlencode "name=Parasol Claims" || true
-              echo "✅ SonarQube bootstrap complete — admin secured, CI token minted, project ready"
+
+              # --- 4) install the security-focused DEFAULT quality gate (M27 SAST gate) ---------------
+              # WHY a custom gate: the built-in "Sonar way" gate is Clean-as-You-Code — every condition is
+              # "on NEW code", and a project's FIRST analysis has no new-code baseline, so a brand-new
+              # per-user project passes even WITH a hardcoded credential (verified live 2026-07-15). M27
+              # needs a gate that bites on the FIRST scan of each attendee's project. This gate keys on
+              # OVERALL security metrics — a hardcoded credential (rule S2068 = a Vulnerability) makes
+              # `vulnerabilities > 0`, so the gate is RED until the attendee externalizes it; a clean build
+              # (0 vulns/hotspots) is GREEN. No coverage/duplication conditions (they would false-fail a
+              # test-light lab project). Set as DEFAULT so every per-user parasol-claims-<user> project
+              # (auto-created on first scan) inherits it. Idempotent: skip if the gate already exists.
+              GATE="Parasol AppSec Gate"
+              if curl -sf -u "admin:${NEWPASS}" "${SONAR}/api/qualitygates/show" --get --data-urlencode "name=${GATE}" >/dev/null 2>&1; then
+                echo "  ✓ quality gate '${GATE}' already present — skip"
+              else
+                echo "▶ creating the '${GATE}' quality gate…"
+                curl -s -o /dev/null -u "admin:${NEWPASS}" -X POST "${SONAR}/api/qualitygates/create" \
+                  --data-urlencode "name=${GATE}" || true
+                # Any Vulnerability (e.g. a hardcoded credential, S2068) → red.
+                curl -s -o /dev/null -u "admin:${NEWPASS}" -X POST "${SONAR}/api/qualitygates/create_condition" \
+                  --data-urlencode "gateName=${GATE}" --data-urlencode "metric=vulnerabilities" \
+                  --data-urlencode "op=GT" --data-urlencode "error=0" || true
+                # Any unreviewed Security Hotspot → red (robustness if a rule reports a hotspot not a vuln).
+                curl -s -o /dev/null -u "admin:${NEWPASS}" -X POST "${SONAR}/api/qualitygates/create_condition" \
+                  --data-urlencode "gateName=${GATE}" --data-urlencode "metric=security_hotspots" \
+                  --data-urlencode "op=GT" --data-urlencode "error=0" || true
+                curl -s -o /dev/null -u "admin:${NEWPASS}" -X POST "${SONAR}/api/qualitygates/set_as_default" \
+                  --data-urlencode "name=${GATE}" || true
+                echo "  ✓ '${GATE}' created + set as the default gate (vulnerabilities/hotspots = 0)"
+              fi
+              echo "✅ SonarQube bootstrap complete — admin secured, CI token minted, project + gate ready"

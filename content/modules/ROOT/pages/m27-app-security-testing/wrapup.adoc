@@ -1,0 +1,78 @@
+= Application Security Testing (SAST · SCA · DAST): Wrap-up
+:module-id: m27
+include::partial$version-attributes.adoc[]
+
+// Wrap-up for M27. Renders in all flavors. Org-mapping prompts + an honest "when NOT to use" + pointers
+// to M07 (Pipelines) and M08 (Trusted Supply Chain), all standalone-safe. Environment values via
+// attributes only. No per-module Credits section — the rcarrata/devsecops-demo credit lives in CREDITS.md.
+
+== What you built
+
+You took a `parasol-claims` build that *compiled clean and passed its tests* — and proved that "green" said nothing about *security* until you made it say so. You wired *five security gates* into one pipeline and drove each one from *red to green* with a real commit:
+
+* *SAST* caught a *hard-coded credential* (SonarQube rule S2068) — you externalized it to configuration, exactly the pattern M04 teaches.
+* *SCA* caught a *CRITICAL dependency vulnerability* (a deserialization RCE in a five-year-old library) — you removed it.
+* *Image scan* caught *log4shell baked into the image* — a flaw a source scan *cannot* see — you stopped baking it in.
+* *Config check* caught an *insecure Deployment* (privileged, excess capabilities, no limits) — you restored the hardened manifest.
+* *DAST* caught *missing HTTP security headers* on the running app — you added them.
+
+[mermaid]
+....
+graph LR
+  seed["seed-appsec branch<br/>5 flaws · every gate RED"]
+  sast["fix SAST<br/>externalize secret"]
+  sca["fix SCA<br/>drop vuln dep"]
+  img["fix image<br/>stop baking log4shell"]
+  cfg["fix config<br/>harden manifest"]
+  dast["fix DAST<br/>add headers"]
+  green["every gate GREEN<br/>scanned · signed · deployed"]
+  seed --> sast --> sca --> img --> cfg --> dast --> green
+  classDef r fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef f fill:#e8f0fe,stroke:#1967d2,color:#174ea6;
+  classDef g fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  class seed r; class sast,sca,img,cfg,dast f; class green g;
+....
+
+// media-pass: replace/augment with SVG export m27-app-security-testing-02-red-to-green.svg (see media-manifest.md)
+
+The through-line: *a security gate is only real if it fails the build* — and every finding you fixed, you first *read in its own console*.
+
+== Map it to your org
+
+Discuss with the person next to you:
+
+. *Which of the five gates does your pipeline have today?* Most teams have unit tests and maybe an image scan. Which of SAST, SCA, config-check, and DAST are *missing* — and which one, added first, would have caught your last security surprise?
+. *Where do your findings live?* When a security scan fails in your CI, can a developer see *what* failed and *where* — or just "the pipeline is red"? A gate nobody can read gets *disabled*, not fixed. What would it take to route each finding to a console your team actually opens?
+. *What's your "break glass"?* A gate that can never be overridden gets bypassed the first time it blocks a Friday release. Who can grant a *documented, time-boxed* exception, and how do you make sure the exception is *tracked* so the debt gets paid down — not forgotten?
+. *Pin or float?* Do you pin your build tools and base images by digest, or float on `:latest`? The 2026 Trivy Action compromise turned that choice from pedantry into a real incident. Where in your supply chain are you trusting a moving tag?
+
+== When NOT to use this
+
+Honesty keeps this credible — more gates is not automatically better:
+
+* *Don't add a gate you won't maintain.* A scanner with a stale rule set or an ignored red build is *worse* than no scanner — it trains your team that red means "click through". If you can't keep a gate's findings triaged, don't turn it into a build breaker yet; start in report-only mode.
+* *Don't gate on the CVE feed alone.* Vulnerability databases change daily; a build that was green yesterday can go red today with no code change. That is *correct* for security, but it will halt unrelated releases. Separate *"a NEW critical arrived"* from *"you introduced this"* — gate hard on the second, alert on the first, and give teams a triage path.
+* *DAST is not a penetration test.* A *baseline* DAST scan is a passive, fast, first-pass check — missing headers, obvious misconfigurations. It does *not* replace an authenticated, active security assessment by people. Treat a green baseline as "no obvious front-door problems", not "secure".
+* *SonarQube Community Build has no pull-request analysis.* This pipeline analyzes the *pushed revision* and gates on it — there is no per-PR decoration. If your workflow needs PR-level SAST comments, that is a paid edition or a different tool; don't promise what the free build doesn't do.
+* *A green pipeline is a floor, not a ceiling.* Passing five automated gates means you cleared the *known, automatable* risks. Threat modeling, secrets rotation, least-privilege review, and dependency currency are ongoing human work these gates *support*, not *replace*.
+
+== The bigger journey — where M27 sits
+
+This module is the *testing* half of a secure software supply chain. It builds on two neighbours (each a separate module):
+
+* *M07 — Pipelines Fundamentals* is the machinery: the Tekton tasks, the cluster-resolver library, and the PipelineRun graph this capstone reuses. If the pipeline mechanics here felt new, M07 is where they're taught from scratch.
+* *M08 — Trusted Software Supply Chain* is the *trust* half: it *signs and attests* the image (Tekton Chains), generates and verifies the SBOM, and enforces admission — proving *provenance*. M27 proves the image is *free of known flaws*; M08 proves it is *the image you built and nothing else*. Together they answer both "is it safe?" and "is it really ours?".
+
+The mature end state is *both*, running continuously: every push scanned at five layers, signed, attested, and gated — so a vulnerable or tampered image simply cannot be promoted.
+
+== Go deeper
+
+* SonarQube Community Build documentation — quality gates, the rule catalog (including S2068, hard-coded credentials), and CI integration with `sonar.qualitygate.wait`.
+* Trivy documentation — filesystem and image scanning, the CycloneDX SBOM output, license scanning, and the `--db-repository` mirror option for scale.
+* ZAP (Zed Attack Proxy) documentation — the `zap-baseline.py` scan, its alert rules, and how to promote or ignore specific rules for your gate.
+* Red Hat Advanced Cluster Security documentation — `roxctl` image and deployment checks, build/deploy-time policy enforcement, and reading violations in the RHACS console.
+* Module M04 — Configuration & Secrets and module M07 — Pipelines Fundamentals (separate modules) — the config-externalization and pipeline foundations this capstone leans on.
+
+== Clean up
+
+Everything for this module lives in your `{user}-cicd` project. `ws prep m27 --yes` returns your environment to the entry state — it removes the PipelineRuns, the deployed `parasol-claims` and its Route, and re-materializes the clean capstone pipeline. Your seeded fork in Gitea (`{user}/parasol-claims`, the `seed-appsec` branch) is re-asserted to the seeded state, so you can run the whole gauntlet again from scratch.
