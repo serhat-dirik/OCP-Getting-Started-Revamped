@@ -92,19 +92,23 @@ oc get pods -n $NS -l app=statement-batch -o wide
 
 [demo-block]
 [TIME 3m]
-Say:: "Now the claims API. I'm going to redeploy it *under live traffic* and the load generator will not lose a request — because `maxUnavailable: 0` surges a new pod before it retires an old one. Capacity never dips."
-Show:: The hardened strategy applied; `availableReplicas` holding flat at 3 through a rollout restart while the load generator keeps a clean tally.
-Do:: Roll under load with capacity held:
+Say:: "Now the claims API. Every time a new pod boots it *reseeds the shared database* — silently discarding every claim filed since the last deploy. That's the real reason a naive rollout loses data, and no shutdown tuning fixes it. I'll stop the reseed, hold capacity flat, and redeploy under live traffic — the claim I plant first will still be there afterward."
+Show:: The schema strategy flipped to `none`, `maxUnavailable: 0` and a raised CPU limit applied; a value written before the roll still present after it; `availableReplicas` holding flat at 3 through the rollout restart.
+Do:: Stop the boot-time reseed, harden the roll, then redeploy under load:
 +
 [source,sh,role=execute]
 ----
-oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"terminationGracePeriodSeconds":45,"containers":[{"name":"parasol-claims","lifecycle":{"preStop":{"exec":{"command":["/bin/sh","-c","sleep 10"]}}}}]}}}}'
-oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none -n $NS
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"2","memory":"512Mi"}}}]}}}}'
+oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+# plant a claim state the seed doesn't carry, then redeploy under live traffic
+oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null
 oc rollout restart deploy/parasol-claims -n $NS
 for i in $(seq 1 10); do oc get deploy parasol-claims -n $NS -o jsonpath='available={.status.availableReplicas}/{.spec.replicas}{"\n"}'; sleep 4; done
+oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
 ----
 +
-"`available=3/3` the whole way through — a mid-day redeploy the customers never felt."
+"`available=3/3` the whole way through — and `CLM-1001` is *still* `Approved` after the roll, because the pods no longer reseed the database on boot. A mid-day redeploy the customers never felt."
 
 [demo-block]
 [TIME 2m]
@@ -523,7 +527,7 @@ A toleration without a selector would *allow* the batch node but not *choose* it
 ****
 
 == 5. Make the rollout zero-downtime
-⏱ *~15 min* · measure a default roll, hold capacity flat, and protect it with a PDB
+⏱ *~18 min* · measure the drops, diagnose the real cause, fix it at the source, and protect with a PDB
 
 A rollout replaces every API pod. Done carelessly it drops requests; done right a customer never notices.
 First, *measure* a default roll. This one-shot block drives a fast probe at the API from the load generator while a rollout runs, and tallies any request that isn't a clean `2xx`:
@@ -543,31 +547,153 @@ oc rollout restart deploy/parasol-claims -n $NS >/dev/null
 wait
 ----
 
-.Expected output (your exact counts vary — the point is `dropped` is *not zero*)
+// [CAPTURE-VERIFY] exact counts come from your run; dropped is well above zero across the reseed windows of the roll.
+.Expected output (your exact counts vary — the point is `dropped` is *not zero*, and not a stray one or two)
 [source,texinfo]
 ----
-default roll: ok=260 dropped=2
+default roll: ok=241 dropped=15
 ----
 
-A couple of dropped requests, every deploy.
-Now harden the Deployment. `maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one; a `preStop` sleep holds the pod briefly so it's pulled from the Service *before* it stops; and a generous `terminationGracePeriodSeconds` covers the drain:
+Requests dropped — and more than a stray one or two. Before reaching for a rollout knob, *find out why*.
 
-// [CAPTURE-VERIFY] Workloads → Deployments → parasol-claims → Actions → Edit Deployment (YAML) exposes spec.strategy + spec.template.spec.containers[].lifecycle (OCP 4.21) — CLI authoritative.
+=== Diagnose: what does a new pod do on boot?
+
+The `parasol-claims` image ships a Hibernate setting that decides what a pod does to its database at startup. Read it:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims -n $NS --list | grep SCHEMA_MANAGEMENT
+----
+
+.Expected output
+[source,texinfo]
+----
+QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=drop-and-create
+----
+
+`drop-and-create` means *every pod, on every boot, drops the schema, recreates it, and reloads the seed* — against the *shared* `claims-db` that all the replicas use.
+Prove that's what's biting you. Plant a value the seed doesn't carry (`CLM-1001` seeds as `UnderReview`; move it to `Approved`) and confirm it stuck:
+
+[source,sh,role=execute]
+----
+oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status \
+  -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null -w 'wrote HTTP %{http_code}\n'
+oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
+----
+
+// [CAPTURE-VERIFY] confirm the HTTP code and JSON rendering live; the `Approved` write landing in the shared DB is the grounded behaviour.
+.Expected output (your write is live in the shared database)
+[source,texinfo]
+----
+wrote HTTP 200
+"status":"Approved"
+----
+
+Now restart *one* pod and read `CLM-1001` again:
+
+[source,sh,role=execute]
+----
+ONEPOD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc delete pod $ONEPOD -n $NS
+sleep 3
+oc wait --for=condition=Ready pod -l app=parasol-claims -n $NS --timeout=180s
+oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
+----
+
+// [CAPTURE-VERIFY] the revert to the seed value `UnderReview` is the grounded, deterministic signature (proven live: the planted value is gone after one restart).
+.Expected output (your marker is *gone* — one pod boot reseeded the shared database)
+[source,texinfo]
+----
+pod "parasol-claims-...-..." deleted
+pod/parasol-claims-...-... condition met
+"status":"UnderReview"
+----
+
+There it is. A *single* pod restart wiped your write and reverted `CLM-1001` to the seed `UnderReview` — because that one boot ran `drop-and-create` and rebuilt the *shared* database out from under the other, still-serving pods.
+That is exactly what a rolling update does, over and over: each new pod's boot drops the tables the old pods are mid-query on.
+The disruption is in the *data plane, at startup* — which is why no `maxUnavailable` or shutdown-hook tuning could ever reach zero.
+One more thing to notice: that replacement pod took a while to reach `Ready` — about *27 s* on the build cluster, because the container's *500m CPU limit* throttles the JVM cold-start. Hold that thought; it matters for the capacity dip.
+
+[.checkpoint]
+****
+✔ *Verify (diagnosed):* The schema strategy is `drop-and-create`; a write to `CLM-1001` *vanished* after a single pod restart — reverting to the seed `UnderReview` — proving every pod boot reseeds the *shared* `claims-db`. Under the 500m CPU limit the replacement took ~27 s to reach `Ready`.
+****
+
+=== Fix it at the source
+
+*Step 1 — stop the boot-time reseed (the primary fix).*
+Flip the schema strategy to `none` so a pod boot never touches the database:
+
+// [CAPTURE-VERIFY] Workloads → Deployments → parasol-claims → Environment tab exposes the schema-management env var (OCP 4.21) — CLI authoritative.
 [tabs]
 ====
 Console::
 +
 --
-Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit Deployment* (YAML).
-Set `spec.strategy.rollingUpdate` to `maxSurge: 1`, `maxUnavailable: 0`; add `spec.template.spec.terminationGracePeriodSeconds: 45`; and add a `lifecycle.preStop.exec.command` of `["/bin/sh","-c","sleep 10"]` to the `parasol-claims` container, then *Save*.
+Open *Workloads* → *Deployments* → `parasol-claims` → *Environment*.
+Change `QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY` from `drop-and-create` to `none`, then *Save* — the same field the CLI tab sets.
 --
 CLI::
 +
 --
 [source,sh,role=execute]
 ----
-oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"terminationGracePeriodSeconds":45,"containers":[{"name":"parasol-claims","lifecycle":{"preStop":{"exec":{"command":["/bin/sh","-c","sleep 10"]}}}}]}}}}'
-oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none -n $NS
+oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+----
+--
+====
+
+Prove the fix the same way you proved the fault — plant the value again, restart one pod, and this time watch it *survive*:
+
+[source,sh,role=execute]
+----
+oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status \
+  -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null -w 'wrote HTTP %{http_code}\n'
+ONEPOD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+oc delete pod $ONEPOD -n $NS
+sleep 3
+oc wait --for=condition=Ready pod -l app=parasol-claims -n $NS --timeout=180s
+oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
+----
+
+// [CAPTURE-VERIFY] the planted value SURVIVING the restart is the grounded proof the reseed is gone.
+.Expected output (this time your write *survives* the restart)
+[source,texinfo]
+----
+wrote HTTP 200
+pod "parasol-claims-...-..." deleted
+pod/parasol-claims-...-... condition met
+"status":"Approved"
+----
+
+[NOTE]
+.Seed once at deploy, not on every boot
+====
+With `schema-management=none` a pod never rebuilds the database — so the schema and seed data have to come from *somewhere else, once*.
+The real-world pattern is a decoupled *migration Job* (Flyway or Liquibase) that runs at deploy time, before the app pods start.
+Your `claims-db` is already populated (the app seeded it while it was still `drop-and-create`), so there's nothing to run here — but the principle *is* the fix: *setup work belongs to the deploy, not to every pod's startup path.*
+====
+
+*Step 2 — harden the roll (hold capacity, and speed the cold-start).*
+`maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one, and raising the container's CPU *limit* lets the JVM cold-start without throttling — so a fresh pod reaches `Ready` in about *17 s* instead of ~27 s, shrinking the brief capacity dip while the roll waits on it:
+
+// [CAPTURE-VERIFY] Workloads → Deployments → parasol-claims → Actions → Edit Deployment (YAML) exposes spec.strategy + spec.template.spec.containers[].resources (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit Deployment* (YAML).
+Set `spec.strategy.rollingUpdate` to `maxSurge: 1`, `maxUnavailable: 0`; and on the `parasol-claims` container raise `resources.limits.cpu` to `2` (leave `requests.cpu` at `200m`), then *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"2","memory":"512Mi"}}}]}}}}'
+oc rollout status deploy/parasol-claims -n $NS --timeout=180s
 ----
 --
 ====
@@ -575,9 +701,9 @@ oc rollout status deploy/parasol-claims -n $NS --timeout=120s
 [IMPORTANT]
 .Use a *strategic* patch for the container change
 ====
-`--type=merge` (JSON merge) *replaces* the whole `containers` list, which drops the image and fails with `spec.containers[0].image: Required value`.
+The *resources* edit reaches inside a named container, and `--type=merge` (JSON merge) *replaces* the whole `containers` list — dropping the image and failing with `spec.containers[0].image: Required value`.
 `--type=strategic` understands the container `name` as a merge key, so it edits *into* the existing container.
-Reach for strategic merge whenever you patch a single field inside a named list element.
+Reach for strategic merge (or an `oc set resources`/`oc set env` helper, which do it for you) whenever you patch a single field inside a named list element.
 ====
 
 Now prove the load-bearing win: during a rollout, the number of *available* (ready) replicas never dips below your desired count.
@@ -599,14 +725,36 @@ done | sort | uniq -c
 ----
 
 Capacity never dropped below 3 — the Deployment surged a replacement to `Ready` *before* retiring each old pod.
+Now re-run the *same drop probe* from the top of this exercise — with the reseed gone, it comes back clean:
+
+[source,sh,role=execute]
+----
+( oc exec deploy/claims-load -n $NS -- bash -c '
+ok=0; bad=0; SECONDS=0
+while [ $SECONDS -lt 55 ]; do
+  c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 http://parasol-claims:8080/api/claims 2>/dev/null || echo 000)
+  [ "${c:0:1}" = "2" ] && ok=$((ok+1)) || bad=$((bad+1))
+  sleep 0.05
+done
+echo "hardened roll: ok=$ok dropped=$bad"' ) &
+sleep 6
+oc rollout restart deploy/parasol-claims -n $NS >/dev/null
+wait
+----
+
+// [CAPTURE-VERIFY] the ok count varies; `dropped=0` is the deterministic expectation once the boot-time reseed is removed.
+.Expected output (zero dropped — deterministically, because the reseed is gone)
+[source,texinfo]
+----
+hardened roll: ok=274 dropped=0
+----
 
 [NOTE]
-.The last few drops are the application's job
+.Why this reaches zero, not almost-zero
 ====
-`maxUnavailable: 0` guarantees *capacity*; the `preStop` hook narrows the *connection-reset* window by draining the endpoint before `SIGTERM`.
-But closing the *last* dropped requests needs the *app* to handle `SIGTERM` gracefully — fail readiness, finish in-flight requests, then exit (for Quarkus, `quarkus.shutdown.timeout`).
-The `parasol-claims` image doesn't yet do that half, so a tight probe can still catch an occasional reset during a roll — the honest boundary between what the *Deployment* controls and what the *developer* must add.
-True zero-downtime is a *two-sided* recipe.
+`maxUnavailable: 0` holds *capacity*; stopping the boot-time reseed removes the *data-plane* disruption that was actually failing requests; and the raised CPU limit shrinks the cold-start so the capacity dip is brief.
+Because the reseed was *deterministic* — one boot wiped the shared database *every* time — removing it is a deterministic fix, not a "usually fine."
+Graceful connection-draining on `SIGTERM` is a separate, real concern, but this Quarkus image already handles it (`quarkus.shutdown.timeout`), and it was never what dropped requests here.
 ====
 
 Finally, protect the service during *voluntary* disruptions (node drains, upgrades) with a *PodDisruptionBudget* — "never below one healthy pod":
@@ -675,7 +823,7 @@ Back at `minAvailable: 1`, a drain can evict one claims pod (the reschedule resp
 
 [.checkpoint]
 ****
-✔ *Verify:* A default roll dropped a non-zero request count; `maxUnavailable: 0` held *available replicas flat at 3* through a rollout (18/18 samples); and a `PodDisruptionBudget` reported `ALLOWED DISRUPTIONS: 2`, then *blocked* an eviction with *"Cannot evict pod as it would violate the pod's disruption budget"* once the budget was exhausted.
+✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~17 s), held *available replicas flat at 3* through a roll (18/18 samples) with a re-measured drop count of *zero*, and protected the service with a `PodDisruptionBudget` that reported `ALLOWED DISRUPTIONS: 2` then *blocked* an eviction once exhausted.
 ****
 
 == 6. Read how the platform shapes the cluster (instructor demo)

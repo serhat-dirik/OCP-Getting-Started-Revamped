@@ -1,5 +1,14 @@
 # M16 build note — Deployment Targets & Scheduling  `[OCP]`
 
+> ⚠ **Zero-downtime beat SUPERSEDED (2026-07-16).** The graceful-shutdown recipe below (preStop +
+> `terminationGracePeriodSeconds` + Quarkus `quarkus.shutdown.timeout`) was a MIS-DIAGNOSIS. Grounded
+> live on C1 2026-07-16: the real cause is the shared `claims-db` being reseeded on every parasol-claims
+> boot (Hibernate `drop-and-create`) → a rolling-update pod silently discards data written since the last
+> boot (proven: a written value reverts to its seed after one pod restart), compounded by a cold-start
+> CPU throttle (27s@500m → 17s@2). Fix = `schema-management=none` + a decoupled seed-once-at-deploy Job +
+> a raised CPU limit; the graceful `SIGTERM` drain the image already does was never the cause. The shipped
+> content, entry-state, and verify now teach this. The scheduling/placement sections of this note stand.
+
 Date: 2026-07-12 · Author: research-analyst · Spec: 02-MODULE-SPECS §M16 (lines 201-210) · Renumber: OLD M14 → NEW M16 (decoder `docs/module-catalog-renumber-2026-07-10.md`)
 Method: live build cluster `ocp-ws-revamped` (OCP 4.21.22, k8s 1.34.8) READ-ONLY as `admin` — node/MachineSet/DaemonSet inventory, `oc explain` on every scheduling/strategy/PDB/sidecar field, platform-observer RBAC read; repo inspection (apps + entry-states + workshop-config); docs.redhat.com OCP 4.20 EUS Nodes; kubernetes.io (native sidecar GA); quarkus.io (graceful shutdown). versions.yaml (2026-07-08) trusted for OCP; native-sidecar GA row added 2026-07-12.
 

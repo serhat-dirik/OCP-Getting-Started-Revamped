@@ -1,7 +1,9 @@
-# The claims REST API — the "api" tier and the star of M16's placement + strategy + graceful-shutdown
-# beats. Shared prebuilt image (tag 1.1). ENTRY (solve=false): {{ .Values.claimsReplicas }} replicas with
-# NO scheduling shaping — default strategy (RollingUpdate 25%/25%), no affinity/TSC, no preStop/grace, no
-# PDB. The attendee ADDS every hardening field in the lab; ws solve renders the END state inline below.
+# The claims REST API — the "api" tier and the star of M16's placement + rollout beats. Shared prebuilt
+# image (tag 1.1). ENTRY (solve=false): {{ .Values.claimsReplicas }} replicas that run Hibernate
+# drop-and-create (schema env below), so EVERY pod boot reseeds the shared claims-db — the zero-downtime
+# fault the lab diagnoses. No scheduling shaping, default RollingUpdate 25%/25%, no PDB. SOLVE (solve=true,
+# rendered inline below): schema-management=none + a raised CPU limit + maxUnavailable:0 + anti-affinity/
+# TSC + a PDB (solve-endstate.yaml) — the REAL zero-downtime fix. The attendee applies each field in the lab.
 ---
 # why: the running claims API; the workload the attendee spreads (anti-affinity/TSC), rolls under load
 # (tuned RollingUpdate + graceful shutdown), and protects with a PDB (solve-endstate.yaml).
@@ -34,12 +36,6 @@ spec:
         workshop.redhat.com/module: m16
     spec:
       {{- if .Values.solve }}
-      # SOLVE — graceful shutdown, the missing half of zero-downtime: the grace period lets in-flight
-      # requests drain after SIGTERM. Drain MEASURED live 2026-07-13 (user2, OCP 4.21): maxUnavailable=0
-      # holds capacity flat (availableReplicas 3/3 across a full roll) and this preStop narrows the reset
-      # window, but literal-zero drops still need the Quarkus-side quarkus.shutdown.timeout (readiness-on-
-      # SIGTERM + in-flight finish) — app-developer work, flagged to the PM, NOT a substrate defect.
-      terminationGracePeriodSeconds: 45
       # SOLVE — hard spread: no two claims replicas on the same node (the anti-affinity "force apart"
       # beat). Required (not preferred) so the distinct-node outcome is deterministic; M16 assumes a
       # multi-node cluster (>= claimsReplicas schedulable non-batch nodes — true here: 5 available).
@@ -70,24 +66,26 @@ spec:
           env:
             - name: POSTGRESQL_HOST
               value: claims-db
+            # THE FAULT (entry) / THE FIX (solve). Entry: drop-and-create → every boot drops+recreates+
+            # reseeds the SHARED claims-db from import.sql, so a rolling-update pod wipes the DB out from
+            # under the still-serving pod (proven live: a marker row vanishes after one restart). Solve:
+            # `none` → pods never touch the schema (the marker SURVIVES a restart); claims-db-seed.yaml
+            # populates the DB once instead. This one env var is the heart of the M16 zero-downtime fix.
+            - name: QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY
+              value: {{ if .Values.solve }}"none"{{ else }}"drop-and-create"{{ end }}
           envFrom:
             # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
             - secretRef:
                 name: claims-db
-          {{- if .Values.solve }}
-          # SOLVE — preStop sleep: hold SIGTERM ~10s so kube-proxy/OVN drop this pod from the Service
-          # endpoints BEFORE the JVM starts shutting down (closes the connection-reset window in a roll).
-          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 10"]
-          {{- end }}
           resources:
             requests:
               cpu: 200m
               memory: 256Mi
             limits:
-              cpu: 500m
+              # THE FAULT (entry) / THE FIX (solve). Entry 500m throttles the JVM cold-start (measured 27s
+              # to Ready); solve raises it to 2 so a rolling-update pod starts fast (measured 17s), shrinking
+              # the capacity-dip during the roll. requests stay 200m → QoS Burstable, portfolio-safe.
+              cpu: {{ if .Values.solve }}"2"{{ else }}"500m"{{ end }}
               memory: 512Mi
           readinessProbe:
             httpGet:

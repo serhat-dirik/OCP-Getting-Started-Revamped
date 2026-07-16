@@ -81,6 +81,29 @@ batch_unpinned() {
   [[ -z "$(oc get deploy statement-batch -n "$NS" -o jsonpath="{.spec.template.spec.nodeSelector.${POOL_KEY//./\\.}}" 2>/dev/null || true)" ]]
 }
 
+# The parasol-claims Hibernate schema-management strategy from the running container env (empty if unset →
+# the image default, which is drop-and-create). Central to M16's zero-downtime re-diagnosis: at entry the
+# app reseeds the SHARED claims-db on every boot (drop-and-create), so a rolling-update pod wipes the DB
+# out from under the serving pod; the fix flips it OFF drop-and-create so pods stop reseeding on boot.
+claims_schema_strategy() {
+  oc get deploy parasol-claims -n "$NS" \
+    -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null \
+    | grep '^QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=' | head -1 | cut -d= -f2- || true
+}
+# ENTRY fault-present: the app reseeds on boot (drop-and-create explicitly, or unset → same image default).
+claims_schema_is_reseed() { local v; v="$(claims_schema_strategy)"; [[ -z "$v" || "$v" == "drop-and-create" ]]; }
+# END fix-applied: the app is OFF drop-and-create (none/validate/…) so a new pod boot no longer reseeds.
+claims_schema_not_reseed() { local v; v="$(claims_schema_strategy)"; [[ -n "$v" && "$v" != "drop-and-create" ]]; }
+# END fix-applied: the parasol-claims CPU limit is raised above the 500m entry floor that throttled the
+# JVM cold-start (measured 27s→17s when raised to 2). Any limit >500m passes (accepts 1, 2, 1500m, …).
+claims_cpu_limit_raised() {
+  local cpu m
+  cpu="$(oc get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}' 2>/dev/null || true)"
+  [[ -n "$cpu" ]] || return 1
+  if [[ "$cpu" == *m ]]; then m="${cpu%m}"; else m=$(( ${cpu%.*} * 1000 )); fi
+  [[ "${m:-0}" -gt 500 ]]
+}
+
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                     || hint "run: ws prep m16 (or ws start m16 --user ${USER_NAME})"
 check "entry marker ws-entry-m16 present"               oc get cm ws-entry-m16 -n "$NS"     || hint "entry app not synced — ws reset m16 --user ${USER_NAME}"
@@ -102,6 +125,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "statement-batch is NOT pinned to the batch pool yet (attendee pins it)" batch_unpinned      || hint "entry ships it unpinned; if a batch-pool nodeSelector is set the lab already started — ws reset m16 --user ${USER_NAME}"
   check "parasol-claims has NO anti-affinity yet (attendee adds it)"             no_claims_antiaffinity || hint "entry ships default scheduling; if podAntiAffinity is set the lab already started — ws reset m16 --user ${USER_NAME}"
   check "no PodDisruptionBudget on parasol-claims yet (attendee creates it)"     no_claims_pdb        || hint "entry ships no PDB; if one exists the lab already started — ws reset m16 --user ${USER_NAME}"
+  check "parasol-claims ships the reseed fault (schema-management drop-and-create)" claims_schema_is_reseed || hint "the reseed fault should be present at entry; if schema-management is already off drop-and-create the lab started — ws reset m16 --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — placement + spread + availability in place -------------------
   # Assert OUTCOMES (a PDB exists; batch runs on the pool; claims span >=2 nodes), never the exact field
@@ -121,10 +145,19 @@ else
   else
     info "(skipped the claims node-spread outcome — parasol-claims not Ready; needs the parasol-images build)"
   fi
-  # Graceful-shutdown / zero-downtime is a BEHAVIOURAL outcome (dropped-request count before/after a
-  # roll) that needs the failure-counting load-gen metric + Quarkus quarkus.shutdown.timeout — both
-  # app-developer work. Not a hard gate here; surfaced for the content builder.
-  info "(zero-downtime roll — preStop + terminationGracePeriodSeconds + Quarkus graceful shutdown — is proven behaviourally in content via the load-gen dropped-request tally; [CAPTURE-VERIFY])"
+  # Zero-downtime is a real, gradeable OUTCOME (M16 re-diagnosis 2026-07-16). The fault: the shared
+  # claims-db is reseeded on EVERY parasol-claims boot (Hibernate drop-and-create), so a rolling-update
+  # pod drops the DB out from under the still-serving pod — compounded by a 500m cold-start CPU throttle.
+  # Assert the two fix outcomes on the running deployment (never exact wording — any schema value that
+  # stops the reseed passes, any CPU limit above the throttle floor passes).
+  if deploy_ready parasol-claims; then
+    check "parasol-claims no longer reseeds the DB on boot (schema-management off drop-and-create)" claims_schema_not_reseed \
+      || hint "stop the per-boot reseed of the shared DB: oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none"
+    check "parasol-claims CPU limit raised above the cold-start-throttle floor (>500m)" claims_cpu_limit_raised \
+      || hint "give cold-starting pods headroom so the roll's capacity dip is brief: oc set resources deployment/parasol-claims --limits=cpu=2 --requests=cpu=200m"
+  else
+    info "(skipped the zero-downtime outcomes — parasol-claims not Ready; needs the parasol-images build)"
+  fi
 fi
 
 verify_summary

@@ -8,7 +8,7 @@ You took Parasol's claims app from *scheduled-wherever-it-fit* to *placed on pur
 You read how the scheduler *filters then scores* by resource *requests*, and confirmed it against a `Scheduled` event.
 You turned the API's soft "prefers apart" into a *required* `podAntiAffinity` so no single node failure can take it down, spread it evenly with `topologySpreadConstraints` (across hostnames, and — with one changed key — across zones), and read the `FailedScheduling` event the scheduler writes when it can't oblige.
 You pinned the `statement-batch` worker onto a *dedicated pool* the honest way — feeling the `Pending` that a `nodeSelector` alone earns, then fixing it with the *toleration* that permits the tainted node.
-You made a rollout *zero-downtime* where the Deployment can — `maxUnavailable: 0` holding capacity flat through a roll — and protected the service with a *PodDisruptionBudget* that blocks an eviction rather than breach its floor.
+You made a rollout *zero-downtime* by fixing the real cause of the drops — an API that reseeded its *shared* database on every pod boot — with `schema-management=none` (seed once at deploy, not on every boot), held capacity flat through the roll with `maxUnavailable: 0`, and protected the service with a *PodDisruptionBudget* that blocks an eviction rather than breach its floor.
 Finally you read how the platform itself is shaped: the *DaemonSet* node agents, the *MachineSet* that builds the pools.
 
 [mermaid]
@@ -48,8 +48,8 @@ Take these back to how your teams' workloads are placed today:
 Default scheduling *prefers* to spread, but "probably" is not a word you want in a post-incident review. You turned that into a *required* rule. For your production services, is anti-affinity (or a topology spread) actually set — or is the spread you rely on just luck that has held so far?
 . *Is your expensive hardware running the workload you bought it for — and nothing else?*
 A GPU node, a node licensed for a commercial database, a high-memory box — each earns its premium only if it runs *the* workload and freeloaders stay off. That's a taint (keep others off) plus a toleration and selector (put the right one on). Could you point, in your cluster, to the pool your most expensive workload runs on, and prove nothing else can land there?
-. *Do your deploys drop requests — and does anyone know?*
-You measured a default roll dropping a couple of requests and held capacity flat with `maxUnavailable: 0`. Many teams accept mid-day-deploy blips as inherent; they're usually self-inflicted. Is `maxUnavailable: 0` plus a graceful-shutdown recipe part of your deployment template, or is "we deploy after hours to be safe" doing the job a config field should?
+. *Do your deploys drop requests — and does anyone know why?*
+You found a rollout dropping requests, *diagnosed* it to an app rebuilding shared state on every pod boot, and fixed it at the source. Many teams accept mid-day-deploy blips as inherent; they're usually self-inflicted. Does any of your apps do setup work — a schema migration, a cache warm-up, a data reseed — *on every boot* that a rolling update turns into an outage? Is that work moved to *once, at deploy* (a migration Job or init step), and is `maxUnavailable: 0` in your deployment template — or is "we deploy after hours to be safe" doing the job a config field should?
 . *When maintenance drains a node, what stops it taking your last replica?*
 A `PodDisruptionBudget` is a one-line floor that makes a drain *wait its turn*. For your critical services, is that floor written down — or does a 2 a.m. node patch depend on the on-call remembering not to drain two nodes at once?
 
@@ -70,7 +70,7 @@ Tainting a pool to isolate a workload is the heavy tool. If two workloads just n
 
 * *Controlling pod placement onto nodes (scheduling)* — the full reference for `nodeSelector`, node and pod affinity/anti-affinity, taints and tolerations, and `topologySpreadConstraints`, with the `required`-vs-`preferred` semantics you exercised.
 * *Deployment strategies* and *Argo Rollouts* — `RollingUpdate` (`maxSurge`/`maxUnavailable`) vs `Recreate`, and where *canary* and *blue-green* live (the progressive-delivery module cross-referenced in this workshop).
-* *Graceful application shutdown* — `terminationGracePeriodSeconds`, `preStop` hooks, and `SIGTERM` handling; for Quarkus services, `quarkus.shutdown.timeout` — the *application* half of the zero-downtime recipe you saw the Deployment can't finish alone.
+* *Database schema management and migrations* — running schema and seed changes *once at deploy* (a Flyway or Liquibase migration Job, or an init step) instead of on every application boot, and why an app that rebuilds shared state at startup breaks a rolling update. Graceful application shutdown (`terminationGracePeriodSeconds`, `preStop`, `SIGTERM` handling / `quarkus.shutdown.timeout`) is the related, separate concern on the *connection* side of a roll.
 * *Specifying a disruption budget for your application* — `PodDisruptionBudget`, `minAvailable`/`maxUnavailable`, the eviction API, and `unhealthyPodEvictionPolicy` for the PDB-during-a-rolling-update edge.
 * *DaemonSets* and *sidecar containers* — the node-agent pattern, and the GA native-sidecar lifecycle (an init container with `restartPolicy: Always`) you read about.
 * *Machine management (MachineSets, MachineAutoscaler)* and *Cluster Autoscaler* — how platform teams *create* and *size* the pools your workloads target; the object behind the batch pool you pinned onto.

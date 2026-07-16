@@ -23,7 +23,7 @@ Same app, same cluster — but by the end the API is spread across the cluster, 
 * How to *direct* pods with `nodeSelector`, node/pod *affinity*, and *anti-affinity*, and the one distinction that trips everyone: *affinity attracts, a taint repels* — and a toleration only *permits*.
 * How to *spread* replicas across failure domains with `topologySpreadConstraints`, and read the `FailedScheduling` event when the scheduler can't.
 * How to reserve a *dedicated pool* (batch, GPU, licensed software) with a *taint + toleration + nodeSelector*, and why you need all three.
-* How to make a rollout *zero-downtime* — the `RollingUpdate` knobs, the *graceful-shutdown* half the Deployment can't do alone, and a *PodDisruptionBudget* that a drain must respect.
+* How to make a rollout *zero-downtime* — the `RollingUpdate` knobs, why a pod that *rebuilds shared state at startup* (an app that reseeds its database on every boot) breaks a rollout no matter how you tune it, and a *PodDisruptionBudget* that a drain must respect.
 
 == The scheduler in one mental model
 
@@ -59,6 +59,7 @@ The currency in the filter is *requests*, not usage and not limits.
 A pod that *requests* 200m CPU is placed as if it will always use 200m, even while idle; a pod that requests *nothing* can be packed onto a node that is already at its limit, because the scheduler thinks it costs nothing.
 Requests are also what set a pod's *Quality of Service* class — `Guaranteed` (requests == limits), `Burstable` (requests < limits), or `BestEffort` (none) — which decides who gets evicted first when a node runs out of memory.
 Get requests right and scheduling and eviction both behave; get them wrong and the scheduler is working from fiction.
+A *limit* has a second effect that matters later in this module: it caps a container's CPU even during *startup*, so a JVM under a tight CPU limit takes longer to warm up and report *Ready* — and a slow cold-start stretches out a rolling update, which waits on each new pod before retiring an old one.
 
 == Directing pods: who seeks, who repels
 
@@ -123,20 +124,48 @@ A Deployment doesn't just run pods — it *replaces* them, and *how* it replaces
 `maxUnavailable: 0` is the load-bearing zero-downtime setting: the Deployment *surges* a new pod, waits for it to pass readiness, and only *then* retires an old one — so the number of *ready* pods never dips below what you asked for.
 You will watch this hold at a steady count throughout a roll in the lab.
 
-== The missing half of zero-downtime: graceful shutdown
+== The other half of zero-downtime: what a pod does at startup
 
-`maxUnavailable: 0` guarantees *capacity* — enough ready pods at all times.
-It does *not* guarantee that the pods being *retired* let go of their in-flight requests cleanly, and that's where a "zero-downtime" rollout still drops connections.
+`maxUnavailable: 0` guarantees *capacity* — enough *ready* pods at every instant of a roll.
+It says *nothing* about what a brand-new pod *does to shared state* while it boots — and that is where Parasol's "zero-downtime" rollout still dropped requests.
 
-When a pod is deleted, two things race: the endpoints controller pulls it out of the Service, and the kubelet sends it `SIGTERM`.
-If the process exits *instantly* on `SIGTERM` while the data plane still lists it for a moment, requests routed in that window get a reset.
-The fix is a *two-sided* recipe:
+The claims API shares *one* PostgreSQL across every replica.
+The image boots with Hibernate set to *drop-and-create*: on *every* startup a pod drops the schema, recreates it, and reloads the seed data.
+That is harmless when a single pod owns the database in development — and a live grenade during a rolling update.
+When the new pod boots, its drop-and-create wipes the shared tables and reloads the seed — *silently discarding every row written since the last pod started*.
+`maxUnavailable: 0` did exactly its job — three *ready* pods the whole time, not one dropped connection — and yet a claim filed at 2 p.m. is *gone* after the 3 p.m. rollout, because the disruption is in the *data plane, at startup*, not the *connection plane, at shutdown*.
+The reseed commits in a single transaction, so callers rarely even see an error — which is precisely why the bug hides for months: the deploy doesn't *fail*, it quietly *forgets*.
 
-* *The Deployment's half* (you set this): a `preStop` hook that sleeps a few seconds so the endpoint removal propagates *before* the process is told to stop, and a `terminationGracePeriodSeconds` long enough to cover the drain.
-* *The app's half* (the developer sets this): handle `SIGTERM` by *failing readiness first*, then *finishing in-flight requests* before exiting — for a Quarkus service, `quarkus.shutdown.timeout`.
+[mermaid]
+....
+graph LR
+  req["client files a claim"]
+  subgraph roll["RollingUpdate · maxUnavailable 0 keeps pods Ready"]
+    old["OLD pod<br/>still serving"]
+    new["NEW pod BOOTING<br/>Hibernate drop-and-create"]
+  end
+  db[("shared claims-db<br/>one PostgreSQL")]
+  req -->|"POST /api/claims"| old
+  old -->|"INSERT (committed)"| db
+  new -->|"DROP + reseed<br/>the schema on boot"| db
+  db -.->|"the new claim is discarded —<br/>no error, just gone"| req
+  classDef ok fill:#e6f4ea,stroke:#137333,color:#0d652d;
+  classDef bad fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
+  classDef data fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
+  class old ok; class new bad; class db,req data;
+....
 
-Miss either half and a rollout still leaks a few requests.
-In the lab you'll *measure* this: a default roll drops a couple of requests, `maxUnavailable: 0` holds capacity flat, and the `preStop`/grace hook narrows the window — while staying honest that closing the *last* drops is the application's job, not the Deployment's.
+// media-pass: replace/augment with SVG export m16-deployment-targets-scheduling-04-reseed-on-boot.svg (see media-manifest.md)
+
+This is the trap no *shutdown*-side tuning can close: a `preStop` sleep, a longer `terminationGracePeriodSeconds`, careful `SIGTERM` handling all govern a pod *leaving* — but the damage here is done by a pod *arriving*.
+The fix is to stop pods rebuilding shared state on boot:
+
+* *Set the schema strategy to `none`* so a pod boot never touches the database — the single most important change.
+* *Seed the database once, at deploy time,* from a decoupled migration Job (the Flyway/Liquibase pattern) rather than from every application pod. Work that belongs to the *deploy* has no business in the *app's startup path*.
+* *Raise the CPU limit* so the JVM cold-start is quick — a new pod reaches *Ready* faster, shrinking the brief capacity dip while the rolling update waits on it.
+
+Keep `maxUnavailable: 0` and the `PodDisruptionBudget` as well — they are correct capacity hygiene, not the cause of the drops. Graceful connection-draining on `SIGTERM` is a genuine concern in its own right (and this Quarkus image already handles it), but it was never what failed requests here.
+In the lab you'll *prove* the cause before fixing it: plant a value the seed doesn't carry, restart a single pod, and watch your write vanish as that one boot reseeds the shared database — the deterministic signature of the fault.
 
 [NOTE]
 .Native sidecar containers are GA
@@ -171,7 +200,7 @@ You'll *read* these live via the read-only `platform-observer` role; creating an
 == How this shows up in real orgs
 
 * *"Why is our GPU node running a web server?"* is a real, expensive question. A node your finance team pays a premium for — a GPU box, a node licensed for a commercial database — earns its keep only if it runs *the* workload it was bought for and *nothing else*. A taint keeps the freeloaders off; a toleration + selector puts the right workload on. Without the pair, the premium node schedules whatever fits, and the workload it was for ends up somewhere generic.
-* *"The deploy dropped a few hundred requests again"* is tribal knowledge on a lot of teams, quietly accepted as the cost of shipping. It isn't: `maxUnavailable: 0` plus a graceful-shutdown recipe makes a mid-day rollout invisible to customers — and the teams that *haven't* done it usually don't know the drops are self-inflicted, not inherent.
+* *"The deploy dropped a few hundred requests again"* is tribal knowledge on a lot of teams, quietly accepted as the cost of shipping. It rarely is inherent: the usual culprit is an application doing *setup work on every boot* — a schema reseed, a cache rebuild, a migration — that a rolling update turns into an outage as each new pod tramples shared state the old pods are still using. Move that work to *once, at deploy* and hold capacity with `maxUnavailable: 0`, and the mid-day rollout goes invisible — the teams that *haven't* usually don't know the drops are self-inflicted.
 * *"The 2 a.m. node patch took the service down"* happens when an admin drains a node with no PDB in the way. The budget is a one-line insurance policy: the drain still happens, it just waits its turn instead of taking your last replica.
 * *"Both replicas were on the same node when it died."* Default scheduling *prefers* to spread, but doesn't *guarantee* it — and "prefers" is exactly the word you don't want in an incident review. Required anti-affinity turns a soft preference into a promise you can put in a design doc.
 
@@ -180,8 +209,8 @@ ifdef::demo[]
 .Presenter framing
 ====
 Spend no more than five minutes here before the live demo.
-Three ideas must land: (1) the scheduler places by *requests* through a *filter → score* pipeline, and a `FailedScheduling` event tells you *exactly* why a pod won't fit; (2) *affinity attracts, a taint repels, a toleration only permits* — a dedicated pool needs a *taint + toleration + nodeSelector*, all three; (3) zero-downtime is *two-sided* — `maxUnavailable: 0` holds capacity, but the *app* must drain gracefully to close the last drops.
-The demo is the ten-minute story: pin the batch worker onto its dedicated pool (add the selector, watch it go *Pending* on the untolerated taint, add the toleration, watch it *snap* onto the batch node), then roll the claims API under load with `maxUnavailable: 0` and watch capacity stay flat while a PodDisruptionBudget makes a drain wait its turn.
+Three ideas must land: (1) the scheduler places by *requests* through a *filter → score* pipeline, and a `FailedScheduling` event tells you *exactly* why a pod won't fit; (2) *affinity attracts, a taint repels, a toleration only permits* — a dedicated pool needs a *taint + toleration + nodeSelector*, all three; (3) zero-downtime has *two* enemies — a *capacity* dip (which `maxUnavailable: 0` closes) and a pod that *rebuilds shared state at startup* (Parasol's API reseeds its shared database on every boot, dropping requests until you stop it).
+The demo is the ten-minute story: pin the batch worker onto its dedicated pool (add the selector, watch it go *Pending* on the untolerated taint, add the toleration, watch it *snap* onto the batch node), then stop the claims API reseeding its shared database on every boot and roll it under load — capacity stays flat *and* the load generator's tally stays clean — while a PodDisruptionBudget makes a drain wait its turn.
 Close on the punchline: "the batch job is on its own nodes, the API is spread so no single node can take it down, and the rollout kept serving — none of it a bigger cluster, all of it the scheduler doing what you told it."
 ====
 endif::demo[]

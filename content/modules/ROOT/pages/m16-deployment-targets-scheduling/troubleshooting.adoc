@@ -69,13 +69,15 @@ It genuinely *wedges* only if replicas equal the eligible-node count (the surge 
 
 == `oc patch` fails with `spec.containers[0].image: Required value`
 
-Symptom:: Patching a container field (a `preStop` hook, an env var) with `--type=merge` errors: `The Deployment "parasol-claims" is invalid: spec.template.spec.containers[0].image: Required value`.
+Symptom:: Patching a container field (raising a CPU limit, setting an env var) with `--type=merge` errors: `The Deployment "parasol-claims" is invalid: spec.template.spec.containers[0].image: Required value`.
 Cause:: A JSON *merge* patch (`--type=merge`) treats `containers` as a whole-list *replace* — your patch, which named only the container and the new field, wiped the image and everything else.
-Fix:: Use a *strategic* merge patch, which understands the container `name` as a merge key and edits *into* the existing container:
+Fix:: Use a *strategic* merge patch, which understands the container `name` as a merge key and edits *into* the existing container (or an `oc set` helper, which does it for you):
 +
 [source,sh,role=execute]
 ----
-oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"parasol-claims","lifecycle":{"preStop":{"exec":{"command":["/bin/sh","-c","sleep 10"]}}}}]}}}}'
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"2","memory":"512Mi"}}}]}}}}'
+# or the helper that sidesteps the footgun entirely:
+oc set resources deploy/parasol-claims -n $NS --limits=cpu=2,memory=512Mi --requests=cpu=200m,memory=256Mi
 ----
 +
 Rule of thumb: patching a single field inside a *named list element* (a container, a volume) → `--type=strategic`, not `merge`.
@@ -95,18 +97,25 @@ oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
 +
 `minAvailable` must be *strictly less* than the replica count (`1` of `3`) so a disruption can proceed while the service stays up.
 
-== A rollout still drops a few requests despite `maxUnavailable: 0`
+== A rollout drops requests even with `maxUnavailable: 0`
 
-Symptom:: You set `maxUnavailable: 0` (and a `preStop` hook), but a tight probe still catches an occasional non-`2xx` during a roll.
-Cause:: `maxUnavailable: 0` guarantees *capacity* (ready-pod count never dips), and `preStop` narrows the connection-reset window — but true zero-downtime also needs the *application* to handle `SIGTERM` gracefully: fail readiness first, finish in-flight requests, then exit. The `parasol-claims` image doesn't yet do that half.
-Fix:: Confirm the Deployment half is right (this is all you control here), and recognise the remainder as app-developer work:
+Symptom:: You set `maxUnavailable: 0`, capacity holds flat at the desired replica count through the roll, and the API *still* returns 5xx/000 during a rollout — often a burst of them, not a stray one or two.
+Cause:: The disruption is in the *data plane, at pod startup*, not the connection plane at shutdown. The `parasol-claims` image boots with Hibernate `schema-management.strategy=drop-and-create`, so *every* pod, on *every* boot, drops and reseeds the *shared* `claims-db`. During a rolling update each new pod's boot wipes the tables out from under the old pods still serving — which is why the shutdown-side knobs (`maxUnavailable`, `preStop`, `terminationGracePeriodSeconds`) can never reach zero. The *deterministic* tell: a value written to the database *reverts to its seed* after a single pod restart.
+Fix:: Confirm the signature, then stop pods rebuilding shared state on boot (`schema-management=none`; seed the DB once at deploy from a migration Job instead of from every app pod):
 +
 [source,sh,role=execute]
 ----
-oc get deploy parasol-claims -n $NS -o jsonpath='maxUnavailable={.spec.strategy.rollingUpdate.maxUnavailable} grace={.spec.template.spec.terminationGracePeriodSeconds} preStop={.spec.template.spec.containers[0].lifecycle.preStop.exec.command}{"\n"}'
+# signature: write a non-seed status, restart ONE pod, watch it revert (CLM-1001 seeds as UnderReview)
+oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status \
+  -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null -w 'wrote %{http_code}\n'
+oc delete pod -n $NS "$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')"
+sleep 3; oc wait --for=condition=Ready pod -l app=parasol-claims -n $NS --timeout=180s
+oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
+# reverted to "UnderReview" ⇒ the boot-time reseed is the cause. The primary fix:
+oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none -n $NS
 ----
 +
-The application fix is `SIGTERM`-aware shutdown (for Quarkus, `quarkus.shutdown.timeout`) so in-flight requests drain before exit. That's the *app's* half of the two-sided recipe — the Deployment can't do it for the app.
+After `schema-management=none` the same write *survives* a restart and a re-run of the drop probe reads `dropped=0`. Graceful `SIGTERM` draining (`quarkus.shutdown.timeout`) is a separate concern this image already handles — it was not what dropped requests here.
 
 == The zone-spread step shows empty zones
 
