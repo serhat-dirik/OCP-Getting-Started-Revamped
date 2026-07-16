@@ -258,6 +258,16 @@ meta_expect_degraded() {  # module → "true" if the module SEEDS AN INTENTIONAL
   awk '$1=="expectDegraded:"{print $2; exit}' "$meta"
 }
 
+meta_require_sync() {  # module → "false" if the module's app is Healthy but legitimately NEVER Synced
+  # (ws-meta expectOutOfSync: true — e.g. it seeds an OpenShift BuildConfig whose server-defaulted spec
+  # fields Argo diffs forever, with selfHeal off → permanent OutOfSync). Then wait_healthy gates on
+  # Health + a Succeeded op only, not Synced. Default "true" (normal modules must reach Synced/Healthy).
+  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml" v
+  [[ -f "$meta" ]] || { echo "true"; return 0; }
+  v="$(awk '$1=="expectOutOfSync:"{print $2; exit}' "$meta")"
+  if [[ "$v" == "true" ]]; then echo "false"; else echo "true"; fi
+}
+
 meta_smoke_cmds() {  # module → ws-meta smokeCommands list (OPTIONAL, default empty). Each entry is a
   # representative attendee command a module genuinely leans on (an in-terminal `mvn …`, an `argocd app
   # delete`); `ws smoke` runs each as {user} in the live cockpit and asserts exit 0. ${USER} is resolved
@@ -533,8 +543,14 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
   fi
 }
 
-wait_healthy() {  # appname [timeout_s]
-  local app="$1" timeout="${2:-300}" t=0 health sync phase empty_ok=0
+wait_healthy() {  # appname [timeout_s] [require_sync]
+  # require_sync (default true): also require the app to read Synced. Pass "false" for a module whose app
+  # is genuinely Healthy but never reaches Synced — an entry state that seeds an OpenShift BuildConfig
+  # drifts forever because the build API defaults spec fields (runPolicy, {successful,failed}Builds-
+  # HistoryLimit, postCommit, nodeSelector:null) that Argo diffs, and selfHeal is off (m25, ws-meta
+  # expectOutOfSync). Health + a Succeeded op still gate readiness, so a genuine failure is still caught;
+  # `ws verify` is the correctness gate regardless.
+  local app="$1" timeout="${2:-300}" require_sync="${3:-true}" t=0 health sync phase empty_ok=0 sync_ok
   info "waiting for ${app} to sync (up to ${timeout}s)…"
   while (( t < timeout )); do
     health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
@@ -543,9 +559,10 @@ wait_healthy() {  # appname [timeout_s]
     # solve hook that does real work (m07: runs the whole pipeline) is exactly the point. Ready
     # means the operation finished too, or "demo-ready" prints while the namespace is still empty.
     phase="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
-    if [[ "$health" == "Healthy" && "$sync" == "Synced" ]]; then
+    sync_ok="true"; [[ "$require_sync" == "true" && "$sync" != "Synced" ]] && sync_ok="false"
+    if [[ "$health" == "Healthy" && "$sync_ok" == "true" ]]; then
       if [[ "$phase" == "Succeeded" ]]; then
-        ok "entry state ready (Synced/Healthy)"
+        ok "entry state ready (${sync}/Healthy)"
         return 0
       fi
       # Empty phase can be a transient window BETWEEN hook retries (M10 G1 flag #3: a failing
@@ -553,7 +570,7 @@ wait_healthy() {  # appname [timeout_s]
       if [[ -z "$phase" ]]; then
         empty_ok=$((empty_ok+1))
         if (( empty_ok >= 3 )); then
-          ok "entry state ready (Synced/Healthy)"
+          ok "entry state ready (${sync}/Healthy)"
           return 0
         fi
       else
@@ -630,7 +647,7 @@ cmd_start() {
   if [[ "$(meta_expect_degraded "$module")" == "true" ]]; then
     wait_materialized "$(app_name "$module" "$user")" "$(meta_wait "$module")"
   else
-    wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+    wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")" "$(meta_require_sync "$module")"
   fi
   echo
   ok "${user} can start ${module}."
@@ -789,8 +806,15 @@ cmd_smoke() {
   fi
 
   # ── lifecycle FROM the cockpit (the attendee's real prep/verify entrypoints) ────────────────────
-  check "ws prep ${module} converges from the cockpit (attendee self-service)" pod_i "ws prep ${module}" \
-    || hint "attendee 'ws prep ${module}' did not converge — materialize it first: ws prep ${module} --user ${user}, then re-smoke"
+  # --yes is REQUIRED here, not optional: the smoke drives prep through `oc exec` with NO TTY, so prep's
+  # destructive-wipe consent (`[[ -t 0 ]]` → prompt, else → die) can never be answered interactively —
+  # without --yes any module that must evict a resident conflict/leftover dies "not a terminal and no
+  # --yes given" and the gate false-fails (found live: m25-after-m24, 2026-07-16). --yes is the
+  # automation-equivalent of the attendee typing "y", AND it forces a real wipe+re-materialize every run
+  # instead of prep's "already prepared — nothing to do" fast path — so this check actually exercises
+  # materialization (create app → sync → converge) as {user}, not just a pre-existing healthy state.
+  check "ws prep ${module} --yes converges from the cockpit (attendee self-service)" pod_i "ws prep ${module} --yes" \
+    || hint "attendee 'ws prep ${module} --yes' did not converge — materialize it first: ws prep ${module} --user ${user} --yes, then re-smoke"
   # --entry-only on purpose: the smoke targets a freshly-materialized ENTRY state; a completed lab's
   # END checks legitimately go red on an entry state (verify scripts are mode-split, template rule 14).
   check "ws verify ${module} --entry-only passes N/N in the cockpit" pod_i "ws verify ${module} --entry-only" \
@@ -875,7 +899,7 @@ cmd_solve() {  # instructor: materialize the module END state (entry chart with 
   if [[ "$(meta_expect_degraded "$module")" == "true" ]]; then
     wait_materialized "$(app_name "$module" "$user")" "$(meta_wait "$module")"
   else
-    wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+    wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")" "$(meta_require_sync "$module")"
   fi
   echo
   ok "${module} solved for ${user} — demo-ready."
