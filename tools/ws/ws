@@ -249,6 +249,15 @@ meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); 
   awk '$1=="waitSeconds:"{print $2; exit}' "$meta"
 }
 
+meta_expect_degraded() {  # module → "true" if the module SEEDS AN INTENTIONAL FAULT (ws-meta
+  # expectDegraded) so its Argo app is Degraded/OutOfSync BY DESIGN (a broken 0/1 seed + an
+  # operator-managed DevWorkspace). ws start/solve then wait for the sync OPERATION to land, not for
+  # Healthy/Synced — otherwise set -e would fail every start. `ws verify` is the real correctness gate.
+  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
+  [[ -f "$meta" ]] || return 0
+  awk '$1=="expectDegraded:"{print $2; exit}' "$meta"
+}
+
 meta_smoke_cmds() {  # module → ws-meta smokeCommands list (OPTIONAL, default empty). Each entry is a
   # representative attendee command a module genuinely leans on (an in-terminal `mvn …`, an `argocd app
   # delete`); `ws smoke` runs each as {user} in the live cockpit and asserts exit 0. ${USER} is resolved
@@ -560,6 +569,24 @@ wait_healthy() {  # appname [timeout_s]
   return 1
 }
 
+wait_materialized() {  # app [timeout] — for expectDegraded modules whose Argo app is Degraded/OutOfSync
+  # by design (intentional-fault seed + operator-managed DevWorkspace): wait for the sync OPERATION to
+  # reach a terminal phase (manifests landed + hooks ran), then return. NEVER fails ws start — the app is
+  # unhealthy on PURPOSE; `ws verify` confirms the world is actually up.
+  local app="$1" timeout="${2:-180}" t=0 phase
+  info "materializing ${app} (Degraded-by-design; up to ${timeout}s)…"
+  while (( t < timeout )); do
+    phase="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
+    if [[ "$phase" == "Succeeded" || "$phase" == "Failed" || "$phase" == "Error" ]]; then
+      ok "entry state materialized (sync ${phase}; app stays Degraded by design — confirm: ws verify)"
+      return 0
+    fi
+    sleep 5; t=$((t+5))
+  done
+  info "still settling after ${timeout}s (op=${phase:-none}) — app is Degraded by design; confirm with ws verify"
+  return 0
+}
+
 cmd_list() {
   heal_if_behind   # a just-published module should list here without a pod restart (mirror-clone only)
   echo "Modules with entry states:"
@@ -600,7 +627,11 @@ cmd_start() {
   # Spec changes on an EXISTING app (e.g. solve->start) can serve Argo's cached manifests;
   # force a re-render + real operation (M11 G1: solve materialized only after refresh+sync).
   sync_app_operation "$(app_name "$module" "$user")"
-  wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+  if [[ "$(meta_expect_degraded "$module")" == "true" ]]; then
+    wait_materialized "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+  else
+    wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+  fi
   echo
   ok "${user} can start ${module}."
 }
@@ -841,7 +872,11 @@ cmd_solve() {  # instructor: materialize the module END state (entry chart with 
   # solve flips a helm parameter on an EXISTING app — without a hard-refresh + operation Argo
   # can serve the cached solve=false render and "solve" becomes a silent no-op (M11 G1 flag #1).
   sync_app_operation "$(app_name "$module" "$user")"
-  wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+  if [[ "$(meta_expect_degraded "$module")" == "true" ]]; then
+    wait_materialized "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+  else
+    wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")"
+  fi
   echo
   ok "${module} solved for ${user} — demo-ready."
 }
