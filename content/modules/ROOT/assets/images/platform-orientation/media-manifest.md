@@ -58,7 +58,7 @@ Record with asciinema as **user1** in `user1-dev` (reset first: `ws reset m01`).
 ```sh
 # (record from here)
 oc project user1-dev
-oc new-app --image=image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0 --name=parasol-web
+oc new-app --image=image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web:1.0 --name=parasol-web
 oc rollout status deployment/parasol-web
 oc scale deployment/parasol-web --replicas=3
 oc get pods -o wide

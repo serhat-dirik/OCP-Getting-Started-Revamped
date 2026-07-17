@@ -7,7 +7,7 @@ include::partial$version-attributes.adoc[]
 // every exercise: injected rollouts ~30-40s each on a cache-warm node; a 200-request in-pod loop 6.1s; the
 // fault call 5.0s; policy propagation ~5s. The shared control plane (istiod + Kiali in istio-system) is
 // platform substrate and was NOT mutated. KNOWN PLATFORM BLOCKER captured at build and flagged below: the
-// parasol-images image-puller RoleBinding omits {user}-mesh SAs, so a meshed rollout onto a cache-miss node
+// ogsr-parasol-images image-puller RoleBinding omits {user}-mesh SAs, so a meshed rollout onto a cache-miss node
 // fails ImagePull — pre-flight check #3. NAMESPACE in output is the sample user user4-mesh.
 
 This module has one arc and it builds: *naked services → meshed → encrypted → visible → shiftable → resilient → locked to identity → served at the edge*.
@@ -72,11 +72,11 @@ Expect `istio v1.28.6 Healthy`, a running `istiod`, and a healthy Kiali. If the 
 +
 [source,sh,role=execute]
 ----
-oc auth can-i get imagestreams/layers -n parasol-images \
+oc auth can-i get imagestreams/layers -n ogsr-parasol-images \
   --as=system:serviceaccount:user4-mesh:default
 ----
 +
-This *must* print `yes`. If it prints `no`, the `parasol-images` image-puller RoleBinding does not include the `{user}-mesh` ServiceAccounts, and *every* enrollment rollout that lands a pod on a node without the image cached will fail `ImagePullBackOff` (`authentication required`). The app appears to work at entry only because the initial pods were scheduled onto nodes that had the images cached. *Fix before delivery* (platform action): add `"mesh"` to the suffix list in `gitops/workshop-config/templates/parasol-images-pull.yaml` and sync the workshop-config layer. See *Watchouts*.
+This *must* print `yes`. If it prints `no`, the `ogsr-parasol-images` image-puller RoleBinding does not include the `{user}-mesh` ServiceAccounts, and *every* enrollment rollout that lands a pod on a node without the image cached will fail `ImagePullBackOff` (`authentication required`). The app appears to work at entry only because the initial pods were scheduled onto nodes that had the images cached. *Fix before delivery* (platform action): add `"mesh"` to the suffix list in `gitops/workshop-config/templates/parasol-images-pull.yaml` and sync the workshop-config layer. See *Watchouts*.
 
 . *Kiali is reachable at its route.*
 +
@@ -116,7 +116,7 @@ They're gone — that's the headline change, and it's the first thing a migratin
 Because that's a *cluster-scoped* edit to the Namespace object, and an attendee is admin only *within* their namespace — exercise 1 shows the exact `Forbidden`. A namespace tenant enrolls *per workload* with `sidecar.istio.io/inject: "true"` on the pod template, which is finer-grained anyway. The namespace *is* already a discovered mesh tenant (the platform set `istio-discovery=enabled`); discovery is what scopes istiod to the namespace, injection is the separate per-workload toggle.
 
 *3. "The pull-secret / my meshed pod is stuck on `ImagePullBackOff` — what's wrong?"*::
-Almost certainly the pre-flight blocker (#3): the `parasol-images` image-puller RoleBinding doesn't cover the `{user}-mesh` ServiceAccounts, so when an enrollment rollout schedules a pod onto a node that doesn't already have the image cached, the pull fails with `authentication required`. The fix is platform-side (add `{user}-mesh` to the puller grant). If you hit it live before the fix lands, the pod will recover once it reschedules onto a cache-warm node, or you can pin the Deployment to such a node as a stopgap. This is *not* an attendee error — check it in pre-flight.
+Almost certainly the pre-flight blocker (#3): the `ogsr-parasol-images` image-puller RoleBinding doesn't cover the `{user}-mesh` ServiceAccounts, so when an enrollment rollout schedules a pod onto a node that doesn't already have the image cached, the pull fails with `authentication required`. The fix is platform-side (add `{user}-mesh` to the puller grant). If you hit it live before the fix lands, the pod will recover once it reschedules onto a cache-warm node, or you can pin the Deployment to such a node as a stopgap. This is *not* an attendee error — check it in pre-flight.
 
 *4. "I set `timeout: 3s` but the faulted call took 5 seconds — is the timeout broken?"*::
 No — it's correct Istio behavior and a genuinely useful thing to know. Istio applies *fault injection* in a filter that runs *ahead* of the router, so an injected delay (or abort) is *not* subject to that same route's `timeout` or `retries`. Fault injection tests *how the caller copes* with a slow dependency; it doesn't exercise the route's own timeout. To see the timeout fire you need a genuinely slow *upstream* (a real slow endpoint), which the sample fraud service isn't. The timeout/retry/circuit-breaker config is real and applied (confirm it with `istioctl proxy-config cluster`); observing it trip live waits on a slower upstream.
@@ -127,7 +127,7 @@ Because fraud v1 and v2 run the *same image* in this lab (v2 carries a `version`
 == Watchouts
 
 * *[BLOCKER] `{user}-mesh` image-pull grant.*
-The `parasol-images` `workshop-image-pullers` RoleBinding lists `{user}-dev/-stage/-prod/-cicd` ServiceAccounts but *not* `{user}-mesh` (the mesh namespaces are net-new for this module). Result: every enrollment rollout that lands a pod on a cache-miss node fails `ImagePullBackOff`. Entry looks fine only because the initial pods were cache-warm. *Permanent fix:* add `"mesh"` to the suffix `list` in `gitops/workshop-config/templates/parasol-images-pull.yaml` and sync workshop-config. Pre-flight check #3 catches it.
+The `ogsr-parasol-images` `workshop-image-pullers` RoleBinding lists `{user}-dev/-stage/-prod/-cicd` ServiceAccounts but *not* `{user}-mesh` (the mesh namespaces are net-new for this module). Result: every enrollment rollout that lands a pod on a cache-miss node fails `ImagePullBackOff`. Entry looks fine only because the initial pods were cache-warm. *Permanent fix:* add `"mesh"` to the suffix `list` in `gitops/workshop-config/templates/parasol-images-pull.yaml` and sync workshop-config. Pre-flight check #3 catches it.
 * *Revert STRICT mutual TLS before the rest of the lab.*
 The mTLS beat applies a namespace-wide STRICT `PeerAuthentication`, which blocks the un-meshed `demo-client` from *everything* — and the demo-client drives traffic in later exercises. The lab deletes the policy at the end of exercise 2; if an attendee's later traffic-driving `curl`s all fail with connection resets, check for a leftover STRICT `PeerAuthentication`.
 * *Sidecar overhead scales with users.*

@@ -64,7 +64,7 @@ Record with asciinema as **user1** in `user1-dev` (reset first: `ws reset m02`).
 ```sh
 # (record from here)
 oc project user1-dev
-GITEA=$(oc get route gitea -n gitea -o jsonpath='{.spec.host}')   # or paste your Gitea host
+GITEA=$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}')   # or paste your Gitea host
 # 1. deploy the database from the Parasol catalog template
 oc process openshift//parasol-postgresql-ephemeral -p APP_NAME=claims-db | oc apply -f -
 oc rollout status deployment/claims-db
