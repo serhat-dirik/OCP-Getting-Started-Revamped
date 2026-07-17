@@ -1,0 +1,126 @@
+{{- if .Values.multi_user.manageHtpasswd }}
+# =============================================================================
+# Workshop users (Sync hook, wave -8) — the declarative twin of
+# bootstrap/install.sh's [2/6] steps 2a + 2a'. An htpasswd init container (ships
+# /usr/bin/htpasswd) builds the file into a MEMORY-backed emptyDir; the oc main container
+# creates the openshift-config htpasswd Secret from it and appends the `workshop-users`
+# HTPasswd IdP to oauth/cluster ONLY IF ABSENT (never a full-list server-side apply, which
+# would wipe a cluster's pre-existing IdPs). Records oauth_idp_ownedbyus so the uninstall
+# removes exactly the entry we added. # TODO(verify-on-cluster): htpasswd present on the
+# httpd image; OAuth JSON-patch indexes behave on the live singleton.
+# Disable (multi_user.manageHtpasswd=false) when the platform base CI already provisions the
+# userN htpasswd identities from the FSC multi_user roster.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogsr-workshop-users
+  namespace: {{ .Values.namespaces.system }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-8"
+  labels:
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "ogsr-bootstrap.ownerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: ogsr-bootstrap
+      restartPolicy: Never
+      volumes:
+        - name: handoff
+          emptyDir:
+            medium: Memory   # credential handoff between init + main, never on disk
+      initContainers:
+        - name: htpasswd-gen
+          image: {{ .Values.images.htpasswd }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: USERS
+              value: {{ include "ogsr-bootstrap.userList" . | quote }}
+            # Non-secret shared workshop password by design (throwaway attendee logins).
+            - name: WS_PASS
+              value: {{ .Values.workshop_user_password | quote }}
+          args:
+            - |
+              set -euo pipefail
+              read -ra U <<< "$USERS"
+              first=1
+              for u in "${U[@]}"; do
+                if [[ "$first" == "1" ]]; then
+                  htpasswd -B -b -c /handoff/htpasswd "$u" "$WS_PASS" >/dev/null 2>&1
+                  first=0
+                else
+                  htpasswd -B -b /handoff/htpasswd "$u" "$WS_PASS" >/dev/null 2>&1
+                fi
+              done
+              echo "✅ built htpasswd for: $USERS"
+          volumeMounts:
+            - name: handoff
+              mountPath: /handoff
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi
+      containers:
+        - name: apply
+          image: {{ .Values.images.cli }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: STATE_NS
+              value: {{ .Values.namespaces.system | quote }}
+            - name: CONFIG_NS
+              value: {{ .Values.namespaces.config | quote }}
+            - name: OWNER
+              value: {{ .Values.owner | quote }}
+          args:
+            - |
+              set -euo pipefail
+              CM="ogsr-uninstall-state"
+              ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
+              record_once(){
+                local k="$1" v="$2" cur
+                cur="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
+                [[ -n "$cur" ]] && return 0
+                oc patch configmap "$CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
+              }
+
+              info "creating/updating htpasswd-workshop-users Secret (key must be 'htpasswd')"
+              oc create secret generic htpasswd-workshop-users \
+                --from-file=htpasswd=/handoff/htpasswd -n "$CONFIG_NS" \
+                --dry-run=client -o yaml \
+                | oc label --local -f - "workshop.redhat.com/owner=${OWNER}" --overwrite -o yaml \
+                | oc apply -f - >/dev/null
+              ok "htpasswd-workshop-users applied in ${CONFIG_NS}"
+
+              info "merging the 'workshop-users' IdP into oauth/cluster (append-if-absent)"
+              if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' | grep -qw workshop-users; then
+                record_once oauth_idp_ownedbyus false
+                ok "OAuth IdP 'workshop-users' already present — preserved"
+              else
+                IDP='{"name":"workshop-users","mappingMethod":"claim","type":"HTPasswd","htpasswd":{"fileData":{"name":"htpasswd-workshop-users"}}}'
+                if [[ -z "$(oc get oauth cluster -o jsonpath='{.spec.identityProviders}')" ]]; then
+                  oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders\",\"value\":[${IDP}]}]" >/dev/null
+                else
+                  oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders/-\",\"value\":${IDP}}]" >/dev/null
+                fi
+                record_once oauth_idp_ownedbyus true
+                ok "OAuth IdP 'workshop-users' appended (existing IdPs preserved)"
+              fi
+          volumeMounts:
+            - name: handoff
+              mountPath: /handoff
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi
+{{- end }}
