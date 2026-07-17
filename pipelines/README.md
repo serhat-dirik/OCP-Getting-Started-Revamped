@@ -1,10 +1,10 @@
-# pipelines/ — Tekton task library & the parasol-claims build pipeline (M07)
+# pipelines/ — Tekton task library & the parasol-claims build pipeline (pipelines-fundamentals)
 
-The reusable Tekton artifacts for **M07 — Pipelines Fundamentals & Task Libraries**. Everything here
+The reusable Tekton artifacts for **pipelines-fundamentals — Pipelines Fundamentals & Task Libraries**. Everything here
 is `tekton.dev/v1` (GA) and every task is referenced by the **cluster resolver** — the supported
 replacement for the removed `ClusterTask` kind. No bundled-Task YAML is ever copied.
 
-## The three reuse layers M07 teaches
+## The three reuse layers pipelines-fundamentals teaches
 
 | Layer | Where it lives | Example |
 |---|---|---|
@@ -39,7 +39,7 @@ pipelines/
   chart). It is workshop-layer, not `platform-portfolio/`, because it is Parasol-branded content and
   its RBAC is parameterized by the per-user model — the portfolio stays workshop-agnostic.
 - **The per-user pipeline** (the `Pipeline`, a `PipelineRun`/`.tekton` run) is materialized in
-  `{user}-cicd` by the **M07 entry state** (`gitops/entry-states/m07/`, built later). The push +
+  `{user}-cicd` by the **pipelines-fundamentals entry state** (`gitops/entry-states/pipelines-fundamentals/`, built later). The push +
   deploy RBAC is free: the operator pre-creates a `pipeline` SA bound to `edit` + `system:image-builder`
   in every namespace (see `rbac/pipeline-rbac.example.yaml`).
 
@@ -65,15 +65,15 @@ namespace. The run builds from the shared `parasol/parasol-claims` repo in the i
   build this JDK 21 app; the curated `maven-jdk21` library Task is why.
 - **Deploy target + Route:** the pipeline deploys into its own `-cicd` namespace to stay self-contained,
   and its `deploy` step creates the Service and an edge-terminated Route itself (no hand `oc expose`).
-  The parasol-claims prod profile needs a PostgreSQL datasource, so the M07 entry state must provide a
-  `claims-db` in the target namespace (reuse the M04/M05 pattern) for a healthy end state.
+  The parasol-claims prod profile needs a PostgreSQL datasource, so the pipelines-fundamentals entry state must provide a
+  `claims-db` in the target namespace (reuse the config-multienv/storage-stateful pattern) for a healthy end state.
 - **PaC `pipelineRef` must use the cluster resolver.** `.tekton/pull-request.yaml` resolves the
   in-namespace Pipeline via `resolver: cluster` (kind/name/namespace=`{{ target_namespace }}`), NOT a
   bare `pipelineRef: {name: …}`. PaC resolves a name-only ref from the repo's `.tekton` dir or a
   remote-pipeline annotation, never from the run namespace, so a name-only ref fails the webhook with
-  `cannot find referenced pipeline parasol-claims-build-test-deploy` (M07-build, 2026-07-10).
+  `cannot find referenced pipeline parasol-claims-build-test-deploy` (pipelines-fundamentals-build, 2026-07-10).
 - **Gitea PaC needs `git_provider` on the `Repository` CR.** Without it the webhook is rejected with
-  `failed to find git_provider details in repository spec`. The M07 entry state ships `git_provider`
+  `failed to find git_provider details in repository spec`. The pipelines-fundamentals entry state ships `git_provider`
   (type gitea, url, and secret/webhook_secret refs to `gitea-pac-secret`) so the attendee only creates
   the Secret + the Gitea webhook. Gitea webhook signatures are not validated by PaC (webhook-secret is
   still required as the shared trust string).
