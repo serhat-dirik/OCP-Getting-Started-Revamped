@@ -1,0 +1,106 @@
+# =============================================================================
+# Uninstall-state capture (Sync hook, wave -10) — the declarative twin of
+# bootstrap/install.sh's [0/6] step. Records the PRIOR state of every shared/default
+# object the install will touch into the ogsr-uninstall-state ConfigMap, BEFORE the
+# child Applications (wave 0+) mutate anything, so ogsr-uninstall.sh RESTORES rather
+# than blindly deletes. First-write-wins (record_once) → the true prior state survives
+# idempotent re-syncs. # TODO(verify-on-cluster): every oc read here needs a live cluster.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogsr-state-capture
+  namespace: {{ .Values.namespaces.system }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "ogsr-bootstrap.ownerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: ogsr-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: capture
+          image: {{ .Values.images.cli }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: STATE_NS
+              value: {{ .Values.namespaces.system | quote }}
+            - name: OWNER
+              value: {{ .Values.owner | quote }}
+            - name: STACKS
+              value: {{ include "ogsr-bootstrap.installedStacks" . | quote }}
+          args:
+            - |
+              set -euo pipefail
+              CM="ogsr-uninstall-state"
+              ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
+
+              info "ensuring ${STATE_NS}/${CM} exists (owner-labeled)"
+              oc get configmap "$CM" -n "$STATE_NS" >/dev/null 2>&1 || \
+                oc create configmap "$CM" -n "$STATE_NS" >/dev/null
+              oc label configmap "$CM" -n "$STATE_NS" "workshop.redhat.com/owner=${OWNER}" --overwrite >/dev/null
+
+              # record_once KEY VALUE — write only if unset (true first-install snapshot).
+              record_once(){
+                local k="$1" v="$2" cur
+                cur="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
+                [[ -n "$cur" ]] && return 0
+                oc patch configmap "$CM" -n "$STATE_NS" --type merge \
+                  -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
+              }
+
+              info "cluster-monitoring-config (portfolio flips enableUserWorkload=true)"
+              if oc get configmap cluster-monitoring-config -n openshift-monitoring >/dev/null 2>&1; then
+                record_once monitoring_cm_existed true
+                UWM="$(oc get configmap cluster-monitoring-config -n openshift-monitoring -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+                if   echo "$UWM" | grep -qE 'enableUserWorkload:[[:space:]]*true';  then record_once monitoring_uwm_prior true
+                elif echo "$UWM" | grep -qE 'enableUserWorkload:[[:space:]]*false'; then record_once monitoring_uwm_prior false
+                else record_once monitoring_uwm_prior absent; fi
+              else
+                record_once monitoring_cm_existed false
+                record_once monitoring_uwm_prior absent
+              fi
+
+              info "OpenShift GitOps operator (adopted vs created)"
+              if oc get subscription openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
+                record_once gitops_preexisted true
+                RES="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources}' 2>/dev/null | base64 | tr -d '\n' || true)"
+                [[ -n "$RES" ]] && record_once gitops_argocd_controller_resources_b64 "$RES"
+              else
+                record_once gitops_preexisted false
+              fi
+
+              info "Gateway API default GatewayClass"
+              if oc get gatewayclass openshift-default >/dev/null 2>&1; then
+                record_once gatewayclass_preexisted true
+              else
+                record_once gatewayclass_preexisted false
+              fi
+
+              info "OpenShift Lightspeed (pre-installed?)"
+              if oc get olsconfig cluster >/dev/null 2>&1; then
+                record_once lightspeed_preinstalled true
+              else
+                record_once lightspeed_preinstalled false
+              fi
+
+              # The stack list ogsr-uninstall.sh re-derives the operator set from.
+              record_once installed_stacks "$STACKS"
+
+              ok "uninstall-state captured"
+              oc get configmap "$CM" -n "$STATE_NS" -o jsonpath='{.data}'; echo
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi

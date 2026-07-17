@@ -18,7 +18,7 @@ Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-S
 ## Non-negotiable rules
 
 1. **Verify, never recall.** Product versions / UI paths / CR fields come from `versions.yaml` (fresh <60 days) or get re-verified on docs.redhat.com / a live cluster — never from model memory. Mark unverifiable steps `// TODO(verify-on-cluster)`; zero TODOs at Definition of Done.
-2. **Module independence is sacred.** No module assumes another ran. Entry states materialize everything (`gitops/entry-states/mNN/` + `ws start`). Same-namespace modules declare `conflictsWith` in `ws-meta.yaml` (both directions).
+2. **Module independence is sacred.** No module assumes another ran. Entry states materialize everything (`gitops/entry-states/<slug>/` + `ws start`). Same-namespace modules declare `conflictsWith` in `ws-meta.yaml` (both directions).
 3. **Perform first, write second.** Every command block shows output you actually captured; every timing chip is measured; console click-paths are grounded live (labels you can't ground get `[CAPTURE-VERIFY]` + a CLI alternative).
 4. **One source, three renderings.** Workshop / demo (`ifdef::demo` Say/Show/Do) / instructor. Environment values ONLY via attributes (`{user}`, `{ocp_console_url}`, …) — a hardcoded URL is a CI failure.
 5. **Dual-path CLI|Console tabs are the standard** wherever a step can be done both in the terminal and the OpenShift web console. Labels exactly `Console::` then `CLI::` — site-wide tab sync groups by label text. Single path only where duality is genuinely absent (product UIs like Argo CD/RHDH/Gitea, pure-git steps, IDE-centric modules). Details: `docs/module-template/README.md` rule 12.
@@ -38,14 +38,14 @@ Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-S
 
 ## Repo map
 
-`content/` Antora, three site configs; pages at `modules/ROOT/pages/mNN-<slug>/{concept,lab,wrapup,instructor,troubleshooting}.adoc` · `apps/` Parasol services (Quarkus-primary) · `platform-portfolio/` standalone GitOps installer (workshop-agnostic, reusable for PoC clusters) · `gitops/` workshop layer (workshop-config + entry-states) · `pipelines/` Tekton task library · `slides/outlines/` → PPTX build · `tools/ws` CLI + `tools/verify` scripts · `bootstrap/` one-command cluster installer · `showroom/` in-cluster cockpit build (its `site.yml` needs the workshop-owned `antora-ext` image — stock antora images fail on it) · `docs/` contributor docs, ADRs, module template, research notes · `.claude/agents/` specialized agent definitions you may delegate to.
+`content/` Antora, three site configs; pages at `modules/ROOT/pages/<slug>/{concept,lab,wrapup,instructor,troubleshooting}.adoc` (slug-named; a module's number is its position in `/modules.yaml`) · `apps/` Parasol services (Quarkus-primary) · `platform-portfolio/` standalone GitOps installer (workshop-agnostic, reusable for PoC clusters) · `gitops/` workshop layer (workshop-config + entry-states) · `pipelines/` Tekton task library · `slides/outlines/` → PPTX build · `tools/ws` CLI + `tools/verify` scripts · `bootstrap/` one-command cluster installer · `helm/bootstrap/` FSC entrypoint chart (RHDP `field-content` target; declarative twin of `bootstrap/install.sh`) · `showroom/` in-cluster cockpit build (its `site.yml` needs the workshop-owned `antora-ext` image — stock antora images fail on it) · `docs/` contributor docs, ADRs, module template, research notes · `.claude/agents/` specialized agent definitions you may delegate to.
 
 ## Frequent commands
 
 - Preview content: `./utilities/lab-serve`, or build with `cd content && npx antora site-workshop.yml` (also `site-demo.yml` / `site-instructor.yml`)
 - Stand up a cluster: copy `bootstrap/vars.example.yaml` → `bootstrap/vars.yaml`, edit it, then `./bootstrap/install.sh` (reads `vars.yaml`; no CLI flags)
 - Tear down (non-invasive, adoption-aware): `./bootstrap/ogsr-uninstall.sh --dry-run` to preview the WIPE/PRESERVE plan, then `./bootstrap/ogsr-uninstall.sh`
-- Module lifecycle: `tools/ws/ws start|verify|reset|solve mNN [userN]` (attendee-facing text says `ws prep`)
+- Module lifecycle: `tools/ws/ws start|verify|reset|solve <module> [userN]` — module = `mNN` (position in `/modules.yaml`) or the slug (attendee-facing text says `ws prep`)
 - Lint locally: `vale content/`, `yamllint .`, `shellcheck`, `helm lint` on charts
 
 ## Git flow

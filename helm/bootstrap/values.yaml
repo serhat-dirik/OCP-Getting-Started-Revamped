@@ -1,0 +1,90 @@
+# =============================================================================
+# ogsr-bootstrap — FSC entrypoint values contract
+# =============================================================================
+# RHDP (Field Sourced Content) auto-injects deployer.*, gitops.*, and — when
+# provisioned — litemaas.* and multi_user.* onto the `field-content` Application's
+# Helm values. Everything else has a safe default so the chart also installs on any
+# OpenShift 4.20+ cluster (BYO / partner) with one small values override.
+# NO cluster domain is ever hardcoded here (privacy guard forbids live domains) —
+# deployer.domain is the single source and stays "" until the platform injects it.
+# =============================================================================
+
+# --- RHDP-injected: cluster coordinates (set by the platform — DO NOT hardcode) ---
+deployer:
+  domain: ""        # injected e.g. apps.cluster-xyz.example.com  (ingress apps domain)
+  apiUrl: ""        # injected e.g. https://api.cluster-xyz.example.com:6443
+
+# --- RHDP-injected: self-reference so child Applications point back at this repo ---
+# Under FSC these mirror the three order parameters (GitOps Repo URL / Revision / Path).
+gitops:
+  repoURL: "https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
+  revision: "main"
+  path: "helm/bootstrap"   # informational: the path RHDP points `field-content` at
+
+# --- RHDP-injected (only when a MaaS key was provisioned): LiteMaaS / MaaS LLM ------
+# Default disabled. When enabled, the maas-secret Job materializes the OpenShift
+# Lightspeed `credentials` Secret (key: apitoken) from apiKey — the same contract
+# bootstrap/install.sh creates imperatively today. Enable stacks.lightspeed alongside.
+litemaas:
+  enabled: false
+  apiUrl: ""              # OpenAI/vLLM-compatible base, ends in /v1
+  apiKey: ""              # sk-…  (injected; never committed — lives only in the rendered Secret)
+  model: "llama-scout-17b"
+
+# --- RHDP-injected (only when multi-user was requested): attendee roster ------------
+# num_users drives the htpasswd roster + workshop-config userCount. `users` is the
+# optional explicit FSC roster ([{username: user1}, …]); when empty the chart derives
+# userPrefix1..userPrefix{num_users}.
+multi_user:
+  num_users: 5
+  userPrefix: "user"
+  users: []
+  # When the platform base CI already provisions the userN htpasswd identities from the FSC
+  # roster, set false to skip the htpasswd Secret + OAuth IdP Job. Default true (self-provision,
+  # as bootstrap/install.sh does) so the chart also stands users up on a BYO cluster.
+  manageHtpasswd: true
+
+# --- Shared workshop password (console/CLI htpasswd login AND Gitea) -----------------
+# A SHARED, throwaway, non-secret value by design (the attendee users are disposable).
+# Keep it simple/memorable. Overridable per order.
+workshop_user_password: "openshift"
+
+# --- Platform stack selection (mirrors bootstrap/vars.yaml) --------------------------
+# core-devtools + batch are ALWAYS installed (baseline: git-localize anchor, dev tools,
+# and the Kueue/KEDA CRDs workshop-config depends on). The three below are opt-in.
+stacks:
+  lightspeed: false   # ai-assist stack (OpenShift Lightspeed). Requires litemaas.* for the MaaS key.
+  auth: false         # auth stack (Red Hat build of Keycloak) — M13 "Securing Apps with Keycloak".
+  resilience: false   # resilience stack (OADP + RHSI) — M21. PREREQ: ODF/MCG for the S3 target.
+
+# --- Namespaces (parameterized so the upcoming ogsr- rename is a values flip) --------
+# gitea/showroom MUST match the namespaces the reused portfolio + workshop-config
+# components actually deploy into (today: gitea, showroom). When the portfolio flips to
+# ogsr- prefixes, flip these in lockstep — no chart edit needed.
+namespaces:
+  gitea: "gitea"
+  showroom: "showroom"
+  system: "ogsr-system"             # owner-labeled home for the uninstall-state CM + bootstrap SA
+  lightspeed: "openshift-lightspeed" # product-canonical — never prefix (OLM owns the name)
+  config: "openshift-config"         # product-canonical — never prefix
+
+# --- In-cluster Gitea mirror coordinates (match git-mirror + workshop-config) --------
+gitea:
+  org: "parasol"
+  repo: "ocp-getting-started"
+
+# --- Argo CD instance the child Applications live in ---------------------------------
+argocd:
+  namespace: "openshift-gitops"
+  project: "default"
+
+# --- RHDP integration + non-invasive delivery labels --------------------------------
+owner: "ogsr"                        # workshop.redhat.com/owner — enumeration + safe uninstall
+demoApplication: "ocp-getting-started"  # demo.redhat.com/application — RHDP health grouping
+
+# --- Job images (idempotent, restricted-SCC-safe, no runtime dnf) -------------------
+images:
+  # oc + curl + bash on every connected cluster; ≥512Mi (oc OOMs at 256Mi).
+  cli: "registry.redhat.io/openshift4/ose-cli:latest"
+  # ships /usr/bin/htpasswd (httpd-tools); UBI, pullable without a pull secret.
+  htpasswd: "registry.access.redhat.com/ubi9/httpd-24:latest"

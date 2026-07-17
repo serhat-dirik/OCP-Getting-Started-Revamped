@@ -47,14 +47,51 @@ Demos are **not** workshop paths and never appear on the attendee index. The dem
 flavor (`site-demo.yml`, presenter Say/Show/Do blocks per module) feeds a **separate
 SA-Demos showroom** whose purpose is fluent, presenter-led demonstrations with
 talk-and-show points — reusing all the module preparation without the lab framing.
-*(Direction of 2026-07-11; build slice queued — see 06-BACKLOG "SA-Demos showroom".)*
+*(Direction of 2026-07-11 — the cockpit itself is described below; demo-path
+composition pages are still queued, see 06-BACKLOG "SA-Demos showroom".)*
 
 | Demo path | Audience | Sequence |
 |---|---|---|
 | `DEMO-EXEC-45` | 45-minute executive demo (presenter-led) | M03 + M08 + M10 + M23 |
 
-More demo paths (e.g. "OpenShift Advanced App Platform Demo") are composed as the
-SA-Demos showroom lands.
+More demo paths (e.g. "OpenShift Advanced App Platform Demo") are composed as
+SA-Demos content work continues.
+
+## SA-Demos cockpit
+
+The SA-Demos showroom above is a **cockpit**, not just a set of pages: a second,
+shared Showroom instance (`templates/showroom-demos.yaml` in `gitops/workshop-config/`)
+that builds and serves the demo rendering the same way each attendee cockpit serves
+the workshop rendering — split-pane guide + tool tabs, built at pod-init from the
+in-cluster mirror. It is **one shared instance**, not one per attendee: there is no
+"SA user," so it carries no terminal and no per-attendee identity (see the template's
+header comment for the full reasoning). Use it to run a demo end-to-end from a
+browser tab: the left pane carries the Say/Show/Do talk track, the right pane is
+one-click launchers into Console, Gitea, Argo CD, Dev Spaces, Dev Hub, and SonarQube
+— the same tools every module demo references. A demo step that needs a live shell
+uses the presenter's own already-authenticated attendee cockpit (a reserved session
+is the natural fit — see "Reserved showrooms" below) rather than this one.
+
+**URL pattern:** `https://showroom-demos.<cluster-domain>` (parallel to
+`showroom-<user>.<cluster-domain>` for attendee cockpits, just without a user segment).
+
+**What it serves:** the `demo: true` Antora rendering — `showroom/site-demo.yml`
+in-cluster (the demo-flavor sibling of `showroom/site.yml`, which the attendee
+cockpit builds), equivalent in content terms to `content/site-demo.yml`. Every
+module's `ifdef::demo[]` Say/Show/Do block renders here; workshop-only exercise
+framing (`ifdef::workshop[]`) does not.
+
+**How to disable at provisioning:** set `showroomDemos.enabled: false` in the
+`workshop-config` values (e.g. a pure attendee-only run with no SA presenting live
+demos). It defaults to **true**. The cockpit shares its namespace with the attendee
+showrooms by default (`showroomDemos.namespace: ""` inherits `showroom.namespace`);
+set that value explicitly only if it should live in its own namespace.
+
+**Not yet built** (queued in 06-BACKLOG "SA-Demos showroom," landing with the
+`ogsr-` rename slice): a consolidated Quick-Access page (every deployed URL, the
+shared workshop password, admin/troubleshooting pointers) and a Troubleshooting page
+inside this cockpit. This section covers the cockpit plumbing only — the shared
+instance that will host those pages once they land.
 
 ## Module selection at provision time (planned)
 

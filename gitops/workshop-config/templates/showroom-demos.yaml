@@ -1,0 +1,333 @@
+{{- /*
+  SA-Demos cockpit — ONE shared presenter cockpit serving the DEMO rendering (site-demo.yml
+  equivalent — see showroom/site-demo.yml), so an SA can run a customer/exec demo straight from a
+  browser tab using the Say/Show/Do talk track instead of stitching module pages together by hand.
+  Owner direction 2026-07-11 (docs/sa-provisioning-guide.md "Demo paths"); this is the plumbing
+  half — content (demo-path composition pages, the Quick-Access/Troubleshooting pages queued in
+  06-BACKLOG "SA-Demos showroom") lands separately.
+
+  NOT modeled 1:1 on showroom.yaml — it is genuinely a different kind of object (one shared
+  instance vs. one Deployment per attendee), so three things deliberately diverge. Each is a
+  design call made while implementing this template; flagged here for review, not silently
+  decided:
+
+  1. NO TERMINAL. showroom.yaml's terminal logs in as a SPECIFIC attendee ({user}) using the
+     shared workshop password read from a cross-namespace Secret. There is no attendee identity
+     for a shared, presenter-facing cockpit to borrow — picking any one real user (user1, the
+     reserved user5, ...) would be misleading (this cockpit is not "logged in as" that person) and
+     would silently break if that user's session is reset independently. So: no ttyd container, no
+     terminal-prep init step, no home PVC, and consequently no need for the `showroom` ServiceAccount
+     or its cross-namespace `workshop-user-creds` read Role at all — this template invents ZERO new
+     RBAC (a stricter bar than "no more than showroom.yaml's pattern"). A demo's Do:: blocks that
+     need a live shell use the SA's own already-authenticated attendee cockpit (their reserved
+     session is the natural fit) or the Console/Gitea/Argo tool tabs below, same as here.
+  2. REPLICAS = 1, same as every per-attendee showroom. It's a single presentation aid viewed by
+     one presenter (or a few people on one screen-share) at a time, not a fan-out workload — no
+     argument for more, and `Recreate` avoids two pods mid-rebuild serving inconsistent content.
+  3. NAMES: Deployment/Service/Route/ConfigMaps are all `showroom-demos` (proxy/userdata
+     ConfigMaps suffixed accordingly) — parallel to `showroom-{user}` but without a user segment,
+     since there isn't one. Route host `showroom-demos.<domain>` follows the same pattern.
+
+  Deliberately NOT sharing objects with showroom.yaml (own Namespace declaration, own nginx
+  ConfigMap, own userdata ConfigMap) even though both usually land in the same namespace: this
+  template must produce a working cockpit on its own if someone sets showroomDemos.enabled=true
+  with showroom.enabled=false (e.g. a demo-only PoC cluster, no attendee cohort at all). The
+  Namespace declaration is safe to duplicate when both render into the same namespace (byte-
+  identical objects; Argo/kubectl apply it twice, no drift) — see 01-ARCHITECTURE §4.0.5 (PoC mode
+  is first-class) for why self-containment wins over avoiding that cosmetic overlap.
+
+  DOES share showroom.images / showroom.nookbagBundle (same physical images doing the same job —
+  duplicating those into a second values block would just be a second place to forget to bump).
+
+  Serving pipeline (per pod, one pod total): init content-clone (mirror → /showroom/repo) → init
+  antora-build (showroom/site-demo.yml → /showroom/www, cockpit-level attributes injected, NO
+  per-user attributes — see the userdata ConfigMap below). Runtime containers: nginx (8080 proxy,
+  content only — no /tty-* routes, so no long HAProxy websocket timeouts needed on the Route
+  either) + content (nookbag UI over /showroom/www, :8000).
+*/ -}}
+{{- if .Values.showroomDemos.enabled }}
+{{- $ns := .Values.showroomDemos.namespace | default .Values.showroom.namespace }}
+{{- $domain := .Values.clusterDomain }}
+{{- $giteaHost := printf "gitea-gitea.%s" .Values.clusterDomain }}
+{{- $mirrorUrl := printf "https://gitea-gitea.%s/%s/%s.git" .Values.clusterDomain .Values.mirrorOrg .Values.mirrorRepo }}
+{{- $img := .Values.showroom.images }}
+---
+# Shared cockpit namespace. See header: safe to declare even when templates/showroom.yaml also
+# declares it (identical object; co-location is the default, not an accident).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+---
+# nginx reverse proxy for the SA-Demos pod: / → nookbag content (:8000) only. No /tty-top or
+# /tty-bottom locations — see header point 1, there is no terminal to proxy to.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: showroom-demos-proxy
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  nginx.conf: |
+    events {}
+    error_log /dev/stdout info;
+    http {
+      include /etc/nginx/mime.types;
+      server {
+        listen 8080;
+        absolute_redirect off;
+        location / {
+          proxy_pass http://127.0.0.1:8000;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+      }
+    }
+---
+# Cockpit-level Antora attributes → injected as build-time doc attributes, same mechanism
+# showroom.yaml uses per-user (mount at /user_data/). Cluster-wide values only (cluster_domain,
+# tool URLs) — deliberately NO `user` / `page-user` / `password` keys: there is no single attendee
+# identity for a shared cockpit to claim, so {user} et al fall back to antora.yml's safe
+# `user1@`/`openshift@` defaults, exactly as the CI/local-preview demo build already does.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: showroom-demos-userdata
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+data:
+  user_data.yml: |
+    cluster_domain: {{ $domain }}
+    ocp_console_url: https://console-openshift-console.{{ $domain }}
+    gitea_url: https://{{ $giteaHost }}
+    devspaces_url: https://devspaces.{{ $domain }}
+    guid: sa-demo
+    lab_name: OpenShift Application Platform — Getting Started — Demo Guide
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: showroom-demos
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    app.kubernetes.io/name: showroom-demos
+    app.kubernetes.io/instance: showroom-demos
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: showroom-demos
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: showroom-demos
+        app.kubernetes.io/instance: showroom-demos
+    spec:
+      # No serviceAccountName override (defaults to `default`): unlike showroom.yaml, nothing in
+      # this pod talks to the k8s API — no oc-login step, so no need for the showroom SA or its
+      # cross-namespace secret-read Role. See header point 1.
+      initContainers:
+        # 1) Clone the in-cluster monorepo mirror (public repo, valid RHDP wildcard cert → no auth).
+        - name: content-clone
+          image: {{ $img.gitCloner | quote }}
+          env:
+            - name: GIT_REPO_URL
+              value: {{ $mirrorUrl | quote }}
+            - name: GIT_REPO_REF
+              value: {{ $.Values.showroomDemos.contentRef | quote }}
+            - name: CLONE_DIR
+              value: /showroom/repo
+          volumeMounts:
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+        # 2) Build the DEMO rendering into /showroom/www — showroom/site-demo.yml, the demo-flavor
+        #    sibling of showroom.yaml's showroom/site.yml (see that file's header for why the
+        #    in-pod build needs its own playbook rather than referencing content/site-demo.yml
+        #    directly).
+        - name: antora-build
+          image: {{ $img.antora | quote }}
+          env:
+            - name: FILES_DIR
+              value: /showroom/repo
+            - name: OUTPUT_DIR
+              value: /showroom/www
+            - name: ANTORA_SITE_FILE
+              value: showroom/site-demo.yml
+          volumeMounts:
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+            - name: showroom-files
+              mountPath: /showroom/www
+              subPath: www
+            - name: userdata
+              mountPath: /user_data/
+      containers:
+        # nginx proxy — the only container the Route targets.
+        - name: nginx
+          image: {{ $img.nginx | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: web
+              containerPort: 8080
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-pid
+              mountPath: /var/run
+        # nookbag content — serves the built demo site + split-screen UI, reading our ui-config.
+        - name: content
+          image: {{ $img.content | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GIT_REPO_URL
+              value: {{ $mirrorUrl | quote }}
+            - name: GIT_REPO_REF
+              value: {{ $.Values.showroomDemos.contentRef | quote }}
+            - name: ANTORA_PLAYBOOK
+              value: showroom/site-demo.yml
+            - name: DOMAIN
+              value: {{ $domain | quote }}
+            - name: ZT_UI_ENABLED
+              value: "true"
+            - name: ZT_BUNDLE
+              value: {{ $.Values.showroom.nookbagBundle | quote }}
+            - name: SHOWROOM_UI_CONFIG
+              value: |
+                ---
+                type: showroom
+                default_width: 45
+                persist_url_state: true
+                view_switcher:
+                  enabled: true
+                  default_mode: split
+                antora:
+                  name: modules
+                tabs:
+                  # No terminal tab — see header point 1. Tool tabs are external launchers for the
+                  # same reason showroom.yaml's are: every one of these sends a frame-blocking
+                  # header, so cross-origin iframe embedding is not possible without a cluster-wide
+                  # IngressController change we avoid (non-invasive rule).
+                  - name: OCP Console
+                    url: https://console-openshift-console.{{ $domain }}
+                    external: true
+                  - name: Gitea
+                    url: https://{{ $giteaHost }}
+                    external: true
+                  - name: Dev Spaces
+                    url: https://devspaces.{{ $domain }}
+                    external: true
+                  - name: Argo CD
+                    url: https://student-gitops-server-student-gitops.{{ $domain }}
+                    external: true
+                  - name: Dev Hub
+                    url: https://backstage-developer-hub-rhdh.{{ $domain }}
+                    external: true
+                  - name: SonarQube
+                    url: https://sonarqube-sonarqube.{{ $domain }}
+                    external: true
+          volumeMounts:
+            - name: userdata
+              mountPath: /user_data/
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+            - name: showroom-files
+              mountPath: /showroom/www
+              subPath: www
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+      volumes:
+        - name: showroom-files
+          emptyDir: {}
+        - name: userdata
+          configMap:
+            name: showroom-demos-userdata
+        - name: nginx-config
+          configMap:
+            name: showroom-demos-proxy
+            defaultMode: 420
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-pid
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: showroom-demos
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: showroom-demos
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# SA-Demos cockpit URL: showroom-demos.<apps-domain>. Default router timeouts are fine here (no
+# terminal websocket to keep alive, unlike showroom-{user}'s 1h haproxy timeout annotations).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: showroom-demos
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  host: showroom-demos.{{ $domain }}
+  to:
+    kind: Service
+    name: showroom-demos
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+{{- end }}

@@ -283,9 +283,25 @@ print_plan() {
     if [[ "$st" == "created" ]]; then created="${created} ${name}"; else adopted="${adopted} ${name}(${st})"; fi
   done < <(enumerate_operators)
 
-  if [[ "$(state gitops_preexisted)" == "false" ]]; then gitops_plan="REMOVE (we installed it)"; else gitops_plan="PRESERVE (adopted)"; fi
-  if [[ "$(state monitoring_cm_existed)" == "false" ]]; then mon_plan="REMOVE (we created it)"; else mon_plan="restore enableUserWorkload → $(state monitoring_uwm_prior '?')"; fi
-  if [[ "$(state gatewayclass_preexisted)" == "false" ]]; then gw_plan="REMOVE (we created it)"; else gw_plan="PRESERVE (adopted)"; fi
+  # Three-way plans: created-by-us → REMOVE/restore; recorded-adopted → PRESERVE; NO state record at all
+  # (pre-Wave-1 install, or the state CM was lost) → PRESERVE and say so honestly. Found in the 2026-07-17
+  # verification pass: the old two-way else printed "restore → ?" on a stateless cluster while step 4
+  # correctly skipped — the summary must match the action.
+  case "$(state gitops_preexisted '')" in
+    false) gitops_plan="REMOVE (we installed it)";;
+    true)  gitops_plan="PRESERVE (adopted)";;
+    *)     gitops_plan="PRESERVE (no state recorded)";;
+  esac
+  case "$(state monitoring_cm_existed '')" in
+    false) mon_plan="REMOVE (we created it)";;
+    true)  mon_plan="restore enableUserWorkload → $(state monitoring_uwm_prior '?')";;
+    *)     mon_plan="PRESERVE (no state recorded)";;
+  esac
+  case "$(state gatewayclass_preexisted '')" in
+    false) gw_plan="REMOVE (we created it)";;
+    true)  gw_plan="PRESERVE (adopted)";;
+    *)     gw_plan="PRESERVE (no state recorded)";;
+  esac
 
   echo "ogsr-uninstall — WIPE the workshop, PRESERVE everything the org owns"
   echo

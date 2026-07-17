@@ -1,0 +1,155 @@
+# =============================================================================
+# App-of-apps — child Argo CD Applications (reuse platform-portfolio/stacks/* and
+# gitops/workshop-config; nothing duplicated here).
+# =============================================================================
+# Two-phase git-localize, expressed through sync-waves:
+#   wave 0  pp-core-devtools  — sourced from GitHub (gitops.repoURL). It is the MIRROR
+#           ANCHOR: its own internal waves deploy gitea (wave 0) then the git-mirror job
+#           (wave 1). It must come from GitHub because it CONTAINS the mirror-builder — you
+#           cannot source the thing that builds the mirror from the mirror it builds.
+#   wave 1  pp-batch [+ pp-ai-assist / pp-auth / pp-resilience]  — sourced FROM the
+#           in-cluster mirror (the git-localize payoff); Argo gates this wave on
+#           pp-core-devtools becoming Healthy, i.e. after the mirror job has populated Gitea.
+#   wave 2  workshop-config  — the workshop layer, sourced FROM the mirror (exactly the
+#           source bootstrap/install.sh step 5 uses today).
+# Naming matches install.sh (pp-<stack>, workshop-config) so ogsr-uninstall.sh treats an
+# FSC install identically to a script install.
+# =============================================================================
+{{- $root := . -}}
+{{- $mirror := include "ogsr-bootstrap.mirrorRepoURL" . -}}
+{{- $rev := .Values.gitops.revision -}}
+
+# --- wave 0: core-devtools (mirror anchor: gitea + git-mirror + dev tooling) ----------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pp-core-devtools
+  namespace: {{ .Values.argocd.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    portfolio.redhat.com/stack: core-devtools
+    demo.redhat.com/application: {{ .Values.demoApplication | quote }}
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ .Values.gitops.repoURL }}
+    targetRevision: {{ $rev }}
+    path: platform-portfolio/stacks/core-devtools
+    kustomize:
+      # Rewrite the stack's child Applications to this same repo/revision (as the portfolio
+      # stack-app.template.yaml does), so the whole tree pins to the ordered source.
+      patches:
+        - target:
+            kind: Application
+          patch: |-
+            - op: replace
+              path: /spec/source/repoURL
+              value: {{ .Values.gitops.repoURL }}
+            - op: replace
+              path: /spec/source/targetRevision
+              value: {{ $rev }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.argocd.namespace }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 10
+      backoff: {duration: 15s, factor: 2, maxDuration: 3m}
+
+# --- wave 1: remaining platform stacks, sourced FROM the in-cluster mirror -------------
+{{- $mirrorStacks := list "batch" -}}
+{{- if .Values.stacks.lightspeed }}{{ $mirrorStacks = append $mirrorStacks "ai-assist" }}{{- end -}}
+{{- if .Values.stacks.auth }}{{ $mirrorStacks = append $mirrorStacks "auth" }}{{- end -}}
+{{- if .Values.stacks.resilience }}{{ $mirrorStacks = append $mirrorStacks "resilience" }}{{- end -}}
+{{- range $stack := $mirrorStacks }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pp-{{ $stack }}
+  namespace: {{ $root.Values.argocd.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    portfolio.redhat.com/stack: {{ $stack | quote }}
+    demo.redhat.com/application: {{ $root.Values.demoApplication | quote }}
+    {{- include "ogsr-bootstrap.ownerLabels" $root | nindent 4 }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ $root.Values.argocd.project }}
+  source:
+    repoURL: {{ $mirror }}
+    targetRevision: {{ $rev }}
+    path: platform-portfolio/stacks/{{ $stack }}
+    kustomize:
+      patches:
+        - target:
+            kind: Application
+          patch: |-
+            - op: replace
+              path: /spec/source/repoURL
+              value: {{ $mirror }}
+            - op: replace
+              path: /spec/source/targetRevision
+              value: {{ $rev }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $root.Values.argocd.namespace }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 10
+      backoff: {duration: 15s, factor: 2, maxDuration: 3m}
+{{- end }}
+
+# --- wave 2: workshop layer (users, RBAC, quotas, entry-state AppProject, showroom,
+#     Gitea seeding), sourced FROM the mirror — the git-localize payoff -----------------
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: workshop-config
+  namespace: {{ .Values.argocd.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    demo.redhat.com/application: {{ .Values.demoApplication | quote }}
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ $mirror }}
+    targetRevision: {{ $rev }}
+    path: gitops/workshop-config
+    helm:
+      parameters:
+        - name: userCount
+          value: {{ .Values.multi_user.num_users | quote }}
+        - name: clusterDomain
+          value: {{ .Values.deployer.domain | quote }}
+        # Seed per-user realm-{user} imports only when the auth stack (M13) is installed.
+        - name: sso.enabled
+          value: {{ .Values.stacks.auth | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.argocd.namespace }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 10
+      backoff: {duration: 15s, factor: 2, maxDuration: 3m}

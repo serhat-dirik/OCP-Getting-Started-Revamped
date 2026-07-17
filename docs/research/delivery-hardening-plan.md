@@ -180,6 +180,16 @@ first-install caveat on clusters that already run the same operator dedicated-na
 
 ---
 
+### Verified on C1 (2026-07-17 pass) — two operational facts the checklist below must respect
+
+- **Two GitOps sources, two propagation paths.** The `pp-*` portfolio apps track **GitHub upstream**
+  (auto-poll + selfHeal), while workshop content + entry-states track the **in-cluster Gitea mirror**.
+  `ws git-refresh` therefore propagates content/entry-state changes but does NOT drive `pp-*` — those
+  pick up pushed commits on their own poll. "Re-sync to propagate" means different things per layer.
+- **CRD ambiguity in enumeration commands:** on a cluster with Serverless installed, bare `subscription`
+  resolves to `subscriptions.messaging.knative.dev` and returns zero rows — a false negative. Always use
+  the full `subscriptions.operators.coreos.com` in owner-label enumeration.
+
 ## 6. TODO(verify-on-cluster) — the on-cluster checklist for when tokens return
 
 Local tooling cannot exercise any `oc` path. Verify all of the following on a disposable cluster:

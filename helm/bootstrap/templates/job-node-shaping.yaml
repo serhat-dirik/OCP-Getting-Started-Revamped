@@ -1,0 +1,80 @@
+# =============================================================================
+# Workshop node substrate (Sync hook, wave -9) — the declarative twin of
+# bootstrap/install.sh's node-shaping step. Cluster-scoped, one-time, idempotent
+# (--overwrite): a dedicated BATCH POOL node (label+taint) so M16's toleration+
+# nodeSelector beat is real, and synthetic workshop.redhat.com/zone={a,b,c} labels for
+# M16/M21. Deliberately workshop-namespaced keys (NOT topology.kubernetes.io/zone) so no
+# scheduler/volume controller treats them as a real cloud AZ. Records the touched nodes for
+# the uninstall report (uninstall reverses by label selector, so the record is documentary).
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogsr-node-shaping
+  namespace: {{ .Values.namespaces.system }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+  labels:
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "ogsr-bootstrap.ownerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: ogsr-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: shape
+          image: {{ .Values.images.cli }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: STATE_NS
+              value: {{ .Values.namespaces.system | quote }}
+          args:
+            - |
+              set -euo pipefail
+              CM="ogsr-uninstall-state"
+              POOL="workshop.redhat.com/pool=batch"
+              ZONE_KEY="workshop.redhat.com/zone"
+              ok(){ echo "✅ $*"; }; err(){ echo "❌ $*" >&2; }; info(){ echo "▶ $*"; }
+              record_once(){
+                local k="$1" v="$2" cur
+                cur="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
+                [[ -n "$cur" ]] && return 0
+                oc patch configmap "$CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
+              }
+
+              info "selecting a batch-pool node (pure worker preferred, deterministic by name)"
+              BATCH="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' \
+                        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
+              [[ -n "$BATCH" ]] || BATCH="$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
+              if [[ -n "$BATCH" ]]; then
+                oc label node "$BATCH" "$POOL" --overwrite >/dev/null
+                oc adm taint nodes "$BATCH" "${POOL}:NoSchedule" --overwrite >/dev/null
+                ok "batch pool: ${BATCH} labeled+tainted ${POOL}:NoSchedule"
+              else
+                err "no nodes found to shape a batch pool — M16's dedicated-pool beat will have no target"
+              fi
+
+              info "synthesizing ${ZONE_KEY}={a,b,c} round-robin across all nodes (idempotent)"
+              read -ra NODES <<<"$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
+              ZONES=(a b c); zi=0
+              for n in "${NODES[@]}"; do
+                oc label node "$n" "${ZONE_KEY}=${ZONES[zi % 3]}" --overwrite >/dev/null
+                zi=$((zi + 1))
+              done
+              ok "synthetic zones applied across ${#NODES[@]} node(s)"
+
+              record_once nodes_batch "${BATCH:-}"
+              record_once nodes_zoned "${NODES[*]:-}"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi
