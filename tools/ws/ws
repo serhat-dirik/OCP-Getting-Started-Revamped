@@ -12,6 +12,7 @@
 #   ws doctor                        environment sanity: login, argo, gitea, operators
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
 #   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
+#   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
 # Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
@@ -1373,6 +1374,150 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
   (( wedged == 0 )) || return 1
 }
 
+# ── SA/admin read-only recipes (ws preflight, ws status, ws diag) ────────────────────────────────────
+# Preparation + troubleshooting the installing org's SAs run against a customer/BYO cluster. STRICTLY
+# READ-ONLY by contract: they inspect and report, and NEVER mutate (no delete/patch/apply/create/label) —
+# that is the safety guarantee, kept absolute. Authored off-cluster (tokens expired this session); every
+# oc read is unverified live, so each function carries a # TODO(verify-on-cluster).
+
+pf_row() {  # STATUS label [detail] — print one preflight row; bump PF_WARN/PF_FAIL (globals set in cmd_preflight)
+  local status="$1" label="$2" detail="${3:-}" icon
+  case "$status" in
+    PASS) icon="✅" ;;
+    WARN) icon="⚠" ; PF_WARN=$((PF_WARN + 1)) ;;
+    FAIL) icon="❌"; PF_FAIL=$((PF_FAIL + 1)) ;;
+    *)    icon="•" ;;                                  # INFO / adoption-forecast rows never move the verdict
+  esac
+  printf "  %s %-32s %s\n" "$icon" "$label" "$detail"
+}
+
+cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/install.sh on a customer/BYO cluster.
+  # Reports PASS/WARN/FAIL per check plus a non-invasive "adoption forecast" (what install will ADOPT vs
+  # CREATE — derived exactly as bootstrap/install.sh + ogsr-uninstall.sh decide it), then a verdict + the
+  # exact next command. Exits non-zero if any check FAILs. READ-ONLY. Deliberately does NOT need_oc: a
+  # missing login is a reported check, not a hard abort. # TODO(verify-on-cluster): every oc read below.
+  PF_WARN=0; PF_FAIL=0
+  echo "ws preflight — is this cluster ready to install the workshop on?"
+  echo
+
+  info "Local tooling (bootstrap/install.sh prereqs)"
+  local t
+  for t in oc yq htpasswd openssl git; do
+    if command -v "$t" >/dev/null 2>&1; then
+      pf_row PASS "$t" "$(command -v "$t")"
+    else
+      pf_row FAIL "$t" "not found in PATH — install before bootstrap/install.sh"
+    fi
+  done
+  if command -v yq >/dev/null 2>&1; then
+    local yqv; yqv="$(yq --version 2>/dev/null || true)"
+    case "$yqv" in
+      *"version v4"*|*"version 4."*) : ;;
+      "") pf_row WARN "yq is mikefarah v4" "could not read 'yq --version'" ;;
+      *)  pf_row WARN "yq is mikefarah v4" "got: ${yqv} (install.sh uses go-yq v4 syntax)" ;;
+    esac
+  fi
+  echo
+
+  info "Cluster access"
+  local reachable="false" who server
+  who="$(oc whoami 2>/dev/null || true)"
+  server="$(oc whoami --show-server 2>/dev/null || true)"
+  if [[ -n "$who" ]]; then
+    reachable="true"
+    pf_row PASS "cluster reachable" "as ${who} @ ${server:-?}"
+  else
+    pf_row FAIL "cluster reachable" "not logged in — run: oc login <api-url>, then re-run ws preflight"
+  fi
+
+  if [[ "$reachable" == "true" ]]; then
+    if oc auth can-i '*' '*' --all-namespaces >/dev/null 2>&1; then
+      pf_row PASS "cluster-admin" "have '*' '*' on all namespaces"
+    else
+      pf_row FAIL "cluster-admin" "install requires cluster-admin (oc auth can-i '*' '*' failed)"
+    fi
+
+    local ver maj min
+    ver="$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)"
+    if [[ "$ver" =~ ^([0-9]+)\.([0-9]+) ]]; then
+      maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"
+      if (( maj > 4 || (maj == 4 && min >= 20) )); then
+        pf_row PASS "OpenShift >= 4.20" "cluster is ${ver}"
+      else
+        pf_row FAIL "OpenShift >= 4.20" "cluster is ${ver} — the workshop targets 4.20+"
+      fi
+    else
+      pf_row WARN "OpenShift >= 4.20" "could not read clusterversion (got '${ver}') — verify manually"
+    fi
+
+    # default StorageClass — the workshop provisions RWO (and some RWX) PVCs dynamically.
+    # TODO(verify-on-cluster): confirm the escaped-dot annotation jsonpath prints '<name>=true' for the default SC.
+    local scs default_sc
+    scs="$(oc get storageclass -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}{.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class}{"\n"}{end}' 2>/dev/null || true)"
+    default_sc="$(printf '%s\n' "$scs" | awk -F= '$2 ~ /true/ {print $1; exit}' || true)"
+    if [[ -n "$default_sc" ]]; then
+      pf_row PASS "default StorageClass" "${default_sc}"
+    elif [[ -n "$scs" ]]; then
+      pf_row FAIL "default StorageClass" "StorageClasses exist but none is default — oc annotate sc <name> storageclass.kubernetes.io/is-default-class=true"
+    else
+      pf_row FAIL "default StorageClass" "no StorageClass found — dynamic RWO storage is required"
+    fi
+  else
+    pf_row WARN "cluster checks skipped" "log in, then re-run for admin / version / storage / adoption checks"
+  fi
+  echo
+
+  if [[ "$reachable" == "true" ]]; then
+    info "Adoption forecast (preview only — nothing is changed)"
+    if oc get subscription openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
+      pf_row INFO "OpenShift GitOps" "ADOPT — operator present; install reuses it, uninstall preserves it"
+    else
+      pf_row INFO "OpenShift GitOps" "CREATE — argocd-bootstrap installs it; uninstall removes it"
+    fi
+    if oc get olsconfig cluster >/dev/null 2>&1; then
+      pf_row INFO "OpenShift Lightspeed" "ADOPT — OLSConfig present; ai-assist skipped, existing provider reused"
+    else
+      pf_row INFO "OpenShift Lightspeed" "CREATE — ai-assist installs it when lightspeed:true + a MaaS key are set"
+    fi
+    if oc get configmap cluster-monitoring-config -n openshift-monitoring >/dev/null 2>&1; then
+      local uwm; uwm="$(oc get configmap cluster-monitoring-config -n openshift-monitoring -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+      if printf '%s' "$uwm" | grep -qE 'enableUserWorkload:[[:space:]]*true'; then
+        pf_row INFO "user-workload monitoring" "ADOPT — enableUserWorkload already true; left as-is"
+      else
+        pf_row INFO "user-workload monitoring" "MODIFY — CM exists; install sets enableUserWorkload=true (prior value recorded for restore)"
+      fi
+    else
+      pf_row INFO "user-workload monitoring" "CREATE — install adds cluster-monitoring-config; uninstall removes it"
+    fi
+    if oc get gatewayclass openshift-default >/dev/null 2>&1; then
+      pf_row INFO "GatewayClass openshift-default" "ADOPT — present (a cluster istiod is already active); mesh stack reuses it"
+    else
+      pf_row INFO "GatewayClass openshift-default" "CREATE — added by the mesh stack; uninstall removes it only if ours"
+    fi
+    if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
+      pf_row INFO "OAuth IdP workshop-users" "PRESENT — install reuses it (prior install or a name clash — review)"
+    else
+      pf_row INFO "OAuth IdP workshop-users" "CREATE — appended to oauth/cluster; all existing IdPs preserved"
+    fi
+    if oc get configmap ogsr-uninstall-state -n ogsr-system >/dev/null 2>&1; then
+      pf_row WARN "prior install detected" "ogsr-system/ogsr-uninstall-state exists — this cluster already ran install (re-run is idempotent; or ./bootstrap/ogsr-uninstall.sh first)"
+    fi
+    echo
+  fi
+
+  if (( PF_FAIL > 0 )); then
+    err "NOT ready — ${PF_FAIL} check(s) FAILED (and ${PF_WARN} warning(s)). Resolve the ❌ rows, then re-run: ws preflight"
+    exit 1
+  fi
+  if (( PF_WARN > 0 )); then
+    ok "ready to install, with ${PF_WARN} warning(s) — review the ⚠ rows above."
+  else
+    ok "ready to install — all checks passed."
+  fi
+  echo "   next: cp bootstrap/vars.example.yaml bootstrap/vars.yaml    # then edit users / cluster_domain / maas.api_key / workshop_user_password"
+  echo "         ./bootstrap/install.sh                                 # reads vars.yaml; idempotent"
+}
+
 main() {
   local cmd="${1:-}"; shift || true
   # git-refresh self-parses its own flags (--restart-terminals/--user/--all/--exclude, where
@@ -1410,7 +1555,8 @@ main() {
     reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;
     solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
     doctor)      cmd_doctor;;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,14p';;
+    preflight)   cmd_preflight;;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,15p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
