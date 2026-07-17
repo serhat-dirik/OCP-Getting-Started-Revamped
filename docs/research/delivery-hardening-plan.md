@@ -226,7 +226,7 @@ Local tooling cannot exercise any `oc` path. Verify all of the following on a di
 `README.md` is fixed to the real install contract (`cp vars.example.yaml vars.yaml` → edit →
 `./install.sh`; no CLI flags). `CLAUDE.md` line 46 carries the same stale example
 (`./bootstrap/install.sh --profiles core[,…] --users N --domain …`). I did **not** edit `CLAUDE.md`
-(it is the session operating card / protected config; an agent task does not authorize changing it). The
-one-line fix for the owner to apply:
+(it is the session operating card / protected config; an agent task does not authorize changing it).
+**Applied by the maintainer in commit `4ee4b52`** — the fix that landed:
 
 > `- Stand up a cluster: cp bootstrap/vars.example.yaml bootstrap/vars.yaml`, edit it, then `./bootstrap/install.sh` (reads vars.yaml; no flags). Uninstall: `./bootstrap/ogsr-uninstall.sh`
