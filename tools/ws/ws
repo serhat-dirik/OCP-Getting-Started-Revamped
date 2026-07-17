@@ -11,6 +11,7 @@
 #   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
 #   ws doctor                        environment sanity: login, argo, gitea, operators
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
+#   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
 # Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
@@ -1236,6 +1237,140 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
   [[ "$generated" == "true" ]] && echo "   (randomly generated — record it; the shared workshop password is non-secret by policy)"
 }
 
+delete_app_with_finalizer() {  # app — delete an entry Argo app in ARGO_NS, stripping a stuck finalizer as
+  # a fallback (the same dance as cmd_reset). Safe when the app is already gone. Returns non-zero ONLY if
+  # the app is still wedged after the strip, so the caller can flag it without aborting the whole sweep.
+  local app="$1" t=0
+  oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1 || return 0
+  info "  deleting entry app ${app}…"
+  if ! oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=120s >/dev/null 2>&1; then
+    info "  finalizer still settling on ${app} — namespaces already purged, removing it…"
+    oc patch application "$app" -n "$ARGO_NS" --type=json \
+      -p '[{"op":"remove","path":"/metadata/finalizers"}]' >/dev/null 2>&1 || true
+    while oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; do
+      (( t >= 60 )) && { err "  entry app ${app} stuck deleting — inspect: oc get application ${app} -n ${ARGO_NS} -o yaml"; return 1; }
+      sleep 3; t=$((t+3))
+    done
+  fi
+  return 0
+}
+
+cohort_purge_student_apps() {  # user — delete ALL the user's apps/appsets in the student-gitops control
+  # plane (project proj-<user>), ApplicationSets FIRST (they regenerate deleted apps). cohort-reset is a
+  # cluster-admin op, so this uses the direct k8s path (no student-Argo token needed). No-op when
+  # student-gitops is absent (pre-M09 clusters) or the user owns nothing there. Mirrors purge_apps' admin
+  # path but sweeps the WHOLE per-user project rather than one module's apps.
+  local user="$1" name
+  local proj="proj-${user}"
+  oc get ns "$STUDENT_ARGO_NS" >/dev/null 2>&1 || return 0
+  for name in $(oc get applicationsets.argoproj.io -n "$STUDENT_ARGO_NS" \
+      -o jsonpath="{range .items[?(@.spec.template.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
+    info "  deleting attendee ApplicationSet ${name} (project ${proj})…"
+    oc delete applicationset "$name" -n "$STUDENT_ARGO_NS" --wait=true --timeout=120s >/dev/null 2>&1 || true
+  done
+  for name in $(oc get applications.argoproj.io -n "$STUDENT_ARGO_NS" \
+      -o jsonpath="{range .items[?(@.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
+    info "  deleting attendee Argo app ${name} (project ${proj})…"
+    oc delete application "$name" -n "$STUDENT_ARGO_NS" --wait=true --timeout=120s >/dev/null 2>&1 \
+      || oc patch application "$name" -n "$STUDENT_ARGO_NS" --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+  done
+}
+
+cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH cohort, KEEPING the platform.
+  # "Prune namespaces only and leave the components" — reset every attendee's world to pristine so a new
+  # group starts clean, WITHOUT uninstalling any operator/stack. Per user, in this order: (1) delete the
+  # attendee-created Argo apps in student-gitops (stops selfHeal), (2) purge the four per-user namespaces'
+  # CONTENTS via purge_ns (keeps the namespace shell + its workshop-owned RBAC/quota/LimitRange), (3)
+  # delete the entry-*-<user> apps LAST so the resources-finalizer never deadlocks on a PVC still pinned
+  # by an attendee pod (cmd_reset's SEV1 ordering). Idempotent + safe to re-run.
+  local yes="false" do_restart="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes|-y)                      yes="true"; shift;;
+      --restart-terminals|--restart) do_restart="true"; shift;;
+      -*) die "cohort-reset: unknown option '$1' — usage: ws cohort-reset [--yes] [--restart-terminals]";;
+      *)  die "cohort-reset: unexpected argument '$1' — this is a whole-cohort op (no module/user)";;
+    esac
+  done
+  need_oc
+
+  local users_str users_arr
+  users_str="$(workshop_users)"
+  read -ra users_arr <<< "$users_str"
+  local n="${#users_arr[@]}"
+
+  # Plan first — say exactly what is wiped and what is preserved BEFORE touching anything.
+  echo "ws cohort-reset — wipe ALL per-user state for a fresh cohort (platform preserved)"
+  echo
+  echo "WILL WIPE, for each of ${n} user(s) [${users_arr[*]}]:"
+  echo "  • entry-*-<user> Argo apps in ${ARGO_NS} (module state; finalizers handled)"
+  echo "  • attendee-created Argo apps/appsets in ${STUDENT_ARGO_NS} (project proj-<user>, if present)"
+  echo "  • CONTENTS of <user>-{dev,stage,prod,cicd}: workloads, PVCs, user secrets/configmaps, lab CRs"
+  echo
+  echo "WILL PRESERVE (untouched):"
+  echo "  • platform-portfolio stacks (pp-*), operators, workshop-config"
+  echo "  • gitea, parasol-images, parasol-tasks, showroom infra"
+  echo "  • the per-user namespace SHELLS + their workshop-owned RBAC / quota / LimitRange"
+  if [[ "$do_restart" == "true" ]]; then
+    echo "  • per-user cockpits — RESTARTED at the end (--restart-terminals)"
+  else
+    echo "  • per-user cockpits (left running; add --restart-terminals to cycle them for the new cohort)"
+  fi
+  echo
+
+  # Destructive → require an explicit yes (mirror cmd_prep's TTY/--yes guard exactly).
+  if [[ "$yes" != "true" ]]; then
+    if [[ -t 0 ]]; then
+      local reply
+      read -r -p "Wipe all per-user state for ${n} user(s) now? [y/N] " reply
+      [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]] || { info "nothing changed. Re-run when ready (or use --yes)."; return 0; }
+    else
+      die "not a terminal and no --yes given — re-run: ws cohort-reset --yes"
+    fi
+  fi
+
+  local u ns app wedged=0
+  for u in "${users_arr[@]}"; do
+    echo
+    info "── ${u} ──"
+    # 1. Attendee-created Argo apps FIRST — a selfHeal app would otherwise re-deploy its workloads into a
+    #    namespace we are about to purge and orphan them (cmd_reset's load-bearing ordering).
+    cohort_purge_student_apps "$u"
+    # 2. Purge the four per-user namespaces' CONTENTS. purge_ns keeps the ns shell + RBAC/quota/LimitRange;
+    #    with no keep-module every stale ws-entry-* marker is cleared too. No-op on a missing namespace.
+    for ns in "${u}-dev" "${u}-stage" "${u}-prod" "${u}-cicd"; do
+      purge_ns "$ns"
+    done
+    # 3. Delete the entry apps LAST (namespaces already emptied → the resources-finalizer completes fast).
+    #    Select by the per-user label, then guard on the entry- name so platform/workshop apps are never
+    #    touched even if something else were ever labelled with this user.
+    for app in $(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${u}" -o name 2>/dev/null); do
+      app="${app##*/}"
+      case "$app" in
+        entry-*) delete_app_with_finalizer "$app" || wedged=1 ;;
+        *) : ;;
+      esac
+    done
+  done
+
+  echo
+  if (( wedged == 0 )); then
+    ok "cohort-reset complete — ${n} user(s) wiped to pristine; platform intact."
+  else
+    err "cohort-reset finished, but one or more entry apps were wedged (see above) — re-run cohort-reset or inspect manually."
+  fi
+  echo "   verify: oc get applications -n ${ARGO_NS} | grep entry-   (expect none)"
+  echo "           oc get all -n ${users_arr[0]}-dev                 (expect empty)"
+  echo "   next  : a subsequent 'ws prep mNN <user>' from a cockpit re-materializes any module cleanly."
+
+  if [[ "$do_restart" == "true" ]]; then
+    echo
+    info "restarting cockpits so the new cohort gets fresh pods…"
+    restart_terminals "" true
+  fi
+  (( wedged == 0 )) || return 1
+}
+
 main() {
   local cmd="${1:-}"; shift || true
   # git-refresh self-parses its own flags (--restart-terminals/--user/--all/--exclude, where
@@ -1245,6 +1380,7 @@ main() {
   # passwd/cohort-reset self-parse their own flags (passwd's NEWPASS is a free-form string, not a module;
   # cohort-reset takes no module/user) — route their raw args straight through, like git-refresh.
   [[ "$cmd" == "passwd" ]] && { cmd_passwd "$@"; return; }
+  [[ "$cmd" == "cohort-reset" ]] && { cmd_cohort_reset "$@"; return; }
   local user="" module="" extra=()
   # collect --user anywhere; a bare userN (e.g. `ws start m07 user2`) is the target user, exactly like
   # --user user2 — the first OTHER bare arg is the module. Honoring positional userN closes a footgun:
@@ -1272,7 +1408,7 @@ main() {
     reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;
     solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
     doctor)      cmd_doctor;;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,13p';;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,14p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
