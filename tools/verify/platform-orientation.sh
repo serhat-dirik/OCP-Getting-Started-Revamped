@@ -16,14 +16,14 @@ NS="${USER_NAME}-dev"
 # the script stays environment-agnostic (no hardcoded URLs). Instructors/CI read the
 # route directly; an attendee (userN) cannot read routes in the gitea namespace, so
 # we fall back to the conventional host derived from the cluster ingress domain
-# (route "gitea" in namespace "gitea" → gitea-gitea.<domain>), which every
+# (route "gitea" in namespace "ogsr-gitea" → gitea-ogsr-gitea.<domain>), which every
 # authenticated user can resolve.
 gitea_user_exists() {
   local user="$1" host domain
-  host="$(oc get route gitea -n gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   if [[ -z "$host" ]]; then
     domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-    [[ -n "$domain" ]] && host="gitea-gitea.${domain}"
+    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
   fi
   [[ -n "$host" ]] || return 1
   curl -ksf -o /dev/null "https://${host}/api/v1/users/${user}"

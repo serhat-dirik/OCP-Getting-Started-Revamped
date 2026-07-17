@@ -26,13 +26,13 @@ ingress_domain() {
   oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true
 }
 
-# Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "gitea").
+# Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "ogsr-gitea").
 gitea_host() {
   local host domain
-  host="$(oc get route gitea -n gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   if [[ -z "$host" ]]; then
     domain="$(ingress_domain)"
-    [[ -n "$domain" ]] && host="gitea-gitea.${domain}"
+    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
   fi
   echo "$host"
 }
@@ -103,7 +103,7 @@ route_ready_200() {
 check "namespace ${GITOPS} exists"                       oc get ns "$GITOPS"                                 || hint "workshop layer not applied — run bootstrap/install.sh"
 check "entry marker ws-entry-gitops-fundamentals in ${GITOPS}"           oc get cm ws-entry-gitops-fundamentals -n "$GITOPS"                 || hint "entry app not synced — ws start gitops-fundamentals --user ${USER_NAME}"
 check "student-gitops Argo CD instance reachable"        student_argo_up                                     || hint "student instance missing — sync the workshop-config Argo app (student-argocd.yaml)"
-check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
+check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n ogsr-student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
 check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset gitops-fundamentals --user ${USER_NAME} (or check gitea-fork-gitops-fundamentals-${USER_NAME} Job in ns gitea)"
 check "dev overlay personalized to ${DEV}"               overlay_personalized                                || hint "fork not personalized — ws reset gitops-fundamentals --user ${USER_NAME}"
 

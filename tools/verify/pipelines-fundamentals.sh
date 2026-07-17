@@ -23,10 +23,10 @@ NS="${USER_NAME}-cicd"
 # cluster ingress domain — the attendee-safe pattern; attendees can't read the gitea route).
 gitea_host() {
   local host domain
-  host="$(oc get route gitea -n gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   if [[ -z "$host" ]]; then
     domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-    [[ -n "$domain" ]] && host="gitea-gitea.${domain}"
+    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
   fi
   echo "$host"
 }
@@ -70,7 +70,7 @@ check "Pipeline parasol-claims-build-test-deploy present" oc get pipelines.tekto
 check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing — re-run: ws start pipelines-fundamentals --user ${USER_NAME} (fork job)"
 check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset pipelines-fundamentals --user ${USER_NAME} re-asserts the fork's app content from the mirror"
 check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset pipelines-fundamentals --user ${USER_NAME}"
-check "curated library task image-size-report reachable"  oc get tasks.tekton.dev image-size-report -n parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"
+check "curated library task image-size-report reachable"  oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / solve looks like) -------------------

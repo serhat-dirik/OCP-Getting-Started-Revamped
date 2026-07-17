@@ -30,13 +30,13 @@ ingress_domain() {
   oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true
 }
 
-# Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "gitea").
+# Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "ogsr-gitea").
 gitea_host() {
   local host domain
-  host="$(oc get route gitea -n gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   if [[ -z "$host" ]]; then
     domain="$(ingress_domain)"
-    [[ -n "$domain" ]] && host="gitea-gitea.${domain}"
+    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
   fi
   echo "$host"
 }
@@ -122,7 +122,7 @@ check "namespace ${GITOPS} exists"                       oc get ns "$GITOPS"    
 check "entry marker ws-entry-gitops-at-scale in ${GITOPS}"           oc get cm ws-entry-gitops-at-scale -n "$GITOPS"                 || hint "entry app not synced — ws start gitops-at-scale --user ${USER_NAME}"
 check "student-gitops Argo CD instance reachable"        student_argo_up                                     || hint "student instance missing — sync workshop-config (student-argocd.yaml)"
 check "argocd CLI served for the appset-create beat"     cli_download_ready                                   || hint "server not serving /download/argocd-linux-amd64 — check the student-gitops server route"
-check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
+check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n ogsr-student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
 check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset gitops-at-scale --user ${USER_NAME} (or check gitea-fork-gitops-at-scale-${USER_NAME} Job in ns gitea)"
 check "fork carries rollouts/ overlay (prod-personalized)" fork_file_matches "rollouts/kustomization.yaml" "namespace: ${PROD}" || hint "fork missing gitops-at-scale source — ws reset gitops-at-scale --user ${USER_NAME}"
 check "fork carries applicationset.yaml (personalized)"  fork_file_matches "applicationset.yaml" "proj-${USER_NAME}"            || hint "fork missing the ApplicationSet source — ws reset gitops-at-scale --user ${USER_NAME}"

@@ -38,12 +38,12 @@ VERIFY_DIR="${REPO_ROOT}/tools/verify"
 MODULES_YAML="${WS_MODULES_YAML:-${REPO_ROOT}/modules.yaml}"
 ARGO_NS="${WS_ARGO_NS:-openshift-gitops}"
 ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"
-GITEA_NS="${WS_GITEA_NS:-gitea}"
-STUDENT_ARGO_NS="${WS_STUDENT_ARGO_NS:-student-gitops}"
+GITEA_NS="${WS_GITEA_NS:-ogsr-gitea}"
+STUDENT_ARGO_NS="${WS_STUDENT_ARGO_NS:-ogsr-student-gitops}"
 MIRROR_ORG="${WS_MIRROR_ORG:-parasol}"
 MIRROR_REPO="${WS_MIRROR_REPO:-ocp-getting-started}"
 SOURCE_REVISION="${WS_REVISION:-main}"
-SHOWROOM_NS="${WS_SHOWROOM_NS:-showroom}"
+SHOWROOM_NS="${WS_SHOWROOM_NS:-ogsr-showroom}"
 
 # `ws smoke` targets the LIVE cockpit pod (showroom-<user>) and its ttyd shell container. SMOKE_POD/
 # SMOKE_NS are resolved per-run in cmd_smoke; declared here so the pod_i/pod_x exec helpers (dynamic
@@ -434,7 +434,7 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
 
 # ── student-gitops attendee-app cleanup (SEV1-A) ──────────────────────────────────────────────────
 # Attendee-created apps live in the student-gitops CONTROL PLANE, where attendees have ZERO k8s RBAC
-# (only ARGO RBAC via proj-{user}, ADR-0002). So `oc delete application -n student-gitops` as an
+# (only ARGO RBAC via proj-{user}, ADR-0002). So `oc delete application -n ogsr-student-gitops` as an
 # attendee is Forbidden and the old `2>/dev/null` swallowed it into a silent no-op — a selfHeal
 # survivor (m09/m10 claims-*) then re-deployed into the just-purged namespace and prep/reset never
 # converged (SEV1-A). We instead delete through the STUDENT ARGO API as the attendee: the per-user
@@ -447,7 +447,11 @@ _student_argo_host() {  # → student Argo server route host, derived from the i
   local domain
   domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
   [[ -n "$domain" ]] || return 1
-  echo "student-gitops-server-${STUDENT_ARGO_NS}.${domain}"
+  # Route host is PINNED to its old value (student-argocd.yaml spec.server.host), so it is decoupled
+  # from ${STUDENT_ARGO_NS}: the instance name stays 'student-gitops' and the host must not change
+  # under the ogsr- namespace rename. Do NOT reintroduce ${STUDENT_ARGO_NS} here — it would drift to
+  # student-gitops-server-ogsr-student-gitops.<domain> and miss the actual (pinned) route.
+  echo "student-gitops-server-student-gitops.${domain}"
 }
 _shared_password() {  # → the SHARED workshop password (non-secret). WS_WORKSHOP_PASSWORD overrides
   # for CI; otherwise the gitea workshop-user-creds secret (workshop-config grants attendees a
@@ -495,7 +499,7 @@ argo_purge_apps() {  # user proj [keep] — delete the user's OWN proj apps/apps
     || { info "student Argo unreachable — skipping attendee-app cleanup (${proj})"; return 0; }
   token="$(_argo_token "$user")"
   [[ -n "$token" ]] || { err "could not authenticate ${user} to student Argo — attendee apps in ${proj} NOT cleaned"; \
-    echo "   fix: workshop-config must grant attendees read on gitea/workshop-user-creds, or set WS_WORKSHOP_PASSWORD"; return 0; }
+    echo "   fix: workshop-config must grant attendees read on ogsr-gitea/workshop-user-creds, or set WS_WORKSHOP_PASSWORD"; return 0; }
   while IFS=$'\t' read -r name mod; do
     [[ -n "$name" ]] || continue
     [[ -n "$keep" && "$mod" == "$keep" ]] && continue
@@ -1041,7 +1045,7 @@ restart_terminals() {  # target all-flag [exclude...] — opt-in restart of show
   # requires naming it with --user (i.e. with intent).
   local target="$1" all="$2"; shift 2
   local excludes=("$@")
-  local ns="${WS_SHOWROOM_NS:-showroom}"
+  local ns="${WS_SHOWROOM_NS:-ogsr-showroom}"
   local reserved=" ${WS_RESERVED_USERS:-} "
   local users=() u x skip
   if [[ -n "$target" ]]; then
@@ -1263,7 +1267,7 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
     oc create secret generic workshop-user-creds \
       --from-literal=password="$newpass" -n "${GITEA_NS}" \
       --dry-run=client -o yaml | oc apply -f - >/dev/null
-    ok "workshop-user-creds (gitea/password) updated"
+    ok "workshop-user-creds (ogsr-gitea/password) updated"
   fi
 
   # Verify wiring (never print hashes): every user present in the secret + the IdP still points at it.
@@ -1292,7 +1296,7 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
   if [[ -n "$target_user" ]]; then
     echo
     info "scope: ONLY ${target_user}'s OpenShift console/CLI (OAuth) login changed."
-    echo "   The shared Gitea/student-Argo password (gitea/workshop-user-creds) is UNCHANGED — ${target_user}"
+    echo "   The shared Gitea/student-Argo password (ogsr-gitea/workshop-user-creds) is UNCHANGED — ${target_user}"
     echo "   still uses the shared password there. For a full cohort rotation, run: ws passwd [NEWPASS]"
   fi
   echo
@@ -1376,7 +1380,7 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
   echo
   echo "WILL PRESERVE (untouched):"
   echo "  • platform-portfolio stacks (pp-*), operators, workshop-config"
-  echo "  • gitea, parasol-images, parasol-tasks, showroom infra"
+  echo "  • ogsr-gitea, ogsr-parasol-images, ogsr-parasol-tasks, ogsr-showroom infra"
   echo "  • the per-user namespace SHELLS + their workshop-owned RBAC / quota / LimitRange"
   if [[ "$do_restart" == "true" ]]; then
     echo "  • per-user cockpits — RESTARTED at the end (--restart-terminals)"
@@ -1662,7 +1666,7 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
            | grep -E '^(pp-|workshop-config)' || true)
 
   local infra="" ns rt
-  for ns in gitea showroom parasol-tasks parasol-images student-gitops; do
+  for ns in ogsr-gitea ogsr-showroom ogsr-parasol-tasks ogsr-parasol-images ogsr-student-gitops; do
     rt="$(ns_pods_ready "$ns")"
     infra="${infra}${infra:+ · }${ns} ${rt}"
   done

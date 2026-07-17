@@ -44,7 +44,7 @@ claims_otel_enabled() {
 claims_otel_endpoint() {
   oc get deploy parasol-claims -n "$NS" \
     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_ENDPOINT")].value}' 2>/dev/null \
-    | grep -q 'otel-collector.observability-workshop'
+    | grep -q 'otel-collector.ogsr-observability-workshop'
 }
 
 # /q/metrics (scraped by the ServiceMonitor) exposes a given metric name. Retries briefly: a
@@ -84,7 +84,7 @@ check "claims-db deployment has >=1 ready replica"        deploy_ready claims-db
 check "parasol-claims deployment has >=1 ready replica"   deploy_ready parasol-claims "$NS"             || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
 check "claims Route answers 200 (/q/health/ready)"        route_ready_200                               || hint "claims app not ready — check: oc get pods -n ${NS}"
 check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset observability-health-scale --user ${USER_NAME}"
-check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.observability-workshop; ws reset observability-health-scale"
+check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.ogsr-observability-workshop; ws reset observability-health-scale"
 check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset observability-health-scale --user ${USER_NAME}"
 check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-health-scale --user ${USER_NAME}"
 check "/q/metrics exposes http_server_requests (golden signals)" metrics_expose http_server_requests_seconds || hint "metrics endpoint not answering — check: oc get pods -n ${NS}"

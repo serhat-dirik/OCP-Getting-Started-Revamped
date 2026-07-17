@@ -19,13 +19,13 @@ NS="${USER_NAME}-dev"
 # Gitea host, discovered environment-agnostically. Instructors/CI can read the route;
 # an attendee (userN) cannot read routes in the gitea namespace, so fall back to the
 # conventional host derived from the cluster ingress domain (route "gitea" in namespace
-# "gitea" → gitea-gitea.<domain>).
+# "gitea" → gitea-ogsr-gitea.<domain>).
 gitea_host() {
   local host domain
-  host="$(oc get route gitea -n gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   if [[ -z "$host" ]]; then
     domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-    [[ -n "$domain" ]] && host="gitea-gitea.${domain}"
+    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
   fi
   echo "$host"
 }

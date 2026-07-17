@@ -31,10 +31,10 @@ check "Pipeline parasol-claims-devsecops present"           oc get pipelines.tek
 check "sonar-auth copied into ${NS} (SAST-gate secret)"     oc get secret sonar-auth -n "$NS"                      || hint "the secrets hook copies it from sonarqube/sonar-ci-token — ws reset app-security-testing --user ${USER_NAME} (needs the appsec stack)"
 check "rox-api-token copied into ${NS} (scan-gate secret)"  oc get secret rox-api-token -n "$NS"                   || hint "the secrets hook copies it from stackrox — ws reset app-security-testing --user ${USER_NAME} (needs the trust stack)"
 check "ephemeral claims-db present (deploy target)"         oc get deploy claims-db -n "$NS"                       || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
-check "curated task sonar-scan reachable"                   oc get tasks.tekton.dev sonar-scan -n parasol-tasks                || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
-check "curated task trivy-scan reachable"                   oc get tasks.tekton.dev trivy-scan -n parasol-tasks                || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
-check "curated task roxctl-deployment-check reachable"      oc get tasks.tekton.dev roxctl-deployment-check -n parasol-tasks   || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
-check "curated task zap-baseline reachable"                 oc get tasks.tekton.dev zap-baseline -n parasol-tasks              || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
+check "curated task sonar-scan reachable"                   oc get tasks.tekton.dev sonar-scan -n ogsr-parasol-tasks                || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
+check "curated task trivy-scan reachable"                   oc get tasks.tekton.dev trivy-scan -n ogsr-parasol-tasks                || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
+check "curated task roxctl-deployment-check reachable"      oc get tasks.tekton.dev roxctl-deployment-check -n ogsr-parasol-tasks   || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
+check "curated task zap-baseline reachable"                 oc get tasks.tekton.dev zap-baseline -n ogsr-parasol-tasks              || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   :  # entry-only stops here — no PipelineRun has run yet on a fresh entry state.

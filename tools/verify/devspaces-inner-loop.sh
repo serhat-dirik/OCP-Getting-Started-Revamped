@@ -15,13 +15,13 @@ WS_NS="${USER_NAME}-devspaces"
 
 # Gitea host discovered from the cluster ingress domain so the script stays
 # environment-agnostic and needs no cross-namespace route read (attendees can't
-# read routes in the gitea namespace): route "gitea" in ns "gitea" → gitea-gitea.<domain>.
+# read routes in the gitea namespace): route "gitea" in ns "ogsr-gitea" → gitea-ogsr-gitea.<domain>.
 gitea_host() {
   local host domain
-  host="$(oc get route gitea -n gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   if [[ -z "$host" ]]; then
     domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-    [[ -n "$domain" ]] && host="gitea-gitea.${domain}"
+    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
   fi
   echo "$host"
 }
