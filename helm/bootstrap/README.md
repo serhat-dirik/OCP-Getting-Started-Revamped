@@ -137,7 +137,7 @@ comments in `values.yaml`).
 | `multi_user.num_users` / `.users` / `.userPrefix` / `.manageHtpasswd` | `5` / `[]` / `user` / `true` | attendee roster; `manageHtpasswd=false` if the base CI provisions userN |
 | `workshop_user_password` | `openshift` | shared, throwaway, non-secret console/Gitea password |
 | `stacks.lightspeed` / `.auth` / `.resilience` | `false` | opt-in stacks (core-devtools + batch are always on) |
-| `namespaces.gitea` / `.showroom` / `.system` | `gitea` / `showroom` / `ogsr-system` | parameterized so the `ogsr-` rename is a values flip |
+| `namespaces.gitea` / `.showroom` / `.system` | `ogsr-gitea` / `ogsr-showroom` / `ogsr-system` | parameterized so the `ogsr-` rename is a values flip |
 | `gitea.org` / `.repo` | `parasol` / `ocp-getting-started` | in-cluster mirror coordinates |
 
 ---

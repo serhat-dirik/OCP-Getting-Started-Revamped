@@ -17,7 +17,7 @@ VARS="${SCRIPT_DIR}/vars.yaml"
 PORTFOLIO_INSTALL="${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/install.sh"
 CREDS_FILE="${SCRIPT_DIR}/.credentials.local.txt"
 
-GITEA_NS="gitea"
+GITEA_NS="ogsr-gitea"
 MIRROR_ORG="parasol"
 MIRROR_REPO="ocp-getting-started"
 USER_PREFIX="user"
@@ -321,12 +321,12 @@ curl -ksf "$CHART_RAW" >/dev/null 2>&1 \
   || die "workshop chart not in the mirror at revision ${REVISION} — push it upstream, then re-run (or: ws git-refresh)"
 ok "mirror serves gitops/workshop-config@${REVISION}"
 
-# ── 4. shared workshop password for Gitea seeding (gitea ns now exists) ───────
+# ── 4. shared workshop password for Gitea seeding (ogsr-gitea ns now exists) ───────
 info "[4/6] recording the shared workshop password (secret workshop-user-creds)"
 oc create secret generic workshop-user-creds \
   --from-literal=password="$WS_PASS" -n "$GITEA_NS" \
   --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
-ok "workshop-user-creds (gitea/password)"
+ok "workshop-user-creds (ogsr-gitea/password)"
 
 # ── 5. materialize the workshop layer from the LOCAL mirror ───────────────────
 info "[5/6] materializing the workshop layer (Argo Application workshop-config)"

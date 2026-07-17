@@ -16,7 +16,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
 
 {{/*
-Web host of the in-cluster Gitea (route `gitea` in the gitea namespace →
+Web host of the in-cluster Gitea (route `gitea` in the ogsr-gitea namespace →
 default host gitea-<ns>.<domain>). Single source for the mirror + userinfo URLs.
 */}}
 {{- define "ogsr-bootstrap.giteaHost" -}}
