@@ -38,7 +38,7 @@ Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-S
 
 ## Repo map
 
-`content/` Antora, three site configs; pages at `modules/ROOT/pages/mNN-<slug>/{concept,lab,wrapup,instructor,troubleshooting}.adoc` · `apps/` Parasol services (Quarkus-primary) · `platform-portfolio/` standalone GitOps installer (workshop-agnostic, reusable for PoC clusters) · `gitops/` workshop layer (workshop-config + entry-states) · `pipelines/` Tekton task library · `slides/outlines/` → PPTX build · `tools/ws` CLI + `tools/verify` scripts · `bootstrap/` one-command cluster installer · `showroom/` in-cluster cockpit build (its `site.yml` needs the workshop-owned `antora-ext` image — stock antora images fail on it) · `docs/` contributor docs, ADRs, module template, research notes · `.claude/agents/` specialized agent definitions you may delegate to.
+`content/` Antora, three site configs; pages at `modules/ROOT/pages/mNN-<slug>/{concept,lab,wrapup,instructor,troubleshooting}.adoc` · `apps/` Parasol services (Quarkus-primary) · `platform-portfolio/` standalone GitOps installer (workshop-agnostic, reusable for PoC clusters) · `gitops/` workshop layer (workshop-config + entry-states) · `pipelines/` Tekton task library · `slides/outlines/` → PPTX build · `tools/ws` CLI + `tools/verify` scripts · `bootstrap/` one-command cluster installer · `helm/bootstrap/` FSC entrypoint chart (RHDP `field-content` target; declarative twin of `bootstrap/install.sh`) · `showroom/` in-cluster cockpit build (its `site.yml` needs the workshop-owned `antora-ext` image — stock antora images fail on it) · `docs/` contributor docs, ADRs, module template, research notes · `.claude/agents/` specialized agent definitions you may delegate to.
 
 ## Frequent commands
 
