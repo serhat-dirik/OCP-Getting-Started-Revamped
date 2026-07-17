@@ -13,6 +13,7 @@
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
 #   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
 #   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
+#   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
 # Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
@@ -1518,6 +1519,164 @@ cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/ins
   echo "         ./bootstrap/install.sh                                 # reads vars.yaml; idempotent"
 }
 
+ns_pods_ready() {  # ns → "R/T" ready/total pods · "none" if the ns has no pods · "absent" if no such ns.
+  # Read-only. Completed/Succeeded pods (seed Jobs) count as ready; a Running pod counts only when all its
+  # containers are ready (the READY column numerator == denominator).
+  local ns="$1"
+  oc get ns "$ns" >/dev/null 2>&1 || { echo "absent"; return 0; }
+  oc get pods -n "$ns" --no-headers 2>/dev/null | awk '
+    { total++; split($2, a, "/"); st = $3
+      if (st == "Completed" || st == "Succeeded" || (a[2] + 0 > 0 && a[1] == a[2])) ready++ }
+    END { if (total + 0 == 0) print "none"; else printf "%d/%d", ready + 0, total + 0 }'
+}
+
+entry_apps_for() {  # user → TSV "name<TAB>sync<TAB>health" for every Application labelled with this user
+  # (the caller filters to entry-* names). Read-only; empty output when none / CRD or label absent.
+  oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${1}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' 2>/dev/null || true
+}
+
+entry_app_ok() {  # module sync health → exit 0 if the entry app is "healthy enough". Respects ws-meta
+  # expectDegraded / expectOutOfSync so a fault-by-design module (whose Argo app is Degraded/OutOfSync ON
+  # PURPOSE — see meta_expect_degraded / meta_require_sync) is not falsely flagged. Falls back to strict
+  # Synced/Healthy when the module's entry dir is not present locally.
+  local module="$1" sync="$2" health="$3" exp_deg exp_sync
+  exp_deg="$(meta_expect_degraded "$module" 2>/dev/null || true)"
+  exp_sync="$(meta_require_sync "$module" 2>/dev/null || echo true)"
+  if [[ "$health" != "Healthy" && "$exp_deg" != "true" ]]; then return 1; fi
+  if [[ "$sync" != "Synced" && "$exp_sync" != "false" && "$exp_deg" != "true" ]]; then return 1; fi
+  return 0
+}
+
+status_user_detail() {  # user — single-user deep view: workshop-owned namespaces + workshop-quota headroom.
+  # Read-only. Shown only in --user scope (too deep for the cohort table).
+  local user="$1" ns nslist q
+  info "Detail — ${user}"
+  nslist="$(oc get ns -l "workshop.redhat.com/user=${user}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  if [[ -z "$nslist" ]]; then
+    echo "  (no namespaces labelled workshop.redhat.com/user=${user} — is ${user} provisioned?)"
+    return 0
+  fi
+  echo "  Namespaces + quota headroom (ResourceQuota 'workshop-quota', used/hard):"
+  # TODO(verify-on-cluster): confirm the quota keys pods / requests.cpu / requests.memory on a live cluster.
+  while IFS= read -r ns; do
+    [[ -n "$ns" ]] || continue
+    if oc get resourcequota workshop-quota -n "$ns" >/dev/null 2>&1; then
+      q="$(oc get resourcequota workshop-quota -n "$ns" \
+            -o jsonpath='pods {.status.used.pods}/{.status.hard.pods} · cpu {.status.used.requests\.cpu}/{.status.hard.requests\.cpu} · mem {.status.used.requests\.memory}/{.status.hard.requests\.memory}' 2>/dev/null || true)"
+      printf "    %-22s %s\n" "$ns" "${q:-(unreadable)}"
+    else
+      printf "    %-22s %s\n" "$ns" "(no workshop-quota in this namespace)"
+    fi
+  done <<< "$nslist"
+}
+
+cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] scopes to one attendee; empty =
+  # every attendee. ALWAYS exits 0 (it is a report). # TODO(verify-on-cluster): every oc read is authored
+  # off-cluster (tokens expired this session).
+  local scope_user="${1:-}"
+  need_oc
+  if [[ -n "$scope_user" ]]; then
+    [[ "$scope_user" =~ ^user[0-9]+$ ]] || die "status: --user must look like userN, got '$scope_user'"
+  fi
+
+  local who server
+  who="$(oc whoami 2>/dev/null || true)"
+  server="$(oc whoami --show-server 2>/dev/null || true)"
+  echo "ws status — workshop cohort health   (cluster: ${server:-?} as ${who:-?})"
+  echo
+
+  # ── platform: pp-* + workshop-config app health, shared-infra pod readiness, install marker ──
+  info "Platform"
+  printf "  %-26s %-12s %-10s\n" "App" "Sync" "Health"
+  local name sync health plat_bad=0
+  while IFS=$'\t' read -r name sync health; do
+    [[ -n "$name" ]] || continue
+    printf "  %-26s %-12s %-10s\n" "$name" "${sync:-?}" "${health:-?}"
+    [[ "$sync" == "Synced" && "$health" == "Healthy" ]] || plat_bad=$((plat_bad + 1))
+  done < <(oc get applications -n "$ARGO_NS" \
+             -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' 2>/dev/null \
+           | grep -E '^(pp-|workshop-config)' || true)
+
+  local infra="" ns rt
+  for ns in gitea showroom parasol-tasks parasol-images student-gitops; do
+    rt="$(ns_pods_ready "$ns")"
+    infra="${infra}${infra:+ · }${ns} ${rt}"
+  done
+  echo "  Infra pods: ${infra}"
+  if oc get configmap ogsr-uninstall-state -n ogsr-system >/dev/null 2>&1; then
+    echo "  Install:    ogsr-uninstall-state present (install completed; uninstall available)"
+  else
+    echo "  Install:    ⚠ ogsr-uninstall-state absent (install incomplete, or a pre-hardening build)"
+  fi
+  echo
+
+  # ── attendees: one row per user (cockpit · active modules · entry-app health) ──
+  local users_str users_arr
+  users_str="$(workshop_users)"
+  read -ra users_arr <<< "$users_str"
+  if [[ -n "$scope_user" ]]; then users_arr=("$scope_user"); fi
+
+  info "Attendees"
+  printf "  %-8s %-9s %-24s %-10s\n" "User" "Cockpit" "Modules active" "Entries"
+  local u cockpit modules entries entries_total entries_ok mods m ready desired
+  local sum_cockpit_ready=0 sum_entries=0 sum_entries_ok=0
+  local attention=() a
+  for u in "${users_arr[@]}"; do
+    if ! oc get deploy "showroom-${u}" -n "$SHOWROOM_NS" >/dev/null 2>&1; then
+      cockpit="— none"
+    else
+      ready="$(oc get deploy "showroom-${u}" -n "$SHOWROOM_NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+      desired="$(oc get deploy "showroom-${u}" -n "$SHOWROOM_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+      ready="${ready:-0}"; desired="${desired:-0}"
+      if [[ "$ready" -ge 1 && "$ready" == "$desired" ]]; then
+        cockpit="✅ ${ready}/${desired}"; sum_cockpit_ready=$((sum_cockpit_ready + 1))
+      else
+        cockpit="❌ ${ready}/${desired}"
+        attention+=("${u}: cockpit showroom-${u} not ready (${ready}/${desired})")
+      fi
+    fi
+
+    entries_total=0; entries_ok=0; mods=""
+    while IFS=$'\t' read -r name sync health; do
+      [[ "$name" == entry-*-"$u" ]] || continue
+      m="${name#entry-}"; m="${m%-"$u"}"
+      mods="${mods}${mods:+,}${m}"
+      entries_total=$((entries_total + 1))
+      if entry_app_ok "$m" "$sync" "$health"; then
+        entries_ok=$((entries_ok + 1))
+      else
+        attention+=("entry ${name}: ${sync:-?}/${health:-?} — ws diag --user ${u} ${m}")
+      fi
+    done < <(entry_apps_for "$u")
+    sum_entries=$((sum_entries + entries_total))
+    sum_entries_ok=$((sum_entries_ok + entries_ok))
+
+    if [[ "$entries_total" -eq 0 ]]; then
+      modules="—"; entries="—"
+    else
+      modules="$mods"
+      if [[ "$entries_ok" -eq "$entries_total" ]]; then entries="${entries_ok}/${entries_total} ✅"; else entries="${entries_ok}/${entries_total} ⚠"; fi
+    fi
+    printf "  %-8s %-9s %-24s %-10s\n" "$u" "$cockpit" "$modules" "$entries"
+  done
+  echo
+
+  if [[ -n "$scope_user" ]]; then status_user_detail "$scope_user"; echo; fi
+
+  if [[ ${#attention[@]} -gt 0 ]]; then
+    err "Needs attention:"
+    for a in "${attention[@]}"; do echo "   • $a"; done
+    echo
+  fi
+
+  local nusers="${#users_arr[@]}" plat_state
+  if [[ "$plat_bad" -eq 0 ]]; then plat_state="all-Synced ✅"; else plat_state="${plat_bad} app(s) need attention ❌"; fi
+  echo "Summary: ${nusers} user(s) · ${sum_cockpit_ready}/${nusers} cockpit(s) ready · ${sum_entries} entry app(s) (${sum_entries_ok} healthy, $((sum_entries - sum_entries_ok)) need attention) · platform ${plat_state}"
+  echo "   drill in: ws status --user <userN>   ·   ws diag --user <userN> [mNN]"
+  return 0
+}
+
 main() {
   local cmd="${1:-}"; shift || true
   # git-refresh self-parses its own flags (--restart-terminals/--user/--all/--exclude, where
@@ -1556,7 +1715,8 @@ main() {
     solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
     doctor)      cmd_doctor;;
     preflight)   cmd_preflight;;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,15p';;
+    status)      cmd_status "$user";;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,16p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
