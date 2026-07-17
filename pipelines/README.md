@@ -9,14 +9,14 @@ replacement for the removed `ClusterTask` kind. No bundled-Task YAML is ever cop
 | Layer | Where it lives | Example |
 |---|---|---|
 | Catalog (shipped) | `openshift-pipelines` namespace | `git-clone`, `buildah`, `openshift-client` — cluster resolver |
-| Org library (curated) | `parasol-tasks` namespace | `image-size-report`, `maven-jdk21` — cluster resolver |
+| Org library (curated) | `ogsr-parasol-tasks` namespace | `image-size-report`, `maven-jdk21` — cluster resolver |
 | App pipeline | `{user}-cicd` namespace | `parasol-claims-build-test-deploy` |
 
 ## Contents
 
 ```
 pipelines/
-├── tasks/                         curated org library (installed into the parasol-tasks namespace)
+├── tasks/                         curated org library (installed into the ogsr-parasol-tasks namespace)
 │   ├── image-size-report.yaml     reports image pull-size + budget; emits results (flagship example)
 │   ├── maven-jdk21.yaml           JDK 21 Maven runner (the shipped maven task is JDK 17)
 │   └── kustomization.yaml         `oc apply -k pipelines/tasks`
