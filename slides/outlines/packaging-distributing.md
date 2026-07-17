@@ -1,4 +1,4 @@
-# M25 — Packaging & Distributing Your App (Helm & OLM)
+# Packaging & Distributing Your App (Helm & OLM)
 
 ## Slide: "It runs" is not "it ships"
 
@@ -20,7 +20,7 @@ Visual: A split — left: a messy folder of YAML files with a shrug ("which vers
 - Most apps are happiest in the middle — a Helm chart
 
 Notes: There's no single right way to package an app — there's a spectrum, and the axis that orders it is how much day-2 responsibility the package takes off the human. Raw manifests (oc apply): no templating, no versioned artifact, you own everything. An OpenShift Template (oc process): parameters and a one-shot instantiate, but it doesn't upgrade an existing instance. Kustomize: base plus overlays, declarative and Git-friendly — the shape GitOps loves — but no hooks, no rollback command, no reconcile. Helm: Go-templated manifests driven by values, packaged as a versioned OCI chart, with upgrade/rollback/hooks/tests — real release management, but client-side (Helm acts when you run it, then stops). Operator: a custom resource plus a controller that runs forever, continuously reconciling — the most operability per install, and the highest authoring cost. The move down is a trade: more day-2 behaviour lives in the package, off the human, at the cost of authoring and lifetime complexity. Most applications want the middle — a Helm chart is plenty. This module drives Helm hands-on and reads the operator end.
-Visual: Reuse concept diagram m25-...-01-spectrum.svg — five stops left to right (manifests → Template → Kustomize → Helm → Operator) on a "day-2 encoded in the package →" axis, Helm highlighted green as the focus, Operator amber as "high cost."
+Visual: Reuse concept diagram packaging-distributing-...-01-spectrum.svg — five stops left to right (manifests → Template → Kustomize → Helm → Operator) on a "day-2 encoded in the package →" axis, Helm highlighted green as the focus, Operator amber as "high cost."
 
 ## Slide: A Helm chart = values + templates + a lifecycle
 
@@ -64,7 +64,7 @@ Visual: A push/pull round-trip loop — local .tgz → helm push → registry <n
 - You dissect it live: Pipelines' Subscription, channels, CSV, CRDs
 
 Notes: Cross to the operator end of the spectrum — and ground it in something real. When you installed the Pipelines operator, or any operator, from OperatorHub, a specific chain ran. This is classic OLM, and on this cluster it installed every operator the attendee used all week. A CatalogSource is a catalog index image listing installable operators. A PackageManifest is one operator's entry, exposing its channels — named upgrade streams like latest or a version-pinned line. You create a Subscription naming the package, a channel, and the catalog — "I want this operator, on this stream." OLM resolves it into an InstallPlan, approved automatically or held for a manual click (the gate an admin uses for upgrades). The InstallPlan installs a ClusterServiceVersion, the heart of the bundle: it declares the custom resource definitions the operator owns, the controller Deployment to run, and the RBAC it needs. That Deployment is the operator Pod, which reconciles the custom resources you create. In the lab they read this backwards from the live Pipelines operator — its Subscription (channel latest, source redhat-operators), its channel list, its CSV (14 owned CRDs, a controller, AllNamespaces), the Tekton CRDs it added, and the CatalogSource and InstallPlan behind it. That is what happened when someone clicked Install.
-Visual: Reuse concept diagram m25-...-02-olm-anatomy.svg — the top-down chain CatalogSource → PackageManifest → Subscription → InstallPlan → CSV → operator Pod, with a side note "OLM v1: ClusterCatalog + ClusterExtension (the direction)."
+Visual: Reuse concept diagram packaging-distributing-...-02-olm-anatomy.svg — the top-down chain CatalogSource → PackageManifest → Subscription → InstallPlan → CSV → operator Pod, with a side note "OLM v1: ClusterCatalog + ClusterExtension (the direction)."
 
 ## Slide: When NOT to write an operator — and choose with a straight face
 

@@ -1,4 +1,4 @@
-# M22 — Application Modernization (MTA + Developer Lightspeed)
+# Application Modernization (MTA + Developer Lightspeed)
 
 ## Slide: Don't lift-and-shift the WAR — measure it
 
@@ -31,7 +31,7 @@ Visual: A 2×3 grid of the six Rs, each a card with a one-line "when it's right"
 - Re-analysis after a fix shows the effort NUMBER DROP — measurable
 
 Notes: MTA is a rule-based static analyzer. You point it at an application's source, select one or more migration targets, and it runs a large library of rules — the live Hub ships 39 rulesets — reporting every place your code trips a rule. Three ideas make the report usable. Targets are goals: you don't ask "is my code bad," you ask "what stops this from reaching this target." The targets for containerizing a legacy Java app are cloud-readiness and linux for OpenShift readiness, openjdk to move off older JDKs, jakarta-ee for the javax-to-jakarta namespace move, and jws for the Tomcat runtime rules. Issues have a category — mandatory, optional, or potential — and triage starts with mandatory. And effort is a number: each issue carries a relative story-point estimate, so "this feels hard" becomes "24 points," and a re-analysis after fixing shows the number drop.
-Visual: The concept diagram m22-app-modernization-01-mta-flow.svg — the Git source + the target chips feeding the analyzer addon in the shared Hub, emitting a report (issues + effort) to "you," who loop through a Dev Spaces + Developer Lightspeed fix back to the source.
+Visual: The concept diagram app-modernization-01-mta-flow.svg — the Git source + the target chips feeding the analyzer addon in the shared Hub, emitting a report (issues + effort) to "you," who loop through a Dev Spaces + Developer Lightspeed fix back to the source.
 
 ## Slide: Read the report like a consultant
 
@@ -60,8 +60,8 @@ Visual: A split card. Left: the MTA extension showing the "Hardcoded IP" issue a
 - Assess the portfolio → Analyze candidates → Fix high-value/low-effort → Retain/retire the rest
 - Ship early cheap wins; bank the pattern and the credibility
 - Big monolith? STRANGLER pattern: run the modern service BESIDE the legacy, move traffic slice by slice
-- Coexistence is a CONNECTIVITY problem → Service Interconnect (module M21)
+- Coexistence is a CONNECTIVITY problem → Service Interconnect (the Resilience, Multi-Cluster & DR module)
 - When NOT to: retire-worthy apps, replatform-is-enough, un-reviewable AI diffs
 
-Notes: You do not modernize a portfolio by rewriting all of it at once — you run a funnel. Assess the whole portfolio with a questionnaire per app to rank candidates; analyze the candidates with MTA to price them; fix and ship the ones where effort is low and value is high, banking the win and the pattern; repeat, and retain or retire the rest deliberately. The incremental path for a big monolith is the strangler pattern: stand the modern service up beside the legacy one, route a slice of traffic to it, and grow that slice until the legacy app is strangled — off, with no big-bang cutover. That routing and coexistence is a connectivity problem, exactly what Service Interconnect solves across clusters and sites, which is module M21. And be honest about when not to modernize: retire what you'll turn off within the year, stop at replatform when it gets you most of the value, and never accept an AI diff you didn't read.
-Visual: A funnel graphic — wide "portfolio (assess)" at top narrowing through "analyze (MTA effort)" to "fix + ship" at the spout, with a small "retain/retire" side-chute. Below the funnel, a strangler mini-diagram: legacy box and modern box side by side, a traffic-split dial moving from 100/0 toward 0/100, labeled "Service Interconnect → M21." A footer "When NOT to: retire · replatform-enough · un-reviewed AI."
+Notes: You do not modernize a portfolio by rewriting all of it at once — you run a funnel. Assess the whole portfolio with a questionnaire per app to rank candidates; analyze the candidates with MTA to price them; fix and ship the ones where effort is low and value is high, banking the win and the pattern; repeat, and retain or retire the rest deliberately. The incremental path for a big monolith is the strangler pattern: stand the modern service up beside the legacy one, route a slice of traffic to it, and grow that slice until the legacy app is strangled — off, with no big-bang cutover. That routing and coexistence is a connectivity problem, exactly what Service Interconnect solves across clusters and sites, which is the Resilience, Multi-Cluster & DR module. And be honest about when not to modernize: retire what you'll turn off within the year, stop at replatform when it gets you most of the value, and never accept an AI diff you didn't read.
+Visual: A funnel graphic — wide "portfolio (assess)" at top narrowing through "analyze (MTA effort)" to "fix + ship" at the spout, with a small "retain/retire" side-chute. Below the funnel, a strangler mini-diagram: legacy box and modern box side by side, a traffic-split dial moving from 100/0 toward 0/100, labeled "Service Interconnect → Resilience, Multi-Cluster & DR." A footer "When NOT to: retire · replatform-enough · un-reviewed AI."

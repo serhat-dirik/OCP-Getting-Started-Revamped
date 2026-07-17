@@ -1,4 +1,4 @@
-# M08 — Trusted Software Supply Chain
+# Trusted Software Supply Chain
 
 ## Slide: The audit Parasol couldn't pass
 
@@ -31,7 +31,7 @@ Visual: A container image drawn as an iceberg — a thin "your code" sliver abov
 - You need all three; they reinforce each other
 
 Notes: Three artifacts travel with a trustworthy image and answer three different questions — pin the distinction because people conflate them constantly. The signature proves the image is intact and came from us (a cryptographic signature over the digest). The attestation is signed provenance — how the image was built: the builder, the source, the steps, the timestamps, as a SLSA statement. The SBOM is what's inside — every component and version. A signature with no SBOM tells you the image is authentic but not what's in it; an SBOM with no signature tells you what a build contained but not that this image is that build. You need all three, and they reinforce each other: the attestation is signed, the SBOM can be attested, and the signature is what an admission gate checks.
-Visual: Reuse concept diagram m08-...-01 (the trust triangle / pipeline) — signature / attestation / SBOM as three labelled artifacts beside the image.
+Visual: Reuse concept diagram trusted-supply-chain-...-01 (the trust triangle / pipeline) — signature / attestation / SBOM as three labelled artifacts beside the image.
 
 ## Slide: Gate at build, admit at run
 

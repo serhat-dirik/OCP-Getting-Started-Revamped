@@ -1,4 +1,4 @@
-# M10 — GitOps at Scale & Progressive Delivery
+# GitOps at Scale & Progressive Delivery
 
 ## Slide: Thirty-six Applications nobody wants to write
 
@@ -20,7 +20,7 @@ Visual: Left: a wall of near-identical "Application" cards (36) tinted red/drift
 - Take a position: folders, not branches
 
 Notes: An ApplicationSet removes the toil. You describe the Application once as a template and hand it a generator — a source of truth for "what set of things should exist." A list generator enumerates environments inline; a git generator discovers them from folders; a cluster generator makes one per registered cluster; matrix/merge combine them. Parameters in, Applications out. Take a position on layout: folders, not branches — one main branch with overlays/dev, overlays/stage, overlays/prod side by side, so "what's different about prod" is the difference between folders, not a diff between drifting branches. And environments can differ in kind: dev/stage are plain Deployments, prod is a Rollout — one ApplicationSet still covers all three.
-Visual: Concept diagram m10-gitops-at-scale-01-appset — generator (dev/stage/prod) → one template → three generated Applications, prod tinted as a Rollout.
+Visual: Concept diagram gitops-at-scale-01-appset — generator (dev/stage/prod) → one template → three generated Applications, prod tinted as a Rollout.
 
 ## Slide: Order matters — sync waves and hooks
 
@@ -31,7 +31,7 @@ Visual: Concept diagram m10-gitops-at-scale-01-appset — generator (dev/stage/p
 - DB (0) → migration (1) → app (2)
 
 Notes: Applying a folder all at once is usually fine — Kubernetes retries. It is not fine when order matters: a schema migration must run after the database accepts connections and before the app boots against it. Argo CD gives you two tools. Sync waves: an integer annotation groups resources; Argo applies all of wave 0, waits for health, then wave 1, then wave 2. Resource hooks: a Sync hook runs as part of the sync rather than as steady state — the idiomatic way to slot in a one-shot Job. Production uses exactly this: database at wave 0, the migration Job as a Sync hook at wave 1, the app Rollout at wave 2 — so the app is never created against a schema that isn't ready, unattended, every time.
-Visual: Concept diagram m10-gitops-at-scale-02-sync-waves — three waves left to right, the middle one (migration Job) styled as a hook.
+Visual: Concept diagram gitops-at-scale-02-sync-waves — three waves left to right, the middle one (migration Job) styled as a hook.
 
 ## Slide: Progressive delivery — earn the traffic
 
@@ -42,7 +42,7 @@ Visual: Concept diagram m10-gitops-at-scale-02-sync-waves — three waves left t
 - Pod-ratio here; request-% needs a traffic router
 
 Notes: GitOps gets the new manifests into prod; it does not tell you whether the new version is healthy under real conditions. Rolling to all pods at once bets the environment on the answer being yes. Progressive delivery refuses the bet: route a small slice to the new version, watch it, widen only as it proves itself, and revert automatically if it fails. Argo Rollouts is the controller — a drop-in for a Deployment whose strategy describes the shift. The canary steps: 25% to the canary, a pause to bake, 50%, then an automated analysis step probes the canary's real readiness, and only on success does it take 100%. Be honest about the mechanism: traffic splits by pod ratio (1 of 4 pods at 25%), which needs no extra infrastructure; exact request percentages or header routing need a traffic router — a Route plugin or a mesh.
-Visual: Concept diagram m10-gitops-at-scale-03-canary-analysis — the canary flow with the analysis diamond forking to pass (100%) and fail (rollback).
+Visual: Concept diagram gitops-at-scale-03-canary-analysis — the canary flow with the analysis diamond forking to pass (100%) and fail (rollback).
 
 ## Slide: The bad release that rolls itself back
 

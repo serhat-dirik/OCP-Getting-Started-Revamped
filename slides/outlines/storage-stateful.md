@@ -1,4 +1,4 @@
-# M05 — Storage & Stateful Apps
+# Storage & Stateful Apps
 
 ## Slide: The database that was a time bomb
 
@@ -20,7 +20,7 @@ Visual: A single "Pod restart" arrow turning a database full of claims into an e
 - You write PVCs, never disks
 
 Notes: The three objects and why the separation is the whole idea. A PersistentVolumeClaim is a request in your namespace ("2Gi, ReadWriteOnce"). A PersistentVolume is the actual storage the platform provisioned. A StorageClass is the rules it followed — provisioner, access modes, expansion, reclaim. Dynamic provisioning makes it a one-liner: submit a PVC and a matching PV is created and bound on demand. App teams ask; the platform provisions.
-Visual: Reuse concept diagram m05-...-01-storage-chain.svg — Pod → PVC (namespace) → PV (cluster) → StorageClass → storage backend (Ceph).
+Visual: Reuse concept diagram storage-stateful-...-01-storage-chain.svg — Pod → PVC (namespace) → PV (cluster) → StorageClass → storage backend (Ceph).
 
 ## Slide: Ephemeral vs persistent is a property of the volume
 
@@ -53,7 +53,7 @@ Visual: RWO/RWX/ROX three-panel with node/Pod icons; a checklist "what does MY c
 - Not automatically a replicated database
 
 Notes: When identity matters, a Deployment's interchangeable Pods are wrong. A StatefulSet gives ordinal names that persist across restarts, a headless Service so each Pod has its own stable DNS name, and a volumeClaimTemplate so each Pod gets its own PVC — identity and storage stay bound together. Updates can be staged with a partition (canary one ordinal, then finish). Be honest: two replicas of PostgreSQL are two independent instances, not an HA database — real replication is an Operator's job. The StatefulSet is the plumbing.
-Visual: Reuse concept diagram m05-...-02-sts-vs-deployment.svg — Deployment (shared Service, random Pods) vs StatefulSet (headless Service, pg-sts-0/1 each with its own PVC).
+Visual: Reuse concept diagram storage-stateful-...-02-sts-vs-deployment.svg — Deployment (shared Service, random Pods) vs StatefulSet (headless Service, pg-sts-0/1 each with its own PVC).
 
 ## Slide: What you'll do
 

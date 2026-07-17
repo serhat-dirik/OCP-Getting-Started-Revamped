@@ -1,4 +1,4 @@
-# M09 — GitOps Fundamentals
+# GitOps Fundamentals
 
 ## Slide: The cluster nobody can vouch for
 
@@ -20,7 +20,7 @@ Visual: A "Git repo (base + overlays)" box and a "live cluster" box that have vi
 - Pull is what "GitOps" means
 
 Notes: Contrast the model attendees already know with the one this module teaches. In the pipeline module a build ran oc apply from inside a PipelineRun — the thing that made the change lived outside the cluster and reached in, holding cluster credentials. That is push delivery. Pull inverts it: a controller runs inside the cluster, watches a Git repository, and pulls the desired state in — nothing outside needs cluster credentials because the cluster reconciles itself. Pull buys three things push cannot: Git stays the source of truth continuously (not just at deploy time), no CI job holds a standing key to production, and every environment converges to what its folder in Git says rather than to whatever the last person to touch it did. OpenShift GitOps — Argo CD — is the controller that implements it.
-Visual: Concept diagram m09-gitops-fundamentals-01-push-vs-pull — CI pushing into a namespace (blue) vs a controller in the cluster pulling from Git and reconciling (green).
+Visual: Concept diagram gitops-fundamentals-01-push-vs-pull — CI pushing into a namespace (blue) vs a controller in the cluster pulling from Git and reconciling (green).
 
 ## Slide: The reconcile loop and the Application
 
@@ -31,7 +31,7 @@ Visual: Concept diagram m09-gitops-fundamentals-01-push-vs-pull — CI pushing i
 - Application CR binds one source to one destination
 
 Notes: The controller does one thing forever — compare desired against live and converge them. Desired state is the manifests at a path in a Git repo at a revision (your overlays/dev folder on main); live state is the actual objects in a destination namespace. Reconcile renders the desired manifests, diffs them against live, and reports two facts: sync status (Synced when they match, OutOfSync when they differ) and health (is the app actually up). The object that ties one source to one destination is the Application — a small custom resource that is really just "this Git path, into that namespace, reconciled this way." Attendees create it in the Argo CD web UI, signed in with their OpenShift identity — not with oc apply — because the instance is shared and Argo CD scopes each person to their own project.
-Visual: Concept diagram m09-gitops-fundamentals-02-reconcile-loop — Git (desired) → Application → reconcile diff → Synced/Healthy or OutOfSync → Sync back to live.
+Visual: Concept diagram gitops-fundamentals-02-reconcile-loop — Git (desired) → Application → reconcile diff → Synced/Healthy or OutOfSync → Sync back to live.
 
 ## Slide: Drift and self-heal — Git wins
 

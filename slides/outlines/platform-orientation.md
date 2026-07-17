@@ -1,4 +1,4 @@
-# M01 — Platform Orientation & First App
+# Platform Orientation & First App
 
 ## Slide: The 2 a.m. pet problem
 
@@ -20,7 +20,7 @@ Visual: Split image — a single labeled "pet" server with a pager, versus a her
 - You stop operating Pods by hand
 
 Notes: This is the concept the entire workshop rests on. You do not run Pods directly — you declare desired state on a Deployment ("three replicas of this image"), and the reconcile loop continuously makes actual match desired. Introduce the three objects at consumer depth: Pod (disposable unit), Deployment (desired state), Service (stable front door).
-Visual: Reuse concept diagram m01-...-01-desired-state.svg — You → Deployment → ReplicaSet → 3 Pods, Service load-balancing, reconcile loop watching.
+Visual: Reuse concept diagram platform-orientation-...-01-desired-state.svg — You → Deployment → ReplicaSet → 3 Pods, Service load-balancing, reconcile loop watching.
 
 ## Slide: What OpenShift adds over Kubernetes
 
@@ -31,7 +31,7 @@ Visual: Reuse concept diagram m01-...-01-desired-state.svg — You → Deploymen
 - Kubernetes is the engine; OpenShift the car
 
 Notes: Kubernetes gives the object model and the reconcile loop. OpenShift adds what an organization needs on day one: the console and catalog, Routes for ingress without a load-balancer ticket, containers hardened automatically (non-root, random high UID, dropped capabilities), and an integrated build-run-operate workflow. Every lab step uses a Kubernetes primitive plus an OpenShift convenience.
-Visual: The platform-accretion master diagram m01-...-02-platform-accretion-v1.svg with the M01 layer highlighted in red.
+Visual: The platform-accretion master diagram platform-orientation-...-02-platform-accretion-v1.svg with the Platform Orientation layer highlighted in red.
 
 ## Slide: Self-healing, live
 
@@ -42,7 +42,7 @@ Visual: The platform-accretion master diagram m01-...-02-platform-accretion-v1.s
 - Cattle, not pets
 
 Notes: The signature moment. With three replicas spread across nodes, deleting a Pod is a routine event, not an incident: actual drops below desired, the ReplicaSet emits SuccessfulCreate, a replacement schedules, and the Service keeps routing to survivors the whole time. No human, no page, no downtime. This is desired state defending itself.
-Visual: Screen-capture still or GIF m01-...-selfheal — Topology donut losing and regaining a segment.
+Visual: Screen-capture still or GIF platform-orientation-...-selfheal — Topology donut losing and regaining a segment.
 
 ## Slide: What you'll do
 

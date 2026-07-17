@@ -1,4 +1,4 @@
-# M14 — Multi-Tenancy & Workload Security
+# Multi-Tenancy & Workload Security
 
 ## Slide: A safe sandbox for a team
 
@@ -20,7 +20,7 @@ Visual: A "payments team" box (three env sub-boxes + two teammate icons + one wo
 - Onboarding = one membership change
 
 Notes: Every request answers two questions in order — authentication (who are you, settled by an identity provider wired into OpenShift's OAuth) and authorization (what may you do, settled by RBAC). The chain from login to permission has four links, and the design lever is the third: bind access to a group, not to individuals, so a new engineer inherits the team's access with one membership change and off-boarding is one removal. This isn't theory — attendees are governed exactly this way in the workshop, and they'll inspect their own group binding later in the lab.
-Visual: Reuse concept diagram m14-...-01-identity-flow.svg — IdP → User → Group (highlighted) → RoleBinding → Role → verbs.
+Visual: Reuse concept diagram multi-tenancy-workload-security-...-01-identity-flow.svg — IdP → User → Group (highlighted) → RoleBinding → Role → verbs.
 
 ## Slide: The RBAC object model
 
@@ -42,7 +42,7 @@ Visual: Three concentric role rings (view ⊂ edit ⊂ admin) with a hard wall l
 - OR a scoped SCC grant to one ServiceAccount
 
 Notes: The security beat. On OpenShift you cannot run a container as root just by asking. Pod Security Admission labels namespaces, but the SCC is the real enforcer, and the default — restricted-v2 — drops all capabilities, forbids privilege escalation, and pins the UID to a range assigned to the namespace that never includes 0. A Deployment demanding runAsUser:0 is rejected at admission with a message naming the range. Two honest fixes: fix the image (stop demanding root — almost always right and permanent), or, when a workload genuinely needs a fixed UID, a narrowly scoped SCC grant to one ServiceAccount — never a blanket anyuid.
-Visual: Reuse concept diagram m14-...-02-scc-admission.svg — Pod runAsUser:0 → restricted-v2 gate → rejected / fixed / scoped-grant.
+Visual: Reuse concept diagram multi-tenancy-workload-security-...-02-scc-admission.svg — Pod runAsUser:0 → restricted-v2 gate → rejected / fixed / scoped-grant.
 
 ## Slide: Guardrails — quota, limits, workload identity
 

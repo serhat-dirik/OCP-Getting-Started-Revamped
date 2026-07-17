@@ -1,4 +1,4 @@
-# M13 — Securing Apps with Keycloak
+# Securing Apps with Keycloak
 
 ## Slide: The claims API answers anyone who can reach it
 
@@ -31,7 +31,7 @@ Visual: Two gates — gate 1 "AuthN: who are you?" (401 if no), gate 2 "AuthZ: w
 - Learn these four; resist the rest of OAuth
 
 Notes: OAuth/OIDC define many flows; four cover almost every enterprise app and this module teaches exactly those. Auth-code + PKCE protects the browser app — the human logs in at Keycloak, the app gets a code it swaps for tokens, and PKCE (a one-time per-login secret) makes a stolen code useless. Bearer protects the API — every request carries a self-contained token the API validates against Keycloak's public keys, no session. Client credentials is for machines with no human. Token exchange is for one service calling another as the user, and its defining property — proven in the lab — is that it can downscope but never escalate.
-Visual: Concept diagram m13-securing-apps-keycloak-01-four-flows — human flows (auth-code, bearer) above, machine flows (client-creds, exchange) below, an arrow from the user token into the exchange.
+Visual: Concept diagram securing-apps-keycloak-01-four-flows — human flows (auth-code, bearer) above, machine flows (client-creds, exchange) below, an arrow from the user token into the exchange.
 
 ## Slide: Realm, client, role, user — the whole model
 
@@ -42,7 +42,7 @@ Visual: Concept diagram m13-securing-apps-keycloak-01-four-flows — human flows
 - Get this vocabulary and Keycloak stops being mysterious
 
 Notes: Keycloak's vocabulary is small. A realm is a self-contained world — its own users, roles, clients, keys, login page — and this workshop gives every attendee their own, the same isolation a platform team uses to separate business units. A client is an app talking to the realm; public clients (the browser) cannot keep a secret so they use PKCE, confidential clients (a backend) hold one. A role is a named permission that rides in the token — realm roles specifically under `realm_access.roles`, which is *where the app reads it*. Users are people; the two seeded users are the two sides of every authorization check.
-Visual: Concept diagram m13-securing-apps-keycloak-02-realm-model — realm containing clients / roles / users, with the four Parasol clients and two users as leaves.
+Visual: Concept diagram securing-apps-keycloak-02-realm-model — realm containing clients / roles / users, with the four Parasol clients and two users as leaves.
 
 ## Slide: Don't build your own login page
 
@@ -53,7 +53,7 @@ Visual: Concept diagram m13-securing-apps-keycloak-02-realm-model — realm cont
 - **The punchline: Red Hat build of Keycloak is included with your OpenShift subscription**
 
 Notes: Authentication is a solved problem and a catastrophic one to get wrong — a weak reset flow or a missing token check is the whole breach. A dedicated identity provider gives you password policy, MFA, lockout, social/enterprise federation, token issuance, and audit, built and patched by people who do only this. Your job becomes configuration, not code. And the message for leadership: this ships with OpenShift. The same product backs the console login. A team treating "add login" as a procurement project is usually re-buying what the subscription already includes.
-Visual: Concept diagram m13-securing-apps-keycloak-03-build-vs-buy — a long "build it yourself" column of risk vs a single "included with OpenShift" tile.
+Visual: Concept diagram securing-apps-keycloak-03-build-vs-buy — a long "build it yourself" column of risk vs a single "included with OpenShift" tile.
 
 ## Slide: Bearer + role, live — 401 → 200 → 403
 
@@ -86,4 +86,4 @@ Visual: user token (aud=claims) → [Keycloak exchange] → token (aud=fraud, st
 - "Trusted network" is not a security model; a token you can validate is
 
 Notes: Close by connecting it back. You put a front door on Parasol — web login, bearer API with roles, a machine identity, token-debugging fluency, and a delegation chain that cannot escalate — without writing authentication code, on a product included with OpenShift that also secures the platform's own login. The durable message: stop trusting the network and start trusting tokens you can validate, and stop re-buying (or worse, re-building) identity you already own. The bridge to what's next: the same identity provider wiring apps *and* the cluster is the multi-tenancy story.
-Visual: Concept diagram m13-securing-apps-keycloak-07-what-you-built — Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds), all green.
+Visual: Concept diagram securing-apps-keycloak-07-what-you-built — Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds), all green.

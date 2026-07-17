@@ -1,4 +1,4 @@
-# M15 — Networking for Dev & DevOps
+# Networking for Dev & DevOps
 
 ## Slide: From a flat network to a controlled one
 
@@ -20,7 +20,7 @@ Visual: A three-tier app box (web/API/db) with "everything talks to everything" 
 - Every tool is one direction or the other
 
 Notes: Every conversation runs in one of two directions, and OpenShift gives you a different tool for each. North-south is traffic crossing the cluster boundary — a browser reaching your front end — and you control it by choosing what to expose; most workloads should never be reachable from outside. East-west is traffic between pods inside the cluster — web calling API, API querying database — and by default it's wide open, so you control it by writing policy or giving a namespace its own network. Knowing which direction you need is half the battle: north-south is a Route or Gateway, east-west is a NetworkPolicy or UDN.
-Visual: Reuse concept diagram m15-...-01-traffic-directions.svg — outside→web (north-south, exposure) and web→api→db (east-west, policy).
+Visual: Reuse concept diagram networking-dev-devops-...-01-traffic-directions.svg — outside→web (north-south, exposure) and web→api→db (east-west, policy).
 
 ## Slide: A mental model of the network
 
@@ -42,7 +42,7 @@ Visual: A left-to-right chain: Service (name/VIP) → Endpoints (pod IPs, select
 - Gateway API — the strategic direction (GA)
 
 Notes: There's a decision tree for "make this reachable," and each rung exists for a reason — stop at the first that fits. ClusterIP is the default and where most workloads stay. NodePort opens the same port on every node — understand it once, reach for it almost never. LoadBalancer asks the platform for an external IP, which only appears if a provider answers — on this bare-metal cluster with no provider it hangs at <pending>, which is the lesson: LoadBalancer is a promise the platform has to be able to keep. Route is the deterministic path — wildcard DNS, edge TLS, no provider — and it's what you actually run. The Gateway API (GatewayClass → Gateway → HTTPRoute, weighted splits) is the portable successor and the strategic direction, GA on OpenShift.
-Visual: Reuse concept diagram m15-...-02-exposure-tree.svg — the branching tree from ClusterIP through Route/Gateway, with LoadBalancer flagged "<pending> on bare metal."
+Visual: Reuse concept diagram networking-dev-devops-...-02-exposure-tree.svg — the branching tree from ClusterIP through Route/Gateway, with LoadBalancer flagged "<pending> on bare metal."
 
 ## Slide: The honest L4 boundary
 

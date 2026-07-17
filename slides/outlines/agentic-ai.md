@@ -1,4 +1,4 @@
-# M23 — Agentic AI on OpenShift
+# Agentic AI on OpenShift
 
 ## Slide: A model alone is confidently wrong about YOUR data
 
@@ -20,7 +20,7 @@ Visual: Left panel "Ask the model" — a chat bubble "CLM-1004 is Approved ✓" 
 - Memory — per-request only; with temperature 0, answers are reproducible
 
 Notes: An agent is not a model and not magic — it is four parts working together. The model is the reasoning engine; on this workshop it is served over an OpenAI-compatible Models-as-a-Service endpoint, and the agent is model-agnostic — the same code runs against any served model, only an environment value changes. The instructions are the system prompt that sets the agent's job and rules: use your tools instead of guessing, never invent claim details, cite the policy id you relied on — this is where you encode behaviour, and it is ordinary text you can read and change. The tools are the functions the model may call — the two MCP servers, claims-db and policy-docs — and they are the whole point, because they are how the agent touches your world. Memory is where the multi-step tool conversation is held; Parasol's agent uses a fresh per-request memory, which with temperature 0 keeps answers reproducible.
-Visual: The concept diagram m23-agentic-ai-01-agent-anatomy.svg — a rounded "parasol-agent" box containing four labelled parts (Model, Instructions, Tools, Memory), a question arrow in, and a "grounded answer + which tools it called + tokens" arrow out; the Tools part connects out to the two MCP servers.
+Visual: The concept diagram agentic-ai-01-agent-anatomy.svg — a rounded "parasol-agent" box containing four labelled parts (Model, Instructions, Tools, Memory), a question arrow in, and a "grounded answer + which tools it called + tokens" arrow out; the Tools part connects out to the two MCP servers.
 
 ## Slide: MCP tools are your APIs
 
@@ -28,10 +28,10 @@ Visual: The concept diagram m23-agentic-ai-01-agent-anatomy.svg — a rounded "p
 - An MCP SERVER advertises tools (name, args, result); the agent is the CLIENT
 - claims-db + policy-docs are plain Deployments — probes, metrics, Services
 - New capability = deploy a service + register a tool, NOT retrain a model
-- Write the tool once — every MCP-capable agent (and M24's coding assistant) reuses it
+- Write the tool once — every MCP-capable agent (and AI-Assisted Development's coding assistant) reuses it
 
-Notes: This is the most important idea in the module: the tools an agent calls are just your services, behind a small standard adapter. MCP — the Model Context Protocol — is that standard. An MCP server advertises a set of tools: a name, the arguments, and what it returns; an MCP client, here the agent, discovers them and lets the model call them. Parasol wraps its claims data and policy search as two MCP servers. Three things follow. A tool is a contract, not a model concern — get_claim returns one grounded sentence, and the model neither knows nor cares whether that came from H2, PostgreSQL, or a mainframe. Tools are ordinary services on the platform — claims-db and policy-docs are plain Deployments with health probes and metrics, exactly like any microservice, so giving the agent a new capability means deploying a service and registering a tool, not retraining a model. And the same tool serves any MCP-capable client — the claims-db server here is reused unchanged in M24 by a coding assistant. Write the tool once; every agent uses it.
-Visual: The concept diagram m23-agentic-ai-02-mcp-tools.svg — the user posting to parasol-agent (the MCP client) inside a namespace box; the agent making tool calls over HTTP-SSE to claims-db and policy-docs (each listing its tools) and a chat call out to the MaaS model endpoint. A caption strip: "a tool is just your service + a standard adapter."
+Notes: This is the most important idea in the module: the tools an agent calls are just your services, behind a small standard adapter. MCP — the Model Context Protocol — is that standard. An MCP server advertises a set of tools: a name, the arguments, and what it returns; an MCP client, here the agent, discovers them and lets the model call them. Parasol wraps its claims data and policy search as two MCP servers. Three things follow. A tool is a contract, not a model concern — get_claim returns one grounded sentence, and the model neither knows nor cares whether that came from H2, PostgreSQL, or a mainframe. Tools are ordinary services on the platform — claims-db and policy-docs are plain Deployments with health probes and metrics, exactly like any microservice, so giving the agent a new capability means deploying a service and registering a tool, not retraining a model. And the same tool serves any MCP-capable client — the claims-db server here is reused unchanged in AI-Assisted Development by a coding assistant. Write the tool once; every agent uses it.
+Visual: The concept diagram agentic-ai-02-mcp-tools.svg — the user posting to parasol-agent (the MCP client) inside a namespace box; the agent making tool calls over HTTP-SSE to claims-db and policy-docs (each listing its tools) and a chat call out to the MaaS model endpoint. A caption strip: "a tool is just your service + a standard adapter."
 
 ## Slide: RAG honestly — and grounding is engineered
 

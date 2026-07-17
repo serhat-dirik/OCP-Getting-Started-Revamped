@@ -1,4 +1,4 @@
-# M12 — Observability, Health & Scale
+# Observability, Health & Scale
 
 ## Slide: 02:00 — the claims API is failing, and you can't tell why
 
@@ -20,7 +20,7 @@ Visual: A dark red "claims API" tile with a question mark; a clock at 02:00; thr
 - The discipline: metrics to notice, traces to locate, logs to confirm
 
 Notes: The foundation. Metrics are numbers over time — request rate, error rate, latency, CPU — always on and what you alert on, but a metric won't tell you which claim failed. Logs are individual events with full detail, but at scale they're a firehose. Traces follow one request across every service and DB call and show where the time went. The operating discipline is metrics to notice and alert, traces to locate the fault, logs to confirm the detail. Parasol's claims service is deliberately quiet at runtime — a healthy request logs nothing — which is exactly why you don't operate it by tailing logs.
-Visual: Concept diagram m12-observability-health-scale-01-three-signals — request fanning into metrics/logs/traces, each labeled with the question it answers.
+Visual: Concept diagram observability-health-scale-01-three-signals — request fanning into metrics/logs/traces, each labeled with the question it answers.
 
 ## Slide: Observe your app; the platform observes itself
 
@@ -31,7 +31,7 @@ Visual: Concept diagram m12-observability-health-scale-01-three-signals — requ
 - The claims app already speaks it: /q/metrics + a custom `claims_created_total`
 
 Notes: The surprise that lands: there's no monitoring to install. User-workload monitoring is already running. To get your app in, you point it at your app with a ServiceMonitor — a small object that says "scrape this Service every 30 seconds." The claims service already exposes Prometheus metrics at /q/metrics — the framework's HTTP timers plus a business metric the team added by hand, claims_created_total. Your job isn't to build the plumbing; it's to consume it: read, alert, act. Same story for traces — the app emits OpenTelemetry to a shared collector that forwards to Tempo, so "add tracing" is a platform decision, not a per-app rewrite.
-Visual: Concept diagram m12-observability-health-scale-02-servicemonitor-bridge — app /q/metrics → ServiceMonitor → user-workload monitoring → console + your alert.
+Visual: Concept diagram observability-health-scale-02-servicemonitor-bridge — app /q/metrics → ServiceMonitor → user-workload monitoring → console + your alert.
 
 ## Slide: Alert on symptoms — then make it fire
 
@@ -64,7 +64,7 @@ Visual: Concept-style trace waterfall for /history (single HTTP span today), wit
 - Live: burst load → CPU 221% → HPA scales 2→4 in ~24s
 
 Notes: "It's slow — add replicas" is only sometimes right. Four tools: HPA adds replicas when CPU/memory climbs with traffic (the workhorse, and what you build — it needs a CPU request to compute utilization against). Serverless scales to zero for spiky/idle services. KEDA scales on external signals like queue depth for event-driven work. VPA right-sizes one pod rather than adding pods — useful, but never point a VPA and an HPA at the same resource, they fight. The live moment: drive a burst, CPU hits 221%, the HPA scales to the ceiling of 4 in about 24 seconds, then holds for a 5-minute window before shrinking so it doesn't flap.
-Visual: Concept diagram m12-observability-health-scale-03-scaling-decision-tree — four branches from "what is the pressure?"; HPA highlighted.
+Visual: Concept diagram observability-health-scale-03-scaling-decision-tree — four branches from "what is the pressure?"; HPA highlighted.
 
 ## Slide: Survive the drain with a PodDisruptionBudget
 
@@ -86,4 +86,4 @@ Visual: A node draining, two claims pods; one evicted + rescheduling, the second
 - None of it was a separate product to buy — it ships with the platform
 
 Notes: Close by connecting it back. You instrumented nothing and consumed everything: golden signals and a business metric, an alert you made fire, a trace, an HPA, a PDB — the observability, health and scale layer over the platform you'd built through the earlier modules. And the punchline for the room's leadership: user-workload monitoring, the Cluster Observability Operator, Tempo and OpenTelemetry all ship with OpenShift. Teams that treat "add monitoring" as a procurement project are usually re-buying what their subscription already includes.
-Visual: Concept diagram m12-observability-health-scale-05-what-you-built — the claims service with metrics/alert/trace/HPA/PDB layered on, all green.
+Visual: Concept diagram observability-health-scale-05-what-you-built — the claims service with metrics/alert/trace/HPA/PDB layered on, all green.

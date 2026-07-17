@@ -1,4 +1,4 @@
-# M18 — Service Mesh 3 & Advanced Gateways
+# Service Mesh 3 & Advanced Gateways
 
 ## Slide: One slow service shouldn't take down the site
 
@@ -20,7 +20,7 @@ Visual: A three-node chain (web → claims → fraud) with a red "hang" on the f
 - OSSM3 injects a NATIVE sidecar: an always-on init container
 
 Notes: Two halves, and the split is the whole mental model. The data plane is the fleet of sidecar proxies — one Envoy proxy injected into every meshed pod, with all of the pod's inbound and outbound traffic transparently redirected through it. This is where encryption, routing, retries, and access checks actually happen. On OpenShift Service Mesh 3 the proxy is injected as a native sidecar — a Kubernetes init container with an always-on restart policy, so it starts before your app and shuts down after it, closing the startup and shutdown gaps older sidecars had. The control plane is istiod, in the istio-system namespace: it watches your Kubernetes resources and the mesh custom resources you create, compiles them into proxy configuration, and pushes that config plus a short-lived identity certificate to every sidecar. It is not in the request path — if istiod restarts, traffic keeps flowing on the last config the proxies received. You configure the mesh by creating custom resources — VirtualService, DestinationRule, AuthorizationPolicy, PeerAuthentication — and istiod turns them into proxy behavior. You never edit a proxy directly.
-Visual: Reuse concept diagram m18-...-01-mesh-architecture.svg — blue control plane (istiod + Kiali) pushing config/certs down to amber sidecar proxies wrapping green app containers, with an un-meshed red client outside.
+Visual: Reuse concept diagram service-mesh-advanced-gateways-...-01-mesh-architecture.svg — blue control plane (istiod + Kiali) pushing config/certs down to amber sidecar proxies wrapping green app containers, with an un-meshed red client outside.
 
 ## Slide: Enroll once, get three things free
 
@@ -86,4 +86,4 @@ Visual: Three arrows converging on the fraud service: a green check from claims 
 - Map to org: is your east-west traffic provably encrypted and identity-gated?
 
 Notes: Close on the ingress boundary and the transfer. Getting traffic into the mesh is the job of an ingress gateway. The honest boundary worth carrying to a customer: Routes and the newer Gateway API handle HTTP(S) ingress well — for most web traffic you don't need the mesh's gateway. But raw TCP and TLS passthrough by SNI are different: a Route can't route an arbitrary TCP protocol, and on supported OpenShift channels the experimental L4 Gateway API resources (TCPRoute, TLSRoute) aren't available — they were absent on this cluster. So when Parasol's legacy partner bureaus send claim feeds over raw TCP, the Istio ingress Gateway with a TCP or TLS-passthrough listener is the supported path. The decision guide: Gateway API or Routes for HTTP(S); Istio Gateway/VirtualService for raw-TCP and passthrough today. In the optional encore you build exactly that raw-TCP path and add a native gateway rate limit with an EnvoyFilter — hammer it, read the 429s — framed honestly as a platform capability, not a replacement for a full API-management product. Take the questions back to your org: is your east-west traffic provably mutual-TLS encrypted and gated by identity, or just assumed safe because it's "inside the cluster"? Can you canary 10% without a redeploy? Do you have an answer when a partner needs raw TCP?
-Visual: A decision fork — "HTTP(S)? → Route / Gateway API" vs "raw TCP / SNI passthrough? → Istio Gateway/VirtualService" — with an "EnvoyFilter rate limit → 429" chip on the gateway path and a footnote pointer to M15 (Routes / Gateway API) and M12 (tracing across the mesh).
+Visual: A decision fork — "HTTP(S)? → Route / Gateway API" vs "raw TCP / SNI passthrough? → Istio Gateway/VirtualService" — with an "EnvoyFilter rate limit → 429" chip on the gateway path and a footnote pointer to Networking for Dev & DevOps (Routes / Gateway API) and Observability (tracing across the mesh).

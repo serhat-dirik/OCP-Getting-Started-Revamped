@@ -1,4 +1,4 @@
-# M02 — Ways to Build & Deliver Apps
+# Ways to Build & Deliver Apps
 
 ## Slide: Here is some source code
 
@@ -20,7 +20,7 @@ Visual: A Git repo icon with an arrow to a question mark over an OpenShift clust
 - Match the on-ramp to the app
 
 Notes: There is no single right way, because apps arrive in different shapes. Four on-ramps, from least to most control: deploy a prebuilt image (no build); import from Git and let Source-to-Image build it (no Dockerfile); build from a Dockerfile/Containerfile when you need control of the base image; graduate to a pipeline when the build is really test-scan-sign-deploy. The skill is choosing, not memorizing one path.
-Visual: Reuse concept diagram m02-build-deliver-01-build-spectrum.svg — the decision tree from image? / source? / need control? / workflow?
+Visual: Reuse concept diagram build-deliver-01-build-spectrum.svg — the decision tree from image? / source? / need control? / workflow?
 
 ## Slide: Source-to-Image — the paved road
 

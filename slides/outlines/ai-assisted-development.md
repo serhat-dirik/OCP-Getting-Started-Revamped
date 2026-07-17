@@ -1,4 +1,4 @@
-# M24 — AI-Assisted Development on OpenShift (Vibe Coding, Safely)
+# AI-Assisted Development on OpenShift (Vibe Coding, Safely)
 
 ## Slide: It runs your cluster now
 
@@ -20,7 +20,7 @@ Visual: A split — left: an engineer pasting `oc get` output into a chat window
 - Every call the server makes is made AS mcp-agent, and the API server checks its RBAC
 
 Notes: Ground the mechanism. An AI assistant doesn't speak to the Kubernetes API — it speaks MCP, the same open standard the claims assistant used for its data tools in the Agentic AI module. Here the MCP server is pointed at the platform: it advertises list-pods, read-events, get-deployment, read-logs as tools the model can call. The single most important fact is how that server authenticates: it runs as a dedicated ServiceAccount, mcp-agent, and its pod's projected token is the only cluster credential in the entire system. The client — the neutral CLI the attendee runs — holds no kubeconfig; it knows only the MCP server's address and a model key. So when the model calls "list pods in namespace X," the server asks the API server as mcp-agent, and the API server checks: may mcp-agent do this? The agent's powers are exactly mcp-agent's powers — no more. That's the whole design, and it's why RBAC on that SA is the lever.
-Visual: Reuse concept diagram m24-...-01-mcp-sa-boundary.svg — client (no kubeconfig) → MCP server (runs as mcp-agent) → RBAC gate → API server; a side branch to the MaaS model. The RBAC gate highlighted red as "the actual boundary."
+Visual: Reuse concept diagram ai-assisted-development-...-01-mcp-sa-boundary.svg — client (no kubeconfig) → MCP server (runs as mcp-agent) → RBAC gate → API server; a side branch to the MaaS model. The RBAC gate highlighted red as "the actual boundary."
 
 ## Slide: Read-only first — and the flag is not the boundary
 
@@ -64,7 +64,7 @@ Visual: A three-panel strip: (1) the deployer Role YAML with "no secrets, no sca
 - oc auth can-i --as confirms the scope: yes at home, no next door, no cluster-wide
 
 Notes: The climax the whole module builds to. The agent can now read and patch the attendee's namespace. Point it at someone else's. Writes are still allowed and the server still offers every tool — the only thing between the agent and a neighbour's namespace is RBAC on mcp-agent. Ask it to list pods and events in user1-dev, and watch the trace: it *calls* the tool — this is not the client refusing on the agent's behalf — and the API server returns "pods is forbidden: User system:serviceaccount:user3-dev:mcp-agent cannot list resource pods in the namespace user1-dev." The agent reports the denial honestly and doesn't try to work around it. That denial IS the lesson: mcp-agent has a view RoleBinding in the attendee's namespace and nowhere else, so a read of user1-dev is a 403, enforced by the platform underneath the agent. Confirm from the other side with oc auth can-i --as impersonation: yes in your namespace, no next door, no cluster nodes. This is why you scope with a namespaced RoleBinding, never cluster-reader — on a shared cluster the blast radius is exactly the namespace you put the agent in. Trust didn't stop it; the platform did.
-Visual: Reuse concept diagram m24-...-02-two-phase-rbac.svg, zoomed on the denial branch: the agent's call to user1-dev bouncing off a red RBAC wall labeled "403 — no binding here", with the can-i matrix (yes/no/no) beside it.
+Visual: Reuse concept diagram ai-assisted-development-...-02-two-phase-rbac.svg, zoomed on the denial branch: the agent's call to user1-dev bouncing off a red RBAC wall labeled "403 — no binding here", with the can-i matrix (yes/no/no) beside it.
 
 ## Slide: The Lightspeed family, and a team policy you can adopt
 

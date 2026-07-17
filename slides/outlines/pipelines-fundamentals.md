@@ -1,4 +1,4 @@
-# M07 — Pipelines Fundamentals & Task Libraries
+# Pipelines Fundamentals & Task Libraries
 
 ## Slide: The build that lives in someone's shell history
 
@@ -20,7 +20,7 @@ Visual: A messy "shell history + stale wiki" box on the left, an arrow to a clea
 - Params in, files shared, facts out
 
 Notes: Give people the vocabulary before anything else. A Task is a single reusable unit — clone, test, build, deploy. A Pipeline is an ordered graph of Tasks; it runs nothing itself, it's the recipe. A PipelineRun is one execution — you hand it parameter values and a workspace and it creates the Pods. What makes a Task reusable instead of a copy-pasted script is three typed connection points: parameters (typed inputs like the Git URL and image tag), workspaces (shared storage, usually a PVC, so one Task hands files to the next), and results (small typed outputs — a computed size, a verdict — that let later steps and humans act on a fact). The claims pipeline is exactly this: five Tasks, one workspace, four params, two results.
-Visual: Reuse concept diagram m07-...-01 (top half) — Task → Pipeline → PipelineRun with params-in / workspace / results-out labels.
+Visual: Reuse concept diagram pipelines-fundamentals-...-01 (top half) — Task → Pipeline → PipelineRun with params-in / workspace / results-out labels.
 
 ## Slide: Three reuse layers, wired by the cluster resolver
 
@@ -31,7 +31,7 @@ Visual: Reuse concept diagram m07-...-01 (top half) — Task → Pipeline → Pi
 - ClusterTask is gone (1.17); resolver replaced it
 
 Notes: The best Task is one you didn't write. OpenShift Pipelines organizes reuse into three layers and your app pipeline pulls from all three: shipped catalog Tasks in the openshift-pipelines namespace (git-clone, buildah, openshift-client — you reference, never maintain); a curated organization library your platform team standardizes on, published once into a shared namespace so every team uses the same blessed version; and your app's own pipeline, which composes the other two. The wiring is the cluster resolver — instead of copying a Task's YAML you write a reference ("the Task named X in namespace Y") and Tekton resolves it at run time. Note for the field: the old ClusterTask kind was removed in Pipelines 1.17; the cluster resolver is its supported, better replacement.
-Visual: Reuse concept diagram m07-...-01 (full) — three colored layers, each Task dotted to a resolver: cluster arrow into the app pipeline.
+Visual: Reuse concept diagram pipelines-fundamentals-...-01 (full) — three colored layers, each Task dotted to a resolver: cluster arrow into the app pipeline.
 
 ## Slide: Why curate a library — the Java 17 vs 21 gap
 
@@ -53,7 +53,7 @@ Visual: Two Task cards side by side — shipped "maven / openjdk-17 / no image p
 - Every push built the same way
 
 Notes: A pipeline someone has to remember to run will drift from the code it builds. Pipelines-as-Code closes that gap: the PipelineRun definition lives in a .tekton/ directory inside the application's own Git repository, and a push fires it. Two pieces make it work, and attendees set up both in the lab — a webhook on the repo that POSTs to the PaC controller on every push, and a Repository custom resource that PaC matches to the incoming webhook by URL. The payoff is that the build is versioned with the app: the .tekton file is reviewed, diffed, and rolled back like any other code, and every push — yours or a teammate's — is built the same way, with no one remembering to press a button. This is the on-ramp everything later attaches to.
-Visual: Reuse concept diagram m07-...-02 — push → Gitea webhook → PaC controller → new PipelineRun.
+Visual: Reuse concept diagram pipelines-fundamentals-...-02 — push → Gitea webhook → PaC controller → new PipelineRun.
 
 ## Slide: Pipelines produce data, not just images
 

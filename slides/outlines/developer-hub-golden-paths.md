@@ -1,4 +1,4 @@
-# M11 — Developer Hub & Golden Paths
+# Developer Hub & Golden Paths
 
 ## Slide: Ten tools before the first line of code
 
@@ -20,7 +20,7 @@ Visual: A lone developer facing a wall of nine tool logos/boxes (build, pipeline
 - Sourced from files next to the code
 
 Notes: The first thing a developer portal — Red Hat Developer Hub, Red Hat's build of Backstage — gives you is a software catalog: a live inventory modelled as typed entities. A Component is a service or website; an API is a contract it provides or consumes; a System groups components that work together; a Group is the team that owns them. Because the relationships are typed, the catalog is a map, not a spreadsheet: it renders who owns the claims service, which System it belongs to, which API it provides, who consumes that API. And each entity's source of truth is a small catalog-info.yaml in the service's own repo — described as code, reviewed in pull requests, as current as the last commit. When you onboard someone, you point them at the catalog, not a diagram three reorgs out of date.
-Visual: Concept diagram m11-developer-hub-golden-paths-01-catalog-model — System box containing Components + an API, a Group owning them, provides/consumes arrows.
+Visual: Concept diagram developer-hub-golden-paths-01-catalog-model — System box containing Components + an API, a Group owning them, provides/consumes arrows.
 
 ## Slide: The golden path — a paved road, not a cage
 
@@ -31,7 +31,7 @@ Visual: Concept diagram m11-developer-hub-golden-paths-01-catalog-model — Syst
 - The right thing is the easy thing
 
 Notes: A catalog tells you what exists; a golden path is how you create something new, correctly, without learning the whole platform first. Concretely it is a Software Template: a form plus steps. The developer names a service, and the template scaffolds a complete, standards-compliant service — source with health, metrics, and tracing already wired; a trusted UBI base image; a build recipe; a catalog entry; a workspace. The phrase that matters is paved road, not cage: a cage forces one way and punishes deviation; a paved road makes the right thing the easy thing while leaving you free to drive off it with a reason. The scaffolded service is plain, editable code in your own repo — you own it the moment it is created. The template gave you a correct starting line and got out of the way.
-Visual: Concept diagram m11-developer-hub-golden-paths-02-golden-path-flow — form → template → three outputs (scaffold skeleton, publish to Git, register in catalog) → a new repo + a catalog entry.
+Visual: Concept diagram developer-hub-golden-paths-02-golden-path-flow — form → template → three outputs (scaffold skeleton, publish to Git, register in catalog) → a new repo + a catalog entry.
 
 ## Slide: One button = modules 2 through 10
 
@@ -42,7 +42,7 @@ Visual: Concept diagram m11-developer-hub-golden-paths-02-golden-path-flow — f
 - Improve the template once, every future service gains
 
 Notes: This is why the golden path is the payoff of the whole delivery-and-trust block. Everything you did by hand across the earlier modules — choosing a trusted base image, wiring probes and metrics, describing the app for GitOps, laying out the repo — is a decision the platform team makes once and encodes in the template. The new engineer does not re-derive those decisions; they inherit them. And notice when compliance happens: without a golden path, a service is created some ad-hoc way and audited later — someone finds the missing probe and files a ticket. With one, the service starts already carrying probes, a trusted image, and an owner, so compliance is the default state at creation. Auditing shifts from find-and-fix-the-drift to confirm-the-road-was-used. And the leverage compounds: improve the template once and every service created after inherits it.
-Visual: A single glowing "Create" button on the left; on the right, a stack of labelled layers (trusted image, probes, metrics, tracing, catalog entry, build recipe) assembling into one service card — with a small "M02–M10" bracket over the layers.
+Visual: A single glowing "Create" button on the left; on the right, a stack of labelled layers (trusted image, probes, metrics, tracing, catalog entry, build recipe) assembling into one service card — with a small bracket over the accreted platform layers.
 
 ## Slide: What you'll do
 

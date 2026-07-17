@@ -1,4 +1,4 @@
-# M16 — Deployment Targets & Scheduling
+# Deployment Targets & Scheduling
 
 ## Slide: From scheduled-wherever to placed-on-purpose
 
@@ -20,7 +20,7 @@ Visual: A "before" cluster: pods scattered at random across nodes, a batch box a
 - The currency is REQUESTS, not usage
 
 Notes: You don't need the scheduler's internals — you need one two-step pipeline that runs for every pod. Filter throws out every node that can't run it: not enough unreserved CPU or memory measured by the pod's requests, a taint it doesn't tolerate, a nodeSelector or affinity that doesn't match. Score ranks the survivors — most room, best spread, anti-affinity satisfied — and binds to the winner. If no node survives, the pod stays Pending and the scheduler writes a FailedScheduling event that names the reason node by node — reading that event is the whole skill. The currency in the filter is requests, not usage and not limits: a pod that requests 200m is placed as if it always uses 200m; a pod that requests nothing can be packed onto a full node. Requests also set QoS (Guaranteed/Burstable/BestEffort), which decides eviction order.
-Visual: Reuse concept diagram m16-...-01-scheduler-pipeline.svg — Pending pod → FILTER → SCORE → BIND, with a red branch "0 survive → Pending + FailedScheduling."
+Visual: Reuse concept diagram deployment-targets-scheduling-...-01-scheduler-pipeline.svg — Pending pod → FILTER → SCORE → BIND, with a red branch "0 survive → Pending + FailedScheduling."
 
 ## Slide: Direct pods — who seeks, who repels
 
@@ -31,7 +31,7 @@ Visual: Reuse concept diagram m16-...-01-scheduler-pipeline.svg — Pending pod 
 - podAntiAffinity: never two replicas on one node
 
 Notes: There are two families of placement control, and confusing them is the most common scheduling mistake there is. Affinity is the pod reaching toward a node — nodeSelector is the blunt form, nodeAffinity adds required/preferred, podAntiAffinity points at other pods ("never two of me on a node") to spread replicas. A taint is the node pushing pods away: NoSchedule means nothing lands unless it tolerates the taint. Here's the trap that catches everyone: a toleration only permits, it does not attract. A pod that tolerates the batch taint may land on the batch node, but the scheduler is just as happy to put it anywhere else. To actually pin a workload to a dedicated pool you need all three: a taint (keep others off), a toleration (be allowed on), and a nodeSelector (be sent there). Add the selector alone and the pod goes Pending on the untolerated taint.
-Visual: Reuse concept diagram m16-...-02-seek-vs-repel.svg — left "affinity pulls the pod toward a labelled node"; right "a taint pushes pods away; a toleration is a permitted-but-not-attracted arrow."
+Visual: Reuse concept diagram deployment-targets-scheduling-...-02-seek-vs-repel.svg — left "affinity pulls the pod toward a labelled node"; right "a taint pushes pods away; a toleration is a permitted-but-not-attracted arrow."
 
 ## Slide: Spread across failure domains
 

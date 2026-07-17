@@ -1,4 +1,4 @@
-# M03 — Dev Spaces & the Inner Loop
+# Dev Spaces & the Inner Loop
 
 ## Slide: Day one, without the laptop marathon
 
@@ -20,7 +20,7 @@ Visual: Split image — a laptop-setup checklist (JDK, Maven, DB, VPN, creds) ve
 - The platform optimizes each differently
 
 Notes: The core mental model. The inner loop is the seconds-scale edit-run-observe cycle you do dozens of times an hour; the outer loop is the minutes-to-hours build-test-deploy cycle about safety and repeatability. Dev Spaces is about making the inner loop fast without a laptop. The rest of the workshop is the outer loop, and it begins the moment they git push.
-Visual: Reuse concept diagram m03-...-01-inner-outer-loop.svg — red inner loop (edit→build→run→observe) handing off via git push to the grey outer loop (pipeline→image→GitOps→prod).
+Visual: Reuse concept diagram devspaces-inner-loop-...-01-inner-outer-loop.svg — red inner loop (edit→build→run→observe) handing off via git push to the grey outer loop (pipeline→image→GitOps→prod).
 
 ## Slide: Why the IDE belongs in the cluster
 
@@ -53,7 +53,7 @@ Visual: A devfile.yaml snippet with components/commands/endpoints annotated, arr
 - Debug port 5005 opens automatically
 
 Notes: The workspace is a first-class citizen of the cluster network. Dev mode runs in the workspace project and reaches the real claims-db in the app project by cross-namespace DNS — exactly how one microservice finds another. Hot reload lands changes in ~2 seconds against real data, and a Java debug port opens automatically so you can step through a live request. This is what "fast inner loop, real services" means.
-Visual: Reuse concept diagram m03-...-02-workspace-gateway-services.svg — browser → che-gateway (HTTPS) → tools container (dev mode :8080, debug :5005) → cross-ns DNS → claims-db.
+Visual: Reuse concept diagram devspaces-inner-loop-...-02-workspace-gateway-services.svg — browser → che-gateway (HTTPS) → tools container (dev mode :8080, debug :5005) → cross-ns DNS → claims-db.
 
 ## Slide: What you'll do
 

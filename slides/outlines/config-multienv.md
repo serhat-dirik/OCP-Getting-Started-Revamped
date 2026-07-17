@@ -1,4 +1,4 @@
-# M04 — Config, Secrets & Multi-Environment
+# Config, Secrets & Multi-Environment
 
 ## Slide: It worked in staging
 
@@ -20,7 +20,7 @@ Visual: Split panel — a green "staging: passed" check next to a red "productio
 - Ship exactly what you tested
 
 Notes: The core mental model of the whole module. An immutable image carries behavior; the environment supplies settings. Introduce the four config sources in increasing order of handling — inline environment variables, a ConfigMap for non-secret config, a Secret for credentials, and a mounted file for larger config or rotation. The payoff line: promotion becomes applying different configuration to the same bytes, so you ship exactly what you tested.
-Visual: Reuse concept diagram m04-...-01-config-sources.svg — one immutable image fed by env / ConfigMap / Secret / mounted file.
+Visual: Reuse concept diagram config-multienv-...-01-config-sources.svg — one immutable image fed by env / ConfigMap / Secret / mounted file.
 
 ## Slide: ConfigMap vs Secret — and an honest word
 
@@ -42,7 +42,7 @@ Visual: Two cards side by side — ConfigMap (host, port, log level) and Secret 
 - No ready pods = Route holds traffic (503)
 
 Notes: Three probes, three different platform reactions. Startup holds the other two off so a slow boot is not mistaken for a failure. Readiness controls whether the pod is in the Service endpoints — fail it and traffic is held, not sent to a broken pod. Liveness restarts a wedged container. The one to internalize is readiness: in the lab they break it and watch the endpoints drain and the Route return 503 — the platform protecting users from a half-broken pod.
-Visual: Reuse concept diagram m04-...-02-readiness-gate.svg — a Route routing to a passing pod and NOT to a failing one (503).
+Visual: Reuse concept diagram config-multienv-...-02-readiness-gate.svg — a Route routing to a passing pod and NOT to a failing one (503).
 
 ## Slide: Requests, limits, and the quota
 
@@ -64,7 +64,7 @@ Visual: A namespace box with a quota meter (requests.cpu 3 cores), a normal pod 
 - "Tested what we shipped," provably
 
 Notes: Bring it together. With an immutable image and externalized config, promotion is a Kustomize base plus overlays that change only what differs per environment — replica count, APP_ENV, log level. The same image DIGEST lands in all three namespaces, which the lab proves at runtime. That identical digest is what "we tested what we shipped" actually means — not the same tag, the same bytes.
-Visual: Reuse concept diagram m04-...-03-promotion-overlays.svg — one base fanning into dev/stage/prod overlays, all carrying the same image digest.
+Visual: Reuse concept diagram config-multienv-...-03-promotion-overlays.svg — one base fanning into dev/stage/prod overlays, all carrying the same image digest.
 
 ## Slide: What you'll do
 
