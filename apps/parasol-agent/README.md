@@ -98,8 +98,8 @@ running (booting the app without them makes the MCP client block retrying dead e
 ## Building the image in-cluster
 
 ```bash
-oc new-build --binary --strategy=docker --name=parasol-agent -n parasol-images
-oc start-build parasol-agent --from-dir=apps/parasol-agent --follow -n parasol-images
+oc new-build --binary --strategy=docker --name=parasol-agent -n ogsr-parasol-images
+oc start-build parasol-agent --from-dir=apps/parasol-agent --follow -n ogsr-parasol-images
 ```
 
 `openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig` (`parasol-agent-git`) for

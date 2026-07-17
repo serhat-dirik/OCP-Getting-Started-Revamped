@@ -75,8 +75,8 @@ curl -s localhost:8081/q/health/ready
 Built on the cluster (cluster-first policy). Binary build, then an immutable tag:
 
 ```bash
-oc new-build --binary --strategy=docker --name=claims-db -n parasol-images
-oc start-build claims-db --from-dir=apps/mcp-servers/claims-db --follow -n parasol-images
+oc new-build --binary --strategy=docker --name=claims-db -n ogsr-parasol-images
+oc start-build claims-db --from-dir=apps/mcp-servers/claims-db --follow -n ogsr-parasol-images
 ```
 
 `openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig` (`claims-db-git`) for

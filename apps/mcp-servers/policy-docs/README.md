@@ -61,8 +61,8 @@ curl -s localhost:8082/q/health/ready
 ## Building the image in-cluster
 
 ```bash
-oc new-build --binary --strategy=docker --name=policy-docs -n parasol-images
-oc start-build policy-docs --from-dir=apps/mcp-servers/policy-docs --follow -n parasol-images
+oc new-build --binary --strategy=docker --name=policy-docs -n ogsr-parasol-images
+oc start-build policy-docs --from-dir=apps/mcp-servers/policy-docs --follow -n ogsr-parasol-images
 ```
 
 `openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig` (`policy-docs-git`) for

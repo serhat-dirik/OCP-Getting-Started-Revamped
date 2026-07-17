@@ -98,8 +98,8 @@ Keycloak container.
 Built on the cluster (cluster-first policy). Binary build, then an immutable tag:
 
 ```bash
-oc start-build parasol-claims --from-dir=apps/parasol-claims --follow -n parasol-images
-oc tag parasol-images/parasol-claims:latest parasol-images/parasol-claims:1.1
+oc start-build parasol-claims --from-dir=apps/parasol-claims --follow -n ogsr-parasol-images
+oc tag ogsr-parasol-images/parasol-claims:latest ogsr-parasol-images/parasol-claims:1.1
 ```
 
 > Image tags are immutable per release. `1.0` is the M02-era image pinned by the
@@ -114,7 +114,7 @@ oc tag parasol-images/parasol-claims:latest parasol-images/parasol-claims:1.1
 - The repo ships the recipe under **both** names — `Dockerfile` and the
   vendor-neutral `Containerfile` — kept byte-for-byte identical. `Dockerfile`
   lets `oc new-app --strategy=docker <repo>` auto-detect it (M02 exercise 2);
-  `Containerfile` is what the M07/M08 pipelines and the `parasol-images` binary
+  `Containerfile` is what the M07/M08 pipelines and the `ogsr-parasol-images` binary
   build reference. Edit one, edit both.
 - Runtime runs as numeric non-root **USER 185**, port **8080**; files are copied
   `--chown=185:0` and group-readable, so it runs under an arbitrary injected UID.

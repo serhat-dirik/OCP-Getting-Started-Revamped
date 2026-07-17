@@ -97,9 +97,9 @@ builds). Two supported paths:
 Source is streamed straight from this directory — no Git checkout needed:
 
 ```bash
-oc new-build --strategy=docker --binary --name=parasol-web -n parasol-images
-oc start-build parasol-web --from-dir=apps/parasol-web --follow -n parasol-images
-oc tag parasol-images/parasol-web:latest parasol-images/parasol-web:1.0
+oc new-build --strategy=docker --binary --name=parasol-web -n ogsr-parasol-images
+oc start-build parasol-web --from-dir=apps/parasol-web --follow -n ogsr-parasol-images
+oc tag ogsr-parasol-images/parasol-web:latest ogsr-parasol-images/parasol-web:1.0
 ```
 
 ### Git BuildConfig (for later CI-driven rebuilds)
@@ -112,12 +112,12 @@ apply it once the repo is published to enable rebuilds from Git.
 ### Image reference M01 deploys
 
 ```
-image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-web:1.0
+image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web:1.0
 ```
 
 Workshop attendees pull it via the `system:image-puller` RoleBinding in
 `openshift/image-puller-rb.yaml` (granted to group `workshop-attendees`,
-scoped to the `parasol-images` namespace).
+scoped to the `ogsr-parasol-images` namespace).
 
 ## Container notes (OpenShift restricted-v2)
 

@@ -85,9 +85,9 @@ Keycloak container — the workshop always points OIDC at the shared rhbk (M29).
 Built on the cluster (cluster-first policy). Binary build for the initial image:
 
 ```bash
-oc new-build --strategy=docker --binary --name=parasol-fraud -n parasol-images
-oc start-build parasol-fraud --from-dir=apps/parasol-fraud --follow -n parasol-images
-oc tag parasol-images/parasol-fraud:latest parasol-images/parasol-fraud:1.0
+oc new-build --strategy=docker --binary --name=parasol-fraud -n ogsr-parasol-images
+oc start-build parasol-fraud --from-dir=apps/parasol-fraud --follow -n ogsr-parasol-images
+oc tag ogsr-parasol-images/parasol-fraud:latest ogsr-parasol-images/parasol-fraud:1.0
 ```
 
 `openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig`

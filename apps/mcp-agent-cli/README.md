@@ -174,10 +174,10 @@ filtering:
 ## Building the image in-cluster
 
 ```bash
-oc new-build --binary --strategy=docker --name=mcp-agent-cli -n parasol-images
-oc start-build mcp-agent-cli --from-dir=apps/mcp-agent-cli --follow -n parasol-images
+oc new-build --binary --strategy=docker --name=mcp-agent-cli -n ogsr-parasol-images
+oc start-build mcp-agent-cli --from-dir=apps/mcp-agent-cli --follow -n ogsr-parasol-images
 # Immutable release tag, matching the parasol-claims:1.0 convention:
-oc tag parasol-images/mcp-agent-cli:latest parasol-images/mcp-agent-cli:1.0
+oc tag ogsr-parasol-images/mcp-agent-cli:latest ogsr-parasol-images/mcp-agent-cli:1.0
 ```
 
 `openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig` (`mcp-agent-cli-git`) for later
