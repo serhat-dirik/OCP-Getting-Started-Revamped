@@ -18,6 +18,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: parasol-claims
     workshop.redhat.com/module: m04
+    workshop.redhat.com/owner: ogsr
 data:
   POSTGRESQL_HOST: claims-db
   POSTGRESQL_PORT: "5432"
@@ -33,6 +34,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: parasol-claims
     workshop.redhat.com/module: m04
+    workshop.redhat.com/owner: ogsr
 type: Opaque
 stringData:
   POSTGRESQL_USER: parasol
@@ -46,6 +48,7 @@ metadata:
   labels:
     app: claims-db
     workshop.redhat.com/module: m04
+    workshop.redhat.com/owner: ogsr
 spec:
   replicas: 1
   selector:
@@ -86,6 +89,7 @@ metadata:
   labels:
     app: claims-db
     workshop.redhat.com/module: m04
+    workshop.redhat.com/owner: ogsr
 spec:
   selector:
     app: claims-db
@@ -102,6 +106,7 @@ metadata:
   labels:
     app: parasol-claims
     workshop.redhat.com/module: m04
+    workshop.redhat.com/owner: ogsr
 spec:
   replicas: {{ .replicas }}
   selector:
@@ -156,6 +161,7 @@ metadata:
   labels:
     app: parasol-claims
     workshop.redhat.com/module: m04
+    workshop.redhat.com/owner: ogsr
 spec:
   selector:
     app: parasol-claims
@@ -172,6 +178,7 @@ metadata:
   labels:
     app: parasol-claims
     workshop.redhat.com/module: m04
+    workshop.redhat.com/owner: ogsr
 spec:
   to:
     kind: Service
