@@ -27,7 +27,7 @@ Every imperative step in `bootstrap/install.sh` is expressed as a chart mechanis
 | `[2/6]` 2a' OAuth IdP append-if-absent | same Job's `oc` container (records `oauth_idp_ownedbyus`) |
 | `[2/6]` 2b MaaS Secret (guarded) | `templates/job-maas-secret.yaml` (wave -8, `if litemaas.enabled`) |
 | `[3/6]` wait for the Gitea mirror | sync-wave gating: wave-1 children are created only after `pp-core-devtools` (wave 0, contains git-mirror) is Healthy |
-| `[4/6]` shared-password Secret in the gitea ns | `templates/job-gitea-seed-secret.yaml` (wave 1, polls for the ns) |
+| `[4/6]` shared-password Secret in the ogsr-gitea ns | `templates/job-gitea-seed-secret.yaml` (wave 1, polls for the ns) |
 | `[5/6]` materialize `workshop-config` from the mirror | `templates/applications.yaml` — `workshop-config` Application (wave 2) |
 | `[6/6]` wait for Healthy | Argo reconciliation + `demo.redhat.com/application` health labels |
 

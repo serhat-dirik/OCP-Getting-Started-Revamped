@@ -31,7 +31,7 @@ Cluster-scoping `student-gitops` (option A) was REJECTED: it preserves the cosme
 instance that *physically cannot reach* the platform machinery — and widens any attendee
 mistake's blast radius to the cluster.
 
-**Decision (option B):** attendee Application CRs live in the `student-gitops` namespace itself.
+**Decision (option B):** attendee Application CRs live in the `ogsr-student-gitops` namespace itself.
 Isolation layers, each proven live before ratification: per-user Argo RBAC (userN cannot
 sync/delete userM's apps — `argocd admin settings rbac can` verified), per-user AppProjects
 boxing destinations to `{user}-dev/stage/prod`, and k8s RBAC denying attendees direct writes to

@@ -165,7 +165,7 @@ rendered, so their Deployment's `spec.template` is byte-identical to what's live
 nothing to sync. Check the fleet at a glance:
 
 ```
-oc get deploy -n showroom -L workshop.redhat.com/reserved-session
+oc get deploy -n ogsr-showroom -L workshop.redhat.com/reserved-session
 ```
 
 `reserved-session=true` = frozen against pod-spec rollouts. Keep a live session in BOTH lists
@@ -190,7 +190,7 @@ their maintenance window:
    rolls **that one showroom once**. The marker flips to `reserved-session=false`. Confirm:
 
    ```
-   oc rollout status deploy/showroom-user5 -n showroom
+   oc rollout status deploy/showroom-user5 -n ogsr-showroom
    ```
 
 A released user takes **all** pending pod-spec changes in that single roll (the guard is not
