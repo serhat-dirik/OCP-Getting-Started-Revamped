@@ -215,7 +215,7 @@ Two Antora extensions are enabled in every playbook:
   ....
   ```
 
-- **Tabs** (`@andrew-jones/antora-tabs-extension`) — console-vs-CLI dual paths in M01–M04:
+- **Tabs** (`@andrew-jones/antora-tabs-extension`) — console-vs-CLI dual paths, the site-wide standard wherever a step works in both the terminal and the web console:
 
   ```asciidoc
   [tabs]
@@ -267,4 +267,4 @@ D Advanced Electives).
 
 Each module is one directory `content/modules/ROOT/pages/mNN-<slug>/` with
 `concept.adoc`, `lab.adoc`, `wrapup.adoc`, `instructor.adoc`, `troubleshooting.adoc`
-(`04-STYLE-GUIDE §2`). The full authored template arrives with M01.
+(`04-STYLE-GUIDE §2`). The full authored template + skeleton live in `docs/module-template/`.

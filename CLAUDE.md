@@ -43,7 +43,8 @@ Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-S
 ## Frequent commands
 
 - Preview content: `./utilities/lab-serve`, or build with `cd content && npx antora site-workshop.yml` (also `site-demo.yml` / `site-instructor.yml`)
-- Stand up a cluster: `./bootstrap/install.sh --profiles core[,…] --users N --domain …`
+- Stand up a cluster: copy `bootstrap/vars.example.yaml` → `bootstrap/vars.yaml`, edit it, then `./bootstrap/install.sh` (reads `vars.yaml`; no CLI flags)
+- Tear down (non-invasive, adoption-aware): `./bootstrap/ogsr-uninstall.sh --dry-run` to preview the WIPE/PRESERVE plan, then `./bootstrap/ogsr-uninstall.sh`
 - Module lifecycle: `tools/ws/ws start|verify|reset|solve mNN [userN]` (attendee-facing text says `ws prep`)
 - Lint locally: `vale content/`, `yamllint .`, `shellcheck`, `helm lint` on charts
 
