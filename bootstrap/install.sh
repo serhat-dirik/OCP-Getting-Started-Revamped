@@ -72,6 +72,97 @@ if [[ -z "$WS_PASS" || "$WS_PASS" == "null" || "$WS_PASS" == "generate" || "$WS_
   info "generated a random shared workshop password (recorded in ${CREDS_FILE})"
 fi
 
+# ── [0/6] uninstall-state capture (non-invasive delivery, Wave 1) ─────────────
+# Record the PRIOR state of every shared/default object the install is about to touch, into a
+# ConfigMap that bootstrap/ogsr-uninstall.sh reads to RESTORE (not blindly delete). Created FIRST,
+# before any mutation, in a workshop-owned namespace. Snapshots are first-write-wins so the TRUE
+# prior state survives re-runs (idempotent). # TODO(verify-on-cluster): every oc read here needs a cluster.
+OWNER_LABEL="workshop.redhat.com/owner=ogsr"
+STATE_NS="ogsr-system"
+STATE_CM="ogsr-uninstall-state"
+
+owner_stamp() { oc label --local --overwrite -f - "$OWNER_LABEL" -o yaml; }  # add the owner label to a piped manifest
+
+record_once() {  # key value — write to the state CM only if the key is unset (true first-install snapshot)
+  local k="$1" v="$2" cur
+  cur="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
+  [[ -n "$cur" ]] && return 0
+  oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
+}
+
+# Operator adoption snapshot: for each operator the SELECTED stacks will install, record whether it
+# already exists (adopted → uninstall NEVER removes it) or will be created by us (created → uninstall
+# may remove it). Source of truth is the component subscription manifests — no brittle hardcoded map.
+snapshot_operators() {
+  local stacks_csv="$1" stack app comp_path sub name ns _stacks
+  IFS=',' read -ra _stacks <<< "$stacks_csv"
+  for stack in "${_stacks[@]}"; do
+    stack="$(echo "$stack" | xargs)"
+    [[ -d "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps" ]] || continue
+    for app in "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+      [[ -e "$app" ]] || continue
+      comp_path="$(yq '.spec.source.path' "$app" 2>/dev/null || true)"
+      [[ -n "$comp_path" && "$comp_path" != "null" ]] || continue
+      for sub in "${SCRIPT_DIR}/../${comp_path}"/subscription*.yaml; do
+        [[ -e "$sub" ]] || continue
+        name="$(yq '.metadata.name' "$sub" 2>/dev/null || true)"
+        ns="$(yq '.metadata.namespace' "$sub" 2>/dev/null || true)"
+        [[ -n "$name" && "$name" != "null" ]] || continue
+        if oc get subscription "$name" -n "$ns" >/dev/null 2>&1; then
+          record_once "op_${name}" "adopted:${ns}"
+        else
+          record_once "op_${name}" "created:${ns}"
+        fi
+      done
+    done
+  done
+}
+
+info "[0/6] capturing uninstall-state (prior cluster state for a non-destructive uninstall)"
+oc apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${STATE_NS}
+  labels:
+    workshop.redhat.com/owner: ogsr
+EOF
+oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1 \
+  || oc create configmap "$STATE_CM" -n "$STATE_NS" --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
+
+# cluster-monitoring-config: the portfolio flips enableUserWorkload=true — remember its prior value.
+if oc get configmap cluster-monitoring-config -n openshift-monitoring >/dev/null 2>&1; then
+  record_once monitoring_cm_existed true
+  UWM_NOW="$(oc get configmap cluster-monitoring-config -n openshift-monitoring -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+  if echo "$UWM_NOW" | grep -qE 'enableUserWorkload:[[:space:]]*true'; then
+    record_once monitoring_uwm_prior true
+  elif echo "$UWM_NOW" | grep -qE 'enableUserWorkload:[[:space:]]*false'; then
+    record_once monitoring_uwm_prior false
+  else
+    record_once monitoring_uwm_prior absent
+  fi
+else
+  record_once monitoring_cm_existed false
+  record_once monitoring_uwm_prior absent
+fi
+
+# GitOps operator: adopted (pre-existing) or created by us? If adopted, remember the openshift-gitops
+# ArgoCD controller.resources we are about to raise, so uninstall can restore the org's prior value.
+if oc get subscription openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
+  record_once gitops_preexisted true
+  ARGO_RES_PRIOR="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources}' 2>/dev/null | base64 | tr -d '\n' || true)"
+  [[ -n "$ARGO_RES_PRIOR" ]] && record_once gitops_argocd_controller_resources_b64 "$ARGO_RES_PRIOR"
+else
+  record_once gitops_preexisted false
+fi
+
+# Gateway API: did the openshift-default GatewayClass already exist (activates a cluster istiod)?
+if oc get gatewayclass openshift-default >/dev/null 2>&1; then
+  record_once gatewayclass_preexisted true
+else
+  record_once gatewayclass_preexisted false
+fi
+
 # ── workshop node substrate (M16 scheduling / M21 resilience) ─────────────────
 # Cluster-scoped, one-time, idempotent node shaping the per-user entry charts must NOT own (ADR-0001
 # Rule 13 — entry charts never own cluster policy). Two pieces, both workshop-specific substrate:
@@ -108,6 +199,10 @@ for n in "${SHAPE_NODES[@]}"; do
   zi=$((zi + 1))
 done
 ok "synthetic ${ZONE_KEY} labels applied across ${#SHAPE_NODES[@]} node(s) (a/b/c round-robin)"
+# Record the node mutations for the uninstall report. (Uninstall reverses by label selector, so this
+# is documentation — it removes pool/zone labels + the batch taint from ANY node still carrying them.)
+record_once nodes_batch "${BATCH_NODE:-}"
+record_once nodes_zoned "${SHAPE_NODES[*]:-}"
 
 # ── 1. portfolio stacks ───────────────────────────────────────────────────────
 # Pre-installed detection: managed/demo clusters (RHDP) often ship Lightspeed already wired
@@ -132,6 +227,10 @@ STACKS="core-devtools,batch"
 # resilience stack (OADP/Velero + in-cluster NooBaa S3) for M21. Opt-in; PREREQ ODF/MCG for the S3 target.
 # The RHSI (Skupper v2) add-on stays commented out in the stack unless the catalog offers channel stable-2.
 [[ "$RESILIENCE" == "true" ]] && STACKS="${STACKS},resilience"
+# Snapshot operator adoption BEFORE Argo installs anything (created vs adopted → safe uninstall).
+record_once lightspeed_preinstalled "$LIGHTSPEED_PREINSTALLED"
+record_once installed_stacks "$STACKS"
+snapshot_operators "$STACKS"
 info "[1/6] installing portfolio stacks: ${STACKS}"
 "$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$REPO_URL" --revision "$REVISION"
 
@@ -148,7 +247,7 @@ while [[ "$i" -le "$USERS" ]]; do
 done
 oc create secret generic htpasswd-workshop-users \
   --from-file=htpasswd="$HTP_FILE" -n openshift-config \
-  --dry-run=client -o yaml | oc apply -f - >/dev/null
+  --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
 ok "htpasswd-workshop-users (openshift-config) — ${USERS} users"
 
 # 2a'. Merge the workshop IdP into the OAuth SINGLETON imperatively (append-if-absent).
@@ -156,6 +255,8 @@ ok "htpasswd-workshop-users (openshift-config) — ${USERS} users"
 # has an 'rhbk' OpenID provider backing the admin login) and a forced server-side apply from
 # Argo would replace the atomic identityProviders list — locking everyone out.
 if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' | grep -qw "workshop-users"; then
+  # first-write-wins: only records false if WE did not already claim ownership on an earlier run.
+  record_once oauth_idp_ownedbyus false
   ok "OAuth IdP 'workshop-users' already present"
 else
   IDP_JSON='{"name":"workshop-users","mappingMethod":"claim","type":"HTPasswd","htpasswd":{"fileData":{"name":"htpasswd-workshop-users"}}}'
@@ -164,6 +265,8 @@ else
   else
     oc patch oauth cluster --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/identityProviders/-\",\"value\":${IDP_JSON}}]" >/dev/null
   fi
+  # WE appended it — uninstall removes exactly this entry (preserving any other IdPs).
+  record_once oauth_idp_ownedbyus true
   ok "OAuth IdP 'workshop-users' appended (existing IdPs preserved)"
 fi
 
@@ -172,10 +275,13 @@ fi
 if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
   [[ -n "$MAAS_KEY" && "$MAAS_KEY" != "null" && "$MAAS_KEY" != "CHANGEME" ]] \
     || die "lightspeed: true but maas.api_key is unset/CHANGEME in ${VARS}"
-  oc create namespace openshift-lightspeed --dry-run=client -o yaml | oc apply -f - >/dev/null
+  # Remember whether the namespace pre-existed — uninstall deletes it ONLY if WE created it.
+  if oc get namespace openshift-lightspeed >/dev/null 2>&1; then record_once lightspeed_ns_created false; else record_once lightspeed_ns_created true; fi
+  oc create namespace openshift-lightspeed --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
   oc create secret generic credentials \
     --from-literal=apitoken="$MAAS_KEY" -n openshift-lightspeed \
-    --dry-run=client -o yaml | oc apply -f - >/dev/null
+    --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
+  record_once lightspeed_secret_created true
   ok "credentials (openshift-lightspeed/apitoken) — MaaS token"
 fi
 
@@ -219,7 +325,7 @@ ok "mirror serves gitops/workshop-config@${REVISION}"
 info "[4/6] recording the shared workshop password (secret workshop-user-creds)"
 oc create secret generic workshop-user-creds \
   --from-literal=password="$WS_PASS" -n "$GITEA_NS" \
-  --dry-run=client -o yaml | oc apply -f - >/dev/null
+  --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
 ok "workshop-user-creds (gitea/password)"
 
 # ── 5. materialize the workshop layer from the LOCAL mirror ───────────────────
@@ -232,6 +338,7 @@ metadata:
   namespace: openshift-gitops
   labels:
     workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/owner: ogsr
 spec:
   project: default
   source:
