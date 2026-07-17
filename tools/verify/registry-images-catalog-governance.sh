@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M17 — Registry, Images & Catalog Governance.
+# Verify registry-images-catalog-governance — Registry, Images & Catalog Governance.
 #   Entry: {user}-dev holds the seeded parasol-claims ImageStream (only the SEED tag — a pull-through
 #          reference to the shared parasol-images build) and a SAMPLE private-registry pull Secret, with
 #          NOTHING acted on yet: no promoted tag, no scheduled-import stream, no custom Template, the
@@ -9,7 +9,7 @@
 #          import), a custom Template lives in {user}-dev (namespaced catalog governance), and the sample
 #          pull secret is referenced for pull by a workload or ServiceAccount (deploy-from-private-registry).
 # Runnable as the ATTENDEE: reads ONLY {user}-dev objects the attendee sees via namespace admin (rule 10).
-# The cluster-wide governance surface M17 also teaches (image.config, samples Config, ImagePruner, IDMS/
+# The cluster-wide governance surface registry-images-catalog-governance also teaches (image.config, samples Config, ImagePruner, IDMS/
 # ITMS, OperatorHub sources) is inspected via platform-observer and exercised by ws-meta smokeCommands, not
 # here. The G1 cockpit smoke runs `--entry-only` as {user}.
 #
@@ -71,18 +71,18 @@ no_custom_template(){ [[ "$(custom_template_count)" == "0" ]]; }
 secret_unreferenced() { ! secret_referenced; }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                     || hint "run: ws prep m17 (or ws start m17 --user ${USER_NAME})"
-check "entry marker ws-entry-m17 present"               oc get cm ws-entry-m17 -n "$NS"     || hint "entry app not synced — ws reset m17 --user ${USER_NAME}"
-check "seeded ImageStream ${IS_NAME} present"           is_present                          || hint "entry app not synced — ws reset m17 --user ${USER_NAME}"
-check "ImageStream ${IS_NAME} declares the seed tag :${SEED_TAG}" has_tag "$SEED_TAG"       || hint "the seed tag is missing — ws reset m17 --user ${USER_NAME}"
-check "sample private-registry pull Secret ${PULL_SECRET} present" pull_secret_present      || hint "entry app not synced — ws reset m17 --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                     || hint "run: ws prep registry-images-catalog-governance (or ws start registry-images-catalog-governance --user ${USER_NAME})"
+check "entry marker ws-entry-registry-images-catalog-governance present"               oc get cm ws-entry-registry-images-catalog-governance -n "$NS"     || hint "entry app not synced — ws reset registry-images-catalog-governance --user ${USER_NAME}"
+check "seeded ImageStream ${IS_NAME} present"           is_present                          || hint "entry app not synced — ws reset registry-images-catalog-governance --user ${USER_NAME}"
+check "ImageStream ${IS_NAME} declares the seed tag :${SEED_TAG}" has_tag "$SEED_TAG"       || hint "the seed tag is missing — ws reset registry-images-catalog-governance --user ${USER_NAME}"
+check "sample private-registry pull Secret ${PULL_SECRET} present" pull_secret_present      || hint "entry app not synced — ws reset registry-images-catalog-governance --user ${USER_NAME}"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has acted on NOTHING yet ---------------------------------
-  check "no promoted :${PROMOTE_TAG} tag yet (attendee tags/promotes it)"    no_promote_tag      || hint "entry ships only :${SEED_TAG}; if :${PROMOTE_TAG} exists the lab already started — ws reset m17 --user ${USER_NAME}"
-  check "no ${EXT_STREAM} scheduled-import stream yet (attendee imports it)" no_ext_stream       || hint "entry ships no ${EXT_STREAM}; if it exists the lab already started — ws reset m17 --user ${USER_NAME}"
-  check "no custom Template in ${NS} yet (attendee adds one)"                no_custom_template  || hint "entry ships no namespaced Template; if one exists the lab already started — ws reset m17 --user ${USER_NAME}"
-  check "sample pull Secret is NOT referenced yet (attendee links/uses it)"  secret_unreferenced || hint "entry ships it unreferenced; if a SA/Deployment uses it the lab already started — ws reset m17 --user ${USER_NAME}"
+  check "no promoted :${PROMOTE_TAG} tag yet (attendee tags/promotes it)"    no_promote_tag      || hint "entry ships only :${SEED_TAG}; if :${PROMOTE_TAG} exists the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
+  check "no ${EXT_STREAM} scheduled-import stream yet (attendee imports it)" no_ext_stream       || hint "entry ships no ${EXT_STREAM}; if it exists the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
+  check "no custom Template in ${NS} yet (attendee adds one)"                no_custom_template  || hint "entry ships no namespaced Template; if one exists the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
+  check "sample pull Secret is NOT referenced yet (attendee links/uses it)"  secret_unreferenced || hint "entry ships it unreferenced; if a SA/Deployment uses it the lab already started — ws reset registry-images-catalog-governance --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOMES — promote + scheduled import + catalog Template + pull-secret use ---
   # Assert OUTCOMES (a promoted tag exists; a scheduled stream exists; a custom Template exists; the pull

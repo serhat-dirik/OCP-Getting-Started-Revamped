@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Verify M10 — GitOps at Scale & Progressive Delivery.
+# Verify gitops-at-scale — GitOps at Scale & Progressive Delivery.
 #   Entry: {user}-gitops workspace ns + entry marker · the student-gitops Argo CD instance is
 #          reachable · the attendee's proj-{user} AppProject exists · a per-user Gitea fork of
-#          claims-config that ALSO carries the M10 source (rollouts/ overlay personalized to
+#          claims-config that ALSO carries the gitops-at-scale source (rollouts/ overlay personalized to
 #          {user}-prod + applicationset.yaml) · the per-user analysis prereqs in {user}-prod
-#          (claims-analysis SA + m10-canary-control knob) · AND the M09 END STATE materialized:
-#          claims runs GitOps-managed in {user}-dev + {user}-stage (M10 starts where M09 ended, so
-#          M10 is independent). Entry leaves {user}-prod WITHOUT the Rollout (converting prod to a
+#          (claims-analysis SA + gitops-at-scale-canary-control knob) · AND the gitops-fundamentals END STATE materialized:
+#          claims runs GitOps-managed in {user}-dev + {user}-stage (gitops-at-scale starts where gitops-fundamentals ended, so
+#          gitops-at-scale is independent). Entry leaves {user}-prod WITHOUT the Rollout (converting prod to a
 #          Rollout is the lab).
 #   End:   {user}-prod runs claims as an Argo Rollout (canary), Healthy, route answers 200 (also
 #          proves the cluster RolloutManager is serving — a Rollout only goes Healthy if the
@@ -48,7 +48,7 @@ fork_exists() {
   curl -ksf -o /dev/null "https://${host}/api/v1/repos/${USER_NAME}/claims-config"
 }
 
-# The fork carries a raw file whose contents match a pattern (proves the M10 source + personalization).
+# The fork carries a raw file whose contents match a pattern (proves the gitops-at-scale source + personalization).
 fork_file_matches() {
   local path="$1" pattern="$2" host; host="$(gitea_host)"
   [[ -n "$host" ]] || return 1
@@ -66,7 +66,7 @@ student_argo_up() {
   [[ "$code" == "200" ]]
 }
 
-# The student server serves its own argocd CLI (M10 beat 1 downloads it — Argo 3.4 has no appset UI,
+# The student server serves its own argocd CLI (gitops-at-scale beat 1 downloads it — Argo 3.4 has no appset UI,
 # so the attendee creates the ApplicationSet via the CLI). A byte-range probe, not a ~300MB pull.
 cli_download_ready() {
   local domain code
@@ -117,29 +117,29 @@ route_ready_200() {
   [[ "$code" == "200" ]]
 }
 
-# --- entry state (what `ws start m10` materializes) --------------------------
+# --- entry state (what `ws start gitops-at-scale` materializes) --------------------------
 check "namespace ${GITOPS} exists"                       oc get ns "$GITOPS"                                 || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-m10 in ${GITOPS}"           oc get cm ws-entry-m10 -n "$GITOPS"                 || hint "entry app not synced — ws start m10 --user ${USER_NAME}"
+check "entry marker ws-entry-gitops-at-scale in ${GITOPS}"           oc get cm ws-entry-gitops-at-scale -n "$GITOPS"                 || hint "entry app not synced — ws start gitops-at-scale --user ${USER_NAME}"
 check "student-gitops Argo CD instance reachable"        student_argo_up                                     || hint "student instance missing — sync workshop-config (student-argocd.yaml)"
 check "argocd CLI served for the appset-create beat"     cli_download_ready                                   || hint "server not serving /download/argocd-linux-amd64 — check the student-gitops server route"
 check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
-check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset m10 --user ${USER_NAME} (or check gitea-fork-m10-${USER_NAME} Job in ns gitea)"
-check "fork carries rollouts/ overlay (prod-personalized)" fork_file_matches "rollouts/kustomization.yaml" "namespace: ${PROD}" || hint "fork missing M10 source — ws reset m10 --user ${USER_NAME}"
-check "fork carries applicationset.yaml (personalized)"  fork_file_matches "applicationset.yaml" "proj-${USER_NAME}"            || hint "fork missing the ApplicationSet source — ws reset m10 --user ${USER_NAME}"
-check "analysis SA claims-analysis in ${PROD}"           oc get sa claims-analysis -n "$PROD"                || hint "analysis prereq missing — ws reset m10 --user ${USER_NAME}"
-check "canary knob m10-canary-control in ${PROD}"        oc get cm m10-canary-control -n "$PROD"             || hint "analysis knob missing — ws reset m10 --user ${USER_NAME}"
-# M10 entry = the M09 END STATE: claims GitOps-managed in dev + stage (M10 starts where M09 ended).
-check "claims-db ready in ${DEV}"                        deploy_ready claims-db "$DEV"                       || hint "M09 end state not materialized — ws reset m10 --user ${USER_NAME}"
-check "parasol-claims ready in ${DEV}"                   deploy_ready parasol-claims "$DEV"                  || hint "M09 end state not materialized — ws reset m10 --user ${USER_NAME}"
-check "dev claims is GitOps-managed (Argo tracking)"     deploy_gitops_managed parasol-claims "$DEV"         || hint "dev claims should be deployed by the student instance — ws reset m10 --user ${USER_NAME}"
-check "parasol-claims ready in ${STAGE} (>=2 replicas)"  deploy_ready_min parasol-claims "$STAGE" 2          || hint "M09 end state not materialized in stage — ws reset m10 --user ${USER_NAME}"
+check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset gitops-at-scale --user ${USER_NAME} (or check gitea-fork-gitops-at-scale-${USER_NAME} Job in ns gitea)"
+check "fork carries rollouts/ overlay (prod-personalized)" fork_file_matches "rollouts/kustomization.yaml" "namespace: ${PROD}" || hint "fork missing gitops-at-scale source — ws reset gitops-at-scale --user ${USER_NAME}"
+check "fork carries applicationset.yaml (personalized)"  fork_file_matches "applicationset.yaml" "proj-${USER_NAME}"            || hint "fork missing the ApplicationSet source — ws reset gitops-at-scale --user ${USER_NAME}"
+check "analysis SA claims-analysis in ${PROD}"           oc get sa claims-analysis -n "$PROD"                || hint "analysis prereq missing — ws reset gitops-at-scale --user ${USER_NAME}"
+check "canary knob gitops-at-scale-canary-control in ${PROD}"        oc get cm gitops-at-scale-canary-control -n "$PROD"             || hint "analysis knob missing — ws reset gitops-at-scale --user ${USER_NAME}"
+# gitops-at-scale entry = the gitops-fundamentals END STATE: claims GitOps-managed in dev + stage (gitops-at-scale starts where gitops-fundamentals ended).
+check "claims-db ready in ${DEV}"                        deploy_ready claims-db "$DEV"                       || hint "gitops-fundamentals end state not materialized — ws reset gitops-at-scale --user ${USER_NAME}"
+check "parasol-claims ready in ${DEV}"                   deploy_ready parasol-claims "$DEV"                  || hint "gitops-fundamentals end state not materialized — ws reset gitops-at-scale --user ${USER_NAME}"
+check "dev claims is GitOps-managed (Argo tracking)"     deploy_gitops_managed parasol-claims "$DEV"         || hint "dev claims should be deployed by the student instance — ws reset gitops-at-scale --user ${USER_NAME}"
+check "parasol-claims ready in ${STAGE} (>=2 replicas)"  deploy_ready_min parasol-claims "$STAGE" 2          || hint "gitops-fundamentals end state not materialized in stage — ws reset gitops-at-scale --user ${USER_NAME}"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove {user}-prod does NOT yet run the Rollout (converting prod is the lab).
-  check "no parasol-claims Rollout in ${PROD} yet (clean)" rollout_absent parasol-claims "$PROD"             || hint "prod already has the Rollout — ws reset m10 --user ${USER_NAME} for a clean entry"
+  check "no parasol-claims Rollout in ${PROD} yet (clean)" rollout_absent parasol-claims "$PROD"             || hint "prod already has the Rollout — ws reset gitops-at-scale --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
-  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "convert prod to a Rollout (rollouts/ overlay); ws solve m10 does this — needs the cluster RolloutManager"
+  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "convert prod to a Rollout (rollouts/ overlay); ws solve gitops-at-scale does this — needs the cluster RolloutManager"
   check "route parasol-claims answers 200 in ${PROD}"     route_ready_200 "$PROD"                            || hint "prod claims not ready — check the Rollout: oc argo rollouts get rollout parasol-claims -n ${PROD}"
 fi
 

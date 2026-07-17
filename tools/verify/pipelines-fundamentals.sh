@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M07 — Pipelines Fundamentals & Task Libraries.
+# Verify pipelines-fundamentals — Pipelines Fundamentals & Task Libraries.
 #   Entry: {user}-cicd exists · entry marker CM · claims-db Deployment ready · the
 #          parasol-claims-build-test-deploy Pipeline present · Gitea fork answers ·
 #          .tekton/pull-request.yaml seeded in the fork · the curated parasol-tasks
@@ -62,21 +62,21 @@ deploy_ready() {
   [[ -n "$ready" && "$ready" -ge 1 ]]
 }
 
-# --- entry state (what `ws start m07` materializes) --------------------------
-check "namespace ${NS} exists"                            oc get ns "$NS"                                    || hint "run: ws start m07 --user ${USER_NAME}"
-check "entry marker ws-entry-m07 present"                 oc get cm ws-entry-m07 -n "$NS"                    || hint "entry app not synced — ws start m07 --user ${USER_NAME}"
-check "claims-db deployment ready in ${NS}"               deploy_ready claims-db "$NS"                       || hint "the ephemeral DB is entry state — ws reset m07 --user ${USER_NAME}"
-check "Pipeline parasol-claims-build-test-deploy present" oc get pipelines.tekton.dev parasol-claims-build-test-deploy -n "$NS" || hint "entry app not synced — ws start m07 --user ${USER_NAME}"
-check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing — re-run: ws start m07 --user ${USER_NAME} (fork job)"
-check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset m07 --user ${USER_NAME} re-asserts the fork's app content from the mirror"
-check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset m07 --user ${USER_NAME}"
+# --- entry state (what `ws start pipelines-fundamentals` materializes) --------------------------
+check "namespace ${NS} exists"                            oc get ns "$NS"                                    || hint "run: ws start pipelines-fundamentals --user ${USER_NAME}"
+check "entry marker ws-entry-pipelines-fundamentals present"                 oc get cm ws-entry-pipelines-fundamentals -n "$NS"                    || hint "entry app not synced — ws start pipelines-fundamentals --user ${USER_NAME}"
+check "claims-db deployment ready in ${NS}"               deploy_ready claims-db "$NS"                       || hint "the ephemeral DB is entry state — ws reset pipelines-fundamentals --user ${USER_NAME}"
+check "Pipeline parasol-claims-build-test-deploy present" oc get pipelines.tekton.dev parasol-claims-build-test-deploy -n "$NS" || hint "entry app not synced — ws start pipelines-fundamentals --user ${USER_NAME}"
+check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing — re-run: ws start pipelines-fundamentals --user ${USER_NAME} (fork job)"
+check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset pipelines-fundamentals --user ${USER_NAME} re-asserts the fork's app content from the mirror"
+check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset pipelines-fundamentals --user ${USER_NAME}"
 check "curated library task image-size-report reachable"  oc get tasks.tekton.dev image-size-report -n parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / solve looks like) -------------------
-  check "parasol-claims deployment ready in ${NS}"        deploy_ready parasol-claims "$NS"                  || hint "run the pipeline (ws solve m07 --user ${USER_NAME}); it deploys + wires the app to claims-db"
+  check "parasol-claims deployment ready in ${NS}"        deploy_ready parasol-claims "$NS"                  || hint "run the pipeline (ws solve pipelines-fundamentals --user ${USER_NAME}); it deploys + wires the app to claims-db"
   check "parasol-claims image built (ImageStream present)" oc get imagestream parasol-claims -n "$NS"        || hint "the build-image step pushes here — run the build-test-deploy pipeline"
-  check "parasol-claims Route created by the pipeline in ${NS}" oc get route parasol-claims -n "$NS"         || hint "the deploy step creates the edge Route itself — run the pipeline (ws solve m07 --user ${USER_NAME}); attendees never run oc expose"
+  check "parasol-claims Route created by the pipeline in ${NS}" oc get route parasol-claims -n "$NS"         || hint "the deploy step creates the edge Route itself — run the pipeline (ws solve pipelines-fundamentals --user ${USER_NAME}); attendees never run oc expose"
 fi
 
 verify_summary

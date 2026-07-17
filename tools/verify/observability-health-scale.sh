@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M12 — Observability, Health & Scale.
+# Verify observability-health-scale — Observability, Health & Scale.
 #   Entry: {user}-dev has the INSTRUMENTED claims app (OTLP export ON → the shared collector) + an
 #          ephemeral claims-db + a load generator, plus a per-user ServiceMonitor; /q/metrics exposes
 #          the golden signals and the custom claims_created_total. The scale/resilience objects the lab
@@ -77,24 +77,24 @@ hpa_on_cpu() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                            oc get ns "$NS"                               || hint "run: ws start m12 --user ${USER_NAME}"
-check "entry marker ws-entry-m12 present"                 oc get cm ws-entry-m12 -n "$NS"               || hint "entry app not synced — ws start m12 --user ${USER_NAME}"
+check "namespace ${NS} exists"                            oc get ns "$NS"                               || hint "run: ws start observability-health-scale --user ${USER_NAME}"
+check "entry marker ws-entry-observability-health-scale present"                 oc get cm ws-entry-observability-health-scale -n "$NS"               || hint "entry app not synced — ws start observability-health-scale --user ${USER_NAME}"
 check "workshop quota present in ${NS}"                   oc get resourcequota workshop-quota -n "$NS"  || hint "workshop layer not applied — run bootstrap/install.sh"
 check "claims-db deployment has >=1 ready replica"        deploy_ready claims-db "$NS"                  || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment has >=1 ready replica"   deploy_ready parasol-claims "$NS"             || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
 check "claims Route answers 200 (/q/health/ready)"        route_ready_200                               || hint "claims app not ready — check: oc get pods -n ${NS}"
-check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset m12 --user ${USER_NAME}"
-check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.observability-workshop; ws reset m12"
-check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset m12 --user ${USER_NAME}"
-check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset m12 --user ${USER_NAME}"
+check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset observability-health-scale --user ${USER_NAME}"
+check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.observability-workshop; ws reset observability-health-scale"
+check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset observability-health-scale --user ${USER_NAME}"
+check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-health-scale --user ${USER_NAME}"
 check "/q/metrics exposes http_server_requests (golden signals)" metrics_expose http_server_requests_seconds || hint "metrics endpoint not answering — check: oc get pods -n ${NS}"
 check "/q/metrics exposes claims_created_total (custom metric)"  metrics_expose claims_created_total         || hint "custom counter absent — the load generator POSTs claims to register it; check: oc logs deploy/claims-load -n ${NS}"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the scale/resilience objects the lab builds do NOT exist yet ---------------
-  check "no HorizontalPodAutoscaler yet (scale beat not started)"   test -z "$(oc get hpa parasol-claims -n "$NS" -o name 2>/dev/null)"            || hint "entry state has no HPA — ws reset m12 --user ${USER_NAME}"
-  check "no PrometheusRule yet (alert beat not started)"            test -z "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)"               || hint "entry state has no alert rule — ws reset m12 --user ${USER_NAME}"
-  check "no PodDisruptionBudget yet (resilience beat not started)"  test -z "$(oc get pdb parasol-claims -n "$NS" -o name 2>/dev/null)"           || hint "entry state has no PDB — ws reset m12 --user ${USER_NAME}"
+  check "no HorizontalPodAutoscaler yet (scale beat not started)"   test -z "$(oc get hpa parasol-claims -n "$NS" -o name 2>/dev/null)"            || hint "entry state has no HPA — ws reset observability-health-scale --user ${USER_NAME}"
+  check "no PrometheusRule yet (alert beat not started)"            test -z "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)"               || hint "entry state has no alert rule — ws reset observability-health-scale --user ${USER_NAME}"
+  check "no PodDisruptionBudget yet (resilience beat not started)"  test -z "$(oc get pdb parasol-claims -n "$NS" -o name 2>/dev/null)"           || hint "entry state has no PDB — ws reset observability-health-scale --user ${USER_NAME}"
 else
   # --- end state: the lab's outcomes exist (HPA + alert + PDB); >= replicas, never == ----------
   check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "create the HPA: oc autoscale deploy/parasol-claims --cpu-percent=60 --min=2 --max=4 -n ${NS}"

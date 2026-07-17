@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ws — workshop state CLI: materialize, verify, and reset per-user module environments.
 #
-#   ws list                          modules with an entry state
+#   ws list                          the module catalog (number · slug · title) from modules.yaml
 #   ws prep   <module> [--yes]       ATTENDEE self-service: detect leftovers, offer wipe, prepare
 #   ws start  <module> [--user U]    materialize the module's entry state for a user
 #   ws verify <module> [--user U]    run the module's verification script
@@ -14,7 +14,10 @@
 #   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
 #   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
 #   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
-#   ws diag [--user U] [mNN]         SA/admin: read-only troubleshooting bundle for a stuck attendee
+#   ws diag [--user U] [<module>]    SA/admin: read-only troubleshooting bundle for a stuck attendee
+#
+# <module> is a position number (m08) OR a slug (app-security-testing) — both resolve via modules.yaml
+# (position → slug); everything internal keys off the slug. `ws list` shows the mapping.
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
 # Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
@@ -32,6 +35,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENTRY_DIR="${REPO_ROOT}/gitops/entry-states"
 VERIFY_DIR="${REPO_ROOT}/tools/verify"
+MODULES_YAML="${WS_MODULES_YAML:-${REPO_ROOT}/modules.yaml}"
 ARGO_NS="${WS_ARGO_NS:-openshift-gitops}"
 ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"
 GITEA_NS="${WS_GITEA_NS:-gitea}"
@@ -148,12 +152,61 @@ heal_if_behind() {  # `ws list` freshness: refresh the clone ONLY when it is beh
   heal_clone || true
 }
 
-module_arg() {
-  local m="${1:-}"
-  [[ -n "$m" ]] || die "module required (e.g. m01) — see: ws list"
-  m="$(echo "$m" | tr '[:upper:]' '[:lower:]')"
-  [[ "$m" =~ ^m[0-9]{2}$ ]] || die "module must look like m01, got '$m'"
-  echo "$m"
+# ── modules.yaml resolution (Gen-4: module NUMBERS are decoupled from SLUGS) ───────────────────────
+# modules.yaml (repo root) is the ORDERED catalog: a module's POSITION in the list is its number, and
+# its `slug` is its stable identity. Everything downstream keys off the SLUG — the entry dir
+# (gitops/entry-states/<slug>), the verify script (<slug>.sh), the Argo app (entry-<slug>-<user>), the
+# ws-entry-<slug> marker, the workshop.redhat.com/module=<slug> label. `ws start m08` resolves position
+# 8 → its slug; `ws start <slug>` takes the slug directly. Reorder the catalog = reorder modules.yaml
+# (+ the nav); nothing here changes.
+#
+# yq v4 is the parser, with a dependency-free awk fallback: module resolution gates the ATTENDEE path
+# (`ws prep`), and ws degrades gracefully everywhere else (mirror down, Argo unreachable), so a cockpit
+# image that happens to ship without yq must not make module resolution the one hard stop.
+_module_rows() {  # → "slug<TAB>title" per module, in catalog order (position = line number)
+  [[ -f "$MODULES_YAML" ]] || return 1
+  if command -v yq >/dev/null 2>&1; then
+    yq -r '.modules[] | [.slug, .title] | @tsv' "$MODULES_YAML" 2>/dev/null
+  else
+    # Flat-list fallback: each entry is `- slug: X` then `title: "Y"` (see modules.yaml).
+    awk '
+      /^[[:space:]]*-[[:space:]]*slug:[[:space:]]*/ {
+        if (s != "") print s "\t" t
+        s=$0; sub(/^.*slug:[[:space:]]*/,"",s); gsub(/["'\''[:space:]]/,"",s); t=""; next }
+      /^[[:space:]]+title:[[:space:]]*/ {
+        t=$0; sub(/^[[:space:]]*title:[[:space:]]*/,"",t); sub(/[[:space:]]*$/,"",t); gsub(/^"|"$/,"",t) }
+      END { if (s != "") print s "\t" t }
+    ' "$MODULES_YAML"
+  fi
+}
+_module_slugs()    { _module_rows | cut -f1; }                                 # ordered slug list
+module_count()     { _module_rows | grep -c . ; }                             # module total
+slug_at_position() { _module_slugs | sed -n "${1}p"; }                         # 1-based position → slug
+position_of_slug() { _module_slugs | grep -nxF "$1" | head -1 | cut -d: -f1; } # slug → position ('' if absent)
+module_title()     { _module_rows | awk -F'\t' -v s="$1" '$1==s{print $2; exit}'; }
+
+require_modules_yaml() {  # the catalog must exist to resolve any module; self-heal once on a miss
+  [[ -f "$MODULES_YAML" ]] && return 0
+  heal_clone && [[ -f "$MODULES_YAML" ]] && return 0
+  die "modules.yaml not found (${MODULES_YAML}) — the module catalog is missing from this clone"
+}
+
+module_arg() {  # mNN (position, zero-padded) OR a slug → the canonical SLUG (the internal module key)
+  local raw="${1:-}" n count slug
+  [[ -n "$raw" ]] || die "module required — e.g. m08 (position) or a slug like app-security-testing; see: ws list"
+  raw="$(echo "$raw" | tr '[:upper:]' '[:lower:]')"
+  require_modules_yaml
+  if [[ "$raw" =~ ^m0*([0-9]+)$ ]]; then
+    n="${BASH_REMATCH[1]}"                                  # mNN → position number (m08 → 8, m10 → 10)
+    count="$(module_count)"
+    [[ "$n" -ge 1 && "$n" -le "$count" ]] || die "module number out of range: '${raw}' (valid m1–m${count}) — see: ws list"
+    slug="$(slug_at_position "$n")"
+    [[ -n "$slug" ]] || die "no module at position ${n} — see: ws list"
+    echo "$slug"
+  else
+    [[ -n "$(position_of_slug "$raw")" ]] || die "unknown module '${raw}' — expected mNN (e.g. m08) or a slug (see: ws list)"
+    echo "$raw"
+  fi
 }
 
 user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee self-service)
@@ -513,7 +566,7 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
   # OutOfSync on SharedResourceWarning and the attendee gets a silently wrong world while
   # the marker check stays green (G3-M04, m03+m04 on user3). Starting a module therefore
   # evicts the conflicting app and purges this module's namespaces (= reset semantics).
-  # Disjoint modules (m01 parasol-web, m06 {user}-batch) still coexist untouched.
+  # Disjoint modules (platform-orientation's parasol-web, jobs-batch-kueue's {user}-batch) still coexist untouched.
   local user="$1" module="$2" evicted=0 c app ns
   for c in $(meta_conflicts "$module"); do
     app="$(app_name "$c" "$user")"
@@ -613,17 +666,21 @@ wait_materialized() {  # app [timeout] — for expectDegraded modules whose Argo
 
 cmd_list() {
   heal_if_behind   # a just-published module should list here without a pod restart (mirror-clone only)
-  echo "Modules with entry states:"
-  local found=0
-  for d in "${ENTRY_DIR}"/m*/; do
-    [[ -d "$d" ]] || continue
-    found=1
-    local m desc
-    m="$(basename "$d")"
-    desc="$(grep -m1 '^description:' "${d}Chart.yaml" 2>/dev/null | sed 's/description:[[:space:]]*//' || true)"
-    printf "  %-6s %s\n" "$m" "${desc:-—}"
-  done
-  [[ "$found" == 1 ]] || echo "  (none yet)"
+  require_modules_yaml
+  echo "Modules (number = catalog position; entry state keyed by slug):"
+  local i=0 slug title
+  while IFS=$'\t' read -r slug title; do
+    [[ -n "$slug" ]] || continue
+    i=$((i+1))
+    if [[ -d "${ENTRY_DIR}/${slug}" ]]; then
+      printf "  %2d  %-34s %s\n" "$i" "$slug" "${title:-—}"
+    else
+      printf "  %2d  %-34s %s  (no entry state yet)\n" "$i" "$slug" "${title:-—}"
+    fi
+  done < <(_module_rows)
+  [[ "$i" -gt 0 ]] || echo "  (catalog is empty — check ${MODULES_YAML})"
+  echo
+  echo "  Use:  ws start <number|slug>   e.g.  ws start m08   or   ws start app-security-testing"
 }
 
 cmd_start() {
@@ -816,7 +873,8 @@ cmd_smoke() {
   # --yes is REQUIRED here, not optional: the smoke drives prep through `oc exec` with NO TTY, so prep's
   # destructive-wipe consent (`[[ -t 0 ]]` → prompt, else → die) can never be answered interactively —
   # without --yes any module that must evict a resident conflict/leftover dies "not a terminal and no
-  # --yes given" and the gate false-fails (found live: m25-after-m24, 2026-07-16). --yes is the
+  # --yes given" and the gate false-fails (found live: packaging-distributing after ai-assisted-development,
+  # 2026-07-16). --yes is the
   # automation-equivalent of the attendee typing "y", AND it forces a real wipe+re-materialize every run
   # instead of prep's "already prepared — nothing to do" fast path — so this check actually exercises
   # materialization (create app → sync → converge) as {user}, not just a pre-existing healthy state.
@@ -1366,7 +1424,7 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
   fi
   echo "   verify: oc get applications -n ${ARGO_NS} | grep entry-   (expect none)"
   echo "           oc get all -n ${users_arr[0]}-dev                 (expect empty)"
-  echo "   next  : a subsequent 'ws prep mNN <user>' from a cockpit re-materializes any module cleanly."
+  echo "   next  : a subsequent 'ws prep <module> <user>' from a cockpit re-materializes any module cleanly."
 
   if [[ "$do_restart" == "true" ]]; then
     echo
@@ -1674,7 +1732,7 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   local nusers="${#users_arr[@]}" plat_state
   if [[ "$plat_bad" -eq 0 ]]; then plat_state="all-Synced ✅"; else plat_state="${plat_bad} app(s) need attention ❌"; fi
   echo "Summary: ${nusers} user(s) · ${sum_cockpit_ready}/${nusers} cockpit(s) ready · ${sum_entries} entry app(s) (${sum_entries_ok} healthy, $((sum_entries - sum_entries_ok)) need attention) · platform ${plat_state}"
-  echo "   drill in: ws status --user <userN>   ·   ws diag --user <userN> [mNN]"
+  echo "   drill in: ws status --user <userN>   ·   ws diag --user <userN> [<module>]"
   return 0
 }
 
@@ -1704,10 +1762,9 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
   # oc read is authored off-cluster (tokens expired this session).
   local user="$1" module="${2:-}"
   need_oc
-  if [[ -n "$module" ]]; then
-    module="$(echo "$module" | tr '[:upper:]' '[:lower:]')"
-    [[ "$module" =~ ^m[0-9]{2}$ ]] || die "diag: module must look like m01, got '$module'"
-  fi
+  # Optional module scope: accept mNN (position) OR a slug and normalize to the canonical slug —
+  # every downstream read (app_name, ws-entry-<slug> marker, verify) keys off the slug.
+  [[ -n "$module" ]] && module="$(module_arg "$module")"
 
   local who server
   who="$(oc whoami 2>/dev/null || true)"
@@ -1808,10 +1865,10 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
     echo "  ws reset  ${module} --user ${user}       # re-materialize the entry state (last resort)"
   else
     echo "  oc get applications -n ${ARGO_NS} -l workshop.redhat.com/user=${user}"
-    echo "  ws diag --user ${user} mNN                # focus on one module"
+    echo "  ws diag --user ${user} <module>           # focus on one module (mNN or slug)"
   fi
   echo "  oc logs deploy/showroom-${user} -n ${SHOWROOM_NS} -c terminal --tail=100"
-  echo "  ws smoke <mNN> ${user}                     # run the attendee path in the live cockpit"
+  echo "  ws smoke <module> ${user}                     # run the attendee path in the live cockpit"
   return 0
 }
 
@@ -1855,7 +1912,7 @@ main() {
     preflight)   cmd_preflight;;
     status)      cmd_status "$user";;
     diag)        cmd_diag "$(user_arg "$user")" "$module";;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,17p';;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,20p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }

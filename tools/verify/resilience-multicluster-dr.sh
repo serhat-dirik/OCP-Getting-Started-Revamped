@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M21 — Resilience, Multi-Cluster & DR (APPLICATION-LEVEL cross-site failover).
+# Verify resilience-multicluster-dr — Resilience, Multi-Cluster & DR (APPLICATION-LEVEL cross-site failover).
 #   Entry: three per-user namespaces, all istio-discovery=enabled (mesh tenants). {user}-site-a and
 #          {user}-site-b each run a RESILIENT claims service (parasol-claims: >=2 replicas + PDB + HPA +
 #          topologySpread + probes, meshed), echoing SITE=A / SITE=B. {user}-client runs the external
@@ -44,7 +44,7 @@ ns_discovery_labeled() {
 }
 
 # A site's claims service is RESILIENT: the Deployment is present with >=2 desired replicas, a PDB, and an
-# HPA (the M12/M16 primitives the in-site resiliency beat leans on): $1=namespace.
+# HPA (the observability-health-scale/deployment-targets-scheduling primitives the in-site resiliency beat leans on): $1=namespace.
 site_resilient() {
   local ns="$1" reps
   oc get deploy parasol-claims -n "$ns" >/dev/null 2>&1 || return 1
@@ -105,19 +105,19 @@ failover_proof() {
 }
 
 # Solve marker (end-state only) lives in the client ns.
-solved() { oc get cm ws-solve-m21 -n "$CLIENT_NS" >/dev/null 2>&1; }
+solved() { oc get cm ws-solve-resilience-multicluster-dr -n "$CLIENT_NS" >/dev/null 2>&1; }
 not_solved() { ! solved; }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${CLIENT_NS} exists"                  oc get ns "$CLIENT_NS"                   || hint "run: ws prep m21 (or ws start m21 --user ${USER_NAME}); the three namespaces are workshop-layer (per-user-resilience)"
+check "namespace ${CLIENT_NS} exists"                  oc get ns "$CLIENT_NS"                   || hint "run: ws prep resilience-multicluster-dr (or ws start resilience-multicluster-dr --user ${USER_NAME}); the three namespaces are workshop-layer (per-user-resilience)"
 check "namespace ${SITEA_NS} exists"                   oc get ns "$SITEA_NS"                    || hint "the ${SITEA_NS} namespace is workshop-layer — sync gitops/workshop-config (per-user-resilience.yaml)"
 check "namespace ${SITEB_NS} exists"                   oc get ns "$SITEB_NS"                    || hint "the ${SITEB_NS} namespace is workshop-layer — sync gitops/workshop-config (per-user-resilience.yaml)"
 check "${CLIENT_NS} is istio-discovery=enabled (mesh tenant)" ns_discovery_labeled "$CLIENT_NS" || hint "the workshop layer must label ${CLIENT_NS} istio-discovery=enabled — sync per-user-resilience.yaml"
 check "${SITEA_NS} is istio-discovery=enabled (mesh tenant)"  ns_discovery_labeled "$SITEA_NS"  || hint "the workshop layer must label ${SITEA_NS} istio-discovery=enabled — sync per-user-resilience.yaml"
 check "${SITEB_NS} is istio-discovery=enabled (mesh tenant)"  ns_discovery_labeled "$SITEB_NS"  || hint "the workshop layer must label ${SITEB_NS} istio-discovery=enabled — sync per-user-resilience.yaml"
-check "entry marker ws-entry-m21 present"              oc get cm ws-entry-m21 -n "$CLIENT_NS"   || hint "entry app not synced — ws reset m21 --user ${USER_NAME}"
-check "site-a claims service is RESILIENT (>=2 replicas + PDB + HPA)" site_resilient "$SITEA_NS" || hint "the primary site must be resilient — ws reset m21 --user ${USER_NAME}"
-check "site-b claims service is RESILIENT (>=2 replicas + PDB + HPA)" site_resilient "$SITEB_NS" || hint "the secondary site must be resilient — ws reset m21 --user ${USER_NAME}"
+check "entry marker ws-entry-resilience-multicluster-dr present"              oc get cm ws-entry-resilience-multicluster-dr -n "$CLIENT_NS"   || hint "entry app not synced — ws reset resilience-multicluster-dr --user ${USER_NAME}"
+check "site-a claims service is RESILIENT (>=2 replicas + PDB + HPA)" site_resilient "$SITEA_NS" || hint "the primary site must be resilient — ws reset resilience-multicluster-dr --user ${USER_NAME}"
+check "site-b claims service is RESILIENT (>=2 replicas + PDB + HPA)" site_resilient "$SITEB_NS" || hint "the secondary site must be resilient — ws reset resilience-multicluster-dr --user ${USER_NAME}"
 check "site-a claims has >=1 ready replica"            deploy_ready parasol-claims "$SITEA_NS"   || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${SITEA_NS}"
 check "site-b claims has >=1 ready replica"            deploy_ready parasol-claims "$SITEB_NS"   || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${SITEB_NS}"
 check "external client (claims-client) has >=1 ready replica" deploy_ready claims-client "$CLIENT_NS" || hint "the client loop isn't up — oc get pods -l app=claims-client -n ${CLIENT_NS}"
@@ -126,9 +126,9 @@ check "mesh ingress gateway (claims-gateway) has >=1 ready replica" deploy_ready
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — sites up, gateway up, but NO failover routing wired yet ----------------
   check "no failover routing yet (attendee builds ServiceEntry + VirtualService)" no_failover_routing \
-    || hint "entry ships no failover routing; if a ServiceEntry/VirtualService exists the lab already ran — ws reset m21 --user ${USER_NAME}"
-  check "no solve marker yet (ws-solve-m21 absent)"    not_solved \
-    || hint "a solve/end marker exists; the lab already ran — ws reset m21 --user ${USER_NAME}"
+    || hint "entry ships no failover routing; if a ServiceEntry/VirtualService exists the lab already ran — ws reset resilience-multicluster-dr --user ${USER_NAME}"
+  check "no solve marker yet (ws-solve-resilience-multicluster-dr absent)"    not_solved \
+    || hint "a solve/end marker exists; the lab already ran — ws reset resilience-multicluster-dr --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — cross-site failover configured AND proven -------------------------
   # Restore site-a on ANY exit so an interrupted probe never leaves the primary scaled down.
@@ -137,8 +137,8 @@ else
     || hint "build the failover routing: a ServiceEntry spanning both sites, a DestinationRule (locality LB + outlier detection), and a VirtualService with retries on claims-gateway (see the lab)"
   check "the stable endpoint serves HTTP 200"          stable_serves \
     || hint "the ingress gateway isn't routing — check the VirtualService is bound to gateway claims-gateway and the ServiceEntry host matches"
-  check "solve marker present (ws-solve-m21)"          solved \
-    || hint "mark the failover exercise done — or: ws solve m21 --user ${USER_NAME}"
+  check "solve marker present (ws-solve-resilience-multicluster-dr)"          solved \
+    || hint "mark the failover exercise done — or: ws solve resilience-multicluster-dr --user ${USER_NAME}"
   info "failover drill: briefly scaling site-a to 0 to prove the client fails over to site-b (auto-restores)…"
   check "FAILOVER proven: site-a down -> the client is served by site-b" failover_proof \
     || hint "with site-a scaled to 0 the client should be served by site-b within ~30s — check the DestinationRule outlierDetection + locality LB and the VirtualService retries"

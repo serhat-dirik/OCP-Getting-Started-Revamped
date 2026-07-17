@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M08 — Trusted Software Supply Chain [ADS].
+# Verify trusted-supply-chain — Trusted Software Supply Chain [ADS].
 #   Entry: {user}-cicd exists · entry marker CM · the parasol-claims-supply-chain Pipeline present ·
 #          the copied rox-api-token Secret (scan-gate contract) + chains-cosign-pub ConfigMap (verify
 #          contract) · Gitea fork answers with its seed-vulnerable branch · the curated parasol-tasks
@@ -68,27 +68,27 @@ supply_chain_run_succeeded() {
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
-check "namespace ${NS} exists"                             oc get ns "$NS"                                     || hint "run: ws start m08 --user ${USER_NAME}"
-check "entry marker ws-entry-m08 present"                  oc get cm ws-entry-m08 -n "$NS"                     || hint "entry app not synced — ws start m08 --user ${USER_NAME}"
-check "Pipeline parasol-claims-supply-chain present"       oc get pipelines.tekton.dev parasol-claims-supply-chain -n "$NS" || hint "entry app not synced — ws start m08 --user ${USER_NAME}"
-check "rox-api-token copied into ${NS} (scan-gate secret)" oc get secret rox-api-token -n "$NS"                || hint "the secrets hook copies it from stackrox — ws reset m08 --user ${USER_NAME} (needs the trust stack)"
+check "namespace ${NS} exists"                             oc get ns "$NS"                                     || hint "run: ws start trusted-supply-chain --user ${USER_NAME}"
+check "entry marker ws-entry-trusted-supply-chain present"                  oc get cm ws-entry-trusted-supply-chain -n "$NS"                     || hint "entry app not synced — ws start trusted-supply-chain --user ${USER_NAME}"
+check "Pipeline parasol-claims-supply-chain present"       oc get pipelines.tekton.dev parasol-claims-supply-chain -n "$NS" || hint "entry app not synced — ws start trusted-supply-chain --user ${USER_NAME}"
+check "rox-api-token copied into ${NS} (scan-gate secret)" oc get secret rox-api-token -n "$NS"                || hint "the secrets hook copies it from stackrox — ws reset trusted-supply-chain --user ${USER_NAME} (needs the trust stack)"
 check "chains-cosign-pub copied into ${NS} (verify key)"   oc get cm chains-cosign-pub -n "$NS"                || hint "the secrets hook copies it from openshift-pipelines — needs the trust-signing component"
-check "Gitea fork ${USER_NAME}/parasol-claims answers"     gitea_repo_exists "$USER_NAME" parasol-claims       || hint "fork missing — re-run: ws start m08 --user ${USER_NAME} (fork job)"
-check "fork branch seed-vulnerable exists"                 gitea_branch_exists "$USER_NAME" parasol-claims seed-vulnerable || hint "re-run the fork/seed job: ws reset m08 --user ${USER_NAME}"
+check "Gitea fork ${USER_NAME}/parasol-claims answers"     gitea_repo_exists "$USER_NAME" parasol-claims       || hint "fork missing — re-run: ws start trusted-supply-chain --user ${USER_NAME} (fork job)"
+check "fork branch seed-vulnerable exists"                 gitea_branch_exists "$USER_NAME" parasol-claims seed-vulnerable || hint "re-run the fork/seed job: ws reset trusted-supply-chain --user ${USER_NAME}"
 check "curated library task acs-image-check reachable"     oc get tasks.tekton.dev acs-image-check -n parasol-tasks        || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
-  # Entry-only: the seeded flaw exists ONLY in the fresh entry state. The M08 lab's fix REMOVES
+  # Entry-only: the seeded flaw exists ONLY in the fresh entry state. The trusted-supply-chain lab's fix REMOVES
   # log4j-core from the fork, so in FULL mode this would false-FAIL a successful attendee (G3
-  # finding) — it validates ENTRY materialization, not lab completion. Same mode-split as m09.
-  check "seed-vulnerable carries the seeded log4j CVE"     gitea_raw_contains "$USER_NAME" parasol-claims pom.xml seed-vulnerable "log4j-core" || hint "re-run the fork/seed job: ws reset m08 --user ${USER_NAME}"
+  # finding) — it validates ENTRY materialization, not lab completion. Same mode-split as gitops-fundamentals.
+  check "seed-vulnerable carries the seeded log4j CVE"     gitea_raw_contains "$USER_NAME" parasol-claims pom.xml seed-vulnerable "log4j-core" || hint "re-run the fork/seed job: ws reset trusted-supply-chain --user ${USER_NAME}"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   # The seeded CVE is expected to be GONE here — removing log4j-core IS the lab's fix (success), so
   # the seeded-CVE check above is deliberately NOT run in this mode. Assert the ACTUAL fixed outcome
   # (a run that PASSED the scan gate), not the proxy "an image was built" — a blocked vulnerable run
   # builds + signs an image too, so the proxy false-greens an attendee who never removed log4j (SEV2).
-  check "supply-chain run PASSED the scan gate (a run Succeeded)" supply_chain_run_succeeded "$NS"             || hint "the ACS gate blocks log4j-core: remove its <dependency> from seed-vulnerable's pom.xml and re-run the pipeline (or ws solve m08 --user ${USER_NAME} builds the clean main). A scan-blocked run stays Failed even though it built + signed an image."
+  check "supply-chain run PASSED the scan gate (a run Succeeded)" supply_chain_run_succeeded "$NS"             || hint "the ACS gate blocks log4j-core: remove its <dependency> from seed-vulnerable's pom.xml and re-run the pipeline (or ws solve trusted-supply-chain --user ${USER_NAME} builds the clean main). A scan-blocked run stays Failed even though it built + signed an image."
   check "Tekton Chains signed the build (signed TaskRun present)" signed_taskrun_exists "$NS"                  || hint "Chains signs a few seconds after the build TaskRun completes — re-check, or run the pipeline"
 fi
 

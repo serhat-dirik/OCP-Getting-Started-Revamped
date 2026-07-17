@@ -13,12 +13,14 @@ _ws_complete() {
     return
   fi
 
-  # After a module-taking verb → complete module ids from the repo's entry states.
+  # After a module-taking verb → complete module SLUGS from the repo's entry states.
+  # Gen-4: entry dirs are slug-named (numbers live only in modules.yaml, position = number).
+  # `ws <verb> m08` still resolves by position, but tab offers the stable slugs the pages use.
   case "$prev" in
     prep|verify|smoke|reset|start|solve)
       repo="${WS_REPO_ROOT:-$HOME/ocp-getting-started}"
-      mods="$(ls -d "$repo"/gitops/entry-states/m[0-9]* 2>/dev/null | while read -r d; do basename "$d"; done)"
-      [ -z "$mods" ] && mods="m01 m02 m03 m04 m05 m06 m07 m08 m09 m10 m11 m12 m13"
+      mods="$(ls -d "$repo"/gitops/entry-states/*/ 2>/dev/null | while read -r d; do basename "$d"; done)"
+      [ -z "$mods" ] && mods="$(sed -n 's/^[[:space:]]*-[[:space:]]*slug:[[:space:]]*//p' "$repo"/modules.yaml 2>/dev/null)"
       mapfile -t COMPREPLY < <(compgen -W "$mods" -- "$cur")
       return
       ;;

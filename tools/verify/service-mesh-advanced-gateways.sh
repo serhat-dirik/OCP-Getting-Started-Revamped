@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M18 — Service Mesh 3 & Advanced Gateways.
+# Verify service-mesh-advanced-gateways — Service Mesh 3 & Advanced Gateways.
 #   Entry: {user}-mesh holds the UN-MESHED chain parasol-web -> parasol-claims -> parasol-fraud ->
 #          ephemeral claims-db on ClusterIP-only Services, a demo-client verification pod (pinned OUT of
 #          the mesh), and a legacy-partner raw-TCP backend. The namespace carries istio-discovery=enabled
@@ -72,13 +72,13 @@ no_mesh_config() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                          || hint "run: ws prep m18 (or ws start m18 --user ${USER_NAME}); the ${NS} namespace is workshop-layer (per-user-mesh)"
+check "namespace ${NS} exists"                          oc get ns "$NS"                          || hint "run: ws prep service-mesh-advanced-gateways (or ws start service-mesh-advanced-gateways --user ${USER_NAME}); the ${NS} namespace is workshop-layer (per-user-mesh)"
 check "${NS} is istio-discovery=enabled (mesh tenant)"  ns_discovery_labeled                     || hint "the workshop layer must label ${NS} istio-discovery=enabled — sync gitops/workshop-config (per-user-mesh.yaml)"
-check "entry marker ws-entry-m18 present"               oc get cm ws-entry-m18 -n "$NS"          || hint "entry app not synced — ws reset m18 --user ${USER_NAME}"
+check "entry marker ws-entry-service-mesh-advanced-gateways present"               oc get cm ws-entry-service-mesh-advanced-gateways -n "$NS"          || hint "entry app not synced — ws reset service-mesh-advanced-gateways --user ${USER_NAME}"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db                   || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
-check "parasol-fraud deployment present"                deploy_present parasol-fraud             || hint "entry app not synced — ws reset m18 --user ${USER_NAME}"
-check "parasol-claims deployment present"               deploy_present parasol-claims            || hint "entry app not synced — ws reset m18 --user ${USER_NAME}"
-check "parasol-web deployment present"                  deploy_present parasol-web               || hint "entry app not synced — ws reset m18 --user ${USER_NAME}"
+check "parasol-fraud deployment present"                deploy_present parasol-fraud             || hint "entry app not synced — ws reset service-mesh-advanced-gateways --user ${USER_NAME}"
+check "parasol-claims deployment present"               deploy_present parasol-claims            || hint "entry app not synced — ws reset service-mesh-advanced-gateways --user ${USER_NAME}"
+check "parasol-web deployment present"                  deploy_present parasol-web               || hint "entry app not synced — ws reset service-mesh-advanced-gateways --user ${USER_NAME}"
 check "demo-client deployment has >=1 ready replica"    deploy_ready demo-client                 || hint "the in-cluster verification pod isn't up — oc get pods -l app=demo-client -n ${NS}"
 check "partner-tcp-backend has >=1 ready replica"       deploy_ready partner-tcp-backend         || hint "the legacy-partner raw-TCP backend isn't up — oc get pods -l app=partner-tcp-backend -n ${NS}"
 
@@ -90,9 +90,9 @@ fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — UN-MESHED, no enrollment, no mesh config ------------------------------
-  check "${NS} NOT istio-injection-labelled yet (attendee enrolls it)" ns_not_injection_labeled       || hint "entry ships un-enrolled; if istio-injection is set the lab already started — ws reset m18 --user ${USER_NAME}"
-  check "parasol-claims is UN-meshed (no sidecar yet)"                 claims_unmeshed                  || hint "a sidecar is present; the lab already enrolled the namespace — ws reset m18 --user ${USER_NAME}"
-  check "no mesh config CRs yet (attendee creates VS/DR/AuthorizationPolicy)" no_mesh_config            || hint "entry ships no istio CRs; if VirtualService/DestinationRule/AuthorizationPolicy exist the lab already started — ws reset m18 --user ${USER_NAME}"
+  check "${NS} NOT istio-injection-labelled yet (attendee enrolls it)" ns_not_injection_labeled       || hint "entry ships un-enrolled; if istio-injection is set the lab already started — ws reset service-mesh-advanced-gateways --user ${USER_NAME}"
+  check "parasol-claims is UN-meshed (no sidecar yet)"                 claims_unmeshed                  || hint "a sidecar is present; the lab already enrolled the namespace — ws reset service-mesh-advanced-gateways --user ${USER_NAME}"
+  check "no mesh config CRs yet (attendee creates VS/DR/AuthorizationPolicy)" no_mesh_config            || hint "entry ships no istio CRs; if VirtualService/DestinationRule/AuthorizationPolicy exist the lab already started — ws reset service-mesh-advanced-gateways --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOMES — enrolled + traffic-managed + secured ------------------------------
   # Assert OUTCOMES (app meshed; a weighted route, a circuit-breaker DR, an authz policy, a v2 exist),

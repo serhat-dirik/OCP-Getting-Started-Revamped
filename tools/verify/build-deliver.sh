@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Verify M02 — Ways to Build & Deliver Apps.
+# Verify build-deliver — Ways to Build & Deliver Apps.
 #   Entry: {user}-dev exists · entry marker CM · workshop quota · both Gitea forks
 #          answer · Parasol PostgreSQL catalog Template present.
 #   End:   claims-db Deployment ready · parasol-claims Deployment ready · Route answers
 #          HTTP 200 · zero DeploymentConfig objects (banned-tech guard).
 # End checks are mechanism-agnostic (satisfied by the attendee's S2I build AND by
 # `ws solve`'s prebuilt image) — they assert the OUTCOME (a running, DB-backed claims
-# app), matching the M01 verify philosophy and the "verify runs after solve" contract.
+# app), matching the platform-orientation verify philosophy and the "verify runs after solve" contract.
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
@@ -62,12 +62,12 @@ no_deploymentconfig() {
   [[ "$n" == "0" ]]
 }
 
-# --- entry state (what `ws start m02` materializes) --------------------------
-check "namespace ${NS} exists"                       oc get ns "$NS"                            || hint "run: ws start m02 --user ${USER_NAME}"
-check "entry marker ws-entry-m02 present"            oc get cm ws-entry-m02 -n "$NS"            || hint "entry app not synced — ws start m02 --user ${USER_NAME}"
+# --- entry state (what `ws start build-deliver` materializes) --------------------------
+check "namespace ${NS} exists"                       oc get ns "$NS"                            || hint "run: ws start build-deliver --user ${USER_NAME}"
+check "entry marker ws-entry-build-deliver present"            oc get cm ws-entry-build-deliver -n "$NS"            || hint "entry app not synced — ws start build-deliver --user ${USER_NAME}"
 check "workshop quota present in ${NS}"              oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
-check "Gitea fork ${USER_NAME}/parasol-claims answers"        gitea_repo_exists "$USER_NAME" parasol-claims        || hint "fork missing — re-run: ws start m02 --user ${USER_NAME} (fork job)"
-check "Gitea fork ${USER_NAME}/parasol-notifications answers" gitea_repo_exists "$USER_NAME" parasol-notifications || hint "fork missing — re-run: ws start m02 --user ${USER_NAME} (fork job)"
+check "Gitea fork ${USER_NAME}/parasol-claims answers"        gitea_repo_exists "$USER_NAME" parasol-claims        || hint "fork missing — re-run: ws start build-deliver --user ${USER_NAME} (fork job)"
+check "Gitea fork ${USER_NAME}/parasol-notifications answers" gitea_repo_exists "$USER_NAME" parasol-notifications || hint "fork missing — re-run: ws start build-deliver --user ${USER_NAME} (fork job)"
 check "Parasol PostgreSQL catalog Template present"  oc get template parasol-postgresql-ephemeral -n openshift || hint "template missing — sync the workshop-config Argo app"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then

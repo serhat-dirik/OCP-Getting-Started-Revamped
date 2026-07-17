@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M16 — Deployment Targets & Scheduling.
+# Verify deployment-targets-scheduling — Deployment Targets & Scheduling.
 #   Entry: {user}-dev holds the multi-component claims app (parasol-web + parasol-claims @ N replicas +
 #          ephemeral claims-db), a statement-batch worker with NO toleration/nodeSelector, and a load
 #          generator — all with DEFAULT scheduling (no affinity/TSC/PDB, batch unpinned). The dedicated
@@ -82,7 +82,7 @@ batch_unpinned() {
 }
 
 # The parasol-claims Hibernate schema-management strategy from the running container env (empty if unset →
-# the image default, which is drop-and-create). Central to M16's zero-downtime re-diagnosis: at entry the
+# the image default, which is drop-and-create). Central to deployment-targets-scheduling's zero-downtime re-diagnosis: at entry the
 # app reseeds the SHARED claims-db on every boot (drop-and-create), so a rolling-update pod wipes the DB
 # out from under the serving pod; the fix flips it OFF drop-and-create so pods stop reseeding on boot.
 claims_schema_strategy() {
@@ -105,11 +105,11 @@ claims_cpu_limit_raised() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                     || hint "run: ws prep m16 (or ws start m16 --user ${USER_NAME})"
-check "entry marker ws-entry-m16 present"               oc get cm ws-entry-m16 -n "$NS"     || hint "entry app not synced — ws reset m16 --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                     || hint "run: ws prep deployment-targets-scheduling (or ws start deployment-targets-scheduling --user ${USER_NAME})"
+check "entry marker ws-entry-deployment-targets-scheduling present"               oc get cm ws-entry-deployment-targets-scheduling -n "$NS"     || hint "entry app not synced — ws reset deployment-targets-scheduling --user ${USER_NAME}"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db              || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
-check "parasol-claims deployment present"               deploy_present parasol-claims       || hint "entry app not synced — ws reset m16 --user ${USER_NAME}"
-check "parasol-web deployment present"                  deploy_present parasol-web          || hint "entry app not synced — ws reset m16 --user ${USER_NAME}"
+check "parasol-claims deployment present"               deploy_present parasol-claims       || hint "entry app not synced — ws reset deployment-targets-scheduling --user ${USER_NAME}"
+check "parasol-web deployment present"                  deploy_present parasol-web          || hint "entry app not synced — ws reset deployment-targets-scheduling --user ${USER_NAME}"
 check "statement-batch worker has >=1 ready replica"    deploy_ready statement-batch        || hint "the batch worker isn't up — oc get pods -l app=statement-batch -n ${NS}"
 check "load generator has >=1 ready replica"            deploy_ready claims-load            || hint "the load generator isn't up — oc get pods -l app=claims-load -n ${NS}"
 check "dedicated batch pool exists (a node is labeled ${POOL_KEY}=${POOL_VALUE})" batch_pool_exists || hint "no batch pool — run the bootstrap node-shaping step (bootstrap/install.sh labels+taints one worker ${POOL_KEY}=${POOL_VALUE})"
@@ -122,10 +122,10 @@ fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has shaped NOTHING yet ------------------------------
-  check "statement-batch is NOT pinned to the batch pool yet (attendee pins it)" batch_unpinned      || hint "entry ships it unpinned; if a batch-pool nodeSelector is set the lab already started — ws reset m16 --user ${USER_NAME}"
-  check "parasol-claims has NO anti-affinity yet (attendee adds it)"             no_claims_antiaffinity || hint "entry ships default scheduling; if podAntiAffinity is set the lab already started — ws reset m16 --user ${USER_NAME}"
-  check "no PodDisruptionBudget on parasol-claims yet (attendee creates it)"     no_claims_pdb        || hint "entry ships no PDB; if one exists the lab already started — ws reset m16 --user ${USER_NAME}"
-  check "parasol-claims ships the reseed fault (schema-management drop-and-create)" claims_schema_is_reseed || hint "the reseed fault should be present at entry; if schema-management is already off drop-and-create the lab started — ws reset m16 --user ${USER_NAME}"
+  check "statement-batch is NOT pinned to the batch pool yet (attendee pins it)" batch_unpinned      || hint "entry ships it unpinned; if a batch-pool nodeSelector is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
+  check "parasol-claims has NO anti-affinity yet (attendee adds it)"             no_claims_antiaffinity || hint "entry ships default scheduling; if podAntiAffinity is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
+  check "no PodDisruptionBudget on parasol-claims yet (attendee creates it)"     no_claims_pdb        || hint "entry ships no PDB; if one exists the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
+  check "parasol-claims ships the reseed fault (schema-management drop-and-create)" claims_schema_is_reseed || hint "the reseed fault should be present at entry; if schema-management is already off drop-and-create the lab started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — placement + spread + availability in place -------------------
   # Assert OUTCOMES (a PDB exists; batch runs on the pool; claims span >=2 nodes), never the exact field
@@ -145,7 +145,7 @@ else
   else
     info "(skipped the claims node-spread outcome — parasol-claims not Ready; needs the parasol-images build)"
   fi
-  # Zero-downtime is a real, gradeable OUTCOME (M16 re-diagnosis 2026-07-16). The fault: the shared
+  # Zero-downtime is a real, gradeable OUTCOME (deployment-targets-scheduling re-diagnosis 2026-07-16). The fault: the shared
   # claims-db is reseeded on EVERY parasol-claims boot (Hibernate drop-and-create), so a rolling-update
   # pod drops the DB out from under the still-serving pod — compounded by a 500m cold-start CPU throttle.
   # Assert the two fix outcomes on the running deployment (never exact wording — any schema value that

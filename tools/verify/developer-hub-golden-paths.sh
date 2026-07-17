@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M11 — Developer Hub & Golden Paths.
+# Verify developer-hub-golden-paths — Developer Hub & Golden Paths.
 #   Entry: {user}-dev + entry marker · the SHARED RHDH portal is reachable · the Parasol software
 #          catalog is populated (parasol-claims Component present) · the golden-path Software Template
 #          is registered · and a CLEAN scaffold slate — the {user}-svcs scaffold org holds NO
@@ -116,21 +116,21 @@ print(sum(1 for e in d if isinstance(e,dict) and ("/"+org+"/") in ((e.get("data"
 scaffold_slate_clean() { [[ "$(scaffold_repo_count)" == "0" && "$(user_catalog_location_count)" -eq 0 ]]; }
 scaffold_repo_present() { [[ "$(scaffold_repo_count)" -ge 1 ]]; }
 
-# --- entry state (what `ws start m11` materializes) --------------------------
+# --- entry state (what `ws start developer-hub-golden-paths` materializes) --------------------------
 check "namespace ${DEV} exists"                          oc get ns "$DEV"                          || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-m11 in ${DEV}"              oc get cm ws-entry-m11 -n "$DEV"          || hint "entry app not synced — ws start m11 --user ${USER_NAME}"
+check "entry marker ws-entry-developer-hub-golden-paths in ${DEV}"              oc get cm ws-entry-developer-hub-golden-paths -n "$DEV"          || hint "entry app not synced — ws start developer-hub-golden-paths --user ${USER_NAME}"
 check "shared RHDH portal is reachable"                  rhdh_up                                   || hint "portal stack down — sync pp-portal (platform-portfolio/stacks/portal)"
 check "Parasol catalog populated (parasol-claims)"       catalog_has_parasol                       || hint "catalog not wired — check app-config-rhdh catalog.locations + Gitea seeding (ws git-refresh)"
 check "golden-path template registered"                  template_registered                       || hint "template not registered — check the parasol-service-template location in app-config-rhdh"
-check "scaffold org ${SCAFFOLD_ORG} exists"              scaffold_org_exists                       || hint "org hook didn't run — ws reset m11 --user ${USER_NAME} (or check gitea-scaffold-org-m11-${USER_NAME} Job in ns gitea)"
+check "scaffold org ${SCAFFOLD_ORG} exists"              scaffold_org_exists                       || hint "org hook didn't run — ws reset developer-hub-golden-paths --user ${USER_NAME} (or check gitea-scaffold-org-developer-hub-golden-paths-${USER_NAME} Job in ns gitea)"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove the scaffold slate is clean (running the template is the lab). "Clean" =
   # empty Gitea org AND no orphan catalog Location on the shared portal (the G3 multi-tenancy fix).
-  check "clean scaffold slate (${SCAFFOLD_ORG} empty, no orphan catalog entry)"   scaffold_slate_clean   || hint "prior scaffold left over (Gitea repo or catalog Location) — ws reset m11 --user ${USER_NAME} for a clean entry"
+  check "clean scaffold slate (${SCAFFOLD_ORG} empty, no orphan catalog entry)"   scaffold_slate_clean   || hint "prior scaffold left over (Gitea repo or catalog Location) — ws reset developer-hub-golden-paths --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
-  check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "run the 'New Parasol microservice' template in RHDH; ws solve m11 materializes ${SCAFFOLD_ORG}/parasol-golden"
+  check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "run the 'New Parasol microservice' template in RHDH; ws solve developer-hub-golden-paths materializes ${SCAFFOLD_ORG}/parasol-golden"
 fi
 
 verify_summary

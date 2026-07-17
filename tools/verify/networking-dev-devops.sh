@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M15 — Networking for Dev & DevOps.
+# Verify networking-dev-devops — Networking for Dev & DevOps.
 #   Entry: {user}-dev holds the 3-tier claims app (parasol-web + parasol-claims + ephemeral
 #          claims-db) on ClusterIP-only Services (NO Route/NodePort/HTTPRoute — the attendee builds
 #          every exposure), a demo-client verification pod, and NO NetworkPolicies. {user}-partner
@@ -52,11 +52,11 @@ db_blocked_from_demo_client() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                          || hint "run: ws prep m15 (or ws start m15 --user ${USER_NAME})"
-check "entry marker ws-entry-m15 present"               oc get cm ws-entry-m15 -n "$NS"          || hint "entry app not synced — ws reset m15 --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                          || hint "run: ws prep networking-dev-devops (or ws start networking-dev-devops --user ${USER_NAME})"
+check "entry marker ws-entry-networking-dev-devops present"               oc get cm ws-entry-networking-dev-devops -n "$NS"          || hint "entry app not synced — ws reset networking-dev-devops --user ${USER_NAME}"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db "$NS"             || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
-check "parasol-claims deployment present"               deploy_present parasol-claims "$NS"      || hint "entry app not synced — ws reset m15 --user ${USER_NAME}"
-check "parasol-web deployment present"                  deploy_present parasol-web "$NS"         || hint "entry app not synced — ws reset m15 --user ${USER_NAME}"
+check "parasol-claims deployment present"               deploy_present parasol-claims "$NS"      || hint "entry app not synced — ws reset networking-dev-devops --user ${USER_NAME}"
+check "parasol-web deployment present"                  deploy_present parasol-web "$NS"         || hint "entry app not synced — ws reset networking-dev-devops --user ${USER_NAME}"
 check "demo-client deployment has >=1 ready replica"    deploy_ready demo-client "$NS"           || hint "the in-cluster verification pod isn't up — oc get pods -l app=demo-client -n ${NS}"
 check "partner UDN partner-udn present in ${PARTNER}"   udn_present                              || hint "partner namespace/UDN missing — ${PARTNER} must exist (workshop layer) and the entry app be synced"
 check "partner-workload has >=1 ready replica (on UDN)" deploy_ready partner-workload "$PARTNER" || hint "the UDN-attached workload isn't up — oc get pods -n ${PARTNER} (a slow first attach is normal)"
@@ -69,8 +69,8 @@ fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has built NO exposure and NO policy yet -------------
-  check "no default-deny NetworkPolicy yet (attendee writes it)"  no_default_deny || hint "entry ships no NetworkPolicies; if present the lab already started — ws reset m15 --user ${USER_NAME}"
-  check "no parasol-web Route yet (attendee exposes it)"          no_web_route    || hint "entry ships ClusterIP-only; if a Route exists the lab already started — ws reset m15 --user ${USER_NAME}"
+  check "no default-deny NetworkPolicy yet (attendee writes it)"  no_default_deny || hint "entry ships no NetworkPolicies; if present the lab already started — ws reset networking-dev-devops --user ${USER_NAME}"
+  check "no parasol-web Route yet (attendee exposes it)"          no_web_route    || hint "entry ships ClusterIP-only; if a Route exists the lab already started — ws reset networking-dev-devops --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — micro-segmentation + exposure in place -----------------------
   # Assert OUTCOMES (a policy exists and blocks; a Route exists), never the exact rule wording, so any

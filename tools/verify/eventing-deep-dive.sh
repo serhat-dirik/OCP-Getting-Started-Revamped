@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Verify M20 — Eventing Deep-Dive & Serverless Workflows.
-#   Entry: {user}-dev holds the M19 serverless END state PLUS the M20 eventing substrate, all deployed:
+# Verify eventing-deep-dive — Eventing Deep-Dive & Serverless Workflows.
+#   Entry: {user}-dev holds the serverless-zero-to-hero serverless END state PLUS the eventing-deep-dive eventing substrate, all deployed:
 #          the parasol-claims claims-processor ksvc (+ ephemeral claims-db so its /q/health/ready passes)
 #          and demo-client load pod; a default in-memory Broker; a NET-NEW real CloudEvents consumer
 #          (claims-consumer, the quay showcase image — returns HTTP 200 and displays the event) and a
@@ -71,24 +71,24 @@ no_filtered_trigger() { ! filtered_trigger_present; }
 no_dlq_trigger()      { ! dlq_trigger_present; }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep m20 (or ws start m20 --user ${USER_NAME}); the ${NS} namespace is workshop-layer (workshop-config)"
-check "entry marker ws-entry-m20 present"               oc get cm ws-entry-m20 -n "$NS" || hint "entry app not synced — ws reset m20 --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep eventing-deep-dive (or ws start eventing-deep-dive --user ${USER_NAME}); the ${NS} namespace is workshop-layer (workshop-config)"
+check "entry marker ws-entry-eventing-deep-dive present"               oc get cm ws-entry-eventing-deep-dive -n "$NS" || hint "entry app not synced — ws reset eventing-deep-dive --user ${USER_NAME}"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db          || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "demo-client deployment has >=1 ready replica"    deploy_ready demo-client        || hint "the in-cluster load pod isn't up — oc get pods -l app=demo-client -n ${NS}"
-check "parasol-claims Knative Service is Ready"         ksvc_ready parasol-claims       || hint "the M19 claims-processor ksvc isn't Ready — check image pull + claims-db: oc get ksvc,revision -n ${NS}; oc get pods -n ${NS}"
-check "claims-consumer ksvc present (net-new consumer)" ksvc_present claims-consumer    || hint "entry app not synced (is the serverless stack installed?) — ws reset m20 --user ${USER_NAME}"
+check "parasol-claims Knative Service is Ready"         ksvc_ready parasol-claims       || hint "the serverless-zero-to-hero claims-processor ksvc isn't Ready — check image pull + claims-db: oc get ksvc,revision -n ${NS}; oc get pods -n ${NS}"
+check "claims-consumer ksvc present (net-new consumer)" ksvc_present claims-consumer    || hint "entry app not synced (is the serverless stack installed?) — ws reset eventing-deep-dive --user ${USER_NAME}"
 check "claims-consumer ksvc is Ready (returns HTTP 200)" ksvc_ready claims-consumer     || hint "the showcase consumer revision isn't Ready — oc get ksvc claims-consumer -n ${NS} -o yaml; oc get pods -l app=claims-consumer -n ${NS}"
 check "claims-consumer ksvc has an auto-created URL (Addressable)" ksvc_has_url claims-consumer || hint "blank status.url means the Route/Kourier isn't ready — oc get ksvc claims-consumer -n ${NS} -o yaml"
 check "claims-dlq dead-letter sink ksvc is Ready"       ksvc_ready claims-dlq           || hint "the dead-letter sink isn't Ready — oc get ksvc claims-dlq -n ${NS} -o yaml"
-check "eventing Broker present (in-memory)"             broker_present                  || hint "create a Broker in ${NS} (the eventing hub) — ws reset m20 --user ${USER_NAME}"
+check "eventing Broker present (in-memory)"             broker_present                  || hint "create a Broker in ${NS} (the eventing hub) — ws reset eventing-deep-dive --user ${USER_NAME}"
 check "eventing Broker is Ready"                        broker_ready                    || hint "the Broker isn't Ready — oc get broker default -n ${NS} -o yaml (is KnativeEventing installed?)"
-check "PingSource present (seeded source -> Broker)"    pingsource_present              || hint "the seeded PingSource is missing — ws reset m20 --user ${USER_NAME}"
-check "baseline Trigger present (Broker -> consumer)"   base_trigger_present            || hint "the baseline claims-events Trigger is missing — ws reset m20 --user ${USER_NAME}"
+check "PingSource present (seeded source -> Broker)"    pingsource_present              || hint "the seeded PingSource is missing — ws reset eventing-deep-dive --user ${USER_NAME}"
+check "baseline Trigger present (Broker -> consumer)"   base_trigger_present            || hint "the baseline claims-events Trigger is missing — ws reset eventing-deep-dive --user ${USER_NAME}"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — substrate only, no filtered/DLQ Triggers yet -----------------------
-  check "no attribute-filtered Trigger yet (attendee filters routing)" no_filtered_trigger || hint "entry ships one UNFILTERED baseline Trigger; if a filtered Trigger exists the lab already started — ws reset m20 --user ${USER_NAME}"
-  check "no dead-letter Trigger yet (attendee wires retries + DLQ)"     no_dlq_trigger      || hint "entry ships no deadLetterSink Trigger; if one exists the lab already started — ws reset m20 --user ${USER_NAME}"
+  check "no attribute-filtered Trigger yet (attendee filters routing)" no_filtered_trigger || hint "entry ships one UNFILTERED baseline Trigger; if a filtered Trigger exists the lab already started — ws reset eventing-deep-dive --user ${USER_NAME}"
+  check "no dead-letter Trigger yet (attendee wires retries + DLQ)"     no_dlq_trigger      || hint "entry ships no deadLetterSink Trigger; if one exists the lab already started — ws reset eventing-deep-dive --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOMES — filtered routing + retry/DLQ wired -----------------------------
   check "an attribute-filtered Trigger exists (spec.filter.attributes)" filtered_trigger_present || hint "add a Trigger that filters on a CloudEvent attribute (e.g. type) to the consumer — see the lab"

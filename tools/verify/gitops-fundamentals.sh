@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M09 — GitOps Fundamentals.
+# Verify gitops-fundamentals — GitOps Fundamentals.
 #   Entry: {user}-gitops workspace ns + entry marker · the student-gitops Argo CD instance is
 #          reachable · the attendee's proj-{user} AppProject exists · a per-user Gitea fork of
 #          claims-config with its dev overlay personalized to {user}-dev. Entry leaves dev/stage
@@ -79,7 +79,7 @@ deploy_ready_min() {
 }
 
 # The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student
-# instance (annotation tracking), NOT applied by hand — the point of M09 vs the M04 hand-config.
+# instance (annotation tracking), NOT applied by hand — the point of gitops-fundamentals vs the config-multienv hand-config.
 deploy_gitops_managed() {
   oc get deploy "$1" -n "$2" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null | grep -q .
 }
@@ -99,25 +99,25 @@ route_ready_200() {
   [[ "$code" == "200" ]]
 }
 
-# --- entry state (what `ws start m09` materializes) --------------------------
+# --- entry state (what `ws start gitops-fundamentals` materializes) --------------------------
 check "namespace ${GITOPS} exists"                       oc get ns "$GITOPS"                                 || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-m09 in ${GITOPS}"           oc get cm ws-entry-m09 -n "$GITOPS"                 || hint "entry app not synced — ws start m09 --user ${USER_NAME}"
+check "entry marker ws-entry-gitops-fundamentals in ${GITOPS}"           oc get cm ws-entry-gitops-fundamentals -n "$GITOPS"                 || hint "entry app not synced — ws start gitops-fundamentals --user ${USER_NAME}"
 check "student-gitops Argo CD instance reachable"        student_argo_up                                     || hint "student instance missing — sync the workshop-config Argo app (student-argocd.yaml)"
 check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
-check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset m09 --user ${USER_NAME} (or check gitea-fork-m09-${USER_NAME} Job in ns gitea)"
-check "dev overlay personalized to ${DEV}"               overlay_personalized                                || hint "fork not personalized — ws reset m09 --user ${USER_NAME}"
+check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset gitops-fundamentals --user ${USER_NAME} (or check gitea-fork-gitops-fundamentals-${USER_NAME} Job in ns gitea)"
+check "dev overlay personalized to ${DEV}"               overlay_personalized                                || hint "fork not personalized — ws reset gitops-fundamentals --user ${USER_NAME}"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove dev/stage start EMPTY (the attendee's Application deploys the app in the lab).
-  check "no parasol-claims in ${DEV} yet (clean)"        deploy_absent parasol-claims "$DEV"                 || hint "dev already has the app — ws reset m09 --user ${USER_NAME} for a clean entry"
-  check "no parasol-claims in ${STAGE} yet (clean)"      deploy_absent parasol-claims "$STAGE"               || hint "stage already has the app — ws reset m09 --user ${USER_NAME} for a clean entry"
+  check "no parasol-claims in ${DEV} yet (clean)"        deploy_absent parasol-claims "$DEV"                 || hint "dev already has the app — ws reset gitops-fundamentals --user ${USER_NAME} for a clean entry"
+  check "no parasol-claims in ${STAGE} yet (clean)"      deploy_absent parasol-claims "$STAGE"               || hint "stage already has the app — ws reset gitops-fundamentals --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   check "claims-db ready in ${DEV}"                      deploy_ready claims-db "$DEV"                       || hint "your Argo Application should deploy claims-db — check it Synced/Healthy in the student UI"
-  check "parasol-claims ready in ${DEV}"                 deploy_ready parasol-claims "$DEV"                  || hint "create your Argo Application (overlays/dev) on student-gitops; ws solve m09 does this"
-  check "dev claims is GitOps-managed (Argo tracking)"   deploy_gitops_managed parasol-claims "$DEV"         || hint "deploy it via an Argo Application, not oc apply — that is the M09 lesson"
+  check "parasol-claims ready in ${DEV}"                 deploy_ready parasol-claims "$DEV"                  || hint "create your Argo Application (overlays/dev) on student-gitops; ws solve gitops-fundamentals does this"
+  check "dev claims is GitOps-managed (Argo tracking)"   deploy_gitops_managed parasol-claims "$DEV"         || hint "deploy it via an Argo Application, not oc apply — that is the gitops-fundamentals lesson"
   check "route parasol-claims answers 200 in ${DEV}"     route_ready_200 "$DEV"                              || hint "claims app not ready — check pods: oc get pods -n ${DEV}"
-  check "parasol-claims promoted to ${STAGE} (>=2 replicas)" deploy_ready_min parasol-claims "$STAGE" 2     || hint "promote — add a second Application pointed at overlays/stage (ws solve m09 does this)"
+  check "parasol-claims promoted to ${STAGE} (>=2 replicas)" deploy_ready_min parasol-claims "$STAGE" 2     || hint "promote — add a second Application pointed at overlays/stage (ws solve gitops-fundamentals does this)"
 fi
 
 verify_summary

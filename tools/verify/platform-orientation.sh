@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M01 — Platform Orientation & First App.
+# Verify platform-orientation — Platform Orientation & First App.
 #   Entry: {user}-dev exists · entry marker CM · workshop quota · Gitea account answers ·
 #          clean slate (no leftover parasol-web) so `ws prep` re-wipes on a re-run.
 #   End:   parasol-web Deployment ready · Route answers HTTP 200 on / .
@@ -45,20 +45,20 @@ route_answers_200() {
   [[ "$code" == "200" ]]
 }
 
-# --- entry state (what `ws start m01` materializes) --------------------------
-check "namespace ${NS} exists"                 oc get ns "$NS"                      || hint "run: ws start m01 --user ${USER_NAME}"
-check "entry marker ws-entry-m01 present"       oc get cm ws-entry-m01 -n "$NS"      || hint "entry app not synced — ws start m01 --user ${USER_NAME}"
+# --- entry state (what `ws start platform-orientation` materializes) --------------------------
+check "namespace ${NS} exists"                 oc get ns "$NS"                      || hint "run: ws start platform-orientation --user ${USER_NAME}"
+check "entry marker ws-entry-platform-orientation present"       oc get cm ws-entry-platform-orientation -n "$NS"      || hint "entry app not synced — ws start platform-orientation --user ${USER_NAME}"
 check "workshop quota present in ${NS}"         oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
 check "Gitea account ${USER_NAME} answers (API 200)" gitea_user_exists "$USER_NAME" || hint "Gitea seeding incomplete — check the workshop layer / ws git-refresh"
 
-# m01's entry state is an EMPTY {user}-dev "ready to receive a first deployment". A leftover
+# platform-orientation's entry state is an EMPTY {user}-dev "ready to receive a first deployment". A leftover
 # parasol-web means a previous run was not reset; assert the clean slate at ENTRY so `ws prep`
 # detects the dirty namespace (its "already prepared" gate keys off this entry check passing)
 # instead of letting the lab's `oc new-app parasol-web` collide with "already exists".
 # Entry-only: at END, parasol-web SHOULD exist, so this must not run in completion mode.
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "clean slate: parasol-web not yet deployed" bash -c "! oc get deploy parasol-web -n $NS >/dev/null 2>&1" \
-    || hint "leftover from a previous run — reset with: ws prep m01 --yes"
+    || hint "leftover from a previous run — reset with: ws prep platform-orientation --yes"
 fi
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then

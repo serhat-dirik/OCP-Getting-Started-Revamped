@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M05 — Storage & Stateful Apps.
+# Verify storage-stateful — Storage & Stateful Apps.
 #   Entry: {user}-dev has the claims app + an EPHEMERAL PostgreSQL (emptyDir, NO PVC yet);
 #          entry marker + quota present.
 #   End:   the claims DB is backed by a bound PVC, and a 2-replica PostgreSQL StatefulSet
@@ -83,8 +83,8 @@ headless_svc() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws start m05 --user ${USER_NAME}"
-check "entry marker ws-entry-m05 present"               oc get cm ws-entry-m05 -n "$NS"              || hint "entry app not synced — ws start m05 --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws start storage-stateful --user ${USER_NAME}"
+check "entry marker ws-entry-storage-stateful present"               oc get cm ws-entry-storage-stateful -n "$NS"              || hint "entry app not synced — ws start storage-stateful --user ${USER_NAME}"
 check "workshop quota present in ${NS}"                 oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db "$NS"                 || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment has >=1 ready replica" deploy_ready parasol-claims "$NS"            || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
@@ -92,8 +92,8 @@ check "route parasol-claims answers 200 (/q/health/ready)" route_ready_200 "$NS"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the DB is EPHEMERAL and no PVC exists yet ----------------
-  check "claims-db data volume is emptyDir (ephemeral)" claims_db_ephemeral                          || hint "entry DB should be ephemeral — ws reset m05 --user ${USER_NAME}"
-  check "no PVC in ${NS} yet (persistence exercise not started)" no_pvcs_yet                          || hint "entry state has no PVCs — ws reset m05 --user ${USER_NAME}"
+  check "claims-db data volume is emptyDir (ephemeral)" claims_db_ephemeral                          || hint "entry DB should be ephemeral — ws reset storage-stateful --user ${USER_NAME}"
+  check "no PVC in ${NS} yet (persistence exercise not started)" no_pvcs_yet                          || hint "entry state has no PVCs — ws reset storage-stateful --user ${USER_NAME}"
 else
   # --- end state: persistent claims DB + the StatefulSet ---------------------
   check "a default StorageClass exists on this cluster" has_default_sc                               || hint "no default StorageClass — a PVC with no storageClassName cannot bind; set one as default"

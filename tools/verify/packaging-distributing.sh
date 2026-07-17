@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M25 — Packaging & Distributing Your App (Helm/OLM).
+# Verify packaging-distributing — Packaging & Distributing Your App (Helm/OLM).
 #   Entry: {user}-dev holds the entry marker; the attendee has a Gitea fork {user}/parasol-notifications
 #          (the Helm target) and a PREBUILT istag parasol-notifications:1.0 in {user}-dev, so `helm
 #          install` has a pullable image. The platform-observer ClusterRole lets the attendee DISSECT a
@@ -26,7 +26,7 @@ NS="${USER_NAME}-dev"
 # --- helpers (oc + curl only) ------------------------------------------------
 
 # A field from the entry marker (single source of truth for repo URL / image / dissection target).
-marker() { oc get cm ws-entry-m25 -n "$NS" -o jsonpath="{.data.$1}" 2>/dev/null || true; }
+marker() { oc get cm ws-entry-packaging-distributing -n "$NS" -o jsonpath="{.data.$1}" 2>/dev/null || true; }
 
 # The prebuilt notifications istag exists in {user}-dev (helm install has something to pull).
 istag_present() {
@@ -53,11 +53,11 @@ deploy_present() { oc get deploy "$(marker imageName)" -n "$NS" >/dev/null 2>&1;
 no_deploy()      { ! oc get deploy "$(marker imageName)" -n "$NS" >/dev/null 2>&1; }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep m25 (or ws start m25 --user ${USER_NAME}); ${NS} is workshop-layer (per-user-namespaces)"
-check "entry marker ws-entry-m25 present"               oc get cm ws-entry-m25 -n "$NS" || hint "entry app not synced — ws reset m25 --user ${USER_NAME}"
-check "Helm target fork parasol-notifications reachable in Gitea" repo_reachable        || hint "the fork {user}/parasol-notifications is missing — check the gitea-fork Job (ws reset m25 --user ${USER_NAME}); needs parasol/parasol-notifications seeded (workshop-config app-repo-seed)"
+check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep packaging-distributing (or ws start packaging-distributing --user ${USER_NAME}); ${NS} is workshop-layer (per-user-namespaces)"
+check "entry marker ws-entry-packaging-distributing present"               oc get cm ws-entry-packaging-distributing -n "$NS" || hint "entry app not synced — ws reset packaging-distributing --user ${USER_NAME}"
+check "Helm target fork parasol-notifications reachable in Gitea" repo_reachable        || hint "the fork {user}/parasol-notifications is missing — check the gitea-fork Job (ws reset packaging-distributing --user ${USER_NAME}); needs parasol/parasol-notifications seeded (workshop-config app-repo-seed)"
 check "prebuilt image istag $(marker imageName):$(marker imageTag) present in ${NS}" istag_present \
-  || hint "the notifications image is not built — check the notifications-build Job (ws reset m25 --user ${USER_NAME}); inspect: oc logs -f bc/$(marker imageName) -n ${NS}"
+  || hint "the notifications image is not built — check the notifications-build Job (ws reset packaging-distributing --user ${USER_NAME}); inspect: oc logs -f bc/$(marker imageName) -n ${NS}"
 check "platform-observer: attendee can read OLM ClusterServiceVersions (bundle dissection)" observer_reads_csv \
   || hint "extend platform-observer with operators.coreos.com {clusterserviceversions,subscriptions,installplans,operatorgroups} — gitops/workshop-config/templates/platform-observer-clusterrole.yaml, then sync workshop-config"
 check "platform-observer: attendee can read CustomResourceDefinitions"                observer_reads_crd \
@@ -81,13 +81,13 @@ fi
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has not installed the chart yet ------------------------
   check "no notifications app deployed yet (attendee runs helm install)" no_deploy \
-    || hint "parasol-notifications is already deployed; the lab already ran — ws reset m25 --user ${USER_NAME}"
+    || hint "parasol-notifications is already deployed; the lab already ran — ws reset packaging-distributing --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — the notifications app deployed to {user}-dev --------------------
   # Assert the OUTCOME (a notifications Deployment is running), never the mechanism, so any correct
   # solution (helm install OR ws solve) stays green (rule 14).
   check "notifications app parasol-notifications deployed" deploy_present \
-    || hint "install the chart (helm install parasol-notifications ./parasol-notifications -n ${NS}), or ws solve m25 --user ${USER_NAME}"
+    || hint "install the chart (helm install parasol-notifications ./parasol-notifications -n ${NS}), or ws solve packaging-distributing --user ${USER_NAME}"
 fi
 
 verify_summary

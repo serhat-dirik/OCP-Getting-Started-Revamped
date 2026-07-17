@@ -21,8 +21,8 @@ parse_verify_args "$@"
 NS="${USER_NAME}-dev"
 
 # --- entry state ---
-check "namespace ${NS} exists" oc get ns "$NS" || hint "run: ws start m01 --user ${USER_NAME}"
-check "entry marker present"   oc get cm ws-entry-m01 -n "$NS" || hint "entry app not synced — ws start m01"
+check "namespace ${NS} exists" oc get ns "$NS" || hint "run: ws start platform-orientation --user ${USER_NAME}"
+check "entry marker present"   oc get cm ws-entry-platform-orientation -n "$NS" || hint "entry app not synced — ws start platform-orientation"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state ---

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M13 — Securing Apps with Keycloak.
+# Verify securing-apps-keycloak — Securing Apps with Keycloak.
 #   Entry: {user}-dev has parasol-web + parasol-claims + an ephemeral claims-db, all UNPROTECTED (the
 #          OIDC tenant is off) — GET /api/claims returns 200 with NO token; parasol-fraud is not up yet.
 #   End:   the apps are OIDC-protected — GET /api/claims is 401 without a token and 200 with a valid
@@ -35,7 +35,7 @@ route_code() {  # route path [authHeader]
 
 # The OIDC auth-server-url the entry marker recorded (workshop Keycloak + this user's realm).
 auth_server_url() {
-  oc get cm ws-entry-m13 -n "$NS" -o jsonpath='{.data.authServerUrl}' 2>/dev/null || true
+  oc get cm ws-entry-securing-apps-keycloak -n "$NS" -o jsonpath='{.data.authServerUrl}' 2>/dev/null || true
 }
 
 # A demo access token for the given realm user (password grant, public client parasol-web). Uses the
@@ -51,8 +51,8 @@ realm_token() {  # username
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                         || hint "run: ws start m13 --user ${USER_NAME}"
-check "entry marker ws-entry-m13 present"               oc get cm ws-entry-m13 -n "$NS"         || hint "entry app not synced — ws start m13 --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                         || hint "run: ws start securing-apps-keycloak --user ${USER_NAME}"
+check "entry marker ws-entry-securing-apps-keycloak present"               oc get cm ws-entry-securing-apps-keycloak -n "$NS"         || hint "entry app not synced — ws start securing-apps-keycloak --user ${USER_NAME}"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db "$NS"            || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment has >=1 ready replica" deploy_ready parasol-claims "$NS"       || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
 check "parasol-web deployment has >=1 ready replica"    deploy_ready parasol-web "$NS"          || hint "wait for rollout: oc rollout status deploy/parasol-web -n ${NS}"
@@ -62,9 +62,9 @@ check "web Route answers 200 (/q/health/ready)"         test "$(route_code paras
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: apps are UNPROTECTED and the advanced beat has not started -----------------
   check "claims API is OPEN — GET /api/claims is 200 with no token" \
-        test "$(route_code parasol-claims /api/claims)" = "200"                                 || hint "entry is unprotected; if this is 401 the app is already secured — ws reset m13 --user ${USER_NAME}"
+        test "$(route_code parasol-claims /api/claims)" = "200"                                 || hint "entry is unprotected; if this is 401 the app is already secured — ws reset securing-apps-keycloak --user ${USER_NAME}"
   check "no parasol-fraud yet (token-exchange beat not started)" \
-        test -z "$(oc get deploy parasol-fraud -n "$NS" -o name 2>/dev/null)"                   || hint "entry has no fraud service — ws reset m13 --user ${USER_NAME}"
+        test -z "$(oc get deploy parasol-fraud -n "$NS" -o name 2>/dev/null)"                   || hint "entry has no fraud service — ws reset securing-apps-keycloak --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — the API is bearer-protected and role-enforced -------------
   # Assert outcomes (HTTP behaviour), never the mechanism (env vars / annotation), so any correct

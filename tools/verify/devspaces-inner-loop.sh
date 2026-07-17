@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Verify M03 — Dev Spaces & the Inner Loop.
-#   Entry: {user}-dev has the claims app + PostgreSQL (M02 end state, composed directly);
+# Verify devspaces-inner-loop — Dev Spaces & the Inner Loop.
+#   Entry: {user}-dev has the claims app + PostgreSQL (build-deliver end state, composed directly);
 #          a per-user Gitea fork of parasol-claims exists; entry marker + quota present.
 #   End:   the attendee started a Dev Spaces workspace — it lives in {user}-devspaces.
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
@@ -51,11 +51,11 @@ route_ready_200() {
   [[ "$code" == "200" ]]
 }
 
-# --- entry state (what `ws start m03` materializes) --------------------------
-check "namespace ${NS} exists"                       oc get ns "$NS"                              || hint "run: ws start m03 --user ${USER_NAME}"
-check "entry marker ws-entry-m03 present"            oc get cm ws-entry-m03 -n "$NS"              || hint "entry app not synced — ws start m03 --user ${USER_NAME}"
+# --- entry state (what `ws start devspaces-inner-loop` materializes) --------------------------
+check "namespace ${NS} exists"                       oc get ns "$NS"                              || hint "run: ws start devspaces-inner-loop --user ${USER_NAME}"
+check "entry marker ws-entry-devspaces-inner-loop present"            oc get cm ws-entry-devspaces-inner-loop -n "$NS"              || hint "entry app not synced — ws start devspaces-inner-loop --user ${USER_NAME}"
 check "workshop quota present in ${NS}"              oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
-check "Gitea fork ${USER_NAME}/parasol-claims exists" fork_exists                                 || hint "fork job didn't run — ws reset m03 --user ${USER_NAME} (or check the gitea-fork-m03-${USER_NAME} Job in ns gitea)"
+check "Gitea fork ${USER_NAME}/parasol-claims exists" fork_exists                                 || hint "fork job didn't run — ws reset devspaces-inner-loop --user ${USER_NAME} (or check the gitea-fork-devspaces-inner-loop-${USER_NAME} Job in ns gitea)"
 check "claims-db deployment has >=1 ready replica"   deploy_ready claims-db "$NS"                 || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment has >=1 ready replica" deploy_ready parasol-claims "$NS"         || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
 check "route parasol-claims answers 200 (/q/health/ready)" route_ready_200 "$NS"                  || hint "claims app not ready — check: oc get pods -n ${NS}"

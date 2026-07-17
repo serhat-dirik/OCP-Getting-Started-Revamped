@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M19 — Serverless Zero-to-Hero.
+# Verify serverless-zero-to-hero — Serverless Zero-to-Hero.
 #   Entry: {user}-dev holds a single-revision SCALE-TO-ZERO parasol-claims Knative Service (revision
 #          parasol-claims-v1) on the pre-built parasol-images/parasol-claims:1.1 image, an ephemeral
 #          claims-db (PostgreSQL) so the revision's /q/health/ready passes, and a demo-client load pod.
@@ -64,18 +64,18 @@ no_eventing() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                       oc get ns "$NS"                 || hint "run: ws prep m19 (or ws start m19 --user ${USER_NAME}); the ${NS} namespace is workshop-layer (workshop-config)"
-check "entry marker ws-entry-m19 present"            oc get cm ws-entry-m19 -n "$NS" || hint "entry app not synced — ws reset m19 --user ${USER_NAME}"
+check "namespace ${NS} exists"                       oc get ns "$NS"                 || hint "run: ws prep serverless-zero-to-hero (or ws start serverless-zero-to-hero --user ${USER_NAME}); the ${NS} namespace is workshop-layer (workshop-config)"
+check "entry marker ws-entry-serverless-zero-to-hero present"            oc get cm ws-entry-serverless-zero-to-hero -n "$NS" || hint "entry app not synced — ws reset serverless-zero-to-hero --user ${USER_NAME}"
 check "claims-db deployment has >=1 ready replica"   deploy_ready claims-db          || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "demo-client deployment has >=1 ready replica" deploy_ready demo-client        || hint "the in-cluster load pod isn't up — oc get pods -l app=demo-client -n ${NS}"
-check "parasol-claims Knative Service present"       ksvc_present                    || hint "entry app not synced (is the serverless stack installed?) — ws reset m19 --user ${USER_NAME}"
+check "parasol-claims Knative Service present"       ksvc_present                    || hint "entry app not synced (is the serverless stack installed?) — ws reset serverless-zero-to-hero --user ${USER_NAME}"
 check "parasol-claims ksvc is Ready"                 ksvc_ready                      || hint "revision not Ready — check image pull + claims-db: oc get ksvc,revision -n ${NS}; oc get pods -n ${NS}"
 check "parasol-claims ksvc has an auto-created URL (edge Route)" ksvc_has_url        || hint "Knative auto-publishes the edge Route — a blank status.url means the Route/Kourier isn't ready: oc get ksvc parasol-claims -n ${NS} -o yaml"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — one revision, no split, no eventing --------------------------------
-  check "no tag-based traffic split yet (attendee splits revisions)" no_traffic_split || hint "entry ships one revision; if the ksvc traffic is tag-split the lab already started — ws reset m19 --user ${USER_NAME}"
-  check "no eventing objects yet (attendee wires source->broker->trigger)" no_eventing || hint "entry ships no Broker/Trigger/PingSource; if they exist the lab already started — ws reset m19 --user ${USER_NAME}"
+  check "no tag-based traffic split yet (attendee splits revisions)" no_traffic_split || hint "entry ships one revision; if the ksvc traffic is tag-split the lab already started — ws reset serverless-zero-to-hero --user ${USER_NAME}"
+  check "no eventing objects yet (attendee wires source->broker->trigger)" no_eventing || hint "entry ships no Broker/Trigger/PingSource; if they exist the lab already started — ws reset serverless-zero-to-hero --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOMES — tuned + split + eventing wired ---------------------------------
   # Assert OUTCOMES (ksvc tag-split; a Broker, Trigger and PingSource exist), never the exact CR wording,

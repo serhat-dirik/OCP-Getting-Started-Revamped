@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M04 — Config, Secrets & Multi-Environment.
+# Verify config-multienv — Config, Secrets & Multi-Environment.
 #   Entry: {user}-dev has the claims app + PostgreSQL (naive: inline env, no probes/resources);
 #          entry markers in dev/stage/prod; workshop quota; a per-user Gitea fork of the
 #          claims-config promotion repo. With --entry-only, also asserts stage/prod start empty.
@@ -96,23 +96,23 @@ cm_app_env() {
   [[ "$got" == "$want" ]]
 }
 
-# --- entry state (what `ws start m04` materializes) --------------------------
-check "namespace ${DEV} exists"                        oc get ns "$DEV"                            || hint "run: ws start m04 --user ${USER_NAME}"
+# --- entry state (what `ws start config-multienv` materializes) --------------------------
+check "namespace ${DEV} exists"                        oc get ns "$DEV"                            || hint "run: ws start config-multienv --user ${USER_NAME}"
 check "namespace ${STAGE} exists"                      oc get ns "$STAGE"                          || hint "workshop layer not applied — run bootstrap/install.sh"
 check "namespace ${PROD} exists"                       oc get ns "$PROD"                           || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-m04 in ${DEV}"            oc get cm ws-entry-m04 -n "$DEV"            || hint "entry app not synced — ws start m04 --user ${USER_NAME}"
-check "entry marker ws-entry-m04 in ${STAGE}"          oc get cm ws-entry-m04 -n "$STAGE"          || hint "entry app not synced — ws start m04 --user ${USER_NAME}"
-check "entry marker ws-entry-m04 in ${PROD}"           oc get cm ws-entry-m04 -n "$PROD"           || hint "entry app not synced — ws start m04 --user ${USER_NAME}"
+check "entry marker ws-entry-config-multienv in ${DEV}"            oc get cm ws-entry-config-multienv -n "$DEV"            || hint "entry app not synced — ws start config-multienv --user ${USER_NAME}"
+check "entry marker ws-entry-config-multienv in ${STAGE}"          oc get cm ws-entry-config-multienv -n "$STAGE"          || hint "entry app not synced — ws start config-multienv --user ${USER_NAME}"
+check "entry marker ws-entry-config-multienv in ${PROD}"           oc get cm ws-entry-config-multienv -n "$PROD"           || hint "entry app not synced — ws start config-multienv --user ${USER_NAME}"
 check "workshop quota present in ${DEV}"               oc get resourcequota workshop-quota -n "$DEV" || hint "workshop layer not applied — run bootstrap/install.sh"
-check "Gitea fork ${USER_NAME}/claims-config exists"   fork_exists                                 || hint "fork job didn't run — ws reset m04 --user ${USER_NAME} (or check the gitea-fork-m04-${USER_NAME} Job in ns gitea)"
+check "Gitea fork ${USER_NAME}/claims-config exists"   fork_exists                                 || hint "fork job didn't run — ws reset config-multienv --user ${USER_NAME} (or check the gitea-fork-config-multienv-${USER_NAME} Job in ns gitea)"
 check "claims-db deployment ready in ${DEV}"           deploy_ready claims-db "$DEV"               || hint "wait for rollout: oc rollout status deploy/claims-db -n ${DEV}"
 check "parasol-claims deployment ready in ${DEV}"      deploy_ready parasol-claims "$DEV"          || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${DEV}"
 check "route parasol-claims answers 200 in ${DEV}"     route_ready_200 "$DEV"                      || hint "claims app not ready — check: oc get pods -n ${DEV}"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove stage/prod start EMPTY (they fill in during the promotion exercise).
-  check "no parasol-claims in ${STAGE} yet (clean)"    deploy_absent parasol-claims "$STAGE"       || hint "stage already has the app — ws reset m04 --user ${USER_NAME} for a clean entry"
-  check "no parasol-claims in ${PROD} yet (clean)"     deploy_absent parasol-claims "$PROD"        || hint "prod already has the app — ws reset m04 --user ${USER_NAME} for a clean entry"
+  check "no parasol-claims in ${STAGE} yet (clean)"    deploy_absent parasol-claims "$STAGE"       || hint "stage already has the app — ws reset config-multienv --user ${USER_NAME} for a clean entry"
+  check "no parasol-claims in ${PROD} yet (clean)"     deploy_absent parasol-claims "$PROD"        || hint "prod already has the app — ws reset config-multienv --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab looks like) ---------------------------
   # dev: config externalized to a ConfigMap + a Secret, all three probes, explicit resources.

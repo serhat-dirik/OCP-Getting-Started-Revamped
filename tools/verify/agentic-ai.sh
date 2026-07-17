@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify M23 — Agentic AI on OpenShift.
+# Verify agentic-ai — Agentic AI on OpenShift.
 #   Entry: {user}-ai holds the entry marker + MaaS config, and the full agent world is DEPLOYED from the
 #          shared parasol-images — the two MCP servers (claims-db, policy-docs) and parasol-agent, with
 #          the agent Ready (its /q/health/ready pings both MCP servers, so a Ready agent has proven its
@@ -29,7 +29,7 @@ deploy_available() {
 
 # The agent's public Route URL, as recorded in the entry marker (attendee-safe: no gitea/route read
 # cross-namespace — the URL was computed from the cluster domain at materialization).
-agent_route() { oc get cm ws-entry-m23 -n "$NS" -o jsonpath='{.data.agentRoute}' 2>/dev/null || true; }
+agent_route() { oc get cm ws-entry-agentic-ai -n "$NS" -o jsonpath='{.data.agentRoute}' 2>/dev/null || true; }
 
 # END-STATE OUTCOME: the agent answered a TOOL-GROUNDED query. POST a claim question and assert the
 # agent ACTUALLY EXECUTED the claims-db get_claim tool — a real (structured) tool call serializes as
@@ -52,17 +52,17 @@ tool_grounded_answer() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                     oc get ns "$NS"                    || hint "run: ws prep m23 (or ws start m23 --user ${USER_NAME}); ${NS} is workshop-layer (per-user-ai)"
-check "entry marker ws-entry-m23 present"          oc get cm ws-entry-m23 -n "$NS"    || hint "entry app not synced — ws reset m23 --user ${USER_NAME}"
-check "MaaS config present (endpoint + model)"     oc get cm maas-config -n "$NS"     || hint "entry app not synced — ws reset m23 --user ${USER_NAME}"
-check "MCP server claims-db deployed + ready"      deploy_available claims-db         || hint "claims-db not ready — check pods in ${NS} (ws reset m23 --user ${USER_NAME}); pulls the shared parasol-images/claims-db:1.0"
-check "MCP server policy-docs deployed + ready"    deploy_available policy-docs       || hint "policy-docs not ready — check pods in ${NS} (ws reset m23 --user ${USER_NAME}); pulls the shared parasol-images/policy-docs:1.0"
+check "namespace ${NS} exists"                     oc get ns "$NS"                    || hint "run: ws prep agentic-ai (or ws start agentic-ai --user ${USER_NAME}); ${NS} is workshop-layer (per-user-ai)"
+check "entry marker ws-entry-agentic-ai present"          oc get cm ws-entry-agentic-ai -n "$NS"    || hint "entry app not synced — ws reset agentic-ai --user ${USER_NAME}"
+check "MaaS config present (endpoint + model)"     oc get cm maas-config -n "$NS"     || hint "entry app not synced — ws reset agentic-ai --user ${USER_NAME}"
+check "MCP server claims-db deployed + ready"      deploy_available claims-db         || hint "claims-db not ready — check pods in ${NS} (ws reset agentic-ai --user ${USER_NAME}); pulls the shared parasol-images/claims-db:1.0"
+check "MCP server policy-docs deployed + ready"    deploy_available policy-docs       || hint "policy-docs not ready — check pods in ${NS} (ws reset agentic-ai --user ${USER_NAME}); pulls the shared parasol-images/policy-docs:1.0"
 # A Ready parasol-agent means its readiness probe passes — and that probe pings BOTH MCP servers, so
 # this single check proves the agent + its tool wiring are up (the entry-state outcome).
 check "parasol-agent deployed + Ready (both MCP clients OK)" deploy_available parasol-agent \
-  || hint "the agent is not Ready — its /q/health/ready pings both MCP servers; check pods in ${NS} (ws reset m23 --user ${USER_NAME})"
+  || hint "the agent is not Ready — its /q/health/ready pings both MCP servers; check pods in ${NS} (ws reset agentic-ai --user ${USER_NAME})"
 
-# INFO: the per-cluster converged model (proves the M22-style secret-sourcing — llama-scout-17b on C2).
+# INFO: the per-cluster converged model (proves the app-modernization-style secret-sourcing — llama-scout-17b on C2).
 info "agent model (maas-config): $(oc get cm maas-config -n "$NS" -o jsonpath='{.data.model}' 2>/dev/null || echo '?')"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
@@ -73,7 +73,7 @@ else
   # Assert the OUTCOME (the agent invoked the claims-db get_claim tool), not exact answer wording, so any
   # correct run stays green (rule 14). Needs a live MaaS key (short-lived on RHDP).
   check "agent executed a tool-grounded query (get_claim on CLM-1001)" tool_grounded_answer \
-    || hint "POST /agent/ask did not EXECUTE get_claim (empty toolCalls) — the MaaS key (GENAI_API_KEY) may be expired (agent returns 502 authFailure), the agent is not Ready, or the model text-echoed the call; ws solve m23 --user ${USER_NAME} then retry"
+    || hint "POST /agent/ask did not EXECUTE get_claim (empty toolCalls) — the MaaS key (GENAI_API_KEY) may be expired (agent returns 502 authFailure), the agent is not Ready, or the model text-echoed the call; ws solve agentic-ai --user ${USER_NAME} then retry"
 fi
 
 verify_summary
