@@ -2,7 +2,7 @@
 
 How the Antora/Showroom content under `content/` is written and built. This is the
 scaffold-level reference; the full **module page template** (concept / lab / wrapup /
-instructor / troubleshooting) lands with the M01 build. Rules here implement
+instructor / troubleshooting) lands with the Platform Orientation build. Rules here implement
 `04-STYLE-GUIDE.md` and `01-ARCHITECTURE.md` §2; Vale + yamllint + shellcheck enforce
 the automatable ones in CI.
 
@@ -186,9 +186,12 @@ Attribute names are `<key>_version` for every product entry in `versions.yaml`
   top of every `lab.adoc`. Set `:module-id:` first:
 
   ```asciidoc
-  :module-id: m07
+  :module-id: pipelines-fundamentals
   \include::partial$prereq-ws-start.adoc[]
   ```
+
+  `:module-id:` is the module's **slug** (the page directory name) — not a number. It renders the
+  attendee `ws prep {module-id}` command and must match the page's directory.
 
 - **`partial$instructor-demo.adoc`** — the `[INSTRUCTOR-DEMO]` callout for instructor-performed
   segments (renders in all flavors). Set the body first:
@@ -265,6 +268,10 @@ D Advanced Electives).
 
 ## Module page skeleton (pointer)
 
-Each module is one directory `content/modules/ROOT/pages/mNN-<slug>/` with
+Each module is one directory `content/modules/ROOT/pages/<slug>/` with
 `concept.adoc`, `lab.adoc`, `wrapup.adoc`, `instructor.adoc`, `troubleshooting.adoc`
-(`04-STYLE-GUIDE §2`). The full authored template + skeleton live in `docs/module-template/`.
+(`04-STYLE-GUIDE §2`). The directory is named by **slug only** — the module's number is its
+position in `/modules.yaml` and the displayed order in the `nav-*.adoc` sidebars, decoupled from
+the path (owner decision 2026-07-17). Image assets follow the same rule:
+`content/modules/ROOT/assets/images/<slug>/<slug>-NN-short-desc.ext`. The full authored template +
+skeleton live in `docs/module-template/`.

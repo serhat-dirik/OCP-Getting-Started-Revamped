@@ -1,6 +1,6 @@
 # M20 media manifest — Eventing Deep-Dive & Serverless Workflows
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module's **marquee visual is the event-display UI showing a received CloudEvent envelope** — the
 `showcase` consumer's own web page rendering `☁️ cloudevents.Event` with its context attributes and the
 claim `Data`, and the **dead-letter sink page showing a dead event stamped `knativeerrorcode: 404`**. No

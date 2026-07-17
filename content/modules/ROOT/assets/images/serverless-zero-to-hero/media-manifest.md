@@ -1,6 +1,6 @@
 # M19 media manifest — Serverless Zero-to-Hero
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module's **marquee visuals are the scale-to-zero moments** — the terminal cold start (a ~15 s first
 request, then ~0.1 s warm) and the Topology view of a service at **0 pods** waking to **N** — which no
 static diagram fully conveys, so the terminal cast and the Topology screenshots are the priority of the

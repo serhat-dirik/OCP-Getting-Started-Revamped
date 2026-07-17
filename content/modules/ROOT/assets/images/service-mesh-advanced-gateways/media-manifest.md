@@ -1,6 +1,6 @@
 # M18 media manifest — Service Mesh 3 & Advanced Gateways
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module's **marquee visual is the Kiali service graph** — a screenshot no CLI output can replace — so
 the Kiali captures below are the priority of the media pass. All lab mechanics and every expected-output
 block were captured on-cluster (OCP 4.21.22, Kubernetes 1.34, OpenShift Service Mesh 3.3.5 / Istio v1.28.6,

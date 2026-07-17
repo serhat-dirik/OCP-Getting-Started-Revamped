@@ -1,6 +1,6 @@
 # M22 media manifest — Application Modernization (MTA + Developer Lightspeed)
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module's **marquee visuals are the MTA analysis report** (the *Issues* view showing the mandatory
 blockers and the **24 story-point** effort total on `parasol-legacy-claims`) and the **Developer Lightspeed
 for MTA diff** (the extension proposing `System.getenv("CLAIMS_DB_URL")` for the hardcoded-IP issue). No

@@ -1,6 +1,6 @@
 # M06 media manifest — Jobs, Batch & Queued Workloads
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module is **CLI-first** — the console is not the content, so the mandatory recording is a
 **terminal cast** of the demo arc, and screenshots are optional enrichment. All lab mechanics and
 every expected-output block were captured on-cluster (OCP 4.21 / Red Hat build of Kueue 1.3.1,

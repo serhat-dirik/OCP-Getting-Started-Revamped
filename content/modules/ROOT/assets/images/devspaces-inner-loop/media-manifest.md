@@ -1,6 +1,6 @@
 # M03 media manifest — Dev Spaces & the Inner Loop
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 Shoot as **user1** on the workshop cluster, 16:10, default console/IDE theme, annotate with
 numbered red circles matching the referenced step. Every screenshot needs alt text
 (what it shows + what to notice). Embed points are marked in the `.adoc` files with a

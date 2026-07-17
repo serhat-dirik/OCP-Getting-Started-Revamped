@@ -1,6 +1,6 @@
 # M23 media manifest — Agentic AI on OpenShift
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module's **marquee visual is the `POST /agent/ask` response** — the JSON showing the `answer`, the
 populated `toolCalls` array (which tool the agent chose and with what arguments), and the `tokenUsage` —
 because that single artifact carries the whole thesis: the model called *your* tool and grounded its

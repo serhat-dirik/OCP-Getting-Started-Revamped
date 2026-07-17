@@ -1,6 +1,6 @@
 # M27 media manifest — Application Security Testing (SAST · SCA · DAST)
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module's **marquee visual is the pipeline graph going from RED to GREEN** — the OpenShift Pipelines
 console graph with a security gate red (the build stopped), paired with the same graph all-green after the
 five fixes — because that pair carries the whole thesis: a green *build* said nothing about security until

@@ -1,6 +1,6 @@
 # M16 media manifest — Deployment Targets & Scheduling
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module is **CLI-first** — the console is dual-path but scheduling is YAML/CLI-centric, so the
 mandatory recording is a **terminal cast** of the demo arc; screenshots are optional enrichment for the
 Console tabs. All lab mechanics and every expected-output block were captured on-cluster (OCP 4.21.22,

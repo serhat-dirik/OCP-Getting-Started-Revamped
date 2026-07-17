@@ -1,6 +1,6 @@
 # M13 media manifest — Securing Apps with Keycloak
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 Shoot as **user1** (or any assigned attendee id) on the workshop cluster, default console theme,
 annotate with numbered red circles matching the referenced step. Every screenshot needs alt text
 (what it shows + what to notice). Embed points are marked in the `.adoc` files with a commented

@@ -1,6 +1,6 @@
 # M21 media manifest — Resilience, Multi-Cluster & DR
 
-Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`mNN-<slug>-NN-short-desc.ext`).
+Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-short-desc.ext`).
 This module's **marquee moment is the failover**: the client's live log flipping `SITE=A` → `SITE=B` — *every
 line still `HTTP 200`* — the instant an entire site is scaled to zero, and back to `A` on recovery. No static
 diagram conveys "the whole primary site vanished and the client never dropped a request," so the **live-log
