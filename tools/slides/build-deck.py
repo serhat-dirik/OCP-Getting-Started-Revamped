@@ -115,13 +115,40 @@ def add_slide(prs: Presentation, spec: dict, layout_map: dict[str, str]) -> None
         slide.notes_slide.notes_text_frame.text = notes.strip()
 
 
+def ordered_outlines() -> list[Path]:
+    """Deck order comes from /modules.yaml (position = number, decoupled from slug): one
+    slides/outlines/<slug>.md per module, in catalog order. Falls back to alphabetical when the
+    manifest is absent; warns (but still includes) outlines missing from / not listed in it."""
+    outdir = REPO_ROOT / "slides" / "outlines"
+    manifest = REPO_ROOT / "modules.yaml"
+    all_md = sorted(outdir.glob("*.md"))
+    if not manifest.is_file():
+        print("⚠ modules.yaml not found — falling back to alphabetical outline order")
+        return all_md
+    slugs = re.findall(r"^\s*-\s*slug:\s*(\S+)", manifest.read_text(), re.M)
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for slug in slugs:
+        p = outdir / f"{slug}.md"
+        if p.is_file():
+            ordered.append(p)
+            seen.add(p.name)
+        else:
+            print(f"⚠ no outline for module '{slug}' ({p.name}) — skipping")
+    for p in all_md:  # keep any stray outline not in the manifest, at the end
+        if p.name not in seen:
+            print(f"⚠ outline {p.name} not listed in modules.yaml — appended at end")
+            ordered.append(p)
+    return ordered
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("outlines", nargs="*", type=Path)
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "slides" / "dist" / "deck.pptx")
     args = ap.parse_args()
 
-    outlines = args.outlines or sorted((REPO_ROOT / "slides" / "outlines").glob("*.md"))
+    outlines = args.outlines or ordered_outlines()
     if not outlines:
         print("❌ no outlines found under slides/outlines/")
         return 1
