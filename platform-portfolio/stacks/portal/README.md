@@ -25,7 +25,7 @@ race.
 
 ## Prerequisite: in-cluster Gitea
 
-The portal reads its catalog from, and scaffolds into, the in-cluster **Gitea** (`gitea.gitea.svc:3000`,
+The portal reads its catalog from, and scaffolds into, the in-cluster **Gitea** (`gitea.ogsr-gitea.svc:3000`,
 the `core-devtools` stack). The `rhdh-gitea` secret (Gitea credentials) is a **contract** created before
 the instance reconciles — see `components/rhdh/README.md`. In the workshop the credentials are the Gitea
 admin account; the workshop bootstrap discovers them and creates the secret.

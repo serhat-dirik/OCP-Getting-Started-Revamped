@@ -16,7 +16,7 @@ never per-user; per-user isolation is done with namespaced `ServiceMonitor`/`Pro
 | Component | Operator (channel) | Config CRs | Wave |
 |---|---|---|---|
 | `cluster-observability-operator` | `cluster-observability-operator` (`stable`) | `UIPlugin` Dashboards + DistributedTracing (console Observe -> Dashboards/Traces) | 0 |
-| `tempo` | `tempo-product` (`stable`) | `TempoMonolithic` (memory backend, OTLP ingest) + the shared `observability-workshop` namespace | 0 |
+| `tempo` | `tempo-product` (`stable`) | `TempoMonolithic` (memory backend, OTLP ingest) + the shared `ogsr-observability-workshop` namespace | 0 |
 | `opentelemetry` | `opentelemetry-product` (`stable`) | `OpenTelemetryCollector` (OTLP :4317/:4318 -> Tempo) | 1 |
 | `loki-logging` *(optional)* | `loki-operator` + `cluster-logging` (`stable-6.5`) | `LokiStack` 1x.demo + `ClusterLogForwarder` + Logging `UIPlugin` | 2 |
 
@@ -25,19 +25,19 @@ never per-user; per-user isolation is done with namespaced `ServiceMonitor`/`Pro
 console **Observe -> Metrics/Alerting** work today. This stack adds **tracing** (and optional **logging**)
 on top.
 
-## Shared `observability-workshop` namespace model
+## Shared `ogsr-observability-workshop` namespace model
 
 The tracing workloads — the `TempoMonolithic` store and the `OpenTelemetryCollector` — both live in one
-shared namespace, **`observability-workshop`**. The `tempo` component owns/creates it (Tempo is the
+shared namespace, **`ogsr-observability-workshop`**. The `tempo` component owns/creates it (Tempo is the
 pipeline anchor); the `opentelemetry` stack app runs **one wave later** so the namespace exists before the
 collector applies (same pattern as `core-devtools` gitea wave 0 -> git-mirror wave 1 — dependencies are
 ordered by sync-wave, not sleep-and-hope). Operators themselves install into their own
-`openshift-*-operator` namespaces (AllNamespaces mode); only the workload CRs share `observability-workshop`.
+`openshift-*-operator` namespaces (AllNamespaces mode); only the workload CRs share `ogsr-observability-workshop`.
 
 The stable in-cluster endpoints this exposes:
 
-- **Collector (apps send traces here):** `otel-collector.observability-workshop.svc.cluster.local:4317` (OTLP gRPC), `:4318` (OTLP HTTP)
-- **Tempo (collector exports here):** `tempo-traces.observability-workshop.svc.cluster.local:4317`
+- **Collector (apps send traces here):** `otel-collector.ogsr-observability-workshop.svc.cluster.local:4317` (OTLP gRPC), `:4318` (OTLP HTTP)
+- **Tempo (collector exports here):** `tempo-traces.ogsr-observability-workshop.svc.cluster.local:4317`
 
 ## Footprint
 
@@ -53,7 +53,7 @@ This stack is workshop-agnostic. The **per-user** wiring is the M12 entry state'
 (`gitops/entry-states/observability-health-scale/`, built separately) and layers on top of this shared infra:
 
 - Flip OTLP export on `parasol-claims`: `QUARKUS_OTEL_SDK_DISABLED=false` and
-  `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability-workshop.svc.cluster.local:4317`.
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.ogsr-observability-workshop.svc.cluster.local:4317`.
 - A per-user `ServiceMonitor` in `{user}-dev` scraping `parasol-claims` `/q/metrics` (UWM picks it up).
 - Solve-state extras: a `PrometheusRule` alert, an `HorizontalPodAutoscaler` (CPU), a `PodDisruptionBudget`.
 
@@ -71,8 +71,8 @@ None of that belongs in this portfolio stack — it is user-/story-specific and 
 ```bash
 oc get applications -n openshift-gitops -l portfolio.redhat.com/component | grep -E 'cluster-observability|tempo|opentelemetry'
 oc get csv -A | grep -E 'cluster-observability|tempo|opentelemetry'         # operators Succeeded
-oc get tempomonolithic -n observability-workshop                            # traces -> Ready
-oc get opentelemetrycollector -n observability-workshop                     # otel -> pod Running
+oc get tempomonolithic -n ogsr-observability-workshop                            # traces -> Ready
+oc get opentelemetrycollector -n ogsr-observability-workshop                     # otel -> pod Running
 oc get uiplugin                                                             # dashboards, distributed-tracing
 ```
 

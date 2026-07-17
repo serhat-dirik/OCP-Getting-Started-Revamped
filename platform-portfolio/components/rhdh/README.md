@@ -33,7 +33,7 @@ cluster login).
 ## Gitea: in-cluster service address (no host injection)
 
 Both the catalog reader and the scaffolder (`publish:gitea`) address Gitea by its **in-cluster service
-URL** `gitea.gitea.svc:3000` — stable on any cluster, so this component needs **no per-cluster domain
+URL** `gitea.ogsr-gitea.svc:3000` — stable on any cluster, so this component needs **no per-cluster domain
 injection** (RHDH's backend, Dev Spaces, and the workshop terminal all reach it in-cluster). Verified
 live 2026-07-11: catalog loads and the golden-path template publishes + registers end to end via the
 service URL.
@@ -77,7 +77,7 @@ credentials are the Gitea admin account the operator generates, so the workshop 
 and creates the secret:
 
 ```bash
-GITEA_NS=gitea
+GITEA_NS=ogsr-gitea
 ADMIN_USER="$(oc get gitea gitea -n "$GITEA_NS" -o jsonpath='{.spec.giteaAdminUser}')"
 ADMIN_PASS="$(oc get gitea gitea -n "$GITEA_NS" -o jsonpath='{.status.adminPassword}')"
 oc create secret generic rhdh-gitea -n rhdh \
