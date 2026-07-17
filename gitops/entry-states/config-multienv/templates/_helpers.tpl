@@ -119,7 +119,7 @@ spec:
     spec:
       containers:
         - name: parasol-claims
-          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
           ports:
             - containerPort: 8080
           envFrom:
