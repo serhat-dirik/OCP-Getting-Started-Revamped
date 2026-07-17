@@ -1,0 +1,92 @@
+# Decoupled one-time seed for the SOLVE/end state. In the entry (fault) world the parasol-claims app
+# seeds the shared claims-db ITSELF on every boot (Hibernate drop-and-create) — which is exactly the
+# fault deployment-targets-scheduling now diagnoses: a rolling-update pod boot drops+reseeds the DB out from under the still-
+# serving pod (proven live 2026-07-16 — a marker row is gone after one pod restart). The fix flips the
+# app to schema-management=none (marker SURVIVES the restart), so the schema+data must come from
+# somewhere ELSE, ONCE, at deploy time — this Job. It runs only when solve=true (the entry app still
+# self-seeds), as an Argo Sync hook that self-waits for claims-db (pg_isready below) rather than gating on
+# a sync-wave — so it can NEVER stall a start the way a wave dependency on an image-gapped tier would (the
+# ai-assisted-development wave-gating hang lesson). `ws solve` waits for the hook to complete, so the DB is populated before
+# the state reports ready; the solve app runs schema=none, which stays Healthy (SELECT 1) through the brief
+# pre-seed window. This is the "seed once at deploy" pattern (a Flyway/Liquibase migration Job in production).
+{{- if .Values.solve }}
+---
+# why: the schema DDL + deterministic INSERTs the seed Job loads. schema.sql was captured from the app's
+# own Hibernate drop-and-create output so it matches the entity mapping exactly; import.sql is the same
+# 30-claim/20-event seed the image ships (synced from apps/parasol-claims/src/main/resources/import.sql).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claims-db-seed
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: deployment-targets-scheduling
+    workshop.redhat.com/owner: ogsr
+data:
+  schema.sql: |
+{{ .Files.Get "files/schema.sql" | indent 4 }}
+  import.sql: |
+{{ .Files.Get "files/import.sql" | indent 4 }}
+---
+# why: loads schema.sql + import.sql into claims-db ONCE via psql (the same postgresql:15-el9 image the
+# DB runs, so psql is present and no external pull is needed). Argo Sync hook so it re-runs on every
+# solve materialization; BeforeHookCreation delete-policy avoids the immutable-Job conflict on re-sync.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: claims-db-seed
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: deployment-targets-scheduling
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        app: claims-db-seed
+        workshop.redhat.com/module: deployment-targets-scheduling
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ waiting for claims-db to accept connections…"
+              for i in $(seq 1 30); do pg_isready -h "$PGHOST" -q && break; sleep 2; done
+              echo "▶ loading schema + seed…"
+              psql -v ON_ERROR_STOP=1 -f /seed/schema.sql -f /seed/import.sql
+              echo "✅ claims-db seeded: $(psql -tAc 'select count(*) from claim') claims, $(psql -tAc 'select count(*) from claim_event') events"
+          env:
+            - name: PGHOST
+              value: claims-db
+            - name: PGUSER
+              valueFrom: {secretKeyRef: {name: claims-db, key: POSTGRESQL_USER}}
+            - name: PGPASSWORD
+              valueFrom: {secretKeyRef: {name: claims-db, key: POSTGRESQL_PASSWORD}}
+            - name: PGDATABASE
+              valueFrom: {secretKeyRef: {name: claims-db, key: POSTGRESQL_DATABASE}}
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 250m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+      volumes:
+        - name: seed
+          configMap:
+            name: claims-db-seed
+{{- end }}

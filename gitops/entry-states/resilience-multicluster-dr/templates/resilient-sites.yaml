@@ -1,0 +1,164 @@
+# The RESILIENT claims service in BOTH simulated sites — the workload the resilience-multicluster-dr lab (1) keeps alive through a
+# single-pod kill (in-site resiliency: PDB + replicas absorb it) and (2) fails traffic OVER when a whole
+# site goes down (cross-site failover: scale the Deployment to 0 = "the site fails"). Each site runs the
+# SAME env-driven responder; only SITE (A/B) differs, so the client sees WHICH site served each request.
+# Resilience = {{ .Values.siteReplicas }} replicas + PodDisruptionBudget + topologySpreadConstraints +
+# HorizontalPodAutoscaler + probes (a concrete recap of the observability-health-scale/deployment-targets-scheduling primitives). Meshed per-pod (native
+# istio-proxy sidecar) so the failover routing is programmed into each caller's proxy.
+{{- $replicas := int .Values.siteReplicas }}
+{{- range $site := list (dict "ns" (include "resilience-multicluster-dr.siteANs" $) "site" "A") (dict "ns" (include "resilience-multicluster-dr.siteBNs" $) "site" "B") }}
+---
+# why: the resilient claims tier at {{ $replicas }} replicas so a single-pod loss is a non-event, meshed so
+# the mesh can route + fail over between sites. SITE={{ $site.site }} is echoed in every response.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ $site.ns }}
+  labels:
+    app: parasol-claims
+    site: {{ $site.site | quote }}
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: {{ $replicas }}
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        site: {{ $site.site | quote }}
+        workshop.redhat.com/module: resilience-multicluster-dr
+        # Meshed via the injection LABEL (webhook objectSelector matches the label, not an annotation).
+        sidecar.istio.io/inject: "true"
+    spec:
+      # Fast death so scaling the Deployment to 0 (the "site fails" action) removes the backend promptly and
+      # the mesh fails over crisply — the responder handles SIGTERM and exits immediately.
+      terminationGracePeriodSeconds: 3
+      # Soft anti-affinity: prefer spreading replicas across nodes so a node loss can't take them all.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: parasol-claims
+      # Spread across nodes AND synthetic zones. BOTH ScheduleAnyway (soft) so scheduling NEVER blocks on a
+      # cluster lacking workshop.redhat.com/zone labels (portable); the hostname spread works everywhere.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: parasol-claims
+        - maxSkew: 1
+          topologyKey: workshop.redhat.com/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: parasol-claims
+      containers:
+        - name: claims
+          image: {{ $.Values.claimsResponderImage }}
+          # A tiny HTTP responder: every response is a claims-flavored JSON that names the serving SITE (so
+          # the client can log A vs B) and an X-Parasol-Site header. Handles SIGTERM to exit immediately.
+          command: ["node", "-e"]
+          args:
+            - |
+              const http=require('http');const s=process.env.SITE||'?';let n=0;
+              const srv=http.createServer((q,r)=>{n++;r.setHeader('X-Parasol-Site',s);r.writeHead(200,{'Content-Type':'application/json'});r.end(JSON.stringify({site:s,service:'parasol-claims',served:n,pod:process.env.HOSTNAME}));});
+              srv.listen(8080,()=>console.log('parasol-claims site '+s+' listening on :8080'));
+              process.on('SIGTERM',()=>process.exit(0));
+          env:
+            - name: SITE
+              value: {{ $site.site | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+# why: the stable in-cluster address of THIS site's claims service — claims.{{ $site.ns }}.svc:8080. The
+# ServiceEntry's per-site endpoint (built in the lab) points at this FQDN.
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims
+  namespace: {{ $site.ns }}
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: keep a quorum during voluntary disruptions (the in-site resiliency drill: kill a pod / drain a node).
+# minAvailable = replicas-1 so exactly one pod may be evicted at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: parasol-claims
+  namespace: {{ $site.ns }}
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  minAvailable: {{ sub $replicas 1 }}
+  selector:
+    matchLabels:
+      app: parasol-claims
+---
+# why: the autoscale posture — HPA holds the replica floor and bursts under load. minReplicas = the
+# resilient floor; maxReplicas = 2x.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: parasol-claims
+  namespace: {{ $site.ns }}
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: parasol-claims
+  minReplicas: {{ $replicas }}
+  maxReplicas: {{ mul $replicas 2 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+{{- end }}

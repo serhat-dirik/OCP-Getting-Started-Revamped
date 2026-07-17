@@ -1,0 +1,82 @@
+# Injected by ws start (helm parameters user, clusterDomain, solve); defaults here serve local
+# `helm template` dev. clusterDomain default is a PLACEHOLDER — the real (ephemeral) cluster domain
+# is injected at apply time and must NEVER be committed (CI privacy guard).
+user: user1
+clusterDomain: apps.example.com
+# ws solve sets true → renders the module END state (instructor/demo/testing): the seeded deployment's
+# readinessProbe path is patched to the CORRECT value (goodProbePath) so parasol-claims is Running 1/1
+# — the outcome after the agent, granted a scoped write by the attendee, fixes the probe. Entry (false)
+# = the pre-lab world: the probe path is WRONG (badProbePath), so parasol-claims is Running 0/1 (the
+# deterministic diagnosis target). The mcp-agent SA stays view-only in BOTH states; the scoped-write
+# grant is always an attendee action (the lesson), never pre-granted by the platform.
+solve: false
+
+# --- OpenShift/Kubernetes MCP server (DIGEST-PINNED) ------------------------------------------
+# The upstream Go containers/kubernetes-mcp-server (Red Hat's TP openshift-mcp-server is its fork).
+# Pinned by the v0.0.65 MULTI-ARCH manifest-list digest (verified live 2026-07-15 via `oc image info`
+# ghcr.io/containers/kubernetes-mcp-server:v0.0.65 → Manifest List sha256:5df586e2…) so every node
+# arch resolves and the tag can never drift under us (this is the fastest-moving tool in the library).
+# Runs as the scoped mcp-agent SA (below) → its projected in-cluster token is the ONLY cluster
+# credential in the system; the CLI client holds none. Started --read-only --toolsets core,config as
+# defence-in-depth, but RBAC on mcp-agent is the real boundary (CVE-2026-46519: a sibling project's
+# read-only flag filtered tool discovery, not execution → bypassable).
+mcpServerImage: ghcr.io/containers/kubernetes-mcp-server@sha256:5df586e2c7ced2a3125f6e78923388d80b69de0a2ad1470325b05318f12725bd
+mcpServiceName: kubernetes-mcp-server
+mcpPort: 8080
+mcpToolsets: "core,config"
+mcpReadOnly: true
+mcpAgentSA: mcp-agent
+
+# --- Seeded broken deployment (the deterministic diagnosis target) ----------------------------
+# parasol-claims:1.0 from the shared parasol-images (Quarkus, exposes /q/health/ready on 8080), pulled
+# by the {user}-dev default SA (the workshop-image-pullers group binding grants system:image-puller on
+# parasol-images — verified live: user1-dev already runs parasol-images/parasol-claims). Run DB-FREE
+# (QUARKUS_DATASOURCE_ACTIVE/HIBERNATE_ORM_ACTIVE=false in the template) so it is self-contained — the
+# image otherwise CrashLoops on a missing parasol-db, not the clean 0/1 we want. The fault is a
+# single wrong readinessProbe.httpGet.path (badProbePath → HTTP 404): pod Running 0/1 Ready, empty
+# Service endpoints, ONE crisp "Readiness probe failed … statuscode: 404" event, and NO restart loop
+# (liveness is deliberately OMITTED). Fixed by patching the path to goodProbePath — a one-field WRITE,
+# which is what later exercises the attendee-granted scoped write. Low-temperature-friendly (one
+# unambiguous signal). Intentional flaw — do not "fix" it in the chart.
+seedName: parasol-claims
+seedImage: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-claims:1.0
+seedPort: 8080
+goodProbePath: /q/health/ready
+badProbePath: /q/health/reddy
+
+# --- Provided neutral CLI agent (mcp-agent-cli) -----------------------------------------------
+# The assistant-neutral Quarkus + LangChain4j MCP client (apps/mcp-agent-cli): env-driven MaaS + MCP
+# over SSE, always-on tool-call trace, client-side read-only filter (defence-in-depth). Built ONCE
+# into the shared parasol-images by the app pipeline (like parasol-agent) — referenced here + in the
+# devfile, never built per-user. Built into parasol-images on both clusters from the app's own
+# BuildConfig (apps/mcp-agent-cli/openshift/buildconfig.yaml) and pinned to :1.0. The DevWorkspace is
+# started:false so entry materialization does not depend on it.
+agentCliImage: image-registry.openshift-image-registry.svc:5000/parasol-images/mcp-agent-cli:1.0
+# Caps the agentic loop (plan → tool calls → observe → fix → verify) to bound MaaS token spend ×users.
+maxSteps: "10"
+
+# --- Dev Spaces workspace (devfile) -----------------------------------------------------------
+# A DevWorkspace (started:false → zero pods/token cost at entry) co-located in {user}-dev, so the MCP
+# server is reachable by short in-cluster DNS and the auto-mounted maas-credentials Secret is
+# same-namespace. The che-code editor resolves via the in-cluster Dev Spaces dashboard editor API (svc
+# DNS, no cluster domain) — the DS 3.x plugin registry is OpenVSX-proxy-only and can't resolve a bare id
+# (see devworkspace.yaml). udiImage = the Dev Spaces Universal
+# Developer Image (versions.yaml devspaces.udi_image), which ships oc + a JDK.
+devWorkspaceName: parasol-ai-assist
+udiImage: registry.redhat.io/devspaces/udi-rhel9:3.29
+cheEditorId: che-incubator/che-code/latest
+
+# --- MaaS credentials for the CLI agent (jobs-batch-kueue/agentic-ai per-cluster secret-sourcing) -----------------
+# The CLI calls an OpenAI-compatible Models-as-a-Service endpoint. endpoint + model are NOT secret
+# (attendee-readable maas-config ConfigMap); the Bearer key IS a secret and is COPIED at sync time
+# from the platform Lightspeed secret (openshift-lightspeed/credentials key apitoken) into a
+# maas-credentials Secret here by a hook Job with its own least-privilege SA. The hook ALSO sources
+# model + endpoint from the SAME secret and converges the ConfigMap to them, falling back to these
+# chart values when the source keys are absent (C1's secret carries only apitoken → qwen3-14b stands).
+# The maasEndpoint host is the shared RHDP MaaS endpoint the CI privacy guard explicitly tolerates
+# (semi-public, queued for parameterization in the packaging wave) — same value agentic-ai ships.
+maasEndpoint: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
+maasModel: qwen3-14b
+maasSourceNamespace: openshift-lightspeed
+maasSourceSecret: credentials
+maasSourceKey: apitoken

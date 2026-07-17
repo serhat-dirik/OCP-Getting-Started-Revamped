@@ -1,0 +1,159 @@
+{{- if .Values.solve }}
+# END state for instructor demos / `ws solve service-mesh-advanced-gateways` / testing — the core east-west mesh outcomes the attendee
+# produces once the namespace is enrolled: a fraud v2 subset, a weighted + header-routed VirtualService with
+# timeout/retry, a DestinationRule carrying the circuit-breaker (connectionPool + outlierDetection), and the
+# claims→fraud AuthorizationPolicy. Verify asserts these OUTCOMES exist (+ the app tier meshed), never the
+# exact CR wording, so any correct attendee solution stays green (rule 14). The app tier is meshed per-pod
+# via sidecar.istio.io/inject=true on the web/claims/fraud Deployments (rendered by their own templates when
+# solve=true) — no namespace-label toggle, so the workshop-owned {user}-mesh namespace is never mutated.
+#
+# NOT here (deliberately): mTLS is left at the mesh DEFAULT (PERMISSIVE auto-mTLS between sidecars — the
+# "mTLS for free" beat, provable in Kiali; a STRICT PeerAuthentication would block the un-meshed demo-client
+# from the frontend with no ingress gateway to route through). The advanced-ingress trio (istio Gateway with
+# HTTPS-terminate / raw-TCP / TLS-passthrough listeners) + the EnvoyFilter rate-limit are the service-mesh-advanced-gateways deep-dive
+# encore, built in content on top of the partner-tcp-backend this chart seeds — they need the ingress gateway
+# wiring and are not required for a valid, demo-able east-west end state. Advanced ingress + rate-limit shipped as service-mesh-advanced-gateways content Exercise 7 (optional encore).
+---
+# why: fraud v2 — the target of the 90/10 weighted shift + the header route. Same image as v1 (no distinct
+# v2 image yet — service-mesh-advanced-gateways build note app-gap) with a version:v2 label + FRAUD_VERSION=v2 marker so the subsets are
+# distinguishable. Meshed (injected) so it joins the graph.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-fraud-v2
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    app: parasol-fraud
+    workshop.redhat.com/module: service-mesh-advanced-gateways
+    version: v2
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-fraud
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: parasol-fraud
+        version: v2
+        workshop.redhat.com/module: service-mesh-advanced-gateways
+        # Meshed via the injection LABEL (webhook objectSelector matches the label, not an annotation).
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: {{ .Values.fraudImageV2 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: FRAUD_VERSION
+              value: v2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+# why: the traffic-management + resilience policy on the fraud host. subsets v1/v2 back the weighted split;
+# outlierDetection IS the circuit breaker (eject a host after consecutive 5xx); connectionPool bounds
+# in-flight load. Applies on the CLIENT sidecar (claims) calling parasol-fraud.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: parasol-fraud
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    workshop.redhat.com/module: service-mesh-advanced-gateways
+    workshop.redhat.com/owner: ogsr
+spec:
+  host: parasol-fraud
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 10
+      http:
+        http1MaxPendingRequests: 10
+        maxRequestsPerConnection: 1
+    outlierDetection:
+      consecutive5xxErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+    - name: v1
+      labels:
+        version: v1
+    - name: v2
+      labels:
+        version: v2
+---
+# why: route claims→fraud — a header route (x-parasol-test:true → all v2, the "test users" beat) ahead of a
+# 90/10 v1/v2 weighted split, with a timeout + retry (the fault-injection/cascade fix). Applies on claims' sidecar.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: parasol-fraud
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    workshop.redhat.com/module: service-mesh-advanced-gateways
+    workshop.redhat.com/owner: ogsr
+spec:
+  hosts:
+    - parasol-fraud
+  http:
+    - match:
+        - headers:
+            x-parasol-test:
+              exact: "true"
+      route:
+        - destination:
+            host: parasol-fraud
+            subset: v2
+    - route:
+        - destination:
+            host: parasol-fraud
+            subset: v1
+          weight: 90
+        - destination:
+            host: parasol-fraud
+            subset: v2
+          weight: 10
+      timeout: 3s
+      retries:
+        attempts: 2
+        perTryTimeout: 1s
+        retryOn: 5xx,reset,connect-failure
+---
+# why: only claims may call fraud. An ALLOW policy on the fraud workload scoped to claims' SPIFFE identity
+# creates an implicit deny for everyone else — the un-meshed demo-client (no principal) and web (default SA)
+# are denied; claims (sa/parasol-claims, over mTLS) is allowed. The module's "secure with AuthorizationPolicy" beat.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: fraud-allow-claims
+  namespace: {{ .Values.user }}-mesh
+  labels:
+    workshop.redhat.com/module: service-mesh-advanced-gateways
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    matchLabels:
+      app: parasol-fraud
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/{{ .Values.user }}-mesh/sa/parasol-claims"
+{{- end }}

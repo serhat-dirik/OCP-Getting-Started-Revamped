@@ -1,0 +1,112 @@
+{{- if .Values.solve }}
+# END state for instructor demos / `ws solve securing-apps-keycloak`: the RFC 8693 token-exchange encore's target — the
+# fraud scoring service. Bearer-only, and it ENFORCES aud=parasol-fraud (QUARKUS_OIDC_TOKEN_AUDIENCE):
+# a user's direct claims token (aud=parasol-claims) is rejected, but the token parasol-claims EXCHANGES
+# for the parasol-fraud audience is accepted — the "re-audience/downscope, never escalate" lesson.
+# parasol-web + parasol-claims are flipped to their protected form by the shared templates (solve=true);
+# this file adds only the fraud service, which exists solely for the advanced beat.
+#
+# NOTE (handoff): the claims->fraud *call on the user's behalf* is app code the module teaches/adds
+# (parasol-claims:1.1 ships quarkus-oidc-client but no fraud REST client yet). The realm already supports
+# the exchange end to end (proved live via curl); this service is its audience-guarded receiver.
+---
+# why: the fraud scoring API, protected as a bearer resource that only accepts fraud-audience tokens.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-fraud
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-fraud
+    workshop.redhat.com/module: securing-apps-keycloak
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-fraud
+  template:
+    metadata:
+      labels:
+        app: parasol-fraud
+        workshop.redhat.com/module: securing-apps-keycloak
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: image-registry.openshift-image-registry.svc:5000/parasol-images/parasol-fraud:1.0
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: QUARKUS_OIDC_TENANT_ENABLED
+              value: "true"
+            - name: QUARKUS_OIDC_AUTH_SERVER_URL
+              value: "https://{{ .Values.ssoRoutePrefix }}.{{ .Values.clusterDomain }}/realms/realm-{{ .Values.user }}"
+            - name: QUARKUS_OIDC_APPLICATION_TYPE
+              value: "service"
+            # The point of the exchange lesson: accept ONLY tokens re-audienced to parasol-fraud.
+            - name: QUARKUS_OIDC_TOKEN_AUDIENCE
+              value: "parasol-fraud"
+            # Require an authenticated (fraud-audience) caller on the scoring endpoint.
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_PATHS
+              value: "/api/fraud,/api/fraud/*"
+            - name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_POLICY
+              value: "authenticated"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+# why: stable in-cluster address for the fraud API.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-fraud
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-fraud
+    workshop.redhat.com/module: securing-apps-keycloak
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: parasol-fraud
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: publishes the fraud API so the exchanged-token call can be demonstrated from a terminal.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-fraud
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-fraud
+    workshop.redhat.com/module: securing-apps-keycloak
+    workshop.redhat.com/owner: ogsr
+spec:
+  to:
+    kind: Service
+    name: parasol-fraud
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+{{- end }}

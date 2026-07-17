@@ -1,0 +1,56 @@
+# ws reset purges user-created leftovers from these namespaces before re-materializing.
+# ai-assisted-development's in-namespace state lives entirely in {user}-dev: the entry marker, the mcp-agent SA + view
+# RoleBinding, the digest-pinned MCP server (Deployment/Service), the seeded broken parasol-claims
+# (Deployment/Service), the MaaS credentials (ConfigMap + hook-created Secret), and the DevWorkspace.
+# `oc delete all,pvc` clears the Deployments/Services; the ws engine's purge also deletes the
+# hook-created maas-credentials Secret (secret sweep), the DevWorkspace (devspaces-inner-loop+ idiom), and — because the
+# SA + RoleBindings are user-scoped, not system objects — the mcp-agent SA and its bindings, so the
+# next start re-materializes a clean read-only sandbox and re-runs the copy hook.
+# NOTE: the {user}-dev NAMESPACE, its quota, LimitRange and RBAC are WORKSHOP-LAYER-owned
+# (gitops/workshop-config/templates/per-user-namespaces.yaml); like build-deliver/packaging-distributing this chart only fills it.
+purgeNamespaces:
+  - "${USER}-dev"
+
+# Modules whose entry/solve charts materialize into the SAME namespace ({user}-dev). Coexisting Argo
+# apps that own workloads in one namespace deadlock (SharedResourceWarning, both OutOfSync), so
+# `ws start`/`ws solve` evicts the conflicting module before materializing (gc_conflicts). ai-assisted-development joins
+# the {user}-dev cohort (same as build-deliver/packaging-distributing). Cross-namespace modules (jobs-batch-kueue {user}-batch, pipelines-fundamentals {user}-cicd,
+# service-mesh-advanced-gateways {user}-mesh, app-modernization {user}-modernize, agentic-ai {user}-ai) are NOT conflicts and coexist untouched.
+# ⚠ RECIPROCAL EDITS REQUIRED (both directions): each module below must add `ai-assisted-development` to ITS conflictsWith.
+# Those edits touch files outside this chart and are handled by PM integration — this file sets only
+# the ai-assisted-development→others direction.
+conflictsWith:
+  - platform-orientation
+  - build-deliver
+  - devspaces-inner-loop
+  - config-multienv
+  - storage-stateful
+  - gitops-fundamentals
+  - gitops-at-scale
+  - developer-hub-golden-paths
+  - observability-health-scale
+  - securing-apps-keycloak
+  - multi-tenancy-workload-security
+  - networking-dev-devops
+  - deployment-targets-scheduling
+  - registry-images-catalog-governance
+  - serverless-zero-to-hero
+  - eventing-deep-dive
+  - packaging-distributing
+
+# This module SEEDS AN INTENTIONAL FAULT (parasol-claims 0/1 via a wrong readiness probe — the diagnosis
+# target) and ships an operator-managed DevWorkspace, so its Argo app is Degraded/OutOfSync BY DESIGN.
+# expectDegraded makes `ws start`/`ws solve` wait for the sync OPERATION to land, not for Healthy/Synced
+# (which never holds) — otherwise ws's `set -e` fails every start. `ws verify ai-assisted-development` is the correctness gate.
+expectDegraded: true
+
+# The MaaS copy hook (up to ~60s of source-secret retries) plus a cold-node pull of the ghcr MCP server
+# image and the shared parasol-claims image — widen the sync-wait window (the cap on wait_materialized,
+# which returns as soon as the sync op lands) so a cold materialization has room.
+waitSeconds: 360
+
+# Representative ai-assisted-development attendee muscle the generic battery (cockpit/identity/isolation) does NOT cover:
+# the MCP server world materialized into the attendee's own {user}-dev and the attendee (namespace
+# admin) can read it. ${USER} resolves per-run; ws smoke runs it as {user} in the live cockpit.
+smokeCommands:
+  - "oc get deployment kubernetes-mcp-server -n ${USER}-dev"

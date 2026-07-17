@@ -1,0 +1,74 @@
+{{- if .Values.solve }}
+# END state for instructor demos / `ws solve eventing-deep-dive` / testing — the eventing lab OUTCOMES the attendee
+# builds on the entry substrate (Broker + seeded PingSource + real consumer + DLQ sink already present):
+#   1. an attribute-FILTERED Trigger with delivery RETRIES + a deadLetterSink (the routing + retry/DLQ
+#      break-fix beat), and
+#   2. a second FILTERED Trigger (the fan-out beat — "two filtered triggers, fraud-score routing").
+# Verify asserts these OUTCOMES exist (a Trigger with spec.filter.attributes; a Trigger with
+# spec.delivery.deadLetterSink), never the exact CR wording, so any correct attendee solution stays green
+# (rule 14). The entry objects (Broker, PingSource, claims-events, the ksvcs) are rendered unconditionally
+# by the other templates and REMAIN at solve — this file only ADDS.
+---
+# why: the fraud-review Trigger — the core eventing-deep-dive outcome. Filters on the CloudEvent `type` (attribute
+# filtering) so only matching events reach claims-consumer, and carries a delivery spec: on repeated
+# failure (the lab kills the consumer) Knative RETRIES with exponential backoff, then routes the
+# exhausted event to the claims-dlq deadLetterSink instead of dropping it (the DLQ beat).
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-fraud-review
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    workshop.redhat.com/module: eventing-deep-dive
+    workshop.redhat.com/owner: ogsr
+spec:
+  broker: default
+  # Attribute filter: match the seeded PingSource's CloudEvent type (routing by envelope attribute).
+  filter:
+    attributes:
+      type: dev.knative.sources.ping
+  subscriber:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: claims-consumer
+  # Delivery guarantees: retry with exponential backoff, then dead-letter the exhausted event.
+  delivery:
+    retry: 3
+    backoffPolicy: exponential
+    backoffDelay: PT0.2S
+    deadLetterSink:
+      ref:
+        apiVersion: serving.knative.dev/v1
+        kind: Service
+        name: claims-dlq
+---
+# why: the audit Trigger — the fan-out beat. A SECOND filtered Trigger on the SAME Broker, matching the
+# domain extension attribute (claimpriority) the PingSource stamps, so one event fans out to more than one
+# subscriber. Demonstrates that Triggers filter independently on the shared Broker (broker/trigger vs
+# channel/subscription decision). Points at claims-consumer here; the lab can repoint it at a distinct
+# audit sink.
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-audit
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    workshop.redhat.com/module: eventing-deep-dive
+    workshop.redhat.com/owner: ogsr
+spec:
+  broker: default
+  # Filter on the domain extension attribute the PingSource ceOverrides stamps (filter by extension attr).
+  filter:
+    attributes:
+      claimpriority: high
+  subscriber:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: claims-consumer
+{{- end }}

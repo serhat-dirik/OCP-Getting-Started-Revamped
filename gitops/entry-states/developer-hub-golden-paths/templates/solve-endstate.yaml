@@ -1,0 +1,130 @@
+{{- if .Values.solve }}
+# ws solve ONLY (guarded by .Values.solve): materializes the developer-hub-golden-paths END state — a representative
+# "already scaffolded" golden-path service, {user}-{{ .Values.scaffoldOrgSuffix }}/{{ .Values.solveServiceName }},
+# in the attendee's scaffold org. It creates the repo, stamps it with the golden-path provenance
+# description, and seeds a catalog-info.yaml so it is registerable in RHDH — the demo-ready outcome an
+# instructor shows without running the interactive template. (The lab's running deploy of a scaffolded
+# service is an interactive image build; solve materializes the repo outcome, not a built image —
+# honest end state, not a fabricated running workload.) Wave 2 = AFTER the scaffold-org hook (wave 1),
+# so the clean-slate pass never deletes the repo solve just created.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gitea-solve-developer-hub-golden-paths-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: developer-hub-golden-paths
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: gitea-solve-developer-hub-golden-paths-{{ .Values.user }}
+    spec:
+      # reuses the scaffold-org hook's ServiceAccount (same namespace, same read-only Gitea RBAC).
+      serviceAccountName: gitea-scaffold-org-developer-hub-golden-paths-{{ .Values.user }}
+      restartPolicy: Never
+      containers:
+        - name: solve
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: FORK_USER
+              value: {{ .Values.user | quote }}
+            - name: SCAFFOLD_ORG
+              value: {{ printf "%s-%s" .Values.user .Values.scaffoldOrgSuffix | quote }}
+            - name: SVC_NAME
+              value: {{ .Values.solveServiceName | quote }}
+            - name: SCAFFOLD_MARKER
+              value: {{ .Values.scaffoldMarker | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 5
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found"; exit 1; }
+              GITEA_URL="https://${HOST}"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 5
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 5
+              done
+
+              echo "▶ materializing end-state repo ${SCAFFOLD_ORG}/${SVC_NAME} (golden-path outcome)…"
+              GITEA_URL="$GITEA_URL" AUTH="$AUTH" FORK_USER="$FORK_USER" SCAFFOLD_ORG="$SCAFFOLD_ORG" SVC_NAME="$SVC_NAME" MARKER="$SCAFFOLD_MARKER" python3 - <<'PY'
+              import base64, json, os, ssl, urllib.request, urllib.error
+              base = os.environ["GITEA_URL"].rstrip("/"); auth = os.environ["AUTH"]
+              user = os.environ["FORK_USER"]; org = os.environ["SCAFFOLD_ORG"]
+              svc = os.environ["SVC_NAME"]; marker = os.environ["MARKER"]
+              ctx = ssl._create_unverified_context()
+              def api(method, path, body=None, sudo=False):
+                  h = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(),
+                       "Content-Type": "application/json"}
+                  if sudo: h["Sudo"] = user
+                  data = json.dumps(body).encode() if body is not None else None
+                  req = urllib.request.Request(base + path, data=data, headers=h, method=method)
+                  try:
+                      with urllib.request.urlopen(req, context=ctx) as r:
+                          return r.status, json.loads(r.read().decode() or "{}")
+                  except urllib.error.HTTPError as e:
+                      return e.code, {}
+              desc = f"{svc} — {marker}"
+              st, _ = api("GET", f"/api/v1/repos/{org}/{svc}")
+              if st == 200:
+                  print(f"  ✓ {org}/{svc} already exists — ensuring description marker")
+                  api("PATCH", f"/api/v1/repos/{org}/{svc}", {"description": desc}, sudo=True)
+              else:
+                  # create in the org (owner is the org, not a user → /orgs/{org}/repos)
+                  cst, _ = api("POST", f"/api/v1/orgs/{org}/repos",
+                      {"name": svc, "description": desc, "private": False, "auto_init": True,
+                       "default_branch": "main"}, sudo=True)
+                  print(f"  {'✓ created' if cst in (201,) else '! create HTTP '+str(cst)} {org}/{svc}")
+              catalog = """apiVersion: backstage.io/v1alpha1
+              kind: Component
+              metadata:
+                name: %s
+                description: Parasol service scaffolded from the golden-path template.
+                annotations:
+                  backstage.io/kubernetes-id: %s
+                tags: [java, quarkus, parasol]
+              spec:
+                type: service
+                lifecycle: experimental
+                owner: parasol
+                system: parasol-insurance
+              """ % (svc, svc)
+              catalog = "\n".join(l[14:] if l.startswith(" " * 14) else l for l in catalog.splitlines()) + "\n"
+              st2, cur = api("GET", f"/api/v1/repos/{org}/{svc}/contents/catalog-info.yaml?ref=main")
+              body = {"message": "golden-path catalog-info", "branch": "main",
+                      "content": base64.b64encode(catalog.encode()).decode()}
+              if st2 == 200:
+                  body["sha"] = cur["sha"]
+                  api("PUT", f"/api/v1/repos/{org}/{svc}/contents/catalog-info.yaml", body, sudo=True)
+              else:
+                  api("POST", f"/api/v1/repos/{org}/{svc}/contents/catalog-info.yaml", body, sudo=True)
+              print(f"✅ end state ready: {org}/{svc} (golden-path scaffolded service)")
+              PY
+{{- end }}

@@ -1,0 +1,78 @@
+{{- if .Values.solve }}
+# END state for instructor demos / `ws solve observability-health-scale`: the three outcomes the attendee builds by hand in
+# the scale + resilience beats — a CPU HorizontalPodAutoscaler, an error-rate PrometheusRule alert, and
+# a PodDisruptionBudget. Mirrors the storage-stateful solve split (entry = the world before the lab; solve = the
+# world after a correct completion). parasol-claims itself is raised to 2 replicas in the shared
+# Deployment template when solve=true, so the HPA floor and the PDB quorum are satisfied on first sync.
+---
+# why: scale parasol-claims on CPU under the load generator (autoscaling/v2, Utilization = actual/request
+# against the 200m request). min 2 keeps quorum for the PDB + node-drain demo; max 4 fits the {user}-dev
+# quota (4 x 500m limit = 2 CPU < 6). The lab may scale past this — verify checks are `>=`, never `==`.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: observability-health-scale
+    workshop.redhat.com/owner: ogsr
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: parasol-claims
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+---
+# why: a namespaced alert on the claims server-error rate. UWM scopes rules authored in {user}-dev to
+# that namespace (per-user isolation — no cross-tenant leakage), so this fires in Observe -> Alerting for
+# THIS user only. Armed, not firing, at the clean load-gen baseline (no 5xx); the resilience beat trips it
+# by disrupting the app (e.g. scaling claims-db to 0 so queries 500). http_server_requests_seconds_count
+# is the Quarkus Micrometer HTTP-server timer; status=~"5.." selects server errors.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: parasol-claims-alerts
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: observability-health-scale
+    workshop.redhat.com/owner: ogsr
+spec:
+  groups:
+    - name: parasol-claims.rules
+      rules:
+        - alert: ParasolClaimsErrorRateHigh
+          expr: sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "parasol-claims is returning server errors"
+            description: "The claims API 5xx rate in {{ .Values.user }}-dev has exceeded 0.1/s for 2m."
+---
+# why: keep at least one claims pod serving during voluntary disruption (the [INSTRUCTOR-DEMO] node
+# drain). With the HPA floor at 2, minAvailable 1 lets the drain evict one pod while quorum holds.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: observability-health-scale
+    workshop.redhat.com/owner: ogsr
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+{{- end }}

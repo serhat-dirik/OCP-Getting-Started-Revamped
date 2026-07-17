@@ -1,0 +1,60 @@
+# claims-consumer — the NET-NEW real CloudEvents consumer, the heart of why eventing-deep-dive needs its own app
+# substrate. serverless-zero-to-hero's eventing taste routed events to parasol-claims, which has no CloudEvents handler and
+# 404s them, so no event was ever actually processed. claims-consumer is a scale-to-zero Knative Service
+# on the Red Hat OpenShift Serverless SHOWCASE image (quay.io/openshift-knative/showcase, the docs'
+# "event-display"): it listens on 8080, returns HTTP 200 to a CloudEvents POST, and DISPLAYS the event
+# (web UI + pod logs) so the attendee can SEE the CloudEvents envelope (ce-type/ce-source/data). It is a
+# dedicated NEW service — NOT a change to the shared parasol-web/parasol-claims/parasol-fraud apps
+# (platform-orientation-serverless-zero-to-hero depend on those unchanged). A Trigger's subscriber ref points here; delivery WAKES it from
+# zero (the scale-from-zero-on-event beat). sync-wave 1 (no dependency on claims-db or the Broker).
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: claims-consumer
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: claims-consumer
+    workshop.redhat.com/module: eventing-deep-dive
+    workshop.redhat.com/owner: ogsr
+spec:
+  template:
+    metadata:
+      name: claims-consumer-v1
+      labels:
+        app: claims-consumer
+        workshop.redhat.com/module: eventing-deep-dive
+      annotations:
+        # Cap fan-out per user; min-scale unset (=0) so the consumer sits at zero until an event wakes it.
+        autoscaling.knative.dev/max-scale: "3"
+    spec:
+      containers:
+        - name: showcase
+          # Red Hat OpenShift Serverless eventing showcase / event-display — public quay image, no build,
+          # no external pull secret; the canonical CloudEvents sink from docs.redhat.com.
+          image: {{ .Values.consumerImage }}
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          # Pin an EXPLICIT readinessProbe (showcase serves HTTP 200 on GET /). Without one, Knative
+          # DEFAULTS a probe into the stored revision ({"successThreshold":1,"tcpSocket":{"port":0}}); on
+          # any re-apply (ws solve, a 2nd ws start, an Argo re-sync) Argo's desired (no probe) diffs the
+          # defaulted stored probe on the UNCHANGED revision name, and the immutable-revision webhook
+          # rejects it ("changes without a name change") — the sync then never converges (reproduced on C1,
+          # 2026-07-13). This is the serverless-zero-to-hero 6f6ddcf lesson generalized: every field Knative would default must
+          # be pinned so a re-apply is a no-op diff. All fields set explicitly so nothing is defaulted.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1

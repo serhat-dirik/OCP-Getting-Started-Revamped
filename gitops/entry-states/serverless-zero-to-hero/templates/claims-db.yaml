@@ -1,0 +1,104 @@
+# PostgreSQL for the claims-processor — the datastore the parasol-claims ksvc reads/writes. The Quarkus
+# app ships quarkus-jdbc-postgresql + smallrye-health, so /q/health/ready includes an Agroal datasource
+# check: without a reachable DB the ksvc revision never goes Ready and scale-from-zero can't complete.
+# sync-wave 0 so the DB is Available BEFORE the ksvc (wave 1) reconciles its first revision. Deliberately
+# EPHEMERAL (emptyDir): serverless-zero-to-hero is the serverless module, not storage (that is storage-stateful) — the claims image reseeds
+# 30 fixed sample claims on boot. Internal openshift/postgresql imagestream (always present, no pull secret).
+---
+# why: the claims datasource credentials, consumed by BOTH the DB (to init) and the ksvc (to connect).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+type: Opaque
+stringData:
+  POSTGRESQL_USER: parasol
+  POSTGRESQL_PASSWORD: parasol
+  POSTGRESQL_DATABASE: parasol
+---
+# why: the PostgreSQL 15 server the claims ksvc connects to; env-driven from the Secret above.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  # Recreate: a single writer to one volume — never run two Pods on the same data dir at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claims-db
+  template:
+    metadata:
+      labels:
+        app: claims-db
+        workshop.redhat.com/module: serverless-zero-to-hero
+    spec:
+      containers:
+        - name: postgresql
+          # Internal imagestream tag (RHEL9 PostgreSQL 15) — already cached, no external pull secret.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        - name: data
+          # Ephemeral on purpose — serverless-zero-to-hero needs a reproducible seed, not persistence (that is storage-stateful).
+          emptyDir: {}
+---
+# why: the stable in-cluster address the ksvc resolves — claims-db.{user}-dev.svc:5432 (POSTGRESQL_HOST).
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: claims-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432

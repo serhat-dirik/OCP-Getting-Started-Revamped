@@ -21,4 +21,4 @@ Rules:
 5. Secrets: never in templates. Reference cluster-provided Secrets (workshop layer contracts) by name.
 6. Every template carries a one-line comment saying why it exists (style guide §7).
 
-`m01/` is the exemplar — deliberately minimal so the *engine* is what gets exercised.
+`platform-orientation/` is the exemplar — deliberately minimal so the *engine* is what gets exercised.

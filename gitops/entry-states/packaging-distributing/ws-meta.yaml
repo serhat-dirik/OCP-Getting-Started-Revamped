@@ -1,0 +1,66 @@
+# ws reset purges user-created leftovers from these namespaces before re-materializing.
+# packaging-distributing's in-namespace state lives entirely in {user}-dev: the entry marker, the notifications
+# ImageStream/BuildConfig/builds (the prebuilt istag), and — after the lab / at solve — the Helm
+# release of parasol-notifications (Deployment/Service/Route + its helm.sh/release.v1 Secret). The
+# ws engine's purge runs `oc delete all,pvc --all` here, which removes the ImageStream, BuildConfig,
+# Builds AND the Helm-created Deployment/Service/Route (all in the `all` category — verified live
+# 2026-07-15); its Secret/ConfigMap sweep then removes the Helm RELEASE secrets (they are not system
+# objects), so a reset purges the user's Helm releases + istag exactly as required. The chart then
+# re-materializes the seeded fork, a fresh istag, and the marker → a clean entry state.
+# NOTE: the {user}-dev NAMESPACE, its quota, LimitRange and RBAC are WORKSHOP-LAYER-owned
+# (gitops/workshop-config/templates/per-user-namespaces.yaml); like build-deliver this chart only fills it.
+purgeNamespaces:
+  - "${USER}-dev"
+
+# Modules whose entry/solve charts materialize into the SAME namespace ({user}-dev). Coexisting Argo
+# apps that own workloads in one namespace deadlock (SharedResourceWarning, both OutOfSync — G3-config-multienv),
+# so `ws start`/`ws solve` evicts the conflicting module before materializing (gc_conflicts). This is
+# the same {user}-dev cohort build-deliver declares (same-namespace = conflict by policy, 2026-07-10); packaging-distributing joins
+# it. Cross-namespace modules (jobs-batch-kueue {user}-batch, pipelines-fundamentals {user}-cicd, service-mesh-advanced-gateways {user}-mesh, app-modernization {user}-modernize)
+# are NOT conflicts and coexist untouched.
+# ⚠ RECIPROCAL EDITS REQUIRED (both directions): each module below must add `packaging-distributing` to ITS conflictsWith
+# so that starting IT after packaging-distributing evicts packaging-distributing's world too. Those edits touch files outside this chart
+# (and include deployment-targets-scheduling, fenced off this session) — left for PM integration; see the platform report.
+conflictsWith:
+  - platform-orientation
+  - build-deliver
+  - devspaces-inner-loop
+  - config-multienv
+  - storage-stateful
+  - gitops-fundamentals
+  - gitops-at-scale
+  - developer-hub-golden-paths
+  - observability-health-scale
+  - securing-apps-keycloak
+  - multi-tenancy-workload-security
+  - networking-dev-devops
+  - deployment-targets-scheduling
+  - registry-images-catalog-governance
+  - serverless-zero-to-hero
+  - eventing-deep-dive
+  - ai-assisted-development
+
+# The build-runner hook runs an S2I build (pull the nodejs builder + build + push the istag); on a
+# cold node that can take a couple of minutes, plus the fork job. Give the sync a generous window so
+# `ws start` blocks until the image is genuinely pullable (no sleep-and-hope) rather than timing out.
+waitSeconds: 360
+
+# This entry seeds an OpenShift BuildConfig, and the build API DEFAULTS spec fields it did not set
+# (runPolicy: Serial, {successful,failed}BuildsHistoryLimit: 5, postCommit: {}, nodeSelector: null).
+# Argo diffs those server-added fields against the desired manifest → the app is PERMANENTLY OutOfSync
+# even though every workload is Healthy and the sync operation Succeeded; with selfHeal off (entry-app
+# policy) it never self-corrects. expectOutOfSync makes `ws start`/`ws prep` gate on Health + a Succeeded
+# op instead of Synced (wait_healthy require_sync=false) — otherwise wait_healthy loops to timeout and
+# prep exits non-zero under `set -e`, false-failing the cockpit smoke though materialization worked
+# (found live via `ws smoke packaging-distributing`, 2026-07-16). This is NOT expectDegraded: the app is genuinely Healthy,
+# only unsynced. `ws verify packaging-distributing` remains the correctness gate. Distinct from ai-assisted-development (Degraded-by-design).
+expectOutOfSync: true
+
+# Representative attendee commands packaging-distributing genuinely leans on (the generic battery covers cockpit/identity/
+# isolation). ws smoke runs each as {user} in the live cockpit and asserts exit 0. ${USER} resolves
+# per-run. (1) the OLM dissection READ works read-only for the attendee via the extended
+# platform-observer — fully-qualified to dodge the bare-name Knative Subscription trap; (2) the OCI-
+# capable helm client is on PATH in the cockpit (verified live: helm v3.17.1).
+smokeCommands:
+  - "oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh"
+  - "helm version --short"

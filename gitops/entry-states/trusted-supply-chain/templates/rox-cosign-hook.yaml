@@ -1,0 +1,192 @@
+# Per-user supply-chain wiring: copy the two SHARED trust-stack artifacts into {user}-cicd so the
+# pipeline scan gate + the attendee's verify beat work without cross-namespace reads at run time:
+#   • stackrox/rox-api-token            → {user}-cicd/rox-api-token  (the acs-image-check gate reads it)
+#   • openshift-pipelines/chains-cosign-pub → {user}-cicd/chains-cosign-pub (cosign verify + ImagePolicy)
+# Least-privilege cross-namespace RBAC: read ONLY those two named objects; write only in {user}-cicd.
+# The token value is moved base64-to-base64 (never echoed as plaintext); the cosign key is public.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trusted-supply-chain-secrets
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+---
+# read the shared RHACS CI token (stackrox), scoped to that one Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trusted-supply-chain-read-rox-token-{{ .Values.user }}
+  namespace: {{ .Values.stackroxNamespace }}
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["rox-api-token"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trusted-supply-chain-read-rox-token-{{ .Values.user }}
+  namespace: {{ .Values.stackroxNamespace }}
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trusted-supply-chain-read-rox-token-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: trusted-supply-chain-secrets
+    namespace: {{ .Values.user }}-cicd
+---
+# read the shared Chains PUBLIC key (openshift-pipelines), scoped to that one ConfigMap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trusted-supply-chain-read-cosign-pub-{{ .Values.user }}
+  namespace: {{ .Values.pipelinesNamespace }}
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["chains-cosign-pub"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trusted-supply-chain-read-cosign-pub-{{ .Values.user }}
+  namespace: {{ .Values.pipelinesNamespace }}
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trusted-supply-chain-read-cosign-pub-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: trusted-supply-chain-secrets
+    namespace: {{ .Values.user }}-cicd
+---
+# write the two copies in the attendee's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trusted-supply-chain-write-secrets
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trusted-supply-chain-write-secrets
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trusted-supply-chain-write-secrets
+subjects:
+  - kind: ServiceAccount
+    name: trusted-supply-chain-secrets
+    namespace: {{ .Values.user }}-cicd
+---
+# Argo Sync hook (BeforeHookCreation): re-runs every ws start / ws reset so the copies stay fresh
+# (e.g. if the trust stack rotated the token). Idempotent (apply). Wave 0 — before the pipeline runs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trusted-supply-chain-secrets-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: trusted-supply-chain-secrets-{{ .Values.user }}
+    spec:
+      serviceAccountName: trusted-supply-chain-secrets
+      restartPolicy: Never
+      containers:
+        - name: copy
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: NS
+              value: {{ .Values.user }}-cicd
+            - name: ROX_NS
+              value: {{ .Values.stackroxNamespace | quote }}
+            - name: PIPE_NS
+              value: {{ .Values.pipelinesNamespace | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ waiting for the shared RHACS CI token (${ROX_NS}/rox-api-token)…"
+              for i in $(seq 1 60); do
+                oc get secret rox-api-token -n "$ROX_NS" >/dev/null 2>&1 && break
+                sleep 10
+              done
+              oc get secret rox-api-token -n "$ROX_NS" >/dev/null 2>&1 \
+                || { echo "❌ ${ROX_NS}/rox-api-token missing — is the trust stack installed?"; exit 1; }
+
+              # Move the token base64-to-base64 (never echoed as plaintext).
+              B64TOKEN="$(oc get secret rox-api-token -n "$ROX_NS" -o jsonpath='{.data.rox-api-token}')"
+              B64EP="$(oc get secret rox-api-token -n "$ROX_NS" -o jsonpath='{.data.rox-central-endpoint}')"
+              cat <<EOF | oc apply -f - >/dev/null
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: rox-api-token
+                namespace: ${NS}
+                labels:
+                  workshop.redhat.com/module: trusted-supply-chain
+              type: Opaque
+              data:
+                rox-api-token: ${B64TOKEN}
+                rox-central-endpoint: ${B64EP}
+              EOF
+              echo "  ✓ rox-api-token copied into ${NS} (value not shown)"
+
+              echo "▶ copying the Chains public key (${PIPE_NS}/chains-cosign-pub)…"
+              if oc get cm chains-cosign-pub -n "$PIPE_NS" >/dev/null 2>&1; then
+                oc get cm chains-cosign-pub -n "$PIPE_NS" -o jsonpath='{.data.cosign\.pub}' > /tmp/cosign.pub
+                oc create configmap chains-cosign-pub -n "$NS" --from-file=cosign.pub=/tmp/cosign.pub \
+                  --dry-run=client -o yaml | oc apply -f - >/dev/null
+                echo "  ✓ chains-cosign-pub copied into ${NS} (public key)"
+              else
+                echo "  ⚠ ${PIPE_NS}/chains-cosign-pub not found — is trust-signing installed? (continuing)"
+              fi
+              echo "✅ trusted-supply-chain per-user supply-chain wiring ready in ${NS}"

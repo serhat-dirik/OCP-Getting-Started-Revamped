@@ -1,0 +1,104 @@
+{{- if .Values.solve }}
+# ws solve (instructor/demo/testing) — the END state of the Helm lab: the notifications app DEPLOYED
+# to {user}-dev, i.e. the outcome of `helm install parasol-notifications` (image = the prebuilt istag,
+# port 8080, GET /health probes, SITE env, edge Route). Entry state (solve=false) renders none of this
+# — the attendee installs it themselves. verify asserts the OUTCOME (a parasol-notifications Deployment
+# exists), never the mechanism, so any correct solution (helm install OR solve) stays green (rule 14).
+---
+# why: the notifications workload the finished lab leaves running (mirrors a helm-installed release).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.imageName }}
+  namespace: {{ include "packaging-distributing.namespace" . }}
+  labels:
+    app: {{ .Values.imageName }}
+    app.kubernetes.io/name: {{ .Values.imageName }}
+    workshop.redhat.com/module: packaging-distributing
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    # sync-wave 3 = AFTER the build-runner hook (wave 2) populates the istag, so `ws solve` never
+    # transiently ImagePullBackOffs waiting for the image the same chart is building.
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.imageName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.imageName }}
+        app.kubernetes.io/name: {{ .Values.imageName }}
+    spec:
+      containers:
+        - name: {{ .Values.imageName }}
+          image: {{ include "packaging-distributing.imageRef" . | quote }}
+          ports:
+            - containerPort: 8080
+          env:
+            # Optional origin-site marker the service echoes on GET / (matches the app's SITE contract).
+            - name: SITE
+              value: {{ .Values.user | quote }}
+          readinessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+---
+# why: stable in-cluster address for the notifications Deployment.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.imageName }}
+  namespace: {{ include "packaging-distributing.namespace" . }}
+  labels:
+    app: {{ .Values.imageName }}
+    workshop.redhat.com/module: packaging-distributing
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: {{ .Values.imageName }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# why: browser-facing landing (GET /) → an EDGE Route with insecureEdgeTerminationPolicy Allow. Plain
+# `oc expose`/HTTP-only Routes get HSTS-upgraded and 503 in the browser; edge+Allow serves both http
+# and https cleanly (browser-routes-need-edge, verified platform-orientation/build-deliver).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ .Values.imageName }}
+  namespace: {{ include "packaging-distributing.namespace" . }}
+  labels:
+    app: {{ .Values.imageName }}
+    workshop.redhat.com/module: packaging-distributing
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+spec:
+  to:
+    kind: Service
+    name: {{ .Values.imageName }}
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow
+{{- end }}

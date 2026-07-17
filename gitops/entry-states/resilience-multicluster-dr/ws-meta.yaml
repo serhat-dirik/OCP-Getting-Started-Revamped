@@ -1,0 +1,32 @@
+# ws reset purges user-created leftovers from these namespaces before re-materializing.
+# resilience-multicluster-dr's in-namespace state spans THREE namespaces: {user}-client (the external client + the mesh ingress
+# gateway), {user}-site-a and {user}-site-b (the two resilient claims services). `oc delete all,pvc --all`
+# clears the Deployments/Services/Gateway; the ws engine's purge_ns ALSO prunes the istio CR types the resilience-multicluster-dr
+# lab creates that `oc delete all` misses — virtualservices/destinationrules/serviceentries/gateways
+# /sidecars/envoyfilters + authorizationpolicies/peerauthentications (the failover routing) — AND the
+# skupper.io v2 CRs of the RHSI section (sites/links/listeners/connectors/accessgrants/accesstokens), and it
+# STRIPS the istio-injection / istio.io/rev namespace labels the attendee may have added. Otherwise a
+# leftover ServiceEntry or Skupper Site would red-fail the next entry verify.
+# NOTE: the {user}-client / {user}-site-a / {user}-site-b NAMESPACES, their quota, LimitRange, RBAC and the
+# stable istio-discovery=enabled label are WORKSHOP-LAYER-owned (gitops/workshop-config/templates/
+# per-user-resilience.yaml — the workshop-entries AppProject blacklists ResourceQuota/LimitRange, and a
+# discovery-scoped shared istiod needs the label stable). Like {user}-dev/mesh/partner they SURVIVE reset
+# with the same UID and keep their mesh label; the entry Application owns only the in-namespace objects.
+purgeNamespaces:
+  - "${USER}-client"
+  - "${USER}-site-a"
+  - "${USER}-site-b"
+# NO conflictsWith: resilience-multicluster-dr is the ONLY module that materializes into {user}-client / {user}-site-a /
+# {user}-site-b (dedicated namespaces, like jobs-batch-kueue's {user}-batch and service-mesh-advanced-gateways's {user}-mesh). It shares no
+# namespace with any other module, so its entry app coexists with every dev-namespace module untouched — no
+# reciprocal edits needed (ADR-0001 same-namespace policy). Key omitted deliberately (meta_list returns empty).
+# Representative resilience-multicluster-dr muscle the generic battery does NOT cover: exec the external client (the substrate every
+# failover probe leans on) as {user} and prove it can reach the PRIMARY site's claims responder cross-namespace
+# over the mesh (HTTP 200). Touches only namespaces the attendee is admin on, and the responder runs on the
+# always-present nodejs imagestream, so it stays green regardless of any parasol-image build state. ${USER}
+# resolves per-run.
+# QUOTING CONSTRAINT (prior G1 smoke defect): the ws meta_list parser STRIPS every double-quote and reads the
+# raw line, so a smokeCommand must contain NO double-quotes and be a PLAIN (unquoted) scalar — single-quotes
+# only. This form uses single-quoted -w '%{http_code}' and no double-quotes anywhere.
+smokeCommands:
+  - oc exec deploy/claims-client -n ${USER}-client -- curl -s -m5 -o /dev/null -w '%{http_code}' http://claims.${USER}-site-a.svc.cluster.local:8080/ | grep -qw 200

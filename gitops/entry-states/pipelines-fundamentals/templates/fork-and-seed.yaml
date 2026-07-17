@@ -1,0 +1,270 @@
+# Forks parasol/parasol-claims into THIS attendee's Gitea account, RE-ASSERTS the fork's app content
+# to the upstream mirror (factory-fresh, like gitops-fundamentals/gitops-at-scale's claims-config fork), AND seeds
+# .tekton/pull-request.yaml into the fork root (where Pipelines-as-Code expects it). Same Gitea route +
+# admin-credential discovery + Sudo-as-the-user idiom as gitops/entry-states/build-deliver/templates/fork-repos.yaml.
+# The .tekton content is fetched from the in-cluster monorepo MIRROR (pipelines/.tekton/…) so there
+# is ONE source of truth and nothing is pushed to any shared parasol/* repo (seed-gated).
+# Why the re-assert (G4 SEV1-B): forks made BEFORE the app gained the Ex3 break-fix toggle stayed stale
+# forever — the fork was created-if-missing and only .tekton was seeded, so ClaimResourceTest.java never
+# refreshed and Ex3 (flip assignAdjusterBeforeApproval at :191) was unperformable. Now every start/reset
+# re-asserts the fork's tree to the mirror's parasol/parasol-claims, so the Ex3 target always exists.
+# All names are -{user} suffixed so concurrent per-user entry states never collide in gitea.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipelines-fundamentals-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: pipelines-fundamentals
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+---
+# why: read the Gitea CR status + operator admin secret + route host to reach the API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipelines-fundamentals-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: pipelines-fundamentals
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+rules:
+  - apiGroups: ["pfe.rhpds.com"]
+    # the rhpds CRD's plural is literally "gitea" (verified live)
+    resources: ["gitea"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipelines-fundamentals-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: pipelines-fundamentals
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pipelines-fundamentals-fork-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: pipelines-fundamentals-fork-{{ .Values.user }}
+    namespace: {{ .Values.giteaNamespace }}
+---
+# Argo Sync hook (BeforeHookCreation): re-runs on every ws start / ws reset so the fork + its
+# .tekton seed are (re)made idempotently; a pre-existing fork/file is tolerated.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pipelines-fundamentals-fork-{{ .Values.user }}
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/module: pipelines-fundamentals
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: pipelines-fundamentals-fork-{{ .Values.user }}
+    spec:
+      serviceAccountName: pipelines-fundamentals-fork-{{ .Values.user }}
+      restartPolicy: Never
+      containers:
+        - name: fork
+          # why ose-cli: ships oc + curl + base64 on every connected cluster; no custom image.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          env:
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: TARGET_USER
+              value: {{ .Values.user | quote }}
+            - name: UPSTREAM_ORG
+              value: {{ .Values.upstreamOrg | quote }}
+            - name: MIRROR_REPO
+              value: {{ .Values.mirrorRepo | quote }}
+            - name: REPO
+              value: "parasol-claims"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS="${GITEA_NS}"
+
+              echo "▶ waiting for the Gitea route…"
+              for i in $(seq 1 60); do
+                HOST="$(oc get route gitea -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+                [[ -n "$HOST" ]] && break
+                sleep 10
+              done
+              [[ -n "${HOST:-}" ]] || { echo "❌ gitea route not found after 10m"; exit 1; }
+              GITEA_URL="https://${HOST}"
+
+              echo "▶ discovering admin credentials (retry loop — operator writes them post-setup)…"
+              ADMIN_USER="$(oc get gitea gitea -n "$NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get gitea gitea -n "$NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+                [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(oc get secret gitea-admin-credentials -n "$NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 10
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ no Gitea admin password after 10m"; exit 1; }
+              AUTH="${ADMIN_USER}:${ADMIN_PASS}"
+
+              echo "▶ waiting for the Gitea API…"
+              for i in $(seq 1 30); do
+                curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null && break
+                sleep 10
+              done
+              curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/version" >/dev/null || { echo "❌ Gitea API not answering"; exit 1; }
+
+              # --- 1) fork parasol/parasol-claims into the attendee's account -----------------
+              if curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}"; then
+                echo "  ✓ ${TARGET_USER}/${REPO} already exists"
+              else
+                CODE="$(curl -ks -o /tmp/fork.json -w '%{http_code}' -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                  -X POST "${GITEA_URL}/api/v1/repos/${UPSTREAM_ORG}/${REPO}/forks" \
+                  -H 'Content-Type: application/json' -d '{}')"
+                case "$CODE" in
+                  201|202) echo "  ✓ ${TARGET_USER}/${REPO} fork requested (${CODE})";;
+                  409|422) echo "  ✓ ${TARGET_USER}/${REPO} already exists (${CODE})";;
+                  *) echo "  ❌ fork ${REPO} failed (HTTP ${CODE}): $(cat /tmp/fork.json)"; exit 1;;
+                esac
+              fi
+              # Fork is asynchronous — poll until the new repo answers (bounded).
+              for i in $(seq 1 30); do
+                curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}" && break
+                sleep 4
+              done
+              # Fork copies git data asynchronously: wait until main is POPULATED (a known file
+              # answers) before seeding, so the contents API has a branch to commit onto.
+              for i in $(seq 1 30); do
+                curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/pom.xml?ref=main" && break
+                sleep 4
+              done
+              curl -ksf -o /dev/null -u "$AUTH" "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/pom.xml?ref=main" \
+                || { echo "❌ ${TARGET_USER}/${REPO} main never became ready"; exit 1; }
+
+              # --- 2) re-assert the fork's app content to the upstream mirror (factory-fresh) ---
+              # A fork created BEFORE the app gained the Ex3 toggle stays stale (create-if-missing +
+              # .tekton-only seed never refreshed the app code). Walk the mirror's tree and upsert every
+              # file whose fork copy differs (base64-normalized compare → no spurious commits; binaries
+              # handled), delete fork files the mirror no longer has (except the seeded .tekton/), then
+              # HARD-GATE the Ex3 target so a stale fork that could not be refreshed fails loud (retries).
+              # Commits are authored as the attendee (Sudo). python3 ships in ose-cli (no git needed).
+              echo "▶ re-asserting ${TARGET_USER}/${REPO} app content from ${UPSTREAM_ORG}/${REPO}…"
+              GITEA_URL="$GITEA_URL" AUTH="$AUTH" TARGET_USER="$TARGET_USER" \
+                UPSTREAM_ORG="$UPSTREAM_ORG" REPO="$REPO" python3 - <<'PY'
+              import base64, json, os, ssl, urllib.request, urllib.error
+              base = os.environ["GITEA_URL"].rstrip("/")
+              auth = os.environ["AUTH"]
+              user = os.environ["TARGET_USER"]
+              org  = os.environ["UPSTREAM_ORG"]
+              repo = os.environ["REPO"]
+              ctx  = ssl._create_unverified_context()
+              def hdr(sudo=False):
+                  h = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(),
+                       "Content-Type": "application/json"}
+                  if sudo:
+                      h["Sudo"] = user
+                  return h
+              def api(method, path, body=None, sudo=False):
+                  data = json.dumps(body).encode() if body is not None else None
+                  req = urllib.request.Request(base + path, data=data, headers=hdr(sudo), method=method)
+                  try:
+                      with urllib.request.urlopen(req, context=ctx) as r:
+                          return r.status, json.loads(r.read().decode() or "{}")
+                  except urllib.error.HTTPError as e:
+                      return e.code, {}
+              def blobs(owner):
+                  st, d = api("GET", f"/api/v1/repos/{owner}/{repo}/git/trees/main?recursive=true")
+                  return None if st != 200 else {t["path"] for t in d.get("tree", []) if t.get("type") == "blob"}
+              def norm(b64):
+                  return "".join((b64 or "").split())
+              up = blobs(org)
+              fk = blobs(user)
+              if up is None or fk is None:
+                  print("  ! could not read upstream/fork tree — skipping bulk re-assert (Ex3 gate still runs)")
+              else:
+                  upserted = removed = 0
+                  for p in sorted(up):
+                      st, ub = api("GET", f"/api/v1/repos/{org}/{repo}/contents/{p}?ref=main")
+                      if st != 200 or "content" not in ub:
+                          continue
+                      canon = norm(ub["content"])
+                      st2, cur = api("GET", f"/api/v1/repos/{user}/{repo}/contents/{p}?ref=main")
+                      if st2 == 200 and norm(cur.get("content")) == canon:
+                          continue
+                      body = {"message": f"Assert canonical {p} (pipelines-fundamentals factory-fresh)", "content": canon, "branch": "main"}
+                      if st2 == 200:
+                          body["sha"] = cur["sha"]
+                          rc, _ = api("PUT", f"/api/v1/repos/{user}/{repo}/contents/{p}", body, sudo=True)
+                      else:
+                          rc, _ = api("POST", f"/api/v1/repos/{user}/{repo}/contents/{p}", body, sudo=True)
+                      if rc in (200, 201):
+                          upserted += 1
+                  for p in sorted(fk - up):
+                      if p.startswith(".tekton/"):
+                          continue
+                      st2, cur = api("GET", f"/api/v1/repos/{user}/{repo}/contents/{p}?ref=main")
+                      if st2 != 200:
+                          continue
+                      api("DELETE", f"/api/v1/repos/{user}/{repo}/contents/{p}",
+                          {"message": f"Drop non-canonical {p} (pipelines-fundamentals factory-fresh)", "branch": "main", "sha": cur["sha"]}, sudo=True)
+                      removed += 1
+                  print(f"✅ fork app content re-asserted from {org}/{repo} ({upserted} upserted, {removed} removed)")
+              # Hard-gate the Ex3 target regardless of the bulk path: the break-fix file MUST carry the
+              # toggle, else Ex3 is unperformable. Fail loud so the Job (backoffLimit 4) retries.
+              tgt = "src/test/java/com/parasol/claims/ClaimResourceTest.java"
+              st, cur = api("GET", f"/api/v1/repos/{user}/{repo}/contents/{tgt}?ref=main")
+              body = base64.b64decode(norm(cur.get("content", ""))).decode("utf-8", "replace") if st == 200 else ""
+              if "assignAdjusterBeforeApproval" not in body:
+                  print("❌ ClaimResourceTest.java still lacks the Ex3 toggle after re-assert — failing")
+                  raise SystemExit(1)
+              print("  ✓ Ex3 target present: ClaimResourceTest.java carries assignAdjusterBeforeApproval")
+              PY
+
+              # --- 3) seed .tekton/pull-request.yaml into the fork (PaC entrypoint) -----------
+              # Source of truth = the monorepo mirror's pipelines/.tekton copy (never a shared fork).
+              echo "▶ seeding .tekton/pull-request.yaml from the mirror…"
+              SRC="pipelines/.tekton/parasol-claims-pull-request.yaml"
+              DST=".tekton/pull-request.yaml"
+              RAW="$(curl -ksf -u "$AUTH" "${GITEA_URL}/api/v1/repos/${UPSTREAM_ORG}/${MIRROR_REPO}/raw/${SRC}?ref=main" || true)"
+              [[ -n "$RAW" ]] || { echo "❌ could not fetch ${SRC} from mirror ${UPSTREAM_ORG}/${MIRROR_REPO}"; exit 1; }
+              CONTENT_B64="$(printf '%s' "$RAW" | base64 -w0)"
+
+              # Idempotent: if the file already exists, update it (PUT with its blob sha), else create (POST).
+              SHA="$(curl -ksf -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/${DST}?ref=main" 2>/dev/null \
+                | grep -oE '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' | head -1 | grep -oE '[0-9a-f]{40}' || true)"
+              if [[ -n "$SHA" ]]; then
+                BODY="$(printf '{"message":"Seed .tekton/pull-request.yaml (pipelines-fundamentals PaC)","branch":"main","content":"%s","sha":"%s"}' "$CONTENT_B64" "$SHA")"
+                METHOD=PUT
+              else
+                BODY="$(printf '{"message":"Seed .tekton/pull-request.yaml (pipelines-fundamentals PaC)","branch":"main","content":"%s"}' "$CONTENT_B64")"
+                METHOD=POST
+              fi
+              CODE="$(curl -ks -o /tmp/seed.json -w '%{http_code}' -u "$AUTH" -H "Sudo: ${TARGET_USER}" \
+                -H 'Content-Type: application/json' -X "$METHOD" \
+                "${GITEA_URL}/api/v1/repos/${TARGET_USER}/${REPO}/contents/${DST}" -d "$BODY")"
+              case "$CODE" in
+                200|201) echo "  ✓ ${DST} seeded (${CODE})";;
+                *) echo "  ❌ seeding ${DST} failed (HTTP ${CODE}): $(cat /tmp/seed.json)"; exit 1;;
+              esac
+
+              echo "✅ ${TARGET_USER}/${REPO} forked and .tekton seeded at ${GITEA_URL}/${TARGET_USER}/${REPO}"

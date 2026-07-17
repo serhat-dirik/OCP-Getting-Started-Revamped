@@ -1,0 +1,45 @@
+# The security spine of ai-assisted-development (ties multi-tenancy-workload-security). The MCP server runs as a DEDICATED least-privilege
+# ServiceAccount `mcp-agent` (never `default`) whose ONLY grant is a NAMESPACED RoleBinding to the
+# built-in `view` ClusterRole, scoped to {user}-dev. Consequences that ARE the lesson:
+#   • the SA can READ {user}-dev (pods, events, deployments, pods/log) → the agent can diagnose;
+#   • `view` excludes Secrets → the agent cannot read credentials even read-only;
+#   • it is a RoleBinding (namespaced), not a ClusterRoleBinding and not `cluster-reader`, so the SA is
+#     DENIED every other namespace by RBAC — the forbidden cross-namespace ask 403s at the API server,
+#     not at the server's --read-only flag (CVE-2026-46519: RBAC is the boundary, the flag is a seatbelt);
+#   • WRITE is NOT granted here. The scoped-write RoleBinding (edit / a custom deployer Role) is always
+#     an ATTENDEE action in the lab — the platform enforces the sandbox, trust does not.
+# Wave 0: the SA + binding exist before the MCP server pod (wave 1) mounts the SA token.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.mcpAgentSA }}
+  namespace: {{ include "ai-assisted-development.namespace" . }}
+  labels:
+    workshop.redhat.com/module: ai-assisted-development
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+---
+# why: read-only on {user}-dev ONLY. RoleBinding (not ClusterRoleBinding) → the `view` powers apply in
+# this namespace and nowhere else. `view` intentionally excludes Secrets (least privilege).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.mcpAgentSA }}-view
+  namespace: {{ include "ai-assisted-development.namespace" . }}
+  labels:
+    workshop.redhat.com/module: ai-assisted-development
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.mcpAgentSA }}
+    namespace: {{ include "ai-assisted-development.namespace" . }}

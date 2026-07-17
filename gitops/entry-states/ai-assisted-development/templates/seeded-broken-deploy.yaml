@@ -1,0 +1,89 @@
+# ⚠ INTENTIONAL FLAW — DO NOT "FIX" IN THE CHART. This is the deterministic diagnosis target of ai-assisted-development.
+# parasol-claims:1.0 (shared parasol-images; Quarkus, real health at /q/health/ready on 8080) deployed
+# with a WRONG readinessProbe.httpGet.path (badProbePath → HTTP 404). Result at entry (solve=false):
+#   • pod Running but 0/1 Ready (readiness fails);
+#   • the Service has NO ready endpoints;
+#   • `oc get events` shows ONE crisp "Readiness probe failed … statuscode: 404" line;
+#   • NO restart loop — liveness is deliberately OMITTED (readiness-only ⇒ non-flapping, low-temperature
+#     friendly for the agent).
+# The agent diagnoses this read-only (pods_list / events_list / resources_get / pods_log), then — once
+# the attendee grants a scoped write — FIXES it with a one-field patch to goodProbePath. ws solve
+# renders goodProbePath directly (Running 1/1) as the END state. Wave 1 (alongside the MCP server).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.seedName }}
+  namespace: {{ include "ai-assisted-development.namespace" . }}
+  labels:
+    app: {{ .Values.seedName }}
+    app.kubernetes.io/component: diagnosis-target
+    workshop.redhat.com/module: ai-assisted-development
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    # HIGHEST sync-wave on purpose: this Deployment is Running 0/1 BY DESIGN (the diagnosis target), so
+    # it never goes Healthy. In an earlier/shared wave Argo gates the sync on its health, hits the
+    # Deployment progress deadline, and the WHOLE sync operation fails + retries forever — so `ws start`
+    # hangs (proven live on C1, 2026-07-16). As the last wave nothing waits on it: Argo applies it and
+    # the operation Succeeds; the app is then Degraded by design, which `ws start` tolerates via the
+    # ws-meta `expectDegraded` flag (wait_materialized). Do NOT lower this wave.
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.seedName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.seedName }}
+        workshop.redhat.com/module: ai-assisted-development
+    spec:
+      containers:
+        - name: {{ .Values.seedName }}
+          image: {{ .Values.seedImage }}
+          env:
+            # parasol-claims is a PostgreSQL-backed Quarkus service — run it DB-FREE so the seed is
+            # SELF-CONTAINED and the ONLY fault is the readiness path. WITHOUT this it CrashLoops on a
+            # missing parasol-db (UnknownHostException) instead of the clean Running 0/1 we need
+            # (verified live 2026-07-15). This is the documented same-image pattern the app ships for
+            # resilience-multicluster-dr's per-site responder (apps/parasol-claims/src/main/resources/application.properties).
+            - name: QUARKUS_DATASOURCE_ACTIVE
+              value: "false"
+            - name: QUARKUS_HIBERNATE_ORM_ACTIVE
+              value: "false"
+          ports:
+            - name: http
+              containerPort: {{ .Values.seedPort }}
+          # THE FAULT (entry) / THE FIX (solve): badProbePath 404s → 0/1; goodProbePath → 1/1. One field.
+          readinessProbe:
+            httpGet:
+              path: {{ include "ai-assisted-development.probePath" . }}
+              port: {{ .Values.seedPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # NO livenessProbe on purpose: a readiness-only fault keeps the pod Running (no CrashLoop),
+          # so the single 404 signal stays clean and deterministic.
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+# why: the Service whose endpoints stay EMPTY while the pod is 0/1 — part of the diagnosis signal
+# (name MUST be seedName so the agent + attendee reference it by the app name).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.seedName }}
+  namespace: {{ include "ai-assisted-development.namespace" . }}
+  labels:
+    app: {{ .Values.seedName }}
+    workshop.redhat.com/module: ai-assisted-development
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: {{ .Values.seedName }}
+  ports:
+    - name: http
+      port: {{ .Values.seedPort }}
+      targetPort: http

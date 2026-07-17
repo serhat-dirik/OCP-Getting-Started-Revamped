@@ -1,0 +1,103 @@
+# The claims-processor as a Knative Service (serving.knative.dev/v1) — the serverless-zero-to-hero spine. ENTRY: a single
+# scale-to-zero revision (parasol-claims-v1) the attendee observes (0->N under load), tunes, splits and
+# wires eventing onto. SOLVE: morphs to a second revision (parasol-claims-v2) with tuned autoscaling
+# (target concurrency + containerConcurrency) and an 80/20 tag-based blue/green traffic split across v1/v2.
+#
+# ROUTING: Knative AUTO-CREATES the external edge-terminated OpenShift Route (ns knative-serving-ingress,
+# Kourier); the browser URL is `oc get ksvc parasol-claims -o jsonpath={.status.url}` (HTTPS). Do NOT
+# `oc create route edge` for a ksvc — that fights the operator (the documented exception to the project's
+# standing edge-route rule). sync-wave 1 so the ksvc reconciles AFTER claims-db (wave 0) is Available, so
+# the first revision's /q/health/ready (Agroal datasource check) passes and the revision goes Ready.
+{{- $rev := ternary "parasol-claims-v2" "parasol-claims-v1" .Values.solve }}
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+spec:
+  template:
+    metadata:
+      # Named revision so the solve traffic split can pin v1 (entry) + v2 (solve) by name. Knative
+      # requires the revision name to be prefixed with the Service name.
+      name: {{ $rev }}
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: serverless-zero-to-hero
+      annotations:
+        # Cap fan-out so 30 attendees each bursting 0->N never exhaust the per-user quota (build-note risk).
+        # min-scale is left unset (=0): scale-to-zero is the whole point of the module.
+        autoscaling.knative.dev/max-scale: {{ ternary "5" "3" .Values.solve | quote }}
+        {{- if .Values.solve }}
+        # Tuned at solve: soft concurrency target the KPA scales on (the "tune target concurrency" beat).
+        autoscaling.knative.dev/target: "10"
+        {{- end }}
+    spec:
+      {{- if .Values.solve }}
+      # Hard per-pod in-flight request ceiling (the "tune concurrency" beat) — set only at solve so the
+      # entry ksvc starts at the Knative default and the attendee tunes it.
+      containerConcurrency: 20
+      {{- end }}
+      containers:
+        - name: parasol-claims
+          image: {{ .Values.claimsImage }}
+          ports:
+            # Single container port — Knative routes the auto-Route + queue-proxy to it.
+            - containerPort: 8080
+          env:
+            - name: POSTGRESQL_HOST
+              value: claims-db
+            # Visible revision marker so v1/v2 are distinguishable in the traffic-split beat (no distinct
+            # v2 image needed — the revision identity is the teaching artifact).
+            - name: CLAIMS_REVISION
+              value: {{ ternary "v2" "v1" .Values.solve | quote }}
+          envFrom:
+            # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # Gate revision-Ready on the app's real readiness (includes the Agroal datasource check), so a
+          # Ready revision can actually serve /api/claims. Knative routes this probe through queue-proxy.
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 6
+            timeoutSeconds: 5
+            # Knative stores a default successThreshold=1; pin it explicitly so ws solve's patch-reapply
+            # is a no-op diff. Omitting it makes the re-apply send successThreshold=0 with the revision
+            # NAME unchanged → the immutable-revision webhook rejects it ("changes without a name change")
+            # and ws solve never converges. (eventing-deep-dive entry = serverless-zero-to-hero end state, so this must hold.)
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+{{- if .Values.solve }}
+  # SOLVE: pin an 80/20 blue/green split across the two named revisions (the "tag-based traffic: blue/green
+  # on revisions" beat — contrast gitops-at-scale Argo Rollouts / service-mesh-advanced-gateways mesh weighting). Each tag also gets its own
+  # sub-route (stable-… / candidate-…). v1 exists from the entry apply (ws solve upgrades on top of ws
+  # start), so the split is valid; a bare `ws solve` without a prior `ws start` is not the instructor flow.
+  traffic:
+    - tag: stable
+      revisionName: parasol-claims-v1
+      percent: 80
+    - tag: candidate
+      revisionName: parasol-claims-v2
+      percent: 20
+{{- end }}

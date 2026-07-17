@@ -1,0 +1,172 @@
+# The CLIENT namespace: the external client that continuously calls the claims service through the STABLE
+# endpoint, and the mesh ingress GATEWAY that IS that stable endpoint. The gateway is co-located with
+# site-a's locality (istio-locality label), so the mesh prefers the PRIMARY site and fails over to the
+# secondary — the failover routing (ServiceEntry/DestinationRule/VirtualService) is built in the lab (or
+# rendered by ws solve). At entry there is no route yet, so the stable endpoint returns 404 until wired.
+---
+# why: the external client — a curl loop that hits the stable endpoint once a second and LOGS which site
+# served each response. `oc logs -f deploy/claims-client` is the continuous failover log the lab watches.
+# UN-meshed on purpose (sidecar.istio.io/inject=false): it is an EXTERNAL client entering through the mesh
+# ingress gateway, not a mesh member — the honest "client accessing the service from outside" model.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-client
+  namespace: {{ include "resilience-multicluster-dr.clientNs" . }}
+  labels:
+    app: claims-client
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claims-client
+  template:
+    metadata:
+      labels:
+        app: claims-client
+        workshop.redhat.com/module: resilience-multicluster-dr
+        # Never meshed — a clean external client hitting the ingress gateway.
+        sidecar.istio.io/inject: "false"
+    spec:
+      containers:
+        - name: client
+          # RHEL tools imagestream — always present, no external pull secret, carries curl.
+          image: {{ .Values.clientImage }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "client -> stable endpoint http://claims-stable/  (each response names the serving site)"
+              while true; do
+                code=$(curl -s -m3 -o /tmp/b -w '%{http_code}' http://claims-stable/ 2>/dev/null || echo 000)
+                site=$(sed -n 's/.*"site":"\([AB]\)".*/\1/p' /tmp/b 2>/dev/null)
+                echo "$(date -u +%H:%M:%S)  HTTP ${code}  served-by-site=${site:-none}"
+                sleep 1
+              done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # restricted-v2 compliant (random non-root UID) so it admits without any SCC exception.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+---
+# why: the mesh ingress GATEWAY proxy — the stable endpoint. `image: auto` is replaced by the injector with
+# the Istio proxy (inject.istio.io/templates: gateway). The istio-locality label pins this gateway to
+# site-a's zone, so the locality-aware load balancer treats site-a as PRIMARY (priority 0) and site-b as
+# the failover (priority 1). This is the one deliberate "the gateway lives at the primary site" choice.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-gateway
+  namespace: {{ include "resilience-multicluster-dr.clientNs" . }}
+  labels:
+    istio: claims-gateway
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      istio: claims-gateway
+  template:
+    metadata:
+      annotations:
+        inject.istio.io/templates: gateway
+      labels:
+        istio: claims-gateway
+        workshop.redhat.com/module: resilience-multicluster-dr
+        sidecar.istio.io/inject: "true"
+        # Locality override (value uses '.' — '/' is invalid in a label value): region=east, zone=site-a.
+        # Co-locates the gateway with site-a so the mesh prefers the primary and fails over to site-b.
+        istio-locality: east.site-a
+    spec:
+      containers:
+        - name: istio-proxy
+          image: auto
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+---
+# why: the STABLE in-cluster address the client always calls — claims-stable.{{ include "resilience-multicluster-dr.clientNs" . }}.svc.
+# It selects the gateway proxy; the gateway (not this Service) does the primary/backup failover.
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-stable
+  namespace: {{ include "resilience-multicluster-dr.clientNs" . }}
+  labels:
+    istio: claims-gateway
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    istio: claims-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+# why: the Istio ingress Gateway binding — an HTTP listener on :80 for any host. The VirtualService built in
+# the lab attaches to this Gateway and routes to the claims ServiceEntry with failover.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: claims-gateway
+  namespace: {{ include "resilience-multicluster-dr.clientNs" . }}
+  labels:
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    istio: claims-gateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+---
+# why: an OPTIONAL external URL for the stable endpoint (the "external client accessing the service" story +
+# console visibility). Edge-terminated with Allow so both http and https reach the HTTP gateway listener.
+# The graded client is the in-cluster claims-client loop; this Route is a convenience, not a dependency.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: claims-stable
+  namespace: {{ include "resilience-multicluster-dr.clientNs" . }}
+  labels:
+    workshop.redhat.com/module: resilience-multicluster-dr
+    workshop.redhat.com/owner: ogsr
+spec:
+  to:
+    kind: Service
+    name: claims-stable
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow

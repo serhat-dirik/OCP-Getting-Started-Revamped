@@ -1,0 +1,57 @@
+# The ENTRY event path (always rendered — the serverless-zero-to-hero end state, now FIXED with a real 200 consumer): a
+# seeded PingSource emits CloudEvents into the default Broker, and one UNFILTERED baseline Trigger routes
+# every event to claims-consumer (which returns HTTP 200 and displays it — unlike serverless-zero-to-hero, whose taste routed
+# to the handler-less parasol-claims and 404'd). This is the working source->broker->trigger->consumer
+# baseline the attendee OBSERVES, then deepens in the lab (attribute filtering, retries, dead-letter
+# sink). NO filter and NO deadLetterSink here — those are the lab OUTCOMES (ws solve / solve-endstate.yaml).
+---
+# why: the seeded CloudEvents source. Emits a small claim-shaped JSON event on a schedule into the Broker
+# (the "source" leg). Every 5 min (gentle: proves events flow + wakes the consumer from zero without
+# hammering it). ceOverrides stamps a domain extension attribute (claimpriority) so the solve's
+# attribute-filtered Trigger has something real to match — PingSource fixes ce-type to
+# dev.knative.sources.ping, so a domain attribute is carried as an extension. (The content builder can
+# repoint this to parasol-claims' real com.parasol.claim.submitted events once the app emits them.)
+apiVersion: sources.knative.dev/v1
+kind: PingSource
+metadata:
+  name: claim-ticker
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    workshop.redhat.com/module: eventing-deep-dive
+    workshop.redhat.com/owner: ogsr
+spec:
+  schedule: "*/5 * * * *"
+  contentType: application/json
+  data: '{"claimId":"CLM-0000","amount":4200,"fraudScore":0.82,"note":"seeded claim event — eventing-deep-dive eventing"}'
+  ceOverrides:
+    extensions:
+      # A filterable domain attribute the solve claims-audit Trigger matches on (attribute filtering demo).
+      claimpriority: high
+  sink:
+    ref:
+      apiVersion: eventing.knative.dev/v1
+      kind: Broker
+      name: default
+---
+# why: the UNFILTERED baseline Trigger — routes ALL Broker events to the claims-consumer ksvc (the
+# "trigger" leg). subscriber is the ksvc (Addressable); delivery wakes it from scale-to-zero. This is the
+# entry baseline (no filter, no DLQ); the lab adds filtered + dead-letter Triggers on top.
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-events
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    workshop.redhat.com/module: eventing-deep-dive
+    workshop.redhat.com/owner: ogsr
+spec:
+  broker: default
+  subscriber:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: claims-consumer

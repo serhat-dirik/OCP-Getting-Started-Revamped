@@ -1,0 +1,141 @@
+# The trusted-supply-chain build→scan→sign supply-chain Pipeline, materialized per-user in {user}-cicd. It builds the
+# ATTENDEE's fork (so their fix matters) from the seeded seed-vulnerable branch, reports the CycloneDX
+# SBOM (surfacing the seeded log4j-core), builds + Tekton-Chains-SIGNS the image, then gates on RHACS.
+# Tasks are cluster-resolver references (bundled git-clone/buildah + the curated parasol-tasks
+# acs-image-check) — no task bodies copied, except one small inline SBOM-report taskSpec.
+#
+# Chains signs the build-image TaskRun's image automatically (signing-secrets cosign key from the
+# trust-signing component); `cosign verify --key` is the attendee's terminal beat. The scan gate fails
+# on the seeded Log4Shell (trust stack's "Block Log4Shell at build" policy, scoped to the Supply Chain
+# Security category). The gate turns green by DROPPING log4j-core from the fork — that is the only fix
+# it keys on; bumping the base tag is optional trusted-base hardening (it does not affect this gate).
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: parasol-claims-supply-chain
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    app.kubernetes.io/part-of: parasol-claims
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/owner: ogsr
+spec:
+  params:
+    - name: git-url
+      type: string
+      description: Source repository — defaults to THIS attendee's Gitea fork (over the in-cluster svc).
+      default: http://gitea.{{ .Values.giteaNamespace }}.svc:3000/{{ .Values.user }}/parasol-claims.git
+    - name: git-revision
+      type: string
+      description: Branch/tag/commit to build. Defaults to the seeded (vulnerable) branch.
+      default: seed-vulnerable
+    - name: image
+      type: string
+      description: Fully-qualified target image reference (registry/namespace/name:tag).
+      # Own-namespace registry path, so this Pipeline is portable across every {user}-cicd with no edit.
+      default: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:latest
+  workspaces:
+    # One shared PVC carries the checkout from git-clone through the SBOM report and the image build.
+    - name: shared-workspace
+  results:
+    # Surface the scan verdict at the PipelineRun level for `tkn pr describe` / ws doctor.
+    - name: scan-passed
+      value: $(tasks.acs-scan.results.check-passed)
+  tasks:
+    # 1) Clone the attendee's fork@seed-vulnerable into the shared workspace (bundled task, resolver).
+    - name: fetch-source
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: URL
+          value: $(params.git-url)
+        - name: REVISION
+          value: $(params.git-revision)
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+
+    # 2) SBOM report: generate the CycloneDX bill of materials and surface the seeded vulnerable dep
+    #    (the trusted-supply-chain "find what's inside" beat). Inline taskSpec — makeBom needs no compile, so it is fast.
+    - name: sbom-report
+      runAfter:
+        - fetch-source
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: cyclonedx
+            # UBI9 OpenJDK 21 (Maven 3.9) — same runner as the parasol-tasks maven-jdk21 Task.
+            image: registry.access.redhat.com/ubi9/openjdk-21:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "▶ generating the CycloneDX SBOM…"
+              # makeBom invoked from the CLI uses the plugin's DEFAULT output name (target/bom.json),
+              # not the pom's outputName — so find whichever CycloneDX JSON was written.
+              /usr/bin/mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
+              SBOM="$(ls -1 target/parasol-claims-sbom.json target/bom.json target/*cyclonedx.json 2>/dev/null | head -1 || true)"
+              [[ -n "$SBOM" ]] || { echo "❌ no CycloneDX SBOM produced under target/"; exit 1; }
+              echo "▶ SBOM: ${SBOM} — scanning for known-vulnerable components…"
+              # The purl carries the exact version, e.g. pkg:maven/…/log4j-core@2.14.1
+              if HIT="$(grep -oE 'log4j-core@[0-9][0-9.]*' "$SBOM" | head -1)"; then
+                echo "⚠️  the SBOM contains ${HIT} — CVE-2021-44228 (Log4Shell). Fix: drop this dependency."
+              else
+                echo "✅ no log4j-core in the SBOM (clean build)."
+              fi
+
+    # 3) Build the image from the Containerfile and push it to the internal registry. Tekton Chains
+    #    SIGNS this TaskRun's image automatically (cosign key in openshift-pipelines/signing-secrets).
+    #    TLS_VERIFY=false: the in-cluster registry serves a service-CA cert the build pod doesn't trust.
+    - name: build-image
+      runAfter:
+        - sbom-report
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: buildah
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: IMAGE
+          value: $(params.image)
+        - name: DOCKERFILE
+          value: ./Containerfile
+        - name: TLS_VERIFY
+          value: "false"
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    # 4) The scan GATE: the curated parasol-tasks acs-image-check runs `roxctl image check` (scoped to
+    #    the Supply Chain Security category) against the freshly-built image and FAILS the pipeline on
+    #    the seeded Log4Shell. Fix = DROP log4j-core from the fork (the gate keys ONLY on that; the
+    #    base-tag bump is optional hardening), then re-run → this passes.
+    - name: acs-scan
+      runAfter:
+        - build-image
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: acs-image-check
+          - name: namespace
+            value: parasol-tasks
+      params:
+        - name: IMAGE
+          value: $(params.image)

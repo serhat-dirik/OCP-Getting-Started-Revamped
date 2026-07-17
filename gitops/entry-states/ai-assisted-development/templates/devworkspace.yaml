@@ -1,0 +1,66 @@
+# The Dev Spaces workspace that carries the neutral mcp-agent-cli client configured against MaaS + the
+# in-cluster MCP server. Co-located in {user}-dev so: (a) the MCP server is reachable by short DNS, and
+# (b) the auto-mounted maas-credentials Secret (GENAI_API_KEY) is same-namespace. started:false → the
+# entry state creates ZERO workspace pods (no quota/token cost); the attendee starts it in the lab.
+# The che-code editor is resolved via the in-cluster Dev Spaces DASHBOARD editor API (svc DNS, never a
+# cluster-domain URL): on Dev Spaces 3.x the embedded plugin registry is OpenVSX-proxy-only
+# (START_OPENVSX=true) and serves NO devfile content, so a bare plugin-registry id can't resolve. ws
+# reset purges DevWorkspaces (devspaces-inner-loop+ idiom).
+#
+# CREDS/CONFIG INTO THE WORKSPACE (all cluster-correct, no devfile edit): GENAI_API_KEY arrives via the
+# DevWorkspace Operator auto-mount of the labelled maas-credentials Secret, and GENAI_ENDPOINT/GENAI_MODEL
+# via the auto-mounted maas-config-env ConfigMap — both CONVERGED per-cluster by the hook (see
+# maas-credentials.yaml; C2 → llama-scout-17b). A devfile container env (schemaVersion 2.2.0) can't
+# configMapKeyRef, so these three are injected by the operator, NOT hardcoded here — hardcoding
+# model/endpoint pinned C1's qwen3-14b onto every cluster. Only static, non-MaaS env is literal below.
+apiVersion: workspace.devfile.io/v1alpha2
+kind: DevWorkspace
+metadata:
+  name: {{ .Values.devWorkspaceName }}
+  namespace: {{ include "ai-assisted-development.namespace" . }}
+  labels:
+    workshop.redhat.com/module: ai-assisted-development
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+spec:
+  started: false
+  routingClass: che
+  contributions:
+    # The default Dev Spaces editor (VS Code / che-code), resolved through the in-cluster Dev Spaces
+    # dashboard editor API (svc DNS — no cluster domain, CI-privacy-safe). The dashboard returns the
+    # platform's OWN che-code devfile, so the editor stays version-correct per cluster (no pinned digests
+    # in this file) and portable. A plugin-registry id/registryUrl can't be used: the DS 3.x registry is
+    # OpenVSX-proxy-only and 404s on /devfiles/<id>. cheEditorId (values.yaml) is the che-editor query id.
+    # This is the MCP-capable IDE surface ai-assisted-development's in-IDE beat runs in.
+    - name: editor
+      uri: "http://devspaces-dashboard.openshift-devspaces.svc:8080/dashboard/api/editors/devfile?che-editor={{ .Values.cheEditorId }}"
+  template:
+    schemaVersion: 2.2.0
+    metadata:
+      name: {{ .Values.devWorkspaceName }}
+    components:
+      - name: tools
+        container:
+          # The Dev Spaces Universal Developer Image (oc + JDK 21) — the terminal the attendee runs the
+          # CLI agent from. Pulled with the cluster global pull secret (registry.redhat.io).
+          image: {{ .Values.udiImage }}
+          memoryLimit: 2Gi
+          mountSources: true
+          env:
+            # GENAI_ENDPOINT / GENAI_MODEL / GENAI_API_KEY are auto-mounted as env by the DevWorkspace
+            # Operator (maas-config-env ConfigMap + maas-credentials Secret), converged per-cluster — so
+            # they are deliberately NOT listed here (a devfile env can't configMapKeyRef, and a literal
+            # would re-pin C1's model onto every cluster).
+            # The in-cluster MCP server the CLI agent binds its tools to (SSE on the short Service DNS).
+            - name: MCP_SERVER_URL
+              value: {{ include "ai-assisted-development.mcpSseUrl" . | quote }}
+            # Client-side read-only filter (defence-in-depth). --allow-writes / MCP_READ_ONLY=false flips
+            # it; on-cluster it is then RBAC, not this flag, that stops a disallowed write.
+            - name: MCP_READ_ONLY
+              value: {{ .Values.mcpReadOnly | quote }}
+            # Caps the agentic loop → bounds MaaS token spend.
+            - name: MCP_MAX_STEPS
+              value: {{ .Values.maxSteps | quote }}
+            # The provided neutral CLI image the lab runs (e.g. `oc run mcp-agent-cli --image=$AGENT_CLI_IMAGE …`).
+            - name: AGENT_CLI_IMAGE
+              value: {{ .Values.agentCliImage | quote }}

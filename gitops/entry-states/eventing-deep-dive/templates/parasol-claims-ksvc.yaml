@@ -1,0 +1,87 @@
+# The claims-processor as a Knative Service (serving.knative.dev/v1) — carried over from serverless-zero-to-hero as the
+# domain app that is "present" in the serverless-zero-to-hero end state. In eventing-deep-dive it is NOT the CloudEvents sink: parasol-claims
+# has no CloudEvents handler (POSTing an event to it 404s — the exact reason serverless-zero-to-hero's eventing taste never
+# processed one), so eventing-deep-dive's events flow to the net-new showcase consumer (claims-consumer) instead. It
+# stays here as the scale-to-zero service the content builder later teaches to EMIT a
+# com.parasol.claim.submitted CloudEvent on POST /api/claims (net-new app work, out of scope for the
+# entry state).
+#
+# SINGLE stable revision on purpose. serverless-zero-to-hero's 80/20 v1/v2 blue-green split is an serverless-zero-to-hero lab artifact that needs
+# TWO revisions, which a Knative Service produces only across TWO applies (start creates v1, then solve
+# adds v2) — it CANNOT be expressed in eventing-deep-dive's single self-contained apply (a lone declarative apply naming
+# a v1/v2 split whose v1 was never created fails RevisionMissing and never goes Ready; observed live on
+# C1, 2026-07-13). eventing-deep-dive teaches EVENTING, not traffic splitting, so the split is dropped here and
+# parasol-claims is one Ready revision in both entry and solve. (Reported to the PM as serverless-zero-to-hero-end-state
+# friction — see the eventing-deep-dive build note.)
+#
+# ROUTING: Knative AUTO-CREATES the external edge-terminated OpenShift Route (ns knative-serving-ingress,
+# Kourier); the browser URL is `oc get ksvc parasol-claims -o jsonpath={.status.url}`. Do NOT
+# `oc create route edge` for a ksvc — that fights the operator (the documented exception to the project's
+# standing edge-route rule). sync-wave 1 so the ksvc reconciles AFTER claims-db (wave 0) is Available, so
+# the revision's /q/health/ready (Agroal datasource check) passes and the revision goes Ready.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: eventing-deep-dive
+    workshop.redhat.com/owner: ogsr
+spec:
+  template:
+    metadata:
+      # Named revision (v1) for a stable, recognizable identity; single revision so no traffic split is
+      # pinned (100% flows to the latest-ready revision).
+      name: parasol-claims-v1
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: eventing-deep-dive
+      annotations:
+        # Cap fan-out so 30 attendees each bursting 0->N never exhaust the per-user quota. min-scale unset
+        # (=0): scale-to-zero is the serverless default serverless-zero-to-hero established and eventing-deep-dive relies on for the
+        # wake-on-event beat.
+        autoscaling.knative.dev/max-scale: "3"
+    spec:
+      containers:
+        - name: parasol-claims
+          image: {{ .Values.claimsImage }}
+          ports:
+            # Single container port — Knative routes the auto-Route + queue-proxy to it.
+            - containerPort: 8080
+          env:
+            - name: POSTGRESQL_HOST
+              value: claims-db
+          envFrom:
+            # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
+            - secretRef:
+                name: claims-db
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # Gate revision-Ready on the app's real readiness (includes the Agroal datasource check), so a
+          # Ready revision can actually serve /api/claims. Knative routes this probe through queue-proxy.
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 6
+            timeoutSeconds: 5
+            # Pin the Knative default explicitly so any patch-reapply is a no-op diff — omitting it sends
+            # successThreshold=0 with the revision NAME unchanged, which the immutable-revision webhook
+            # rejects (the serverless-zero-to-hero 6f6ddcf lesson; keep it here so eventing-deep-dive re-applies converge too).
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3

@@ -1,0 +1,67 @@
+# The load generator — drives steady traffic at the claims API so the rollout beats have something to
+# measure, and TALLIES dropped requests (non-2xx + connection failures, via curl --max-time … || 000) so
+# the zero-downtime before/after contrast is visible in `oc logs` during a roll. Uses the always-present
+# tools image (curl + bash), tiny and capped so it never dominates the {user}-dev quota. NOTE: a real
+# measurable metric (a counter the dashboard reads) is app-developer work — this log-tally is the entry
+# substrate ([CAPTURE-VERIFY] the exact before/after numbers when content is built).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-load
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: claims-load
+    workshop.redhat.com/module: deployment-targets-scheduling
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claims-load
+  template:
+    metadata:
+      labels:
+        app: claims-load
+        workshop.redhat.com/module: deployment-targets-scheduling
+    spec:
+      containers:
+        - name: load
+          image: {{ .Values.toolsImage }}
+          env:
+            - name: TARGET
+              value: http://parasol-claims:8080
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              echo "▶ claims load generator → ${TARGET} (steady baseline; tallies dropped requests)"
+              # Wait for the claims API readiness before driving load (avoids a burst of connection errors
+              # during the initial rollout that would skew the first before/after tally).
+              until curl -sf -o /dev/null --max-time 5 "${TARGET}/q/health/ready"; do sleep 3; done
+              echo "  ✓ claims ready — generating traffic"
+              total=0; dropped=0
+              while true; do
+                code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${TARGET}/api/claims" || echo 000)"
+                total=$((total + 1))
+                case "$code" in
+                  2*) : ;;
+                  *) dropped=$((dropped + 1)); echo "  ✗ dropped (code=${code}) — ${dropped}/${total} dropped" ;;
+                esac
+                sleep 1
+              done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          # restricted-v2 compliant (random non-root UID) so it admits with no SCC exception.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

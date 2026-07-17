@@ -1,0 +1,69 @@
+{{- if .Values.solve }}
+# END state for instructor demos / `ws solve serverless-zero-to-hero` / testing — the EVENTING TASTE the attendee wires once
+# they have a working ksvc: a default in-memory Broker, a PingSource that emits CloudEvents into it, and a
+# Trigger that routes them to the parasol-claims ksvc (which scales up from zero to receive them). This is
+# a TASTE only — the broker-vs-channel decision, trigger filters, dead-letter sinks and SonataFlow
+# workflows are the eventing-deep-dive deep-dive. The other solve outcome — the second revision (parasol-claims-v2) + the
+# 80/20 tag-based blue/green traffic split + tuned autoscaling — is rendered by parasol-claims-ksvc.yaml
+# when solve=true (it morphs the ksvc that must exist at entry), NOT here. Verify asserts these OUTCOMES
+# exist (a split ksvc, a Broker, a Trigger, a PingSource), never the exact wording, so any correct
+# attendee solution stays green (rule 14).
+---
+# why: the default in-memory Broker (MTChannelBasedBroker) — the eventing hub. In-memory needs no Kafka/
+# Streams subscription (eventing-deep-dive's optional [ADD-ON]); it is the subscription-free default the taste runs on.
+apiVersion: eventing.knative.dev/v1
+kind: Broker
+metadata:
+  name: default
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    # Pin the in-memory broker class explicitly (don't rely on the cluster default-broker-class).
+    eventing.knative.dev/broker.class: MTChannelBasedBroker
+  labels:
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+---
+# why: a CloudEvents source — emits a small JSON event on a schedule into the Broker. The "source" leg of
+# the source->broker->trigger taste. Every 5 min (gentle: present + wired without hammering the ksvc).
+apiVersion: sources.knative.dev/v1
+kind: PingSource
+metadata:
+  name: claim-ticker
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+spec:
+  schedule: "*/5 * * * *"
+  contentType: application/json
+  data: '{"source":"claim-ticker","note":"eventing taste — deep story is eventing-deep-dive"}'
+  sink:
+    ref:
+      apiVersion: eventing.knative.dev/v1
+      kind: Broker
+      name: default
+---
+# why: the Trigger routes Broker events to the parasol-claims ksvc (the "trigger" leg). The subscriber is
+# the ksvc (Addressable); delivery wakes the scaled-to-zero revision. Event HANDLING in the app is eventing-deep-dive —
+# here the teaching point is the wiring + the scale-up, not the business logic.
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: claims-processor
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    workshop.redhat.com/module: serverless-zero-to-hero
+    workshop.redhat.com/owner: ogsr
+spec:
+  broker: default
+  subscriber:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: parasol-claims
+{{- end }}
