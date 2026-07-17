@@ -10,6 +10,7 @@
 #   ws solve  <module> [--user U]    materialize the END state (instructor only)
 #   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
 #   ws doctor                        environment sanity: login, argo, gitea, operators
+#   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
 # Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
@@ -1094,12 +1095,156 @@ cmd_doctor() {
   if (( fail == 0 )); then ok "environment looks good"; else err "issues found — fix hints above"; exit 1; fi
 }
 
+# ── SA/admin cohort operations (ws passwd, ws cohort-reset) ────────────────────────────────────────
+# These are cluster-admin recipes an SA runs from the platform kubeconfig, NOT attendee self-service.
+# They act on the WORKSHOP LAYER only (per-user creds + per-user module state) and never touch the
+# platform portfolio (pp-* stacks, operators, gitea/images/tasks/showroom infra, namespace shells).
+
+workshop_users() {  # → space-separated attendee usernames from the AUTHORITATIVE group; die if none.
+  # The workshop-attendees group is what bootstrap populates (user1..userN); it is the source of truth
+  # for "who is an attendee", ahead of any repo default — cohort size can differ from values.yaml.
+  local u
+  u="$(oc get group workshop-attendees -o jsonpath='{.users[*]}' 2>/dev/null || true)"
+  [[ -n "$u" ]] || die "cannot enumerate the workshop-attendees group — is the workshop layer installed? (ws doctor)"
+  echo "$u"
+}
+
+repo_user_count() {  # → workshop-config's INTENDED userCount (repo default), or empty. Soft cross-check
+  # only: the live group wins, but a mismatch is a useful "bootstrap ran with a different --users" signal.
+  awk '$1=="userCount:"{print $2; exit}' "${REPO_ROOT}/gitops/workshop-config/values.yaml" 2>/dev/null
+}
+
+cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-cohort by default; --user U
+  # rotates ONLY that user's OpenShift console/CLI (OAuth) login. Grounded mechanism (2026-07-17): the
+  # shared password lives in the htpasswd-workshop-users secret (openshift-config, key 'htpasswd', bcrypt)
+  # that the 'workshop-users' OAuth IdP already references, AND the gitea workshop-user-creds secret (key
+  # 'password', used for Gitea seeding + student-Argo login). We rewrite the secrets with the SAME
+  # idempotent create|apply pattern bootstrap uses and leave the IdP wiring intact (bootstrap owns it).
+  # The workshop password is NON-SECRET by policy, so we print the new value once — NEVER the bcrypt hash.
+  local target_user="" newpass="" generated="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --user)
+        [[ $# -ge 2 ]] || die "passwd: --user needs a value (e.g. user3)"
+        target_user="$2"; shift 2 ;;
+      -*) die "passwd: unknown option '$1' — usage: ws passwd [--user userN] [NEWPASS]" ;;
+      *)
+        if [[ -z "$newpass" ]]; then newpass="$1"; shift
+        else die "passwd: unexpected extra argument '$1' — usage: ws passwd [--user userN] [NEWPASS]"; fi ;;
+    esac
+  done
+  need_oc
+  command -v htpasswd >/dev/null || die "htpasswd not found — install httpd-tools (brew install httpd / dnf install httpd-tools)"
+  command -v openssl  >/dev/null || die "openssl not found — needed to generate/handle passwords"
+
+  local users_str users_arr
+  users_str="$(workshop_users)"
+  read -ra users_arr <<< "$users_str"
+
+  # Validate --user against the authoritative group before mutating anything.
+  if [[ -n "$target_user" ]]; then
+    [[ "$target_user" =~ ^user[0-9]+$ ]] || die "passwd: --user must look like userN, got '$target_user'"
+    local found="false" gu
+    for gu in "${users_arr[@]}"; do [[ "$gu" == "$target_user" ]] && found="true"; done
+    [[ "$found" == "true" ]] || die "passwd: ${target_user} is not in the workshop-attendees group (${users_str})"
+  fi
+
+  # Soft cross-check group size vs the repo's intended userCount (the live group is authoritative).
+  local want_n; want_n="$(repo_user_count || true)"
+  [[ -n "$want_n" && "$want_n" != "${#users_arr[@]}" ]] \
+    && info "note: group has ${#users_arr[@]} user(s) but workshop-config values.yaml userCount=${want_n} (group wins)"
+
+  # Resolve the new password (generate a strong random one, bootstrap-style, when none was given). The
+  # tr/cut pipeline yields up-to-16 JSON-safe alnum chars — identical to bootstrap's generator.
+  if [[ -z "$newpass" ]]; then
+    newpass="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | cut -c1-16)"
+    [[ -n "$newpass" ]] || die "failed to generate a random password (openssl)"
+    generated="true"
+  fi
+
+  # Build the bcrypt htpasswd file. Whole-cohort: regenerate every user's line with the new password.
+  # --user: preserve every OTHER user's EXISTING line verbatim (no plaintext needed) and re-issue ONLY
+  # the target's — so a single-user rotate never disturbs the rest of the cohort's console logins.
+  local htp; htp="$(mktemp)"; trap 'rm -f "$htp"' EXIT
+  if [[ -z "$target_user" ]]; then
+    info "rotating the shared workshop password for all ${#users_arr[@]} user(s)…"
+    htpasswd -B -b -c "$htp" "${users_arr[0]}" "$newpass" >/dev/null 2>&1 || die "htpasswd failed for ${users_arr[0]}"
+    local u
+    for u in "${users_arr[@]:1}"; do
+      htpasswd -B -b "$htp" "$u" "$newpass" >/dev/null 2>&1 || die "htpasswd failed for $u"
+    done
+  else
+    info "rotating ONLY ${target_user}'s console login (preserving the other users' entries)…"
+    local cur line
+    cur="$(oc get secret htpasswd-workshop-users -n openshift-config -o jsonpath='{.data.htpasswd}' 2>/dev/null | base64 -d || true)"
+    [[ -n "$cur" ]] || die "htpasswd-workshop-users secret not found/empty in openshift-config — run bootstrap first"
+    : > "$htp"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      [[ "$line" == "${target_user}:"* ]] && continue
+      printf '%s\n' "$line" >> "$htp"
+    done <<< "$cur"
+    htpasswd -B -b "$htp" "$target_user" "$newpass" >/dev/null 2>&1 || die "htpasswd failed for $target_user"
+  fi
+
+  # Replace the secrets (idempotent create|apply — the exact bootstrap pattern). The OAuth IdP already
+  # references htpasswd-workshop-users, so it is deliberately NOT re-patched. Gitea's shared password is
+  # updated ONLY on a whole-cohort rotate: a single-user console change must not move the cohort-shared
+  # Gitea/student-Argo secret (which has one value for everyone).
+  oc create secret generic htpasswd-workshop-users \
+    --from-file=htpasswd="$htp" -n openshift-config \
+    --dry-run=client -o yaml | oc apply -f - >/dev/null
+  ok "htpasswd-workshop-users (openshift-config) updated"
+  if [[ -z "$target_user" ]]; then
+    oc create secret generic workshop-user-creds \
+      --from-literal=password="$newpass" -n "${GITEA_NS}" \
+      --dry-run=client -o yaml | oc apply -f - >/dev/null
+    ok "workshop-user-creds (gitea/password) updated"
+  fi
+
+  # Verify wiring (never print hashes): every user present in the secret + the IdP still points at it.
+  # We CANNOT test the console login itself — the OAuth browser flow is not scriptable — so this checks
+  # the secret contents + IdP reference only, which is what actually gates a successful attendee login.
+  echo
+  info "verifying…"
+  local dec missing="" present=0 vu
+  dec="$(oc get secret htpasswd-workshop-users -n openshift-config -o jsonpath='{.data.htpasswd}' 2>/dev/null | base64 -d || true)"
+  for vu in "${users_arr[@]}"; do
+    if grep -q "^${vu}:" <<< "$dec"; then present=$((present+1)); else missing="${missing} ${vu}"; fi
+  done
+  if [[ -z "$missing" ]]; then ok "htpasswd secret carries all ${present}/${#users_arr[@]} users"; else err "htpasswd secret MISSING:${missing}"; fi
+  if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
+    ok "OAuth IdP 'workshop-users' still wired to the secret"
+  else
+    err "OAuth IdP 'workshop-users' NOT present — attendees cannot log in (bootstrap adds it)"
+  fi
+
+  # Report: surface the oauth-pod roll delay, the verification caveat, and the new (non-secret) password.
+  echo
+  ok "workshop login password rotated."
+  info "the oauth-openshift pods roll (~1 min) before the new password takes effect (the console login"
+  echo "   itself is not scriptable, so only the secret + IdP wiring are verified above)."
+  echo "   watch the roll: oc rollout status deploy/oauth-openshift -n openshift-authentication"
+  if [[ -n "$target_user" ]]; then
+    echo
+    info "scope: ONLY ${target_user}'s OpenShift console/CLI (OAuth) login changed."
+    echo "   The shared Gitea/student-Argo password (gitea/workshop-user-creds) is UNCHANGED — ${target_user}"
+    echo "   still uses the shared password there. For a full cohort rotation, run: ws passwd [NEWPASS]"
+  fi
+  echo
+  echo "   new password: ${newpass}"
+  [[ "$generated" == "true" ]] && echo "   (randomly generated — record it; the shared workshop password is non-secret by policy)"
+}
+
 main() {
   local cmd="${1:-}"; shift || true
   # git-refresh self-parses its own flags (--restart-terminals/--user/--all/--exclude, where
   # --exclude takes a value); route its raw args straight through so the generic module parser
   # below never mis-bins that value as a module. "$@" is set -u-safe when empty (unlike an array).
   [[ "$cmd" == "git-refresh" ]] && { cmd_git_refresh "$@"; return; }
+  # passwd/cohort-reset self-parse their own flags (passwd's NEWPASS is a free-form string, not a module;
+  # cohort-reset takes no module/user) — route their raw args straight through, like git-refresh.
+  [[ "$cmd" == "passwd" ]] && { cmd_passwd "$@"; return; }
   local user="" module="" extra=()
   # collect --user anywhere; a bare userN (e.g. `ws start m07 user2`) is the target user, exactly like
   # --user user2 — the first OTHER bare arg is the module. Honoring positional userN closes a footgun:
@@ -1127,7 +1272,7 @@ main() {
     reset)       cmd_reset "$(user_arg "$user")" "$(module_arg "$module")";;
     solve)       cmd_solve "$(user_arg "$user")" "$(module_arg "$module")";;
     doctor)      cmd_doctor;;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,12p';;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,13p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
