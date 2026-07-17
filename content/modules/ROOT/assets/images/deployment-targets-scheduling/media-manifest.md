@@ -12,10 +12,10 @@ files with a commented `// media-pass:` line — replace with the `image::…` w
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m16-deployment-targets-scheduling-01-scheduler-pipeline.svg` | concept.adoc Mermaid "the scheduler in one mental model" | Pending pod (requests/tolerations/selectors) → **FILTER** → **SCORE** → **BIND**; red branch **0 survive → Pending + FailedScheduling**; the mental-model spine — reused on slide 2 |
-| `m16-deployment-targets-scheduling-02-seek-vs-repel.svg` | concept.adoc Mermaid "who seeks, who repels" | left **affinity/nodeSelector attracts** (pod → labelled node); right **taint repels**, **toleration only permits** (permitted-but-not-attracted); the module's central distinction — reused on slide 3 |
-| `m16-deployment-targets-scheduling-03-what-you-built.svg` | wrapup.adoc Mermaid recap | app tier **spread** (anti-affinity, distinct nodes) + **dedicated batch pool** (toleration+selector) + **PDB guard**; green = spread app, amber = pool, blue = the PDB |
-| `m16-deployment-targets-scheduling-04-reseed-on-boot.svg` | concept.adoc Mermaid "the other half of zero-downtime" | shared PostgreSQL; the OLD pod serving (INSERT committed) while the NEW pod boots **drop-and-create** and reseeds → the client's new claim **silently discarded, no error**; red = the booting pod's reseed, blue = shared db, green = still-serving old pod; the data-plane-at-startup fault the re-diagnosis surfaced (2026-07-16) |
+| `deployment-targets-scheduling-01-scheduler-pipeline.svg` | concept.adoc Mermaid "the scheduler in one mental model" | Pending pod (requests/tolerations/selectors) → **FILTER** → **SCORE** → **BIND**; red branch **0 survive → Pending + FailedScheduling**; the mental-model spine — reused on slide 2 |
+| `deployment-targets-scheduling-02-seek-vs-repel.svg` | concept.adoc Mermaid "who seeks, who repels" | left **affinity/nodeSelector attracts** (pod → labelled node); right **taint repels**, **toleration only permits** (permitted-but-not-attracted); the module's central distinction — reused on slide 3 |
+| `deployment-targets-scheduling-03-what-you-built.svg` | wrapup.adoc Mermaid recap | app tier **spread** (anti-affinity, distinct nodes) + **dedicated batch pool** (toleration+selector) + **PDB guard**; green = spread app, amber = pool, blue = the PDB |
+| `deployment-targets-scheduling-04-reseed-on-boot.svg` | concept.adoc Mermaid "the other half of zero-downtime" | shared PostgreSQL; the OLD pod serving (INSERT committed) while the NEW pod boots **drop-and-create** and reseeds → the client's new claim **silently discarded, no error**; red = the booting pod's reseed, blue = shared db, green = still-serving old pod; the data-plane-at-startup fault the re-diagnosis surfaced (2026-07-16) |
 
 Shared legend across the diagrams: node box, taint shield, toleration key, affinity/anti-affinity
 arrows, PDB guard badge — same palette as M01–M15 (Red Hat-neutral, no vendor-logo soup). Do **not**
@@ -25,7 +25,7 @@ the attribute policy). Do **not** print the real cluster's node names — use ge
 
 ## Recordings
 
-### Terminal cast — dedicated pool break-fix → zero-downtime roll → PDB block (`m16-deployment-targets-scheduling-demo.cast`, ~10 min, MANDATORY)
+### Terminal cast — dedicated pool break-fix → zero-downtime roll → PDB block (`deployment-targets-scheduling-demo.cast`, ~10 min, MANDATORY)
 Asciinema cast of the demo-arc happy path, recorded in the Showroom terminal as `user2` (drive it
 straight from the demo-flavor Say/Show/Do blocks in `lab.adoc`):
 
@@ -43,13 +43,13 @@ placement is the whole visual. The `sleep 10` after the `nodeSelector` patch is 
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m16-deployment-targets-scheduling-01-pods-by-node.png` | Console → Workloads → Pods (project `{user}-dev`), the **Node** column visible | Circle: the scattered Node values — two `parasol-claims` on different nodes, `statement-batch` on a general node | lab.adoc ex. 1 Console tab |
-| 2 | `m16-deployment-targets-scheduling-02-edit-deployment-affinity.png` | Console → Workloads → Deployments → `parasol-claims` → Actions → Edit Deployment (YAML), `affinity.podAntiAffinity` in view | Circle: `requiredDuringSchedulingIgnoredDuringExecution` + `topologyKey: kubernetes.io/hostname` | lab.adoc ex. 2 Console tab |
-| 3 | `m16-deployment-targets-scheduling-03-batch-pending.png` | Console → Workloads → Pods → the `statement-batch` pod `Pending`, its Events showing the untolerated-taint `FailedScheduling` | Circle: the `FailedScheduling` event text "untolerated taint" | lab.adoc ex. 4 Console tab |
-| 4 | `m16-deployment-targets-scheduling-04-pdb-allowed-disruptions.png` | Console → Workloads → PodDisruptionBudgets → `parasol-claims`, the **ALLOWED DISRUPTIONS** column = 2 | Circle: `ALLOWED DISRUPTIONS = 2` (3 healthy − minAvailable 1) | lab.adoc ex. 5 Console tab |
+| 1 | `deployment-targets-scheduling-01-pods-by-node.png` | Console → Workloads → Pods (project `{user}-dev`), the **Node** column visible | Circle: the scattered Node values — two `parasol-claims` on different nodes, `statement-batch` on a general node | lab.adoc ex. 1 Console tab |
+| 2 | `deployment-targets-scheduling-02-edit-deployment-affinity.png` | Console → Workloads → Deployments → `parasol-claims` → Actions → Edit Deployment (YAML), `affinity.podAntiAffinity` in view | Circle: `requiredDuringSchedulingIgnoredDuringExecution` + `topologyKey: kubernetes.io/hostname` | lab.adoc ex. 2 Console tab |
+| 3 | `deployment-targets-scheduling-03-batch-pending.png` | Console → Workloads → Pods → the `statement-batch` pod `Pending`, its Events showing the untolerated-taint `FailedScheduling` | Circle: the `FailedScheduling` event text "untolerated taint" | lab.adoc ex. 4 Console tab |
+| 4 | `deployment-targets-scheduling-04-pdb-allowed-disruptions.png` | Console → Workloads → PodDisruptionBudgets → `parasol-claims`, the **ALLOWED DISRUPTIONS** column = 2 | Circle: `ALLOWED DISRUPTIONS = 2` (3 healthy − minAvailable 1) | lab.adoc ex. 5 Console tab |
 
 **Animated gif (PREFERRED for the break-and-fix story):**
-`m16-deployment-targets-scheduling-05-pin-to-pool.gif` (<30 s, silent) — quick cuts:
+`deployment-targets-scheduling-05-pin-to-pool.gif` (<30 s, silent) — quick cuts:
 `statement-batch` on a general node → add `nodeSelector` → **Pending** (untolerated taint) → add
 toleration → **Running on the pool node**. The Pending→snap transition is the payoff; hold the two
 `-o wide` frames side by side.

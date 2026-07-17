@@ -15,9 +15,9 @@ the `image::…` when the asset lands. **Do not shoot yet** — this is the spec
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m19-serverless-zero-to-hero-01-request-driven-compute.svg` | concept.adoc Mermaid "The revision model" | client → auto edge Route (Kourier) → the ksvc's Route/Configuration → two immutable Revisions (v1 #stable 80% / v2 #candidate 20%) → **KPA scaling 0..N on concurrency**; an amber side-panel for the eventing taste (PingSource → in-memory Broker → Trigger → back to the ksvc, "wakes from zero"). The module's spine — reused on slide 3 |
-| `m19-serverless-zero-to-hero-02-cold-start-timeline.svg` | concept.adoc cold-start NOTE + slide 4 | a single request hitting a **zero-pod** service: activator buffers → pod schedules → JVM boots → response, annotated **"~15 s cold"**, beside a second **"~0.1 s warm"** request; a callout "min-scale: 1 removes the cold start (gives up scale-to-zero)". The honest-tradeoff visual |
-| `m19-serverless-zero-to-hero-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = the two revisions (v1 #stable / v2 #candidate · CC=2 · max-scale 3); blue = the Route + KPA Knative manages; amber = the eventing taste (PingSource → Broker → Trigger, "wakes on event → 404 (M20)") |
+| `serverless-zero-to-hero-01-request-driven-compute.svg` | concept.adoc Mermaid "The revision model" | client → auto edge Route (Kourier) → the ksvc's Route/Configuration → two immutable Revisions (v1 #stable 80% / v2 #candidate 20%) → **KPA scaling 0..N on concurrency**; an amber side-panel for the eventing taste (PingSource → in-memory Broker → Trigger → back to the ksvc, "wakes from zero"). The module's spine — reused on slide 3 |
+| `serverless-zero-to-hero-02-cold-start-timeline.svg` | concept.adoc cold-start NOTE + slide 4 | a single request hitting a **zero-pod** service: activator buffers → pod schedules → JVM boots → response, annotated **"~15 s cold"**, beside a second **"~0.1 s warm"** request; a callout "min-scale: 1 removes the cold start (gives up scale-to-zero)". The honest-tradeoff visual |
+| `serverless-zero-to-hero-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = the two revisions (v1 #stable / v2 #candidate · CC=2 · max-scale 3); blue = the Route + KPA Knative manages; amber = the eventing taste (PingSource → Broker → Trigger, "wakes on event → 404 (M20)") |
 
 Shared legend across the diagrams: the ksvc boundary box, the auto-Route (edge/Kourier) chip, the immutable
 -revision card, the KPA "0..N on concurrency" badge, the eventing source→broker→trigger row — Red Hat-neutral
@@ -33,10 +33,10 @@ sample user, project scoped to the user's `{user}-dev`. **Topology needs the tra
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m19-serverless-zero-to-hero-01-topology-scaled-to-zero.png` | Console → **Topology** (`{user}-dev`), the `parasol-claims` ksvc showing **0 pods** (dashed/hollow scale ring) while idle | Circle: the **0 pods** ring + the "scaled to zero" state | lab.adoc ex. 1 (the "holding zero pods" beat) — **the marquee** |
-| 2 | `m19-serverless-zero-to-hero-02-topology-scaled-up.png` | Console → Topology during the ex. 3 burst: the same ksvc showing **3/3 pods** (filled ring) | Circle: the pod ring filled to the **max-scale=3** ceiling | lab.adoc ex. 3 (autoscale-under-load beat) |
-| 3 | `m19-serverless-zero-to-hero-03-serverless-services-revisions.png` | Console → **Serverless → Services → parasol-claims**, the Revisions list showing **v1 (stable, 80%)** and **v2 (candidate, 20%)** | Circle: the **80% / 20%** per-revision traffic split | lab.adoc ex. 4 (traffic-split beat) |
-| 4 | `m19-serverless-zero-to-hero-04-serverless-eventing.png` | Console → **Serverless → Eventing**, the `default` Broker with the `claims-processor` Trigger and `claim-ticker` PingSource wired to the ksvc | Circle: the **Trigger → parasol-claims** subscriber edge | lab.adoc ex. 5 (eventing-taste beat) |
+| 1 | `serverless-zero-to-hero-01-topology-scaled-to-zero.png` | Console → **Topology** (`{user}-dev`), the `parasol-claims` ksvc showing **0 pods** (dashed/hollow scale ring) while idle | Circle: the **0 pods** ring + the "scaled to zero" state | lab.adoc ex. 1 (the "holding zero pods" beat) — **the marquee** |
+| 2 | `serverless-zero-to-hero-02-topology-scaled-up.png` | Console → Topology during the ex. 3 burst: the same ksvc showing **3/3 pods** (filled ring) | Circle: the pod ring filled to the **max-scale=3** ceiling | lab.adoc ex. 3 (autoscale-under-load beat) |
+| 3 | `serverless-zero-to-hero-03-serverless-services-revisions.png` | Console → **Serverless → Services → parasol-claims**, the Revisions list showing **v1 (stable, 80%)** and **v2 (candidate, 20%)** | Circle: the **80% / 20%** per-revision traffic split | lab.adoc ex. 4 (traffic-split beat) |
+| 4 | `serverless-zero-to-hero-04-serverless-eventing.png` | Console → **Serverless → Eventing**, the `default` Broker with the `claims-processor` Trigger and `claim-ticker` PingSource wired to the ksvc | Circle: the **Trigger → parasol-claims** subscriber edge | lab.adoc ex. 5 (eventing-taste beat) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
@@ -48,7 +48,7 @@ click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs a
 
 ## Recordings
 
-### Terminal cast — cold start → autoscale → split → rollback → eventing (`m19-serverless-zero-to-hero-demo.cast`, ~10 min, MANDATORY)
+### Terminal cast — cold start → autoscale → split → rollback → eventing (`serverless-zero-to-hero-demo.cast`, ~10 min, MANDATORY)
 Asciinema cast of the demo-arc happy path, recorded in the Showroom terminal as the sample user (drive it
 straight from the demo-flavor Say/Show/Do blocks in `lab.adoc`), with a second pane running
 `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w`:

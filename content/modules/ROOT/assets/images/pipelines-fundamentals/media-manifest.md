@@ -18,9 +18,9 @@ today); the SVG exports replace/augment them in the pass.
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
-| 1 | `m07-pipelines-fundamentals-01-pipelinerun-graph.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns → (your run)** — the 5-Task graph (fetch-source → unit-test → build-image → image-report → deploy) | the visual DAG; a green run; the `image-within-budget` result in the details pane | lab.adoc ex. 1 / challenge (console view of the run) |
-| 2 | `m07-pipelines-fundamentals-02-gitea-webhook.png` | ⬜ NOT CAPTURED | **Gitea → fork → Settings → Webhooks → Add Webhook (Gitea type)** | Target URL = the `pipelines-as-code-controller` route; POST Content Type `application/json`; the secret filled in; **Push Events** selected | lab.adoc ex. 4 (`// media-pass:` marker after "Add Webhook") |
-| 3 | `m07-pipelines-fundamentals-03-pipelinerun-failed.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns** — the RED break-fix run: `unit-test` failed, `build-image`/`image-report`/`deploy` **Skipped** | the failed `unit-test` node and the three *Skipped* downstream nodes — the gate, visually | lab.adoc ex. 3 (optional; the log message is the load-bearing artifact and is shown inline) |
+| 1 | `pipelines-fundamentals-01-pipelinerun-graph.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns → (your run)** — the 5-Task graph (fetch-source → unit-test → build-image → image-report → deploy) | the visual DAG; a green run; the `image-within-budget` result in the details pane | lab.adoc ex. 1 / challenge (console view of the run) |
+| 2 | `pipelines-fundamentals-02-gitea-webhook.png` | ⬜ NOT CAPTURED | **Gitea → fork → Settings → Webhooks → Add Webhook (Gitea type)** | Target URL = the `pipelines-as-code-controller` route; POST Content Type `application/json`; the secret filled in; **Push Events** selected | lab.adoc ex. 4 (`// media-pass:` marker after "Add Webhook") |
+| 3 | `pipelines-fundamentals-03-pipelinerun-failed.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns** — the RED break-fix run: `unit-test` failed, `build-image`/`image-report`/`deploy` **Skipped** | the failed `unit-test` node and the three *Skipped* downstream nodes — the gate, visually | lab.adoc ex. 3 (optional; the log message is the load-bearing artifact and is shown inline) |
 
 Screenshots 1 and 3 are **enrichment** — the lab's load-bearing evidence is CLI output (`tkn
 pipelinerun describe`, the `Parasol rule violated` log line), shown inline. Screenshot **2 (the Gitea
@@ -32,14 +32,14 @@ comments, so their absence breaks nothing).
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m07-pipelines-fundamentals-01-anatomy-and-layers.svg` | concept.adoc Mermaid "anatomy + three reuse layers" | the module's key diagram: catalog (openshift-pipelines) → org library (parasol-tasks) → app Pipeline, each Task wired by `resolver: cluster`. Colour the three layers distinctly (blue / amber / green) |
-| `m07-pipelines-fundamentals-02-pac-flow.svg` | concept.adoc Mermaid "PaC flow" | push → Gitea webhook → PaC controller → new PipelineRun; small and linear |
-| `m07-pipelines-fundamentals-03-what-you-built.svg` | wrapup.adoc Mermaid recap | the happy path green; the "red test stops here" branch red (the gate) |
-| `m07-pipelines-fundamentals-04-platform-accretion.svg` | (new) master accretion diagram, **pipelines/CI layer** highlighted | reuse the platform base; light up the pipelines + task-library layer in red (accretion pattern) |
+| `pipelines-fundamentals-01-anatomy-and-layers.svg` | concept.adoc Mermaid "anatomy + three reuse layers" | the module's key diagram: catalog (openshift-pipelines) → org library (parasol-tasks) → app Pipeline, each Task wired by `resolver: cluster`. Colour the three layers distinctly (blue / amber / green) |
+| `pipelines-fundamentals-02-pac-flow.svg` | concept.adoc Mermaid "PaC flow" | push → Gitea webhook → PaC controller → new PipelineRun; small and linear |
+| `pipelines-fundamentals-03-what-you-built.svg` | wrapup.adoc Mermaid recap | the happy path green; the "red test stops here" branch red (the gate) |
+| `pipelines-fundamentals-04-platform-accretion.svg` | (new) master accretion diagram, **pipelines/CI layer** highlighted | reuse the platform base; light up the pipelines + task-library layer in red (accretion pattern) |
 
 ## Recordings
 
-### Terminal cast — anatomy run + results (`m07-pipelines-fundamentals-demo.cast`)
+### Terminal cast — anatomy run + results (`pipelines-fundamentals-demo.cast`)
 Record with asciinema as **user1** in `user1-cicd` (reset first: `ws reset m07 --user user1`, and
 pre-warm the Maven cache with one `ws solve` so the recorded run is the ~7-min warm path, not the
 ~13-min cold one; trim the build wait in post). Exact sequence:
@@ -57,7 +57,7 @@ tkn pipelinerun describe --last -n $NS | sed -n '/Results/,/^$/p'  # image-size-
 ```
 Target length < 2 min after trimming the build wait. Embed with asciinema-player on lab.adoc (near exercise 1).
 
-### Screen capture — the PaC git-push fire (`m07-pipelines-fundamentals-pac.gif`, < 90 s)
+### Screen capture — the PaC git-push fire (`pipelines-fundamentals-pac.gif`, < 90 s)
 Playwright/console capture: edit `README.md` in the Gitea fork and **Commit Changes**, then cut to
 the console **Pipelines → PipelineRuns** where a `parasol-claims-pull-request-…` run appears *on its
 own* within ~5 s and starts building. This is the "push → pipeline fires" moment; embed near lab.adoc

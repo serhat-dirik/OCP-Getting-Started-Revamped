@@ -16,10 +16,10 @@ SVG diagram exports remain the deferred media pass.
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
-| 1 | `m03-devspaces-inner-loop-01-workspace-loaded.png` | ✅ DONE 2026-07-10 | che-code editor after the factory URL, project `parasol-claims` in the Explorer, integrated terminal open | the Explorer tree, `devfile.yaml`, the terminal with `java -version` = openjdk 21 | lab.adoc ex. 1 |
-| 2 | `m03-devspaces-inner-loop-02-debug-5005.png` | ⬜ NOT CAPTURED (blocked) | che-code paused on a breakpoint in `ClaimResource.list`, debug toolbar visible | the breakpoint dot, the paused line, the Variables panel | lab.adoc ex. 6 |
-| 3 | `m03-devspaces-inner-loop-03-devfile-endpoints.png` | ⬜ NOT CAPTURED | Endpoints view listing the new internal `valkey` endpoint after the devfile restart; terminal `valkey-cli ping` = PONG | the `cache` container / valkey endpoint; the PONG | lab.adoc ex. 4 (no embed comment) |
-| 4 | `m03-devspaces-inner-loop-04-topology-open-in-devspaces.png` | ⚠ CAPTURED but UNUSED | Console Topology in `user1-dev`, `parasol-claims` node | the "Open in Dev Spaces" / edit-source link it was meant to show **does not exist** in 4.21 | none — not embedded |
+| 1 | `devspaces-inner-loop-01-workspace-loaded.png` | ✅ DONE 2026-07-10 | che-code editor after the factory URL, project `parasol-claims` in the Explorer, integrated terminal open | the Explorer tree, `devfile.yaml`, the terminal with `java -version` = openjdk 21 | lab.adoc ex. 1 |
+| 2 | `devspaces-inner-loop-02-debug-5005.png` | ⬜ NOT CAPTURED (blocked) | che-code paused on a breakpoint in `ClaimResource.list`, debug toolbar visible | the breakpoint dot, the paused line, the Variables panel | lab.adoc ex. 6 |
+| 3 | `devspaces-inner-loop-03-devfile-endpoints.png` | ⬜ NOT CAPTURED | Endpoints view listing the new internal `valkey` endpoint after the devfile restart; terminal `valkey-cli ping` = PONG | the `cache` container / valkey endpoint; the PONG | lab.adoc ex. 4 (no embed comment) |
+| 4 | `devspaces-inner-loop-04-topology-open-in-devspaces.png` | ⚠ CAPTURED but UNUSED | Console Topology in `user1-dev`, `parasol-claims` node | the "Open in Dev Spaces" / edit-source link it was meant to show **does not exist** in 4.21 | none — not embedded |
 
 **Status notes (2026-07-10 browser pass):**
 
@@ -78,10 +78,10 @@ The `vscode-java-pack` meta-extension is not in the embedded registry and would 
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m03-devspaces-inner-loop-01-inner-outer-loop.svg` | concept.adoc Mermaid "inner vs outer loop" | red inner loop hands off via git push to the grey outer loop; reuse across the delivery block. **Owner review M03-2: this diagram (the one after "currency is minutes to hours…") was too small.** The inline Mermaid source has been tightened to concise labels (`Edit → Build → Run → Observe`; `Pipeline · Image · GitOps · Prod`) as the interim legibility fix; export the SVG **~25% larger** and lightbox-enabled (see Lightbox note below). |
-| `m03-devspaces-inner-loop-02-workspace-gateway-services.svg` | concept.adoc Mermaid "workspace ↔ gateway ↔ services" | shared legend (browser, gateway, container, DB, namespace box); the "IDE is in the cluster" picture |
-| `m03-devspaces-inner-loop-03-platform-accretion-v3.svg` | concept.adoc TODO(media) | **master accretion diagram**, M03 layer (Dev Spaces workspace) highlighted on the M01/M02 base |
-| `m03-devspaces-inner-loop-04-what-you-built.svg` | wrapup.adoc Mermaid recap | green = what the attendee ran (workspace → dev mode → hot reload → push) |
+| `devspaces-inner-loop-01-inner-outer-loop.svg` | concept.adoc Mermaid "inner vs outer loop" | red inner loop hands off via git push to the grey outer loop; reuse across the delivery block. **Owner review M03-2: this diagram (the one after "currency is minutes to hours…") was too small.** The inline Mermaid source has been tightened to concise labels (`Edit → Build → Run → Observe`; `Pipeline · Image · GitOps · Prod`) as the interim legibility fix; export the SVG **~25% larger** and lightbox-enabled (see Lightbox note below). |
+| `devspaces-inner-loop-02-workspace-gateway-services.svg` | concept.adoc Mermaid "workspace ↔ gateway ↔ services" | shared legend (browser, gateway, container, DB, namespace box); the "IDE is in the cluster" picture |
+| `devspaces-inner-loop-03-platform-accretion-v3.svg` | concept.adoc TODO(media) | **master accretion diagram**, M03 layer (Dev Spaces workspace) highlighted on the M01/M02 base |
+| `devspaces-inner-loop-04-what-you-built.svg` | wrapup.adoc Mermaid recap | green = what the attendee ran (workspace → dev mode → hot reload → push) |
 
 ### Lightbox (click-to-enlarge) — shared fix SW-3 / CC-5
 
@@ -93,7 +93,7 @@ and wrapped in the lightbox once the supplemental-ui lands.
 
 ## Recordings
 
-### Silent screen capture — one-click to a live change (`m03-devspaces-inner-loop-demo.mp4`, < 90 s)
+### Silent screen capture — one-click to a live change (`devspaces-inner-loop-demo.mp4`, < 90 s)
 Playwright/console capture of the demo happy path: Topology in `user1-dev` (the running claims
 app) → open the workspace from the **factory URL** (`{devspaces_url}/#<fork>`; there is no
 "Open in Dev Spaces" link on the node in this console version) → workspace loads → in the

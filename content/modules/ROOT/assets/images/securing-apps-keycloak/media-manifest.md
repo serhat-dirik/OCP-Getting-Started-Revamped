@@ -26,9 +26,9 @@ alternatives to `oc set env` / `oc apply`); each gets a screenshot below.
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
-| 5 | `m13-securing-apps-keycloak-05-claims-env.png` | ⬜ NOT CAPTURED | **Workloads → Deployments → parasol-claims → Environment** tab with the `QUARKUS_OIDC_*` vars entered | the Name/Value rows that enable bearer protection — the Console-tab equivalent of `oc set env` (grounds the Console tab of ex. 2; the same UI is reused for ex. 3 and the ex. 4 web env) | lab.adoc ex. 2 (Console tab) |
-| 6 | `m13-securing-apps-keycloak-06-keycloak-login.png` | ⬜ NOT CAPTURED — **HIGH (signature; prefer <30s GIF/MP4)** | the **Keycloak login page** for `realm-<user>`, reached by opening the protected `parasol-web` frontend unauthenticated | the realm-branded login form the app never had to build — record the browser redirect (app → Keycloak login → back into the app after signing in as `adjuster`/`parasol`) | lab.adoc ex. 4 (after the proxy-forwarding fix) |
-| 8 | `m13-securing-apps-keycloak-08-import-fraud.png` | ⬜ NOT CAPTURED — optional | **+ / Import YAML** editor with the `parasol-fraud` manifest pasted | the masthead `+` action and the paste-and-Create flow (grounds the Console tab of ex. 7) | lab.adoc ex. 7 (Console tab) |
+| 5 | `securing-apps-keycloak-05-claims-env.png` | ⬜ NOT CAPTURED | **Workloads → Deployments → parasol-claims → Environment** tab with the `QUARKUS_OIDC_*` vars entered | the Name/Value rows that enable bearer protection — the Console-tab equivalent of `oc set env` (grounds the Console tab of ex. 2; the same UI is reused for ex. 3 and the ex. 4 web env) | lab.adoc ex. 2 (Console tab) |
+| 6 | `securing-apps-keycloak-06-keycloak-login.png` | ⬜ NOT CAPTURED — **HIGH (signature; prefer <30s GIF/MP4)** | the **Keycloak login page** for `realm-<user>`, reached by opening the protected `parasol-web` frontend unauthenticated | the realm-branded login form the app never had to build — record the browser redirect (app → Keycloak login → back into the app after signing in as `adjuster`/`parasol`) | lab.adoc ex. 4 (after the proxy-forwarding fix) |
+| 8 | `securing-apps-keycloak-08-import-fraud.png` | ⬜ NOT CAPTURED — optional | **+ / Import YAML** editor with the `parasol-fraud` manifest pasted | the masthead `+` action and the paste-and-Create flow (grounds the Console tab of ex. 7) | lab.adoc ex. 7 (Console tab) |
 
 ## Diagrams (SVG in-repo; source of truth is the inline Mermaid in the `.adoc`)
 
@@ -38,15 +38,15 @@ the editable source (do not delete it).
 
 | # | Filename | Status | Source (inline Mermaid in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `m13-securing-apps-keycloak-01-four-flows.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | the four OIDC flows — auth-code+PKCE + bearer (human), client-credentials + token-exchange (machine) — and how the user token flows through them |
-| 2 | `m13-securing-apps-keycloak-02-realm-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | realm → clients / roles / users, with the four Parasol clients, `claims-adjuster`, and the `adjuster`/`viewer` users |
-| 3 | `m13-securing-apps-keycloak-03-build-vs-buy.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | "build it yourself" (a column of auth risk) vs "use the platform" (Keycloak, included with OpenShift) |
-| 4 | `m13-securing-apps-keycloak-04-security-layer.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | the identity/access layer (login / bearer API / machine identity / exchange) over the M01–M12 Parasol platform, fed by Keycloak |
-| 7 | `m13-securing-apps-keycloak-07-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc | Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds) |
+| 1 | `securing-apps-keycloak-01-four-flows.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | the four OIDC flows — auth-code+PKCE + bearer (human), client-credentials + token-exchange (machine) — and how the user token flows through them |
+| 2 | `securing-apps-keycloak-02-realm-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | realm → clients / roles / users, with the four Parasol clients, `claims-adjuster`, and the `adjuster`/`viewer` users |
+| 3 | `securing-apps-keycloak-03-build-vs-buy.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | "build it yourself" (a column of auth risk) vs "use the platform" (Keycloak, included with OpenShift) |
+| 4 | `securing-apps-keycloak-04-security-layer.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | the identity/access layer (login / bearer API / machine identity / exchange) over the M01–M12 Parasol platform, fed by Keycloak |
+| 7 | `securing-apps-keycloak-07-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc | Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds) |
 
 ## Recording (demo-arc happy path)
 
-- `m13-securing-apps-keycloak-demo.cast` (asciinema) OR a `<90s` silent screen capture — ⬜ NOT CAPTURED.
+- `securing-apps-keycloak-demo.cast` (asciinema) OR a `<90s` silent screen capture — ⬜ NOT CAPTURED.
   The flagship clip pairs the two beats that read best on screen: **flip the open API live** (one
   `oc set env`, then the same `curl` goes `200 → 401` no token / `200` adjuster / `403` viewer), and the
   **token-exchange encore** (user token 401 at fraud → exchanged token 200 → the `parasol-batch`

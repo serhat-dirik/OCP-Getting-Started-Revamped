@@ -17,9 +17,9 @@ yet** — this is the spec; capture in the media phase.
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m20-eventing-deep-dive-01-eventing-model.svg` | concept.adoc Mermaid "The four primitives" | amber seeded PingSource + a "you: POST" actor both feeding a blue in-memory Broker; three green triggers (catch-all, filter `type`, filter `claimpriority`) to the light-blue `claims-consumer`; a dashed "on repeated failure" edge to `claims-dlq`. The module's spine — reused on slide 2 |
-| `m20-eventing-deep-dive-02-retries-dlq.svg` | concept.adoc delivery NOTE + slide 5 | a trigger→consumer edge with the consumer marked **broken**; the event bouncing through attempt 0 + retries at **1s/2s/4s** (~8s), then a fat arrow to the dead-letter sink showing a dead-event card with **`knativeerrorcode: 404`** and `knativeerrordest` highlighted. The "not dropped — dead-lettered, with why" visual |
-| `m20-eventing-deep-dive-03-what-you-built.svg` | wrapup.adoc Mermaid recap | amber seeded source; blue in-memory broker; the three green triggers (incl. the filtered + retry/DLQ `claims-fraud-review`); light-blue `claims-consumer` + `claims-dlq` dead-letter sink |
+| `eventing-deep-dive-01-eventing-model.svg` | concept.adoc Mermaid "The four primitives" | amber seeded PingSource + a "you: POST" actor both feeding a blue in-memory Broker; three green triggers (catch-all, filter `type`, filter `claimpriority`) to the light-blue `claims-consumer`; a dashed "on repeated failure" edge to `claims-dlq`. The module's spine — reused on slide 2 |
+| `eventing-deep-dive-02-retries-dlq.svg` | concept.adoc delivery NOTE + slide 5 | a trigger→consumer edge with the consumer marked **broken**; the event bouncing through attempt 0 + retries at **1s/2s/4s** (~8s), then a fat arrow to the dead-letter sink showing a dead-event card with **`knativeerrorcode: 404`** and `knativeerrordest` highlighted. The "not dropped — dead-lettered, with why" visual |
+| `eventing-deep-dive-03-what-you-built.svg` | wrapup.adoc Mermaid recap | amber seeded source; blue in-memory broker; the three green triggers (incl. the filtered + retry/DLQ `claims-fraud-review`); light-blue `claims-consumer` + `claims-dlq` dead-letter sink |
 
 Shared legend across the diagrams: the Broker hub, the Trigger-with-filter chip, the CloudEvents envelope
 card (type/source/id + extension attr), the scale-to-zero consumer, the dead-letter sink — Red Hat-neutral
@@ -35,10 +35,10 @@ consumer's **event-display** web page, signed in as the sample user, project sco
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m20-eventing-deep-dive-01-event-display-envelope.png` | The `claims-consumer` **event-display** page showing a received `☁️ cloudevents.Event` — `type: com.parasol.claim.submitted`, `source`, `id`, `Validation: valid`, and the claim `Data` | Circle: the **context attributes** + `Validation: valid` — "the consumer genuinely received and displayed this" | lab.adoc ex. 2 (consumer-as-processor beat) — **the marquee** |
-| 2 | `m20-eventing-deep-dive-02-dead-letter-event.png` | The `claims-dlq` **event-display** page showing a dead-lettered event with the **`knativeerrorcode: 404`** and `knativeerrordest` extension attributes | Circle: **`knativeerrorcode: 404`** + `knativeerrordest` — "not dropped; dead-lettered with why" | lab.adoc ex. 5 (retries + dead-letter beat) — **the second marquee** |
-| 3 | `m20-eventing-deep-dive-03-eventing-triggers.png` | Console → **Serverless → Eventing**, the `default` Broker with the three Triggers (`claims-events`, `claims-fraud-review`, `claims-audit`) and their filters, and the `claim-ticker` PingSource | Circle: the two **filtered** Triggers' filter attributes (`type`, `claimpriority`) | lab.adoc ex. 4 (attribute-filtering beat) |
-| 4 | `m20-eventing-deep-dive-04-trigger-filter-edit.png` | Console → **Serverless → Eventing → Trigger** editor (or +Add → Import YAML) showing a Trigger's `filter.attributes` and a `delivery` block with `deadLetterSink` | Circle: the **`deadLetterSink`** + `retry` fields | lab.adoc ex. 5 (delivery-spec beat) |
+| 1 | `eventing-deep-dive-01-event-display-envelope.png` | The `claims-consumer` **event-display** page showing a received `☁️ cloudevents.Event` — `type: com.parasol.claim.submitted`, `source`, `id`, `Validation: valid`, and the claim `Data` | Circle: the **context attributes** + `Validation: valid` — "the consumer genuinely received and displayed this" | lab.adoc ex. 2 (consumer-as-processor beat) — **the marquee** |
+| 2 | `eventing-deep-dive-02-dead-letter-event.png` | The `claims-dlq` **event-display** page showing a dead-lettered event with the **`knativeerrorcode: 404`** and `knativeerrordest` extension attributes | Circle: **`knativeerrorcode: 404`** + `knativeerrordest` — "not dropped; dead-lettered with why" | lab.adoc ex. 5 (retries + dead-letter beat) — **the second marquee** |
+| 3 | `eventing-deep-dive-03-eventing-triggers.png` | Console → **Serverless → Eventing**, the `default` Broker with the three Triggers (`claims-events`, `claims-fraud-review`, `claims-audit`) and their filters, and the `claim-ticker` PingSource | Circle: the two **filtered** Triggers' filter attributes (`type`, `claimpriority`) | lab.adoc ex. 4 (attribute-filtering beat) |
+| 4 | `eventing-deep-dive-04-trigger-filter-edit.png` | Console → **Serverless → Eventing → Trigger** editor (or +Add → Import YAML) showing a Trigger's `filter.attributes` and a `delivery` block with `deadLetterSink` | Circle: the **`deadLetterSink`** + `retry` fields | lab.adoc ex. 5 (delivery-spec beat) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
@@ -50,7 +50,7 @@ click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs a
 
 ## Recordings
 
-### Terminal + browser cast — route → filter → break → dead-letter (`m20-eventing-deep-dive-demo.cast`, ~12 min, MANDATORY)
+### Terminal + browser cast — route → filter → break → dead-letter (`eventing-deep-dive-demo.cast`, ~12 min, MANDATORY)
 Asciinema cast (or screen capture with the event-display page visible) of the demo-arc happy path, recorded
 in the Showroom terminal as the sample user (drive it straight from the demo-flavor Say/Show/Do blocks in
 `lab.adoc`), with the `claims-consumer` and `claims-dlq` **event-display pages** on screen beside the terminal:

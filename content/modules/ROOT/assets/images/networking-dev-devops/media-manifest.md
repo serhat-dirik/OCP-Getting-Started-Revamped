@@ -12,10 +12,10 @@ files with a commented `// media-pass:` line — replace with the `image::…` w
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m15-networking-dev-devops-01-traffic-directions.svg` | concept.adoc Mermaid "two directions of traffic" | outside → web = **north-south (expose)**; web → api → db = **east-west (policy)**; the mental-model spine — reused on slide 2 |
-| `m15-networking-dev-devops-02-exposure-tree.svg` | concept.adoc Mermaid "exposure decision tree" | ClusterIP → NodePort → LoadBalancer (**\<pending\> on bare metal**) → **Route (workhorse)** → Gateway API (strategic); reused on slide 4 |
-| `m15-networking-dev-devops-03-platform-accretion.svg` | concept.adoc — media-pass pending (centrally maintained master diagram) | **master accretion diagram**, the M15 layer (the network control plane: exposure + NetworkPolicy + UDN around `{user}-dev` and `{user}-partner`) highlighted on the running Parasol platform |
-| `m15-networking-dev-devops-04-what-you-built.svg` | wrapup.adoc Mermaid recap | app namespace (web→api→db allowed, demo-client **DENIED** to db) + partner namespace (partner-workload on `ovn-udn1`, **native isolation**); green = allowed, red = denied/isolated, blue = ingress |
+| `networking-dev-devops-01-traffic-directions.svg` | concept.adoc Mermaid "two directions of traffic" | outside → web = **north-south (expose)**; web → api → db = **east-west (policy)**; the mental-model spine — reused on slide 2 |
+| `networking-dev-devops-02-exposure-tree.svg` | concept.adoc Mermaid "exposure decision tree" | ClusterIP → NodePort → LoadBalancer (**\<pending\> on bare metal**) → **Route (workhorse)** → Gateway API (strategic); reused on slide 4 |
+| `networking-dev-devops-03-platform-accretion.svg` | concept.adoc — media-pass pending (centrally maintained master diagram) | **master accretion diagram**, the M15 layer (the network control plane: exposure + NetworkPolicy + UDN around `{user}-dev` and `{user}-partner`) highlighted on the running Parasol platform |
+| `networking-dev-devops-04-what-you-built.svg` | wrapup.adoc Mermaid recap | app namespace (web→api→db allowed, demo-client **DENIED** to db) + partner namespace (partner-workload on `ovn-udn1`, **native isolation**); green = allowed, red = denied/isolated, blue = ingress |
 
 Shared legend across all four: namespace box, Service/endpoints tag, NetworkPolicy shield, UDN
 "own-network" badge, Route/Gateway ingress icon — same palette as M01–M14 (Red Hat-neutral, no
@@ -24,7 +24,7 @@ described as GA, not by number — matches the attribute policy).
 
 ## Recordings
 
-### Terminal cast — flat network → controlled network → UDN reveal (`m15-networking-dev-devops-demo.cast`, ~12 min, MANDATORY)
+### Terminal cast — flat network → controlled network → UDN reveal (`networking-dev-devops-demo.cast`, ~12 min, MANDATORY)
 Asciinema cast of the demo-arc happy path, recorded in the Showroom terminal as `user1` (drive it
 straight from the demo-flavor Say/Show/Do blocks in `lab.adoc`):
 
@@ -43,13 +43,13 @@ don't cut them short in the edit.
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m15-networking-dev-devops-01-services-clusterip.png` | Console → Networking → Services (project `{user}-dev`), the three tiers all `ClusterIP` | Circle: the `Type = ClusterIP` column + empty external address | lab.adoc ex. 1 Console tab |
-| 2 | `m15-networking-dev-devops-02-create-edge-route.png` | Console → Networking → Routes → Create Route form (Service `parasol-web`, Secure, Edge, Insecure=Allow) | Circle: TLS termination = Edge, Insecure traffic = Allow | lab.adoc ex. 2 Console tab |
-| 3 | `m15-networking-dev-devops-03-networkpolicy-yaml.png` | Console → Networking → NetworkPolicies → Create → YAML view showing `default-deny-all` | Circle: empty `podSelector: {}` + `policyTypes: [Ingress, Egress]` | lab.adoc ex. 3 Console tab |
-| 4 | `m15-networking-dev-devops-04-pod-terminal-blocked.png` | Console → Workloads → Pods → a `demo-client` pod → Terminal, the `</dev/tcp/claims-db/5432>` probe hanging/timing out | Circle: the command timing out (no `OPEN`) vs a `parasol-claims` pod terminal that prints `OPEN` | lab.adoc ex. 4 Console tab |
+| 1 | `networking-dev-devops-01-services-clusterip.png` | Console → Networking → Services (project `{user}-dev`), the three tiers all `ClusterIP` | Circle: the `Type = ClusterIP` column + empty external address | lab.adoc ex. 1 Console tab |
+| 2 | `networking-dev-devops-02-create-edge-route.png` | Console → Networking → Routes → Create Route form (Service `parasol-web`, Secure, Edge, Insecure=Allow) | Circle: TLS termination = Edge, Insecure traffic = Allow | lab.adoc ex. 2 Console tab |
+| 3 | `networking-dev-devops-03-networkpolicy-yaml.png` | Console → Networking → NetworkPolicies → Create → YAML view showing `default-deny-all` | Circle: empty `podSelector: {}` + `policyTypes: [Ingress, Egress]` | lab.adoc ex. 3 Console tab |
+| 4 | `networking-dev-devops-04-pod-terminal-blocked.png` | Console → Workloads → Pods → a `demo-client` pod → Terminal, the `</dev/tcp/claims-db/5432>` probe hanging/timing out | Circle: the command timing out (no `OPEN`) vs a `parasol-claims` pod terminal that prints `OPEN` | lab.adoc ex. 4 Console tab |
 
 **Animated gif (PREFERRED for the multi-step default-deny→allow story):**
-`m15-networking-dev-devops-05-deny-then-allow.gif` (<30 s, silent) — split-screen or quick cuts:
+`networking-dev-devops-05-deny-then-allow.gif` (<30 s, silent) — split-screen or quick cuts:
 apply `default-deny` (parasol-claims → `0/1`) → apply the DNS + db allows (parasol-claims → `1/1`) →
 the two probes (API `OPEN`, demo-client `BLOCKED`). The "two answers" frame is the payoff; hold it.
 

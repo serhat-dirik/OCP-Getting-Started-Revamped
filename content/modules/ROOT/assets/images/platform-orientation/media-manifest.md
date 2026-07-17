@@ -20,10 +20,10 @@ the newly-enabled Developer perspective, so the nav it shows is stale.
 
 | # | Filename | Status | Console view | Notice | Embed point |
 |---|----------|--------|--------------|--------|-------------|
-| 1 | `m01-platform-orientation-01-topology-3pods.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, `parasol-web` scaled to 3 | the Pod donut showing 3/3; the node title; the Open-URL arrow | lab.adoc ex. 3 (scale) |
-| 2 | `m01-platform-orientation-02-deploy-image-dialog.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Container images** form, registry reference pasted and **Validated** | the *Image name from external registry* field, the green *Validated*, the auto-filled Name, Resource type = Deployment; Target port and *Create a route* live under *Advanced options* | lab.adoc ex. 2 (Console tab) |
-| 3 | `m01-platform-orientation-03-lightspeed-answer.png` | ✅ DONE 2026-07-10 | OpenShift Lightspeed panel after asking "Why is my pod restarting?" | the Lightspeed **chat bubble at bottom-right**; the bulleted causes; the suggested `oc` commands; the doc citations | lab.adoc ex. 7 |
-| 4 | `m01-platform-orientation-04-unified-console-landmarks.png` | ⚠️ RE-SHOOT as `user1` (owner review 2026-07-14) | Unified console, project `user1-dev` selected, on the CURRENT nav (with the Pipelines/GitOps/ACS plugins present) | (1) project selector on `user1-dev`, (2) masthead **Quick create (+)** menu, (3) Topology under **Workloads**, (4) Lightspeed **chat bubble (bottom-right)**; if the Developer perspective is enabled, include the perspective switcher at the top of the nav. The web-terminal masthead icon is **no longer a landmark** (the lab dropped that step). | lab.adoc ex. 1 |
+| 1 | `platform-orientation-01-topology-3pods.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, `parasol-web` scaled to 3 | the Pod donut showing 3/3; the node title; the Open-URL arrow | lab.adoc ex. 3 (scale) |
+| 2 | `platform-orientation-02-deploy-image-dialog.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Container images** form, registry reference pasted and **Validated** | the *Image name from external registry* field, the green *Validated*, the auto-filled Name, Resource type = Deployment; Target port and *Create a route* live under *Advanced options* | lab.adoc ex. 2 (Console tab) |
+| 3 | `platform-orientation-03-lightspeed-answer.png` | ✅ DONE 2026-07-10 | OpenShift Lightspeed panel after asking "Why is my pod restarting?" | the Lightspeed **chat bubble at bottom-right**; the bulleted causes; the suggested `oc` commands; the doc citations | lab.adoc ex. 7 |
+| 4 | `platform-orientation-04-unified-console-landmarks.png` | ⚠️ RE-SHOOT as `user1` (owner review 2026-07-14) | Unified console, project `user1-dev` selected, on the CURRENT nav (with the Pipelines/GitOps/ACS plugins present) | (1) project selector on `user1-dev`, (2) masthead **Quick create (+)** menu, (3) Topology under **Workloads**, (4) Lightspeed **chat bubble (bottom-right)**; if the Developer perspective is enabled, include the perspective switcher at the top of the nav. The web-terminal masthead icon is **no longer a landmark** (the lab dropped that step). | lab.adoc ex. 1 |
 
 **4.21 console reality confirmed during the pass (corrections applied to `lab.adoc`):** there is
 **no `+Add` nav item** — the deploy flows (Import YAML / Import from Git / Container images) live
@@ -46,13 +46,13 @@ of the nav. The landmarks re-shoot (screenshot 4) must reflect this current nav.
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m01-platform-orientation-01-desired-state.svg` | concept.adoc Mermaid "desired state / reconcile loop" | shared legend (pod, deployment, service, human) |
-| `m01-platform-orientation-02-platform-accretion-v1.svg` | concept.adoc Mermaid platform diagram | **master accretion diagram**, M01 layer in red; later modules highlight their own layer on this base |
-| `m01-platform-orientation-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = objects the attendee created |
+| `platform-orientation-01-desired-state.svg` | concept.adoc Mermaid "desired state / reconcile loop" | shared legend (pod, deployment, service, human) |
+| `platform-orientation-02-platform-accretion-v1.svg` | concept.adoc Mermaid platform diagram | **master accretion diagram**, M01 layer in red; later modules highlight their own layer on this base |
+| `platform-orientation-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = objects the attendee created |
 
 ## Recordings
 
-### Terminal cast — the six-command recap (`m01-platform-orientation-demo.cast`)
+### Terminal cast — the six-command recap (`platform-orientation-demo.cast`)
 Record with asciinema as **user1** in `user1-dev` (reset first: `ws reset m01`). Exact sequence:
 
 ```sh
@@ -71,7 +71,7 @@ oc logs deployment/parasol-web --tail=6
 ```
 Target length < 2 min. Embed with asciinema-player on lab.adoc (near exercise 6).
 
-### Screen capture — kill-a-Pod self-heal (`m01-platform-orientation-selfheal.gif`, < 90 s)
+### Screen capture — kill-a-Pod self-heal (`platform-orientation-selfheal.gif`, < 90 s)
 Playwright/console capture: Topology with 3 Pods, delete one Pod from a side terminal,
 capture the donut losing and regaining a segment. This is the module's signature moment;
 embed near lab.adoc exercise 3.

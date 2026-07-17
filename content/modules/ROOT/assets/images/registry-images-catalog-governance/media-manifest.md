@@ -13,9 +13,9 @@ asset lands.
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m17-registry-images-catalog-governance-01-two-supply-chains.svg` | concept.adoc Mermaid "two supply chains on one page" | external registries → **governance** (allowed-registries / IDMS-ITMS) → internal registry (svc:5000 + PVC + pruner) → **ImageStream** (immutable digest · scheduled · Local) → workload; **catalog supply** branch (OperatorHub sources · samples operator · ConsoleSample · namespaced Template · devfiles) → Developer Catalog. red = outside trust boundary, amber = platform governance, green = attendee hands-on. The module's spine — reused on slide 2 |
-| `m17-registry-images-catalog-governance-02-immutable-promote.svg` | concept.adoc "why an ImageStream still matters" | a moving tag `prod` pinned to an immutable `sha256`; `1.0` and `prod` arrows converging on the SAME digest box; a side note "re-push `1.0` upstream → `prod` still points at the promoted digest". The promotion-by-digest idea — reused on slide 3 |
-| `m17-registry-images-catalog-governance-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = your namespaced work (promote · scheduled import · Template · pull secret); amber = cluster-wide governance you read (allowed-registries/IDMS-ITMS · nightly pruner · samples operator/ConsoleSample); blue = the internal registry + Developer Catalog they meet at |
+| `registry-images-catalog-governance-01-two-supply-chains.svg` | concept.adoc Mermaid "two supply chains on one page" | external registries → **governance** (allowed-registries / IDMS-ITMS) → internal registry (svc:5000 + PVC + pruner) → **ImageStream** (immutable digest · scheduled · Local) → workload; **catalog supply** branch (OperatorHub sources · samples operator · ConsoleSample · namespaced Template · devfiles) → Developer Catalog. red = outside trust boundary, amber = platform governance, green = attendee hands-on. The module's spine — reused on slide 2 |
+| `registry-images-catalog-governance-02-immutable-promote.svg` | concept.adoc "why an ImageStream still matters" | a moving tag `prod` pinned to an immutable `sha256`; `1.0` and `prod` arrows converging on the SAME digest box; a side note "re-push `1.0` upstream → `prod` still points at the promoted digest". The promotion-by-digest idea — reused on slide 3 |
+| `registry-images-catalog-governance-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = your namespaced work (promote · scheduled import · Template · pull secret); amber = cluster-wide governance you read (allowed-registries/IDMS-ITMS · nightly pruner · samples operator/ConsoleSample); blue = the internal registry + Developer Catalog they meet at |
 
 Shared legend across the diagrams: registry cylinder, ImageStream box, immutable-digest badge, the
 amber governance shield, catalog tile — same palette as M01–M16 (Red Hat-neutral, no vendor-logo soup).
@@ -26,7 +26,7 @@ and generic `user3-dev`.
 
 ## Recordings
 
-### Terminal cast — promote by digest → allowed-registries block → scheduled import → namespaced Template (`m17-registry-images-catalog-governance-demo.cast`, ~10 min, MANDATORY)
+### Terminal cast — promote by digest → allowed-registries block → scheduled import → namespaced Template (`registry-images-catalog-governance-demo.cast`, ~10 min, MANDATORY)
 Asciinema cast of the demo-arc happy path, recorded in the Showroom terminal as `user3` (drive it
 straight from the demo-flavor Say/Show/Do blocks in `lab.adoc`):
 
@@ -44,13 +44,13 @@ it on a disposable cluster, never a shared workshop cluster mid-session.**
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m17-registry-images-catalog-governance-01-imagestream-detail.png` | Console → Builds → ImageStreams → `parasol-claims` (project `{user}-dev`), the tag + `sha256` visible | Circle: the `1.0` tag and its resolved `sha256` digest | lab.adoc ex. 1 Console tab |
-| 2 | `m17-registry-images-catalog-governance-02-imagestream-two-tags.png` | Console → Builds → ImageStreams → `parasol-claims` after the promote, showing `1.0` **and** `prod` | Circle: both tags pointing at the same `sha256` | lab.adoc ex. 2 Console tab |
-| 3 | `m17-registry-images-catalog-governance-03-developer-catalog-template.png` | Console → +Add → Developer Catalog filtered to *Template*, the **Parasol Claims Quickstart** tile | Circle: the custom tile (present only in `{user}-dev`) | lab.adoc ex. 5 Console tab |
-| 4 | `m17-registry-images-catalog-governance-04-cluster-image-config.png` | Console → Administration → Cluster Settings → Configuration → **Image**, the allowed-registries fields | Circle: `allowedRegistriesForImport` (empty = open) | lab.adoc ex. 6 (governance read) |
+| 1 | `registry-images-catalog-governance-01-imagestream-detail.png` | Console → Builds → ImageStreams → `parasol-claims` (project `{user}-dev`), the tag + `sha256` visible | Circle: the `1.0` tag and its resolved `sha256` digest | lab.adoc ex. 1 Console tab |
+| 2 | `registry-images-catalog-governance-02-imagestream-two-tags.png` | Console → Builds → ImageStreams → `parasol-claims` after the promote, showing `1.0` **and** `prod` | Circle: both tags pointing at the same `sha256` | lab.adoc ex. 2 Console tab |
+| 3 | `registry-images-catalog-governance-03-developer-catalog-template.png` | Console → +Add → Developer Catalog filtered to *Template*, the **Parasol Claims Quickstart** tile | Circle: the custom tile (present only in `{user}-dev`) | lab.adoc ex. 5 Console tab |
+| 4 | `registry-images-catalog-governance-04-cluster-image-config.png` | Console → Administration → Cluster Settings → Configuration → **Image**, the allowed-registries fields | Circle: `allowedRegistriesForImport` (empty = open) | lab.adoc ex. 6 (governance read) |
 
 **Animated gif (PREFERRED for the promote-by-digest story):**
-`m17-registry-images-catalog-governance-05-promote-by-digest.gif` (<20 s, silent) — quick cuts:
+`registry-images-catalog-governance-05-promote-by-digest.gif` (<20 s, silent) — quick cuts:
 `parasol-claims` with one `1.0` tag → `oc tag` → **two tags, identical `sha256`** side by side. The
 matching-digest reveal is the payoff; hold the two `dockerImageReference` lines together.
 

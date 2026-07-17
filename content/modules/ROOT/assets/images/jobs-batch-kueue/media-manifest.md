@@ -12,17 +12,17 @@ commented `// media-pass: image::…` line — uncomment when the asset lands.
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m06-jobs-batch-kueue-01-async-spectrum.svg` | concept.adoc Mermaid "async spectrum" | request-driven → event-driven → **batch** (highlighted); the framing diagram, reused on slide 2 |
-| `m06-jobs-batch-kueue-02-kueue-admission.svg` | concept.adoc Mermaid "admission flow" | Job (labelled) → LocalQueue → ClusterQueue quota → **admitted / pending / preempted**; the module's anchor diagram, reused on slide 5 |
-| `m06-jobs-batch-kueue-03-platform-accretion-v23.svg` | concept.adoc — media-pass pending (no inline Mermaid source; centrally maintained master diagram) | **master accretion diagram**, the M06 layer (batch tier + admission control) highlighted on the running Parasol platform |
-| `m06-jobs-batch-kueue-04-what-you-built.svg` | wrapup.adoc Mermaid recap | Job/CronJob → LocalQueue → ClusterQueue (admitted / pending / preempted), with the AI inference job feeding the *same* LocalQueue (green = ran to completion; amber = queued/preempted) |
+| `jobs-batch-kueue-01-async-spectrum.svg` | concept.adoc Mermaid "async spectrum" | request-driven → event-driven → **batch** (highlighted); the framing diagram, reused on slide 2 |
+| `jobs-batch-kueue-02-kueue-admission.svg` | concept.adoc Mermaid "admission flow" | Job (labelled) → LocalQueue → ClusterQueue quota → **admitted / pending / preempted**; the module's anchor diagram, reused on slide 5 |
+| `jobs-batch-kueue-03-platform-accretion-v23.svg` | concept.adoc — media-pass pending (no inline Mermaid source; centrally maintained master diagram) | **master accretion diagram**, the M06 layer (batch tier + admission control) highlighted on the running Parasol platform |
+| `jobs-batch-kueue-04-what-you-built.svg` | wrapup.adoc Mermaid recap | Job/CronJob → LocalQueue → ClusterQueue (admitted / pending / preempted), with the AI inference job feeding the *same* LocalQueue (green = ran to completion; amber = queued/preempted) |
 
 Shared legend across all four: namespace box, Job/Pod, queue (LocalQueue/ClusterQueue) tag, quota
 gauge, priority chevron — same palette as M01–M05 (Red Hat-neutral, no vendor-logo soup).
 
 ## Recordings
 
-### Terminal cast — the queue, the preemption, the AI beat (`m06-jobs-batch-kueue-demo.cast`, ~10 min, MANDATORY)
+### Terminal cast — the queue, the preemption, the AI beat (`jobs-batch-kueue-demo.cast`, ~10 min, MANDATORY)
 Asciinema cast of the demo-arc happy path, recorded in the Showroom terminal as `user1` in
 `user1-batch` (drive it straight from the demo-flavor Say/Show/Do blocks in `lab.adoc`):
 
@@ -39,8 +39,8 @@ eviction. Warm the images first so there is no cold-pull dead air before the fir
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m06-jobs-batch-kueue-01-workloads-admitted.png` | Console → search `Workload` (kueue.x-k8s.io) in `user1-batch`, the list showing 2 Admitted / 3 Pending | Circle: the two `Admitted=True` rows vs the three pending | lab.adoc ex. 5 (optional) |
-| 2 | `m06-jobs-batch-kueue-02-preempted-conditions.png` | Console → the preempted Workload's Conditions (`Evicted`/`Preempted`/`Requeued`) | Circle: `Preempted: True` and `Requeued: True` | lab.adoc ex. 5 (optional) |
+| 1 | `jobs-batch-kueue-01-workloads-admitted.png` | Console → search `Workload` (kueue.x-k8s.io) in `user1-batch`, the list showing 2 Admitted / 3 Pending | Circle: the two `Admitted=True` rows vs the three pending | lab.adoc ex. 5 (optional) |
+| 2 | `jobs-batch-kueue-02-preempted-conditions.png` | Console → the preempted Workload's Conditions (`Evicted`/`Preempted`/`Requeued`) | Circle: `Preempted: True` and `Requeued: True` | lab.adoc ex. 5 (optional) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 console): the Workload list is reached
 via the top **search** box (there is no dedicated Kueue nav item in 4.21) — confirm `Workload` and

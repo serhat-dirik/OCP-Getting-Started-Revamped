@@ -16,12 +16,12 @@ media pass.
 
 | # | Filename | Status | Console view | Notice | Embed point |
 |---|----------|--------|--------------|--------|-------------|
-| 1 | `m02-build-deliver-01-import-from-git.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Import from Git**, `user1/parasol-claims` pasted, **repository-unreachable** warning, Import Strategy = **Builder Image → Java 21** | the Git URL field; the "repository is unreachable / unable to detect the import strategy" warning; the manually-selected **Java 21** tile | lab.adoc ex. 1 (Console tab) |
-| 2 | `m02-build-deliver-02-catalog-postgres-tile.png` | ✅ DONE 2026-07-10 | **Ecosystem → Software Catalog → Databases**, the Parasol PostgreSQL tile | the "Parasol PostgreSQL (ephemeral)" tile; provider "Provided by Parasol Insurance"; the DATABASE / PARASOL / POSTGRESQL tags | lab.adoc ex. 4 (Console tab) |
-| 3 | `m02-build-deliver-03-buildconfig-to-imagestream.png` | ⬜ NOT CAPTURED | Topology `parasol-claims` node → **Resources**: the completed Build and the ImageStream tag | the `Complete` build; `parasol-claims:latest`; the "Source (S2I)" strategy | lab.adoc ex. 1 (inspect) |
-| 4 | `m02-build-deliver-04-topology-built-and-wired.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, claims + claims-db + notifications all healthy | the `parasol-claims`→`claims-db` connection; the Open-URL arrow on claims | lab.adoc ex. 5 (end state) |
+| 1 | `build-deliver-01-import-from-git.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Import from Git**, `user1/parasol-claims` pasted, **repository-unreachable** warning, Import Strategy = **Builder Image → Java 21** | the Git URL field; the "repository is unreachable / unable to detect the import strategy" warning; the manually-selected **Java 21** tile | lab.adoc ex. 1 (Console tab) |
+| 2 | `build-deliver-02-catalog-postgres-tile.png` | ✅ DONE 2026-07-10 | **Ecosystem → Software Catalog → Databases**, the Parasol PostgreSQL tile | the "Parasol PostgreSQL (ephemeral)" tile; provider "Provided by Parasol Insurance"; the DATABASE / PARASOL / POSTGRESQL tags | lab.adoc ex. 4 (Console tab) |
+| 3 | `build-deliver-03-buildconfig-to-imagestream.png` | ⬜ NOT CAPTURED | Topology `parasol-claims` node → **Resources**: the completed Build and the ImageStream tag | the `Complete` build; `parasol-claims:latest`; the "Source (S2I)" strategy | lab.adoc ex. 1 (inspect) |
+| 4 | `build-deliver-04-topology-built-and-wired.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, claims + claims-db + notifications all healthy | the `parasol-claims`→`claims-db` connection; the Open-URL arrow on claims | lab.adoc ex. 5 (end state) |
 
-**#3 `m02-build-deliver-03-buildconfig-to-imagestream.png` remains uncaptured** — the 2026-07-10
+**#3 `build-deliver-03-buildconfig-to-imagestream.png` remains uncaptured** — the 2026-07-10
 browser pass prioritized the two load-bearing shots (#1 the import reality, #2 the catalog) plus
 the #4 end-state; the BuildConfig→ImageStream inspection (#3) is enrichment for an inline CLI step
 and is deferred to the next media pass. It has no `// media-pass:` embed comment in `lab.adoc`
@@ -51,13 +51,13 @@ and is deferred to the next media pass. It has no `// media-pass:` embed comment
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m02-build-deliver-01-build-spectrum.svg` | concept.adoc Mermaid "build spectrum decision tree" | the module's key diagram: image? / source? / need control? / workflow? |
-| `m02-build-deliver-02-platform-accretion-v2.svg` | (new) master accretion diagram, **build layer** highlighted | reuse the M01 platform base; light up the build/registry layer in red (accretion pattern) |
-| `m02-build-deliver-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = objects the attendee created (source→S2I→image→Deployment + DB + Secret + Route) |
+| `build-deliver-01-build-spectrum.svg` | concept.adoc Mermaid "build spectrum decision tree" | the module's key diagram: image? / source? / need control? / workflow? |
+| `build-deliver-02-platform-accretion-v2.svg` | (new) master accretion diagram, **build layer** highlighted | reuse the M01 platform base; light up the build/registry layer in red (accretion pattern) |
+| `build-deliver-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = objects the attendee created (source→S2I→image→Deployment + DB + Secret + Route) |
 
 ## Recordings
 
-### Terminal cast — source to running app, S2I (`m02-build-deliver-demo.cast`)
+### Terminal cast — source to running app, S2I (`build-deliver-demo.cast`)
 Record with asciinema as **user1** in `user1-dev` (reset first: `ws reset m02`). Exact sequence
 (the claims build takes ~4 min — trim the wait in post, or narrate the trusted-content beat over it):
 
@@ -80,7 +80,7 @@ curl -s http://parasol-claims-user1-dev.$(oc get ingresses.config cluster -o jso
 ```
 Target length < 2 min after trimming the build wait. Embed with asciinema-player on lab.adoc (near exercise 1 or 5).
 
-### Screen capture — import-from-Git to Topology (`m02-build-deliver-import.gif`, < 90 s)
+### Screen capture — import-from-Git to Topology (`build-deliver-import.gif`, < 90 s)
 Playwright/console capture: **Quick create (+) → Import from Git**, paste `user1/parasol-claims`,
 dismiss the **repository-unreachable** warning, pick **Import Strategy → Builder Image → Java 21**,
 type the Name, Create, and land in Topology with the build starting. This is the console-heavy

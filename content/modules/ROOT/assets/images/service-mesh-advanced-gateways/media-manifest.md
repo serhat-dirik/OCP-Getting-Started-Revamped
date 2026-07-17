@@ -13,9 +13,9 @@ with the `image::…` when the asset lands. **Do not shoot yet** — this is the
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m18-service-mesh-advanced-gateways-01-mesh-architecture.svg` | concept.adoc Mermaid "The data plane and the control plane" | blue **control plane** (istiod + Kiali in istio-system) pushing config + mTLS certs DOWN to amber **sidecar proxies** wrapping green app containers (web/claims/fraud) in `{user}-mesh`; solid mTLS edges between meshed pods; a red **un-meshed demo-client** with a dashed "plaintext (blocked under STRICT)" edge. The module's spine — reused on slide 2 |
-| `m18-service-mesh-advanced-gateways-02-traffic-split.svg` | lab.adoc ex. 4 + slide 5 | claims' sidecar fanning to a fat **90%** arrow (v1 subset) and a thin **10%** arrow (v2 subset), with an `x-parasol-test:true` header-tagged request on a dedicated line straight to v2; a "read from `istio_requests_total`" telemetry chip. The weighted/header routing idea |
-| `m18-service-mesh-advanced-gateways-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = meshed workloads (web/claims/fraud v1+v2); amber = the mesh policy applied (VirtualService · DestinationRule · AuthorizationPolicy · Gateway); blue = the un-meshed claims-db; mTLS + authz edges claims→fraud |
+| `service-mesh-advanced-gateways-01-mesh-architecture.svg` | concept.adoc Mermaid "The data plane and the control plane" | blue **control plane** (istiod + Kiali in istio-system) pushing config + mTLS certs DOWN to amber **sidecar proxies** wrapping green app containers (web/claims/fraud) in `{user}-mesh`; solid mTLS edges between meshed pods; a red **un-meshed demo-client** with a dashed "plaintext (blocked under STRICT)" edge. The module's spine — reused on slide 2 |
+| `service-mesh-advanced-gateways-02-traffic-split.svg` | lab.adoc ex. 4 + slide 5 | claims' sidecar fanning to a fat **90%** arrow (v1 subset) and a thin **10%** arrow (v2 subset), with an `x-parasol-test:true` header-tagged request on a dedicated line straight to v2; a "read from `istio_requests_total`" telemetry chip. The weighted/header routing idea |
+| `service-mesh-advanced-gateways-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = meshed workloads (web/claims/fraud v1+v2); amber = the mesh policy applied (VirtualService · DestinationRule · AuthorizationPolicy · Gateway); blue = the un-meshed claims-db; mTLS + authz edges claims→fraud |
 
 Shared legend across the diagrams: control-plane box, sidecar-proxy ring, mTLS padlock edge, the amber
 policy card, the SPIFFE-identity badge — Red Hat-neutral palette, no vendor-logo soup. Do **not** print the
@@ -30,12 +30,12 @@ traffic first** — run the exercise-3 traffic-generation before each shot.
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m18-service-mesh-advanced-gateways-01-kiali-graph-mtls.png` | Kiali → Traffic Graph → `{user}-mesh`, after exercise-3 traffic: nodes `parasol-web`/`parasol-claims`/`parasol-fraud` with traffic-driven edges | Circle: an edge's **mutual-TLS padlock** icon + the request-rate label | lab.adoc ex. 3 (the "graph lights up" beat) — **the marquee** |
-| 2 | `m18-service-mesh-advanced-gateways-02-kiali-versioned-split.png` | Kiali → Traffic Graph with **versioned** app grouping, after exercise-4 traffic: `parasol-fraud` split into `v1` and `v2` workloads | Circle: the **90% vs 10%** edge thickness / percentages to v1 vs v2 | lab.adoc ex. 4 (the weighted-split beat) |
-| 3 | `m18-service-mesh-advanced-gateways-03-kiali-health-red.png` | Kiali → Traffic Graph during the exercise-6 authz deny (or exercise-5 fault): a **red/failing** edge into fraud | Circle: the red edge + the health badge flipping from green | lab.adoc ex. 5–6 (resilience / authz — "you can SEE the failure") |
+| 1 | `service-mesh-advanced-gateways-01-kiali-graph-mtls.png` | Kiali → Traffic Graph → `{user}-mesh`, after exercise-3 traffic: nodes `parasol-web`/`parasol-claims`/`parasol-fraud` with traffic-driven edges | Circle: an edge's **mutual-TLS padlock** icon + the request-rate label | lab.adoc ex. 3 (the "graph lights up" beat) — **the marquee** |
+| 2 | `service-mesh-advanced-gateways-02-kiali-versioned-split.png` | Kiali → Traffic Graph with **versioned** app grouping, after exercise-4 traffic: `parasol-fraud` split into `v1` and `v2` workloads | Circle: the **90% vs 10%** edge thickness / percentages to v1 vs v2 | lab.adoc ex. 4 (the weighted-split beat) |
+| 3 | `service-mesh-advanced-gateways-03-kiali-health-red.png` | Kiali → Traffic Graph during the exercise-6 authz deny (or exercise-5 fault): a **red/failing** edge into fraud | Circle: the red edge + the health badge flipping from green | lab.adoc ex. 5–6 (resilience / authz — "you can SEE the failure") |
 
 **Animated gif (PREFERRED for the enroll→graph story):**
-`m18-service-mesh-advanced-gateways-04-graph-lights-up.gif` (<25 s, silent) — quick cuts: app pods `1/1 →
+`service-mesh-advanced-gateways-04-graph-lights-up.gif` (<25 s, silent) — quick cuts: app pods `1/1 →
 2/2` (a sidecar appears) → generate traffic → the Kiali graph **drawing itself** node by node with padlocks
 appearing on the edges. The "mesh for free" reveal is the payoff.
 
@@ -46,8 +46,8 @@ unified-console click-paths while shooting (no perspective switch).
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 4 | `m18-service-mesh-advanced-gateways-05-deployment-inject-label.png` | Console → Workloads → Deployments → `parasol-web` → YAML, the `sidecar.istio.io/inject: "true"` label under `spec.template.metadata.labels` | Circle: the injection label on the **pod template** | lab.adoc ex. 1 Console tab |
-| 5 | `m18-service-mesh-advanced-gateways-06-import-virtualservice.png` | Console → +Add → Import YAML with the `VirtualService` (90/10) pasted | Circle: the `weight: 90` / `weight: 10` route entries | lab.adoc ex. 4 Console tab |
+| 4 | `service-mesh-advanced-gateways-05-deployment-inject-label.png` | Console → Workloads → Deployments → `parasol-web` → YAML, the `sidecar.istio.io/inject: "true"` label under `spec.template.metadata.labels` | Circle: the injection label on the **pod template** | lab.adoc ex. 1 Console tab |
+| 5 | `service-mesh-advanced-gateways-06-import-virtualservice.png` | Console → +Add → Import YAML with the `VirtualService` (90/10) pasted | Circle: the `weight: 90` / `weight: 10` route entries | lab.adoc ex. 4 Console tab |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console; Kiali 2.27.1) — these
 confirm the click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc` (the CLI tabs are authoritative):
@@ -59,7 +59,7 @@ confirm the click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc` (the CLI t
 
 ## Recordings
 
-### Terminal cast — enroll → mTLS → shift → fault → authz → gateway (`m18-service-mesh-advanced-gateways-demo.cast`, ~15 min, MANDATORY)
+### Terminal cast — enroll → mTLS → shift → fault → authz → gateway (`service-mesh-advanced-gateways-demo.cast`, ~15 min, MANDATORY)
 Asciinema cast of the demo-arc happy path, recorded in the Showroom terminal as the sample user (drive it
 straight from the demo-flavor Say/Show/Do blocks in `lab.adoc`):
 

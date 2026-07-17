@@ -15,10 +15,10 @@ and every expected-output block were captured on-cluster (OCP 4.21 / ODF externa
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m05-storage-stateful-01-storage-chain.svg` | concept.adoc Mermaid "storage abstraction chain" | Pod → PVC (namespace) → PV (cluster) → StorageClass → Ceph backend; the module's anchor diagram, reused on slide 2. **Owner review M05-1: was too small.** Inline Mermaid source is now a vertical (`TB`) chain with concise 2-line labels (interim legibility fix); export the SVG **large** and lightbox-enabled (see Lightbox note below). |
-| `m05-storage-stateful-02-sts-vs-deployment.svg` | concept.adoc Mermaid "StatefulSet vs Deployment" | left: Deployment (one Service, interchangeable Pods); right: StatefulSet (headless Service, pg-sts-0/1 each with its own PVC); reused on slide 5 |
-| `m05-storage-stateful-03-platform-accretion-v5.svg` | concept.adoc TODO(media) | **master accretion diagram**, M05 layer (persistent claims DB + StatefulSet) highlighted on the M01–M04 base |
-| `m05-storage-stateful-04-what-you-built.svg` | wrapup.adoc Mermaid recap | green = persistent (PVC, StatefulSet, per-Pod PVCs); red = the ephemeral trap that was removed |
+| `storage-stateful-01-storage-chain.svg` | concept.adoc Mermaid "storage abstraction chain" | Pod → PVC (namespace) → PV (cluster) → StorageClass → Ceph backend; the module's anchor diagram, reused on slide 2. **Owner review M05-1: was too small.** Inline Mermaid source is now a vertical (`TB`) chain with concise 2-line labels (interim legibility fix); export the SVG **large** and lightbox-enabled (see Lightbox note below). |
+| `storage-stateful-02-sts-vs-deployment.svg` | concept.adoc Mermaid "StatefulSet vs Deployment" | left: Deployment (one Service, interchangeable Pods); right: StatefulSet (headless Service, pg-sts-0/1 each with its own PVC); reused on slide 5 |
+| `storage-stateful-03-platform-accretion-v5.svg` | concept.adoc TODO(media) | **master accretion diagram**, M05 layer (persistent claims DB + StatefulSet) highlighted on the M01–M04 base |
+| `storage-stateful-04-what-you-built.svg` | wrapup.adoc Mermaid recap | green = persistent (PVC, StatefulSet, per-Pod PVCs); red = the ephemeral trap that was removed |
 
 Shared legend across all four: namespace box, Pod, volume/disk cylinder, StorageClass tag,
 storage-backend cylinder — same palette as M01–M04 (Red Hat-neutral, no vendor-logo soup).
@@ -33,7 +33,7 @@ committed SVG should still be exported larger and wrapped in the lightbox once t
 
 ## Recordings
 
-### Terminal cast — data-loss → redemption (`m05-storage-stateful-demo.cast`, ~8 min, MANDATORY)
+### Terminal cast — data-loss → redemption (`storage-stateful-demo.cast`, ~8 min, MANDATORY)
 Asciinema cast of the demo-arc happy path, recorded in the Showroom terminal as `user1` in
 `user1-dev` (drive it straight from the demo-flavor Say/Show/Do blocks in `lab.adoc`):
 
@@ -50,8 +50,8 @@ Warm the app first so there is no cold-boot dead air before seeding.
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `m05-storage-stateful-01-pvc-bound.png` | Console → Storage → PersistentVolumeClaims, `claims-db-data` = `Bound`, 2Gi, its StorageClass | Circle: Status `Bound`, Capacity, StorageClass link | lab.adoc ex. 3 (optional) |
-| 2 | `m05-storage-stateful-02-storageclass.png` | Console → Storage → StorageClasses, the default class detail (provisioner, binding mode, expansion) | Circle: the `default` badge, `WaitForFirstConsumer`, `Allow volume expansion` | lab.adoc ex. 5 (optional) |
+| 1 | `storage-stateful-01-pvc-bound.png` | Console → Storage → PersistentVolumeClaims, `claims-db-data` = `Bound`, 2Gi, its StorageClass | Circle: Status `Bound`, Capacity, StorageClass link | lab.adoc ex. 3 (optional) |
+| 2 | `storage-stateful-02-storageclass.png` | Console → Storage → StorageClasses, the default class detail (provisioner, binding mode, expansion) | Circle: the `default` badge, `WaitForFirstConsumer`, `Allow volume expansion` | lab.adoc ex. 5 (optional) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 console): the PVC list Status/Capacity/StorageClass
 columns; the StorageClass detail page fields (provisioner `openshift-storage.rbd.csi.ceph.com`, binding

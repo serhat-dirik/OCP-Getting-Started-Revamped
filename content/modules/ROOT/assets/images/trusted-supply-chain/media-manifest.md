@@ -19,9 +19,9 @@ exports replace/augment them in the pass.
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
-| 1 | `m08-trusted-supply-chain-01-acs-violation.png` | ⬜ NOT CAPTURED — **TOP PRIORITY (the money shot)** | **RHACS console** ({acs_console_url}) → **Vulnerability Management** (or **Violations**) → the `parasol-claims` image → the **Log4Shell CVE-2021-44228** entry (CVSS 10, `log4j-core` 2.14.1) and the **"Block Log4Shell at build"** policy | the single CRITICAL CVE that breaks the build; the policy that enforces it; the affected component + version | lab.adoc ex. 1 (the RHACS view of the violation the `acs-scan` log names) |
-| 2 | `m08-trusted-supply-chain-02-gitea-pom-edit.png` | ⬜ NOT CAPTURED | **Gitea → your fork → `seed-vulnerable` branch → `pom.xml` (edit)** — the `log4j-core` `<dependency>` block selected for deletion | the exact block to remove (the `M08 seeded CVE` comment + the 5-line `log4j-core` dependency); the branch selector reads `seed-vulnerable` | lab.adoc ex. 3 (the fix edit) |
-| 3 | `m08-trusted-supply-chain-03-pipelinerun-scan-failed.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns → (the vulnerable run)** — `build-image` green, `acs-scan` **red** | the build **Succeeded** but the run **Failed** at the scan — the gate refused a *built* image | lab.adoc ex. 1 (console view of the failed run; the log message is the load-bearing artifact and is shown inline) |
+| 1 | `trusted-supply-chain-01-acs-violation.png` | ⬜ NOT CAPTURED — **TOP PRIORITY (the money shot)** | **RHACS console** ({acs_console_url}) → **Vulnerability Management** (or **Violations**) → the `parasol-claims` image → the **Log4Shell CVE-2021-44228** entry (CVSS 10, `log4j-core` 2.14.1) and the **"Block Log4Shell at build"** policy | the single CRITICAL CVE that breaks the build; the policy that enforces it; the affected component + version | lab.adoc ex. 1 (the RHACS view of the violation the `acs-scan` log names) |
+| 2 | `trusted-supply-chain-02-gitea-pom-edit.png` | ⬜ NOT CAPTURED | **Gitea → your fork → `seed-vulnerable` branch → `pom.xml` (edit)** — the `log4j-core` `<dependency>` block selected for deletion | the exact block to remove (the `M08 seeded CVE` comment + the 5-line `log4j-core` dependency); the branch selector reads `seed-vulnerable` | lab.adoc ex. 3 (the fix edit) |
+| 3 | `trusted-supply-chain-03-pipelinerun-scan-failed.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns → (the vulnerable run)** — `build-image` green, `acs-scan` **red** | the build **Succeeded** but the run **Failed** at the scan — the gate refused a *built* image | lab.adoc ex. 1 (console view of the failed run; the log message is the load-bearing artifact and is shown inline) |
 
 Screenshot **1 (the RHACS violation screen) is the priority capture** — it is the visual that makes
 the threat concrete (a named CVE, CVSS 10, the exact library) and the one attendees will remember.
@@ -34,13 +34,13 @@ breaks nothing).
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `m08-trusted-supply-chain-01-trust-triangle.svg` | concept.adoc Mermaid "trust triangle / pipeline" | the module's key diagram: source → SBOM → build+sign → scan gate → registry (image + .sig + .att) → ImagePolicy admission. Colour the two refusals (gate + admission) red, the trustworthy path green |
-| `m08-trusted-supply-chain-03-what-you-built.svg` | wrapup.adoc Mermaid recap | the trustworthy path green; the two refusals (Log4Shell → gate red; unsigned → admission red) |
-| `m08-trusted-supply-chain-04-platform-accretion.svg` | (new) master accretion diagram, **trust/supply-chain layer** highlighted | reuse the platform base; light up the scan-gate + signing + admission layer in red (accretion pattern) |
+| `trusted-supply-chain-01-trust-triangle.svg` | concept.adoc Mermaid "trust triangle / pipeline" | the module's key diagram: source → SBOM → build+sign → scan gate → registry (image + .sig + .att) → ImagePolicy admission. Colour the two refusals (gate + admission) red, the trustworthy path green |
+| `trusted-supply-chain-03-what-you-built.svg` | wrapup.adoc Mermaid recap | the trustworthy path green; the two refusals (Log4Shell → gate red; unsigned → admission red) |
+| `trusted-supply-chain-04-platform-accretion.svg` | (new) master accretion diagram, **trust/supply-chain layer** highlighted | reuse the platform base; light up the scan-gate + signing + admission layer in red (accretion pattern) |
 
 ## Recordings
 
-- **Terminal cast** (asciinema, `m08-trusted-supply-chain-demo.cast`) of the demo-arc happy path:
+- **Terminal cast** (asciinema, `trusted-supply-chain-demo.cast`) of the demo-arc happy path:
   the vulnerable run failing on Log4Shell → the SBOM `jq` finding `log4j-core@2.14.1` → the fix →
   the fixed run passing + `signed=true` + the `.sig`/`.att` tags. Recorded in the Showroom terminal
   as `user1`. Preferred over a screen capture (this flow is CLI-first).
