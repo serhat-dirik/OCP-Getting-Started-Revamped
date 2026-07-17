@@ -160,3 +160,54 @@ A released user takes **all** pending pod-spec changes in that single roll (the 
 per-change). Re-adding them to `reservedUsers` afterward would render their pod-spec back
 without those changes and roll them **again** — only re-reserve a user you intend to freeze at
 the current spec, not one you just updated.
+
+## Uninstall — removing the workshop from a shared/customer cluster
+
+The workshop is built to drop onto a cluster the org already uses and to reverse **without
+changing any characteristic of their cluster**. The teardown is `bootstrap/ogsr-uninstall.sh`
+(the inverse of `bootstrap/install.sh`). Always dry-run first:
+
+```
+./bootstrap/ogsr-uninstall.sh --dry-run   # prints the WIPE / PRESERVE plan; changes nothing
+./bootstrap/ogsr-uninstall.sh             # interactive confirm, then uninstall  (--yes to skip the prompt)
+```
+
+**The two guarantees**
+
+1. **Adopted operators are never removed.** `install.sh` records — per operator, in the
+   `ogsr-uninstall-state` ConfigMap (namespace `ogsr-system`) — whether it *pre-existed* (adopted)
+   or was *created by us*. Uninstall removes only the ones we created; anything adopted, or not
+   recorded, is preserved. The GitOps operator itself is removed only if we installed it.
+2. **Deleting our Argo apps never prunes an adopted operator.** Each `pp-*` / `workshop-config` /
+   `entry-*` Application is stripped of its resources-finalizer and deleted with `--cascade=orphan`,
+   so component resources are **orphaned, not pruned**. Only resources carrying
+   `workshop.redhat.com/owner=ogsr`, plus operators recorded as created-by-us, are then deleted.
+
+**What it restores (not just deletes)**
+
+- `cluster-monitoring-config` → its recorded prior `enableUserWorkload` value (the ConfigMap is
+  deleted only if the workshop created it).
+- The `workshop-users` OAuth IdP entry is removed while **every other identity provider is
+  preserved** (the cluster's real login IdP is untouched).
+- Node labels (`workshop.redhat.com/pool`, `/zone`) and the batch `NoSchedule` taint are removed.
+- `openshift-default` GatewayClass, `openshift/java-21` ImageStream, `platform-observer` /
+  Lightspeed cluster RBAC, the `workshop-attendees` Group, Kueue cluster objects, and the
+  per-user/shared workshop namespaces — each removed (the GatewayClass and GitOps operator only
+  if we created them).
+
+**Prerequisite:** run it from a clone of this repo (it reads the component manifests to know which
+operators belong to which stack) as a **cluster-admin**. If the `ogsr-uninstall-state` ConfigMap is
+missing (e.g. an install predating this tooling), the script still removes everything owner-labeled
+but **defaults to preserving operators and shared-object mutations** — safe, but review the plan.
+
+**Verify afterwards** (the script prints these):
+
+```
+oc get ns -l workshop.redhat.com/owner=ogsr                       # expect: no resources
+oc get applications -n openshift-gitops | grep -E 'pp-|entry-|workshop-config'   # expect: none
+oc get csv -A | grep -v ogsr                                      # adopted operators still Present/Succeeded
+```
+
+The litmus test for "non-invasive": after uninstall, nothing the org owned should differ. If you
+find a leftover, capture it and file it — the owner label (`-l workshop.redhat.com/owner=ogsr`) is
+how we enumerate the full footprint on any cluster.

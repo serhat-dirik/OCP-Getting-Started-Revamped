@@ -29,17 +29,32 @@ Session composition is a delivery-time choice: recommended enablement paths, mod
 ## Quickstart
 
 ```bash
-# 1. Stand up a cluster's platform (any OpenShift 4.20+, cluster-admin)
-./bootstrap/install.sh --profiles core --users 5 --domain apps.cluster-x.example.com
+# 1. Configure the install — ALL inputs live in one gitignored vars file (the installer takes no flags)
+cp bootstrap/vars.example.yaml bootstrap/vars.yaml
+# edit bootstrap/vars.yaml: users, cluster_domain ("" auto-detects), lightspeed + MaaS key, auth/resilience
 
-# 2. Preview the content locally (builds run from content/ — see docs/authoring-conventions.md)
+# 2. Stand up the cluster's platform + workshop layer (any OpenShift 4.20+, cluster-admin)
+./bootstrap/install.sh
+
+# 3. Preview the content locally (builds run from content/ — see docs/authoring-conventions.md)
 npm run build:workshop   # or: ./utilities/lab-serve
 
-# 3. Materialize a module for a user
+# 4. Materialize a module for a user
 tools/ws/ws start m01 --user user1
 ```
 
 > Provisioning details, profiles, and sizing: `bootstrap/` · Authoring a module: `docs/module-template/`
+
+### Uninstall
+
+The workshop installs onto an existing cluster non-invasively and reverses cleanly — operators, config, and namespaces the org already had are never touched:
+
+```bash
+./bootstrap/ogsr-uninstall.sh --dry-run   # preview the WIPE / PRESERVE plan; change nothing
+./bootstrap/ogsr-uninstall.sh             # remove the workshop (adopted operators + prior cluster state preserved)
+```
+
+Runbook and the non-invasive guarantees: `docs/sa-provisioning-guide.md`.
 
 ## Status
 
