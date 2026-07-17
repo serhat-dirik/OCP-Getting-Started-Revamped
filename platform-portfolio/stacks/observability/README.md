@@ -50,7 +50,7 @@ stays low by construction — the shared-cluster-safe default.
 ## The M12 entry-state seam (NOT installed here)
 
 This stack is workshop-agnostic. The **per-user** wiring is the M12 entry state's job
-(`gitops/entry-states/m12/`, built separately) and layers on top of this shared infra:
+(`gitops/entry-states/observability-health-scale/`, built separately) and layers on top of this shared infra:
 
 - Flip OTLP export on `parasol-claims`: `QUARKUS_OTEL_SDK_DISABLED=false` and
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability-workshop.svc.cluster.local:4317`.

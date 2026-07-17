@@ -52,7 +52,7 @@ every OpenShift cluster).
 Workshop-agnostic by design. The **per-user** wiring lives in the workshop layer, on top of this shared
 control plane:
 
-- `gitops/entry-states/m19/` — a scale-to-zero `parasol-claims` **ksvc** + ephemeral `claims-db` + a
+- `gitops/entry-states/serverless-zero-to-hero/` — a scale-to-zero `parasol-claims` **ksvc** + ephemeral `claims-db` + a
   demo-client load pod in `{user}-dev`; `ws solve` adds a second revision + tag-based traffic split and
   the eventing taste (Broker → PingSource → Trigger → ksvc).
 - `{user}-dev` (namespace, quota, limits, RBAC, image-puller grant) is workshop-config-owned — this

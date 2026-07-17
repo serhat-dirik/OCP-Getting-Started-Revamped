@@ -67,7 +67,7 @@ control plane:
 
 - `gitops/workshop-config/templates/per-user-mesh.yaml` — creates each `{user}-mesh` namespace (labelled
   `istio-discovery=enabled`, quota/limits/RBAC), the discovery-scoped tenant of the shared istiod.
-- `gitops/entry-states/m18/` — the un-meshed `parasol-web -> claims -> fraud -> db` app, a demo-client
+- `gitops/entry-states/service-mesh-advanced-gateways/` — the un-meshed `parasol-web -> claims -> fraud -> db` app, a demo-client
   pod, and a legacy-partner TCP backend in `{user}-mesh`; `ws solve` adds enrollment + traffic management.
 
 None of that belongs in this portfolio stack — it is user-/story-specific and stays in the workshop layer.

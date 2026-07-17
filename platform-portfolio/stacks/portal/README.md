@@ -61,7 +61,7 @@ start takes a few minutes (the Lightspeed `init-rag-data` init container).
 ## The M11 entry-state seam (NOT installed here)
 
 This stack is a shared platform. The **per-user** wiring is the M11 entry state
-(`gitops/entry-states/m11/`, built separately) and layers on top: it gives each attendee a dedicated
+(`gitops/entry-states/developer-hub-golden-paths/`, built separately) and layers on top: it gives each attendee a dedicated
 `{user}-svcs` Gitea org to scaffold into and keeps it a clean slate across `ws reset`.
 
 > Platform/workshop split note: the Parasol `catalog.locations` in `components/rhdh/app-config.yaml` are

@@ -61,7 +61,7 @@ first boot — allow it to finish (can take a while on a cold cluster) before th
 ## The M08 entry-state seam (NOT installed here)
 
 This stack is workshop-agnostic. The **per-user** wiring is the M08 entry state
-(`gitops/entry-states/m08/`, built separately) and layers on top:
+(`gitops/entry-states/trusted-supply-chain/`, built separately) and layers on top:
 
 - Copies the shared `stackrox/rox-api-token` and `openshift-pipelines/chains-cosign-pub` into
   `{user}-cicd` (least-privilege cross-namespace RBAC).

@@ -49,7 +49,7 @@ shared Hub:
 
 - `gitops/workshop-config/templates/per-user-modernize.yaml` — the `{user}-modernize` namespace
   (quota/limits/RBAC).
-- `gitops/entry-states/m22/` — the per-user `parasol-legacy-claims` Gitea fork (the migration target),
+- `gitops/entry-states/app-modernization/` — the per-user `parasol-legacy-claims` Gitea fork (the migration target),
   the MaaS credentials for Developer Lightspeed, and the entry marker; `ws solve` deploys the
   modernized service.
 

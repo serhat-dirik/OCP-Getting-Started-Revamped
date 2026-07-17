@@ -79,7 +79,7 @@ piece the default deliberately avoids.
 ## The M10 entry-state seam (NOT installed here)
 
 This stack is workshop-agnostic. The **per-user** wiring is the M10 entry state
-(`gitops/entry-states/m10/`) and layers on top: the M09 end state pre-materialized (claims
+(`gitops/entry-states/gitops-at-scale/`) and layers on top: the GitOps Fundamentals end state pre-materialized (claims
 GitOps-managed in `{user}-dev`/`stage`), the `{user}/claims-config` fork extended with a `rollouts/`
 source (Rollout + `AnalysisTemplate` + `ApplicationSet`), and a per-user analysis SA in `{user}-prod`.
 
