@@ -1,0 +1,140 @@
+# k6-load-test — curated Parasol "company task library" Task (DevSecOps performance gate).
+#
+# WHY THIS EXISTS: the org's load/performance step — the last gate in the DevSecOps gauntlet. Runs a
+# short k6 load test against the DEPLOYED, RUNNING app over its in-cluster Service DNS and GATES on
+# latency + error-rate thresholds (a p95 budget and a max error rate). This is the "is it still fast
+# enough under load?" gate that sits alongside the security gates: a change can pass every security
+# check and still regress performance — this catches that before it ships.
+#
+# HISTORY: the reference DevSecOps demo carried a Gatling perf test. We re-implement the same intent on
+# k6 — a container-native load generator with first-class pass/fail thresholds and a self-contained HTML
+# report — consistent with how the rest of this arc was re-implemented on current tooling (Gogs→Gitea,
+# StackRox→RHACS, …) rather than ported. k6 exits non-zero when a threshold is breached, so the gate is
+# the tool's own exit code (same shape as the zap-baseline DAST gate).
+#
+# By default (FAIL_ON_THRESHOLD=true) a breached threshold fails the build. Set FAIL_ON_THRESHOLD=false
+# to run report-only (measure without gating) while you tune the budget to the cluster's node sizing.
+#
+# CANONICAL SOURCE. The identical Task body is installed into the shared parasol-tasks library by the
+# workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — keep the two in lockstep.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: k6-load-test
+  namespace: parasol-tasks
+  labels:
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/library: parasol-tasks
+spec:
+  description: >-
+    Runs a short k6 load test against a running app's in-cluster Service DNS and fails the build when a
+    latency (p95) or error-rate threshold is breached. Writes a self-contained HTML report to the
+    k6-work workspace.
+  params:
+    - name: TARGET_URL
+      type: string
+      description: In-cluster base URL of the running app (Service DNS), e.g. http://parasol-claims:8080.
+      default: "http://parasol-claims:8080"
+    - name: VUS
+      type: string
+      description: Virtual users (concurrent load) to sustain for DURATION.
+      default: "10"
+    - name: DURATION
+      type: string
+      description: How long to sustain the load (k6 duration string, e.g. 30s, 1m).
+      default: "30s"
+    - name: P95_THRESHOLD_MS
+      type: string
+      description: Gate — 95th-percentile request duration budget in milliseconds.
+      default: "800"
+    - name: MAX_ERROR_RATE
+      type: string
+      description: Gate — maximum fraction of failed requests tolerated (0.01 = 1%).
+      default: "0.01"
+    - name: FAIL_ON_THRESHOLD
+      type: string
+      description: '"true" fails the build on a breached threshold; "false" runs report-only.'
+      default: "true"
+  workspaces:
+    # k6 writes its HTML dashboard report here (the run mounts an empty workspace). The container FS is
+    # not writable under the restricted-v2 random UID, so the report + script go to the workspace.
+    - name: k6-work
+  results:
+    - name: perf-passed
+      description: '"true" if no latency/error threshold was breached, else "false".'
+  steps:
+    - name: k6-load-test
+      # k6 (Grafana Labs, AGPL-3.0), the container-native load generator. Third-party OSS.
+      # TODO(verify-on-cluster): pin to a specific version + digest (like zap-baseline) and confirm the
+      # k6 web-dashboard export flags on the pinned version during the M27 cluster pass.
+      image: docker.io/grafana/k6:latest
+      workingDir: $(workspaces.k6-work.path)
+      env:
+        - name: TARGET_URL
+          value: $(params.TARGET_URL)
+        - name: VUS
+          value: $(params.VUS)
+        - name: DURATION
+          value: $(params.DURATION)
+        - name: P95_THRESHOLD_MS
+          value: $(params.P95_THRESHOLD_MS)
+        - name: MAX_ERROR_RATE
+          value: $(params.MAX_ERROR_RATE)
+        - name: FAIL_ON_THRESHOLD
+          value: $(params.FAIL_ON_THRESHOLD)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        echo "▶ k6 load test (perf gate) against ${TARGET_URL}"
+        echo "  load: ${VUS} VUs for ${DURATION}   gate: p95<${P95_THRESHOLD_MS}ms, errors<${MAX_ERROR_RATE}"
+        export HOME="$(pwd)"
+        # The load profile: read-only hits on the claims API + health endpoint — safe, idempotent, and
+        # representative of the service's hot path. Thresholds live in options{} so k6's own exit code
+        # (non-zero on breach) IS the gate.
+        cat > load-test.js <<'EOF'
+        import http from 'k6/http';
+        import { check, sleep } from 'k6';
+
+        const BASE = __ENV.TARGET_URL;
+
+        export const options = {
+          vus: Number(__ENV.VUS) || 10,
+          duration: __ENV.DURATION || '30s',
+          thresholds: {
+            http_req_duration: [`p(95)<${Number(__ENV.P95_THRESHOLD_MS) || 800}`],
+            http_req_failed: [`rate<${Number(__ENV.MAX_ERROR_RATE) || 0.01}`],
+          },
+        };
+
+        export default function () {
+          const list = http.get(`${BASE}/api/claims`);
+          check(list, { 'GET /api/claims -> 200': (r) => r.status === 200 });
+
+          const health = http.get(`${BASE}/q/health/ready`);
+          check(health, { 'GET /q/health/ready -> 200': (r) => r.status === 200 });
+
+          sleep(1);
+        }
+        EOF
+        # k6's built-in web dashboard writes one self-contained HTML report at the end of the run — the
+        # "load-test report" artifact (analogous to the ZAP HTML report), saved to the k6-work workspace.
+        export K6_WEB_DASHBOARD=true
+        export K6_WEB_DASHBOARD_EXPORT=k6-report.html
+        k6 run load-test.js
+        RC=$?
+        # k6 exits 0 when every threshold held, non-zero when a threshold was breached (or on error).
+        if [ "$RC" -eq 0 ]; then
+          echo "✅ perf gate passed — p95 within ${P95_THRESHOLD_MS}ms budget (report in k6-work)"
+          printf 'true' > "$(results.perf-passed.path)"
+          exit 0
+        fi
+        printf 'false' > "$(results.perf-passed.path)"
+        if [ "${FAIL_ON_THRESHOLD}" = "false" ]; then
+          echo "⚠️  perf thresholds breached (reporting only — FAIL_ON_THRESHOLD=false). Review the k6 summary/report."
+          printf 'true' > "$(results.perf-passed.path)"
+          exit 0
+        fi
+        echo "❌ perf gate FAILED — a latency/error threshold was breached under load."
+        echo "   fix: profile the hot path (DB round-trips, cold start, a missing index), raise resources,"
+        echo "        or re-tune the budget to the cluster, then re-run."
+        exit "$RC"

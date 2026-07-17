@@ -44,6 +44,8 @@ spec:
     - name: shared-workspace
     # ZAP writes its session + reports here (mounted at /zap/wrk by the zap-baseline task).
     - name: zap-work
+    # k6 writes its HTML dashboard report here (the perf-k6 load-test gate).
+    - name: k6-work
   results:
     - name: sast-passed
       value: $(tasks.sast-sonar.results.quality-gate-passed)
@@ -55,6 +57,8 @@ spec:
       value: $(tasks.deployment-check.results.check-passed)
     - name: dast-passed
       value: $(tasks.dast-zap.results.dast-passed)
+    - name: perf-passed
+      value: $(tasks.perf-k6.results.perf-passed)
   tasks:
     # 1) Clone the app source into the shared workspace (bundled task, cluster resolver).
     - name: fetch-source
@@ -251,3 +255,21 @@ spec:
         - {name: FAIL_ON_WARN, value: "true"}
       workspaces:
         - {name: zap-work, workspace: zap-work}
+
+    # 12) PERF GATE: a short k6 load test against the RUNNING app over the in-cluster Service DNS. Gates
+    #     on a p95 latency budget + a max error rate — k6's own non-zero exit on a breached threshold IS
+    #     the gate (same shape as the DAST gate). The last gate in the gauntlet: a change can pass every
+    #     security check and still regress performance.
+    - name: perf-k6
+      runAfter: [dast-zap]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: k6-load-test}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - {name: TARGET_URL, value: "http://parasol-claims.$(context.pipelineRun.namespace).svc:8080"}
+        - {name: FAIL_ON_THRESHOLD, value: "true"}
+      workspaces:
+        - {name: k6-work, workspace: k6-work}

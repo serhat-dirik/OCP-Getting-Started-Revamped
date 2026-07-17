@@ -1,20 +1,21 @@
-# parasol-claims-devsecops — the M27 DevSecOps CAPSTONE Pipeline (11 security-gated stages).
+# parasol-claims-devsecops — the M27 DevSecOps CAPSTONE Pipeline (12 gated stages — 11 security + 1 perf).
 #
 # WHY THIS EXISTS: the reference pipeline attendees run in M27 — every stage of the software supply
 # chain has a security gate. It reuses the whole curated library across three renderings of "reuse":
 # bundled catalog tasks (git-clone/buildah/openshift-client), the M07/M08 curated tasks
-# (maven-jdk21, image-size-report, acs-image-check) and the four net-new M27 tasks (sonar-scan,
-# trivy-scan, roxctl-deployment-check, zap-baseline). Nothing is copy-pasted — every taskRef is a
+# (maven-jdk21, image-size-report, acs-image-check) and the net-new M27 tasks (sonar-scan,
+# trivy-scan, roxctl-deployment-check, zap-baseline, k6-load-test). Nothing is copy-pasted — every taskRef is a
 # CLUSTER RESOLVER into the shared parasol-tasks library or openshift-pipelines.
 #
 #   fetch → SAST(sonar) → SCA(trivy) → unit-test → build-image → acs-image-check ┐
-#                                                                 → image-report   ├→ deploy-check → deploy(+Route) → DAST(zap)
+#                                                                 → image-report   ├→ deploy-check → deploy(+Route) → DAST(zap) → perf(k6)
 #                                                                 → sign-check ─────┘
 #
 # GATES: sonar-scan (qualitygate.wait), trivy-scan (HIGH/CRITICAL + copyleft), unit-test, acs-image-check
 # (Block-Log4Shell), sign-check (unsigned = fail), roxctl-deployment-check (enforced deploy policy),
-# zap-baseline (ZAP FAIL). On CLEAN source every gate passes; the seeded flaws (per stage) make each
-# fail deterministically — those seeds ship with the M27 content/app pass.
+# zap-baseline (ZAP FAIL), k6-load-test (p95 latency + error-rate budget). On CLEAN source every gate
+# passes; the security seeds (per stage) make each fail deterministically — those seeds ship with the
+# M27 content/app pass. The perf gate has no seeded regression yet; it passes on the healthy app.
 #
 # Memory for the Maven/Quarkus steps is raised in the PipelineRun (taskRunSpecs), not here, so the
 # Pipeline stays runtime-agnostic. LOCKSTEP: byte-identical to the M27 entry-state copy
@@ -54,6 +55,8 @@ spec:
     - name: shared-workspace
     # ZAP writes its session + reports here (mounted at /zap/wrk by the zap-baseline task).
     - name: zap-work
+    # k6 writes its HTML dashboard report here (the perf-k6 load-test gate).
+    - name: k6-work
   results:
     - name: sast-passed
       value: $(tasks.sast-sonar.results.quality-gate-passed)
@@ -65,6 +68,8 @@ spec:
       value: $(tasks.deployment-check.results.check-passed)
     - name: dast-passed
       value: $(tasks.dast-zap.results.dast-passed)
+    - name: perf-passed
+      value: $(tasks.perf-k6.results.perf-passed)
   tasks:
     # 1) Clone the app source into the shared workspace (bundled task, cluster resolver).
     - name: fetch-source
@@ -261,3 +266,21 @@ spec:
         - {name: FAIL_ON_WARN, value: "true"}
       workspaces:
         - {name: zap-work, workspace: zap-work}
+
+    # 12) PERF GATE: a short k6 load test against the RUNNING app over the in-cluster Service DNS. Gates
+    #     on a p95 latency budget + a max error rate — k6's own non-zero exit on a breached threshold IS
+    #     the gate (same shape as the DAST gate). The last gate in the gauntlet: a change can pass every
+    #     security check and still regress performance.
+    - name: perf-k6
+      runAfter: [dast-zap]
+      taskRef:
+        resolver: cluster
+        params:
+          - {name: kind, value: task}
+          - {name: name, value: k6-load-test}
+          - {name: namespace, value: parasol-tasks}
+      params:
+        - {name: TARGET_URL, value: "http://parasol-claims.$(context.pipelineRun.namespace).svc:8080"}
+        - {name: FAIL_ON_THRESHOLD, value: "true"}
+      workspaces:
+        - {name: k6-work, workspace: k6-work}
