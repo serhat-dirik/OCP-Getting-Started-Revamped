@@ -14,6 +14,7 @@
 #   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
 #   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
 #   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
+#   ws diag [--user U] [mNN]         SA/admin: read-only troubleshooting bundle for a stuck attendee
 #
 # Entry states are Helm charts under gitops/entry-states/<module>/, materialized as
 # Argo CD Applications (name: entry-<module>-<user>) sourced from the IN-CLUSTER Gitea
@@ -1677,6 +1678,138 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   return 0
 }
 
+diag_entry_app() {  # app — print one entry app's sync/health/op-phase + .status.conditions + operationState
+  # message. Read-only; tolerant of an absent app.
+  local app="$1" sync health phase msg conds
+  if ! oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
+    echo "  ${app}: absent (not materialized — ws start/prep it, or re-check the user/module)"
+    return 0
+  fi
+  sync="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+  health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+  phase="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
+  printf "  %-30s %s / %s   op:%s\n" "$app" "${sync:-?}" "${health:-?}" "${phase:-none}"
+  conds="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}' 2>/dev/null || true)"
+  if [[ -n "$conds" ]]; then echo "$conds" | sed 's/^/     condition: /'; fi
+  msg="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.message}' 2>/dev/null || true)"
+  if [[ -n "$msg" ]]; then echo "     op-message: ${msg}"; fi
+}
+
+cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_diag <user> [module]. Dumps
+  # the diagnostic context an SA needs — entry app status + conditions/operationState, per-namespace recent
+  # events, not-Ready pods, ws-entry markers, cockpit status + a logs pointer, and the user's student-gitops
+  # apps — then prints copy-paste follow-ups (rather than streaming logs). # TODO(verify-on-cluster): every
+  # oc read is authored off-cluster (tokens expired this session).
+  local user="$1" module="${2:-}"
+  need_oc
+  if [[ -n "$module" ]]; then
+    module="$(echo "$module" | tr '[:upper:]' '[:lower:]')"
+    [[ "$module" =~ ^m[0-9]{2}$ ]] || die "diag: module must look like m01, got '$module'"
+  fi
+
+  local who server
+  who="$(oc whoami 2>/dev/null || true)"
+  server="$(oc whoami --show-server 2>/dev/null || true)"
+  echo "ws diag — ${user}${module:+ / ${module}}   (cluster: ${server:-?} as ${who:-?})"
+  echo
+
+  # ── 1. entry app(s): status + conditions + operationState ──
+  info "Entry app(s)"
+  local apps app
+  if [[ -n "$module" ]]; then
+    apps="$(app_name "$module" "$user")"
+  else
+    apps="$(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${user}" -o name 2>/dev/null \
+             | sed 's|.*/||' | grep '^entry-' || true)"
+  fi
+  if [[ -z "$apps" ]]; then
+    echo "  (no entry-* apps for ${user}${module:+ matching ${module}}) — has ws start/prep run?"
+  else
+    while IFS= read -r app; do
+      [[ -n "$app" ]] || continue
+      diag_entry_app "$app"
+    done <<< "$apps"
+  fi
+  echo
+
+  # ── 2. per-namespace: ws-entry markers · not-Ready pods · recent events ──
+  local nslist ns markers badpods ev
+  nslist="$(oc get ns -l "workshop.redhat.com/user=${user}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  if [[ -z "$nslist" ]]; then
+    info "Namespaces"
+    echo "  (no namespaces labelled workshop.redhat.com/user=${user} — is ${user} provisioned?)"
+  else
+    while IFS= read -r ns; do
+      [[ -n "$ns" ]] || continue
+      info "Namespace ${ns}"
+      markers="$(oc get cm -n "$ns" -o name 2>/dev/null | sed -n 's|.*/ws-entry-|ws-entry-|p' | paste -sd' ' - || true)"
+      echo "  ws-entry markers: ${markers:-none}"
+      badpods="$(oc get pods -n "$ns" --no-headers 2>/dev/null | awk '
+        { split($2, a, "/"); st = $3
+          if (st != "Running" && st != "Completed" && st != "Succeeded") { print "     " $1 "  " st; next }
+          if (a[2] + 0 > 0 && a[1] != a[2]) print "     " $1 "  " st " (" $2 " ready)" }' || true)"
+      if [[ -n "$badpods" ]]; then echo "  not-Ready pods:"; echo "$badpods"; else echo "  not-Ready pods: none"; fi
+      ev="$(oc get events -n "$ns" --sort-by=.lastTimestamp 2>/dev/null | grep -v '^LAST' | tail -n 6 || true)"
+      if [[ -n "$ev" ]]; then echo "  recent events:"; echo "$ev" | sed 's/^/     /'; else echo "  recent events: none"; fi
+    done <<< "$nslist"
+  fi
+  echo
+
+  # ── 3. cockpit (showroom-<user>) status + a logs pointer (do NOT stream) ──
+  info "Cockpit (showroom-${user})"
+  if ! oc get deploy "showroom-${user}" -n "$SHOWROOM_NS" >/dev/null 2>&1; then
+    echo "  no showroom-${user} Deployment — cockpit not provisioned for ${user}"
+  else
+    local cr cd cpod cphase
+    cr="$(oc get deploy "showroom-${user}" -n "$SHOWROOM_NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    cd="$(oc get deploy "showroom-${user}" -n "$SHOWROOM_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    echo "  deployment ready: ${cr:-0}/${cd:-0}"
+    cpod="$(oc get pods -n "$SHOWROOM_NS" -l "app.kubernetes.io/name=showroom,workshop.redhat.com/user=${user}" \
+             --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -1 | sed 's|.*/||' || true)"
+    if [[ -n "$cpod" ]]; then
+      cphase="$(oc get pod "$cpod" -n "$SHOWROOM_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      echo "  newest pod: ${cpod} (${cphase:-?})"
+      echo "  logs: oc logs ${cpod} -n ${SHOWROOM_NS} -c terminal --tail=100"
+    else
+      echo "  no cockpit pod found for ${user}"
+    fi
+  fi
+  echo
+
+  # ── 4. student-gitops apps in the user's project (proj-<user>) ──
+  info "Student GitOps (project proj-${user})"
+  if ! oc get ns "$STUDENT_ARGO_NS" >/dev/null 2>&1; then
+    echo "  (${STUDENT_ARGO_NS} namespace absent — pre-M09 cluster or student-gitops not installed)"
+  else
+    local sapps n s h
+    sapps="$(oc get applications -n "$STUDENT_ARGO_NS" \
+      -o jsonpath="{range .items[?(@.spec.project==\"proj-${user}\")]}{.metadata.name}{\"\t\"}{.status.sync.status}{\"\t\"}{.status.health.status}{\"\n\"}{end}" 2>/dev/null || true)"
+    if [[ -n "$sapps" ]]; then
+      while IFS=$'\t' read -r n s h; do
+        [[ -n "$n" ]] || continue
+        printf "  %-30s %s / %s\n" "$n" "${s:-?}" "${h:-?}"
+      done <<< "$sapps"
+    else
+      echo "  (no attendee apps in ${STUDENT_ARGO_NS} for proj-${user})"
+    fi
+  fi
+  echo
+
+  # ── 5. copy-paste follow-ups ──
+  info "Follow-up (copy-paste)"
+  if [[ -n "$module" ]]; then
+    echo "  oc describe application $(app_name "$module" "$user") -n ${ARGO_NS}"
+    echo "  ws verify ${module} --user ${user}"
+    echo "  ws reset  ${module} --user ${user}       # re-materialize the entry state (last resort)"
+  else
+    echo "  oc get applications -n ${ARGO_NS} -l workshop.redhat.com/user=${user}"
+    echo "  ws diag --user ${user} mNN                # focus on one module"
+  fi
+  echo "  oc logs deploy/showroom-${user} -n ${SHOWROOM_NS} -c terminal --tail=100"
+  echo "  ws smoke <mNN> ${user}                     # run the attendee path in the live cockpit"
+  return 0
+}
+
 main() {
   local cmd="${1:-}"; shift || true
   # git-refresh self-parses its own flags (--restart-terminals/--user/--all/--exclude, where
@@ -1716,7 +1849,8 @@ main() {
     doctor)      cmd_doctor;;
     preflight)   cmd_preflight;;
     status)      cmd_status "$user";;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,16p';;
+    diag)        cmd_diag "$(user_arg "$user")" "$module";;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,17p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
