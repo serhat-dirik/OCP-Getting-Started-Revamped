@@ -17,7 +17,7 @@ Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-S
 
 ## Non-negotiable rules
 
-1. **Verify, never recall.** Product versions / UI paths / CR fields come from `versions.yaml` (fresh <60 days) or get re-verified on docs.redhat.com / a live cluster — never from model memory. Mark unverifiable steps `// TODO(verify-on-cluster)`; zero TODOs at Definition of Done.
+1. **Verify, never recall.** Product versions / UI paths / CR fields — and AI model names / endpoint contracts (a wrong model default once propagated through 5 files unverified; per-user MaaS keys are model-scoped) — come from `versions.yaml` (fresh <60 days) or get re-verified on docs.redhat.com / a live cluster — never from model memory. Mark unverifiable steps `// TODO(verify-on-cluster)`; zero TODOs at Definition of Done.
 2. **Module independence is sacred.** No module assumes another ran. Entry states materialize everything (`gitops/entry-states/<slug>/` + `ws start`). Same-namespace modules declare `conflictsWith` in `ws-meta.yaml` (both directions).
 3. **Perform first, write second.** Every command block shows output you actually captured; every timing chip is measured; console click-paths are grounded live (labels you can't ground get `[CAPTURE-VERIFY]` + a CLI alternative).
 4. **One source, three renderings.** Workshop / demo (`ifdef::demo` Say/Show/Do) / instructor. Environment values ONLY via attributes (`{user}`, `{ocp_console_url}`, …) — a hardcoded URL is a CI failure.
