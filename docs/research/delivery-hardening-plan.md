@@ -192,6 +192,14 @@ first-install caveat on clusters that already run the same operator dedicated-na
 
 ## 6. TODO(verify-on-cluster) — the on-cluster checklist for when tokens return
 
+> **STATUS 2026-07-18 — largely EXECUTED on C2** (the destructive-window + mega-window passes): install
+> idempotency + state capture ✓; REAL uninstall on an operator-preloaded cluster ✓ (adopted operators
+> preserved, multi-IdP preservation live, monitoring preserved per recorded prior, node shaping reversed,
+> owner-label litmus empty, idempotent 2nd run = zero destructive actions); FSC reinstall onto the
+> preloaded cluster ✓ (zero collisions, 11/11 smoke). STILL OPEN: true-greenfield install (create-path),
+> the monitoring-restore matrix beyond the one prior-state case exercised, and operator install-collision
+> PREVENTION (§3 — detected, not prevented; Wave-2). Items below are kept as the original checklist.
+
 Local tooling cannot exercise any `oc` path. Verify all of the following on a disposable cluster:
 
 **Install (idempotency + capture):**

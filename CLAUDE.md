@@ -32,7 +32,7 @@ Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-S
 - **In-cluster Gitea mirror setups:** after pushing content, sync the mirror and **wait until the mirror's HEAD equals origin's** before restarting Showroom deployments — cockpits build content at pod-init from the mirror; restarting early serves stale content.
 - **`[tabs]` nesting:** a collapsible/NOTE inside a tab needs a 5-`=` delimiter (`=====`); same-length `====` collides ("unterminated open block").
 - **Hook Jobs on OpenShift:** `ose-cli` needs ≥512Mi (oc OOMs at 256Mi); no runtime `dnf` under the restricted SCC — use purpose-built images; memory-backed emptyDir for credential handoff between init and main containers.
-- **CI lint runs SIX checks** (privacy guard, vale, yamllint, shellcheck, helm, kustomize) — read the failing STEP, not just the job name.
+- **CI lint runs EIGHT checks** (privacy guard, vale, yamllint, shellcheck, helm, kustomize, module-order, namespace-drift) — read the failing STEP, not just the job name.
 - **Local lint via podman:** the podman machine auto-stops; "connection refused" from a linter means restart it and re-run — treat unrun gates as failed, never as passed.
 - **Verify scripts are mode-split:** entry-state checks never run at completion mode; use `>=` not `==` for lab-exceedable outcomes. A false ❌ destroys attendee trust in every other ✅.
 
