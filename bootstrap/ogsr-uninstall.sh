@@ -634,7 +634,7 @@ del_obj namespace "$STATE_NS"; DELETED_WS_NS+=("$STATE_NS")   # always ≥1 elem
 report_stuck_namespaces "${DELETED_WS_NS[@]}"
 
 echo
-ok "ogsr-uninstall complete${DRY_RUN:+ (dry-run)}"
+ok "ogsr-uninstall complete$([[ "$DRY_RUN" == "true" ]] && echo ' (dry-run — nothing changed)')"
 cat <<'VERIFY'
 
    Verify (run after the namespaces finish terminating):
