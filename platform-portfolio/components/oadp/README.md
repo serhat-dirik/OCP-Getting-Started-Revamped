@@ -2,7 +2,7 @@
 
 Installs the **OADP operator** (`redhat-oadp-operator`, channel `stable`, OwnNamespace in `openshift-adp`)
 and a **`DataProtectionApplication`** wired to an **in-cluster NooBaa (ODF MCG) S3 bucket** — no external
-AWS S3 required. Backs the M21 "Resilience, Multi-Cluster & DR" module (backup / restore an app namespace
+AWS S3 required. Backs the M22 "Resilience, Multi-Cluster & DR" module (backup / restore an app namespace
 incl. PVC data). Entitlement `[OCP]` (included with an OpenShift subscription).
 
 ## What it creates
@@ -27,7 +27,7 @@ Job with your own `cloud-credentials` Secret + an external-S3 `BackupStorageLoca
 default RWO Ceph-RBD PVCs, and needs no VolumeSnapshotClass. The `csi` plugin + the auto-labeled
 `VolumeSnapshotClass` also enable the CSI-snapshot + Data Mover path where a snapclass exists.
 
-## Plugin note (correction to the M21 build note)
+## Plugin note (correction to the M22 build note)
 
 The build note specified `defaultPlugins: [openshift, csi]`. A `provider: aws` BSL (which is how any
 S3-compatible target, incl. NooBaa, is addressed) needs the **`aws`** object-store plugin, so this

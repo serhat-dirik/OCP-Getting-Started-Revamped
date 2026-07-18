@@ -1,7 +1,7 @@
 # component: rhtpa (OPTIONAL — instructor-demo only)
 
 Red Hat Trusted Profile Analyzer — the enterprise SBOM/VEX explorer UI. This is the **optional
-"go deeper" SBOM beat** for M08; the module's core SBOM lesson is app-native CycloneDX inspected in
+"go deeper" SBOM beat** for M09; the module's core SBOM lesson is app-native CycloneDX inspected in
 the terminal (`cosign download sbom | jq`), which needs none of this.
 
 **Not in the core `trust` stack** (build-note verdict + PM decision 2026-07-09: RHTPA = optional

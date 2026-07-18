@@ -1,6 +1,6 @@
 # stack: auth
 
-The platform backend for **M13 — Securing Apps with Keycloak `[OCP]`**. Installs a workshop-owned
+The platform backend for **M14 — Securing Apps with Keycloak `[OCP]`**. Installs a workshop-owned
 **Red Hat build of Keycloak** (RHBK 26.6) instance as an Argo CD app-of-apps: its own operator, a
 Keycloak CR, and a PostgreSQL. Workshop-agnostic — no users, no per-user realms, no cluster domain
 baked in. Per-attendee `realm-{user}` imports are the **workshop layer's** job
@@ -64,7 +64,7 @@ portfolio stays workshop-agnostic (hard rule 2). Each realm ships the Parasol cl
 This stack backs the **application** login scenario (attendees protect the Parasol app with OIDC +
 bearer tokens). It deliberately does **not** wire the OpenShift **console** OAuth to this Keycloak —
 that is a cluster-OAuth change parked as a project-owner decision (the `[INSTRUCTOR-DEMO]` IdP-tie in
-M13 references the existing `keycloak/sso` IdP read-only).
+M14 references the existing `keycloak/sso` IdP read-only).
 
 ## Footprint (live, ocp-ws-revamped 2026-07-11, idle)
 

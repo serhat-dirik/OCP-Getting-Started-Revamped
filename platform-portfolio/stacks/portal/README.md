@@ -1,10 +1,10 @@
 # stack: portal
 
-The platform prerequisite for **M11 — Developer Hub & Golden Paths [ADS]**. Installs **Red Hat
+The platform prerequisite for **M12 — Developer Hub & Golden Paths [ADS]**. Installs **Red Hat
 Developer Hub (RHDH)** as an Argo CD app-of-apps: a single shared developer portal with the Parasol
 software catalog and a golden-path Software Template that scaffolds a new microservice into the
 attendee's Gitea org. One shared instance — never per-user; per-attendee isolation is each attendee's
-own Gitea org (materialized by the M11 entry state).
+own Gitea org (materialized by the M12 entry state).
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks portal
@@ -30,7 +30,7 @@ the `core-devtools` stack). The `rhdh-gitea` secret (Gitea credentials) is a **c
 the instance reconciles — see `components/rhdh/README.md`. In the workshop the credentials are the Gitea
 admin account; the workshop bootstrap discovers them and creates the secret.
 
-## How the pieces serve M11 (verified live 2026-07-11)
+## How the pieces serve M12 (verified live 2026-07-11)
 
 - **Catalog browse (LAB beat 1):** `catalog.locations` register the `parasol/*` repos' `catalog-info.yaml`
   (parasol-claims/-web/-notifications, their APIs, the `parasol-insurance` System) — served from the
@@ -44,7 +44,7 @@ admin account; the workshop bootstrap discovers them and creates the secret.
 - **Auth:** guest sign-in (simplest honest workshop auth); OpenShift OAuth is the documented hardening
   path.
 - **Developer Lightspeed** ships **on by default** (operator flavour) and degrades gracefully without a
-  model; the M11 [ADS] section wires it to MaaS.
+  model; the M12 [ADS] section wires it to MaaS.
 
 ## Footprint (live, ocp-ws-revamped 2026-07-11, idle)
 
@@ -58,9 +58,9 @@ Idle total ~50m CPU / ~1.4Gi; peaks during catalog refresh + scaffolds. Workers 
 (5–10% CPU, 20–48% memory). A single shared instance is the right shape — do not scale per-user. First
 start takes a few minutes (the Lightspeed `init-rag-data` init container).
 
-## The M11 entry-state seam (NOT installed here)
+## The M12 entry-state seam (NOT installed here)
 
-This stack is a shared platform. The **per-user** wiring is the M11 entry state
+This stack is a shared platform. The **per-user** wiring is the M12 entry state
 (`gitops/entry-states/developer-hub-golden-paths/`, built separately) and layers on top: it gives each attendee a dedicated
 `{user}-svcs` Gitea org to scaffold into and keeps it a clean slate across `ws reset`.
 

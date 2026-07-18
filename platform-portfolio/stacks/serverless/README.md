@@ -1,10 +1,10 @@
 # stack: serverless
 
-The platform prerequisite for **M19 — Serverless Zero-to-Hero** (and **M20 — Eventing Deep-Dive**).
+The platform prerequisite for **M20 — Serverless Zero-to-Hero** (and **M21 — Eventing Deep-Dive**).
 Installs the shared, cluster-wide **OpenShift Serverless** control plane — **Knative Serving** (request-
 driven compute, scale-to-zero, Kourier ingress) and **Knative Eventing** (sources / brokers / triggers,
 in-memory broker) — as an Argo CD app-of-apps. Everything here is a **single shared install** — never
-per-user; the per-user `{user}-dev` claims-processor ksvc + eventing wiring is the M19 entry state on top.
+per-user; the per-user `{user}-dev` claims-processor ksvc + eventing wiring is the M20 entry state on top.
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks serverless
@@ -19,7 +19,7 @@ per-user; the per-user `{user}-dev` claims-processor ksvc + eventing wiring is t
 | `serverless` | `serverless-operator` (`stable-1.37` = v1.37.1, Knative 1.17) | `KnativeServing` (knative-serving) + `KnativeEventing` (knative-eventing) | operator 0, CRs 1 |
 
 The operator channel is **pinned to `stable-1.37`** (not bare `stable`, which floats to the newest minor
-and will drift — the M18 OSSM lesson, commit `3302c14`). `versions.yaml` `serverless` is the source of
+and will drift — the M19 OSSM lesson, commit `3302c14`). `versions.yaml` `serverless` is the source of
 truth for the pin.
 
 ## Namespaces
@@ -47,7 +47,7 @@ images by **tag**: Knative skips tag→digest resolution and the kubelet pulls a
 namespace's image-puller grant. Cluster-agnostic (the internal-registry Service DNS is identical on
 every OpenShift cluster).
 
-## The M19 entry-state seam (NOT installed here)
+## The M20 entry-state seam (NOT installed here)
 
 Workshop-agnostic by design. The **per-user** wiring lives in the workshop layer, on top of this shared
 control plane:

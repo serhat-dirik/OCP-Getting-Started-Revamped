@@ -1,9 +1,9 @@
 # stack: observability
 
-The platform prerequisite for **M12 — Observability, Health & Scale**. Installs shared, cluster-wide
+The platform prerequisite for **M13 — Observability, Health & Scale**. Installs shared, cluster-wide
 observability infrastructure as an Argo CD app-of-apps. Everything here is a **single shared install** —
 never per-user; per-user isolation is done with namespaced `ServiceMonitor`/`PrometheusRule` and RBAC
-(the M12 entry state's job, below).
+(the M13 entry state's job, below).
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks observability
@@ -47,9 +47,9 @@ Tracing tier (COO + Tempo memory-backend + collector): **~1–1.5 CPU / ~2.5Gi**
 **memory backend** (traces are ephemeral, bounded by pod memory) so there is no PVC footprint and retention
 stays low by construction — the shared-cluster-safe default.
 
-## The M12 entry-state seam (NOT installed here)
+## The M13 entry-state seam (NOT installed here)
 
-This stack is workshop-agnostic. The **per-user** wiring is the M12 entry state's job
+This stack is workshop-agnostic. The **per-user** wiring is the M13 entry state's job
 (`gitops/entry-states/observability-health-scale/`, built separately) and layers on top of this shared infra:
 
 - Flip OTLP export on `parasol-claims`: `QUARKUS_OTEL_SDK_DISABLED=false` and
@@ -63,7 +63,7 @@ None of that belongs in this portfolio stack — it is user-/story-specific and 
 
 `loki-logging` is **commented out** of `kustomization.yaml`. It needs ODF/NooBaa object storage and the
 `logging-loki-s3` Secret contract — see `platform-portfolio/components/loki-logging/README.md`. Uncomment
-`apps/loki-logging.yaml` to opt in. Without it, the M12 logs beat degrades to `oc logs` / the console
+`apps/loki-logging.yaml` to opt in. Without it, the M13 logs beat degrades to `oc logs` / the console
 **Pod -> Logs** tab (always available).
 
 ## Verify

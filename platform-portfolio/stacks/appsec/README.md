@@ -1,12 +1,12 @@
 # stack: appsec
 
-The platform prerequisite for the standing **application-security service** used by **M27 — DevSecOps**.
+The platform prerequisite for the standing **application-security service** used by **M08 — DevSecOps**.
 Installs **SonarQube Community Build** (SAST) as an Argo CD Application. Workshop-agnostic: no users,
-no per-user wiring — that is the M27 entry state's job.
+no per-user wiring — that is the M08 entry state's job.
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks appsec
-# together with the dev-loop + trust bases M27 also leans on:
+# together with the dev-loop + trust bases M08 also leans on:
 ./argocd-bootstrap/install.sh --stacks core-devtools,trust,appsec
 ```
 
@@ -26,7 +26,7 @@ The fable-owned `argocd-bootstrap/stack-app.template.yaml` rewrites **every** ch
 SonarSource chart repo) would be clobbered by that rewrite. Sourcing this component from the **monorepo
 path** and inflating the chart via kustomize `helmCharts` (the Argo instance already runs
 `--enable-helm`) keeps the rewrite a harmless no-op and follows the "every component is a kustomize dir"
-convention. See the friction note in the M27 handoff — this is worth a look when a stack legitimately
+convention. See the friction note in the M08 handoff — this is worth a look when a stack legitimately
 needs an external Helm chart repo.
 
 ## Node prereq (HIGH — may need cluster-admin)
@@ -43,11 +43,11 @@ oc apply -f platform-portfolio/components/sonarqube/node-tuning/sonarqube-vm-max
 Many clusters already satisfy this (ODF/Ceph nodes ship 262144). The `sonarqube` pod's Elasticsearch
 CrashLoops with `vm.max_map_count [65530] is too low` until the node value is raised.
 
-## The token contract (consumed by M27)
+## The token contract (consumed by M08)
 
 The bootstrap Job stores a CI analysis token in `sonarqube/sonar-ci-token` (keys `sonar-token` +
-`sonar-host-url = http://sonarqube.sonarqube.svc:9000`). The M27 entry state copies it per-user into
-`{user}-cicd/sonar-auth` (the M08 rox-token copy pattern); the `sonar-scan` task reads it there. The
+`sonar-host-url = http://sonarqube.sonarqube.svc:9000`). The M08 entry state copies it per-user into
+`{user}-cicd/sonar-auth` (the M09 rox-token copy pattern); the `sonar-scan` task reads it there. The
 token value is never logged.
 
 ## Footprint

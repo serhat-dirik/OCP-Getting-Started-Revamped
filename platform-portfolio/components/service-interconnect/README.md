@@ -1,7 +1,7 @@
 # components/service-interconnect — Red Hat Service Interconnect (Skupper v2)
 
 Installs the **Skupper v2 operator** (`skupper-operator`, channel **`stable-2`**) — the L7 cross-site
-connectivity layer for M21's optional `[ADD-ON]` section (link a service across namespaces/clusters
+connectivity layer for M22's optional `[ADD-ON]` section (link a service across namespaces/clusters
 without a VPN or flat network). Entitlement `[ADD-ON]` (separate subscription); no `[OCP]` module depends
 on it.
 

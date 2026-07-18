@@ -1,6 +1,6 @@
 # component: rhdh
 
-Red Hat Developer Hub (RHDH / Backstage) — the developer portal for **M11 Developer Hub & Golden
+Red Hat Developer Hub (RHDH / Backstage) — the developer portal for **M12 Developer Hub & Golden
 Paths [ADS]**. A single shared instance: the software catalog + the golden-path Software Template are
 browsed and run by every attendee.
 
@@ -49,7 +49,7 @@ discovered at runtime (a small hook) — tracked as an enhancement, not required
 plugin (integrity-pinned) — **v0.2.19**, version-matched to the image (`@backstage/plugin-scaffolder-node
 ^0.13.0` vs the image's 0.13.1; 0.2.20+ need ^0.13.2+). Re-pin on RHDH upgrades. Verified live: loads
 clean, `publish:gitea` runs. Note: the module publishes into a Gitea **organization** (it rejects a user
-namespace) — the M11 entry state gives each attendee a `<user>-svcs` org; and its `repoContentsUrl`
+namespace) — the M12 entry state gives each attendee a `<user>-svcs` org; and its `repoContentsUrl`
 output omits the branch, so the golden-path template registers with an explicit `catalogInfoUrl`.
 
 ## Developer Lightspeed is ON by default
@@ -57,7 +57,7 @@ output omits the branch, so the golden-path template registers with an explicit 
 RHDH 1.10.2 enables the **Developer Lightspeed** flavour by default (operator-level
 `rhdh-flavour-lightspeed-config`, not a dynamic-plugin toggle) — it adds a `lightspeed-core` sidecar +
 an `init-rag-data` init container. It **degrades gracefully** with no model wired (the assistant is
-present but has no inference) and does not block the portal. Kept on (ample headroom); the M11
+present but has no inference) and does not block the portal. Kept on (ample headroom); the M12
 Lightspeed [ADS] section wires it to a MaaS endpoint. To slim the instance, disable the flavour at the
 operator level.
 

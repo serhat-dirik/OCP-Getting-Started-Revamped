@@ -1,10 +1,10 @@
 # stack: mta
 
-The platform prerequisite for **M22 — Application Modernization (MTA + AI)**. Installs the shared,
+The platform prerequisite for **M23 — Application Modernization (MTA + AI)**. Installs the shared,
 cluster-wide **Migration Toolkit for Applications 8 (MTA)** — the `mta-operator` + a single **Tackle**
 Hub — as an Argo CD app-of-apps. Everything here is a **single shared install** — never per-user;
 per-user modernization state (`{user}-modernize` + the seeded `parasol-legacy-claims` repo + the MTA
-Application entry) is the workshop layer / M22 entry state on top.
+Application entry) is the workshop layer / M23 entry state on top.
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks mta
@@ -34,7 +34,7 @@ Git repos in the workshop layer, not MTA logins.
 
 **Developer Lightspeed for MTA ([ADS]) is NOT configured on the Tackle CR** — verified live (v8.1.2)
 that the CR carries no genAI provider/model fields. The AI refactor's LLM is wired in the VS Code
-extension per workspace (MaaS endpoint/model + key), by the M22 entry state.
+extension per workspace (MaaS endpoint/model + key), by the M23 entry state.
 
 ## Namespaces
 
@@ -42,7 +42,7 @@ extension per workspace (MaaS endpoint/model + key), by the M22 entry state.
 |---|---|
 | `openshift-mta` | the mta-operator + the Tackle Hub: `mta-hub` + `mta-ui` pods, DB embedded on a PVC. No separate Postgres; no Keycloak pod while `feature_auth_required: false` (the RHBK operator installs as a dependency but runs no instance); the server-side Kai/AI solution server stays gated (`KaiSolutionServerReady=False`) until its API-keys Secret exists. Verified v8.1.2 on-cluster 2026-07-13 (no `pathfinder` — that was MTA 6). |
 
-## The M22 entry-state seam (NOT installed here)
+## The M23 entry-state seam (NOT installed here)
 
 Workshop-agnostic by design. The **per-user** wiring lives in the workshop layer, on top of this
 shared Hub:
@@ -67,5 +67,5 @@ oc get route -n openshift-mta                             # the MTA web console 
 > default channel `stable-v8.1` → `mta-operator.v8.1.2`, OwnNamespace/SingleNamespace/MultiNamespace
 > install modes (AllNamespaces unsupported), owned CRDs (Tackle/Addon/Extension/Schema/Task), and the
 > Tackle `alm-example` (minimal `feature_auth_required`). Full install verification (operator Succeeded
-> + the Tackle Hub UI/hub/keycloak/postgres pods Running) runs post-merge via Argo — see the M22 build
+> + the Tackle Hub UI/hub/keycloak/postgres pods Running) runs post-merge via Argo — see the M23 build
 > report for why on-cluster install was merge-gated in the build session.

@@ -1,9 +1,9 @@
 # stack: trust
 
-The platform prerequisite for **M08 — Trusted Software Supply Chain [ADS]**. Installs the shared
+The platform prerequisite for **M09 — Trusted Software Supply Chain [ADS]**. Installs the shared
 supply-chain security infrastructure as an Argo CD app-of-apps: scan images, sign them, and prove
 what is inside. Everything here is a **single shared install** — never per-user; the per-user wiring
-is the M08 entry state's job (below).
+is the M09 entry state's job (below).
 
 ```bash
 ./argocd-bootstrap/install.sh --stacks trust
@@ -23,9 +23,9 @@ is the M08 entry state's job (below).
 Operators are **wave-serialized** (rhacs wave 0 → rhtas wave 2) so only one OLM install churns at a
 time. `rhacs-central` (wave 1) runs after the operator's CRDs exist.
 
-## How the pieces serve M08
+## How the pieces serve M09
 
-- **Scan gate (LAB):** the M08 pipeline's `acs-image-check` task runs `roxctl image check` against the
+- **Scan gate (LAB):** the M09 pipeline's `acs-image-check` task runs `roxctl image check` against the
   built image; the shipped **"Block Log4Shell (CVE-2021-44228) at build"** `SecurityPolicy` (BUILD +
   `FAIL_BUILD_ENFORCEMENT`) fails the build on the seeded log4j-core. Deterministic (feed-independent
   of severity thresholds): a clean image lacks the CVE and passes.
@@ -58,9 +58,9 @@ first boot — allow it to finish (can take a while on a cold cluster) before th
 - Cluster had ~60 cores / ~180 Gi free before install — ample. RHTPA (the optional `trust-demo`
   component) would add ~12–15 more pods; it is default-off.
 
-## The M08 entry-state seam (NOT installed here)
+## The M09 entry-state seam (NOT installed here)
 
-This stack is workshop-agnostic. The **per-user** wiring is the M08 entry state
+This stack is workshop-agnostic. The **per-user** wiring is the M09 entry state
 (`gitops/entry-states/trusted-supply-chain/`, built separately) and layers on top:
 
 - Copies the shared `stackrox/rox-api-token` and `openshift-pipelines/chains-cosign-pub` into

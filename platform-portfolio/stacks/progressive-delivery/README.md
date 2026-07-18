@@ -1,10 +1,10 @@
 # stack: progressive-delivery
 
-The platform prerequisite for **M10 — GitOps at Scale & Progressive Delivery [OCP]**. Provisions the
+The platform prerequisite for **M11 — GitOps at Scale & Progressive Delivery [OCP]**. Provisions the
 **cluster-scoped Argo Rollouts controller** (one `RolloutManager` per cluster — PM decision
 2026-07-09; no other module claims Rollouts) as an Argo CD app-of-apps. Workshop-agnostic: any
 OpenShift 4.20+ cluster on OpenShift GitOps 1.13+ gets a working Rollouts controller from this one
-stack. Everything M10-specific (per-user prod overlays, ApplicationSets, analysis knobs) lives in the
+stack. Everything M11-specific (per-user prod overlays, ApplicationSets, analysis knobs) lives in the
 workshop layer / entry states ON TOP — never here.
 
 ```bash
@@ -35,10 +35,10 @@ so the operator upgrade path is never pinned.
    `Available` with **no Subscription edit**. Placing the controller there keeps this component purely
    declarative and never touches the fable-owned `argocd-bootstrap` operator install. (A dedicated
    `argo-rollouts` namespace would force an operator-Subscription patch → operator pod restart on
-   every cluster → an M10 concern leaking into the core bootstrap. Rejected.)
+   every cluster → an M11 concern leaking into the core bootstrap. Rejected.)
 
 2. **No traffic/metric plugins (pod-ratio canary + job-provider analysis).** The `RolloutManager`
-   ships with **no `spec.plugins`**. The core M10 lab teaches canary + blue-green + automated analysis
+   ships with **no `spec.plugins`**. The core M11 lab teaches canary + blue-green + automated analysis
    + auto-rollback using **pod-ratio canary weighting** (Rollouts scales the canary/stable ReplicaSets
    to approximate `setWeight`) and a **job-provider `AnalysisTemplate`** — both fully self-contained.
    The OpenShift **Route traffic-router plugin** (real request-level `%` via `Route.alternateBackends`)
@@ -48,7 +48,7 @@ so the operator upgrade path is never pinned.
    ANY cluster." It is documented as an **optional enhancement**, not the default. See the
    `## Route traffic-plugin` note below to enable it.
 
-## How it serves M10
+## How it serves M11
 
 - **ApplicationSets / sync-waves / promotion** need no controller — they are core Argo CD, already
   present via the student instance (ADR-0002). This stack is specifically the **Rollouts** half.
@@ -76,9 +76,9 @@ with the managed `Route`, and the Argo Application ignores the plugin's writes:
 **Verify the exact release coordinates + name at enable time** — this is the one internet-dependent
 piece the default deliberately avoids.
 
-## The M10 entry-state seam (NOT installed here)
+## The M11 entry-state seam (NOT installed here)
 
-This stack is workshop-agnostic. The **per-user** wiring is the M10 entry state
+This stack is workshop-agnostic. The **per-user** wiring is the M11 entry state
 (`gitops/entry-states/gitops-at-scale/`) and layers on top: the GitOps Fundamentals end state pre-materialized (claims
 GitOps-managed in `{user}-dev`/`stage`), the `{user}/claims-config` fork extended with a `rollouts/`
 source (Rollout + `AnalysisTemplate` + `ApplicationSet`), and a per-user analysis SA in `{user}-prod`.
