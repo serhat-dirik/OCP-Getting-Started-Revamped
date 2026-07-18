@@ -212,6 +212,13 @@ preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, strip our own
   echo "   • preserved namespace/${ns}, stripped owner label (${reason})"
 }
 
+del_ns_fast() {  # ns — delete a namespace classify already confirmed exists (skips del_obj's redundant get,
+  local ns="$1"  # which halves step-9 round-trips on an 8-user cohort's ~100 per-user namespaces)
+  if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD delete namespace/${ns}"; return 0; fi
+  oc delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  ok "deleted namespace/${ns}"
+}
+
 # ── reverse the imperative bootstrap mutations ────────────────────────────────
 remove_oauth_idp() {  # remove ONLY the workshop-users IdP entry, preserving every other identity provider
   local owned names n idx i backing
@@ -413,7 +420,7 @@ delete_workshop_namespaces() {  # act on the classification: delete ours (F5 fir
   while IFS=$'\t' read -r verb n reason; do
     [[ -n "$n" ]] || continue
     case "$verb" in
-      delete)         strip_hook_finalizers "$n"; del_obj namespace "$n"; DELETED_WS_NS+=("$n");;
+      delete)         strip_hook_finalizers "$n"; del_ns_fast "$n"; DELETED_WS_NS+=("$n");;
       preserve-strip) preserve_and_strip "$n" "$reason";;
       defer)          : ;;  # STATE_NS removed right after this fn; Lightspeed handled by handle_lightspeed
     esac
