@@ -42,6 +42,15 @@ USERS="$(v '.users')";           [[ "$USERS" =~ ^[0-9]+$ ]] || USERS=5
 LIGHTSPEED="$(v '.lightspeed')"; [[ "$LIGHTSPEED" == "false" ]] || LIGHTSPEED="true"
 AUTH="$(v '.auth')";             [[ "$AUTH" == "true" ]] || AUTH="false"
 RESILIENCE="$(v '.resilience')"; [[ "$RESILIENCE" == "true" ]] || RESILIENCE="false"
+# Elective stacks (all default-false opt-ins; each maps 1:1 to platform-portfolio/stacks/<name>)
+MESH="$(v '.mesh')";                 [[ "$MESH" == "true" ]] || MESH="false"
+SERVERLESS="$(v '.serverless')";     [[ "$SERVERLESS" == "true" ]] || SERVERLESS="false"
+MTA="$(v '.mta')";                   [[ "$MTA" == "true" ]] || MTA="false"
+OBSERVABILITY="$(v '.observability')"; [[ "$OBSERVABILITY" == "true" ]] || OBSERVABILITY="false"
+APPSEC="$(v '.appsec')";             [[ "$APPSEC" == "true" ]] || APPSEC="false"
+PORTAL="$(v '.portal')";             [[ "$PORTAL" == "true" ]] || PORTAL="false"
+TRUST="$(v '.trust')";               [[ "$TRUST" == "true" ]] || TRUST="false"
+TRUST_DEMO="$(v '.trust_demo')";     [[ "$TRUST_DEMO" == "true" ]] || TRUST_DEMO="false"
 CONSOLE_PLUGINS="$(v '.console_plugins')"; [[ "$CONSOLE_PLUGINS" == "true" ]] || CONSOLE_PLUGINS="false"
 REPO_URL="$(v '.repo_url')";     [[ -n "$REPO_URL" && "$REPO_URL" != "null" ]] || REPO_URL="https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
 REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
@@ -231,7 +240,12 @@ fi
 # batch and workshop-config's sync dies on missing kueue.x-k8s.io CRDs — which also aborts the
 # in-app Gitea/Argo seed hooks riding the same Application, blocking the whole workshop. M06 also
 # teaches Kueue. Verified: a clean bootstrap without it broke cluster-km7vw's seed (2026-07-12).
-STACKS="core-devtools,batch"
+# progressive-delivery (Argo Rollouts via RolloutManager) is BASELINE, not opt-in: M11
+# gitops-at-scale is core catalog (flagship Day-2 path) and its canary/rollback exercises are
+# dead without the controller. The Rollouts CRDs ship with GitOps, which HID the gap — the CR
+# applies cleanly and then nothing reconciles it (QA gate, 2026-07-18: greenfield installs
+# shipped a dead M11 on both install paths).
+STACKS="core-devtools,batch,progressive-delivery"
 [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]] && STACKS="${STACKS},ai-assist"
 # auth stack (Red Hat build of Keycloak) for M13. Workshop-agnostic; per-user realms are seeded by the
 # workshop layer below (sso.enabled). Its own OwnNamespace operator never touches a cluster login IdP.
@@ -239,6 +253,17 @@ STACKS="core-devtools,batch"
 # resilience stack (OADP/Velero + in-cluster NooBaa S3) for M21. Opt-in; PREREQ ODF/MCG for the S3 target.
 # The RHSI (Skupper v2) add-on stays commented out in the stack unless the catalog offers channel stable-2.
 [[ "$RESILIENCE" == "true" ]] && STACKS="${STACKS},resilience"
+# Elective stacks for the D-block / DevSecOps modules. Each is a plain portfolio stack; prereqs
+# (if any) are documented in the stack's own kustomization. Without these, the matching modules
+# are simply absent from the cluster (module independence holds — nothing else breaks).
+[[ "$MESH" == "true" ]] && STACKS="${STACKS},mesh"
+[[ "$SERVERLESS" == "true" ]] && STACKS="${STACKS},serverless"
+[[ "$MTA" == "true" ]] && STACKS="${STACKS},mta"
+[[ "$OBSERVABILITY" == "true" ]] && STACKS="${STACKS},observability"
+[[ "$APPSEC" == "true" ]] && STACKS="${STACKS},appsec"
+[[ "$PORTAL" == "true" ]] && STACKS="${STACKS},portal"
+[[ "$TRUST" == "true" ]] && STACKS="${STACKS},trust"
+[[ "$TRUST_DEMO" == "true" ]] && STACKS="${STACKS},trust-demo"
 # Snapshot operator adoption BEFORE Argo installs anything (created vs adopted → safe uninstall).
 record_once lightspeed_preinstalled "$LIGHTSPEED_PREINSTALLED"
 record_once installed_stacks "$STACKS"
