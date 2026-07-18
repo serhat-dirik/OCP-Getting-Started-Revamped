@@ -116,8 +116,8 @@ Workshop attendees pull it via the `workshop-image-pullers` RoleBinding in
 `gitops/workshop-config/templates/parasol-images-pull.yaml` (granted to every
 per-user namespace's ServiceAccount group, plus the human `workshop-attendees`
 group, scoped to the `ogsr-parasol-images` namespace — this is the mechanism that
-is actually live; `openshift/image-puller-rb.yaml` in this directory predates it
-and is not applied on any cluster).
+is actually live; an earlier `openshift/image-puller-rb.yaml` RoleBinding in this
+directory predated it, was never applied on any cluster, and has been removed).
 
 ## Container notes (OpenShift restricted-v2)
 
