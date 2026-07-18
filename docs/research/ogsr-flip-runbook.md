@@ -87,11 +87,45 @@ The gitea host changes rather than collides, so the new gitea can come up alongs
    ```
 3. The old `gitea` namespace may stay up for now (different host — harmless). It is removed in
    Phase 4.
+4. **Re-publish the shared workshop password into the new gitea namespace.** Found missing during
+   the C1 flip window. `gitops/workshop-config`'s **gitea-user-seed** Job (Phase 2, sync-wave 2) reads
+   the `workshop-user-creds` secret FROM `ogsr-gitea` — it does not create it. That secret is normally
+   published once by `helm/bootstrap`'s `ogsr-gitea-seed-secret` hook Job
+   (`helm/bootstrap/templates/job-gitea-seed-secret.yaml`), which does **not** re-run on a flip
+   (bootstrap is the one-time imperative step; renaming the gitea namespace does not re-trigger it).
+   Without this, Phase 2's seed Job fails against the new `ogsr-gitea` and no attendee accounts or
+   `parasol/*` repos get (re-)seeded. Re-publish it with the exact contract that Job uses:
+   ```
+   oc create secret generic workshop-user-creds \
+     --from-literal=password="<workshop_user_password from vars.yaml>" -n ogsr-gitea \
+     --dry-run=client -o yaml \
+     | oc label --local -f - "workshop.redhat.com/owner=ogsr" --overwrite -o yaml \
+     | oc apply -f -
+   ```
+   (Equivalent shortcut for the whole cohort: `tools/ws/ws passwd <the known password>` — it writes
+   this same secret into `ogsr-gitea` AND keeps the OpenShift console/CLI login in sync. Pass the
+   EXISTING password explicitly; a bare `ws passwd` generates and rotates to a NEW one.)
+5. **Re-point `workshop-config`'s Argo Application at the new gitea host.** Found missing during the
+   C1 flip window. `workshop-config` is a **static, bootstrap-created** `Application`
+   (`helm/bootstrap/templates/applications.yaml`) — its `spec.source.repoURL` is a literal string baked
+   in at `helm install` time (`https://gitea-<OLD gitea namespace>.<domain>/parasol/ocp-getting-started.git`)
+   and does **not** self-heal when the gitea namespace is renamed: nothing re-renders the bootstrap
+   chart on a flip, and Argo's `selfHeal` reconciles the resources an Application *manages*, not the
+   Application object's own `spec.source`. Left alone, the Phase 2 sync below keeps pulling from the
+   OLD host (which still resolves until Phase 4 deletes it, so this fails silently-late rather than
+   loudly-now — patch it before syncing, not after):
+   ```
+   oc patch application workshop-config -n openshift-gitops --type=merge \
+     -p '{"spec":{"source":{"repoURL":"https://gitea-ogsr-gitea.<domain>/parasol/ocp-getting-started.git"}}}'
+   ```
+   (Any other wave-2 Application sourced from the mirror — currently only `workshop-config` — needs
+   the same patch.)
 
 ### Phase 2 — routeless shared namespaces (no collision)
 
-Sync **`gitops/workshop-config`**. This creates `ogsr-parasol-tasks` (curated Task library),
-`ogsr-parasol-images` (shared image registry namespace + puller grants), and re-runs the
+Sync **`gitops/workshop-config`**. This creates `ogsr-parasol-tasks` (curated Task library) and
+`ogsr-parasol-images` (shared image registry namespace + puller grants +, as of 2026-07-18, the
+`parasol-claims`/`parasol-web` BuildConfigs themselves — see "Known behaviour changes"), and re-runs the
 **gitea-user-seed** + **app-repo-seed** Jobs against `ogsr-gitea` (re-seeds workshop users and
 `parasol/*` repos). If the observability stack is installed, sync it to create
 `ogsr-observability-workshop` (Tempo owns/creates it; the OTel collector deploys into it).
@@ -169,7 +203,11 @@ tools/ws/ws git-refresh --restart-terminals --all
   - `student-gitops-server-student-gitops.<domain>` → student Argo login (**unchanged** host).
 - **Mirror fresh:** `HEAD == origin` on `parasol/ocp-getting-started@main` in `ogsr-gitea`.
 - **Task library present:** `oc get tasks -n ogsr-parasol-tasks` → the 8 curated Tasks.
-- **Image namespace present:** `oc get is -n ogsr-parasol-images` → `parasol-claims`, `parasol-web`, … (re-loaded / re-built as applicable).
+- **Images (re-)build automatically — no manual step:** the `parasol-claims`/`parasol-web`
+  BuildConfigs in the new `ogsr-parasol-images` fire on creation (ConfigChange trigger); watch
+  `oc logs -f bc/parasol-claims -n ogsr-parasol-images` (and `bc/parasol-web`), then confirm
+  `oc get istag -n ogsr-parasol-images` shows `parasol-claims:1.0`, `parasol-claims:1.1`,
+  `parasol-web:1.0`, `parasol-web:1.1` (`ws doctor`'s "parasol images" check asserts the same).
 - **Observability (if installed):** `oc get opentelemetrycollector,tempomonolithic -n ogsr-observability-workshop` → Ready.
 - **`ws` converges:** `tools/ws/ws doctor`, then `tools/ws/ws prep pipelines-fundamentals user1`
   (exercises: fork into `ogsr-gitea`, seed `.tekton/`, resolver into `ogsr-parasol-tasks`) and
@@ -181,6 +219,16 @@ tools/ws/ws git-refresh --restart-terminals --all
 
 ## Known behaviour changes (call these out to the owner)
 
+- **No manual image/cockpit-content rebuild needed on this flip.** The shared prebuilt images
+  (`parasol-claims`, `parasol-web`) and the showroom `antora-ext` cockpit-content image now self-seed
+  declaratively (BuildConfigs owned by `gitops/workshop-config` — this change, plus a33b61a for
+  antora-ext). A namespace-renaming flip like this one still needs the **one** Phase 2
+  `workshop-config` sync to materialize those BuildConfigs *in the new namespace* (`ogsr-parasol-images`,
+  `ogsr-showroom`) — the images don't exist until that sync runs and the ConfigChange-triggered builds
+  complete — but nothing beyond that one sync is required; there is no separate manual
+  `oc new-build`/`oc start-build`/`oc tag` step left to remember (that used to be an undocumented,
+  easy-to-miss 4th re-derivation gap — the runbook never mentioned it because the old manual flow
+  wasn't runbook material at all).
 - **Gitea attendee URL changes:** `gitea-gitea.<domain>` → `gitea-ogsr-gitea.<domain>`. The
   gitea operator route host is namespace-derived and the workshop layer's `giteaHost` helper
   (`helm/bootstrap`), `showroom.yaml`/`showroom-demos.yaml` cockpit tabs, `ws` fallback, and the
