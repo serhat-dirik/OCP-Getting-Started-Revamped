@@ -82,16 +82,21 @@ Keycloak container — the workshop always points OIDC at the shared rhbk (M29).
 
 ## Building the image in-cluster
 
-Built on the cluster (cluster-first policy). Binary build for the initial image:
+Built declaratively by GitOps, not a manual step: the `parasol-fraud` BuildConfig +
+ImageStream in `gitops/workshop-config/templates/parasol-images-build.yaml` (Argo CD
+`workshop-config` Application) clones this repo and pushes `parasol-fraud:latest`;
+`1.0` is a declared ImageStream tag aliasing `latest`, so the entry states that pin
+it (securing-apps-keycloak, service-mesh-advanced-gateways) resolve without anyone
+having run a build by hand.
 
 ```bash
-oc new-build --strategy=docker --binary --name=parasol-fraud -n ogsr-parasol-images
-oc start-build parasol-fraud --from-dir=apps/parasol-fraud --follow -n ogsr-parasol-images
-oc tag ogsr-parasol-images/parasol-fraud:latest ogsr-parasol-images/parasol-fraud:1.0
+# Manual rebuild (e.g. after editing this app) — moves latest and the 1.0 alias together:
+oc start-build parasol-fraud -n ogsr-parasol-images --follow
 ```
 
-`openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig`
-(`parasol-fraud-git`) for later CI-driven rebuilds (`contextDir apps/parasol-fraud`).
+> Historically this was a hand-run binary build + `oc tag` (git history before
+> 2026-07-18 has the old recipe); the Git-strategy `openshift/buildconfig.yaml` twin
+> was retired with it, matching the parasol-claims/parasol-web precedent.
 
 ## Container notes (OpenShift restricted-v2)
 
