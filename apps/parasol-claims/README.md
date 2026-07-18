@@ -95,17 +95,23 @@ Keycloak container.
 
 ## Building the image in-cluster
 
-Built on the cluster (cluster-first policy). Binary build, then an immutable tag:
+Built declaratively by GitOps, not a manual step: the `parasol-claims` BuildConfig +
+ImageStream in `gitops/workshop-config/templates/parasol-images-build.yaml` (Argo CD
+`workshop-config` Application) clones this repo and pushes `parasol-claims:latest`;
+`1.0` and `1.1` are declared ImageStream tags aliasing `latest`, so every entry state
+that pins either tag resolves without anyone having run a build by hand.
 
 ```bash
-oc start-build parasol-claims --from-dir=apps/parasol-claims --follow -n ogsr-parasol-images
-oc tag ogsr-parasol-images/parasol-claims:latest ogsr-parasol-images/parasol-claims:1.1
+# Manual rebuild (e.g. after editing this app) — moves latest AND both aliases together:
+oc start-build parasol-claims -n ogsr-parasol-images --follow
 ```
 
-> Image tags are immutable per release. `1.0` is the M02-era image pinned by the
-> Phase-2 entry states — **never overwrite it**. Builds carrying the M07/M11/M29
-> app changes are tagged `1.1`. `openshift/buildconfig.yaml` defines the
-> Git-strategy `BuildConfig` (`parasol-claims-git`) for later CI rebuilds.
+> Historically `1.0` and `1.1` were two hand-tagged, genuinely different binary
+> builds (`1.0` frozen at the M02-era image, `1.1` carrying the later M07/M11/M29
+> changes) — see git history before 2026-07-18 for the old manual recipe. The
+> declarative build keeps `1.0`/`1.1` as a **naming** convention (which entry
+> states pin which tag) rather than a content split: both aliases now track the
+> same `latest` build (see the template's header comment for the full tradeoff).
 
 ## Container notes (OpenShift restricted-v2)
 

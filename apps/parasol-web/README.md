@@ -89,25 +89,22 @@ this app has no external dependencies, so dev mode runs standalone.
 
 ## Building the image in-cluster
 
-`parasol-web` is built on the cluster (cluster-first policy — no laptop image
-builds). Two supported paths:
-
-### Binary build (used for the initial M01 image)
-
-Source is streamed straight from this directory — no Git checkout needed:
+Built declaratively by GitOps, not a manual step: the `parasol-web` BuildConfig +
+ImageStream in `gitops/workshop-config/templates/parasol-images-build.yaml` (Argo CD
+`workshop-config` Application) clones this repo (Docker strategy, `contextDir
+apps/parasol-web`) and pushes `parasol-web:latest`; `1.0` and `1.1` are declared
+ImageStream tags aliasing `latest`, so M01 (and every later module that pins either
+tag) resolves the image without anyone having run a build by hand.
 
 ```bash
-oc new-build --strategy=docker --binary --name=parasol-web -n ogsr-parasol-images
-oc start-build parasol-web --from-dir=apps/parasol-web --follow -n ogsr-parasol-images
-oc tag ogsr-parasol-images/parasol-web:latest ogsr-parasol-images/parasol-web:1.0
+# Manual rebuild (e.g. after editing this app) — moves latest AND both aliases together:
+oc start-build parasol-web -n ogsr-parasol-images --follow
 ```
 
-### Git BuildConfig (for later CI-driven rebuilds)
-
-`openshift/buildconfig.yaml` defines a Docker-strategy `BuildConfig`
-(`parasol-web-git`) that builds from the public repo, `contextDir apps/parasol-web`.
-It is **not** applied during M01 (the code must be committed and pushed first);
-apply it once the repo is published to enable rebuilds from Git.
+> Historically this was a one-off binary build (`oc new-build --strategy=docker
+> --binary` + `oc start-build --from-dir`, streamed straight from this directory)
+> followed by `oc tag …:latest …:1.0` — necessary only because the code wasn't yet
+> committed to the public repo. See git history before 2026-07-18 for that recipe.
 
 ### Image reference M01 deploys
 
@@ -115,9 +112,12 @@ apply it once the repo is published to enable rebuilds from Git.
 image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web:1.0
 ```
 
-Workshop attendees pull it via the `system:image-puller` RoleBinding in
-`openshift/image-puller-rb.yaml` (granted to group `workshop-attendees`,
-scoped to the `ogsr-parasol-images` namespace).
+Workshop attendees pull it via the `workshop-image-pullers` RoleBinding in
+`gitops/workshop-config/templates/parasol-images-pull.yaml` (granted to every
+per-user namespace's ServiceAccount group, plus the human `workshop-attendees`
+group, scoped to the `ogsr-parasol-images` namespace — this is the mechanism that
+is actually live; `openshift/image-puller-rb.yaml` in this directory predates it
+and is not applied on any cluster).
 
 ## Container notes (OpenShift restricted-v2)
 
