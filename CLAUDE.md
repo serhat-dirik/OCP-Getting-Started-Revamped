@@ -28,7 +28,7 @@ Keep EVERYTHING private in a sibling folder **outside this repo**: `../Project-S
 
 ## Session best practices (hard-earned — trust them)
 
-- **Argo sync discipline:** never start a sync while an operation is Running (the patch is silently swallowed). Flow: mirror-sync → hard refresh → ~10s → sync. Stuck op: patch `status.operationState.phase=Terminating`, then a fresh sync. A poisoned manifest cache survives SHA changes and Redis flushes — **bump the chart version** to bust it.
+- **Argo sync discipline:** never start a sync while an operation is Running (the patch is silently swallowed). Flow: mirror-sync → hard refresh → ~10s → sync. Stuck op: patch `status.operationState.phase=Terminating`, then a fresh sync. A poisoned manifest cache survives SHA changes, Redis flushes, **and even reverting a helm-parameter override** (the stale render can re-apply minutes later on an unrelated reconcile) — **bump the chart version** to bust it. Also: Argo `helm.parameters` does NOT apply Helm `{a,b,c}` list-literals the way the helm CLI does — keep list values in values.yaml, parameterize only scalars.
 - **In-cluster Gitea mirror setups:** after pushing content, sync the mirror and **wait until the mirror's HEAD equals origin's** before restarting Showroom deployments — cockpits build content at pod-init from the mirror; restarting early serves stale content.
 - **`[tabs]` nesting:** a collapsible/NOTE inside a tab needs a 5-`=` delimiter (`=====`); same-length `====` collides ("unterminated open block").
 - **Hook Jobs on OpenShift:** `ose-cli` needs ≥512Mi (oc OOMs at 256Mi); no runtime `dnf` under the restricted SCC — use purpose-built images; memory-backed emptyDir for credential handoff between init and main containers.
