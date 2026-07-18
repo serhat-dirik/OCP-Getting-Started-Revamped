@@ -153,7 +153,7 @@ If asked "so it's *zero* dropped?" the answer is *yes*, and it's deterministic: 
 *1. "My pod is `Pending` — how do I find out why?"*::
 Read the `FailedScheduling` event: `oc get events -n <ns> --field-selector reason=FailedScheduling`.
 It names the reason *node by node* — `untolerated taint(s)`, `didn't match Pod's node affinity/selector`, `didn't match pod anti-affinity rules`, `Insufficient cpu/memory`.
-On the build cluster the anti-affinity case read `0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match pod anti-affinity rules` — one tainted node plus five already holding a claims pod.
+On the 6-node build cluster the anti-affinity case read `0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match pod anti-affinity rules` — one tainted batch node plus every other node already holding a claims pod. On a differently-sized cluster both totals track its node count (the `0/N` is all nodes; the anti-affinity count is the non-batch nodes) — the lab derives them live, so don't read `6`/`5` as fixed.
 That one line answers almost every "why won't it schedule," and it's always the first thing to read.
 
 *2. "I added a `nodeSelector` for the pool and my pod won't schedule."*::
@@ -178,12 +178,12 @@ Check `oc get pdb -n <ns>`: `ALLOWED DISRUPTIONS: 0` with `minAvailable == repli
 No — required `podAntiAffinity` makes a rolling update *sequential*.
 With `maxSurge: 1`, each new pod must find a node with no other claims pod, so it waits for an old pod to vacate before the next replica rolls.
 It's deliberate, not stuck (watch `oc rollout status` progress one replica at a time).
-The one real trap: if replicas *equal* the number of eligible nodes, the surge pod has *nowhere* to go and the roll wedges — keep replicas below the eligible-node count (here: ≤4 of the 5 non-batch nodes) so there's always a free node to surge onto.
+The one real trap: if replicas *equal* the number of eligible (non-batch) nodes, the surge pod has *nowhere* to go and the roll wedges — keep replicas below the eligible-node count (on this 6-node cluster that's the 5 non-batch nodes, so ≤4; on another cluster it's that cluster's non-batch count) so there's always a free node to surge onto.
 
 == Watchouts
 
 * *Required anti-affinity + rolling update = sequential, and can wedge.*
-The roll is slow by design (see question 5). It *wedges* only if replicas == eligible nodes (the surge pod can't place). The lab scales to 6 *deliberately* to show the `Pending`, then back to 3; don't leave a user at 6 with `maxUnavailable: 0` or their next roll can't surge.
+The roll is slow by design (see question 5). It *wedges* only if replicas == eligible nodes (the surge pod can't place). The lab scales to *one past the eligible-node count* (`ELIGIBLE+1`, computed live — 6 on this 6-node cluster) *deliberately* to show the `Pending`, then back to 3; don't leave a user scaled to the eligible count with `maxUnavailable: 0` or their next roll can't surge.
 * *Use a `--type=strategic` patch for container-level edits.*
 `--type=merge` replaces the whole `containers` list and fails with `spec.containers[0].image: Required value`. The lab flags this in an IMPORTANT block; if a user hits it raising the CPU limit (the resources step), that's the cause — the `oc set resources`/`oc set env` helpers sidestep it.
 * *You can promise "0 after" — the cause is deterministic.*

@@ -9,7 +9,10 @@ include::partial$version-attributes.adoc[]
 // performed on OCP {ocp_version} (Kubernetes 1.34) as user2 on 2026-07-13: the FailedScheduling events,
 // the anti-affinity spread, the batch-pool break-and-fix, the maxUnavailable=0 capacity samples, the
 // PDB eviction 429, the DaemonSet inventory, and the hollow MachineSet are real captures. NODE NAMES in
-// output are scrubbed to generic worker-N / control-plane-N (they differ per cluster). Console
+// output are scrubbed to generic worker-N / control-plane-N (they differ per cluster). NODE COUNTS are
+// derived live (ELIGIBLE=non-batch nodes for the scale-to-Pending beat; NODES=total for the DaemonSet
+// DESIRED filter) so the beats reproduce on any cluster size — re-grounded on C1 (6 nodes: 5 non-batch +
+// 1 batch pool) 2026-07-18; the shown 6/5 are that cluster's example, not a fixed fact. Console
 // click-paths are grounded against the unified console (OCP 4.19+, no perspective switch); labels a
 // build couldn't click get [CAPTURE-VERIFY] + the authoritative CLI.
 
@@ -313,18 +316,21 @@ parasol-claims-789ff476b-jkb6t    1/1     Running   worker-3
 ----
 
 Finally, see what happens when the scheduler *can't* satisfy the rule.
-Ask for *more* replicas than there are eligible nodes (the batch node is tainted off, so only the rest are available), and one pod has nowhere to go:
+A claims pod can only land on a node *outside* the tainted batch pool — count those eligible nodes, then ask for one *more* replica than that, so the extra pod has nowhere to go:
 
 [source,sh,role=execute]
 ----
-oc scale deploy/parasol-claims -n $NS --replicas=6
+ELIGIBLE=$(oc get nodes -l 'workshop.redhat.com/pool!=batch' --no-headers | wc -l)
+echo "eligible (non-batch) nodes: $ELIGIBLE"
+oc scale deploy/parasol-claims -n $NS --replicas=$((ELIGIBLE + 1))
 sleep 12
-oc get pods -n $NS -l app=parasol-claims -o wide | grep -E 'NAME|Pending|Running' | head -8
+oc get pods -n $NS -l app=parasol-claims -o wide | grep -E 'NAME|Pending|Running' | head -12
 ----
 
-.Expected output (one pod stuck `Pending`)
+.Expected output (one pod stuck `Pending`; the counts track *your* cluster — here `ELIGIBLE` is 5, so 5 replicas run and 1 cannot place)
 [source,texinfo]
 ----
+eligible (non-batch) nodes: 5
 NAME                              READY   STATUS    NODE
 parasol-claims-585785cf56-hhcs9   0/1     Pending   <none>
 parasol-claims-585785cf56-prjvp   1/1     Running   control-plane-1
@@ -341,13 +347,13 @@ The scheduler tells you *exactly* why — read its refusal:
 oc get events -n $NS --field-selector reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tail -1
 ----
 
-.Expected output
+.Expected output (the totals are *your* cluster's node counts — here 6 nodes: 1 tainted batch node + 5 each already holding a claims pod)
 [source,texinfo]
 ----
 0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match pod anti-affinity rules. ...
 ----
 
-Six nodes, none available: *one* is the tainted batch node, and the other *five* already hold a claims pod, so the anti-affinity rule rejects them.
+None available: *one* node is the tainted batch pool, and every *other* node already holds a claims pod, so the anti-affinity rule rejects it — the counts add up to your cluster's node total.
 That single line is the answer to almost every "why is my pod Pending?" — always read it first.
 Scale back to three (a good spread, room for the disruption budget later):
 
@@ -481,7 +487,7 @@ BATCHPOD=$(oc get pods -n $NS -l app=statement-batch --field-selector=status.pha
 oc get events -n $NS --field-selector involvedObject.name=$BATCHPOD,reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tail -1
 ----
 
-.Expected output
+.Expected output (the totals are *your* cluster's node counts — here 6 nodes: 1 tainted batch node + 5 that don't match the selector)
 [source,texinfo]
 ----
 0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match Pod's node affinity/selector. ...
@@ -489,7 +495,7 @@ oc get events -n $NS --field-selector involvedObject.name=$BATCHPOD,reason=Faile
 
 Read it carefully — this is the whole lesson.
 The *one* node your selector points at (the batch pool) has an *untolerated taint* — the selector *sent* the pod there, but the node *repels* it.
-The other *five* don't match the selector at all.
+Every *other* node doesn't match the selector at all.
 So the pod has nowhere to go.
 
 The fix is the *toleration* — the pod's permission slip for the tainted node.
@@ -845,16 +851,20 @@ Back at `minAvailable: 1`, a drain can evict one claims pod (the reschedule resp
 
 The pools and node agents you've been working around are *built* with the same primitives you just used.
 Read them live (the `platform-observer` role grants you cluster-wide *read*).
-First, the *DaemonSets* — the "one pod per node" agents that are the cluster's own plumbing:
+First, the *DaemonSets* — the "one pod per node" agents that are the cluster's own plumbing.
+Count your nodes, then list the DaemonSets whose desired count equals that — the ones that run on *every* node:
 
 [source,sh,role=execute]
 ----
-oc get ds -A | awk 'NR==1 || $4>=6' | head -8
+NODES=$(oc get nodes --no-headers | wc -l)
+echo "cluster nodes: $NODES"
+oc get ds -A | awk -v n="$NODES" 'NR==1 || $4>=n' | head -12
 ----
 
-.Expected output (each runs on every node — `DESIRED = 6`)
+.Expected output (each runs on every node — `DESIRED` equals your node count, 6 here; your cluster may list more or fewer such agents)
 [source,texinfo]
 ----
+cluster nodes: 6
 NAMESPACE                                NAME                    DESIRED   CURRENT   READY   NODE SELECTOR
 openshift-cluster-node-tuning-operator   tuned                   6         6         6       kubernetes.io/os=linux
 openshift-dns                            node-resolver           6         6         6       kubernetes.io/os=linux
@@ -872,13 +882,13 @@ Some target only a *subset* of nodes using the very `nodeSelector` + `toleration
 oc get ds -n openshift-machine-config-operator machine-config-server -o jsonpath='desired={.status.desiredNumberScheduled} nodeSelector={.spec.template.spec.nodeSelector}{"\n"}'
 ----
 
-.Expected output (three — it targets only the control-plane nodes)
+.Expected output (it targets only the control-plane nodes — `desired` equals your control-plane count, 3 here)
 [source,texinfo]
 ----
 desired=3 nodeSelector={"node-role.kubernetes.io/master":""}
 ----
 
-That agent runs only on the three control-plane nodes — the label in its selector is the legacy control-plane role label the platform still sets.
+That agent runs only on the control-plane nodes — the label in its selector is the legacy control-plane role label the platform still sets.
 Finally, the *MachineSets* — how a platform team *creates* the pools you targeted (scale a MachineSet, label + taint its nodes):
 
 [source,sh,role=execute]
@@ -911,7 +921,7 @@ You'll find the exact commands and expected output in this module's instructor g
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You read the platform's own `DaemonSet` node agents (`DESIRED = 6`, one per node), saw a control-plane-only DaemonSet target a node subset with a `nodeSelector`, and inspected the `MachineSet` that platform teams scale to build the pools your workloads target.
+✔ *Verify (observed):* You read the platform's own `DaemonSet` node agents (`DESIRED` equal to your node count, one per node), saw a control-plane-only DaemonSet target a node subset with a `nodeSelector`, and inspected the `MachineSet` that platform teams scale to build the pools your workloads target.
 ****
 
 == Challenge (optional)
