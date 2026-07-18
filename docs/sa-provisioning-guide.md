@@ -116,11 +116,22 @@ without the `trust` stack) — it never touches a plugin the org or another oper
 and it never removes anything. Expect the console pods to roll shortly after the Job runs — the
 console operator restarts them whenever `spec.plugins` changes; this is normal OpenShift behavior,
 not a workshop bug. On a cluster already running: patch the live Application instead of a full
-reinstall —
+reinstall.
+
+**Do not** patch `helm.parameters` with a `--type merge` JSON merge patch — a merge patch replaces
+the entire array, silently dropping `userCount`, `clusterDomain`, and `sso.enabled` (this exact
+example shipped that trap until it was caught 2026-07-18). Use the computed-index JSON-patch idiom
+`ws scale-users` uses instead: read the parameter's current array position, then replace only that
+one element —
 
 ```
-oc patch application workshop-config -n openshift-gitops --type merge -p \
-  '{"spec":{"source":{"helm":{"parameters":[{"name":"consolePlugins.enabled","value":"true"}]}}}}'
+IDX="$(oc get application workshop-config -n openshift-gitops \
+  -o jsonpath='{range .spec.source.helm.parameters[*]}{.name}{"\n"}{end}' \
+  | grep -nx 'consolePlugins.enabled' | head -1 | cut -d: -f1)"
+[ -n "$IDX" ] || { echo "consolePlugins.enabled not found — inspect: oc get application workshop-config -n openshift-gitops -o yaml" >&2; exit 1; }
+IDX=$((IDX - 1))
+oc patch application workshop-config -n openshift-gitops --type=json \
+  -p "[{\"op\":\"replace\",\"path\":\"/spec/source/helm/parameters/${IDX}/value\",\"value\":\"true\"}]"
 ```
 
 `bootstrap/ogsr-uninstall.sh` removes only the plugin names it recorded adding (`ogsr-uninstall-state`
