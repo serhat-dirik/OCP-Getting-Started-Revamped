@@ -7,10 +7,13 @@
 #   End:   the attendee ran the lab — the workload is FIXED and running non-root, payments-ci holds
 #          edit-in-dev + view-in-prod, and payments-ops holds a custom `deployer` Role (Deployments
 #          yes, Secrets no).
-# Runnable as the ATTENDEE: the shared/namespace checks read only {user}-dev|prod objects the attendee
-# sees via namespace admin. The RBAC-outcome checks need to IMPERSONATE the teammate SAs (cluster verb),
-# so they AUTO-SKIP unless the caller can impersonate (admin/CI) — mirroring jobs-batch-kueue's ClusterQueue skip.
-# The G1 cockpit smoke runs `--entry-only` as {user}, so those guarded checks correctly no-op there.
+# Runnable as the ATTENDEE end-to-end: the shared/namespace checks read only {user}-dev|prod objects the
+# attendee sees via namespace admin. The RBAC-outcome checks impersonate the teammate SAs — and the stock
+# OpenShift `admin` ClusterRole every attendee holds on their own namespaces GRANTS `impersonate` on
+# serviceaccounts, so IMPERSONATE_OK is true for the attendee too: these checks RUN and grade correctly for
+# the attendee, `ws prep`/`ws verify`, and CI alike (verified live as a cockpit attendee 2026-07-18). The
+# guard is defensive — it would only skip for a caller with NO namespace-admin, which this workshop never
+# produces — so there is no silent admin-only skip for real attendees, at entry or end.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
