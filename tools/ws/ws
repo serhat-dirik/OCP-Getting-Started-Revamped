@@ -1431,13 +1431,24 @@ cohort_purge_student_apps() {  # user — delete ALL the user's apps/appsets in 
   done
 }
 
+user_namespaces() {  # user → newline-separated namespace names carrying workshop.redhat.com/user=<user>
+  # Label discovery, NOT a hardcoded suffix list: the per-user world has grown module-scoped extras
+  # (ai/batch/gitops/mesh/modernize/partner + resilience's client/site-a/site-b — 13 namespaces total
+  # as of Gen-4, up from the original dev/stage/prod/cicd-only 4) since cohort-reset's suffix list was
+  # first written. Every per-user Namespace template carries this label
+  # (gitops/workshop-config/templates/per-user-*.yaml). cmd_scale_users' shrink path pioneered this
+  # idiom; cmd_cohort_reset shares it here rather than keeping its own stale 4-ns list in sync by hand.
+  oc get ns -l "workshop.redhat.com/user=${1}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null
+}
+
 cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH cohort, KEEPING the platform.
   # "Prune namespaces only and leave the components" — reset every attendee's world to pristine so a new
   # group starts clean, WITHOUT uninstalling any operator/stack. Per user, in this order: (1) delete the
-  # attendee-created Argo apps in student-gitops (stops selfHeal), (2) purge the four per-user namespaces'
-  # CONTENTS via purge_ns (keeps the namespace shell + its workshop-owned RBAC/quota/LimitRange), (3)
-  # delete the entry-*-<user> apps LAST so the resources-finalizer never deadlocks on a PVC still pinned
-  # by an attendee pod (cmd_reset's SEV1 ordering). Idempotent + safe to re-run.
+  # attendee-created Argo apps in student-gitops (stops selfHeal), (2) purge EVERY per-user namespace's
+  # CONTENTS via purge_ns (label-discovered — user_namespaces — keeps each namespace shell + its
+  # workshop-owned RBAC/quota/LimitRange), (3) delete the entry-*-<user> apps LAST so the
+  # resources-finalizer never deadlocks on a PVC still pinned by an attendee pod (cmd_reset's SEV1
+  # ordering). Idempotent + safe to re-run.
   local yes="false" do_restart="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1460,7 +1471,9 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
   echo "WILL WIPE, for each of ${n} user(s) [${users_arr[*]}]:"
   echo "  • entry-*-<user> Argo apps in ${ARGO_NS} (module state; finalizers handled)"
   echo "  • attendee-created Argo apps/appsets in ${STUDENT_ARGO_NS} (project proj-<user>, if present)"
-  echo "  • CONTENTS of <user>-{dev,stage,prod,cicd}: workloads, PVCs, user secrets/configmaps, lab CRs"
+  echo "  • CONTENTS of every <user>-* namespace (label-discovered via workshop.redhat.com/user=<user>,"
+  echo "    currently 13: dev/stage/prod/cicd + ai/batch/gitops/mesh/modernize/partner + resilience's"
+  echo "    client/site-a/site-b): workloads, PVCs, user secrets/configmaps, lab CRs"
   echo
   echo "WILL PRESERVE (untouched):"
   echo "  • platform-portfolio stacks (pp-*), operators, workshop-config"
@@ -1491,9 +1504,11 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
     # 1. Attendee-created Argo apps FIRST — a selfHeal app would otherwise re-deploy its workloads into a
     #    namespace we are about to purge and orphan them (cmd_reset's load-bearing ordering).
     cohort_purge_student_apps "$u"
-    # 2. Purge the four per-user namespaces' CONTENTS. purge_ns keeps the ns shell + RBAC/quota/LimitRange;
-    #    with no keep-module every stale ws-entry-* marker is cleared too. No-op on a missing namespace.
-    for ns in "${u}-dev" "${u}-stage" "${u}-prod" "${u}-cicd"; do
+    # 2. Purge every per-user namespace's CONTENTS (user_namespaces — label discovery, not a hardcoded
+    #    suffix list; matches cmd_scale_users' shrink path). purge_ns keeps the ns shell + RBAC/quota/
+    #    LimitRange; with no keep-module every stale ws-entry-* marker is cleared too. No-op on a
+    #    missing namespace.
+    for ns in $(user_namespaces "$u"); do
       purge_ns "$ns"
     done
     # 3. Delete the entry apps LAST (namespaces already emptied → the resources-finalizer completes fast).
@@ -1623,9 +1638,9 @@ cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ws scale-us
   # additionally cleans the removed users' world FIRST, in cohort-reset's exact SEV1 order (student-
   # gitops apps → namespace CONTENTS purge → entry-*-<user> apps deleted) — all BEFORE the userCount
   # patch, so the sync's namespace prune never races a still-tracked entry Application or an attendee-
-  # pinned PVC. Namespaces are discovered by label (workshop.redhat.com/user=<u>), not a hardcoded
-  # dev/stage/prod/cicd list — the chart has grown module-scoped extras (ai/batch/mesh/modernize/
-  # partner/gitops/site-a/site-b) since cohort-reset's suffix list was written.
+  # pinned PVC. Namespaces come from the shared user_namespaces() helper (label discovery via
+  # workshop.redhat.com/user=<u>) — cmd_cohort_reset uses the same helper, so the two SA-destructive
+  # paths can't drift out of sync with the chart's per-user namespace fan-out again.
   local target="" yes="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1712,7 +1727,7 @@ cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ws scale-us
       echo
       info "── removing ${u} (before the userCount sync prunes their namespaces) ──"
       cohort_purge_student_apps "$u"
-      for ns in $(oc get ns -l "workshop.redhat.com/user=${u}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+      for ns in $(user_namespaces "$u"); do
         purge_ns "$ns"
       done
       for app in $(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${u}" -o name 2>/dev/null); do
