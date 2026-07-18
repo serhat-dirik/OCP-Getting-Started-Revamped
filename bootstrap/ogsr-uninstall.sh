@@ -82,6 +82,8 @@ STATE_LOADED="false" # so one read serves the ~60 lookups a full run makes (a pe
 state() {  # key [default] — echo a recorded value from the uninstall-state ConfigMap (or the default)
   local k="$1" def="${2:-}" v
   if [[ "$STATE_LOADED" != "true" ]]; then
+    # $k/$v are go-template variables, not shell variables — the single quotes are intentional.
+    # shellcheck disable=SC2016
     STATE_SNAPSHOT="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o go-template='{{range $k,$v := .data}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
     STATE_LOADED="true"
   fi
