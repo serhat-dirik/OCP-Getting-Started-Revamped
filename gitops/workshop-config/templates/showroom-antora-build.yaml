@@ -1,0 +1,97 @@
+{{- /*
+  antora-ext build — the DECLARATIVE replacement for the one-time manual `oc new-build` that used to
+  produce the workshop-owned Antora image. Both cockpit templates (showroom.yaml, showroom-demos.yaml)
+  run an `antora-build` initContainer FROM this image, which layers our two pinned Antora extensions
+  (@sntke/antora-mermaid-extension + @andrew-jones/antora-tabs-extension) onto the stock rhpds antora
+  image at /opt/antora-ext/node_modules — the absolute path showroom/site.yml + site-demo.yml require
+  (the in-pod repo checkout ships no node_modules, so the stock image cannot build our playbooks).
+  Gap closed 2026-07-18 (C2 lifecycle test: 9 cockpits stuck Init:ImagePullBackOff on a fresh install
+  because nothing in the repo built this ImageStream tag — only a values-comment documented a manual
+  build).
+
+  ORDERING / RECOVERY (no new machinery — task + 03-DEV-WORKFLOW): the ImageStream + BuildConfig are
+  sync-wave 2 (after the wave-1 namespace, before the wave-3 cockpit Deployments) so the
+  ConfigChange-triggered FIRST build fires as early as possible. Argo does NOT gate the wave on Build
+  completion (a BuildConfig is Healthy the moment it applies), so on a cold install the wave-3 cockpits
+  start BEFORE antora-ext:latest exists and their antora-build initContainer sits in ImagePullBackOff.
+  That SELF-HEALS: the kubelet keeps retrying the pull (backoff caps at ~5m) and succeeds once the
+  build pushes the tag — verified on C2 2026-07-18, cockpits went Running with no restart. If a cockpit
+  is still wedged after the tag appears, kick it: `oc rollout restart deploy -n <showroom-ns>`
+  (documented in docs/research/ogsr-flip-runbook.md and surfaced by `ws doctor`). Rebuild after an
+  extension version bump: `oc start-build antora-ext -n <showroom-ns>`.
+
+  Renders only when a cockpit that consumes the image is enabled. The wave-1 Namespace is declared by
+  those same cockpit templates, so this file does not re-declare it.
+*/ -}}
+{{- if or .Values.showroom.enabled .Values.showroomDemos.enabled }}
+{{- $ns := .Values.showroom.namespace }}
+{{- $build := .Values.showroom.build }}
+---
+# ImageStream the cockpit initContainers pull antora-ext:latest from (in-cluster registry, this ns).
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: antora-ext
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  # Explicit default (matches the server) so Argo sees no drift on this field.
+  lookupPolicy:
+    local: false
+---
+# BuildConfig that layers our pinned Antora extensions onto the stock rhpds antora image. Docker
+# strategy with an INLINE Dockerfile: the git source supplies package.json + package-lock.json (the
+# SAME pinned extension versions CI's `npm ci` validates), the Dockerfile npm-ci's them into
+# /opt/antora-ext. ConfigChange trigger → build #1 fires on creation (the cold-install self-heal
+# above). History limits are pinned to the server defaults so Argo selfHeal sees no field drift.
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: antora-ext
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  runPolicy: Serial
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 5
+  source:
+    type: Git
+    git:
+      uri: {{ $build.repoUrl | quote }}
+      ref: {{ $build.revision | quote }}
+    {{- if $build.contextDir }}
+    contextDir: {{ $build.contextDir | quote }}
+    {{- end }}
+    # Inline Dockerfile — no Containerfile committed to the repo root; the recipe lives with the chart
+    # that owns it. package.json + package-lock.json arrive from the git source above (repo root).
+    dockerfile: |
+      FROM {{ $build.baseImage }}
+      # The extensions are devDependencies, so install the FULL pinned tree (NOT --omit=dev). They land
+      # at /opt/antora-ext/node_modules/@sntke/... and /@andrew-jones/... — the absolute paths
+      # showroom/site.yml + site-demo.yml require. npm's umask-022 output is world-readable, so the
+      # cockpit's arbitrary-UID antora-build initContainer can require() them read-only.
+      USER 0
+      RUN mkdir -p /opt/antora-ext
+      COPY package.json package-lock.json /opt/antora-ext/
+      RUN cd /opt/antora-ext && npm ci --no-audit --no-fund && npm cache clean --force
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: DockerImage
+        name: {{ $build.baseImage | quote }}
+  output:
+    to:
+      kind: ImageStreamTag
+      name: antora-ext:latest
+  triggers:
+    - type: ConfigChange
+{{- end }}

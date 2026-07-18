@@ -126,6 +126,19 @@ Sync **`gitops/workshop-config`**. This creates `ogsr-parasol-tasks` (curated Ta
    #   -> student-gitops-server-student-gitops.<domain>   (UNCHANGED)
    oc get deploy -n ogsr-showroom -l app.kubernetes.io/name=showroom
    ```
+5. **Cockpit content image (`antora-ext`).** `workshop-config` also creates the `antora-ext`
+   ImageStream + BuildConfig (sync-wave 2, `templates/showroom-antora-build.yaml`); its ConfigChange
+   trigger fires build #1 on creation. The wave-3 cockpits schedule *before* that build finishes, so
+   their `antora-build` initContainer sits in `Init:ImagePullBackOff` until the tag is pushed — this
+   **self-heals** once the build completes (the kubelet keeps retrying the pull; verified on C2
+   2026-07-18, cockpits went Running with no restart). Watch the build; only kick a cockpit that is
+   *still* wedged after the tag exists:
+   ```
+   oc logs -f bc/antora-ext -n ogsr-showroom                # follow build #1
+   oc get istag antora-ext:latest -n ogsr-showroom          # present once the build succeeds
+   oc rollout restart deploy -n ogsr-showroom               # ONLY if a cockpit stays ImagePullBackOff after the tag appears
+   ```
+   (`ws doctor` reports this as the "showroom antora image" check.)
 
 ### Phase 4 — remove the remaining old namespaces
 
