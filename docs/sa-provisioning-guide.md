@@ -102,6 +102,31 @@ the nav/library include each module conditionally — one content source, filter
 Showroom content-build time. Until that lands, selection is advisory: tell attendees
 which modules their session includes.
 
+## Console plugins opt-in (Pipelines/GitOps/ACS console views)
+
+OFF by default — the non-invasive rule means a workshop that doesn't ask for this sees zero change
+to the cluster's console. Set `console_plugins: true` in `vars.yaml` before `bootstrap/install.sh`
+(or `consolePlugins.enabled: true` for the `helm/bootstrap` FSC path) to have `workshop-config`'s
+hook Job merge its known plugin names (`gitops/workshop-config/values.yaml` `consolePlugins.names` —
+`pipelines-console-plugin`, `gitops-plugin`, `advanced-cluster-security` as verified live 2026-07-18;
+reconfirm with `oc get consoleplugins` if your operator versions differ) into
+`consoles.operator.openshift.io/cluster` `.spec.plugins`. The merge is append-if-absent and skips any
+name without a matching ConsolePlugin CR on the cluster (an operator you didn't install, e.g. no ACS
+without the `trust` stack) — it never touches a plugin the org or another operator already enabled,
+and it never removes anything. Expect the console pods to roll shortly after the Job runs — the
+console operator restarts them whenever `spec.plugins` changes; this is normal OpenShift behavior,
+not a workshop bug. On a cluster already running: patch the live Application instead of a full
+reinstall —
+
+```
+oc patch application workshop-config -n openshift-gitops --type merge -p \
+  '{"spec":{"source":{"helm":{"parameters":[{"name":"consolePlugins.enabled","value":"true"}]}}}}'
+```
+
+`bootstrap/ogsr-uninstall.sh` removes only the plugin names it recorded adding (`ogsr-uninstall-state`
+ConfigMap, key `console_plugins_added`) — flipping the toggle back off stops it adding more on future
+syncs but does not retract what is already there; uninstall is the only removal path.
+
 ## Publishing content updates to a LIVE session (publish runbook)
 
 You author on your laptop and push to `main`. The cluster runs from an **in-cluster
@@ -226,6 +251,8 @@ changing any characteristic of their cluster**. The teardown is `bootstrap/ogsr-
   deleted only if the workshop created it).
 - The `workshop-users` OAuth IdP entry is removed while **every other identity provider is
   preserved** (the cluster's real login IdP is untouched).
+- Console plugin names the opt-in feature added to `consoles.operator.openshift.io` `.spec.plugins`
+  (`console_plugins_added` in the state ConfigMap) — every other plugin entry is preserved.
 - Node labels (`workshop.redhat.com/pool`, `/zone`) and the batch `NoSchedule` taint are removed.
 - `openshift-default` GatewayClass, `openshift/java-21` ImageStream, `platform-observer` /
   Lightspeed cluster RBAC, the `workshop-attendees` Group, Kueue cluster objects, and the

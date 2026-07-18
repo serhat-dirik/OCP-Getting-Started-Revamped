@@ -1,0 +1,209 @@
+{{- /*
+  Console plugins opt-in (backlog #24) — richer console views for Pipelines/GitOps/ACS.
+
+  Non-invasive by construction: OFF by default (.Values.consolePlugins.enabled), and even when
+  enabled the hook Job below only ever APPENDS to the shared consoles.operator.openshift.io/cluster
+  singleton — same append-if-absent shape as bootstrap/install.sh's OAuth IdP merge (2a'), because
+  spec.plugins is exactly the same kind of atomic shared list: a forced server-side apply would
+  clobber entries other operators or the org already added. The Job is GitOps-owned (unlike the
+  OAuth merge, which install.sh does once, imperatively, before Argo exists) because this needs to
+  re-converge on every workshop-config sync and needs its own state-CM bookkeeping independent of
+  install.sh's one-time snapshot semantics.
+
+  Split responsibility, mirrored from app-repo-seed.yaml/gitea-user-seed.yaml:
+    - ClusterRole+ClusterRoleBinding: minimal get/patch on the ONE cluster-scoped object
+      (resourceNames: [cluster]), plus get on ONLY the plugin CRs this chart is configured to add
+      (resourceNames from .Values.consolePlugins.names) — an existence probe, nothing more.
+    - Role+RoleBinding (namespaced, systemNamespace): get/patch the ogsr-uninstall-state ConfigMap by
+      name; a separate create rule because (like the attendee Application RBAC in
+      per-user-argo-rbac.yaml) the create verb cannot be resourceName-scoped.
+*/ -}}
+{{- if .Values.consolePlugins.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: console-plugins-enable
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: console-plugins-enable
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["operator.openshift.io"]
+    resources: ["consoles"]
+    verbs: ["get", "patch"]
+    resourceNames: ["cluster"]
+  # Existence probe only (never installs/mutates a ConsolePlugin) — an operator this cluster never
+  # got (e.g. no `trust` stack → no ACS) means its name is skipped, not added as a dangling reference.
+  - apiGroups: ["console.openshift.io"]
+    resources: ["consoleplugins"]
+    verbs: ["get"]
+    resourceNames:
+      {{- range .Values.consolePlugins.names }}
+      - {{ . }}
+      {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: console-plugins-enable
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: console-plugins-enable
+subjects:
+  - kind: ServiceAccount
+    name: console-plugins-enable
+    namespace: {{ .Values.systemNamespace }}
+---
+# why: read+update the ONE shared uninstall-state ConfigMap that also records the OAuth/monitoring/
+# node/operator-adoption facts bootstrap/install.sh snapshots (create cannot be resourceName-scoped).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: console-plugins-enable
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "patch"]
+    resourceNames: ["ogsr-uninstall-state"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: console-plugins-enable
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: console-plugins-enable
+subjects:
+  - kind: ServiceAccount
+    name: console-plugins-enable
+    namespace: {{ .Values.systemNamespace }}
+---
+# Argo Sync hook (BeforeHookCreation): re-runs on every workshop-config sync, so a later addition to
+# .Values.consolePlugins.names converges without a separate release. Sync-wave 5 — deliberately later
+# than every other wave in this chart (max elsewhere is 3) since this only needs the cluster-scoped
+# console singleton + the uninstall-state ConfigMap, both of which exist long before this chart is
+# ever applied (bootstrap/install.sh step 0 / helm/bootstrap wave -10) — nothing here is a dependency
+# FOR anything else, so it is ordered to run last, out of the way.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: console-plugins-enable
+  namespace: {{ .Values.systemNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: console-plugins-enable
+    spec:
+      serviceAccountName: console-plugins-enable
+      restartPolicy: Never
+      containers:
+        - name: enable
+          # ose-cli ships oc; no custom image to maintain (same choice as every other hook Job in
+          # this chart). `oc` OOMs at 256Mi — 512Mi limit gives it headroom (repo-wide hard-won fact).
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {cpu: 300m, memory: 512Mi}
+          env:
+            - name: STATE_NS
+              value: {{ .Values.systemNamespace | quote }}
+            - name: PLUGIN_NAMES
+              value: {{ .Values.consolePlugins.names | join " " | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              CM="ogsr-uninstall-state"
+              ok()   { echo "✅ $*"; }
+              info() { echo "▶ $*"; }
+              skip() { echo "   • $*"; }
+              err()  { echo "❌ $*" >&2; }
+              die()  { err "$*"; exit 1; }
+
+              info "preflight — ${STATE_NS}/${CM}"
+              oc get configmap "$CM" -n "$STATE_NS" >/dev/null 2>&1 \
+                || die "configmap ${STATE_NS}/${CM} not found — bootstrap/install.sh (or helm/bootstrap) creates this before workshop-config ever syncs; run that first"
+
+              # Range-jsonpath: one plugin name per line, format-stable across oc client versions
+              # (unlike the whole-array printer, which renders differently client to client).
+              current_list() {
+                oc get consoles.operator.openshift.io cluster -o jsonpath='{range .spec.plugins[*]}{@}{"\n"}{end}' 2>/dev/null || true
+              }
+              is_current() { current_list | grep -qxF "$1"; }
+
+              ADDED_NOW=()
+              for name in ${PLUGIN_NAMES}; do
+                [[ -n "$name" ]] || continue
+                if ! oc get consoleplugins.console.openshift.io "$name" >/dev/null 2>&1; then
+                  skip "${name} — no ConsolePlugin CR on this cluster (operator not installed here); not added"
+                  continue
+                fi
+                if is_current "$name"; then
+                  skip "${name} already in spec.plugins (pre-existing / another operator's default — left untouched, not claimed)"
+                  continue
+                fi
+                info "appending ${name} to consoles.operator.openshift.io/cluster spec.plugins"
+                if [[ -z "$(current_list)" ]]; then
+                  oc patch consoles.operator.openshift.io cluster --type=json \
+                    -p "[{\"op\":\"add\",\"path\":\"/spec/plugins\",\"value\":[\"${name}\"]}]" >/dev/null
+                else
+                  oc patch consoles.operator.openshift.io cluster --type=json \
+                    -p "[{\"op\":\"add\",\"path\":\"/spec/plugins/-\",\"value\":\"${name}\"}]" >/dev/null
+                fi
+                ok "appended ${name}"
+                ADDED_NOW+=("$name")
+              done
+
+              # Cumulative record = union(previously-recorded, newly-added-this-run). This key is a
+              # RUNNING SET (unlike the true one-time install snapshots elsewhere in this ConfigMap):
+              # it only ever grows, even if .Values.consolePlugins.names shrinks on a later sync —
+              # the Job only ever ADDS to spec.plugins, so the removal record must track everything
+              # it EVER added; only ogsr-uninstall.sh actually subtracts.
+              PREV="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data['console_plugins_added']}" 2>/dev/null || true)"
+              read -ra PREV_ARR <<< "$PREV"
+              UNION="$(printf '%s\n' ${PREV_ARR[@]+"${PREV_ARR[@]}"} ${ADDED_NOW[@]+"${ADDED_NOW[@]}"} | awk 'NF' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+              if [[ -n "$UNION" ]]; then
+                oc patch configmap "$CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"console_plugins_added\":\"${UNION}\"}}" >/dev/null
+                ok "ogsr-uninstall-state.console_plugins_added = [${UNION}]"
+              else
+                skip "console_plugins_added left unset (nothing WE added this run, none recorded previously)"
+              fi
+
+              echo
+              ok "done — consoles.operator.openshift.io/cluster spec.plugins now: [$(current_list | tr '\n' ' ')]"
+{{- end }}

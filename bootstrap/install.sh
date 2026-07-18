@@ -42,6 +42,7 @@ USERS="$(v '.users')";           [[ "$USERS" =~ ^[0-9]+$ ]] || USERS=5
 LIGHTSPEED="$(v '.lightspeed')"; [[ "$LIGHTSPEED" == "false" ]] || LIGHTSPEED="true"
 AUTH="$(v '.auth')";             [[ "$AUTH" == "true" ]] || AUTH="false"
 RESILIENCE="$(v '.resilience')"; [[ "$RESILIENCE" == "true" ]] || RESILIENCE="false"
+CONSOLE_PLUGINS="$(v '.console_plugins')"; [[ "$CONSOLE_PLUGINS" == "true" ]] || CONSOLE_PLUGINS="false"
 REPO_URL="$(v '.repo_url')";     [[ -n "$REPO_URL" && "$REPO_URL" != "null" ]] || REPO_URL="https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
 REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
 DOMAIN="$(v '.cluster_domain')"
@@ -354,6 +355,9 @@ spec:
         # Seed per-user realm-{user} imports only when the auth stack is installed (M13).
         - name: sso.enabled
           value: "${AUTH}"
+        # Console plugins opt-in (backlog #24) — OFF unless vars.yaml sets console_plugins: true.
+        - name: consolePlugins.enabled
+          value: "${CONSOLE_PLUGINS}"
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops

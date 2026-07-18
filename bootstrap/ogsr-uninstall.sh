@@ -167,6 +167,34 @@ remove_oauth_idp() {  # remove ONLY the workshop-users IdP entry, preserving eve
   ok "removed OAuth IdP 'workshop-users' (existing IdPs preserved)"  # TODO(verify-on-cluster)
 }
 
+remove_console_plugins() {  # remove ONLY the plugin names workshop-config recorded as added (backlog #24)
+  local added n idx i cur
+  added="$(state console_plugins_added)"
+  if [[ -z "$added" ]]; then
+    echo "   • skip console plugins (no console_plugins_added recorded — feature never enabled, or nothing was newly added)"
+    return 0
+  fi
+  for n in $added; do
+    [[ -n "$n" ]] || continue
+    # Recompute the index every iteration: removing one entry shifts every index after it.
+    idx=-1; i=0
+    while IFS= read -r cur; do
+      if [[ "$cur" == "$n" ]]; then idx="$i"; break; fi
+      i=$((i + 1))
+    done < <(oc get consoles.operator.openshift.io cluster -o jsonpath='{range .spec.plugins[*]}{@}{"\n"}{end}' 2>/dev/null || true)
+    if [[ "$idx" -lt 0 ]]; then
+      echo "   • skip console plugin '${n}' (already absent)"
+      continue
+    fi
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "   • WOULD remove console plugin '${n}' from spec.plugins (index ${idx}; other plugins preserved)"
+      continue
+    fi
+    oc patch consoles.operator.openshift.io cluster --type=json -p "[{\"op\":\"remove\",\"path\":\"/spec/plugins/${idx}\"}]" >/dev/null 2>&1 || true
+    ok "removed console plugin '${n}' from spec.plugins (existing plugins preserved)"  # TODO(verify-on-cluster)
+  done
+}
+
 restore_monitoring() {  # put cluster-monitoring-config back the way we found it
   local existed prior
   existed="$(state monitoring_cm_existed)"
@@ -319,6 +347,7 @@ print_plan() {
   echo "  • owner-labeled cluster RBAC (platform-observer, lightspeed-query, argo controller CRB),"
   echo "    Group workshop-attendees, Kueue cluster objects, AppProjects, openshift/java-21 ImageStream"
   echo "  • imperative bootstrap objects: htpasswd-workshop-users, workshop-users OAuth IdP entry, node labels/taint"
+  echo "  • console plugins WE added to consoles.operator.openshift.io (backlog #24): $(state console_plugins_added '<none recorded>')"
   echo "  • operators WE created:${created:-<none recorded>}"
   echo
   echo "WILL PRESERVE (untouched):"
@@ -373,8 +402,9 @@ info "[3/9] removing operators we created (adopted operators preserved)"
 cleanup_created_operators
 
 # 4. Reverse the imperative, cluster-global mutations.
-info "[4/9] reversing imperative cluster mutations (OAuth IdP, monitoring, nodes, htpasswd)"
+info "[4/9] reversing imperative cluster mutations (OAuth IdP, console plugins, monitoring, nodes, htpasswd)"
 remove_oauth_idp
+remove_console_plugins
 del_obj secret htpasswd-workshop-users openshift-config
 handle_lightspeed
 restore_monitoring
@@ -420,6 +450,7 @@ cat <<'VERIFY'
      oc get applications -n openshift-gitops | grep -E 'pp-|entry-|workshop-config'   # expect: none
      oc get clusterrole,clusterrolebinding -l workshop.redhat.com/owner=ogsr          # expect: none
      oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'; echo       # expect: workshop-users absent
+     oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}'; echo  # expect: names WE added absent, everything else preserved
      # Adopted operators must still be Present/Succeeded:
      oc get csv -A | grep -Ev 'ogsr'                             # org operators intact
 VERIFY
