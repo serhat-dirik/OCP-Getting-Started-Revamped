@@ -28,7 +28,7 @@ tracer / read-only filter / formatter that make the trace and the safety posture
 $ mcp-agent-cli "diagnose why parasol-claims is not Ready in user1-dev"
 
 mcp-agent-cli
-  model:     qwen3-14b
+  model:     llama-scout-17b
   mcp server: http://kubernetes-mcp-server:8080/sse  (1 wired)
   mode:      READ-ONLY (mutating tools hidden from the model)
 

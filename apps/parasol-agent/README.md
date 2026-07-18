@@ -33,7 +33,7 @@ curl -sS localhost:8080/agent/ask -H 'content-type: application/json' \
     { "tool": "get_claim", "arguments": "{\"claimNumber\":\"CLM-1001\"}",
       "result": "Claim CLM-1001: claimant Alice Nguyen, line of business auto, status UnderReview, amount 4200.00 USD, adjuster Rebecca Torres, incident date 2026-05-14." }
   ],
-  "model": "qwen3-14b",
+  "model": "llama-scout-17b",
   "tokenUsage": { "inputTokens": 512, "outputTokens": 61, "totalTokens": 573 }
 }
 ```
