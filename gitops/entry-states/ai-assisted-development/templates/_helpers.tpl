@@ -13,3 +13,8 @@
      Running 0/1); solve=true = the CORRECT path (the fixed end state → Running 1/1). This single field
      is the whole fault + the one-field patch that later exercises the attendee's scoped-write grant. */}}
 {{- define "ai-assisted-development.probePath" -}}{{ if .Values.solve }}{{ .Values.goodProbePath }}{{ else }}{{ .Values.badProbePath }}{{ end }}{{- end -}}
+
+{{/* The che-code editor contribution URI (design call #40, closed — see devworkspace.yaml
+     `contributions` for the full decision). In-cluster svc DNS only, resolved against the Dev Spaces
+     dashboard's OWN documented editor API — never an external registry, never a cluster-domain URL. */}}
+{{- define "ai-assisted-development.cheEditorUri" -}}http://{{ .Values.cheDashboardService }}.{{ .Values.cheDashboardNamespace }}.svc:{{ .Values.cheDashboardPort }}/dashboard/api/editors/devfile?che-editor={{ .Values.cheEditorId }}{{- end -}}
