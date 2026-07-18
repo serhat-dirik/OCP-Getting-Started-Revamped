@@ -1144,9 +1144,31 @@ cmd_doctor() {
   csv="$(oc get csv -n openshift-gitops-operator -o jsonpath='{.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}' 2>/dev/null || true)"
   if [[ "$csv" == *Succeeded* ]]; then ok "installed"; else err "not ready (${csv:-missing})"; fail=1; fi
   printf "  %-28s" "argo applications"
-  local bad
-  bad="$(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}={.status.health.status} {end}' 2>/dev/null | tr ' ' '\n' | grep -v '=Healthy' | grep -v '^$' || true)"
-  if [[ -z "$bad" ]]; then ok "all Healthy"; else err "unhealthy: $(echo "$bad" | tr '\n' ' ')"; fail=1; fi
+  # An entry-*-<user> app for a module whose ws-meta.yaml declares expectDegraded (an intentional-fault
+  # seed, e.g. ai-assisted-development's broken 0/1 Deployment) is Degraded/OutOfSync BY DESIGN — ws
+  # start/solve already know this (meta_expect_degraded, wait_materialized) and never fail on it. This
+  # row used to red-flag the same app as unhealthy: a false ❌ on a module that is working exactly as
+  # designed destroys attendee/SA trust in every OTHER ✅ (the repo's own rule). Split those out here
+  # instead of counting them against the row; genuinely broken apps still fail it.
+  local bad="" expect_ok="" name health module
+  while IFS='=' read -r name health; do
+    [[ -n "$name" ]] || continue
+    [[ "$health" == "Healthy" ]] && continue
+    module=""
+    if [[ "$name" == entry-* ]]; then
+      module="$(oc get application "$name" -n "$ARGO_NS" -o jsonpath='{.metadata.labels.workshop\.redhat\.com/module}' 2>/dev/null || true)"
+    fi
+    if [[ -n "$module" && "$(meta_expect_degraded "$module")" == "true" ]]; then
+      expect_ok="${expect_ok} ${name}=${health}"
+    else
+      bad="${bad} ${name}=${health}"
+    fi
+  done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}={.status.health.status}{"\n"}{end}' 2>/dev/null)
+  if [[ -z "${bad// }" ]]; then ok "all Healthy"; else err "unhealthy:${bad}"; fail=1; fi
+  if [[ -n "${expect_ok// }" ]]; then
+    printf "  %-28s" ""
+    ok "(Degraded by design):${expect_ok}"
+  fi
   printf "  %-28s" "gitea"
   local host
   host="$(oc get route gitea -n "$GITEA_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
