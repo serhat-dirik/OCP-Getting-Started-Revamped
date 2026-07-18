@@ -97,7 +97,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no PodDisruptionBudget yet (resilience beat not started)"  test -z "$(oc get pdb parasol-claims -n "$NS" -o name 2>/dev/null)"           || hint "entry state has no PDB — ws reset observability-health-scale --user ${USER_NAME}"
 else
   # --- end state: the lab's outcomes exist (HPA + alert + PDB); >= replicas, never == ----------
-  check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "create the HPA: oc autoscale deploy/parasol-claims --cpu-percent=60 --min=2 --max=4 -n ${NS}"
+  check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "create the HPA: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"
   check "parasol-claims has >=2 ready replicas (HPA floor)"        claims_replicas_at_least 2                    || hint "HPA floor is 2 — wait: oc get hpa parasol-claims -n ${NS}"
   check "a PrometheusRule alert exists in ${NS}"                   test -n "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)"               || hint "create an alerting rule (PrometheusRule) in ${NS} — see the alert beat"
   check "PodDisruptionBudget parasol-claims exists"               oc get pdb parasol-claims -n "$NS"            || hint "create a PDB: oc create pdb parasol-claims --selector app=parasol-claims --min-available=1 -n ${NS}"

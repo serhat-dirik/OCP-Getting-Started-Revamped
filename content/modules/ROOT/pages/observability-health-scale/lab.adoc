@@ -293,7 +293,7 @@ oc scale deploy/claims-db -n $NS --replicas=0
 The database is gone — but making the alert fire is a *race against the app's own health check*.
 A one-request-at-a-time loop loses that race: within about a minute the failing app trips its own `/q/health/ready` probe, Kubernetes pulls the pod out of the Service endpoints, and the metrics scrape *freezes* with only a couple of dozen 5xx recorded — a 5-minute rate of roughly `0.08/s`, just *under* your `0.1/s` line, so the alert flaps in and out of *Pending* and never fires.
 Win the race with a *concurrent burst* instead — twenty workers hammering the failing API at once — so you bank hundreds of server-errors in the first half-minute, while the pod is still being scraped, and pin the 5-minute rate well above the line.
-Run it from the terminal (it works whichever lane you picked) and watch the sampled status go *200* while the old connection pool is still warm, then a steady stream of *500* once it breaks:
+Run it from the terminal (it works whichever lane you picked) and watch the sampled status walk through *three* stages: *200* while the old connection pool is still warm, a stream of *500* once it breaks, then *503* once the app trips its readiness probe and the *router* pulls the pod out of rotation (that last `503` is the readiness probe doing its job — the platform stops sending traffic to a pod that says it is not ready):
 
 [source,sh,role=execute]
 ----
@@ -311,7 +311,7 @@ done
 wait
 ----
 
-.Expected output (the once-a-second sampled line; the 20 workers push silently in the background)
+.Expected output (the once-a-second sample; the 20 workers push silently in the background — 200 while warm, 500 once the DB is gone, then 503 after ~30-45s once the readiness probe drops the pod from the Service)
 [%collapsible]
 ====
 [source,texinfo]
@@ -320,9 +320,9 @@ GET /api/claims -> HTTP 200
 GET /api/claims -> HTTP 200
 GET /api/claims -> HTTP 500
 GET /api/claims -> HTTP 500
-GET /api/claims -> HTTP 500
-GET /api/claims -> HTTP 500
-GET /api/claims -> HTTP 500
+GET /api/claims -> HTTP 503
+GET /api/claims -> HTTP 503
+GET /api/claims -> HTTP 503
 ----
 ====
 
@@ -344,12 +344,14 @@ A healthy claims request logs nothing, and even the failures are terse — which
 * *Traces* say *where* — you will use them in the next exercise; the failing requests are recorded there with their status.
 
 [NOTE]
-.Measured: how long until it fires
+.Measured: how long until it fires — and why the freeze is the real lesson
 ====
-With the concurrent burst, the 5xx rate cleared `0.1/s` within about *40 seconds* and climbed to roughly *12/s* — so `ParasolClaimsErrorRateHigh` reached *Pending* about *1 minute* after the database went down and *Firing* about two minutes after that (its `for: 2m` window), close to *3 minutes* end to end.
-It fires with a wide margin, not a squeaker.
-A single serial `curl` loop, by contrast, peaks at only ~*0.08/s*: the failing pod trips its readiness probe and drops out of the scrape before enough server-errors are banked, so the rate never clears the line and the alert stays *Inactive*.
-That is why the burst is concurrent — and the two-minute `for:` window is deliberate, so a brief blip never pages anyone.
+With the concurrent burst, the 5xx rate cleared `0.1/s` within about *30 seconds* and, on the build run, climbed to roughly *1.3/s* — comfortably over the line.
+*Exactly* how high it climbs is a race: it depends on how many 5xx you bank before — about *30-45 seconds* in — the failing app trips its `/q/health/ready` probe (three failures, ten seconds apart), Kubernetes pulls the pod from the Service endpoints, the router starts returning `503`, and the metrics scrape *freezes the 5xx counter at its last value*.
+What matters is that it freezes *above* `0.1/s`, so the 5-minute rate stays over the line through the `for: 2m` window: `ParasolClaimsErrorRateHigh` reached *Pending* about *45 seconds* after the database went down and *Firing* about two minutes later — close to *3 minutes* end to end.
+That freeze is itself the observability lesson: a failing pod stops reporting *exactly* when you most want the signal, so the alert fires off the *last-scraped* value and then *lingers* in Firing while that frozen count ages out of the 5-minute window (the same reason recovery isn't instant, below).
+A single serial `curl` loop, by contrast, banks only a couple of dozen 5xx before that same freeze — a 5-minute rate that stalls at roughly `0.08/s`, just *under* the line, so it never fires.
+That is why the burst is concurrent: bank enough server-errors *before* the pod drops out of the scrape. The two-minute `for:` window is deliberate, so a brief blip never pages anyone.
 ====
 
 // media-pass: screenshot observability-health-scale-04-alert-firing.png — Observe -> Alerting, ParasolClaimsErrorRateHigh Firing (HIGH; the signature visual). Alt: "Observe Alerting view showing the ParasolClaimsErrorRateHigh alert Firing with warning severity while claims-db is scaled to zero."
@@ -458,7 +460,7 @@ CLI::
 --
 [source,sh,role=execute]
 ----
-oc autoscale deploy/parasol-claims --cpu-percent=60 --min=2 --max=4 -n $NS
+oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n $NS
 oc get hpa parasol-claims -n $NS
 ----
 
