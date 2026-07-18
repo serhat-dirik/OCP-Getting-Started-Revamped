@@ -6,18 +6,20 @@
 # Verb scoping notes (why the rules look like this):
 #   - get/list/watch: broad reads on Applications are harmless (specs hold no secrets)
 #     and let prep inspect state + wait for Synced/Healthy.
-#   - patch/delete: resourceNames-scoped to entry-mNN-{user} for the whole catalog
-#     (platform-orientation..app-security-testing, enumerated ahead of modules existing — harmless). delete powers
-#     conflict eviction + self-reset; patch powers the declarative sync trigger
-#     (operation field) on an already-provisioned app.
+#   - patch/delete: resourceNames-scoped to THIS user's entry apps, entry-<slug>-{user}, one per
+#     catalog module. The slug list is .Values.moduleSlugs, generated from modules.yaml by
+#     tools/gen-module-slugs.sh (k8s RBAC resourceNames can't wildcard; Helm can't read /modules.yaml
+#     outside the chart root — so the catalog is materialized into values.yaml, drift-gated in CI).
+#     delete powers conflict eviction + self-reset; patch powers the declarative sync trigger
+#     (operation field) on an already-provisioned app. Fail-closed: an empty moduleSlugs OMITS the
+#     rule (attendee sees Forbidden, surfacing the misconfig) rather than emitting a null
+#     resourceNames that would match ALL Applications.
 #   - create: CANNOT be resourceName-scoped (no name exists at admission time) — an
 #     attendee could in principle create an arbitrary Application object. Accepted for
 #     the workshop threat model (cooperative attendees, dedicated disposable cluster):
 #     the ws CLI always renders project=workshop-entries whose AppProject pins the
 #     source repo to the in-cluster mirror. Revisit if this portfolio ever backs a
 #     shared/long-lived cluster.
-{{- $modules := list }}
-{{- range $n := until 27 }}{{- $modules = append $modules (printf "m%02d" (add $n 1)) }}{{- end }}
 {{- range $i := until (int .Values.userCount) }}
 {{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
 ---
@@ -38,12 +40,14 @@ rules:
   - apiGroups: ["argoproj.io"]
     resources: ["appprojects"]
     verbs: ["get", "list"]
+{{- if $.Values.moduleSlugs }}
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
     verbs: ["patch", "delete"]
     resourceNames:
-{{- range $m := $modules }}
-      - entry-{{ $m }}-{{ $user }}
+{{- range $slug := $.Values.moduleSlugs }}
+      - entry-{{ $slug }}-{{ $user }}
+{{- end }}
 {{- end }}
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]

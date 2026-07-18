@@ -290,3 +290,9 @@ position in `/modules.yaml` and the displayed order in the `nav-*.adoc` sidebars
 the path (owner decision 2026-07-17). Image assets follow the same rule:
 `content/modules/ROOT/assets/images/<slug>/<slug>-NN-short-desc.ext`. The full authored template +
 skeleton live in `docs/module-template/`.
+
+Editing `/modules.yaml` (add, remove, or reorder a module) is a **two-file change**, like
+`versions.yaml`: run `tools/gen-module-slugs.sh` and commit the regenerated `moduleSlugs` block in
+`gitops/workshop-config/values.yaml`. That block scopes each attendee's entry-app Argo RBAC to
+`entry-<slug>-<user>` — Helm can't read `/modules.yaml` from outside its chart root, so the catalog
+is materialized into the chart. CI fails on drift (`tools/gen-module-slugs.sh --check`).
