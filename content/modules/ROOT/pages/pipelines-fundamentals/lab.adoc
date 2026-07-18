@@ -85,11 +85,11 @@ Do::
 +
 [source,sh,role=execute]
 ----
-oc get task maven -n openshift-pipelines -o jsonpath='shipped maven runs on: {.spec.steps[1].image}{"\n"}'
-oc get task maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='our maven-jdk21 runs on: {.spec.steps[0].image}{"\n"}'
+oc get tasks.tekton.dev maven -n openshift-pipelines -o jsonpath='shipped maven runs on: {.spec.steps[1].image}{"\n"}'
+oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='our maven-jdk21 runs on: {.spec.steps[0].image}{"\n"}'
 ----
 +
-"Java 17 versus Java 21, and the shipped one has no knob to change it. So we curated *one* correct Task into a shared library, and every team's pipeline references it. That library is the platform team's leverage."
+"Java 17 versus Java 21 — and the shipped task's `JAVA_VERSION` knob doesn't repoint that pinned Java 17 image, so it still can't build a 21 app. So we curated *one* correct Task into a shared library, and every team's pipeline references it. That library is the platform team's leverage."
 
 [demo-block]
 [TIME 3m]
@@ -381,18 +381,21 @@ You have read access to it (the platform team granted it), so you can list and r
 
 [source,sh,role=execute]
 ----
-oc get tasks -n ogsr-parasol-tasks
+oc get tasks.tekton.dev -n ogsr-parasol-tasks
 ----
 
-.Expected output
+(Fully qualified as `tasks.tekton.dev`: on a full-catalog cluster another operator also serves a bare `tasks`, so the short name can resolve to the *wrong* API — the same collision the packaging module flags for `subscriptions`.)
+
+.Expected output (an extract — the shared library grows as teams curate their own Tasks; the two this pipeline uses:)
 [source,texinfo]
 ----
 NAME                AGE
 image-size-report   ...
 maven-jdk21         ...
+...
 ----
 
-Two curated Tasks.
+The shared library holds several curated Tasks — teams add their own over time — and two of them fill gaps in *this* pipeline.
 Now the *why*.
 The Pipeline's `unit-test` step runs Maven — and OpenShift Pipelines *ships* a `maven` Task, so the obvious choice is to use that shipped one.
 Look at what it actually runs:
@@ -400,29 +403,30 @@ Look at what it actually runs:
 [source,sh,role=execute]
 ----
 echo "shipped maven task, build step image:"
-oc get task maven -n openshift-pipelines -o jsonpath='  {.spec.steps[1].image}{"\n"}'
+oc get tasks.tekton.dev maven -n openshift-pipelines -o jsonpath='  {.spec.steps[1].image}{"\n"}'
 echo "shipped maven task, parameters:"
-oc get task maven -n openshift-pipelines -o jsonpath='  {range .spec.params[*]}{.name}{"  "}{end}{"\n"}'
+oc get tasks.tekton.dev maven -n openshift-pipelines -o jsonpath='  {range .spec.params[*]}{.name}{"  "}{end}{"\n"}'
 ----
 
-.Expected output
+.Expected output (parameter names vary by Pipelines version — the load-bearing fact is the build-step *image*)
 [source,texinfo]
 ----
 shipped maven task, build step image:
   registry.redhat.io/ubi9/openjdk-17@sha256:...
 shipped maven task, parameters:
-  GOALS  MAVEN_MIRROR_URL  SUBDIRECTORY
+  GOALS  MAVEN_MIRROR_URL  JAVA_VERSION  SUBDIRECTORY  ENV_VARS
 ----
 
-The shipped `maven` Task runs on a *Java 17* image — and there is *no parameter* to change it (`GOALS`, `MAVEN_MIRROR_URL`, `SUBDIRECTORY`, and nothing for the image).
-`parasol-claims` is a *Java 21* application, so the shipped Task cannot build it; Maven fails with `release version 21 not supported`.
-That is the gap the curated library fills.
+The shipped `maven` Task *advertises* a `JAVA_VERSION` parameter (its description even lists `8, 11, 17, 21`) — so it looks like you could just ask for 21.
+But read the *build-step image*: it is pinned to *Java 17* (`ubi9/openjdk-17`), and `JAVA_VERSION` does not repoint it — the parameter is a promise the pinned image can't keep.
+`parasol-claims` is a *Java 21* application, so the shipped Task still cannot build it: Maven runs on JDK 17 and fails with `release version 21 not supported`, whatever you set `JAVA_VERSION` to.
+That is the gap the curated library fills — not a missing *knob*, but a guaranteed *runtime*.
 Read Parasol's answer:
 
 [source,sh,role=execute]
 ----
 echo "curated maven-jdk21, build step image:"
-oc get task maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='  {.spec.steps[0].image}{"\n"}'
+oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='  {.spec.steps[0].image}{"\n"}'
 ----
 
 .Expected output
@@ -432,7 +436,7 @@ curated maven-jdk21, build step image:
   registry.access.redhat.com/ubi9/openjdk-21:latest
 ----
 
-A *Java 21* runner — the one thing the shipped Task could not give.
+A *Java 21* runner image — the guaranteed runtime the shipped Task's `JAVA_VERSION` knob could not actually deliver.
 Rather than paste a patched Maven Task into every Java 21 pipeline, the platform team curated `maven-jdk21` *once*, and every pipeline references it by cluster resolver.
 That is the entire argument for an organization library, in one concrete gap.
 
@@ -440,7 +444,7 @@ Now read the other curated Task — the one that produced the `image-size-mb` re
 
 [source,sh,role=execute]
 ----
-oc get task image-size-report -n ogsr-parasol-tasks \
+oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks \
   -o jsonpath='params: {range .spec.params[*]}{.name}{" "}{end}{"\n"}results: {range .spec.results[*]}{.name}{" "}{end}{"\n"}'
 ----
 
@@ -452,7 +456,7 @@ results: image-size-bytes image-size-mb within-budget
 ----
 
 This is a Task you could have written: it takes an image reference and a budget as *parameters*, inspects the image, and publishes three *results*.
-Read its full body if you like (`oc get task image-size-report -n ogsr-parasol-tasks -o yaml`) — it is a short shell script.
+Read its full body if you like (`oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks -o yaml`) — it is a short shell script.
 The point is that it lives in the *shared library*, so every Parasol pipeline gets image-size reporting by adding *one `taskRef`*, not by copying a script.
 
 [NOTE]
@@ -788,7 +792,7 @@ Re-run the pipeline with `-p max-size-mb=300` (add a `params` entry, or `tkn pip
 Notice the run still *succeeds* — the report *flags*, it does not *fail* the build.
 How would you make it a hard gate?
 * *Read a Task's full body.*
-`oc get task image-size-report -n ogsr-parasol-tasks -o yaml` — find where it writes its three results (the `$(results.<name>.path)` files).
+`oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks -o yaml` — find where it writes its three results (the `$(results.<name>.path)` files).
 That is how any Task publishes data.
 * *Trigger on a pull request.*
 Open a PR in Gitea against `main` instead of pushing to it, and watch PaC run the pipeline for the PR — the same `.tekton/` file handles both (`on-event: [push, pull_request]`).
