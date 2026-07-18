@@ -184,10 +184,10 @@ Read that as a sentence: the `claim-ticker` *PingSource* emits into the `default
 BROKER=$(oc get broker default -n $NS -o jsonpath='{.status.address.url}')
 echo "broker ingress: $BROKER"
 oc get ksvc claims-consumer claims-dlq -n $NS
-oc get pods -n $NS -l 'app in (claims-consumer,claims-dlq)' --no-headers | grep -c . || echo 0
+oc get pods -n $NS -l 'app in (claims-consumer,claims-dlq)' --no-headers 2>/dev/null | wc -l
 ----
 
-.Expected output (the broker's internal address; two Ready scale-to-zero consumers; zero pods while idle)
+.Expected output (abridged — your hostnames and revision hashes differ; the broker's internal address, two Ready scale-to-zero consumers, zero pods while idle)
 [source,texinfo]
 ----
 broker ingress: http://broker-ingress.knative-eventing.svc.cluster.local/user7-dev/default
@@ -255,6 +255,12 @@ POST CloudEvent: HTTP 204 in 0.406753s
 oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=20 | grep -A12 'Received event'
 ----
 
+[NOTE]
+.If a consumer log-read says "timed out waiting for the condition"
+====
+`claims-consumer` and `claims-dlq` are *scale-to-zero* Services. If you pause and one settles back to zero, `oc logs deploy/claims-consumer-…` finds no pod and returns `error: timed out waiting for the condition` — that's not a failure. Re-run the *event-send* in the same step to wake the consumer, then read the log again. This applies to *every* consumer log-read below.
+====
+
 .Expected output (the consumer displays the full CloudEvents envelope — attributes + your data)
 [source,texinfo]
 ----
@@ -293,7 +299,7 @@ Let the consumer settle back to *zero* first, so you can watch it *wake on the e
 ----
 # wait for scale-to-zero (about a minute of no traffic), then confirm no consumer pod:
 sleep 90
-oc get pods -n $NS -l app=claims-consumer --no-headers | grep -c . || echo 0
+oc get pods -n $NS -l app=claims-consumer --no-headers 2>/dev/null | wc -l
 ----
 
 .Expected output (the consumer is holding zero pods)
@@ -322,6 +328,12 @@ claim -> broker (cold): HTTP 202 in 13.814156s
 NAME                                             READY   STATUS    RESTARTS   AGE
 claims-consumer-v1-deployment-...                2/2     Running   0          14s
 ----
+
+[NOTE]
+.If your POST comes back fast instead of ~14 s
+====
+The seeded `claim-ticker` `PingSource` fires into this *same* broker every five minutes, and the baseline `claims-events` Trigger routes those pings to `claims-consumer` too — so a ping may have *already* woken it. If your first broker POST returns in under a second instead of ~14 s, a ping beat you to it: wait ~2 minutes for the consumer to settle back to zero (`oc get pods … | wc -l` shows `0`), then POST again to see the real cold start.
+====
 
 The consumer *woke from zero on an event* — no client was waiting on it directly; the trigger's delivery scaled it up. Send a *second* event now that the consumer is warm, and watch the difference:
 
@@ -464,7 +476,7 @@ Here all three triggers point at the *same* `claims-consumer` so you can *see an
 
 Routing works — but what happens when a consumer *fails*? By default, a failed delivery is *retried a few times and then dropped*. For events you can't afford to lose, a trigger's `delivery` spec adds *retries with backoff* and a *dead-letter sink* (DLQ): the events that still fail land in a separate sink, *stamped with why*.
 
-Give the `claims-fraud-review` trigger a delivery spec — retry three times with exponential backoff, and dead-letter to `claims-dlq`. Delivery guarantees aren't a `kn trigger` flag, so apply the trigger as YAML:
+Give the `claims-fraud-review` trigger a delivery spec — retry three times with exponential backoff, and dead-letter to `claims-dlq`. Delivery guarantees aren't a `kn trigger` flag, so apply the trigger as YAML. One catch: `kn trigger create` set the subscriber as a `ref`, and this YAML uses a `uri` — a subscriber is `ref` *or* `uri`, never both, and `oc apply` would *merge* the two forms (the webhook then rejects it). So *delete and recreate* the trigger to switch it cleanly:
 
 [tabs]
 ====
@@ -478,6 +490,9 @@ CLI::
 --
 [source,sh,role=execute]
 ----
+# The kn-created trigger set subscriber.ref; recreating it lets this YAML use a single subscriber.uri
+# (oc apply over the existing ref would keep BOTH forms -> "Absolute URI is not allowed when Ref is present"):
+oc delete trigger claims-fraud-review -n $NS
 oc apply -n $NS -f - <<EOF
 apiVersion: eventing.knative.dev/v1
 kind: Trigger
@@ -550,7 +565,7 @@ spec:
 EOF
 ----
 
-Send a claim event. It will fail, retry three times with backoff, then dead-letter. Because the broker is *synchronous*, the `202` returns only after all of that completes (~8 s) — so give `curl` a *generous* `-m 90` and *don't* let it cancel:
+Send a claim event. It will fail, retry three times with backoff, then dead-letter. Because the broker is *synchronous*, the `202` returns only after all of that completes — *~8 s* if the consumer is warm (just the 1s/2s/4s backoff), but *~20 s or more* when the failing consumer cold-starts on the retries — so give `curl` a *generous* `-m 90` and *don't* let it cancel:
 
 [source,sh,role=execute]
 ----
@@ -560,7 +575,7 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "fa
   -d "{\"claimId\":\"CLM-DEAD-99\",\"fraudScore\":0.99}" "'"$BROKER"'"'
 ----
 
-.Expected output (202 after ~8 s — one try plus three retries at 1s/2s/4s backoff — then dead-lettered)
+.Expected output (the synchronous 202 returns only after the retries — the value below is a warm run; a cold consumer pushes it to ~20 s+ — then the event dead-letters)
 [source,texinfo]
 ----
 failing claim -> retries -> DLQ: HTTP 202 in 7.867066s
@@ -573,7 +588,7 @@ That ~8 seconds *is* the retry policy: the initial attempt plus three retries wi
 oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=40 | grep -A16 'dead-99'
 ----
 
-.Expected output (the dead event, with knativeerror* extension attributes recording the failure)
+.Expected output (abridged — the dead event, with the `knativeerror*` extension attributes that record the failure; the `knativeerrordata` value is a longer JSON blob, truncated here)
 [source,texinfo]
 ----
   id: dead-99
@@ -623,7 +638,7 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "re
   -H "Ce-Source: /demo" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-OK2\"}" "'"$BROKER"'"'
 ----
 
-.Expected output (delivery is healthy again; no dead-letter, sub-second)
+.Expected output (delivery is healthy again; no dead-letter — sub-second when the consumer is warm, but up to ~20 s if this first recovered POST cold-starts it)
 [source,texinfo]
 ----
 recovered claim: HTTP 202 in 0.212295s
