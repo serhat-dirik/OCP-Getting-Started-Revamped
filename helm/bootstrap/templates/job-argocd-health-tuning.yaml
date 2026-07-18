@@ -1,0 +1,189 @@
+# =============================================================================
+# Argo CD resource-health-check tuning (Sync hook, wave -9) — narrowly overrides the
+# built-in operators.coreos.com/Subscription health check for ONE specific, provable-benign
+# case: an ADOPTED operator whose OLM Subscription already reports `.status.state:
+# AtLatestKnown` with `installedCSV == currentCSV` (i.e. OLM itself considers it fully
+# resolved and current), but a stale/orphaned-CSV artifact from a CSV replace OLM never
+# garbage-collected still trips `ResolutionFailed`/`CatalogSourcesUnhealthy` in
+# .status.conditions. Verified live on C2, 2026-07-18: an adopted KEDA install with two
+# custom-metrics-autoscaler CSVs (the old one stuck "Replacing", orphaned) carried
+# ResolutionFailed=True permanently, false-flagging pp-keda Degraded even though
+# KedaController.status.phase = "Installation Succeeded" and every KEDA pod Running.
+#
+# Deliberately NOT a blanket override: it does not touch the UpgradePending/UpgradeAvailable/
+# UpgradeFailed branches or add any new Degraded-suppressing condition — a Subscription OLM
+# does NOT consider AtLatestKnown keeps reporting exactly as Argo CD's upstream check does.
+# Confirmed on the SAME cluster this does NOT paper over a real problem: cert-manager-operator
+# on C2 is genuinely broken (installedCSV references a ClusterServiceVersion that no longer
+# exists; no operator pod) — its Subscription reports UpgradePending, which this override does
+# not touch, so it correctly stays Progressing. See the platform-engineer session report for
+# the full KEDA-vs-cert-manager investigation.
+#
+# There is no per-Application health-check override in Argo CD — resource_customizations are
+# necessarily cluster-scoped (keyed by group/kind on the ArgoCD instance), never per-app. This
+# Job is that one supported mechanism, applied the same "imperative Job against the instance
+# the Job hooks can't safely self-heal" way platform-portfolio/argocd-bootstrap/operator/
+# argocd-controller-resources.yaml already raises the controller memory limit — a wedged
+# controller cannot reconcile its own config, so this can never be a plain Argo Application.
+# The script-bootstrap path carries the identical check in that same file for parity; kept as
+# two copies (not one shared file) because platform-portfolio must stay dependency-free from
+# the rest of the monorepo (01-ARCHITECTURE §4.0.8) — see that file's header for the sync note.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogsr-argocd-health-tuning
+  # The ogsr-bootstrap ServiceAccount (cluster-admin-bound) lives in namespaces.system, not
+  # argocd.namespace — a Job can only use a ServiceAccount that exists in its OWN namespace.
+  # The cluster-admin ClusterRoleBinding reaches the ArgoCD CR in argocd.namespace regardless
+  # of which namespace this Job itself runs in (verified live on C2, 2026-07-18: placing this
+  # Job in argocd.namespace failed FailedCreate — "serviceaccount openshift-gitops/ogsr-bootstrap
+  # not found" — the SA was never rendered there).
+  namespace: {{ .Values.namespaces.system }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+  labels:
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "ogsr-bootstrap.ownerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: ogsr-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: tune
+          image: {{ .Values.images.cli }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: ARGOCD_NS
+              value: {{ .Values.argocd.namespace | quote }}
+          args:
+            - |
+              set -euo pipefail
+              ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
+              ARGOCD_NAME=openshift-gitops
+
+              if ! oc get argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" >/dev/null 2>&1; then
+                info "no ${ARGOCD_NS}/${ARGOCD_NAME} ArgoCD CR yet — nothing to tune, skipping"
+                exit 0
+              fi
+
+              info "tuning ${ARGOCD_NS}/${ARGOCD_NAME}: operators.coreos.com/Subscription health check"
+              PATCH_FILE="$(mktemp)"; trap 'rm -f "$PATCH_FILE"' EXIT
+              cat > "$PATCH_FILE" <<'PATCHEOF'
+              spec:
+                resourceHealthChecks:
+                  - group: operators.coreos.com
+                    kind: Subscription
+                    check: |
+                      -- Same upstream logic as Argo CD's built-in operators.coreos.com/Subscription health
+                      -- check (github.com/argoproj/argo-cd resource_customizations/.../Subscription/health.lua,
+                      -- fetched 2026-07-18), with ONE narrow addition (marked below). Deliberately does NOT
+                      -- touch the UpgradePending/UpgradeAvailable branches or any other condition handling —
+                      -- a Subscription that OLM itself does not consider AtLatestKnown keeps reporting exactly
+                      -- as upstream does (e.g. cert-manager-operator on C2, 2026-07-18: state=UpgradePending
+                      -- with its installedCSV genuinely absent from the cluster — a real broken install, stays
+                      -- Progressing, unaffected by this override).
+                      local health_status = {}
+                      if obj.status ~= nil then
+                        if obj.status.conditions ~= nil then
+                          local numDegraded = 0
+                          local numPending = 0
+                          local msg = ""
+
+                          local isManualApprovalPending = false
+                          if obj.spec ~= nil and obj.spec.installPlanApproval == "Manual" then
+                            for _, condition in pairs(obj.status.conditions) do
+                              if condition.type == "InstallPlanPending" and condition.status == "True" and condition.reason == "RequiresApproval" then
+                                if obj.status.installedCSV ~= nil then
+                                  isManualApprovalPending = true
+                                end
+                                break
+                              end
+                            end
+                          end
+
+                          for i, condition in pairs(obj.status.conditions) do
+                            if isManualApprovalPending and condition.type == "InstallPlanPending" then
+                              -- skip: InstallPlanPending is expected when manual upgrade approval is pending
+                            else
+                              msg = msg .. i .. ": " .. condition.type .. " | " .. condition.status .. "\n"
+                              if condition.type == "InstallPlanPending" and condition.status == "True" then
+                                numPending = numPending + 1
+                              elseif (condition.type == "InstallPlanMissing" and condition.reason ~= "ReferencedInstallPlanNotFound") then
+                                numDegraded = numDegraded + 1
+                              elseif (condition.type == "CatalogSourcesUnhealthy" or condition.type == "InstallPlanFailed" or condition.type == "ResolutionFailed") and condition.status == "True" then
+                                numDegraded = numDegraded + 1
+                              end
+                            end
+                          end
+
+                          -- Available states: undef/nil, UpgradeAvailable, UpgradePending, UpgradeFailed, AtLatestKnown
+                          if obj.status.state == nil then
+                            numPending = numPending + 1
+                            msg = msg .. ".status.state not yet known\n"
+                          elseif obj.status.state == "" or obj.status.state == "UpgradeAvailable" then
+                            numPending = numPending + 1
+                            msg = msg .. ".status.state is '" .. obj.status.state .. "'\n"
+                          elseif obj.status.state == "UpgradePending" then
+                            if isManualApprovalPending then
+                              msg = msg .. ".status.state is 'UpgradePending' (manual InstallPlan approval pending; treated as healthy)\n"
+                            else
+                              numPending = numPending + 1
+                              msg = msg .. ".status.state is '" .. obj.status.state .. "'\n"
+                            end
+                          elseif obj.status.state == "UpgradeFailed" then
+                            numDegraded = numDegraded + 1
+                            msg = msg .. ".status.state is '" .. obj.status.state .. "'\n"
+                          else
+                            msg = msg .. ".status.state is '" .. obj.status.state .. "'\n"
+                          end
+
+                          -- ADDITION (not in upstream, ogsr-only): OLM's own AtLatestKnown + installedCSV ==
+                          -- currentCSV outranks a stale/orphaned-CSV condition artifact left over from a CSV
+                          -- replace that OLM never garbage-collected. Narrow on purpose: only fires when state
+                          -- is the one value that means "OLM considers this fully resolved and current", so it
+                          -- can only ever clear noise the conditions loop added on top of an already-good state
+                          -- — never a real UpgradePending/UpgradeFailed/unknown-state signal. Verified live
+                          -- 2026-07-18: an adopted KEDA install with two custom-metrics-autoscaler CSVs (the old
+                          -- one stuck Replacing, orphaned) carried ResolutionFailed=True forever, yet
+                          -- KedaController.status.phase = "Installation Succeeded" and every KEDA pod Running.
+                          if obj.status.state == "AtLatestKnown" and obj.status.installedCSV ~= nil and obj.status.installedCSV == obj.status.currentCSV then
+                            numDegraded = 0
+                            numPending = 0
+                            msg = msg .. "(ogsr override: AtLatestKnown with installedCSV==currentCSV — condition(s) above treated as stale, not live)\n"
+                          end
+
+                          if numDegraded == 0 and numPending == 0 then
+                            health_status.status = "Healthy"
+                            health_status.message = msg
+                            return health_status
+                          elseif numPending > 0 and numDegraded == 0 then
+                            health_status.status = "Progressing"
+                            health_status.message = msg
+                            return health_status
+                          else
+                            health_status.status = "Degraded"
+                            health_status.message = msg
+                            return health_status
+                          end
+                        end
+                      end
+                      health_status.status = "Progressing"
+                      health_status.message = "An install plan for a subscription is pending installation"
+                      return health_status
+              PATCHEOF
+              oc patch argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" --type=merge --patch-file="$PATCH_FILE" >/dev/null
+              ok "resourceHealthChecks tuned for operators.coreos.com/Subscription"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 256Mi
