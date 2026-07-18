@@ -117,6 +117,17 @@ snapshot_operators() {
       done
     done
   done
+  # gitea-operator comes from an external rhpds OLMDeploy kustomize base (fetched at build time), so
+  # the subscription*.yaml glob above can never find it — record it explicitly, gated on core-devtools
+  # (the stack carrying the gitea component). Same treatment ogsr-uninstall.sh's enumerate_operators()
+  # and helm/bootstrap's job-state-capture give it (c50067d / cf79b0d).
+  if [[ ",${stacks_csv}," == *",core-devtools,"* ]]; then
+    if oc get subscription gitea-operator -n gitea-operator >/dev/null 2>&1; then
+      record_once "op_gitea-operator" "adopted:gitea-operator"
+    else
+      record_once "op_gitea-operator" "created:gitea-operator"
+    fi
+  fi
 }
 
 info "[0/6] capturing uninstall-state (prior cluster state for a non-destructive uninstall)"
