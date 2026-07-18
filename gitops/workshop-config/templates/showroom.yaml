@@ -338,31 +338,29 @@ spec:
               fi
 
               echo "▶ writing shell profile (ws on PATH + greeting)…"
-              # Seed .bashrc from skel (HOME=/home/lab-user is set on the terminal container), then
-              # append an idempotent workshop block — PATH so `ws` is runnable, greeting on interactive
-              # shells only. Guarded by a marker because the home PVC persists across restarts. Written
-              # with single-quoted echoes (NOT a heredoc: an indented closing delimiter is invalid both
-              # in this YAML block scalar and to bash) so every $ lands literally in .bashrc.
-              [[ -f "$HOME/.bashrc" ]] || cp /etc/skel/.bashrc "$HOME/.bashrc" 2>/dev/null || touch "$HOME/.bashrc"
-              if ! grep -q "WS_WORKSHOP_PROFILE" "$HOME/.bashrc" 2>/dev/null; then
-                {
-                  echo ''
-                  echo '# WS_WORKSHOP_PROFILE — workshop terminal setup (idempotent)'
-                  echo 'export PATH="$HOME/ocp-getting-started/tools/ws:$PATH"'
-                  echo 'if [[ $- == *i* ]]; then'
-                  echo '  echo "You are logged in as $(oc whoami 2>/dev/null || echo attendee) — project: $(oc project -q 2>/dev/null || echo none)"'
-                  echo '  echo "Set up a module with: ws prep platform-orientation   (then follow the lab; ws verify platform-orientation checks it)"'
-                  echo 'fi'
-                } >> "$HOME/.bashrc"
-              fi
-              # Separate idempotent block (its own marker) so existing home PVCs pick up ws tab-completion
-              # on the next restart without rewriting the profile above.
-              if ! grep -q "WS_COMPLETION" "$HOME/.bashrc" 2>/dev/null; then
-                {
-                  echo '# WS_COMPLETION — ws tab-completion (project-owner ask 2026-07-11)'
-                  echo '[ -f "$HOME/ocp-getting-started/tools/ws/ws-completion.bash" ] && source "$HOME/ocp-getting-started/tools/ws/ws-completion.bash"'
-                } >> "$HOME/.bashrc"
-              fi
+              # DROP-IN under ~/.bashrc.d/, NOT an append to ~/.bashrc. The terminal image's runttyd
+              # clobbers ~/.bashrc on FIRST boot of a fresh home PVC (`cp /var/lab-user/bashrc.base
+              # ~/.bashrc`, guarded by ~/.setupcomplete), and this init container runs BEFORE runttyd —
+              # so an appended block is wiped and `ws` is off the interactive PATH on every freshly
+              # provisioned cockpit until a restart (found on fresh C2, 2026-07-18: `ws smoke` red on
+              # "ws on the attendee's interactive PATH"). Both ~/.bashrc and bashrc.base source
+              # ~/.bashrc.d/*, and that dir lives on the persistent PVC, so a drop-in there survives the
+              # clobber (verified on-cluster). We own this file, so overwrite it every run — idempotent
+              # by construction, no grep guard. Single-quoted echoes (NOT a heredoc: an indented closing
+              # delimiter is invalid in this YAML block scalar and to bash) so every $ lands literally in
+              # the drop-in, evaluated at shell time. Covers PATH, ws tab-completion, and the greeting.
+              mkdir -p "$HOME/.bashrc.d"
+              {
+                echo '# WS_WORKSHOP_PROFILE — workshop terminal setup (ws on PATH + completion + greeting).'
+                echo '# Managed by the showroom terminal-prep init; sourced by ~/.bashrc via its'
+                echo '# ~/.bashrc.d/* loop, so it survives the runttyd first-boot ~/.bashrc clobber.'
+                echo 'export PATH="$HOME/ocp-getting-started/tools/ws:$PATH"'
+                echo '[ -f "$HOME/ocp-getting-started/tools/ws/ws-completion.bash" ] && source "$HOME/ocp-getting-started/tools/ws/ws-completion.bash"'
+                echo 'if [[ $- == *i* ]]; then'
+                echo '  echo "You are logged in as $(oc whoami 2>/dev/null || echo attendee) — project: $(oc project -q 2>/dev/null || echo none)"'
+                echo '  echo "Set up a module with: ws prep platform-orientation   (then follow the lab; ws verify platform-orientation checks it)"'
+                echo 'fi'
+              } > "$HOME/.bashrc.d/ws-workshop.sh"
               echo "✅ terminal prepared for ${WS_USER}"
           volumeMounts:
             - name: home
