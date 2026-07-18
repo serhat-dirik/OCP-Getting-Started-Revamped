@@ -81,7 +81,12 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: the seeded flaw exists ONLY in the fresh entry state. The trusted-supply-chain lab's fix REMOVES
   # log4j-core from the fork, so in FULL mode this would false-FAIL a successful attendee (G3
   # finding) — it validates ENTRY materialization, not lab completion. Same mode-split as gitops-fundamentals.
-  check "seed-vulnerable carries the seeded log4j CVE"     gitea_raw_contains "$USER_NAME" parasol-claims pom.xml seed-vulnerable "log4j-core" || hint "re-run the fork/seed job: ws reset trusted-supply-chain --user ${USER_NAME}"
+  # Needle is the literal injected XML tag, NOT the bare word "log4j-core": the base pom.xml's own
+  # SBOM-plugin comment mentions "log4j-core" in prose, and that comment forks onto seed-vulnerable
+  # from main too — a bare-word needle here made this check a false-positive rubber stamp that stayed
+  # green even while fork-and-seed.yaml's OWN loose grep skipped the real injection (same root cause,
+  # found together during the same investigation).
+  check "seed-vulnerable carries the seeded log4j CVE"     gitea_raw_contains "$USER_NAME" parasol-claims pom.xml seed-vulnerable "<artifactId>log4j-core</artifactId>" || hint "re-run the fork/seed job: ws reset trusted-supply-chain --user ${USER_NAME}"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   # The seeded CVE is expected to be GONE here — removing log4j-core IS the lab's fix (success), so
