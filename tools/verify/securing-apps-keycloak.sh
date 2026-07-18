@@ -50,6 +50,23 @@ realm_token() {  # username
   [[ -n "$tok" ]] && printf '%s' "$tok"
 }
 
+# Exchange a subject token for a parasol-fraud-audience token via Keycloak standard token exchange
+# (RFC 8693), authenticating as the confidential parasol-claims client with the fixed workshop secret the
+# lab uses (parasol-claims-secret — not a real credential). Parsed with sed (no jq), so this stays runnable
+# with only oc + curl. Empty output ⇒ the exchange was refused (a broken/absent exchange wiring).
+exchanged_token() {  # subject_token
+  local subj="$1" url
+  url="$(auth_server_url)"
+  [[ -n "$url" && -n "$subj" ]] || return 1
+  curl -ks --max-time 20 "${url}/protocol/openid-connect/token" \
+    -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+    -d client_id=parasol-claims -d client_secret=parasol-claims-secret \
+    -d subject_token="$subj" \
+    -d subject_token_type=urn:ietf:params:oauth:token-type:access_token \
+    -d audience=parasol-fraud 2>/dev/null \
+    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
+}
+
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                         || hint "run: ws start securing-apps-keycloak --user ${USER_NAME}"
 check "entry marker ws-entry-securing-apps-keycloak present"               oc get cm ws-entry-securing-apps-keycloak -n "$NS"         || hint "entry app not synced — ws start securing-apps-keycloak --user ${USER_NAME}"
@@ -76,6 +93,23 @@ else
         test "$(route_code parasol-claims /api/claims "$ADJ_TOKEN")" = "200"                    || hint "role wiring: map realm_access/roles and allow claims-adjuster; token from ${USER_NAME}'s realm (adjuster/parasol)"
   check "web frontend redirects an unauthenticated request to login (302)" \
         test "$(route_code parasol-web /api/claims)" = "302"                                    || hint "protect the web app: OIDC web-app (auth-code + PKCE) — see the lab"
+
+  # --- Ex7 [ADVANCED] token exchange (RFC 8693) — the module's ONLY optional exercise, and what `ws solve`
+  # materializes. Never let this beat pass silently: if parasol-fraud is deployed, assert the discriminator
+  # (the user's aud=parasol-claims token is 401 at fraud; a token EXCHANGED to aud=parasol-fraud is 200). If
+  # fraud is absent, print a LOUD skip naming Ex7 — it is optional, so absence is not a core-lab failure, but
+  # a grader must SEE it was not done instead of reading a misleading all-green.
+  if oc get deploy parasol-fraud -n "$NS" >/dev/null 2>&1; then
+    XADJ="$(realm_token adjuster || true)"
+    check "Ex7 token-exchange: fraud REFUSES the user's aud=parasol-claims token — 401" \
+          test "$(route_code parasol-fraud /api/fraud/score/CLM-1001 "$XADJ")" = "401"          || hint "fraud must enforce aud=parasol-fraud (QUARKUS_OIDC_TOKEN_AUDIENCE) — see Ex7"
+    XCHG="$(exchanged_token "$XADJ" || true)"
+    check "Ex7 token-exchange: fraud ACCEPTS a token exchanged to aud=parasol-fraud — 200" \
+          test "$(route_code parasol-fraud /api/fraud/score/CLM-1001 "$XCHG")" = "200"          || hint "wire RFC 8693 exchange: parasol-claims (confidential) exchanges the user token to audience=parasol-fraud — see Ex7"
+  else
+    echo "⏭  SKIP Ex7 [ADVANCED] token-exchange — parasol-fraud is not deployed (the module's only optional"
+    echo "    exercise; this is NOT a pass — deploy the fraud service and wire the RFC 8693 exchange to finish it)."
+  fi
 fi
 
 verify_summary
