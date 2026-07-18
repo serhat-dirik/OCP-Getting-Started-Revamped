@@ -116,6 +116,20 @@ enumerate_operators() {
       done
     done
   done
+  # gitea-operator: installed via a remote rhpds/gitea-operator OLMDeploy kustomize base
+  # (platform-portfolio/components/gitea/kustomization.yaml fetches it from a GitHub URL at build
+  # time), so it carries no local subscription*.yaml for the glob above to find — explicit, same
+  # treatment job-state-capture.yaml's snapshot gives it on the write side. Gated on core-devtools
+  # (the stack that carries the gitea component) so a state record with no core-devtools somehow
+  # installed doesn't fabricate an entry. Falls back to "unknown" (preserve-biased, like every other
+  # operator here) when a pre-Wave-3 state record has no op_gitea-operator key yet.
+  case ",${stacks}," in
+    *,core-devtools,*)
+      st="$(state op_gitea-operator | cut -d: -f1)"
+      [[ -n "$st" ]] || st="unknown"
+      echo "gitea-operator gitea-operator ${st}"
+      ;;
+  esac
 }
 
 # Every namespace the INSTALLED stacks declare in their component manifests — the "installed stacks'
