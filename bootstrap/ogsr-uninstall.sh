@@ -330,13 +330,23 @@ reverse_node_shaping() {  # remove the batch pool label+taint and the synthetic 
 }
 
 handle_lightspeed() {  # remove our MaaS secret / namespace only when WE installed Lightspeed
-  local preinstalled ns_created
+  local preinstalled ns_created secret_created secret_owner
   preinstalled="$(state lightspeed_preinstalled)"
   ns_created="$(state lightspeed_ns_created)"
+  secret_created="$(state lightspeed_secret_created)"
   if [[ "$preinstalled" == "true" ]]; then
     echo "   • preserve OpenShift Lightspeed (pre-installed / adopted — untouched)"; return 0
   fi
-  del_obj secret credentials openshift-lightspeed
+  # Delete the MaaS secret ONLY with positive evidence it is ours: install recorded creating it, or it
+  # still carries our owner label. Absent both — e.g. a re-run after the state CM was removed (every
+  # second run is stateless, since run 1 deletes it), on an ADOPTED Lightspeed — we must NOT delete the
+  # org's provider secret. Preserve-biased, matching the preflight's promise (retrofit-safe like the IdP).
+  secret_owner="$(oc get secret credentials -n openshift-lightspeed -o jsonpath='{.metadata.labels.workshop\.redhat\.com/owner}' 2>/dev/null || true)"
+  if [[ "$secret_created" == "true" || "$secret_owner" == "ogsr" ]]; then
+    del_obj secret credentials openshift-lightspeed
+  else
+    echo "   • preserve secret credentials in openshift-lightspeed (no state/label showing WE created it)"
+  fi
   if [[ "$ns_created" == "true" ]]; then
     del_obj namespace openshift-lightspeed
   else
