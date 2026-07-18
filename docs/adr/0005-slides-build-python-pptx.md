@@ -19,3 +19,14 @@ A thin **python-pptx** generator (`tools/slides/build-deck.py`) parses the outli
 
 - We own ~150 lines of build script; in exchange we get deterministic RH-layout mapping and a clean template swap.
 - pandoc `--reference-doc` stays the documented fallback.
+
+## Update (2026-07-18) — CI structural proof wired
+
+The CI proof promised under *Decision* is now implemented as `.github/workflows/slides-build.yml`
+(path-filtered to `slides/outlines/**`, `tools/slides/**`, `modules.yaml`): it installs
+python-pptx, runs `build-deck.py` on two outlines (whose own self-check fails the build if the
+built slide count is below what it parsed), then re-opens the artifact with python-pptx and
+asserts the slide count independently. The branded assembly (redhat-deck-design skill) needs
+LibreOffice + fonts + the authored icon set and is **not** reproducible in CI, so CI validates
+the schema + template-fallback path only — the skill remains the presentation-output path per
+the 2026-07-09 amendment. Branded build usage is documented in `slides/template/README.md`.
