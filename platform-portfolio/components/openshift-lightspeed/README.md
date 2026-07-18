@@ -20,7 +20,9 @@ NOT hardcoded here. This component ships generic placeholders (`https://maas.exa
 model `example-model`); the **consuming stack** patches in the real values. For this project the
 `ai-assist` stack (`platform-portfolio/stacks/ai-assist/apps/openshift-lightspeed.yaml`) applies
 a kustomize JSON patch setting the endpoint to the project's MaaS route and the model to
-`qwen3-14b`. Point the component elsewhere by editing that stack app (or your own overlay) — the
+`llama-scout-17b` — the model the per-user MaaS key is actually scoped to (a prior `qwen3-14b`
+value 401'd; root-caused live by the task #67 QA gate, matching the FSC litemaas.model contract
+default). Point the component elsewhere by editing that stack app (or your own overlay) — the
 component itself stays generic and reusable.
 
 The API **token IS secret** and is delivered as a contract, never in git:
@@ -46,6 +48,6 @@ oc create secret generic credentials \
 ## Verify
 
 ```bash
-oc get olsconfig cluster -o jsonpath='{.spec.ols.defaultModel}{"\n"}'   # -> qwen3-14b once patched
+oc get olsconfig cluster -o jsonpath='{.spec.ols.defaultModel}{"\n"}'   # -> llama-scout-17b once patched
 oc get pods -n openshift-lightspeed                                     # lightspeed-app-server Running
 ```

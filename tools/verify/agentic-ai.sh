@@ -10,10 +10,11 @@
 # Route over HTTPS (the URL is recorded in the marker — no cross-namespace reads). The G1 cockpit smoke
 # runs `--entry-only` as {user}.
 #
-# MODEL-AGNOSTIC / PER-CLUSTER: maas-config carries the converged model (llama-scout-17b on C2,
-# qwen3-14b on C1) — reported as INFO. SHORT-LIVED KEY: the end-state model call needs a live MaaS key;
-# if it has expired the agent returns a clean 502 authFailure and the end check fails with a key hint
-# (correct — the end state genuinely requires a working model). The entry checks never call the model.
+# MODEL-AGNOSTIC / PER-CLUSTER: maas-config carries the converged model (chart default llama-scout-17b,
+# task #67; a cluster whose Lightspeed secret carries a different model key converges to that instead)
+# — reported as INFO. SHORT-LIVED KEY: the end-state model call needs a live MaaS key; if it has expired
+# the agent returns a clean 502 authFailure and the end check fails with a key hint (correct — the end
+# state genuinely requires a working model). The entry checks never call the model.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
@@ -36,11 +37,12 @@ agent_route() { oc get cm ws-entry-agentic-ai -n "$NS" -o jsonpath='{.data.agent
 # "tool":"get_claim" inside a NON-empty toolCalls array; a model that merely ECHOES the call as text
 # leaves toolCalls EMPTY (and only the answer string carries get_claim(...)). Grepping the executed-tool
 # field, not a bare substring, is what tells true grounding from an echo.
-# PROMPT CHOICE (verified live on C2, 2026-07-13): the imperative "use your tools" phrasing is
-# deterministic across models — qwen3-14b (C1) and llama-scout-17b (C2) both EXECUTE get_claim for it,
-# whereas the terse "what is the status of CLM-1001?" makes llama-scout-17b deterministically emit
-# [get_claim(...)] as plain text with an EMPTY toolCalls (ungrounded). Model-agnostic + deterministic
-# (temperature 0). Needs a live MaaS key (short-lived on RHDP).
+# PROMPT CHOICE (verified live, 2026-07-13): the imperative "use your tools" phrasing makes
+# llama-scout-17b (the chart-default, key-scoped model — task #67) deterministically EXECUTE get_claim,
+# whereas the terse "what is the status of CLM-1001?" makes it deterministically emit [get_claim(...)]
+# as plain text with an EMPTY toolCalls (ungrounded) instead. The imperative phrasing is the robust
+# choice designed to stay deterministic on other models too. Temperature 0. Needs a live MaaS key
+# (short-lived on RHDP).
 tool_grounded_answer() {
   local route body
   route="$(agent_route)"
@@ -62,7 +64,7 @@ check "MCP server policy-docs deployed + ready"    deploy_available policy-docs 
 check "parasol-agent deployed + Ready (both MCP clients OK)" deploy_available parasol-agent \
   || hint "the agent is not Ready — its /q/health/ready pings both MCP servers; check pods in ${NS} (ws reset agentic-ai --user ${USER_NAME})"
 
-# INFO: the per-cluster converged model (proves the app-modernization-style secret-sourcing — llama-scout-17b on C2).
+# INFO: the per-cluster converged model (proves the app-modernization-style secret-sourcing).
 info "agent model (maas-config): $(oc get cm maas-config -n "$NS" -o jsonpath='{.data.model}' 2>/dev/null || echo '?')"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
