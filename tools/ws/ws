@@ -12,6 +12,7 @@
 #   ws doctor                        environment sanity: login, argo, gitea, operators
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
 #   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
+#   ws scale-users N [--yes]         SA/admin: grow/shrink the workshop cohort to N users
 #   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
 #   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
 #   ws diag [--user U] [<module>]    SA/admin: read-only troubleshooting bundle for a stuck attendee
@@ -1192,6 +1193,21 @@ cmd_doctor() {
   if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then ok "workshop-users present"; else err "IdP missing — bootstrap adds it"; fail=1; fi
   printf "  %-28s" "user namespaces"
   if oc get ns user1-dev >/dev/null 2>&1; then ok "user1-dev exists"; else err "missing — workshop-config not synced"; fail=1; fi
+  printf "  %-28s" "workshop cohort size"
+  # Honest after a `ws scale-users`: cross-check the LIVE helm parameter against the group it should
+  # have converged to. A mismatch usually means a scale is still mid-sync — re-run shortly.
+  if ! oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1; then
+    ok "n/a (workshop layer not installed)"
+  else
+    local n_live n_group
+    n_live="$(live_user_count || true)"
+    n_group="$(oc get group workshop-attendees -o jsonpath='{.users[*]}' 2>/dev/null | wc -w | xargs || true)"
+    if [[ -n "$n_live" && "$n_live" == "$n_group" ]]; then
+      ok "${n_live} user(s) (live userCount + group agree)"
+    else
+      err "live userCount=${n_live:-?} but workshop-attendees group has ${n_group:-?} — scale still converging? re-run shortly, or: ws status"; fail=1
+    fi
+  fi
   echo
   if (( fail == 0 )); then ok "environment looks good"; else err "issues found — fix hints above"; exit 1; fi
 }
@@ -1213,6 +1229,15 @@ workshop_users() {  # → space-separated attendee usernames from the AUTHORITAT
 repo_user_count() {  # → workshop-config's INTENDED userCount (repo default), or empty. Soft cross-check
   # only: the live group wins, but a mismatch is a useful "bootstrap ran with a different --users" signal.
   awk '$1=="userCount:"{print $2; exit}' "${REPO_ROOT}/gitops/workshop-config/values.yaml" 2>/dev/null
+}
+
+live_user_count() {  # → workshop-config Application's LIVE userCount helm parameter, or empty if
+  # absent/unreadable (pre-install, or oc unreachable). This is what Argo will ACTUALLY render on the
+  # next sync — the authoritative "target" cohort size. `ws scale-users` is the only thing that moves
+  # this value; it never touches the repo's values.yaml default (repo_user_count), so that default goes
+  # stale the moment a cluster is ever scaled — callers that need a LIVE, honest count use this instead.
+  oc get application workshop-config -n "$ARGO_NS" \
+    -o jsonpath='{.spec.source.helm.parameters[?(@.name=="userCount")].value}' 2>/dev/null || true
 }
 
 cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-cohort by default; --user U
@@ -1250,10 +1275,14 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
     [[ "$found" == "true" ]] || die "passwd: ${target_user} is not in the workshop-attendees group (${users_str})"
   fi
 
-  # Soft cross-check group size vs the repo's intended userCount (the live group is authoritative).
-  local want_n; want_n="$(repo_user_count || true)"
+  # Soft cross-check group size vs workshop-config's LIVE userCount helm parameter (the authoritative
+  # "what Argo will render" value — the repo's values.yaml default goes stale the moment anyone runs
+  # `ws scale-users`, which never touches that file). Falls back to the repo default only if the
+  # Application itself can't be read. The live GROUP remains what actually governs this command below.
+  local want_n; want_n="$(live_user_count || true)"
+  [[ -n "$want_n" ]] || want_n="$(repo_user_count || true)"
   [[ -n "$want_n" && "$want_n" != "${#users_arr[@]}" ]] \
-    && info "note: group has ${#users_arr[@]} user(s) but workshop-config values.yaml userCount=${want_n} (group wins)"
+    && info "note: group has ${#users_arr[@]} user(s) but workshop-config's userCount=${want_n} (group wins) — see: ws status"
 
   # Resolve the new password (generate a strong random one, bootstrap-style, when none was given). The
   # tr/cut pipeline yields up-to-16 JSON-safe alnum chars — identical to bootstrap's generator.
@@ -1475,6 +1504,263 @@ cmd_cohort_reset() {  # SA/admin: wipe ALL per-user module state for a FRESH coh
   (( wedged == 0 )) || return 1
 }
 
+# ── ws scale-users — grow/shrink the workshop cohort ───────────────────────────────────────────────
+_gitea_admin_creds() {  # → "host admin-user admin-pass" via oc/the Gitea CR, or empty on failure. Same
+  # discovery idiom as force_mirror_sync and the gitea-user-seed hook's own Job script.
+  local host user pass
+  host="$(oc get route gitea -n "${GITEA_NS}" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || return 1
+  user="$(oc get gitea gitea -n "${GITEA_NS}" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || echo gitea-admin)"
+  pass="$(oc get gitea gitea -n "${GITEA_NS}" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+  [[ -z "$pass" ]] && pass="$(oc get secret gitea-admin-credentials -n "${GITEA_NS}" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+  [[ -n "$host" && -n "$pass" ]] || return 1
+  echo "${host} ${user} ${pass}"
+}
+
+regen_htpasswd() {  # target_n → rebuild htpasswd-workshop-users to cover EXACTLY user1..user<target_n>.
+  # Existing users keep their CURRENT bcrypt line VERBATIM — no rotation; `ws passwd` is the only verb
+  # that changes the password. A user newly IN range (grow) gets a fresh line with the CURRENT shared
+  # password (_shared_password, read from the gitea secret — never a newly generated one). A user no
+  # longer in range (shrink) is simply not written back out. One routine serves both directions, the
+  # same idiomatic mktemp+trap+htpasswd -b build cmd_passwd uses.
+  local target_n="$1" htp cur pass i u line
+  htp="$(mktemp)"; trap 'rm -f "$htp"' EXIT
+  cur="$(oc get secret htpasswd-workshop-users -n openshift-config -o jsonpath='{.data.htpasswd}' 2>/dev/null | base64 -d || true)"
+  [[ -n "$cur" ]] || die "htpasswd-workshop-users secret not found/empty in openshift-config — run bootstrap first"
+  pass="$(_shared_password)"
+  [[ -n "$pass" ]] || die "could not read the shared workshop password (ogsr-gitea/workshop-user-creds) — run bootstrap first"
+  : > "$htp"
+  for (( i = 1; i <= target_n; i++ )); do
+    u="user${i}"
+    line="$(grep "^${u}:" <<< "$cur" || true)"
+    if [[ -n "$line" ]]; then
+      printf '%s\n' "$line" >> "$htp"
+    else
+      htpasswd -B -b "$htp" "$u" "$pass" >/dev/null 2>&1 || die "htpasswd failed for ${u}"
+    fi
+  done
+  oc create secret generic htpasswd-workshop-users \
+    --from-file=htpasswd="$htp" -n openshift-config \
+    --dry-run=client -o yaml | oc apply -f - >/dev/null
+  rm -f "$htp"; trap - EXIT
+}
+
+wait_gitea_seed() {  # target_n [timeout] → confirm Gitea has an account for user<target_n>. The
+  # gitea-user-seed Sync hook (chart wave 2) is what actually creates it; this just gives scale-users a
+  # specific, visible proof point instead of trusting Argo Health alone. Best-effort: an unreachable
+  # Gitea admin API degrades to a non-fatal note rather than failing the whole command.
+  local target_n="$1" timeout="${2:-180}" t=0 creds host user pass code want
+  want="user${target_n}"
+  info "confirming Gitea has an account for ${want} (gitea-user-seed hook)…"
+  creds="$(_gitea_admin_creds || true)"
+  if [[ -z "$creds" ]]; then
+    info "could not reach the Gitea admin API to confirm — check: oc logs -n ${GITEA_NS} job/gitea-user-seed"
+    return 0
+  fi
+  read -r host user pass <<< "$creds"
+  while (( t < timeout )); do
+    code="$(curl -ks -o /dev/null -w '%{http_code}' -u "${user}:${pass}" "https://${host}/api/v1/users/${want}" 2>/dev/null || true)"
+    [[ "$code" == "200" ]] && { ok "Gitea account ${want} confirmed (HTTP 200)"; return 0; }
+    sleep 5; t=$((t+5))
+  done
+  err "Gitea account ${want} not confirmed after ${timeout}s (last HTTP ${code:-?}) — check: oc logs -n ${GITEA_NS} job/gitea-user-seed"
+  return 1
+}
+
+confirm_cockpit() {  # user grow|shrink [timeout] → confirm the cockpit matches the new count's
+  # expectation: Running (grow) or gone (shrink). Best-effort visibility layered on top of wait_healthy
+  # — a Deployment can read Argo-Healthy slightly before kubelet actually reports readyReplicas.
+  local user="$1" direction="$2" timeout="${3:-300}" t=0 ready desired
+  if [[ "$direction" == "grow" ]]; then
+    info "confirming ${user}'s cockpit (showroom-${user}) comes up Running…"
+    while (( t < timeout )); do
+      if oc get deploy "showroom-${user}" -n "$SHOWROOM_NS" >/dev/null 2>&1; then
+        ready="$(oc get deploy "showroom-${user}" -n "$SHOWROOM_NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+        desired="$(oc get deploy "showroom-${user}" -n "$SHOWROOM_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+        [[ "${ready:-0}" -ge 1 && "$ready" == "${desired:-1}" ]] && { ok "cockpit showroom-${user} Running (${ready}/${desired})"; return 0; }
+      fi
+      sleep 10; t=$((t+10))
+    done
+    err "cockpit showroom-${user} not Running after ${timeout}s — inspect: oc get pods -n ${SHOWROOM_NS} -l workshop.redhat.com/user=${user}"
+    return 1
+  else
+    info "confirming ${user}'s cockpit (showroom-${user}) is gone…"
+    while (( t < timeout )); do
+      oc get deploy "showroom-${user}" -n "$SHOWROOM_NS" >/dev/null 2>&1 || { ok "cockpit showroom-${user} removed"; return 0; }
+      sleep 10; t=$((t+10))
+    done
+    err "cockpit showroom-${user} still present after ${timeout}s — inspect: oc get deploy showroom-${user} -n ${SHOWROOM_NS}"
+    return 1
+  fi
+}
+
+cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ws scale-users N [--yes]
+  # Mechanism: patch workshop-config's userCount helm parameter (a scalar JSON-patch replace — leaves
+  # clusterDomain/sso.enabled/consolePlugins.enabled untouched) → hard refresh → sync → wait Healthy →
+  # regenerate htpasswd → confirm the gitea-user-seed hook + cockpits for the new count. SHRINK
+  # additionally cleans the removed users' world FIRST, in cohort-reset's exact SEV1 order (student-
+  # gitops apps → namespace CONTENTS purge → entry-*-<user> apps deleted) — all BEFORE the userCount
+  # patch, so the sync's namespace prune never races a still-tracked entry Application or an attendee-
+  # pinned PVC. Namespaces are discovered by label (workshop.redhat.com/user=<u>), not a hardcoded
+  # dev/stage/prod/cicd list — the chart has grown module-scoped extras (ai/batch/mesh/modernize/
+  # partner/gitops/site-a/site-b) since cohort-reset's suffix list was written.
+  local target="" yes="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes|-y) yes="true"; shift;;
+      -*) die "scale-users: unknown option '$1' — usage: ws scale-users N [--yes]";;
+      *)
+        if [[ -z "$target" ]]; then target="$1"; shift
+        else die "scale-users: unexpected extra argument '$1' — usage: ws scale-users N [--yes]"; fi ;;
+    esac
+  done
+  [[ -n "$target" ]] || die "scale-users: N required — usage: ws scale-users N [--yes]"
+  [[ "$target" =~ ^[0-9]+$ && "$target" -ge 1 ]] || die "scale-users: N must be a positive integer, got '${target}'"
+  need_oc
+  command -v htpasswd >/dev/null || die "htpasswd not found — install httpd-tools (brew install httpd / dnf install httpd-tools)"
+
+  oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1 \
+    || die "workshop-config Application not found in ${ARGO_NS} — is the workshop layer installed? (ws doctor)"
+  local current
+  current="$(oc get application workshop-config -n "$ARGO_NS" \
+    -o jsonpath='{.spec.source.helm.parameters[?(@.name=="userCount")].value}' 2>/dev/null || true)"
+  [[ "$current" =~ ^[0-9]+$ ]] \
+    || die "could not read workshop-config's userCount helm parameter (got '${current}') — inspect: oc get application workshop-config -n ${ARGO_NS} -o yaml"
+
+  local users_str users_arr
+  users_str="$(workshop_users)"
+  read -ra users_arr <<< "$users_str"
+  [[ "${#users_arr[@]}" != "$current" ]] \
+    && info "note: workshop-attendees group has ${#users_arr[@]} user(s) but workshop-config's live userCount=${current} — a prior scale may still be converging (the Application value wins below)"
+
+  echo "ws scale-users — grow/shrink the workshop cohort"
+  echo
+  echo "Current: ${current} user(s) (user1..user${current})"
+  echo "Target : ${target} user(s)"
+  echo
+
+  if [[ "$target" == "$current" ]]; then
+    ok "already at ${current} user(s) — nothing to do."
+    return 0
+  fi
+
+  local direction
+  if (( target > current )); then
+    direction="grow"
+    echo "WILL GROW — materialize user$((current+1))..user${target}:"
+    echo "  • namespaces + RBAC + quotas (per-user-namespaces/rbac/limits + module-scoped extras)"
+    echo "  • Kueue ClusterQueue cq-user<N>, student-gitops AppProject + Argo RBAC"
+    echo "  • Gitea account (gitea-user-seed hook) — SAME shared workshop password"
+    echo "  • Showroom cockpit (Deployment/Route showroom-user<N>)"
+    echo "  • htpasswd login for the new user(s) — SAME shared workshop password (not rotated)"
+    echo
+    echo "PRESERVED: all of user1..user${current}, and the platform (pp-*) — untouched."
+  else
+    direction="shrink"
+    echo "WILL SHRINK — DESTRUCTIVE for user$((target+1))..user${current}:"
+    echo "  • their entry-*-<user> Argo apps deleted (every module, in ${ARGO_NS})"
+    echo "  • their attendee-created Argo apps/appsets deleted (student-gitops, if present)"
+    echo "  • CONTENTS of every one of their workshop namespaces purged, THEN the namespace"
+    echo "    SHELLS themselves pruned (the chart stops rendering them once userCount drops)"
+    echo "  • their Showroom cockpit + Kueue ClusterQueue cq-<user> + student AppProject (pruned by sync)"
+    echo "  • their htpasswd login entry removed"
+    echo "  • NOT removed today: their Gitea account, and their student-Argo local-account password"
+    echo "    hash in argocd-secret — gitea-user-seed/student-argo-accounts only ADD, never delete"
+    echo "    (harmless orphaned credentials; see docs/sa-provisioning-guide.md)"
+    echo
+    echo "PRESERVED: the platform, and user1..user${target} — UNTOUCHED."
+  fi
+  echo
+
+  if [[ "$yes" != "true" ]]; then
+    if [[ -t 0 ]]; then
+      local reply
+      read -r -p "Proceed to ${direction} the cohort to ${target} user(s) now? [y/N] " reply
+      [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]] || { info "nothing changed. Re-run when ready (or use --yes)."; return 0; }
+    else
+      die "not a terminal and no --yes given — re-run: ws scale-users ${target} --yes"
+    fi
+  fi
+
+  local removed=() i u ns app wedged=0 confirm_failed=0
+  if [[ "$direction" == "shrink" ]]; then
+    for (( i = target + 1; i <= current; i++ )); do
+      u="user${i}"
+      removed+=("$u")
+      echo
+      info "── removing ${u} (before the userCount sync prunes their namespaces) ──"
+      cohort_purge_student_apps "$u"
+      for ns in $(oc get ns -l "workshop.redhat.com/user=${u}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+        purge_ns "$ns"
+      done
+      for app in $(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${u}" -o name 2>/dev/null); do
+        app="${app##*/}"
+        case "$app" in
+          entry-*) delete_app_with_finalizer "$app" || wedged=1 ;;
+          *) : ;;
+        esac
+      done
+    done
+    echo
+  fi
+
+  info "patching workshop-config's userCount helm parameter: ${current} → ${target}…"
+  local idx
+  idx="$(oc get application workshop-config -n "$ARGO_NS" \
+    -o jsonpath='{range .spec.source.helm.parameters[*]}{.name}{"\n"}{end}' 2>/dev/null \
+    | grep -nx 'userCount' | head -1 | cut -d: -f1)"
+  [[ -n "$idx" ]] || die "workshop-config Application has no 'userCount' helm parameter — inspect: oc get application workshop-config -n ${ARGO_NS} -o yaml"
+  idx=$((idx - 1))
+  oc patch application workshop-config -n "$ARGO_NS" --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/source/helm/parameters/${idx}/value\",\"value\":\"${target}\"}]" >/dev/null \
+    || die "failed to patch workshop-config's userCount — inspect: oc get application workshop-config -n ${ARGO_NS} -o yaml"
+  ok "userCount patched to ${target}"
+
+  info "hard-refreshing + syncing workshop-config…"
+  sync_app_operation workshop-config
+
+  # htpasswd is regenerated BEFORE waiting for workshop-config to go Healthy — deliberately ahead of
+  # where a surface reading of "sync -> wait Healthy -> regenerate htpasswd" would put it. On GROW, the
+  # new user's Showroom cockpit is rendered by THIS SAME Application, and its terminal-prep init
+  # container must `oc login` as that user during pod startup; the overall Application can never read
+  # Healthy while that Deployment isn't Ready. Regenerating htpasswd only after "wait Healthy" is a
+  # deadlock — live-reproduced on C1 2026-07-18 (grow 8->9: the cockpit's login retried 20x/6s, exhausted,
+  # crash-looped, and wait_healthy ran out its full 600s with no way to ever succeed). Moving it here is
+  # safe in both directions: regen_htpasswd only rewrites the openshift-config secret directly and has no
+  # dependency on the Argo sync having completed.
+  info "regenerating htpasswd for user1..user${target} (existing hashes kept; new lines use the current shared password)…"
+  regen_htpasswd "$target"
+  ok "htpasswd-workshop-users (openshift-config) updated for ${target} user(s)"
+  info "the oauth-openshift pods roll (~1 min) before login changes take effect: oc rollout status deploy/oauth-openshift -n openshift-authentication"
+
+  wait_healthy workshop-config 600 true
+
+  wait_gitea_seed "$target" || confirm_failed=1
+
+  echo
+  if [[ "$direction" == "grow" ]]; then
+    for (( i = current + 1; i <= target; i++ )); do
+      confirm_cockpit "user${i}" grow || confirm_failed=1
+    done
+  else
+    for u in "${removed[@]}"; do
+      confirm_cockpit "$u" shrink || confirm_failed=1
+    done
+  fi
+
+  echo
+  if [[ "$direction" == "shrink" && "$wedged" == 1 ]]; then
+    err "scale-users finished, but one or more entry apps were wedged (see above) — re-run scale-users or inspect manually."
+  elif [[ "$confirm_failed" == 1 ]]; then
+    err "scale-users finished, but a post-check above did not settle in time — sync/hooks may still be converging; re-check: ws status"
+  else
+    ok "scale-users complete — cohort is now ${target} user(s)."
+  fi
+  echo "   verify: ws status"
+  [[ "$direction" == "shrink" ]] && echo "           oc get ns -l workshop.redhat.com/owner=ogsr   (confirm the removed user(s)' namespaces are gone)"
+  (( wedged == 0 && confirm_failed == 0 )) || return 1
+}
+
 # ── SA/admin read-only recipes (ws preflight, ws status, ws diag) ────────────────────────────────────
 # Preparation + troubleshooting the installing org's SAs run against a customer/BYO cluster. STRICTLY
 # READ-ONLY by contract: they inspect and report, and NEVER mutate (no delete/patch/apply/create/label) —
@@ -1602,6 +1888,8 @@ cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/ins
     fi
     if oc get configmap ogsr-uninstall-state -n ogsr-system >/dev/null 2>&1; then
       pf_row WARN "prior install detected" "ogsr-system/ogsr-uninstall-state exists — this cluster already ran install (re-run is idempotent; or ./bootstrap/ogsr-uninstall.sh first)"
+      local existing_n; existing_n="$(live_user_count || true)"
+      [[ -n "$existing_n" ]] && pf_row INFO "existing cohort size" "${existing_n} user(s) (live workshop-config userCount) — ws scale-users grows/shrinks it"
     fi
     echo
   fi
@@ -1689,14 +1977,16 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   # ── platform: pp-* + workshop-config app health, shared-infra pod readiness, install marker ──
   info "Platform"
   printf "  %-26s %-12s %-10s\n" "App" "Sync" "Health"
-  local name sync health plat_bad=0
+  local name sync health plat_bad=0 plat_seen=0
   while IFS=$'\t' read -r name sync health; do
     [[ -n "$name" ]] || continue
+    plat_seen=$((plat_seen + 1))
     printf "  %-26s %-12s %-10s\n" "$name" "${sync:-?}" "${health:-?}"
     [[ "$sync" == "Synced" && "$health" == "Healthy" ]] || plat_bad=$((plat_bad + 1))
   done < <(oc get applications -n "$ARGO_NS" \
              -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' 2>/dev/null \
            | grep -E '^(pp-|workshop-config)' || true)
+  (( plat_seen == 0 )) && echo "  (none found — is the platform installed? see: ws preflight)"
 
   local infra="" ns rt
   for ns in ogsr-gitea ogsr-showroom ogsr-parasol-tasks ogsr-parasol-images ogsr-student-gitops; do
@@ -1715,9 +2005,15 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   local users_str users_arr
   users_str="$(workshop_users)"
   read -ra users_arr <<< "$users_str"
+  local group_n="${#users_arr[@]}"
   if [[ -n "$scope_user" ]]; then users_arr=("$scope_user"); fi
 
   info "Attendees"
+  # Live-vs-group cohort size (honest after a `ws scale-users`): only in whole-cohort scope — in
+  # --user scope users_arr is deliberately singleton and would always "mismatch" a live_n > 1.
+  local live_n; live_n="$(live_user_count || true)"
+  [[ -z "$scope_user" && -n "$live_n" && "$live_n" != "$group_n" ]] \
+    && echo "  note: workshop-config userCount=${live_n} (live) but the workshop-attendees group has ${group_n} — a scale may still be converging"
   printf "  %-8s %-9s %-24s %-10s\n" "User" "Cockpit" "Modules active" "Entries"
   local u cockpit modules entries entries_total entries_ok mods m ready desired
   local sum_cockpit_ready=0 sum_entries=0 sum_entries_ok=0
@@ -1771,7 +2067,13 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   fi
 
   local nusers="${#users_arr[@]}" plat_state
-  if [[ "$plat_bad" -eq 0 ]]; then plat_state="all-Synced ✅"; else plat_state="${plat_bad} app(s) need attention ❌"; fi
+  if [[ "$plat_seen" -eq 0 ]]; then
+    plat_state="no platform apps found"
+  elif [[ "$plat_bad" -eq 0 ]]; then
+    plat_state="all-Synced ✅"
+  else
+    plat_state="${plat_bad} app(s) need attention ❌"
+  fi
   echo "Summary: ${nusers} user(s) · ${sum_cockpit_ready}/${nusers} cockpit(s) ready · ${sum_entries} entry app(s) (${sum_entries_ok} healthy, $((sum_entries - sum_entries_ok)) need attention) · platform ${plat_state}"
   echo "   drill in: ws status --user <userN>   ·   ws diag --user <userN> [<module>]"
   return 0
@@ -1919,10 +2221,12 @@ main() {
   # --exclude takes a value); route its raw args straight through so the generic module parser
   # below never mis-bins that value as a module. "$@" is set -u-safe when empty (unlike an array).
   [[ "$cmd" == "git-refresh" ]] && { cmd_git_refresh "$@"; return; }
-  # passwd/cohort-reset self-parse their own flags (passwd's NEWPASS is a free-form string, not a module;
-  # cohort-reset takes no module/user) — route their raw args straight through, like git-refresh.
+  # passwd/cohort-reset/scale-users self-parse their own flags (passwd's NEWPASS is a free-form string,
+  # not a module; cohort-reset takes no module/user; scale-users' N is a bare integer) — route their
+  # raw args straight through, like git-refresh.
   [[ "$cmd" == "passwd" ]] && { cmd_passwd "$@"; return; }
   [[ "$cmd" == "cohort-reset" ]] && { cmd_cohort_reset "$@"; return; }
+  [[ "$cmd" == "scale-users" ]] && { cmd_scale_users "$@"; return; }
   local user="" module="" extra=()
   # collect --user anywhere; a bare userN (e.g. `ws start m07 user2`) is the target user, exactly like
   # --user user2 — the first OTHER bare arg is the module. Honoring positional userN closes a footgun:
@@ -1965,7 +2269,7 @@ main() {
     preflight)   cmd_preflight;;
     status)      cmd_status "$user";;
     diag)        cmd_diag "$user" "$module";;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,20p';;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,21p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }

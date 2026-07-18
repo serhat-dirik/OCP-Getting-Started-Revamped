@@ -223,6 +223,34 @@ per-change). Re-adding them to `reservedUsers` afterward would render their pod-
 without those changes and roll them **again** — only re-reserve a user you intend to freeze at
 the current spec, not one you just updated.
 
+## Growing or shrinking the cohort (`ws scale-users`)
+
+`ws scale-users N [--yes]` moves the live user count to `N` on top of an already-installed cluster —
+no re-run of `bootstrap/install.sh` needed. It patches the `workshop-config` Application's `userCount`
+helm parameter and syncs, so the chart's own per-user fan-out (namespaces, RBAC, quotas, Kueue
+`cq-<user>`, the Showroom cockpit, the student-gitops AppProject) grows or shrinks to match — the
+same mechanism `bootstrap/install.sh` uses to set the count on day one.
+
+```
+ws scale-users 12          # plan only — prints what would change, then asks to confirm
+ws scale-users 12 --yes    # grow to 12 users
+ws scale-users 8  --yes    # shrink back to 8 users
+```
+
+**Growing** materializes the new users' world via the normal Argo sync and regenerates
+`htpasswd-workshop-users` to add their login, using the SAME shared workshop password already in use
+(read live from the `ogsr-gitea/workshop-user-creds` secret — never rotated here, never printed
+except the one-time non-secret confirmation; `ws passwd` is the only verb that changes it).
+
+**Shrinking is destructive** for the removed users: their `entry-*` Argo apps (every module) are
+deleted, their namespaces are purged and then pruned once the chart stops rendering them, and their
+htpasswd entry is removed — the same per-user severity as `ws cohort-reset`, so it demands the same
+`--yes`/TTY confirmation. Their **Gitea account and student-Argo local-account credential are not
+removed** (`gitea-user-seed` / `student-argo-accounts` only ever add accounts, never delete them) —
+harmless orphaned credentials for a user with no cluster identity left to use them.
+
+Users outside the requested range (in either direction) and the platform are never touched.
+
 ## Uninstall — removing the workshop from a shared/customer cluster
 
 The workshop is built to drop onto a cluster the org already uses and to reverse **without
