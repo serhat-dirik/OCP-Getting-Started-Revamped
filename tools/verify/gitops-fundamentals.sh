@@ -114,7 +114,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   check "claims-db ready in ${DEV}"                      deploy_ready claims-db "$DEV"                       || hint "your Argo Application should deploy claims-db — check it Synced/Healthy in the student UI"
-  check "parasol-claims ready in ${DEV}"                 deploy_ready parasol-claims "$DEV"                  || hint "create your Argo Application (overlays/dev) on student-gitops; ws solve gitops-fundamentals does this"
+  check "parasol-claims ready in ${DEV}"                 deploy_ready parasol-claims "$DEV"                  || hint "create your Argo Application (overlays/dev) on student-gitops; ws solve gitops-fundamentals does this — or the platform enrollment (managed-by) is broken, see troubleshooting"
   check "dev claims is GitOps-managed (Argo tracking)"   deploy_gitops_managed parasol-claims "$DEV"         || hint "deploy it via an Argo Application, not oc apply — that is the gitops-fundamentals lesson"
   check "route parasol-claims answers 200 in ${DEV}"     route_ready_200 "$DEV"                              || hint "claims app not ready — check pods: oc get pods -n ${DEV}"
   check "parasol-claims promoted to ${STAGE} (>=2 replicas)" deploy_ready_min parasol-claims "$STAGE" 2     || hint "promote — add a second Application pointed at overlays/stage (ws solve gitops-fundamentals does this)"
