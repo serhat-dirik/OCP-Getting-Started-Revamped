@@ -92,30 +92,36 @@ ifndef::demo[]
 
 First, look at what your colleague shipped. Clone the `seed-appsec` branch and read the five regressions — each carries an "Intentional flaws — do not fix on this branch" marker:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
 git clone -b seed-appsec $FORK ~/parasol-claims 2>/dev/null || (cd ~/parasol-claims && git fetch && git checkout seed-appsec && git pull)
 cd ~/parasol-claims
 git config --global credential.helper store   # store your Gitea login once, so later pushes don't re-prompt
+git config --global user.email "{user}@workshop.local"   # this module stands alone: set a commit identity so your five fixes can commit
+git config --global user.name  "{user}"
 echo "--- SAST: a hard-coded credential ---";        grep "partnerApiPassword" src/main/java/com/parasol/claims/PartnerGateway.java
 echo "--- SCA: a vulnerable dependency ---";          grep "commons-collections" pom.xml
 echo "--- image: log4shell baked into the image ---"; grep "log4j-core:2.14.1" Containerfile
 echo "--- config: an insecure Deployment ---";        grep -E "privileged|SYS_ADMIN" deploy/parasol-claims-deployment.yaml
-echo "--- DAST: no security headers ---";             grep -c "quarkus.http.header" src/main/resources/application.properties
+echo "--- DAST: no security headers ---";             grep -cE '^quarkus\.http\.header' src/main/resources/application.properties
 ----
 
-.Expected output (the five seeded flaws — the pipeline will fail on each in turn)
+.Expected output (the five seeded flaws — each `grep` may match a nearby comment too; the pipeline will fail on each flaw in turn)
 [source,texinfo]
 ----
 --- SAST: a hard-coded credential ---
     private final String partnerApiPassword = "P@rasol-Partner-2026!";
+        return partnerApiPassword;
 --- SCA: a vulnerable dependency ---
+         commons-collections 3.2.1 = CVE-2015-7501 (InvokerTransformer RCE). -->
+      <groupId>commons-collections</groupId>
       <artifactId>commons-collections</artifactId>
 --- image: log4shell baked into the image ---
-RUN mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+    -Dartifact=org.apache.logging.log4j:log4j-core:2.14.1 \
 --- config: an insecure Deployment ---
-                privileged: true
-                    - SYS_ADMIN
+# PRIVILEGED, adds the CAP_SYS_ADMIN + CAP_NET_ADMIN capabilities, allows privilege escalation, runs
+            privileged: true
+                - SYS_ADMIN
 --- DAST: no security headers ---
 0
 ----
@@ -135,7 +141,7 @@ Fill the parameters:
 * *git-revision* → `seed-appsec`
 * *sonar-project-key* → `parasol-claims-{user}`
 
-For *Workspaces*, set *shared-workspace* to *VolumeClaimTemplate* (1 GiB) and *zap-work* to *Empty Directory*, then click *Start*.
+For *Workspaces*, set *shared-workspace* to *VolumeClaimTemplate* (1 GiB), and *zap-work* and *k6-work* each to *Empty Directory*, then click *Start*.
 Watch the graph: `fetch-source` goes green, then `sast-sonar` turns *red* and the run stops.
 --
 CLI::
@@ -159,6 +165,7 @@ spec:
   workspaces:
     - {name: shared-workspace, volumeClaimTemplate: {spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}}}
     - {name: zap-work, emptyDir: {}}
+    - {name: k6-work, emptyDir: {}}
 EOF
 ----
 
@@ -193,7 +200,7 @@ CLI::
 [source,sh,role=execute]
 ----
 oc get taskrun -n $NS -l tekton.dev/pipelineTask=sast-sonar --sort-by=.metadata.creationTimestamp \
-  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "QUALITY GATE|S2068|dashboard"
+  -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "QUALITY GATE|S2068|dashboard"
 ----
 
 .Expected output (the SonarQube gate failed on the credential)
@@ -249,7 +256,7 @@ SCA (Software Composition Analysis) checks the *dependencies you pulled in*. Rea
 [source,sh,role=execute]
 ----
 oc get taskrun -n $NS -l tekton.dev/pipelineTask=sca-trivy --sort-by=.metadata.creationTimestamp \
-  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "commons-collections|CVE-2015|CRITICAL|HIGH|SCA scan FAILED"
+  -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "commons-collections|CVE-2015|CRITICAL|HIGH|SCA scan FAILED"
 ----
 
 .Expected output (Trivy flags a critical RCE in a transitive-era library)
@@ -300,7 +307,7 @@ CLI::
 [source,sh,role=execute]
 ----
 oc get taskrun -n $NS -l tekton.dev/pipelineTask=image-scan --sort-by=.metadata.creationTimestamp \
-  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "log4|CVE-2021-44228|Block Log4Shell|FAIL"
+  -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "log4|CVE-2021-44228|Block Log4Shell|FAIL"
 ----
 
 .Expected output (the image scan blocks log4shell — the SCA source scan two stages earlier was clean of it)
@@ -350,7 +357,7 @@ Config security checks the *manifest you're about to apply*, before it reaches t
 [source,sh,role=execute]
 ----
 oc get taskrun -n $NS -l tekton.dev/pipelineTask=deployment-check --sort-by=.metadata.creationTimestamp \
-  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "POLICY|Privileged|CAP_SYS_ADMIN|limit|TOTAL|deployment check FAILED"
+  -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "POLICY|Privileged|CAP_SYS_ADMIN|limit|TOTAL|deployment check FAILED"
 ----
 
 .Expected output (RHACS deploy-time policies flag the insecure manifest)
@@ -417,7 +424,7 @@ DAST (Dynamic Application Security Testing) exercises the *running* app — some
 [source,sh,role=execute]
 ----
 oc get taskrun -n $NS -l tekton.dev/pipelineTask=dast-zap --sort-by=.metadata.creationTimestamp \
-  -o name | tail -1 | xargs -I{} oc logs -n $NS {} --all-containers | grep -iE "WARN-NEW|FAIL-NEW|DAST FAILED"
+  -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "WARN-NEW|FAIL-NEW|DAST FAILED"
 ----
 
 .Expected output (ZAP flags the missing headers on the RUNNING app — a check only possible post-deploy)
