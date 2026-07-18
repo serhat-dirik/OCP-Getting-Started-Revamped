@@ -5,7 +5,7 @@ _ws_complete() {
   local cur prev subcmds mods repo
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
-  subcmds="list prep verify smoke reset start solve git-refresh doctor"
+  subcmds="list prep verify smoke reset start solve git-refresh doctor passwd cohort-reset preflight status diag scale-users"
 
   # First word after `ws` → a subcommand.
   if [ "$COMP_CWORD" -eq 1 ]; then
@@ -19,7 +19,7 @@ _ws_complete() {
   case "$prev" in
     prep|verify|smoke|reset|start|solve)
       repo="${WS_REPO_ROOT:-$HOME/ocp-getting-started}"
-      mods="$(ls -d "$repo"/gitops/entry-states/*/ 2>/dev/null | while read -r d; do basename "$d"; done)"
+      mods="$(find "$repo/gitops/entry-states" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null)"
       [ -z "$mods" ] && mods="$(sed -n 's/^[[:space:]]*-[[:space:]]*slug:[[:space:]]*//p' "$repo"/modules.yaml 2>/dev/null)"
       mapfile -t COMPREPLY < <(compgen -W "$mods" -- "$cur")
       return
