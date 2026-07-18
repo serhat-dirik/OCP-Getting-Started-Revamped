@@ -14,27 +14,43 @@
   showroom antora-ext build (a33b61a): BuildConfig sourced from the public repo, sync-waved right after
   the namespace.
 
-  TAGS (replicating the manual flow's tag step, not just its build step): each app's BuildConfig outputs
-  to `:latest` (ConfigChange trigger fires build #1 on creation); the ImageStream then declares `1.0` and
-  `1.1` as "from"-references onto `:latest` — the exact server-side effect of the manual
-  `oc tag <ns>/<app>:latest <ns>/<app>:1.0` (and `:1.1`) step the READMEs documented, just declared
-  instead of run by hand.
+  APPS: parasol-claims + parasol-web (original), plus parasol-fraud (added 2026-07-18 — SEV1 QA-gate
+  finding: securing-apps-keycloak's solve-endstate and service-mesh-advanced-gateways both pull
+  parasol-fraud by full in-cluster-registry spec, same as the other two apps, but nothing built it —
+  apps/parasol-fraud/openshift/buildconfig.yaml exists but was never wired into any Argo app, the exact
+  same dead-recipe shape parasol-claims/parasol-web had before this file first existed). `ws doctor`'s
+  "parasol images" check (tools/ws/ws) still only asserts parasol-claims/parasol-web istags — extending
+  it to also assert parasol-fraud:1.0 is a tools/ change, out of scope for this lane; flagged to the PM.
 
-  JUDGMENT CALL — flagged for the PM, not hidden: the READMEs' historical invariant was "1.0 is the
-  M02-era image, pinned — never overwrite it" (1.0 and 1.1 were two hand-tagged, GENUINELY different
-  builds captured at two points in the app's history: 1.0 pre-dates the M07/M11/M29 feature work,
-  2b76a6b, and was deliberately never re-tagged). Same-ImageStream ImageStreamTag "from" references track
-  their source continuously (no --scheduled needed — that flag is for periodic re-poll of EXTERNAL
-  DockerImage references; internal tag-to-tag refs update via the in-cluster watch whenever the source
-  tag's status changes), so on this declarative path `1.0`/`1.1`/`latest` all move together on every
-  future rebuild — there is no cheap declarative way to "freeze 1.0 forever" without pinning a SECOND,
-  separate historical git revision (which conflicts with the single values-driven repoUrl+revision this
-  chart uses everywhere, including here). Checked before shipping this: nothing that pins `1.0` depends
-  on it LACKING an 1.1-era feature (both apps' pom.xml stayed at 1.0.0 through 2b76a6b — the "1.1" bump
-  was image-tag-only, not a Maven release; the added endpoints/SBOM/OIDC-disabled-by-default are additive
-  and none of the 1.0-consuming labs touch them). Net effect: 1.0 vs 1.1 becomes a pure NAMING convention
-  (which entry states pin which tag) rather than a content split — functionally safe for every current
-  module, but it does retire the "1.0 frozen forever" guarantee a hand-managed cluster had.
+  TAGS (replicating the manual flow's tag step, not just its build step): each app's BuildConfig outputs
+  to `:latest` (ConfigChange trigger fires build #1 on creation); the ImageStream then declares its
+  consumed tag(s) as "from"-references onto `:latest` — the exact server-side effect of the manual
+  `oc tag <ns>/<app>:latest <ns>/<app>:<tag>` step the READMEs documented, just declared instead of run
+  by hand. The tag SET is per-app data (see the `range` below), not one shared list, because it is not
+  uniform: parasol-claims/parasol-web each need `1.0` AND `1.1` (see JUDGMENT CALL); parasol-fraud needs
+  ONLY `1.0` — securing-apps-keycloak's solve-endstate.yaml and service-mesh-advanced-gateways's
+  values.yaml (`fraudImage` AND `fraudImageV2`) all pin `parasol-fraud:1.0`, and nothing in the repo
+  references a `parasol-fraud:1.1`. Unlike claims/web, parasol-fraud also has no historical two-generation
+  split to preserve (it postdates the "1.1" cohort's phase entirely) — so a second, unused `1.1` alias
+  here would document a distinction that never happened. Add one for real only once a module actually
+  starts consuming `parasol-fraud:1.1`.
+
+  JUDGMENT CALL (parasol-claims/parasol-web only) — flagged for the PM, not hidden: the READMEs'
+  historical invariant was "1.0 is the M02-era image, pinned — never overwrite it" (1.0 and 1.1 were two
+  hand-tagged, GENUINELY different builds captured at two points in the app's history: 1.0 pre-dates the
+  M07/M11/M29 feature work, 2b76a6b, and was deliberately never re-tagged). Same-ImageStream
+  ImageStreamTag "from" references track their source continuously (no --scheduled needed — that flag is
+  for periodic re-poll of EXTERNAL DockerImage references; internal tag-to-tag refs update via the
+  in-cluster watch whenever the source tag's status changes), so on this declarative path `1.0`/`1.1`/
+  `latest` all move together on every future rebuild — there is no cheap declarative way to "freeze 1.0
+  forever" without pinning a SECOND, separate historical git revision (which conflicts with the single
+  values-driven repoUrl+revision this chart uses everywhere, including here). Checked before shipping
+  this: nothing that pins `1.0` depends on it LACKING an 1.1-era feature (both apps' pom.xml stayed at
+  1.0.0 through 2b76a6b — the "1.1" bump was image-tag-only, not a Maven release; the added
+  endpoints/SBOM/OIDC-disabled-by-default are additive and none of the 1.0-consuming labs touch them).
+  Net effect: 1.0 vs 1.1 becomes a pure NAMING convention (which entry states pin which tag) rather than
+  a content split — functionally safe for every current module, but it does retire the "1.0 frozen
+  forever" guarantee a hand-managed cluster had. parasol-fraud carries no such invariant (see TAGS above).
 
   ORDERING: sync-wave 1 (after the wave-0 Namespace in parasol-images-pull.yaml). Source is the PUBLIC
   GitHub repo, like antora-ext, NOT the in-cluster Gitea mirror — no mirror-readiness dependency, and no
@@ -44,22 +60,27 @@
   for parity/consistency with the antora-ext readiness check.
 
   Manual rebuild (e.g. after editing an app): `oc start-build parasol-claims -n <namespace>` (or
-  parasol-web) — rebuilds latest and both aliases together.
+  parasol-web / parasol-fraud) — rebuilds latest and all of that app's declared tag aliases together.
 */ -}}
 {{- $ns := .Values.parasolImages.namespace }}
 {{- $build := .Values.parasolImages.build }}
-{{- range $app := list "parasol-claims" "parasol-web" }}
+{{- range $app := list
+  (dict "name" "parasol-claims" "tags" (list "1.0" "1.1"))
+  (dict "name" "parasol-web" "tags" (list "1.0" "1.1"))
+  (dict "name" "parasol-fraud" "tags" (list "1.0"))
+}}
 ---
-# ImageStream backing the {{ $app }} shared build. `latest` is populated purely by the BuildConfig's
-# push below (no spec.tags entry needed for it); `1.0`/`1.1` are declared aliases onto `latest` — same
-# digest as latest, always (see the JUDGMENT CALL note in this file's header).
+# ImageStream backing the {{ $app.name }} shared build. `latest` is populated purely by the BuildConfig's
+# push below (no spec.tags entry needed for it); the tag(s) below are declared aliases onto `latest` —
+# same digest as latest, always (see the TAGS / JUDGMENT CALL notes in this file's header for why the
+# tag set differs per app).
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
-  name: {{ $app }}
+  name: {{ $app.name }}
   namespace: {{ $ns }}
   labels:
-    app.kubernetes.io/name: {{ $app }}
+    app.kubernetes.io/name: {{ $app.name }}
     app.kubernetes.io/part-of: parasol
     workshop.redhat.com/layer: workshop-config
     {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
@@ -70,35 +91,28 @@ spec:
   lookupPolicy:
     local: false
   tags:
-    # why: the M02-era tag the EARLY-phase entry states pin (config-multienv, platform-orientation,
-    # devspaces-inner-loop, storage-stateful, build-deliver solve, ai-assisted-development).
-    - name: "1.0"
+  {{- range $tag := $app.tags }}
+    - name: {{ $tag | quote }}
       from:
         kind: ImageStreamTag
-        name: {{ $app }}:latest
+        name: {{ $app.name }}:latest
       referencePolicy:
         type: Local
-    # why: the tag the LATER-phase entry states pin (networking-dev-devops, observability-health-scale,
-    # securing-apps-keycloak, service-mesh-advanced-gateways, deployment-targets-scheduling,
-    # app-modernization, serverless-zero-to-hero, eventing-deep-dive).
-    - name: "1.1"
-      from:
-        kind: ImageStreamTag
-        name: {{ $app }}:latest
-      referencePolicy:
-        type: Local
+  {{- end }}
 ---
-# BuildConfig: Docker strategy against the committed apps/{{ $app }}/Containerfile, git source = the
-# values-driven public repo/revision (was apps/{{ $app }}/openshift/buildconfig.yaml — retired in favor
-# of this chart-owned copy so a fresh cluster self-seeds instead of needing a manual `oc apply` +
-# binary build). ConfigChange trigger fires build #1 on creation.
+# BuildConfig: Docker strategy against the committed apps/{{ $app.name }}/Containerfile, git source = the
+# values-driven public repo/revision. This chart-owned copy replaces the now-unused
+# apps/{{ $app.name }}/openshift/buildconfig.yaml recipe (see this file's header APPS note for the
+# parasol-fraud nuance: its app-level recipe is inert rather than retired, since apps/ is a different
+# lane) — so a fresh cluster self-seeds instead of needing a manual `oc apply` + binary build.
+# ConfigChange trigger fires build #1 on creation.
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
-  name: {{ $app }}
+  name: {{ $app.name }}
   namespace: {{ $ns }}
   labels:
-    app.kubernetes.io/name: {{ $app }}
+    app.kubernetes.io/name: {{ $app.name }}
     app.kubernetes.io/part-of: parasol
     workshop.redhat.com/layer: workshop-config
     {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
@@ -113,16 +127,16 @@ spec:
     git:
       uri: {{ $build.repoUrl | quote }}
       ref: {{ $build.revision | quote }}
-    contextDir: apps/{{ $app }}
+    contextDir: apps/{{ $app.name }}
   strategy:
     type: Docker
     dockerStrategy:
-      # The committed recipe (apps/{{ $app }}/Containerfile) — relative to contextDir above.
+      # The committed recipe (apps/{{ $app.name }}/Containerfile) — relative to contextDir above.
       dockerfilePath: Containerfile
   output:
     to:
       kind: ImageStreamTag
-      name: {{ $app }}:latest
+      name: {{ $app.name }}:latest
   triggers:
     - type: ConfigChange
 {{- end }}
