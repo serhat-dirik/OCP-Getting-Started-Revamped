@@ -3,71 +3,83 @@
 include::partial$version-attributes.adoc[]
 
 // Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version} / OpenShift
-// Pipelines {pipelines_version} / RHACS {acs_version} / Tekton Chains) as user2 on 2026-07-10 by
-// performing every exercise and timing the runs; see "how timing was measured" below.
+// Pipelines {pipelines_version} / RHACS {acs_version} / RHTAS {rhtas_version} / Tekton Chains) as user3
+// on 2026-07-18 by performing every exercise and timing the runs; see "how timing was measured" below.
+// This module was rebalanced on 2026-07-18 (owner review): scanning is one beat on a PRE-SCANNED image,
+// and the trust story (cosign verify → attestation → keyless/Rekor → admission) is the spine.
 
-This module has two dominant facts to plan around.
-First, *there are two full pipeline runs* — a vulnerable one that fails the scan and a fixed one that passes — each ~6–12 minutes, and the module is designed so the SBOM reading (exercise 2) fills the first wait.
-Second, *the scan gate depends on the RHACS vulnerability store being warm*: on a freshly installed cluster the scanner needs *~1 hour* to populate its vulnerability data before the Log4Shell policy will fire — pre-warm before any session (see pre-flight).
-The single most memorable beat is exercise 1: the build *succeeds*, and then the scan turns the run *red* on a CVSS-10 vulnerability — the image was built but refused.
+This module has three facts to plan around.
+First, *the environment is pre-warmed*: at every prep, `warm-clean-image.yaml` builds the clean `main` branch, so a *scanned-green, Chains-signed* `parasol-claims:latest` is ready before the attendee starts — that adds *~8 minutes to prep* (budget it into provisioning), and the whole trust spine runs against it with no waiting.
+Second, *there is exactly one attendee build* — the seeded branch, to a throwaway `:candidate` tag — and it is the single memorable beat: the build *succeeds*, then the scan turns the run *red* on a CVSS-10 vulnerability.
+Third, *the scan gate depends on the RHACS vulnerability store being warm*: on a freshly installed cluster the scanner needs *~1 hour* to populate before the Log4Shell policy will fire — pre-warm before any session (see pre-flight).
 
 == Timing
 
-Total hands-on: *~70–80 min* (spec target 90 min; add ~12–15 min of concept up front).
+Total hands-on: *~65 min* (spec target 90 min; add ~12–15 min of concept up front).
+This is *shorter* than the pre-rebalance module (~80 min) — the second full build (fix-and-re-run to green) is gone; its place is taken by reading the pre-scanned clean verdict and by the deeper trust beats.
 
 [cols="1,4,1,2",options="header"]
 |===
-| # | Exercise group | Attendee time | Measured core (as user2, {ocp_version}, warm cluster)
+| # | Exercise group | Attendee time | Measured core (as user3, {ocp_version}, warm cluster)
 
-| 1 | Run the pipeline — gate catches the CVE | ~20 min | vulnerable run `Failed` at `acs-scan` in *6m9s* — fetch 21s, sbom-report 1m36s, build-image 3m41s, `acs-scan` 27s (build *Succeeded*, scan blocked on Log4Shell)
-| 2 | Find what's inside: the SBOM | ~15 min | `mvn ...:makeBom` *~45s* warm (~1.5–2m cold), 225 components; `jq` instant — done *during* the exercise-1 build
-| 3 | Fix and watch the gate go green | ~20 min | fixed run `Succeeded` in *6m34s* — `acs-scan` 45s, `scan-passed=true`; the fix is *removing `log4j-core`* (base image unchanged)
-| 4 | Signing and provenance | ~15 min | read-only (`oc get`/`jsonpath`) — seconds; the `cosign verify`/`verify-attestation` demo ~2 min
+| 1 | The scan gate — one refused, one cleared | ~18 min | seeded `:candidate` run `Failed` at `acs-scan` in *7m11s* (build *Succeeded*, scan blocked on Log4Shell CVSS 10); reading the pre-scanned `scan-passed=true` is instant; `mvn ...:makeBom` *~45s* warm, 239 components — done *during* the build
+| 2 | Chains signed it — verify with cosign | ~12 min | `cosign` (v3.0.4) + `rekor-cli` fetched from the RHTAS cli-server in *seconds*; `cosign verify --key` RC=0; the negative (stock image) fails "no matching signatures"
+| 3 | Provenance and SBOM | ~10 min | read-only — `verify-attestation` + `download attestation` seconds; SLSA provenance v0.2, `builder tekton.dev/chains/v2`
+| 4 | Keyless signing and the transparency log | ~15 min | `cosign initialize` + `sign-blob` + `rekor-cli search` + `verify-blob` *~2 min*; Rekor tree grows by one, `verify-blob` → `Verified OK`
 | 5 | Only signed images run (admission) | ~10 min | instructor-demo; the `ImagePolicy` applies via a CRI-O *reload* (not a reboot) — seconds
 |===
 
 [NOTE]
 .How this timing was measured
 ====
-Every exercise was performed as `user2` on the build cluster (OCP {ocp_version}, RHACS {acs_version}, Tekton Chains) on 2026-07-10 and timed.
+Every exercise was performed as `user3` on the build cluster (OCP {ocp_version}, RHACS {acs_version}, RHTAS {rhtas_version}, Tekton Chains) on 2026-07-18 and timed.
 
-* *Vulnerable run (exercise 1)* — `Failed` at `acs-scan` in *6m9s*; the build *Succeeded* (3m41s) and was even signed before the scan refused it.
-* *Fixed run (exercise 3)* — `Succeeded` in *6m34s*; `acs-scan` 45s, `scan-passed=true`.
-* *These are warm-cache numbers.*
-A cold node downloads the Maven dependency tree, adding several minutes to the first run; pre-warm with the pre-flight below.
-* *Chains signing latency* — the `chains.tekton.dev/signed=true` annotation appears a *few seconds after* the build TaskRun completes, not instantly; if an attendee checks immediately they may see it blank, then `true` on a re-check.
+* *Warm clean build (prep)* — the `main` branch built, scanned green (`scan-passed=true`), and was Chains-signed in *~8 min* (cold node longer); this is the `parasol-claims:latest` the trust spine reads.
+* *Seeded run (exercise 1)* — `Failed` at `acs-scan` in *7m11s*; the build *Succeeded* and was even signed before the scan refused the `:candidate` image.
+* *These are warm-cache numbers.* A cold node downloads the Maven dependency tree, adding several minutes to the first build; the warm prep run pre-heats it.
+* *Chains signing latency* — the `chains.tekton.dev/signed=true` annotation appears a *few seconds after* the build TaskRun completes, not instantly.
 ====
 
 == Pre-flight checklist
 
 Run these *before the session* (as cluster admin unless noted).
 
-. *A sample user's entry state materializes and verifies.*
+. *A sample user's entry state materializes and verifies (including the warm signed image).*
 +
 [source,sh,role=execute]
 ----
-ws start trusted-supply-chain --user user1
+ws start trusted-supply-chain --user user1     # blocks ~8 min: it builds the warm clean image
 ws verify trusted-supply-chain --user user1 --entry-only
 ----
 +
-Expect `✅ all 9 checks passed`: the `user1-cicd` namespace + entry marker, the `parasol-claims-supply-chain` Pipeline, the copied `rox-api-token` Secret and `chains-cosign-pub` ConfigMap, the Gitea fork, its `seed-vulnerable` branch carrying the seeded `log4j-core`, and the curated `ogsr-parasol-tasks` `acs-image-check` task.
+Expect all checks green: the `user1-cicd` namespace + entry marker, the `parasol-claims-supply-chain` Pipeline, the copied `rox-api-token` Secret and `chains-cosign-pub` ConfigMap, the Gitea fork + its `seed-vulnerable` branch carrying the seeded `log4j-core`, the curated `acs-image-check` task, *and the pre-scanned trust artifact* — a Chains-signed `parasol-claims:latest` with its `.sig`/`.att` tags and a run that passed the scan gate.
 
-. *The shared trust stack is up.*
+. *The shared trust stack is up — RHACS and RHTAS.*
 +
 [source,sh,role=execute]
 ----
 oc get central -n stackrox -o jsonpath='RHACS: {.items[0].status.conditions[?(@.type=="Deployed")].status}{"\n"}'
-oc get secret signing-secrets -n openshift-pipelines -o name        # Chains cosign key
-oc get configmap chains-cosign-pub -n openshift-pipelines -o name   # exported public key
-oc get task acs-image-check -n ogsr-parasol-tasks -o name                # curated scan-gate task
+oc get securesign -n trusted-artifact-signer -o jsonpath='RHTAS: {.items[0].status.phase}{"\n"}'
+oc get route -n trusted-artifact-signer | grep -E 'cli-server|rekor-server|tuf'
+oc get task acs-image-check -n ogsr-parasol-tasks -o name
 ----
 +
-Expect RHACS `Deployed=True`, the `signing-secrets` secret, the `chains-cosign-pub` configmap, and the `acs-image-check` task.
-If any is missing, the trust stack (`pp-trust` + `trust-signing`) has not synced — re-sync it (these are workshop-layer, not per-user).
+Expect RHACS `Deployed=True`, RHTAS `Ready`, the `cli-server`/`rekor-server`/`tuf` routes serving, and the `acs-image-check` task.
+If RHTAS is not `Ready`, exercises 2–4 cannot run (no cli-server to fetch cosign, no Rekor to record to) — re-sync the trust stack (`pp-trust` + `trust-signing`; these are workshop-layer, not per-user).
 
-. *Pre-warm the scanner AND prove the gate fires (strongly recommended — do this ~1 h before).*
-Run the vulnerable pipeline once on a sample user.
-This both warms the Maven cache and confirms the RHACS vulnerability store is populated enough for the Log4Shell policy to fire:
+. *The cli-server actually serves the clients.*
++
+[source,sh,role=execute]
+----
+CLI=https://$(oc get route -n trusted-artifact-signer -l app.kubernetes.io/component=client-server -o jsonpath='{.items[0].spec.host}' 2>/dev/null || oc get route cli-server -n trusted-artifact-signer -o jsonpath='{.spec.host}')
+curl -ksI $CLI/clients/linux/cosign-amd64.gz  | head -1
+curl -ksI $CLI/clients/linux/rekor-cli-amd64.gz | head -1
+----
++
+Expect `HTTP/1.1 200` for both — the attendee downloads `cosign` and `rekor-cli` from here (the Showroom terminal ships neither).
+
+. *Pre-warm the scanner AND prove the gate fires (do this ~1 h before).*
+Run the seeded pipeline once on a sample user to a `:candidate` tag — it both warms the Maven cache and confirms the RHACS vulnerability store is populated enough for the Log4Shell policy to fire:
 +
 [source,sh,role=execute]
 ----
@@ -78,6 +90,9 @@ kind: PipelineRun
 metadata: {generateName: preflight-vuln-}
 spec:
   pipelineRef: {name: parasol-claims-supply-chain}
+  params:
+    - {name: git-revision, value: seed-vulnerable}
+    - {name: image, value: "image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:candidate"}
   taskRunTemplate: {serviceAccountName: pipeline}
   workspaces:
     - name: shared-workspace
@@ -92,54 +107,28 @@ tkn pipelinerun logs --last -f -n $NS | grep -iE 'Block Log4Shell|image check'
 [IMPORTANT]
 .The scanner needs ~1 hour of warm-up on a fresh cluster
 =====
-RHACS Scanner V4 downloads its vulnerability data after install; until it is populated, `roxctl image check` finds *no* CVEs and the gate *passes even on the vulnerable branch* — the lab's whole first beat silently fails.
-On a cluster that has been up for an hour this is a non-issue.
-On a *freshly provisioned* cluster, run the pre-flight run above and confirm it prints `Block Log4Shell (CVE-2021-44228) at build` before you trust the gate.
-If it passes when it should fail, the scanner is not warm yet — wait and re-run.
+RHACS Scanner V4 downloads its vulnerability data after install; until it is populated, `roxctl image check` finds *no* CVEs and the gate *passes even on the seeded branch* — the lab's first beat silently fails.
+On a cluster up for an hour this is a non-issue.
+On a *freshly provisioned* cluster, run the pre-flight above and confirm it prints `Block Log4Shell (CVE-2021-44228) at build` before you trust the gate.
 =====
-
-. *(For the demos) confirm `cosign` verification works and stage the ImagePolicy.*
-The Showroom terminal has *no `cosign`*, so exercise 4's verification is instructor-run.
-See "Demo-mode notes" for the one-line verification pod and the `ImagePolicy` for exercise 5 — dry-run both before the room.
 
 == Demo-mode notes
 
 Beyond the Say/Show/Do arc in the demo flavor:
 
 * *Pre-solve before the room.*
-Run `ws solve trusted-supply-chain --user {user}` early.
-It runs the supply-chain pipeline on the *clean* branch to completion (build + scan-passes + Chains signs) and *blocks by design* (the solve Job waits for the PipelineRun; `ws-meta waitSeconds: 1500` is the hard stop).
-*Measured 2026-07-10:* `7m49s` end-to-end on a warm cluster (the solve pipeline itself ran 6m54s), returning `scan-passed=true` and a Chains-signed image; budget ~10–12 min on a cold cluster.
-It leaves a *scanned, signed* image as your "good outcome," and warms the Maven cache for the live vulnerable run.
+`ws solve trusted-supply-chain --user {user}` lands on the same warm end state as prep (a scanned, signed `parasol-claims:latest`) and *blocks by design* (~8 min warm, ~10–12 cold).
+It leaves your "good outcome" ready and warms the Maven cache for the live seeded build.
 
-* *Talk through the build, never at it.*
-Even warm, a run is ~6–7 minutes.
-Start the vulnerable run, then narrate the threat-model / three-artifacts story while it builds — the payoff is the *red scan*, not a progress bar.
+* *cosign is now attendee-hands-on — no verification pod needed.*
+Since RHTAS recovered, `cosign` and `rekor-cli` are fetched from the cli-server (exercise 2), so verification is *hands-on for everyone* — the old "instructor runs cosign in a pod" workaround is retired.
+If you present on a machine without them, run the same two `curl … | gunzip` lines from the lab.
 
-* *The verification pod (exercise 4 / demo beat 5).*
-`cosign` is bundled in the RHTAS client image.
-Verify a signed image against the in-namespace public key (run as admin; substitute the user's namespace and the image digest from `oc get istag`):
-+
-[source,sh,role=execute]
-----
-NS=user1-cicd
-DIGEST=$(oc get taskrun -n $NS -l tekton.dev/pipelineTask=build-image \
-  --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.results[?(@.name=="IMAGE_DIGEST")].value}')
-IMG="image-registry.openshift-image-registry.svc:5000/$NS/parasol-claims@${DIGEST}"
-# build a docker config the pod can use, then run cosign from the RHTAS client image
-oc get secret pipeline-dockercfg -n $NS -o jsonpath='{.data.\.dockercfg}' 2>/dev/null | base64 -d \
-  | python3 -c 'import sys,json;print(json.dumps({"auths":json.load(sys.stdin)}))' > /tmp/cfg.json
-oc create secret generic trusted-supply-chain-verify-cfg -n $NS --from-file=config.json=/tmp/cfg.json --dry-run=client -o yaml | oc apply -f -
-oc run trusted-supply-chain-verify -n $NS --restart=Never --rm -i \
-  --image=registry.redhat.io/rhtas/client-server-rhel9 \
-  --overrides='{"spec":{"containers":[{"name":"c","image":"registry.redhat.io/rhtas/client-server-rhel9","env":[{"name":"DOCKER_CONFIG","value":"/c"}],"command":["/bin/bash","-c"],"args":["mkdir -p /t; tar xzf /tmp/cosign/cosign_linux_amd64.tar.gz -C /t; /t/cosign verify --key /k/cosign.pub --allow-insecure-registry --insecure-ignore-tlog '"$IMG"'"],"volumeMounts":[{"name":"k","mountPath":"/k"},{"name":"c","mountPath":"/c"}]}],"volumes":[{"name":"k","configMap":{"name":"chains-cosign-pub"}},{"name":"c","secret":{"secretName":"trusted-supply-chain-verify-cfg"}}]}}'
-----
-+
-Expect `The signatures were verified against the specified public key` and exit 0.
-`--insecure-ignore-tlog` is required because this cluster's Chains signs *key-only* (no Rekor transparency-log entry); `--allow-insecure-registry` skips the internal registry's service-CA TLS.
-For the *provenance*, swap `verify` for `verify-attestation --type slsaprovenance` — it prints the SLSA predicate (`buildType: tekton.dev/v1/TaskRun`, `builder.id: https://tekton.dev/chains/v2`).
+* *Talk through the one build, never at it.*
+Even warm, the seeded run is ~7 minutes.
+Start it, then narrate the threat-model / three-artifacts story while it builds — the payoff is the *red scan* and then the trust beats, not a progress bar.
 
-* *The admission demo (exercise 5).*
+* *The admission demo (exercise 5) is the only instructor-run beat.*
 Apply the `ImagePolicy` as cluster-admin (attendees cannot — see watchouts):
 +
 [source,sh,role=execute]
@@ -158,8 +147,8 @@ spec:
 EOF
 ----
 +
-Then show the block by deploying an *unsigned* image into the scoped repo (or a stock image via that scope) and reading the pod events: `SignatureValidationFailed: ... A signature was required, but no signature exists`.
-Deploying the *signed* `parasol-claims` image works.
+Then show the block by deploying an *unsigned* image into the scoped repo and reading the pod events: `SignatureValidationFailed: ... A signature was required, but no signature exists`.
+Deploying the *signed* `parasol-claims:latest` works.
 Clean up with `oc delete imagepolicy only-signed-claims -n $NS` (the entry-state engine also purges ImagePolicies on `ws reset`).
 +
 [IMPORTANT]
@@ -174,13 +163,12 @@ It does briefly cycle the worker MCP through an "updating" (reload) state that t
 *1. "The build succeeded but the run failed — is that a bug?"*::
 No, it is the design.
 The scan runs *after* the build (`acs-scan` has `runAfter: build-image`) because you cannot scan an image you have not built.
-So the image _is_ built (and even signed), and then the scan refuses it — the run is `Failed` with `build-image: Succeeded, acs-scan: Failed`.
-Contrast the previous module, where a failing _test_ stopped everything _before_ the build; here the gate is a post-build scan.
+So the image _is_ built (and even signed), and then the scan refuses the `:candidate` — the run is `Failed` with `build-image: Succeeded, acs-scan: Failed`.
 
-*2. "Why did removing `log4j-core` fix the gate, but bumping the base image didn't?"*::
-Because the gate is *scoped to one policy category* ("Supply Chain Security"), which contains the deterministic "Block Log4Shell" policy — it keys on the `log4j-core` dependency, not on base-OS CVEs.
-Bumping the base image (`openjdk-21:1.18` → `1.23`) clears some base-OS CVEs, which is good hygiene, but those are not what this gate checks.
-The scoping is deliberate: the default "Fixable Severity at least Important" policy would fire on drifting base-OS CVEs and make the gate non-deterministic (pass Monday, fail Friday).
+*2. "Where did the clean `latest` image come from — I only built `:candidate`?"*::
+The entry state pre-built it.
+At every prep, `warm-clean-image.yaml` runs the pipeline on the clean `main` branch (no log4j) and leaves a scanned-green, Chains-signed `parasol-claims:latest`.
+That is deliberate — the owner's rebalance makes the attendee *read* the clean verdict and *verify* the clean image, instead of waiting through a second build. Their own seeded build goes to `:candidate` so it never clobbers `:latest`.
 
 *3. "What's the difference between the signature, the attestation, and the SBOM?"*::
 Three different facts.
@@ -188,54 +176,48 @@ The *signature* proves the image is intact and came from us (a signature over th
 The *attestation* is *signed provenance* — how the image was built (builder, source, steps, timestamps), as a SLSA statement.
 The *SBOM* is what is *inside* — every component and version.
 Chains produces the signature and attestation automatically; the build produces the SBOM.
-You want all three, and they reinforce each other.
 
-*4. "Cosign key versus keyless — which should we use?"*::
-The lab uses a *cosign key pair* (private key in the cluster, public key verifies) because it is deterministic and needs no per-build identity wiring — the right choice for a controlled build system and for teaching.
-*Keyless* (RHTAS: Fulcio short-lived certs + a Rekor transparency log) removes long-lived keys and gives public verifiability, at the cost of an OpenID Connect (OIDC) identity dependency and transparency-log retention.
-Reach for keyless when you need public auditability or per-identity signing — not by default.
+*4. "Key-based versus keyless — and why did we sign the SBOM, not the image, keylessly?"*::
+The lab verifies the Chains *key-based* signature (deterministic, no per-build identity) in exercise 2, then demonstrates *keyless* (Fulcio short-lived cert + a Rekor transparency-log entry) in exercise 4.
+We sign the *SBOM file* (`sign-blob`) rather than push a keyless *image* signature because the OpenShift internal registry rejects cosign's keyless image-signature manifest (`UNKNOWN` on the manifest PUT) — the Rekor entry is written first regardless, but the image push fails.
+In production, keyless *image* signatures go to an external registry (Quay). The SBOM `sign-blob` keeps the transparency-log beat self-contained and clean.
 
-*5. "Does creating an `ImagePolicy` reboot the nodes?"*::
-Not on this cluster.
-The `ImagePolicy` writes the node's sigstore verification files, and the cluster's node-disruption policy maps those files to a *CRI-O reload*, not a reboot.
-The worker pool does briefly show "updating" as it reloads on each node, so apply it *once, cluster-wide, from the instructor seat* — do not have every attendee create one.
+*5. "How does the transparency log actually help?"*::
+It makes signing *auditable*.
+A key-based signature proves "signed with a key we hold." A keyless signature in Rekor proves "signed by _this identity_ at _this time_, on a public, append-only log nobody — not even us — can quietly alter."
+When an auditor asks "prove the image in production came from your pipeline," the Rekor entry is a receipt they can read without contacting you.
 
 *6. "How does this module relate to the Application Security Testing module?"*::
 Complementary halves of DevSecOps.
-*This* module (trust) proves the image is *provably yours* — signed, attested, SBOM-recorded, and admission-controlled.
+*This* module (trust) proves the image is *provably yours* — signed, attested, transparency-logged, and admission-controlled.
 *Application Security Testing* (scanning) proves the image is *free of known flaws* — SAST, SCA, DAST, config, and image-risk gates.
-They overlap on one mechanic: both drive an RHACS build-time image check that blocks Log4Shell.
-Here that scan is *context* — a realistic pipeline for the trust controls to attach to — and the flaw is seeded as a declared `pom.xml` dependency; there it is the *subject*, and Log4Shell is baked into the *image* to teach defense-in-depth (an image scan catching what a source scan cannot).
-Teach the scan here as setup and point to that module for the scanning depth — a mature pipeline runs both controls together.
+They overlap on one mechanic: both drive an RHACS build-time image check that blocks Log4Shell. Here that scan is *one beat of context*; there it is the subject.
 
 == Watchouts
 
 * *The scanner vulnerability store must be warm.*
-On a freshly installed cluster, RHACS Scanner V4 needs *~1 hour* to populate before the Log4Shell policy fires; until then the gate *passes on the vulnerable branch* and the lab's first beat silently no-ops.
-Always run the pre-flight vulnerable pipeline and confirm it prints `Block Log4Shell` before a session.
-* *The Showroom terminal has no `cosign`.*
-Exercise 4's cryptographic verification (`cosign verify`) is *instructor-run* (the verification pod above); attendees prove signing hands-on via the `chains.tekton.dev/signed=true` annotation and the `.sig`/`.att` registry tags, which need only `oc`.
+On a freshly installed cluster, RHACS Scanner V4 needs *~1 hour* to populate before the Log4Shell policy fires; until then the gate *passes on the seeded branch* and the lab's first beat silently no-ops.
+Always run the pre-flight seeded pipeline and confirm it prints `Block Log4Shell` before a session.
+* *Prep now blocks ~8 minutes (the warm build).*
+`ws start`/`ws prep`/`ws solve` build the clean image before returning (ws-meta `waitSeconds: 1500` covers it). Provision with that in mind; a re-prep on an already-warm namespace skips the rebuild (the hook's idempotency guard).
+* *RHTAS must be Ready for exercises 2–4.*
+`cosign`/`rekor-cli` come from the RHTAS cli-server, and the keyless beat records to Rekor. If Securesign is not `Ready`, those exercises cannot run — confirm the routes serve in pre-flight.
 * *Attendees cannot create an `ImagePolicy`.*
-`ImagePolicy` is a `config.openshift.io` resource; the namespace `admin` role does *not* grant it, so admission (exercise 5) is an *instructor-demo* — the instructor applies one cluster-wide and the effect lands in each user's namespace.
-(If you want it hands-on in a future revision, that needs a per-user Role granting `imagepolicies.config.openshift.io` — flagged to the platform team.)
-* *A stale fork has no CycloneDX plugin — the CLI `makeBom` is why the SBOM beat still works.*
-Forks created before the app repo gained the `cyclonedx-maven-plugin` will not produce an SBOM from `mvn package`.
-The lab deliberately uses the *plugin CLI invocation* (`mvn org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom`), which fetches the plugin from Maven Central and works regardless of the `pom.xml` — the same invocation the pipeline's `sbom-report` step uses.
-* *Chains signs every build — including the vulnerable one.*
-`signed=true` appears on the build TaskRun of the _failed_ run too; that is correct (signing answers "who built it," a different question from "is it clean").
-Do not let attendees read "signed" as "passed the scan."
-* *The `scan-passed` pipeline result is empty on a failed run.*
-A failed `acs-scan` task does not propagate the `scan-passed` result to the PipelineRun, so it is blank (not `false`) on the vulnerable run; it reads `true` on the fixed run.
+`ImagePolicy` is a `config.openshift.io` resource; the namespace `admin` role does *not* grant it (verified: `oc auth can-i create imagepolicies --as=user3` = `no`), so admission (exercise 5) is an *instructor-demo* — the instructor applies one cluster-wide and the effect lands in each user's namespace.
+(To make it hands-on in a future revision, a per-user Role granting `imagepolicies.config.openshift.io` is needed — flagged to the platform team.)
+* *cosign v3 sources Fulcio/Rekor from the TUF signing config.*
+On cosign v3.0.4, passing `--fulcio-url`/`--rekor-url` to `sign` after `cosign initialize` errors with "cannot specify service URLs and use signing config" — let the signing config (from `cosign initialize`) supply them. The lab commands already do.
+* *Chains signs every build — including the seeded one.*
+`signed=true` appears on the build TaskRun of the _failed_ `:candidate` run too; that is correct (signing answers "who built it," a different question from "is it clean"). Do not let attendees read "signed" as "passed the scan."
+* *The `scan-passed` result is empty on a failed run.*
+A failed `acs-scan` task does not propagate the `scan-passed` result, so it is blank (not `false`) on the seeded run; it reads `true` on the pre-warmed clean run.
 * *Benign roxctl warning.*
-The `acs-scan` logs a `warning: unsuccessful cred copy: ".docker" ... permission denied` line — harmless; `roxctl` authenticates with the token from `rox-api-token`, not a docker cred.
-* *`ws reset`/`ws prep` restores the vulnerable seed.*
-The fork job re-injects `log4j-core` on `seed-vulnerable` idempotently, so a reset returns the fork to its vulnerable state — attendees who reset start the module fresh with the gate ready to fail again.
-* *This scan gate overlaps the Application Security Testing module — teach it as context.*
-Both modules block Log4Shell with an RHACS build-time image check, seeded differently (a declared `pom.xml` dependency here; baked into the image there, to teach defense-in-depth).
-If you deliver both, frame this module's scan as the *pipeline context* the trust controls attach to, and keep the scanning depth (SAST/SCA/DAST, defense-in-depth) in the other module — do not re-teach it here.
+The `acs-scan` logs a `warning: unsuccessful cred copy: ".docker" ... permission denied` line — harmless; `roxctl` authenticates with the token from `rox-api-token`.
+* *`ws reset`/`ws prep` restores the vulnerable seed and re-warms the image.*
+The fork job re-injects `log4j-core` on `seed-vulnerable` idempotently, and the warm hook rebuilds the signed `:latest` — a reset returns the attendee to a fresh, warm start.
 
 == Provenance
 
-Trusted Software Supply Chain is built fresh on RHACS {acs_version}, OpenShift Pipelines {pipelines_version} (Tekton Chains, `tekton.dev/v1`), and RHTAS {rhtas_version} from the RHACS, Pipelines/Chains, and sigstore documentation, then performed end-to-end on OpenShift {ocp_version} as `user2` on 2026-07-10.
-Every command, output, and timing — the 6m9s vulnerable run `Failed` at `acs-scan` with the `Block Log4Shell (CVE-2021-44228) ... CVSS 10 ... log4j-core 2.14.1` violation, the 225-component CycloneDX SBOM, the 6m34s fixed run with `scan-passed=true` and a Chains-signed image, and `cosign verify`/`verify-attestation` returning 0 against the SLSA provenance — was captured on-cluster during that build.
-The `cosign` verification and `ImagePolicy` admission were verified live in a pod and via `oc explain`/the node-disruption policy respectively (attendee terminal has no cosign; attendees cannot create ImagePolicy — both are instructor-run).
+Trusted Software Supply Chain runs on RHACS {acs_version}, OpenShift Pipelines {pipelines_version} (Tekton Chains, `tekton.dev/v1`), and RHTAS {rhtas_version} (Fulcio + Rekor + TUF), from the RHACS, Pipelines/Chains, and sigstore/RHTAS documentation, then performed end-to-end on OpenShift {ocp_version} as `user3` on 2026-07-18 (the owner's "pre-scanned image" rebalance).
+Every command, output, and timing — the 7m11s seeded `:candidate` run `Failed` at `acs-scan` on `Block Log4Shell (CVE-2021-44228) ... CVSS 10 ... log4j-core 2.14.1`, the 239-component CycloneDX SBOM, the warm clean run with `scan-passed=true` and a Chains-signed `parasol-claims:latest`, `cosign` (v3.0.4) + `rekor-cli` fetched from the cli-server, `cosign verify`/`verify-attestation` RC=0 against SLSA provenance v0.2 (`builder tekton.dev/chains/v2`), and a keyless `cosign sign-blob` recorded in the live Rekor log with `verify-blob` returning `Verified OK` — was captured on-cluster during that run.
+The `ImagePolicy` admission was verified via the API/RBAC (`can-i create imagepolicies` = `no`, attendees cannot; instructor-applied) and, on a prior run, the CRI-O reload behavior; it was not re-triggered live this pass to avoid a cluster-wide node reload on the shared cluster.

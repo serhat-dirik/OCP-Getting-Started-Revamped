@@ -3,36 +3,80 @@
 include::partial$version-attributes.adoc[]
 
 // Real entries from performing the module on OCP {ocp_version} / RHACS {acs_version} / OpenShift
-// Pipelines {pipelines_version} / Tekton Chains (2026-07-10). Format: Symptom / Cause / Fix. Every
-// entry below is a behaviour that was actually observed on-cluster during the build.
+// Pipelines {pipelines_version} / RHTAS {rhtas_version} / Tekton Chains as user3 (2026-07-18, the
+// "pre-scanned image" rebalance). Format: Symptom / Cause / Fix. Every entry was actually observed
+// on-cluster during the build.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
-Most terminal commands assume you set `NS={user}-cicd` at the start of the lab.
+Most terminal commands assume you set `NS={user}-cicd`, `CLI`, `REKOR`, and `TUF` (and downloaded `cosign`/`rekor-cli`) as in the lab's setup blocks.
 
-== The scan gate PASSES on the vulnerable branch (no Log4Shell violation)
+== The scan gate PASSES on the seeded branch (no Log4Shell violation)
 
-Symptom:: You run the pipeline on `seed-vulnerable` and `acs-scan` *passes* — no `Block Log4Shell` violation — even though the `log4j-core` dependency is there.
+Symptom:: You build the `seed-vulnerable` branch and `acs-scan` *passes* — no `Block Log4Shell` violation — even though the `log4j-core` dependency is there.
 Cause:: The RHACS *vulnerability store is not warm yet*.
 On a freshly installed cluster, Scanner V4 takes *~1 hour* to download its vulnerability data; until then `roxctl image check` finds no CVEs and the gate passes on everything.
 Fix:: Wait for the scanner to populate, then re-run.
-An instructor can confirm warmth with the pre-flight run (instructor guide): the vulnerable pipeline should print `Block Log4Shell (CVE-2021-44228) at build`.
+An instructor can confirm warmth with the pre-flight run (instructor guide): the seeded pipeline should print `Block Log4Shell (CVE-2021-44228) at build`.
 This is the top pre-session check — the lab's first beat depends on it.
 
 == The build `Succeeded` but the run is `Failed` — did the build break?
 
 Symptom:: `tkn pipelinerun describe --last` shows `build-image: Succeeded` but the overall run is `Failed`.
-Cause:: This is the *intended* behavior, not an error.
-The scan gate (`acs-scan`) runs *after* the build — you cannot scan an image you have not built — so on the vulnerable branch the image is built (and even signed) and then the *scan* refuses it.
+Cause:: This is the *intended* behavior.
+The scan gate (`acs-scan`) runs *after* the build — you cannot scan an image you have not built — so on the seeded branch the `:candidate` image is built (and even signed) and then the *scan* refuses it.
 Fix:: Nothing to fix — this is the lesson.
 Read the `acs-scan` step: it names the enforced policy (`Block Log4Shell (CVE-2021-44228) at build`) and the CVE.
-To make the run pass, *remove the `log4j-core` dependency* (exercise 3), not the build.
 
-== `mvn ...:makeBom` (or `mvn package`) produces no SBOM file
+== `cosign: command not found` (or `rekor-cli: command not found`)
 
-Symptom:: You run a Maven build but there is no `target/parasol-claims-sbom.json`; `ls target/*bom*` finds nothing.
-Cause:: Two variants.
-(a) You ran `mvn package` on a *fork that predates the CycloneDX plugin* in `pom.xml`, so no SBOM execution is bound to the build.
-(b) The build failed before it reached the plugin.
+Symptom:: `cosign` or `rekor-cli` is not on your PATH.
+Cause:: The Showroom terminal ships `oc`, `tkn`, `mvn`, `jq`, `git`, and `skopeo` — but *not* the sigstore clients.
+Fix:: Download them from the *Red Hat Trusted Artifact Signer* client server (exercise 2) and put them on your PATH:
++
+[source,sh,role=execute]
+----
+mkdir -p ~/bin
+curl -ksL $CLI/clients/linux/cosign-amd64.gz  | gunzip > ~/bin/cosign
+curl -ksL $CLI/clients/linux/rekor-cli-amd64.gz | gunzip > ~/bin/rekor-cli
+chmod +x ~/bin/cosign ~/bin/rekor-cli
+export PATH="$HOME/bin:$PATH"
+----
++
+If the `curl` fails, RHTAS is not serving — confirm `oc get securesign -n trusted-artifact-signer` is `Ready` (an instructor/pre-flight check).
+
+== `cosign verify` fails with `UNAUTHORIZED: authentication required`
+
+Symptom:: `cosign verify --key …` errors with `GET https://image-registry…/manifests/…sig: UNAUTHORIZED: authentication required`.
+Cause:: cosign pulls the signature from your internal registry, and it has no credential.
+A plain `oc registry login` also fails in the terminal with `mkdir /run/containers: permission denied` (it cannot write its default auth path).
+Fix:: Write the auth file to a path you own and point cosign at it:
++
+[source,sh,role=execute]
+----
+oc registry login --to="$HOME/.docker/config.json" --skip-check
+export DOCKER_CONFIG="$HOME/.docker"
+----
++
+Re-run `cosign verify` with `--allow-insecure-registry` (the internal registry serves a service-CA cert) and `--insecure-ignore-tlog` (this key-based signature has no transparency-log entry).
+
+== Keyless `cosign sign` on the *image* fails with an `UNKNOWN` push error
+
+Symptom:: A keyless `cosign sign <image>` errors with `failed to upload manifest: PUT …/parasol-claims/manifests/sha256-….sig: UNKNOWN: unknown error`.
+Cause:: The OpenShift internal registry does not accept cosign's keyless image-signature manifest format.
+Note the Rekor entry is written *before* the push, so the transparency-log record exists even though the image push failed — but `cosign verify` on the image then reports "no signatures found."
+Fix:: This is why the lab signs the *SBOM file* keylessly (`cosign sign-blob`, exercise 4), which is registry-independent and records cleanly in Rekor.
+For keyless *image* signatures, push to an external registry (Quay), where `cosign sign` lands them normally.
+
+== `cosign sign` errors `cannot specify service URLs and use signing config`
+
+Symptom:: After `cosign initialize`, `cosign sign … --fulcio-url … --rekor-url …` errors with `cannot specify service URLs and use signing config`.
+Cause:: cosign v3 sources the Fulcio and Rekor endpoints from the TUF *signing config* that `cosign initialize` installed — you must not also pass them as flags.
+Fix:: Drop `--fulcio-url`/`--rekor-url` from the `sign`/`sign-blob` command; pass only `--identity-token` (the lab commands already do this).
+
+== `mvn …:makeBom` produces no SBOM file
+
+Symptom:: There is no `target/parasol-claims-sbom.json`; `ls target/*bom*` finds nothing.
+Cause:: Either you ran `mvn package` on a fork that predates the CycloneDX plugin, or the build failed before reaching the plugin.
 Fix:: Use the *plugin CLI invocation*, which fetches the plugin from Maven Central and does not depend on the `pom.xml` declaring it (this is what the lab and the pipeline both use):
 +
 [source,sh,role=execute]
@@ -41,57 +85,43 @@ cd ~/parasol-claims
 mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
 ls -la target/parasol-claims-sbom.json
 ----
-+
-That writes `target/parasol-claims-sbom.json` (CycloneDX, ~225 components) regardless of the fork's `pom.xml`.
 
 == `chains.tekton.dev/signed` is blank right after the build
 
-Symptom:: Immediately after a successful run, `oc get taskrun ... signed=...` shows an empty value, not `true`.
-Cause:: *Tekton Chains signs a few seconds after* the build TaskRun completes — it is an asynchronous controller, not part of the TaskRun.
-Fix:: Wait a few seconds and re-check:
-+
-[source,sh,role=execute]
-----
-oc get taskrun -n $NS -l tekton.dev/pipelineTask=build-image \
-  -o jsonpath='{range .items[*]}{.metadata.name}{" signed="}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}'
-----
-+
+Symptom:: Immediately after a successful run, `oc get taskrun … signed=…` shows an empty value, not `true`.
+Cause:: *Tekton Chains signs a few seconds after* the build TaskRun completes — it is an asynchronous controller.
+Fix:: Wait a few seconds and re-check.
 If it stays blank for more than a minute, confirm Chains is configured (`oc get tektonconfig config -o jsonpath='{.spec.chain}'`) and that `signing-secrets` exists in `openshift-pipelines`.
 
 == The pipeline errors at `acs-scan` with a secret or endpoint error
 
 Symptom:: `acs-scan` fails immediately (not on a policy) with an error about `rox-api-token`, an empty endpoint, or authentication.
 Cause:: The scan task reads Central's endpoint and a CI token from the `rox-api-token` Secret in your namespace; if the entry state's copy hook did not run, that Secret is missing.
-Fix:: Confirm the Secret is present, and re-materialize the entry state if not:
+Fix:: Re-materialize the entry state, which re-runs the hook that copies `rox-api-token` from the shared `stackrox` namespace:
 +
 [source,sh,role=execute]
 ----
-oc get secret rox-api-token -n $NS -o jsonpath='keys: {.data.rox-api-token} / {.data.rox-central-endpoint}{"\n"}' 2>/dev/null && echo "(present)"
-# if missing:
-ws prep {module-id} --yes
+oc get secret rox-api-token -n $NS -o name 2>/dev/null || ws prep {module-id} --yes
 ----
-+
-`ws prep` re-runs the hook that copies `rox-api-token` from the shared `stackrox` namespace into yours.
 
-== `cosign: command not found` in the terminal
+== `cosign initialize` prints a `root-checksum` deprecation warning
 
-Symptom:: You try `cosign verify` in the Showroom terminal and it is not installed.
-Cause:: The Showroom terminal image ships `oc`, `tkn`, `mvn`, `jq`, `git`, and `skopeo` — but *not `cosign`*.
-Fix:: Signature *verification* is an instructor-run step in this module (the instructor guide has a one-line verification pod using the RHTAS client image).
-Your hands-on proof that the image is signed uses only `oc`: the `chains.tekton.dev/signed=true` annotation and the `.sig`/`.att` tags on the ImageStream (exercise 4).
+Symptom:: `cosign initialize --mirror=$TUF --root=$TUF/root.json` prints `WARNING: Fetching initial root from URL without providing its checksum is deprecated`.
+Cause:: cosign v3 prefers a `--root-checksum` alongside the root URL.
+Fix:: Ignore it — it is a warning, not an error; initialization completes and the keyless beat works.
+(In a hardened setup you would pin the root checksum.)
 
 == `oc apply` of an `ImagePolicy` is forbidden
 
-Symptom:: You try to create an `ImagePolicy` yourself and get `Error from server (Forbidden): ... imagepolicies.config.openshift.io is forbidden`.
-Cause:: `ImagePolicy` is a cluster-configuration resource (`config.openshift.io/v1`); the namespace `admin` role you hold does not include it — only cluster admins can create one.
+Symptom:: You try to create an `ImagePolicy` yourself and get `Error from server (Forbidden): … imagepolicies.config.openshift.io is forbidden`.
+Cause:: `ImagePolicy` is a cluster-configuration resource (`config.openshift.io/v1`); the namespace `admin` role does not include it.
 Fix:: This is why exercise 5 (admission) is an *instructor-demo* — the instructor applies the `ImagePolicy` cluster-wide and the effect lands in your namespace.
 You verify the pieces that make it work (`chains-cosign-pub` and a signed image) with `oc`, which you _can_ do.
 
 == A build TaskRun dies mid-`mvn`/`buildah` with `OOMKilled`
 
 Symptom:: `sbom-report` or `build-image` fails partway; `oc describe` on the Pod shows `Reason: OOMKilled`.
-Cause:: The build Pod inherited the namespace's default memory limit (1 Gi from the workshop LimitRange), and the Maven/buildah build needs more.
-This happens if you write your *own* PipelineRun and leave out the memory overrides.
+Cause:: The build Pod inherited the namespace's default memory limit (1 Gi), and the Maven/buildah build needs more. This happens if you write your *own* PipelineRun and leave out the memory overrides.
 Fix:: Set more memory for the build-heavy Tasks in the PipelineRun's `taskRunSpecs` (the lab's PipelineRuns already do this):
 +
 [source,yaml]
@@ -103,27 +133,12 @@ Fix:: Set more memory for the build-heavy Tasks in the PipelineRun's `taskRunSpe
       computeResources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}
 ----
 
-== You fixed `pom.xml` but the pipeline still fails on Log4Shell
-
-Symptom:: You removed `log4j-core` but a re-run still reports the `Block Log4Shell` violation.
-Cause:: The run built a different revision than you edited — either you committed to the wrong branch, or the run's `git-revision` was not `seed-vulnerable`.
-Fix:: Confirm your edit landed on `seed-vulnerable` (the Gitea file view shows the branch), and that the run used that branch:
-+
-[source,sh,role=execute]
-----
-tkn pipelinerun describe --last -n $NS | grep -iA3 'Params'
-----
-+
-The `git-revision` should read `seed-vulnerable`.
-The default already is, so a plain re-run (exercise 3's PipelineRun) rebuilds the branch you fixed — just make sure the *commit* is on `seed-vulnerable`, not `main`.
-
 == A harmless warning in the `acs-scan` logs
 
-Symptom:: The `acs-scan` step logs `warning: unsuccessful cred copy: ".docker" from "/tekton/creds" to "/": ... permission denied`.
+Symptom:: The `acs-scan` step logs `warning: unsuccessful cred copy: ".docker" from "/tekton/creds" to "/": … permission denied`.
 Cause:: `roxctl` probes for a docker credential directory it cannot create; it does not need one.
-Fix:: Ignore it — it is benign.
-`roxctl` authenticates to Central with the token from `rox-api-token`, and the scan proceeds normally after this line.
+Fix:: Ignore it — `roxctl` authenticates to Central with the token from `rox-api-token`, and the scan proceeds normally.
 
 '''
 
-_Last verified on OpenShift {ocp_version} / RHACS {acs_version} / OpenShift Pipelines {pipelines_version} (Tekton Chains) — 2026-07-10._
+_Last verified on OpenShift {ocp_version} / RHACS {acs_version} / OpenShift Pipelines {pipelines_version} / RHTAS {rhtas_version} (Tekton Chains) — 2026-07-18._

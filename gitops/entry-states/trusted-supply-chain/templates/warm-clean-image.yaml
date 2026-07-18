@@ -1,0 +1,125 @@
+# PREP-TIME WARMING (always-on): build the CLEAN main branch (base 1.23, no log4j) so the scan gate
+# PASSES and Tekton Chains signs the image — leaving a scanned-green, Chains-signed parasol-claims:latest
+# in {user}-cicd BEFORE the attendee starts. This is the owner's "pre-scanned image" (2026-07-18 review):
+# the lab's trust story (cosign verify → attestation → keyless/rekor) runs against THIS ready image, and
+# the scan beat READS its green verdict instead of waiting on a second build. The attendee's own red beat
+# builds the seeded branch to a *different* tag (:candidate), so this :latest signed image is never
+# clobbered. (Previously this ran only under `ws solve`; the rebalance makes it part of every prep so the
+# lab — not just the demo — has the warm image. `ws solve` still lands here; the value is now equivalent.)
+#
+# The PostSync hook Job launches the PipelineRun and WAITS for it: prep must not report "ready" while the
+# build+scan+sign still has minutes to go (the pipelines-fundamentals blocking-hook lesson — a blocking hook
+# keeps the Argo sync OPERATION Running, which ws's wait gates on, sized by ws-meta waitSeconds: 1500).
+# backoffLimit 0: a retry would launch a SECOND PipelineRun — fail loud instead.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trusted-supply-chain-warm-run-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+data:
+  pipelinerun.yaml: |
+    apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      generateName: warm-clean-
+      labels:
+        app.kubernetes.io/part-of: parasol-claims
+        workshop.redhat.com/module: trusted-supply-chain
+    spec:
+      pipelineRef:
+        name: parasol-claims-supply-chain
+      params:
+        # The CLEAN branch → scan passes, image is Chains-signed, pushed to :latest (the trusted image).
+        - name: git-revision
+          value: main
+      taskRunTemplate:
+        serviceAccountName: pipeline
+      workspaces:
+        - name: shared-workspace
+          volumeClaimTemplate:
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 1Gi
+      taskRunSpecs:
+        - pipelineTaskName: sbom-report
+          computeResources:
+            requests:
+              memory: 1Gi
+            limits:
+              memory: 1536Mi
+        - pipelineTaskName: build-image
+          computeResources:
+            requests:
+              memory: 1536Mi
+            limits:
+              memory: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trusted-supply-chain-warm-{{ .Values.user }}
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    workshop.redhat.com/module: trusted-supply-chain
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    # PostSync: run after the pipeline + the copied rox-api-token have synced, so the run finds them.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1500
+  template:
+    metadata:
+      labels:
+        app: trusted-supply-chain-warm-{{ .Values.user }}
+    spec:
+      # The operator-provisioned pipeline SA (edit) can create PipelineRuns in its own namespace.
+      serviceAccountName: pipeline
+      restartPolicy: Never
+      volumes:
+        - name: warm
+          configMap:
+            name: trusted-supply-chain-warm-run-{{ .Values.user }}
+      containers:
+        - name: warm
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          volumeMounts:
+            - name: warm
+              mountPath: /warm
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # If a clean, signed :latest already exists (idempotent re-prep), skip the ~8 min rebuild.
+              if oc get imagestreamtag parasol-claims:latest -o name >/dev/null 2>&1 \
+                 && oc get taskrun -l tekton.dev/pipeline=parasol-claims-supply-chain \
+                      -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' 2>/dev/null | grep -qx true; then
+                echo "  ✓ a Chains-signed parasol-claims:latest already present — warm, skipping rebuild"
+                exit 0
+              fi
+              echo "▶ warming: build→scan→sign the CLEAN main branch → parasol-claims:latest…"
+              PR="$(oc create -o name -f /warm/pipelinerun.yaml)"
+              echo "  ✓ started ${PR#*/} — waiting (build + RHACS scan + Chains signing ≈ 8 min; cold node longer)…"
+              for i in $(seq 1 140); do
+                s="$(oc get "$PR" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || true)"
+                case "$s" in
+                  True)
+                    echo "  ✓ pipeline Succeeded — parasol-claims:latest scanned clean and Chains-signed (warm)"
+                    exit 0;;
+                  False)
+                    echo "  ❌ warm pipeline FAILED — inspect: tkn pipelinerun logs ${PR##*/}"
+                    exit 1;;
+                esac
+                sleep 10
+              done
+              echo "  ❌ warm pipeline still not finished after ~23 min — inspect: oc get ${PR}"
+              exit 1

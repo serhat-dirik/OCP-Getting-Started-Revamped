@@ -5,58 +5,71 @@ include::partial$version-attributes.adoc[]
 // Lab page for Trusted Software Supply Chain. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
 // presenter arc. Every command runs in the Showroom Terminal as {user}, so blocks are
 // [source,sh,role=execute]. To avoid AsciiDoc attribute-substitution eating jsonpath braces, the
-// FIRST block sets NS={user}-cicd (subs=attributes, no braces) and later oc/tkn blocks use $NS with
-// NO subs — so `{.status...}` stays literal (same idiom as jobs-batch-kueue/pipelines-fundamentals). All commands, outputs, and
-// timings were performed on OCP {ocp_version} / OpenShift Pipelines {pipelines_version} / RHACS
-// {acs_version} / Tekton Chains as user2 on 2026-07-10: vulnerable run Failed at acs-scan on
-// Log4Shell in 6m9s (build Succeeded, scan blocked); CycloneDX SBOM = 225 components with
-// log4j-core@2.14.1; fixed run Succeeded in 6m34s, scan-passed=true, build image Chains-signed;
-// cosign verify + verify-attestation RC=0 (SLSA provenance v0.2). The cosign-verify and ImagePolicy
-// beats are [INSTRUCTOR-DEMO] because the Showroom terminal has no cosign and attendees cannot create
-// cluster-scoped ImagePolicy — see instructor.adoc / the PM build report.
+// FIRST block sets NS={user}-cicd + the RHTAS route URLs (subs=attributes, no braces) and later
+// oc/tkn/cosign blocks use $NS/$CLI/$REKOR/$TUF with NO subs — so `{.status...}` stays literal (same
+// idiom as jobs-batch-kueue/pipelines-fundamentals).
+//
+// PERFORM-FIRST provenance (owner's 2026-07-18 "pre-scanned image" rebalance): every command, output and
+// timing below was performed as user3 on OCP {ocp_version} / OpenShift Pipelines {pipelines_version} /
+// RHACS {acs_version} / RHTAS {rhtas_version} on 2026-07-18. The entry state now PRE-BUILDS the clean,
+// scanned-green, Chains-signed parasol-claims:latest (warm-clean-image.yaml), so the trust story runs
+// against a ready image and the scan beat READS a verdict instead of waiting on a second build. Grounded:
+// seeded build Failed at acs-scan on Log4Shell (CVSS 10, log4j-core 2.14.1) in 7m11s to a :candidate tag;
+// CycloneDX SBOM = 239 components; cosign v3.0.4 + rekor-cli fetched from the RHTAS cli-server; cosign
+// verify + verify-attestation against parasol-claims:latest RC=0 (SLSA provenance v0.2, builder
+// tekton.dev/chains/v2); keyless `cosign sign-blob` recorded the SBOM in the live Rekor transparency log
+// and `verify-blob` returned "Verified OK". The ImagePolicy admission beat stays [INSTRUCTOR-DEMO] —
+// attendees cannot create the cluster-config resource (verified: `can-i create imagepolicies` = no) — see
+// instructor.adoc.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
 
-Set a shortcut you will reuse in every command below:
+Set the shortcuts you will reuse in every command below.
+`$NS` is your `-cicd` project; `$CLI`, `$REKOR`, and `$TUF` are the *Red Hat Trusted Artifact Signer* (RHTAS) service URLs you will download tools from and query later:
 
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-cicd
+CLI=https://cli-server-trusted-artifact-signer.{cluster_domain}
+REKOR=https://rekor-server-trusted-artifact-signer.{cluster_domain}
+TUF=https://tuf-trusted-artifact-signer.{cluster_domain}
 echo "working in project: $NS"
 ----
 
 In this lab you take Parasol's `parasol-claims` pipeline from "it builds" to "it is *trustworthy*."
-You run a *supply-chain pipeline* that builds, generates a bill of materials, *signs* the image with provenance, and scans it — then you see what makes the result trustworthy: the *signature* and *SLSA attestation* that travel with the image, and the cluster *refusing to run anything unsigned*.
-Along the way the pipeline's scan step fails the build on a seeded Log4Shell dependency; you find it in the SBOM and fix it, so the image you end up signing is a *clean* one.
+Most of your time is spent on the *trust* controls — the *signature* and *SLSA provenance* that travel with the image, a *transparency-log* record anyone can audit, and the cluster *refusing to run anything unsigned*.
+Scanning is *one compact beat*: your environment already holds a clean, *pre-scanned* image, so you read a verdict rather than wait on a build.
 
 [NOTE]
-.The scan here is context — scanning is its own module
+.Your environment came pre-warmed with a signed image
 ====
-The pipeline includes one *scan* step, and you will watch it fail and then pass.
-That build-time scanning — vulnerabilities, secrets, insecure config — is the subject of the *Application Security Testing* module (a separate module), which runs SAST, SCA, DAST, and image-risk gates in depth.
-*This* module's subject is *trust*: signing, provenance, attestation, and admission.
-When the scan goes green here, the real lesson is what happens *next* — the clean image is signed, its provenance attested, and the cluster taught to refuse anything unsigned.
+When your project was prepared, the pipeline already ran once on the *clean* `main` branch and left a *scanned-green, signed* `parasol-claims:latest` in your registry.
+That is the image the trust exercises below verify.
+You will *also* build the *seeded* branch yourself to watch the scan gate catch a real CVE — that build goes to a separate `:candidate` tag, so it never disturbs the trusted `:latest`.
 ====
 
-[TIP]
+[NOTE]
+.The scan here is one beat — scanning is its own module
 ====
-Several steps below are offered two ways.
-The *Console* tab drives the graphical *Pipelines* and *ImageStreams* views in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`, project `{user}-cicd`); the *CLI* tab uses `oc` and `tkn` in the *Terminal* tab beside these instructions.
-A few steps are terminal-only by nature — generating the SBOM (`mvn`, `jq`) and the `cosign` signature checks — and are marked where they occur; if a console label reads differently on your cluster, the CLI beside it is the source of truth.
+You will watch the pipeline's *scan* step fail on a seeded Log4Shell dependency, and read the *clean* image's passing verdict beside it.
+That build-time scanning — vulnerabilities, secrets, insecure config — is the subject of the *Application Security Testing* module, which runs SAST, SCA, DAST, and image-risk gates in depth.
+*This* module's subject is *trust*: signing, provenance, attestation, transparency, and admission.
+
 ====
 
 [NOTE]
 .Your terminal, the console, and the Gitea web UI
 ====
-The *CLI* path runs in the *Terminal* tab beside these instructions, logged in as `{user}`, using `oc`, `tkn` (the Tekton CLI), `mvn`, and `jq`; the *Console* path uses the *OpenShift web console* tab.
-The `$NS` shortcut points at your `{user}-cicd` project — keep the terminal open so it persists.
+Every command runs in the *Terminal* tab beside these instructions, logged in as `{user}`, using `oc`, `tkn`, `mvn`, `jq`, and (once you download them) `cosign` and `rekor-cli`.
+A few steps are offered two ways: the *Console* tab drives the graphical views in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`, project `{user}-cicd`); the *CLI* tab is the source of truth where a console label reads differently on your cluster.
+The cryptographic steps — `cosign`, `rekor-cli` — are terminal-only by nature and marked where they occur.
 One exercise edits a file in the *Gitea web UI*: open your fork at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^] in a second browser tab now.
 ====
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — ~15-minute presenter arc: the gate catches a bad image, the fix, the signature
+// DEMO FLAVOR — ~15-minute presenter arc: the gate catches a bad image, then the trust payoff
 // ============================================================================
 ifdef::demo[]
 == Demo arc — Block the bad image, then prove the good one (15 min)
@@ -67,18 +80,18 @@ ifdef::demo[]
 Two prep steps, both *before the room*:
 
 . Run `ws solve trusted-supply-chain --user {user}`.
-It runs the supply-chain pipeline on the *clean* branch to completion, leaving a *scanned, signed* `parasol-claims` image in the registry — your "good outcome" to point at.
-*This blocks for ~7–12 minutes by design* (it waits for the real build + scan + signing), so do it early; it is truthful when it returns.
-. Confirm `cosign` is available where you present (the Showroom terminal does *not* ship it — see the instructor guide's "Demo-mode notes" for the one-line verification pod).
+It warms the environment: the supply-chain pipeline runs on the *clean* branch to completion, leaving a *scanned, signed* `parasol-claims:latest` in the registry — your "good outcome" to point at.
+*This blocks for ~8–12 minutes by design* (it waits for the real build + scan + signing), so do it early; it is truthful when it returns.
+. In your presenter terminal, download `cosign` from the RHTAS cli-server (the Showroom terminal does not ship it) and set `NS`, `CLI`, `REKOR`, `TUF` as in the lab's first block — the verify beats need them.
 
-Have your fork open at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^] and a terminal with `NS={user}-cicd` set.
-The hook is beat 2 — the pipeline goes *red at the scan* on a CVSS-10 vulnerability, and the build never ships — but the *payoff* is beats 4–5: the clean image is *signed* with SLSA provenance, and the cluster *refuses* an unsigned one.
+Have your fork open at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^].
+The hook is beat 2 — the pipeline goes *red at the scan* on a CVSS-10 vulnerability — but the *payoff* is beats 3–5: the clean image is *signed* with SLSA provenance, its signature is anchored in a public *transparency log*, and the cluster *refuses* an unsigned one.
 ====
 
 [demo-block]
 [TIME 3m]
 Say:: "Parasol's pipeline builds and deploys reliably — but a supplier audit asked three questions it could not answer: what is inside this image, who built it, and can you prove it.
-Here is the same pipeline with three trust controls added."
+Here is the same pipeline with trust controls added — and it already produced a signed image when I set up."
 Show:: The Terminal.
 `tkn pipeline describe parasol-claims-supply-chain` — walk the four Tasks.
 Do::
@@ -86,16 +99,19 @@ Do::
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-cicd
+CLI=https://cli-server-trusted-artifact-signer.{cluster_domain}
+REKOR=https://rekor-server-trusted-artifact-signer.{cluster_domain}
+TUF=https://tuf-trusted-artifact-signer.{cluster_domain}
 tkn pipeline describe parasol-claims-supply-chain -n $NS
 ----
 +
 "Clone, *SBOM*, build-and-*sign*, *scan*.
-Same shape as before, but now the pipeline produces trust artifacts, not just an image — and the scan can *stop* it."
+Same shape as the pipelines module, but now it produces trust artifacts, not just an image — and the scan can *stop* it."
 
 [demo-block]
 [TIME 4m]
-Say:: "Watch it earn its keep.
-I'll run it on a branch that carries a known-bad dependency — the Log4Shell library from 2021 — and the scan will refuse the build."
+Say:: "Watch the scan earn its keep.
+I'll build a branch that carries the Log4Shell library from 2021, to a throwaway tag, and the gate will refuse it."
 Show:: The Terminal: start the run, then stream the logs to the *red* scan step.
 Do::
 +
@@ -107,6 +123,9 @@ kind: PipelineRun
 metadata: {generateName: demo-vuln-}
 spec:
   pipelineRef: {name: parasol-claims-supply-chain}
+  params:
+    - {name: git-revision, value: seed-vulnerable}
+    - {name: image, value: "image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:candidate"}
   taskRunTemplate: {serviceAccountName: pipeline}
   workspaces:
     - name: shared-workspace
@@ -120,79 +139,50 @@ tkn pipelinerun logs --last -f -n $NS
 ----
 +
 "Build succeeded — the image exists.
-But the scan is *red*: `Block Log4Shell (CVE-2021-44228) at build`, CVSS 10, found in `log4j-core` 2.14.1.
-The build *fails* — that image never reaches a registry anyone deploys from.
+But the scan is *red*: `Block Log4Shell (CVE-2021-44228) at build`, CVSS 10, in `log4j-core` 2.14.1.
+The build *fails* — that `:candidate` never becomes a trusted image.
 That is the gate."
 
 [demo-block]
 [TIME 3m]
-Say:: "The gate says _something_ is wrong.
-The bill of materials says _exactly what_."
-Show:: The Terminal — generate the SBOM, grep for the offender.
+Say:: "The gate says _something_ is wrong. Now the trust half — and the *good* image was signed automatically when I prepped."
+Show:: The Terminal — download cosign, verify the signed `latest`.
 Do::
 +
 [source,sh,role=execute]
 ----
-tkn pipelinerun logs --last -n $NS | grep -i log4j
+mkdir -p ~/bin && curl -ksL $CLI/clients/linux/cosign-amd64.gz | gunzip > ~/bin/cosign && chmod +x ~/bin/cosign
+export PATH="$HOME/bin:$PATH"
+oc registry login --to="$HOME/.docker/config.json" --skip-check && export DOCKER_CONFIG="$HOME/.docker"
+oc get cm chains-cosign-pub -n $NS -o jsonpath='{.data.cosign\.pub}' > ~/cosign.pub
+IMG=$(oc get istag parasol-claims:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
+cosign verify --key ~/cosign.pub --allow-insecure-registry --insecure-ignore-tlog "$IMG"
 ----
 +
-"There it is, straight out of the CycloneDX bill of materials the pipeline generated: `log4j-core@2.14.1`.
-When the next big CVE lands, _this_ is how you answer 'are we affected' — a query, not a fire drill."
+"*Tekton Chains* signed the clean build with no per-build wiring — and `cosign` confirms the signature is intact and made with our key.
+Sign in the pipeline; verify anywhere."
 
 [demo-block]
 [TIME 3m]
-Say:: "Now I fix it the way a developer would — remove the bad dependency — and the same pipeline goes green *and signs* the image."
-Show:: Gitea — delete the `log4j-core` dependency block from `pom.xml`, commit.
-Then the Terminal: re-run, watch the scan pass, then show the signature.
-Do:: In Gitea, edit `pom.xml` on `seed-vulnerable`, delete the `log4j-core` `<dependency>` block, and *Commit Changes*.
-Then:
-+
-[source,sh,role=execute]
-----
-oc create -n $NS -f - <<'EOF'
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata: {generateName: demo-fixed-}
-spec:
-  pipelineRef: {name: parasol-claims-supply-chain}
-  taskRunTemplate: {serviceAccountName: pipeline}
-  workspaces:
-    - name: shared-workspace
-      volumeClaimTemplate:
-        spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
-  taskRunSpecs:
-    - {pipelineTaskName: sbom-report, computeResources: {requests: {memory: 1Gi}, limits: {memory: 1536Mi}}}
-    - {pipelineTaskName: build-image, computeResources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}}
-EOF
-tkn pipelinerun logs --last -f -n $NS
-----
-+
-"Scan passed — no enforced violations.
-And Tekton Chains *signed* this build automatically: the signature and a SLSA provenance statement now live in the registry right next to the image.
-Removing the dependency was the whole fix — one commit, gate green, image signed."
-
-[demo-block]
-[TIME 2m]
-Say:: "Signing is only half the story.
-The other half is the cluster *refusing to run* anything unsigned."
-Show:: The Terminal — the signature + attestation beside the image; then name the admission control.
+Say:: "Signing proves _we_ built it. The other half is the cluster *refusing to run* anything unsigned — and a public *transparency log* so no signature can be quietly backdated."
+Show:: The Terminal — name the `.sig`/`.att` tags and the live Rekor log; name the admission control.
 Do::
 +
 [source,sh,role=execute]
 ----
-oc get imagestream parasol-claims -n $NS \
-  -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}'
+oc get istag -n $NS | grep parasol-claims
+rekor-cli loginfo --rekor_server "$REKOR" | grep 'Tree Size'
 ----
 +
-"See the `.sig` and `.att` tags?
-That is the signature and the provenance, stored beside the image.
-And with an `ImagePolicy` on the namespace — which ships with OpenShift — the node *verifies that signature before it will pull the image*.
-Sign in the pipeline, enforce at the cluster: a bad image cannot build, and an unsigned one cannot run."
+"The `.sig` and `.att` tags are the signature and the SLSA provenance, stored beside the image.
+Red Hat Trusted Artifact Signer runs that Rekor log — every keyless signature lands there permanently.
+And with an `ImagePolicy` on the namespace, the node *verifies the signature before it will pull the image*.
+Bad image cannot build; unsigned image cannot run; and every signature is on the record."
 
 [NOTE]
 .Reset between runs
 ====
-`ws prep trusted-supply-chain --user {user} --yes` wipes `{user}-cicd` back to the entry state (the pipeline, the copied trust secrets, your fork with its vulnerable `seed-vulnerable` branch restored) so you can present again from the top.
+`ws prep trusted-supply-chain --user {user} --yes` re-warms `{user}-cicd` back to the entry state (a fresh signed `parasol-claims:latest`, the pipeline, the copied trust secrets, your fork with its vulnerable `seed-vulnerable` branch) so you can present again from the top.
 ====
 endif::demo[]
 
@@ -201,14 +191,14 @@ endif::demo[]
 // ============================================================================
 ifndef::demo[]
 
-== 1. Run the supply-chain pipeline — and watch the gate catch a CVE
-⏱ *~20 min* · start the run early, then read how it is wired while it builds
+== 1. The scan gate: one image refused, one already cleared
+⏱ *~18 min* · start the seeded build, then read the pre-scanned clean verdict and find the CVE while it runs
 
 Your project has a Pipeline the platform team seeded — `parasol-claims-supply-chain`.
 It is the build-and-deploy shape from the Pipelines Fundamentals module with *three trust controls* added.
-Read it before you run it:
+Read it before you use it:
 
-// [CAPTURE-VERIFY] Pipelines > Pipelines > parasol-claims-supply-chain Details (graph of 4 Tasks) + YAML tab spec.tasks resolver refs (OCP 4.21) — CLI 'tkn pipeline describe' authoritative.
+// [CAPTURE-VERIFY] Pipelines > Pipelines > parasol-claims-supply-chain Details (graph of 4 Tasks) + YAML tab spec.tasks resolver refs — CLI 'tkn pipeline describe' authoritative.
 [tabs]
 ====
 Console::
@@ -232,6 +222,8 @@ tkn pipeline describe parasol-claims-supply-chain -n $NS
 =====
 [source,texinfo]
 ----
+ Name:          parasol-claims-supply-chain
+
 Params
  NAME           TYPE     DEFAULT VALUE
  git-url        string   http://gitea.ogsr-gitea.svc:3000/<you>/parasol-claims.git
@@ -243,55 +235,36 @@ Results
  scan-passed
 
 Tasks
- NAME           TASKREF    RUNAFTER       PARAMS
- fetch-source              ---            URL, REVISION
- sbom-report    EMBEDDED   fetch-source   ---
- build-image               sbom-report    IMAGE, DOCKERFILE: ./Containerfile, TLS_VERIFY: false
- acs-scan                  build-image    IMAGE
+ NAME           TASKREF         RUNAFTER       PARAMS
+ fetch-source   git-clone       ---            URL, REVISION
+ sbom-report    EMBEDDED        fetch-source   ---
+ build-image    buildah         sbom-report    IMAGE, DOCKERFILE: ./Containerfile, TLS_VERIFY: false
+ acs-scan       acs-image-check build-image    IMAGE
 ----
 =====
 --
 ====
 
 Four Tasks in order: `fetch-source` → `sbom-report` → `build-image` → `acs-scan`.
-Notice the default `git-revision` is *`seed-vulnerable`* — a branch of your fork the entry state seeded with a known-bad dependency, so the gate has something real to catch.
-Now look at *where the Tasks come from*:
+The last one is the *gate*: the curated `acs-image-check` Task runs a *Red Hat Advanced Cluster Security* (RHACS) build-time check and *fails the build* on a policy violation.
 
-[source,sh,role=execute]
-----
-oc get pipeline parasol-claims-supply-chain -n $NS \
-  -o jsonpath='{range .spec.tasks[*]}{.name}{" -> "}{.taskRef.resolver}{" "}{.taskRef.params[1].value}{"/"}{.taskRef.params[2].value}{"\n"}{end}'
-----
+Now *start a build of the seeded branch* — to a throwaway `:candidate` tag, so the trusted `:latest` already in your registry is untouched.
+This build takes a few minutes, so start it and read on:
 
-.Expected output
-[source,texinfo]
-----
-fetch-source -> cluster git-clone/openshift-pipelines
-sbom-report ->  /
-build-image -> cluster buildah/openshift-pipelines
-acs-scan -> cluster acs-image-check/ogsr-parasol-tasks
-----
-
-Two Tasks come from the shipped catalog (`git-clone`, `buildah`), one is the curated *`acs-image-check`* from Parasol's `parasol-tasks` library (the scan gate), and `sbom-report` is defined inline in the Pipeline.
-The scan gate is the curated Task — the platform team standardized _one_ way to fail a build on a vulnerability.
-
-Now *run* it.
-A PipelineRun attaches a fresh workspace and raises memory for the two Maven/build-heavy steps above the namespace default:
-
-// [CAPTURE-VERIFY] masthead "+" (Quick create) > "Import YAML"; Pipelines > PipelineRuns graph — build-image green, acs-scan red (OCP 4.21) — CLI heredoc authoritative.
+// [CAPTURE-VERIFY] masthead "+" (Quick create) > "Import YAML"; Pipelines > PipelineRuns graph — build-image green, acs-scan red — CLI heredoc authoritative.
 [tabs]
 ====
 Console::
 +
 --
-Use the masthead *+* (*Quick create*) → *Import YAML*, paste the PipelineRun manifest from the *CLI* tab, and click *Create* — it builds your fork's `seed-vulnerable` branch by default, so nothing to edit.
-Then open *Pipelines* → *PipelineRuns* and click the new `supply-chain-run-…` run: the graph fills in and stops *red at `acs-scan`* while `build-image` stays green.
+Use the masthead *+* (*Quick create*) → *Import YAML*, paste the PipelineRun manifest from the *CLI* tab, and click *Create*.
+Then open *Pipelines* → *PipelineRuns* and click the new `seed-scan-…` run: the graph fills in and stops *red at `acs-scan`* while `build-image` stays green.
 
 [NOTE]
 .Import YAML, not the *Start* button
 =====
 Create the run from *Import YAML* (which takes the whole manifest), *not* from the Pipeline's *Actions → Start* form.
-This run raises per-Task memory for the build steps (the `taskRunSpecs` in the manifest), and the *Start* form cannot set that — a run started without it is killed mid-build.
+This run raises per-Task memory for the build steps (the `taskRunSpecs`), and the *Start* form cannot set that — a run started without it is killed mid-build.
 =====
 --
 CLI::
@@ -303,21 +276,26 @@ oc create -n $NS -f - <<'EOF'
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
-  generateName: supply-chain-run-
+  generateName: seed-scan-
 spec:
   pipelineRef:
     name: parasol-claims-supply-chain
+  params:
+    - name: git-revision
+      value: seed-vulnerable              # the seeded branch — build it to a throwaway tag
+    - name: image
+      value: image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/parasol-claims:candidate
   taskRunTemplate:
-    serviceAccountName: pipeline      # operator-provided SA: can build + push images here
+    serviceAccountName: pipeline          # operator-provided SA: can build + push images here
   workspaces:
     - name: shared-workspace
-      volumeClaimTemplate:            # one PVC per run, auto-pruned with the run
+      volumeClaimTemplate:                # one PVC per run, auto-pruned with the run
         spec:
           accessModes: [ReadWriteOnce]
           resources:
             requests:
               storage: 1Gi
-  taskRunSpecs:                       # more memory than the 1Gi namespace default for the builds
+  taskRunSpecs:                           # more memory than the 1Gi namespace default for the builds
     - pipelineTaskName: sbom-report
       computeResources:
         requests: {memory: 1Gi}
@@ -331,117 +309,44 @@ EOF
 --
 ====
 
-Follow it live.
-The build downloads Maven dependencies, so expect *roughly 6–12 minutes* (longer the first time on a node):
+While that builds (*roughly 6–12 minutes*, longer on a cold node), read the verdict on the image you *already* have.
+Your registry holds the clean `parasol-claims:latest` the pipeline built on the `main` branch when your project was prepared — and the pipeline recorded its scan verdict as a *result*:
 
-[source,sh,role=execute]
-----
-tkn pipelinerun logs --last -f -n $NS
-----
-
-[TIP]
-.Use the wait — read exercise 2's SBOM section now
-====
-This is a real build.
-Rather than watch dependencies download, *leave this streaming* (or press *Ctrl-C* — the run keeps going) and read ahead.
-Come back when the logs reach the `acs-scan` step — that is the beat you want to watch.
-You can re-attach any time with `tkn pipelinerun logs --last -f -n $NS`.
-====
-
-The build *succeeds* — and then the `acs-scan` step turns the run *red*.
-Read what it says:
-
-.The scan step's output (abridged — the real RHACS table has six columns)
-[source,texinfo]
-----
-[image-check] ▶ RHACS build-time image check: image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims:latest (categories: Supply Chain Security)
-[image-check] Policy check results for image: .../parasol-claims:latest
-[image-check] (TOTAL: 2, LOW: 1, MEDIUM: 0, HIGH: 0, CRITICAL: 1)
-[image-check]
-[image-check] | POLICY                                    | SEVERITY | BREAKS BUILD | VIOLATION
-[image-check] | Block Log4Shell (CVE-2021-44228) at build | CRITICAL |      X       | CVE-2021-44228 (CVSS 10) (severity Critical) found in
-[image-check] |                                           |          |              | component 'org.apache.logging.log4j:log4j-core' (version 2.14.1)
-[image-check] | Latest tag                                |   LOW    |      -       | Image has tag 'latest'
-[image-check]
-[image-check] ERROR: failed policies found: 1 policies violated that are failing the check
-[image-check] ❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell).
-----
-
-Read it the way a security-minded engineer would.
-*Red Hat Advanced Cluster Security* (RHACS) ran a build-time check on your freshly built image and found *two* policy violations, but only one *breaks the build*: "Block Log4Shell (CVE-2021-44228) at build," `CRITICAL`, `CVSS 10`, in `log4j-core` version `2.14.1`.
-The "Latest tag" violation is `LOW` and does *not* break the build — it is advice, not a gate.
-Because `acs-scan` exited non-zero, the pipeline is `Failed` and the image — though it was built — is flagged as one you must not ship.
-
-// media-pass: screenshot trusted-supply-chain-01-acs-violation.png — the RHACS console view of
-// this violation (CVE-2021-44228, CVSS 10, log4j-core 2.14.1, the "Block Log4Shell at build" policy).
-// The money shot — embed here. See media-manifest.md.
-// media-pass: screenshot trusted-supply-chain-03-pipelinerun-scan-failed.png — the PipelineRun
-// graph with build-image green and acs-scan red (the gate refused a built image). See media-manifest.md.
-
-Confirm the run's shape — every Task's status in one view:
-
-// [CAPTURE-VERIFY] PipelineRun graph — acs-scan red, fetch-source/sbom-report/build-image green (OCP 4.21) — CLI 'tkn pipelinerun describe' authoritative.
+// [CAPTURE-VERIFY] Pipelines > PipelineRuns > warm-clean-... Details "Results" section listing scan-passed=true — CLI 'oc get pipelinerun -o jsonpath' authoritative.
 [tabs]
 ====
 Console::
 +
 --
-On the run's graph (*Pipelines* → *PipelineRuns* → your run), only `acs-scan` is red; `fetch-source`, `sbom-report`, and `build-image` are all green.
-The build ran to completion — the *scan*, at the end, is what turned the run red.
+Open *Pipelines* → *PipelineRuns* (project `{user}-cicd`) and click the `warm-clean-…` run (the pre-warm build).
+Its *Results* section shows `scan-passed` = `true` — the gate's verdict on the clean image, published as run data.
+Under *Builds* → *ImageStreams* → `parasol-claims`, the `latest` tag is that clean image.
 --
 CLI::
 +
 --
 [source,sh,role=execute]
 ----
-tkn pipelinerun describe --last -n $NS | sed -n '/^Taskruns/,$p'
+oc get pipelinerun -n $NS -l tekton.dev/pipeline=parasol-claims-supply-chain \
+  --field-selector status.phase!=Running \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"  scan-passed="}{.status.results[?(@.name=="scan-passed")].value}{"\n"}{end}'
 ----
 
-.Expected output (your run name and relative times differ)
+.Expected output (the pre-warmed clean run)
 [source,texinfo]
 ----
-Taskruns
-
- NAME                                  TASK NAME      STARTED         DURATION   STATUS
- supply-chain-run-xxxxx-acs-scan       acs-scan       2 minutes ago   32s        Failed
- supply-chain-run-xxxxx-build-image    build-image    6 minutes ago   3m53s      Succeeded
- supply-chain-run-xxxxx-sbom-report    sbom-report    7 minutes ago   1m39s      Succeeded
- supply-chain-run-xxxxx-fetch-source   fetch-source   8 minutes ago   14s        Succeeded
+warm-clean-xxxxx  scan-passed=true
 ----
 --
 ====
 
-Only `acs-scan` is `Failed`; `fetch-source`, `sbom-report`, and `build-image` all `Succeeded`.
-The build *ran to completion* — this is different from the Pipelines Fundamentals module's failing _test_, which stopped everything before the build.
-Here the image is built and even *signed* (you see that in exercise 4); the *scan* is what refuses it.
-That is deliberate: you cannot scan an image you have not built.
-
-[.checkpoint]
-****
-✔ *Verify:* `tkn pipelinerun list -n $NS` shows your run `Failed`; the `acs-scan` step logged `Block Log4Shell (CVE-2021-44228) at build ... CRITICAL` against `log4j-core` `2.14.1`; and `build-image` shows `Succeeded` (the gate refused a *built* image, it did not stop the build).
-****
-
-== 2. Find what's inside: the software bill of materials
-⏱ *~15 min* · generate the CycloneDX SBOM and locate the exact vulnerable component
-
-The scan step told you _something_ is wrong.
-The *SBOM* — the software bill of materials — tells you _exactly what_.
-In this module the SBOM is a *trust* artifact: an attestable record of what the image contains, produced on every build so it can travel with the signed image.
-Using it to answer "are we affected by component X" across a whole estate is the scanning story (the Application Security Testing module); here you generate it and read it directly, so you can see the offender the scan flagged.
-Your pipeline already generated one (the `sbom-report` step); now generate the same bill of materials yourself and inspect it.
-
-[NOTE]
-.Why this exercise is terminal-only
-====
-Generating the SBOM (`git clone`, `mvn`) and querying it (`jq`) are terminal tasks — there is no console equivalent for running Maven or `jq` — so this exercise has no *Console* tab.
-====
-
-Clone your fork's `seed-vulnerable` branch and produce a *CycloneDX* SBOM.
-This is the identical plugin invocation the pipeline's `sbom-report` step uses, so it works whether or not the project's `pom.xml` declares the plugin:
+`scan-passed=true`: the clean image already cleared the gate.
+Now find *what the seeded build is about to fail on*.
+The *software bill of materials* (SBOM) — an attestable list of every component in the build — is a trust artifact your pipeline produces on every run; here you generate the same one by hand and read it.
+Clone your fork's `seed-vulnerable` branch and produce a *CycloneDX* SBOM (the identical plugin invocation the pipeline's `sbom-report` step uses):
 
 [source,sh,role=execute]
 ----
-# your fork's in-cluster URL, derived from $NS — no typing your username
 git clone -b seed-vulnerable http://gitea.ogsr-gitea.svc:3000/${NS%-cicd}/parasol-claims.git ~/parasol-claims
 cd ~/parasol-claims
 mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
@@ -450,16 +355,13 @@ mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom
 .Expected output (abridged)
 [source,texinfo]
 ----
-[INFO] --- cyclonedx:2.9.2:makeBom (default-cli) @ parasol-claims ---
-[INFO] CycloneDX: Resolving Dependencies
-[INFO] CycloneDX: Creating BOM version 1.6 with 225 component(s)
+[INFO] CycloneDX: Creating BOM version 1.6 with 239 component(s)
 [INFO] CycloneDX: Writing and validating BOM (JSON): .../target/parasol-claims-sbom.json
 [INFO] BUILD SUCCESS
 ----
 
-That wrote `target/parasol-claims-sbom.json` — a *CycloneDX* SBOM listing all *225* components in the build.
-CycloneDX is an open SBOM standard; each component carries a *purl* (package URL) that names it exactly.
-Now search it for the vulnerable dependency:
+That wrote `target/parasol-claims-sbom.json` — a CycloneDX SBOM naming every component by its *purl* (package URL).
+Search it for the vulnerable dependency:
 
 [source,sh,role=execute]
 ----
@@ -472,216 +374,159 @@ jq -r '.components[] | select(.name=="log4j-core") | "\(.group):\(.name)@\(.vers
 org.apache.logging.log4j:log4j-core@2.14.1  pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1?type=jar
 ----
 
-There is the offender, named precisely by its purl: `log4j-core` version `2.14.1`.
-That is the whole value proposition of an SBOM — the question "is the Log4Shell library in this image?" is a one-line query against a file, not a manual audit of the source.
+There is the offender: `log4j-core` 2.14.1 — the Log4Shell library (`CVE-2021-44228`).
+That is the value of an SBOM: "is the Log4Shell library in this image?" is a one-line query, not a manual audit.
 
-[NOTE]
-.The pipeline generated the same SBOM — you can read its finding too
-====
-The pipeline's `sbom-report` step ran this exact `makeBom` and then scanned the result.
-Read what it reported for your last failed run:
+By now the seeded build has reached the `acs-scan` step.
+Re-attach to its logs and read the gate:
 
 [source,sh,role=execute]
 ----
-SBOM_TR=$(oc get taskrun -n $NS -l tekton.dev/pipelineTask=sbom-report \
-  --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
-tkn taskrun logs "$SBOM_TR" -n $NS | grep -iE 'Creating BOM|log4j-core'
-----
-
-.Expected output
-[source,texinfo]
-----
-[cyclonedx] [INFO] CycloneDX: Creating BOM version 1.6 with 225 component(s)
-[cyclonedx] ⚠️  the SBOM contains log4j-core@2.14.1 — CVE-2021-44228 (Log4Shell). Fix: drop this dependency.
-----
-
-The pipeline generates the bill of materials on *every* build; you just reproduced it by hand to see what it contains.
-====
-
-[.checkpoint]
-****
-✔ *Verify:* `mvn ...:makeBom` produced `target/parasol-claims-sbom.json` (a CycloneDX BOM, 225 components); `jq` found `log4j-core@2.14.1` with its purl; and you can explain what the SBOM is _for_ (answering "are we affected by component X" as a query).
-****
-
-== 3. Fix the vulnerability and watch the gate go green
-⏱ *~20 min* · remove the dependency, re-run, and watch the scan pass — and the image get signed
-
-You know the exact problem: a `log4j-core` 2.14.1 dependency that should not be there.
-The fix is to *remove it* — and then prove the fix by re-running the pipeline and watching the gate pass.
-You make the change in *your own fork*, on the `seed-vulnerable` branch the pipeline builds.
-
-In your *Gitea tab* ({gitea_url}/{user}/parasol-claims[{user}/parasol-claims^]):
-
-. Switch to the *`seed-vulnerable`* branch (the branch selector, top-left of the file list).
-. Open `pom.xml` and click the *pencil* (Edit) icon.
-. Find and *delete* this block (near the end of the `<dependencies>` section):
-+
-[source,xml]
-----
-    <!-- trusted-supply-chain seeded CVE (do not fix on this branch): log4j-core 2.14.1 = CVE-2021-44228 Log4Shell. -->
-    <dependency>
-      <groupId>org.apache.logging.log4j</groupId>
-      <artifactId>log4j-core</artifactId>
-      <version>2.14.1</version>
-    </dependency>
-----
-. Scroll down and *Commit Changes* directly to the `seed-vulnerable` branch (commit message e.g. "fix: remove vulnerable log4j-core dependency").
-
-// media-pass: screenshot trusted-supply-chain-02-gitea-pom-edit.png — the Gitea pom.xml editor on
-// the seed-vulnerable branch with the log4j-core <dependency> block selected for deletion. See media-manifest.md.
-
-[NOTE]
-.Why remove it, rather than upgrade it
-====
-Upgrading `log4j-core` to a patched version would also clear the CVE.
-But `parasol-claims` does not actually _use_ `log4j-core` — it was seeded purely to trip the gate — so the honest fix is to *remove the dependency you do not need*.
-Fewer dependencies is fewer supply-chain risk: the smallest attack surface is the code you did not ship.
-====
-
-Now re-run the pipeline against your fork — the default `git-revision` is already `seed-vulnerable`, so this rebuilds the branch you just fixed:
-
-// [CAPTURE-VERIFY] "Import YAML"; Pipelines > PipelineRuns graph — acs-scan turns green this time (OCP 4.21) — CLI heredoc authoritative.
-[tabs]
-====
-Console::
-+
---
-As in exercise 1, *+* (*Quick create*) → *Import YAML*, paste the manifest from the *CLI* tab, and *Create* (it rebuilds `seed-vulnerable`, now fixed).
-Watch the new run under *Pipelines* → *PipelineRuns*: this time `acs-scan` goes *green* and the whole graph succeeds.
---
-CLI::
-+
---
-[source,sh,role=execute]
-----
-oc create -n $NS -f - <<'EOF'
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  generateName: supply-chain-fixed-
-spec:
-  pipelineRef:
-    name: parasol-claims-supply-chain
-  taskRunTemplate:
-    serviceAccountName: pipeline
-  workspaces:
-    - name: shared-workspace
-      volumeClaimTemplate:
-        spec:
-          accessModes: [ReadWriteOnce]
-          resources: {requests: {storage: 1Gi}}
-  taskRunSpecs:
-    - pipelineTaskName: sbom-report
-      computeResources: {requests: {memory: 1Gi}, limits: {memory: 1536Mi}}
-    - pipelineTaskName: build-image
-      computeResources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}
-EOF
 tkn pipelinerun logs --last -f -n $NS
 ----
---
-====
 
-[TIP]
-.Another full build — use the wait
-====
-This second run is a complete build again (roughly 6–12 minutes).
-While it runs, read ahead to *exercise 4* (signing), which inspects the very image this run produces — then come back to watch the `acs-scan` step turn green.
-====
-
-Watch the `acs-scan` step this time.
-It passes:
-
-.The scan step's output (abridged)
+.The scan step's output (abridged — the real RHACS table has more columns)
 [source,texinfo]
 ----
-[image-check] ▶ RHACS build-time image check: .../parasol-claims:latest (categories: Supply Chain Security)
-[image-check] (TOTAL: 1, LOW: 1, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
-[image-check] | POLICY     | SEVERITY | BREAKS BUILD | VIOLATION
-[image-check] | Latest tag |   LOW    |      -       | Image has tag 'latest'
-[image-check] ✅ image check passed — no enforced build-time policy violations
+[image-check] ▶ RHACS build-time image check: .../parasol-claims:candidate (categories: Supply Chain Security)
+[image-check] (TOTAL: 1, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 1)
+[image-check]
+[image-check] | POLICY                                    | SEVERITY | BREAKS BUILD | VIOLATION
+[image-check] | Block Log4Shell (CVE-2021-44228) at build | CRITICAL |      X       | CVE-2021-44228 (CVSS 10) (severity Critical) found in
+[image-check] |                                           |          |              | component 'org.apache.logging.log4j:log4j-core' (version 2.14.1)
+[image-check]
+[image-check] ERROR: failed policies found: 1 policies violated that are failing the check
+[image-check] ❌ image check FAILED — an enforced build policy was violated (e.g. Log4Shell).
 ----
 
-The `CRITICAL` Log4Shell violation is *gone* — only the harmless `LOW` "Latest tag" advice remains, and that does not break the build.
-The run is `Succeeded`, and the pipeline surfaces its verdict as a *result*:
+The build *succeeded* — the image was built — and then the `acs-scan` step turned the run *red* on one `CRITICAL` violation: "Block Log4Shell," CVSS 10, in `log4j-core` 2.14.1.
+Because `acs-scan` runs *after* `build-image` (you cannot scan an image you have not built), the image exists and is even signed — the *scan* is what refuses it.
 
-// [CAPTURE-VERIFY] Pipelines > PipelineRuns > <run> Details "Results" section listing scan-passed=true (OCP 4.21) — CLI 'oc get pipelinerun -o jsonpath' authoritative.
-[tabs]
-====
-Console::
-+
---
-On the fixed run's page (*Pipelines* → *PipelineRuns* → your `supply-chain-fixed-…` run), the *Results* section shows `scan-passed` = `true` — the gate's verdict, published as run data.
---
-CLI::
-+
---
-[source,sh,role=execute]
-----
-oc get pipelinerun --sort-by=.metadata.creationTimestamp -n $NS \
-  -o jsonpath='{range .items[-1:]}{.metadata.name}{"  scan-passed="}{.status.results[?(@.name=="scan-passed")].value}{"\n"}{end}'
-----
-
-.Expected output
-[source,texinfo]
-----
-supply-chain-fixed-xxxxx  scan-passed=true
-----
---
-====
-
-Removing the dependency was the *entire* fix — the base image never changed.
-A broken supply chain became a clean one with a one-line commit, and the pipeline _proved_ it with a scan.
-
-[TIP]
-.Optional hardening: bump the base image
-====
-The seeded branch also pins an *older* UBI OpenJDK tag (`openjdk-21:1.18`), which carries base-operating-system CVEs that a newer tag has patched.
-Bumping it (in the `Containerfile`, `FROM ...openjdk-21:1.23`) is good hygiene — *complementary hardening* — but it is *not* what turned this gate green.
-The gate is scoped to the "Supply Chain Security" policy category, which keys on the Log4Shell dependency, not on drifting base-OS CVEs.
-Try it if you like: bump the tag, re-run, and confirm the gate still passes (it does either way) — proof that the dependency, not the base image, was the gate.
-====
+// media-pass: screenshot trusted-supply-chain-01-acs-violation.png — the RHACS console view of
+// this violation (CVE-2021-44228, CVSS 10, log4j-core 2.14.1, the "Block Log4Shell at build" policy).
+// The money shot — embed here. See media-manifest.md.
+// media-pass: screenshot trusted-supply-chain-03-pipelinerun-scan-failed.png — the PipelineRun
+// graph with build-image green and acs-scan red (the gate refused a built image). See media-manifest.md.
 
 [.checkpoint]
 ****
-✔ *Verify:* After removing the `log4j-core` dependency and re-running, `acs-scan` reports `✅ image check passed` (no `CRITICAL`); the run is `Succeeded`; and `scan-passed=true` is the pipeline result.
-The gate that refused the bad image now passes the fixed one — with no base-image change.
+✔ *Verify:* the pre-warmed clean run shows `scan-passed=true` (the clean `:latest` cleared the gate); your `jq` query found `log4j-core@2.14.1` in the SBOM; and your seeded `:candidate` build is `Failed` with the `acs-scan` step logging `Block Log4Shell (CVE-2021-44228) ... CRITICAL` — the gate refused a *built* image, it did not stop the build.
 ****
 
-== 4. Signing and provenance: prove who built the image
-⏱ *~15 min* · Tekton Chains signed your build automatically — see the signature and its SLSA provenance
+[TIP]
+.Optional: prove the fix in the SBOM (no rebuild needed)
+====
+The honest fix is to *remove* the dependency `parasol-claims` never actually uses.
+In your *Gitea tab* ({gitea_url}/{user}/parasol-claims[{user}/parasol-claims^]), on the `seed-vulnerable` branch, edit `pom.xml`, delete the `log4j-core` `<dependency>` block (its comment marks it), and *Commit Changes*.
+Then re-pull and regenerate the SBOM — *seconds*, no build:
+[source,sh,role=execute]
+----
+cd ~/parasol-claims && git pull -q
+mvn -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.2:makeBom -q
+jq -e '[.components[] | select(.name=="log4j-core")] | length == 0' target/parasol-claims-sbom.json \
+  && echo "✔ log4j-core is gone from the SBOM"
+----
+The clean image you verify in the next exercises came from exactly this — the `main` branch, without the dependency.
+====
 
-The scan proved the image is _clean_ — that was the scanning beat.
-This is the heart of the trust module: *signing* proves the image is _yours_ — that the image you are about to run is byte-for-byte the one your pipeline produced, built by a builder you trust.
-*Tekton Chains* — a component of OpenShift Pipelines — watches every build TaskRun and *signs the image it produced*, with no per-build wiring.
-Confirm it signed your builds:
+== 2. Chains signed it — verify the signature with cosign
+⏱ *~12 min* · fetch cosign from RHTAS, then prove the clean image is intact and yours
+
+The scan proved the clean image is _clean_.
+This is the heart of the trust module: *signing* proves the image is _yours_ — byte-for-byte the one your pipeline produced.
+*Tekton Chains* — a component of OpenShift Pipelines — watched the build TaskRun and *signed the image it produced*, with no per-build wiring, when your environment was warmed.
+
+`cosign` is the tool that _checks_ what Chains _produced_.
+The Showroom terminal does not ship it — but *Red Hat Trusted Artifact Signer* runs a *client-download server*, so fetch `cosign` (and `rekor-cli`, for later) straight from the cluster:
 
 [source,sh,role=execute]
 ----
-oc get taskrun -n $NS -l tekton.dev/pipelineTask=build-image \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"  signed="}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}'
+mkdir -p ~/bin
+curl -ksL $CLI/clients/linux/cosign-amd64.gz  | gunzip > ~/bin/cosign
+curl -ksL $CLI/clients/linux/rekor-cli-amd64.gz | gunzip > ~/bin/rekor-cli
+chmod +x ~/bin/cosign ~/bin/rekor-cli
+export PATH="$HOME/bin:$PATH"
+cosign version | grep GitVersion
 ----
 
 .Expected output
 [source,texinfo]
 ----
-supply-chain-run-xxxxx-build-image     signed=true
-supply-chain-fixed-xxxxx-build-image   signed=true
+GitVersion:    v3.0.4
 ----
 
-Every build is `signed=true` — even the vulnerable one.
-That is correct: signing answers "did _we_ build this," which is a _different_ question from "is it clean" (the scan) and "what is inside" (the SBOM).
-You want all three; here they all happened automatically.
+`cosign` verifies signatures by pulling them from the registry, so give it a credential for your internal registry and point it at your signed image:
 
-Chains stores the signature and the provenance *in the registry, beside the image* — as extra tags derived from the image digest:
+[source,sh,role=execute]
+----
+oc registry login --to="$HOME/.docker/config.json" --skip-check
+export DOCKER_CONFIG="$HOME/.docker"
+# the public key Chains signs with — copied into your namespace by the entry state
+oc get cm chains-cosign-pub -n $NS -o jsonpath='{.data.cosign\.pub}' > ~/cosign.pub
+# the exact clean image, by digest
+IMG=$(oc get istag parasol-claims:latest -n $NS -o jsonpath='{.image.dockerImageReference}')
+echo "verifying: $IMG"
+----
 
-// [CAPTURE-VERIFY] Builds > ImageStreams > parasol-claims Details "Tags" — latest + sha256-….att + sha256-….sig (OCP 4.21) — CLI 'oc get imagestream' authoritative.
+Now *verify* it against the public key:
+
+[source,sh,role=execute]
+----
+cosign verify --key ~/cosign.pub --allow-insecure-registry --insecure-ignore-tlog "$IMG"
+----
+
+.Expected output (abridged)
+[source,texinfo]
+----
+Verification for image-registry.openshift-image-registry.svc:5000/<you>-cicd/parasol-claims@sha256:... --
+The following checks were performed on each of these signatures:
+  - The cosign claims were validated
+  - The signatures were verified against the specified public key
+----
+
+The signature is *valid*: this image is intact and was signed with the key your pipeline signs with.
+(`--insecure-ignore-tlog` tells cosign not to look for a transparency-log entry — this key-based signature does not use one; you will meet the transparency log with *keyless* signing in exercise 4. `--allow-insecure-registry` skips the internal registry's service-CA TLS.)
+
+Now watch it *reject* an image that was not signed with your key — a stock public image:
+
+[source,sh,role=execute]
+----
+cosign verify --key ~/cosign.pub --insecure-ignore-tlog \
+  docker.io/library/hello-world:latest 2>&1 | tail -2
+----
+
+.Expected output
+[source,texinfo]
+----
+Error: no signatures found
+error during command execution: no signatures found
+----
+
+That is the whole point of verification: an image your pipeline did not sign does not pass.
+Exercise 5 turns that check into a cluster rule.
+
+[.checkpoint]
+****
+✔ *Verify:* `cosign version` prints `v3.0.4` (fetched from the RHTAS cli-server); `cosign verify --key` against `parasol-claims:latest` reports *"The signatures were verified against the specified public key"*; and the same command against a stock image fails with *"no signatures found"*.
+****
+
+== 3. Provenance and SBOM: prove *how* it was built
+⏱ *~10 min* · read the SLSA attestation Chains attached beside the image
+
+A signature says the image is intact and yours.
+An *attestation* says _how it was built_ — the builder, the source, the steps, the timestamps — as a signed *SLSA provenance* statement.
+Chains attached one to your image, stored in the registry beside it as a `.att` tag.
+
+First see the artifacts Chains stored — the image plus two tags derived from its digest:
+
+// [CAPTURE-VERIFY] Builds > ImageStreams > parasol-claims Details "Tags" — latest + sha256-….att + sha256-….sig — CLI 'oc get istag' authoritative.
 [tabs]
 ====
 Console::
 +
 --
 In the navigation, choose *Builds* → *ImageStreams* (project `{user}-cicd`) and click `parasol-claims`.
-Its *Tags* list shows three tags: `latest` (the image) plus two derived from its digest — `sha256-….att` (the attestation) and `sha256-….sig` (the signature).
+Its *Tags* list shows `latest` (the image) plus two derived from its digest — `sha256-….att` (the attestation) and `sha256-….sig` (the signature).
 --
 CLI::
 +
@@ -695,57 +540,121 @@ oc get imagestream parasol-claims -n $NS \
 .Expected output
 [source,texinfo]
 ----
+candidate
 latest
-sha256-<your-image-digest>.att
-sha256-<your-image-digest>.sig
+sha256-<digest>.att
+sha256-<digest>.sig
 ----
 --
 ====
 
-The `.sig` tag is the *signature*; the `.att` tag is the *attestation* — a signed *SLSA provenance* statement describing how the image was built.
-They travel with the image: copy the image to another registry and the signature comes too.
+Now *verify the attestation's signature* and read its SLSA provenance:
 
-[NOTE,role=instructor-demo]
-.🧑‍🏫 Instructor demo — verify the signature and read the provenance with cosign
-====
-`cosign` is the tool that _checks_ what Chains _produced_.
-It is not installed in the attendee terminal, so the instructor runs it (see the instructor guide for the one-line verification pod).
-Against the in-namespace public key (`chains-cosign-pub`, copied in by the entry state), verification *passes*:
+[source,sh,role=execute]
+----
+cosign verify-attestation --key ~/cosign.pub --type slsaprovenance \
+  --allow-insecure-registry --insecure-ignore-tlog "$IMG" > /dev/null \
+  && echo "✔ attestation signature verified"
 
-.cosign verify + verify-attestation output
-[%collapsible]
-=====
+cosign download attestation --allow-insecure-registry "$IMG" \
+  | jq -r '.payload' | base64 -d \
+  | jq -c '{predicateType, buildType: .predicate.buildType, builder: .predicate.builder.id}'
+----
+
+.Expected output
 [source,texinfo]
 ----
-$ cosign verify --key cosign.pub <image>@sha256:<digest>
-Verification for ...parasol-claims@sha256:<digest> --
-The following checks were performed on each of these signatures:
-  - The cosign claims were validated
-  - The signatures were verified against the specified public key
-
-$ cosign verify-attestation --key cosign.pub --type slsaprovenance <image>@sha256:<digest>
-  ... verified against the specified public key
-  predicateType: https://slsa.dev/provenance/v0.2
-  buildType:     tekton.dev/v1/TaskRun
-  builder.id:    https://tekton.dev/chains/v2
+✔ attestation signature verified
+{"predicateType":"https://slsa.dev/provenance/v0.2","buildType":"tekton.dev/v1/TaskRun","builder":"https://tekton.dev/chains/v2"}
 ----
-=====
 
-The attestation is real *SLSA provenance*: it names the builder (`tekton.dev/chains/v2`), the build type (a Tekton TaskRun), the source, and the start/finish timestamps — a machine-checkable answer to "prove this image came from your pipeline."
-An unsigned image, or one signed with a different key, fails this check with a non-zero exit code — which is exactly what the admission control in exercise 5 relies on.
-====
+That is real *SLSA provenance*: it names the predicate type (`slsa.dev/provenance/v0.2`), the build type (a Tekton TaskRun), and the builder (`tekton.dev/chains/v2`) — a machine-checkable answer to "prove this image came from your pipeline."
+The full predicate also lists the source materials and the start/finish timestamps.
+
+You have now seen the three artifacts of a trustworthy image, each answering a different question: the *signature* (intact + ours), the *attestation* (how it was built), and the *SBOM* (what is inside).
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get imagestream parasol-claims` shows `.sig` and `.att` tags beside `latest`; `cosign verify-attestation` confirms the attestation's signature; and `cosign download attestation` yields a SLSA provenance predicate naming `buildType: tekton.dev/v1/TaskRun` and `builder: https://tekton.dev/chains/v2`.
+****
+
+== 4. Keyless signing and the transparency log
+⏱ *~15 min* · sign the SBOM with a short-lived identity and find it in Rekor
+
+The signature you verified uses a *cosign key pair* (the private key lives in the cluster).
+The enterprise alternative is *keyless* signing: *Red Hat Trusted Artifact Signer* issues a *short-lived certificate* tied to your build identity (via *Fulcio*), and records every signature in a public, append-only *transparency log* (*Rekor*) — so there is no long-lived key to steal, and no signature can be quietly backdated or hidden.
+
+You will sign your *SBOM* keylessly and then find its record in the log.
+First point cosign at the RHTAS trust root, and mint a short-lived *identity token* (a Kubernetes service-account token — the identity Fulcio issues a certificate for):
+
+[source,sh,role=execute]
+----
+cosign initialize --mirror=$TUF --root=$TUF/root.json
+TOKEN=$(oc create token pipeline --audience trusted-artifact-signer -n $NS)
+----
+
+Now *sign the SBOM* keylessly.
+cosign gets a certificate from Fulcio for your identity, signs, and uploads the record to Rekor — writing a *bundle* (certificate + signature + log proof) beside the file:
+
+[source,sh,role=execute]
+----
+cd ~/parasol-claims
+cosign sign-blob -y --identity-token="$TOKEN" \
+  --bundle ~/sbom.bundle target/parasol-claims-sbom.json > /dev/null
+echo "signed; bundle written to ~/sbom.bundle"
+----
+
+The signature is now in the transparency log.
+*Find it* — search Rekor for your artifact, and read the log's growth:
+
+[source,sh,role=execute]
+----
+rekor-cli search --rekor_server $REKOR --artifact target/parasol-claims-sbom.json
+rekor-cli loginfo --rekor_server $REKOR | grep -E 'Tree Size'
+----
+
+.Expected output (your UUID differs; the log is shared and append-only, so the tree size is a running total)
+[source,texinfo]
+----
+Found matching entries (listed by UUID):
+<a 64-character entry UUID>
+Active Tree Size:       <a running total — your signature is now one of them>
+Total Tree Size:        <a running total — your signature is now one of them>
+----
+
+That UUID is a permanent, tamper-evident record: *this artifact was signed by this identity at this time.*
+Anyone can audit it without contacting you.
+
+Finally, *verify the keyless signature* — cosign checks the certificate identity, the issuer, and the log proof from the bundle:
+
+[source,sh,role=execute,subs="attributes"]
+----
+cosign verify-blob --bundle ~/sbom.bundle \
+  --certificate-identity=https://kubernetes.io/namespaces/{user}-cicd/serviceaccounts/pipeline \
+  --certificate-oidc-issuer=https://kubernetes.default.svc \
+  ~/parasol-claims/target/parasol-claims-sbom.json
+----
+
+.Expected output
+[source,texinfo]
+----
+Verified OK
+----
+
+`Verified OK`: the SBOM was signed by the `pipeline` identity in your namespace, and Rekor has the receipt.
 
 [NOTE]
-.Keyless signing — the enterprise path
+.Why sign the SBOM, and not push the keyless signature onto the image
 ====
-This lab signs with a *cosign key pair* (the private key lives in the cluster; the public key verifies).
-The enterprise alternative is *keyless* signing: *Red Hat Trusted Artifact Signer* (RHTAS, built on the sigstore project — Fulcio + Rekor) issues a *short-lived certificate* tied to the build's identity and records the signature in a public *transparency log*, so there is no long-lived key to steal or rotate.
-RHTAS is installed on this cluster and the instructor can show the keyless flow; the key-based path you used here is the deterministic one for a lab.
+Keyless signing records in Rekor *before* it stores the signature — which is exactly what you want to see here.
+Signing the *SBOM file* (`sign-blob`) keeps the beat self-contained and registry-independent; the OpenShift internal registry does not accept cosign's keyless image-signature manifest (you would see an `UNKNOWN` push error _after_ the log entry is already written).
+In production you would push keyless *image* signatures to an external registry (Quay), where the same `cosign sign` you saw in exercise 2 lands them.
+You can browse every entry in this log in the *Rekor Search UI* at https://rekor-search-ui-trusted-artifact-signer.{cluster_domain}[the Rekor Search UI^].
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* `chains.tekton.dev/signed=true` on your build TaskRuns; `oc get imagestream parasol-claims` shows `.sig` and `.att` tags beside `latest`; and you can explain the three artifacts — signature (intact + ours), attestation (how it was built), SBOM (what is inside).
+✔ *Verify:* `cosign sign-blob` recorded your SBOM in Rekor; `rekor-cli search --artifact` returns a matching entry UUID and `loginfo` shows the tree grew; and `cosign verify-blob --bundle` returns *"Verified OK"* against your namespace's `pipeline` identity and the `kubernetes.default.svc` issuer.
 ****
 
 == 5. Only signed images run: admission control
@@ -785,21 +694,21 @@ spec:
 
 With the policy in place:
 
-* Deploying your *signed* `parasol-claims` image *works* — the node verifies the signature against the key and pulls it.
-* Deploying an *unsigned* image (say a stock `docker.io` image) into the same namespace is *refused* — the pod stays `ImagePullBackOff`, and its events read `SignatureValidationFailed: ... A signature was required, but no signature exists`.
+* Deploying your *signed* `parasol-claims:latest` image *works* — the node verifies the signature against the key and pulls it.
+* Deploying an *unsigned* image (say a stock `docker.io` image) into the same scope is *refused* — the pod stays `ImagePullBackOff`, and its events read `SignatureValidationFailed: ... A signature was required, but no signature exists`.
 
-That is the whole point of admission: it does not matter whether anyone _remembered_ to run the scan gate — the cluster will not pull an image it cannot verify.
+That is the point of admission: it does not matter whether anyone _remembered_ to run the scan gate — the cluster will not pull an image it cannot verify.
 ====
 
 Confirm the pieces that make this possible are already in *your* namespace — the public key the policy trusts, and a signed image for it to admit:
 
-// [CAPTURE-VERIFY] Workloads > ConfigMaps > chains-cosign-pub present (OCP 4.21) — CLI 'oc get configmap'/'oc get imagestream' authoritative.
+// [CAPTURE-VERIFY] Workloads > ConfigMaps > chains-cosign-pub present — CLI 'oc get configmap'/'oc get imagestream' authoritative.
 [tabs]
 ====
 Console::
 +
 --
-Confirm both in the console: under *Workloads* → *ConfigMaps* (project `{user}-cicd`), `chains-cosign-pub` is present (the key admission trusts); and under *Builds* → *ImageStreams* → `parasol-claims` (from exercise 4), the `.sig`/`.att` tags are the signature admission verifies.
+Under *Workloads* → *ConfigMaps* (project `{user}-cicd`), `chains-cosign-pub` is present (the key admission trusts); and under *Builds* → *ImageStreams* → `parasol-claims` (from exercise 3), the `.sig`/`.att` tags are the signature admission verifies.
 --
 CLI::
 +
@@ -814,7 +723,7 @@ echo "signed image tags:  $(oc get imagestream parasol-claims -n $NS -o jsonpath
 [source,texinfo]
 ----
 trust key present:  configmap/chains-cosign-pub
-signed image tags:  latest sha256-....att sha256-....sig
+signed image tags:  candidate latest sha256-....att sha256-....sig
 ----
 --
 ====
@@ -824,7 +733,7 @@ The key that admission verifies against, and the signature it verifies — both 
 
 [.checkpoint]
 ****
-✔ *Verify:* You watched the instructor's `ImagePolicy` admit your *signed* image and refuse an *unsigned* one (`SignatureValidationFailed` at pull); and you confirmed your namespace holds the trust key (`chains-cosign-pub`) and a signed image the policy admits.
+✔ *Verify:* you watched the instructor's `ImagePolicy` admit your *signed* image and refuse an *unsigned* one (`SignatureValidationFailed` at pull); and you confirmed your namespace holds the trust key (`chains-cosign-pub`) and a signed image the policy admits.
 ****
 
 == Challenge (optional)
@@ -834,18 +743,16 @@ You have the mechanics.
 Try these on your own:
 
 * *Query the SBOM like a security team.*
-Re-generate `target/parasol-claims-sbom.json` and answer a real question with `jq`: how many components come from `org.apache.*`? (`jq '[.components[] | select(.group | startswith("org.apache"))] | length' target/parasol-claims-sbom.json`.)
+Answer a real question with `jq`: how many components come from `org.apache.*`? (`jq '[.components[] | select(.group | startswith("org.apache"))] | length' target/parasol-claims-sbom.json`.)
 That is exactly the query you would run the day a CVE lands in an Apache library.
-* *Prove the base image is not the gate.*
-Bump the `Containerfile` base tag to `openjdk-21:1.23` on `seed-vulnerable` (leave `log4j-core` in), re-run, and read the scan: it still *fails* on Log4Shell.
-Then remove `log4j-core` too and watch it pass.
-The dependency, not the base image, is the gate — you just proved it both ways.
 * *Read the full provenance.*
-Ask the instructor to run `cosign download attestation <image> | jq -r '.payload | @base64d | fromjson | .predicate'` — the SLSA provenance predicate lists the build steps, the materials, and the timestamps.
+`cosign download attestation --allow-insecure-registry "$IMG" | jq -r '.payload' | base64 -d | jq '.predicate.materials, .predicate.metadata'` — the SLSA predicate lists the source materials and build timestamps.
 That is the machine-readable answer to "how was this image built."
-* *Find the run in the console.*
-Open *Pipelines → PipelineRuns* in the {ocp_console_url}[OpenShift console^], select your failed run, and read the `acs-scan` step logs in the graph — the same Log4Shell violation, visualized.
+* *Inspect a Rekor entry in full.*
+Take the UUID from exercise 4 and run `rekor-cli get --rekor_server $REKOR --uuid <uuid>` — read the log index, the integrated time, and the certificate the identity was issued.
+* *Prove the base image is not the gate.*
+The seeded branch also pins an older UBI OpenJDK base tag. Bump it in the `Containerfile`, rebuild the `:candidate`, and confirm the gate *still* fails on Log4Shell — the dependency, not the base image, is what the "Supply Chain Security" gate keys on.
 
-When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to wipe `{user}-cicd` back to the entry state (the pipeline and trust secrets, your fork restored to its vulnerable `seed-vulnerable` state) and start fresh.
+When you are done, run `ws verify {module-id}` — or `ws prep {module-id} --yes` to re-warm `{user}-cicd` back to the entry state (a fresh signed `parasol-claims:latest`, the pipeline and trust secrets, your fork restored to its vulnerable `seed-vulnerable` state) and start fresh.
 
 endif::demo[]

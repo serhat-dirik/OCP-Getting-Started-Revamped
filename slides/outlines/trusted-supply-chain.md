@@ -68,14 +68,14 @@ Visual: A build step with a small "Chains" badge auto-attaching a .sig and .att 
 
 ## Slide: What you'll do
 
-- Run the pipeline — watch the scan block Log4Shell
-- Find log4j-core@2.14.1 in the SBOM (one jq)
-- Remove the dependency — gate goes green
-- See Chains signed it; read the provenance
+- Watch the gate refuse a seeded build (Log4Shell)
+- Your clean image is already built, scanned, signed
+- Verify it yourself with cosign (fetched from RHTAS)
+- Read the SLSA provenance; sign the SBOM keylessly → Rekor
 - Watch the cluster refuse an unsigned image
 
-Notes: Set expectations for the hands-on, all in your own -cicd project. You run the supply-chain pipeline on a branch seeded with a known-bad dependency and watch the build succeed and then the scan turn the run red — "Block Log4Shell," CVSS 10, in log4j-core 2.14.1. You generate a CycloneDX SBOM and find that exact component with a one-line jq query — the same query you'd run the day the next big CVE lands. You remove the dependency in your fork, re-run, and watch the gate go green with no base-image change. You confirm Tekton Chains signed every build and attached SLSA provenance, and you see how a native ImagePolicy makes the cluster refuse to pull an unsigned image. Two beats — the cosign verification and the admission block — are instructor-run (the terminal has no cosign, and ImagePolicy is a cluster resource), but you verify the pieces hands-on.
-Visual: Numbered arc strip: run → scan blocks → find in SBOM → fix → signed → admission refuses unsigned.
+Notes: Set expectations for the hands-on, all in your own -cicd project — and it's trust-first. Your environment comes pre-warmed: the pipeline already built, scanned, and signed a clean parasol-claims:latest. Scanning is one beat — you build the seeded branch to a throwaway tag and watch the build succeed and then the scan turn the run red ("Block Log4Shell," CVSS 10, log4j-core 2.14.1), while you read the clean image's already-green verdict beside it. Then the trust spine, all hands-on: you fetch cosign and rekor-cli straight from the Red Hat Trusted Artifact Signer client server, verify the signature against the public key, read the SLSA provenance attestation Chains attached, sign your SBOM keylessly and find its permanent record in the Rekor transparency log, and finally watch a native ImagePolicy make the cluster refuse an unsigned image. Only that last admission beat is instructor-run (ImagePolicy is a cluster resource); everything else you do yourself.
+Visual: Numbered arc strip: gate refuses seeded → verify signed :latest → read provenance → keyless sign → Rekor entry → admission refuses unsigned.
 
 ## Slide: Map to your org — and when not
 
