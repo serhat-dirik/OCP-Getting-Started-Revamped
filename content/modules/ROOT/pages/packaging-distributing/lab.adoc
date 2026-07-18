@@ -49,7 +49,7 @@ ifdef::demo[]
 [NOTE]
 .Before you present
 ====
-Run `ws start packaging-distributing --user {user}` a few minutes ahead and set `NS={user}-dev`, `helm create parasol-notifications`, and apply the chart edits (values + Route) so you start from a chart ready to install — this demo runs from the *entry* state, not `ws solve`.
+Run `ws start packaging-distributing --user {user}` a few minutes ahead and set `NS={user}-dev`, `helm create parasol-notifications`, and apply the chart edits (`appVersion`, values, Route, and the Route-aware `NOTES.txt` — the stock `NOTES.txt` still refers to the removed Ingress and would break the render) so you start from a chart ready to install — this demo runs from the *entry* state, not `ws solve`.
 The money moment is beat 2 — a bad probe path that *fails the upgrade* while the app *stays up on the old pods*, then a one-command rollback.
 Keep the terminal font large; the failed `helm history` line and the digest match are the whole visual.
 ====
@@ -175,6 +175,9 @@ First set the chart's *values* — image, the service's real port (`8080`), heal
 [source,sh,role=execute]
 ----
 cd parasol-notifications
+# The chart ships the 1.0 notifications app — record that in Chart.yaml's appVersion
+# (so `helm history` reads 1.0, not the placeholder `helm create` stamps in).
+sed -i 's/^appVersion:.*/appVersion: "1.0"/' Chart.yaml
 cat > values.yaml <<EOF
 replicaCount: 1
 
@@ -307,6 +310,21 @@ A plain HTTP Route (or `oc expose`) gets HSTS-upgraded by the router and can dea
 This is the workshop-wide rule for any browser-facing app — the chart bakes it in so every install gets it right.
 ====
 
+One scaffolded template is left — `NOTES.txt`, the message Helm prints after an install.
+The stock one refers to the Ingress you just removed (`.Values.ingress.*`), so it would *break every render* (`helm lint`/`template`/`install` all fail with a `nil pointer evaluating interface {}.enabled`).
+Replace it with a Route-aware message:
+
+[source,sh,role=execute]
+----
+cat > templates/NOTES.txt <<'EOF'
+Thanks for installing {{ .Chart.Name }} (release {{ .Release.Name }}).
+Reach the notifications service in your browser:
+
+  oc get route {{ include "parasol-notifications.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{"https://"}{.spec.host}{"\n"}'
+EOF
+echo "NOTES.txt replaced (Route-aware; no stale ingress refs)"
+----
+
 Now *lint* the chart (catches structural mistakes) and *render* it locally without installing (so you see exactly what will be applied):
 
 [source,sh,role=execute]
@@ -348,7 +366,7 @@ The image points at *your* registry, the port is `8080`, the probes hit `/health
 
 [.checkpoint]
 ****
-✔ *Verify:* Your `values.yaml` drives the image (your namespace's `parasol-notifications:1.0`), `service.port: 8080`, `/health` probes, and the `SITE` marker; the Deployment template carries the `SITE` env; the Ingress is replaced by an edge `Route`. `helm lint` passes and `helm template` renders all of it — the chart now describes *your* app, not nginx.
+✔ *Verify:* Your `values.yaml` drives the image (your namespace's `parasol-notifications:1.0`), `service.port: 8080`, `/health` probes, and the `SITE` marker; the Deployment template carries the `SITE` env; the Ingress is replaced by an edge `Route`, and the stock `NOTES.txt` by a Route-aware one (no stale `ingress` refs). `helm lint` passes and `helm template` renders all of it — the chart now describes *your* app, not nginx.
 ****
 
 == 3. Install the release and reach it
@@ -630,7 +648,8 @@ Upgrade to apply both — the *post-upgrade hook fires* and seeds the welcome no
 [source,sh,role=execute]
 ----
 helm upgrade parasol-notifications ./parasol-notifications -n $NS >/dev/null && echo "upgraded"
-curl -sk "https://$ROUTE/api/notifications" | grep -o 'CLM-0000'
+# the post-upgrade hook Job seeds CLM-0000 a moment after the upgrade returns — retry until it lands
+for i in $(seq 1 15); do curl -sk "https://$ROUTE/api/notifications" | grep -o 'CLM-0000' && break; sleep 2; done
 ----
 
 .Expected output (the hook ran — the store now carries the seeded welcome)
@@ -821,11 +840,11 @@ oc get packagemanifests --field-selector=metadata.name=openshift-pipelines-opera
   | jq -r '.items[0].status | "default channel: \(.defaultChannel)", "channels: \([.channels[].name] | join(", "))"'
 ----
 
-.Expected output (a default channel plus version-pinned streams)
+.Expected output (a default channel plus one version-pinned stream per release — the list grows over time, so yours may end at a higher `pipelines-1.NN`)
 [source,texinfo]
 ----
 default channel: latest
-channels: latest, pipelines-1.15, pipelines-1.16, pipelines-1.17, pipelines-1.18, pipelines-1.19, pipelines-1.20, pipelines-1.21, pipelines-1.22
+channels: latest, pipelines-1.15, pipelines-1.16, ..., pipelines-1.23
 ----
 
 Now the *heart of the bundle* — the *ClusterServiceVersion (CSV)*.
@@ -841,10 +860,10 @@ oc get csv "$CSV" -n openshift-operators -o json | jq -r '
   "install modes: \([.spec.installModes[] | select(.supported) | .type] | join(", "))"'
 ----
 
-.Expected output (the CSV: the CRDs it owns, the controller it installs, its scope)
+.Expected output (the CSV: the CRDs it owns, the controller it installs, its scope — the CSV version tracks whatever Pipelines release is installed)
 [source,texinfo]
 ----
-installed CSV: openshift-pipelines-operator-rh.v1.22.4
+installed CSV: openshift-pipelines-operator-rh.v1.23.0
 owned CRDs: 14
 install strategy: deployment
 install modes: AllNamespaces
