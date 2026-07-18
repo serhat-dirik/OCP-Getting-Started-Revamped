@@ -28,6 +28,23 @@ NS={user}-mesh
 echo "mesh namespace: $NS"
 ----
 
+The Showroom terminal ships `oc` but not `istioctl` — the mesh CLI you'll use throughout to read what each proxy was *actually* programmed with. Download the build that matches the running control plane (a one-time fetch into `~/bin`; if it can't reach the mirror, see xref:service-mesh-advanced-gateways/troubleshooting.adoc[troubleshooting]):
+
+[source,sh,role=execute]
+----
+mkdir -p ~/bin
+ISTIO_VER=$(oc get istio default -o jsonpath='{.spec.version}')   # the shared control plane's exact Istio version
+curl -sSL "https://storage.googleapis.com/istio-release/releases/${ISTIO_VER#v}/istioctl-${ISTIO_VER#v}-linux-amd64.tar.gz" | tar -xzf - -C ~/bin istioctl
+export PATH="$HOME/bin:$PATH"
+istioctl version --remote=false
+----
+
+.Expected output (the client matches the running {service_mesh_version} control plane's Istio version)
+[source,texinfo]
+----
+client version: 1.28.6
+----
+
 You are the platform engineer for Parasol's *claims* application.
 Its services — `parasol-web` → `parasol-claims` → `parasol-fraud` (with a `claims-db`) — are already running in `{user}-mesh`, but *un-meshed*: no proxies, no mutual TLS, no traffic control.
 A shared OpenShift Service Mesh {service_mesh_version} control plane is waiting in `istio-system`, and your namespace is already a *discovered* mesh tenant.
@@ -404,23 +421,27 @@ oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 60); do curl
 echo "traffic sent"
 ----
 
-Ground that the traffic really flowed *through the mesh* before you open the console — the data plane reports three proxies and their live request counts:
+Ground that the traffic really flowed *through the mesh* before you open the console — your `istioctl` client matches the mesh, and the claims sidecar recorded its calls to fraud in `istio_requests_total`:
 
 [source,sh,role=execute]
 ----
-istioctl version
+istioctl version --remote=false
 oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null | grep -c parasol-fraud
 ----
 
-.Expected output (a 3-proxy data plane; many recorded requests to fraud)
+.Expected output (the client matches the control plane; the claims proxy has a live fraud-request metric series)
 [source,texinfo]
 ----
-client version: 1.16.7
-control plane version: 1.28.6_ossm
-data plane version: 1.28.6 (3 proxies)
-...
-6
+client version: 1.28.6
+1
 ----
+
+[NOTE]
+.Why `--remote=false`
+====
+The bare `istioctl version` also reports the *control-plane* and *data-plane* builds, but reading those lists cluster-scoped webhook and `istio-system` objects your project role deliberately doesn't include — so as an attendee it stalls on a permissions error.
+`--remote=false` prints the client you just installed; the per-pod `istioctl proxy-config` reads later in the lab are how you inspect what the data plane is actually running.
+====
 
 Now open Kiali and *see* it.
 
@@ -840,14 +861,12 @@ oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud:          HTT
 oc exec deploy/demo-client -n $NS -- curl -s -m5 -w "demo-client -> fraud:  HTTP %{http_code}  (denied)\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
 ----
 
-.Expected output (only the claims identity is allowed; everyone else gets 403)
+.Expected output (only the claims identity is allowed; Envoy's `RBAC: access denied` body has no trailing newline, so it runs straight into the next line's `-w` summary)
 [source,texinfo]
 ----
 claims -> fraud:       HTTP 200  (allowed)
-RBAC: access denied
-web -> fraud:          HTTP 403  (denied)
-RBAC: access denied
-demo-client -> fraud:  HTTP 403  (denied)
+RBAC: access deniedweb -> fraud:          HTTP 403  (denied)
+RBAC: access denieddemo-client -> fraud:  HTTP 403  (denied)
 ----
 
 That's the whole point: `claims` (identity `sa/parasol-claims`, over mutual TLS) is allowed; the `web` tier — a perfectly healthy pod with a *different* identity — is refused with `403 RBAC: access denied`; and the un-meshed `demo-client` (no mesh identity at all) is refused too.
@@ -886,13 +905,13 @@ The seeded `partner-tcp-backend` is a raw-TCP server that ACKs each connection. 
 
 [source,sh,role=execute]
 ----
-oc exec deploy/demo-client -n $NS -- sh -c 'printf "CLAIM-FEED-42\n" | timeout 5 python3 -c "import socket,sys;s=socket.create_connection((\"partner-tcp-backend\",9000),5);s.sendall(sys.stdin.buffer.read());print(repr(s.recv(200)))"'
+oc exec deploy/demo-client -n $NS -- sh -c 'printf "CLAIM-FEED-42\n" | timeout 5 python3 -c "import socket,sys,time;s=socket.create_connection((\"partner-tcp-backend\",9000),5);s.sendall(sys.stdin.buffer.read());time.sleep(0.3);print(repr(s.recv(200)))"'
 ----
 
-.Expected output (the raw-TCP backend answers with its banner)
+.Expected output (the backend ACKs with its banner and echoes the feed line back)
 [source,texinfo]
 ----
-b'PARASOL-PARTNER-FEED-ACK '
+b'PARASOL-PARTNER-FEED-ACK CLAIM-FEED-42\n'
 ----
 
 Now serve it through an *Istio ingress gateway* — the supported path for raw TCP. First deploy a small gateway proxy (the `image: auto` is replaced by the injector with the Istio proxy):
@@ -985,7 +1004,7 @@ Send the raw-TCP feed *through the gateway* now (to the gateway Service on 9000,
 [source,sh,role=execute]
 ----
 sleep 5
-oc exec deploy/demo-client -n $NS -- sh -c 'printf "CLAIM-FEED-99\n" | timeout 6 python3 -c "import socket,sys;s=socket.create_connection((\"parasol-partner-gw\",9000),5);s.sendall(sys.stdin.buffer.read());print(\"gateway reply:\",repr(s.recv(200)))"'
+oc exec deploy/demo-client -n $NS -- sh -c 'printf "CLAIM-FEED-99\n" | timeout 6 python3 -c "import socket,sys,time;s=socket.create_connection((\"parasol-partner-gw\",9000),5);s.sendall(sys.stdin.buffer.read());time.sleep(0.3);print(\"gateway reply:\",repr(s.recv(200)))"'
 ----
 
 .Expected output (raw TCP, end-to-end through the Istio gateway)
