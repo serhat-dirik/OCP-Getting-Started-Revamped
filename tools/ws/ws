@@ -431,6 +431,22 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
       esac
     done
   done
+  # Dangling ServiceAccount secret links aren't in `oc delete all` either: M18's Ex4 links the sample
+  # pull Secret into the default SA (`oc secrets link … --for=pull`); the loop above deletes the Secret
+  # but the SA's imagePullSecrets/secrets entries survive reset and red-fail the next entry verify
+  # ("sample pull Secret is NOT referenced yet") — the exact sibling of the PDB/NetworkPolicy/Template
+  # purge gaps above (M18 full G3, 2026-07-19). Unlink every non-system reference: system dockercfg/
+  # token links match the same preserve patterns as the purge loop, so they stay; anything else points
+  # at a secret the purge just deleted and must go with it.
+  local sa refname
+  for sa in default builder deployer; do
+    for refname in $(oc get sa "$sa" -n "$ns" -o jsonpath='{range .imagePullSecrets[*]}{.name}{"\n"}{end}{range .secrets[*]}{.name}{"\n"}{end}' 2>/dev/null | sort -u); do
+      case "$refname" in
+        builder-dockercfg-*|default-dockercfg-*|deployer-dockercfg-*|builder-token-*|default-token-*|deployer-token-*) ;;
+        *) oc secrets unlink "$sa" "$refname" -n "$ns" >/dev/null 2>&1 || true;;
+      esac
+    done
+  done
   ok "purge requested in ${ns}"
 }
 
