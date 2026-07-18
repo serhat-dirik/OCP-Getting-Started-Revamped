@@ -5,6 +5,25 @@
 # child Applications (wave 0+) mutate anything, so ogsr-uninstall.sh RESTORES rather
 # than blindly deletes. First-write-wins (record_once) → the true prior state survives
 # idempotent re-syncs. # TODO(verify-on-cluster): every oc read here needs a live cluster.
+#
+# Per-operator adoption (op_<name>=adopted|created:<ns>) needs the SAME component-
+# manifest walk install.sh's snapshot_operators() does, which needs the repo on disk —
+# a Job has no filesystem of its own. The initContainer below shallow + sparse clones
+# (platform-portfolio/ only) the chart's own source coordinates (.Values.gitops.repoURL
+# @ .revision — the same repo/revision FSC injects for the field-content Application)
+# into a memory-backed emptyDir the main container reads. ose-cli ships oc+curl but no
+# git (verified live on this image 2026-07-18: `which git` → not found), hence the
+# separate git-capable init image — the SAME pinned digest OpenShift Pipelines' own
+# git-clone/git-cli Tasks use (`oc get tasks.tekton.dev git-clone -n openshift-pipelines
+# -o yaml`), so it's already trusted and commonly cached wherever Pipelines is installed.
+# No yq in the main image either: `oc create -f <file> --dry-run=client -o jsonpath=...`
+# parses a local manifest client-side (no server round-trip, no extra tooling needed).
+#
+# gitea-operator is a deliberate, explicit exception to the generic per-stack walk: it
+# comes from an external rhpds/gitea-operator OLMDeploy kustomize base (a GitHub URL
+# platform-portfolio/components/gitea/kustomization.yaml fetches at build time), so it
+# carries no local subscription*.yaml for the walk (or install.sh's snapshot_operators)
+# to glob. Same explicit-check treatment as the GitOps-operator/Lightspeed checks below.
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
@@ -19,7 +38,7 @@ metadata:
     {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
 spec:
   backoffLimit: 3
-  activeDeadlineSeconds: 600
+  activeDeadlineSeconds: 900
   template:
     metadata:
       labels:
@@ -27,6 +46,44 @@ spec:
     spec:
       serviceAccountName: ogsr-bootstrap
       restartPolicy: Never
+      volumes:
+        # Handoff between the git-fetch init container and the capture container. Memory-backed
+        # per the house Job convention (no writable node-local disk assumption under restricted SCC).
+        - name: repo
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+      initContainers:
+        - name: fetch-repo
+          # Pinned by digest: this repo has no floating ":latest" tag (registry.redhat.io refuses it
+          # — verified live 2026-07-18). Same image the cluster's own git-clone/git-cli Tekton Tasks
+          # use, so any cluster with the Pipelines operator (core-devtools baseline) already trusts it.
+          image: "registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel9@sha256:4e7c197c1f328cf8dbd6455647b137725495b0dfbe32ec2d640caadce0486523"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              echo "▶ shallow + sparse clone: ${REPO_URL} @ ${REPO_REVISION} (platform-portfolio/ only)"
+              git clone --filter=blob:none --no-checkout --depth 1 -b "${REPO_REVISION}" "${REPO_URL}" /workspace/repo
+              cd /workspace/repo
+              git sparse-checkout init --cone
+              git sparse-checkout set platform-portfolio
+              git checkout "${REPO_REVISION}"
+              echo "✅ repo ready: $(du -sh . | cut -f1) at /workspace/repo"
+          env:
+            - name: REPO_URL
+              value: {{ .Values.gitops.repoURL | quote }}
+            - name: REPO_REVISION
+              value: {{ .Values.gitops.revision | quote }}
+          volumeMounts:
+            - name: repo
+              mountPath: /workspace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
       containers:
         - name: capture
           image: {{ .Values.images.cli }}
@@ -38,6 +95,12 @@ spec:
               value: {{ .Values.owner | quote }}
             - name: STACKS
               value: {{ include "ogsr-bootstrap.installedStacks" . | quote }}
+            - name: REPO_DIR
+              value: /workspace/repo
+          volumeMounts:
+            - name: repo
+              mountPath: /workspace
+              readOnly: true
           args:
             - |
               set -euo pipefail
@@ -56,6 +119,13 @@ spec:
                 [[ -n "$cur" ]] && return 0
                 oc patch configmap "$CM" -n "$STATE_NS" --type merge \
                   -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
+              }
+
+              # yaml_field FILE JSONPATH — read one field from a local manifest with no yq in this
+              # image: `oc create --dry-run=client` parses the file client-side, no server round-trip,
+              # and (unlike yq) prints an empty string rather than the literal "null" for a missing key.
+              yaml_field() {
+                oc create -f "$1" --dry-run=client -o jsonpath="$2" 2>/dev/null || true
               }
 
               info "cluster-monitoring-config (portfolio flips enableUserWorkload=true)"
@@ -95,6 +165,48 @@ spec:
 
               # The stack list ogsr-uninstall.sh re-derives the operator set from.
               record_once installed_stacks "$STACKS"
+
+              # gitea-operator: see the file header — external OLMDeploy base, not locally globbable.
+              info "gitea-operator (external OLMDeploy base — explicit check, not part of the walk below)"
+              if oc get subscription gitea-operator -n gitea-operator >/dev/null 2>&1; then
+                record_once op_gitea-operator "adopted:gitea-operator"
+              else
+                record_once op_gitea-operator "created:gitea-operator"
+              fi
+
+              # snapshot_operators STACKS_CSV — for each operator the SELECTED stacks install, record
+              # whether it already existed (adopted → uninstall NEVER removes it) or will be created
+              # by us (created → uninstall may remove it). Mirrors bootstrap/install.sh's
+              # snapshot_operators() field-for-field: source of truth is the component Subscription
+              # manifests (no hardcoded operator map), just read via the init container's checkout +
+              # yaml_field() instead of a local clone + yq.
+              snapshot_operators() {
+                local stacks_csv="$1" stack app comp_path sub name ns _stacks
+                IFS=',' read -ra _stacks <<< "$stacks_csv"
+                for stack in "${_stacks[@]}"; do
+                  stack="$(echo "$stack" | xargs)"
+                  [[ -d "${REPO_DIR}/platform-portfolio/stacks/${stack}/apps" ]] || continue
+                  for app in "${REPO_DIR}/platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+                    [[ -e "$app" ]] || continue
+                    comp_path="$(yaml_field "$app" '{.spec.source.path}')"
+                    [[ -n "$comp_path" ]] || continue
+                    for sub in "${REPO_DIR}/${comp_path}"/subscription*.yaml; do
+                      [[ -e "$sub" ]] || continue
+                      name="$(yaml_field "$sub" '{.metadata.name}')"
+                      ns="$(yaml_field "$sub" '{.metadata.namespace}')"
+                      [[ -n "$name" ]] || continue
+                      if oc get subscription "$name" -n "$ns" >/dev/null 2>&1; then
+                        record_once "op_${name}" "adopted:${ns}"
+                      else
+                        record_once "op_${name}" "created:${ns}"
+                      fi
+                    done
+                  done
+                done
+              }
+
+              info "per-operator adoption snapshot (stacks: ${STACKS})"
+              snapshot_operators "$STACKS"
 
               ok "uninstall-state captured"
               oc get configmap "$CM" -n "$STATE_NS" -o jsonpath='{.data}'; echo
