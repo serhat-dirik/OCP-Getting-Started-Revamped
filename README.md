@@ -22,7 +22,7 @@ The same content base doubles as a **presenter-led demo kit** for Red Hat Soluti
 
 ## Module library
 
-27 active modules today in four blocks — **A Foundations** (M01–M06) · **B Delivery & Trust** (M07–M13) · **C Platform & Tenancy** (M14–M17) · **D Advanced Electives** (M18–M27). The catalog is elastic: modules are split, combined, or added when analysis shows it serves attendees better. Any module can be someone's first: entry states are materialized per user by automation (`ws start m07`), never by "please complete the previous module."
+26 active modules today in four blocks — **A Foundations** (M01–M06) · **B Delivery & Trust** (M07–M13) · **C Platform & Tenancy** (M14–M17) · **D Advanced Electives** (M18–M26). The catalog is elastic: modules are split, combined, or added when analysis shows it serves attendees better. Any module can be someone's first: entry states are materialized per user by automation (`ws start m07`), never by "please complete the previous module."
 
 Session composition is a delivery-time choice: recommended enablement paths, module selection, and demo picks live in the [SA provisioning guide](docs/sa-provisioning-guide.md) — attendees see only the modules their session includes.
 

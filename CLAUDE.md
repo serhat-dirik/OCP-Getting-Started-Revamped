@@ -1,6 +1,6 @@
 # CLAUDE.md — OpenShift Application Platform: Getting Started
 
-You are working on an **established** modular OpenShift enablement workshop: self-contained modules (catalog is elastic — currently ~27 — split/combine when it serves the end-user), a Parasol Insurance story universe, and three renderings (workshop / demo / instructor) from one AsciiDoc source. This file is the operating card for any contributor's coding agent — human newcomers: start at README "Contributing".
+You are working on an **established** modular OpenShift enablement workshop: self-contained modules (catalog is elastic — currently ~26 — split/combine when it serves the end-user), a Parasol Insurance story universe, and three renderings (workshop / demo / instructor) from one AsciiDoc source. This file is the operating card for any contributor's coding agent — human newcomers: start at README "Contributing".
 
 ## Private material — the `../Project-Shared` convention
 

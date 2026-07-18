@@ -15,24 +15,28 @@ modules make a day**.
 
 ## Workshop paths
 
+Module numbers below are **current positions in `/modules.yaml`** (Gen-4 order; position = number,
+slugs are the stable identity — re-derive paths from module *names* if the catalog is ever reordered).
+
 | Path | Audience | Sequence |
 |---|---|---|
-| `WS-FULL-3D` (flagship) | 3-day full enablement | **Day 1** M01 → M02 → M03 → M04 · **Day 2** M07 → M08 → M09 → M10 · **Day 3** M11 → M12 → M14 → M23 |
-| `WS-FULL-2D` | 2-day compressed | **Day 1** M01 → M02 → M03 → M04 · **Day 2** M07 → M09 → M10 → M12 |
+| `WS-FULL-3D` (flagship) | 3-day full enablement | **Day 1** M01 → M02 → M03 → M04 · **Day 2** M07 → M09 → M10 → M11 · **Day 3** M12 → M13 → M15 → M24 |
+| `WS-FULL-2D` | 2-day compressed | **Day 1** M01 → M02 → M03 → M04 · **Day 2** M07 → M10 → M11 → M13 |
 | `WS-DEV-1D` | 1-day developer | M01 → M02 → M03 → M04 |
-| `WS-OPS-1D` | 1-day devops / platform | M07 → M08 → M10 → M14 |
+| `WS-OPS-1D` | 1-day devops / platform | M07 → M09 → M11 → M15 |
 
 Composition rationale (change deliberately, not accidentally):
 
 - **WS-FULL-3D** — Day 1 foundations core; Day 2 the delivery story in its natural
-  order (build pipelines → trust the supply chain → GitOps → GitOps at scale): M08
+  order (build pipelines → trust the supply chain → GitOps → GitOps at scale): M09
   sits **beside M07** because the supply-chain gates extend the very pipeline the
-  attendee just built. Day 3 broadens to developer experience (M11), operations
-  (M12), multi-tenancy (M14), and the AI elective finale (M23).
-  *(Fixed 2026-07-11: the earlier draft ran M12 before M08 on Day 3 — an
-  ascending-order violation that made the numbering look wrong. The numbering was
-  right; the path wasn't.)*
-- **WS-FULL-2D** — drops trust + developer hub to fit two days; observability (M12)
+  attendee just built. Day 3 broadens to developer experience (M12), operations
+  (M13), multi-tenancy (M15), and the AI elective finale (M24).
+  *(Fixed 2026-07-11: the earlier draft ran observability before the supply-chain
+  module on Day 3 — an ascending-order violation that made the numbering look
+  wrong. The numbering was right; the path wasn't. Numbers re-based 2026-07-18 to
+  the Gen-4 catalog.)*
+- **WS-FULL-2D** — drops trust + developer hub to fit two days; observability (M13)
   stays because ops questions always come up.
 - **WS-DEV-1D** — the developer on-ramp, foundations only.
 - **WS-OPS-1D** — assumes container fluency; jumps straight to pipelines, supply
@@ -52,7 +56,7 @@ composition pages are still queued, see 06-BACKLOG "SA-Demos showroom".)*
 
 | Demo path | Audience | Sequence |
 |---|---|---|
-| `DEMO-EXEC-45` | 45-minute executive demo (presenter-led) | M03 + M08 + M10 + M23 |
+| `DEMO-EXEC-45` | 45-minute executive demo (presenter-led) | M03 + M09 + M11 + M24 |
 
 More demo paths (e.g. "OpenShift Advanced App Platform Demo") are composed as
 SA-Demos content work continues.
