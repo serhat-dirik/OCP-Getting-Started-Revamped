@@ -36,9 +36,16 @@ STATE_CM="ogsr-uninstall-state"
 ARGO_NS="openshift-gitops"
 POOL_KEY="workshop.redhat.com/pool"
 ZONE_KEY="workshop.redhat.com/zone"
+# Argo attaches this finalizer to its Sync/PostSync hook resources (Jobs). After we delete an
+# Application with --cascade=orphan the hook Jobs are orphaned but keep the finalizer, and with no
+# controller left to clear it they wedge their namespace in Terminating forever (F5: ogsr-gitea hung
+# 8h in the C2 lifecycle test). This is the ONE finalizer class we strip automatically (Argo bookkeeping).
+HOOK_FINALIZER="argocd.argoproj.io/hook-finalizer"
 
 DRY_RUN="false"
 ASSUME_YES="false"
+# Namespaces we actually issued a delete for — F6 waits on exactly these to finish terminating.
+DELETED_WS_NS=()
 
 ok()   { echo "✅ $*"; }
 err()  { echo "❌ $*" >&2; }
@@ -70,9 +77,15 @@ if ! oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1; then
 fi
 
 # ── state helpers ─────────────────────────────────────────────────────────────
+STATE_SNAPSHOT=""    # whole state CM cached as key=value lines — it is immutable until step 9 deletes it,
+STATE_LOADED="false" # so one read serves the ~60 lookups a full run makes (a per-lookup oc call is minutes).
 state() {  # key [default] — echo a recorded value from the uninstall-state ConfigMap (or the default)
   local k="$1" def="${2:-}" v
-  v="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
+  if [[ "$STATE_LOADED" != "true" ]]; then
+    STATE_SNAPSHOT="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o go-template='{{range $k,$v := .data}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+    STATE_LOADED="true"
+  fi
+  v="$(printf '%s\n' "$STATE_SNAPSHOT" | grep -m1 "^${k}=" | cut -d= -f2- || true)"
   if [[ -n "$v" ]]; then echo "$v"; else echo "$def"; fi
 }
 
@@ -98,6 +111,33 @@ enumerate_operators() {
         st="$(state "op_${name}" | cut -d: -f1)"
         [[ -n "$st" ]] || st="unknown"
         echo "${name} ${ns} ${st}"
+      done
+    done
+  done
+}
+
+# Every namespace the INSTALLED stacks declare in their component manifests — the "installed stacks'
+# namespaces" half of F2's delete allowlist. Mirrors enumerate_operators but reads namespace*.yaml
+# instead of subscription*.yaml, so it also catches non-operator infra namespaces (e.g. ogsr-gitea)
+# that carry no per-user/shared marker label. A stack no longer in installed_stacks contributes
+# nothing here, so its leftover owner-labeled namespace (e.g. openshift-mta) is NOT in the allowlist.
+enumerate_installed_stack_ns() {
+  local stacks stack app comp_path nsfile _stacks n
+  stacks="$(state installed_stacks)"
+  [[ -n "$stacks" ]] || return 0
+  IFS=',' read -ra _stacks <<< "$stacks"
+  for stack in "${_stacks[@]}"; do
+    stack="$(echo "$stack" | xargs)"
+    [[ -d "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps" ]] || continue
+    for app in "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+      [[ -e "$app" ]] || continue
+      comp_path="$(yq '.spec.source.path' "$app" 2>/dev/null || true)"
+      [[ -n "$comp_path" && "$comp_path" != "null" ]] || continue
+      for nsfile in "${SCRIPT_DIR}/../${comp_path}"/namespace*.yaml "${SCRIPT_DIR}/../${comp_path}"/namespaces*.yaml; do
+        [[ -e "$nsfile" ]] || continue
+        while IFS= read -r n; do
+          [[ -n "$n" && "$n" != "null" ]] && echo "$n"
+        done < <(yq 'select(.kind == "Namespace") | .metadata.name' "$nsfile" 2>/dev/null || true)
       done
     done
   done
@@ -138,6 +178,36 @@ del_labeled_namespaced() {  # kind — delete owner-labeled objects of a NAMESPA
     del_obj "$kind" "$name" "$ns"
   done < <(oc get "$kind" -l "$OWNER_LABEL" -A \
             -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+}
+
+# ── namespace lifecycle helpers (F5 hook-finalizer strip, F7 owner-label strip) ─
+HOOK_JOBS_SNAPSHOT=""  # "<ns>\t<job>\t<fin,fin,>" for every Job cluster-wide carrying a finalizer.
+collect_finalizer_jobs() {  # ONE cluster-wide read (finalizers are static once step 2 orphaned the apps)
+  HOOK_JOBS_SNAPSHOT="$(oc get jobs -A \
+    -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{range .metadata.finalizers[*]}{.}{","}{end}{"\n"}{end}' 2>/dev/null || true)"
+}
+
+strip_hook_finalizers() {  # ns — F5: clear Argo's hook-finalizer off Jobs so the namespace can terminate
+  local ns="$1" rns job fins
+  # An orphaned hook Job's ONLY finalizer is Argo's own hook bookkeeping, so removing the array is safe;
+  # we act only on Jobs in THIS namespace that actually carry an argocd finalizer (never app-data ones).
+  [[ -n "$HOOK_JOBS_SNAPSHOT" ]] || return 0
+  while IFS=$'\t' read -r rns job fins; do
+    [[ "$rns" == "$ns" && -n "$job" ]] || continue
+    # On a Job the only argocd finalizer is the hook one (${HOOK_FINALIZER}); match its domain so a
+    # future suffix change still gets caught. The Application resources-finalizer never lands on a Job.
+    case "$fins" in *"${HOOK_FINALIZER#*/}"*|*"${HOOK_FINALIZER%%/*}"*) ;; *) continue;; esac
+    if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD clear Argo hook-finalizer on job/${job} -n ${ns}"; continue; fi
+    oc patch job "$job" -n "$ns" --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]' >/dev/null 2>&1 || true
+    echo "   • cleared Argo hook-finalizer on job/${job} -n ${ns}"
+  done <<< "$HOOK_JOBS_SNAPSHOT"
+}
+
+preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, strip our owner label so `-l owner=ogsr` is clean
+  local ns="$1" reason="$2" key="${OWNER_LABEL%%=*}"
+  if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD preserve namespace/${ns} + strip ${key} label (${reason})"; return 0; fi
+  oc label namespace "$ns" "${key}-" --overwrite >/dev/null 2>&1 || true
+  echo "   • preserved namespace/${ns}, stripped owner label (${reason})"
 }
 
 # ── reverse the imperative bootstrap mutations ────────────────────────────────
@@ -255,7 +325,7 @@ handle_lightspeed() {  # remove our MaaS secret / namespace only when WE install
 }
 
 handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise preserve (+ note the memory bump)
-  local preexisted csv b64
+  local preexisted csv b64 prior_res prior_mem target_mem
   preexisted="$(state gitops_preexisted)"
   if [[ "$preexisted" == "false" ]]; then
     info "GitOps was installed by us — removing operator + default instance"
@@ -270,9 +340,21 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
     info "GitOps was adopted (pre-existing) — operator + instance preserved"
     b64="$(state gitops_argocd_controller_resources_b64)"
     if [[ -n "$b64" ]]; then
-      err "install raised the adopted openshift-gitops controller memory (limit 6Gi). Prior spec.controller.resources:"
-      echo "      $(echo "$b64" | base64 --decode 2>/dev/null || echo '<unreadable>')"
-      echo "      restore manually if the org relied on it: oc -n openshift-gitops edit argocd openshift-gitops"
+      prior_res="$(echo "$b64" | base64 --decode 2>/dev/null || true)"
+      # Install only RAISES the controller memory limit (operator default 2Gi → 6Gi). If the org was
+      # ALREADY at the target, install changed nothing and there is nothing to restore — so gate the
+      # warning on prior≠target instead of firing whenever a prior spec was recorded (false alarm on a
+      # cluster that shipped at 6Gi). Target is read from the canonical override so it never drifts.
+      target_mem="$(yq '.spec.controller.resources.limits.memory' "${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/operator/argocd-controller-resources.yaml" 2>/dev/null || true)"
+      [[ -n "$target_mem" && "$target_mem" != "null" ]] || target_mem="6Gi"
+      prior_mem="$(echo "$prior_res" | yq -p=json '.limits.memory' 2>/dev/null || true)"
+      if [[ "$prior_mem" == "$target_mem" ]]; then
+        echo "   • openshift-gitops controller memory was already ${target_mem} before install — not raised, nothing to restore"
+      else
+        err "install raised the adopted openshift-gitops controller memory to ${target_mem} (was ${prior_mem:-unset}). Prior spec.controller.resources:"
+        echo "      ${prior_res:-<unreadable>}"
+        echo "      restore manually if the org relied on it: oc -n openshift-gitops edit argocd openshift-gitops"
+      fi
     fi
   fi
 }
@@ -291,28 +373,99 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
   done < <(enumerate_operators)
 }
 
-delete_workshop_namespaces() {  # delete owner-labeled namespaces, skipping adopted-operator namespaces
-  local adopted_ns="" name ns st n
+# F2/F7 — classify EVERY owner-labeled namespace exactly as the teardown will act on it, so the plan
+# and the action can never disagree (each row is "<verb>\t<ns>\t<reason>"). Delete allowlist = the
+# INSTALLED stacks' namespaces + the workshop's own per-user/shared namespaces. Anything else that is
+# owner-labeled is PRESERVED and de-labeled: an adopted operator's namespace (deleting it would take
+# the org's operator down with it), or a namespace of a stack no longer installed (openshift-mta).
+classify_workshop_namespaces() {
+  local created_op_ns=" " adopted_op_ns=" " stack_ns name ns st n user layer shared
   while read -r name ns st; do
     [[ -n "$ns" ]] || continue
-    if [[ "$st" != "created" ]]; then adopted_ns="${adopted_ns} ${ns}"; fi  # adopted OR unknown → preserve its ns
+    if [[ "$st" == "created" ]]; then created_op_ns="${created_op_ns}${ns} "; else adopted_op_ns="${adopted_op_ns}${ns} "; fi
   done < <(enumerate_operators)
-  while IFS= read -r n; do
+  stack_ns=" $(enumerate_installed_stack_ns | tr '\n' ' ') "
+  while IFS=$'\t' read -r n user layer shared; do
     [[ -n "$n" ]] || continue
-    # These are handled elsewhere (state CM lives in ogsr-system; Lightspeed has its own guard).
-    [[ "$n" == "$STATE_NS" || "$n" == "openshift-lightspeed" ]] && continue
-    case " $adopted_ns " in
-      *" $n "*) echo "   • preserve namespace/${n} (adopted-operator namespace)"; continue;;
+    [[ "$n" == "$STATE_NS" ]]            && { printf 'defer\t%s\tuninstall-state namespace (removed last)\n' "$n"; continue; }
+    [[ "$n" == "openshift-lightspeed" ]] && { printf 'defer\t%s\tLightspeed (its own adoption guard)\n' "$n"; continue; }
+    # Adopted-operator namespace → PRESERVE (the operator lives here) + strip our owner label (F7).
+    case "$adopted_op_ns" in *" $n "*) printf 'preserve-strip\t%s\tadopted-operator namespace (operator preserved)\n' "$n"; continue;; esac
+    # Workshop-owned per-user / shared namespace (marker label) → ours to delete.
+    if [[ -n "$user" || "$layer" == "workshop-config" || "$shared" == "true" ]]; then
+      printf 'delete\t%s\tworkshop-owned (per-user / shared) namespace\n' "$n"; continue
+    fi
+    # Namespace of an installed stack — an operator we created, or plain infra like ogsr-gitea → delete.
+    case "$created_op_ns" in *" $n "*) printf 'delete\t%s\tinstalled-stack operator namespace (created by us)\n' "$n"; continue;; esac
+    case "$stack_ns"       in *" $n "*) printf 'delete\t%s\tinstalled-stack namespace\n' "$n"; continue;; esac
+    # Owner-labeled but attributable to NO installed stack (e.g. openshift-mta after `mta` left the set,
+    # or infra we cannot positively attribute) → PRESERVE intact + strip the label + flag for review (F2).
+    printf 'preserve-strip\t%s\tnot part of installed_stacks (%s) — left intact, review manually\n' "$n" "$(state installed_stacks)"
+  done < <(oc get namespaces -l "$OWNER_LABEL" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/layer}{"\t"}{.metadata.labels.workshop\.redhat\.com/shared}{"\n"}{end}' 2>/dev/null || true)
+}
+
+delete_workshop_namespaces() {  # act on the classification: delete ours (F5 first), preserve+strip the rest (F7)
+  local verb n reason
+  collect_finalizer_jobs   # one cluster-wide read feeds strip_hook_finalizers for every deleted namespace
+  while IFS=$'\t' read -r verb n reason; do
+    [[ -n "$n" ]] || continue
+    case "$verb" in
+      delete)         strip_hook_finalizers "$n"; del_obj namespace "$n"; DELETED_WS_NS+=("$n");;
+      preserve-strip) preserve_and_strip "$n" "$reason";;
+      defer)          : ;;  # STATE_NS removed right after this fn; Lightspeed handled by handle_lightspeed
     esac
-    del_obj namespace "$n"
-  done < <(oc get namespaces -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' || true)
+  done < <(classify_workshop_namespaces)
+}
+
+# F6 — a namespace whose operator we PRESERVED can wedge in Terminating on an operator-instance CR
+# finalizer (e.g. CheCluster che.eclipse.org). We refuse to auto-strip arbitrary CR finalizers (the
+# operator may need to run cleanup first) — the one known-safe class, Argo's hook-finalizer, is already
+# cleared by strip_hook_finalizers. Here we wait (bounded, early-exit) for our deletes to finish, then
+# REPORT anything still stuck past ~2min with the finalizer-holding CRs + the exact manual clear command.
+report_ns_finalizer_holders() {  # ns — list every object in ns still carrying a finalizer + how to clear it
+  local ns="$1" kind objkind objname fins
+  while IFS= read -r kind; do
+    [[ -n "$kind" ]] || continue
+    while IFS=$'\t' read -r objkind objname fins; do
+      [[ -n "$objname" ]] || continue
+      echo "      ↳ ${objkind}/${objname}  finalizers=[${fins% }]"
+      echo "         clear: oc patch ${kind} ${objname} -n ${ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'"
+    done < <(oc get "$kind" -n "$ns" \
+              -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.kind}{"\t"}{.metadata.name}{"\t"}{range .metadata.finalizers[*]}{.}{" "}{end}{"\n"}{end}' 2>/dev/null || true)
+  done < <(oc api-resources --namespaced --verbs=list -o name 2>/dev/null | sort -u || true)
+}
+
+report_stuck_namespaces() {  # names… — bounded wait for termination, then report any still stuck (>~2min)
+  local targets=("$@") waited=0 max=150 ns remaining present
+  [[ ${#targets[@]} -gt 0 && "$DRY_RUN" != "true" ]] || return 0
+  while (( waited < max )); do
+    # ONE list per poll (not one get per target — the delete set can be ~100 namespaces).
+    present=" $(oc get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null || true) "
+    remaining=()
+    for ns in "${targets[@]}"; do case "$present" in *" $ns "*) remaining+=("$ns");; esac; done
+    [[ ${#remaining[@]} -eq 0 ]] && { ok "all deleted workshop namespaces finished terminating"; return 0; }
+    sleep 10; waited=$((waited + 10))
+  done
+  err "still Terminating after ${max}s — a preserved operator's CR finalizer is holding these namespaces:"
+  for ns in "${remaining[@]}"; do
+    echo "   ✗ namespace/${ns} — finalizer-holding objects (clear ONLY if you understand the operator's cleanup):"
+    report_ns_finalizer_holders "$ns"
+  done
 }
 
 # ── plan ──────────────────────────────────────────────────────────────────────
 print_plan() {
-  local apps ns_list created adopted name ns st gitops_plan mon_plan gw_plan
+  local apps created adopted name ns st gitops_plan mon_plan gw_plan
+  local verb wn reason nwipe=0 wipe_stack="" strip_list=""
   apps="$(oc get applications -n "$ARGO_NS" -l "$OWNER_LABEL" -o name 2>/dev/null | wc -l | tr -d ' ' || echo '?')"
-  ns_list="$(oc get namespaces -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' | tr '\n' ' ' || true)"
+  # Drive the namespace plan from the SAME classifier step 9 uses, so the summary is exactly the action.
+  while IFS=$'\t' read -r verb wn reason; do
+    case "$verb" in
+      delete) nwipe=$((nwipe + 1)); case "$reason" in installed-stack*) wipe_stack="${wipe_stack} ${wn}";; esac;;
+      preserve-strip) strip_list="${strip_list}\n      - ${wn} — ${reason}";;
+    esac
+  done < <(classify_workshop_namespaces)
   created=""; adopted=""
   while read -r name ns st; do
     [[ -n "$name" ]] || continue
@@ -343,7 +496,7 @@ print_plan() {
   echo
   echo "WILL WIPE:"
   echo "  • ${apps} owner-labeled Argo Applications (pp-*, workshop-config, entry-*) — orphaned, not pruned"
-  echo "  • owner-labeled namespaces: ${ns_list:-<none / cluster unreachable>}"
+  echo "  • ${nwipe} owner-labeled namespaces (per-user {user}-*, shared ogsr-*, installed-stack:${wipe_stack:- <none>} )"
   echo "  • owner-labeled cluster RBAC (platform-observer, lightspeed-query, argo controller CRB),"
   echo "    Group workshop-attendees, Kueue cluster objects, AppProjects, openshift/java-21 ImageStream"
   echo "  • imperative bootstrap objects: htpasswd-workshop-users, workshop-users OAuth IdP entry, node labels/taint"
@@ -352,6 +505,7 @@ print_plan() {
   echo
   echo "WILL PRESERVE (untouched):"
   echo "  • operators the org already had:${adopted:-<none recorded>}"
+  printf '  • namespaces preserved + owner-label stripped (adopted-operator / not in installed_stacks — F2/F7):%b\n' "${strip_list:-\n      - <none>}"
   echo "  • GitOps operator: ${gitops_plan}"
   echo "  • cluster-monitoring-config: ${mon_plan}"
   echo "  • openshift-default GatewayClass: ${gw_plan}"
@@ -436,10 +590,13 @@ del_labeled_namespaced appprojects.argoproj.io
 info "[8/9] GitOps operator"
 handle_gitops
 
-# 9. Workshop namespaces (per-user + shared), then the state namespace last.
-info "[9/9] deleting workshop namespaces (org / adopted-operator namespaces preserved)"
+# 9. Workshop namespaces (per-user + shared), then the state namespace last. F5 clears Argo hook
+#    finalizers before each delete; F6 waits (bounded, early-exit) and reports any namespace still
+#    wedged on a preserved operator's CR finalizer, with the exact manual clear command.
+info "[9/9] deleting workshop namespaces (org / adopted-operator namespaces preserved + de-labeled)"
 delete_workshop_namespaces
-del_obj namespace "$STATE_NS"
+del_obj namespace "$STATE_NS"; DELETED_WS_NS+=("$STATE_NS")   # always ≥1 element, so the expansion below is safe
+report_stuck_namespaces "${DELETED_WS_NS[@]}"
 
 echo
 ok "ogsr-uninstall complete${DRY_RUN:+ (dry-run)}"
