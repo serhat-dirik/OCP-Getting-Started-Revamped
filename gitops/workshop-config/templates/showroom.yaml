@@ -348,7 +348,19 @@ spec:
               # clobber (verified on-cluster). We own this file, so overwrite it every run — idempotent
               # by construction, no grep guard. Single-quoted echoes (NOT a heredoc: an indented closing
               # delimiter is invalid in this YAML block scalar and to bash) so every $ lands literally in
-              # the drop-in, evaluated at shell time. Covers PATH, ws tab-completion, and the greeting.
+              # the drop-in, evaluated at shell time. Covers PATH, ws tab-completion, the greeting, and
+              # (below) a JVM user.home belt-and-suspenders fix.
+              #
+              # JVM user.home companion fix (QA-gate X2): `mvn`/`java` resolve user.home from
+              # /etc/passwd's home field (glibc getpwuid), NOT from $HOME — confirmed by the "terminal"
+              # container's own postStart hook below, which corrects that passwd field so
+              # user.home==$HOME. That hook is sound but POLLS for up to 10s racing runttyd's own
+              # passwd rewrite (best-effort) and only patches THIS container's passwd. Belt-and-
+              # suspenders it here with the JVM's own supported override, which sidesteps passwd/nss
+              # resolution entirely: every interactive shell exports MAVEN_OPTS/JDK_JAVA_OPTIONS with
+              # -Duser.home, so ~/.m2 and friends always resolve under the persistent PVC home even if
+              # the passwd race is ever lost (e.g. right after a restart). JDK_JAVA_OPTIONS prints one
+              # harmless "Picked up JDK_JAVA_OPTIONS" notice to stderr — standard JDK behavior.
               mkdir -p "$HOME/.bashrc.d"
               {
                 echo '# WS_WORKSHOP_PROFILE — workshop terminal setup (ws on PATH + completion + greeting).'
@@ -356,6 +368,9 @@ spec:
                 echo '# ~/.bashrc.d/* loop, so it survives the runttyd first-boot ~/.bashrc clobber.'
                 echo 'export PATH="$HOME/ocp-getting-started/tools/ws:$PATH"'
                 echo '[ -f "$HOME/ocp-getting-started/tools/ws/ws-completion.bash" ] && source "$HOME/ocp-getting-started/tools/ws/ws-completion.bash"'
+                echo '# JVM user.home belt-and-suspenders (QA-gate X2) — see terminal-prep header comment.'
+                echo 'export MAVEN_OPTS="-Duser.home=$HOME ${MAVEN_OPTS:-}"'
+                echo 'export JDK_JAVA_OPTIONS="-Duser.home=$HOME ${JDK_JAVA_OPTIONS:-}"'
                 echo 'if [[ $- == *i* ]]; then'
                 echo '  echo "You are logged in as $(oc whoami 2>/dev/null || echo attendee) — project: $(oc project -q 2>/dev/null || echo none)"'
                 echo '  echo "Set up a module with: ws prep platform-orientation   (then follow the lab; ws verify platform-orientation checks it)"'
