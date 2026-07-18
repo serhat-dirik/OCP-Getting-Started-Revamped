@@ -365,6 +365,35 @@ oc create secret generic workshop-user-creds \
   --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
 ok "workshop-user-creds (ogsr-gitea/password)"
 
+# ── 4b. RHDH Gitea contract (portal only) — CREATE-OR-REFRESH, never create-only ─────
+# The rhdh-gitea secret is the portal stack's documented contract (components/rhdh/README.md).
+# It must be REFRESHED on every install, not preserved: the Gitea operator regenerates its admin
+# password on reinstall, and a preserved secret fossilizes → RHDH reads 401 on every catalog
+# Location and the whole cohort sees an empty catalog (M12 G3 FAIL, 2026-07-19 — found live).
+if [[ "$PORTAL" == "true" ]]; then
+  info "[4b/6] RHDH Gitea contract (secret rhdh-gitea) — create-or-refresh from the gitea CR"
+  RHDH_GITEA_USER=""; RHDH_GITEA_PASS=""
+  for _i in $(seq 1 30); do
+    RHDH_GITEA_USER="$(oc get gitea gitea -n "$GITEA_NS" -o jsonpath='{.spec.giteaAdminUser}' 2>/dev/null || true)"
+    RHDH_GITEA_PASS="$(oc get gitea gitea -n "$GITEA_NS" -o jsonpath='{.status.adminPassword}' 2>/dev/null || true)"
+    [[ -n "$RHDH_GITEA_USER" && -n "$RHDH_GITEA_PASS" ]] && break
+    sleep 10
+  done
+  if [[ -n "$RHDH_GITEA_USER" && -n "$RHDH_GITEA_PASS" ]]; then
+    RHDH_GITEA_ROUTE="$(oc get route -n "$GITEA_NS" -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true)"
+    oc get ns rhdh >/dev/null 2>&1 || oc create ns rhdh >/dev/null 2>&1 || true
+    oc create secret generic rhdh-gitea -n rhdh \
+      --from-literal=GITEA_USERNAME="$RHDH_GITEA_USER" \
+      --from-literal=GITEA_PASSWORD="$RHDH_GITEA_PASS" \
+      --from-literal=GITEA_BASEURL="https://$RHDH_GITEA_ROUTE" \
+      --from-literal=GITEA_HOST="$RHDH_GITEA_ROUTE" \
+      --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
+    ok "rhdh-gitea (rhdh) refreshed from the live gitea CR"
+  else
+    warn "gitea CR admin credential not readable after 5m — rhdh-gitea NOT refreshed (RHDH catalog may 401)"
+  fi
+fi
+
 # ── 5. materialize the workshop layer from the LOCAL mirror ───────────────────
 info "[5/6] materializing the workshop layer (Argo Application workshop-config)"
 cat <<EOF | oc apply -f - >/dev/null

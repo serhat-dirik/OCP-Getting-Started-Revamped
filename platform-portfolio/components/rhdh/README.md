@@ -72,9 +72,11 @@ The Gitea credentials the scaffolder + catalog reader use. Delivered as a contra
 | Key `GITEA_USERNAME` | a Gitea user that can create repos in the attendee orgs (the admin user works) |
 | Key `GITEA_PASSWORD` | that user's password (or a token in the password field) |
 
-Created **before** the Backstage CR reconciles (the pod will not start without it). In this workshop the
-credentials are the Gitea admin account the operator generates, so the workshop bootstrap discovers them
-and creates the secret:
+Created **before** the Backstage CR reconciles (the pod will not start without it) and **refreshed on
+every install** — both installers automate this (bootstrap/install.sh step 4b; helm/bootstrap's
+ogsr-rhdh-gitea-secret hook Job), discovering the live values from the gitea CR. Create-or-refresh is
+deliberate: the Gitea operator regenerates its admin password on reinstall, and a preserved secret
+fossilizes into cohort-wide 401s (M12 G3, 2026-07-19). Manual equivalent:
 
 ```bash
 GITEA_NS=ogsr-gitea

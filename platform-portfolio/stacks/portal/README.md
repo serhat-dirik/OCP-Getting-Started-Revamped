@@ -82,4 +82,4 @@ curl -ks -o /dev/null -w '%{http_code}\n' "https://${RT}/"              # 200
 ## Uninstall
 
 Delete the stack Applications (`oc delete application pp-rhdh pp-rhdh-operator -n openshift-gitops`) —
-prune removes the components. The `rhdh-gitea` secret is left in place (recreate on reinstall).
+prune removes the components. The `rhdh-gitea` secret is refreshed automatically on every install (both installers); a preserved stale copy is exactly what broke the M12 catalog cohort-wide.
