@@ -206,7 +206,16 @@ The `parasol-claims` `ksvc` is the *only* object you'd author. Behind it, `oc ge
 == 2. Scale to zero and back — feel the cold start
 ⏱ *~12 min* · wake the service with one request, and measure the honest cost
 
-The service is at zero. Send it a request and *time it* — the first caller pays the *cold start* while Knative schedules a pod, boots the JVM, and hands the request through the activator. Drive the request from the in-cluster `demo-client`:
+For a real cold start the service must be at *zero* first — and right after you set up the module its initial pod is often still running. Wait for Knative to scale it away (about 60-90s of no traffic), watching the pod disappear:
+
+[source,sh,role=execute]
+----
+# Knative scales the idle pod to zero after ~60-90s — wait for zero before you time the cold start:
+until [ "$(oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | grep -c Running)" = 0 ]; do sleep 10; done
+echo "scaled to zero — the next request pays a real cold start"
+----
+
+Now send it a request and *time it* — the first caller pays the *cold start* while Knative schedules a pod, boots the JVM, and hands the request through the activator. Drive the request from the in-cluster `demo-client`:
 
 [source,sh,role=execute]
 ----
@@ -259,11 +268,12 @@ oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers | 
 oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null -w "with -m5: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims" || echo "curl gave up (exit $?) — the cold start outran the 5s timeout"
 ----
 
-.Expected output (the request is abandoned before the cold start finishes)
+.Expected output (the request is abandoned before the cold start finishes; `curl` exits 28, which `oc exec` surfaces as its own line before the `||` message)
 [source,texinfo]
 ----
 0
 with -m5: HTTP 000 in 5.001s
+command terminated with exit code 28
 curl gave up (exit 28) — the cold start outran the 5s timeout
 ----
 
@@ -273,8 +283,10 @@ The client gave up at 5 seconds, before the ~15-second cold start could complete
 ----
 # fix option A — a realistic client timeout that allows for the cold start:
 oc exec deploy/demo-client -n $NS -- curl -s -k -m 30 -o /dev/null -w "with -m30: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
-# fix option B — pin a warm floor so scale-from-zero never hits the critical path:
-kn service update parasol-claims -n $NS --scale-min 1 --no-wait
+# fix option B — pin a warm floor so scale-from-zero never hits the critical path.
+# Knative revisions are IMMUTABLE: changing the template (here, the min-scale floor) needs a NEW
+# revision name, or the webhook rejects "changes without a name change" — so name this one:
+kn service update parasol-claims -n $NS --scale-min 1 --revision-name parasol-claims-v1-warm --no-wait
 ----
 
 .Expected output (option A rides out the cold start; option B keeps one pod always warm)
@@ -287,11 +299,11 @@ Service 'parasol-claims' updated in namespace 'user6-dev'.
 [NOTE]
 .min-scale is a tradeoff, not a fix-all
 ====
-`--scale-min 1` gives up scale-to-*zero* (you now always pay for one pod) in exchange for *no cold start* on the critical path — the right call for a latency-sensitive service. For a bursty, latency-tolerant one, leave `min-scale` at `0` and let the cold start happen. To finish this exercise as a scale-to-zero service, put the floor back to zero:
+`--scale-min 1` gives up scale-to-*zero* (you now always pay for one pod) in exchange for *no cold start* on the critical path — the right call for a latency-sensitive service. For a bursty, latency-tolerant one, leave `min-scale` at `0` and let the cold start happen. To finish this exercise as a scale-to-zero service, put the floor back to zero — again with a fresh revision name, since the template is changing:
 
 [source,sh,role=execute]
 ----
-kn service update parasol-claims -n $NS --scale-min 0 --no-wait
+kn service update parasol-claims -n $NS --scale-min 0 --revision-name parasol-claims-v1-cold --no-wait
 ----
 ====
 
@@ -640,21 +652,21 @@ oc exec deploy/demo-client -n $NS -- sh -c '
     -d "{\"source\":\"claim-ticker\"}" "'$URL'/"'
 ----
 
-.Expected output (the delivery is real — and honestly returns 404)
+.Expected output (the delivery is real — and honestly returns 405)
 [source,texinfo]
 ----
-event delivered to ksvc: HTTP 404
+event delivered to ksvc: HTTP 405
 ----
 
 [NOTE]
-.Read the 404 correctly — the plumbing works; the processing is the next module
+.Read the 405 correctly — the plumbing works; the processing is the next module
 ====
-That `404` is *expected*, and it's the honest boundary of this taste. The event was *genuinely delivered*: the trigger POSTed it to the `ksvc`, which *woke from zero* to receive it. But the claims-processor has *no CloudEvents handler* — the event lands on `/`, a path the app doesn't serve, so it answers `404`. What you have proved is real and valuable: *source → broker → trigger → scale-up on an event*. What you have *not* done is *process* the event — parse the CloudEvent, branch on its data, reply. That is the whole subject of the *Eventing Deep-Dive & Serverless Workflows* module, which starts from exactly this end state. Don't add a fake handler to force a `200`; the `404` is the truth, and the next module is where the handler lives.
+That `405` is *expected*, and it's the honest boundary of this taste. The event was *genuinely delivered*: the trigger POSTed it to the `ksvc`, which *woke from zero* to receive it. The app *serves* `/` (a `GET` returns `200`), but it has *no CloudEvents handler* — so a `POST` to `/` is *Method Not Allowed*, `405`. That is even sharper than a `404`: the route exists and the request arrived, the app simply has nothing wired to *handle* a posted event. What you have proved is real and valuable: *source → broker → trigger → scale-up on an event*. What you have *not* done is *process* the event — parse the CloudEvent, branch on its data, reply. That is the whole subject of the *Eventing Deep-Dive & Serverless Workflows* module, which starts from exactly this end state. Don't add a fake handler to force a `200`; the `405` is the truth, and the next module is where the handler lives.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* You wired *source → broker → trigger* — a `PingSource` into an in-memory `Broker`, a `Trigger` delivering to the `parasol-claims` `ksvc` — confirmed all three *Ready*, and saw a real event delivery *wake the service from zero* and return an honest `HTTP 404` (the app has no event handler yet — that's Eventing).
+✔ *Verify:* You wired *source → broker → trigger* — a `PingSource` into an in-memory `Broker`, a `Trigger` delivering to the `parasol-claims` `ksvc` — confirmed all three *Ready*, and saw a real event delivery *wake the service from zero* and return an honest `HTTP 405` (the app serves `/` but has no *POST* event handler yet — that's Eventing).
 ****
 
 == 6. Build a Function (concept + instructor demo)
