@@ -8,14 +8,14 @@ OVN-Kubernetes, 2026-07-13 as user1); the diagram SVG exports below are the defe
 screenshot needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc`
 files with a commented `// media-pass:` line — replace with the `image::…` when the asset lands.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `networking-dev-devops-01-traffic-directions.svg` | concept.adoc Mermaid "two directions of traffic" | outside → web = **north-south (expose)**; web → api → db = **east-west (policy)**; the mental-model spine — reused on slide 2 |
-| `networking-dev-devops-02-exposure-tree.svg` | concept.adoc Mermaid "exposure decision tree" | ClusterIP → NodePort → LoadBalancer (**\<pending\> on bare metal**) → **Route (workhorse)** → Gateway API (strategic); reused on slide 4 |
+| `networking-dev-devops-01-traffic-directions.svg` | concept.adoc Mermaid "two directions of traffic" — `examples/diagrams/networking-dev-devops/01-traffic-directions.mmd` | outside → web = **north-south (expose)**; web → api → db = **east-west (policy)**; the mental-model spine — reused on slide 2 |
+| `networking-dev-devops-02-exposure-tree.svg` | concept.adoc Mermaid "exposure decision tree" — `examples/diagrams/networking-dev-devops/02-exposure-tree.mmd` | ClusterIP → NodePort → LoadBalancer (**\<pending\> on bare metal**) → **Route (workhorse)** → Gateway API (strategic); reused on slide 4 |
 | `networking-dev-devops-03-platform-accretion.svg` | concept.adoc — media-pass pending (centrally maintained master diagram) | **master accretion diagram**, the M15 layer (the network control plane: exposure + NetworkPolicy + UDN around `{user}-dev` and `{user}-partner`) highlighted on the running Parasol platform |
-| `networking-dev-devops-04-what-you-built.svg` | wrapup.adoc Mermaid recap | app namespace (web→api→db allowed, demo-client **DENIED** to db) + partner namespace (partner-workload on `ovn-udn1`, **native isolation**); green = allowed, red = denied/isolated, blue = ingress |
+| `networking-dev-devops-04-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/networking-dev-devops/04-what-you-built.mmd` | app namespace (web→api→db allowed, demo-client **DENIED** to db) + partner namespace (partner-workload on `ovn-udn1`, **native isolation**); green = allowed, red = denied/isolated, blue = ingress |
 
 Shared legend across all four: namespace box, Service/endpoints tag, NetworkPolicy shield, UDN
 "own-network" badge, Route/Gateway ingress icon — same palette as M01–M14 (Red Hat-neutral, no

@@ -33,19 +33,20 @@ should be short GIFs/MP4s** per the project owner's 2026-07-11 directive.
 | 5 | `observability-health-scale-05-observe-alerting-inactive.png` | ⬜ NOT CAPTURED | **Observe → Alerting → Alerting rules**, rule **Inactive** | the just-created `ParasolClaimsErrorRateHigh` armed-but-inactive at the healthy baseline (the "before" to #4's "after") | lab.adoc ex. 2 (Console tab) — **`// media-pass:` marker placed** |
 | 6 | `observability-health-scale-06-import-yaml.png` | ⬜ OPTIONAL — **no embed marker** | **+ / Import YAML** dialog with the PrometheusRule (or PDB) pasted | the masthead `+` action and the paste-and-Create flow | **Intentionally not embedded** (2026-07-11): the `+` / Import YAML masthead flow is generic OpenShift UI already spelled out in the ex. 2 / ex. 6 Console-tab prose; a screenshot adds little over the signature alerting/topology beats. Capture only if a deck wants it — no `// media-pass:` marker in `lab.adoc`. |
 
-## Diagrams (SVG in-repo; source of truth is the inline Mermaid in the `.adoc`)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
-The concept/wrap-up pages ship inline Mermaid (editable-source rule satisfied by construction).
-Export these to SVG next to their `.adoc` for the slide deck and richer rendering; keep the Mermaid as
-the editable source (do not delete it).
+The concept/wrap-up pages `include::` their diagram source — a standalone `.mmd` under
+`examples/diagrams/observability-health-scale/` (path linked per row in the Source column below),
+never inline Mermaid text in the `.adoc`. Export these to SVG next to their `.adoc` for the slide
+deck and richer rendering; keep the `.mmd` as the editable master (do not delete it).
 
-| # | Filename | Status | Source (inline Mermaid in) | Shows |
+| # | Filename | Status | Page (Mermaid included in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `observability-health-scale-01-three-signals.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | one request fanning into metrics/logs/traces, each labeled with the question it answers |
-| 2 | `observability-health-scale-02-servicemonitor-bridge.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | app `/q/metrics` → ServiceMonitor → user-workload monitoring → console + your PrometheusRule |
-| 3 | `observability-health-scale-03-scaling-decision-tree.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | "what is the pressure?" → HPA (highlighted) / Serverless / KEDA / VPA |
-| 4 | `observability-health-scale-04-platform-accretion.svg` | ⬜ NOT CAPTURED (shared) | concept.adoc | the observe-&-steer layer (metrics/traces/HPA/PDB) over the M01–M11 Parasol platform |
-| 5 | `observability-health-scale-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc | the claims service with ServiceMonitor→UWM→alert, Tempo traces, HPA 2→4, and PDB, all green |
+| 1 | `observability-health-scale-01-three-signals.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/observability-health-scale/01-three-signals.mmd` | one request fanning into metrics/logs/traces, each labeled with the question it answers |
+| 2 | `observability-health-scale-02-servicemonitor-bridge.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/observability-health-scale/02-servicemonitor-bridge.mmd` | app `/q/metrics` → ServiceMonitor → user-workload monitoring → console + your PrometheusRule |
+| 3 | `observability-health-scale-03-scaling-decision-tree.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/observability-health-scale/03-scaling-decision-tree.mmd` | "what is the pressure?" → HPA (highlighted) / Serverless / KEDA / VPA |
+| 4 | `observability-health-scale-04-platform-accretion.svg` | ⬜ NOT CAPTURED (shared) | concept.adoc — `examples/diagrams/observability-health-scale/04-platform-accretion.mmd` | the observe-&-steer layer (metrics/traces/HPA/PDB) over the M01–M11 Parasol platform |
+| 5 | `observability-health-scale-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc — `examples/diagrams/observability-health-scale/05-what-you-built.mmd` | the claims service with ServiceMonitor→UWM→alert, Tempo traces, HPA 2→4, and PDB, all green |
 
 ## Recording (demo-arc happy path)
 

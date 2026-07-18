@@ -11,8 +11,9 @@ Media note: the module's pipeline mechanics — the anatomy run (12m54s, image 3
 task-library resolver refs, the break-fix RED/GREEN, and the live PaC git-push fire — were all
 performed and captured from the CLI/API as `user6` on 2026-07-10. The console screenshots and the
 SVG diagram exports below are the **deferred media pass** (no screenshots captured yet — the build
-was CLI-driven). Diagrams currently ship inline as Mermaid (they satisfy the ≥1-diagram requirement
-today); the SVG exports replace/augment them in the pass.
+was CLI-driven). Diagrams ship as a standalone Mermaid `.mmd` under
+`examples/diagrams/pipelines-fundamentals/` (never inline in the `.adoc`); the SVG exports
+replace/augment them in the pass.
 
 ## Screenshots (console/UI views — the view IS the content)
 
@@ -28,13 +29,13 @@ webhook form) is the most useful capture**, since exercise 4's webhook fields ar
 it in the pass. None is required for the page to read correctly (all embed points are `// media-pass:`
 comments, so their absence breaks nothing).
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `pipelines-fundamentals-01-anatomy-and-layers.svg` | concept.adoc Mermaid "anatomy + three reuse layers" | the module's key diagram: catalog (openshift-pipelines) → org library (parasol-tasks) → app Pipeline, each Task wired by `resolver: cluster`. Colour the three layers distinctly (blue / amber / green) |
+| `pipelines-fundamentals-01-anatomy-and-layers.svg` | concept.adoc Mermaid "anatomy + three reuse layers" — `examples/diagrams/pipelines-fundamentals/01-anatomy-and-layers.mmd` | the module's key diagram: catalog (openshift-pipelines) → org library (parasol-tasks) → app Pipeline, each Task wired by `resolver: cluster`. Colour the three layers distinctly (blue / amber / green) |
 | `pipelines-fundamentals-02-pac-flow.svg` | concept.adoc Mermaid "PaC flow" | push → Gitea webhook → PaC controller → new PipelineRun; small and linear |
-| `pipelines-fundamentals-03-what-you-built.svg` | wrapup.adoc Mermaid recap | the happy path green; the "red test stops here" branch red (the gate) |
+| `pipelines-fundamentals-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/pipelines-fundamentals/03-what-you-built.mmd` | the happy path green; the "red test stops here" branch red (the gate) |
 | `pipelines-fundamentals-04-platform-accretion.svg` | (new) master accretion diagram, **pipelines/CI layer** highlighted | reuse the platform base; light up the pipelines + task-library layer in red (accretion pattern) |
 
 ## Recordings

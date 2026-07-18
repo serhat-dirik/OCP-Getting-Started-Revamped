@@ -30,19 +30,20 @@ alternatives to `oc set env` / `oc apply`); each gets a screenshot below.
 | 6 | `securing-apps-keycloak-06-keycloak-login.png` | ⬜ NOT CAPTURED — **HIGH (signature; prefer <30s GIF/MP4)** | the **Keycloak login page** for `realm-<user>`, reached by opening the protected `parasol-web` frontend unauthenticated | the realm-branded login form the app never had to build — record the browser redirect (app → Keycloak login → back into the app after signing in as `adjuster`/`parasol`) | lab.adoc ex. 4 (after the proxy-forwarding fix) |
 | 8 | `securing-apps-keycloak-08-import-fraud.png` | ⬜ NOT CAPTURED — optional | **+ / Import YAML** editor with the `parasol-fraud` manifest pasted | the masthead `+` action and the paste-and-Create flow (grounds the Console tab of ex. 7) | lab.adoc ex. 7 (Console tab) |
 
-## Diagrams (SVG in-repo; source of truth is the inline Mermaid in the `.adoc`)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
-The concept/wrap-up pages ship inline Mermaid (editable-source rule satisfied by construction).
-Export these to SVG next to their `.adoc` for the slide deck and richer rendering; keep the Mermaid as
-the editable source (do not delete it).
+The concept/wrap-up pages `include::` their diagram source — a standalone `.mmd` under
+`examples/diagrams/securing-apps-keycloak/` (path linked per row in the Source column below),
+never inline Mermaid text in the `.adoc`. Export these to SVG next to their `.adoc` for the slide
+deck and richer rendering; keep the `.mmd` as the editable master (do not delete it).
 
-| # | Filename | Status | Source (inline Mermaid in) | Shows |
+| # | Filename | Status | Page (Mermaid included in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `securing-apps-keycloak-01-four-flows.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | the four OIDC flows — auth-code+PKCE + bearer (human), client-credentials + token-exchange (machine) — and how the user token flows through them |
-| 2 | `securing-apps-keycloak-02-realm-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | realm → clients / roles / users, with the four Parasol clients, `claims-adjuster`, and the `adjuster`/`viewer` users |
-| 3 | `securing-apps-keycloak-03-build-vs-buy.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | "build it yourself" (a column of auth risk) vs "use the platform" (Keycloak, included with OpenShift) |
-| 4 | `securing-apps-keycloak-04-security-layer.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | the identity/access layer (login / bearer API / machine identity / exchange) over the M01–M12 Parasol platform, fed by Keycloak |
-| 7 | `securing-apps-keycloak-07-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc | Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds) |
+| 1 | `securing-apps-keycloak-01-four-flows.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/01-four-flows.mmd` | the four OIDC flows — auth-code+PKCE + bearer (human), client-credentials + token-exchange (machine) — and how the user token flows through them |
+| 2 | `securing-apps-keycloak-02-realm-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/02-realm-model.mmd` | realm → clients / roles / users, with the four Parasol clients, `claims-adjuster`, and the `adjuster`/`viewer` users |
+| 3 | `securing-apps-keycloak-03-build-vs-buy.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/03-build-vs-buy.mmd` | "build it yourself" (a column of auth risk) vs "use the platform" (Keycloak, included with OpenShift) |
+| 4 | `securing-apps-keycloak-04-security-layer.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/04-security-layer.mmd` | the identity/access layer (login / bearer API / machine identity / exchange) over the M01–M12 Parasol platform, fed by Keycloak |
+| 7 | `securing-apps-keycloak-07-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc — `examples/diagrams/securing-apps-keycloak/07-what-you-built.mmd` | Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds) |
 
 ## Recording (demo-arc happy path)
 

@@ -8,14 +8,14 @@ Console tabs. All lab mechanics and every expected-output block were captured on
 needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc` files with a
 commented `// media-pass:` line — replace with the `image::…` when the asset lands.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `multi-tenancy-workload-security-01-identity-flow.svg` | concept.adoc Mermaid "identity → authority" | IdP → User → **Group** → RoleBinding → Role → verbs; highlight the group as the design lever; reused on slide 2 |
-| `multi-tenancy-workload-security-02-scc-admission.svg` | concept.adoc Mermaid "restricted-v2 admission" | Pod `runAsUser:0` → restricted-v2 UID-range gate → **rejected** vs **fix the image** vs **scoped SCC grant**; the module's anchor diagram, reused on slide 4 |
+| `multi-tenancy-workload-security-01-identity-flow.svg` | concept.adoc Mermaid "identity → authority" — `examples/diagrams/multi-tenancy-workload-security/01-identity-flow.mmd` | IdP → User → **Group** → RoleBinding → Role → verbs; highlight the group as the design lever; reused on slide 2 |
+| `multi-tenancy-workload-security-02-scc-admission.svg` | concept.adoc Mermaid "restricted-v2 admission" — `examples/diagrams/multi-tenancy-workload-security/02-scc-admission.mmd` | Pod `runAsUser:0` → restricted-v2 UID-range gate → **rejected** vs **fix the image** vs **scoped SCC grant**; the module's anchor diagram, reused on slide 4 |
 | `multi-tenancy-workload-security-03-platform-accretion.svg` | concept.adoc — media-pass pending (centrally maintained master diagram) | **master accretion diagram**, the M14 layer (tenant sandbox: RBAC + quota + SCC around `{user}-dev/stage/prod`) highlighted on the running Parasol platform |
-| `multi-tenancy-workload-security-04-what-you-built.svg` | wrapup.adoc Mermaid recap | tenant sandbox (payments-ci/ops, non-root workload, quota) vs platform-owned levers (platform-observer, self-provisioning/template, OAuth IdPs); green = tenant self-service, blue = platform-owned |
+| `multi-tenancy-workload-security-04-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/multi-tenancy-workload-security/04-what-you-built.mmd` | tenant sandbox (payments-ci/ops, non-root workload, quota) vs platform-owned levers (platform-observer, self-provisioning/template, OAuth IdPs); green = tenant self-service, blue = platform-owned |
 
 Shared legend across all four: namespace box, User/Group/ServiceAccount subject icons, Role/binding
 tag, quota gauge, SCC shield — same palette as M01–M13 (Red Hat-neutral, no vendor-logo soup).

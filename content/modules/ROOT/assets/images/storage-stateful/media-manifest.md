@@ -11,14 +11,14 @@ This module is **CLI-first** — the console is not the content, so the mandator
 and every expected-output block were captured on-cluster (OCP 4.21 / ODF external Ceph,
 2026-07-09); the diagram SVG exports below are the deferred media pass.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `storage-stateful-01-storage-chain.svg` | concept.adoc Mermaid "storage abstraction chain" | Pod → PVC (namespace) → PV (cluster) → StorageClass → Ceph backend; the module's anchor diagram, reused on slide 2. **Owner review M05-1: was too small.** Inline Mermaid source is now a vertical (`TB`) chain with concise 2-line labels (interim legibility fix); export the SVG **large** and lightbox-enabled (see Lightbox note below). |
-| `storage-stateful-02-sts-vs-deployment.svg` | concept.adoc Mermaid "StatefulSet vs Deployment" | left: Deployment (one Service, interchangeable Pods); right: StatefulSet (headless Service, pg-sts-0/1 each with its own PVC); reused on slide 5 |
+| `storage-stateful-01-storage-chain.svg` | concept.adoc Mermaid "storage abstraction chain" — `examples/diagrams/storage-stateful/01-storage-chain.mmd` | Pod → PVC (namespace) → PV (cluster) → StorageClass → Ceph backend; the module's anchor diagram, reused on slide 2. **Owner review M05-1: was too small.** The Mermaid source is now a vertical (`TB`) chain with concise 2-line labels (interim legibility fix); export the SVG **large** and lightbox-enabled (see Lightbox note below). |
+| `storage-stateful-02-sts-vs-deployment.svg` | concept.adoc Mermaid "StatefulSet vs Deployment" — `examples/diagrams/storage-stateful/02-sts-vs-deployment.mmd` | left: Deployment (one Service, interchangeable Pods); right: StatefulSet (headless Service, pg-sts-0/1 each with its own PVC); reused on slide 5 |
 | `storage-stateful-03-platform-accretion-v5.svg` | concept.adoc TODO(media) | **master accretion diagram**, M05 layer (persistent claims DB + StatefulSet) highlighted on the M01–M04 base |
-| `storage-stateful-04-what-you-built.svg` | wrapup.adoc Mermaid recap | green = persistent (PVC, StatefulSet, per-Pod PVCs); red = the ephemeral trap that was removed |
+| `storage-stateful-04-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/storage-stateful/04-what-you-built.mmd` | green = persistent (PVC, StatefulSet, per-Pod PVCs); red = the ephemeral trap that was removed |
 
 Shared legend across all four: namespace box, Pod, volume/disk cylinder, StorageClass tag,
 storage-backend cylinder — same palette as M01–M04 (Red Hat-neutral, no vendor-logo soup).
@@ -27,7 +27,7 @@ storage-backend cylinder — same palette as M01–M04 (Red Hat-neutral, no vend
 
 All four SVG exports must render at a legible size and open a **click-to-enlarge (lightbox)** view,
 per the course-wide diagram-legibility fix (SW-3, a one-time supplemental-ui change). The storage-chain
-diagram (`…-01-…`) was called out as too small in the owner review (**M05-1**): its inline Mermaid
+diagram (`…-01-…`) was called out as too small in the owner review (**M05-1**): its Mermaid
 source has been simplified to a vertical (`TB`) chain with concise labels as an interim fix, but the
 committed SVG should still be exported larger and wrapped in the lightbox once the supplemental-ui lands.
 

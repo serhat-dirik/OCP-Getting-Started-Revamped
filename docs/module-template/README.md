@@ -9,6 +9,7 @@ Every module is identified by its **slug** — the directory/file name across al
 | Artifact | Path | Notes |
 |---|---|---|
 | Content (5 files) | `content/modules/ROOT/pages/<slug>/{concept,lab,wrapup,instructor,troubleshooting}.adoc` | skeletons in `skeleton/` |
+| Diagram sources | `content/modules/ROOT/examples/diagrams/<slug>/<NN>-<short-name>.mmd` | skeletons in `skeleton/examples/diagrams/`; pages `include::` them inside the `[mermaid]` wrapper — never author Mermaid text inline on a page |
 | Demo flavor | `ifdef::demo[]` blocks inside concept/lab | `[demo-block]` + `[TIME Nm]` + Say/Show/Do, written after performing it once |
 | Entry state | `gitops/entry-states/<slug>/` (Helm chart + `ws-meta.yaml`) | compose, don't chain (ADR-0001); `solve:` value guards end-state templates |
 | Verify script | `tools/verify/<slug>.sh` | entry + end checks via `_lib.sh`; runnable as the attendee (no cross-ns reads) |

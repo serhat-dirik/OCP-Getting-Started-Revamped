@@ -9,13 +9,13 @@ Every screenshot needs alt text (what it shows + what to notice). Embed points a
 files with a commented `// media-pass:` (diagrams) or `// [CAPTURE-VERIFY]` (console/Kiali) line — replace
 with the `image::…` when the asset lands. **Do not shoot yet** — this is the spec; capture in the media phase.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `service-mesh-advanced-gateways-01-mesh-architecture.svg` | concept.adoc Mermaid "The data plane and the control plane" | blue **control plane** (istiod + Kiali in istio-system) pushing config + mTLS certs DOWN to amber **sidecar proxies** wrapping green app containers (web/claims/fraud) in `{user}-mesh`; solid mTLS edges between meshed pods; a red **un-meshed demo-client** with a dashed "plaintext (blocked under STRICT)" edge. The module's spine — reused on slide 2 |
+| `service-mesh-advanced-gateways-01-mesh-architecture.svg` | concept.adoc Mermaid "The data plane and the control plane" — `examples/diagrams/service-mesh-advanced-gateways/01-mesh-architecture.mmd` | blue **control plane** (istiod + Kiali in istio-system) pushing config + mTLS certs DOWN to amber **sidecar proxies** wrapping green app containers (web/claims/fraud) in `{user}-mesh`; solid mTLS edges between meshed pods; a red **un-meshed demo-client** with a dashed "plaintext (blocked under STRICT)" edge. The module's spine — reused on slide 2 |
 | `service-mesh-advanced-gateways-02-traffic-split.svg` | lab.adoc ex. 4 + slide 5 | claims' sidecar fanning to a fat **90%** arrow (v1 subset) and a thin **10%** arrow (v2 subset), with an `x-parasol-test:true` header-tagged request on a dedicated line straight to v2; a "read from `istio_requests_total`" telemetry chip. The weighted/header routing idea |
-| `service-mesh-advanced-gateways-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = meshed workloads (web/claims/fraud v1+v2); amber = the mesh policy applied (VirtualService · DestinationRule · AuthorizationPolicy · Gateway); blue = the un-meshed claims-db; mTLS + authz edges claims→fraud |
+| `service-mesh-advanced-gateways-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/service-mesh-advanced-gateways/03-what-you-built.mmd` | green = meshed workloads (web/claims/fraud v1+v2); amber = the mesh policy applied (VirtualService · DestinationRule · AuthorizationPolicy · Gateway); blue = the un-meshed claims-db; mTLS + authz edges claims→fraud |
 
 Shared legend across the diagrams: control-plane box, sidecar-proxy ring, mTLS padlock edge, the amber
 policy card, the SPIFFE-identity badge — Red Hat-neutral palette, no vendor-logo soup. Do **not** print the

@@ -8,14 +8,14 @@ Kubernetes 1.34, 2026-07-13 as user2); the diagram SVG exports below are the def
 screenshot needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc`
 files with a commented `// media-pass:` line — replace with the `image::…` when the asset lands.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `deployment-targets-scheduling-01-scheduler-pipeline.svg` | concept.adoc Mermaid "the scheduler in one mental model" | Pending pod (requests/tolerations/selectors) → **FILTER** → **SCORE** → **BIND**; red branch **0 survive → Pending + FailedScheduling**; the mental-model spine — reused on slide 2 |
-| `deployment-targets-scheduling-02-seek-vs-repel.svg` | concept.adoc Mermaid "who seeks, who repels" | left **affinity/nodeSelector attracts** (pod → labelled node); right **taint repels**, **toleration only permits** (permitted-but-not-attracted); the module's central distinction — reused on slide 3 |
-| `deployment-targets-scheduling-03-what-you-built.svg` | wrapup.adoc Mermaid recap | app tier **spread** (anti-affinity, distinct nodes) + **dedicated batch pool** (toleration+selector) + **PDB guard**; green = spread app, amber = pool, blue = the PDB |
-| `deployment-targets-scheduling-04-reseed-on-boot.svg` | concept.adoc Mermaid "the other half of zero-downtime" | shared PostgreSQL; the OLD pod serving (INSERT committed) while the NEW pod boots **drop-and-create** and reseeds → the client's new claim **silently discarded, no error**; red = the booting pod's reseed, blue = shared db, green = still-serving old pod; the data-plane-at-startup fault the re-diagnosis surfaced (2026-07-16) |
+| `deployment-targets-scheduling-01-scheduler-pipeline.svg` | concept.adoc Mermaid "the scheduler in one mental model" — `examples/diagrams/deployment-targets-scheduling/01-scheduler-pipeline.mmd` | Pending pod (requests/tolerations/selectors) → **FILTER** → **SCORE** → **BIND**; red branch **0 survive → Pending + FailedScheduling**; the mental-model spine — reused on slide 2 |
+| `deployment-targets-scheduling-02-seek-vs-repel.svg` | concept.adoc Mermaid "who seeks, who repels" — `examples/diagrams/deployment-targets-scheduling/02-seek-vs-repel.mmd` | left **affinity/nodeSelector attracts** (pod → labelled node); right **taint repels**, **toleration only permits** (permitted-but-not-attracted); the module's central distinction — reused on slide 3 |
+| `deployment-targets-scheduling-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/deployment-targets-scheduling/03-what-you-built.mmd` | app tier **spread** (anti-affinity, distinct nodes) + **dedicated batch pool** (toleration+selector) + **PDB guard**; green = spread app, amber = pool, blue = the PDB |
+| `deployment-targets-scheduling-04-reseed-on-boot.svg` | concept.adoc Mermaid "the other half of zero-downtime" — `examples/diagrams/deployment-targets-scheduling/04-reseed-on-boot.mmd` | shared PostgreSQL; the OLD pod serving (INSERT committed) while the NEW pod boots **drop-and-create** and reseeds → the client's new claim **silently discarded, no error**; red = the booting pod's reseed, blue = shared db, green = still-serving old pod; the data-plane-at-startup fault the re-diagnosis surfaced (2026-07-16) |
 
 Shared legend across the diagrams: node box, taint shield, toleration key, affinity/anti-affinity
 arrows, PDB guard badge — same palette as M01–M15 (Red Hat-neutral, no vendor-logo soup). Do **not**

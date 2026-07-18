@@ -11,13 +11,13 @@ Every screenshot needs alt text (what it shows + what to notice). Embed points a
 files with a commented `// media-pass:` (diagrams) or `// [CAPTURE-VERIFY]` (console) line — replace with
 the `image::…` when the asset lands. **Do not shoot yet** — this is the spec; capture in the media phase.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `serverless-zero-to-hero-01-request-driven-compute.svg` | concept.adoc Mermaid "The revision model" | client → auto edge Route (Kourier) → the ksvc's Route/Configuration → two immutable Revisions (v1 #stable 80% / v2 #candidate 20%) → **KPA scaling 0..N on concurrency**; an amber side-panel for the eventing taste (PingSource → in-memory Broker → Trigger → back to the ksvc, "wakes from zero"). The module's spine — reused on slide 3 |
+| `serverless-zero-to-hero-01-request-driven-compute.svg` | concept.adoc Mermaid "The revision model" — `examples/diagrams/serverless-zero-to-hero/01-request-driven-compute.mmd` | client → auto edge Route (Kourier) → the ksvc's Route/Configuration → two immutable Revisions (v1 #stable 80% / v2 #candidate 20%) → **KPA scaling 0..N on concurrency**; an amber side-panel for the eventing taste (PingSource → in-memory Broker → Trigger → back to the ksvc, "wakes from zero"). The module's spine — reused on slide 3 |
 | `serverless-zero-to-hero-02-cold-start-timeline.svg` | concept.adoc cold-start NOTE + slide 4 | a single request hitting a **zero-pod** service: activator buffers → pod schedules → JVM boots → response, annotated **"~15 s cold"**, beside a second **"~0.1 s warm"** request; a callout "min-scale: 1 removes the cold start (gives up scale-to-zero)". The honest-tradeoff visual |
-| `serverless-zero-to-hero-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = the two revisions (v1 #stable / v2 #candidate · CC=2 · max-scale 3); blue = the Route + KPA Knative manages; amber = the eventing taste (PingSource → Broker → Trigger, "wakes on event → 404 (M20)") |
+| `serverless-zero-to-hero-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/serverless-zero-to-hero/03-what-you-built.mmd` | green = the two revisions (v1 #stable / v2 #candidate · CC=2 · max-scale 3); blue = the Route + KPA Knative manages; amber = the eventing taste (PingSource → Broker → Trigger, "wakes on event → 404 (M20)") |
 
 Shared legend across the diagrams: the ksvc boundary box, the auto-Route (edge/Kourier) chip, the immutable
 -revision card, the KPA "0..N on concurrency" badge, the eventing source→broker→trigger row — Red Hat-neutral

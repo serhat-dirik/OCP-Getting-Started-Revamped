@@ -8,8 +8,8 @@ commented `// TODO(media): image::…` line — uncomment when the asset lands.
 
 Media note: the console screenshots below were captured on the live 4.21 console during the
 2026-07-10 browser-verification pass and are embedded in `lab.adoc` (see the Status column).
-Diagrams ship inline as Mermaid (they satisfy the ≥1-diagram requirement today); the SVG diagram
-exports remain the deferred media pass.
+Diagrams ship as a standalone Mermaid `.mmd` under `examples/diagrams/platform-orientation/`
+(never inline in the `.adoc`); the SVG diagram exports remain the deferred media pass.
 
 ## Screenshots (console views — the view IS the content)
 
@@ -42,13 +42,13 @@ perspective is enabled on the workshop cluster (`consoles.operator.openshift.io/
 of the nav. The landmarks re-shoot (screenshot 4) must reflect this current nav. The lab also
 **dropped the web-terminal step**, so the masthead terminal icon is no longer called out.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `platform-orientation-01-desired-state.svg` | concept.adoc Mermaid "desired state / reconcile loop" | shared legend (pod, deployment, service, human) |
-| `platform-orientation-02-platform-accretion-v1.svg` | concept.adoc Mermaid platform diagram | **master accretion diagram**, M01 layer in red; later modules highlight their own layer on this base |
-| `platform-orientation-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = objects the attendee created |
+| `platform-orientation-01-desired-state.svg` | concept.adoc Mermaid "desired state / reconcile loop" — `examples/diagrams/platform-orientation/01-desired-state.mmd` | shared legend (pod, deployment, service, human) |
+| `platform-orientation-02-platform-accretion-v1.svg` | concept.adoc Mermaid platform diagram — `examples/diagrams/platform-orientation/02-platform-accretion-v1.mmd` | **master accretion diagram**, M01 layer in red; later modules highlight their own layer on this base |
+| `platform-orientation-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/platform-orientation/03-what-you-built.mmd` | green = objects the attendee created |
 
 ## Recordings
 

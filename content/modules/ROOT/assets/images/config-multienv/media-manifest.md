@@ -23,15 +23,15 @@ remain the deferred media pass.
 | 4 | `config-multienv-04-quota-replicafailure.png` | Console: the `claims-hog` Deployment with its `ReplicaFailure`/`exceeded quota` event, next to the namespace ResourceQuota view | Circle: the `exceeded quota: workshop-quota` event; the quota's requests.cpu used/hard | lab.adoc ex. 5 |
 | 5 | `config-multienv-05-three-envs.png` | Three Topology tiles side by side — `user1-dev` (1 pod), `user1-stage` (2 pods), `user1-prod` (3 pods) — all `parasol-claims` | Circle: the differing replica counts; note "same image" | lab.adoc ex. 6 |
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `config-multienv-01-config-sources.svg` | concept.adoc Mermaid "config sources" | one immutable image fed by env / ConfigMap / Secret / mounted file; shared legend |
-| `config-multienv-02-readiness-gate.svg` | concept.adoc Mermaid "readiness gate" | Route → passing pod; NOT → failing pod (503); the module's signature idea |
-| `config-multienv-03-promotion-overlays.svg` | concept.adoc Mermaid "promotion overlays" | one base → dev/stage/prod overlays, same image digest into three namespaces |
+| `config-multienv-01-config-sources.svg` | concept.adoc Mermaid "config sources" — `examples/diagrams/config-multienv/01-config-sources.mmd` | one immutable image fed by env / ConfigMap / Secret / mounted file; shared legend |
+| `config-multienv-02-readiness-gate.svg` | concept.adoc Mermaid "readiness gate" — `examples/diagrams/config-multienv/02-readiness-gate.mmd` | Route → passing pod; NOT → failing pod (503); the module's signature idea |
+| `config-multienv-03-promotion-overlays.svg` | concept.adoc Mermaid "promotion overlays" — `examples/diagrams/config-multienv/03-promotion-overlays.mmd` | one base → dev/stage/prod overlays, same image digest into three namespaces |
 | `config-multienv-04-platform-accretion-v4.svg` | concept.adoc TODO(media) | **master accretion diagram**, M04 layer (config + multi-env) highlighted on the M01–M03 base |
-| `config-multienv-05-what-you-built.svg` | wrapup.adoc Mermaid recap | green = what the attendee ran (ConfigMap + Secret + probes → promote to stage/prod) |
+| `config-multienv-05-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/config-multienv/05-what-you-built.mmd` | green = what the attendee ran (ConfigMap + Secret + probes → promote to stage/prod) |
 
 ## Recordings
 

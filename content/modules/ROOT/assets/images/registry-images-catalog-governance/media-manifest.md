@@ -9,13 +9,13 @@ deferred media pass. Every screenshot needs alt text (what it shows + what to no
 marked in the `.adoc` files with a commented `// media-pass:` line — replace with the `image::…` when the
 asset lands.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `registry-images-catalog-governance-01-two-supply-chains.svg` | concept.adoc Mermaid "two supply chains on one page" | external registries → **governance** (allowed-registries / IDMS-ITMS) → internal registry (svc:5000 + PVC + pruner) → **ImageStream** (immutable digest · scheduled · Local) → workload; **catalog supply** branch (OperatorHub sources · samples operator · ConsoleSample · namespaced Template · devfiles) → Developer Catalog. red = outside trust boundary, amber = platform governance, green = attendee hands-on. The module's spine — reused on slide 2 |
+| `registry-images-catalog-governance-01-two-supply-chains.svg` | concept.adoc Mermaid "two supply chains on one page" — `examples/diagrams/registry-images-catalog-governance/01-two-supply-chains.mmd` | external registries → **governance** (allowed-registries / IDMS-ITMS) → internal registry (svc:5000 + PVC + pruner) → **ImageStream** (immutable digest · scheduled · Local) → workload; **catalog supply** branch (OperatorHub sources · samples operator · ConsoleSample · namespaced Template · devfiles) → Developer Catalog. red = outside trust boundary, amber = platform governance, green = attendee hands-on. The module's spine — reused on slide 2 |
 | `registry-images-catalog-governance-02-immutable-promote.svg` | concept.adoc "why an ImageStream still matters" | a moving tag `prod` pinned to an immutable `sha256`; `1.0` and `prod` arrows converging on the SAME digest box; a side note "re-push `1.0` upstream → `prod` still points at the promoted digest". The promotion-by-digest idea — reused on slide 3 |
-| `registry-images-catalog-governance-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = your namespaced work (promote · scheduled import · Template · pull secret); amber = cluster-wide governance you read (allowed-registries/IDMS-ITMS · nightly pruner · samples operator/ConsoleSample); blue = the internal registry + Developer Catalog they meet at |
+| `registry-images-catalog-governance-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/registry-images-catalog-governance/03-what-you-built.mmd` | green = your namespaced work (promote · scheduled import · Template · pull secret); amber = cluster-wide governance you read (allowed-registries/IDMS-ITMS · nightly pruner · samples operator/ConsoleSample); blue = the internal registry + Developer Catalog they meet at |
 
 Shared legend across the diagrams: registry cylinder, ImageStream box, immutable-digest badge, the
 amber governance shield, catalog tile — same palette as M01–M16 (Red Hat-neutral, no vendor-logo soup).

@@ -14,12 +14,12 @@ a commented `// media-pass:` (diagrams) or `[CAPTURE-VERIFY]` (console/IDE) line
 `image::…` when the asset lands. **Do not shoot yet** — this is the spec; capture in the media phase, and
 scrub the cluster domain to a placeholder (`apps.example.com`) and the user to `{user}` in every frame.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `app-modernization-01-mta-flow.svg` | concept.adoc Mermaid "How MTA analysis works" | Git source + target chips (cloud-readiness/linux/openjdk/jakarta-ee/jws) feeding the analyzer addon in the shared Hub; report (issues + effort) to "you"; loop through a Dev Spaces + Developer Lightspeed `[ADS]` fix back to the source. The module's spine — reused on concept slide 3 |
-| `app-modernization-02-modernize-loop.svg` | wrapup.adoc Mermaid recap | the linear loop legacy (24 pts) → MTA analysis (6 mandatory) → fix (Developer Lightspeed `[ADS]` / manual) → re-analyze (effort drops) → parasol-claims-modernized on OpenShift |
+| `app-modernization-01-mta-flow.svg` | concept.adoc Mermaid "How MTA analysis works" — `examples/diagrams/app-modernization/01-mta-flow.mmd` | Git source + target chips (cloud-readiness/linux/openjdk/jakarta-ee/jws) feeding the analyzer addon in the shared Hub; report (issues + effort) to "you"; loop through a Dev Spaces + Developer Lightspeed `[ADS]` fix back to the source. The module's spine — reused on concept slide 3 |
+| `app-modernization-02-modernize-loop.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/app-modernization/02-modernize-loop.mmd` | the linear loop legacy (24 pts) → MTA analysis (6 mandatory) → fix (Developer Lightspeed `[ADS]` / manual) → re-analyze (effort drops) → parasol-claims-modernized on OpenShift |
 
 Shared legend: the Git-repo box, the migration-target chip, the analyzer/Hub box, the report card
 (mandatory/optional/potential + effort badge), the Dev Spaces + Lightspeed fix chip — Red Hat-neutral

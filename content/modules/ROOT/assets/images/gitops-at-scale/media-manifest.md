@@ -32,19 +32,20 @@ Capture them in the media pass.
 | 4 | `gitops-at-scale-04-canary-progressing.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Rollout view, mid-canary** | revision 2 (canary, 1.1) alongside revision 1 (stable, 1.0), SetWeight 25 or 50, the analysis step running — the module's signature visual | lab.adoc ex. 3 (watch the canary) |
 | 5 | `gitops-at-scale-05-canary-aborted.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Rollout view, aborted** | the Rollout Degraded/aborted at the analysis step, the failed AnalysisRun, stable still serving — the payoff | lab.adoc ex. 4 (the auto-rollback) |
 
-## Diagrams (SVG in-repo; source of truth is the inline Mermaid in the `.adoc`)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
-The concept/wrap-up pages ship inline Mermaid (editable-source rule satisfied by construction).
-Export these to SVG next to their `.adoc` for the slide deck and richer rendering; keep the Mermaid
-as the editable source (do not delete it).
+The concept/wrap-up pages `include::` their diagram source — a standalone `.mmd` under
+`examples/diagrams/gitops-at-scale/` (path linked per row in the Source column below), never
+inline Mermaid text in the `.adoc`. Export these to SVG next to their `.adoc` for the slide deck
+and richer rendering; keep the `.mmd` as the editable master (do not delete it).
 
-| # | Filename | Status | Source (inline Mermaid in) | Shows |
+| # | Filename | Status | Page (Mermaid included in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `gitops-at-scale-01-appset.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | hand-made-per-env vs one ApplicationSet (generator → template → 3 apps) |
-| 2 | `gitops-at-scale-02-sync-waves.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | db (wave 0) → migration hook (wave 1) → app Rollout (wave 2) |
-| 3 | `gitops-at-scale-03-canary-analysis.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | canary 25→50 → analysis → pass (100%) / fail (roll back to stable) |
+| 1 | `gitops-at-scale-01-appset.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/gitops-at-scale/01-appset.mmd` | hand-made-per-env vs one ApplicationSet (generator → template → 3 apps) |
+| 2 | `gitops-at-scale-02-sync-waves.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/gitops-at-scale/02-sync-waves.mmd` | db (wave 0) → migration hook (wave 1) → app Rollout (wave 2) |
+| 3 | `gitops-at-scale-03-canary-analysis.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/gitops-at-scale/03-canary-analysis.mmd` | canary 25→50 → analysis → pass (100%) / fail (roll back to stable) |
 | 4 | `gitops-at-scale-04-platform-accretion.svg` | ⬜ NOT CAPTURED (shared) | concept.adoc (pointer) | the cross-module Parasol platform diagram with the M10 layer (ApplicationSets + Rollouts) highlighted |
-| 5 | `gitops-at-scale-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc | ApplicationSet → 3 apps; prod canary with the pass/rollback fork highlighted |
+| 5 | `gitops-at-scale-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc — `examples/diagrams/gitops-at-scale/05-what-you-built.mmd` | ApplicationSet → 3 apps; prod canary with the pass/rollback fork highlighted |
 
 ## Recording (demo-arc happy path)
 

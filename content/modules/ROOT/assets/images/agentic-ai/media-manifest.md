@@ -15,13 +15,13 @@ asset lands. **Do not shoot yet** — this is the spec; capture in the media pha
 domain to a placeholder (`apps.example.com`) and the user to `{user}` in every frame. **Never show the
 MaaS key** — the attendee never handles it, and it must not appear in any terminal frame or pod-log capture.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `agentic-ai-01-agent-anatomy.svg` | concept.adoc Mermaid "The anatomy of an agent" | The four parts (model · instructions · tools · memory) inside the parasol-agent box; question in, grounded answer + tool-calls + tokens out; tools connect to the two MCP servers. Reused on concept slide 2 |
-| `agentic-ai-02-mcp-tools.svg` | concept.adoc Mermaid "MCP tools are your APIs" | The agent as MCP client in the `{user}-ai` namespace, calling claims-db + policy-docs (tools listed) over HTTP-SSE and the MaaS model endpoint for chat. The module's spine — reused on concept slide 3 |
-| `agentic-ai-03-agent-recap.svg` | wrapup.adoc Mermaid recap | question → agent (model+instructions+tools+memory) → MCP tools → grounded/cited answer (or honest "not found") + tokens; the `[ADD-ON]` next layer (guardrails · Llama Stack · vector DB) slotting in behind the same contracts |
+| `agentic-ai-01-agent-anatomy.svg` | concept.adoc Mermaid "The anatomy of an agent" — `examples/diagrams/agentic-ai/01-agent-anatomy.mmd` | The four parts (model · instructions · tools · memory) inside the parasol-agent box; question in, grounded answer + tool-calls + tokens out; tools connect to the two MCP servers. Reused on concept slide 2 |
+| `agentic-ai-02-mcp-tools.svg` | concept.adoc Mermaid "MCP tools are your APIs" — `examples/diagrams/agentic-ai/02-mcp-tools.mmd` | The agent as MCP client in the `{user}-ai` namespace, calling claims-db + policy-docs (tools listed) over HTTP-SSE and the MaaS model endpoint for chat. The module's spine — reused on concept slide 3 |
+| `agentic-ai-03-agent-recap.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/agentic-ai/03-agent-recap.mmd` | question → agent (model+instructions+tools+memory) → MCP tools → grounded/cited answer (or honest "not found") + tokens; the `[ADD-ON]` next layer (guardrails · Llama Stack · vector DB) slotting in behind the same contracts |
 
 Shared legend: the agent box (MCP client), the MCP-server/tool box, the model-endpoint box, the
 grounded-answer card (answer + citation + tokens + tool calls), and the dashed `[ADD-ON]` layer —

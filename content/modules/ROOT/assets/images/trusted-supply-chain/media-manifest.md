@@ -12,8 +12,8 @@ CVSS 10), the 225-component CycloneDX SBOM, the **fixed** run passing with a Cha
 and `cosign verify`/`verify-attestation` (SLSA provenance v0.2) — were all performed and captured
 from the CLI/API as `user2` on 2026-07-10. The console/RHACS screenshots and the SVG diagram exports
 below are the **deferred media pass** (no screenshots captured yet — the build was CLI-driven).
-Diagrams currently ship inline as Mermaid (they satisfy the ≥1-diagram requirement today); the SVG
-exports replace/augment them in the pass.
+Diagrams ship as a standalone Mermaid `.mmd` under `examples/diagrams/trusted-supply-chain/`
+(never inline in the `.adoc`); the SVG exports replace/augment them in the pass.
 
 ## Screenshots (console/UI views — the view IS the content)
 
@@ -30,12 +30,12 @@ check` table, the `jq` SBOM query, `chains.tekton.dev/signed=true`), shown inlin
 for the page to read correctly (all embed points are `// media-pass:` comments, so their absence
 breaks nothing).
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `trusted-supply-chain-01-trust-triangle.svg` | concept.adoc Mermaid "trust triangle / pipeline" | the module's key diagram: source → SBOM → build+sign → scan gate → registry (image + .sig + .att) → ImagePolicy admission. Colour the two refusals (gate + admission) red, the trustworthy path green |
-| `trusted-supply-chain-03-what-you-built.svg` | wrapup.adoc Mermaid recap | the trustworthy path green; the two refusals (Log4Shell → gate red; unsigned → admission red) |
+| `trusted-supply-chain-01-trust-triangle.svg` | concept.adoc Mermaid "trust triangle / pipeline" — `examples/diagrams/trusted-supply-chain/01-trust-triangle.mmd` | the module's key diagram: source → SBOM → build+sign → scan gate → registry (image + .sig + .att) → ImagePolicy admission. Colour the two refusals (gate + admission) red, the trustworthy path green |
+| `trusted-supply-chain-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/trusted-supply-chain/03-what-you-built.mmd` | the trustworthy path green; the two refusals (Log4Shell → gate red; unsigned → admission red) |
 | `trusted-supply-chain-04-platform-accretion.svg` | (new) master accretion diagram, **trust/supply-chain layer** highlighted | reuse the platform base; light up the scan-gate + signing + admission layer in red (accretion pattern) |
 
 ## Recordings

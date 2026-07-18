@@ -18,12 +18,12 @@ in the media phase, and scrub the live cluster domain to a placeholder (`apps.ex
 `{user}` in every frame. **Never show a credential or token** — the Gitea push login, the SonarQube token,
 and the RHACS API token must not appear in any terminal frame or pod-log capture.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `app-security-testing-01-five-pillars.svg` | concept.adoc inline Mermaid "The five pillars, mapped to pipeline stages" | The pillars-to-stages map: source → SAST → SCA → build → image scan → config check → deploy → DAST, with the shift-LEFT gates (SAST · SCA · config, blue) before build and the shift-RIGHT gates (image · DAST, amber) after. Reused on concept slides 2 and 3 |
-| `app-security-testing-02-red-to-green.svg` | wrapup.adoc inline Mermaid recap | The gauntlet: the `seed-appsec` branch (five flaws, every gate RED) flowing through five fix steps (externalize secret · drop vuln dep · stop baking log4shell · harden manifest · add headers) into one green end state (every gate GREEN · scanned · signed · deployed). Reused on the demo-arc slide |
+| `app-security-testing-01-five-pillars.svg` | concept.adoc Mermaid "The five pillars, mapped to pipeline stages" — `examples/diagrams/app-security-testing/01-five-pillars.mmd` | The pillars-to-stages map: source → SAST → SCA → build → image scan → config check → deploy → DAST, with the shift-LEFT gates (SAST · SCA · config, blue) before build and the shift-RIGHT gates (image · DAST, amber) after. Reused on concept slides 2 and 3 |
+| `app-security-testing-02-red-to-green.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/app-security-testing/02-red-to-green.mmd` | The gauntlet: the `seed-appsec` branch (five flaws, every gate RED) flowing through five fix steps (externalize secret · drop vuln dep · stop baking log4shell · harden manifest · add headers) into one green end state (every gate GREEN · scanned · signed · deployed). Reused on the demo-arc slide |
 
 Shared legend: the shift-LEFT gate box (blue), the shift-RIGHT gate box (amber), the plain build/deploy
 step (grey), the RED failed-gate state, and the GREEN passed end state — Red Hat-neutral palette, no

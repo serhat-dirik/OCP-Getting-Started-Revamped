@@ -208,15 +208,30 @@ Attribute names are `<key>_version` for every product entry in `versions.yaml`
 
 Two Antora extensions are enabled in every playbook:
 
-- **Mermaid** (`@sntke/antora-mermaid-extension`) — inline diagrams. Every concept section
-  ships at least one diagram (`04-STYLE-GUIDE §4`), sized and lightboxed per CC-5:
+- **Mermaid** (`@sntke/antora-mermaid-extension`) — rendered diagrams. Every concept section
+  ships at least one diagram (`04-STYLE-GUIDE §4`), sized and lightboxed per CC-5. **Diagram
+  source is never authored as inline Mermaid text in a page** (owner directive 2026-07-18: the
+  editable master must be a file you can open in a proper tool). It lives as a standalone
+  `.mmd` file under `content/modules/ROOT/examples/diagrams/<slug>/<NN>-<short-name>.mmd` —
+  open/edit/save it in the Mermaid Live Editor, a VS Code Mermaid plugin, or import it into
+  draw.io. The page only `include::`s it, inside the unchanged `[mermaid]` wrapper (Antora's
+  `example$` family resolves to `content/modules/ROOT/examples/`):
 
   ```asciidoc
   [mermaid]
   ....
-  graph LR; web --> claims --> db[(Postgres)]
+  include::example$diagrams/<slug>/01-short-name.mmd[]
   ....
   ```
+
+  Asciidoctor's preprocessor resolves `include::` directives before the Mermaid extension ever
+  sees the block's content, even inside a verbatim `....` block — no `subs` attribute is needed
+  for the include itself (confirmed in the build: the rendered page carries the full diagram
+  source, not an unresolved-include placeholder). Register the `.mmd` path on the module's
+  `media-manifest.md` diagram row (`Source: examples/diagrams/<slug>/<file>.mmd`) so the
+  register always points at the editable master. A future hand-made (non-Mermaid) diagram
+  follows the same rule: commit its editable source (`.excalidraw`/`.drawio`) next to its
+  export under `assets/images/<slug>/src/`, registered in the manifest the same way.
 
 - **Tabs** (`@andrew-jones/antora-tabs-extension`) — console-vs-CLI dual paths, the site-wide standard wherever a step works in both the terminal and the web console:
 

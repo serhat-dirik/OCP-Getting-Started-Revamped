@@ -8,9 +8,9 @@ commented `// TODO(media): image::…` line — uncomment when the asset lands.
 
 Media note: the module's build/template/end-state mechanics were verified from the CLI/API as
 `user2`; the console screenshots below were then captured on the live 4.21 console during the
-2026-07-10 browser-verification pass (see the Status column). Diagrams ship inline as Mermaid
-(they satisfy the ≥1-diagram requirement today); the SVG diagram exports remain the deferred
-media pass.
+2026-07-10 browser-verification pass (see the Status column). Diagrams ship as a standalone
+Mermaid `.mmd` under `examples/diagrams/build-deliver/` (never inline in the `.adoc`); the SVG
+diagram exports remain the deferred media pass.
 
 ## Screenshots (console views — the view IS the content)
 
@@ -47,13 +47,13 @@ and is deferred to the next media pass. It has no `// media-pass:` embed comment
   ConfigMaps or Secrets (envFrom)"** section (equivalent to `--from=secret/claims-db`); a per-key
   "Add from ConfigMap or Secret" control also exists in the Single-values section.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `build-deliver-01-build-spectrum.svg` | concept.adoc Mermaid "build spectrum decision tree" | the module's key diagram: image? / source? / need control? / workflow? |
+| `build-deliver-01-build-spectrum.svg` | concept.adoc Mermaid "build spectrum decision tree" — `examples/diagrams/build-deliver/01-build-spectrum.mmd` | the module's key diagram: image? / source? / need control? / workflow? |
 | `build-deliver-02-platform-accretion-v2.svg` | (new) master accretion diagram, **build layer** highlighted | reuse the M01 platform base; light up the build/registry layer in red (accretion pattern) |
-| `build-deliver-03-what-you-built.svg` | wrapup.adoc Mermaid recap | green = objects the attendee created (source→S2I→image→Deployment + DB + Secret + Route) |
+| `build-deliver-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/build-deliver/03-what-you-built.mmd` | green = objects the attendee created (source→S2I→image→Deployment + DB + Secret + Route) |
 
 ## Recordings
 

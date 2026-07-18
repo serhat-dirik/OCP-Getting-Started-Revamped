@@ -13,13 +13,13 @@ Embed points are marked in the `.adoc` files with a commented `// media-pass:` (
 `// [CAPTURE-VERIFY]` (console) line — replace with the `image::…` when the asset lands. **Do not shoot
 yet** — this is the spec; capture in the media phase.
 
-## Diagrams (SVG exports of the inline Mermaid, committed next to the source)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |
 |----------|--------|-------|
-| `eventing-deep-dive-01-eventing-model.svg` | concept.adoc Mermaid "The four primitives" | amber seeded PingSource + a "you: POST" actor both feeding a blue in-memory Broker; three green triggers (catch-all, filter `type`, filter `claimpriority`) to the light-blue `claims-consumer`; a dashed "on repeated failure" edge to `claims-dlq`. The module's spine — reused on slide 2 |
+| `eventing-deep-dive-01-eventing-model.svg` | concept.adoc Mermaid "The four primitives" — `examples/diagrams/eventing-deep-dive/01-eventing-model.mmd` | amber seeded PingSource + a "you: POST" actor both feeding a blue in-memory Broker; three green triggers (catch-all, filter `type`, filter `claimpriority`) to the light-blue `claims-consumer`; a dashed "on repeated failure" edge to `claims-dlq`. The module's spine — reused on slide 2 |
 | `eventing-deep-dive-02-retries-dlq.svg` | concept.adoc delivery NOTE + slide 5 | a trigger→consumer edge with the consumer marked **broken**; the event bouncing through attempt 0 + retries at **1s/2s/4s** (~8s), then a fat arrow to the dead-letter sink showing a dead-event card with **`knativeerrorcode: 404`** and `knativeerrordest` highlighted. The "not dropped — dead-lettered, with why" visual |
-| `eventing-deep-dive-03-what-you-built.svg` | wrapup.adoc Mermaid recap | amber seeded source; blue in-memory broker; the three green triggers (incl. the filtered + retry/DLQ `claims-fraud-review`); light-blue `claims-consumer` + `claims-dlq` dead-letter sink |
+| `eventing-deep-dive-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/eventing-deep-dive/03-what-you-built.mmd` | amber seeded source; blue in-memory broker; the three green triggers (incl. the filtered + retry/DLQ `claims-fraud-review`); light-blue `claims-consumer` + `claims-dlq` dead-letter sink |
 
 Shared legend across the diagrams: the Broker hub, the Trigger-with-filter chip, the CloudEvents envelope
 card (type/source/id + extension attr), the scale-to-zero consumer, the dead-letter sink — Red Hat-neutral

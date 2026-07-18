@@ -31,18 +31,19 @@ visuals.
 | 5 | `developer-hub-golden-paths-05-scaffold-steps.png` | ⬜ NOT CAPTURED — **HIGH** | **Scaffolder task page** | the three steps (fetch / publish / register) completed green, and the output links ("Open the new repository", "Open in the software catalog") | lab.adoc ex. 2 (watch the task) |
 | 6 | `developer-hub-golden-paths-06-scaffold-409.png` | ⬜ NOT CAPTURED | **Scaffolder task, failed** | the *Publish to Gitea* step failed (red) with `409 … repository with the same name already exists` — the deliberate break | lab.adoc ex. 2 (break and fix) |
 
-## Diagrams (SVG in-repo; source of truth is the inline Mermaid in the `.adoc`)
+## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
-The concept/wrap-up pages ship inline Mermaid (editable-source rule satisfied by construction).
-Export these to SVG next to their `.adoc` for the slide deck and richer rendering; keep the Mermaid
-as the editable source (do not delete it).
+The concept/wrap-up pages `include::` their diagram source — a standalone `.mmd` under
+`examples/diagrams/developer-hub-golden-paths/` (path linked per row in the Source column below),
+never inline Mermaid text in the `.adoc`. Export these to SVG next to their `.adoc` for the slide
+deck and richer rendering; keep the `.mmd` as the editable master (do not delete it).
 
-| # | Filename | Status | Source (inline Mermaid in) | Shows |
+| # | Filename | Status | Page (Mermaid included in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `developer-hub-golden-paths-01-catalog-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | System → Components + API, owned by a Group; provides/consumes relations |
-| 2 | `developer-hub-golden-paths-02-golden-path-flow.svg` | ⬜ NOT CAPTURED (export) | concept.adoc | form → template → scaffold + publish + register → new repo + catalog entry |
+| 1 | `developer-hub-golden-paths-01-catalog-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/developer-hub-golden-paths/01-catalog-model.mmd` | System → Components + API, owned by a Group; provides/consumes relations |
+| 2 | `developer-hub-golden-paths-02-golden-path-flow.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/developer-hub-golden-paths/02-golden-path-flow.mmd` | form → template → scaffold + publish + register → new repo + catalog entry |
 | 3 | `developer-hub-golden-paths-04-platform-accretion.svg` | ⬜ NOT CAPTURED (shared) | concept.adoc (pointer) | the cross-module Parasol platform diagram with the M11 layer (portal + catalog + golden path packaging M02–M10) highlighted |
-| 4 | `developer-hub-golden-paths-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc | form → template → repo + catalog + in-cluster build → running service |
+| 4 | `developer-hub-golden-paths-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc — `examples/diagrams/developer-hub-golden-paths/05-what-you-built.mmd` | form → template → repo + catalog + in-cluster build → running service |
 
 ## Recording (demo-arc happy path)
 
