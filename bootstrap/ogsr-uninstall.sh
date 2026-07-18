@@ -142,10 +142,18 @@ del_labeled_namespaced() {  # kind — delete owner-labeled objects of a NAMESPA
 
 # ── reverse the imperative bootstrap mutations ────────────────────────────────
 remove_oauth_idp() {  # remove ONLY the workshop-users IdP entry, preserving every other identity provider
-  local owned names n idx i
+  local owned names n idx i backing
   owned="$(state oauth_idp_ownedbyus)"
   if [[ "$owned" != "true" ]]; then
-    echo "   • preserve OAuth IdP 'workshop-users' (no record that we added it)"; return 0
+    # Retrofit safety: a pre-Wave-1 install (no state ConfigMap) leaves oauth_idp_ownedbyus unrecorded,
+    # so this branch would PRESERVE 'workshop-users' — but step 4 deletes the htpasswd secret it points
+    # at, stranding a broken login provider on the org's cluster (fails "uninstall fully reverses"). The
+    # IdP is unambiguously ours when it is backed by OUR htpasswd-workshop-users secret; remove it then.
+    backing="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[?(@.name=="workshop-users")].htpasswd.fileData.name}' 2>/dev/null || true)"
+    if [[ "$backing" != "htpasswd-workshop-users" ]]; then
+      echo "   • preserve OAuth IdP 'workshop-users' (not ours: no state record, not backed by htpasswd-workshop-users)"; return 0
+    fi
+    echo "   • OAuth IdP 'workshop-users' is backed by our htpasswd-workshop-users secret — removing (retrofit-safe)"
   fi
   names="$(oc get oauth cluster -o jsonpath='{range .spec.identityProviders[*]}{.name}{"\n"}{end}' 2>/dev/null || true)"
   idx=-1; i=0
