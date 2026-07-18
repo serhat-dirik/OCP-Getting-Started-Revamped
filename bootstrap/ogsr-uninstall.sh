@@ -145,6 +145,17 @@ enumerate_installed_stack_ns() {
   done
 }
 
+# Every Argo Application that is OURS: owner-labeled (current installs) OR portfolio-stack-labeled.
+# The portfolio.redhat.com/stack label is exclusively ours (stack-app.template.yaml) and catches
+# LEGACY pp-* apps created before Wave-1 owner-labeling — which otherwise survive step 2 and keep an
+# uninstalled stack reconciling (a stale pp-mta on C2 re-created pp-mta-hub mid-teardown and re-added
+# openshift-mta's owner label right after F7 stripped it). Deduped so an app with both labels appears once.
+our_applications() {
+  { oc get applications -n "$ARGO_NS" -l "$OWNER_LABEL"               -o name 2>/dev/null
+    oc get applications -n "$ARGO_NS" -l "portfolio.redhat.com/stack" -o name 2>/dev/null
+  } | sed 's|.*/||' | sort -u || true
+}
+
 # ── delete helpers (all dry-run aware, all tolerant of already-absent objects) ─
 del_obj() {  # kind name [ns] — delete one object if it exists; print a skip reason if absent
   local kind="$1" name="$2" ns="${3:-}" loc
@@ -432,17 +443,22 @@ delete_workshop_namespaces() {  # act on the classification: delete ours (F5 fir
 # operator may need to run cleanup first) — the one known-safe class, Argo's hook-finalizer, is already
 # cleared by strip_hook_finalizers. Here we wait (bounded, early-exit) for our deletes to finish, then
 # REPORT anything still stuck past ~2min with the finalizer-holding CRs + the exact manual clear command.
-report_ns_finalizer_holders() {  # ns — list every object in ns still carrying a finalizer + how to clear it
-  local ns="$1" kind objkind objname fins
-  while IFS= read -r kind; do
-    [[ -n "$kind" ]] || continue
-    while IFS=$'\t' read -r objkind objname fins; do
+report_ns_finalizer_holders() {  # ns — surface what blocks termination, from the namespace's OWN status
+  local ns="$1" rtype objname fins
+  # The namespace controller records exactly what content + which finalizers remain, in
+  # status.conditions — ONE read, instead of brute-force `oc get` across every namespaced
+  # api-resource (~100 calls, which is what pushed the first C2 run past the run budget).
+  oc get namespace "$ns" -o jsonpath='{range .status.conditions[?(@.status=="True")]}{"      ↳ "}{.type}{": "}{.message}{"\n"}{end}' 2>/dev/null || true
+  # For each resource TYPE the status still lists as remaining, print each object + the exact clear cmd
+  # (the finalizers themselves are already itemised in the NamespaceFinalizersRemaining message above).
+  while IFS= read -r rtype; do
+    [[ -n "$rtype" ]] || continue
+    while IFS= read -r objname; do
       [[ -n "$objname" ]] || continue
-      echo "      ↳ ${objkind}/${objname}  finalizers=[${fins% }]"
-      echo "         clear: oc patch ${kind} ${objname} -n ${ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'"
-    done < <(oc get "$kind" -n "$ns" \
-              -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.kind}{"\t"}{.metadata.name}{"\t"}{range .metadata.finalizers[*]}{.}{" "}{end}{"\n"}{end}' 2>/dev/null || true)
-  done < <(oc api-resources --namespaced --verbs=list -o name 2>/dev/null | sort -u || true)
+      echo "         clear: oc patch ${rtype} ${objname} -n ${ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'"
+    done < <(oc get "$rtype" -n "$ns" -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  done < <(oc get namespace "$ns" -o jsonpath='{range .status.conditions[*]}{.message}{"\n"}{end}' 2>/dev/null \
+            | grep -oE '[a-z0-9.-]+\.[a-z0-9-]+ has [0-9]+ resource instances' | sed 's/ has.*//' | sort -u || true)
 }
 
 report_stuck_namespaces() {  # names… — bounded wait for termination, then report any still stuck (>~2min)
@@ -467,7 +483,7 @@ report_stuck_namespaces() {  # names… — bounded wait for termination, then r
 print_plan() {
   local apps created adopted name ns st gitops_plan mon_plan gw_plan
   local verb wn reason nwipe=0 wipe_stack="" strip_list=""
-  apps="$(oc get applications -n "$ARGO_NS" -l "$OWNER_LABEL" -o name 2>/dev/null | wc -l | tr -d ' ' || echo '?')"
+  apps="$(our_applications | grep -c . || echo '?')"
   # Drive the namespace plan from the SAME classifier step 9 uses, so the summary is exactly the action.
   while IFS=$'\t' read -r verb wn reason; do
     case "$verb" in
@@ -547,7 +563,7 @@ while IFS= read -r app; do
   [[ -n "$app" ]] || continue
   if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD disable automated sync on application/${app}"; continue; fi
   oc patch application "$app" -n "$ARGO_NS" --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}' >/dev/null 2>&1 || true
-done < <(oc get applications -n "$ARGO_NS" -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' || true)
+done < <(our_applications)
 
 # 2. Orphan + delete our apps (drop the resources-finalizer, --cascade=orphan) so deleting them NEVER
 #    prunes an adopted operator. The workshop's own resources are removed explicitly in later steps.
@@ -558,7 +574,7 @@ while IFS= read -r app; do
   oc patch application "$app" -n "$ARGO_NS" --type json -p '[{"op":"remove","path":"/metadata/finalizers"}]' >/dev/null 2>&1 || true
   oc delete application "$app" -n "$ARGO_NS" --cascade=orphan --ignore-not-found --wait=false >/dev/null 2>&1 || true
   ok "orphaned + deleted application/${app}"
-done < <(oc get applications -n "$ARGO_NS" -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' || true)
+done < <(our_applications)
 
 # 3. Remove Subscriptions/CSVs for operators WE created (dedicated-ns ones also go with their namespace).
 info "[3/9] removing operators we created (adopted operators preserved)"
