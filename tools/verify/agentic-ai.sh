@@ -69,7 +69,7 @@ info "agent model (maas-config): $(oc get cm maas-config -n "$NS" -o jsonpath='{
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the full agent world is deployed + Ready; no model token spent ---------------------
-  info "entry state: agent world deployed (claims-db + policy-docs + parasol-agent Ready) — no model call made"
+  info "entry state: asserting the agent-world deployments below — no model call made"
 else
   # --- end state: the lab's OUTCOME — the agent answered a TOOL-GROUNDED query ------------------------
   # Assert the OUTCOME (the agent invoked the claims-db get_claim tool), not exact answer wording, so any
