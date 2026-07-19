@@ -167,16 +167,16 @@ The MCP server is the *only* thing in this system with a cluster credential — 
 [source,sh,role=execute]
 ----
 oc get rolebinding -n $NS -o json | jq -r '.items[] | select(.subjects[]?.name=="mcp-agent") | "\(.metadata.name) -> \(.roleRef.kind)/\(.roleRef.name)"'
-oc auth can-i --list -n $NS --as=system:serviceaccount:$NS:mcp-agent 2>/dev/null | grep -E '^(pods|events|deployments|secrets) ' | head
+oc auth can-i --list -n $NS --as=system:serviceaccount:$NS:mcp-agent 2>/dev/null | grep -E '^(pods|events|deployments\.apps|secrets) ' | head
 ----
 
 .Expected output (one namespaced binding to the built-in read-only `view` role — and no secrets)
 [source,texinfo]
 ----
 mcp-agent-view -> ClusterRole/view
-deployments.apps                []     []    [get list watch]
 events                          []     []    [get list watch]
 pods                            []     []    [get list watch]
+deployments.apps                []     []    [get list watch]
 ----
 
 `mcp-agent` has *one* RoleBinding, to the built-in `view` ClusterRole, *in this namespace only*. That means read (`get list watch`) on pods, events, deployments, logs — and, because `view` excludes them, *no access to Secrets* and *no writes*. This is the agent's entire power. Nothing here can reach another namespace or read a credential.
@@ -204,6 +204,18 @@ jq -n --arg pod "$POD" --arg img "$AGENT_CLI_IMAGE" --argjson args "$ARGS" --arg
     resources:{requests:{cpu:"100m",memory:"384Mi"},limits:{cpu:"1",memory:"768Mi"}}}]}}' \
   | oc apply -f - >/dev/null
 echo "· agent pod $POD running (the model round-trip can take up to a minute)…"
+# fail fast on a pull-dead pod instead of waiting out the full timeout
+for _ in $(seq 1 12); do
+  ph=$(oc get pod "$POD" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  [[ "$ph" == Running || "$ph" == Succeeded || "$ph" == Failed ]] && break
+  wr=$(oc get pod "$POD" -n "$NS" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true)
+  if [[ "$wr" == ImagePullBackOff || "$wr" == ErrImagePull ]]; then
+    echo "✗ agent image could not be pulled ($wr) — check that AGENT_CLI_IMAGE is reachable: $AGENT_CLI_IMAGE"
+    oc delete pod "$POD" -n "$NS" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  sleep 2
+done
 oc wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$POD" -n "$NS" --timeout=180s >/dev/null 2>&1 \
   || oc wait --for=jsonpath='{.status.phase}'=Failed pod/"$POD" -n "$NS" --timeout=3s >/dev/null 2>&1 || true
 echo "────────────────────────────────────────────────────────────────────"
@@ -216,6 +228,12 @@ echo "ask-agent ready"
 ----
 
 You don't need to read every line. The wiring is the lesson, and it's in the `spec`: the agent pod gets the *model* endpoint and key (`envFrom` the `maas-config-env` ConfigMap and the `maas-credentials` Secret) and the *MCP server* address (`MCP_SERVER_URL`) — *and nothing else*. No kubeconfig, no cluster token it uses. Its only route to the cluster is asking the MCP server, which acts as `mcp-agent`.
+
+[NOTE]
+.If an "ask" fails fast instead of thinking for a minute
+====
+A genuine model round-trip takes up to ~a minute, and `ask-agent` waits up to ~3 minutes for the one-shot pod to finish. But if the agent *image can't be pulled*, the helper's pre-check catches the `ImagePullBackOff` in the first few seconds and *fails fast* — `agent image could not be pulled` — rather than leaving you staring at a 3-minute hang. If you see that, the problem is image/registry access, not the model: check `echo $AGENT_CLI_IMAGE` and `oc get pod -l app=mcp-agent-cli-run -n $NS`.
+====
 
 [.checkpoint]
 ****
@@ -420,16 +438,21 @@ ANSWER
 ----
 
 [IMPORTANT]
-.If the agent *narrates* the change instead of running it — that's today's second lesson
+.When the agent doesn't land the fix — your manual fallback (and today's second lesson)
 ====
-On some models (this cluster's included), the agent will *print* the `resources_create_or_update(...)` call as *text* in its answer and make *zero* tool calls — it proposed the exact right patch but didn't execute it. That is the same "grounding is engineered" reality from exercise 2, and it is exactly why you *review the agent*: you now hold a change you can read and approve.
-When it happens, apply the change you just reviewed — using the very write you granted:
+The agent path can come up short in more than one way, and you should be ready for all of them:
+
+* *The agent narrates instead of acting.* On some models (this cluster's included), the agent *prints* the `resources_create_or_update(...)` call as *text* and makes *zero* tool calls — it proposed the exact right patch but didn't execute it. That is the same "grounding is engineered" reality from exercise 2.
+* *The model endpoint is unavailable.* If the MaaS endpoint or key is down, `ask-agent` comes back with an error like `model authentication failed` and no answer at all.
+* *The agent pod can't run.* If its image won't pull, `ask-agent` fails fast (see the note in exercise 1) instead of hanging.
+
+In *every* one of these cases you are not blocked, because you already *diagnosed* the fault yourself in exercise 2. You apply the reviewed change directly — using the very write you granted:
 [source,sh,role=execute]
 ----
 oc patch deploy parasol-claims -n $NS --type=json \
   -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/q/health/ready"}]'
 ----
-The point stands either way: the write is *permitted* because you granted the scoped role, and the human stayed in the loop for the change.
+The manual fallback isn't a workaround for a chatty model — it is how you keep making progress *whenever the agent path is unavailable*, whether the agent narrated, the model endpoint is down, or the one-shot pod never ran. The point stands either way: the write is *permitted* because you granted the scoped role, and a human stayed in the loop for the change.
 ====
 
 Watch the fix land, and confirm the service is finally healthy:
@@ -464,26 +487,31 @@ parasol-claims-7df9f89857-...     1/1     Running   0          40s
 fixed probe path: /q/health/ready
 ----
 
-Finally, *review the audit trail*. Who changed the deployment, and how? The `managedFields` record every writer by name:
+Finally, *review the audit trail*. Who changed the deployment, and how? The `managedFields` record every writer by name — and the *last* one names whoever applied your fix:
 
 [source,sh,role=execute]
 ----
 oc get deploy parasol-claims -n $NS -o jsonpath='{range .metadata.managedFields[*]}{.manager}{" — op="}{.operation}{"\n"}{end}'
 ----
 
-.Expected output (the agent's write is attributed to the MCP server's field manager — an auditable record)
+.Expected output (the managedFields name every writer; the last one is whoever applied the fix — here, the `oc` fallback)
 [source,texinfo]
 ----
-kubernetes-mcp-server — op=Apply
-kubectl-client-side-apply — op=Update
+argocd-controller — op=Update
 kube-controller-manager — op=Update
+kubectl-patch — op=Update
 ----
 
-`manager: kubernetes-mcp-server, op=Apply` is the agent's write, recorded by the API server itself. Between the *tool-call trace* (what the agent tried) and the *managedFields* (what actually changed the object), every write the agent made is accountable.
+The base managers (`argocd-controller`, which materialized the deployment, and `kube-controller-manager`) are always present; the *last* manager is the one that mattered — it records *who* applied your fix:
+
+* *If the agent applied it* (a tool-calling model, with writes allowed), that line reads `kubernetes-mcp-server — op=Apply` — the agent's write, made through the MCP server's *scoped identity* and recorded by the API server itself.
+* *If you applied it with the `oc patch` fallback above* (as you did here, because this cluster's model narrated the change), the writer is your own client — `kubectl-patch — op=Update`, attributed to *you*.
+
+Either way the point holds: between the *tool-call trace* (what the agent tried) and the *managedFields* (what actually changed the object), *every write is accountable* — the platform records who wrote, whether that was the agent or you.
 
 [.checkpoint]
 ****
-✔ *Verify:* You granted `mcp-agent` a *scoped* write (patch deployments in *this* namespace only — `oc auth can-i` confirms `patch deployments: yes` but `read secrets: no`), watched the client's read-only filter *hide 6 mutating tools* as defense in depth, and the agent fixed the probe path to `/q/health/ready` — `parasol-claims` is now `1/1`. The `managedFields` audit trail attributes the write to `kubernetes-mcp-server`.
+✔ *Verify:* You granted `mcp-agent` a *scoped* write (patch deployments in *this* namespace only — `oc auth can-i` confirms `patch deployments: yes` but `read secrets: no`), watched the client's read-only filter *hide 6 mutating tools* as defense in depth, and the probe path is now fixed to `/q/health/ready` — whether the agent applied it or you applied the reviewed `oc` fallback — so `parasol-claims` is `1/1`. The `managedFields` audit trail names whoever applied it: `kubernetes-mcp-server` if the agent did, or your `oc` client (`kubectl-patch`) if you used the fallback.
 ****
 
 == 4. The forbidden test — watch RBAC deny the agent
