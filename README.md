@@ -1,6 +1,6 @@
 # OpenShift Application Platform — Getting Started
 
-A modern, modular **OpenShift enablement workshop**: 27 self-contained modules that take developers, DevOps engineers, and architects from "I have credentials to a cluster" to "I can develop, deliver, and operate applications on OpenShift — and I know why the platform works this way."
+A modern, modular **OpenShift enablement workshop**: 26 self-contained modules that take developers, DevOps engineers, and architects from "I have credentials to a cluster" to "I can develop, deliver, and operate applications on OpenShift — and I know why the platform works this way."
 
 The same content base doubles as a **presenter-led demo kit** for Red Hat Solution Architects: every module renders as an attendee workshop guide, an SA demo guide (talk track + click path), and an instructor runbook — from one AsciiDoc source.
 
@@ -58,7 +58,7 @@ Runbook and the non-invasive guarantees: `docs/sa-provisioning-guide.md`.
 
 ## Status
 
-Pre-v1.0, under active build. Progress, phase status, and the module state grid live in the project status page (internal).
+**Content-complete.** All 26 modules pass the milestone QA gate and the workshop is deliverable end-to-end on any OpenShift 4.20+ cluster. Remaining work is finishing polish — media capture, the slide deck, contributor-doc cleanup — none of which blocks running a cohort. Progress detail and the module state grid live in the project status page (internal).
 
 ## Contributing
 
