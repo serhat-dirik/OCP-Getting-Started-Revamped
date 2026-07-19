@@ -15,9 +15,12 @@
 # assess/analyze/replatform flow is unaffected (graceful degradation), so verify stays green.
 # READINESS NOTE: parasol-claims-modernized runs a parasol-images image (parasol-claims, built by
 # workshop-config parasol-images-build.yaml); at end state its Deployment is asserted READY (not merely
-# present) so an Ex6 crash-loop is CAUGHT. `ws solve` deploys a clean image with NO readiness probe (Ready
-# once Running), so solve/demo stays green; a hand build that CrashLoops stays RED — the desired catch.
-# This diverges from the service-mesh-advanced-gateways/serverless present-not-ready tier on purpose.
+# present) so a crash-loop is CAUGHT. Grounded live 2026-07-19: the modernized deploy currently
+# CrashLoopBackOffs (exit 1) — the parasol-claims image needs a DB and the solve-endstate does NOT set
+# QUARKUS_DATASOURCE_ACTIVE=false the way the ai-assisted-development seed does, so it is RED for BOTH
+# `ws solve` AND a hand build until that crash-loop fix lands (being fixed separately). That RED is
+# correct and desired — the old deploy_present FALSELY passed on the crash-looping pod. This diverges
+# from the service-mesh-advanced-gateways/serverless present-not-ready tier on purpose.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
@@ -73,11 +76,11 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
 else
   # --- end state: the lab's OUTCOME — the modernized service deployed to {user}-modernize -------------
   # Assert the OUTCOME (a modernized claims service is deployed AND Ready), never exact wording, so any
-  # correct solution stays green (rule 14). READY, not just present: parasol-claims:1.0 is built by
-  # parasol-images-build.yaml and the solve Deployment has no readiness probe, so a healthy deploy is
-  # Ready — while an Ex6-crash-looping hand build stays RED (the desired catch).
+  # correct solution stays green (rule 14). READY, not just present: a crash-looping modernized deploy
+  # (see the READINESS NOTE — it currently does) fails HERE, which deploy_present missed. RED until the
+  # crash-loop fix lands is correct and desired.
   check "modernized service parasol-claims-modernized deployed + Ready" deploy_ready parasol-claims-modernized \
-    || hint "parasol-claims-modernized is not Ready — if it CrashLoops, that is the Ex6 content bug; otherwise deploy it (ws solve app-modernization --user ${USER_NAME})"
+    || hint "parasol-claims-modernized is not Ready — if it CrashLoops it needs QUARKUS_DATASOURCE_ACTIVE=false (DB-free), the crash-loop fix; otherwise deploy it (ws solve app-modernization --user ${USER_NAME})"
 fi
 
 verify_summary
