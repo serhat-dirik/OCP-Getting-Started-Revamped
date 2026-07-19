@@ -74,7 +74,7 @@ Every contribution — a new module, a fix, a diagram — goes through the same 
 
 **The quality bar** (identical whether written by hand or with an agent): every command block shows real captured output; every timing is measured; console paths are grounded live; entry states keep each module independent; CI is green.
 
-**Using a coding agent (optional).** This repo was built by its owner working alongside an AI coding agent, and it's laid out so you can do the same with whatever agent you prefer. [CLAUDE.md](CLAUDE.md) is the agent operating card — tool-named for historical reasons, but the rules inside it are agent-agnostic (verify-never-recall, module independence, dual-path tabs, GitOps-only installs). Point your agent at it and the workflow above is unchanged. See [AGENTS.md](AGENTS.md) for the agent-neutral entry point.
+**Using a coding agent (optional).** This repo was built alongside an AI coding agent, and it's laid out so you can do the same with whatever agent you prefer. [CLAUDE.md](CLAUDE.md) is the agent operating card — tool-named for historical reasons, but the rules inside it are agent-agnostic (verify-never-recall, module independence, dual-path tabs, GitOps-only installs). Point your agent at it and the workflow above is unchanged. See [AGENTS.md](AGENTS.md) for the agent-neutral entry point.
 
 ## Credits
 
