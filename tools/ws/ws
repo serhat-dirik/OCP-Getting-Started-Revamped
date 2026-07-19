@@ -447,6 +447,32 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
       esac
     done
   done
+  # Roles/RoleBindings the attendee CREATED during a lab aren't in `oc delete all` and survive reset —
+  # e.g. ai-assisted-development Ex3's mcp-agent-deployer Role+RoleBinding granting the agent SA write.
+  # An RBAC-teaching module that leaves RBAC behind red-fails the next entry verify (scoped_write_absent)
+  # AND leaves a stale write grant live. Delete every Role/RoleBinding that is NOT platform-owned; PRESERVE:
+  #   • workshop.redhat.com/owner=ogsr → workshop-config per-user grants ({user}-admin/-monitoring-edit)
+  #                                       + entry-state grants (maas-copy-*); re-created on materialize.
+  #   • app.kubernetes.io/managed-by   → operator/controller-managed (student-gitops argocd-* Role+RB).
+  #   • ownerReferences present        → controller-owned (Tekton InstallerSet: openshift-pipelines-edit,
+  #                                       pipelines-scc-rolebinding).
+  #   • system:* default names         → openshift-controller-manager defaults (system:image-pullers/
+  #                                       deployers/builders — deleting these breaks cross-ns image pulls).
+  # GROUNDED live (C2 user8-dev, 2026-07-19): only {user}-admin/-monitoring-edit carry owner=ogsr; the
+  # system/operator grants do NOT — an owner-label-only filter would delete them, hence the broader
+  # preserve-set. Field delimiter is '|' NOT tab: IFS tab is whitespace and COALESCES empty fields, which
+  # would shift a managed-by/ownerRef value into the owner slot and mis-preserve. Sibling of the SA-unlink gap.
+  local rbname rbowner rbmgr rbref
+  for kind in role rolebinding; do
+    while IFS='|' read -r rbname rbowner rbmgr rbref; do
+      [[ -n "$rbname" ]] || continue
+      [[ "$rbowner" == "ogsr" ]] && continue
+      [[ -n "$rbmgr" ]] && continue
+      [[ -n "$rbref" ]] && continue
+      case "$rbname" in system:*) continue;; esac
+      oc delete "$kind" "$rbname" -n "$ns" --wait=false >/dev/null 2>&1 || true
+    done < <(oc get "$kind" -n "$ns" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.labels.workshop\.redhat\.com/owner}{"|"}{.metadata.labels.app\.kubernetes\.io/managed-by}{"|"}{.metadata.ownerReferences[0].kind}{"\n"}{end}' 2>/dev/null)
+  done
   ok "purge requested in ${ns}"
 }
 
