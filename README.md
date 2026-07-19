@@ -62,18 +62,19 @@ Runbook and the non-invasive guarantees: `docs/sa-provisioning-guide.md`.
 
 ## Contributing
 
-This project is developed **human + AI**: the content and platform were built by the project owner working with Claude (Claude Code) as PM/tech-lead, and the repo is structured so anyone can continue that way — or work entirely by hand.
+Every contribution — a new module, a fix, a diagram — goes through the same door: read the conventions, do the work on a real cluster, show the output you actually captured, keep CI green. Write it by hand or with a coding agent's help; the bar is the same either way.
 
-**First, the private-material convention (everyone):** create a sibling folder `../Project-Shared/` **outside the repo** for anything private — your cluster credentials, notes, personal backlog. It can never be committed by accident because it isn't in the tree. Then copy `vars.example.yaml` → `vars.yaml` (gitignored) and point it at your cluster. Never put credentials, tokens, or live cluster domains in tracked files — CI has a privacy guard, and reviews enforce it.
+**First, the private-material convention (everyone).** Create a sibling folder `../Project-Shared/` **outside the repo** for anything private — cluster credentials, notes, your own backlog. It can't be committed by accident because it isn't in the tree. Then copy `vars.example.yaml` → `vars.yaml` (gitignored) and point it at your cluster. Never put credentials, tokens, or live cluster domains in tracked files — CI has a privacy guard, and reviews enforce it.
 
-**Contributing with Claude Code (or another coding agent):**
-1. Clone, open the repo in Claude Code. [CLAUDE.md](CLAUDE.md) is the agent's operating card — it encodes the project's rules (verify-never-recall, module independence, dual-path tabs, GitOps-only installs) and the hard-earned session practices.
-2. Specialized agent definitions ship in `.claude/agents/` (module-builder, platform-engineer, content-editor, smoke-tester, …) — your session can delegate to them the way the original development did.
-3. Ask for a module build or fix; the agent knows to perform on a cluster first and write second. The module contract is [docs/module-template/README.md](docs/module-template/README.md).
+**The authoring workflow.**
+1. Read [docs/authoring-conventions.md](docs/authoring-conventions.md) and the [module template](docs/module-template/README.md) — the template is the contract every module meets (five pages, three renderings, dual-path tabs).
+2. Do the work against a live OpenShift cluster: perform each step, capture the real output, measure the timings, ground the console click-paths as you go. Nothing ships from memory.
+3. Preview locally — `npm run build:workshop` (also `:demo`, `:instructor`) or `./utilities/lab-serve` — and lint: `vale content/`, `yamllint .`, `shellcheck`.
+4. External contributors open a pull request; maintainers push to `main`. CI must be green.
 
-**Contributing manually:** read [docs/authoring-conventions.md](docs/authoring-conventions.md) and the [module template](docs/module-template/README.md); preview with `./utilities/lab-serve` or `cd content && npx antora site-workshop.yml`; lint with `vale content/`, `yamllint .`, `shellcheck`.
+**The quality bar** (identical whether written by hand or with an agent): every command block shows real captured output; every timing is measured; console paths are grounded live; entry states keep each module independent; CI is green.
 
-**Quality bar for every contribution (AI or human):** every command block shows real captured output; timings are measured; console paths are grounded live; entry states keep modules independent; CI green. External contributions arrive as fork + pull request; maintainers work directly on `main`.
+**Using a coding agent (optional).** This repo was built by its owner working alongside an AI coding agent, and it's laid out so you can do the same with whatever agent you prefer. [CLAUDE.md](CLAUDE.md) is the agent operating card — tool-named for historical reasons, but the rules inside it are agent-agnostic (verify-never-recall, module independence, dual-path tabs, GitOps-only installs). Point your agent at it and the workflow above is unchanged. See [AGENTS.md](AGENTS.md) for the agent-neutral entry point.
 
 ## Credits
 
