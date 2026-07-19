@@ -38,7 +38,7 @@ In this lab you *analyze* the app to measure what blocks containerization, *tria
 ====
 The *MTA web console* (adding the app, running analysis, reading the report) and the *Dev Spaces* IDE fix are *product user interfaces* — you drive them in the browser, so those steps are single-path with screenshots. The console button labels are marked `[CAPTURE-VERIFY]`, and each carries a *grounded command-line alternative* beside it so you are never stuck.
 The *deploy* step at the end is genuine dual-path: a `Console::` tab (the OpenShift web console) and a `CLI::` tab (`oc`) — pick either.
-The MTA console URL for this workshop is {mta_url}[the MTA console^]; sign in when prompted.
+The MTA console URL for this workshop is {mta_url}[the MTA console^] — it opens directly (this build has no sign-in).
 ====
 endif::demo[]
 
@@ -51,7 +51,7 @@ ifdef::demo[]
 [NOTE]
 .Before you present
 ====
-Run `ws solve app-modernization --user {user}` a few minutes ahead so the *end state* is materialized (the modernized `parasol-claims-modernized` service deployed to `{user}-modernize`), and — critically — *pre-run one MTA analysis on `parasol-legacy-claims` in the console the day before* so the report is instant on screen (analysis takes ~90 s live; you don't want to narrate a progress bar).
+Run `ws solve app-modernization --user {user}` a few minutes ahead so the *end state* is materialized (the modernized `parasol-claims-modernized` service deployed to `{user}-modernize`), and — critically — *pre-run one MTA analysis on `parasol-legacy-claims` in the console the day before* so the report is instant on screen (analysis takes a few minutes live; you don't want to narrate a progress bar).
 Open three tabs: {mta_url}[the MTA console^] on the `parasol-legacy-claims` *Issues* report, a *Dev Spaces* workspace on the fork with the *MTA extension* view open, and the OpenShift *Topology* for `{user}-modernize`.
 The money moment is beat 3: the effort number *falls* after a fix — modernization made measurable.
 ====
@@ -106,7 +106,7 @@ grep -n "AUDIT_LOG_PATH\|System.out" /tmp/legacy/src/main/java/com/parasol/claim
 grep -n "java.version\|ojdbc\|tomcat-servlet" /tmp/legacy/pom.xml
 ----
 
-.Expected output (config baked into the build — the exact things a container can't tolerate)
+.Expected output (abridged — one representative line per file; config baked into the build, the exact things a container can't tolerate)
 [source,texinfo]
 ----
 jdbc.driverClassName=oracle.jdbc.driver.OracleDriver
@@ -130,11 +130,11 @@ You are looking at the whole modernization story: a *hardcoded database IP* and 
 == 2. Add the app to MTA and run the analysis
 ⏱ *~12 min* · point MTA at your fork and analyze it against the containerization targets
 
-Open {mta_url}[the MTA console^] and sign in. This is a *product web console* — the steps below are the console click-path; a command-line alternative follows.
+Open {mta_url}[the MTA console^] — it opens directly (no sign-in on this build). This is a *product web console* — the steps below are the console click-path; a command-line alternative follows.
 
 . *Create the application.* Go to *Migration → Application inventory*, choose *Create new application*, name it `parasol-legacy-claims`, and under *Source code* set the *Repository URL* to your fork (`{gitea_url}/{user}/parasol-legacy-claims`) and *Branch* `main`. Save. [CAPTURE-VERIFY: exact field labels on the MTA {mta_version} "Create application" drawer.]
 . *Run the analysis.* Select the application, click *Analyze*. Choose *Source code* mode, then on *Set targets* select *Containerization*, *OpenShift*, and *OpenJDK* (these map to the rule labels `cloud-readiness`, `linux`, `openjdk`, `jakarta-ee`, `jws`). Advance through the wizard and *Run*. [CAPTURE-VERIFY: the target tiles + wizard step names on this MTA build.]
-. *Wait for it to finish.* The analysis runs as a task in the Hub; a small source app like this completes in about *90 seconds*. The *Status* becomes *Completed*.
+. *Wait for it to finish.* The analysis runs as a task in the Hub; even a small source app like this takes *a few minutes* (measured ~*4–5 minutes* end to end — pod scheduling + the analyzer image pull + the rule run). The *Status* becomes *Completed*.
 
 [NOTE]
 .The same analysis from the command line (`mta-cli`)
@@ -234,7 +234,10 @@ curl -sS -k "$(oc get cm maas-config -n $NS -o jsonpath='{.data.endpoint}')/chat
   -H 'Content-Type: application/json' \
   -d '{"model":"'"$(oc get cm maas-config -n $NS -o jsonpath='{.data.model}')"'","temperature":0,"max_tokens":120,
        "messages":[{"role":"user","content":"Rewrite this to read the JDBC URL from env var CLAIMS_DB_URL, return only the Java line: dataSource.setUrl(\"jdbc:oracle:thin:@10.14.221.9:1521/CLAIMSDB\");"}]}' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
+  | python3 -c 'import sys,json
+b=sys.stdin.read()
+try: print(json.loads(b)["choices"][0]["message"]["content"])
+except Exception: print("MaaS did not return a completion (a 401 — your key is not scoped to the model in maas-config — is the usual cause). Raw response:\n"+b[:400])'
 ----
 
 Live, this returns `HTTP 200` and the `System.getenv("CLAIMS_DB_URL")` rewrite above. It never prints your key. This is *exactly* the wiring the module fixes: the MaaS key is scoped per cluster and the model (`{maas_model}` here) is sourced on-cluster, so the same content targets a cluster whose key is scoped to a different model without a code change.
@@ -306,6 +309,11 @@ spec:
       containers:
         - name: parasol-claims
           image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1
+          # Run the modernized app DB-inactive: this exercise deploys the *service*; a real migration would
+          # wire its datasource to a database next. Without these it CrashLoops on a missing parasol-db.
+          env:
+            - {name: QUARKUS_DATASOURCE_ACTIVE, value: "false"}
+            - {name: QUARKUS_HIBERNATE_ORM_ACTIVE, value: "false"}
           ports: [{name: http, containerPort: 8080}]
           readinessProbe:                 # WRONG path on purpose — /health 404s
             httpGet: {path: /health, port: 8080}
