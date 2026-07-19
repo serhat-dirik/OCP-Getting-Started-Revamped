@@ -67,12 +67,12 @@ Say:: "Parasol's claims service runs in two sites — A and B — and a client i
 Show:: The live client log printing `HTTP 200  served-by-site=A` once a second; alongside it, `oc get deploy,pdb,hpa -n $SITEA` showing the resilient tier.
 Do:: Show the resilient primary and the steady client log:
 +
-[source,sh]
+[source,sh,subs="attributes"]
 ----
-SITEA=user1-site-a
+SITEA={user}-site-a
 oc get deploy,pdb,hpa -n $SITEA
 # in a second terminal, tailing the client (leave it running for the whole demo):
-oc logs -f deploy/claims-client -n user1-client --tail=5
+oc logs -f deploy/claims-client -n {user}-client --tail=5
 ----
 +
 "Three of three, a budget that keeps two alive, an autoscaler holding the floor. The client is happily on site A."
@@ -83,9 +83,9 @@ Say:: "Now the disaster: site A — the entire primary site — fails. A power c
 Show:: `oc scale ... --replicas=0` on site A; the client log flipping from `served-by-site=A` to `served-by-site=B` within a few seconds — *every line still `HTTP 200`*.
 Do:: Fail the whole primary site:
 +
-[source,sh]
+[source,sh,subs="attributes"]
 ----
-oc scale deploy/parasol-claims -n user1-site-a --replicas=0
+oc scale deploy/parasol-claims -n {user}-site-a --replicas=0
 # watch the tailing client log flip A → B, all 200s
 ----
 +
@@ -97,10 +97,10 @@ Say:: "And recovery is just as automatic. I bring site A back, and once the mesh
 Show:: `oc scale ... --replicas=3` on site A; the client log flipping back to `served-by-site=A` after the site is healthy again.
 Do:: Recover the primary:
 +
-[source,sh]
+[source,sh,subs="attributes"]
 ----
-oc scale deploy/parasol-claims -n user1-site-a --replicas=3
-# ~30s later the client log flips back to served-by-site=A
+oc scale deploy/parasol-claims -n {user}-site-a --replicas=3
+# ~30-90s later (once the fresh pods are Ready) the client log flips back to served-by-site=A
 ----
 +
 "Back on A. Failover *and* failback, automatic, invisible to the client. If site A were a real data center and site B a real second cluster, this is exactly how you'd survive losing one — and Red Hat Service Interconnect is how you'd connect two real sites in the first place, which is the add-on section of the lab."
@@ -178,17 +178,17 @@ oc delete pod $VICTIM -n $SITEA
 oc get pods -n $SITEA -l app=parasol-claims
 ----
 
-.Expected output (one pod deleted; the other two keep running and a replacement is already up)
+.Expected output (one pod deleted; the other two keep serving at `2/2`, and a replacement is already being created — still initializing its sidecar)
 [source,texinfo]
 ----
-pod "parasol-claims-65d8cc85fd-4wwmk" deleted
-NAME                              READY   STATUS    RESTARTS   AGE
-parasol-claims-65d8cc85fd-2t2hf   1/1     Running   0          6s
-parasol-claims-65d8cc85fd-v2wth   1/1     Running   0          2m
-parasol-claims-65d8cc85fd-z5r22   1/1     Running   0          2m
+pod "parasol-claims-65d8cc85fd-4wwmk" deleted from user1-site-a namespace
+NAME                              READY   STATUS     RESTARTS   AGE
+parasol-claims-65d8cc85fd-2t2hf   0/2     Init:0/2   0          1s
+parasol-claims-65d8cc85fd-v2wth   2/2     Running    0          2m
+parasol-claims-65d8cc85fd-z5r22   2/2     Running    0          2m
 ----
 
-Two replicas never stopped serving, and a fresh pod (`2t2hf`, six seconds old) already replaced the one you killed. *That* is what replicas + a PDB + spread buy you: a pod or node loss is a non-event. But it is precisely what they *cannot* do — survive the loss of the *whole site* — that the next exercise is about.
+Each pod reads *`2/2`*, not `1/1`: it runs *two* containers — the claims app *and* its injected Istio sidecar (these pods are mesh members). The two survivors stay `2/2 Running` and never stop serving; the replacement (`2t2hf`) is created instantly but takes *a moment* to become Ready — re-run the `oc get pods` command and you'll watch it climb `0/2 Init:0/2` → `1/2` → `2/2 Running` over roughly ten to fifteen seconds. That brief not-yet-Ready window is exactly why you keep a *quorum*: the PDB holds the two survivors up to carry the traffic while the replacement initializes. *That* is what replicas + a PDB + spread buy you: a pod or node loss is a non-event. But it is precisely what they *cannot* do — survive the loss of the *whole site* — that the next exercise is about.
 
 [NOTE,role=instructor-demo]
 .`[INSTRUCTOR-DEMO]` — drain a node, watch the PDB pace it
@@ -349,7 +349,7 @@ Watch the tailing log. Within a few seconds the site marker *flips from A to B* 
 
 That is *automatic cross-site failover*. The client never changed its address; the mesh detected site A's requests failing, *ejected* it (outlier detection), and *retried* the in-flight requests onto site B — so the client saw a clean flip from A to B, not an outage. The whole primary site vanished and *no request was dropped*.
 
-Now *recover*. Bring site A back, and once the mesh trusts it again (about thirty seconds — the outlier-detection ejection expiring), traffic *returns to the primary*:
+Now *recover*. Bring site A back. Traffic *returns to the primary* once the three fresh site-A pods reschedule, pull their image, and pass their readiness probes, and the locality-aware load balancer re-adds them as the preferred site — *about 30–90 seconds*, depending on how quickly the new pods become Ready:
 
 [source,sh,role=execute]
 ----
@@ -527,14 +527,14 @@ echo "remote over the VAN (claims-remote): $REMOTE"
 echo "local in DC-A (claims):              $LOCAL"
 ----
 
-.Expected output (the remote address serves SITE=B — DC-A is reading DC-B's service over the VAN — vs the local SITE=A)
+.Expected output (the remote address serves SITE=B — DC-A is reading DC-B's service over the VAN — vs the local SITE=A; each response also carries the responder's own `served` request counter and serving `pod` name)
 [source,texinfo]
 ----
-remote over the VAN (claims-remote): {"site":"B","service":"parasol-claims"}
-local in DC-A (claims):              {"site":"A","service":"parasol-claims"}
+remote over the VAN (claims-remote): {"site":"B","service":"parasol-claims","served":172,"pod":"parasol-claims-6b9c4f8d77-jcthw"}
+local in DC-A (claims):              {"site":"A","service":"parasol-claims","served":224,"pod":"parasol-claims-65d8cc85fd-z5r22"}
 ----
 
-`SITE=B` through `claims-remote` — DC-A read DC-B's claims service over a mutual-TLS Layer-7 link, through a *local* address, with *no VPN and no shared network*. On one cluster this VAN links two *namespaces*; across two clusters the *identical* CRs link two *data centers*. That is how you connect the real sites your mesh then fails over between.
+`SITE=B` through `claims-remote` — DC-A read DC-B's claims service over a mutual-TLS Layer-7 link, through a *local* address, with *no VPN and no shared network*. The `pod` field in the remote response even names an actual DC-B pod — proof the bytes came from the other site, not a local cache. On one cluster this VAN links two *namespaces*; across two clusters the *identical* CRs link two *data centers*. That is how you connect the real sites your mesh then fails over between.
 
 [NOTE]
 .Visualize the network — the Service Interconnect console
