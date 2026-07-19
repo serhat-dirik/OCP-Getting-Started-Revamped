@@ -56,6 +56,9 @@ REPO_URL="$(v '.repo_url')";     [[ -n "$REPO_URL" && "$REPO_URL" != "null" ]] |
 REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
 DOMAIN="$(v '.cluster_domain')"
 MAAS_KEY="$(v '.maas.api_key')"
+# Model travels WITH the credential (see the secret step below). Default to the FSC/chart default when
+# vars omits it, so an older vars.yaml still installs; the operator overrides it per cluster.
+MAAS_MODEL="$(v '.maas.model')"; [[ -n "$MAAS_MODEL" && "$MAAS_MODEL" != "null" ]] || MAAS_MODEL="llama-scout-17b"
 WS_PASS="$(v '.workshop_user_password')"
 
 echo "▶ Workshop bootstrap"
@@ -315,11 +318,15 @@ if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
   # Remember whether the namespace pre-existed — uninstall deletes it ONLY if WE created it.
   if oc get namespace openshift-lightspeed >/dev/null 2>&1; then record_once lightspeed_ns_created false; else record_once lightspeed_ns_created true; fi
   oc create namespace openshift-lightspeed --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
+  # Model travels WITH the credential: the per-user MaaS key is model-scoped, and the two clusters' keys
+  # are scoped to OPPOSITE models (llama-scout-17b vs qwen3-14b — inverted-scope incident 2026-07-19), so
+  # ANY hardcoded chart default breaks one cluster. Write model alongside apitoken; the entry-states'
+  # converge Jobs prefer this key over their chart fallback. create-or-refresh (dry-run | apply).
   oc create secret generic credentials \
-    --from-literal=apitoken="$MAAS_KEY" -n openshift-lightspeed \
+    --from-literal=apitoken="$MAAS_KEY" --from-literal=model="$MAAS_MODEL" -n openshift-lightspeed \
     --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
   record_once lightspeed_secret_created true
-  ok "credentials (openshift-lightspeed/apitoken) — MaaS token"
+  ok "credentials (openshift-lightspeed/apitoken + model=${MAAS_MODEL}) — MaaS token + model"
 fi
 
 # ── 3. wait for the in-cluster Gitea mirror (git-localize) ────────────────────
