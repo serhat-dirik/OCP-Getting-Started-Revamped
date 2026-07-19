@@ -43,14 +43,15 @@ seed_probe_is_bad() {
   [[ -n "$want" && "$got" == "$want" ]]
 }
 
-# Pre-lab RBAC shape: the attendee has NOT yet granted the mcp-agent SA a write role. Assert no
-# RoleBinding in NS pairs a write-capable ClusterRole (edit/admin/cluster-admin) with mcp-agent.
+# Pre-lab RBAC shape: the attendee has NOT yet granted the mcp-agent SA a write role. Ask the API
+# DIRECTLY (SubjectAccessReview) whether the SA can WRITE. The old name-based rolebinding grep only saw
+# the stock edit/admin/cluster-admin ClusterRoles and MISSED custom Roles (e.g. Ex3's mcp-agent-deployer),
+# false-greening while a real write grant existed. `oc auth can-i --as=<sa>` catches ANY write grant —
+# custom Role, ClusterRoleBinding, or aggregation. Runs as the attendee (the namespace admin ClusterRole
+# carries impersonate on serviceaccounts — proven live) and as cluster-admin in CI. `patch deployments`
+# is the write the lab grants (the agent fixes the seed's readinessProbe).
 scoped_write_absent() {
-  local lines
-  lines="$(oc get rolebinding -n "$NS" \
-    -o jsonpath='{range .items[*]}{.roleRef.name}{" "}{range .subjects[*]}{.name}{","}{end}{"\n"}{end}' \
-    2>/dev/null || true)"
-  ! echo "$lines" | grep -E '^(edit|admin|cluster-admin) ' | grep -qw "$SA"
+  ! oc auth can-i patch deployments --as="system:serviceaccount:${NS}:${SA}" -n "$NS" >/dev/null 2>&1
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------

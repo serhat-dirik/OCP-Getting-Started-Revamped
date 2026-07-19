@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034  # USER_NAME/ENTRY_ONLY are consumed by the sourcing verify script
+# shellcheck disable=SC2034  # USER_NAME/ENTRY_ONLY/SOLVE_MODE are consumed by the sourcing verify script
 # Shared helpers for per-module verify scripts (tools/verify/mNN.sh).
 # Contract: each script takes --user U (default user1) and optional --entry-only,
 # checks ENTRY state (what `ws start` materializes) and, unless --entry-only,
@@ -39,13 +39,20 @@ verify_summary() {  # call at end of every script
   fi
 }
 
-parse_verify_args() {  # sets USER_NAME, ENTRY_ONLY from "$@"
+parse_verify_args() {  # sets USER_NAME, ENTRY_ONLY, SOLVE_MODE from "$@"
   USER_NAME="user1"
   ENTRY_ONLY="false"
+  # SOLVE_MODE=true ONLY when validating a `ws solve` result (ws verify <m> --solve, or CI). A script may
+  # then hard-assert its ws-solve-<module> marker. A plain `ws verify` — the attendee's own closing verify
+  # after doing the lab BY HAND — leaves SOLVE_MODE=false, so a marker that only `ws solve` stamps must NOT
+  # be asserted (the lab's real OUTCOME checks carry the proof; a false ❌ on a correctly-completed lab
+  # destroys trust in every other ✅).
+  SOLVE_MODE="false"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --user) USER_NAME="$2"; shift 2;;
       --entry-only) ENTRY_ONLY="true"; shift;;
+      --solve) SOLVE_MODE="true"; shift;;
       *) echo "unknown arg: $1" >&2; exit 2;;
     esac
   done

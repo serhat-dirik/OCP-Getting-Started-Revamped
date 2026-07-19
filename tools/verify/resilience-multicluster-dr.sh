@@ -137,8 +137,16 @@ else
     || hint "build the failover routing: a ServiceEntry spanning both sites, a DestinationRule (locality LB + outlier detection), and a VirtualService with retries on claims-gateway (see the lab)"
   check "the stable endpoint serves HTTP 200"          stable_serves \
     || hint "the ingress gateway isn't routing — check the VirtualService is bound to gateway claims-gateway and the ServiceEntry host matches"
-  check "solve marker present (ws-solve-resilience-multicluster-dr)"          solved \
-    || hint "mark the failover exercise done — or: ws solve resilience-multicluster-dr --user ${USER_NAME}"
+  # The ws-solve marker is stamped ONLY by `ws solve`, so assert it ONLY in solve mode (ws verify --solve
+  # / CI). A plain `ws verify` is the attendee's own closing verify after doing the failover BY HAND — no
+  # solve marker exists, and the OUTCOME checks above + the live failover proof below carry the proof.
+  # Asserting the marker there false-REDs a correctly-completed lab.
+  if [[ "$SOLVE_MODE" == "true" ]]; then
+    check "solve marker present (ws-solve-resilience-multicluster-dr)"        solved \
+      || hint "ws solve did not stamp the marker — re-run: ws solve resilience-multicluster-dr --user ${USER_NAME}"
+  else
+    info "closing verify: the failover OUTCOME above is the proof (the ws-solve marker is stamped only by ws solve; a hand-completed lab legitimately has none)"
+  fi
   info "failover drill: briefly scaling site-a to 0 to prove the client fails over to site-b (auto-restores)…"
   check "FAILOVER proven: site-a down -> the client is served by site-b" failover_proof \
     || hint "with site-a scaled to 0 the client should be served by site-b within ~30s — check the DestinationRule outlierDetection + locality LB and the VirtualService retries"

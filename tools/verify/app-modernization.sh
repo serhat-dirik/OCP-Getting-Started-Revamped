@@ -13,8 +13,11 @@
 # ENTITLEMENT SPLIT ([OCP] core / [ADS] Lightspeed): the MaaS credential (Developer Lightspeed for MTA)
 # is OPTIONAL — reported as INFO, never failed. On a cluster without the [ADS] entitlement the [OCP]
 # assess/analyze/replatform flow is unaffected (graceful degradation), so verify stays green.
-# IMAGE-GAP NOTE: parasol-claims-modernized runs a parasol-images image (workshop image-load step); at
-# end state its Deployment is asserted PRESENT (materialization is solve's job), like the service-mesh-advanced-gateways/serverless-zero-to-hero tiers.
+# READINESS NOTE: parasol-claims-modernized runs a parasol-images image (parasol-claims, built by
+# workshop-config parasol-images-build.yaml); at end state its Deployment is asserted READY (not merely
+# present) so an Ex6 crash-loop is CAUGHT. `ws solve` deploys a clean image with NO readiness probe (Ready
+# once Running), so solve/demo stays green; a hand build that CrashLoops stays RED — the desired catch.
+# This diverges from the service-mesh-advanced-gateways/serverless present-not-ready tier on purpose.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
@@ -23,8 +26,14 @@ NS="${USER_NAME}-modernize"
 
 # --- helpers (oc + curl only) ------------------------------------------------
 
-# A Deployment exists (materialized) in {user}-modernize.
-deploy_present() { oc get deploy "$1" -n "$NS" >/dev/null 2>&1; }
+# A Deployment is READY (>=1 ready replica) in {user}-modernize. Readiness — not mere presence — so the
+# Ex6 crash-loop content bug is caught (a deployed-but-crashlooping modernized service fails here, which
+# is correct and desired until that content fix lands). `>=1` is lab-exceedable.
+deploy_ready() {
+  local ready
+  ready="$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+  [[ -n "$ready" && "$ready" -ge 1 ]]
+}
 
 # The attendee's legacy-repo fork URL, as recorded in the entry marker (attendee-safe: no gitea route
 # read cross-namespace — the URL was computed from the cluster domain at materialization).
@@ -63,11 +72,12 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no modernized service deployed yet (attendee builds it)" no_modernized || hint "parasol-claims-modernized exists; the lab already finished — ws reset app-modernization --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — the modernized service deployed to {user}-modernize -------------
-  # Assert the OUTCOME (a modernized claims service is deployed), never exact wording, so any correct
-  # solution stays green (rule 14). Present, not Ready: the parasol image is populated by the image-load
-  # step (image-gap idiom).
-  check "modernized service parasol-claims-modernized deployed" deploy_present parasol-claims-modernized \
-    || hint "deploy the modernized claims service to ${NS} (ws solve app-modernization --user ${USER_NAME} materializes it)"
+  # Assert the OUTCOME (a modernized claims service is deployed AND Ready), never exact wording, so any
+  # correct solution stays green (rule 14). READY, not just present: parasol-claims:1.0 is built by
+  # parasol-images-build.yaml and the solve Deployment has no readiness probe, so a healthy deploy is
+  # Ready — while an Ex6-crash-looping hand build stays RED (the desired catch).
+  check "modernized service parasol-claims-modernized deployed + Ready" deploy_ready parasol-claims-modernized \
+    || hint "parasol-claims-modernized is not Ready — if it CrashLoops, that is the Ex6 content bug; otherwise deploy it (ws solve app-modernization --user ${USER_NAME})"
 fi
 
 verify_summary
