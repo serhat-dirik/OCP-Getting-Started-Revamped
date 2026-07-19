@@ -68,6 +68,16 @@ claims_replicas_at_least() {
   [[ -n "$ready" && "$ready" -ge "$want" ]]
 }
 
+# The parasol-claims ServiceMonitor scrapes every 10s. Not cosmetic: the alert beat (Ex3) needs the
+# ~30s 5xx window (DB gone -> readiness pulls the pod) to span >=3 scrapes so rate() sees a RISING
+# counter and the rule fires deterministically. A 30s scrape re-introduces the G3 "never fires" flake
+# (the counter is sampled once, at its frozen value -> rate()==0). Guards both entry and end state.
+servicemonitor_scrape_10s() {
+  local iv
+  iv="$(oc get servicemonitor parasol-claims -n "$NS" -o jsonpath='{.spec.endpoints[0].interval}' 2>/dev/null || true)"
+  [[ "$iv" == "10s" ]]
+}
+
 # The HPA targets parasol-claims on CPU.
 hpa_on_cpu() {
   local tgt metric
@@ -86,6 +96,7 @@ check "claims Route answers 200 (/q/health/ready)"        route_ready_200       
 check "parasol-claims has OpenTelemetry export ON"        claims_otel_enabled                           || hint "OTLP disabled — entry sets QUARKUS_OTEL_SDK_DISABLED=false; ws reset observability-health-scale --user ${USER_NAME}"
 check "parasol-claims exports OTLP to shared collector"   claims_otel_endpoint                          || hint "OTEL endpoint unset — should point at otel-collector.ogsr-observability-workshop; ws reset observability-health-scale"
 check "ServiceMonitor parasol-claims present"             oc get servicemonitor parasol-claims -n "$NS" || hint "per-user metrics wiring missing — ws reset observability-health-scale --user ${USER_NAME}"
+check "ServiceMonitor scrapes every 10s (alert-beat determinism)" servicemonitor_scrape_10s          || hint "entry ships a 10s scrape so the Ex3 alert fires deterministically; a 30s interval re-introduces the flake — ws reset observability-health-scale --user ${USER_NAME}"
 check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-health-scale --user ${USER_NAME}"
 check "/q/metrics exposes http_server_requests (golden signals)" metrics_expose http_server_requests_seconds || hint "metrics endpoint not answering — check: oc get pods -n ${NS}"
 check "/q/metrics exposes claims_created_total (custom metric)"  metrics_expose claims_created_total         || hint "custom counter absent — the load generator POSTs claims to register it; check: oc logs deploy/claims-load -n ${NS}"

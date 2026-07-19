@@ -6,7 +6,9 @@ include::partial$version-attributes.adoc[]
 // Performed end-to-end as user2 on OCP {ocp_version} on 2026-07-11 against the shared observability
 // stack (COO {cluster_observability_operator_version} / Tempo {tempo_version} / OTel
 // {opentelemetry_version}): the /q/metrics golden signals + claims_created_total in Observe -> Metrics,
-// a PrometheusRule that went inactive -> pending -> firing ~3.25 min after the DB was scaled to 0,
+// a PrometheusRule that went inactive -> pending (T+50s) -> firing (T+170s) after claims-db was scaled
+// to 0 under a concurrent 5xx burst, with the ServiceMonitor scraping every 10s (re-measured on user2,
+// OCP {ocp_version}, 2026-07-19 — the 10s scrape makes the fire deterministic; a 30s scrape flaked at G3),
 // parasol-claims traces in Observe -> Traces with metric->trace exemplars, a CPU HPA that scaled 1->4
 // in ~24s under a burst, and a PDB that returned "Cannot evict pod as it would violate the pod's
 // disruption budget" on the last eviction. Timings in the chips are measured from that run.
@@ -148,16 +150,20 @@ oc get servicemonitor parasol-claims -n $NS -o yaml | grep -A6 'endpoints:'
 [source,texinfo]
 ----
   endpoints:
-  - interval: 30s
+  - interval: 10s
     path: /q/metrics
     port: http
 ----
 ====
 
+This ServiceMonitor scrapes every *10 seconds*, not the more common 30.
+That is deliberate, and Ex3 is where it earns its keep: an alert can only see what the scrape captured, so the scrape interval sets the *shortest fault your alert can catch*.
+A 30-second scrape can miss a 30-second error spike entirely.
+
 [.checkpoint]
 ****
 ✔ *Verify:* you can read the claims service's *request rate*, *error rate* and *average latency* in *Observe → Metrics*, and you plotted the custom `claims_created_total` climbing.
-You also saw the *ServiceMonitor* that scrapes `/q/metrics` every 30s — the single object that put your app's numbers into the platform's monitoring.
+You also saw the *ServiceMonitor* that scrapes `/q/metrics` every 10s — the single object that put your app's numbers into the platform's monitoring.
 ****
 
 == 2. Alert on what matters
@@ -290,15 +296,20 @@ oc scale deploy/claims-db -n $NS --replicas=0
 --
 ====
 
-The database is gone — but making the alert fire is a *race against the app's own health check*.
-A one-request-at-a-time loop loses that race: within about a minute the failing app trips its own `/q/health/ready` probe, Kubernetes pulls the pod out of the Service endpoints, and the metrics scrape *freezes* with only a couple of dozen 5xx recorded — a 5-minute rate of roughly `0.08/s`, just *under* your `0.1/s` line, so the alert flaps in and out of *Pending* and never fires.
-Win the race with a *concurrent burst* instead — twenty workers hammering the failing API at once — so you bank hundreds of server-errors in the first half-minute, while the pod is still being scraped, and pin the 5-minute rate well above the line.
-Run it from the terminal (it works whichever lane you picked) and watch the sampled status walk through *three* stages: *200* while the old connection pool is still warm, a stream of *500* once it breaks, then *503* once the app trips its readiness probe and the *router* pulls the pod out of rotation (that last `503` is the readiness probe doing its job — the platform stops sending traffic to a pod that says it is not ready):
+The database is gone — but the claims API returns server-errors only inside a *short window*, and threading that window is the whole subtlety of this step.
+For the first ~30 seconds the database is still draining, so requests still succeed (*200*).
+Once it is truly gone the API fails (*500*) — until, about a minute in, three failed `/q/health/ready` checks (ten seconds apart) trip the readiness probe and the *router* pulls the pod from rotation, after which every request gets a *503* straight from the router and nothing more reaches the app to record a 5xx.
+So the entire 5xx signal is banked in a roughly *30-second* window, and two things must line up for the alert to catch it:
+you have to bank *enough* server-errors to clear `0.1/s` with margin, and the scrape has to *sample the rising counter more than once* before the pod leaves rotation.
+A *concurrent burst* of twenty workers handles the first — hundreds of 5xx, not a couple of dozen — and the ServiceMonitor's *10-second* scrape handles the second: a 30-second window spans three scrapes, so `rate()` reliably sees the counter climb.
+(At a 30-second scrape it might sample that window only once, at its frozen final value, so `rate()` reads zero and the alert never fires even though the app plainly failed — which is exactly why the scrape is 10s.)
+Run it from the terminal (it works whichever lane you picked) and watch the sampled status walk through the three stages — *200* while the database drains, *500* once it is gone, then *503* once the readiness probe pulls the pod (that last `503` is the probe doing its job — the platform stops sending traffic to a pod that says it is not ready):
 
 [source,sh,role=execute]
 ----
-# 20 workers hammer the failing API so the 5xx rate clears 0.1/s *before* the app
-# trips its readiness probe (~1 min in) and drops out of the metrics scrape:
+# 20 workers bank hundreds of 5xx in the ~30s window between "DB gone" and the
+# readiness probe (~1 min in) pulling the pod from the router — enough, and sampled
+# often enough by the 10s scrape, to push rate(...[5m]) past 0.1/s:
 end=$(( $(date +%s) + 90 ))
 for w in $(seq 1 20); do
   ( while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null "$CLAIMS/api/claims"; done ) &
@@ -311,7 +322,7 @@ done
 wait
 ----
 
-.Expected output (the once-a-second sample; the 20 workers push silently in the background — 200 while warm, 500 once the DB is gone, then 503 after ~30-45s once the readiness probe drops the pod from the Service)
+.Expected output (the once-a-second sample; the 20 workers push silently in the background — 200 while the database drains ~30s, 500 once it is gone, then 503 about a minute in once the readiness probe pulls the pod from the router)
 [%collapsible]
 ====
 [source,texinfo]
@@ -331,7 +342,7 @@ The live *Inactive → Pending → Firing* progression lives in the platform's a
 So read the state where the platform exposes it to you — the console:
 
 . Open *Observe* → *Alerting* → *Alerting rules* and find `ParasolClaimsErrorRateHigh`.
-. Within about a minute it moves to *Pending*, and after its 2-minute `for:` window, to *Firing*.
+. Within about a minute it moves to *Pending*, and after its 2-minute `for:` window, to *Firing* — about three minutes from the break.
 // [CAPTURE-VERIFY] Observe -> Alerting shows ParasolClaimsErrorRateHigh Pending -> Firing while claims-db is at 0
 
 While it climbs, read the *three signals* on the same fault — this is the whole module in ninety seconds:
@@ -344,14 +355,17 @@ A healthy claims request logs nothing, and even the failures are terse — which
 * *Traces* say *where* — you will use them in the next exercise; the failing requests are recorded there with their status.
 
 [NOTE]
-.Measured: how long until it fires — and why the freeze is the real lesson
+.Measured: how long until it fires — and why the scrape interval is the real lesson
 ====
-With the concurrent burst, the 5xx rate cleared `0.1/s` within about *30 seconds* and, on the build run, climbed to roughly *1.3/s* — comfortably over the line.
-*Exactly* how high it climbs is a race: it depends on how many 5xx you bank before — about *30-45 seconds* in — the failing app trips its `/q/health/ready` probe (three failures, ten seconds apart), Kubernetes pulls the pod from the Service endpoints, the router starts returning `503`, and the metrics scrape *freezes the 5xx counter at its last value*.
-What matters is that it freezes *above* `0.1/s`, so the 5-minute rate stays over the line through the `for: 2m` window: `ParasolClaimsErrorRateHigh` reached *Pending* about *45 seconds* after the database went down and *Firing* about two minutes later — close to *3 minutes* end to end.
-That freeze is itself the observability lesson: a failing pod stops reporting *exactly* when you most want the signal, so the alert fires off the *last-scraped* value and then *lingers* in Firing while that frozen count ages out of the 5-minute window (the same reason recovery isn't instant, below).
-A single serial `curl` loop, by contrast, banks only a couple of dozen 5xx before that same freeze — a 5-minute rate that stalls at roughly `0.08/s`, just *under* the line, so it never fires.
-That is why the burst is concurrent: bank enough server-errors *before* the pod drops out of the scrape. The two-minute `for:` window is deliberate, so a brief blip never pages anyone.
+With the concurrent burst, the 5xx rate cleared `0.1/s` within about *50 seconds* and peaked around *1.1/s* — comfortably over the line — then held there through the `for: 2m` window.
+`ParasolClaimsErrorRateHigh` reached *Pending* about *50 seconds* after the database went down and *Firing* about two minutes later — close to *3 minutes* end to end.
+Plot the counter itself in *Observe → Metrics* (`http_server_requests_seconds_count{status=~"5.."}`) and you can watch the mechanism: it climbs across several 10-second scrapes — a rising series like `3 → 9 → 112 → 298` — and then *freezes*, because once the readiness probe pulls the pod from the router the burst gets `503` s and nothing more reaches the app to increment it.
+The alert fires off that captured climb: `rate(...[5m])` sees the rising counter, crosses the line, and stays over it through the `for:` window.
+The freeze is the observability lesson twice over.
+First, a failing pod stops producing the signal *exactly* when you most want it — so the alert fires off the *last climb* and then *lingers* in Firing while that count ages out of the 5-minute window (the same reason recovery isn't instant, below).
+Second — and this is why the scrape is *10 seconds*, not 30 — the whole 5xx climb happens inside a ~30-second window.
+A 10-second scrape samples that window three or four times, so `rate()` sees the rise; a 30-second scrape might sample it *once*, at the frozen value, and `rate()` would read a flat *zero* — the alert would never fire even though the app plainly failed.
+The scrape interval bounds the shortest fault your alert can catch; the two-minute `for:` window is deliberate on top of that, so a brief blip never pages anyone.
 ====
 
 // media-pass: screenshot observability-health-scale-04-alert-firing.png — Observe -> Alerting, ParasolClaimsErrorRateHigh Firing (HIGH; the signature visual). Alt: "Observe Alerting view showing the ParasolClaimsErrorRateHigh alert Firing with warning severity while claims-db is scaled to zero."
@@ -369,7 +383,7 @@ oc rollout status deploy/parasol-claims -n $NS
 ----
 
 Give it a moment, then confirm the service is healthy again — *HTTP 200*.
-The alert does not clear the instant you recover: the 5-minute rate has to decay back below the threshold, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for several minutes after the fix before it returns to *Inactive* — the harder you pushed, the more 5xx there are to drain from the window, so it can take the better part of ten minutes.
+The alert does not clear the instant you recover: the 5-minute rate keeps counting the burst's 5xx until they age out of the window, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for a few minutes after the fix — roughly five minutes past the spike — before it returns to *Inactive*.
 
 [source,sh,role=execute]
 ----
@@ -662,7 +676,7 @@ curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics \
 [TIME 1m]
 Say:: "I'm going to take the database away. Watch the alert — it's armed and inactive right now."
 Show:: *Observe → Alerting*, `ParasolClaimsErrorRateHigh` in *Inactive*.
-Do:: Break it, then drive a *concurrent burst* of failing load so the 5xx rate clears the alert's threshold before the failing pod trips its readiness probe and drops out of the scrape (a serial trickle never gets there) — note the time; it fires in about three minutes:
+Do:: Break it, then drive a *concurrent burst* of failing load — hundreds of 5xx banked into the ~30-second window before the readiness probe pulls the pod from the router, sampled often by the 10-second scrape so `rate()` sees the climb (a serial trickle banks too few) — note the time; it fires in about three minutes:
 +
 [source,sh,role=execute,subs="attributes"]
 ----

@@ -39,11 +39,12 @@ The same grant is what lets `ws verify observability-health-scale` read your Ser
 
 == My alert never fires even though the app is clearly failing
 
-Symptom:: You scaled the database to zero, the claims API is failing, but `ParasolClaimsErrorRateHigh` sits in *Inactive* (or flaps briefly into *Pending* and falls back) — it never reaches *Firing*.
-Cause:: You are banking too few 5xx before the failing pod removes itself from the scrape.
-While the database is down the app returns 500s, but within ~60–80s it trips its own `/q/health/ready` probe; Kubernetes then pulls the pod out of the Service endpoints (you will see the sampled requests flip from `500` to `503` as it leaves rotation), the ServiceMonitor's scrape *freezes*, and the 5xx counter stops climbing.
-A *serial* one-request-at-a-time loop — plus the load generator's steady trickle — banks only a couple of dozen 5xx before that freeze, a 5-minute rate of ~0.08/s that is just *under* the rule's `0.1/s` threshold, so `rate(...[5m])` never crosses the line and the `for: 2m` timer never completes.
-Fix:: Drive a *concurrent* burst, not a serial loop, so you bank hundreds of 5xx in the first half-minute — while the pod is still being scraped — and the rate clears `0.1/s` with room to spare:
+Symptom:: You scaled the database to zero and the claims API is failing, but `ParasolClaimsErrorRateHigh` stays in *Inactive* (or flaps briefly into *Pending* and falls back) — it never reaches *Firing*.
+Cause:: The load step you ran was not the *concurrent burst* the lab specifies.
+The claims API returns 5xx only for a short window — roughly *30 seconds*, between the database going away and the readiness probe pulling the pod from the router (after which every request gets a `503` from the router and nothing reaches the app to record another 5xx).
+To trip a `rate(...[5m]) > 0.1` rule off that short window you have to bank *hundreds* of 5xx into it, not a couple of dozen.
+Just scaling the database to zero (leaving only the load generator's gentle trickle), or editing the burst down to a *serial* one-request-at-a-time loop, banks too few — the 5-minute rate hovers at or below the `0.1/s` line and the `for: 2m` timer never completes.
+Fix:: Run the load step as written — a *concurrent* burst of twenty workers — so you bank hundreds of 5xx into the ~30-second window, which the ServiceMonitor's 10-second scrape samples several times so `rate()` sees the climb:
 +
 [source,sh,role=execute]
 ----
@@ -54,7 +55,7 @@ done
 wait
 ----
 +
-With the burst the 5xx rate holds around ~12/s and the rule reaches *Pending* at ~59s and *Firing* at ~178s (about 3 minutes).
+With the burst the 5-minute 5xx rate peaks around ~1.1/s and the rule reaches *Pending* at ~50s and *Firing* at ~170s (about 3 minutes).
 The `for: 2m` window over a `rate(...[5m])` is deliberately slow so a brief blip does not page anyone — confirm the rule loaded (`oc get prometheusrule parasol-claims-alerts -n <user>-dev`) and give it the full window.
 
 == I brought the database back, but the claims API still returns 500
@@ -124,4 +125,4 @@ Wait ~5 minutes and it steps back toward the floor of 2.
 
 '''
 
-_Last verified on OpenShift {ocp_version} with the Cluster Observability Operator {cluster_observability_operator_version} / Tempo {tempo_version} / Red Hat build of OpenTelemetry {opentelemetry_version} stack — 2026-07-11._
+_Last verified on OpenShift {ocp_version} with the Cluster Observability Operator {cluster_observability_operator_version} / Tempo {tempo_version} / Red Hat build of OpenTelemetry {opentelemetry_version} stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19._

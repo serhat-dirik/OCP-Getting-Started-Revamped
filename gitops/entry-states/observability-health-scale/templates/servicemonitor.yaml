@@ -19,4 +19,15 @@ spec:
   endpoints:
     - port: http
       path: /q/metrics
-      interval: 30s
+      # 10s (not the usual 30s) is LOAD-BEARING for the alert beat (Ex3), not a preference.
+      # When claims-db is scaled to 0, parasol-claims returns 5xx only for the window between
+      # "DB gone" and "readiness probe pulls the pod from the router" — the readiness failure
+      # budget (failureThreshold 3 x periodSeconds 10 = ~30s, pinned in parasol-claims.yaml). At a
+      # 30s scrape that ~30s error window is barely ONE scrape, so whether Prometheus samples the
+      # rising http_server_requests_seconds_count{status=~"5.."} counter twice (rate()>0 -> alert
+      # fires) or once-at-its-frozen-value (rate()==0 -> never fires) is a coin-flip on scrape phase
+      # — the G3 flake (fired on user2, froze at 0 on user4, byte-identical runs). At 10s that same
+      # ~30s window always spans >=3 rising scrapes, so rate() sees the climb and the alert fires
+      # DETERMINISTICALLY. Measured live 2026-07-19 (user2, OCP 4.21): counter 3->9->112->298 across
+      # ~6 scrapes, sum(rate[5m]) peak ~1.15/s, Inactive->Pending T+50s->Firing T+170s.
+      interval: 10s
