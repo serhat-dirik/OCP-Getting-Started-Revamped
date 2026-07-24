@@ -65,19 +65,15 @@ spec:
 
 # --- wave 1: remaining platform stacks, sourced FROM the in-cluster mirror -------------
 {{- /* progressive-delivery is baseline: M11 (core catalog) needs the Rollouts controller; the
-     CRDs shipping with GitOps hide its absence (CRs apply, nothing reconciles) — QA 2026-07-18. */ -}}
+     CRDs shipping with GitOps hide its absence (CRs apply, nothing reconciles) — QA 2026-07-18.
+     The rest are DERIVED from module selection: the union of stacks the enabled modules require
+     (ogsr-bootstrap.requiredStacks, from .Values.modulesDisabled + moduleCatalog), plus ai-assist
+     when Lightspeed is on. No per-stack booleans here — module selection is the interface. */ -}}
 {{- $mirrorStacks := list "batch" "progressive-delivery" -}}
-{{- if .Values.stacks.lightspeed }}{{ $mirrorStacks = append $mirrorStacks "ai-assist" }}{{- end -}}
-{{- if .Values.stacks.auth }}{{ $mirrorStacks = append $mirrorStacks "auth" }}{{- end -}}
-{{- if .Values.stacks.resilience }}{{ $mirrorStacks = append $mirrorStacks "resilience" }}{{- end -}}
-{{- if .Values.stacks.mesh }}{{ $mirrorStacks = append $mirrorStacks "mesh" }}{{- end -}}
-{{- if .Values.stacks.serverless }}{{ $mirrorStacks = append $mirrorStacks "serverless" }}{{- end -}}
-{{- if .Values.stacks.mta }}{{ $mirrorStacks = append $mirrorStacks "mta" }}{{- end -}}
-{{- if .Values.stacks.observability }}{{ $mirrorStacks = append $mirrorStacks "observability" }}{{- end -}}
-{{- if .Values.stacks.appsec }}{{ $mirrorStacks = append $mirrorStacks "appsec" }}{{- end -}}
-{{- if .Values.stacks.portal }}{{ $mirrorStacks = append $mirrorStacks "portal" }}{{- end -}}
-{{- if .Values.stacks.trust }}{{ $mirrorStacks = append $mirrorStacks "trust" }}{{- end -}}
-{{- if .Values.stacks.trustDemo }}{{ $mirrorStacks = append $mirrorStacks "trust-demo" }}{{- end -}}
+{{- range $st := (splitList " " (include "ogsr-bootstrap.requiredStacks" $root)) -}}
+{{- if $st }}{{ $mirrorStacks = append $mirrorStacks $st }}{{- end -}}
+{{- end -}}
+{{- if eq (include "ogsr-bootstrap.lightspeedEnabled" $root) "true" }}{{ $mirrorStacks = append $mirrorStacks "ai-assist" }}{{- end -}}
 {{- range $stack := $mirrorStacks }}
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -150,12 +146,17 @@ spec:
           value: {{ .Values.multi_user.num_users | quote }}
         - name: clusterDomain
           value: {{ .Values.deployer.domain | quote }}
-        # Seed per-user realm-{user} imports only when the auth stack (M14) is installed.
+        # Seed per-user realm-{user} imports only when the auth stack is installed — i.e. when the
+        # securing-apps-keycloak module is enabled (or auth is forced via the expert override).
         - name: sso.enabled
-          value: {{ .Values.stacks.auth | quote }}
+          value: {{ has "auth" (splitList " " (include "ogsr-bootstrap.requiredStacks" .)) | quote }}
         # Console plugins opt-in (backlog #24) — OFF unless consolePlugins.enabled is set.
         - name: consolePlugins.enabled
           value: {{ .Values.consolePlugins.enabled | quote }}
+        # Modules hidden from the attendee showroom nav/library (comma-joined slugs; "" = none).
+        # workshop-config renders one hide-attribute per slug into each cockpit's Antora build.
+        - name: modulesDisabledCSV
+          value: {{ include "ogsr-bootstrap.disabledSlugsCSV" . | quote }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ .Values.argocd.namespace }}

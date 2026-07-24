@@ -22,9 +22,11 @@ gitops:
   path: "helm/bootstrap"   # informational: the path RHDP points `field-content` at
 
 # --- RHDP-injected (only when a MaaS key was provisioned): LiteMaaS / MaaS LLM ------
-# Default disabled. When enabled, the maas-secret Job materializes the OpenShift
-# Lightspeed `credentials` Secret (key: apitoken) from apiKey — the same contract
-# bootstrap/install.sh creates imperatively today. Enable stacks.lightspeed alongside.
+# Default disabled. When enabled AND apiUrl + apiKey are both set, the maas-secret Job materializes
+# the OpenShift Lightspeed `credentials` Secret (key: apitoken) from apiKey and the ai-assist stack
+# (OpenShift Lightspeed) installs automatically — no separate stacks.lightspeed flip needed. If no
+# endpoint/key is provisioned, Lightspeed AUTO-SKIPS (the ai-assist stack is not rendered), so a
+# BYO/partner cluster with no LLM needs no extra config to opt out.
 litemaas:
   enabled: false
   apiUrl: ""              # OpenAI/vLLM-compatible base, ends in /v1
@@ -49,31 +51,44 @@ multi_user:
 # Keep it simple/memorable. Overridable per order.
 workshop_user_password: "openshift"
 
-# --- Platform stack selection (mirrors bootstrap/vars.yaml) --------------------------
-# core-devtools + batch are ALWAYS installed (baseline: git-localize anchor, dev tools,
-# and the Kueue/KEDA CRDs workshop-config depends on). The three below are opt-in.
-stacks:
-  lightspeed: false   # ai-assist stack (OpenShift Lightspeed). Requires litemaas.* for the MaaS key.
-  auth: false         # auth stack (Red Hat build of Keycloak) — M13 "Securing Apps with Keycloak".
-  resilience: false   # resilience stack (OADP + RHSI) — M21. PREREQ: ODF/MCG for the S3 target.
-  # Elective stacks (1:1 with platform-portfolio/stacks/<name>; default false — enabling one adds
-  # its modules to the cluster, disabling just means those modules aren't runnable there).
-  # progressive-delivery is NOT listed: it is baseline (M11 is core catalog — see applications.yaml).
-  mesh: false           # OSSM 3 + Kiali — M19, parts of M21
-  serverless: false     # OpenShift Serverless (Knative) — M20/M21
-  mta: false            # Migration Toolkit for Applications — M23
-  observability: false  # COO + Loki + Tempo + OTel — M13
-  appsec: false         # SonarQube — M08 pipeline gates
-  portal: false         # Red Hat Developer Hub — M12
-  trust: false          # RHACS + RHTAS — M08/M09 trust story
-  trustDemo: false      # RHTPA (stack dir: trust-demo) — M09 demo add-on
+# --- Module selection → platform stacks (mirrors bootstrap/vars.yaml modules_disabled) ------
+# The deployer thinks in MODULES, not stacks. Leave modulesDisabled empty and the WHOLE workshop
+# is delivered — the chart installs the UNION of platform stacks the enabled modules require
+# (moduleCatalog below, generated from /modules.yaml). Disable the modules you are not teaching to
+# lighten the cluster: a stack needed ONLY by disabled modules is not installed. Entries are `mNN`
+# (module number, e.g. m13) or a slug (e.g. observability-health-scale); plain list only, no ranges.
+# core-devtools, batch and progressive-delivery are ALWAYS installed (baseline) and are unaffected.
+modulesDisabled: []
 
-# --- Console plugins opt-in (mirrors bootstrap/vars.yaml console_plugins) ------------
-# OFF by default (non-invasive: a default cluster's console must not change unless asked). true →
-# workshop-config's hook Job merges its known plugin names (gitops/workshop-config/values.yaml
-# consolePlugins.names) into consoles.operator.openshift.io .spec.plugins, append-if-absent.
+# --- Expert stack overrides (rarely needed) ----------------------------------------------------
+# Additive only: set one true to FORCE that platform stack on regardless of module selection (e.g. a
+# PoC cluster that wants a capability with no matching module enabled). Leaving them false is normal —
+# module selection above already turns on exactly what the enabled modules need. To REMOVE a stack,
+# disable the module(s) that need it (modulesDisabled), don't flip these to false.
+stacks:
+  lightspeed: false   # ai-assist stack (OpenShift Lightspeed). Normally auto-driven by litemaas.* (below).
+  auth: false         # auth stack (Red Hat build of Keycloak)
+  resilience: false   # resilience stack (OADP + RHSI). PREREQ: ODF/MCG for the S3 target.
+  mesh: false         # OSSM 3 + Kiali
+  serverless: false   # OpenShift Serverless (Knative)
+  mta: false          # Migration Toolkit for Applications
+  observability: false # COO + Loki + Tempo + OTel
+  appsec: false       # SonarQube
+  portal: false       # Red Hat Developer Hub (RHDH)
+  trust: false        # RHACS + RHTAS
+  trustDemo: false    # RHTPA (stack dir: trust-demo) — M09 demo-flavor add-on (no module requires it)
+
+# --- Console plugins (mirrors bootstrap/vars.yaml console_plugins) --------------------
+# ON by default (owner 2026-07-19: the Pipelines/GitOps/ACS plugins are mostly console links —
+# not worth a deployer decision). workshop-config's hook Job MERGES its known plugin names
+# (gitops/workshop-config/values.yaml consolePlugins.names) into consoles.operator.openshift.io
+# .spec.plugins append-if-absent, and ONLY for a name that already has a matching ConsolePlugin CR
+# (an operator we didn't install is skipped, never dangled); uninstall removes only the names it
+# recorded adding (console_plugins_added). The console pods roll when .spec.plugins changes — that
+# is normal OpenShift behavior, not a workshop defect. Set false only if a shared cluster must not
+# change its console at all.
 consolePlugins:
-  enabled: false
+  enabled: true
 
 # --- Namespaces (parameterized: the ogsr- rename is a values flip) -------------------
 # gitea/showroom MUST match the namespaces the reused portfolio + workshop-config
@@ -107,3 +122,62 @@ images:
   cli: "registry.redhat.io/openshift4/ose-cli:latest"
   # ships /usr/bin/htpasswd (httpd-tools); UBI, pullable without a pull secret.
   htpasswd: "registry.access.redhat.com/ubi9/httpd-24:latest"
+
+# BEGIN gen-module-stacks — GENERATED by tools/gen-module-stacks.sh, DO NOT EDIT
+# Regenerate after editing modules.yaml (CI drift gate). Consumed by templates/_helpers.tpl
+# (ogsr-bootstrap.requiredStacks) to derive the platform-stack set from .Values.modulesDisabled:
+# Helm can't read /modules.yaml, so the ordered slug->stacks catalog is generated here.
+moduleCatalog:
+  - slug: platform-orientation
+    stacks: [] # foundations: deploy/scale/heal on baseline core-devtools only
+  - slug: build-deliver
+    stacks: [] # image/S2I/Dockerfile builds + DB + polyglot svc — all baseline
+  - slug: devspaces-inner-loop
+    stacks: [] # Dev Spaces ships in baseline core-devtools
+  - slug: config-multienv
+    stacks: [] # ConfigMaps/Secrets/probes/promotion — all baseline
+  - slug: storage-stateful
+    stacks: [] # PVC/StorageClass/StatefulSet — all baseline
+  - slug: jobs-batch-kueue
+    stacks: [] # Kueue is baseline (batch); AI batch inference hits MaaS directly, no stack
+  - slug: pipelines-fundamentals
+    stacks: [] # Tekton + Pipelines-as-Code ship in baseline core-devtools
+  - slug: app-security-testing
+    stacks: [appsec, trust] # SAST=SonarQube (appsec); image-scan gate + Chains signing=RHACS/RHTAS (trust)
+  - slug: trusted-supply-chain
+    stacks: [trust] # RHACS + Trusted Artifact Signer (RHTAS): sign/attest/SBOM/admission
+  - slug: gitops-fundamentals
+    stacks: [] # Argo CD ships with the baseline GitOps operator
+  - slug: gitops-at-scale
+    stacks: [] # Argo Rollouts is baseline (progressive-delivery)
+  - slug: developer-hub-golden-paths
+    stacks: [portal] # Red Hat Developer Hub (RHDH)
+  - slug: observability-health-scale
+    stacks: [observability] # COO + Loki + Tempo + OpenTelemetry (metrics/logs/traces)
+  - slug: securing-apps-keycloak
+    stacks: [auth] # Red Hat build of Keycloak + per-user realms
+  - slug: multi-tenancy-workload-security
+    stacks: [] # RBAC/quotas/SCC/PodSecurity + a read-only tour of the live OAuth config (no auth stack required)
+  - slug: networking-dev-devops
+    stacks: [] # Services/Routes/Gateway API (baseline) + NetworkPolicy + UDN (OVN) — mesh is a later module
+  - slug: deployment-targets-scheduling
+    stacks: [] # node selectors/taints/affinity/topology-spread/PDB — all baseline
+  - slug: registry-images-catalog-governance
+    stacks: [] # internal registry/ImageStreams/mirroring/policy — all baseline
+  - slug: service-mesh-advanced-gateways
+    stacks: [mesh] # OSSM 3 (Sail/Istio) + Kiali
+  - slug: serverless-zero-to-hero
+    stacks: [serverless] # Knative Serving
+  - slug: eventing-deep-dive
+    stacks: [serverless] # Knative Eventing + Serverless Logic (SonataFlow) ship in the serverless stack
+  - slug: resilience-multicluster-dr
+    stacks: [resilience, mesh] # OADP + Service Interconnect (resilience); app-level failover runs over OSSM 3 (mesh) per the M21 design
+  - slug: app-modernization
+    stacks: [mta] # Migration Toolkit for Applications; MTA Developer Lightspeed uses MaaS directly (no ai-assist stack)
+  - slug: agentic-ai
+    stacks: [] # MaaS endpoint + on-cluster MCP servers, materialized by the entry state — no platform stack
+  - slug: ai-assisted-development
+    stacks: [] # coding assistant via a least-privilege MCP ServiceAccount + MaaS — no platform stack
+  - slug: packaging-distributing
+    stacks: [] # Helm/OCI + OLM bundle dissection — all baseline
+# END gen-module-stacks

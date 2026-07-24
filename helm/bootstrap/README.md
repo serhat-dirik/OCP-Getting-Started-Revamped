@@ -49,9 +49,12 @@ deploying for roughly **15-25 minutes** after that. Watch them in the Argo CD UI
 oc get applications -n openshift-gitops
 ```
 
-To enable optional stacks or the MaaS assistant at order time, set the matching values
-(see the contract below) as extra Helm values on the order, e.g. `stacks.auth=true`,
-`litemaas.enabled=true` + `stacks.lightspeed=true`.
+By default the whole workshop is delivered and every platform stack the modules need is
+installed. To run a shorter workshop, set `modulesDisabled` on the order (module numbers or
+slugs) — the disabled modules are hidden from the cockpit and any stack needed only by them is
+skipped, e.g. `modulesDisabled={m19,m20,m21,m22,m23,m24,m25}`. For the MaaS assistant, set
+`litemaas.enabled=true` with `litemaas.apiUrl` + `litemaas.apiKey` (Lightspeed auto-skips when
+they are absent). The per-stack `stacks.*` booleans remain only as expert additive overrides.
 
 ---
 
@@ -133,10 +136,12 @@ comments in `values.yaml`).
 |-----|---------|---------|
 | `deployer.domain` / `deployer.apiUrl` | `""` | injected cluster coordinates — never hardcode a domain |
 | `gitops.repoURL` / `.revision` / `.path` | this repo / `main` / `helm/bootstrap` | self-reference for child app sources |
-| `litemaas.enabled` / `.apiUrl` / `.apiKey` / `.model` | `false` / `""` / `""` / `llama-scout-17b` | MaaS LLM for Lightspeed; enabled only when a key is provisioned |
+| `litemaas.enabled` / `.apiUrl` / `.apiKey` / `.model` | `false` / `""` / `""` / `llama-scout-17b` | MaaS LLM; Lightspeed installs only when enabled AND apiUrl + apiKey are set, else auto-skips |
 | `multi_user.num_users` / `.users` / `.userPrefix` / `.manageHtpasswd` | `5` / `[]` / `user` / `true` | attendee roster; `manageHtpasswd=false` if the base CI provisions userN |
 | `workshop_user_password` | `openshift` | shared, throwaway, non-secret console/Gitea password |
-| `stacks.lightspeed` / `.auth` / `.resilience` | `false` | opt-in stacks (core-devtools + batch are always on) |
+| `modulesDisabled` | `[]` | modules to drop (mNN or slugs); hides them + skips stacks only they need. Empty = whole workshop |
+| `consolePlugins.enabled` | `true` | merge Pipelines/GitOps/ACS console plugins (append-if-absent; set false to leave the console untouched) |
+| `stacks.<name>` | `false` | expert additive overrides only — force a stack on with no matching module (core-devtools/batch/progressive-delivery are always on) |
 | `namespaces.gitea` / `.showroom` / `.system` | `ogsr-gitea` / `ogsr-showroom` / `ogsr-system` | parameterized so the `ogsr-` rename is a values flip |
 | `gitea.org` / `.repo` | `parasol` / `ocp-getting-started` | in-cluster mirror coordinates |
 

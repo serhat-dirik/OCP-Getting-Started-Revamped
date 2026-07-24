@@ -32,15 +32,95 @@ https://{{ include "ogsr-bootstrap.giteaHost" . }}/{{ .Values.gitea.org }}/{{ .V
 {{- end -}}
 
 {{/*
-Comma-separated stack list, matching bootstrap/install.sh's STACKS string so
-enumerate_operators() in ogsr-uninstall.sh derives the same operator set.
-core-devtools + batch are the always-on baseline.
+Disabled module SLUGS, space-joined, resolved from .Values.modulesDisabled (each entry is `mNN`
+or a slug). mNN is resolved by 1-based position into .Values.moduleCatalog (generated from
+/modules.yaml — Helm can't read that file). An unknown token or out-of-range number fails the
+render loudly rather than silently ignoring a typo that would leave a module unexpectedly on.
+*/}}
+{{- define "ogsr-bootstrap.disabledSlugs" -}}
+{{- $catalog := .Values.moduleCatalog | default (list) -}}
+{{- $out := list -}}
+{{- range $tok := (.Values.modulesDisabled | default (list)) -}}
+{{- $t := $tok | toString | trim | lower -}}
+{{- if $t -}}
+{{- if regexMatch "^m[0-9]+$" $t -}}
+{{- $idx := sub (atoi (trimPrefix "m" $t)) 1 -}}
+{{- if and (ge $idx 0) (lt $idx (len $catalog)) -}}
+{{- $out = append $out (index $catalog $idx).slug -}}
+{{- else -}}
+{{- fail (printf "modulesDisabled: module number %q is out of range (1..%d)" $t (len $catalog)) -}}
+{{- end -}}
+{{- else -}}
+{{- $found := false -}}
+{{- range $m := $catalog -}}{{- if eq $m.slug $t -}}{{- $found = true -}}{{- end -}}{{- end -}}
+{{- if $found -}}{{- $out = append $out $t -}}{{- else -}}{{- fail (printf "modulesDisabled: unknown module %q (use mNN or a slug from modules.yaml)" $t) -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- join " " $out -}}
+{{- end -}}
+
+{{/*
+Disabled module slugs as a comma-joined string, for the workshop-config Application's
+modulesDisabledCSV Helm parameter (Argo helm.parameters can't carry a YAML list reliably, so the
+showroom hiding travels as a scalar CSV the chart splits — see gitops/workshop-config).
+*/}}
+{{- define "ogsr-bootstrap.disabledSlugsCSV" -}}
+{{- $d := include "ogsr-bootstrap.disabledSlugs" . | trim -}}
+{{- if $d -}}{{- $d | replace " " "," -}}{{- end -}}
+{{- end -}}
+
+{{/*
+Space-joined set of NON-baseline platform stacks to install: the UNION of `stacks` required by
+every ENABLED module (moduleCatalog minus disabledSlugs), plus any expert additive override
+(.Values.stacks.<name> == true). Deterministic order (first-seen in catalog order, then overrides).
+core-devtools / batch / progressive-delivery are baseline and never appear here; ai-assist is
+governed separately (see lightspeedEnabled).
+*/}}
+{{- define "ogsr-bootstrap.requiredStacks" -}}
+{{- $catalog := .Values.moduleCatalog | default (list) -}}
+{{- $disabled := splitList " " (include "ogsr-bootstrap.disabledSlugs" .) -}}
+{{- $stacks := list -}}
+{{- range $m := $catalog -}}
+{{- if not (has $m.slug $disabled) -}}
+{{- range $s := ($m.stacks | default (list)) -}}
+{{- if not (has $s $stacks) -}}{{- $stacks = append $stacks $s -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $ov := .Values.stacks | default dict -}}
+{{- range $name := (list "auth" "resilience" "mesh" "serverless" "mta" "observability" "appsec" "portal" "trust") -}}
+{{- if index $ov $name -}}{{- if not (has $name $stacks) -}}{{- $stacks = append $stacks $name -}}{{- end -}}{{- end -}}
+{{- end -}}
+{{- if $ov.trustDemo -}}{{- if not (has "trust-demo" $stacks) -}}{{- $stacks = append $stacks "trust-demo" -}}{{- end -}}{{- end -}}
+{{- join " " $stacks -}}
+{{- end -}}
+
+{{/*
+"true"/"false" — is OpenShift Lightspeed (the ai-assist stack) installed? AUTO-SKIP contract:
+on only when litemaas.enabled AND both litemaas.apiUrl and litemaas.apiKey are set (no LLM
+endpoint/key ⇒ skipped, no deployer action needed). The stacks.lightspeed expert override forces
+it on. NOT tied to module selection.
+*/}}
+{{- define "ogsr-bootstrap.lightspeedEnabled" -}}
+{{- $lm := .Values.litemaas | default dict -}}
+{{- $on := false -}}
+{{- if and $lm.enabled (ne (trim (toString ($lm.apiKey | default ""))) "") (ne (trim (toString ($lm.apiUrl | default ""))) "") -}}{{- $on = true -}}{{- end -}}
+{{- if (.Values.stacks | default dict).lightspeed -}}{{- $on = true -}}{{- end -}}
+{{- ternary "true" "false" $on -}}
+{{- end -}}
+
+{{/*
+Comma-separated FULL stack list actually installed (baseline + required + ai-assist when
+lightspeed is on), matching bootstrap/install.sh's STACKS string so enumerate_operators() in
+ogsr-uninstall.sh derives the same operator set for a non-destructive uninstall.
 */}}
 {{- define "ogsr-bootstrap.installedStacks" -}}
-{{- $s := list "core-devtools" "batch" -}}
-{{- if .Values.stacks.lightspeed }}{{ $s = append $s "ai-assist" }}{{- end -}}
-{{- if .Values.stacks.auth }}{{ $s = append $s "auth" }}{{- end -}}
-{{- if .Values.stacks.resilience }}{{ $s = append $s "resilience" }}{{- end -}}
+{{- $s := list "core-devtools" "batch" "progressive-delivery" -}}
+{{- range $st := (splitList " " (include "ogsr-bootstrap.requiredStacks" .)) -}}
+{{- if $st -}}{{- $s = append $s $st -}}{{- end -}}
+{{- end -}}
+{{- if eq (include "ogsr-bootstrap.lightspeedEnabled" .) "true" -}}{{- $s = append $s "ai-assist" -}}{{- end -}}
 {{- join "," $s -}}
 {{- end -}}
 

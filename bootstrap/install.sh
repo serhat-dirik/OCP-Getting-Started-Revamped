@@ -16,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VARS="${SCRIPT_DIR}/vars.yaml"
 PORTFOLIO_INSTALL="${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/install.sh"
 CREDS_FILE="${SCRIPT_DIR}/.credentials.local.txt"
+MODULES_YAML="${SCRIPT_DIR}/../modules.yaml"   # SSOT for module order + per-module `stacks:` deps
 
 GITEA_NS="ogsr-gitea"
 MIRROR_ORG="parasol"
@@ -34,35 +35,114 @@ command -v htpasswd >/dev/null || die "htpasswd not found — install it (brew i
 command -v openssl >/dev/null || die "openssl not found — needed to generate/handle passwords"
 [[ -f "$VARS" ]] || die "missing ${VARS} — copy vars.example.yaml to vars.yaml and fill it in"
 [[ -x "$PORTFOLIO_INSTALL" ]] || die "portfolio installer not found/executable: ${PORTFOLIO_INSTALL}"
+[[ -f "$MODULES_YAML" ]] || die "missing ${MODULES_YAML} — the module catalog drives stack selection"
 
 v() { yq "$1" "$VARS" 2>/dev/null || true; }
 
 # ── read inputs (with safe defaults) ──────────────────────────────────────────
 USERS="$(v '.users')";           [[ "$USERS" =~ ^[0-9]+$ ]] || USERS=5
-LIGHTSPEED="$(v '.lightspeed')"; [[ "$LIGHTSPEED" == "false" ]] || LIGHTSPEED="true"
-AUTH="$(v '.auth')";             [[ "$AUTH" == "true" ]] || AUTH="false"
-RESILIENCE="$(v '.resilience')"; [[ "$RESILIENCE" == "true" ]] || RESILIENCE="false"
-# Elective stacks (all default-false opt-ins; each maps 1:1 to platform-portfolio/stacks/<name>)
-MESH="$(v '.mesh')";                 [[ "$MESH" == "true" ]] || MESH="false"
-SERVERLESS="$(v '.serverless')";     [[ "$SERVERLESS" == "true" ]] || SERVERLESS="false"
-MTA="$(v '.mta')";                   [[ "$MTA" == "true" ]] || MTA="false"
-OBSERVABILITY="$(v '.observability')"; [[ "$OBSERVABILITY" == "true" ]] || OBSERVABILITY="false"
-APPSEC="$(v '.appsec')";             [[ "$APPSEC" == "true" ]] || APPSEC="false"
-PORTAL="$(v '.portal')";             [[ "$PORTAL" == "true" ]] || PORTAL="false"
-TRUST="$(v '.trust')";               [[ "$TRUST" == "true" ]] || TRUST="false"
-TRUST_DEMO="$(v '.trust_demo')";     [[ "$TRUST_DEMO" == "true" ]] || TRUST_DEMO="false"
-CONSOLE_PLUGINS="$(v '.console_plugins')"; [[ "$CONSOLE_PLUGINS" == "true" ]] || CONSOLE_PLUGINS="false"
 REPO_URL="$(v '.repo_url')";     [[ -n "$REPO_URL" && "$REPO_URL" != "null" ]] || REPO_URL="https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
 REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
 DOMAIN="$(v '.cluster_domain')"
 MAAS_KEY="$(v '.maas.api_key')"
+MAAS_ENDPOINT="$(v '.maas.endpoint')"
 # Model travels WITH the credential (see the secret step below). Default to the FSC/chart default when
 # vars omits it, so an older vars.yaml still installs; the operator overrides it per cluster.
 MAAS_MODEL="$(v '.maas.model')"; [[ -n "$MAAS_MODEL" && "$MAAS_MODEL" != "null" ]] || MAAS_MODEL="llama-scout-17b"
 WS_PASS="$(v '.workshop_user_password')"
+# Console plugins default ON (owner 2026-07-19: mostly console links). Explicit `false` opts out; the
+# workshop-config hook stays append-if-absent and skips any name without a matching ConsolePlugin CR.
+CONSOLE_PLUGINS="$(v '.console_plugins')"; [[ "$CONSOLE_PLUGINS" == "false" ]] || CONSOLE_PLUGINS="true"
+
+# ── module selection → platform stacks (the deployer interface) ────────────────────────────
+# The deployer lists modules_disabled (mNN like m13, or slugs); we install the UNION of stacks the
+# ENABLED modules require (modules.yaml `stacks:`), so a stack needed only by disabled modules never
+# installs — and therefore never gets an operator-adoption snapshot, so uninstall never touches it.
+# The legacy per-stack vars survive as EXPERT ADDITIVE overrides (set one true to force a stack on for
+# a PoC with no matching module); to REMOVE a stack, disable its module(s), never flip a var false.
+ALL_SLUGS="$(yq -r '.modules[].slug' "$MODULES_YAML" 2>/dev/null || true)"
+[[ -n "$ALL_SLUGS" ]] || die "no modules parsed from ${MODULES_YAML}"
+MODULE_COUNT="$(printf '%s\n' "$ALL_SLUGS" | grep -c .)"
+
+# Resolve one token (mNN or slug) to a canonical slug: echo the slug + return 0, or return 1 if the
+# token is unknown / out of range (the caller turns a 1 into a hard die).
+resolve_slug() {
+  local tok n slug
+  tok="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  [[ -z "$tok" || "$tok" == "null" ]] && return 1
+  if printf '%s' "$tok" | grep -qE '^m[0-9]+$'; then
+    n="${tok#m}"
+    [[ "$n" -ge 1 ]] || return 1                       # m0 (yq index -1 = last) is not a module
+    slug="$(yq -r ".modules[$((n - 1))].slug // \"\"" "$MODULES_YAML" 2>/dev/null || true)"
+    [[ -n "$slug" && "$slug" != "null" ]] || return 1
+    printf '%s' "$slug"; return 0
+  fi
+  printf '%s\n' "$ALL_SLUGS" | grep -qxF "$tok" || return 1
+  printf '%s' "$tok"; return 0
+}
+
+# Space-fenced set of disabled slugs (leading + trailing space so membership globs match whole slugs),
+# plus a comma-joined CSV for the workshop-config showroom-hiding parameter.
+DISABLED_SET=" "
+DISABLED_CSV=""
+while IFS= read -r tok; do
+  [[ -z "$tok" ]] && continue
+  if ! slug="$(resolve_slug "$tok")"; then
+    die "modules_disabled: unknown or out-of-range module '$tok' (use mNN like m13 or a slug from modules.yaml)"
+  fi
+  case "$DISABLED_SET" in *" $slug "*) continue ;; esac
+  DISABLED_SET="${DISABLED_SET}${slug} "
+  DISABLED_CSV="${DISABLED_CSV:+$DISABLED_CSV,}${slug}"
+done < <(yq -r '.modules_disabled[]?' "$VARS" 2>/dev/null || true)
+
+# Union of stacks required by ENABLED modules (space-fenced set).
+REQUIRED_SET=" "
+add_required() { case "$REQUIRED_SET" in *" $1 "*) ;; *) REQUIRED_SET="${REQUIRED_SET}$1 " ;; esac; }
+while IFS= read -r slug; do
+  [[ -z "$slug" ]] && continue
+  case "$DISABLED_SET" in *" $slug "*) continue ;; esac
+  while IFS= read -r st; do
+    [[ -n "$st" && "$st" != "null" ]] && add_required "$st"
+  done < <(yq -r ".modules[] | select(.slug == \"$slug\") | .stacks[]?" "$MODULES_YAML" 2>/dev/null || true)
+done < <(printf '%s\n' "$ALL_SLUGS")
+
+# Each per-stack toggle = required-by-an-enabled-module OR an explicit expert override (true).
+stack_toggle() {  # <stack-name> <vars-key> → true/false
+  local name="$1" key="$2" ov
+  ov="$(v ".$key")"
+  [[ "$ov" == "true" ]] && { echo "true"; return; }
+  case "$REQUIRED_SET" in *" $name "*) echo "true" ;; *) echo "false" ;; esac
+}
+AUTH="$(stack_toggle auth auth)"
+RESILIENCE="$(stack_toggle resilience resilience)"
+MESH="$(stack_toggle mesh mesh)"
+SERVERLESS="$(stack_toggle serverless serverless)"
+MTA="$(stack_toggle mta mta)"
+OBSERVABILITY="$(stack_toggle observability observability)"
+APPSEC="$(stack_toggle appsec appsec)"
+PORTAL="$(stack_toggle portal portal)"
+TRUST="$(stack_toggle trust trust)"
+# trust-demo: expert-override only (RHTPA is a demo-flavor add-on; no module requires it).
+TRUST_DEMO="$(v '.trust_demo')"; [[ "$TRUST_DEMO" == "true" ]] || TRUST_DEMO="false"
+
+# Lightspeed (ai-assist stack): governed by the MaaS credential, NOT module filtering. AUTO-SKIP when
+# no LLM endpoint/key is configured (owner req) so a cluster with no LLM needs no `lightspeed: false`.
+LIGHTSPEED_REQ="$(v '.lightspeed')"
+maas_configured="true"
+case "$MAAS_KEY" in ""|null|CHANGEME) maas_configured="false" ;; esac
+case "$MAAS_ENDPOINT" in ""|null|*"<your-maas-endpoint>"*|*"<unused"*) maas_configured="false" ;; esac
+if [[ "$LIGHTSPEED_REQ" == "false" ]]; then
+  LIGHTSPEED="false"
+elif [[ "$maas_configured" == "false" ]]; then
+  LIGHTSPEED="false"
+  info "lightspeed auto-skipped: no MaaS endpoint/key in ${VARS} — set maas.endpoint + maas.api_key to enable OpenShift Lightspeed"
+else
+  LIGHTSPEED="true"
+fi
 
 echo "▶ Workshop bootstrap"
 echo "  users     : ${USER_PREFIX}1..${USER_PREFIX}${USERS}"
+echo "  modules   : ${MODULE_COUNT} in catalog · disabled: ${DISABLED_CSV:-none}"
 echo "  lightspeed: ${LIGHTSPEED}"
 echo "  source    : ${REPO_URL} @ ${REVISION}"
 
@@ -427,9 +507,12 @@ spec:
         # Seed per-user realm-{user} imports only when the auth stack is installed (M13).
         - name: sso.enabled
           value: "${AUTH}"
-        # Console plugins opt-in (backlog #24) — OFF unless vars.yaml sets console_plugins: true.
+        # Console plugins (backlog #24) — ON by default; vars.yaml console_plugins: false opts out.
         - name: consolePlugins.enabled
           value: "${CONSOLE_PLUGINS}"
+        # Modules hidden from the attendee showroom nav/library (comma-joined slugs; "" = show all).
+        - name: modulesDisabledCSV
+          value: "${DISABLED_CSV}"
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops
