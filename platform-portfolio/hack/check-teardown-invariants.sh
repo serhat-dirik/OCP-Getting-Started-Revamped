@@ -91,7 +91,7 @@ echo "▶ teardown invariants (namespace ${WAVE_NAMESPACE} · controller ${WAVE_
 echo "▶ [0/4] namespace manifests are named so teardown can find them"
 while IFS= read -r nsfile; do
   case "$(basename "$nsfile")" in
-    namespace*.yaml|namespaces*.yaml) ;;
+    namespace*.yaml) ;;   # also matches namespaces.yaml / namespaces-*.yaml — the * covers the plural
     *)
       bad "$(basename "$(dirname "$nsfile")")/$(basename "$nsfile") declares a Namespace"
       hint "rename it to namespace-<something>.yaml — ogsr-uninstall.sh globs namespace*.yaml and"

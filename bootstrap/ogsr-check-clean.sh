@@ -103,6 +103,7 @@ N_DECIDE=0    # unclassifiable — a human has to look; no destructive command i
 
 TMPROOT=""
 # shellcheck disable=SC2329  # invoked by the EXIT trap below, not called by name
+# shellcheck disable=SC2317  # body runs from the EXIT trap, not from a call site
 cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
 trap cleanup EXIT
 
@@ -260,7 +261,8 @@ csv_fill_reasons() {
   CSV_INDEX="$(printf '%s\n%s\n' \
     "$(printf '%s\n' "$CSV_INDEX" | awk -F'|' '$2!="" && $3=="Succeeded"')" "$out" | grep -v '^ *$')"
 }
-# shellcheck disable=SC2329  # dispatched indirectly by run_parallel, not called by name
+# shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
+# (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
 csv_probe() {  # "ns|name" → "ns|name|phase|reason"
   local ns="${1%%|*}" nm="${1#*|}"
   printf '%s|%s|%s\n' "$ns" "$nm" \
@@ -281,6 +283,7 @@ load_csv_owned() {
 
 load_state() {
   local live f
+  # shellcheck disable=SC2016  # $k/$v are go-template variables; expanding them here would break it
   live="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o go-template='{{range $k,$v := .data}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null)"
   if [ -n "$live" ]; then
     STATE_KV="$live"; STATE_SRC="ConfigMap ${STATE_NS}/${STATE_CM} (install still present)"
@@ -289,7 +292,8 @@ load_state() {
   # The state ConfigMap lives in ogsr-system, which the uninstall deletes LAST — so after a
   # successful uninstall it is gone and only the dump file can say what we created vs adopted.
   for f in "$STATE_FILE" "$STATE_FILE_DEFAULT"; do
-    [ -n "$f" ] && [ -r "$f" ] || continue
+    [ -n "$f" ] || continue
+    [ -r "$f" ] || continue
     STATE_KV="$(cat "$f" 2>/dev/null)"; STATE_SRC="file ${f}"
     return 0
   done
@@ -322,7 +326,8 @@ build_adoption_index() {
   [ -n "$rows" ] || return 0
   ADOPTED_SUB_INFO="$(printf '%s\n' "$rows" | run_parallel adopted_probe)"
   while IFS='|' read -r name ns _ csv; do
-    [ -n "$name" ] && [ -n "$ns" ] || continue
+    [ -n "$name" ] || continue
+    [ -n "$ns" ] || continue
     ADOPTED_NS="${ADOPTED_NS}${ns} "
     ADOPTED_OBJ="${ADOPTED_OBJ}subscriptions:${ns}/${name} "
     if [ -n "${csv:-}" ]; then
@@ -337,7 +342,8 @@ build_adoption_index() {
   done < <(printf '%s\n' "$ADOPTED_SUB_INFO")
   return 0
 }
-# shellcheck disable=SC2329  # dispatched indirectly by run_parallel, not called by name
+# shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
+# (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
 adopted_probe() {  # "name ns" → "name|ns|ok|<csv>" or "name|ns|missing|"
   local name="${1%% *}" ns="${1#* }" csv
   if csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" \
@@ -600,7 +606,8 @@ section_adopted_health() {
   # subscriptions.messaging.knative.dev shadows the OLM one and a bare `subscription` silently reports
   # every operator as absent — SEV1 here, fixed in 437bbf4). Reuse it rather than probing twice.
   while IFS='|' read -r name ns st csv; do
-    [ -n "$name" ] && [ -n "$ns" ] || continue
+    [ -n "$name" ] || continue
+    [ -n "$ns" ] || continue
     if [ "$st" = "missing" ]; then
       found adopted "adopted operator ${ns}/${name} — its Subscription is GONE (we must never remove an adopted operator)" \
         "reinstall it from OperatorHub: the org owned this before the workshop was installed"
@@ -741,7 +748,8 @@ section_apiservices() {
     "The highest-impact class there is. An aggregated APIService with no backend makes discovery fail, and Kubernetes then refuses to garbage-collect ANY namespace on the cluster — 92 of them wedged in the 2026-07-25 teardown, most not ours."
   local name svc_ns svc_nm avail hit=0
   while IFS='|' read -r name svc_ns svc_nm avail; do
-    [ -n "$name" ] && [ -n "$svc_ns" ] || continue
+    [ -n "$name" ] || continue
+    [ -n "$svc_ns" ] || continue
     case "$SVC_INDEX" in *" ${svc_ns}/${svc_nm} "*) continue;; esac
     hit=1
     found health "apiservice/${name} → backing service ${svc_ns}/${svc_nm} does not exist (Available=${avail:-?})" \
@@ -765,7 +773,8 @@ section_webhooks() {
       for ref in $refs; do
         case "$ref" in ""|"/") continue;; esac
         rns="${ref%%/*}"; rnm="${ref##*/}"
-        [ -n "$rns" ] && [ -n "$rnm" ] || continue
+        [ -n "$rns" ] || continue
+        [ -n "$rnm" ] || continue
         case "$SVC_INDEX" in *" ${ref} "*) continue;; esac
         hit=1
         found health "${kind}/${w} → missing service ${ref}" "oc delete ${kind} ${w}"
@@ -830,6 +839,7 @@ sweep_labeled() {  # scope(cluster|ns) kinds… — batched gets, run SWEEP_JOBS
 # (`oc delete status/<unknown>` is not a command) and, because it is always present, it would make this
 # script exit 1 forever — destroying the exit contract that CI and `ws doctor` depend on.
 # shellcheck disable=SC2329  # called from sweep_chunk, which is itself dispatched indirectly
+# shellcheck disable=SC2317  # used as a pipeline stage; 0.9.x cannot see that call site
 drop_phantoms() { grep -v '^ *$' | grep -vE '^status/|/<unknown>$'; }
 
 # `oc get <kind> -A -o name` prints `kind/name` and NOT the namespace, so the batched sweep above can
@@ -839,7 +849,8 @@ drop_phantoms() { grep -v '^ *$' | grep -vE '^status/|/<unknown>$'; }
 sweep_ns_kinds() {  # kinds… → "ns|kind/name" lines, SWEEP_JOBS at a time
   printf '%s\n' "$*" | tr ' ' '\n' | grep -v '^ *$' | run_parallel sweep_ns_kind
 }
-# shellcheck disable=SC2329  # dispatched indirectly by run_parallel, not called by name
+# shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
+# (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
 sweep_ns_kind() {  # kind → "ns|kind/name"
   oc get "$1" -A -l "$OWNER_LABEL" --ignore-not-found \
     -o jsonpath="{range .items[*]}{.metadata.namespace}|${1}/{.metadata.name}{\"\n\"}{end}" 2>/dev/null \
@@ -847,7 +858,8 @@ sweep_ns_kind() {  # kind → "ns|kind/name"
   return 0
 }
 
-# shellcheck disable=SC2329  # dispatched indirectly by run_parallel, not called by name
+# shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
+# (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
 sweep_chunk() {  # comma-list — echo "kind/name" (or "ns kind/name" when SWEEP_EXTRA=-A) lines
   local chunk="$1" extra="$SWEEP_EXTRA" out k
   # shellcheck disable=SC2086  # $extra is intentionally word-split (empty or -A)
@@ -949,7 +961,8 @@ section_labeled_objects() {
   #     carried `argocd.argoproj.io/tracking-id: pp-cert-manager`. That is still our fingerprint on
   #     their object, and the "no trace" bar says it goes — by un-marking it, never by deleting it.
   while IFS='|' read -r name ns st csv; do
-    [ -n "$name" ] && [ -n "$ns" ] || continue
+    [ -n "$name" ] || continue
+    [ -n "$ns" ] || continue
     [ "$st" = "ok" ] || continue
     adopted_obj_trace subscriptions.operators.coreos.com "$name" "$ns" "$seen" && \
       seen="${seen}${name} " && hit=1
@@ -1040,7 +1053,8 @@ section_crds() {
   [ "$hit" -eq 0 ] && none "no CRD from an operator we installed is still registered"
   return 0
 }
-# shellcheck disable=SC2329  # dispatched indirectly by run_parallel, not called by name
+# shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
+# (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
 crd_count() {  # "crd|op" → "crd|op|<instance count>"
   printf '%s|%s\n' "$1" "$(oc get "${1%%|*}" -A --no-headers 2>/dev/null | grep -c .)"
 }

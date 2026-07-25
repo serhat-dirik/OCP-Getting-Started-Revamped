@@ -538,11 +538,11 @@ preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, remove every 
   # the key is absent, so this is safe on a namespace that never carried them.
   local ns="$1" reason="$2" key="${OWNER_LABEL%%=*}"
   if [[ "$DRY_RUN" == "true" ]]; then
-    echo "   • WOULD preserve namespace/${ns} + strip ${key} / portfolio.redhat.com/component labels and the Argo tracking-id (${reason})"
+    echo "   • WOULD preserve namespace/${ns} + strip ${key} / portfolio.redhat.com/component labels and ${TRACK_ANN} (${reason})"
     return 0
   fi
-  oc label namespace "$ns" "${key}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
-  oc annotate namespace "$ns" argocd.argoproj.io/tracking-id- >/dev/null 2>&1 || true
+  oc label namespace "$ns" "${key}-" "${TRACK_LABEL}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
+  oc annotate namespace "$ns" "${TRACK_ANN}-" >/dev/null 2>&1 || true
   echo "   • preserved namespace/${ns}, removed our labels + Argo tracking-id (${reason})"
 }
 
@@ -553,15 +553,17 @@ strip_our_marks() {  # kind name ns — same de-marking for a single adopted OBJ
   # drop their settings. The uninstall removes only marks that are unambiguously ours.
   local kind="$1" name="$2" ns="${3:-}" key="${OWNER_LABEL%%=*}"
   if [[ "$DRY_RUN" == "true" ]]; then
-    echo "   • WOULD strip our labels + tracking-id from ${kind}/${name}${ns:+ -n $ns}"
+    echo "   • WOULD strip our labels + ${TRACK_ANN} from ${kind}/${name}${ns:+ -n $ns}"
     return 0
   fi
+  # TRACK_ANN is Argo's current tracking method, TRACK_LABEL the older one — both are marks we made,
+  # and an Argo instance configured for either will have stamped that one.
   if [[ -n "$ns" ]]; then
-    oc label "$kind" "$name" -n "$ns" "${key}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
-    oc annotate "$kind" "$name" -n "$ns" argocd.argoproj.io/tracking-id- >/dev/null 2>&1 || true
+    oc label "$kind" "$name" -n "$ns" "${key}-" "${TRACK_LABEL}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
+    oc annotate "$kind" "$name" -n "$ns" "${TRACK_ANN}-" >/dev/null 2>&1 || true
   else
-    oc label "$kind" "$name" "${key}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
-    oc annotate "$kind" "$name" argocd.argoproj.io/tracking-id- >/dev/null 2>&1 || true
+    oc label "$kind" "$name" "${key}-" "${TRACK_LABEL}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
+    oc annotate "$kind" "$name" "${TRACK_ANN}-" >/dev/null 2>&1 || true
   fi
 }
 
