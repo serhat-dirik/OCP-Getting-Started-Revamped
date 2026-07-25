@@ -1714,7 +1714,23 @@ del_appprojects() {  # the AppProject(s) argocd-bootstrap applies imperatively
   # outside any Application — which means the cascade never sees it and it outlives the teardown.
   # It is also not inert: the installer unions its sourceRepos/destinations on every apply, so a
   # stale one silently widens what a later install is allowed to sync.
-  local name
+  #
+  # DELETING IT WHILE ANY APPLICATION STILL NAMES IT BRICKS THE TEARDOWN. Argo refuses to process an
+  # Application whose project is missing — including its DELETION — so every straggler freezes in
+  # Unknown with `InvalidSpecError: Application referencing project ogsr-platform which does not
+  # exist` and `DeletionError: error getting app project`. Their hook finalizers then never clear and
+  # their namespaces never finish. Measured on ksls5 2026-07-25: deleting it in step 6 stranded 7
+  # Applications and wedged the stackrox namespace on four finalizers at once. An AppProject left
+  # behind is a reported leftover; an AppProject deleted too early is an unrecoverable teardown.
+  local name remaining
+  remaining="$(our_applications | grep -c . || true)"; remaining="${remaining:-0}"
+  if [[ "$remaining" != "0" ]]; then
+    warn "${remaining} Application(s) still reference an AppProject — NOT deleting it"
+    echo "     Argo cannot process an Application whose project is gone, not even to delete it."
+    echo "     Resolve those Applications first, then re-run; ogsr-check-clean.sh will report the"
+    echo "     AppProject as a leftover in the meantime."
+    return 0
+  fi
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     del_obj appprojects.argoproj.io "$name" "$ARGO_NS"
@@ -1793,7 +1809,10 @@ step_cluster_rbac() {  # 6 — cluster-scoped objects the cascade CANNOT reach, 
   # is the one leftover class that grants standing access after a teardown.
   sub del_labeled_cluster clusterrolebindings.rbac.authorization.k8s.io
   sub del_labeled_cluster clusterroles.rbac.authorization.k8s.io
-  sub del_appprojects
+  # NOTE: del_appprojects deliberately does NOT run here. It moved to the LAST step, because an
+  # AppProject removed while any Application still names it freezes those Applications permanently
+  # (Argo will not process an app whose project is missing, not even to delete it). By step 8 the
+  # cascade has drained and the guard inside del_appprojects re-checks anyway.
   sub remove_argo_tls_cert_key
   sub sweep_dead_webhooks
   return 0
@@ -1829,6 +1848,10 @@ sweep_dead_webhooks() {  # admission webhooks whose backing Service died with a 
 }
 
 step_delete_namespaces() {  # 8 — whatever the cascade did not own, then the state namespace last
+  # AppProjects go FIRST in this step and LAST in the run: by now the cascade has drained, so no
+  # Application should still name one. del_appprojects re-checks and refuses if any does — deleting
+  # it early is what stranded 7 Applications and wedged a namespace on 2026-07-25.
+  sub del_appprojects
   sub delete_workshop_namespaces
   # The state ConfigMap is about to go with its namespace, so dump it first: ogsr-check-clean.sh needs
   # it to tell an adopted operator from one we created, and a second run has no other source.
