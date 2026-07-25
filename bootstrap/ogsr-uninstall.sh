@@ -235,9 +235,13 @@ state() {  # key [default] — echo a recorded value from the uninstall-state Co
 }
 
 # Re-derive the operators the install installed, from the SAME component manifests + recorded stacks.
-# Echoes one "subname namespace state" line per operator (state = created|adopted|unknown).
+# Echoes one "subname namespace state package" line per operator (state = created|adopted|unknown).
+# The 4th field is the OLM PACKAGE name, which is what identifies the operator's CSV once its
+# Subscription is gone — see § operator CSV identity below. Every consumer reads four fields; a
+# three-field `read` would silently absorb the package into $st and classify every operator as
+# "not created", so if you add a field here, fix all of them.
 enumerate_operators() {
-  local stacks stack app comp_path sub name ns st _stacks
+  local stacks stack app comp_path sub name ns st pkg _stacks
   stacks="$(state installed_stacks)"
   [[ -n "$stacks" ]] || return 0
   IFS=',' read -ra _stacks <<< "$stacks"
@@ -253,9 +257,14 @@ enumerate_operators() {
         name="$(yq '.metadata.name' "$sub" 2>/dev/null || true)"
         ns="$(yq '.metadata.namespace' "$sub" 2>/dev/null || true)"
         [[ -n "$name" && "$name" != "null" ]] || continue
+        # spec.name IS the OLM package; metadata.name only happens to equal it in this portfolio
+        # (verified across every components/*/subscription*.yaml, 2026-07-25). Read the real thing so
+        # a future Subscription named differently from its package still resolves its CSV.
+        pkg="$(yq '.spec.name' "$sub" 2>/dev/null || true)"
+        [[ -n "$pkg" && "$pkg" != "null" ]] || pkg="$name"
         st="$(state "op_${name}" | cut -d: -f1)"
         [[ -n "$st" ]] || st="unknown"
-        echo "${name} ${ns} ${st}"
+        echo "${name} ${ns} ${st} ${pkg}"
       done
     done
   done
@@ -270,9 +279,276 @@ enumerate_operators() {
     *,core-devtools,*)
       st="$(state op_gitea-operator | cut -d: -f1)"
       [[ -n "$st" ]] || st="unknown"
-      echo "gitea-operator gitea-operator ${st}"
+      # package == subscription name here; confirmed on-cluster, the CSV gitea-operator.v2.1.0 in
+      # namespace gitea-operator carries olm.package packageName "gitea-operator".
+      echo "gitea-operator gitea-operator ${st} gitea-operator"
       ;;
   esac
+  return 0
+}
+
+# ── operator CSV identity ─────────────────────────────────────────────────────
+# OLM creates a ClusterServiceVersion FROM a Subscription. Argo never manages the CSV, so nothing
+# prunes it when the cascade removes the Subscription — and a leftover CSV is not litter, it BREAKS THE
+# NEXT INSTALL of this workshop. OLM resolves the new Subscription against the CSV that is already
+# there and gives up:
+#     constraints not satisfiable: @existing/openshift-operators//devspacesoperator.v3.29.0,
+#                                  redhat-operators/openshift-marketplace/stable/devspacesoperator
+# Measured on ksls5 2026-07-25: that exact orphan drove pp-devspaces Degraded with `CheCluster/devspaces
+# Missing` and took M03 out of the workshop; deleting the CSV by hand let OLM resolve immediately.
+#
+# Step 3 used to name the CSV by reading `.status.installedCSV` off the Subscription. That was correct
+# only while teardown deleted Subscriptions itself. Since teardown became a cascade, step 2 removes the
+# Subscription (it IS an Argo-managed resource) long before step 3 runs, so the lookup returned "" for
+# EVERY operator, every CSV survived, and the log said `skip subscriptions…/<name> (absent)` — a total
+# miss that read as success. The CSV name is therefore obtained without needing the Subscription:
+#
+#   1. SNAPSHOT — main calls capture_installed_csvs() BEFORE step 1, i.e. at the last moment every
+#      Subscription is still alive, and records OLM's own answer. Exact, and it is the same value used
+#      when the Subscription is still present (degraded Argo, or the imperative path), so that case
+#      cannot regress.
+#   2. THE CSV'S OWN IDENTITY — `operatorframework.io/properties` carries the olm.package packageName
+#      on the CSV itself, so (namespace, package) finds it with no Subscription and no snapshot. This
+#      is what makes a RE-RUN correct: run 1 cascades, removes the Subscriptions and then dies; run 2
+#      has no snapshot to take, but every orphaned CSV is still there carrying its own package name.
+#
+# Deliberately NOT the primary mechanism: OLM's `operators.coreos.com/<package>.<namespace>` label. A
+# label KEY is capped at 63 characters and OLM silently TRUNCATES rather than skipping — live on ksls5,
+# cluster-observability-operator in openshift-cluster-observability-operator (71 chars) is stamped
+# `operators.coreos.com/cluster-observability-operator.openshift-cluster-observability` (exactly 63),
+# so a selector built from the real names matches nothing at all. It survives only as a last-resort
+# probe (full key, then its 63-char truncation) for a CSV that carries no properties annotation.
+CSV_INDEX=""
+CSV_INDEX_LOADED="false"
+csv_index() {  # → "<ns>|<csv>|<copiedFrom>|<properties-json>" for every ORIGINAL CSV (cached, one call)
+  if [[ "$CSV_INDEX_LOADED" != "true" ]]; then
+    # `!olm.copiedFrom` drops OLM's per-namespace COPIES server-side. Not a micro-optimisation:
+    # measured on ksls5, unfiltered is 3743 objects / 3.8 MB / 92s, filtered is 37 objects / 36 KB / 4s.
+    # Copies have to be excluded anyway (deleting one is pointless — OLM garbage-collects them when the
+    # original goes, and re-creates any you delete), so filtering at the API server costs nothing.
+    # properties LAST in the line: it is JSON, and putting it last means a stray delimiter inside it
+    # lands in the final `read` variable instead of shifting every field after it.
+    CSV_INDEX="$(oc get clusterserviceversions.operators.coreos.com -A -l '!olm.copiedFrom' \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{.metadata.annotations.olm\.copiedFrom}{"|"}{.metadata.annotations.operatorframework\.io/properties}{"\n"}{end}' 2>/dev/null || true)"
+    CSV_INDEX_LOADED="true"
+  fi
+  printf '%s\n' "$CSV_INDEX"
+  return 0
+}
+
+csv_package() {  # <properties-json> → its olm.package packageName ("" when the annotation is absent)
+  # yq, not grep: the annotation also carries olm.package.required entries whose value has its own
+  # packageName, and a text match would happily return a DEPENDENCY's package (devspaces declares
+  # devworkspace-operator that way). Selecting on .type is the only correct read.
+  local props="$1"
+  [[ -n "$props" ]] || return 0
+  printf '%s' "$props" \
+    | yq -p=json -r '[.properties[] | select(.type == "olm.package") | .value.packageName][0] // ""' 2>/dev/null || true
+  return 0
+}
+
+csv_by_package() {  # <package> <ns> → the ORIGINAL CSV in that namespace for that package ("" if none)
+  local pkg="$1" ns="$2" ins iname icopied iprops
+  [[ -n "$pkg" && -n "$ns" ]] || return 0
+  while IFS='|' read -r ins iname icopied iprops; do
+    [[ "$ins" == "$ns" && -n "$iname" ]] || continue
+    # Older OLM recorded the copy as an ANNOTATION, which the label selector above cannot exclude.
+    [[ -z "$icopied" ]] || continue
+    if [[ "$(csv_package "$iprops")" == "$pkg" ]]; then echo "$iname"; return 0; fi
+  done < <(csv_index)
+  return 0
+}
+
+csv_index_props() {  # <ns> <csv> → "hit|<properties-json>" when the index knows it as an ORIGINAL, else ""
+  local ns="$1" csv="$2" ins iname icopied iprops
+  while IFS='|' read -r ins iname icopied iprops; do
+    if [[ "$ins" == "$ns" && "$iname" == "$csv" && -z "$icopied" ]]; then echo "hit|${iprops}"; return 0; fi
+  done < <(csv_index)
+  return 0
+}
+
+csv_by_olm_label() {  # <package> <ns> → CSV found via OLM's component label (truncation-aware)
+  # Truncation is NOT a plain cut to 63. A label key's name part must also END alphanumeric, so OLM
+  # trims whatever the cut left dangling. Live on ksls5: cut(63) of
+  # cluster-observability-operator.openshift-cluster-observability-operator ends in '-', and the label
+  # OLM actually stamped is the 62-char version with that '-' removed. A cut-only candidate misses it,
+  # and asking the API server for the untruncated key is not even a miss — it is a 400:
+  #   Invalid value: "…": name part must be no more than 63 bytes
+  local pkg="$1" ns="$2" key out
+  [[ -n "$pkg" && -n "$ns" ]] || return 0
+  for key in "${pkg}.${ns}" "$(printf '%s' "${pkg}.${ns}" | cut -c1-63 | sed 's/[^A-Za-z0-9]*$//')"; do
+    [[ "${#key}" -le 63 ]] || continue
+    out="$(oc get clusterserviceversions.operators.coreos.com -n "$ns" \
+            -l "operators.coreos.com/${key},!olm.copiedFrom" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then echo "$out"; return 0; fi
+  done
+  return 0
+}
+
+CSV_SNAPSHOT=""            # "<subname>|<ns>|<installedCSV>" per line
+CSV_SNAPSHOT_TAKEN="false"
+capture_installed_csvs() {  # main calls this ONCE, before step 1 — see mechanism 1 above
+  # Ordering is the whole point: called any later than step 1 it captures nothing, because the cascade
+  # has already taken the Subscriptions. It is read-only, so it runs in --dry-run too — which is what
+  # lets the plan name the exact CSVs the run would remove.
+  local name ns st pkg csv n=0 total=0
+  if [[ "$CSV_SNAPSHOT_TAKEN" == "true" ]]; then return 0; fi
+  CSV_SNAPSHOT_TAKEN="true"
+  # ONE cluster-wide read, not one per operator: an `oc get` against a remote cluster costs ~3s
+  # (measured on ksls5), so 22 operators would be a minute of wall clock for data a single list
+  # already contains. The extra rows for Subscriptions that are not ours are inert — every lookup is
+  # keyed on the exact (name, namespace) pair the state ConfigMap recorded.
+  CSV_SNAPSHOT="$(oc get subscriptions.operators.coreos.com -A \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.namespace}{"|"}{.status.installedCSV}{"\n"}{end}' 2>/dev/null || true)"
+  # Prime the CSV index in the same pre-cascade moment, so both mechanisms describe the same instant
+  # and the plan cannot name a CSV that a later read would have missed.
+  csv_index >/dev/null
+  while read -r name ns st pkg; do
+    [[ -n "$name" && -n "$ns" ]] || continue
+    total=$((total + 1))
+    csv="$(resolve_operator_csv "$name" "$ns" "$pkg" | cut -d'|' -f1)"
+    [[ -n "$csv" ]] || continue
+    n=$((n + 1))
+  done < <(enumerate_operators)
+  if [[ "$total" -eq 0 ]]; then return 0; fi
+  ok "resolved a CSV for ${n} of ${total} recorded operators, before anything can delete a Subscription"
+  if [[ "$n" -lt "$total" ]]; then
+    echo "   • the other $((total - n)) have neither a Subscription nor a CSV on this cluster — either the"
+    echo "     component was never installed, or an earlier uninstall already removed both"
+  fi
+  return 0
+}
+
+operator_package() {  # <subname> <ns> → its OLM package from the component manifests
+  # Falls back to the Subscription name, which is what every subscription*.yaml in this portfolio
+  # uses. Exists so callers that only have (name, namespace) — assert_adopted_protection reads the
+  # state ConfigMap directly, by design — can still reach the package-based resolution.
+  local name="$1" ns="$2" n s p
+  while read -r n s _ p; do
+    if [[ "$n" == "$name" && "$s" == "$ns" ]]; then echo "$p"; return 0; fi
+  done < <(enumerate_operators)
+  echo "$name"
+  return 0
+}
+
+CSV_RESOLVED=""            # memo: "<subname>|<ns>|<csv>|<how>" — an empty <csv> means "probed, nothing"
+resolve_operator_csv() {  # <subname> <ns> <package> → "<csv>|<how>" ("" when nothing matches)
+  # MEMOISED, and not only to save round-trips. The plan (pre-cascade) and step 3 (post-cascade) both
+  # resolve the same operator, and one of the mechanisms — reading a live Subscription — gives a
+  # different answer either side of the cascade. Without the memo a plan line could promise a CSV that
+  # step 3 then fails to name; with it, the answer is fixed at the first, pre-cascade, resolution.
+  local name="$1" ns="$2" pkg="$3" csv out="" hit
+  hit="$(printf '%s\n' "$CSV_RESOLVED" | awk -F'|' -v n="$name" -v s="$ns" '$1==n && $2==s {print $3"|"$4; exit}' || true)"
+  if [[ -n "$hit" ]]; then
+    if [[ "$hit" != "|" ]]; then echo "$hit"; fi
+    return 0
+  fi
+  csv="$(printf '%s\n' "$CSV_SNAPSHOT" | awk -F'|' -v n="$name" -v s="$ns" '$1==n && $2==s {print $3; exit}' || true)"
+  if [[ -n "$csv" ]]; then out="${csv}|snapshot"; fi
+  if [[ -z "$out" ]]; then
+    csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" \
+            -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+    if [[ -n "$csv" ]]; then out="${csv}|live Subscription"; fi
+  fi
+  if [[ -z "$out" ]]; then
+    csv="$(csv_by_package "$pkg" "$ns")"
+    if [[ -n "$csv" ]]; then out="${csv}|olm.package annotation"; fi
+  fi
+  if [[ -z "$out" ]]; then
+    csv="$(csv_by_olm_label "$pkg" "$ns")"
+    if [[ -n "$csv" ]]; then out="${csv}|OLM component label"; fi
+  fi
+  CSV_RESOLVED="${CSV_RESOLVED}${name}|${ns}|${out%%|*}|${out#*|}"$'\n'
+  if [[ -n "$out" ]]; then echo "$out"; fi
+  return 0
+}
+
+# ── the adopted-operator guard, made structural ───────────────────────────────
+# Deleting an ADOPTED operator's CSV uninstalls the ORG'S operator. It is the single most dangerous
+# thing in this file, so it is not guarded by one `if` in the delete path — three independent things
+# have to agree, and two of them are derived from the state ConfigMap rather than from whatever the
+# caller believes:
+#   GATE 1  the state ConfigMap must record this operator as created BY US, in THIS namespace.
+#           Re-read at delete time; the caller's classification is never trusted.
+#   GATE 2  an independently-built deny-set of every CSV reachable from a NON-created record. If one
+#           CSV is ever reachable from both, the delete is refused and reported rather than resolved.
+#   GATE 3  the object on the cluster must be an ORIGINAL (not an OLM copy) of the expected package.
+# The allowlist is structural on top of that: the only producer of deletion candidates walks the
+# `created` branch of enumerate_operators, and the `adopted`/`unknown` branch has no call path to a
+# delete at all — it can only strip labels.
+PROTECTED_CSVS=""
+PROTECTED_CSVS_BUILT="false"
+protected_csv_set() {  # → " <ns>/<csv> … " for every operator the state does NOT record as created
+  local name ns st pkg csv
+  if [[ "$PROTECTED_CSVS_BUILT" != "true" ]]; then
+    PROTECTED_CSVS=" "
+    while read -r name ns st pkg; do
+      [[ -n "$name" && -n "$ns" ]] || continue
+      [[ "$st" != "created" ]] || continue
+      csv="$(resolve_operator_csv "$name" "$ns" "$pkg" | cut -d'|' -f1)"
+      [[ -n "$csv" ]] || continue
+      PROTECTED_CSVS="${PROTECTED_CSVS}${ns}/${csv} "
+    done < <(enumerate_operators)
+    PROTECTED_CSVS_BUILT="true"
+  fi
+  printf '%s' "$PROTECTED_CSVS"
+  return 0
+}
+
+# PREDICATE — its non-zero IS the answer. Never give this one a trailing `return 0`.
+# The ONLY thing that may authorise a CSV deletion, and it reads the state ConfigMap exclusively.
+# Two recorded shapes exist: portfolio operators under op_<subscription>=created|adopted:<ns>, and the
+# GitOps operator, which argocd-bootstrap installs imperatively before Argo exists and which is
+# therefore recorded under gitops_preexisted instead.
+csv_delete_authorized_by_state() {  # <subname> <ns>
+  local name="$1" ns="$2"
+  if [[ "$name" == "openshift-gitops-operator" && "$ns" == "openshift-gitops-operator" ]]; then
+    [[ "$(state gitops_preexisted '')" == "false" ]]
+    return
+  fi
+  [[ "$(state "op_${name}" '')" == "created:${ns}" ]]
+}
+
+del_created_csv() {  # <csv> <ns> <subname> <package> <how> — the ONE place that deletes a CSV
+  local csv="$1" ns="$2" name="$3" pkg="$4" how="$5" info copied ipkg
+  [[ -n "$csv" && -n "$ns" ]] || return 0
+
+  if ! csv_delete_authorized_by_state "$name" "$ns"; then
+    err "   REFUSING to delete csv/${csv} -n ${ns}: the install state does not record ${name} as created"
+    err "      by us in ${ns} (it reads '$(state "op_${name}" '<no record>')'). An adopted operator's CSV"
+    err "      belongs to the org — deleting it would uninstall their operator."
+    return 0
+  fi
+  case "$(protected_csv_set)" in
+    *" ${ns}/${csv} "*)
+      err "   REFUSING to delete csv/${csv} -n ${ns}: the same CSV is also reachable from an operator this"
+      err "      cluster owns. Two records resolved to one CSV — nothing was deleted; please report this."
+      return 0;;
+  esac
+  # Identity comes from the cached index when it knows this CSV as an original — no extra round-trip,
+  # and a package name cannot change under us. An index MISS is the interesting case (a copy, or an
+  # object that is simply gone), so that one is worth a live read.
+  info="$(csv_index_props "$ns" "$csv")"
+  if [[ -n "$info" ]]; then
+    info="|${info#hit|}"
+  else
+    info="$(oc get clusterserviceversions.operators.coreos.com "$csv" -n "$ns" \
+             -o jsonpath='{.metadata.labels.olm\.copiedFrom}{.metadata.annotations.olm\.copiedFrom}{"|"}{.metadata.annotations.operatorframework\.io/properties}' 2>/dev/null || true)"
+  fi
+  copied="${info%%|*}"
+  if [[ -n "$copied" ]]; then
+    echo "   • skip csv/${csv} -n ${ns} — this is OLM's copy of the original in ${copied}; OLM removes"
+    echo "     copies itself once the original goes, so deleting the copy achieves nothing"
+    return 0
+  fi
+  ipkg="$(csv_package "${info#*|}")"
+  if [[ -n "$ipkg" && -n "$pkg" && "$ipkg" != "$pkg" ]]; then
+    err "   REFUSING to delete csv/${csv} -n ${ns}: it belongs to package '${ipkg}', not '${pkg}'"
+    return 0
+  fi
+  if [[ -n "$how" ]]; then echo "   • csv/${csv} -n ${ns} identified via ${how}"; fi
+  del_obj clusterserviceversions.operators.coreos.com "$csv" "$ns"
   return 0
 }
 
@@ -573,8 +849,12 @@ assert_adopted_protection() {
     # ALWAYS fully qualified — Knative's subscriptions.messaging.knative.dev shadows OLM's, and the bare
     # name reported every operator as absent (SEV1, fixed in 437bbf4). Do not regress it here.
     check_adopted subscriptions.operators.coreos.com "$name" "$ns" "adopted operator (the org installed it)"
-    csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" \
-            -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+    # Resolve the CSV the way step 3 does, NOT from the Subscription — this guard had the SAME defect.
+    # Live on ksls5 2026-07-25: the org's adopted openshift-pipelines-operator-rh and web-terminal have
+    # Succeeded CSVs and NO Subscription at all, so the old installedCSV read returned "" and the guard
+    # printed no line for them — it silently verified nothing about the two objects it exists to
+    # protect, and a genuinely unprotected adopted CSV would have sailed through as "clean".
+    csv="$(resolve_operator_csv "$name" "$ns" "$(operator_package "$name" "$ns")" | cut -d'|' -f1)"
     if [[ -n "$csv" ]]; then
       check_adopted clusterserviceversions.operators.coreos.com "$csv" "$ns" "CSV of an adopted operator"
     fi
@@ -1100,14 +1380,21 @@ handle_lightspeed() {  # remove our MaaS secret / namespace only when WE install
 }
 
 handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise preserve (+ note the memory bump)
-  local preexisted csv b64 prior_res prior_mem target_mem
+  local preexisted csv res b64 prior_res prior_mem target_mem
   preexisted="$(state gitops_preexisted)"
   if [[ "$preexisted" == "false" ]]; then
     info "GitOps was installed by us — removing operator + default instance"
     del_obj argocd openshift-gitops openshift-gitops
-    csv="$(oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+    # Same resolution as step 3, and routed through the same single delete path. argocd-bootstrap
+    # applies this Subscription imperatively so the cascade does not normally reach it — but "normally"
+    # is exactly the assumption that broke step 3, and del_created_csv re-derives the authorization
+    # from gitops_preexisted anyway, so an adopted GitOps can never be removed through it.
+    res="$(resolve_operator_csv openshift-gitops-operator openshift-gitops-operator openshift-gitops-operator)"
+    csv="${res%%|*}"
     del_obj subscriptions.operators.coreos.com openshift-gitops-operator openshift-gitops-operator
-    if [[ -n "$csv" ]]; then del_obj clusterserviceversion "$csv" openshift-gitops-operator; fi
+    if [[ -n "$csv" ]]; then
+      del_created_csv "$csv" openshift-gitops-operator openshift-gitops-operator openshift-gitops-operator "${res#*|}"
+    fi
     del_obj operatorgroup openshift-gitops-operator openshift-gitops-operator
     del_obj namespace openshift-gitops
     del_obj namespace openshift-gitops-operator
@@ -1136,22 +1423,43 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
 }
 
 cleanup_created_operators() {  # remove Subscription+CSV for operators WE created (covers shared-ns operators)
-  local name ns st csv og
-  while read -r name ns st; do
+  local name ns st pkg csv how res og n=0 live_subs sub_here
+  # The report below has to say whether each Subscription is still there RIGHT NOW (the pre-cascade
+  # snapshot cannot answer that — it would always say "present"). One list answers it for every
+  # operator; 22 individual gets would be ~66s of round-trips on a remote cluster.
+  live_subs=" $(oc get subscriptions.operators.coreos.com -A \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{" "}{end}' 2>/dev/null || true) "
+  while read -r name ns st pkg; do
     [[ -n "$name" ]] || continue
+    n=$((n + 1))
+    sub_here="false"
+    case "$live_subs" in *" ${ns}/${name} "*) sub_here="true";; esac
     if [[ "$st" == "created" ]]; then
-      csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
-      del_obj subscriptions.operators.coreos.com "$name" "$ns"
-      # THE 2026-07-25 KILLER. This was `[[ -n "$csv" ]] && del_obj …` and it is the LAST statement of
-      # this branch, hence of the loop body, hence of the function. With the cascade pruning
-      # Subscriptions in step 2, $csv is empty for every operator by the time we get here — the AND-list
-      # returns 1, the function returns 1, and `set -e` killed the script between [3/8] and [4/8] with
-      # no output at all. It never fired under the old --cascade=orphan teardown because that left the
-      # Subscriptions in place, so $csv was always populated. An `if` cannot do this.
-      if [[ -n "$csv" ]]; then
-        del_obj clusterserviceversion "$csv" "$ns"
+      # Resolve the CSV WITHOUT depending on the Subscription — by step 3 the cascade has normally
+      # taken it. See § operator CSV identity for the mechanisms and why the old installedCSV-only
+      # lookup silently found nothing for every operator.
+      res="$(resolve_operator_csv "$name" "$ns" "$pkg")"
+      csv="${res%%|*}"; how="${res#*|}"
+      # Report the three states apart. The old code printed `skip … (absent)` for a Subscription the
+      # cascade had already removed, which reads as "nothing to do" at exactly the moment its CSV still
+      # needs deleting — the failure looked like a success in the log.
+      if [[ "$sub_here" == "true" ]]; then
+        echo "   • ${name} -n ${ns}: Subscription still present (the cascade did not prune it) — removing Subscription + CSV"
+        del_obj subscriptions.operators.coreos.com "$name" "$ns"
+      elif [[ -n "$csv" ]] && [[ -n "$(csv_index_props "$ns" "$csv")" ]]; then
+        echo "   • ${name} -n ${ns}: Subscription already pruned by the cascade, but its CSV is STILL HERE."
+        echo "     An orphaned CSV is not litter — it makes the NEXT install of this workshop fail to"
+        echo "     resolve (constraints not satisfiable: @existing/${ns}//${csv}). Removing it."
       else
-        echo "   • skip CSV for ${name} in ${ns} (its Subscription is already gone, so OLM reported no installedCSV)"
+        echo "   • ${name} -n ${ns}: Subscription and CSV both already gone — nothing owed"
+      fi
+      if [[ -n "$csv" ]]; then
+        del_created_csv "$csv" "$ns" "$name" "$pkg" "$how"
+      elif [[ "$sub_here" == "true" ]]; then
+        err "   could not name the CSV for ${name} in ${ns}: its Subscription reports no installedCSV and"
+        err "      no CSV in that namespace carries package '${pkg}'. If one appears later it will block"
+        err "      the next install — check and remove by hand:"
+        echo "      oc get csv -n ${ns}   # then: oc delete csv <name> -n ${ns}"
       fi
     else
       echo "   • preserve operator ${name} in ${ns} (${st} — not created by us)"
@@ -1160,7 +1468,13 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
       # means the cluster still reads as ours after a "complete" teardown, and ogsr-check-clean.sh
       # correctly reports it — so a clean run would still exit non-zero. De-mark what we marked.
       strip_our_marks subscriptions.operators.coreos.com "$name" "$ns"
-      csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+      # Same resolver as the created branch, for the same reason: an adopted operator's Subscription is
+      # ALSO Argo-managed (install.sh adopts it), so the cascade takes it and the installedCSV lookup
+      # that used to be here returned "" — leaving our labels and Argo's tracking-id on the org's CSV
+      # after a teardown that claimed to leave no trace. This branch only ever STRIPS marks; it has no
+      # call path to del_created_csv, which is what makes the adopted guard structural rather than
+      # conditional.
+      csv="$(resolve_operator_csv "$name" "$ns" "$pkg" | cut -d'|' -f1)"
       # Same shape as the killer above, and it survives here only because it is not currently last —
       # which is exactly how this class hides. Written as an `if` so re-ordering this branch is safe.
       if [[ -n "$csv" ]]; then
@@ -1179,6 +1493,14 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
       strip_our_marks namespace "$ns" ""
     fi
   done < <(enumerate_operators)
+  # Say so when there is nothing to act on, rather than printing an empty step. This is the ordinary
+  # shape of a RE-RUN after a completed uninstall: run 1 deleted the state ConfigMap in step 8, so
+  # created-vs-adopted is unknowable and NOTHING here is authorized to delete an operator's CSV.
+  if [[ "$n" -eq 0 ]]; then
+    echo "   • no operators recorded in ${STATE_NS}/${STATE_CM} — nothing here is authorized for removal."
+    echo "     (A re-run after a completed uninstall looks exactly like this. If CSVs of ours are still"
+    echo "      on the cluster, ./bootstrap/ogsr-check-clean.sh names them with their removal command.)"
+  fi
   return 0
 }
 
@@ -1189,7 +1511,9 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
 # the org's operator down with it), or a namespace of a stack no longer installed (openshift-mta).
 classify_workshop_namespaces() {
   local created_op_ns=" " adopted_op_ns=" " stack_ns name ns st n user layer shared
-  while read -r name ns st; do
+  # enumerate_operators emits four fields; the package is discarded here. Reading three would put
+  # "created <package>" into $st and silently classify every namespace as adopted.
+  while read -r name ns st _; do
     [[ -n "$ns" ]] || continue
     if [[ "$st" == "created" ]]; then created_op_ns="${created_op_ns}${ns} "; else adopted_op_ns="${adopted_op_ns}${ns} "; fi
   done < <(enumerate_operators)
@@ -1283,8 +1607,8 @@ report_stuck_namespaces() {  # names… — bounded wait for termination, then r
 
 # ── plan ──────────────────────────────────────────────────────────────────────
 print_plan() {
-  local apps roots created adopted name ns st gitops_plan mon_plan gw_plan mirror_plan
-  local verb wn reason nwipe=0 wipe_stack="" strip_list=""
+  local apps roots created adopted name ns st pkg gitops_plan mon_plan gw_plan mirror_plan
+  local verb wn reason nwipe=0 wipe_stack="" strip_list="" csv_plan="" res
   mirror_plan="$(mirror_stack)"
   # `grep -c .` prints 0 AND exits 1 on empty input, so a `|| echo '?'` fallback appended a second line
   # and the plan read "0\n?". Take the count and normalise it instead.
@@ -1297,9 +1621,19 @@ print_plan() {
     esac
   done < <(classify_workshop_namespaces)
   created=""; adopted=""
-  while read -r name ns st; do
+  while read -r name ns st pkg; do
     [[ -n "$name" ]] || continue
-    if [[ "$st" == "created" ]]; then created="${created} ${name}"; else adopted="${adopted} ${name}(${st})"; fi
+    if [[ "$st" != "created" ]]; then adopted="${adopted} ${name}(${st})"; continue; fi
+    created="${created} ${name}"
+    # Name the CSVs, resolved by the SAME call step 3 makes, so the plan and the action cannot
+    # disagree. This is the line whose absence hid the defect: a plan that says only "operators WE
+    # created: devspaces …" is silent about the object that actually blocks the next install.
+    res="$(resolve_operator_csv "$name" "$ns" "$pkg")"
+    if [[ -n "${res%%|*}" ]]; then
+      csv_plan="${csv_plan}\n      - ${ns}/${res%%|*}  (${name}, identified via ${res#*|})"
+    else
+      csv_plan="${csv_plan}\n      - ${ns}: no CSV on the cluster for package '${pkg}' — nothing to remove"
+    fi
   done < <(enumerate_operators)
 
   # Three-way plans: created-by-us → REMOVE/restore; recorded-adopted → PRESERVE; NO state record at all
@@ -1343,6 +1677,10 @@ print_plan() {
   echo "  • imperative bootstrap objects: htpasswd-workshop-users, workshop-users OAuth IdP entry, node labels/taint"
   echo "  • console plugins WE added to consoles.operator.openshift.io (backlog #24): $(state console_plugins_added '<none recorded>')"
   echo "  • operators WE created:${created:-<none recorded>}"
+  echo "  • their ClusterServiceVersions — OLM creates a CSV from a Subscription and Argo never manages"
+  echo "    it, so the cascade cannot prune it and only step 3 can. Left behind, a CSV BLOCKS the next"
+  echo "    install of this workshop (OLM: constraints not satisfiable / @existing):"
+  printf '%b\n' "${csv_plan:-\n      - <none>}"
   echo
   echo "WILL PRESERVE (untouched):"
   echo "  • operators the org already had:${adopted:-<none recorded>}"
@@ -1518,6 +1856,13 @@ echo
 # Verify BEFORE the plan is printed and before anyone is asked to confirm: the plan's PROTECTED section
 # is this check's output, and refusing after a "yes" would be asking for consent to something we then
 # decline to do. The check itself is read-only, so running it in dry-run costs nothing.
+# FIRST, before anything else reads or touches the cluster: this is the only moment at which OLM's own
+# `.status.installedCSV` is still readable for every operator, and both the protection guard below and
+# step 3 resolve CSVs through the memo it fills. Read-only, so it also runs in --dry-run — which is
+# what lets the plan name the exact CSVs a real run would remove.
+info "capturing operator CSV identity before anything can delete a Subscription"
+capture_installed_csvs
+
 info "verifying adopted-resource protection (the cascade's one safety assumption)"
 assert_adopted_protection
 
@@ -1551,8 +1896,9 @@ run_step "[2/8] cascade-deleting workshop Argo Applications (Argo prunes what it
 # CSVs for operators WE created. The cascade already pruned their Subscriptions (those ARE in our
 # component manifests), but a CSV is created by OLM from the Subscription, never by Argo, so nothing
 # prunes it — deleting a Subscription deliberately leaves its CSV and the running operator behind.
-# This is the one operator-removal step GitOps cannot do for us. The Subscription delete stays as a
-# no-op safety net for a degraded Argo (del_obj prints "skip (absent)" when the cascade got it).
+# This is the one operator-removal step GitOps cannot do for us — and the one that must not depend on
+# the Subscription still being there, because by now it usually is not (§ operator CSV identity). The
+# Subscription delete remains for the degraded-Argo / imperative case.
 run_step "[3/8] removing CSVs for operators we created (adopted operators preserved)" \
   cleanup_created_operators
 
