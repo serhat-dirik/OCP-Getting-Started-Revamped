@@ -69,7 +69,6 @@ The 26 modules are grouped into four blocks:
 | `platform-portfolio/` | **Standalone GitOps installer** — operators/tools as composable Argo CD stacks, replicable on any OpenShift 4.20+ cluster. Workshop-agnostic; also usable alone for SA PoC/demo clusters. See its [README](platform-portfolio/README.md) |
 | `gitops/` | Workshop layer on top of the portfolio: users/RBAC/quotas, Gitea seeding, per-module **entry states**, promotion structures |
 | `pipelines/` | Parasol company task library + per-module pipeline definitions |
-| `slides/` | Ready-to-present **PowerPoint decks** — an SA field overview, one deck per module (`slides/modules/`), and a full-catalog deck. Native and editable |
 | `tools/` | `ws` CLI (`ws start\|verify\|reset\|solve <module>`) + per-module verify scripts |
 | `bootstrap/` | Cluster installer: portfolio stacks + workshop layer in one command |
 
