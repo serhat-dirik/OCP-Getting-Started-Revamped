@@ -42,8 +42,13 @@ v() { yq "$1" "$VARS" 2>/dev/null || true; }
 
 # ── read inputs (with safe defaults) ──────────────────────────────────────────
 USERS="$(v '.users')";           [[ "$USERS" =~ ^[0-9]+$ ]] || USERS=5
+# Source repo/revision the portfolio, the in-cluster mirror and the workshop layer all pull from.
+# The upstream project is the DEFAULT, not a fact: a fork, an internal GitLab or a customer mirror
+# is set here and templated everywhere. `repo_revision` is the documented key; `revision` is still
+# honoured so a vars.yaml written before the rename keeps working.
 REPO_URL="$(v '.repo_url')";     [[ -n "$REPO_URL" && "$REPO_URL" != "null" ]] || REPO_URL="https://github.com/serhat-dirik/OCP-Getting-Started-Revamped"
-REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
+REVISION="$(v '.repo_revision')"; [[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="$(v '.revision')"
+[[ -n "$REVISION" && "$REVISION" != "null" ]] || REVISION="main"
 DOMAIN="$(v '.cluster_domain')"
 MAAS_KEY="$(v '.maas.api_key')"
 MAAS_ENDPOINT="$(v '.maas.endpoint')"
@@ -629,7 +634,17 @@ OG_BASELINE="$(operatorgroup_counts || true)"
 # resource is never managed-but-unprotected, not even for a sync cycle.
 protect_adopted_resources
 info "[1/6] installing portfolio stacks: ${STACKS}"
-"$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$REPO_URL" --revision "$REVISION"
+# The workshop layer rides the portfolio's AppProject (ogsr-platform) rather than the built-in
+# `default`, so nothing of ours shares a project with the organisation's own Applications and
+# teardown gets one handle on the lot. The portfolio project is workshop-agnostic by design, so the
+# two namespace families only the WORKSHOP deploys into are declared here, from this side:
+#   user* — per-user namespaces (userN-dev, userN-cicd, …) that workshop-config materializes
+#   openshift — the shared ImageStream namespace the Java 21 stream lands in
+# Both are unioned into the live project by the portfolio installer, so re-running either layer in
+# any order never revokes the other's destinations.
+PORTFOLIO_DESTS=(--allow-destination 'user*' --allow-destination openshift)
+"$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$REPO_URL" --revision "$REVISION" \
+  "${PORTFOLIO_DESTS[@]}"
 
 # ── 2. secret contracts (imperative by design; never in git) ──────────────────
 info "[2/6] creating secret contracts"
@@ -722,6 +737,161 @@ curl -ksf "$CHART_RAW" >/dev/null 2>&1 \
   || die "workshop chart not in the mirror at revision ${REVISION} — push it upstream, then re-run (or: ws git-refresh)"
 ok "mirror serves gitops/workshop-config@${REVISION}"
 
+# ── 3b. phase 2: repoint the platform stacks at the in-cluster mirror ──────────
+# Phase 1 (above) had to come from the external repo — it is what builds the mirror. From here on
+# reconciliation should be cluster-local: thirty Applications re-reading GitHub every three minutes
+# is fragile (a live session then depends on GitHub availability) and `ws git-refresh` becomes the
+# single content-update path instead of the mirror and the Argo source silently disagreeing.
+#
+# Two gates, both hard. Neither is a timer:
+#   1. the mirror's HEAD on ${REVISION} equals origin's — a mirror one commit behind is a whole
+#      cohort reading stale content, the same rule already learned for restarting cockpits;
+#   2. Argo can verify the mirror's TLS. Never by disabling verification — by teaching Argo the
+#      cluster's ingress CA through argocd-tls-certs-cm, its documented per-host trust store.
+# Failing either gate is NOT an install failure: the stacks simply stay on the external repo,
+# which is a working configuration. We say why, and move on.
+ARGO_NS="openshift-gitops"
+MIRROR_REPO_URL="https://${GITEA_HOST}/${MIRROR_ORG}/${MIRROR_REPO}.git"
+
+# HEAD of a repo at a ref, read from git's smart-HTTP ref advertisement — the handshake `git clone`
+# starts with. Works against GitHub/GitLab/Gitea alike and needs no git binary on this box.
+remote_head() {  # <repo-url> <ref> [curl-opt…] → 40-hex sha, or empty
+  local url="${1%.git}" ref="$2"; shift 2
+  curl -sf --max-time 30 "$@" "${url}.git/info/refs?service=git-upload-pack" 2>/dev/null \
+    | tr -d '\000' \
+    | sed -nE "s#^.*([0-9a-f]{40}) refs/(heads|tags)/${ref}\$#\\1#p" \
+    | head -1 || true
+}
+
+# Teach Argo CD to VERIFY the mirror's certificate. argocd-tls-certs-cm is keyed by hostname and is
+# the supported way to add a CA for one git host; `insecure: true` on a Repository would skip
+# verification entirely and is not an option. Additive by construction — any host key the org
+# already put there is preserved, and we record ours so teardown can remove exactly that key.
+ensure_argo_trusts_mirror() {  # <host> → 0 when Argo can verify it, 1 when it cannot
+  local host="$1" ca ca_file cm_yaml
+  if curl -sSf --max-time 15 "https://${host}/api/v1/version" >/dev/null 2>&1; then
+    ok "mirror TLS verifies against the system trust store — Argo needs no extra CA"
+    return 0
+  fi
+  ca="$(oc get configmap default-ingress-cert -n openshift-config-managed \
+          -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)"
+  if [[ -z "$ca" ]]; then
+    warn "mirror cert is not publicly trusted and openshift-config-managed/default-ingress-cert is unreadable"
+    return 1
+  fi
+  ca_file="$(mktemp)"
+  printf '%s\n' "$ca" > "$ca_file"
+  # Prove the CA actually validates THIS host before installing it — pushing a CA that does not
+  # verify would leave Argo failing with the same x509 error and a new object to explain it.
+  if ! curl -sSf --max-time 15 --cacert "$ca_file" "https://${host}/api/v1/version" >/dev/null 2>&1; then
+    rm -f "$ca_file"
+    warn "the cluster ingress CA does not validate https://${host} — a custom serving cert is in play"
+    return 1
+  fi
+  oc get configmap argocd-tls-certs-cm -n "$ARGO_NS" >/dev/null 2>&1 \
+    || oc create configmap argocd-tls-certs-cm -n "$ARGO_NS" >/dev/null 2>&1 || true
+  cm_yaml="$(oc get configmap argocd-tls-certs-cm -n "$ARGO_NS" -o yaml 2>/dev/null \
+              | yq "del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.managedFields) | .data[\"${host}\"] = load_str(\"${ca_file}\")" \
+              2>/dev/null || true)"
+  rm -f "$ca_file"
+  if [[ -z "$cm_yaml" ]]; then
+    warn "could not compose the argocd-tls-certs-cm update — leaving Argo's trust store untouched"
+    return 1
+  fi
+  printf '%s\n' "$cm_yaml" | oc apply -f - >/dev/null 2>&1 || {
+    warn "could not update argocd-tls-certs-cm in ${ARGO_NS}"
+    return 1
+  }
+  record_once argo_tls_cert_host "$host"
+  ok "cluster ingress CA added to argocd-tls-certs-cm for ${host} (verification ON, not skipped)"
+  # The repo-server reads the ConfigMap from a mounted volume and kubelet propagation is not
+  # instant; the post-flip comparison poll below covers whatever is left of the sync period.
+  sleep 30
+  return 0
+}
+
+apply_stacks_from() {  # <repo-url> <mirror-source-repo> — (re-)apply the stack apps against a source
+  "$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$1" --revision "$REVISION" \
+    --source-repo "$2" "${PORTFOLIO_DESTS[@]}" --stacks-only --skip-repo-check
+}
+
+stacks_compare_against() {  # <expected repoURL> → 0 once every stack app has COMPARED against it
+  # Emptiness is not success: right after a re-apply an Application has no conditions yet, so
+  # "no error condition" would pass before Argo has even tried the new source. The proof is
+  # .status.sync.comparedTo.source.repoURL — Argo only writes it after fetching and rendering
+  # that repo — plus the absence of an error condition once it has.
+  local want="$1" waited=0 stack app pending types
+  while (( waited < 180 )); do
+    pending=""
+    for stack in "${STACK_LIST[@]}"; do
+      app="pp-$(echo "$stack" | xargs)"
+      if [[ "$(oc get application "$app" -n "$ARGO_NS" \
+                -o jsonpath='{.status.sync.comparedTo.source.repoURL}' 2>/dev/null || true)" != "$want" ]]; then
+        pending="${pending} ${app}"; continue
+      fi
+      types="$(oc get application "$app" -n "$ARGO_NS" \
+                -o jsonpath='{.status.conditions[*].type}' 2>/dev/null || true)"
+      case "$types" in *ComparisonError*|*InvalidSpecError*|*UnknownError*) pending="${pending} ${app}(error)" ;; esac
+    done
+    [[ -z "$pending" ]] && return 0
+    sleep 10; waited=$((waited + 10))
+  done
+  err "after 3m these stack Applications had not cleanly compared against ${want}:${pending}"
+  return 1
+}
+
+mirror_caught_up() {  # → 0 once the mirror serves origin's HEAD on ${REVISION}
+  # Bounded POLL, not a sleep: the mirror-sync POSTed above is asynchronous, so a single read here
+  # would almost always miss. The gate is still equality — the bound only limits how long we wait
+  # for it before deciding to stay on the external repo.
+  local waited=0 dots=0
+  [[ -n "$ORIGIN_HEAD" ]] || return 1
+  while (( waited < 180 )); do
+    MIRROR_HEAD="$(remote_head "https://${GITEA_HOST}/${MIRROR_ORG}/${MIRROR_REPO}" "$REVISION" -k)"
+    if [[ "$MIRROR_HEAD" == "$ORIGIN_HEAD" ]]; then
+      (( dots > 0 )) && echo
+      return 0
+    fi
+    printf '.'; dots=$((dots + 1)); sleep 10; waited=$((waited + 10))
+  done
+  echo
+  return 1
+}
+
+IFS=',' read -ra STACK_LIST <<< "$STACKS"
+info "[3b/6] phase 2 — repointing platform stacks at the in-cluster mirror"
+ORIGIN_HEAD="$(remote_head "$REPO_URL" "$REVISION")"
+MIRROR_HEAD=""
+FLIPPED="false"
+if [[ -z "$ORIGIN_HEAD" ]]; then
+  warn "cannot read origin HEAD for ${REVISION} at ${REPO_URL} — stacks stay on the external repo"
+elif ! mirror_caught_up; then
+  warn "mirror serves ${MIRROR_HEAD:-<no ${REVISION} branch>}, origin is at ${ORIGIN_HEAD} — stacks stay on the external repo"
+  warn "   the mirror pulls on its own interval; re-run this installer (or 'ws git-refresh') to flip once it catches up"
+elif ! ensure_argo_trusts_mirror "$GITEA_HOST"; then
+  warn "Argo CD cannot verify the mirror's TLS — stacks stay on the external repo (verification is never disabled)"
+else
+  ok "mirror HEAD == origin HEAD (${ORIGIN_HEAD:0:8}) and Argo trusts it — flipping stack sources"
+  apply_stacks_from "$MIRROR_REPO_URL" "$REPO_URL"
+  # Force a fresh comparison rather than waiting out the 3-minute reconcile before judging the flip.
+  for _s in "${STACK_LIST[@]}"; do
+    oc annotate application "pp-$(echo "$_s" | xargs)" -n "$ARGO_NS" \
+      argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+  done
+  if stacks_compare_against "$MIRROR_REPO_URL"; then
+    FLIPPED="true"
+    ok "platform stacks now reconcile from the in-cluster mirror (${MIRROR_REPO_URL})"
+  else
+    err "the mirror source did not comparison-check clean — reverting the stacks to ${REPO_URL}"
+    apply_stacks_from "$REPO_URL" "$REPO_URL"
+    stacks_compare_against "$REPO_URL" >/dev/null 2>&1 || true
+    err "   reverted. Inspect: oc get application -n ${ARGO_NS} -o wide, then oc describe application pp-core-devtools -n ${ARGO_NS}"
+  fi
+fi
+oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
+  -p "{\"data\":{\"stack_source\":\"$([[ "$FLIPPED" == "true" ]] && echo mirror || echo external)\"}}" \
+  >/dev/null 2>&1 || true
+
 # ── 4. shared workshop password for Gitea seeding (ogsr-gitea ns now exists) ───────
 info "[4/6] recording the shared workshop password (secret workshop-user-creds)"
 oc create secret generic workshop-user-creds \
@@ -774,7 +944,10 @@ metadata:
     workshop.redhat.com/layer: workshop-config
     workshop.redhat.com/owner: ogsr
 spec:
-  project: default
+  # Same project as the platform stacks: nothing of ours sits in the built-in \`default\` alongside
+  # the organisation's Applications, and teardown has one handle on the whole footprint. The
+  # user*/openshift destinations this layer needs were unioned into the project above.
+  project: ogsr-platform
   source:
     repoURL: https://${GITEA_HOST}/${MIRROR_ORG}/${MIRROR_REPO}.git
     targetRevision: ${REVISION}
@@ -794,6 +967,18 @@ spec:
         # Modules hidden from the attendee showroom nav/library (comma-joined slugs; "" = show all).
         - name: modulesDisabledCSV
           value: "${DISABLED_CSV}"
+        # The two in-cluster BuildConfigs (Parasol images, showroom antora-ext) clone the workshop
+        # source directly, so they follow repo_url too — otherwise a fork install would quietly
+        # build its cockpit and app images from the upstream project. Scalars only: Argo's
+        # helm.parameters cannot carry list values reliably.
+        - name: parasolImages.build.repoUrl
+          value: "${REPO_URL%.git}.git"
+        - name: parasolImages.build.revision
+          value: "${REVISION}"
+        - name: showroom.build.repoUrl
+          value: "${REPO_URL%.git}.git"
+        - name: showroom.build.revision
+          value: "${REVISION}"
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops

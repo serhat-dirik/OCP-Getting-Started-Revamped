@@ -15,10 +15,19 @@ This directory is deliberately **workshop-agnostic and dependency-free** from th
 # Add more capability later — same command, more stacks (idempotent):
 ./argocd-bootstrap/install.sh --stacks core-devtools,ai-assist
 
-# Point at your own fork/revision:
+# Point at your own fork/revision (validated before a single Application is created:
+# reachable, the revision exists, and the tree actually carries platform-portfolio/):
 ./argocd-bootstrap/install.sh --stacks core-devtools \
   --repo-url https://github.com/you/your-fork --revision my-branch
+
+# Re-point the stacks at another source without touching the operator (this is how the
+# workshop bootstrap flips them to the in-cluster Gitea mirror — see "Two-phase sourcing"):
+./argocd-bootstrap/install.sh --stacks core-devtools --stacks-only --skip-repo-check \
+  --repo-url https://gitea-ogsr-gitea.<domain>/parasol/ocp-getting-started.git \
+  --source-repo https://github.com/you/your-fork
 ```
+
+Every Application the installer creates lives in the **`ogsr-platform` AppProject**, not the built-in `default` (`--project` renames it). `default` permits every repo, destination and resource kind, and on an adopted Argo CD it is shared with the organisation's own Applications; a dedicated project means a misconfigured Application fails loudly, teardown gets an unambiguous handle on what is ours, and their apps stay untouched. The project is scoped by **namespace pattern** (`ogsr-*`, `openshift-*`, `*-operator`, plus the operand namespaces whose product names match no pattern) rather than by enumerating resource kinds — a project so tight that adding a component means editing it would rot immediately. Consumer layers widen it with `--allow-source-repo` / `--allow-destination`; both lists are unioned with what the live project already permits, so re-running either layer never revokes the other's entries.
 
 Watch reconciliation: `oc get applications -n openshift-gitops` (or the Argo CD console — route `openshift-gitops-server` in `openshift-gitops`).
 
@@ -47,7 +56,7 @@ hack/               # repo-side checks (no cluster): ./hack/check-teardown-invar
 ## Design rules
 
 1. **Two imperative acts only** — the GitOps operator install and the stack Application(s). If you find yourself writing `oc apply` for anything else, it belongs in a component.
-2. **Git-localize pattern**: `core-devtools` deploys Gitea at sync-wave 0 and a mirror job at wave 1 that makes Gitea pull-mirror the upstream repos (Gitea's migrate API — the cluster then re-syncs itself on demand). Downstream layers (e.g. a workshop) point their Argo apps at the local mirror; this portfolio itself keeps sourcing from the upstream repo.
+2. **Git-localize pattern, two-phase sourcing**: `core-devtools` deploys Gitea at sync-wave 0 and a mirror job at wave 1 that makes Gitea pull-mirror the configured source repo (Gitea's migrate API). *Phase 1* — bootstrap installs from `--repo-url`; it has to, because that is what builds the mirror. *Phase 2* — once the mirror serves the same commit as origin, the stacks are re-applied against the mirror (`--stacks-only`), and reconciliation becomes cluster-local: no dependency on GitHub availability during a live session, and one content-update path instead of the mirror and the Argo source silently disagreeing. The flip is gated on **HEAD equality, never a timer** (the mirror job itself does not exit until the mirror serves origin's HEAD) and on Argo being able to **verify** the mirror's TLS — the cluster ingress CA is added to `argocd-tls-certs-cm` for that host; verification is never disabled. Failing either gate is not an install failure: the stacks stay on the external repo, which works fine, and the installer says which gate failed. The repo the mirror pulls FROM is `--source-repo` and always stays external — a mirror pointed at itself never sees another commit.
 3. **Auto-detect where possible** (cluster domain, default StorageClass); explicit in `values/` where not. Secrets are **contracts** (documented per component), never files in git.
 4. **Mine `redhat-cop/gitops-catalog` before writing a component from scratch**; keep component shape compatible (Subscription+OperatorGroup+config).
 5. Components declare `argocd.argoproj.io/sync-wave` and health-relevant sync options (`SkipDryRunOnMissingResource=true` on CRs whose CRDs arrive with the operator).
@@ -87,4 +96,4 @@ Rules for any new component:
 
 ## Uninstall
 
-Delete the stack Applications (`oc delete application pp-<stack> -n openshift-gitops`) — prune removes the components in reverse wave order, so operand CRs go before the operators that own their finalizers. The GitOps operator itself stays (remove manually if desired).
+Delete the stack Applications (`oc delete application pp-<stack> -n openshift-gitops`) — prune removes the components in reverse wave order, so operand CRs go before the operators that own their finalizers. Then delete the `ogsr-platform` AppProject, which is the second, independent handle on what belonged to the portfolio (`oc delete appproject ogsr-platform -n openshift-gitops`). The GitOps operator itself stays (remove manually if desired).

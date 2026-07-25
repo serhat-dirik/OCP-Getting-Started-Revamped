@@ -2,6 +2,13 @@
 # Gitea does the cloning itself (migrate API with mirror=true) — this job is pure API calls.
 # Re-running an Argo sync re-runs the job (BeforeHookCreation), which re-syncs all mirrors:
 # that is exactly what `ws git-refresh` triggers.
+#
+# The job does NOT exit as soon as mirror-sync is accepted: Gitea's pull is asynchronous, so an
+# early exit reports "mirror ready" while the mirror still serves the previous commit. Everything
+# downstream builds from the mirror at that moment — Argo stack Applications after the phase-2
+# flip, and the cockpits, which clone at pod init. So the job waits until the mirror's HEAD on the
+# configured revision equals origin's, and only then succeeds. That makes "pp-git-mirror Healthy"
+# mean "the mirror is current", which is what every consumer actually gates on.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -11,7 +18,9 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 4
-  activeDeadlineSeconds: 900
+  # Raised from 900s for the HEAD-convergence wait below (a cold migrate of a large repo plus up to
+  # 5m of pull-mirror lag has to fit inside one attempt).
+  activeDeadlineSeconds: 1500
   template:
     metadata:
       labels:
@@ -61,6 +70,36 @@ spec:
               ORG="$(oc get cm -n "$NS" -l git-mirror.portfolio.redhat.com/repos=true -o jsonpath='{.items[0].data.org}')"
               REPOS="$(oc get cm -n "$NS" -l git-mirror.portfolio.redhat.com/repos=true -o jsonpath='{range .items[*]}{.data.repos}{end}')"
               [[ -n "$ORG" && -n "$REPOS" ]] || { echo "❌ no mirror config found"; exit 1; }
+              # First non-empty revision wins; a consumer ConfigMap need not carry one.
+              REVISION="$(oc get cm -n "$NS" -l git-mirror.portfolio.redhat.com/repos=true \
+                            -o jsonpath='{range .items[*]}{.data.revision}{"\n"}{end}' 2>/dev/null \
+                          | grep -v '__SET_BY_PARENT_APPLICATION__' | grep . | head -1 || true)"
+              [[ -n "$REVISION" ]] || REVISION="main"
+
+              # The portfolio ships this ConfigMap with placeholders; the parent pp-<stack>
+              # Application replaces them with the install's --source-repo/--revision. An
+              # unreplaced placeholder means the component was applied without its parent, and
+              # mirroring a literal "__SET_BY_PARENT_APPLICATION__" would fail 20 minutes later
+              # inside Gitea's migrate API with nothing pointing at the cause.
+              if printf '%s' "$REPOS" | grep -q '__SET_BY_PARENT_APPLICATION__'; then
+                echo "❌ mirror config still carries the template placeholder — this component was"
+                echo "   applied without its parent stack Application (which patches the source repo in)."
+                echo "   Fix: install through the portfolio bootstrap:"
+                echo "     platform-portfolio/argocd-bootstrap/install.sh --stacks core-devtools [--repo-url …]"
+                exit 1
+              fi
+
+              # HEAD of <repo-url> at <ref>, read straight off git's smart-HTTP ref advertisement —
+              # the same handshake `git clone` starts with, so it works against GitHub, GitLab,
+              # Gitea and anything else that speaks git-over-HTTPS, with no git binary in the image.
+              # Extra curl options (e.g. -k for the in-cluster route) are passed through.
+              remote_head() {  # <repo-url> <ref> [curl-opt…] → 40-hex sha, or empty
+                local url="${1%.git}" ref="$2"; shift 2
+                curl -sf --max-time 30 "$@" "${url}.git/info/refs?service=git-upload-pack" 2>/dev/null \
+                  | tr -d '\000' \
+                  | sed -nE "s#^.*([0-9a-f]{40}) refs/(heads|tags)/${ref}\$#\\1#p" \
+                  | head -1 || true
+              }
 
               echo "▶ ensuring org '${ORG}' exists…"
               CODE=$(curl -ks -o /dev/null -w '%{http_code}' -u "$AUTH" "${GITEA_URL}/api/v1/orgs/${ORG}")
@@ -74,6 +113,7 @@ spec:
               fi
 
               FAIL=0
+              MIRRORED=""
               while IFS='=' read -r NAME URL; do
                 [[ -z "$NAME" || "$NAME" == \#* ]] && continue
                 NAME="$(echo "$NAME" | xargs)"; URL="$(echo "$URL" | xargs)"
@@ -85,14 +125,50 @@ spec:
                     -d "{\"clone_addr\":\"${URL}\",\"repo_name\":\"${NAME}\",\"repo_owner\":\"${ORG}\",\"mirror\":true,\"mirror_interval\":\"30m\"}" >/dev/null; then
                     echo "  ✓ mirrored"
                   else
-                    echo "  ❌ migrate failed for ${NAME}"; FAIL=$((FAIL+1))
+                    echo "  ❌ migrate failed for ${NAME}"; FAIL=$((FAIL+1)); continue
                   fi
                 else
                   echo "▶ refreshing mirror ${NAME}…"
                   curl -ksf -u "$AUTH" -X POST "${GITEA_URL}/api/v1/repos/${ORG}/${NAME}/mirror-sync" >/dev/null \
-                    && echo "  ✓ sync triggered" || { echo "  ❌ sync failed for ${NAME}"; FAIL=$((FAIL+1)); }
+                    && echo "  ✓ sync triggered" \
+                    || { echo "  ❌ sync failed for ${NAME}"; FAIL=$((FAIL+1)); continue; }
                 fi
+                MIRRORED="${MIRRORED}${NAME}=${URL}"$'\n'
               done <<< "$REPOS"
 
               [[ "$FAIL" -eq 0 ]] || { echo "❌ ${FAIL} repo(s) failed"; exit 1; }
-              echo "✅ git-localize mirror up to date at ${GITEA_URL}/${ORG}"
+
+              # ── wait for HEAD equality (never a timer) ──────────────────────────────────────
+              # mirror-sync is accepted asynchronously, so "sync triggered" says nothing about what
+              # the mirror currently serves. Poll until the mirror's ${REVISION} HEAD equals
+              # origin's. If origin's HEAD cannot be read at all (no egress, private repo) we
+              # cannot assert equality, so we say so and pass — the consumer-side gate in
+              # bootstrap/install.sh makes the final call about sourcing from the mirror.
+              echo "▶ waiting for each mirror to serve origin's ${REVISION} HEAD (up to 5m)…"
+              while IFS='=' read -r NAME URL; do
+                [[ -n "$NAME" ]] || continue
+                WANT="$(remote_head "$URL" "$REVISION")"
+                if [[ -z "$WANT" ]]; then
+                  echo "  ⚠ ${NAME}: origin HEAD for ${REVISION} unreadable at ${URL} — cannot confirm"
+                  echo "    freshness (is the revision correct, and is the repo reachable from this cluster?)"
+                  continue
+                fi
+                HAVE=""
+                for i in $(seq 1 30); do
+                  HAVE="$(remote_head "${GITEA_URL}/${ORG}/${NAME}" "$REVISION" -k -u "$AUTH")"
+                  [[ "$HAVE" == "$WANT" ]] && break
+                  sleep 10
+                done
+                if [[ "$HAVE" == "$WANT" ]]; then
+                  echo "  ✓ ${NAME} at ${WANT:0:8}"
+                else
+                  echo "  ❌ ${NAME}: mirror serves ${HAVE:0:8}, origin is at ${WANT:0:8} after 5m"
+                  echo "     Anything sourcing this mirror now would get stale content. Re-running"
+                  echo "     this job (ws git-refresh) re-triggers the pull; a persistent gap means"
+                  echo "     Gitea cannot reach ${URL}."
+                  FAIL=$((FAIL+1))
+                fi
+              done <<< "$MIRRORED"
+
+              [[ "$FAIL" -eq 0 ]] || { echo "❌ ${FAIL} mirror(s) not at origin HEAD"; exit 1; }
+              echo "✅ git-localize mirror up to date at ${GITEA_URL}/${ORG} (${REVISION})"

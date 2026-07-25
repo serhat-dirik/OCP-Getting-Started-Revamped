@@ -529,11 +529,40 @@ del_labeled_cluster() {  # kind — delete owner-labeled objects of a CLUSTER-SC
 # to strip. If a degraded Argo ever leaves one behind, report_stuck_namespaces() names the Job and
 # prints the clear command, and ogsr-check-clean.sh reports it afterwards.
 
-preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, strip our owner label so `-l owner=ogsr` is clean
+preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, remove every mark we put on it
+  # Stripping the owner label alone is not enough. Argo also stamps `argocd.argoproj.io/tracking-id`
+  # and the component kustomizations stamp `portfolio.redhat.com/component` on anything they adopt —
+  # so an org namespace we merely borrowed still reads as ours afterwards. That is a visible "no
+  # trace" failure, and ogsr-check-clean.sh reports it, meaning a genuinely clean teardown would
+  # still exit non-zero. Remove all three; `oc label/annotate` with a trailing `-` is a no-op when
+  # the key is absent, so this is safe on a namespace that never carried them.
   local ns="$1" reason="$2" key="${OWNER_LABEL%%=*}"
-  if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD preserve namespace/${ns} + strip ${key} label (${reason})"; return 0; fi
-  oc label namespace "$ns" "${key}-" --overwrite >/dev/null 2>&1 || true
-  echo "   • preserved namespace/${ns}, stripped owner label (${reason})"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "   • WOULD preserve namespace/${ns} + strip ${key} / portfolio.redhat.com/component labels and the Argo tracking-id (${reason})"
+    return 0
+  fi
+  oc label namespace "$ns" "${key}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
+  oc annotate namespace "$ns" argocd.argoproj.io/tracking-id- >/dev/null 2>&1 || true
+  echo "   • preserved namespace/${ns}, removed our labels + Argo tracking-id (${reason})"
+}
+
+strip_our_marks() {  # kind name ns — same de-marking for a single adopted OBJECT, not a namespace
+  # Used for the org's Subscription/CSV/OperatorGroup, which Argo also stamps when it adopts them.
+  # Deliberately does NOT touch argocd.argoproj.io/sync-options: install.sh merges our Prune/Delete
+  # values into whatever the org already had there, so removing the whole annotation would silently
+  # drop their settings. The uninstall removes only marks that are unambiguously ours.
+  local kind="$1" name="$2" ns="${3:-}" key="${OWNER_LABEL%%=*}"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "   • WOULD strip our labels + tracking-id from ${kind}/${name}${ns:+ -n $ns}"
+    return 0
+  fi
+  if [[ -n "$ns" ]]; then
+    oc label "$kind" "$name" -n "$ns" "${key}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
+    oc annotate "$kind" "$name" -n "$ns" argocd.argoproj.io/tracking-id- >/dev/null 2>&1 || true
+  else
+    oc label "$kind" "$name" "${key}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
+    oc annotate "$kind" "$name" argocd.argoproj.io/tracking-id- >/dev/null 2>&1 || true
+  fi
 }
 
 del_ns_fast() {  # ns — delete a namespace classify already confirmed exists (skips del_obj's redundant get,
@@ -703,7 +732,7 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
 }
 
 cleanup_created_operators() {  # remove Subscription+CSV for operators WE created (covers shared-ns operators)
-  local name ns st csv
+  local name ns st csv og
   while read -r name ns st; do
     [[ -n "$name" ]] || continue
     if [[ "$st" == "created" ]]; then
@@ -712,6 +741,18 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
       [[ -n "$csv" ]] && del_obj clusterserviceversion "$csv" "$ns"
     else
       echo "   • preserve operator ${name} in ${ns} (${st} — not created by us)"
+      # Preserving is necessary but not sufficient: Argo stamped the org's own Subscription, CSV and
+      # OperatorGroup with our labels and its tracking-id when it adopted them. Leaving those behind
+      # means the cluster still reads as ours after a "complete" teardown, and ogsr-check-clean.sh
+      # correctly reports it — so a clean run would still exit non-zero. De-mark what we marked.
+      strip_our_marks subscriptions.operators.coreos.com "$name" "$ns"
+      csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+      [[ -n "$csv" ]] && strip_our_marks clusterserviceversions.operators.coreos.com "$csv" "$ns"
+      while IFS= read -r og; do
+        [[ -n "$og" ]] || continue
+        strip_our_marks operatorgroups.operators.coreos.com "$og" "$ns"
+      done < <(oc get operatorgroups.operators.coreos.com -n "$ns" \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
     fi
   done < <(enumerate_operators)
 }
@@ -962,9 +1003,44 @@ fi
 #    applies controller-rbac.yaml (the openshift-gitops-application-controller-cluster-admin binding)
 #    with `oc apply`, outside any Application. The ClusterRole half is swept alongside it because RBAC is
 #    the one leftover class that grants standing access after a teardown.
+del_appprojects() {  # the AppProject(s) argocd-bootstrap applies imperatively
+  # ogsr-platform must exist BEFORE the Applications that name it, so it is applied with `oc apply`
+  # outside any Application — which means the cascade never sees it and it outlives the teardown.
+  # It is also not inert: the installer unions its sourceRepos/destinations on every apply, so a
+  # stale one silently widens what a later install is allowed to sync.
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    del_obj appprojects.argoproj.io "$name" "$ARGO_NS"
+  done < <(oc get appprojects.argoproj.io -n "$ARGO_NS" -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' || true)
+}
+
+remove_argo_tls_cert_key() {  # drop OUR host key from a ConfigMap the org may also be using
+  # install.sh merges the mirror's host into argocd-tls-certs-cm so Argo can verify Gitea's cert
+  # without `insecure: true`, and records which host under argo_tls_cert_host precisely so teardown
+  # can remove exactly that key. Deleting the whole ConfigMap would strip every host the org trusts.
+  local host esc
+  host="$(state argo_tls_cert_host '')"
+  [[ -n "$host" ]] || return 0
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "   • WOULD remove key ${host} from configmap/argocd-tls-certs-cm -n ${ARGO_NS}"
+    return 0
+  fi
+  oc get configmap argocd-tls-certs-cm -n "$ARGO_NS" >/dev/null 2>&1 || return 0
+  esc="$(printf '%s' "$host" | sed 's|~|~0|g; s|/|~1|g')"   # RFC 6901 JSON-pointer escaping
+  if oc patch configmap argocd-tls-certs-cm -n "$ARGO_NS" --type=json \
+       -p "[{\"op\":\"remove\",\"path\":\"/data/${esc}\"}]" >/dev/null 2>&1; then
+    ok "removed ${host} from argocd-tls-certs-cm (other hosts untouched)"
+  else
+    info "argocd-tls-certs-cm carries no ${host} key — nothing to remove"
+  fi
+}
+
 info "[6/8] deleting owner-labeled cluster RBAC that no Application manages"
 del_labeled_cluster clusterrolebindings.rbac.authorization.k8s.io
 del_labeled_cluster clusterroles.rbac.authorization.k8s.io
+del_appprojects
+remove_argo_tls_cert_key
 
 # 8. GitOps operator — remove only if we created it (else preserve + note the controller-memory bump).
 info "[7/8] GitOps operator"

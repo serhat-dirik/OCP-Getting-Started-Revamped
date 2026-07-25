@@ -40,8 +40,10 @@ spec:
     targetRevision: {{ $rev }}
     path: platform-portfolio/stacks/core-devtools
     kustomize:
-      # Rewrite the stack's child Applications to this same repo/revision (as the portfolio
-      # stack-app.template.yaml does), so the whole tree pins to the ordered source.
+      # Rewrite the stack's child Applications to this same repo/revision/project (as the portfolio
+      # stack-app.template.yaml does), so the whole tree pins to the ordered source. The children
+      # ship an unresolvable .invalid placeholder repoURL on purpose: a patch that stops matching
+      # fails loudly instead of syncing from a repo nobody configured.
       patches:
         - target:
             kind: Application
@@ -52,6 +54,31 @@ spec:
             - op: replace
               path: /spec/source/targetRevision
               value: {{ $rev }}
+            - op: replace
+              path: /spec/project
+              value: {{ .Values.argocd.project }}
+        # git-mirror only: which repo the in-cluster Gitea pull-mirrors. Always the EXTERNAL repo —
+        # a mirror pointed at itself never sees another commit. Targets a name that exists only in
+        # core-devtools; kustomize ignores a target that matches nothing.
+        - target:
+            kind: Application
+            name: pp-git-mirror
+          patch: |-
+            - op: add
+              path: /spec/source/kustomize
+              value:
+                patches:
+                  - target:
+                      kind: ConfigMap
+                      name: git-mirror-repos-portfolio
+                    patch: |-
+                      - op: replace
+                        path: /data/repos
+                        value: |
+                          {{ .Values.gitea.repo }}={{ .Values.gitops.repoURL }}
+                      - op: replace
+                        path: /data/revision
+                        value: {{ $rev }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ .Values.argocd.namespace }}
@@ -106,6 +133,9 @@ spec:
             - op: replace
               path: /spec/source/targetRevision
               value: {{ $rev }}
+            - op: replace
+              path: /spec/project
+              value: {{ $root.Values.argocd.project }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ $root.Values.argocd.namespace }}
@@ -157,6 +187,17 @@ spec:
         # workshop-config renders one hide-attribute per slug into each cockpit's Antora build.
         - name: modulesDisabledCSV
           value: {{ include "ogsr-bootstrap.disabledSlugsCSV" . | quote }}
+        # The two in-cluster BuildConfigs (Parasol images, showroom antora-ext) clone the workshop
+        # source directly, so they follow gitops.repoURL too — otherwise a fork/FSC order would
+        # build its cockpit and app images from the upstream project.
+        - name: parasolImages.build.repoUrl
+          value: {{ printf "%s.git" (trimSuffix ".git" .Values.gitops.repoURL) | quote }}
+        - name: parasolImages.build.revision
+          value: {{ $rev | quote }}
+        - name: showroom.build.repoUrl
+          value: {{ printf "%s.git" (trimSuffix ".git" .Values.gitops.repoURL) | quote }}
+        - name: showroom.build.revision
+          value: {{ $rev | quote }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ .Values.argocd.namespace }}

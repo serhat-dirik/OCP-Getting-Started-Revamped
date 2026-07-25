@@ -1,5 +1,10 @@
-# Stack Application template — rendered by install.sh (__STACK__/__REPO_URL__/__REVISION__).
+# Stack Application template — rendered by install.sh
+# (__STACK__ / __REPO_URL__ / __REVISION__ / __PROJECT__ / __SOURCE_REPO_URL__).
 # One Application per stack; the stack dir contains child Applications (app-of-apps).
+#
+# __REPO_URL__ is the CURRENT source: the external repo during bootstrap (phase 1) and the
+# in-cluster Gitea mirror once the flip has happened (phase 2). __SOURCE_REPO_URL__ is always
+# the EXTERNAL repo — it is what the mirror pulls FROM, so it must never become the mirror.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -10,15 +15,18 @@ metadata:
     # Non-invasive delivery (Wave 1): owner label so ogsr-uninstall.sh enumerates + targets our apps.
     workshop.redhat.com/owner: ogsr
 spec:
-  project: default
+  project: __PROJECT__
   source:
     repoURL: __REPO_URL__
     targetRevision: __REVISION__
     path: platform-portfolio/stacks/__STACK__
-    # Rewrite child Applications to the same fork/revision as this parent,
-    # so --repo-url works without editing every child manifest.
     kustomize:
       patches:
+        # Rewrite child Applications to the same repo/revision as this parent, so --repo-url works
+        # without editing every child manifest — and so the phase-2 flip to the Gitea mirror is one
+        # re-apply of this template rather than 32 manifest edits. The children ship a deliberately
+        # unresolvable placeholder repoURL: if this patch ever stops matching, Argo fails loudly on
+        # an .invalid host instead of quietly reconciling from a repo nobody configured.
         - target:
             kind: Application
           patch: |-
@@ -28,6 +36,34 @@ spec:
             - op: replace
               path: /spec/source/targetRevision
               value: __REVISION__
+            # Same reason for the project: --project stays a single flag, not 32 edits.
+            - op: replace
+              path: /spec/project
+              value: __PROJECT__
+        # git-mirror only: tell the in-cluster Gitea WHICH repo to pull-mirror. It is the one place
+        # that must keep pointing at the external source even after the phase-2 flip — a mirror
+        # configured to pull from itself would never see a new commit again. Targets a name that
+        # exists only in core-devtools; kustomize leaves a non-matching target alone, so the same
+        # rendered template is correct for every other stack.
+        - target:
+            kind: Application
+            name: pp-git-mirror
+          patch: |-
+            - op: add
+              path: /spec/source/kustomize
+              value:
+                patches:
+                  - target:
+                      kind: ConfigMap
+                      name: git-mirror-repos-portfolio
+                    patch: |-
+                      - op: replace
+                        path: /data/repos
+                        value: |
+                          ocp-getting-started=__SOURCE_REPO_URL__
+                      - op: replace
+                        path: /data/revision
+                        value: __REVISION__
   destination:
     server: https://kubernetes.default.svc
     namespace: openshift-gitops
