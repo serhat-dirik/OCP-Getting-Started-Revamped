@@ -53,7 +53,11 @@ for stack_dir in "${STACKS_DIR}"/*/; do
   stack="$(basename "$stack_dir")"
   while IFS= read -r app; do
     [[ -n "$app" ]] || continue
-    cpath="$(component_path_of "$stack" "$app")"
+    # `|| true` is what makes the next line reachable. component_path_of is a grep|sed pipeline, so
+    # under `set -o pipefail` an app file with no `path:` fails the substitution and `set -e` kills
+    # the run HERE — the "no path, skip it" guard below never gets to execute. Same silent-death class
+    # as the one that skipped uninstall steps 4-8 on 2026-07-25 (fix 8722a79).
+    cpath="$(component_path_of "$stack" "$app" || true)"
     [[ -n "$cpath" ]] || continue
     cdir="${REPO_ROOT}/${cpath}"
     comp="$(basename "$cpath")"
