@@ -96,7 +96,11 @@ resolve_slug() {
 DISABLED_SET=" "
 DISABLED_CSV=""
 while IFS= read -r tok; do
-  [[ -z "$tok" ]] && continue
+  # `cond && cmd` written as a statement is the shape that silently skipped five teardown steps on
+  # 2026-07-25 (fixed in 8722a79). It is only fatal inside a function called as a bare command, which
+  # this is not — these are defensive conversions so the hazard cannot be introduced by a later
+  # refactor that moves this code into one.
+  if [[ -z "$tok" ]]; then continue; fi
   if ! slug="$(resolve_slug "$tok")"; then
     die "modules_disabled: unknown or out-of-range module '$tok' (use mNN like m13 or a slug from modules.yaml)"
   fi
@@ -109,10 +113,16 @@ done < <(yq -r '.modules_disabled[]?' "$VARS" 2>/dev/null || true)
 REQUIRED_SET=" "
 add_required() { case "$REQUIRED_SET" in *" $1 "*) ;; *) REQUIRED_SET="${REQUIRED_SET}$1 " ;; esac; }
 while IFS= read -r slug; do
-  [[ -z "$slug" ]] && continue
+  if [[ -z "$slug" ]]; then continue; fi
   case "$DISABLED_SET" in *" $slug "*) continue ;; esac
   while IFS= read -r st; do
-    [[ -n "$st" && "$st" != "null" ]] && add_required "$st"
+    # Latent, not live — measured, not assumed. Under `set -e` a failing `cond && cmd` only kills the
+    # script when it is the last statement of a FUNCTION invoked as a bare command; as a loop body's
+    # or top level's last statement bash tolerates it. This code is top-level loop body, so a `null`
+    # in a module's `stacks:` list does NOT abort the installer today. Written as `if` anyway: the
+    # day someone wraps this block in a function it becomes the exact fault that silently skipped
+    # five teardown steps on 2026-07-25, and the shape is not worth keeping for two characters.
+    if [[ -n "$st" && "$st" != "null" ]]; then add_required "$st"; fi
   done < <(yq -r ".modules[] | select(.slug == \"$slug\") | .stacks[]?" "$MODULES_YAML" 2>/dev/null || true)
 done < <(printf '%s\n' "$ALL_SLUGS")
 
