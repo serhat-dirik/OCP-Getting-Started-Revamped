@@ -102,6 +102,51 @@ ROUTE=$(oc get route parasol-web -n $NS -o jsonpath='{.spec.host}')
 curl -sk --max-time 10 "https://$ROUTE/api/claims" | head -c 60; echo
 ----
 
+== My re-encrypt Route returns 503 "Application is not available"
+
+Symptom:: The reencrypt Route was created and admitted, but every request returns *503* with the router's error page. There is no TLS error anywhere — which is what makes it confusing.
+Cause:: Almost always the Route is pointed at the *plaintext* port. The router opens a TLS connection to the backend, the backend is speaking plain HTTP on `8080`, the handshake gets nothing, and the router reports the backend as unavailable. Reproduced deliberately while building this module by creating the Route with `--port=http`.
+Fix:: Check the target port — it must be the *TLS* port, not the plaintext one:
++
+[source,sh,role=execute]
+----
+oc get route parasol-web-secure -n $NS -o jsonpath='targetPort={.spec.port.targetPort}  termination={.spec.tls.termination}{"\n"}'
+oc delete route parasol-web-secure -n $NS
+oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n $NS
+----
++
+`targetPort=https` is correct; `targetPort=http` is the bug. A re-encrypt Route must terminate against something that actually speaks TLS.
+
+== The pod is `1/1 Ready` but the re-encrypt Route still 503s
+
+Symptom:: `parasol-web` shows `1/1 Running`, the Route looks right, and requests still fail.
+Cause:: *`Ready` does not mean the TLS listener came up.* The readiness probe checks the plaintext port `8080`, so the pod reports healthy whether or not the HTTPS listener started. If the certificate paths are wrong, or the Secret was not mounted, the application quietly serves HTTP only.
+Fix:: Read the startup line and confirm *both* listeners, then confirm the Service publishes the TLS port:
++
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-web -n $NS | grep -o 'Listening on:.*'
+oc get svc parasol-web -n $NS -o jsonpath='ports={range .spec.ports[*]}{.name}:{.port} {end}{"\n"}'
+oc set volume deploy/parasol-web -n $NS   # confirm the tls secret is actually mounted at /etc/tls
+----
++
+You want `Listening on: http://0.0.0.0:8080 and https://0.0.0.0:8443` and `ports=http:8080 https:8443`.
+If the `https://` half is missing, the environment variables or the mount are wrong — fix those, not the Route.
+
+== The serving-cert Secret never appears
+
+Symptom:: You annotated the Service, but `oc get secret parasol-web-tls` reports `NotFound` however long you wait.
+Cause:: Either the annotation key is not exactly `service.beta.openshift.io/serving-cert-secret-name` (a typo in the key means nothing is watching for it), or the cluster's service CA operator is not available to mint it.
+Fix:: Check the annotation actually landed, then check the operator:
++
+[source,sh,role=execute]
+----
+oc get svc parasol-web -n $NS -o jsonpath='{.metadata.annotations}{"\n"}'
+oc get clusteroperator service-ca -o jsonpath='service-ca Available={.status.conditions[?(@.type=="Available")].status}{"\n"}'
+----
++
+The certificate is minted within a few seconds of a correct annotation (measured under 5 s on the build cluster) — if it has not appeared, it is not slow, something is wrong. `service-ca Available=True` means the operator is fine and the annotation is the suspect.
+
 == An unauthorized pod can *still* reach the database after I wrote my policies
 
 Symptom:: You applied the allows, but `demo-client` still connects to `claims-db:5432` (it should be blocked).
@@ -176,4 +221,4 @@ You cannot convert a populated namespace to a Primary UDN; the reset deletes the
 
 '''
 
-_Last verified on OpenShift {ocp_version} (OVN-Kubernetes, 2026-07-13)._
+_Last verified on OpenShift {ocp_version} (OVN-Kubernetes, 2026-07-13; the three re-encrypt entries 2026-07-25)._

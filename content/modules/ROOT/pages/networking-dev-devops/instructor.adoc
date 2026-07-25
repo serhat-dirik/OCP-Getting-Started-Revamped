@@ -24,12 +24,12 @@ Total hands-on: *~40 min* (add ~15 min of concept up front, ~5 min buffer).
 |===
 | # | Exercise group | Attendee time | Measured core
 
-| 1 | Map the network and trace a packet | ~5 min | `oc get svc/endpoints` instant; selector break → endpoints `<none>` in *~2 s*; reachability probes instant (TCP connect)
-| 2 | Expose the front end to the world | ~8 min | edge Route create → external `curl` succeeds in *~2 s*; NodePort create/inspect/delete instant; LoadBalancer `<pending>` visible immediately
+| 1 | Map the network and trace a packet | ~4 min | `oc get svc/endpoints` instant; selector break → endpoints `<none>` in *~2 s*; reachability probes instant (TCP connect). Whole group measured at *21 s* of command time
+| 2 | Expose the front end to the world | ~11 min | edge Route create → external `curl` succeeds in *~2 s*; NodePort create/inspect/delete instant; LoadBalancer `<pending>` visible immediately; then the re-encrypt beat at *46 s* of command time (26 s of it the single `parasol-web` rollout)
 | 3 | Lock the namespace down with default-deny | ~5 min | policy apply instant; `parasol-claims` drops to `0/1` within *~30–70 s* (periodSeconds 10 × failureThreshold 3, plus policy-propagation lag); reading the break is the time cost
 | 4 | Re-open only what the app needs | ~10 min | DNS allow → resolves in *~4 s*; db allow pair → `parasol-claims` back to `1/1` in *~10–20 s*; probes instant; the payoff is the point
-| 5 | Native isolation with a UDN | ~7 min | all `oc exec` reads; the isolation probe *times out by design* (~6 s); reading + the "no policy" reveal
-| 6 | Gateway API `[INSTRUCTOR-DEMO]` | ~5 min | you perform; all read-only; see the script below
+| 5 | Native isolation with a UDN | ~6 min | all `oc exec` reads; the isolation probe *times out by design* (~6 s); reading + the "no policy" reveal. Whole group measured at *20 s* of command time
+| 6 | Gateway API `[INSTRUCTOR-DEMO]` | ~4 min | you perform; all read-only; *6 s* of command time — the budget is your talk track. See the script below
 |===
 
 [NOTE]
@@ -40,6 +40,12 @@ The commands themselves are near-instant — `oc get`, `oc apply`, `oc patch` al
 The genuine waits are: NetworkPolicy taking *~3–9 s* to program the data plane (a probe that should now be blocked keeps succeeding for a few seconds, then starts timing out); `parasol-claims` readiness swinging on its *10 s* probe period (with the default `failureThreshold: 3`, it drops to `0/1` in *~30–70 s* after default-deny — not a flat ~10 s — and returns to `1/1` ~10–20 s after the db allow); and the reachability probes, which *time out on purpose* (the `timeout 5`/`timeout 6` is the wait, and it is the signal).
 The *Attendee time* is dominated by reading the breaks and the payoff, not by command latency.
 The first pod attach to the partner UDN can take ~30 s on a cold namespace — the entry state already did it, so attendees never wait on it.
+
+The re-encrypt beat closing exercise 2 was added later and measured the same way on 2026-07-25: *46 s* of command time end to end, of which *26 s* is the one `parasol-web` rollout after the certificate is mounted.
+The serving-cert Secret appears in *under 5 s* of the annotation.
+Its budget came from re-measuring the three lightest groups rather than from the payoff: exercises 1 and 5 measured *21 s* and *20 s* of command time against 5 and 7 minutes of attendee time, and exercise 6 is *6 s* of read-only commands — so each gave up one minute, and exercise 2 absorbed all three.
+Exercises 3 and 4 were deliberately left alone: exercise 3 contains a genuine 30–70 s wait you cannot compress, and exercise 4 is the module's payoff.
+The total is unchanged at *40 min*.
 ====
 
 == Pre-flight checklist
@@ -86,6 +92,41 @@ oc exec deploy/partner-workload -n user1-partner -- ip -brief addr show ovn-udn1
 +
 Expect an `ovn-udn1` interface on a `10.20.x.x` address.
 If it is missing, the UDN did not attach before the pod — `ws reset networking-dev-devops --user user1` (the reset re-applies the UDN at sync-wave -1, before the workload).
+
+. *The service CA operator is up (the re-encrypt beat depends on it).*
++
+[source,sh,role=execute]
+----
+oc get clusteroperator service-ca -o jsonpath='service-ca Available={.status.conditions[?(@.type=="Available")].status}{"\n"}'
+----
++
+.Expected output
+[source,texinfo]
+----
+service-ca Available=True
+----
++
+This is the operator that mints the serving certificate from the Service annotation.
+It is a core cluster operator, not something the workshop installs — if it is not `Available`, the re-encrypt beat cannot issue a certificate and you should skip to exercise 3 rather than debug it live.
+
+. *A sample user can actually perform the re-encrypt beat.*
++
+[source,sh,role=execute]
+----
+oc auth can-i patch service    --as=user1 -n user1-dev
+oc auth can-i patch deployment --as=user1 -n user1-dev
+oc auth can-i create route     --as=user1 -n user1-dev
+----
++
+.Expected output
+[source,texinfo]
+----
+yes
+yes
+yes
+----
++
+The beat annotates a Service, mounts a Secret into a Deployment, and creates a Route — all three are within the attendee's own namespace role. Checked by impersonation, not assumed.
 
 . *The GatewayClass is Accepted (for the exercise-6 demo).*
 +
@@ -176,19 +217,33 @@ A LoadBalancer Service needs something to hand out external IPs: a cloud load ba
 This workshop cluster is bare metal with no such provider, so the external IP never arrives.
 The fix is a *Route* (which needs no provider) or, if you truly need an L4 external IP, install a provider.
 
-*3. "I applied default-deny and `parasol-claims` went `0/1` — I didn't touch it. Why?"*::
+*3. "Why re-encrypt instead of just passthrough? Both encrypt the last hop."*::
+Because passthrough costs you the router.
+With passthrough the router never decrypts, so it can only see SNI — it cannot route on a URL path, cannot split traffic by path, and cannot add or rewrite HTTP headers (the Route API notes passthrough is incompatible with header actions).
+It also pushes certificate management into the application: the pod must hold a certificate the *outside world* trusts, which means real public certificates distributed to workloads.
+Re-encrypt keeps the router doing HTTP-layer work *and* encrypts the last hop, and the pod's certificate only ever has to be trusted *inside* the cluster.
+Passthrough is the right answer when the backend must terminate TLS itself — client-certificate authentication, or a non-HTTP protocol.
+
+*4. "We never gave the Route a destination CA certificate. Why does it verify the backend?"*::
+Because the backend's certificate is *infrastructure-generated*.
+The Route API's documentation for `destinationCACertificate` states that when the field is not specified, the router may provide its own destination CA and perform hostname validation using the short service name `service.namespace.svc` — which is exactly the subject the service CA operator issues (`CN=parasol-web.{user}-dev.svc`, which attendees read at hop 2).
+So a service serving certificate verifies automatically, with nothing configured.
+You *do* need `destinationCACertificate` when the backend presents a certificate from your own CA rather than the cluster's.
+Verified live on the build cluster: the reencrypt Route was created with `spec.tls` containing only `{"termination":"reencrypt"}` and was `Admitted=True` and serving.
+
+*5. "I applied default-deny and `parasol-claims` went `0/1` — I didn't touch it. Why?"*::
 That is the policy working.
 `default-deny-all` denies *egress* too, so `parasol-claims` can no longer open its connection to `claims-db:5432`; its readiness probe checks the database, the check fails, and the pod is marked NotReady (it does *not* crash — status stays `Running`).
 Its log shows `Database connections health check … DOWN … Acquisition timeout`.
 Add the `parasol-claims → claims-db` egress allow (and the matching db ingress allow) and it returns to `1/1`. This is the intended "app breaks, now write the allows" beat.
 
-*4. "The partner workload still has an `eth0` on the cluster network — is it really isolated?"*::
+*6. "The partner workload still has an `eth0` on the cluster network — is it really isolated?"*::
 Yes.
 A Primary UDN pod keeps a cluster-network `eth0` for node-level infrastructure (kubelet health checks and the like), but its *default route* leaves through `ovn-udn1` on the UDN's `10.20.0.0/16` segment — that is its primary network.
 OVN-Kubernetes enforces the isolation regardless of the extra interface: the pod cannot reach workload pods in other namespaces (verified — the connection to `parasol-web` times out), even though it can still resolve DNS via the shared cluster service.
 The presence of `eth0` is an implementation detail, not a leak.
 
-*5. "Can we demonstrate the Gateway API end-to-end here?"*::
+*7. "Can we demonstrate the Gateway API end-to-end here?"*::
 Not on this cluster.
 The OpenShift Gateway API implementation provisions the Gateway behind a LoadBalancer Service, which — as with question 2 — stays `<pending>` on bare metal, so the Gateway never gets an address and never reaches `Programmed=True`.
 Show the *model* (GatewayClass → Gateway → HTTPRoute, weighted splits) and the *boundary* (no L4 route types), and run the end-to-end path on a cluster that has an LB provider. The Route is the runnable exposure here.
@@ -203,6 +258,12 @@ Both are expected in exercise 3. Don't let a confused attendee "fix" it by delet
 `allow-web-from-router` (namespaceSelector `policy-group.network.openshift.io/ingress: ""`) is what lets the ingress router reach `parasol-web` once default-deny is on. Without it, the Route returns an error even though the Service is fine — a subtle one to debug if an attendee skips it.
 * *The `demo-client` block is over-determined — frame it honestly.*
 Under the end state, `demo-client` is blocked both because default-deny denies its egress (it got no allow) *and* because `claims-db`'s ingress admits only `parasol-claims`. Present it as "no rule lets it through," not "the db ingress policy alone stops it" — both point the same way, and that is the correct mental model.
+* *The re-encrypt beat's real failure mode is a Route pointed at the plaintext port.*
+If an attendee creates the reencrypt Route against `--port=http` (8080) instead of `--port=https` (8443), the router tries to open TLS to a plaintext listener and the Route returns *503* with the router's "Application is not available" page — not a TLS error, which is what makes it confusing. Confirmed live. Check `spec.port.targetPort` first; it is `https` when correct.
+* *The pod must be serving TLS before the Route will work, and `1/1 Ready` does not prove it.*
+The readiness probe checks the plaintext port, so `parasol-web` goes `1/1` whether or not the TLS listener came up. The lab has attendees grep the startup line for `Listening on: … and https://0.0.0.0:8443` for exactly this reason — if someone's re-encrypt Route 503s, check that line before anything else.
+* *The two `oc set` commands trigger two rollouts.*
+`oc set volume` and `oc set env` each patch the Deployment, so the second supersedes the first mid-roll; `oc rollout status` after both is what settles it (measured 26 s). An attendee who runs `oc rollout status` between them will see it complete twice and may think something is wrong.
 * *LoadBalancer `<pending>` and Gateway `Programmed=False` are the same root cause.*
 Bare metal, no LB provider. If asked why the Gateway API isn't hands-on, it is this — not a version or licensing gap.
 * *Don't create a Gateway live.*
@@ -215,3 +276,8 @@ It stays unaddressed *and* triggers a lightweight Istio install in `openshift-in
 Networking for Dev & DevOps is a net-new module (the spec's "fresh for UDN/GwAPI"), built against this repo's live cluster.
 Every command, output, timing, the default-deny app break (the `parasol-claims` DB health-`DOWN` log), the DNS named-port subtlety (`53` fails / `dns`-`dns-tcp` works), the isolation block, the edge Route, the UDN interface and subnet, the NodePort assignment, the LoadBalancer `<pending>`, and the GatewayClass state were captured on OpenShift {ocp_version} as `user1` on 2026-07-13 during the build.
 The Gateway API segment is read-only by design (no Gateway created — bare-metal gap + Istio side effect); no content was ported from stale material.
+
+The *re-encrypt* beat closing exercise 2 was added on 2026-07-25 and performed end to end as `user7` on the same cluster before it was written: the service serving certificate minted from the Service annotation (Secret present in under 5 s), the pod's TLS listener (`Listening on: http://0.0.0.0:8080 and https://0.0.0.0:8443`), the two-port Service, the reencrypt Route admitted with `spec.tls` containing *only* `{"termination":"reencrypt"}`, the external `curl` succeeding, and the two-hop certificate capture (`CN=*.apps.<cluster>` at the router, `CN=parasol-web.<ns>.svc` issued by `openshift-service-serving-signer` at the pod).
+The 503 failure mode was reproduced deliberately by pointing a reencrypt Route at the plaintext port.
+The beat was also checked *against the rest of the lab*: with exercise 3's `default-deny-all` and exercise 4's `allow-web-from-router` in place, both the edge and the re-encrypt Route still return `HTTP 200` (that policy sets no port restriction, so 8443 is covered — exercise 4 needed no change), and `ws verify networking-dev-devops user7` reports *all 14 checks passed* with the beat applied.
+The claim that the router auto-verifies an infrastructure-generated backend certificate is grounded in the Route API's own field documentation (`oc explain route.spec.tls.destinationCACertificate`), not recalled.

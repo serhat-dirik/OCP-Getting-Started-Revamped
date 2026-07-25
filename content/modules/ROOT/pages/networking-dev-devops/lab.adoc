@@ -12,6 +12,13 @@ include::partial$version-attributes.adoc[]
 // and the LoadBalancer <pending> are real captures. Cluster-domain values in output are scrubbed to
 // the placeholder apps.example.com. Console click-paths are grounded against the unified console
 // (OCP 4.19+, no perspective switch); labels a build couldn't click get [CAPTURE-VERIFY] + the CLI.
+// The re-encrypt beat at the end of exercise 2 was added 2026-07-25 and performed as user7 on the
+// same cluster: the serving-cert Secret, the Quarkus "Listening on: … and https://0.0.0.0:8443" line,
+// the two-port Service, the admitted reencrypt Route with NO destinationCACertificate, and the
+// two-hop certificate capture are real. Namespace values in its output blocks are normalized from
+// user7-dev to user1-dev for page consistency (the same declared scrub as the cluster domain);
+// nothing else in those blocks is altered. Measured command time for the beat: 46 s, of which 26 s
+// is the single parasol-web rollout.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -172,7 +179,7 @@ endif::demo[]
 ifndef::demo[]
 
 == 1. Map the network and trace a packet
-⏱ *~5 min* · see the flat network, then break a Service selector and fix it
+⏱ *~4 min* · see the flat network, then break a Service selector and fix it
 
 Start by seeing what you have.
 Three Services front the three tiers, and all of them are *ClusterIP* — in-cluster only, nothing exposed:
@@ -304,7 +311,7 @@ Remember this shape — `<none>` endpoints — the next time "the Service is up 
 ****
 
 == 2. Expose the front end to the world
-⏱ *~8 min* · an edge Route (the workhorse), plus the honest NodePort and LoadBalancer asides
+⏱ *~11 min* · an edge Route (the workhorse), the honest NodePort and LoadBalancer asides, then a re-encrypt Route that encrypts the last hop
 
 Only `parasol-web` should be reachable from outside, and the deterministic way to do that on OpenShift is a *Route*.
 Create an *edge*-terminated Route so the router terminates TLS and forwards to the Service (always `oc create route edge` with `--insecure-policy=Allow`, never a plain expose, so both HTTP and HTTPS answer cleanly):
@@ -396,9 +403,199 @@ service "parasol-web-lb" deleted
 `EXTERNAL-IP <pending>`, forever — not broken, just *unprovided*.
 On a cloud a load balancer would answer; on bare metal you would add one (such as MetalLB) or, as here, *use a Route*.
 
+Now look at what your *edge* Route is doing on the inside.
+The router terminated TLS at the edge — and it is forwarding *plaintext* to the pod.
+See it from inside the cluster:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- curl -s -o /dev/null -w "plain HTTP to parasol-web:8080 -> HTTP %{http_code}\n" http://parasol-web:8080/api/claims
+----
+
+.Expected output
+[source,texinfo]
+----
+plain HTTP to parasol-web:8080 -> HTTP 200
+----
+
+The pod answers *unencrypted* HTTP, and unencrypted HTTP is exactly what the router sends it.
+Inside a trusted cluster network that is normal.
+When policy says "encrypted end to end," it is an audit finding — and the answer is a *re-encrypt* Route: the router still terminates (so it keeps routing on host and path) and then opens a *second, fresh* TLS session to the pod.
+
+For that the pod needs its own certificate — and you are not going to stand up a certificate authority to get one.
+You are going to ask the cluster for it.
+
+*First, ask the platform for a certificate.*
+One annotation on the Service, and the cluster's service CA operator mints a key pair into a Secret for you:
+
+// [CAPTURE-VERIFY] Networking → Services → parasol-web → Actions → Edit annotations (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Networking* → *Services* → `parasol-web` → *Actions* → *Edit annotations*.
+Add the key `service.beta.openshift.io/serving-cert-secret-name` with the value `parasol-web-tls`, then *Save*.
+Open *Workloads* → *Secrets* — `parasol-web-tls` appears within a few seconds, of type `kubernetes.io/tls`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc annotate svc parasol-web -n $NS service.beta.openshift.io/serving-cert-secret-name=parasol-web-tls
+sleep 3
+oc get secret parasol-web-tls -n $NS
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+service/parasol-web annotated
+NAME              TYPE                DATA   AGE
+parasol-web-tls   kubernetes.io/tls   2      4s
+----
+
+You did not generate a key, sign a request, or install a CA — you asked, and the platform issued.
+The Secret holds a `tls.crt` and `tls.key` issued for the Service's internal DNS name, and the operator rotates it for you.
+
+*Next, make the pod actually serve TLS with it.*
+Mount the Secret, tell the application where its certificate is, and publish the HTTPS port on the Service.
+The front end is a Quarkus application, so it takes the certificate paths as environment variables — every runtime has its own equivalent, and this is the part of re-encrypt that is genuinely on you:
+
+// [CAPTURE-VERIFY] Workloads → Deployments → parasol-web → YAML accepts the volume/volumeMount/env edit in one save (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Workloads* → *Deployments* → `parasol-web` → *YAML*.
+Add a `volume` sourced from the `parasol-web-tls` Secret, mount it at `/etc/tls` in the container, and add the two `QUARKUS_HTTP_SSL_*` environment variables from the *CLI* tab, then *Save* — the deployment rolls out a new pod.
+Then open *Networking* → *Services* → `parasol-web` → *YAML* and add a second port named `https` on `8443` targeting `8443`.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set volume deploy/parasol-web -n $NS --add --name=tls --secret-name=parasol-web-tls --mount-path=/etc/tls --read-only
+oc set env deploy/parasol-web -n $NS QUARKUS_HTTP_SSL_CERTIFICATE_FILES=/etc/tls/tls.crt QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES=/etc/tls/tls.key
+oc rollout status deploy/parasol-web -n $NS --timeout=120s
+oc patch svc parasol-web -n $NS --type=json -p '[{"op":"add","path":"/spec/ports/-","value":{"name":"https","port":8443,"targetPort":8443,"protocol":"TCP"}}]'
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+deployment.apps/parasol-web volume updated
+deployment.apps/parasol-web updated
+Waiting for deployment "parasol-web" rollout to finish: 1 old replicas are pending termination...
+deployment "parasol-web" successfully rolled out
+service/parasol-web patched
+----
+
+Confirm the pod really opened a TLS listener — this is the step people skip and then debug for twenty minutes:
+
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-web -n $NS | grep -o 'Listening on:.*'
+oc get svc parasol-web -n $NS
+----
+
+.Expected output
+[source,texinfo]
+----
+Listening on: http://0.0.0.0:8080 and https://0.0.0.0:8443
+NAME          TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)             AGE
+parasol-web   ClusterIP   172.231.54.213   <none>        8080/TCP,8443/TCP   7m
+----
+
+Both listeners are up: the plaintext `8080` your edge Route uses, and the new TLS `8443`.
+
+*Now the re-encrypt Route.*
+Point it at the `https` port — and note what you are *not* supplying: any certificate authority material at all.
+
+// [CAPTURE-VERIFY] Networking → Routes → Create Route: TLS termination=Re-encrypt, Destination CA certificate left empty (OCP 4.21) — CLI authoritative.
+[tabs]
+====
+Console::
++
+--
+Open *Networking* → *Routes* → *Create Route*.
+Name it `parasol-web-secure`, *Service* = `parasol-web`, *Target port* = `8443 → 8443`, tick *Secure Route*, set *TLS termination* = *Re-encrypt*, and leave *Destination CA certificate* *empty*, then *Create*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n $NS
+oc get route parasol-web-secure -n $NS -o jsonpath='termination={.spec.tls.termination}  host={.spec.host}{"\n"}'
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+route.route.openshift.io/parasol-web-secure created
+termination=reencrypt  host=parasol-web-secure-user1-dev.apps.example.com
+----
+
+Reach it from outside, exactly as you did the edge Route:
+
+[source,sh,role=execute]
+----
+SECURE=$(oc get route parasol-web-secure -n $NS -o jsonpath='{.spec.host}')
+curl -sk --max-time 15 "https://$SECURE/api/claims" | head -c 120; echo
+----
+
+.Expected output
+[source,texinfo]
+----
+[{"id":"CLM-1001","policyholder":"Alice Nguyen","type":"Auto","status":"Under Review","amount":4200.0,"filedDate":"2026-
+----
+
+Same application, same router, same claims JSON — but now *two* TLS sessions carried that request instead of one.
+Prove it by reading the certificate at each hop:
+
+[source,sh,role=execute]
+----
+echo -n "hop 1  client -> router : "; curl -skv --max-time 15 "https://$SECURE/api/claims" -o /dev/null 2>&1 | grep -m1 -o 'subject: CN=.*'
+echo -n "hop 2  router -> pod    : "; oc exec deploy/demo-client -n $NS -- timeout 10 openssl s_client -connect parasol-web:8443 </dev/null 2>/dev/null | grep -m1 -o 'subject=CN=.*'
+echo -n "hop 2  issued by        : "; oc exec deploy/demo-client -n $NS -- timeout 10 openssl s_client -connect parasol-web:8443 </dev/null 2>/dev/null | grep -m1 -o 'issuer=CN=.*'
+----
+
+.Expected output (the signer's numeric suffix differs on every cluster)
+[source,texinfo]
+----
+hop 1  client -> router : subject: CN=*.apps.example.com
+hop 2  router -> pod    : subject=CN=parasol-web.user1-dev.svc
+hop 2  issued by        : issuer=CN=openshift-service-serving-signer@1784922828
+----
+
+*Two different certificates, from two different authorities, on one request.*
+The outside hop uses the router's wildcard certificate — issued by whichever CA signed your cluster's ingress certificate, and trusted by browsers.
+The inside hop uses `CN=parasol-web.{user}-dev.svc`, issued by the cluster's own `openshift-service-serving-signer` and trusted only inside the cluster.
+That is re-encrypt: the router still gets to be a router, and no part of the path is in the clear.
+
+[NOTE]
+.Why you never supplied a destination CA certificate
+====
+A re-encrypt Route usually expects a `destinationCACertificate` so the router can verify the backend.
+You omitted it, and it still worked — deliberately.
+The Route API's own documentation for that field says that when it is not specified, the router may supply its own destination CA and validate using the short service name `service.namespace.svc`, "which allows infrastructure generated certificates to automatically verify."
+A service serving certificate is exactly such an infrastructure-generated certificate, and its subject is exactly that short name — which you just read at hop 2.
+Supply a `destinationCACertificate` when the backend's certificate comes from *your own* CA instead.
+====
+
 [.checkpoint]
 ****
-✔ *Verify:* You exposed `parasol-web` with an *edge* Route and reached `\https://parasol-web-{user}-dev.{cluster_domain}/api/claims` from outside the cluster; you created and deleted a NodePort (seeing its assigned `3xxxx` port) and a LoadBalancer Service (seeing `EXTERNAL-IP <pending>` — no provider on bare metal).
+✔ *Verify:* You exposed `parasol-web` with an *edge* Route and reached `\https://parasol-web-{user}-dev.{cluster_domain}/api/claims` from outside the cluster; you created and deleted a NodePort (seeing its assigned `3xxxx` port) and a LoadBalancer Service (seeing `EXTERNAL-IP <pending>` — no provider on bare metal); and you proved the edge Route's last hop was plaintext, then fixed it with a *re-encrypt* Route — a service serving certificate minted by annotation, a TLS listener on the pod, and two different certificates on the two hops of one request.
 ****
 
 == 3. Lock the namespace down with default-deny
@@ -708,7 +905,7 @@ Seven policies: one default-deny, one DNS allow, and five precise allows that sp
 ****
 
 == 5. Native isolation with a UserDefinedNetwork
-⏱ *~7 min* · a partner namespace isolated with zero policy
+⏱ *~6 min* · a partner namespace isolated with zero policy
 
 You just wrote seven NetworkPolicies to segment one namespace.
 Sometimes you want a whole namespace isolated and you want it *for free* — no policy to write or maintain.
@@ -794,7 +991,7 @@ The catch that makes UDN a platform-team decision: a Primary UDN must exist *bef
 ****
 
 == 6. The Gateway API — the strategic direction (instructor demo)
-⏱ *~5 min* · watch — the modern ingress model, and why the Route is what you ran
+⏱ *~4 min* · watch — the modern ingress model, and why the Route is what you ran
 
 The Route you built is the workhorse *today*.
 The *Gateway API* is where portable, multi-tenant ingress is heading, and it is GA on OpenShift {ocp_version}.
@@ -839,6 +1036,7 @@ Try these on your own:
 * *Add a third-party allow.* Suppose a new `reporting` pod (label `app=reporting`) must read the database directly. Write the *two* NetworkPolicies that let *only* it reach `claims-db:5432` (ingress on the db, egress on the reporting pod), deploy a throwaway pod with that label, and prove it connects while `demo-client` still cannot.
 * *Prove the DNS gotcha yourself.* Delete `allow-dns-egress`, re-create it with `port: 53` instead of the named ports, and confirm DNS *stays broken*; then switch back to `dns`/`dns-tcp` and watch it recover. Now you will never lose an afternoon to it.
 * *Compare the two exposure objects.* You have a Route on `parasol-web`. Read its YAML (`oc get route parasol-web -n {user}-dev -o yaml`) and map each field — `host`, `tls.termination`, `to.kind/name` — to how a Gateway `listener` + `HTTPRoute` `backendRef` would express the same intent.
+* *Diff your two Routes.* You now have an edge Route and a re-encrypt Route in front of the *same* Service. Compare their `spec.tls` and `spec.port` (`oc get route parasol-web parasol-web-secure -n {user}-dev -o custom-columns='NAME:.metadata.name,TERMINATION:.spec.tls.termination,PORT:.spec.port.targetPort'`) and explain, without re-reading the lab, why only one of them needs an `https` target port — and what would break if you swapped them.
 
 When you are done, run `ws verify {module-id}` in the Terminal — or run `ws prep {module-id} --yes` to return your world to the flat entry state (no policy, no Route).
 

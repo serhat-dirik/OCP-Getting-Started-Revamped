@@ -9,6 +9,12 @@ include::partial$version-attributes.adoc[]
 // UDN interface/subnet, the LoadBalancer <pending>, and the GatewayClass state are real captures,
 // not from memory. Networking is core OpenShift, so nothing new lands in versions.yaml; Gateway API
 // and UserDefinedNetwork are GA features of OCP {ocp_version} and are described as GA, not by number.
+// The Route TLS-termination section (edge/passthrough/re-encrypt + service serving certificates) was
+// added 2026-07-25 and performed on the same cluster as user7: the serving cert minted by the service
+// CA operator, the pod's own TLS listener, the reencrypt Route admitted with NO destinationCACertificate,
+// and the two-hop certificate capture are all real. The claim that the router auto-verifies an
+// infrastructure-generated backend certificate is grounded in the Route API's own field documentation
+// (oc explain route.spec.tls.destinationCACertificate), not recalled.
 
 [.lead]
 Parasol's claims application is three tiers — a web front end, a claims API, and a Postgres database — and right now they sit on a *flat, open* network where any pod can reach any other, and *nothing* is reachable from outside at all.
@@ -19,6 +25,7 @@ Same cluster, same app — but by the end the database answers *only* the API, a
 
 * How to *trace a packet* through OpenShift — Service → endpoints → the OVN-Kubernetes data plane → Route — without needing the vendor internals.
 * How to *choose an exposure* correctly: the decision tree from ClusterIP through NodePort, LoadBalancer, *Route*, and the *Gateway API*, and why on this cluster the Route is the workhorse and the Gateway API is the strategic direction.
+* How to choose *how far the encryption goes* — the three Route termination modes (*edge*, *passthrough*, *re-encrypt*) — and how to encrypt the router-to-pod hop without running your own certificate authority.
 * How to *segment east-west traffic* with *NetworkPolicy* — a default-deny baseline plus precise allows — and the one gotcha (DNS) that makes the fix look broken when it isn't.
 * When a *UserDefinedNetwork (UDN)* gives you *native isolation* with no policy at all, and why that sometimes beats a wall of NetworkPolicies.
 * The *honest boundary* of Routes and today's Gateway API — they are HTTP(S)/SNI-centric — and where raw-TCP and TLS-passthrough live instead (a later module).
@@ -92,6 +99,59 @@ When you need L4 ingress — a database port, a gRPC stream with passthrough, a 
 Knowing this boundary keeps you from fighting the Route to do something it was never meant to do.
 ====
 
+== How far does the encryption go?
+
+Choosing a Route settles *what* is exposed.
+It does not settle *how much of the path is encrypted* — and that is a separate decision your security team almost certainly has an opinion about.
+A Route offers three answers, and they differ in exactly one respect: where the TLS session ends.
+
+[cols="1,2,2",options="header"]
+|===
+| Termination | Where the client's TLS session ends | What the pod receives
+
+| *edge*
+| At the router, which presents the cluster's wildcard certificate.
+| *Plaintext* HTTP, carried over the pod network.
+
+| *passthrough*
+| Nowhere — the router forwards the encrypted stream untouched.
+| The client's *original* TLS session. The *pod* owns the certificate.
+
+| *re-encrypt*
+| At the router — which then opens a *second, independent* TLS session to the pod.
+| Its *own* TLS session, with its *own* certificate.
+|===
+
+*edge* is the sensible default and the one you will use most.
+It is also the one worth being honest about: the router decrypts, and the hop from router to pod crosses the cluster network *in the clear*.
+Inside a trusted software-defined network that is usually fine — and when policy says "encrypted end to end," it is usually not.
+
+*passthrough* fixes the encryption but costs you the router.
+Because the router never decrypts, it cannot read the hostname beyond SNI, cannot route on a URL path, and cannot add or rewrite HTTP headers — it is moving bytes, not requests.
+It also moves certificate management *into* the application: the pod must hold a certificate the outside world trusts.
+
+*re-encrypt* is the mode that keeps both halves.
+The router still terminates, so it still routes on host and path and still handles headers; then it opens a *fresh* TLS connection to the pod, so the last hop is encrypted too.
+That combination — full HTTP-layer routing *plus* encryption all the way to the container — is why re-encrypt is the mode regulated environments tend to mandate, and the one you will be asked about in a security review.
+
+=== The certificate problem, and how OpenShift removes it
+
+Re-encrypt has an obvious catch: the pod now has to serve TLS, which means the pod needs a certificate and something has to issue it.
+Standing up a certificate authority for internal traffic is exactly the kind of work that makes teams give up and settle for edge.
+
+OpenShift removes that work with *service serving certificates*.
+Annotate a Service with `service.beta.openshift.io/serving-cert-secret-name`, and the cluster's service CA operator mints a certificate into a Secret for you — automatically, with rotation handled, and with no CA of your own to run.
+The certificate is issued for the Service's internal DNS name (`service.namespace.svc`), and the router *already trusts the issuer*, so a re-encrypt Route validates the backend with nothing extra to configure.
+That is the whole point: inside the cluster, end-to-end encryption is an annotation and a mount, not a PKI project.
+
+[NOTE]
+.Internal certificates are for internal traffic
+====
+A service serving certificate is trusted *inside* the cluster, not by browsers.
+That is the correct division of labour for a re-encrypt Route: the *outside* hop uses the router's publicly trusted certificate, and the *inside* hop uses the cluster-issued one.
+Neither one is trying to do the other's job — which is also why you never need to hand a public certificate to your pods.
+====
+
 == East-west: controlling who may talk to whom
 
 Inside the cluster the default is *allow-all*: every pod can open a connection to every other pod, in any namespace.
@@ -142,6 +202,9 @@ Knowing that default-deny-egress includes DNS — and exactly how to re-open it 
 * *"LoadBalancer is stuck at pending" is the most common bare-metal surprise.*
 Teams coming from a cloud assume `type=LoadBalancer` just works; on bare metal it needs a provider, and the fix is either an add-on such as MetalLB or — usually — *use a Route instead*.
 Recognizing that `<pending>` means "no provider," not "broken," saves the ticket.
+* *"Is it encrypted end to end?" is an audit question with a one-word answer — and edge gives the wrong one.*
+Teams reach for an edge Route, tick "TLS enabled," and only discover during a compliance review that the router-to-pod hop was plaintext all along.
+Knowing that re-encrypt exists — and that the certificate for it is an annotation, not a PKI project — turns that finding from a re-architecture into an afternoon.
 * *Gateway API is where ingress is going, and adopting the mental model now is cheap insurance.*
 Even while Routes remain the workhorse, framing exposure as GatewayClass → Gateway → HTTPRoute — platform-owned listener, app-owned routes, weighted splits — is the portable, multi-tenant shape the ecosystem is standardizing on.
 

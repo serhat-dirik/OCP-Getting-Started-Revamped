@@ -44,6 +44,14 @@ udn_present() { oc get userdefinednetwork partner-udn -n "$PARTNER" >/dev/null 2
 no_default_deny() { ! oc get networkpolicy default-deny-all -n "$NS" >/dev/null 2>&1; }
 no_web_route()    { ! oc get route parasol-web -n "$NS" >/dev/null 2>&1; }
 
+# A Route somewhere in the namespace terminates re-encrypt — the exercise-2 outcome, matched on the
+# termination mode rather than on a Route name, so an attendee who names theirs differently still
+# passes. Completion-mode only: the entry state ships no Routes at all.
+reencrypt_route() {
+  [ -n "$(oc get route -n "$NS" \
+            -o jsonpath='{.items[?(@.spec.tls.termination=="reencrypt")].metadata.name}' 2>/dev/null)" ]
+}
+
 # From the demo-client pod, is claims-db:5432 BLOCKED? Returns 0 (success) when the connection does
 # NOT open — the "db only from api" outcome, since demo-client is not an app=parasol-claims pod. A
 # netpol drop makes the connect time out (timeout → non-zero); an open connect exits 0 → NOT blocked.
@@ -80,6 +88,7 @@ else
   check "'api only from web' policy present"              np_present allow-claims-from-web        || hint "allow ingress to parasol-claims:8080 only from parasol-web pods"
   check "'db only from api' policy present"               np_present allow-db-from-claims         || hint "allow ingress to claims-db:5432 only from parasol-claims pods"
   check "parasol-web is exposed via a Route"              oc get route parasol-web -n "$NS"       || hint "expose parasol-web: oc create route edge parasol-web --service=parasol-web -n ${NS}"
+  check "a re-encrypt Route exists (last hop encrypted)"  reencrypt_route                         || hint "the edge Route leaves router→pod in plaintext; re-encrypt it: oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n ${NS}"
   # Behavioural proof — only meaningful when the substrate (claims-db + demo-client) is up, which it is
   # on any cluster (platform images). demo-client is NOT app=parasol-claims, so default-deny + the
   # 'db only from api' allow must BLOCK it. A >= -style outcome check: it must be UNreachable.
