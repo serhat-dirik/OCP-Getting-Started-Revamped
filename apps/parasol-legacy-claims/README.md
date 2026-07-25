@@ -21,14 +21,6 @@ stack. It is intentionally **not** JBoss EAP/JMS (Decision D16: Tomcat/JWS, no m
 | 7 | `ClaimsAppInitializer.java` / `pom.xml` | Servlet-era **WAR** + `javax.servlet` | containerization |
 | 8 | `Claim.java` | `javax.persistence` (pre-Jakarta) | openjdk, cloud-readiness |
 
-## Provenance
-
-Adapted (re-themed to Parasol claims) from the Apache-2.0 **Konveyor `customers-tomcat-legacy`**
-demo used in the Red Hat Modern Application Development workshop (`rh-mad-workshop`). Structure,
-the hardcoded-config anti-patterns, and the assess→analyze→refactor→deploy arc are ported; the
-domain model is Parasol. Credit belongs in the module wrap-up + `CREDITS.md` (Decision D18) — a
-follow-up for the M22 content builder.
-
 ## Build
 
 ```bash
