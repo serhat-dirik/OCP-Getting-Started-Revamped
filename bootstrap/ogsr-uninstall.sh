@@ -15,6 +15,14 @@
 #      Prune=false,Delete=false — applied by install.sh's protect_adopted_resources), so the cascade
 #      removes our resources and never theirs. This script VERIFIES that protection before it cascades
 #      and REFUSES to run without it (see --cascade-unprotected).
+#   3. The cascade runs in three ORDERED, blocking phases — consumers before providers. Argo orders
+#      prunes WITHIN one Application (reverse sync-wave); it has no ordering BETWEEN app-of-apps roots,
+#      so deleting all roots at once races. See § cascade ordering for the two dependencies that cross
+#      that boundary and what each one cost.
+#   4. No step can silently skip the ones after it. Every step runs through run_step(), which reports a
+#      failure and continues, and an EXIT trap always prints a ledger of which steps actually ran.
+#      A half-finished uninstall that says nothing is worse than a reported failure: the imperative
+#      mutations (OAuth IdP, node taint, htpasswd, console plugins) are reversed by the LATER steps.
 #
 # Shared/default objects are RESTORED, not blindly deleted: cluster-monitoring-config's
 # enableUserWorkload returns to its recorded prior value (or the ConfigMap is removed if we created it);
@@ -26,7 +34,9 @@
 #   ./ogsr-uninstall.sh               # interactive confirm, then uninstall
 #   ./ogsr-uninstall.sh --yes         # no prompt (CI / scripted)
 #   ./ogsr-uninstall.sh --cascade-timeout SECONDS
-#                                     # how long to let Argo finish pruning before continuing (default 900)
+#                                     # TOTAL seconds to let Argo finish pruning, shared across the three
+#                                     # ordered cascade phases below (default 900). Each phase is still
+#                                     # guaranteed a 60s floor, so a slow phase 1 cannot starve phase 3.
 #   ./ogsr-uninstall.sh --cascade-unprotected
 #                                     # DANGEROUS. Cascade even though adopted resources are NOT annotated
 #                                     # Prune=false,Delete=false. What you are risking: Argo prunes every
@@ -82,7 +92,104 @@ err()  { echo "❌ $*" >&2; }
 info() { echo "▶ $*"; }
 die()  { err "$*"; exit 1; }
 
-usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,45p'; exit 1; }
+usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,57p'; exit 1; }
+
+# ── step resilience ───────────────────────────────────────────────────────────
+# On 2026-07-25 this script printed "[3/8]" and stopped. No error, no summary. Steps 4-8 — OAuth IdP
+# removal, console plugins, htpasswd, Lightspeed, monitoring restore, node unshaping, cluster RBAC,
+# the AppProject, the Argo TLS key, GitOps handling and namespace deletion — never ran, and the
+# cluster was left with every imperative mutation still in place and nothing on screen saying so.
+#
+# The cause was one line: `[[ -n "$csv" ]] && del_obj …` as the LAST statement of a loop body. With an
+# empty $csv the AND-list returns 1, so the loop returns 1, so the function returns 1 — and a function
+# CALL that returns non-zero is not exempt from `set -e`, so the shell exited. Nothing was wrong; the
+# operator simply had no CSV to delete. That shape is a landmine anywhere it ends a function, and it
+# hides perfectly: it only fires once the branch that leaves the value empty is actually taken.
+#
+# Three layers, because one is not enough:
+#   1. every `cond && cmd` used as a statement is now an `if` (so a false condition is not a failure);
+#   2. every action/enumerator function ends in an explicit `return 0` (so its status means "ran",
+#      never "the last thing I evaluated happened to be false") — predicates are exempt and marked;
+#   3. this wrapper. `set -e` is suppressed for the whole dynamic extent of a command whose status is
+#      tested, so a non-zero return anywhere inside a step is RECORDED and the run continues.
+#      `set -euo pipefail` stays on: unset variables are still fatal, containment is per-step.
+STEP_TOTAL=8
+STEP_LEDGER=""        # "<status>|<label>" per step, in run order — the EXIT summary reads only this
+STEP_FAILED=0
+STEP_SUB_FAILED=0     # non-zero returns from sub-actions inside the step currently running
+STEPS_STARTED="false"
+STATE_DUMP=""         # set in step 8; the EXIT summary references it, so it must always be defined
+
+sub() {  # <fn> [args…] — one action inside a step: report a non-zero return, run the rest anyway
+  local rc=0
+  "$@" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    err "   ${1}() returned exit ${rc} — the remaining actions in this step still run"
+    STEP_SUB_FAILED=$((STEP_SUB_FAILED + 1))
+  fi
+  return 0
+}
+
+run_step() {  # <label> <fn> [args…] — run one uninstall step; a failure is reported, never fatal
+  local label="$1" rc=0
+  shift
+  STEPS_STARTED="true"
+  STEP_SUB_FAILED=0
+  info "$label"
+  "$@" || rc=$?
+  if [[ "$rc" -eq 0 && "$STEP_SUB_FAILED" -eq 0 ]]; then
+    STEP_LEDGER="${STEP_LEDGER}ok|${label}"$'\n'
+    return 0
+  fi
+  if [[ "$rc" -eq 0 ]]; then
+    STEP_LEDGER="${STEP_LEDGER}ran, ${STEP_SUB_FAILED} action(s) failed|${label}"$'\n'
+  else
+    STEP_LEDGER="${STEP_LEDGER}step function returned exit ${rc}|${label}"$'\n'
+    err "step returned exit ${rc}: ${label}"
+  fi
+  STEP_FAILED=$((STEP_FAILED + 1))
+  err "   continuing with the remaining steps — a half-finished uninstall is worse than a reported one"
+  return 0
+}
+
+print_run_summary() {  # <shell exit status> — the ONE place that says what happened, so it cannot lie
+  local rc="$1" ran=0 status label
+  echo
+  echo "STEPS THAT RAN (${STEP_TOTAL} total):"
+  while IFS='|' read -r status label; do
+    [[ -n "$label" ]] || continue
+    ran=$((ran + 1))
+    if [[ "$status" == "ok" ]]; then echo "   ✅ ${label}"; else echo "   ❌ ${label} — ${status}"; fi
+  done <<< "$STEP_LEDGER"
+  echo
+  if [[ "$ran" -lt "$STEP_TOTAL" ]]; then
+    err "EXITED EARLY after ${ran} of ${STEP_TOTAL} steps (shell exit ${rc}) — steps $((ran + 1))-${STEP_TOTAL} did NOT run."
+    err "   Whatever they reverse is still in place on this cluster. Every step is idempotent:"
+    err "   fix the cause above and re-run this script — it will skip what is already gone."
+  elif [[ "$STEP_FAILED" -gt 0 ]]; then
+    err "all ${STEP_TOTAL} steps ran; ${STEP_FAILED} reported a failure (details above). Re-run when fixed."
+  elif [[ "$DRY_RUN" == "true" ]]; then
+    ok "ogsr-uninstall dry-run complete — all ${STEP_TOTAL} steps evaluated, nothing changed"
+  else
+    ok "ogsr-uninstall complete — all ${STEP_TOTAL} steps ran"
+  fi
+  echo
+  echo "   NEXT — check what outlived the teardown (read-only, deletes nothing):"
+  if [[ -r "$STATE_DUMP" ]]; then
+    echo "     ./bootstrap/ogsr-check-clean.sh --state-file ${STATE_DUMP}"
+  else
+    echo "     ./bootstrap/ogsr-check-clean.sh"
+  fi
+  return 0
+}
+
+on_exit() {  # EXIT trap — fires on the normal end AND on any early death, so silence is impossible
+  local rc=$?
+  trap - EXIT
+  if [[ "$STEPS_STARTED" == "true" ]]; then print_run_summary "$rc"; fi
+  exit "$rc"
+}
+trap on_exit EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -124,6 +231,7 @@ state() {  # key [default] — echo a recorded value from the uninstall-state Co
   fi
   v="$(printf '%s\n' "$STATE_SNAPSHOT" | grep -m1 "^${k}=" | cut -d= -f2- || true)"
   if [[ -n "$v" ]]; then echo "$v"; else echo "$def"; fi
+  return 0
 }
 
 # Re-derive the operators the install installed, from the SAME component manifests + recorded stacks.
@@ -165,6 +273,7 @@ enumerate_operators() {
       echo "gitea-operator gitea-operator ${st}"
       ;;
   esac
+  return 0
 }
 
 # Every namespace the INSTALLED stacks declare in their component manifests — the "installed stacks'
@@ -172,7 +281,9 @@ enumerate_operators() {
 # instead of subscription*.yaml, so it also catches non-operator infra namespaces (e.g. ogsr-gitea)
 # that carry no per-user/shared marker label. A stack no longer in installed_stacks contributes
 # nothing here, so its leftover owner-labeled namespace (e.g. openshift-mta) is NOT in the allowlist.
-enumerate_installed_stack_ns() {
+# Emits "<stack>|<namespace>" so the same walk answers both questions asked of it: F2's delete
+# allowlist (namespace only) and "which stack owns this namespace?" (the cascade's phase-3 lookup).
+enumerate_installed_stack_ns_pairs() {
   local stacks stack app comp_path nsfile _stacks n
   stacks="$(state installed_stacks)"
   [[ -n "$stacks" ]] || return 0
@@ -186,12 +297,22 @@ enumerate_installed_stack_ns() {
       [[ -n "$comp_path" && "$comp_path" != "null" ]] || continue
       for nsfile in "${SCRIPT_DIR}/../${comp_path}"/namespace*.yaml "${SCRIPT_DIR}/../${comp_path}"/namespaces*.yaml; do
         [[ -e "$nsfile" ]] || continue
+        # `[[ … ]] && echo` here would make the LAST namespace line decide the function's exit status
+        # (yq emits a blank line for a non-Namespace document), and this function's output is consumed
+        # in a command substitution — a 1 there is a `set -e` kill. Guard with `continue`, never `&&`.
         while IFS= read -r n; do
-          [[ -n "$n" && "$n" != "null" ]] && echo "$n"
+          [[ -n "$n" && "$n" != "null" ]] || continue
+          echo "${stack}|${n}"
         done < <(yq 'select(.kind == "Namespace") | .metadata.name' "$nsfile" 2>/dev/null || true)
       done
     done
   done
+  return 0
+}
+
+enumerate_installed_stack_ns() {  # namespace-only view of the pairs above
+  enumerate_installed_stack_ns_pairs | cut -d'|' -f2
+  return 0
 }
 
 # Every Argo Application that is OURS, matched on ANY label we stamp. All five are exclusively ours
@@ -210,6 +331,20 @@ our_applications() {
       oc get applications.argoproj.io -n "$ARGO_NS" -l "$l" -o name 2>/dev/null
     done
   } | sed 's|.*/||' | sort -u || true
+  return 0
+}
+
+# The WORKSHOP LAYER — everything the workshop bootstrap put on top of the portfolio (the
+# workshop-config Application and tools/ws's per-module entry-* apps). Architecturally it is the
+# consumer side of every operator the portfolio installs, which is why it is cascade phase 1.
+WORKSHOP_LAYER_LABELS=("workshop.redhat.com/layer" "workshop.redhat.com/module")
+workshop_layer_applications() {
+  local l
+  { for l in "${WORKSHOP_LAYER_LABELS[@]}"; do
+      oc get applications.argoproj.io -n "$ARGO_NS" -l "$l" -o name 2>/dev/null
+    done
+  } | sed 's|.*/||' | sort -u || true
+  return 0
 }
 
 # The app-of-apps ROOTS: our apps minus the child component apps. Deleting only the roots is what makes
@@ -228,6 +363,117 @@ root_applications() {
     case "$comps" in *" $app "*) continue;; esac
     echo "$app"
   done < <(our_applications)
+  return 0
+}
+
+# ── cascade ordering: consumers before providers ──────────────────────────────
+# Argo orders prunes WITHIN one Application (reverse sync-wave). It has no ordering BETWEEN
+# app-of-apps roots, so deleting all 13 at once issues 13 independent cascades in parallel. Two
+# dependencies cross that boundary; the ordered phases below are the only place they can be expressed.
+#
+#   PHASE 1 — the workshop layer depends on the platform's OPERATORS.
+#     gitops/workshop-config renders Kueue operands: 8 ClusterQueue + 1 ResourceFlavor. The Kueue
+#     OPERATOR ships in the batch stack (pp-batch → pp-kueue). On 2026-07-25 both roots were deleted
+#     at 13:52:41; pp-batch removed the Kueue controller first, so when workshop-config deleted its
+#     ClusterQueues at 13:55:27 nothing was left to run kueue.x-k8s.io/resource-in-use. The app never
+#     finished pruning — 900s cascade wait plus a 300s straggler sweep, then steps 4-8 were skipped.
+#     This is the SAME operand-before-operator rule check-teardown-invariants.sh enforces inside a
+#     stack; it simply has no expression across roots, so ordering it here is bash's job.
+#
+#   PHASE 3 — every Gitea-sourced Application depends on the in-cluster MIRROR.
+#     Since the phase-2 install flip, apps source from ogsr-gitea, which is itself torn down by the
+#     stack that hosts it. Measured on the same run: the mirror began returning 503 at 13:57:02 and
+#     20 Applications — pp-gitea and pp-core-devtools among them — finished pruning normally between
+#     14:00:56 and 14:04:57. So Argo's CASCADED DELETE does not need the source repo (it enumerates
+#     managed objects from the cluster cache); only the refresh/comparison loop does, which is why a
+#     dying mirror shows up as a cosmetic ComparisonError. Deleting the mirror's stack last is
+#     therefore insurance, not a fix for an observed failure — it costs one extra bounded wait and
+#     removes the class, and it keeps teardown independent of any repo, in-cluster or external.
+#
+# Deliberately NOT chosen: flipping sources back to the external repo_url before cascading. That
+# would make an offline teardown depend on GitHub being reachable — a new failure mode, to fix a
+# dependency the measurements above show does not exist.
+
+# The hosts our Applications currently source FROM (post-flip: the in-cluster mirror's Route host).
+our_app_repo_hosts() {
+  local l
+  { for l in "${APP_LABELS[@]}"; do
+      oc get applications.argoproj.io -n "$ARGO_NS" -l "$l" \
+        -o jsonpath='{range .items[*]}{.spec.source.repoURL}{"\n"}{end}' 2>/dev/null
+    done
+  } | sed -e 's|^[a-z+]*://||' -e 's|^[^/@]*@||' -e 's|[/:].*$||' | grep . | sort -u || true
+  return 0
+}
+
+mirror_host_namespaces() {  # namespaces whose Route serves a repo our Applications source from
+  local hosts rhost ns
+  hosts="$(our_app_repo_hosts)"
+  [[ -n "$hosts" ]] || return 0
+  while IFS='|' read -r rhost ns; do
+    [[ -n "$rhost" && -n "$ns" ]] || continue
+    if printf '%s\n' "$hosts" | grep -qxF -- "$rhost"; then echo "$ns"; fi
+  done < <(oc get routes --all-namespaces \
+             -o jsonpath='{range .items[*]}{.spec.host}{"|"}{.metadata.namespace}{"\n"}{end}' 2>/dev/null || true) \
+    | sort -u
+  return 0
+}
+
+mirror_stack() {  # → the installed stack that HOSTS the in-cluster git mirror ("" when there is none)
+  local ns stack pstack pns
+  while IFS= read -r ns; do
+    [[ -n "$ns" ]] || continue
+    while IFS='|' read -r pstack pns; do
+      if [[ "$pns" == "$ns" ]]; then stack="$pstack"; fi
+    done < <(enumerate_installed_stack_ns_pairs)
+    if [[ -n "${stack:-}" ]]; then echo "$stack"; return 0; fi
+  done < <(mirror_host_namespaces)
+  return 0
+}
+
+stack_child_app_names() {  # <stack> → the child Application names its app-of-apps declares
+  local stack="$1" app name
+  [[ -n "$stack" ]] || return 0
+  [[ -d "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps" ]] || return 0
+  for app in "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+    [[ -e "$app" ]] || continue
+    name="$(yq '.metadata.name' "$app" 2>/dev/null || true)"
+    [[ -n "$name" && "$name" != "null" ]] || continue
+    echo "$name"
+  done
+  return 0
+}
+
+# Phase membership is a space-padded one-line set (" a b c "), the same idiom the namespace
+# classifier already uses — no associative arrays, so this stays correct on the bash 3.2 that
+# /usr/bin/env bash resolves to on a stock macOS.
+to_set() {  # <newline-list> → " a b c "
+  local s
+  s="$(printf '%s\n' "$1" | grep . | tr '\n' ' ' || true)"
+  echo " ${s}"
+  return 0
+}
+
+apps_remaining_in() {  # <set> → how many of our LIVE Applications belong to that phase
+  local set="$1" app n=0
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    case "$set" in *" $app "*) n=$((n + 1));; esac
+  done < <(our_applications)
+  echo "$n"
+  return 0
+}
+
+# The phases share ONE budget so --cascade-timeout still means "roughly this long in total", with a
+# floor per phase so a slow phase 1 cannot starve phase 3 of any chance at all.
+CASCADE_DEADLINE=0
+PHASE_FLOOR=60
+phase_budget() {  # → seconds the next phase may wait
+  local now left
+  now="$(date +%s)"
+  left=$((CASCADE_DEADLINE - now))
+  if [[ "$left" -lt "$PHASE_FLOOR" ]]; then left="$PHASE_FLOOR"; fi
+  echo "$left"
+  return 0
 }
 
 # ── adopted-resource protection guard ─────────────────────────────────────────
@@ -270,13 +516,15 @@ is_protected() {  # kind name [ns] → 0 if sync-options carries BOTH Prune=fals
   [[ "$v" == *"Prune=false"* && "$v" == *"Delete=false"* ]]
 }
 
+# PREDICATE — its non-zero IS the answer. Never give this one a trailing `return 0`.
 obj_exists() { local k="$1" n="$2" ns="${3:-}"
   if [[ -n "$ns" ]]; then oc get "$k" "$n" -n "$ns" >/dev/null 2>&1; else oc get "$k" "$n" >/dev/null 2>&1; fi
 }
 
 check_adopted() {  # kind name ns why — classify ONE adopted resource against the cascade
   local kind="$1" name="$2" ns="${3:-}" why="$4" loc nsarg=""
-  loc="${kind%%.*}/${name}"; [[ -n "$ns" ]] && { loc="${loc} -n ${ns}"; nsarg=" -n ${ns}"; }
+  loc="${kind%%.*}/${name}"
+  if [[ -n "$ns" ]]; then loc="${loc} -n ${ns}"; nsarg=" -n ${ns}"; fi
   if ! obj_exists "$kind" "$name" "$ns"; then
     PROT_OK=$((PROT_OK + 1))
     PROT_NOTE_LIST="${PROT_NOTE_LIST}"$'\n'"      ✓ ${loc} — recorded ${why}, but no longer on the cluster"
@@ -327,8 +575,9 @@ assert_adopted_protection() {
     check_adopted subscriptions.operators.coreos.com "$name" "$ns" "adopted operator (the org installed it)"
     csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" \
             -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
-    [[ -n "$csv" ]] && check_adopted clusterserviceversions.operators.coreos.com "$csv" "$ns" \
-      "CSV of an adopted operator"
+    if [[ -n "$csv" ]]; then
+      check_adopted clusterserviceversions.operators.coreos.com "$csv" "$ns" "CSV of an adopted operator"
+    fi
     while IFS= read -r og; do
       [[ -n "$og" ]] || continue
       check_adopted operatorgroups.operators.coreos.com "$og" "$ns" "OperatorGroup of an adopted operator"
@@ -348,10 +597,12 @@ assert_adopted_protection() {
   # verified here rather than assumed: a pruned cluster-monitoring-config takes the org's whole
   # monitoring configuration with it (not just the enableUserWorkload key restore_monitoring() handles),
   # and a pruned GatewayClass tears down their Gateway API data plane.
-  [[ "$(state gatewayclass_preexisted '')" == "true" ]] && \
+  if [[ "$(state gatewayclass_preexisted '')" == "true" ]]; then
     check_adopted gatewayclasses.gateway.networking.k8s.io openshift-default "" "GatewayClass the cluster already had"
-  [[ "$(state monitoring_cm_existed '')" == "true" ]] && \
+  fi
+  if [[ "$(state monitoring_cm_existed '')" == "true" ]]; then
     check_adopted configmap cluster-monitoring-config openshift-monitoring "the org's own cluster-monitoring-config"
+  fi
   return 0
 }
 
@@ -392,7 +643,7 @@ enforce_adopted_protection() {  # print the verdict; refuse the cascade unless i
     err "--cascade-unprotected given — PROCEEDING ANYWAY. The ${PROT_BAD} resource(s) above are expected to be deleted."
     return 0
   fi
-  [[ "$DRY_RUN" == "true" ]] && { echo >&2; err "(dry-run: a real run stops here. Nothing was changed.)"; exit 1; }
+  if [[ "$DRY_RUN" == "true" ]]; then echo >&2; err "(dry-run: a real run stops here. Nothing was changed.)"; fi
   exit 1
 }
 
@@ -409,20 +660,21 @@ ensure_resources_finalizer() {  # app — make `oc delete` CASCADE instead of si
     oc patch applications.argoproj.io "$app" -n "$ARGO_NS" --type json \
       -p "[{\"op\":\"add\",\"path\":\"/metadata/finalizers/-\",\"value\":\"${ARGO_FINALIZER}\"}]" >/dev/null 2>&1 || true
   fi
+  return 0
 }
 
-wait_for_cascade() {  # bounded, progress-printing wait until every one of our Applications is gone
-  local waited=0 n prev="" label="$1"
-  local budget="$2"
+# PREDICATE — returns 1 on timeout by design; every caller tests it. Do not add `return 0`.
+wait_for_phase() {  # <label> <member-set> <budget> — bounded, progress-printing wait for one phase
+  local label="$1" members="$2" budget="$3" waited=0 n prev=""
   while (( waited < budget )); do
-    n="$(our_applications | grep -c . || true)"; n="${n:-0}"
+    n="$(apps_remaining_in "$members")"
     if [[ "$n" == "0" ]]; then
-      ok "${label}: Argo finished pruning after ${waited}s — 0 workshop Applications remain"
+      ok "${label}: Argo finished pruning after ${waited}s"
       return 0
     fi
     # Print only on change, so an unattended run shows progress without a wall of identical lines.
     if [[ "$n" != "$prev" ]]; then
-      echo "   … ${n} Application(s) still pruning (${waited}s of ${budget}s)"
+      echo "   … ${label}: ${n} Application(s) still pruning (${waited}s of ${budget}s)"
       prev="$n"
     fi
     sleep 10; waited=$((waited + 10))
@@ -430,13 +682,123 @@ wait_for_cascade() {  # bounded, progress-printing wait until every one of our A
   return 1
 }
 
+cascade_phase() {  # <label> <roots> <member-set> — delete this phase's roots, then BLOCK on them
+  local label="$1" roots="$2" members="$3" app budget n
+  n="$(apps_remaining_in "$members")"
+  if [[ "$n" == "0" ]]; then
+    echo "   • ${label}: no Applications in this phase — skipping"
+    return 0
+  fi
+  # Members but no ROOT to delete = orphaned children whose parent is already gone (a stale pp-* from
+  # an older stack set). Waiting would burn this phase's budget on deletes nobody issued; the straggler
+  # sweep deletes them directly afterwards, which is exactly what it exists for.
+  if [[ -z "${roots//[[:space:]]/}" ]]; then
+    echo "   • ${label}: ${n} Application(s) present but no app-of-apps root to delete — left to the straggler sweep"
+    return 0
+  fi
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "   • WOULD cascade-delete application/${app}  [${label}]"
+      continue
+    fi
+    oc delete applications.argoproj.io "$app" -n "$ARGO_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    ok "cascade-delete requested for application/${app}  [${label}]"
+  done < <(printf '%s\n' "$roots")
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "   • WOULD then WAIT for ${label} to finish pruning before starting the next phase"
+    return 0
+  fi
+  budget="$(phase_budget)"
+  info "waiting for ${label} to finish pruning (${n} Application(s), up to ${budget}s)"
+  if wait_for_phase "$label" "$members" "$budget"; then return 0; fi
+  err "${label} did not finish pruning within ${budget}s — moving to the next phase anyway"
+  err "   ordering is best-effort for whatever is left; the straggler sweep and the report below cover it"
+  return 0
+}
+
+app_source_host() {  # <app> → the host its source repoURL points at ("" when unreadable)
+  oc get applications.argoproj.io "$1" -n "$ARGO_NS" -o jsonpath='{.spec.source.repoURL}' 2>/dev/null \
+    | sed -e 's|^[a-z+]*://||' -e 's|^[^/@]*@||' -e 's|[/:].*$||' || true
+  return 0
+}
+
+# PREDICATE — returns 1 when nothing serves the host any more. Callers test it; no `return 0`.
+host_served_by_route() {  # <host>
+  local host="$1" n
+  [[ -n "$host" ]] || return 1
+  n="$(oc get routes --all-namespaces -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' 2>/dev/null \
+        | grep -cxF -- "$host" || true)"
+  [[ "${n:-0}" != "0" ]]
+}
+
+diagnose_stuck_app() {  # <app> — name the blocker and the exact command, never an rpc error to decode
+  local app="$1" group kind ns name res fins shown=0 blockers=0 host
+  err "   ✗ application/${app}"
+  # .status.resources is Argo's OWN list of what it still manages, and it shrinks as objects go — so
+  # whatever remains in it is exactly what the cascade is waiting for. That is how the 2026-07-25 run
+  # read: 8 ClusterQueue + 1 ResourceFlavor, all Terminating on kueue.x-k8s.io/resource-in-use with
+  # the Kueue operator already removed by a DIFFERENT root. Read it before blaming anything else.
+  while IFS='|' read -r group kind ns name; do
+    [[ -n "$kind" && -n "$name" ]] || continue
+    res="$kind"
+    if [[ -n "$group" ]]; then res="${kind}.${group}"; fi
+    if [[ -n "$ns" ]]; then
+      fins="$(oc get "$res" "$name" -n "$ns" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)"
+    else
+      fins="$(oc get "$res" "$name" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)"
+    fi
+    [[ -n "$fins" && "$fins" != "[]" ]] || continue
+    blockers=$((blockers + 1))
+    if [[ "$shown" -ge 20 ]]; then continue; fi
+    shown=$((shown + 1))
+    echo "      ↳ ${res}/${name}${ns:+ -n $ns} still holds ${fins}" >&2
+    if [[ -n "$ns" ]]; then
+      echo "         clear: oc patch ${res} ${name} -n ${ns} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >&2
+    else
+      echo "         clear: oc patch ${res} ${name} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >&2
+    fi
+  done < <(oc get applications.argoproj.io "$app" -n "$ARGO_NS" \
+             -o jsonpath='{range .status.resources[*]}{.group}{"|"}{.kind}{"|"}{.namespace}{"|"}{.name}{"\n"}{end}' 2>/dev/null || true)
+
+  if [[ "$blockers" -gt 0 ]]; then
+    if [[ "$blockers" -gt "$shown" ]]; then err "      ↳ … and $((blockers - shown)) more"; fi
+    err "      CAUSE: those objects are Terminating on a finalizer whose controller is already gone,"
+    err "      so Argo cannot finish. Clearing them (commands above) releases the Application too —"
+    err "      you do NOT need to touch the Application's own finalizer. Clear only if you accept that"
+    err "      the operator's cleanup for those objects will not run."
+    return 0
+  fi
+
+  # No managed objects left, so the Application's own finalizer is all that remains. The one cause
+  # with no self-healing path is a source repo that no longer exists: the in-cluster Gitea mirror is
+  # torn down by this very uninstall, and if it went before this app did, Argo's refresh loop reports
+  # only `failed to list refs … rpc error`, which says nothing about what to do.
+  host="$(app_source_host "$app")"
+  if [[ -n "$host" ]] && ! host_served_by_route "$host"; then
+    err "      CAUSE: its source repo is GONE — ${host} is no longer served by any Route on this"
+    err "      cluster. That is the in-cluster Gitea mirror, torn down earlier in this same uninstall."
+    err "      It surfaces as: ComparisonError … failed to list refs: unexpected client error."
+    err "      Nothing will bring it back, so the ONLY recourse is to clear the finalizer by hand:"
+    echo "         oc patch application ${app} -n ${ARGO_NS} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >&2
+    err "      Anything the app still manages is then ORPHANED — run ogsr-check-clean.sh afterwards."
+    return 0
+  fi
+  err "      no managed objects and no missing source repo — inspect it directly:"
+  err "         oc describe application ${app} -n ${ARGO_NS}"
+  return 0
+}
+
 cascade_delete_applications() {
-  local app n roots=0 total=0 sweep_budget
+  local app n total=0 sweep_budget all_set p1_set p3_set p2_set
+  local mstack p1_roots="" p2_roots="" p3_roots="" p3_apps=""
   # The straggler sweep gets a third of the main budget (floor 30s): someone who sets a short
   # --cascade-timeout means "do not sit here", and a fixed second wait would ignore that.
-  sweep_budget=$(( CASCADE_TIMEOUT / 3 )); [[ "$sweep_budget" -lt 30 ]] && sweep_budget=30
+  sweep_budget=$(( CASCADE_TIMEOUT / 3 ))
+  if [[ "$sweep_budget" -lt 30 ]]; then sweep_budget=30; fi
   total="$(our_applications | grep -c . || true)"; total="${total:-0}"
   if [[ "$total" == "0" ]]; then ok "no workshop Argo Applications present — nothing to cascade"; return 0; fi
+  CASCADE_DEADLINE=$(( $(date +%s) + CASCADE_TIMEOUT ))
 
   # (a) Arm EVERY app, children included. A child pruned by its parent still needs its own finalizer,
   #     or the parent's cascade deletes the child Application object and orphans the child's resources.
@@ -445,46 +807,74 @@ cascade_delete_applications() {
     if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD ensure ${ARGO_FINALIZER} on application/${app}"; continue; fi
     ensure_resources_finalizer "$app"
   done < <(our_applications)
-  [[ "$DRY_RUN" == "true" ]] || ok "armed ${total} Application(s) with ${ARGO_FINALIZER} (cascade, not orphan)"
-
-  # (b) Delete the ROOTS only and let Argo prune downward in reverse sync-wave order. --wait=false so
-  #     all roots start pruning together; the ordering that matters is WITHIN each app-of-apps.
-  while IFS= read -r app; do
-    [[ -n "$app" ]] || continue
-    roots=$((roots + 1))
-    if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD cascade-delete application/${app} (root — Argo prunes its children in reverse sync-wave order)"; continue; fi
-    oc delete applications.argoproj.io "$app" -n "$ARGO_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    ok "cascade-delete requested for application/${app}"
-  done < <(root_applications)
-  if [[ "$DRY_RUN" == "true" ]]; then
-    echo "   • WOULD then wait up to ${CASCADE_TIMEOUT}s for Argo to finish pruning before touching anything else"
-    return 0
+  if [[ "$DRY_RUN" != "true" ]]; then
+    ok "armed ${total} Application(s) with ${ARGO_FINALIZER} (cascade, not orphan)"
   fi
 
-  # (c) WAIT. Everything after this step assumes Argo is done: step 3 removes operators, step 9 deletes
-  #     namespaces. Racing ahead is how an operand CR ends up outliving its operator and stranding a
-  #     finalizer nothing can run (TempoMonolithic/traces, 2026-07-25) — the exact bug this replaces.
-  info "waiting for Argo to finish pruning (${roots} root app(s), up to ${CASCADE_TIMEOUT}s)"
-  wait_for_cascade "cascade" "$CASCADE_TIMEOUT" && return 0
+  # (b) Partition the ROOTS into the three ordered phases (see § cascade ordering above). Membership
+  #     is computed once, from the live cluster plus the stack manifests — an app that cannot be
+  #     attributed lands in phase 2, which is exactly where every root used to be, so the worst case
+  #     is today's behaviour and never worse.
+  all_set="$(to_set "$(our_applications)")"
+  p1_set="$(to_set "$(workshop_layer_applications)")"
+  mstack="$(mirror_stack)"
+  if [[ -n "$mstack" ]]; then
+    p3_apps="$(printf 'pp-%s\n' "$mstack"; stack_child_app_names "$mstack")"
+    p3_set="$(to_set "$p3_apps")"
+    info "in-cluster git mirror is hosted by stack '${mstack}' — its Applications are pruned LAST"
+  else
+    p3_set=" "
+    info "no in-cluster git mirror found among our Application sources — two phases instead of three"
+  fi
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    case "$p1_set" in *" $app "*) p1_roots="${p1_roots}${app}"$'\n'; continue;; esac
+    case "$p3_set" in *" $app "*) p3_roots="${p3_roots}${app}"$'\n'; continue;; esac
+    p2_roots="${p2_roots}${app}"$'\n'
+  done < <(root_applications)
+  # Phase 2 = everything that is neither the workshop layer nor the mirror's stack. Built by
+  # subtraction so a child Application nobody classified still gets waited on by SOME phase.
+  p2_set=" "
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    case "$p1_set" in *" $app "*) continue;; esac
+    case "$p3_set" in *" $app "*) continue;; esac
+    p2_set="${p2_set}${app} "
+  done < <(printf '%s' "${all_set# }" | tr ' ' '\n')
+
+  # (c) Run the phases in order, each BLOCKING. Within a phase, Argo still prunes each root's children
+  #     in reverse sync-wave order, so the operand-before-operator ordering the sync waves buy is
+  #     preserved — the phases only add ordering BETWEEN roots, where Argo has none.
+  cascade_phase "phase 1/3 · workshop layer"                    "$p1_roots" "$p1_set"
+  cascade_phase "phase 2/3 · platform stacks"                   "$p2_roots" "$p2_set"
+  cascade_phase "phase 3/3 · git mirror stack (${mstack:-none})" "$p3_roots" "$p3_set"
+  if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
+
+  n="$(our_applications | grep -c . || true)"; n="${n:-0}"
+  if [[ "$n" == "0" ]]; then ok "cascade complete — 0 workshop Applications remain"; return 0; fi
 
   # (d) Stragglers: a child whose parent was already gone (a legacy stale pp-* app) is never reached by
   #     a root delete. Delete those directly — they are armed, so they still cascade, just unordered.
-  n="$(our_applications | grep -c . || true)"; n="${n:-0}"
-  err "${n} Application(s) still present after ${CASCADE_TIMEOUT}s — deleting them directly"
+  err "${n} Application(s) still present after the ordered phases — deleting them directly"
   while IFS= read -r app; do
     [[ -n "$app" ]] || continue
     oc delete applications.argoproj.io "$app" -n "$ARGO_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
     echo "   • direct cascade-delete requested for application/${app}"
   done < <(our_applications)
-  wait_for_cascade "straggler sweep" "$sweep_budget" && return 0
+  # Recompute the set: the sweep must wait on what is on the cluster NOW, not on the partition taken
+  # before the phases ran, or an app that appeared since would be declared gone without being checked.
+  all_set="$(to_set "$(our_applications)")"
+  if wait_for_phase "straggler sweep" "$all_set" "$sweep_budget"; then return 0; fi
 
   # (e) Still stuck. Do NOT force the finalizer off — that would silently orphan everything the app
-  #     still manages, which is the failure mode this whole change removes. Report and continue: the
-  #     imperative mutations below (OAuth IdP, node taint, htpasswd) must still be reversed, and
-  #     ogsr-check-clean.sh will show precisely what Argo left behind.
+  #     still manages, which is the failure mode this whole change removes. Diagnose each one by name
+  #     and continue: the imperative mutations below (OAuth IdP, node taint, htpasswd) must still be
+  #     reversed, and ogsr-check-clean.sh will show precisely what Argo left behind.
   err "Argo did not finish pruning. Continuing with the rest of the uninstall, but expect leftovers:"
-  our_applications | sed 's/^/      ✗ application\//' >&2
-  err "   inspect: oc describe application <name> -n ${ARGO_NS}"
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    diagnose_stuck_app "$app"
+  done < <(our_applications)
   err "   then run: ./bootstrap/ogsr-check-clean.sh"
   return 0
 }
@@ -492,7 +882,8 @@ cascade_delete_applications() {
 # ── delete helpers (all dry-run aware, all tolerant of already-absent objects) ─
 del_obj() {  # kind name [ns] — delete one object if it exists; print a skip reason if absent
   local kind="$1" name="$2" ns="${3:-}" loc
-  loc="${kind}/${name}"; [[ -n "$ns" ]] && loc="${loc} -n ${ns}"
+  loc="${kind}/${name}"
+  if [[ -n "$ns" ]]; then loc="${loc} -n ${ns}"; fi
   if [[ -n "$ns" ]]; then
     oc get "$kind" "$name" -n "$ns" >/dev/null 2>&1 || { echo "   • skip ${loc} (absent)"; return 0; }
   else
@@ -505,6 +896,7 @@ del_obj() {  # kind name [ns] — delete one object if it exists; print a skip r
     oc delete "$kind" "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
   ok "deleted ${loc}"
+  return 0
 }
 
 del_labeled_cluster() {  # kind — delete owner-labeled objects of a CLUSTER-SCOPED kind (skips if CRD absent)
@@ -513,6 +905,7 @@ del_labeled_cluster() {  # kind — delete owner-labeled objects of a CLUSTER-SC
     [[ -n "$name" ]] || continue
     del_obj "$kind" "$name"
   done < <(oc get "$kind" -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' || true)
+  return 0
 }
 
 # REMOVED with the move to cascade delete: del_labeled_namespaced(). Its only caller was the old step 7
@@ -544,6 +937,7 @@ preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, remove every 
   oc label namespace "$ns" "${key}-" "${TRACK_LABEL}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
   oc annotate namespace "$ns" "${TRACK_ANN}-" >/dev/null 2>&1 || true
   echo "   • preserved namespace/${ns}, removed our labels + Argo tracking-id (${reason})"
+  return 0
 }
 
 strip_our_marks() {  # kind name ns — same de-marking for a single adopted OBJECT, not a namespace
@@ -565,6 +959,7 @@ strip_our_marks() {  # kind name ns — same de-marking for a single adopted OBJ
     oc label "$kind" "$name" "${key}-" "${TRACK_LABEL}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
     oc annotate "$kind" "$name" "${TRACK_ANN}-" >/dev/null 2>&1 || true
   fi
+  return 0
 }
 
 del_ns_fast() {  # ns — delete a namespace classify already confirmed exists (skips del_obj's redundant get,
@@ -572,6 +967,7 @@ del_ns_fast() {  # ns — delete a namespace classify already confirmed exists (
   if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD delete namespace/${ns}"; return 0; fi
   oc delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   ok "deleted namespace/${ns}"
+  return 0
 }
 
 # ── reverse the imperative bootstrap mutations ────────────────────────────────
@@ -599,6 +995,7 @@ remove_oauth_idp() {  # remove ONLY the workshop-users IdP entry, preserving eve
   if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD remove OAuth IdP 'workshop-users' (index ${idx}; other IdPs preserved)"; return 0; fi
   oc patch oauth cluster --type=json -p "[{\"op\":\"remove\",\"path\":\"/spec/identityProviders/${idx}\"}]" >/dev/null 2>&1 || true
   ok "removed OAuth IdP 'workshop-users' (existing IdPs preserved)"  # TODO(verify-on-cluster)
+  return 0
 }
 
 remove_console_plugins() {  # remove ONLY the plugin names workshop-config recorded as added (backlog #24)
@@ -627,6 +1024,7 @@ remove_console_plugins() {  # remove ONLY the plugin names workshop-config recor
     oc patch consoles.operator.openshift.io cluster --type=json -p "[{\"op\":\"remove\",\"path\":\"/spec/plugins/${idx}\"}]" >/dev/null 2>&1 || true
     ok "removed console plugin '${n}' from spec.plugins (existing plugins preserved)"  # TODO(verify-on-cluster)
   done
+  return 0
 }
 
 restore_monitoring() {  # put cluster-monitoring-config back the way we found it
@@ -654,6 +1052,7 @@ restore_monitoring() {  # put cluster-monitoring-config back the way we found it
       err "cluster-monitoring-config pre-existed WITHOUT enableUserWorkload; we added it. Remove it manually:"
       echo "      oc -n openshift-monitoring edit configmap cluster-monitoring-config   # delete the enableUserWorkload line";;
   esac
+  return 0
 }
 
 reverse_node_shaping() {  # remove the batch pool label+taint and the synthetic zone labels
@@ -671,6 +1070,7 @@ reverse_node_shaping() {  # remove the batch pool label+taint and the synthetic 
     oc label node "$node" "${ZONE_KEY}-" >/dev/null 2>&1 || true
     ok "removed ${ZONE_KEY} label from node/${node}"
   done < <(oc get nodes -l "$ZONE_KEY" -o name 2>/dev/null | sed 's|.*/||' || true)
+  return 0
 }
 
 handle_lightspeed() {  # remove our MaaS secret / namespace only when WE installed Lightspeed
@@ -696,6 +1096,7 @@ handle_lightspeed() {  # remove our MaaS secret / namespace only when WE install
   else
     echo "   • preserve namespace/openshift-lightspeed (pre-existed; removed only our secret + operator)"
   fi
+  return 0
 }
 
 handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise preserve (+ note the memory bump)
@@ -706,7 +1107,7 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
     del_obj argocd openshift-gitops openshift-gitops
     csv="$(oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
     del_obj subscriptions.operators.coreos.com openshift-gitops-operator openshift-gitops-operator
-    [[ -n "$csv" ]] && del_obj clusterserviceversion "$csv" openshift-gitops-operator
+    if [[ -n "$csv" ]]; then del_obj clusterserviceversion "$csv" openshift-gitops-operator; fi
     del_obj operatorgroup openshift-gitops-operator openshift-gitops-operator
     del_obj namespace openshift-gitops
     del_obj namespace openshift-gitops-operator
@@ -720,7 +1121,7 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
       # warning on prior≠target instead of firing whenever a prior spec was recorded (false alarm on a
       # cluster that shipped at 6Gi). Target is read from the canonical override so it never drifts.
       target_mem="$(yq '.spec.controller.resources.limits.memory' "${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/operator/argocd-controller-resources.yaml" 2>/dev/null || true)"
-      [[ -n "$target_mem" && "$target_mem" != "null" ]] || target_mem="6Gi"
+      if [[ -z "$target_mem" || "$target_mem" == "null" ]]; then target_mem="6Gi"; fi
       prior_mem="$(echo "$prior_res" | yq -p=json '.limits.memory' 2>/dev/null || true)"
       if [[ "$prior_mem" == "$target_mem" ]]; then
         echo "   • openshift-gitops controller memory was already ${target_mem} before install — not raised, nothing to restore"
@@ -731,6 +1132,7 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
       fi
     fi
   fi
+  return 0
 }
 
 cleanup_created_operators() {  # remove Subscription+CSV for operators WE created (covers shared-ns operators)
@@ -740,7 +1142,17 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
     if [[ "$st" == "created" ]]; then
       csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
       del_obj subscriptions.operators.coreos.com "$name" "$ns"
-      [[ -n "$csv" ]] && del_obj clusterserviceversion "$csv" "$ns"
+      # THE 2026-07-25 KILLER. This was `[[ -n "$csv" ]] && del_obj …` and it is the LAST statement of
+      # this branch, hence of the loop body, hence of the function. With the cascade pruning
+      # Subscriptions in step 2, $csv is empty for every operator by the time we get here — the AND-list
+      # returns 1, the function returns 1, and `set -e` killed the script between [3/8] and [4/8] with
+      # no output at all. It never fired under the old --cascade=orphan teardown because that left the
+      # Subscriptions in place, so $csv was always populated. An `if` cannot do this.
+      if [[ -n "$csv" ]]; then
+        del_obj clusterserviceversion "$csv" "$ns"
+      else
+        echo "   • skip CSV for ${name} in ${ns} (its Subscription is already gone, so OLM reported no installedCSV)"
+      fi
     else
       echo "   • preserve operator ${name} in ${ns} (${st} — not created by us)"
       # Preserving is necessary but not sufficient: Argo stamped the org's own Subscription, CSV and
@@ -749,7 +1161,11 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
       # correctly reports it — so a clean run would still exit non-zero. De-mark what we marked.
       strip_our_marks subscriptions.operators.coreos.com "$name" "$ns"
       csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
-      [[ -n "$csv" ]] && strip_our_marks clusterserviceversions.operators.coreos.com "$csv" "$ns"
+      # Same shape as the killer above, and it survives here only because it is not currently last —
+      # which is exactly how this class hides. Written as an `if` so re-ordering this branch is safe.
+      if [[ -n "$csv" ]]; then
+        strip_our_marks clusterserviceversions.operators.coreos.com "$csv" "$ns"
+      fi
       while IFS= read -r og; do
         [[ -n "$og" ]] || continue
         strip_our_marks operatorgroups.operators.coreos.com "$og" "$ns"
@@ -757,6 +1173,7 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
                 -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
     fi
   done < <(enumerate_operators)
+  return 0
 }
 
 # F2/F7 — classify EVERY owner-labeled namespace exactly as the teardown will act on it, so the plan
@@ -773,8 +1190,12 @@ classify_workshop_namespaces() {
   stack_ns=" $(enumerate_installed_stack_ns | tr '\n' ' ') "
   while IFS=$'\t' read -r n user layer shared; do
     [[ -n "$n" ]] || continue
-    [[ "$n" == "$STATE_NS" ]]            && { printf 'defer\t%s\tuninstall-state namespace (removed last)\n' "$n"; continue; }
-    [[ "$n" == "openshift-lightspeed" ]] && { printf 'defer\t%s\tLightspeed (its own adoption guard)\n' "$n"; continue; }
+    if [[ "$n" == "$STATE_NS" ]]; then
+      printf 'defer\t%s\tuninstall-state namespace (removed last)\n' "$n"; continue
+    fi
+    if [[ "$n" == "openshift-lightspeed" ]]; then
+      printf 'defer\t%s\tLightspeed (its own adoption guard)\n' "$n"; continue
+    fi
     # Adopted-operator namespace → PRESERVE (the operator lives here) + strip our owner label (F7).
     case "$adopted_op_ns" in *" $n "*) printf 'preserve-strip\t%s\tadopted-operator namespace (operator preserved)\n' "$n"; continue;; esac
     # Workshop-owned per-user / shared namespace (marker label) → ours to delete.
@@ -789,6 +1210,7 @@ classify_workshop_namespaces() {
     printf 'preserve-strip\t%s\tnot part of installed_stacks (%s) — left intact, review manually\n' "$n" "$(state installed_stacks)"
   done < <(oc get namespaces -l "$OWNER_LABEL" \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/layer}{"\t"}{.metadata.labels.workshop\.redhat\.com/shared}{"\n"}{end}' 2>/dev/null || true)
+  return 0
 }
 
 delete_workshop_namespaces() {  # act on the classification: delete ours, preserve+strip the rest (F7)
@@ -801,6 +1223,7 @@ delete_workshop_namespaces() {  # act on the classification: delete ours, preser
       defer)          : ;;  # STATE_NS removed right after this fn; Lightspeed handled by handle_lightspeed
     esac
   done < <(classify_workshop_namespaces)
+  return 0
 }
 
 # F6 — a namespace whose operator we PRESERVED can wedge in Terminating on an operator-instance CR
@@ -825,6 +1248,7 @@ report_ns_finalizer_holders() {  # ns — surface what blocks termination, from 
     done < <(oc get "$rtype" -n "$ns" -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
   done < <(oc get namespace "$ns" -o jsonpath='{range .status.conditions[*]}{.message}{"\n"}{end}' 2>/dev/null \
             | grep -oE '[a-z0-9.-]+\.[a-z0-9-]+ has [0-9]+ resource instances' | sed 's/ has.*//' | sort -u || true)
+  return 0
 }
 
 report_stuck_namespaces() {  # names… — bounded wait for termination, then report any still stuck (>~2min)
@@ -835,20 +1259,27 @@ report_stuck_namespaces() {  # names… — bounded wait for termination, then r
     present=" $(oc get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null || true) "
     remaining=()
     for ns in "${targets[@]}"; do case "$present" in *" $ns "*) remaining+=("$ns");; esac; done
-    [[ ${#remaining[@]} -eq 0 ]] && { ok "all deleted workshop namespaces finished terminating"; return 0; }
+    if [[ ${#remaining[@]} -eq 0 ]]; then
+      ok "all deleted workshop namespaces finished terminating"; return 0
+    fi
     sleep 10; waited=$((waited + 10))
   done
+  # Guard the expansion: /usr/bin/env bash is 3.2 on a stock macOS, where "${arr[@]}" on an EMPTY
+  # array under `set -u` is an unbound-variable error, not an empty list.
+  [[ ${#remaining[@]} -gt 0 ]] || return 0
   err "still Terminating after ${max}s — a preserved operator's CR finalizer is holding these namespaces:"
   for ns in "${remaining[@]}"; do
     echo "   ✗ namespace/${ns} — finalizer-holding objects (clear ONLY if you understand the operator's cleanup):"
     report_ns_finalizer_holders "$ns"
   done
+  return 0
 }
 
 # ── plan ──────────────────────────────────────────────────────────────────────
 print_plan() {
-  local apps roots created adopted name ns st gitops_plan mon_plan gw_plan
+  local apps roots created adopted name ns st gitops_plan mon_plan gw_plan mirror_plan
   local verb wn reason nwipe=0 wipe_stack="" strip_list=""
+  mirror_plan="$(mirror_stack)"
   # `grep -c .` prints 0 AND exits 1 on empty input, so a `|| echo '?'` fallback appended a second line
   # and the plan read "0\n?". Take the count and normalise it instead.
   apps="$(our_applications | grep -c . || true)"; apps="${apps:-0}"
@@ -895,6 +1326,11 @@ print_plan() {
   echo "      order, so an operand CR is removed while its operator is still running. Everything Argo"
   echo "      installed goes with them — namespaces, CRs, RBAC, Subscriptions — except the resources"
   echo "      listed under PROTECTED below."
+  echo "      Roots go in THREE ordered, blocking phases — consumers before providers:"
+  echo "        1. the workshop layer (workshop-config, entry-*), whose CRs are operands of"
+  echo "           operators the platform stacks own;"
+  echo "        2. the platform stacks;"
+  echo "        3. the stack hosting the in-cluster git mirror${mirror_plan:+ (${mirror_plan})}, last."
   echo "  • ${nwipe} owner-labeled namespaces (per-user {user}-*, shared ogsr-*, installed-stack:${wipe_stack:- <none>} )"
   echo "    — most are pruned by the cascade; step 9 deletes any Argo did not manage, and waits."
   echo "  • the argo controller ClusterRoleBinding + ClusterRoles (applied imperatively by argocd-bootstrap)"
@@ -922,13 +1358,125 @@ print_plan() {
   else
     echo "      (none — this install adopted nothing, so the cascade has nothing to skip)"
   fi
-  [[ "$PROT_BAD" -gt 0 ]] && echo "      ⚠️  ${PROT_BAD} adopted resource(s) are NOT protected — details below."
+  if [[ "$PROT_BAD" -gt 0 ]]; then
+    echo "      ⚠️  ${PROT_BAD} adopted resource(s) are NOT protected — details below."
+  fi
   echo
+  return 0
+}
+
+del_appprojects() {  # the AppProject(s) argocd-bootstrap applies imperatively
+  # ogsr-platform must exist BEFORE the Applications that name it, so it is applied with `oc apply`
+  # outside any Application — which means the cascade never sees it and it outlives the teardown.
+  # It is also not inert: the installer unions its sourceRepos/destinations on every apply, so a
+  # stale one silently widens what a later install is allowed to sync.
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    del_obj appprojects.argoproj.io "$name" "$ARGO_NS"
+  done < <(oc get appprojects.argoproj.io -n "$ARGO_NS" -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' || true)
+  return 0
+}
+
+remove_argo_tls_cert_key() {  # drop OUR host key from a ConfigMap the org may also be using
+  # install.sh merges the mirror's host into argocd-tls-certs-cm so Argo can verify Gitea's cert
+  # without `insecure: true`, and records which host under argo_tls_cert_host precisely so teardown
+  # can remove exactly that key. Deleting the whole ConfigMap would strip every host the org trusts.
+  local host esc
+  host="$(state argo_tls_cert_host '')"
+  [[ -n "$host" ]] || return 0
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "   • WOULD remove key ${host} from configmap/argocd-tls-certs-cm -n ${ARGO_NS}"
+    return 0
+  fi
+  oc get configmap argocd-tls-certs-cm -n "$ARGO_NS" >/dev/null 2>&1 || return 0
+  esc="$(printf '%s' "$host" | sed 's|~|~0|g; s|/|~1|g')"   # RFC 6901 JSON-pointer escaping
+  if oc patch configmap argocd-tls-certs-cm -n "$ARGO_NS" --type=json \
+       -p "[{\"op\":\"remove\",\"path\":\"/data/${esc}\"}]" >/dev/null 2>&1; then
+    ok "removed ${host} from argocd-tls-certs-cm (other hosts untouched)"
+  else
+    info "argocd-tls-certs-cm carries no ${host} key — nothing to remove"
+  fi
+  return 0
+}
+
+# ── the eight steps ───────────────────────────────────────────────────────────
+# One function per step, so `main` is a list of run_step calls and the ledger it prints cannot drift
+# from what actually ran. Multi-action steps route each action through sub(), which reports a failing
+# action and still runs the rest — the OAuth IdP must come out even if the console-plugin patch fails.
+step_stop_reconciliation() {  # 1 — no app-of-apps may re-create a child mid-teardown
+  local app
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD disable automated sync on application/${app}"; continue; fi
+    oc patch application "$app" -n "$ARGO_NS" --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}' >/dev/null 2>&1 || true
+  done < <(our_applications)
+  return 0
+}
+
+step_reverse_cluster_mutations() {  # 4 — the imperative, cluster-global changes install.sh made
+  sub remove_oauth_idp
+  sub remove_console_plugins
+  sub del_obj secret htpasswd-workshop-users openshift-config
+  sub handle_lightspeed
+  sub restore_monitoring
+  sub reverse_node_shaping
+  return 0
+}
+
+step_gateway_api() {  # 5 — remove only if we created it. Argo manages this CR (it is
+  # platform-portfolio/components/gateway-api/gatewayclass.yaml), so a GatewayClass WE created is
+  # already gone with the cascade and del_obj skips it. Kept for the adopted case, which is the branch
+  # that matters: it must NOT be deleted, and the guard above has verified Argo will skip it.
+  if [[ "$(state gatewayclass_preexisted)" == "false" ]]; then
+    del_obj gatewayclass.gateway.networking.k8s.io openshift-default
+  else
+    echo "   • preserve GatewayClass/openshift-default (adopted / pre-existing)"
+  fi
+  return 0
+}
+
+step_cluster_rbac() {  # 6 — cluster-scoped objects the cascade CANNOT reach, because Argo never
+  # managed them. Everything else that used to be swept here is now pruned by step 2 and has been
+  # removed from this step: Group/workshop-attendees, the Kueue ResourceFlavor/WorkloadPriorityClass/
+  # ClusterQueue triple (all gitops/workshop-config/templates/kueue-queues.yaml), AppProjects
+  # (student-appprojects.yaml + appproject-workshop-entries.yaml) and the openshift/java-21
+  # ImageStream (java-21-imagestream.yaml) — every one is rendered by the workshop-config Application,
+  # so cascade-deleting it removes them in the same pass, with dependency ordering bash never had.
+  # What remains has a genuinely imperative source: platform-portfolio/argocd-bootstrap/install.sh
+  # applies controller-rbac.yaml (the openshift-gitops-application-controller-cluster-admin binding)
+  # with `oc apply`, outside any Application. The ClusterRole half is swept alongside it because RBAC
+  # is the one leftover class that grants standing access after a teardown.
+  sub del_labeled_cluster clusterrolebindings.rbac.authorization.k8s.io
+  sub del_labeled_cluster clusterroles.rbac.authorization.k8s.io
+  sub del_appprojects
+  sub remove_argo_tls_cert_key
+  return 0
+}
+
+step_delete_namespaces() {  # 8 — whatever the cascade did not own, then the state namespace last
+  sub delete_workshop_namespaces
+  # The state ConfigMap is about to go with its namespace, so dump it first: ogsr-check-clean.sh needs
+  # it to tell an adopted operator from one we created, and a second run has no other source.
+  # Only set in a REAL run: the closing guidance prints `--state-file $STATE_DUMP` when the file is
+  # readable, and a dry-run must not point at a dump left behind by some earlier run.
+  if [[ "$DRY_RUN" != "true" && -n "$STATE_SNAPSHOT" ]]; then
+    STATE_DUMP="${TMPDIR:-/tmp}/ogsr-uninstall-state.txt"
+    if printf '%s\n' "$STATE_SNAPSHOT" > "$STATE_DUMP" 2>/dev/null; then
+      ok "install state saved to ${STATE_DUMP}"
+    else
+      err "could not write the install-state dump to ${STATE_DUMP} — ogsr-check-clean.sh will run without it"
+    fi
+  fi
+  sub del_obj namespace "$STATE_NS"
+  DELETED_WS_NS+=("$STATE_NS")   # always ≥1 element, so the expansion below is safe on bash 3.2
+  sub report_stuck_namespaces "${DELETED_WS_NS[@]}"
+  return 0
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────
 echo "▶ ogsr-uninstall  (cluster: $(oc whoami --show-server 2>/dev/null || echo '?') as $(oc whoami 2>/dev/null || echo '?'))"
-[[ "$DRY_RUN" == "true" ]] && echo "  MODE: --dry-run (no changes will be made)"
+if [[ "$DRY_RUN" == "true" ]]; then echo "  MODE: --dry-run (no changes will be made)"; fi
 echo
 
 # Verify BEFORE the plan is printed and before anyone is asked to confirm: the plan's PROTECTED section
@@ -953,129 +1501,39 @@ else
   fi
 fi
 
-# 1. Stop reconciliation on ALL our apps first, so no app-of-apps re-creates a child mid-teardown.
-info "[1/8] stopping reconciliation on workshop Argo Applications"
-while IFS= read -r app; do
-  [[ -n "$app" ]] || continue
-  if [[ "$DRY_RUN" == "true" ]]; then echo "   • WOULD disable automated sync on application/${app}"; continue; fi
-  oc patch application "$app" -n "$ARGO_NS" --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}' >/dev/null 2>&1 || true
-done < <(our_applications)
+run_step "[1/8] stopping reconciliation on workshop Argo Applications" step_stop_reconciliation
 
-# 2. CASCADE-delete our apps: deleting the Application IS the uninstall. Argo removes what it installed,
-#    in reverse sync-wave order, so each operator is still running when its own operand CR is deleted and
-#    that CR's finalizer can complete — which is also how the operator's webhooks and APIServices get
-#    removed at the source instead of being swept up afterwards. The previous --cascade=orphan protected
-#    adopted operators by exempting EVERYTHING, which threw away Argo's ordering and forced the
-#    incomplete bash re-implementation below it; adopted resources are now exempted individually.
-info "[2/8] cascade-deleting workshop Argo Applications (Argo prunes what it installed)"
-cascade_delete_applications
+# CASCADE-delete our apps: deleting the Application IS the uninstall. Argo removes what it installed,
+# in reverse sync-wave order, so each operator is still running when its own operand CR is deleted and
+# that CR's finalizer can complete — which is also how the operator's webhooks and APIServices get
+# removed at the source instead of being swept up afterwards. The previous --cascade=orphan protected
+# adopted operators by exempting EVERYTHING, which threw away Argo's ordering and forced the
+# incomplete bash re-implementation below it; adopted resources are now exempted individually.
+run_step "[2/8] cascade-deleting workshop Argo Applications (Argo prunes what it installed)" \
+  cascade_delete_applications
 
-# 3. CSVs for operators WE created. The cascade already pruned their Subscriptions (those ARE in our
-#    component manifests), but a CSV is created by OLM from the Subscription, never by Argo, so nothing
-#    prunes it — deleting a Subscription deliberately leaves its CSV and the running operator behind.
-#    This is the one operator-removal step GitOps cannot do for us. The Subscription delete stays as a
-#    no-op safety net for a degraded Argo (del_obj prints "skip (absent)" when the cascade got it).
-info "[3/8] removing CSVs for operators we created (adopted operators preserved)"
-cleanup_created_operators
+# CSVs for operators WE created. The cascade already pruned their Subscriptions (those ARE in our
+# component manifests), but a CSV is created by OLM from the Subscription, never by Argo, so nothing
+# prunes it — deleting a Subscription deliberately leaves its CSV and the running operator behind.
+# This is the one operator-removal step GitOps cannot do for us. The Subscription delete stays as a
+# no-op safety net for a degraded Argo (del_obj prints "skip (absent)" when the cascade got it).
+run_step "[3/8] removing CSVs for operators we created (adopted operators preserved)" \
+  cleanup_created_operators
 
-# 4. Reverse the imperative, cluster-global mutations.
-info "[4/8] reversing imperative cluster mutations (OAuth IdP, console plugins, monitoring, nodes, htpasswd)"
-remove_oauth_idp
-remove_console_plugins
-del_obj secret htpasswd-workshop-users openshift-config
-handle_lightspeed
-restore_monitoring
-reverse_node_shaping
+run_step "[4/8] reversing imperative cluster mutations (OAuth IdP, console plugins, monitoring, nodes, htpasswd)" \
+  step_reverse_cluster_mutations
 
-# 5. GatewayClass — remove only if we created it. Argo manages this CR (it is
-#    platform-portfolio/components/gateway-api/gatewayclass.yaml), so a GatewayClass WE created is
-#    already gone with the cascade and del_obj skips it. Kept for the adopted case, which is the branch
-#    that matters: it must NOT be deleted, and step 0's guard has already verified Argo will skip it.
-info "[5/8] Gateway API"
-if [[ "$(state gatewayclass_preexisted)" == "false" ]]; then
-  del_obj gatewayclass.gateway.networking.k8s.io openshift-default
-else
-  echo "   • preserve GatewayClass/openshift-default (adopted / pre-existing)"
-fi
+run_step "[5/8] Gateway API" step_gateway_api
 
-# 6. Cluster-scoped objects the cascade CANNOT reach, because Argo never managed them.
-#    Everything else that used to be swept here is now pruned by step 2 and has been removed from this
-#    step: Group/workshop-attendees, the Kueue ResourceFlavor/WorkloadPriorityClass/ClusterQueue triple
-#    (all gitops/workshop-config/templates/kueue-queues.yaml), AppProjects
-#    (student-appprojects.yaml + appproject-workshop-entries.yaml) and the openshift/java-21 ImageStream
-#    (java-21-imagestream.yaml) — every one of them is rendered by the workshop-config Application, so
-#    cascade-deleting it removes them in the same pass, with dependency ordering bash never had.
-#    What remains here has a genuinely imperative source: platform-portfolio/argocd-bootstrap/install.sh
-#    applies controller-rbac.yaml (the openshift-gitops-application-controller-cluster-admin binding)
-#    with `oc apply`, outside any Application. The ClusterRole half is swept alongside it because RBAC is
-#    the one leftover class that grants standing access after a teardown.
-del_appprojects() {  # the AppProject(s) argocd-bootstrap applies imperatively
-  # ogsr-platform must exist BEFORE the Applications that name it, so it is applied with `oc apply`
-  # outside any Application — which means the cascade never sees it and it outlives the teardown.
-  # It is also not inert: the installer unions its sourceRepos/destinations on every apply, so a
-  # stale one silently widens what a later install is allowed to sync.
-  local name
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    del_obj appprojects.argoproj.io "$name" "$ARGO_NS"
-  done < <(oc get appprojects.argoproj.io -n "$ARGO_NS" -l "$OWNER_LABEL" -o name 2>/dev/null | sed 's|.*/||' || true)
-}
+run_step "[6/8] deleting owner-labeled cluster RBAC that no Application manages" step_cluster_rbac
 
-remove_argo_tls_cert_key() {  # drop OUR host key from a ConfigMap the org may also be using
-  # install.sh merges the mirror's host into argocd-tls-certs-cm so Argo can verify Gitea's cert
-  # without `insecure: true`, and records which host under argo_tls_cert_host precisely so teardown
-  # can remove exactly that key. Deleting the whole ConfigMap would strip every host the org trusts.
-  local host esc
-  host="$(state argo_tls_cert_host '')"
-  [[ -n "$host" ]] || return 0
-  if [[ "$DRY_RUN" == "true" ]]; then
-    echo "   • WOULD remove key ${host} from configmap/argocd-tls-certs-cm -n ${ARGO_NS}"
-    return 0
-  fi
-  oc get configmap argocd-tls-certs-cm -n "$ARGO_NS" >/dev/null 2>&1 || return 0
-  esc="$(printf '%s' "$host" | sed 's|~|~0|g; s|/|~1|g')"   # RFC 6901 JSON-pointer escaping
-  if oc patch configmap argocd-tls-certs-cm -n "$ARGO_NS" --type=json \
-       -p "[{\"op\":\"remove\",\"path\":\"/data/${esc}\"}]" >/dev/null 2>&1; then
-    ok "removed ${host} from argocd-tls-certs-cm (other hosts untouched)"
-  else
-    info "argocd-tls-certs-cm carries no ${host} key — nothing to remove"
-  fi
-}
+run_step "[7/8] GitOps operator (removed only if we created it)" handle_gitops
 
-info "[6/8] deleting owner-labeled cluster RBAC that no Application manages"
-del_labeled_cluster clusterrolebindings.rbac.authorization.k8s.io
-del_labeled_cluster clusterroles.rbac.authorization.k8s.io
-del_appprojects
-remove_argo_tls_cert_key
+run_step "[8/8] deleting workshop namespaces (org / adopted-operator namespaces preserved + de-labeled)" \
+  step_delete_namespaces
 
-# 8. GitOps operator — remove only if we created it (else preserve + note the controller-memory bump).
-info "[7/8] GitOps operator"
-handle_gitops
-
-# 8. Whatever namespaces the cascade did not own (created outside an Application), then the state
-#    namespace last. Most workshop namespaces are gone by now — step 2 pruned them — so this is
-#    normally a short list of skips. F6 waits (bounded, early-exit) and reports any namespace still
-#    wedged on a preserved operator's CR finalizer, with the exact manual clear command.
-info "[8/8] deleting workshop namespaces (org / adopted-operator namespaces preserved + de-labeled)"
-delete_workshop_namespaces
-# The state ConfigMap is about to go with its namespace, so dump it first: ogsr-check-clean.sh needs it
-# to tell an adopted operator from one we created, and a second run of this script has no other source.
-STATE_DUMP="${TMPDIR:-/tmp}/ogsr-uninstall-state.txt"
-if [[ "$DRY_RUN" != "true" && -n "$STATE_SNAPSHOT" ]]; then
-  printf '%s\n' "$STATE_SNAPSHOT" > "$STATE_DUMP" 2>/dev/null && ok "install state saved to ${STATE_DUMP}"
-fi
-del_obj namespace "$STATE_NS"; DELETED_WS_NS+=("$STATE_NS")   # always ≥1 element, so the expansion below is safe
-report_stuck_namespaces "${DELETED_WS_NS[@]}"
-
-echo
-ok "ogsr-uninstall complete$([[ "$DRY_RUN" == "true" ]] && echo ' (dry-run — nothing changed)')"
-echo
-echo "   NEXT — check what outlived the teardown (read-only, deletes nothing):"
-if [[ -r "$STATE_DUMP" ]]; then
-  echo "     ./bootstrap/ogsr-check-clean.sh --state-file ${STATE_DUMP}"
-else
-  echo "     ./bootstrap/ogsr-check-clean.sh"
-fi
+# The step ledger and the closing verdict are printed by the EXIT trap, so they are emitted on an early
+# death too. What follows is guidance that is worth having either way.
 echo
 echo "   Operators create CRDs, APIServices and admission webhooks at runtime, so no GitOps teardown"
 echo "   can own them. The checker reports those with the exact removal command for each, and exits 0"
