@@ -201,7 +201,7 @@ snapshot_operators() {
         name="$(yq '.metadata.name' "$sub" 2>/dev/null || true)"
         ns="$(yq '.metadata.namespace' "$sub" 2>/dev/null || true)"
         [[ -n "$name" && "$name" != "null" ]] || continue
-        if oc get subscription "$name" -n "$ns" >/dev/null 2>&1; then
+        if oc get subscriptions.operators.coreos.com "$name" -n "$ns" >/dev/null 2>&1; then
           record_once "op_${name}" "adopted:${ns}"
         else
           record_once "op_${name}" "created:${ns}"
@@ -214,7 +214,7 @@ snapshot_operators() {
   # (the stack carrying the gitea component). Same treatment ogsr-uninstall.sh's enumerate_operators()
   # and helm/bootstrap's job-state-capture give it (c50067d / cf79b0d).
   if [[ ",${stacks_csv}," == *",core-devtools,"* ]]; then
-    if oc get subscription gitea-operator -n gitea-operator >/dev/null 2>&1; then
+    if oc get subscriptions.operators.coreos.com gitea-operator -n gitea-operator >/dev/null 2>&1; then
       record_once "op_gitea-operator" "adopted:gitea-operator"
     else
       record_once "op_gitea-operator" "created:gitea-operator"
@@ -252,7 +252,7 @@ fi
 
 # GitOps operator: adopted (pre-existing) or created by us? If adopted, remember the openshift-gitops
 # ArgoCD controller.resources we are about to raise, so uninstall can restore the org's prior value.
-if oc get subscription openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
+if oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
   record_once gitops_preexisted true
   ARGO_RES_PRIOR="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources}' 2>/dev/null | base64 | tr -d '\n' || true)"
   [[ -n "$ARGO_RES_PRIOR" ]] && record_once gitops_argocd_controller_resources_b64 "$ARGO_RES_PRIOR"

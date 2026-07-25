@@ -374,8 +374,8 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
   if [[ "$preexisted" == "false" ]]; then
     info "GitOps was installed by us — removing operator + default instance"
     del_obj argocd openshift-gitops openshift-gitops
-    csv="$(oc get subscription openshift-gitops-operator -n openshift-gitops-operator -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
-    del_obj subscription openshift-gitops-operator openshift-gitops-operator
+    csv="$(oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+    del_obj subscriptions.operators.coreos.com openshift-gitops-operator openshift-gitops-operator
     [[ -n "$csv" ]] && del_obj clusterserviceversion "$csv" openshift-gitops-operator
     del_obj operatorgroup openshift-gitops-operator openshift-gitops-operator
     del_obj namespace openshift-gitops
@@ -408,8 +408,8 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
   while read -r name ns st; do
     [[ -n "$name" ]] || continue
     if [[ "$st" == "created" ]]; then
-      csv="$(oc get subscription "$name" -n "$ns" -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
-      del_obj subscription "$name" "$ns"
+      csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+      del_obj subscriptions.operators.coreos.com "$name" "$ns"
       [[ -n "$csv" ]] && del_obj clusterserviceversion "$csv" "$ns"
     else
       echo "   • preserve operator ${name} in ${ns} (${st} — not created by us)"
