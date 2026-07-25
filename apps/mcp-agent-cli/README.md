@@ -173,16 +173,24 @@ filtering:
 
 ## Building the image in-cluster
 
+Built declaratively by GitOps, not a manual step: the `mcp-agent-cli` BuildConfig + ImageStream in
+`gitops/workshop-config/templates/parasol-images-build.yaml` (Argo CD `workshop-config` Application)
+clones this repo (`contextDir: apps/mcp-agent-cli`) and pushes `mcp-agent-cli:latest`; `1.0` is a
+declared ImageStream tag aliasing `latest`, so the `ai-assisted-development` entry state — which
+pins it by full in-cluster-registry spec — resolves without anyone having run a build by hand. The
+git source follows `vars.yaml`'s `repo_url` (bootstrap/install.sh -> `parasolImages.build.repoUrl`),
+so a fork install builds this image from the fork.
+
 ```bash
-oc new-build --binary --strategy=docker --name=mcp-agent-cli -n ogsr-parasol-images
-oc start-build mcp-agent-cli --from-dir=apps/mcp-agent-cli --follow -n ogsr-parasol-images
-# Immutable release tag, matching the parasol-claims:1.0 convention:
-oc tag ogsr-parasol-images/mcp-agent-cli:latest ogsr-parasol-images/mcp-agent-cli:1.0
+# Manual rebuild (e.g. after editing this app) — moves latest and the 1.0 alias together:
+oc start-build mcp-agent-cli -n ogsr-parasol-images --follow
 ```
 
-`openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig` (`mcp-agent-cli-git`) for later
-CI rebuilds. Image tags are immutable per release: the binary build publishes `:latest`, then
-`oc tag` pins `:1.0`.
+> Historically this was a hand-run binary build + `oc tag`, with a separate Git-strategy
+> `openshift/buildconfig.yaml` twin kept for "later CI rebuilds" that nothing ever wired up — dead
+> code that hardcoded this project's own GitHub URL, so it would have silently ignored a fork's
+> `repo_url` if anyone had applied it by hand. Retired 2026-07-25, matching the parasol-claims/
+> parasol-web/parasol-fraud precedent.
 
 ## Container notes (OpenShift restricted-v2)
 

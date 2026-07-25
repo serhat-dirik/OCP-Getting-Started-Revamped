@@ -60,13 +60,24 @@ curl -s localhost:8082/q/health/ready
 
 ## Building the image in-cluster
 
+Built declaratively by GitOps, not a manual step: the `policy-docs` BuildConfig + ImageStream in
+`gitops/workshop-config/templates/parasol-images-build.yaml` (Argo CD `workshop-config` Application)
+clones this repo (`contextDir: apps/mcp-servers/policy-docs`) and pushes `policy-docs:latest`; `1.0`
+is a declared ImageStream tag aliasing `latest`, so the `agentic-ai` entry state — which pins it by
+full in-cluster-registry spec — resolves without anyone having run a build by hand. The git source
+follows `vars.yaml`'s `repo_url` (bootstrap/install.sh -> `parasolImages.build.repoUrl`), so a fork
+install builds this image from the fork.
+
 ```bash
-oc new-build --binary --strategy=docker --name=policy-docs -n ogsr-parasol-images
-oc start-build policy-docs --from-dir=apps/mcp-servers/policy-docs --follow -n ogsr-parasol-images
+# Manual rebuild (e.g. after editing this app) — moves latest and the 1.0 alias together:
+oc start-build policy-docs -n ogsr-parasol-images --follow
 ```
 
-`openshift/buildconfig.yaml` defines the Git-strategy `BuildConfig` (`policy-docs-git`) for
-later CI rebuilds. Image tags are immutable per release.
+> Historically this was a hand-run binary build, with a separate Git-strategy
+> `openshift/buildconfig.yaml` twin kept for "later CI rebuilds" that nothing ever wired up — dead
+> code that hardcoded this project's own GitHub URL, so it would have silently ignored a fork's
+> `repo_url` if anyone had applied it by hand. Retired 2026-07-25, matching the parasol-claims/
+> parasol-web/parasol-fraud precedent.
 
 ## Container notes (OpenShift restricted-v2)
 
