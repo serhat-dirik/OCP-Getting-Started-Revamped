@@ -25,7 +25,8 @@ USER_PREFIX="user"
 
 ok()   { echo "✅ $*"; }
 err()  { echo "❌ $*" >&2; }
-info() { echo "▶ $*"; }
+warn() { echo "⚠️  $*" >&2; }   # was CALLED but never defined — under `set -u` an undefined command is
+info() { echo "▶ $*"; }         # a 127 exit, so the RHDH branch below aborted the install instead of warning
 die()  { err "$*"; exit 1; }
 
 # ── preflight: tooling + vars file ────────────────────────────────────────────
@@ -46,9 +47,13 @@ REVISION="$(v '.revision')";     [[ -n "$REVISION" && "$REVISION" != "null" ]] |
 DOMAIN="$(v '.cluster_domain')"
 MAAS_KEY="$(v '.maas.api_key')"
 MAAS_ENDPOINT="$(v '.maas.endpoint')"
-# Model travels WITH the credential (see the secret step below). Default to the FSC/chart default when
-# vars omits it, so an older vars.yaml still installs; the operator overrides it per cluster.
-MAAS_MODEL="$(v '.maas.model')"; [[ -n "$MAAS_MODEL" && "$MAAS_MODEL" != "null" ]] || MAAS_MODEL="llama-scout-17b"
+# Model travels WITH the credential (see the secret step below) and is NEVER defaulted to a literal
+# name (owner decision 2026-07-25: "we may not know what AI model the installer will bring"). MaaS keys
+# are MODEL-SCOPED, so a guessed default that does not match the key is not a cosmetic mismatch — it is
+# an HTTP 401 key_model_access_denied the attendee meets inside the AI modules, long after the installer
+# said "complete". Empty here means DISCOVER it from the endpoint (discover_maas_model below); a value
+# set in vars.yaml is honoured but still validated against what the endpoint actually offers.
+MAAS_MODEL="$(v '.maas.model')"; [[ -n "$MAAS_MODEL" && "$MAAS_MODEL" != "null" ]] || MAAS_MODEL=""
 WS_PASS="$(v '.workshop_user_password')"
 # Console plugins default ON (owner 2026-07-19: mostly console links). Explicit `false` opts out; the
 # workshop-config hook stays append-if-absent and skips any name without a matching ConsolePlugin CR.
@@ -140,6 +145,54 @@ else
   LIGHTSPEED="true"
 fi
 
+# Ask the OpenAI-compatible endpoint what it actually serves and resolve MAAS_MODEL from the answer.
+# We never guess a model name: the per-user MaaS key is scoped to ONE model, so a name the key does not
+# cover returns HTTP 401 key_model_access_denied — inside the AI modules, at workshop time, not here.
+# The two clusters this workshop has run on had keys scoped to OPPOSITE models (inverted-scope incident
+# 2026-07-19), which is exactly the situation a hardcoded default cannot survive.
+# The API key travels in an Authorization header only and is never printed, not even on failure.
+discover_maas_model() {
+  local base url tmp code ids count
+  base="${MAAS_ENDPOINT%/}"
+  case "$base" in */v1) url="${base}/models" ;; *) url="${base}/v1/models" ;; esac
+  info "discovering available models from ${url}"
+  tmp="$(mktemp)"
+  code="$(curl -sS --max-time 30 -o "$tmp" -w '%{http_code}' \
+            -H "Authorization: Bearer ${MAAS_KEY}" -H 'Accept: application/json' \
+            "$url" 2>/dev/null || echo 000)"
+  # OpenAI list-models contract: {"object":"list","data":[{"id":"…"},…]}
+  ids="$(yq -p=json -r '.data[].id' "$tmp" 2>/dev/null | grep -v '^null$' | grep . || true)"
+  rm -f "$tmp"
+
+  if [[ -z "$ids" ]]; then
+    err "model discovery failed — GET ${url} returned HTTP ${code} with no model list."
+    err "   401/403 → maas.api_key is wrong, expired, or not entitled on this endpoint"
+    err "   404     → maas.endpoint is not an OpenAI-compatible base (it should end in /v1)"
+    err "   000     → endpoint unreachable from this machine (DNS / proxy / TLS)"
+    die "refusing to guess a model name: MaaS keys are model-scoped, so a guess fails inside the AI modules rather than here. Fix maas.endpoint / maas.api_key in ${VARS}, or set 'lightspeed: false' to install without the AI modules."
+  fi
+
+  count="$(printf '%s\n' "$ids" | grep -c . | tr -d ' ')"
+  if [[ -n "$MAAS_MODEL" ]]; then
+    if printf '%s\n' "$ids" | grep -qxF "$MAAS_MODEL"; then
+      ok "maas.model '${MAAS_MODEL}' confirmed — the endpoint offers it (${count} model(s) available)"
+    else
+      warn "maas.model '${MAAS_MODEL}' is NOT among the ${count} model(s) ${url} offers — using it anyway because you set it explicitly."
+      warn "   endpoint offers: $(printf '%s' "$ids" | tr '\n' ' ')"
+      warn "   if the AI modules fail with key_model_access_denied, this is why — pick one of the names above in ${VARS}."
+    fi
+    return 0
+  fi
+
+  MAAS_MODEL="$(printf '%s\n' "$ids" | head -1)"
+  if [[ "$count" == "1" ]]; then
+    ok "model discovered: ${MAAS_MODEL} (the only model this endpoint offers)"
+  else
+    ok "model discovered: ${MAAS_MODEL} (first of ${count}: $(printf '%s' "$ids" | tr '\n' ' '))"
+    info "   set maas.model in ${VARS} to pin a different one if your key is scoped elsewhere"
+  fi
+}
+
 echo "▶ Workshop bootstrap"
 echo "  users     : ${USER_PREFIX}1..${USER_PREFIX}${USERS}"
 echo "  modules   : ${MODULE_COUNT} in catalog · disabled: ${DISABLED_CSV:-none}"
@@ -155,6 +208,22 @@ ok "logged in as $(oc whoami) @ $(oc whoami --show-server)"
 if [[ -z "$DOMAIN" || "$DOMAIN" == "null" ]]; then
   DOMAIN="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
   if [[ -n "$DOMAIN" ]]; then ok "auto-detected cluster domain: ${DOMAIN}"; else err "could not auto-detect cluster domain — content attributes may be blank"; fi
+fi
+
+# Lightspeed pre-installed detection + AI model resolution. Both are READ-ONLY and both run HERE, in
+# preflight, deliberately: they are the two inputs whose failure would otherwise surface long after the
+# install mutated the cluster (a wrong model only fails inside the AI modules). Detection first, so a
+# cluster that already runs Lightspeed against its own LLM never blocks on OUR endpoint being reachable.
+# Managed/demo clusters (RHDP) often ship Lightspeed pre-wired; fighting that wiring breaks a working
+# assistant (duplicate OperatorGroup → OLM ResolutionFailed; secret/OLSConfig clobbering) — reuse it.
+LIGHTSPEED_PREINSTALLED="false"
+if oc get olsconfig cluster >/dev/null 2>&1; then
+  LIGHTSPEED_PREINSTALLED="true"
+  PROVIDER="$(oc get olsconfig cluster -o jsonpath='{.spec.llm.providers[0].type}' 2>/dev/null || echo '?')"
+  ok "OpenShift Lightspeed pre-installed (provider: ${PROVIDER}) — reusing it; ai-assist stack skipped"
+fi
+if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
+  discover_maas_model
 fi
 
 # Resolve the shared workshop password (generate if asked / unset / still placeholder).
@@ -183,6 +252,20 @@ record_once() {  # key value — write to the state CM only if the key is unset 
   oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
 }
 
+# Record the OperatorGroup(s) an ADOPTED operator's namespace ALREADY had, captured before any of our
+# Applications exist. Two things depend on it: protect_adopted_resources() annotates them so a cascade
+# delete can never take the org's OperatorGroup down with our app, and assert_single_operatorgroup()
+# can tell a namespace WE broke apart from one that arrived with two. A healthy OLM namespace has
+# exactly one OperatorGroup; with two, OLM fails every CSV in it (TooManyOperatorGroups).
+snapshot_operatorgroups() {
+  local ns="$1" ogs
+  ogs="$(oc get operatorgroups.operators.coreos.com -n "$ns" \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null || true)"
+  ogs="$(echo "$ogs" | xargs || true)"
+  [[ -n "$ogs" ]] || return 0
+  record_once "og_${ns}" "preexisting:${ogs// /,}"
+}
+
 # Operator adoption snapshot: for each operator the SELECTED stacks will install, record whether it
 # already exists (adopted → uninstall NEVER removes it) or will be created by us (created → uninstall
 # may remove it). Source of truth is the component subscription manifests — no brittle hardcoded map.
@@ -203,6 +286,7 @@ snapshot_operators() {
         [[ -n "$name" && "$name" != "null" ]] || continue
         if oc get subscriptions.operators.coreos.com "$name" -n "$ns" >/dev/null 2>&1; then
           record_once "op_${name}" "adopted:${ns}"
+          snapshot_operatorgroups "$ns"
         else
           record_once "op_${name}" "created:${ns}"
         fi
@@ -216,10 +300,196 @@ snapshot_operators() {
   if [[ ",${stacks_csv}," == *",core-devtools,"* ]]; then
     if oc get subscriptions.operators.coreos.com gitea-operator -n gitea-operator >/dev/null 2>&1; then
       record_once "op_gitea-operator" "adopted:gitea-operator"
+      snapshot_operatorgroups gitea-operator
     else
       record_once "op_gitea-operator" "created:gitea-operator"
     fi
   fi
+}
+
+# ── adopted-resource protection ───────────────────────────────────────────────
+# Uninstall CASCADE-deletes our Argo Applications, so Argo prunes what it installed in dependency
+# order. That only stays safe if every ADOPTED resource is individually exempt — protection has to be a
+# property of the resource, not a blanket amnesty over the whole teardown (the old --cascade=orphan
+# also discarded Argo's ordering, which is what forced an incomplete bash re-implementation and wedged
+# 8 namespaces on 2026-07-25). Argo honours both keys in one annotation:
+#     argocd.argoproj.io/sync-options: Prune=false,Delete=false
+#
+# merge_sync_options is a PURE string function (no cluster) so it can be unit-tested offline by
+# tools/verify/adopted-protection-selftest.sh. It preserves any sync options the org already set —
+# clobbering their annotation would itself be a mutation of a resource we do not own — and re-asserts
+# our two keys authoritatively, because protection must win over a stale Prune=true.
+merge_sync_options() {  # <current-annotation-value> → merged value (order-preserving, no duplicates)
+  local cur="${1:-}" out="" opt
+  local IFS=','
+  for opt in $cur; do
+    opt="$(echo "$opt" | xargs)"
+    [[ -n "$opt" ]] || continue
+    case "$opt" in Prune=*|Delete=*) continue ;; esac
+    out="${out:+$out,}$opt"
+  done
+  printf '%s' "${out:+$out,}Prune=false,Delete=false"
+}
+
+PROTECTED_COUNT=0
+PROTECTED_LIST=""
+PROTECT_MISSING=0
+
+oc_scoped() {  # <ns> <oc-args…> — append -n <ns> only when ns is non-empty
+  local ns="$1"; shift
+  if [[ -n "$ns" ]]; then oc "$@" -n "$ns"; else oc "$@"; fi
+}
+
+state_get() {  # <key> — echo a value recorded in the state ConfigMap ("" when unset)
+  oc get configmap "$STATE_CM" -n "$STATE_NS" -o jsonpath="{.data.$1}" 2>/dev/null || true
+}
+
+protect_one() {  # <kind> <name> [<ns>] — merge our protection into one adopted resource
+  # An EMPTY <ns> means cluster-scoped (Namespace, GatewayClass). `oc get namespace foo -n ""` is not
+  # the same call as `oc get namespace foo`, so the scope has to branch rather than pass an empty -n.
+  local kind="$1" name="$2" ns="${3:-}" cur merged where
+  where="${ns:+ in $ns}"; where="${where:- (cluster-scoped)}"
+  if ! oc_scoped "$ns" get "$kind" "$name" >/dev/null 2>&1; then
+    # A recorded resource that no longer exists is a stale snapshot, not an install failure: warn and
+    # keep going. Failing here would block a re-install on a cluster the admin has since tidied up.
+    PROTECT_MISSING=$((PROTECT_MISSING + 1))
+    warn "adopted ${kind}/${name} recorded in ${STATE_CM} no longer exists${where} — skipped"
+    return 0
+  fi
+  cur="$(oc_scoped "$ns" get "$kind" "$name" \
+          -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/sync-options}' 2>/dev/null || true)"
+  merged="$(merge_sync_options "$cur")"
+  PROTECTED_COUNT=$((PROTECTED_COUNT + 1))
+  if [[ "$cur" == "$merged" ]]; then                       # idempotent: re-running install is a no-op
+    PROTECTED_LIST="${PROTECTED_LIST}${PROTECTED_LIST:+$'\n'}   • ${kind%%.*}/${name}${where} (already ${merged})"
+    return 0
+  fi
+  if ! oc_scoped "$ns" annotate "$kind" "$name" \
+        "argocd.argoproj.io/sync-options=${merged}" --overwrite >/dev/null 2>&1; then
+    PROTECTED_COUNT=$((PROTECTED_COUNT - 1))
+    warn "could NOT annotate ${kind}/${name}${where} — a cascade delete could remove an adopted resource. Check RBAC, then re-run."
+    return 0
+  fi
+  PROTECTED_LIST="${PROTECTED_LIST}${PROTECTED_LIST:+$'\n'}   • ${kind%%.*}/${name}${where} → ${merged}"
+}
+
+protect_adopted_resources() {
+  local cm lines name ns csv og
+  cm="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o json 2>/dev/null || true)"
+  [[ -n "$cm" ]] || return 0
+  lines="$(printf '%s' "$cm" | yq -p=json -r \
+    '.data // {} | to_entries | .[] | select(.key | test("^op_")) | select(.value | test("^adopted:"))
+     | (.key | sub("^op_";"")) + " " + (.value | sub("^adopted:";""))' 2>/dev/null || true)"
+  if [[ -z "$lines" ]]; then
+    ok "adopted-resource protection: no pre-existing operators on this cluster — nothing to protect"
+    return 0
+  fi
+  while read -r name ns; do
+    [[ -n "$name" && -n "$ns" ]] || continue
+    # ALWAYS fully-qualified. The bare name `subscription` is ambiguous — Knative's
+    # subscriptions.messaging.knative.dev shadows OLM's — and that ambiguity was a SEV1 here (64eb8da).
+    protect_one subscriptions.operators.coreos.com "$name" "$ns"
+    csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" \
+            -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+    [[ -n "$csv" ]] && protect_one clusterserviceversions.operators.coreos.com "$csv" "$ns"
+    # The OperatorGroup in an adopted operator's namespace is the org's too. Pruning it would strand
+    # their CSV with no group to scope it — the same class of silent breakage as adding a second one.
+    while IFS= read -r og; do
+      [[ -n "$og" ]] || continue
+      protect_one operatorgroups.operators.coreos.com "$og" "$ns"
+    done < <(oc get operatorgroups.operators.coreos.com -n "$ns" \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+    # The operator's NAMESPACE — the single largest residual risk in the cascade design. Our components
+    # declare these namespaces (platform-portfolio/components/<c>/namespace.yaml), so Argo ADOPTS a
+    # pre-existing one, and deleting a namespace destroys everything inside it regardless of what those
+    # contents are annotated with. Prune=false on the Subscription alone does NOT save an adopted
+    # operator whose namespace goes. ogsr-uninstall.sh's cascade guard requires this and refuses without it.
+    protect_one namespace "$ns" ""
+  done <<< "$lines"
+
+  # Two cluster-scoped objects a cascade would prune that no op_* key covers — neither is an operator,
+  # so the adoption snapshot never sees them, but both may belong to the org.
+  #   • GatewayClass/openshift-default — our gateway-api component declares it, so Argo adopts an
+  #     existing one; pruning it tears down the org's Gateway API data plane.
+  #   • cluster-monitoring-config — synced ServerSideApply precisely BECAUSE it may pre-exist. A cascade
+  #     deletes the whole ConfigMap (retention, alertmanager, remote-write and all), which would make
+  #     the uninstall's careful key-level restore of enableUserWorkload moot.
+  if [[ "$(state_get gatewayclass_preexisted)" == "true" ]]; then
+    protect_one gatewayclasses.gateway.networking.k8s.io openshift-default ""
+  fi
+  if [[ "$(state_get monitoring_cm_existed)" == "true" ]]; then
+    protect_one configmap cluster-monitoring-config openshift-monitoring
+  fi
+
+  if [[ "$PROTECTED_COUNT" -eq 0 ]]; then
+    warn "adopted-resource protection: ${PROTECT_MISSING} recorded resource(s) missing, 0 protected — a cascade uninstall has nothing to skip"
+  else
+    ok "adopted-resource protection: ${PROTECTED_COUNT} resource(s) carry Prune=false,Delete=false"
+    printf '%s\n' "$PROTECTED_LIST"
+    [[ "$PROTECT_MISSING" -gt 0 ]] && info "   (${PROTECT_MISSING} recorded resource(s) no longer exist — skipped, install continues)"
+  fi
+  return 0
+}
+
+# ── OperatorGroup uniqueness gate ─────────────────────────────────────────────
+# OLM fails EVERY CSV in a namespace holding more than one OperatorGroup (phase Failed, reason
+# TooManyOperatorGroups) and it does so silently: the operator's Deployments keep running, so nothing
+# looks broken while reconciliation — upgrades, self-healing — has stopped. Found live 2026-07-25 on a
+# cluster with an org-owned cert-manager: our component applied its own OperatorGroup into the ADOPTED
+# cert-manager-operator namespace and OLM failed the org's CSV one second later. That is a silent and
+# unreversible degradation of somebody else's operator, so this is a hard install failure, not a note.
+OG_BASELINE=""   # "<ns> <count>" per namespace, captured BEFORE any of our Applications exist
+
+operatorgroup_counts() {  # → "<ns> <count>" for every namespace holding at least one OperatorGroup
+  oc get operatorgroups.operators.coreos.com -A --no-headers 2>/dev/null \
+    | awk '{print $1}' | sort | uniq -c | awk '{print $2" "$1}'
+}
+
+owning_stack_of_app() {  # <child-app-name> → the stack whose app-of-apps ships it (for the fix hint)
+  local app="$1" f
+  for f in "${SCRIPT_DIR}/../platform-portfolio/stacks"/*/apps/*.yaml; do
+    [[ -e "$f" ]] || continue
+    [[ "$(yq -r '.metadata.name // ""' "$f" 2>/dev/null)" == "$app" ]] || continue
+    basename "$(dirname "$(dirname "$f")")"; return 0
+  done
+  echo "<unknown>"
+}
+
+assert_single_operatorgroup() {
+  local ns count before ours theirs og app stack bad=0
+  while read -r ns count; do
+    [[ -n "$ns" ]] || continue
+    [[ "$count" -gt 1 ]] || continue
+    before="$(printf '%s\n' "$OG_BASELINE" | awk -v n="$ns" '$1 == n {print $2}')"
+    ours="$(oc get operatorgroups.operators.coreos.com -n "$ns" -l "$OWNER_LABEL" \
+             -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null | xargs || true)"
+    if [[ -z "$ours" ]]; then
+      warn "namespace ${ns} holds ${count} OperatorGroups and none of them is ours (it had ${before:-?} before this install) — pre-existing, left alone"
+      continue
+    fi
+    bad=1
+    theirs=""
+    while IFS= read -r og; do
+      [[ -n "$og" ]] || continue
+      case " $ours " in *" $og "*) continue ;; esac      # skip the ones carrying our owner label
+      theirs="${theirs:+$theirs }$og"
+    done < <(oc get operatorgroups.operators.coreos.com -n "$ns" -o name 2>/dev/null | sed 's|.*/||')
+    app="$(oc get operatorgroups.operators.coreos.com "${ours%% *}" -n "$ns" \
+            -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null \
+            | cut -d: -f1 || true)"
+    stack="$(owning_stack_of_app "${app:-none}")"
+    err "namespace ${ns}: ${count} OperatorGroups — ours (${ours}) was added next to the org's (${theirs:-?})"
+    oc get csv -n "$ns" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{.status.reason}{"\n"}{end}' 2>/dev/null \
+      | grep -i 'TooManyOperatorGroups' | while IFS= read -r line; do echo "      OLM: csv ${line}" >&2; done
+    echo "      undo (stop the app re-creating it, then remove OURS — never theirs):" >&2
+    echo "        oc -n openshift-gitops patch application pp-${stack} --type merge -p '{\"spec\":{\"syncPolicy\":null}}'" >&2
+    echo "        oc -n openshift-gitops delete application ${app:-<child-app>} --cascade=orphan" >&2
+    echo "        oc -n ${ns} delete operatorgroup ${ours}" >&2
+  done < <(operatorgroup_counts)
+  [[ "$bad" -eq 0 ]] && { ok "OperatorGroup uniqueness: every namespace holds at most one"; return 0; }
+  err "An adopted operator has been degraded: OLM stops reconciling every CSV in a namespace with two"
+  err "OperatorGroups, while its pods keep running — so this never surfaces until the org upgrades."
+  return 1
 }
 
 info "[0/6] capturing uninstall-state (prior cluster state for a non-destructive uninstall)"
@@ -250,8 +520,10 @@ else
   record_once monitoring_uwm_prior absent
 fi
 
-# GitOps operator: adopted (pre-existing) or created by us? If adopted, remember the openshift-gitops
-# ArgoCD controller.resources we are about to raise, so uninstall can restore the org's prior value.
+# GitOps operator: adopted (pre-existing) or created by us? Recorded first-write-wins, so a RE-install
+# still knows we were the original installer. The controller.resources snapshot stays as prior-state
+# evidence (a pre-2026-07-25 install did raise an adopted controller to 6Gi and could only print a
+# manual restore hint); we no longer resize an adopted instance at all — see GITOPS_PREEXISTED below.
 if oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
   record_once gitops_preexisted true
   ARGO_RES_PRIOR="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources}' 2>/dev/null | base64 | tr -d '\n' || true)"
@@ -259,6 +531,11 @@ if oc get subscriptions.operators.coreos.com openshift-gitops-operator -n opensh
 else
   record_once gitops_preexisted false
 fi
+# The portfolio bootstrap raises the Argo controller memory; it must do that ONLY on an instance we
+# installed. Pass the RECORDED verdict (not a fresh live check): on a re-install the subscription
+# always exists, and only the first-write-wins snapshot still knows who created it.
+GITOPS_PREEXISTED="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o jsonpath='{.data.gitops_preexisted}' 2>/dev/null || true)"
+export GITOPS_PREEXISTED="${GITOPS_PREEXISTED:-false}"
 
 # Gateway API: did the openshift-default GatewayClass already exist (activates a cluster istiod)?
 if oc get gatewayclass openshift-default >/dev/null 2>&1; then
@@ -309,15 +586,8 @@ record_once nodes_batch "${BATCH_NODE:-}"
 record_once nodes_zoned "${SHAPE_NODES[*]:-}"
 
 # ── 1. portfolio stacks ───────────────────────────────────────────────────────
-# Pre-installed detection: managed/demo clusters (RHDP) often ship Lightspeed already wired
-# to their own LLM. Fighting that wiring breaks a working assistant (duplicate OperatorGroup
-# → OLM ResolutionFailed; secret/OLSConfig clobbering) — reuse it instead.
-LIGHTSPEED_PREINSTALLED="false"
-if oc get olsconfig cluster >/dev/null 2>&1; then
-  LIGHTSPEED_PREINSTALLED="true"
-  PROVIDER="$(oc get olsconfig cluster -o jsonpath='{.spec.llm.providers[0].type}' 2>/dev/null || echo '?')"
-  ok "OpenShift Lightspeed pre-installed (provider: ${PROVIDER}) — reusing it; ai-assist stack skipped"
-fi
+# LIGHTSPEED_PREINSTALLED was resolved in preflight (above) so a wrong MaaS model fails before we
+# mutate anything; the stack decision below just consumes it.
 # batch stack (Kueue + KEDA) is a HARD baseline dependency, NOT optional: the workshop-config
 # layer below unconditionally ships per-user Kueue queues (kueue-queues + per-user-batch). Omit
 # batch and workshop-config's sync dies on missing kueue.x-k8s.io CRDs — which also aborts the
@@ -351,6 +621,13 @@ STACKS="core-devtools,batch,progressive-delivery"
 record_once lightspeed_preinstalled "$LIGHTSPEED_PREINSTALLED"
 record_once installed_stacks "$STACKS"
 snapshot_operators "$STACKS"
+# Baseline of OperatorGroups-per-namespace, taken while the cluster is still exactly as we found it, so
+# the post-install gate can tell a namespace WE gave a second OperatorGroup from one that already had
+# two. Must be read before the portfolio Applications exist.
+OG_BASELINE="$(operatorgroup_counts || true)"
+# Protection runs HERE — after the snapshot, before a single Application exists — so an adopted
+# resource is never managed-but-unprotected, not even for a sync cycle.
+protect_adopted_resources
 info "[1/6] installing portfolio stacks: ${STACKS}"
 "$PORTFOLIO_INSTALL" --stacks "$STACKS" --repo-url "$REPO_URL" --revision "$REVISION"
 
@@ -468,7 +745,11 @@ if [[ "$PORTAL" == "true" ]]; then
   done
   if [[ -n "$RHDH_GITEA_USER" && -n "$RHDH_GITEA_PASS" ]]; then
     RHDH_GITEA_ROUTE="$(oc get route -n "$GITEA_NS" -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true)"
-    oc get ns rhdh >/dev/null 2>&1 || oc create ns rhdh >/dev/null 2>&1 || true
+    # Owner-stamp it on creation: a namespace without workshop.redhat.com/owner is invisible to
+    # bootstrap/ogsr-uninstall.sh and survives a "complete" teardown unseen (defect 5, 2026-07-25).
+    oc get ns rhdh >/dev/null 2>&1 \
+      || oc create namespace rhdh --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null 2>&1 \
+      || true
     oc create secret generic rhdh-gitea -n rhdh \
       --from-literal=GITEA_USERNAME="$RHDH_GITEA_USER" \
       --from-literal=GITEA_PASSWORD="$RHDH_GITEA_PASS" \
@@ -555,6 +836,30 @@ CONSOLE_URL="$(oc whoami --show-console 2>/dev/null || true)"
   echo "password: ${WS_PASS}"
 } > "$CREDS_FILE"
 chmod 600 "$CREDS_FILE"
+
+# ── adopted-resource report ───────────────────────────────────────────────────
+# Surfaced in the summary on purpose: uninstall CASCADE-deletes our Applications, and a wrong adoption
+# snapshot combined with cascade delete would remove an org's operator. These annotations are the only
+# thing standing between the two, so the operator running the install gets to see the actual list.
+echo
+if [[ "$PROTECTED_COUNT" -gt 0 ]]; then
+  ok "adopted resources protected from teardown: ${PROTECTED_COUNT}"
+  printf '%s\n' "$PROTECTED_LIST"
+  echo "   re-check any time: tools/verify/adopted-protection-selftest.sh"
+else
+  info "adopted resources protected from teardown: none (nothing pre-existing was adopted)"
+fi
+
+# ── hard gate: OperatorGroup uniqueness ───────────────────────────────────────
+# Last thing before declaring success. A second OperatorGroup in an adopted operator's namespace stops
+# OLM reconciling the org's CSV without stopping its pods — invisible at runtime, and only discovered
+# when they later try to upgrade. Credentials are written above first, so a failure here still leaves
+# the admin everything they need.
+echo
+if ! assert_single_operatorgroup; then
+  err "install did NOT complete cleanly — fix the OperatorGroup collision above before running the workshop"
+  exit 1
+fi
 
 echo
 ok "workshop bootstrap complete"
