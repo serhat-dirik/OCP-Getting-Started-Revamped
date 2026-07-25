@@ -271,11 +271,17 @@ snapshot_operatorgroups() {
   record_once "og_${ns}" "preexisting:${ogs// /,}"
 }
 
+# Components the portfolio's §0 adoption preflight will SKIP because this cluster already runs that
+# operator. Set from the portfolio's own --adoption-plan below — never re-derived here, so the
+# install and the teardown can never hold two different opinions about who owns an operator.
+SKIPPED_COMPONENTS=""
+is_skipped_component() { case " ${SKIPPED_COMPONENTS} " in *" $1 "*) return 0 ;; esac; return 1; }
+
 # Operator adoption snapshot: for each operator the SELECTED stacks will install, record whether it
 # already exists (adopted → uninstall NEVER removes it) or will be created by us (created → uninstall
 # may remove it). Source of truth is the component subscription manifests — no brittle hardcoded map.
 snapshot_operators() {
-  local stacks_csv="$1" stack app comp_path sub name ns _stacks
+  local stacks_csv="$1" stack app comp_path comp sub name ns _stacks
   IFS=',' read -ra _stacks <<< "$stacks_csv"
   for stack in "${_stacks[@]}"; do
     stack="$(echo "$stack" | xargs)"
@@ -284,12 +290,20 @@ snapshot_operators() {
       [[ -e "$app" ]] || continue
       comp_path="$(yq '.spec.source.path' "$app" 2>/dev/null || true)"
       [[ -n "$comp_path" && "$comp_path" != "null" ]] || continue
+      comp="$(basename "$comp_path")"
       for sub in "${SCRIPT_DIR}/../${comp_path}"/subscription*.yaml; do
         [[ -e "$sub" ]] || continue
         name="$(yq '.metadata.name' "$sub" 2>/dev/null || true)"
         ns="$(yq '.metadata.namespace' "$sub" 2>/dev/null || true)"
         [[ -n "$name" && "$name" != "null" ]] || continue
-        if oc get subscriptions.operators.coreos.com "$name" -n "$ns" >/dev/null 2>&1; then
+        # A SKIPPED component is never ours, whatever the org happened to call their Subscription.
+        # Recording it `created:` because no object of OUR name exists would be catastrophic at
+        # teardown: classify_workshop_namespaces() reads created → "installed-stack operator
+        # namespace (created by us)" → it DELETES the namespace the org's operator lives in.
+        if is_skipped_component "$comp"; then
+          record_once "op_${name}" "adopted:${ns}"
+          snapshot_operatorgroups "$ns"
+        elif oc get subscriptions.operators.coreos.com "$name" -n "$ns" >/dev/null 2>&1; then
           record_once "op_${name}" "adopted:${ns}"
           snapshot_operatorgroups "$ns"
         else
@@ -622,9 +636,51 @@ STACKS="core-devtools,batch,progressive-delivery"
 [[ "$PORTAL" == "true" ]] && STACKS="${STACKS},portal"
 [[ "$TRUST" == "true" ]] && STACKS="${STACKS},trust"
 [[ "$TRUST_DEMO" == "true" ]] && STACKS="${STACKS},trust-demo"
+# ── component adoption plan (read-only) ───────────────────────────────────────
+# Ask the portfolio installer — which OWNS the detection — which components it will skip because
+# this cluster already runs that operator, and which it cannot make safe at all. One detector, two
+# callers: it decides, we record. Everything downstream (protection, teardown classification) keys
+# off the adopted/created records this produces, so a skipped component's operator AND its namespace
+# are preserved even when the org named their Subscription something else entirely.
+info "[0/6] asking the portfolio which components this cluster already provides"
+ADOPTION_PLAN="$("$PORTFOLIO_INSTALL" --stacks "$STACKS" --adoption-plan)" \
+  || die "component adoption preflight failed — re-run by hand: ${PORTFOLIO_INSTALL} --stacks ${STACKS} --adoption-plan"
+
+# Refusals first: fail HERE, before the state ConfigMap grows records and before we annotate a single
+# resource of the org's. The portfolio prints the full explanation and the options.
+if printf '%s\n' "$ADOPTION_PLAN" | grep -q '^refuse'; then
+  err "this cluster already runs component(s) the portfolio cannot safely skip:"
+  printf '%s\n' "$ADOPTION_PLAN" \
+    | awk -F'\t' '$1 == "refuse" { printf "      • %s (stack %s): %s\n", $3, $2, $7 }'
+  err "those components ship operand CRs as well as the operator, so dropping them would leave the"
+  err "workshop quietly incomplete. Full explanation and the two ways forward:"
+  die "  ${PORTFOLIO_INSTALL} --stacks ${STACKS}"
+fi
+
+while IFS=$'\t' read -r _verb _stack _comp _child _ns _subs _reason; do
+  [[ "$_verb" == "skip" ]] || continue
+  : "$_stack" "$_child"
+  SKIPPED_COMPONENTS="${SKIPPED_COMPONENTS} ${_comp}"
+  record_once "skipped_${_comp}" "adopted:${_ns}"
+  ok "adopting this cluster's ${_comp} — ours will not be installed (${_reason})"
+  # The org's OWN Subscription objects, under THEIR names. Recorded adopted so
+  # protect_adopted_resources() annotates them (and their CSVs, OperatorGroups and namespace)
+  # Prune=false,Delete=false, and so ogsr-uninstall.sh preserves rather than removes them.
+  [[ -n "$_subs" && "$_subs" != "-" ]] || continue
+  IFS=',' read -ra _sub_pairs <<< "$_subs"
+  for _pair in "${_sub_pairs[@]}"; do
+    [[ -n "$_pair" ]] || continue
+    record_once "op_${_pair%@*}" "adopted:${_pair#*@}"
+    snapshot_operatorgroups "${_pair#*@}"
+  done
+done <<< "$ADOPTION_PLAN"
+
 # Snapshot operator adoption BEFORE Argo installs anything (created vs adopted → safe uninstall).
 record_once lightspeed_preinstalled "$LIGHTSPEED_PREINSTALLED"
 record_once installed_stacks "$STACKS"
+if [[ -n "$(echo "${SKIPPED_COMPONENTS}" | xargs || true)" ]]; then
+  record_once skipped_components "$(echo "${SKIPPED_COMPONENTS}" | xargs)"
+fi
 snapshot_operators "$STACKS"
 # Baseline of OperatorGroups-per-namespace, taken while the cluster is still exactly as we found it, so
 # the post-install gate can tell a namespace WE gave a second OperatorGroup from one that already had
@@ -1027,6 +1083,17 @@ chmod 600 "$CREDS_FILE"
 # snapshot combined with cascade delete would remove an org's operator. These annotations are the only
 # thing standing between the two, so the operator running the install gets to see the actual list.
 echo
+# Components this cluster already provided, so the portfolio never installed ours. Said plainly here
+# because an operator silently absent from the portfolio is the kind of surprise that surfaces three
+# modules later — and because teardown will leave every one of them exactly as it found it.
+if [[ -n "$(echo "${SKIPPED_COMPONENTS}" | xargs || true)" ]]; then
+  ok "components adopted from this cluster (ours never installed):"
+  read -ra _skipped_list <<< "$SKIPPED_COMPONENTS"
+  for _c in "${_skipped_list[@]}"; do
+    echo "   • ${_c}: already installed by this cluster's owner — using theirs, our component skipped"
+  done
+  echo "   uninstall will not touch them (recorded adopted in ${STATE_NS}/${STATE_CM})"
+fi
 if [[ "$PROTECTED_COUNT" -gt 0 ]]; then
   ok "adopted resources protected from teardown: ${PROTECTED_COUNT}"
   printf '%s\n' "$PROTECTED_LIST"

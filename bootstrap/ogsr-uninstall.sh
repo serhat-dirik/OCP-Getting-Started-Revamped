@@ -904,6 +904,10 @@ print_plan() {
   echo
   echo "WILL PRESERVE (untouched):"
   echo "  • operators the org already had:${adopted:-<none recorded>}"
+  # Components the install SKIPPED because this cluster already ran that operator (portfolio §0
+  # adoption). Their Subscriptions are among the "adopted" line above — this names the components, so
+  # the reason those namespaces survive teardown is legible instead of inferred.
+  echo "  • components never installed (this cluster already provided them): $(state skipped_components '<none>')"
   printf '  • namespaces preserved + owner-label stripped (adopted-operator / not in installed_stacks — F2/F7):%b\n' "${strip_list:-\n      - <none>}"
   echo "  • GitOps operator: ${gitops_plan}"
   echo "  • cluster-monitoring-config: ${mon_plan}"

@@ -2,8 +2,9 @@
 # Platform Portfolio bootstrap — the ONLY imperative step of the portfolio.
 # Mutates exactly twice: (1) install the OpenShift GitOps operator (+ controller RBAC),
 # (2) apply the portfolio AppProject and one Argo CD Application per requested stack.
-# Everything else reconciles. Ahead of both, a read-only preflight refuses to install where
-# doing so would break an operator the cluster's owner already runs (see section 0).
+# Everything else reconciles. Ahead of both, a read-only preflight decides, per component, whether
+# this cluster already runs that operator — and if so uses theirs instead of installing ours
+# (see section 0).
 #
 # Usage:
 #   ./install.sh --stacks core-devtools[,ai-assist,...]
@@ -11,7 +12,7 @@
 #                [--source-repo <git url>] [--allow-source-repo <git url>]…
 #                [--allow-destination <namespace glob>]…
 #                [--project <name>] [--stacks-only] [--skip-repo-check]
-#                [--wait] [--dry-run]
+#                [--adoption-plan] [--wait] [--dry-run]
 #
 # --repo-url        where Argo reads the portfolio FROM (default: the upstream project).
 # --source-repo     the EXTERNAL repo the in-cluster Gitea pull-mirrors (defaults to --repo-url).
@@ -27,6 +28,12 @@
 #                   This is how the phase-2 flip re-points the stacks at the Gitea mirror.
 # --skip-repo-check skip the source-repo reachability/layout validation (used for the in-cluster
 #                   mirror, whose content the caller has already verified).
+# --adoption-plan   print the section-0 verdict and EXIT, applying nothing. One machine-readable
+#                   tab-separated line per component with a verdict:
+#                     <verb> <stack> <component> <child-app> <namespaces> <foreign-subs> <reason>
+#                   verb = skip (adopted, our component dropped from the render) | refuse | warn.
+#                   The workshop bootstrap layer reads this so its uninstall snapshot records a
+#                   skipped component's operator as ADOPTED — one detector, two callers.
 #
 # Idempotent: safe to re-run; re-running with more stacks adds them.
 set -euo pipefail
@@ -44,8 +51,9 @@ WAIT="false"
 DRY_RUN="false"
 STACKS_ONLY="false"
 SKIP_REPO_CHECK="false"
+ADOPTION_PLAN_ONLY="false"
 
-usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -31; exit 1; }
+usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -38; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --project)           PROJECT="$2"; shift 2;;
     --stacks-only)       STACKS_ONLY="true"; shift;;
     --skip-repo-check)   SKIP_REPO_CHECK="true"; shift;;
+    --adoption-plan)     ADOPTION_PLAN_ONLY="true"; shift;;
     --wait)              WAIT="true"; shift;;
     --dry-run)           DRY_RUN="true"; shift;;
     -h|--help)           usage;;
@@ -72,12 +81,16 @@ done
 APPLY=(oc apply -f -)
 [[ "$DRY_RUN" == "true" ]] && APPLY=(oc apply --dry-run=client -f -)
 
-echo "▶ Platform Portfolio bootstrap"
-echo "  cluster : $(oc whoami --show-server) (as $(oc whoami))"
-echo "  source  : ${REPO_URL} @ ${REVISION}"
-echo "  mirrors : ${SOURCE_REPO}"
-echo "  project : ${PROJECT}"
-echo "  stacks  : ${STACKS}"
+# --adoption-plan must emit NOTHING on stdout but the plan, so every human line goes through say().
+say() { [[ "$ADOPTION_PLAN_ONLY" == "true" ]] || printf '%s\n' "$*"; }
+
+say "▶ Platform Portfolio bootstrap"
+[[ "$ADOPTION_PLAN_ONLY" == "true" ]] \
+  || echo "  cluster : $(oc whoami --show-server) (as $(oc whoami))"
+say "  source  : ${REPO_URL} @ ${REVISION}"
+say "  mirrors : ${SOURCE_REPO}"
+say "  project : ${PROJECT}"
+say "  stacks  : ${STACKS}"
 
 # ── source repo validation (READ-ONLY, blocking) ──────────────────────────────
 # A typo in --repo-url must fail HERE, with the URL in the message — not as N Applications stuck
@@ -130,112 +143,292 @@ validate_source_repo() {  # <url> <revision>
   echo "  ✓ ${url}@${rev} reachable and carries platform-portfolio/"
 }
 
-if [[ "$SKIP_REPO_CHECK" == "true" ]]; then
-  echo "▶ source repo validation skipped (--skip-repo-check)"
+# --adoption-plan answers a question about the CLUSTER, not about the repo, and its caller (the
+# workshop bootstrap) validates the repo itself moments later — so skip the network round-trip.
+if [[ "$SKIP_REPO_CHECK" == "true" || "$ADOPTION_PLAN_ONLY" == "true" ]]; then
+  say "▶ source repo validation skipped (--skip-repo-check)"
 else
   echo "▶ validating source repo (read-only)…"
   validate_source_repo "$REPO_URL" "$REVISION" \
     || { echo "❌ nothing was applied, the cluster is untouched."; exit 1; }
 fi
 
-# ── 0. OperatorGroup collision preflight (READ-ONLY, blocking) ────────────────
-# OLM fails EVERY CSV in a namespace holding more than one OperatorGroup — phase Failed, reason
-# TooManyOperatorGroups, "can't pick one automatically" — and it does so SILENTLY: the operator's
-# pods keep running, so nothing looks broken while OLM has stopped managing it entirely (no upgrades,
-# no self-heal). Found live 2026-07-25: pp-cert-manager applied our OperatorGroup into an ADOPTED
-# cert-manager-operator namespace and the org's CSV failed one second later. Breaking somebody else's
-# operator, invisibly and irreversibly, is exactly what this repo forbids — so this is a hard refusal
-# BEFORE anything is applied, not a warning afterwards.
+# ── 0. component adoption preflight (READ-ONLY, blocking) ─────────────────────
+# Two questions per component, both answered before anything is applied.
 #
-# Argo CD has no "create only if absent" primitive, so prevention cannot live in the manifests: the
-# decision has to be made once, here, in the portfolio's single sanctioned imperative step. Read-only
-# throughout — the worst this can do is decline to install.
+#   1. Does this cluster ALREADY run this operator? RHDP clusters — the primary target — ship at
+#      least three pre-installed (cert-manager, Lightspeed, GitOps). Installing ours alongside is
+#      never right, and where the component carries an OperatorGroup it is actively destructive:
+#      OLM fails EVERY CSV in a namespace holding more than one OperatorGroup (phase Failed, reason
+#      TooManyOperatorGroups) and does so SILENTLY — the operator's pods keep running, so nothing
+#      looks broken while OLM has stopped managing it entirely. Found live 2026-07-25:
+#      pp-cert-manager applied our OperatorGroup into an ADOPTED cert-manager-operator namespace and
+#      the org's CSV failed one second later.
+#
+#   2. If it is already there, can we simply not install ours? A component whose directory holds
+#      nothing but a namespace, an OperatorGroup and a Subscription contributes NOTHING but the
+#      operator install, so dropping it loses nothing — we use theirs and carry on. That component is
+#      SKIPPED automatically (§2 renders a kustomize patch that removes its child Application) and
+#      the install continues unattended. A component that ALSO ships operand CRs cannot be dropped
+#      without silently shipping an incomplete workshop, so that one still REFUSES, loudly. No
+#      partial-component surgery: a loud refusal beats a quietly incomplete install.
+#
+# Argo CD has no "create only if absent" primitive, so none of this can live in the manifests: the
+# decision is made once, here, in the portfolio's single sanctioned imperative step. Read-only
+# throughout — the worst this section can do is decline to install.
 OG_OWNER_KEY="workshop.redhat.com/owner"
 OG_OWNER_VALUE="ogsr"
 STACKS_DIR="$(cd "${SCRIPT_DIR}/../stacks" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# The workshop bootstrap layer's adoption snapshot. ABSENT on a standalone portfolio install, which
+# is why it is only ever one signal of three and never a requirement.
+STATE_NS="ogsr-system"
+STATE_CM="ogsr-uninstall-state"
 
-active_app_files() {  # <stack> → each apps/*.yaml the stack's kustomization actually includes
-  # Read the kustomization rather than globbing apps/: several stacks ship an app file that is
-  # deliberately COMMENTED OUT (loki-logging, service-interconnect), and preflighting a component we
-  # will never apply would refuse an install for no reason.
-  sed -n 's|^[[:space:]]*-[[:space:]]*\(apps/[A-Za-z0-9._-]*\.yaml\)[[:space:]]*$|\1|p' \
-    "${STACKS_DIR}/${1}/kustomization.yaml" 2>/dev/null
-}
+# ── manifest readers ──────────────────────────────────────────────────────────
+# Offline, cluster-free, and SHARED with hack/check-adoption-skip.sh so the decision to skip a
+# component and the CI check that proves skipping is safe can never be two different opinions.
+# shellcheck disable=SC1091  # lib-components.sh is linted standalone; its path is runtime-derived
+. "${SCRIPT_DIR}/lib-components.sh"
 
-operatorgroup_namespaces() {  # <stack> → "<namespace> <component>" per OperatorGroup the stack ships
-  local stack="$1" app comp_path og ns
-  while IFS= read -r app; do
-    [[ -n "$app" ]] || continue
-    comp_path="$(grep -m1 -E '^[[:space:]]+path:[[:space:]]' "${STACKS_DIR}/${stack}/${app}" 2>/dev/null \
-                  | sed 's|.*path:[[:space:]]*||')"
-    [[ -n "$comp_path" ]] || continue
-    for og in "${SCRIPT_DIR}/../../${comp_path}"/operatorgroup*.yaml; do
-      [[ -e "$og" ]] || continue
-      # metadata.namespace is the only 2-space-indented `namespace:` in these single-doc files;
-      # spec.targetNamespaces entries are list items at 4 spaces and never match.
-      ns="$(grep -m1 -E '^  namespace:[[:space:]]' "$og" | sed 's|.*namespace:[[:space:]]*||')"
-      [[ -n "$ns" ]] && echo "${ns} $(basename "$comp_path")"
-    done
-  done < <(active_app_files "$stack")
+# ── cluster snapshot ──────────────────────────────────────────────────────────
+# FOUR reads, taken once, then every lookup below is pure text. Per-namespace queries meant ~100
+# sequential round trips for a full stack set (over two minutes against a remote cluster), and made
+# the verdict depend on the cluster not changing under the scan. Read-only and failure-tolerant: an
+# unreadable resource yields an empty snapshot, which can only ever cause us to install rather than
+# skip — never the other way round.
+OG_SNAPSHOT=""      # <ns>|<name>|<our-owner-label>
+SUB_SNAPSHOT=""     # <ns>|<name>|<package>|<our-owner-label>
+CSV_SNAPSHOT=""     # <ns>|<name>|<comma-terminated list of label KEYS>
+STATE_SNAPSHOT=""   # <key>=<value> from the workshop layer's uninstall-state ConfigMap
+
+load_cluster_snapshot() {
+  OG_SNAPSHOT="$(oc get operatorgroups.operators.coreos.com -A \
+    -o jsonpath="{range .items[*]}{.metadata.namespace}{'|'}{.metadata.name}{'|'}{.metadata.labels.${OG_OWNER_KEY//./\\.}}{'\n'}{end}" \
+    2>/dev/null || true)"
+  SUB_SNAPSHOT="$(oc get subscriptions.operators.coreos.com -A \
+    -o jsonpath="{range .items[*]}{.metadata.namespace}{'|'}{.metadata.name}{'|'}{.spec.name}{'|'}{.metadata.labels.${OG_OWNER_KEY//./\\.}}{'\n'}{end}" \
+    2>/dev/null || true)"
+  # go-template, not jsonpath: only a template can enumerate label KEYS, and the package marker OLM
+  # writes is a key (operators.coreos.com/<package>.<namespace>) with an empty value.
+  # $k/$v are go-template variables, not shell variables — the single quotes are intentional.
+  # shellcheck disable=SC2016
+  CSV_SNAPSHOT="$(oc get clusterserviceversions.operators.coreos.com -A \
+    -o go-template='{{range .items}}{{.metadata.namespace}}|{{.metadata.name}}|{{range $k, $v := .metadata.labels}}{{$k}},{{end}}{{"\n"}}{{end}}' \
+    2>/dev/null || true)"
+  # shellcheck disable=SC2016
+  STATE_SNAPSHOT="$(oc get configmap "$STATE_CM" -n "$STATE_NS" \
+    -o go-template='{{range $k, $v := .data}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
 }
 
 foreign_operatorgroups_in() {  # <namespace> → names of OperatorGroups there that are NOT ours
-  oc get operatorgroups.operators.coreos.com -n "$1" \
-    -o jsonpath="{range .items[*]}{.metadata.name}{'|'}{.metadata.labels.${OG_OWNER_KEY//./\\.}}{'\n'}{end}" \
-    2>/dev/null | awk -F'|' -v ours="$OG_OWNER_VALUE" '$1 != "" && $2 != ours { print $1 }'
+  printf '%s\n' "$OG_SNAPSHOT" \
+    | awk -F'|' -v ns="$1" -v ours="$OG_OWNER_VALUE" '$1 == ns && $2 != "" && $3 != ours { print $2 }'
 }
 
-echo "▶ [0/2] OperatorGroup collision preflight (read-only)…"
+our_subscriptions_in() {  # <namespace> → Subscription names there carrying OUR owner label
+  printf '%s\n' "$SUB_SNAPSHOT" \
+    | awk -F'|' -v ns="$1" -v ours="$OG_OWNER_VALUE" '$1 == ns && $4 == ours { print $2 }'
+}
+
+foreign_subscriptions_for() {  # <package> <namespace> → Subscriptions for that package that are NOT ours
+  # Matched on spec.name (the PACKAGE), not metadata.name: the org is free to have called their
+  # Subscription anything. Ours are excluded by owner label, which is what keeps a RE-INSTALL from
+  # reading its own previous install as somebody else's operator and skipping the component.
+  printf '%s\n' "$SUB_SNAPSHOT" \
+    | awk -F'|' -v ns="$2" -v pkg="$1" -v ours="$OG_OWNER_VALUE" \
+        '$1 == ns && $3 == pkg && $4 != ours { print $2 }'
+}
+
+csvs_for_package_in() {  # <package> <namespace> → CSVs OLM has labelled for that package there
+  # OLM stamps every Subscription and CSV it manages with operators.coreos.com/<package>.<namespace>
+  # (verified live, OCP 4.22). Catches an operator installed with no Subscription we can see. A CSV
+  # COPIED into other namespaces by an AllNamespaces operator does NOT carry the marker (verified —
+  # it carries olm.copiedFrom instead), so this never fires outside the operator's own namespace.
+  # Only consulted when we hold no Subscription of our own for the package there — otherwise it
+  # would match the CSV our own Subscription installed and a re-install would adopt itself.
+  printf '%s\n' "$CSV_SNAPSHOT" \
+    | awk -F'|' -v ns="$2" -v key="operators.coreos.com/${1}.${2}," \
+        '$1 == ns && index("," $3, "," key) > 0 { print $2 }'
+}
+
+state_operator_record() {  # <sub-name> → op_<name> from the workshop layer's adoption snapshot
+  printf '%s\n' "$STATE_SNAPSHOT" \
+    | awk -F= -v k="op_$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'
+}
+
+add_unique() {  # <csv> <item> → csv with item appended at most once
+  local csv="$1" item="$2"
+  case ",${csv}," in *",${item},"*) printf '%s' "$csv"; return 0 ;; esac
+  printf '%s' "${csv:+${csv},}${item}"
+}
+
+# ── the verdict for ONE component ─────────────────────────────────────────────
+# Sets globals rather than echoing a value: it also advances OG_CHECKED, which a $(subshell) would
+# throw away. CC_VERB: ok (install it) | present (already on the cluster) | invalid (bug in the
+# component). CC_HARD records whether the evidence was an OperatorGroup collision — the one class of
+# evidence that must still refuse when the component cannot be skipped.
+CC_VERB=""; CC_REASON=""; CC_NS=""; CC_SUBS=""; CC_HARD="false"
+classify_component() {  # <component-dir>
+  local dir="$1" ns f name subns pkg rec csv sub
+  local -a found
+  CC_VERB="ok"; CC_REASON=""; CC_NS=""; CC_SUBS=""; CC_HARD="false"
+
+  # Signal 1 (strongest): a foreign OperatorGroup in a namespace we would ship one into.
+  while IFS= read -r ns; do
+    [[ -n "$ns" ]] || continue
+    OG_CHECKED=$((OG_CHECKED + 1))
+    # Static rule, true on every cluster: openshift-operators ALWAYS carries OpenShift's own
+    # cluster-wide `global-operators`, so shipping one there is a guaranteed collision with the
+    # widest possible blast radius. Not an adoption case — a defect in the component.
+    if [[ "$ns" == "openshift-operators" ]]; then
+      CC_VERB="invalid"
+      CC_REASON="ships an OperatorGroup into openshift-operators, which always carries OpenShift's own cluster-wide 'global-operators'"
+      return 0
+    fi
+    f="$(foreign_operatorgroups_in "$ns" | tr '\n' ' ' | xargs || true)"
+    [[ -n "$f" ]] || continue
+    CC_VERB="present"; CC_HARD="true"
+    CC_NS="$(add_unique "$CC_NS" "$ns")"
+    [[ -n "$CC_REASON" ]] \
+      || CC_REASON="namespace ${ns} already carries an OperatorGroup that is not ours (${f})"
+  done < <(component_operatorgroup_namespaces "$dir")
+
+  # Signals 2-4, per Subscription the component ships.
+  while read -r name subns pkg; do
+    [[ -n "$name" ]] || continue
+
+    # 2 — the workshop layer's first-write-wins snapshot already ruled on this operator.
+    rec="$(state_operator_record "$name")"
+    case "$rec" in
+      adopted:*)
+        CC_VERB="present"
+        CC_NS="$(add_unique "$CC_NS" "$subns")"
+        CC_SUBS="$(add_unique "$CC_SUBS" "${name}@${subns}")"
+        [[ -n "$CC_REASON" ]] \
+          || CC_REASON="the workshop uninstall-state snapshot records ${name} in ${subns} as pre-existing" ;;
+    esac
+
+    # 3 — a Subscription for the same PACKAGE in the same namespace that is not ours. This is the
+    # only signal that sees openshift-pipelines and web-terminal, which ship no OperatorGroup at all
+    # and would otherwise have Argo silently adopt (and re-channel) the org's Subscription.
+    f="$(foreign_subscriptions_for "$pkg" "$subns" | tr '\n' ' ' | xargs || true)"
+    if [[ -n "$f" ]]; then
+      CC_VERB="present"
+      CC_NS="$(add_unique "$CC_NS" "$subns")"
+      read -ra found <<< "$f"
+      for sub in "${found[@]}"; do CC_SUBS="$(add_unique "$CC_SUBS" "${sub}@${subns}")"; done
+      [[ -n "$CC_REASON" ]] \
+        || CC_REASON="package ${pkg} is already subscribed in ${subns} by someone other than us (${f})"
+    elif ! our_subscriptions_in "$subns" | grep -qx "$name"; then
+      # 4 — a CSV with no Subscription of ours behind it.
+      csv="$(csvs_for_package_in "$pkg" "$subns" | tr '\n' ' ' | xargs || true)"
+      if [[ -n "$csv" ]]; then
+        CC_VERB="present"
+        CC_NS="$(add_unique "$CC_NS" "$subns")"
+        [[ -n "$CC_REASON" ]] \
+          || CC_REASON="a ClusterServiceVersion for package ${pkg} is already installed in ${subns} (${csv})"
+      fi
+    fi
+  done < <(component_subscriptions "$dir")
+}
+
+say "▶ [0/2] component adoption preflight (read-only)…"
+load_cluster_snapshot
+ADOPTION_PLAN=""
 OG_CONFLICTS=0
 OG_CHECKED=0
+SKIPPED_COUNT=0
 IFS=',' read -ra PREFLIGHT_STACKS <<< "$STACKS"
 
+plan_add() {  # <verb> <stack> <component> <child-app> <namespaces> <foreign-subs> <reason>
+  ADOPTION_PLAN="${ADOPTION_PLAN}${ADOPTION_PLAN:+$'\n'}$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$1" "$2" "$3" "${4:--}" "${5:--}" "${6:--}" "$7")"
+}
+
 # The bootstrap's own OperatorGroup is only applied when we also create the Subscription (the reuse
-# branch below skips `oc apply -k operator/` entirely), so preflight it only in that case.
-PREFLIGHT_PAIRS=""
+# branch in §1 skips `oc apply -k operator/` entirely), so preflight it only in that case. Never
+# skippable: without Argo CD there is no portfolio at all.
 if ! oc get subscriptions.operators.coreos.com openshift-gitops-operator \
       -n openshift-gitops-operator >/dev/null 2>&1; then
-  PREFLIGHT_PAIRS="openshift-gitops-operator argocd-bootstrap"
+  OG_CHECKED=$((OG_CHECKED + 1))
+  _foreign="$(foreign_operatorgroups_in openshift-gitops-operator | tr '\n' ' ' | xargs || true)"
+  if [[ -n "$_foreign" ]]; then
+    OG_CONFLICTS=$((OG_CONFLICTS + 1))
+    plan_add refuse "-" argocd-bootstrap "-" openshift-gitops-operator "-" \
+      "namespace openshift-gitops-operator already carries an OperatorGroup that is not ours (${_foreign})"
+    say "❌ namespace openshift-gitops-operator already has an OperatorGroup that is not ours: ${_foreign}"
+    say "   but no openshift-gitops-operator Subscription — so something installed a group without an"
+    say "   operator. Installing ours next to it would fail every CSV in that namespace. Refusing."
+    say "   Inspect: oc get operatorgroups,subscriptions,csv -n openshift-gitops-operator"
+  fi
 fi
+
 for _stack in "${PREFLIGHT_STACKS[@]}"; do
   _stack="$(echo "$_stack" | xargs)"
   [[ -d "${STACKS_DIR}/${_stack}" ]] || continue
-  PREFLIGHT_PAIRS="${PREFLIGHT_PAIRS}${PREFLIGHT_PAIRS:+$'\n'}$(operatorgroup_namespaces "$_stack")"
+  while IFS= read -r _app; do
+    [[ -n "$_app" ]] || continue
+    _cpath="$(component_path_of "$_stack" "$_app")"
+    [[ -n "$_cpath" ]] || continue
+    _cdir="${REPO_ROOT}/${_cpath}"
+    _comp="$(basename "$_cpath")"
+    _child="$(yaml_scalar "${STACKS_DIR}/${_stack}/${_app}" metadata name)"
+    [[ -n "$_child" ]] || _child="pp-${_comp}"
+
+    classify_component "$_cdir"
+    [[ "$CC_VERB" == "ok" ]] && continue
+
+    if [[ "$CC_VERB" == "invalid" ]]; then
+      OG_CONFLICTS=$((OG_CONFLICTS + 1))
+      plan_add refuse "$_stack" "$_comp" "$_child" "-" "-" "$CC_REASON"
+      say "❌ component '${_comp}' ${CC_REASON}."
+      say "   Every operator the org installed cluster-wide would stop being reconciled."
+      say "   Fix in git: delete components/${_comp}/operatorgroup*.yaml and drop it from the"
+      say "   component's kustomization — an operator installed there needs no OperatorGroup of ours."
+      continue
+    fi
+
+    # CC_VERB == present. Operator-only → adopt theirs and skip ours, unattended. Anything else →
+    # refuse (OperatorGroup collision) or warn (adoption without a collision).
+    if is_operator_only "$_cdir"; then
+      SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+      plan_add skip "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" "$CC_REASON"
+      say "  • ${_comp}: already installed by this cluster's owner — using theirs, our component skipped"
+      say "      evidence : ${CC_REASON}"
+      say "      effect   : ${_child} is removed from the rendered ${_stack} stack — nothing of theirs is touched"
+    elif [[ "$CC_HARD" == "true" ]]; then
+      OG_CONFLICTS=$((OG_CONFLICTS + 1))
+      plan_add refuse "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" "$CC_REASON"
+      say "❌ ${CC_REASON}"
+      say "   Component '${_comp}' would add a second one. OLM would then fail EVERY CSV in"
+      say "   ${CC_NS%%,*} (TooManyOperatorGroups) while its pods keep running — a silent, invisible"
+      say "   break of an operator this cluster's owner installed. Refusing to continue."
+      say "   '${_comp}' ships operand CRs as well as the operator, so it cannot be skipped the way an"
+      say "   operator-only component is: dropping it would leave the workshop quietly incomplete."
+      say "   Choose one, then re-run:"
+      say "     • install without the stack that ships it — drop '${_stack}' from --stacks"
+      say "     • or remove the org's operator from ${CC_NS%%,*} first (their call, not ours)"
+    else
+      plan_add warn "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" "$CC_REASON"
+      say "  ⚠ ${_comp}: ${CC_REASON}"
+      say "      '${_comp}' ships operand CRs as well as the operator, so it is NOT skipped — Argo will"
+      say "      manage the existing Subscription. Check its channel is one the org expects:"
+      say "        oc get subscriptions.operators.coreos.com -n ${CC_NS%%,*}"
+    fi
+  done < <(active_app_files "$_stack")
 done
 
-while read -r og_ns og_comp; do
-  [[ -n "$og_ns" ]] || continue
-  OG_CHECKED=$((OG_CHECKED + 1))
-
-  # Static rule, true on every cluster: openshift-operators ALWAYS ships the cluster-wide
-  # `global-operators` OperatorGroup, so shipping one there is a guaranteed collision with the widest
-  # possible blast radius — every operator the org installed cluster-wide stops being reconciled.
-  if [[ "$og_ns" == "openshift-operators" ]]; then
-    echo "❌ component '${og_comp}' ships an OperatorGroup into openshift-operators"
-    echo "   That namespace always has OpenShift's own cluster-wide 'global-operators' OperatorGroup."
-    echo "   Fix in git: delete components/${og_comp}/operatorgroup*.yaml and drop it from the"
-    echo "   component's kustomization — an operator installed there needs no OperatorGroup of ours."
-    OG_CONFLICTS=$((OG_CONFLICTS + 1))
-    continue
-  fi
-
-  _foreign="$(foreign_operatorgroups_in "$og_ns" | tr '\n' ' ' | xargs || true)"
-  [[ -n "$_foreign" ]] || continue
-  echo "❌ namespace ${og_ns} already has an OperatorGroup that is not ours: ${_foreign}"
-  echo "   Component '${og_comp}' would add a second one. OLM would then fail EVERY CSV in"
-  echo "   ${og_ns} (TooManyOperatorGroups) while its pods keep running — a silent, invisible"
-  echo "   break of an operator this cluster's owner installed. Refusing to continue."
-  echo "   Fix: this cluster already runs that operator, so do not install ours. Remove"
-  echo "     apps/${og_comp}.yaml from the stack kustomization that ships it and re-run:"
-  echo "       grep -rl '${og_comp}' ${STACKS_DIR}/*/kustomization.yaml"
-  OG_CONFLICTS=$((OG_CONFLICTS + 1))
-done <<< "$PREFLIGHT_PAIRS"
+if [[ "$ADOPTION_PLAN_ONLY" == "true" ]]; then
+  [[ -n "$ADOPTION_PLAN" ]] && printf '%s\n' "$ADOPTION_PLAN"
+  exit 0
+fi
 
 if [[ "$OG_CONFLICTS" -gt 0 ]]; then
-  echo "❌ ${OG_CONFLICTS} OperatorGroup collision(s) — nothing was applied, the cluster is untouched."
+  echo "❌ ${OG_CONFLICTS} unskippable collision(s) — nothing was applied, the cluster is untouched."
   exit 1
 fi
-echo "  ✓ ${OG_CHECKED} OperatorGroup namespace(s) checked — none already carries a foreign one"
+echo "  ✓ ${OG_CHECKED} OperatorGroup namespace(s) checked · ${SKIPPED_COUNT} component(s) adopted-and-skipped"
 
 # ── 1. GitOps operator ────────────────────────────────────────────────────────
 # --stacks-only callers (the phase-2 mirror flip) already have a working Argo CD; re-running the
@@ -327,7 +520,8 @@ echo "▶ [2/2] Applying AppProject ${PROJECT} + stack Applications…"
 # entry for real means deleting the project (which teardown does anyway).
 REPOS_FILE="$(mktemp)"
 DESTS_FILE="$(mktemp)"
-trap 'rm -f "$REPOS_FILE" "$DESTS_FILE"' EXIT
+SKIP_FILE="$(mktemp)"
+trap 'rm -f "$REPOS_FILE" "$DESTS_FILE" "$SKIP_FILE"' EXIT
 
 # Argo matches sourceRepos as globs against the Application's repoURL, and repo URLs are written
 # both with and without the .git suffix across this tree — emit both spellings of every entry so a
@@ -339,7 +533,7 @@ trap 'rm -f "$REPOS_FILE" "$DESTS_FILE"' EXIT
   done
   oc get appproject "$PROJECT" -n "$ARGO_NS" \
     -o jsonpath='{range .spec.sourceRepos[*]}    - {@}{"\n"}{end}' 2>/dev/null || true
-} | grep -v '^[[:space:]]*$' | sort -u > "$REPOS_FILE"
+} | sed '/^[[:space:]]*$/d' | sort -u > "$REPOS_FILE"
 
 # Destinations the template does not already carry (consumer layers add their own namespaces),
 # plus everything the live project already permits.
@@ -348,16 +542,23 @@ trap 'rm -f "$REPOS_FILE" "$DESTS_FILE"' EXIT
     [[ -n "$_ns" ]] || continue
     printf "    - {server: https://kubernetes.default.svc, namespace: '%s'}\n" "$_ns"
   done
-  oc get appproject "$PROJECT" -n "$ARGO_NS" \
-    -o jsonpath='{range .spec.destinations[*]}{.namespace}{"\n"}{end}' 2>/dev/null \
-    | grep . \
+  # `|| true` + an in-loop emptiness guard, NOT `| grep .`: on a FIRST install the AppProject does
+  # not exist yet, so both `oc get` and a `grep .` with no input exit non-zero — and under
+  # `set -o pipefail` that is the last command of this group, so the whole installer died before it
+  # could create the project it was looking for. (Introduced 499aea1, never reached because the
+  # section-0 refusal fired first.)
+  { oc get appproject "$PROJECT" -n "$ARGO_NS" \
+      -o jsonpath='{range .spec.destinations[*]}{.namespace}{"\n"}{end}' 2>/dev/null || true; } \
     | while IFS= read -r _ns; do
+        [[ -n "$_ns" ]] || continue
         # Already in the template body → skip, so the rendered file has no duplicates.
         grep -qF "namespace: '${_ns}'" "${SCRIPT_DIR}/appproject.template.yaml" && continue
         grep -qE "namespace: ${_ns}\$|namespace: ${_ns} " "${SCRIPT_DIR}/appproject.template.yaml" && continue
         printf "    - {server: https://kubernetes.default.svc, namespace: '%s'}\n" "$_ns"
       done
-} | grep -v '^[[:space:]]*$' | sort -u > "$DESTS_FILE"
+  # sed, not `grep -v`: grep exits 1 on empty input, and under `set -o pipefail` that killed a
+  # standalone `--stacks <x>` install (no --allow-destination, no pre-existing project → no lines).
+} | sed '/^[[:space:]]*$/d' | sort -u > "$DESTS_FILE"
 
 # sed's `r` reads a list in after the marker line; the paired `d` drops the marker itself.
 # (A plain s/// cannot carry a multi-line replacement portably across GNU and BSD sed.)
@@ -370,19 +571,44 @@ sed -e "s|__PROJECT__|${PROJECT}|g" \
     "${SCRIPT_DIR}/appproject.template.yaml" | "${APPLY[@]}"
 echo "  ✓ AppProject ${PROJECT} applied ($(wc -l < "$REPOS_FILE" | tr -d ' ') source repo pattern(s), $(wc -l < "$DESTS_FILE" | tr -d ' ') extra destination(s))"
 
+# Render the section-0 skip decisions as kustomize patches on the parent Application. The parent
+# already rewrites repoURL/targetRevision/project across all 32 children this way; a strategic-merge
+# patch carrying `$patch: delete` removes a child outright (JSON6902 has no delete-resource op). The
+# repo is never edited at install time — the decision travels in the Application, so re-running with
+# the same cluster state renders the same manifest.
+render_skip_patches() {  # <stack> → the patch block for every component skipped in that stack
+  local stack="$1" verb s comp child ns subs reason
+  : > "$SKIP_FILE"
+  [[ -n "$ADOPTION_PLAN" ]] || return 0
+  while IFS=$'\t' read -r verb s comp child ns subs reason; do
+    [[ "$verb" == "skip" && "$s" == "$stack" ]] || continue
+    : "$ns" "$subs"   # carried for the workshop layer's uninstall snapshot, not needed here
+    skip_patch_block "$child" "$comp" "$reason" "$ARGO_NS" >> "$SKIP_FILE"
+  done <<< "$ADOPTION_PLAN"
+}
+
 IFS=',' read -ra STACK_ARR <<< "$STACKS"
 for stack in "${STACK_ARR[@]}"; do
   stack="$(echo "$stack" | xargs)"  # trim
   if [[ ! -d "${SCRIPT_DIR}/../stacks/${stack}" ]]; then
     echo "❌ unknown stack '${stack}' (no stacks/${stack}/ directory)"; exit 1
   fi
+  render_skip_patches "$stack"
+  # sed's `r` reads the block in after the marker line; the paired `d` drops the marker itself.
   sed -e "s|__STACK__|${stack}|g" \
       -e "s|__REPO_URL__|${REPO_URL}|g" \
       -e "s|__SOURCE_REPO_URL__|${SOURCE_REPO}|g" \
       -e "s|__REVISION__|${REVISION}|g" \
       -e "s|__PROJECT__|${PROJECT}|g" \
+      -e "/__SKIP_PATCHES__/r ${SKIP_FILE}" \
+      -e "/__SKIP_PATCHES__/d" \
       "${SCRIPT_DIR}/stack-app.template.yaml" | "${APPLY[@]}"
-  echo "  ✓ Application pp-${stack} applied"
+  _skipped_here="$(grep -c '^        - target:' "$SKIP_FILE" || true)"
+  if [[ "${_skipped_here:-0}" -gt 0 ]]; then
+    echo "  ✓ Application pp-${stack} applied (${_skipped_here} adopted component(s) dropped from the render)"
+  else
+    echo "  ✓ Application pp-${stack} applied"
+  fi
 done
 
 # ── Optionally wait for health ────────────────────────────────────────────────
@@ -401,4 +627,14 @@ if [[ "$WAIT" == "true" && "$DRY_RUN" != "true" ]]; then
 fi
 
 echo "✅ bootstrap complete — reconciliation continues in-cluster."
+# Say plainly what this cluster is NOT getting from us, and why. An operator silently absent from the
+# portfolio is the kind of surprise that surfaces three modules later.
+if [[ "$SKIPPED_COUNT" -gt 0 ]]; then
+  echo "   adopted — already on this cluster, so ours was never installed:"
+  while IFS=$'\t' read -r _v _s _c _rest; do
+    [[ "$_v" == "skip" ]] || continue
+    : "$_s" "$_rest"
+    echo "     • ${_c}: already installed by this cluster's owner — using theirs, our component skipped"
+  done <<< "$ADOPTION_PLAN"
+fi
 echo "   Watch: oc get applications -n openshift-gitops"

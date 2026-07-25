@@ -38,7 +38,7 @@ argocd-bootstrap/   # the ONLY imperative step: GitOps operator + controller RBA
 stacks/<stack>/     # one Argo CD Application per component, sync-wave ordered
 components/<name>/  # kustomize bases: Subscription + OperatorGroup + config CRs + health
 values/             # per-cluster inputs where auto-detection isn't possible (see values/README.md)
-hack/               # repo-side checks (no cluster): ./hack/check-teardown-invariants.sh
+hack/               # repo-side checks (no cluster): check-teardown-invariants.sh, check-adoption-skip.sh
 ```
 
 ## Stacks
@@ -91,8 +91,34 @@ Rules for any new component:
 
 - **Never ship an OperatorGroup into `openshift-operators`.** OpenShift always provides the cluster-wide `global-operators` group there. Components that install into it (`devspaces`, `openshift-pipelines`, `web-terminal`) correctly ship none.
 - Every OperatorGroup carries the `workshop.redhat.com/owner: ogsr` label (the component kustomization stamps it), which is how tooling tells ours from theirs.
-- `argocd-bootstrap/install.sh` runs a **read-only preflight** before it applies anything: for every OperatorGroup the requested stacks would create, it checks whether that namespace already holds one that is not ours and refuses the whole install if so, naming the component and the namespace. Argo CD has no "create only if absent" primitive, so this decision cannot live in the manifests — it is made once, in the portfolio's single sanctioned imperative step.
-- If the preflight refuses: that cluster already runs the operator. Remove the component's `apps/<name>.yaml` line from the stack kustomization and re-run — do not delete the organisation's OperatorGroup.
+- `argocd-bootstrap/install.sh` runs a **read-only preflight** before it applies anything (§ Adoption below). Argo CD has no "create only if absent" primitive, so this decision cannot live in the manifests — it is made once, in the portfolio's single sanctioned imperative step.
+
+## Adoption — when the cluster already runs an operator
+
+*"If a capability is already installed, use it instead of installing or overwriting."* RHDP clusters — the primary target — ship at least three pre-installed operators, so a first install must handle this **without a human**: an installer that stops and asks for a repo edit is not an unattended installer.
+
+`argocd-bootstrap/install.sh` §0 asks two questions per component, before anything is applied.
+
+**1. Is this operator already on the cluster?** Four signals, strongest first, all read-only, all namespace-scoped (an operator of the same package in a *different* namespace is not a collision — the org's RHBK in `keycloak` does not stop us installing our own in `sso-workshop`):
+
+| # | Signal | Catches |
+|---|---|---|
+| 1 | the component's OperatorGroup namespace already holds an OperatorGroup that is not ours | the `TooManyOperatorGroups` case |
+| 2 | the workshop layer's `ogsr-uninstall-state` snapshot records `op_<sub>` as `adopted:` | a verdict already reached on an earlier run |
+| 3 | a Subscription for the same **package** in that namespace with no `workshop.redhat.com/owner: ogsr` label | `openshift-pipelines` / `web-terminal`, which ship no OperatorGroup at all and would otherwise have Argo silently re-channel the org's Subscription |
+| 4 | a CSV carrying OLM's `operators.coreos.com/<package>.<namespace>` marker, with no Subscription of ours | an operator installed without a Subscription we can see |
+
+Ours are excluded by owner label, which is what makes a re-install idempotent: the installer never reads its own previous install as somebody else's operator.
+
+**2. Can we simply not install ours?** Only if the component is **operator-only** — its directory holds nothing but `kustomization.yaml`, `namespace*.yaml`, `operatorgroup*.yaml`, `subscription*.yaml`, so it contributes nothing but the operator install. Today that is `cert-manager`, `keycloak-operator`, `openshift-pipelines`, `rhacs-operator`, `rhdh-operator`, `rhtpa`, `service-interconnect`, `web-terminal` — **derived from the directory at runtime, never a hardcoded list**, so a component that grows its first operand stops being skippable automatically.
+
+- **Operator-only + already present → SKIPPED, install continues.** The skip is delivered as a kustomize patch on the parent `pp-<stack>` Application (`$patch: delete` on the child, the same `kustomize.patches` mechanism that rewrites `repoURL` across all 32 children) — **the repo is never edited at install time**. The summary names every skipped component and why.
+- **Anything else + an OperatorGroup collision → REFUSED, loudly.** Dropping a component that also ships operand CRs would leave the workshop quietly incomplete, and there is no partial-component surgery. The two ways forward are dropping the stack from `--stacks`, or the org removing their operator — never deleting their OperatorGroup.
+- **Anything else, present but with no collision → a warning.** Argo will manage the existing Subscription; the message says which namespace to check.
+
+Preview the verdict on any cluster without touching it: `./argocd-bootstrap/install.sh --stacks <s> --adoption-plan`. The workshop bootstrap layer reads exactly that plan so its uninstall snapshot records a skipped component's operator as **adopted** — one detector, two callers, and teardown leaves an operator we never installed exactly as it found it.
+
+Run `./hack/check-adoption-skip.sh` after touching a component or the skip mechanism. It proves both halves from the *rendered* manifests: every skippable component emits only Namespace/OperatorGroup/Subscription, and a simulated skip removes exactly its own child Application from the stack.
 
 ## Uninstall
 
