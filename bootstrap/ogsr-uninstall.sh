@@ -1171,6 +1171,12 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
         strip_our_marks operatorgroups.operators.coreos.com "$og" "$ns"
       done < <(oc get operatorgroups.operators.coreos.com -n "$ns" \
                 -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+      # The NAMESPACE itself, not just the objects inside it. Argo stamps its tracking-id on a
+      # namespace it adopts, and preserve_and_strip never reaches this one — an adopted operator's
+      # namespace is not in the "preserved" list, it is simply never a deletion candidate. Leaving
+      # the mark means ogsr-check-clean.sh correctly reports the org's namespace as marked by us
+      # after a teardown that was otherwise complete. Measured on ksls5, 2026-07-25.
+      strip_our_marks namespace "$ns" ""
     fi
   done < <(enumerate_operators)
   return 0
@@ -1451,6 +1457,36 @@ step_cluster_rbac() {  # 6 — cluster-scoped objects the cascade CANNOT reach, 
   sub del_labeled_cluster clusterroles.rbac.authorization.k8s.io
   sub del_appprojects
   sub remove_argo_tls_cert_key
+  sub sweep_dead_webhooks
+  return 0
+}
+
+sweep_dead_webhooks() {  # admission webhooks whose backing Service died with a namespace we removed
+  # Some operators register their webhooks at RUNTIME rather than through the CSV's webhookdefinitions,
+  # so OLM does not own them and removing the operator leaves them behind. Sync waves cannot help: the
+  # operator's finalizer only cleans up what the operator itself tracks. Measured on ksls5 2026-07-25 —
+  # keda-admission and stackrox both survived a complete teardown pointing at deleted Services.
+  #
+  # These are not inert. failurePolicy=Fail means every create/update the webhook intercepts is REJECTED
+  # while its backend is gone, which blocks writes and can block deletion of objects in the namespaces it
+  # covers. Left behind, they degrade a cluster that is supposed to be back to normal.
+  #
+  # Scoped deliberately: only webhooks whose Service lives in a namespace WE owned and removed. A webhook
+  # pointing at a live Service is working; one pointing into a namespace that was never ours is the org's
+  # problem to diagnose, not ours to delete — ogsr-check-clean.sh reports those instead.
+  # Read the owned-namespace set from the installed stacks' MANIFESTS, not from the cluster: by the
+  # time this runs the namespaces are already deleted, so a live query would return nothing.
+  local kind name svc_ns svc_nm owned
+  owned=" $(enumerate_installed_stack_ns | tr '\n' ' ') "
+  for kind in validatingwebhookconfigurations mutatingwebhookconfigurations; do
+    while IFS='|' read -r name svc_ns svc_nm; do
+      [[ -n "$name" && -n "$svc_ns" ]] || continue
+      case "$owned" in *" ${svc_ns} "*) ;; *) continue ;; esac
+      oc get namespace "$svc_ns" >/dev/null 2>&1 && continue        # namespace still there: not ours to judge
+      oc get service "$svc_nm" -n "$svc_ns" >/dev/null 2>&1 && continue
+      del_obj "$kind" "$name"
+    done < <(oc get "$kind" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.webhooks[0].clientConfig.service.namespace}{"|"}{.webhooks[0].clientConfig.service.name}{"\n"}{end}' 2>/dev/null || true)
+  done
   return 0
 }
 
