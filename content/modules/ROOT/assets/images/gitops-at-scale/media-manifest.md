@@ -41,11 +41,11 @@ and richer rendering; keep the `.mmd` as the editable master (do not delete it).
 
 | # | Filename | Status | Page (Mermaid included in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `gitops-at-scale-01-appset.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/gitops-at-scale/01-appset.mmd` | hand-made-per-env vs one ApplicationSet (generator → template → 3 apps) |
-| 2 | `gitops-at-scale-02-sync-waves.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/gitops-at-scale/02-sync-waves.mmd` | db (wave 0) → migration hook (wave 1) → app Rollout (wave 2) |
-| 3 | `gitops-at-scale-03-canary-analysis.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/gitops-at-scale/03-canary-analysis.mmd` | canary 25→50 → analysis → pass (100%) / fail (roll back to stable) |
+| 1 | `gitops-at-scale-01-appset.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/gitops-at-scale/01-appset.mmd` | hand-made-per-env vs one ApplicationSet (generator → template → 3 apps) |
+| 2 | `gitops-at-scale-02-sync-waves.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/gitops-at-scale/02-sync-waves.mmd` | db (wave 0) → migration hook (wave 1) → app Rollout (wave 2) |
+| 3 | `gitops-at-scale-03-canary-analysis.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/gitops-at-scale/03-canary-analysis.mmd` | canary 25→50 → analysis → pass (100%) / fail (roll back to stable) |
 | 4 | `gitops-at-scale-04-platform-accretion.svg` | ⬜ NOT CAPTURED (shared) | concept.adoc (pointer) | the cross-module Parasol platform diagram with the M10 layer (ApplicationSets + Rollouts) highlighted |
-| 5 | `gitops-at-scale-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc — `examples/diagrams/gitops-at-scale/05-what-you-built.mmd` | ApplicationSet → 3 apps; prod canary with the pass/rollback fork highlighted |
+| 5 | `gitops-at-scale-05-what-you-built.svg` | ✅ RENDERED 2026-07-26| wrapup.adoc — `examples/diagrams/gitops-at-scale/05-what-you-built.mmd` | ApplicationSet → 3 apps; prod canary with the pass/rollback fork highlighted |
 
 ## Recording (demo-arc happy path)
 

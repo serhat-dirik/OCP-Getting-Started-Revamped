@@ -39,11 +39,11 @@ deck and richer rendering; keep the `.mmd` as the editable master (do not delete
 
 | # | Filename | Status | Page (Mermaid included in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `securing-apps-keycloak-01-four-flows.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/01-four-flows.mmd` | the four OIDC flows — auth-code+PKCE + bearer (human), client-credentials + token-exchange (machine) — and how the user token flows through them |
-| 2 | `securing-apps-keycloak-02-realm-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/02-realm-model.mmd` | realm → clients / roles / users, with the four Parasol clients, `claims-adjuster`, and the `adjuster`/`viewer` users |
-| 3 | `securing-apps-keycloak-03-build-vs-buy.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/03-build-vs-buy.mmd` | "build it yourself" (a column of auth risk) vs "use the platform" (Keycloak, included with OpenShift) |
-| 4 | `securing-apps-keycloak-04-security-layer.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/securing-apps-keycloak/04-security-layer.mmd` | the identity/access layer (login / bearer API / machine identity / exchange) over the M01–M12 Parasol platform, fed by Keycloak |
-| 7 | `securing-apps-keycloak-07-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc — `examples/diagrams/securing-apps-keycloak/07-what-you-built.mmd` | Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds) |
+| 1 | `securing-apps-keycloak-01-four-flows.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/securing-apps-keycloak/01-four-flows.mmd` | the four OIDC flows — auth-code+PKCE + bearer (human), client-credentials + token-exchange (machine) — and how the user token flows through them |
+| 2 | `securing-apps-keycloak-02-realm-model.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/securing-apps-keycloak/02-realm-model.mmd` | realm → clients / roles / users, with the four Parasol clients, `claims-adjuster`, and the `adjuster`/`viewer` users |
+| 3 | `securing-apps-keycloak-03-build-vs-buy.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/securing-apps-keycloak/03-build-vs-buy.mmd` | "build it yourself" (a column of auth risk) vs "use the platform" (Keycloak, included with OpenShift) |
+| 4 | `securing-apps-keycloak-04-security-layer.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/securing-apps-keycloak/04-security-layer.mmd` | the identity/access layer (login / bearer API / machine identity / exchange) over the M01–M12 Parasol platform, fed by Keycloak |
+| 7 | `securing-apps-keycloak-07-what-you-built.svg` | ✅ RENDERED 2026-07-26| wrapup.adoc — `examples/diagrams/securing-apps-keycloak/07-what-you-built.mmd` | Keycloak at center feeding web (login), claims (bearer+role), fraud (exchange), batch (client-creds) |
 
 ## Recording (demo-arc happy path)
 

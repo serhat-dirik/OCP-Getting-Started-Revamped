@@ -40,10 +40,10 @@ deck and richer rendering; keep the `.mmd` as the editable master (do not delete
 
 | # | Filename | Status | Page (Mermaid included in) | Shows |
 |---|----------|--------|-----------------------------|-------|
-| 1 | `developer-hub-golden-paths-01-catalog-model.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/developer-hub-golden-paths/01-catalog-model.mmd` | System → Components + API, owned by a Group; provides/consumes relations |
-| 2 | `developer-hub-golden-paths-02-golden-path-flow.svg` | ⬜ NOT CAPTURED (export) | concept.adoc — `examples/diagrams/developer-hub-golden-paths/02-golden-path-flow.mmd` | form → template → scaffold + publish + register → new repo + catalog entry |
+| 1 | `developer-hub-golden-paths-01-catalog-model.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/developer-hub-golden-paths/01-catalog-model.mmd` | System → Components + API, owned by a Group; provides/consumes relations |
+| 2 | `developer-hub-golden-paths-02-golden-path-flow.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/developer-hub-golden-paths/02-golden-path-flow.mmd` | form → template → scaffold + publish + register → new repo + catalog entry |
 | 3 | `developer-hub-golden-paths-04-platform-accretion.svg` | ⬜ NOT CAPTURED (shared) | concept.adoc (pointer) | the cross-module Parasol platform diagram with the M11 layer (portal + catalog + golden path packaging M02–M10) highlighted |
-| 4 | `developer-hub-golden-paths-05-what-you-built.svg` | ⬜ NOT CAPTURED (export) | wrapup.adoc — `examples/diagrams/developer-hub-golden-paths/05-what-you-built.mmd` | form → template → repo + catalog + in-cluster build → running service |
+| 4 | `developer-hub-golden-paths-05-what-you-built.svg` | ✅ RENDERED 2026-07-26| wrapup.adoc — `examples/diagrams/developer-hub-golden-paths/05-what-you-built.mmd` | form → template → repo + catalog + in-cluster build → running service |
 
 ## Recording (demo-arc happy path)
 
