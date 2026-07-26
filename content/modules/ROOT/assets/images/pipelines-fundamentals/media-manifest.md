@@ -7,6 +7,13 @@ numbered red circles matching the referenced step. Every screenshot needs alt te
 commented `// media-pass: …` line — replace with the `image::` (screenshot) or the SVG
 `image::` (diagram) when the asset lands.
 
+Capture status 2026-07-26: five console screenshots captured with tools/media/capture.py
+against OCP 4.22.5 as user1 and embedded in lab.adoc — the PipelineRun graph, the failed
+run, the Output-tab results, the Pipeline details graph, and the PaC Repository page. Two
+of them replaced wrong prose: results are on the Output tab (not Details), and the
+Repository page has no "Git provider" field. Still outstanding: the Gitea Add Webhook
+screenshot (#2), which is a Gitea UI view, not a console one.
+
 Media note: the module's pipeline mechanics — the anatomy run (12m54s, image 391 MB), the
 task-library resolver refs, the break-fix RED/GREEN, and the live PaC git-push fire — were all
 performed and captured from the CLI/API as `user6` on 2026-07-10. The console screenshots and the
@@ -19,9 +26,9 @@ replace/augment them in the pass.
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
-| 1 | `pipelines-fundamentals-01-pipelinerun-graph.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns → (your run)** — the 5-Task graph (fetch-source → unit-test → build-image → image-report → deploy) | the visual DAG; a green run; the `image-within-budget` result in the details pane | lab.adoc ex. 1 / challenge (console view of the run) |
+| 1 | `pipelines-fundamentals-01-pipelinerun-graph.png` | ✅ CAPTURED 2026-07-26 | **Pipelines → PipelineRuns → (your run)** — the 5-Task graph (fetch-source → unit-test → build-image → image-report → deploy) | the visual DAG; a green run; the `image-within-budget` result in the details pane | lab.adoc ex. 1 / challenge (console view of the run) |
 | 2 | `pipelines-fundamentals-02-gitea-webhook.png` | ⬜ NOT CAPTURED | **Gitea → fork → Settings → Webhooks → Add Webhook (Gitea type)** | Target URL = the `pipelines-as-code-controller` route; POST Content Type `application/json`; the secret filled in; **Push Events** selected | lab.adoc ex. 4 (`// media-pass:` marker after "Add Webhook") |
-| 3 | `pipelines-fundamentals-03-pipelinerun-failed.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns** — the RED break-fix run: `unit-test` failed, `build-image`/`image-report`/`deploy` **Skipped** | the failed `unit-test` node and the three *Skipped* downstream nodes — the gate, visually | lab.adoc ex. 3 (optional; the log message is the load-bearing artifact and is shown inline) |
+| 3 | `pipelines-fundamentals-03-pipelinerun-failed.png` | ✅ CAPTURED 2026-07-26 | **Pipelines → PipelineRuns** — the RED break-fix run: `unit-test` failed, `build-image`/`image-report`/`deploy` **Skipped** | the failed `unit-test` node and the three *Skipped* downstream nodes — the gate, visually | lab.adoc ex. 3 (optional; the log message is the load-bearing artifact and is shown inline) |
 
 Screenshots 1 and 3 are **enrichment** — the lab's load-bearing evidence is CLI output (`tkn
 pipelinerun describe`, the `Parasol rule violated` log line), shown inline. Screenshot **2 (the Gitea
