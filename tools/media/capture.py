@@ -76,6 +76,10 @@ class Job:
     # Argo's app-details drawer is a fixed-height overlay, so the section you want can sit below
     # the fold where neither the default shot nor full_page reaches it.
     scroll_to_text: str | None = None
+    # Checkboxes that must end up TICKED. Use this, never click_text, for anything stateful:
+    # Argo persists its "Compact diff" toggle across visits, so a blind click turned it OFF on
+    # the second capture and silently produced the full manifest instead of the one-line diff.
+    check_text: list[str] = field(default_factory=list)
 
     @property
     def out_path(self) -> Path:
@@ -140,6 +144,36 @@ def click_label(page: Any, label: str) -> bool:
         return False
 
 
+_CHECK_STATE = """(label) => {
+    const lab = [...document.querySelectorAll('label, span, div')]
+        .find(e => (e.innerText || '').trim().toLowerCase() === label.toLowerCase());
+    if (!lab) return null;
+    // The input is usually a sibling or inside the same row as its text.
+    let box = lab.querySelector('input[type=checkbox]');
+    if (!box && lab.parentElement) box = lab.parentElement.querySelector('input[type=checkbox]');
+    if (!box) return null;
+    box.scrollIntoView({block: 'center'});
+    const r = box.getBoundingClientRect();
+    return {checked: box.checked, x: r.x + r.width / 2, y: r.y + r.height / 2};
+}"""
+
+
+def ensure_checked(page: Any, label: str) -> bool | None:
+    """Leave a labelled checkbox TICKED. Returns final state, or None if not found.
+
+    Idempotent on purpose: these toggles persist across page visits, so 'click it' is not the
+    same as 'turn it on' — the second run would turn it back off.
+    """
+    state = page.evaluate(_CHECK_STATE, label)
+    if state is None:
+        return None
+    if not state["checked"]:
+        page.mouse.click(state["x"], state["y"])
+        page.wait_for_timeout(2000)
+        state = page.evaluate(_CHECK_STATE, label) or state
+    return bool(state["checked"])
+
+
 def capture(page: Any, job: Job) -> tuple[bool, str]:
     """Navigate, wait for REAL content, shoot. Returns (ok, detail)."""
     try:
@@ -149,6 +183,11 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
         for label in job.click_text:
             if not click_label(page, label):
                 print(f"      (no '{label}' control — continuing)")
+
+        for label in job.check_text:
+            state = ensure_checked(page, label)
+            if state is None:
+                print(f"      (no '{label}' checkbox — continuing)")
 
         if job.wait_selector:
             page.wait_for_selector(job.wait_selector, timeout=60_000)
