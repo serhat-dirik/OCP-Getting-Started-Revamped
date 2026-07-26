@@ -140,7 +140,12 @@ ifndef::demo[]
 Your project already has a Pipeline — `parasol-claims-build-test-deploy` — that the platform team seeded.
 Before you run it, read what it is: the same five-Task anatomy from the concept, made concrete.
 
-// [CAPTURE-VERIFY] Pipelines > Pipelines > parasol-claims-build-test-deploy Details (graph of 5 Tasks) + YAML tab spec.tasks resolver refs (OCP 4.21) — CLI 'tkn pipeline describe' authoritative.
+// Grounded live on OCP 4.22.5 (2026-07-26): the Pipeline detail page's tab row is
+// Details · YAML · Parameters · Metrics · PipelineRuns. The Details tab renders the topology
+// graph (five nodes, in order) ABOVE the property list, and below it a "Tasks" list that prints
+// each pipeline task with its resolved Task in parentheses — fetch-source (git-clone),
+// unit-test (maven-jdk21), build-image (buildah), image-report (image-size-report),
+// deploy (openshift-client) — plus a "Workspaces" entry reading `shared-workspace`.
 [tabs]
 ====
 Console::
@@ -149,6 +154,8 @@ Console::
 . In the {ocp_console_url}[OpenShift web console^] navigation, choose *Pipelines* → *Pipelines* (project `{user}-cicd`).
 . Click the `parasol-claims-build-test-deploy` Pipeline.
 Its *Details* page draws the Pipeline as a graph — five Tasks in order: `fetch-source` → `unit-test` → `build-image` → `image-report` → `deploy`.
+. Below the graph, read the *Tasks* list: each entry names the pipeline task and, in parentheses, the *Task it resolves to* — `unit-test (maven-jdk21)`, `image-report (image-size-report)`, and so on.
+That parenthesised name is the shared Task being pulled in; the name to its left is only this Pipeline's label for that step.
 . Switch to the *YAML* tab and find `spec.tasks`: each Task is a `taskRef` with `resolver: cluster` and a `name`/`namespace`, not a definition pasted into this Pipeline — that is the cluster resolver pulling each Task from a shared library.
 --
 CLI::
@@ -219,7 +226,14 @@ That is the three reuse layers from the concept, in one output — and you explo
 Now *run* it — straight from the console, no hand-built YAML.
 A PipelineRun is one execution: the *Start* form pre-fills the Pipeline's four parameters and asks only for the shared *workspace* — a fresh PersistentVolumeClaim that carries the checkout from one Task to the next.
 
-// [CAPTURE-VERIFY] Pipelines > Pipelines > parasol-claims-build-test-deploy > Actions > Start: the Start form pre-fills git-url/git-revision/image/max-size-mb and a Workspaces section; set shared-workspace = VolumeClaimTemplate; Start — CLI 'tkn pipeline start' authoritative.
+// Partially grounded on OCP 4.22.5 (2026-07-26). CONFIRMED from the API: all four params carry
+// defaults (git-url, git-revision=main, image, max-size-mb=500), so the form has something to
+// pre-fill, and the Pipeline declares exactly one workspace named `shared-workspace`.
+// [CAPTURE-VERIFY] the form's own layout/labels only. The Start form is a MODAL with no route of
+// its own — the pipelines-console-plugin manifest registers `.../:pipelineName/builder` but no
+// start-form page — so it cannot be reached by URL, and PatternFly v6 menus do not open under
+// automation (aria-expanded stays false). Capture this one by hand in a real browser; the CLI
+// path below is the authoritative fallback.
 [tabs]
 ====
 Console::
@@ -263,14 +277,23 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
 The first run downloads Maven dependencies *twice* — once for the test, once inside the image build — so expect *roughly 10–14 minutes*.
 Watch it fill in on the console graph, or stream the step logs from the terminal — clicking a Task node shows exactly what that Task is doing:
 
-// [CAPTURE-VERIFY] Pipelines > PipelineRuns > <run>: the graph; clicking a Task node opens that Task's step Logs — CLI 'tkn pipelinerun logs' authoritative.
+// Grounded live on OCP 4.22.5 (2026-07-26): the PipelineRun detail tab row is
+// Details · YAML · Parameters · Logs · Events · Output · TaskRuns. Each graph node carries a
+// step counter that fills as it runs (`unit-test 1/1`, `build-image 0/1`), and the graph has
+// Zoom in / Zoom out / Fit to screen / Reset view controls. Clicking a node lands on the Logs
+// tab at .../logs?taskName=<task> — only tasks that have STARTED appear in its task list, and
+// the log pane offers `Download`, `Download all task logs` and `Expand`.
 [tabs]
 ====
 Console::
 +
 --
 Open *Pipelines* → *PipelineRuns* and click your run.
-The graph shows the five Tasks; click any Task node to stream that Task's *step logs* in place.
+The graph shows the five Tasks, each with a *step counter* that fills in as it runs — `1/1` once a Task's single step is done, `0/1` while it is still queued.
+Click any Task node to stream that Task's *step logs* on the *Logs* tab.
++
+Only Tasks that have *started* appear in the log view's task list, so early on you will see fewer than five.
+`Download all task logs` grabs the whole run in one file — useful when you want to read it after the run is pruned.
 --
 CLI::
 +
@@ -666,14 +689,30 @@ curl -s -o /dev/null -w "%\{http_code}\n" \
 A `200` means the entry state seeded it into your fork.
 Your namespace also already has a `Repository` resource — the anchor PaC matches an incoming webhook to — and it is pre-wired to read your Gitea credentials from a Secret named `gitea-pac-secret`:
 
-// [CAPTURE-VERIFY] Pipelines > Repositories > parasol-claims (git provider = Gitea; linked PipelineRuns) (OCP 4.21) — CLI 'oc get repository' authoritative.
+// Grounded live on OCP 4.22.5 (2026-07-26) as user1 — CORRECTS an earlier claim. The Repository
+// page does NOT show a "Git provider" field; there is no such field on it. It shows the repo URL
+// (twice: once in the status block, once under `Repository`), `Username`, `Git access token` and
+// `Webhook secret` (both linking the `gitea-pac-secret` Secret), and an empty `Webhook URL`.
+// Tab row: Details · YAML · Metrics · PipelineRuns — PaC's runs land on the PipelineRuns TAB, not
+// in the Details body. Both the list and the detail page carry a "Dev preview" badge. The list
+// columns are Name · URL · Succeeded · Reason · StartTime · CompletionTime · Created · Actions,
+// with the status columns reflecting the LAST PaC run (all `-` before the first push).
+// NOTE: the plugin's `/pac/ns/<ns>` page is NOT this page — it sits behind an off-by-default
+// feature flag and renders "Access Denied … due to cluster policy" for everyone, attendee or
+// admin. It is not an RBAC problem: `oc auth can-i list repositories.pipelinesascode.tekton.dev
+// -n {user}-cicd --as={user}` returns yes. Do not send attendees there.
 [tabs]
 ====
 Console::
 +
 --
 In the navigation, choose *Pipelines* → *Repositories* (project `{user}-cicd`) and click `parasol-claims`.
-Its page shows the Git provider (*Gitea*); once pushes start firing later in this exercise, the PipelineRuns PaC created for it are listed here too.
+Its *Details* page shows the repository *URL* pointing at your fork, and the `gitea-pac-secret` Secret behind both *Git access token* and *Webhook secret* — the credentials PaC uses to talk to Gitea.
+The *Succeeded* / *StartTime* fields read `-` for now: they track the *last* run PaC fired, and nothing has pushed yet.
++
+Once pushes start firing later in this exercise, those runs appear on this page's *PipelineRuns* tab.
++
+NOTE: the *Repositories* page is badged *Dev preview* — that is expected, and does not mean anything is misconfigured.
 --
 CLI::
 +
