@@ -1,0 +1,87 @@
+# Media capture harness
+
+Repeatable console / product-UI screenshots for the workshop media pass. Output lands in
+`content/modules/ROOT/assets/images/<slug>/`, which is where each module's
+`media-manifest.md` expects it.
+
+## Why a driver, and not just `chrome --screenshot`
+
+Both obvious approaches fail, and they fail *quietly* — which is why the media pass stalled
+repeatedly with nobody noticing:
+
+- **An agent's in-conversation browser screenshots are never files.** They are returned into
+  the transcript and discarded. Nothing reaches `assets/images/`, so the manifests stay
+  `⬜ NOT CAPTURED` while the work looks like it is progressing.
+- **`chrome --headless --screenshot=x.png <url>` writes a file, but shoots too early.**
+  Pointed at the Showroom cockpit it captured the Red Hat Demo Platform **splash screen** —
+  a valid 13 KB PNG of a logo. The OpenShift console is the same kind of SPA and is worse:
+  its detail pages register plugin-provided tabs *seconds after* `document.title` resolves.
+  A naive shot of a Pipeline page catches three tabs when the settled page has five.
+
+So every capture must wait on content that only exists once the page has settled. That needs
+a real driver. `capture.py` is it.
+
+## Setup
+
+```bash
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python playwright pyyaml
+```
+
+Uses your installed Google Chrome (`channel="chrome"`), so there is no browser download.
+
+## Authenticating — without handing over a password
+
+`login.py` opens a **headed** window on a throwaway profile directory. A human logs in there;
+the session cookie persists in that profile, and `capture.py` reuses it headlessly.
+
+Neither script reads, types, stores or transmits a credential. The password goes from the
+human into the real OpenShift login page and nowhere else. The profile directory is
+disposable — delete it and log in again when the token expires.
+
+```bash
+.venv/bin/python login.py            # log in in the window that opens, then it exits
+```
+
+## Capturing
+
+```bash
+export OGSR_DOMAIN=apps.cluster-<id>.<base-domain>
+.venv/bin/python capture.py \
+  --jobs jobs-pipelines-fundamentals.yaml \
+  --profile /path/to/shot-profile
+```
+
+Public, password-free pages (the Showroom cockpit) need no profile:
+
+```bash
+.venv/bin/python capture.py --jobs jobs-showroom.yaml --no-auth
+```
+
+## Writing jobs
+
+```yaml
+jobs:
+  - slug: pipelines-fundamentals                      # module slug = output directory
+    filename: pipelines-fundamentals-01-graph.png     # 04-STYLE-GUIDE §4 naming
+    url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/...
+    wait_text: "Tasks Completed"                      # text ONLY the settled page has
+```
+
+Two rules that matter:
+
+1. **Never hardcode a cluster domain.** Write `{domain}`; it is substituted from `--domain` /
+   `$OGSR_DOMAIN` at run time. CI's privacy guard fails the build on a live domain in any
+   tracked file.
+2. **Pick `wait_text` that a half-rendered page does not have.** The console shell, its nav
+   sidebar and `document.title` all arrive early. Wait on a plugin-rendered tab label, a table
+   column header, or a status string — something from the part of the page you are shooting.
+
+`capture.py` flags any output under 20 KB as suspicious, because that is what a splash screen
+or an error page weighs. It is a smoke alarm, not a correctness check — **look at the images**.
+
+## After capturing
+
+Update the module's `media-manifest.md` row from `⬜ NOT CAPTURED` to captured, and replace the
+`// media-pass: …` comment in the `.adoc` with the real `image::` macro plus alt text.
+A captured file that nothing embeds is not done.
