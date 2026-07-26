@@ -267,9 +267,15 @@ def main() -> int:
 
     ok_count = 0
     with sync_playwright() as p:
+        # locale is NOT cosmetic. Gitea honours Accept-Language, so on a machine set to another
+        # locale it renders its whole UI translated — a capture came back with "Değişiklikleri
+        # Uygula" where the lab says "Commit Changes". Pin en-US so screenshots always match the
+        # English labels the content names, whoever runs the capture.
         if args.no_auth:
             browser = p.chromium.launch(channel="chrome", headless=True)
-            ctx = browser.new_context(viewport=DEFAULT_VIEWPORT, ignore_https_errors=True)
+            ctx = browser.new_context(
+                viewport=DEFAULT_VIEWPORT, ignore_https_errors=True, locale="en-US"
+            )
         else:
             ctx = p.chromium.launch_persistent_context(
                 str(args.profile),
@@ -277,6 +283,7 @@ def main() -> int:
                 headless=True,
                 viewport=DEFAULT_VIEWPORT,
                 ignore_https_errors=True,
+                locale="en-US",
             )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 

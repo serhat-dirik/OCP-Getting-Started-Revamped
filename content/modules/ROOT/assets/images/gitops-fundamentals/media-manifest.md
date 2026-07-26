@@ -27,7 +27,7 @@ them in the media pass; the New App form and the drift-diff are the two that mos
 | 4 | `gitops-fundamentals-04-app-synced-healthy.png` | ✅ CAPTURED 2026-07-26| **claims-dev tree fully green after Sync** | **Synced + Healthy**, all 7 resources with green health, both Deployments Healthy — the "it worked" payoff | lab.adoc ex. 2 (after Sync) |
 | 5 | `gitops-fundamentals-05-drift-diff.png` | ✅ CAPTURED 2026-07-26| **App OutOfSync with the Deployment DIFF panel open** | `replicas: 3` (live) vs `replicas: 1` (desired/Git), red/green — the module's signature visual | lab.adoc ex. 3 (drift) |
 | 6 | `gitops-fundamentals-06-enable-selfheal.png` | ✅ CAPTURED 2026-07-26| **App Details → Sync Policy** | **AUTO-SYNC** enabled and **SELF HEAL** enabled | lab.adoc ex. 3 (enable self-heal) |
-| 7 | `gitops-fundamentals-07-gitea-edit-overlay.png` | ⬜ NOT CAPTURED | **Gitea editor on `overlays/stage/kustomization.yaml`** | `count: 2` changed to `count: 3`, the Commit Changes panel | lab.adoc ex. 4 (git edit) |
+| 7 | `gitops-fundamentals-07-gitea-edit-overlay.png` | ✅ CAPTURED 2026-07-26| **Gitea editor on `overlays/stage/kustomization.yaml`** | `count: 2` changed to `count: 3`, the Commit Changes panel | lab.adoc ex. 4 (git edit) |
 | 8 | `gitops-fundamentals-08-stage-gitdriven-diff.png` | ✅ CAPTURED 2026-07-26| **claims-stage OutOfSync after the git edit, DIFF open** | desired `replicas: 3` vs live `replicas: 2`, and the new commit as the target revision — "the change came from Git" | lab.adoc ex. 4 (after Refresh) |
 
 Screenshots **2 (New App form)** and **5 (drift diff)** are the two the text most needs a picture
