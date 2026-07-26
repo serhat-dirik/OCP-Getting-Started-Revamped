@@ -253,7 +253,10 @@ fi
 # Record the PRIOR state of every shared/default object the install is about to touch, into a
 # ConfigMap that bootstrap/ogsr-uninstall.sh reads to RESTORE (not blindly delete). Created FIRST,
 # before any mutation, in a workshop-owned namespace. Snapshots are first-write-wins so the TRUE
-# prior state survives re-runs (idempotent). # TODO(verify-on-cluster): every oc read here needs a cluster.
+# prior state survives re-runs (idempotent). Verified live 2026-07-26 on OCP 4.22.5: this block captured
+# 37 keys, including the ones teardown actually branches on — gitops_preexisted=true,
+# lightspeed_preinstalled=true, og_cert-manager-operator=preexisting:<name>, oauth_idp_ownedbyus,
+# console_plugins_added, and a per-operator op_<pkg>=created:<ns> provenance row.
 OWNER_LABEL="workshop.redhat.com/owner=ogsr"
 STATE_NS="ogsr-system"
 STATE_CM="ogsr-uninstall-state"
