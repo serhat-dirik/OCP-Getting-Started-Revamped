@@ -1,0 +1,189 @@
+# Seeds one SonarQube account per attendee (shared workshop password) via the admin API — the
+# consumer-layer counterpart to the portfolio's sonar-bootstrap job. SonarQube itself stays
+# workshop-agnostic (the portfolio only secures the admin account and mints the CI token); attendee
+# identities are added HERE, exactly as gitea-user-seed.yaml does for Gitea.
+#
+# WHY THIS EXISTS: SonarQube 10+ ships sonar.forceAuthentication=true, so anonymous browsing is off
+# (verified live 2026-07-26: an unauthenticated /api call returns "Insufficient privileges"). M08
+# sends every attendee to the SonarQube dashboard to read the failing SAST gate — without an account
+# they hit a login wall and the module's central teaching moment is unreachable.
+#
+# NO EXPLICIT PERMISSION GRANTS, deliberately. A new user auto-joins the default `sonar-users` group,
+# and SonarQube's "Default template" already grants that group `user` (Browse) and `codeviewer` (See
+# Source Code) — including on projects created LATER, which is what the pipeline does when it scans
+# into parasol-claims-<user>. Verified live 2026-07-26: a freshly created user1 authenticated and
+# listed the parasol-claims project with no further grants. Codifying grants here would duplicate a
+# rule the product already applies and then drift from it.
+{{- if .Values.sonarqube.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sonarqube-user-seed
+  namespace: {{ .Values.sonarqube.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+---
+# why: read the sonarqube-admin Secret (the password the portfolio's bootstrap job set).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sonarqube-user-seed
+  namespace: {{ .Values.sonarqube.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sonarqube-user-seed
+  namespace: {{ .Values.sonarqube.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sonarqube-user-seed
+subjects:
+  - kind: ServiceAccount
+    name: sonarqube-user-seed
+    namespace: {{ .Values.sonarqube.namespace }}
+---
+# why: the shared workshop password lives in the GITEA namespace (bootstrap/install.sh writes
+# workshop-user-creds there), so the same SA needs a second, read-only Role over there. Scoped to
+# secrets/get+list only — no cross-namespace write anywhere.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sonarqube-user-seed-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sonarqube-user-seed-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sonarqube-user-seed-creds
+subjects:
+  - kind: ServiceAccount
+    name: sonarqube-user-seed
+    namespace: {{ .Values.sonarqube.namespace }}
+---
+# Argo Sync hook (BeforeHookCreation): re-runs on every workshop-config sync, so `ws scale-users`
+# growing the cohort seeds the new attendees too. Wave 2 matches gitea-user-seed; the job self-waits
+# for the SonarQube API regardless, so ordering is belt-and-braces.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sonarqube-user-seed
+  namespace: {{ .Values.sonarqube.namespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: sonarqube-user-seed
+    spec:
+      serviceAccountName: sonarqube-user-seed
+      restartPolicy: Never
+      containers:
+        - name: seed
+          # why ose-cli: ships oc + curl on every connected cluster; no custom image to maintain.
+          # >=512Mi because oc OOMs at 256Mi under the restricted SCC.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          resources:
+            requests: {cpu: 50m, memory: 512Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          env:
+            - name: SONAR_NS
+              value: {{ .Values.sonarqube.namespace | quote }}
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: USER_COUNT
+              value: {{ .Values.userCount | quote }}
+            - name: USER_PREFIX
+              value: {{ .Values.userPrefix | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              SONAR="http://sonarqube.${SONAR_NS}.svc:9000"
+
+              echo "▶ reading the SonarQube admin password (secret sonarqube-admin)…"
+              ADMIN_PASS=""
+              for i in $(seq 1 60); do
+                ADMIN_PASS="$(oc get secret sonarqube-admin -n "$SONAR_NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+                [[ -n "$ADMIN_PASS" ]] && break
+                sleep 10
+              done
+              [[ -n "$ADMIN_PASS" ]] || { echo "❌ secret sonarqube-admin (key 'password') missing in ${SONAR_NS} — the portfolio's sonar-bootstrap Job creates it"; exit 1; }
+
+              echo "▶ reading the shared workshop password (secret workshop-user-creds)…"
+              USER_PASS="$(oc get secret workshop-user-creds -n "$GITEA_NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+              [[ -n "$USER_PASS" ]] || { echo "❌ secret workshop-user-creds (key 'password') missing in ${GITEA_NS} — bootstrap/install.sh creates it"; exit 1; }
+
+              echo "▶ waiting for the SonarQube web API…"
+              for i in $(seq 1 60); do
+                curl -sf -u "admin:${ADMIN_PASS}" "${SONAR}/api/authentication/validate" 2>/dev/null | grep -q '"valid":true' && break
+                sleep 10
+              done
+              curl -sf -u "admin:${ADMIN_PASS}" "${SONAR}/api/authentication/validate" 2>/dev/null | grep -q '"valid":true' \
+                || { echo "❌ SonarQube API not answering as admin after 10m"; exit 1; }
+
+              BODY="$(mktemp)"; trap 'rm -f "$BODY"' EXIT
+              FAIL=0
+              for i in $(seq 1 "${USER_COUNT}"); do
+                U="${USER_PREFIX}${i}"
+                # Exact-match check: /api/users/search?q= is a SUBSTRING match, so "user1" also returns
+                # "user10" on a big cohort — grep the exact login field rather than trusting the count.
+                if curl -s -u "admin:${ADMIN_PASS}" "${SONAR}/api/users/search?q=${U}" 2>/dev/null \
+                     | grep -q "\"login\":\"${U}\""; then
+                  echo "  ✓ ${U} exists"
+                  continue
+                fi
+                # Local user, shared workshop password. No permission grants — sonar-users + the
+                # Default template already cover Browse/See-Source-Code (see the header note).
+                HTTP="$(curl -s -o "$BODY" -w '%{http_code}' -u "admin:${ADMIN_PASS}" \
+                  -X POST "${SONAR}/api/users/create" \
+                  --data-urlencode "login=${U}" \
+                  --data-urlencode "name=${U}" \
+                  --data-urlencode "password=${USER_PASS}")"
+                case "$HTTP" in
+                  200|201) echo "  ✓ ${U} created";;
+                  # 400 covers "an active user with login X already exists" — a benign re-run race.
+                  400) if grep -q 'already exists' "$BODY"; then echo "  ✓ ${U} exists (400)"; \
+                       else echo "  ❌ ${U} create failed (HTTP 400): $(cat "$BODY")"; FAIL=$((FAIL + 1)); fi;;
+                  *) echo "  ❌ ${U} create failed (HTTP ${HTTP}): $(cat "$BODY")"; FAIL=$((FAIL + 1));;
+                esac
+              done
+
+              [[ "$FAIL" -eq 0 ]] || { echo "❌ ${FAIL} user(s) failed to seed"; exit 1; }
+              echo "✅ seeded ${USER_COUNT} SonarQube users (login = ${USER_PREFIX}N, shared workshop password)"
+{{- end }}
