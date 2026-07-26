@@ -72,6 +72,10 @@ class Job:
     # Missing buttons are skipped, not fatal: once a session exists the gate stops appearing, so a
     # job must work both on a cold profile and a warm one.
     click_text: list[str] = field(default_factory=list)
+    # Scroll this text into view before shooting. Needed for panels that scroll INTERNALLY —
+    # Argo's app-details drawer is a fixed-height overlay, so the section you want can sit below
+    # the fold where neither the default shot nor full_page reaches it.
+    scroll_to_text: str | None = None
 
     @property
     def out_path(self) -> Path:
@@ -162,6 +166,26 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
             )
         if not (job.wait_selector or job.wait_text):
             page.wait_for_load_state("networkidle", timeout=60_000)
+
+        if job.scroll_to_text:
+            # Locators are unreliable on some of these UIs (see click_label), so find the node in
+            # the DOM and let the browser scroll its own container.
+            found = page.evaluate(
+                """(t) => {
+                    const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    while (walk.nextNode()) {
+                        if (walk.currentNode.textContent.trim() === t) {
+                            const el = walk.currentNode.parentElement;
+                            if (el) { el.scrollIntoView({block: 'center'}); return true; }
+                        }
+                    }
+                    return false;
+                }""",
+                job.scroll_to_text,
+            )
+            if not found:
+                return False, f"scroll target {job.scroll_to_text!r} not present"
+            page.wait_for_timeout(1500)
 
         page.wait_for_timeout(job.settle_ms)
 
