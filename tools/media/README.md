@@ -98,9 +98,9 @@ jobs:
 
 Two rules that matter:
 
-1. **Never hardcode a cluster domain.** Write `{domain}`; it is substituted from `--domain` /
-   `$OGSR_DOMAIN` at run time. CI's privacy guard fails the build on a live domain in any
-   tracked file.
+1. **Never hardcode a cluster domain in the job file.** Write `{domain}`; it is substituted from
+   `--domain` / `$OGSR_DOMAIN` at run time. This keeps the job files portable between clusters —
+   it is not a privacy rule (see "Cluster domains in captured images" below for that).
 2. **Pick `wait_text` that a half-rendered page does not have.** The console shell, its nav
    sidebar and `document.title` all arrive early. Wait on a plugin-rendered tab label, a table
    column header, or a status string — something from the part of the page you are shooting.
