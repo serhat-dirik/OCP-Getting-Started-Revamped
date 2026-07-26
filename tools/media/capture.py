@@ -101,6 +101,41 @@ def load_jobs(path: Path, domain: str) -> list[Job]:
     return jobs
 
 
+# Argo CD's buttons resist every Playwright locator strategy — get_by_role(exact), an anchored
+# has_text filter and XPath on normalised text all time out "waiting for locator", and force=True
+# fails identically (so it is not an overlay intercepting the hit test), while a plain
+# querySelectorAll finds the element visible, enabled and pointer-events:auto. Measured on CREATE
+# and again on DIFF, 2026-07-26. Clicking the rect the DOM itself reports sidesteps locator
+# resolution entirely and works on both.
+_FIND_RECT = """(label) => {
+    const el = [...document.querySelectorAll('button, a, div[role="button"], label')]
+        .find(e => (e.innerText || '').trim().toUpperCase() === label.toUpperCase());
+    if (!el) return null;
+    el.scrollIntoView({block: 'center'});
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+}"""
+
+
+def click_label(page: Any, label: str) -> bool:
+    """Click a control by its exact visible text. Locator first, DOM rect as the fallback."""
+    try:
+        page.get_by_role("button", name=label, exact=True).first.click(timeout=8000)
+        return True
+    except PlaywrightError:
+        pass
+    try:
+        rect = page.evaluate(_FIND_RECT, label)
+        if not rect:
+            return False
+        page.mouse.click(rect["x"], rect["y"])
+        page.wait_for_timeout(2500)
+        return True
+    except PlaywrightError:
+        return False
+
+
 def capture(page: Any, job: Job) -> tuple[bool, str]:
     """Navigate, wait for REAL content, shoot. Returns (ok, detail)."""
     try:
@@ -108,11 +143,8 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
         page.goto(job.url, wait_until="domcontentloaded", timeout=60_000)
 
         for label in job.click_text:
-            try:
-                page.get_by_role("button", name=label, exact=True).first.click(timeout=15_000)
-                page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            except PlaywrightError:
-                pass  # gate absent (already signed in) — see click_text's note on Job
+            if not click_label(page, label):
+                print(f"      (no '{label}' control — continuing)")
 
         if job.wait_selector:
             page.wait_for_selector(job.wait_selector, timeout=60_000)
