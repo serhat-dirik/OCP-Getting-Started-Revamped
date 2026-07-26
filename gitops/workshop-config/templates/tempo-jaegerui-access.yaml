@@ -1,0 +1,59 @@
+# Lets attendees actually OPEN the Tempo Jaeger UI (observability-health-scale exercise 4).
+#
+# WHY THIS EXISTS. The Jaeger UI Route the TempoMonolithic publishes is fronted by oauth-proxy,
+# which runs with a SubjectAccessReview instead of a plain login check:
+#
+#   --openshift-sar={"namespace": "ogsr-observability-workshop", "resource": "pods", "verb": "get"}
+#
+# So the OAuth round-trip SUCCEEDS and the proxy then returns "403 Permission Denied" — verified
+# live as user1 on 2026-07-26, and reproduced independently by the project owner from the
+# /oauth/callback URL. It reads like a login failure and is not one: it is authorization.
+# `oc auth can-i get pods -n ogsr-observability-workshop --as=user1` returned "no" before this.
+#
+# WHY NAMESPACED, not a rule on platform-observer. platform-observer is bound CLUSTER-WIDE to the
+# attendee group. A cluster-wide `pods` read there would let every attendee read every other
+# attendee's pods — precisely the cross-tenant leak its own header warns about (the namespaces
+# grant was removed 2026-07-11 for exactly this). Scoping to the one platform namespace satisfies
+# the proxy's SAR and nothing else.
+#
+# WHY workshop-config, not the module's entry state. Entry states render once PER USER, and this
+# grants a GROUP in a SHARED namespace — eight per-user Applications rendering the same
+# cluster-scoped-by-name object would fight over its ownership on every sync. It belongs in the
+# layer that renders exactly once.
+#
+# NOTE: this does NOT make the console's Observe -> Traces page work. That page requires the
+# TempoMonolithic to declare spec.multitenancy, which ours does not ("No Tempo instances yet ...
+# Instances without multi-tenancy are not supported"). This restores the Jaeger UI path only;
+# the multitenancy question is tracked separately.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tempo-jaegerui-viewer
+  namespace: {{ .Values.observabilityNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+rules:
+  # Exactly the verb+resource the oauth-proxy SAR asks for — nothing wider. Attendees never need
+  # to read these pods' contents; the proxy only performs the access review.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tempo-jaegerui-viewer
+  namespace: {{ .Values.observabilityNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tempo-jaegerui-viewer
+subjects:
+  # Group-level, so growing the cohort with `ws scale-users` needs no change here.
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: workshop-attendees
