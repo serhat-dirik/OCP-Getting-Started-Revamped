@@ -9,6 +9,13 @@ kind: Deployment
 metadata:
   name: parasol-web
   namespace: {{ .Values.user }}-dev
+  {{- if .Values.solve }}
+  annotations:
+    # Applied AFTER the Service (wave 0) so service-ca has minted parasol-web-tls before this pod
+    # tries to mount it — otherwise the first solve leaves the pod in ContainerCreating until the
+    # kubelet retries. Only the solve path mounts a cert, so only the solve path needs the ordering.
+    argocd.argoproj.io/sync-wave: "1"
+  {{- end }}
   labels:
     app: parasol-web
     workshop.redhat.com/module: networking-dev-devops
@@ -30,6 +37,23 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            {{- if .Values.solve }}
+            - name: https
+              containerPort: 8443
+            {{- end }}
+          {{- if .Values.solve }}
+          # Quarkus takes its cert as file paths, not as a keystore — this is the part of re-encrypt
+          # that is genuinely on the application. Every runtime has its own equivalent.
+          env:
+            - name: QUARKUS_HTTP_SSL_CERTIFICATE_FILES
+              value: /etc/tls/tls.crt
+            - name: QUARKUS_HTTP_SSL_CERTIFICATE_KEY_FILES
+              value: /etc/tls/tls.key
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/tls
+              readOnly: true
+          {{- end }}
           resources:
             requests:
               cpu: 200m
@@ -49,6 +73,12 @@ spec:
               port: 8080
             initialDelaySeconds: 20
             periodSeconds: 15
+      {{- if .Values.solve }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: parasol-web-tls
+      {{- end }}
 ---
 # why: stable in-cluster address for the frontend; the attendee's Route/HTTPRoute in the lab targets
 # this Service.
@@ -57,6 +87,13 @@ kind: Service
 metadata:
   name: parasol-web
   namespace: {{ .Values.user }}-dev
+  {{- if .Values.solve }}
+  annotations:
+    # The platform mints a router-trusted cert for parasol-web.{{ .Values.user }}-dev.svc into this
+    # Secret and rotates it — which is why the re-encrypt Route below needs NO destinationCACertificate:
+    # the router already trusts the service CA. No key generated, no CSR signed, no CA installed.
+    service.beta.openshift.io/serving-cert-secret-name: parasol-web-tls
+  {{- end }}
   labels:
     app: parasol-web
     workshop.redhat.com/module: networking-dev-devops
@@ -68,3 +105,9 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    {{- if .Values.solve }}
+    - name: https
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+    {{- end }}
