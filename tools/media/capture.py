@@ -67,6 +67,11 @@ class Job:
     settle_ms: int = SETTLE_MS
     viewport: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_VIEWPORT))
     full_page: bool = False
+    # Buttons to click after load, before waiting — for gates that stand between the URL and the
+    # view, e.g. Developer Hub's "Select a sign-in method" chooser. Each entry is button text.
+    # Missing buttons are skipped, not fatal: once a session exists the gate stops appearing, so a
+    # job must work both on a cold profile and a warm one.
+    click_text: list[str] = field(default_factory=list)
 
     @property
     def out_path(self) -> Path:
@@ -101,6 +106,13 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
     try:
         page.set_viewport_size(job.viewport)
         page.goto(job.url, wait_until="domcontentloaded", timeout=60_000)
+
+        for label in job.click_text:
+            try:
+                page.get_by_role("button", name=label, exact=True).first.click(timeout=15_000)
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            except PlaywrightError:
+                pass  # gate absent (already signed in) — see click_text's note on Job
 
         if job.wait_selector:
             page.wait_for_selector(job.wait_selector, timeout=60_000)

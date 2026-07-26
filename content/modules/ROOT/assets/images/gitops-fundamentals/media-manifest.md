@@ -21,7 +21,7 @@ them in the media pass; the New App form and the drift-diff are the two that mos
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
-| 1 | `gitops-fundamentals-01-argo-login.png` | ⬜ NOT CAPTURED | **Argo CD login page** (student instance) | the **LOG IN VIA OPENSHIFT** button (Dex + OpenShift OAuth) — NOT the local admin username/password box | lab.adoc ex. 2 (after the `oc apply` denial) |
+| 1 | `gitops-fundamentals-01-argo-login.png` | ✅ CAPTURED 2026-07-26| **Argo CD login page** (student instance) | the **LOG IN VIA OPENSHIFT** button (Dex + OpenShift OAuth) — NOT the local admin username/password box | lab.adoc ex. 2 (after the `oc apply` denial) |
 | 2 | `gitops-fundamentals-02-new-app-form.png` | ⬜ NOT CAPTURED — **HIGHEST PRIORITY** | **Argo CD → + NEW APP** panel filled in | Application Name `claims-dev-user1`, Project `proj-user1`, Sync Policy **Manual**, Repo `…/user1/claims-config.git`, Revision `main`, Path `overlays/dev`, Namespace `user1-dev` | lab.adoc ex. 2 (the New App form — the core action of the module) |
 | 3 | `gitops-fundamentals-03-app-outofsync-missing.png` | ⬜ NOT CAPTURED | **claims-dev app card/tree immediately after CREATE** | status **Missing + OutOfSync**; the 7 resources present but greyed out (not yet applied — Manual sync) | lab.adoc ex. 2 (before Sync) |
 | 4 | `gitops-fundamentals-04-app-synced-healthy.png` | ⬜ NOT CAPTURED — **HIGH** | **claims-dev tree fully green after Sync** | **Synced + Healthy**, all 7 resources with green health, both Deployments Healthy — the "it worked" payoff | lab.adoc ex. 2 (after Sync) |
