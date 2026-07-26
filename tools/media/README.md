@@ -108,6 +108,17 @@ Two rules that matter:
 `capture.py` flags any output under 20 KB as suspicious, because that is what a splash screen
 or an error page weighs. It is a smoke alarm, not a correctness check — **look at the images**.
 
+## Cluster domains in captured images
+
+Screenshots of Gitea, Argo CD, Routes and RHDH carry the cluster they were taken on — the URL is
+often the field the reader needs. **That is accepted** for ephemeral RHDP clusters (owner
+decision, 2026-07-26): they are destroyed after use, and blanking the field would damage the
+teaching value.
+
+What is still forbidden in an image: a visible token, password, or API key. **Look at the shot
+before committing it** — CI cannot help here. The privacy guard runs `git grep`, which reads text
+only, so anything rendered inside a PNG is invisible to it and the job stays green regardless.
+
 ## After capturing
 
 Update the module's `media-manifest.md` row from `⬜ NOT CAPTURED` to captured, and replace the
