@@ -43,6 +43,34 @@ disposable — delete it and log in again when the token expires.
 .venv/bin/python login.py            # log in in the window that opens, then it exits
 ```
 
+### Which identity provider — this one wastes an hour if you get it wrong
+
+This cluster wires **two** identity providers, so OpenShift's login page shows a chooser, and
+tools reached through OAuth inherit it. `partial$idp-choice.adoc` tells attendees to pick
+**`workshop-users`**; `rhbk` secures the sample application and knows nothing about workshop
+accounts.
+
+The trap for capture: **a console session does NOT carry to `workshop-users`.** Logging into the
+console (as the profile's initial login) and then opening Argo CD sends you through
+`LOG IN VIA OPENSHIFT` → the IdP chooser → and `workshop-users` still presents a
+username/password form. Measured 2026-07-26.
+
+So if you need attendee-perspective shots of anything behind Dex/OAuth (Argo CD, Dev Spaces,
+RHACS), log the profile in **through that tool, via `workshop-users`, as the attendee** — not
+just into the console. One profile can hold both sessions; just do both logins.
+
+### One capture process at a time
+
+Chrome refuses to open a profile that another instance holds
+(`Failed to create a ProcessSingleton for your profile directory`). Runs against the same
+`--profile` must be serialised. If a run is killed mid-flight it can leave a stale lock:
+
+```bash
+rm -f <profile>/SingletonLock
+```
+
+Only do that once you have confirmed no capture is actually running.
+
 ## Capturing
 
 ```bash
