@@ -28,18 +28,44 @@ spec:
             endpoint: 0.0.0.0:4318
     processors:
       batch: {}
+    extensions:
+      # The gateway authenticates writers with a bearer token and then authorises them with a
+      # SubjectAccessReview, so the collector presents its own ServiceAccount token.
+      bearertokenauth:
+        filename: /var/run/secrets/kubernetes.io/serviceaccount/token
     exporters:
-      # Export to the TempoMonolithic OTLP gRPC endpoint (Service tempo-traces in the same namespace).
+      # Export THROUGH the tempo-gateway, not to Tempo directly. Enabling multitenancy puts the
+      # gateway in front; the direct tempo-traces:4317 path this used to target no longer carries
+      # a tenant, so traces would be accepted nowhere. Values read off the running gateway's own
+      # arguments (2026-07-26) rather than assumed:
+      #   --grpc.listen=0.0.0.0:8090          -> Service port 4317 targets grpc-public
+      #   --traces.tenant-header=x-scope-orgid -> tenant travels as that header
+      #   --tls.server.cert-file=...serving-cert -> TLS is served, so no insecure
       otlp:
-        endpoint: tempo-traces.ogsr-observability-workshop.svc.cluster.local:4317
+        endpoint: tempo-traces-gateway.ogsr-observability-workshop.svc.cluster.local:4317
         tls:
-          insecure: true
+          # The gateway's cert is minted by the service-serving-cert signer, whose CA is injected
+          # into every namespace as this ConfigMap. Verifying it beats tls.insecure.
+          ca_file: /var/run/configmaps/openshift-service-ca/service-ca.crt
+        auth:
+          authenticator: bearertokenauth
+        headers:
+          x-scope-orgid: workshop
     service:
+      extensions: [bearertokenauth]
       pipelines:
         traces:
           receivers: [otlp]
           processors: [batch]
           exporters: [otlp]
+  # Mount the service-CA bundle the exporter verifies the gateway against.
+  volumeMounts:
+    - name: service-ca
+      mountPath: /var/run/configmaps/openshift-service-ca
+  volumes:
+    - name: service-ca
+      configMap:
+        name: openshift-service-ca.crt
   resources:
     requests:
       cpu: 100m

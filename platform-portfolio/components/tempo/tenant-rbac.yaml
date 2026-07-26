@@ -1,0 +1,74 @@
+# RBAC for the Tempo gateway's tenant, in `mode: openshift`.
+#
+# With multitenancy on, every read and write goes through tempo-traces-gateway, which performs a
+# SubjectAccessReview per request. The resource shape is unusual and worth stating plainly,
+# because it does not look like normal Kubernetes RBAC:
+#
+#   apiGroup      tempo.grafana.com
+#   resource      <TENANT NAME>        <- "workshop", from the TempoMonolithic's authentication[]
+#   resourceName  traces               <- the signal, NOT the object name
+#   verb          get (read) / create (write)
+#
+# So the tenant is the RESOURCE and the signal is the RESOURCE NAME. Getting those the wrong way
+# round yields a gateway that authenticates fine and then refuses everything.
+#
+# Cluster-scoped because the gateway's review is not namespaced — but each binding names exactly
+# one tenant and one signal, so this grants nothing beyond reading or writing workshop traces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tempo-workshop-tenant-write
+  labels:
+    workshop.redhat.com/layer: platform-portfolio
+rules:
+  - apiGroups: ["tempo.grafana.com"]
+    resources: ["workshop"]
+    resourceNames: ["traces"]
+    verbs: ["create"]
+---
+# The OTel collector is the only writer: it forwards everything the apps emit.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tempo-workshop-tenant-write
+  labels:
+    workshop.redhat.com/layer: platform-portfolio
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tempo-workshop-tenant-write
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: ogsr-observability-workshop
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tempo-workshop-tenant-read
+  labels:
+    workshop.redhat.com/layer: platform-portfolio
+rules:
+  - apiGroups: ["tempo.grafana.com"]
+    resources: ["workshop"]
+    resourceNames: ["traces"]
+    verbs: ["get"]
+---
+# Readers: the attendee group, so the console's Observe -> Traces page can query on their behalf.
+# Bound to the GROUP, so growing the cohort with `ws scale-users` needs no change here — and note
+# that `oc auth can-i --as=userN` WITHOUT --as-group will report "no" even when this works,
+# because --as impersonates the user without their groups.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tempo-workshop-tenant-read
+  labels:
+    workshop.redhat.com/layer: platform-portfolio
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tempo-workshop-tenant-read
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: workshop-attendees
