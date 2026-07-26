@@ -119,8 +119,12 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
         if job.wait_text:
             # Not a selector: plugin tabs and table columns are plain text, and the whole point
             # is to outlast a half-mounted render that already has a title and a sidebar.
+            # document.body can still be null on the first evaluation — the predicate runs as soon
+            # as navigation commits, which on a redirect chain (Keycloak's account console bounces
+            # through /protocol/openid-connect/auth) can be before any body exists. Without the
+            # guard that raises TypeError and aborts the job instead of simply polling again.
             page.wait_for_function(
-                "t => document.body.innerText.includes(t)",
+                "t => !!document.body && document.body.innerText.includes(t)",
                 arg=job.wait_text,
                 timeout=60_000,
             )
