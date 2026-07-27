@@ -124,3 +124,36 @@ only, so anything rendered inside a PNG is invisible to it and the job stays gre
 Update the module's `media-manifest.md` row from `⬜ NOT CAPTURED` to captured, and replace the
 `// media-pass: …` comment in the `.adoc` with the real `image::` macro plus alt text.
 A captured file that nothing embeds is not done.
+
+## Diagram sources vs manifests — the 2026-07-26 reconciliation
+
+Rendering every source exposed a mismatch that was invisible while nothing was rendered:
+manifests name **89** SVGs, sources yield **81**, and only **73** names match. That is three
+separate situations, and only one is a defect. Re-run the comparison after any diagram change —
+`render_diagrams.py --dry-run` lists what would be produced.
+
+**1. The `platform-accretion` family is by design (11 of the 16 absent).** Only two sources exist
+(`platform-orientation/02-platform-accretion-v1.mmd`,
+`observability-health-scale/04-platform-accretion.mmd`), while eleven module manifests name a
+variant. The manifests describe them as *"the master accretion diagram, M03 layer highlighted on
+the M01/M02 base"* — one cumulative picture re-rendered per module with a different layer
+emphasised. This will never resolve by rendering. It needs a call: author the variants as real
+sources, teach the renderer a highlight parameter, or share one image. Nothing is broken today —
+lab pages render Mermaid client-side; the gap only bites the slide reuse the manifests promise.
+
+**2. Four genuinely missing sources.** `eventing-deep-dive-02-retries-dlq`,
+`serverless-zero-to-hero-02-cold-start-timeline`,
+`service-mesh-advanced-gateways-02-traffic-split`, `pipelines-fundamentals-02-pac-flow`. Check the
+module's `concept.adoc` before authoring: if the page never carried that diagram, the manifest row
+is stale and should go.
+
+**3. One probable rename, and the interesting one.** The manifest wants
+`pipelines-fundamentals-02-pac-flow.svg` ("push → Gitea webhook → PaC controller → new
+PipelineRun"); what exists is `pipelines-fundamentals-02-pipeline-choices.svg`. Same module, same
+number, different subject. The PaC flow is a real teaching beat in exercise 4, so if it was dropped
+rather than renamed, the module lost something.
+
+**4. Eight rendered files no manifest lists** — `ai-assisted-development` (3),
+`packaging-distributing` (3), `networking-dev-devops-05-network-policy-layers`,
+`pipelines-fundamentals-02-pipeline-choices`. Modules whose manifests predate the extraction.
+Mechanical to add, but do it alongside the accretion decision so the row format matches.
