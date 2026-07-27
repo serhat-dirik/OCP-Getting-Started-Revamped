@@ -115,6 +115,14 @@ often the field the reader needs. **That is accepted** for ephemeral RHDP cluste
 decision, 2026-07-26): they are destroyed after use, and blanking the field would damage the
 teaching value.
 
+### Gitea renders in the machine's language
+
+Gitea honours `Accept-Language`, so on a non-English machine its whole UI is translated and a
+capture shows the wrong labels. Append `?lang=en-US` to **every** Gitea job URL — Playwright's
+`locale` flag does not fix it, and the query param only holds for that browsing session (a later
+context on the same profile reverted to the machine language). It is a cookie, not an account
+setting.
+
 What is still forbidden in an image: a visible token, password, or API key. **Look at the shot
 before committing it** — CI cannot help here. The privacy guard runs `git grep`, which reads text
 only, so anything rendered inside a PNG is invisible to it and the job stays green regardless.
