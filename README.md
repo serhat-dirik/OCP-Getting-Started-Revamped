@@ -154,6 +154,8 @@ cd content && npx antora site-workshop.yml    # also: site-demo.yml, site-instru
 ./utilities/lab-serve
 ```
 
+Before pushing a block with `subs="attributes"`, run `tools/lint/curl-format-guard.py` — it catches `curl -w` format fields like `%{http_code}` being eaten as AsciiDoc attribute references (content-build runs antora at `--log-failure-level=warn`, so that warning fails the build).
+
 ## Credits
 
 This workshop reuses and modernizes patterns from earlier Red Hat enablement assets and community workshops. Its own direct ancestor is Red Hat's long-running **OpenShift Getting Started** workshop (the `openshift/starter-guides` content) — the workshop this project is a *revamp* of, and the one that set the original mission: get a room of engineers hands-on and productive on OpenShift, from zero. Everything this project draws on, including that workshop's specific contribution, is credited in the table below.
