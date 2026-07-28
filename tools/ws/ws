@@ -56,6 +56,11 @@ SMOKE_CONTAINER="terminal"
 
 ok()   { echo "✅ $*"; }
 err()  { echo "❌ $*" >&2; }
+# "I could not look", which is NOT "it is broken". `ws doctor` is attendee-runnable, and an
+# attendee cannot read cluster-scoped objects like oauths or groups. Reporting ❌ there told
+# people their IdP was missing seconds after they had logged in THROUGH it — and a false ❌
+# costs trust in every ✅ beside it.
+skip() { echo "➖ $*"; }
 info() { echo "▶ $*"; }
 die()  { err "$*"; exit 1; }
 
@@ -1273,13 +1278,21 @@ cmd_doctor() {
     ok "n/a (parasol-images build not deployed)"
   fi
   printf "  %-28s" "workshop IdP"
-  if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then ok "workshop-users present"; else err "IdP missing — bootstrap adds it"; fail=1; fi
+  if ! oc auth can-i get oauths.config.openshift.io >/dev/null 2>&1; then
+    skip "not checked (needs cluster-admin; you logged in, so it works)"
+  elif oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
+    ok "workshop-users present"
+  else
+    err "IdP missing — bootstrap adds it"; fail=1
+  fi
   printf "  %-28s" "user namespaces"
   if oc get ns user1-dev >/dev/null 2>&1; then ok "user1-dev exists"; else err "missing — workshop-config not synced"; fail=1; fi
   printf "  %-28s" "workshop cohort size"
   # Honest after a `ws scale-users`: cross-check the LIVE helm parameter against the group it should
   # have converged to. A mismatch usually means a scale is still mid-sync — re-run shortly.
-  if ! oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1; then
+  if ! oc auth can-i get groups.user.openshift.io >/dev/null 2>&1; then
+    skip "not checked (needs cluster-admin to read the attendee group)"
+  elif ! oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1; then
     ok "n/a (workshop layer not installed)"
   else
     local n_live n_group
