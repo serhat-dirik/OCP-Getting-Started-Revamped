@@ -27,7 +27,7 @@ echo "app namespace: $NS"
 ----
 
 You are shipping Parasol's *notifications service* to the rest of the engineering org.
-It already runs — a prebuilt image sits in your namespace's registry — but "it runs on my machine" is not a way to hand software to a dozen teams.
+Its image is already built and pushed — it sits in your namespace's registry, but nothing is *deployed* yet — and a bare image in a registry is not a way to hand software to a dozen teams.
 In this lab you *package* it as a Helm chart, `install`/`upgrade`/`rollback` it like a real release, *break* it on purpose and recover, push it to the registry as an *OCI artifact*, and then take apart a *live operator's OLM bundle* to see the other end of the spectrum.
 
 [TIP]
@@ -655,7 +655,14 @@ Upgrade to apply both — the *post-upgrade hook fires* and seeds the welcome no
 ----
 helm upgrade parasol-notifications ./parasol-notifications -n $NS >/dev/null && echo "upgraded"
 # the post-upgrade hook Job seeds CLM-0000 a moment after the upgrade returns — retry until it lands
-for i in $(seq 1 15); do curl -sk "https://$ROUTE/api/notifications" | grep -o 'CLM-0000' && break; sleep 2; done
+SEEDED=""
+for i in $(seq 1 15); do
+  if curl -sk "https://$ROUTE/api/notifications" | grep -o 'CLM-0000'; then SEEDED=yes; break; fi
+  sleep 2
+done
+if [ -z "$SEEDED" ]; then
+  echo "CLM-0000 never appeared — the seed hook Job likely failed; read its logs: oc logs job/parasol-notifications-seed -n $NS"
+fi
 ----
 
 .Expected output (the hook ran — the store now carries the seeded welcome)
@@ -791,6 +798,14 @@ Yours will not be the `ab9cc8…` shown above, and that's correct — what matte
 
 Helm is one end of the packaging spectrum; an *operator* is the other.
 You don't have to imagine one — the *Pipelines operator* that ran your builds all week is installed on this cluster, and you can read its bundle *read-only* (the `platform-observer` role grants cluster-wide *read*; you never mutate it).
+
+[NOTE]
+.If these reads come back empty or `Forbidden`
+====
+Exercises 7-8 depend on that `platform-observer` grant.
+If *Installed Operators* looks empty in the console, or `oc get csv` returns `Forbidden`, the grant's OLM-read extension isn't synced to this cluster — nothing is wrong with your commands or your account.
+Flag the instructor (it is their pre-flight #3); the self-check is on xref:packaging-distributing/troubleshooting.adoc[the troubleshooting page].
+====
 
 First, a *trap* worth knowing: several APIs define a `Subscription` kind, so a bare `oc get subscription` resolves to the *wrong* one.
 
@@ -947,21 +962,21 @@ echo "--- installed the new way: ---"
 oc get clusterextension
 ----
 
-.Expected output (the new catalogs are serving; nothing is installed through them yet)
+.Expected output (the default catalogs are serving; nothing is installed through them yet)
 [source,texinfo]
 ----
 NAME                            LASTUNPACKED   SERVING   AGE
 openshift-certified-operators   ...            True      ...
 openshift-community-operators   ...            True      ...
-openshift-redhat-marketplace    ...            True      ...
 openshift-redhat-operators      ...            True      ...
 --- installed the new way: ---
 No resources found
 ----
 
-Four *ClusterCatalogs* are *serving*, but there are *zero ClusterExtensions* — OLM v1 is present and ready, yet nothing uses it here and the current web console does not surface it.
+The default *ClusterCatalogs* are *serving*, but there are *zero ClusterExtensions* — OLM v1 is present and ready, yet nothing uses it here and the current web console does not surface it.
+How many catalogs you see depends on how the cluster was provisioned: clusters provisioned without the Red Hat Marketplace catalog (common on RHDP/bare-metal) show three; clusters with it show a fourth, `openshift-redhat-marketplace`.
 Classic OLM (a `Subscription` → `CSV`) is what drives OperatorHub today and what you dissected; OLM v1 (a `ClusterCatalog` + a `ClusterExtension` with a ServiceAccount and RBAC you supply) is the *direction*.
-Reading `oc get clustercatalog` returning four `Serving` entries is enough to know it is real and coming.
+Reading `oc get clustercatalog` returning `Serving` entries is enough to know it is real and coming.
 
 *Now the decision, made honestly.*
 You have now seen both ends of the spectrum — you *shipped a Helm chart* and *dissected an operator*.
@@ -987,7 +1002,7 @@ The notifications service you packaged today wants *Helm*, and saying so out lou
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You read OLM v1 live — four `ClusterCatalog`s `Serving`, zero `ClusterExtension`s (present, idle, console-invisible) — and placed the notifications service on the packaging spectrum, concluding a *Helm chart* is the right tool and an operator would be cost without payoff. You can now choose template vs Kustomize vs Helm vs operator with a straight face.
+✔ *Verify (observed):* You read OLM v1 live — the default `ClusterCatalog`s all `Serving`, zero `ClusterExtension`s (present, idle, console-invisible) — and placed the notifications service on the packaging spectrum, concluding a *Helm chart* is the right tool and an operator would be cost without payoff. You can now choose template vs Kustomize vs Helm vs operator with a straight face.
 ****
 
 == Challenge (optional)
