@@ -18,9 +18,11 @@ browser in the build environment). Capture them in the media pass — for M12 th
 content, and two beats (the trace search and the HPA pod-ring growth) are **multi-click flows that
 should be short GIFs/MP4s** per the project owner's 2026-07-11 directive.
 
-> **Signature visual:** `04-alert-firing` — the `ParasolClaimsErrorRateHigh` rule turning **red** in
-> *Observe → Alerting* while the database is down. It is the emotional peak of the module (a real page)
-> and the one still image every deck/summary should carry.
+> **Signature visual:** `04-alert-firing` — the `ParasolClaimsErrorRateHigh` rule going **Firing** in
+> the attendee's project-scoped alerting view (`/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user`)
+> while the database is down. It is the emotional peak of the module (a real page) and the one still
+> image every deck/summary should carry. Shoot the **project-scoped** view — the cluster-wide
+> *Observe → Alerting* page is `Forbidden` for an attendee identity and renders an empty list.
 
 ## Screenshots / recordings (the console view IS the content)
 
@@ -29,8 +31,8 @@ should be short GIFs/MP4s** per the project owner's 2026-07-11 directive.
 | 1 | `observability-health-scale-01-observe-metrics.png` | ❌ RE-CAPTURE — **HIGH** | **Observe → Metrics** with the `claims_created` rate (or the 404 error-rate) query | the PromQL text, the rising line graph, and that this is user-workload monitoring querying the attendee's namespace. RE-CAPTURE: pulled 2026-07-28 — the captured asset on disk shows an errored page ("An error occurred / Bad Request", "No datapoints found", "Access restricted"), not a working query; re-shoot with one of the lab's own queries actually returning a plotted line. | lab.adoc ex. 1 (Console tab) |
 | 2 | `observability-health-scale-02-observe-traces.png` | ❌ RE-CAPTURE (page working; trace-open shot still to do) | **Observe → Traces** (COO distributed-tracing plugin) | the TraceQL `{ resource.service.name = "parasol-claims" }`, the trace list sorted by duration, one trace opened to its HTTP span (method/route/status/time) — record the search→open flow. RE-CAPTURE: pulled 2026-07-28 — the embedded capture showed only the empty "No Tempo instance selected" landing state, no query run, no trace list, no opened span. | lab.adoc ex. 4 |
 | 3 | `observability-health-scale-03-topology-hpa-scale.png` | ❌ RE-CAPTURE — **HIGH (prefer <30s GIF/MP4)** | **Topology**, `parasol-claims` under load | the pod ring growing from 2 to 4 as the HPA scales out — record ~25s of the burst so the ring visibly grows. RE-CAPTURE: pulled 2026-07-28 — the captured asset on disk is a calm 3-node topology with no side panel and no pod count, no evidence of the HPA scale-out. | lab.adoc ex. 5 (Console tab) |
-| 4 | `observability-health-scale-04-alert-firing.png` | ⬜ NOT CAPTURED — **HIGH (signature)** | **Observe → Alerting**, rule **Firing** | `ParasolClaimsErrorRateHigh` red/Firing, severity warning, while `claims-db` is at 0 replicas — the module's money shot | lab.adoc ex. 3 (after the measured-timing note) |
-| 5 | `observability-health-scale-05-observe-alerting-inactive.png` | ⬜ NOT CAPTURED | **Observe → Alerting → Alerting rules**, rule **Inactive** | the just-created `ParasolClaimsErrorRateHigh` armed-but-inactive at the healthy baseline (the "before" to #4's "after") | lab.adoc ex. 2 (Console tab) — **`// media-pass:` marker placed** |
+| 4 | `observability-health-scale-04-alert-firing.png` | ⬜ NOT CAPTURED — **HIGH (signature)** | **project-scoped** `/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user`, rule **Firing** | `ParasolClaimsErrorRateHigh` Firing, severity Warning, source User, while `claims-db` is at 0 replicas — the module's money shot. **Shoot the project-scoped view, NOT the cluster-wide `/monitoring/alertrules` page** — that one is `Forbidden` for an attendee and renders `0 - 0 of 0` (measured as user1, 2026-07-28). Keep the `Source: User` filter on; `Platform` is the default and shows nothing. | lab.adoc ex. 3 (after the measured-timing note) |
+| 5 | `observability-health-scale-05-observe-alerting-inactive.png` | ⬜ NOT CAPTURED | **project-scoped** `/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user` at the healthy baseline | the just-created `ParasolClaimsErrorRateHigh` armed but not active — severity **Warning**, source **User**, and a **`-` in the State column** (the console does not print the word "Inactive" here). Frame the `Project: <user>-dev` selector and the Alerting rules tab so the reader can tell this view from the cluster-wide one. The "before" to #4's "after". | lab.adoc ex. 2 (Console tab) — **`// media-pass:` marker placed** |
 | 6 | `observability-health-scale-06-import-yaml.png` | ⬜ OPTIONAL — **no embed marker** | **+ / Import YAML** dialog with the PrometheusRule (or PDB) pasted | the masthead `+` action and the paste-and-Create flow | **Intentionally not embedded** (2026-07-11): the `+` / Import YAML masthead flow is generic OpenShift UI already spelled out in the ex. 2 / ex. 6 Console-tab prose; a screenshot adds little over the signature alerting/topology beats. Capture only if a deck wants it — no `// media-pass:` marker in `lab.adoc`. |
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
@@ -51,7 +53,7 @@ deck and richer rendering; keep the `.mmd` as the editable master (do not delete
 ## Recording (demo-arc happy path)
 
 - `observability-health-scale-demo.cast` (asciinema) OR a `<90s` silent screen capture — ⬜ NOT
-  CAPTURED. The flagship clip pairs the two live beats: **break the database → the alert goes red in
-  Observe → Alerting** (tee it up, cut the ~3-min wait), then **drive load → the Topology pod ring
+  CAPTURED. The flagship clip pairs the two live beats: **break the database → the alert goes Firing in
+  the project-scoped alerting view** (tee it up, cut the ~3-min wait), then **drive load → the Topology pod ring
   grows 2→4** in ~25s. Console-heavy and animated, so a short screen capture of those two moments is
   the highest-value asset for the deck and the demo flavor.

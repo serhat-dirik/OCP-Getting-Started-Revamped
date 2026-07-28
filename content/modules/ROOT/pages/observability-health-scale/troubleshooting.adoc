@@ -7,7 +7,7 @@ include::partial$version-attributes.adoc[]
 // connection pool after the DB returns, the thanos CLI 403, empty/thin traces, and HPA timing.
 
 Each entry is a symptom you (or an attendee) may hit, its cause, and the fix.
-The first two are the ones that stop the lab cold; the rest are "that's odd" moments with a one-line explanation.
+The first three are the ones that stop the lab cold; the rest are "that's odd" moments with a one-line explanation.
 
 == Creating the PrometheusRule is denied: `Forbidden ... cannot create resource "prometheusrules"`
 
@@ -37,9 +37,24 @@ subjects:
 Once it is in place, `oc auth can-i create prometheusrules -n <user>-dev` prints `yes` and the rule applies.
 The same grant is what lets `ws verify observability-health-scale` read your ServiceMonitor and rule.
 
+== *Observe → Alerting* shows no rules at all — my rule is not there
+
+Symptom:: You created the `PrometheusRule` successfully, but the console's *Observe* → *Alerting* → *Alerting rules* page lists *0 - 0 of 0*.
+Filtering for `ParasolClaimsErrorRateHigh` changes nothing, and there is no *Project* selector to point at your namespace.
+Cause:: That is the *cluster-scoped* alerting page (`/monitoring/alertrules`).
+It reads a cluster-wide monitoring API that a project-level identity is not granted — behind the empty list, the call returns `Forbidden (verb=get, resource=prometheuses, subresource=api)`.
+Your rule exists and is being evaluated; you are just looking at a surface that cannot show it to you.
+Fix:: Use the *project-scoped* Observe view for your namespace instead — the {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^], which the lab links directly (`/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user`).
+It renders a *Project* selector set to your namespace, the tabs *Events* | *Alerting rules* | *Alerts* | *Dashboards* | *Metrics* | *Silences*, and lists `ParasolClaimsErrorRateHigh` with severity *Warning* and source *User*.
++
+Two follow-on traps on that page:
++
+* *Source* defaults to *Platform*, which matches nothing an attendee authored — a *Platform*-filtered list is empty even in the right view. The lab's link pins *Source* to *User*; if you navigated another way, switch the filter to *User* or clear the filters.
+* At the healthy baseline the *State* column reads `-`, not the word *Inactive*. That dash is the expected "loaded and watching, nothing active" state, not a sign the rule failed to load. Confirm the object itself with `oc get prometheusrule parasol-claims-alerts -n <user>-dev`.
+
 == My alert never fires even though the app is clearly failing
 
-Symptom:: You scaled the database to zero and the claims API is failing, but `ParasolClaimsErrorRateHigh` stays in *Inactive* (or flaps briefly into *Pending* and falls back) — it never reaches *Firing*.
+Symptom:: You scaled the database to zero and the claims API is failing, but `ParasolClaimsErrorRateHigh` never reaches *Firing* — its *State* stays at `-` (or flips briefly to *Pending* and falls back).
 Cause:: The load step you ran was not the *concurrent burst* the lab specifies.
 The claims API returns 5xx only for a short window — roughly *30 seconds*, between the database going away and the readiness probe pulling the pod from the router (after which every request gets a `503` from the router and nothing reaches the app to record another 5xx).
 To trip a `rate(...[5m]) > 0.1` rule off that short window you have to bank *hundreds* of 5xx into it, not a couple of dozen.
@@ -78,6 +93,7 @@ This "recovery needs a restart" step is a real operational lesson — a dependen
 Symptom:: Following a generic monitoring how-to, you try `curl -H "Authorization: Bearer $(oc whoami -t)" https://thanos-querier.../api/v1/query ...` and get `Forbidden (user=<user>, verb=get, resource=prometheuses, subresource=api)`.
 Cause:: The `thanos-querier` route enforces a cluster-monitoring view permission attendees do not have, and this cluster exposes only that route (not the per-namespace tenancy endpoint).
 Ad-hoc PromQL over that route is not an attendee capability here.
+It is the same wall as the empty *Observe → Alerting* page above — one grant, two symptoms.
 Fix:: Use *Observe → Metrics* in the console for PromQL — it queries with your identity, scoped to your namespace, and needs no extra role.
 Use `curl $CLAIMS/q/metrics` when you want the raw counter values at the source.
 That two-surface split (console for queries, `curl` for raw truth) is exactly how the lab is written.
@@ -125,4 +141,4 @@ Wait ~5 minutes and it steps back toward the floor of 2.
 
 '''
 
-_Last verified on OpenShift {ocp_version} with the Cluster Observability Operator {cluster_observability_operator_version} / Tempo {tempo_version} / Red Hat build of OpenTelemetry {opentelemetry_version} stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19._
+_Last verified on OpenShift {ocp_version} with the Cluster Observability Operator {cluster_observability_operator_version} / Tempo {tempo_version} / Red Hat build of OpenTelemetry {opentelemetry_version} stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19; the "Observe → Alerting shows no rules" entry grounded in an authenticated attendee console on 2026-07-28._

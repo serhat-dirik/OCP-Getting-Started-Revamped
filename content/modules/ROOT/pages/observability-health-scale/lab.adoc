@@ -15,6 +15,13 @@ include::partial$version-attributes.adoc[]
 // Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks
 // using $NS / $CLAIMS shell vars or jsonpath {..} braces omit subs. Console labels I could not ground
 // from a screenshot in the build env are marked // CAPTURE-VERIFY for the media pass.
+// CORRECTION 2026-07-28 (grounded as user1 in an authenticated console): the alerting beat used to send
+// the reader to the CLUSTER-scoped Observe -> Alerting page (/monitoring/alertrules). That page reads a
+// cluster-scoped monitoring API an attendee is not granted — it answers 403 (verb=get,
+// resource=prometheuses, subresource=api) and renders "0 - 0 of 0" with no Project selector, so the
+// attendee's own rule is invisible there under every filter. The working surface is the PROJECT-scoped
+// view, /dev-monitoring/ns/<user>-dev/alertrules?alert-source=user, which lists the rule; its Source
+// filter defaults to Platform (0 rows for an attendee), which is why the deep links below pin it to User.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -29,6 +36,8 @@ You will consume the three signals, alert on the service, break it on purpose to
 Keep two things open: a *terminal* logged in as `{user}` (the CLI tab of each step runs there), and the {ocp_console_url}[OpenShift web console^] (the Console tab).
 Nearly every step below can be done either way — pick a lane with the *Console / CLI* toggle and it stays put across the page.
 The *Observe* section of the console (Metrics, Alerting, Targets, Traces, Dashboards) is the home base for this module.
+One thing to know up front: alert *rules you author* are read in the *project-scoped* Observe view for `{user}-dev`, not on the cluster-wide *Observe → Alerting* page — that page queries a cluster-scoped monitoring API a project-level identity is not granted, so it comes back empty for you.
+Exercise 2 links straight to the right view.
 ====
 
 Set two shell variables once so the later command blocks stay copy-paste clean:
@@ -207,10 +216,12 @@ spec:
             summary: "parasol-claims is returning server errors"
             description: "The claims API 5xx rate has exceeded 0.1/s for 2m."
 ----
-. Open *Observe* → *Alerting* → *Alerting rules* and filter for `ParasolClaimsErrorRateHigh`.
-Its state is *Inactive* (there are no 5xx yet).
-// [CAPTURE-VERIFY] Observe -> Alerting -> Alerting rules lists the user-defined rule as Inactive
-// media-pass: screenshot observability-health-scale-05-observe-alerting-inactive.png — Observe -> Alerting -> Alerting rules, ParasolClaimsErrorRateHigh Inactive (the "before" to the 04-alert-firing shot). Alt: "Observe Alerting rules list showing the just-created ParasolClaimsErrorRateHigh rule Inactive at the healthy baseline."
+. Read the rule back: open the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^].
+The page carries a *Project* selector (set to `{user}-dev`) and the tabs *Events* | *Alerting rules* | *Alerts* | *Dashboards* | *Metrics* | *Silences*; on *Alerting rules*, your rule is the single row — `ParasolClaimsErrorRateHigh`, severity *Warning*, source *User*.
+Its *State* column reads `-`: the rule is loaded and watching, but no alert has become active yet — there are no 5xx.
+// Grounded 2026-07-28 as user1 in an authenticated console: /dev-monitoring/ns/user1-dev/alertrules?alert-source=user
+// renders the Project selector + the six tabs above and lists exactly this one row (Severity Warning, State -, Source User).
+// media-pass: screenshot observability-health-scale-05-observe-alerting-inactive.png — the PROJECT-scoped Alerting rules view (/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user), ParasolClaimsErrorRateHigh with State "-" (the "before" to the 04-alert-firing shot). Alt: "Project-scoped Alerting rules view for the attendee namespace, showing the just-created ParasolClaimsErrorRateHigh rule with severity Warning, source User and an empty state column at the healthy baseline."
 --
 CLI::
 +
@@ -264,9 +275,19 @@ If either path returns `Forbidden ... cannot create resource "prometheusrules"`,
 That is a one-line platform grant, not a mistake on your part — see xref:observability-health-scale/troubleshooting.adoc[the troubleshooting page].
 ====
 
+[IMPORTANT]
+.Read your rule in the *project-scoped* view — the cluster-wide Alerting page is empty for you
+====
+The masthead's cluster-wide *Observe* → *Alerting* page queries a *cluster-scoped* monitoring API that a project-level identity is not granted — it answers `Forbidden (verb=get, resource=prometheuses, subresource=api)` — so it lists *0 - 0 of 0* rules for you.
+Your rule is missing from it no matter how you filter, and the page has no *Project* selector to point at your namespace.
+The project-scoped link above is the surface that queries *per-namespace* monitoring with your identity, and it finds the rule.
+One filter to watch on it: *Source* defaults to *Platform*, which matches nothing you authored.
+The link already pins *Source* to *User*; if the list ever looks empty, that filter is the first thing to check — switch it to *User* or clear the filters.
+====
+
 [.checkpoint]
 ****
-✔ *Verify:* `oc get prometheusrule -n {user}-dev` lists `parasol-claims-alerts`, and *Observe → Alerting → Alerting rules* shows `ParasolClaimsErrorRateHigh` in the *Inactive* state — loaded and watching, but not firing at the healthy baseline.
+✔ *Verify:* `oc get prometheusrule -n {user}-dev` lists `parasol-claims-alerts`, and the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^] shows one row — `ParasolClaimsErrorRateHigh`, severity *Warning*, source *User*, *State* `-` — loaded and watching, but nothing active at the healthy baseline.
 ****
 
 == 3. Break it, and watch the alert catch it
@@ -274,7 +295,7 @@ That is a one-line platform grant, not a mistake on your part — see xref:obser
 
 Now earn the alert.
 The claims service depends on its database; take the database away and the API starts returning 500s.
-You will watch the alert climb from *Inactive* through *Pending* to *Firing*, and see how each of the three signals reads during a real fault.
+You will watch the alert climb out of that idle `-` — through *Pending* to *Firing* — and see how each of the three signals reads during a real fault.
 
 Break it — scale the database to zero:
 
@@ -338,12 +359,19 @@ GET /api/claims -> HTTP 503
 ====
 
 Now watch the alert catch it.
-The live *Inactive → Pending → Firing* progression lives in the platform's alerting engine, not on the `PrometheusRule` object — the CR carries only your rule's *spec*, and reading the ruler directly needs a cluster-monitoring role you do not have.
-So read the state where the platform exposes it to you — the console:
+The live *inactive → pending → firing* progression lives in the platform's alerting engine, not on the `PrometheusRule` object — the CR carries only your rule's *spec*, and reading the ruler directly needs a cluster-monitoring role you do not have.
+So read the state where the platform exposes it to you — the project-scoped Observe view:
 
-. Open *Observe* → *Alerting* → *Alerting rules* and find `ParasolClaimsErrorRateHigh`.
-. Within about a minute it moves to *Pending*, and after its 2-minute `for:` window, to *Firing* — about three minutes from the break.
-// [CAPTURE-VERIFY] Observe -> Alerting shows ParasolClaimsErrorRateHigh Pending -> Firing while claims-db is at 0
+. Open the {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^] and find `ParasolClaimsErrorRateHigh` — the row whose *State* read `-` a moment ago.
+(An empty list here almost always means the *Source* filter: it defaults to *Platform*, and your rule's source is *User*.)
+. Within about a minute the rule moves to *Pending*, and after its 2-minute `for:` window, to *Firing* — about three minutes from the break.
+Keep the companion {ocp_console_url}/dev-monitoring/ns/{user}-dev/alerts[*Alerts* tab^] to hand too: it read *No alerts found* while the service was healthy, so check it again once the rule fires.
+// Grounded 2026-07-28 as user1: the project-scoped alertrules view lists this rule, and the cluster-scoped
+// /monitoring/alertrules page is 403 for an attendee ("0 - 0 of 0"). The /dev-monitoring/ns/<user>-dev/alerts
+// tab read "No alerts found" at the healthy baseline.
+// TODO(verify-on-cluster): the exact *State*-column text this view renders while the rule is Pending and
+// while it is Firing. Only the healthy baseline was grounded (State reads `-`, NOT the word "Inactive");
+// the media lane's 04-alert-firing capture is being shot on this same page and will settle the wording.
 
 While it climbs, read the *three signals* on the same fault — this is the whole module in ninety seconds:
 
@@ -368,7 +396,7 @@ A 10-second scrape samples that window three or four times, so `rate()` sees the
 The scrape interval bounds the shortest fault your alert can catch; the two-minute `for:` window is deliberate on top of that, so a brief blip never pages anyone.
 ====
 
-// media-pass: screenshot observability-health-scale-04-alert-firing.png — Observe -> Alerting, ParasolClaimsErrorRateHigh Firing (HIGH; the signature visual). Alt: "Observe Alerting view showing the ParasolClaimsErrorRateHigh alert Firing with warning severity while claims-db is scaled to zero."
+// media-pass: screenshot observability-health-scale-04-alert-firing.png — the PROJECT-scoped Alerting rules view (/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user), ParasolClaimsErrorRateHigh Firing (HIGH; the signature visual). Alt: "Project-scoped Alerting rules view for the attendee namespace, showing the ParasolClaimsErrorRateHigh alert firing with warning severity while claims-db is scaled to zero."
 
 Recover.
 Your scale-down stands until you undo it — the entry environment does not auto-heal edits to its own workloads — so bring the database back yourself.
@@ -383,7 +411,7 @@ oc rollout status deploy/parasol-claims -n $NS
 ----
 
 Give it a moment, then confirm the service is healthy again — *HTTP 200*.
-The alert does not clear the instant you recover: the 5-minute rate keeps counting the burst's 5xx until they age out of the window, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for a few minutes after the fix — roughly five minutes past the spike — before it returns to *Inactive*.
+The alert does not clear the instant you recover: the 5-minute rate keeps counting the burst's 5xx until they age out of the window, so `ParasolClaimsErrorRateHigh` lingers in *Firing* for a few minutes after the fix — roughly five minutes past the spike — before it stands down and the row goes idle again.
 
 [source,sh,role=execute]
 ----
@@ -673,7 +701,8 @@ ifdef::demo[]
 .Before you present
 ====
 Run `ws solve observability-health-scale --user {user}` first: it materializes the *end state* — the claims app at 2 replicas with the CPU HorizontalPodAutoscaler (HPA), the `parasol-claims-alerts` rule, and the PodDisruptionBudget (PDB) already in place — so every signal is live and you only have to *drive* it.
-Have the console open on *Observe → Metrics* with the 5xx-rate query ready, a second tab on *Observe → Alerting*, and a terminal logged in as `{user}`.
+Have the console open on *Observe → Metrics* with the 5xx-rate query ready, a second tab on the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^], and a terminal logged in as `{user}`.
+Use that project-scoped view, not the cluster-wide *Observe → Alerting* page: the cluster-wide page needs a cluster-monitoring grant your attendee identity does not have and renders *0 - 0 of 0*, and its *Source* filter defaults to *Platform* — the link above pins it to *User*.
 The database break plus a *concurrent burst* of failing load fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
 ====
 
@@ -694,7 +723,7 @@ curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics \
 [demo-block]
 [TIME 1m]
 Say:: "I'm going to take the database away. Watch the alert — it's armed and inactive right now."
-Show:: *Observe → Alerting*, `ParasolClaimsErrorRateHigh` in *Inactive*.
+Show:: The project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^] — one row, `ParasolClaimsErrorRateHigh`, severity *Warning*, source *User*, *State* `-`: loaded and watching, nothing active.
 Do:: Break it, then drive a *concurrent burst* of failing load — hundreds of 5xx banked into the ~30-second window before the readiness probe pulls the pod from the router, sampled often by the 10-second scrape so `rate()` sees the climb (a serial trickle banks too few) — note the time; it fires in about three minutes:
 +
 [source,sh,role=execute,subs="attributes"]
@@ -724,7 +753,7 @@ oc logs deploy/parasol-claims -n {user}-dev --tail=15
 [demo-block]
 [TIME 2m]
 Say:: "There it goes." (The alert should now be *Firing*.) "That's a page. In production this hits the on-call. Let's fix it — and notice the fix is two steps, because the app is holding dead connections."
-Show:: *Observe → Alerting*, `ParasolClaimsErrorRateHigh` now *Firing* (red).
+Show:: The same project-scoped *Alerting rules* view — `ParasolClaimsErrorRateHigh` has moved off `-` and is now *Firing* — then the *Alerts* tab, which was empty at the healthy baseline.
 Do::
 +
 [source,sh,role=execute,subs="attributes"]
