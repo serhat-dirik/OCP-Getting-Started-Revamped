@@ -185,4 +185,14 @@ spec:
     name: parasol-claims
   port:
     targetPort: http
+  # Browser-facing Routes MUST be edge-terminated. A plain HTTP Route answers curl but the
+  # console renders its link as https and browsers HSTS-upgrade it, so an attendee clicking
+  # through gets "Application is not available" while the terminal says the app is fine.
+  # `Allow` (not `Redirect`) keeps plain-http curl working, which several labs rely on.
+  # This helper renders the Route for EVERY environment namespace (dev/stage/prod), which is
+  # why it was missed when the standalone entry-state templates were fixed on 2026-07-27 —
+  # the stage Route stayed plain and was caught live on cluster-ksls5 (http 200 / https 503).
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow
 {{- end -}}
