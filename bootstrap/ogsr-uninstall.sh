@@ -1954,4 +1954,14 @@ cat <<'VERIFY'
      oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}'; echo  # expect: names WE added absent, everything else preserved
      # Adopted operators must still be Present/Succeeded:
      oc get csv -A | grep -Ev 'ogsr'                             # org operators intact
+     # A CSV that no Subscription installs is an ORPHAN — step [3/8] above deletes only the CSVs the
+     # state records as ours, so anything it could not authorise is still here, and a leftover CSV
+     # makes the NEXT install fail to resolve that operator. Section [3/9] of ogsr-check-clean.sh
+     # names them with the removal command; by hand it is the difference of two lists:
+     comm -23 \
+       <(oc get csv -A -l '!olm.copiedFrom' -o custom-columns=NS:.metadata.namespace,CSV:.metadata.name --no-headers | awk '{print $1"/"$2}' | sort) \
+       <(oc get subscriptions.operators.coreos.com -A -o custom-columns=NS:.metadata.namespace,CSV:.status.installedCSV --no-headers | awk '{print $1"/"$2}' | sort)
+     # expect: only openshift-operator-lifecycle-manager/packageserver, which the cluster itself
+     # installs with no Subscription. Anything else is an orphan — check WHOSE before deleting it:
+     # in an adopted operator's namespace it is the org's operator, and deleting it uninstalls them.
 VERIFY

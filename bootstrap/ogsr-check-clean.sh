@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ogsr-check-clean.sh — REPORT what the workshop left on a cluster. READ-ONLY BY DESIGN.
 #
-# Run this after ./bootstrap/ogsr-uninstall.sh. It scans EIGHT classes of leftover — sections [1/8]
-# through [8/8] below — explains in one line what each class means, and prints the exact `oc` command
+# Run this after ./bootstrap/ogsr-uninstall.sh. It scans NINE classes of leftover — sections [1/9]
+# through [9/9] below — explains in one line what each class means, and prints the exact `oc` command
 # that would deal with each finding.
 #
 # It never deletes, patches, labels, annotates or applies ANYTHING. That is deliberate and is the
@@ -233,7 +233,7 @@ load_indexes() {
   # re-read per object below rather than guessed at.
   CSV_INDEX="$(oc get clusterserviceversions.operators.coreos.com -A --no-headers 2>/dev/null \
     | awk 'NF>=3 { p=$NF; if (p !~ /^(Pending|InstallReady|Installing|Succeeded|Failed|Replacing|Deleting|Unknown)$/) p=""; print $1"|"$2"|"p"|" }')"
-  # status.reason is not in the table and section [2/8] needs it. Only non-Succeeded CSVs can carry an
+  # status.reason is not in the table and section [2/9] needs it. Only non-Succeeded CSVs can carry an
   # interesting reason, and a healthy cluster has none, so this costs nothing in the normal case.
   csv_fill_reasons
 
@@ -309,7 +309,7 @@ state_ops() {  # created|adopted → "name namespace" lines
 # ── is this finding ours to delete? ───────────────────────────────────────────
 # THE point of this block. Our kustomize label transformer stamps workshop labels on every resource in
 # a component, INCLUDING the ones Argo adopted because the org already had them — so "carries a workshop
-# label" is not evidence the workshop created anything. Section [1/8] has always known which operators
+# label" is not evidence the workshop created anything. Section [1/9] has always known which operators
 # were adopted; before this existed, nothing else asked it, and the script cheerfully printed
 # `oc delete namespace cert-manager-operator` for an operator it had reported healthy four lines above.
 #
@@ -317,7 +317,7 @@ state_ops() {  # created|adopted → "name namespace" lines
 ADOPTED_NS=" "        # " ns ns "                                     namespaces of adopted operators
 ADOPTED_OBJ=" "       # " sub:<ns>/<n> csv:<ns>/<n> og:<ns>/<n> "     their OLM objects
 ADOPTED_CSVN=" "      # " <csv-name> "                                CSV names, for OLM's copies elsewhere
-ADOPTED_SUB_INFO=""   # name|ns|ok|missing|<installedCSV>             consumed by section [1/8]
+ADOPTED_SUB_INFO=""   # name|ns|ok|missing|<installedCSV>             consumed by section [1/9]
 
 build_adoption_index() {
   local rows row name ns og
@@ -551,7 +551,7 @@ diagnose_stuck_ns() {  # ns
   if [ "$disc" -gt 0 ]; then
     sub "API DISCOVERY IS FAILING for this namespace — this is the cluster-wide class."
     sub "Kubernetes cannot enumerate resource types, so garbage collection stops for EVERY"
-    sub "namespace on the cluster, not just ours. See section [5/8] for the stale APIService"
+    sub "namespace on the cluster, not just ours. See section [6/9] for the stale APIService"
     sub "that usually causes it; removing that unblocks all of them at once."
     printf '%s\n' "$conds" | sed 's/^/         /'
     return 0
@@ -590,14 +590,14 @@ diagnose_stuck_ns() {  # ns
   # content stays behind as untracked garbage. The fix is always on the blocking object.
 }
 
-# ── [1/8] adopted operators still healthy? ────────────────────────────────────
+# ── [1/9] adopted operators still healthy? ────────────────────────────────────
 section_adopted_health() {
-  hdr "1/8" "the org's own (adopted) operators — still healthy?" \
+  hdr "1/9" "the org's own (adopted) operators — still healthy?" \
     "An adopted operator left broken is worse than any amount of litter: the cluster looks fine and stops being maintained. Every operator this install found already present must still be Succeeded."
   if [ -z "$STATE_KV" ]; then
     note "no install state available — cannot tell adopted from created."
     note "run with --state-file PATH (ogsr-uninstall.sh prints the path it wrote), or accept that"
-    note "this section and section [8/8] cannot be checked on this cluster."
+    note "this section and section [9/9] cannot be checked on this cluster."
     return 0
   fi
   local name ns st csv phase reason
@@ -611,6 +611,8 @@ section_adopted_health() {
     if [ "$st" = "missing" ]; then
       found adopted "adopted operator ${ns}/${name} — its Subscription is GONE (we must never remove an adopted operator)" \
         "reinstall it from OperatorHub: the org owned this before the workshop was installed"
+      sub "section [3/9] shows the same damage from the other side: their CSV is still there and now"
+      sub "belongs to no Subscription. Do not delete that CSV — it IS their running operator."
       continue
     fi
     if [ -z "$csv" ]; then
@@ -625,14 +627,14 @@ section_adopted_health() {
     else
       found adopted "adopted operator ${ns}/${name} — CSV ${csv} is ${phase:-<unknown>}${reason:+ (${reason})}" \
         "oc describe csv ${csv} -n ${ns}"
-      [ "$reason" = "TooManyOperatorGroups" ] && sub "see section [2/8] — an OperatorGroup we added is what stopped OLM reconciling it"
+      [ "$reason" = "TooManyOperatorGroups" ] && sub "see section [2/9] — an OperatorGroup we added is what stopped OLM reconciling it"
     fi
   done < <(printf '%s\n' "$ADOPTED_SUB_INFO")
 }
 
-# ── [2/8] OperatorGroup conflicts ─────────────────────────────────────────────
+# ── [2/9] OperatorGroup conflicts ─────────────────────────────────────────────
 section_operatorgroups() {
-  hdr "2/8" "namespaces with more than one OperatorGroup" \
+  hdr "2/9" "namespaces with more than one OperatorGroup" \
     "OLM refuses to reconcile a CSV in a namespace carrying two OperatorGroups (TooManyOperatorGroups). Pods keep running, so nothing looks wrong — the operator has simply stopped being managed and will not upgrade or self-heal."
   local dupes ns name owner ours csv_ns csv_name csv_reason hit=0
   if [ -z "$OG_INDEX" ]; then note "could not list OperatorGroups — skipping"; return 0; fi
@@ -671,7 +673,190 @@ section_operatorgroups() {
   return 0
 }
 
-# ── [3/8] workshop namespaces ─────────────────────────────────────────────────
+# ── [3/9] CSVs that no Subscription owns ──────────────────────────────────────
+# An org that installs an operator through OLM the normal way ends up with a Subscription, and the CSV
+# is that Subscription's `status.installedCSV`. A CSV that no Subscription points at is an ORPHAN, and
+# an orphan is our fingerprint: the cascade deletes the Subscription (Argo manages it) while nothing
+# prunes the CSV (OLM created it, Argo never did). Adoption logic that only reads labels calls such a
+# CSV "adopted, preserved" — which is exactly backwards, and hides our own mess behind a word that
+# means "the org's".
+#
+# Worse than litter: an orphan CSV BREAKS THE NEXT INSTALL of this workshop. OLM resolves the new
+# Subscription against the CSV that is already there and gives up —
+#   constraints not satisfiable: @existing/openshift-operators//devspacesoperator.v3.29.0,
+#                                redhat-operators/openshift-marketplace/stable/devspacesoperator
+# (measured on ksls5 2026-07-25; see ogsr-uninstall.sh § operator CSV identity for the full incident).
+#
+# Note what this section does NOT use: labels. Measured on ksls5 2026-07-28, not one CSV on the cluster
+# carries a workshop label, a portfolio label or a pp-* tracking-id — Argo manages Subscriptions, not
+# CSVs. The only mark we ever leave on a CSV is install.sh's `Delete=false`, and that is stamped on
+# ADOPTED resources alone. On a CSV, therefore, a mark of ours is evidence the object is the ORG'S; it
+# is never evidence that it is ours. The Subscription is the only signal that can answer the question.
+ORPHAN_CSV_JP='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|{.spec.replaces}|{.metadata.labels.olm\.clusteroperator\.name}|{.metadata.annotations.olm\.copiedFrom}{"\n"}{end}'
+ORPHAN_SUB_JP='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.installedCSV}|{.status.currentCSV}{"\n"}{end}'
+
+section_orphan_csvs() {
+  hdr "3/9" "ClusterServiceVersions that no Subscription owns" \
+    "An operator installed through OLM has a Subscription, and its CSV is that Subscription's status.installedCSV. A CSV nobody subscribes to is an orphan — normally ours, left behind when the cascade took the Subscription and nothing pruned the CSV. Not just litter: OLM resolves the NEXT install against it and fails with 'constraints not satisfiable'."
+
+  local csv_rows sub_rows ef rc skipped hit row
+  local ns name phase coname copied owner_sub unresolved elsewhere successor cls why verdict
+  ef=""; skipped=""; hit=0
+  tmproot && ef="${TMPROOT}/orphan-csv.err"
+
+  # `-l '!olm.copiedFrom'` drops OLM's per-namespace COPIES server-side, and that is load-bearing rather
+  # than an optimisation. A copy legitimately lives in a namespace with no Subscription — it is the
+  # original elsewhere that has one — so every copy is a false orphan. Measured on ksls5 2026-07-28:
+  # 3760 CSVs on the cluster, 3723 of them copies. Unfiltered, this section would print 3723 delete
+  # commands for objects OLM re-creates the moment you remove them.
+  csv_rows="$(oc get clusterserviceversions.operators.coreos.com -A -l '!olm.copiedFrom' \
+    -o jsonpath="$ORPHAN_CSV_JP" 2>"${ef:-/dev/null}")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # Distinct from "there are none": a Forbidden list and an empty cluster both print nothing, so the
+    # EXIT STATUS is what is read here, never the emptiness of the output.
+    note "could not list ClusterServiceVersions (oc exited ${rc}) — this section could not run"
+    if [ -n "$ef" ] && [ -s "$ef" ]; then sub "$(head -1 "$ef")"; fi
+    DISCOVERY_NOTE="${DISCOVERY_NOTE}CSV list failed, the orphan-CSV check did not run; "
+    return 0
+  fi
+  csv_rows="$(printf '%s\n' "$csv_rows" | grep -v '^ *$')"
+  [ -n "$csv_rows" ] || { none "no ClusterServiceVersion is installed on this cluster"; return 0; }
+
+  # THE dangerous read. If this one fails and its failure is swallowed, every CSV on the cluster looks
+  # unowned and this section hands an admin `oc delete` for the org's entire operator estate. Verified
+  # on ksls5 2026-07-28 with `--as=system:serviceaccount:default:default`: a forbidden list exits 1 with
+  # EMPTY stdout — identical output to a cluster with no Subscriptions, distinguishable only by status.
+  #
+  # subscriptions.operators.coreos.com in full, never `subscriptions`: three API groups claim that
+  # plural and messaging.knative.dev shadows OLM's, which once reported every operator as absent (SEV1,
+  # fixed in 437bbf4). Here the same mistake would report every operator as an orphan.
+  sub_rows="$(oc get subscriptions.operators.coreos.com -A \
+    -o jsonpath="$ORPHAN_SUB_JP" 2>"${ef:-/dev/null}")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    note "could not list Subscriptions (oc exited ${rc}) — NOT reporting any orphan"
+    if [ -n "$ef" ] && [ -s "$ef" ]; then sub "$(head -1 "$ef")"; fi
+    sub "without the Subscription list every CSV would read as unowned, so this section reports"
+    sub "nothing rather than name the org's operators as ours. Re-run as an admin who can list"
+    sub "subscriptions.operators.coreos.com cluster-wide."
+    DISCOVERY_NOTE="${DISCOVERY_NOTE}Subscription list failed, the orphan-CSV check did not run; "
+    return 0
+  fi
+
+  # spec.replaces is in the row but is read out of $csv_rows by awk below (a CSV's successor is a
+  # DIFFERENT row than its own), so this loop drops it rather than shadowing the lookup with a name.
+  while IFS='|' read -r ns name phase _ coname copied; do
+    [ -n "$name" ] || continue
+    [ -n "$ns" ] || continue
+
+    # Older OLM recorded the copy as an ANNOTATION, which the label selector above cannot exclude.
+    [ -z "$copied" ] || continue
+
+    # A CSV carrying olm.clusteroperator.name is installed by the cluster-version-operator, not by a
+    # Subscription — it backs a ClusterOperator. `packageserver` in openshift-operator-lifecycle-manager
+    # is that case on EVERY OpenShift cluster (ksls5 2026-07-28: the only original CSV of 37 with no
+    # Subscription), so without this it is a guaranteed false positive on every run, on every cluster.
+    # The namespace test is belt-and-braces for a future core CSV that carries no such label: OLM's own
+    # namespace is never one we install into.
+    if [ -n "$coname" ] || [ "$ns" = "openshift-operator-lifecycle-manager" ]; then
+      skipped="${skipped}${ns}/${name} — installed by the cluster itself (ClusterOperator ${coname:-core OLM}), no Subscription is expected
+"
+      continue
+    fi
+
+    owner_sub="$(printf '%s\n' "$sub_rows" | awk -F'|' -v n="$ns" -v c="$name" \
+      '$1==n && ($3==c || $4==c) {print $2; exit}')"
+    [ -z "$owner_sub" ] || continue
+
+    # Mid-upgrade, OLM's successor CSV names the outgoing one in spec.replaces while the Subscription
+    # has already moved on to the successor. The outgoing CSV is momentarily pointed at by neither
+    # status field — owned, not orphaned, and OLM garbage-collects it on its own.
+    successor="$(printf '%s\n' "$csv_rows" | awk -F'|' -v n="$ns" -v c="$name" \
+      '$1==n && $4==c {print $2; exit}')"
+    if [ -n "$successor" ]; then
+      skipped="${skipped}${ns}/${name} — being replaced by ${successor} (an upgrade in flight, not an orphan)
+"
+      continue
+    fi
+
+    hit=1
+    unresolved="$(printf '%s\n' "$sub_rows" | awk -F'|' -v n="$ns" \
+      '$1==n && $3=="" && $4=="" {print $2; exit}')"
+    elsewhere="$(printf '%s\n' "$sub_rows" | awk -F'|' -v n="$ns" -v c="$name" \
+      '$1!=n && ($3==c || $4==c) {print $1"/"$2; exit}')"
+
+    if [ -n "$unresolved" ]; then
+      # A Subscription that has resolved to nothing yet may be about to adopt this very CSV. That is an
+      # install in flight, not a leftover, and it is the one case where an orphan must not carry a
+      # delete command however it classifies.
+      report_decide clusterserviceversions.operators.coreos.com "$name" "$ns" \
+        "csv/${name} -n ${ns} — ${phase:-<unknown>}, no Subscription owns it, but one in ${ns} is still resolving" \
+        "subscriptions.operators.coreos.com/${unresolved} in ${ns} has neither installedCSV nor currentCSV set — it may be about to claim this CSV"
+      continue
+    fi
+
+    cls="$(classify_finding clusterserviceversions.operators.coreos.com "$name" "$ns")"
+    why="${cls#*|}"
+    verdict="${cls%%|*}"
+    # WITHOUT install state, "ours" is a guess this section refuses to make. An orphan we left and an
+    # operator the ORG installed and later unsubscribed by hand look identical from the cluster alone.
+    # classify_finding's no-state fallback decides by asking whether the namespace holds a CSV it cannot
+    # account for — an inference that is circular here, because the object being classified IS that CSV,
+    # and one that reads "not foreign" whenever its CSV index came back empty for any reason. Measured
+    # against fixtures 2026-07-28: left to that path, an unsubscribed cert-manager in the org's own
+    # namespace printed `oc delete` for the org's operator. Adoption evidence (Delete=false) still
+    # stands on its own — it needs no state — so only the "ours" side is downgraded.
+    if [ -z "$STATE_KV" ] && [ "$verdict" != "adopted" ]; then
+      verdict="decide"
+      why="no install state is available, so an orphan we left cannot be told from an operator the org installed and later unsubscribed by hand"
+    fi
+    case "$verdict" in
+      adopted)
+        # The worst version of this finding, and the reason it is NOT filed as litter: an orphan in an
+        # adopted operator's namespace means the ORG'S operator has lost its Subscription. The CSV is
+        # the running operator — deleting it uninstalls their operator outright. Restoring the
+        # Subscription is the fix, and section [1/9] reports it from the other direction.
+        found adopted "csv/${name} -n ${ns} — no Subscription owns it, and it belongs to the ORG: ${why}"
+        sub "their operator is now UNMANAGED: with no Subscription, OLM will not upgrade or repair it."
+        sub "do NOT delete this CSV — it IS the running operator. Restore the Subscription instead"
+        sub "(OperatorHub, same package and channel the org had), and OLM re-adopts this CSV."
+        sub "check: oc get subscriptions.operators.coreos.com -n ${ns}   # expect: the org's, missing"
+        ;;
+      decide)
+        report_decide clusterserviceversions.operators.coreos.com "$name" "$ns" \
+          "csv/${name} -n ${ns} — ${phase:-<unknown>}, no Subscription owns it" "$why"
+        ;;
+      *)
+        found ws "csv/${name} -n ${ns} — ${phase:-<unknown>}, no Subscription owns it (orphaned by our teardown)" \
+          "oc delete clusterserviceversions.operators.coreos.com ${name} -n ${ns}"
+        sub "leaving it makes the NEXT install of this workshop fail to resolve this operator"
+        sub "('constraints not satisfiable: @existing/...'), so this one is worth acting on."
+        ;;
+    esac
+    # A Subscription elsewhere installing the same CSV NAME does not own this object — two namespaces
+    # can run the same operator (ksls5 2026-07-28: rhbk-operator.v26.6.4-opr.1 in both openshift-mta and
+    # sso-workshop, each with its own Subscription). Said as context, never as a reason to spare it.
+    if [ -n "$elsewhere" ]; then
+      sub "note: ${elsewhere} installs the same CSV name in its own namespace — a different object, and"
+      sub "no evidence about this one."
+    fi
+  done < <(printf '%s\n' "$csv_rows")
+
+  [ "$hit" -eq 0 ] && none "every ClusterServiceVersion is owned by a Subscription"
+  # Printed as context, not as findings: these carry no count and cannot affect the exit code. They are
+  # here because "the section found nothing" and "the section excluded something on purpose" are
+  # different statements, and only the second one is auditable.
+  if [ "$QUIET" != "true" ] && [ -n "$skipped" ]; then
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      note "not an orphan: ${row}"
+    done < <(printf '%s\n' "$skipped")
+  fi
+  return 0
+}
+
+# ── [4/9] workshop namespaces ─────────────────────────────────────────────────
 ns_is_ours() {  # name owner component stack user layer track → 0 and echoes the marker that identified it
   local name="$1" owner="$2" comp="$3" stack="$4" user="$5" layer="$6" track="${7:-}"
   [ -n "$owner" ] && { echo "${OWNER_KEY}=${owner}"; return 0; }
@@ -687,7 +872,7 @@ ns_is_ours() {  # name owner component stack user layer track → 0 and echoes t
 
 OURS_NS_LIST=" "   # filled here, consumed by section 4 so it does not re-report the same namespaces
 section_namespaces() {
-  hdr "3/8" "namespaces carrying a mark of this workshop" \
+  hdr "4/9" "namespaces carrying a mark of this workshop" \
     "A mark is not proof of ownership: Argo stamps our labels onto resources it ADOPTED, so the org's own operator namespace ends up labelled by us. Each line below says whether the namespace is ours to delete, ours only to un-mark, or genuinely undecidable."
   local name phase owner comp stack user layer track marker cls why hit=0
   if [ -z "$NS_INDEX" ]; then note "could not list namespaces — skipping"; return 0; fi
@@ -725,10 +910,10 @@ section_namespaces() {
   return 0
 }
 
-# ── [4/8] anything else wedged ────────────────────────────────────────────────
+# ── [5/9] anything else wedged ────────────────────────────────────────────────
 section_other_terminating() {
-  hdr "4/8" "other namespaces stuck Terminating (not ours)" \
-    "Listed because our teardown can wedge namespaces that were never ours — a stale APIService stops garbage collection cluster-wide. If these appear, look at section [5/8] first; one fix usually releases all of them."
+  hdr "5/9" "other namespaces stuck Terminating (not ours)" \
+    "Listed because our teardown can wedge namespaces that were never ours — a stale APIService stops garbage collection cluster-wide. If these appear, look at section [6/9] first; one fix usually releases all of them."
   local name phase hit=0
   [ -n "$NS_INDEX" ] || { note "could not list namespaces — skipping"; return 0; }
   while IFS='|' read -r name phase _; do
@@ -742,9 +927,9 @@ section_other_terminating() {
   return 0
 }
 
-# ── [5/8] stale APIServices ───────────────────────────────────────────────────
+# ── [6/9] stale APIServices ───────────────────────────────────────────────────
 section_apiservices() {
-  hdr "5/8" "APIServices whose backing Service no longer exists" \
+  hdr "6/9" "APIServices whose backing Service no longer exists" \
     "The highest-impact class there is. An aggregated APIService with no backend makes discovery fail, and Kubernetes then refuses to garbage-collect ANY namespace on the cluster — 92 of them wedged in the 2026-07-25 teardown, most not ours."
   local name svc_ns svc_nm avail hit=0
   while IFS='|' read -r name svc_ns svc_nm avail; do
@@ -761,9 +946,9 @@ section_apiservices() {
   return 0
 }
 
-# ── [6/8] orphaned admission webhooks ─────────────────────────────────────────
+# ── [7/9] orphaned admission webhooks ─────────────────────────────────────────
 section_webhooks() {
-  hdr "6/8" "admission webhooks pointing at a Service that no longer exists" \
+  hdr "7/9" "admission webhooks pointing at a Service that no longer exists" \
     "A webhook whose backend is gone rejects or hangs every create/update it intercepts, which blocks deletion of objects in the namespaces it covers. Only ones with failurePolicy=Fail actually block; Ignore is listed as informational."
   local kind w refs ref rns rnm pol hit=0
   for kind in validatingwebhookconfigurations.admissionregistration.k8s.io \
@@ -790,7 +975,7 @@ section_webhooks() {
   return 0
 }
 
-# ── [7/8] objects still carrying a workshop label ─────────────────────────────
+# ── [8/9] objects still carrying a workshop label ─────────────────────────────
 CLUSTER_KINDS_FALLBACK="clusterroles.rbac.authorization.k8s.io clusterrolebindings.rbac.authorization.k8s.io
 groups.user.openshift.io customresourcedefinitions.apiextensions.k8s.io apiservices.apiregistration.k8s.io
 validatingwebhookconfigurations.admissionregistration.k8s.io mutatingwebhookconfigurations.admissionregistration.k8s.io
@@ -902,7 +1087,7 @@ report_swept() {  # kind/name  ns  scope-suffix
 }
 
 section_labeled_objects() {
-  hdr "7/8" "objects carrying a mark of this workshop" \
+  hdr "8/9" "objects carrying a mark of this workshop" \
     "Our kustomize label transformer stamps these labels on every resource in a component, adopted ones included — so a workshop label on an object is NOT proof the workshop created it. Objects we only marked get an un-mark command; only objects we created get a delete. Argo Applications come first: they actively reconcile, so while one exists it re-creates whatever you delete."
   local obj kinds hit=0 app apps="" ns name owner comp stack layer og st csv kindres seen=" "
 
@@ -930,7 +1115,7 @@ section_labeled_objects() {
   done < <(printf '%s\n' "$apps" | grep -v '^ *$' | sort -u)
 
   # (b) cluster-scoped sweep, driven by live discovery so nothing is missed by a stale hardcoded
-  #     list. namespaces are excluded — section [3/8] already reports them, with diagnosis.
+  #     list. namespaces are excluded — section [4/9] already reports them, with diagnosis.
   # projectrequests is excluded by name as well as filtered by drop_phantoms: listing it is pure noise
   # (it never holds objects) and skipping it saves the API call that produces the Status response.
   kinds="$(oc api-resources --namespaced=false --verbs=list -o name 2>/dev/null \
@@ -990,7 +1175,7 @@ adopted_obj_trace() {  # kind name ns already-seen → 0 when it reported a trac
   return 0
 }
 
-# ── [8/8] CRDs from operators we installed ────────────────────────────────────
+# ── [9/9] CRDs from operators we installed ────────────────────────────────────
 crd_candidates_for() {  # operator-name → CRD names that plausibly belong to it (heuristic)
   local op="$1" tok toks=""
   for tok in $(printf '%s\n' "$op" | tr '-' ' '); do
@@ -1005,7 +1190,7 @@ crd_candidates_for() {  # operator-name → CRD names that plausibly belong to i
 }
 
 section_crds() {
-  hdr "8/8" "CRDs installed by operators this install created" \
+  hdr "9/9" "CRDs installed by operators this install created" \
     "Never removed automatically, and never by us: deleting a CRD deletes every instance of it cluster-wide, in every namespace. The instance count tells you whether anything is using it before you decide."
   if [ -z "$STATE_KV" ]; then
     note "no install state (source: none) — cannot tell which operators were ours."
@@ -1073,12 +1258,13 @@ seed_ns_marks
 if [ -n "$STATE_SRC" ]; then
   echo "  install state: ${STATE_SRC}"
 else
-  echo "  install state: NOT FOUND — sections 1 and 8 are limited, and anything this scan cannot"
+  echo "  install state: NOT FOUND — sections 1 and 9 are limited, and anything this scan cannot"
   echo "                 attribute is reported as 'needs a human decision' rather than as deletable."
 fi
 
 section_adopted_health
 section_operatorgroups
+section_orphan_csvs
 section_namespaces
 section_other_terminating
 section_apiservices
