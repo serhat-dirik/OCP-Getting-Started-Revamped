@@ -21,6 +21,7 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -65,6 +66,36 @@ def out_path_for(src: Path) -> Path:
     return OUT_ROOT / slug / f"{slug}-{src.stem}.svg"
 
 
+# The price of `htmlLabels: false`, and it is invisible unless you LOOK at a render.
+#
+# With HTML labels off, mermaid emits each word of a label as its own <tspan>, carrying the
+# separating space as a LEADING space on the next one:
+#
+#     <tspan>on</tspan><tspan> repeated</tspan><tspan> failure</tspan>
+#
+# SVG's default xml:space strips leading and trailing whitespace per text chunk, so every one
+# of those spaces disappears and the label renders "onrepeatedfailure". It afflicted all 81
+# committed diagrams ("every5min", "you:POSTaCloudEvent", "dead-lettersink") and nothing caught
+# it, because mermaid raises no error, the SVG is well-formed, and the byte count looks healthy.
+#
+# xml:space="preserve" on the <text> element restores them. It is safe here specifically because
+# mermaid emits no formatting whitespace between the tags — there is nothing else to preserve.
+#
+# Note the live lab pages are NOT affected: the Antora sites set `html_labels: true`, so their
+# labels are foreignObject HTML. This is an export-path-only defect — which is exactly why it
+# survived: the surface everyone looks at is the one that was fine.
+_TEXT_OPEN = re.compile(r"<text(?![\w-])")
+
+
+def preserve_label_spaces(svg: str) -> str:
+    return _TEXT_OPEN.sub('<text xml:space="preserve"', svg)
+
+
+def spacing_is_broken(svg: str) -> bool:
+    """True if any <text> still lacks xml:space — the regression guard for the above."""
+    return any(not m.endswith('xml:space="preserve"') for m in re.findall(r"<text(?:\s+xml:space=\"preserve\")?", svg))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", help="render just this module slug")
@@ -103,6 +134,10 @@ def main() -> int:
                 # A syntax error in one diagram must not abort the batch, and it IS a finding:
                 # the source is what the lab pages render too.
                 failed.append((src, str(exc).splitlines()[0][:120]))
+                continue
+            svg = preserve_label_spaces(svg)
+            if spacing_is_broken(svg):
+                failed.append((src, "label spaces would be stripped — see preserve_label_spaces()"))
                 continue
             dest = out_path_for(src)
             dest.parent.mkdir(parents=True, exist_ok=True)
