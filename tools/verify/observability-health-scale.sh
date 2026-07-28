@@ -7,7 +7,10 @@
 #   End:   the lab's outcomes exist — a CPU HorizontalPodAutoscaler on parasol-claims (>=2 replicas),
 #          a PrometheusRule alert, and a PodDisruptionBudget.
 # Runnable as the attendee: reads only {user}-dev, and probes the app's OWN Route for /q/metrics — no
-# cross-namespace reads, no UWM/Thanos query (rule 10). See tools/verify/README.md.
+# cross-namespace reads (rule 10). The one exception is the attendee-visibility guard at the bottom,
+# which queries the UWM *tenancy* rules endpoint with the CALLER's own token and the mandatory
+# ?namespace={user}-dev — the same request the attendee's console page makes, so it stays inside the
+# attendee's own tenancy. See tools/verify/README.md.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
@@ -78,6 +81,88 @@ servicemonitor_scrape_10s() {
   [[ "$iv" == "10s" ]]
 }
 
+# --- attendee-visible alerting (the guard the SEV1 was missing) --------------
+# The attendee's alerting page is the console's PROJECT-scoped view
+#   /dev-monitoring/ns/{user}-dev/alertrules?alert-source=user
+# served by the UWM *tenancy* rules endpoint on thanos-querier:9093. It is NOT the cluster-wide
+# /monitoring/alertrules page: that one comes off port 9091, whose kube-rbac-proxy authorizes
+# `get prometheuses/api` (name k8s) in openshift-monitoring — an attendee is denied it and the page
+# renders 0 - 0 of 0 (measured as user1, 2026-07-28; that was the SEV1). `oc get prometheusrule` as
+# cluster-admin stayed green through the whole incident, so everything below asserts the state the
+# ATTENDEE can actually retrieve.
+
+# `oc auth can-i --as` needs impersonation rights, which only admin/CI has. When the attendee runs
+# this in their own cockpit terminal there is nobody to impersonate — their own SelfSubjectAccessReview
+# IS the attendee answer. Flags stay literal in both branches: an --as string built from a variable
+# silently reviews the wrong subject.
+IMPERSONATE_AS_ATTENDEE="false"
+if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
+  IMPERSONATE_AS_ATTENDEE="true"
+fi
+
+# The exact SubjectAccessReview thanos-querier runs for the tenancy rules port — resource
+# prometheusrules in monitoring.coreos.com, namespace taken from the ?namespace= parameter (read out
+# of secret/thanos-querier-kube-rbac-proxy-rules, 2026-07-29). Attendees get it from the workshop
+# layer's monitoring-edit RoleBinding; drop that binding and the page goes empty while every
+# admin-side check stays green.
+attendee_reads_namespaced_rules() {
+  if [[ "$IMPERSONATE_AS_ATTENDEE" == "true" ]]; then
+    oc auth can-i get prometheusrules.monitoring.coreos.com -n "$NS" \
+      --as="$USER_NAME" --as-group=workshop-attendees
+  else
+    oc auth can-i get prometheusrules.monitoring.coreos.com -n "$NS"
+  fi
+}
+
+# Fetch the page's own data source once, with the CALLER's token. The tenancy ports carry no Route, so
+# this resolves in-cluster only (cockpit terminal, ws smoke) — an off-cluster maintainer run is
+# INCONCLUSIVE (⚠), never a ❌. Measured 2026-07-29: no ?namespace= -> 400, no token -> 401, a
+# namespace with no user rules -> 200 with {"groups":[]} — that 200-plus-empty IS the broken page.
+TENANCY_RULES_URL="https://thanos-querier.openshift-monitoring.svc:9093/api/v1/rules"
+TENANCY_STATE="unreachable"   # unreachable (inconclusive) | denied (hard fail) | ok
+TENANCY_BODY=""
+
+tenancy_rules_fetch() {
+  local token resp code
+  token="$(oc whoami -t 2>/dev/null || true)"
+  if [[ -z "$token" ]]; then
+    return 0
+  fi
+  for _ in 1 2 3; do
+    resp="$(curl -ks --max-time 10 -w '\n%{http_code}' \
+              -H "Authorization: Bearer ${token}" \
+              "${TENANCY_RULES_URL}?namespace=${NS}" 2>/dev/null || true)"
+    code="${resp##*$'\n'}"
+    if [[ "$code" == "200" ]]; then
+      TENANCY_BODY="${resp%$'\n'*}"
+      TENANCY_STATE="ok"
+      return 0
+    fi
+    if [[ "$code" == "401" || "$code" == "403" ]]; then
+      TENANCY_STATE="denied"
+      return 0
+    fi
+    sleep 3
+  done
+  return 0
+}
+
+tenancy_endpoint_ok() { [[ "$TENANCY_STATE" == "ok" ]]; }
+
+# How many ALERTING rules the attendee's page would list. Name-agnostic on purpose (template rule 14):
+# the outcome is "the page is not empty", and Thanos Ruler only serves a group it actually loaded — so
+# this also catches a PrometheusRule that exists but was rejected, which an object-existence check
+# cannot see. An attendee who names their alert something other than ParasolClaimsErrorRateHigh still
+# passes, as they should.
+tenancy_alerting_rule_count() {
+  grep -o '"type":[[:space:]]*"alerting"' <<<"$TENANCY_BODY" | wc -l | tr -d '[:space:]'
+}
+tenancy_lists_an_alerting_rule() {
+  local n
+  n="$(tenancy_alerting_rule_count)"
+  [[ "$n" -ge 1 ]]
+}
+
 # The HPA targets parasol-claims on CPU.
 hpa_on_cpu() {
   local tgt metric
@@ -100,6 +185,18 @@ check "ServiceMonitor scrapes every 10s (alert-beat determinism)" servicemonitor
 check "load generator claims-load has >=1 ready replica"  deploy_ready claims-load "$NS"                || hint "load generator missing — ws reset observability-health-scale --user ${USER_NAME}"
 check "/q/metrics exposes http_server_requests (golden signals)" metrics_expose http_server_requests_seconds || hint "metrics endpoint not answering — check: oc get pods -n ${NS}"
 check "/q/metrics exposes claims_created_total (custom metric)"  metrics_expose claims_created_total         || hint "custom counter absent — the load generator POSTs claims to register it; check: oc logs deploy/claims-load -n ${NS}"
+check "attendee can read alerting rules in ${NS} (tenancy RBAC)" attendee_reads_namespaced_rules            || hint "the project-scoped Alerting rules page would be EMPTY — the workshop layer's ${USER_NAME}-monitoring-edit RoleBinding is missing; run bootstrap/install.sh"
+
+# Both modes: entry ships no PrometheusRule, so an empty rule list is CORRECT there — at entry we only
+# prove the endpoint answers for this namespace (UWM up + caller authorized). The not-empty assertion
+# is end-state only, below.
+tenancy_rules_fetch
+if [[ "$TENANCY_STATE" == "unreachable" ]]; then
+  echo "⚠ project-scoped Alerting rules endpoint unreachable from here — attendee-visibility check SKIPPED (not a failure)"
+  hint "run it where the attendee is — from the cockpit terminal: ws verify observability-health-scale (thanos-querier:9093 is in-cluster only, it has no Route, so an off-cluster run cannot answer this)"
+else
+  check "project-scoped Alerting rules endpoint answers for ${NS}"  tenancy_endpoint_ok                     || hint "UWM tenancy rules API rejected this identity (401/403) — the attendee's Alerting rules page would be empty; check the monitoring-edit RoleBinding and that enableUserWorkload is true"
+fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the scale/resilience objects the lab builds do NOT exist yet ---------------
@@ -111,6 +208,11 @@ else
   check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "create the HPA: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"
   check "parasol-claims has >=2 ready replicas (HPA floor)"        claims_replicas_at_least 2                    || hint "HPA floor is 2 — wait: oc get hpa parasol-claims -n ${NS}"
   check "a PrometheusRule alert exists in ${NS}"                   test -n "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)"               || hint "create an alerting rule (PrometheusRule) in ${NS} — see the alert beat"
+  # The object existing is not the outcome — the attendee SEEING it is. Only assert this when the
+  # endpoint answered; unreachable already printed its ⚠, and a denied endpoint already failed above.
+  if [[ "$TENANCY_STATE" == "ok" ]]; then
+    check "attendee's Alerting rules page lists >=1 rule for ${NS}" tenancy_lists_an_alerting_rule          || hint "the /dev-monitoring/ns/${NS}/alertrules?alert-source=user page is EMPTY for the attendee — if 'oc get prometheusrule -n ${NS}' is empty, create the alert (alert beat); if it lists one, Thanos Ruler did not load it (bad expr, or give UWM ~30s and re-verify)"
+  fi
   check "PodDisruptionBudget parasol-claims exists"               oc get pdb parasol-claims -n "$NS"            || hint "create a PDB: oc create pdb parasol-claims --selector app=parasol-claims --min-available=1 -n ${NS}"
 fi
 

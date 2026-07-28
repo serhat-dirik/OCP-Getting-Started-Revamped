@@ -10,6 +10,17 @@ One script per module: `tools/verify/mNN.sh`. Called by `ws verify mNN [--user U
 - Exit 0 only when every check passes; one `✅/❌` line per check with a `↳ fix:` hint on failure.
 - Source `_lib.sh` for `check`, `hint`, `parse_verify_args`, `verify_summary`.
 - Scripts must be runnable with only `oc` + `curl` available (Showroom terminal reality).
+- **Prove the ATTENDEE-visible state, not the admin-visible one.** An object existing is not proof the
+  attendee's page, UI or API call works — `observability-health-scale` shipped a green
+  `oc get prometheusrule` while the attendee's Alerting rules page was empty (403 on the backing API).
+  Where a check backs an attendee-facing claim, assert it as the attendee: `oc auth can-i` with literal
+  `--as=<user> --as-group=workshop-attendees` when the caller can impersonate (admin/CI) and plain
+  self-review when the attendee runs it themselves, and/or query the real endpoint with the caller's
+  own token.
+- A check the CALLER cannot evaluate (missing impersonation rights, an in-cluster-only endpoint on an
+  off-cluster run) is **inconclusive, never a failure**: print a `⚠` line plus a `↳ fix:` retry hint and
+  skip it — it must not touch the pass/fail counters. A reachable endpoint returning the *wrong answer*
+  is still a hard `❌`. A false `❌` destroys attendee trust in every other `✅`.
 
 ## Skeleton
 

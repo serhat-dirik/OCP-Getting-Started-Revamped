@@ -45,8 +45,10 @@ repo_reachable() {
 # platform-observer OLM-dissection reads (fully-qualified — the bare kinds are live traps). As the
 # attendee these prove the extended grant; as admin they are trivially true (the cockpit smoke is the
 # authoritative attendee-perspective test).
-observer_reads_csv() { oc auth can-i get clusterserviceversions.operators.coreos.com -n "$(marker dissectionOperatorNamespace)" >/dev/null 2>&1; }
-observer_reads_crd() { oc auth can-i get customresourcedefinitions.apiextensions.k8s.io >/dev/null 2>&1; }
+# Impersonate the attendee (user + group, literal flags): ws verify runs as cluster-admin, and a
+# bare can-i answers for the ADMIN — trivially yes, green while the attendee gets Forbidden.
+observer_reads_csv() { oc auth can-i get clusterserviceversions.operators.coreos.com -n "$(marker dissectionOperatorNamespace)" --as="$USER_NAME" --as-group=workshop-attendees >/dev/null 2>&1; }
+observer_reads_crd() { oc auth can-i get customresourcedefinitions.apiextensions.k8s.io --as="$USER_NAME" --as-group=workshop-attendees >/dev/null 2>&1; }
 
 # Deployment presence in {user}-dev (the notifications app the finished lab leaves running).
 deploy_present() { oc get deploy "$(marker imageName)" -n "$NS" >/dev/null 2>&1; }
