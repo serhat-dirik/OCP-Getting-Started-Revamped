@@ -15,6 +15,12 @@ include::partial$version-attributes.adoc[]
 // 1 batch pool) 2026-07-18; the shown 6/5 are that cluster's example, not a fixed fact. Console
 // click-paths are grounded against the unified console (OCP 4.19+, no perspective switch); labels a
 // build couldn't click get CAPTURE-VERIFY + the authoritative CLI.
+// 2026-07-28 re-grounding (exercise 5): the hardening step's CPU limit was lowered from 2 to 1. At 2 the
+// three replicas plus the maxSurge pod ask 7300m against the {user}-dev workshop-quota cap of
+// limits.cpu: 6, so the new ReplicaSet could never create a pod and the roll wedged while the capacity
+// sampler still printed available=3/3 — a silent false pass. At 1 the same roll peaks at 5300m. The
+// quota numbers, the describe-quota block, the cold-start figures and the PDB outputs below were
+// captured as user2 on OCP 4.22.5 / Kubernetes 1.35 that day.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -102,7 +108,7 @@ Do:: Stop the boot-time reseed, harden the roll, then redeploy under load:
 [source,sh,role=execute]
 ----
 oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none -n $NS
-oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"2","memory":"512Mi"}}}]}}}}'
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"1","memory":"512Mi"}}}]}}}}'
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
 # plant a claim state the seed doesn't carry, then redeploy under live traffic
 oc exec deploy/claims-load -n $NS -- curl -s -X PUT http://parasol-claims:8080/api/claims/CLM-1001/status -H 'Content-Type: application/json' -d '{"status":"Approved"}' -o /dev/null
@@ -576,6 +582,10 @@ wait
 ----
 
 // [CAPTURE-VERIFY] exact counts come from your run; dropped is well above zero across the reseed windows of the roll.
+// STILL OPEN after the 2026-07-28 quota fix: this probe only means anything while a roll is actually
+// progressing, and the cluster it was re-run on (5 nodes, platform stacks holding every schedulable node
+// at 97-99% of its CPU requests) could not place the surge pod at all, so no pod ever booted and the
+// probe would have read a misleading dropped=0. Fill it on a cluster with node headroom to spare.
 .Expected output (your exact counts vary — the point is `dropped` is *not zero*, and not a stray one or two)
 [source,texinfo]
 ----
@@ -644,6 +654,8 @@ pod/parasol-claims-655664d848-vw86s condition met
 There it is. A *single* pod restart wiped your write and reverted `CLM-1001` to the seed `UnderReview` — because that one boot ran `drop-and-create` and rebuilt the *shared* database out from under the other, still-serving pods.
 That is exactly what a rolling update does, over and over: each new pod's boot drops the tables the old pods are mid-query on.
 The disruption is in the *data plane, at startup* — which is why no `maxUnavailable` or shutdown-hook tuning could ever reach zero.
+// Re-measured live as user2 on 2026-07-28: three replacement pods at the 500m limit took 23 s / 25 s /
+// 33 s from PodScheduled to Ready (mean 27 s). The same three at limits.cpu=1 took 14 s / 15 s / 15 s.
 One more thing to notice: that replacement pod took a while to reach `Ready` — about *27 s* on the build cluster, because the container's *500m CPU limit* throttles the JVM cold-start. Hold that thought; it matters for the capacity dip.
 
 [.checkpoint]
@@ -711,7 +723,7 @@ Your `claims-db` is already populated (the app seeded it while it was still `dro
 ====
 
 *Step 2 — harden the roll (hold capacity, and speed the cold-start).*
-`maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one, and raising the container's CPU *limit* lets the JVM cold-start without throttling — so a fresh pod reaches `Ready` in about *17 s* instead of ~27 s, shrinking the brief capacity dip while the roll waits on it:
+`maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one, and raising the container's CPU *limit* gives the JVM cold-start more headroom to burn — so a fresh pod reaches `Ready` in about *15 s* instead of ~27 s, shrinking the brief capacity dip while the roll waits on it:
 
 // Verified live OCP 4.22.5, 2026-07-26: parasol-claims's detail page carries a YAML tab directly
 // (Details · Metrics · YAML · ReplicaSets · Pods · Environment · Events · Security) — no need to go via
@@ -722,18 +734,53 @@ Console::
 +
 --
 Open *Workloads* → *Deployments* → `parasol-claims` → *Actions* → *Edit Deployment* (YAML).
-Set `spec.strategy.rollingUpdate` to `maxSurge: 1`, `maxUnavailable: 0`; and on the `parasol-claims` container raise `resources.limits.cpu` to `2` (leave `requests.cpu` at `200m`), then *Save*.
+Set `spec.strategy.rollingUpdate` to `maxSurge: 1`, `maxUnavailable: 0`; and on the `parasol-claims` container raise `resources.limits.cpu` to `1` (leave `requests.cpu` at `200m`), then *Save*.
 --
 CLI::
 +
 --
 [source,sh,role=execute]
 ----
-oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"2","memory":"512Mi"}}}]}}}}'
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}},"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"1","memory":"512Mi"}}}]}}}}'
 oc rollout status deploy/parasol-claims -n $NS --timeout=180s
 ----
 --
 ====
+
+// Quota arithmetic measured live on OCP 4.22.5 as user2, 2026-07-28: `oc describe quota workshop-quota`
+// read 4300m/6 with the three replicas at limits.cpu=1, and the live admission controller accepted a
+// further 1000m surge pod (5300m) while refusing the 2-CPU equivalent — the exact numbers below.
+[NOTE]
+.Why `1`, and not a bigger number — your namespace caps `limits.cpu`
+====
+`{user}-dev` carries a `workshop-quota` `ResourceQuota` with `limits.cpu: 6`, and the namespace's other four workloads (`claims-db`, `parasol-web`, `statement-batch`, `claims-load`) already hold *1300m* of it.
+At `limits.cpu: 1` the three claims replicas take *3000m* and the `maxSurge: 1` pod another *1000m* — *5300m* in total, inside the cap with room to spare.
+Ask for `2` instead and the same roll needs *7300m*: the quota *refuses to create the new pods at all*, the ReplicaSet reports `ReplicaFailure`/`FailedCreate`, and the rollout never finishes — see the troubleshooting page if you experiment upward and the roll stalls.
+====
+
+Read your own headroom any time — the quota is yours to inspect:
+
+[source,sh,role=execute]
+----
+oc describe quota workshop-quota -n $NS
+----
+
+.Expected output (with the three replicas at `limits.cpu: 1`)
+[source,texinfo]
+----
+Name:                   workshop-quota
+Namespace:              user2-dev
+Resource                Used    Hard
+--------                ----    ----
+limits.cpu              4300m   6
+limits.memory           2816Mi  12Gi
+persistentvolumeclaims  0       10
+pods                    7       30
+requests.cpu            1       3
+requests.memory         1408Mi  6Gi
+----
+
+`4300m` of `6` — the `1300m` the rest of the namespace holds plus your three `1000m` replicas. The `1700m` left over covers the `1000m` surge pod the next rollout will ask for, with `700m` to spare.
 
 [IMPORTANT]
 .Use a *strategic* patch for the container change
@@ -762,6 +809,27 @@ done | sort | uniq -c
 ----
 
 Capacity never dropped below 3 — the Deployment surged a replacement to `Ready` *before* retiring each old pod.
+
+[WARNING]
+.`available=N/N` on its own does *not* mean the rollout succeeded
+====
+That sampler only reads *how many old-or-new pods are ready*. If the new pods can never be created — a quota refusal, or no node with room for the surge pod — the old ones keep serving and the sampler happily prints full capacity for the whole window while *nothing rolls*.
+`maxUnavailable: 0` is exactly what makes that failure invisible: it is doing its job of never dropping the floor, so the only symptom is that the roll doesn't finish.
+Always confirm the roll actually landed before you believe the number.
+====
+
+[source,sh,role=execute]
+----
+oc rollout status deploy/parasol-claims -n $NS --timeout=180s
+----
+
+.Expected output
+[source,texinfo]
+----
+deployment "parasol-claims" successfully rolled out
+----
+
+If that command times out instead — `Waiting for deployment "parasol-claims" rollout to finish: 0 out of 3 new replicas have been updated...` — the roll is *wedged*, not slow; the troubleshooting page walks the two causes.
 Now re-run the *same drop probe* from the top of this exercise — with the reseed gone, it comes back clean:
 
 [source,sh,role=execute]
@@ -780,6 +848,9 @@ wait
 ----
 
 // [CAPTURE-VERIFY] the ok count varies; `dropped=0` is the deterministic expectation once the boot-time reseed is removed.
+// STILL OPEN after the 2026-07-28 quota fix, for the same reason as the first probe: on a cluster that
+// cannot place the surge pod, this reads dropped=0 because nothing rolled — a false pass, not a result.
+// Capture it only from a run where `oc rollout status` reports "successfully rolled out".
 .Expected output (zero dropped — deterministically, because the reseed is gone)
 [source,texinfo]
 ----
@@ -860,7 +931,7 @@ Back at `minAvailable: 1`, a drain can evict one claims pod (the reschedule resp
 
 [.checkpoint]
 ****
-✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~17 s), held *available replicas flat at 3* through a roll (18/18 samples) with a re-measured drop count of *zero*, and protected the service with a `PodDisruptionBudget` that reported `ALLOWED DISRUPTIONS: 2` then *blocked* an eviction once exhausted.
+✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~15 s) that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured a drop count of *zero*, and protected the service with a `PodDisruptionBudget` that reported `ALLOWED DISRUPTIONS: 2` then *blocked* an eviction once exhausted.
 ****
 
 == 6. Read how the platform shapes the cluster (instructor demo)

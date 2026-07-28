@@ -75,9 +75,9 @@ Fix:: Use a *strategic* merge patch, which understands the container `name` as a
 +
 [source,sh,role=execute]
 ----
-oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"2","memory":"512Mi"}}}]}}}}'
+oc patch deploy parasol-claims -n $NS --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"parasol-claims","resources":{"requests":{"cpu":"200m","memory":"256Mi"},"limits":{"cpu":"1","memory":"512Mi"}}}]}}}}'
 # or the helper that sidesteps the footgun entirely:
-oc set resources deploy/parasol-claims -n $NS --limits=cpu=2,memory=512Mi --requests=cpu=200m,memory=256Mi
+oc set resources deploy/parasol-claims -n $NS --limits=cpu=1,memory=512Mi --requests=cpu=200m,memory=256Mi
 ----
 +
 Rule of thumb: patching a single field inside a *named list element* (a container, a volume) → `--type=strategic`, not `merge`.
@@ -96,6 +96,40 @@ oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
 ----
 +
 `minAvailable` must be *strictly less* than the replica count (`1` of `3`) so a disruption can proceed while the service stays up.
+
+// Captured live as user2 on OCP 4.22.5 / Kubernetes 1.35, 2026-07-28, by raising the parasol-claims CPU
+// limit to 2 in a {user}-dev namespace whose workshop-quota caps limits.cpu at 6.
+== The rollout never starts — "0 out of N new replicas have been updated"
+
+Symptom:: `oc rollout status` sits at `Waiting for deployment "parasol-claims" rollout to finish: 0 out of 3 new replicas have been updated...` until it times out, and `oc get deploy` still shows the *old* generation. Meanwhile the capacity sampler from exercise 5 prints a reassuring `available=3/3` for the whole window.
+Cause:: The new ReplicaSet cannot create its pods. The usual reason in this lab is the `{user}-dev` `workshop-quota`, which caps `limits.cpu` at *6*: the namespace's other workloads hold *1300m*, so three claims replicas plus the `maxSurge: 1` pod fit at `limits.cpu: 1` (*5300m*) but not at `2` (*7300m*). The second reason is scheduling — no node has room for the surge pod. `maxUnavailable: 0` keeps the *old* pods serving throughout, which is why the capacity number stays flat and *proves nothing about the roll*.
+Fix:: Read the ReplicaSet, which names the cause exactly, then bring the request back inside the cap:
++
+[source,sh,role=execute]
+----
+NEWRS=$(oc get rs -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+oc describe rs $NEWRS -n $NS | sed -n '/Conditions/,$p'
+oc describe quota workshop-quota -n $NS
+----
++
+.A quota refusal looks like this
+[source,texinfo]
+----
+Conditions:
+  Type             Status  Reason
+  ----             ------  ------
+  ReplicaFailure   True    FailedCreate
+Events:
+  Type     Reason        Age   From                   Message
+  ----     ------        ----  ----                   -------
+  Warning  FailedCreate  85s   replicaset-controller  Error creating: pods "parasol-claims-79664894df-4gfvd" is forbidden: exceeded quota: workshop-quota, requested: limits.cpu=2, used: limits.cpu=4300m, limited: limits.cpu=6
+----
++
+`ReplicaFailure=True` with `FailedCreate` and `exceeded quota` means *no pod object was ever created* — this is an admission refusal, not a slow rollout. Lower the container's `limits.cpu` back to `1` (`oc set resources deploy/parasol-claims -n $NS --limits=cpu=1,memory=512Mi --requests=cpu=200m,memory=256Mi`) and the roll proceeds. Do *not* raise the quota: it is a shared workshop-wide object, and every other module's resource lesson depends on it.
++
+If instead the ReplicaSet has *no* `ReplicaFailure` and the new pod exists but sits `Pending`, the pod was admitted and the problem is *placement*, not quota — read `oc get events -n $NS --field-selector reason=FailedScheduling` and expect `Insufficient cpu`/`Insufficient memory`. That is a cluster-headroom problem for whoever provisioned the cluster, not something to fix from inside the namespace.
++
+Either way, the lesson for the sampler is the same: `available=N/N` tells you the *floor held*, never that the roll *landed*. Confirm with `oc rollout status` before you believe it.
 
 == A rollout drops requests even with `maxUnavailable: 0`
 
@@ -133,4 +167,4 @@ On a cloud cluster the same constraint on `topology.kubernetes.io/zone` spreads 
 
 '''
 
-_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-13)._
+_Last verified on OpenShift {ocp_version} (Kubernetes 1.34, 2026-07-13; the quota/rollout entry re-grounded on Kubernetes 1.35, 2026-07-28)._

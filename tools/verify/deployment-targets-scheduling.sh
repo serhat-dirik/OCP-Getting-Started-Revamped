@@ -95,13 +95,30 @@ claims_schema_is_reseed() { local v; v="$(claims_schema_strategy)"; [[ -z "$v" |
 # END fix-applied: the app is OFF drop-and-create (none/validate/…) so a new pod boot no longer reseeds.
 claims_schema_not_reseed() { local v; v="$(claims_schema_strategy)"; [[ -n "$v" && "$v" != "drop-and-create" ]]; }
 # END fix-applied: the parasol-claims CPU limit is raised above the 500m entry floor that throttled the
-# JVM cold-start (measured 27s→17s when raised to 2). Any limit >500m passes (accepts 1, 2, 1500m, …).
+# JVM cold-start (measured 27s→14-15s when raised to 1). Any limit >500m passes (accepts 1, 2, 1500m, …)
+# — the check grades the OUTCOME, not the exact value. NOTE the lab teaches 1 and not more: at 2 the
+# 3 replicas + maxSurge pod exceed the namespace limits.cpu quota of 6 and the rollout can never finish.
 claims_cpu_limit_raised() {
   local cpu m
   cpu="$(oc get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}' 2>/dev/null || true)"
   [[ -n "$cpu" ]] || return 1
   if [[ "$cpu" == *m ]]; then m="${cpu%m}"; else m=$(( ${cpu%.*} * 1000 )); fi
   [[ "${m:-0}" -gt 500 ]]
+}
+# END fix-applied: no ReplicaSet of parasol-claims is being REFUSED its pods. Guards the exact false pass
+# that shipped as a defect (2026-07-28): a CPU limit large enough to breach the namespace limits.cpu quota
+# leaves the new ReplicaSet at ReplicaFailure=True/FailedCreate ("exceeded quota: workshop-quota") and the
+# rollout never starts — while maxUnavailable:0 keeps the OLD pods serving, so availableReplicas still
+# reads N/N and the lab's capacity sampler prints full capacity throughout. Deliberately NOT a
+# "rollout is complete" check: updatedReplicas lags transiently during any healthy roll and would fire a
+# false ❌ on an attendee who verifies mid-rollout. ReplicaFailure only appears when creation is actually
+# being refused, so this is stable. Same signature covers a quota breach on pods/memory, not just CPU.
+claims_no_replica_failure() {
+  local n
+  n="$(oc get rs -n "$NS" -l app=parasol-claims \
+        -o jsonpath='{range .items[*]}{range .status.conditions[?(@.type=="ReplicaFailure")]}{.status}{"\n"}{end}{end}' 2>/dev/null \
+        | grep -c '^True$' || true)"
+  [[ "${n:-0}" -eq 0 ]]
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
@@ -154,7 +171,9 @@ else
     check "parasol-claims no longer reseeds the DB on boot (schema-management off drop-and-create)" claims_schema_not_reseed \
       || hint "stop the per-boot reseed of the shared DB: oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none"
     check "parasol-claims CPU limit raised above the cold-start-throttle floor (>500m)" claims_cpu_limit_raised \
-      || hint "give cold-starting pods headroom so the roll's capacity dip is brief: oc set resources deployment/parasol-claims --limits=cpu=2 --requests=cpu=200m"
+      || hint "give cold-starting pods headroom so the roll's capacity dip is brief: oc set resources deployment/parasol-claims --limits=cpu=1 --requests=cpu=200m (do NOT go above 1 — the namespace limits.cpu quota is 6 and 3 replicas + the surge pod would exceed it)"
+    check "no parasol-claims ReplicaSet is being refused its pods (no ReplicaFailure)" claims_no_replica_failure \
+      || hint "a ReplicaSet cannot create pods — read it: oc describe rs -n ${NS} \$(oc get rs -n ${NS} -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}'). 'exceeded quota: workshop-quota' means the CPU limit you set is too large for the namespace cap (use cpu=1); the roll is wedged even though availableReplicas still reads N/N"
   else
     info "(skipped the zero-downtime outcomes — parasol-claims not Ready; needs the parasol-images build)"
   fi
