@@ -63,7 +63,11 @@ Do:: Show the ungoverned starting point:
 ----
 NS={user}-dev; PROD={user}-prod
 oc get sa payments-ci payments-ops root-demander -n $NS
-oc adm policy who-can update deployments -n $NS | grep -i payments || echo "payments teammates: UNGOVERNED (no access yet)"
+if WHO=$(oc adm policy who-can update deployments -n $NS); then
+  echo "$WHO" | grep -i payments || echo "payments teammates: UNGOVERNED (no access yet)"
+else
+  echo "step failed: who-can errored — check you are logged in and $NS exists"
+fi
 ----
 
 [demo-block]
@@ -118,7 +122,9 @@ oc scale deploy/root-demander --replicas=1 -n $NS
 sleep 6
 oc get deploy root-demander -n $NS
 RS=$(oc get rs -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
-oc get events -n $NS --field-selector involvedObject.name=$RS -o jsonpath='{.items[-1:].message}' | tr ',' '\n' | grep 'restricted-v2.*runAsUser'
+MSG=$(oc get events -n $NS --field-selector involvedObject.name="${RS:-none}" -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+  | tr ',' '\n' | grep 'restricted-v2.*runAsUser' | tail -1)
+echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
 ----
 +
 "There it is — `restricted-v2: runAsUser: Invalid value: 0`. The platform gave this team speed *and* safety in five minutes, and none of it was a purchase. The fix is to stop demanding root — which is one line — and I'll show that in the module."
@@ -144,7 +150,7 @@ Your project has a Deployment called `root-demander`, seeded at *zero replicas* 
 Its container demands to run as root (`runAsUser: 0`).
 Scale it up and watch what OpenShift does:
 
-// [CAPTURE-VERIFY] Topology/Deployments list → root-demander → scale arrows, or Details > Pods count (OCP 4.21) — CLI authoritative.
+// [CAPTURE-VERIFY] Topology/Deployments list → root-demander → scale arrows, or Details > Pods count; the SCC rejection is on the REPLICASET's Events tab (Deployment → ReplicaSets → current RS → Events), NOT the Deployment's (OCP 4.21) — CLI authoritative.
 [tabs]
 ====
 Console::
@@ -152,7 +158,7 @@ Console::
 --
 In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Workloads* → *Deployments* → `root-demander`, and use the *Actions* menu → *Edit Pod count* (or the scale-up arrow) to set it to *1*.
 The Deployment will sit at *0 of 1* — the Pod never appears.
-Open the *Events* tab to see why.
+The *why* is recorded against the *ReplicaSet*, not the Deployment (the Deployment's own *Events* tab shows only scale-ups): open the *ReplicaSets* tab, click the current `root-demander-…` ReplicaSet, then its *Events* tab to read the rejection.
 --
 CLI::
 +
@@ -187,33 +193,35 @@ The full message lists *every* Security Context Constraint on the cluster and wh
 [source,sh,role=execute]
 ----
 RS=$(oc get rs -n $NS -l app=root-demander -o jsonpath='{.items[0].metadata.name}')
-oc get events -n $NS --field-selector involvedObject.name=$RS \
-  -o jsonpath='{.items[-1:].message}' | tr ',' '\n' | grep 'restricted-v2.*runAsUser'
+MSG=$(oc get events -n $NS --field-selector involvedObject.name="${RS:-none}" \
+  -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tr ',' '\n' | grep 'restricted-v2.*runAsUser' | tail -1)
+echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
 ----
 
-.Expected output
+.Expected output (the UID numbers are *your namespace's own* — every namespace gets a different range)
 [source,texinfo]
 ----
  provider restricted-v2: .containers[0].runAsUser: Invalid value: 0: must be in the ranges: [1000960000, 1000969999]
 ----
 
 Read that carefully.
-The default SCC, *restricted-v2*, will only admit a Pod whose UID falls in the range `[1000960000, 1000969999]` — and `0` (root) is not in it.
-Those numbers are not random: they are *your namespace's assigned range*, stamped on the project as an annotation.
-Confirm the range is the same one in the error:
+The default SCC, *restricted-v2*, will only admit a Pod whose UID falls in a 10000-UID band — and `0` (root) is not in it.
+The numbers in *your* error will differ from the sample above: the band is *your namespace's own assigned range* (every namespace gets a different one), stamped on the project as an annotation.
+Read yours, and confirm it is the same range your rejection named:
 
 [source,sh,role=execute]
 ----
 oc get ns $NS -o jsonpath='uid-range={.metadata.annotations.openshift\.io/sa\.scc\.uid-range}{"\n"}'
 ----
 
-.Expected output
+.Expected output (sample — read your own value; it matches *your* rejection message, not this page's)
 [source,texinfo]
 ----
 uid-range=1000960000/10000
 ----
 
-`1000960000/10000` means "10000 UIDs starting at 1000960000" — exactly the `[1000960000, 1000969999]` the rejection named.
+The annotation reads `<start>/10000` — "10000 UIDs starting at `<start>`" — which is exactly the `[<start>, <start+9999>]` band the rejection named.
+Whatever your start value is, the error and the annotation always agree, because the annotation is where admission got the range.
 Every workload in this namespace gets a UID from that band, and none of them can be root.
 That is the platform's default, and it is doing its job.
 
@@ -252,14 +260,14 @@ oc get pod $POD -n $NS -o jsonpath='scc={.metadata.annotations.openshift\.io/scc
 oc exec $POD -n $NS -- id
 ----
 
-.Expected output
+.Expected output (sample — the UID is the bottom of *your* namespace's range)
 [source,texinfo]
 ----
 scc=restricted-v2  phase=Running
 uid=1000960000(1000960000) gid=0(root) groups=0(root),1000960000
 ----
 
-The workload runs as UID `1000960000` — non-root, drawn from the namespace range, under the `restricted-v2` SCC it never had to ask for.
+The workload runs as the bottom UID of your namespace's range (`1000960000` in this sample) — non-root, drawn from the band the annotation declares, under the `restricted-v2` SCC it never had to ask for.
 No image rebuild, no exception, no root.
 
 [NOTE]
@@ -273,7 +281,7 @@ Your instructor demonstrates the grant (and its audit trail) live — see the co
 
 [.checkpoint]
 ****
-✔ *Verify:* Scaling `root-demander` produced *no Pod* and a `restricted-v2 … runAsUser: Invalid value: 0` rejection; after dropping the forced root, the Pod runs as a non-root UID in your namespace range (`uid=1000960000…`) under the `restricted-v2` SCC.
+✔ *Verify:* Scaling `root-demander` produced *no Pod* and a `restricted-v2 … runAsUser: Invalid value: 0` rejection naming your namespace's own UID range (the number differs per namespace — you read it off the annotation); after dropping the forced root, the Pod runs as a non-root UID drawn from that range under the `restricted-v2` SCC.
 ****
 
 == 2. Give the workload a safe identity
@@ -341,7 +349,11 @@ First, prove it currently has *nothing* — and meet the audit command you'll us
 
 [source,sh,role=execute]
 ----
-oc adm policy who-can update deployments -n $NS | grep -i payments || echo "payments-ci: ungoverned (no deployment access yet)"
+if WHO=$(oc adm policy who-can update deployments -n $NS); then
+  echo "$WHO" | grep -i payments || echo "payments-ci: ungoverned (no deployment access yet)"
+else
+  echo "step failed: who-can errored — check you are logged in and $NS exists"
+fi
 ----
 
 The `who-can` command answers "who is allowed to do X here?" — an auditor's favourite question.
@@ -494,7 +506,7 @@ Now prove the least-privilege boundary — it can do its job, and *only* its job
 [source,sh,role=execute]
 ----
 echo -n "create deployments: "; oc auth can-i create deployments      --as=system:serviceaccount:$NS:payments-ops -n $NS
-echo -n "scale deployments:  "; oc auth can-i update deployments/scale --as=system:serviceaccount:$NS:payments-ops -n $NS
+echo -n "scale deployments:  "; oc auth can-i update deployments --subresource=scale --as=system:serviceaccount:$NS:payments-ops -n $NS
 echo -n "get secrets:        "; oc auth can-i get secrets             --as=system:serviceaccount:$NS:payments-ops -n $NS
 echo -n "get configmaps:     "; oc auth can-i get configmaps          --as=system:serviceaccount:$NS:payments-ops -n $NS
 ----
@@ -551,7 +563,7 @@ Resource                Used   Hard
 --------                ----   ----
 limits.cpu              200m   6
 limits.memory           128Mi  12Gi
-persistentvolumeclaims  0      5
+persistentvolumeclaims  0      10
 pods                    1      30
 requests.cpu            50m    3
 requests.memory         64Mi   6Gi
@@ -590,7 +602,9 @@ Read why:
 [source,sh,role=execute]
 ----
 RS=$(oc get rs -n $NS -l app=quota-buster -o jsonpath='{.items[0].metadata.name}')
-oc get events -n $NS --field-selector involvedObject.name=$RS -o jsonpath='{.items[-1:].message}{"\n"}'
+MSG=$(oc get events -n $NS --field-selector involvedObject.name="${RS:-none}" -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+  | grep 'exceeded quota' | tail -1)
+echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
 ----
 
 .Expected output
@@ -675,19 +689,21 @@ oc get storageclass
 ----
 
 Both return results — `platform-observer` grants `get`/`list` on nodes, storage classes, and more.
-But you are *scoped*: try to reach beyond your own projects and RBAC stops you:
+But you are *scoped*: try to reach beyond your own projects and RBAC stops you.
+Probe a *peer's* namespace — the first line derives one that is never your own, so the test is honest no matter which user you are:
 
-[source,sh,role=execute]
+[source,sh,role=execute,subs="attributes"]
 ----
-oc get pods -n $NS >/dev/null && echo "own namespace: allowed"
-oc get pods -n user2-dev 2>&1 | head -1
+PEER=$([ "{user}" = "user2" ] && echo user3-dev || echo user2-dev)
+oc get pods -n $NS >/dev/null && echo "own namespace ($NS): allowed"
+oc get pods -n $PEER 2>&1 | head -1
 oc get namespaces 2>&1 | head -1
 ----
 
-.Expected output (a peer's namespace and the cluster-wide list are forbidden)
+.Expected output (sample for `user1`, whose peer is `user2-dev` — a peer's namespace and the cluster-wide list are forbidden)
 [source,texinfo]
 ----
-own namespace: allowed
+own namespace (user1-dev): allowed
 Error from server (Forbidden): pods is forbidden: User "user1" cannot list resource "pods" in API group "" in the namespace "user2-dev"
 Error from server (Forbidden): namespaces is forbidden: User "user1" cannot list resource "namespaces" in API group "" at the cluster scope
 ----

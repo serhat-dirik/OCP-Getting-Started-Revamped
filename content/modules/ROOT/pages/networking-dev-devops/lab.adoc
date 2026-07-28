@@ -93,10 +93,12 @@ spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
 EOF
 for i in $(seq 1 24); do oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].ready}' | grep -q false && break; sleep 3; done
 oc get pods -n $NS -l app=parasol-claims
-oc logs -n $NS deploy/parasol-claims --tail=1 | grep -o 'health down.*Acquisition timeout' || echo "DB health check DOWN"
+MSG=$(oc logs -n $NS deploy/parasol-claims --tail=20 2>/dev/null | grep -o 'health down.*Acquisition timeout' | tail -1)
+echo "${MSG:-step failed: no DB health-down line in the logs yet — check the pod exists and is Running (oc get pods -n $NS -l app=parasol-claims), then re-run}"
 ----
 +
 "The API is `0/1` — its database health check times out. Default-deny is doing its job a little *too* well: it even ate DNS."
+(The last line prints the *actual* health-down log line; if it prints a "step failed" hint instead, the observable isn't there yet — don't present it as the policy at work.)
 
 [demo-block]
 [TIME 3m]
@@ -145,7 +147,8 @@ Do:: Prove the isolation:
 [source,sh,role=execute]
 ----
 echo -n "parasol-claims (the API)   -> claims-db:5432 : "; oc exec deploy/parasol-claims -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'
-echo -n "demo-client (anything else) -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN' || echo "BLOCKED"
+echo -n "demo-client (anything else) -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'; rc=$?
+[ $rc -eq 124 ] && echo "BLOCKED (connect timed out — the policy dropped it)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists (oc get pods -n $NS -l app=demo-client)"; }
 ----
 +
 "The database now answers *only* the API. That is micro-segmentation — the security review's favourite sentence, in three NetworkPolicies."
@@ -160,7 +163,13 @@ Do:: Reveal native isolation:
 ----
 oc get networkpolicy -n $PARTNER || echo "(no NetworkPolicies)"
 oc exec deploy/partner-workload -n $PARTNER -- ip -brief addr show ovn-udn1
-echo -n "partner-workload -> parasol-web.$NS.svc:8080 : "; oc exec deploy/partner-workload -n $PARTNER -- timeout 5 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080 && echo OPEN" || echo "BLOCKED (own network)"
+echo -n "partner-workload -> parasol-web.$NS.svc:8080 : "
+OUT=$(oc exec deploy/partner-workload -n $PARTNER -- timeout 5 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080 && echo OPEN" 2>&1); rc=$?
+case "$rc:$OUT" in
+  0:*OPEN*) echo "OPEN — NOT isolated (unexpected here)" ;;
+  124:*|*"No route to host"*|*"Network is unreachable"*) echo "BLOCKED (own network — no path to the app)" ;;
+  *) echo "step failed (exit $rc): $OUT" ;;
+esac
 ----
 +
 "Its own Layer 2 network — `10.20.0.0/16` on `ovn-udn1` — and it simply cannot route to our app. No policy to write, no policy to get wrong. That's the whole point of a UserDefinedNetwork."
@@ -273,7 +282,13 @@ CLI::
 oc patch svc parasol-claims -n $NS --type=merge -p '{"spec":{"selector":{"app":"parasol-claims-TYPO"}}}'
 sleep 2
 oc get endpoints parasol-claims -n $NS
-echo -n "demo-client -> parasol-claims:8080 now: "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/parasol-claims/8080 && echo OPEN' || echo "NO ENDPOINTS — connection refused"
+echo -n "demo-client -> parasol-claims:8080 now: "
+OUT=$(oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/parasol-claims/8080 && echo OPEN' 2>&1); rc=$?
+case "$rc:$OUT" in
+  0:*OPEN*) echo "OPEN (still connecting — did the patch apply?)" ;;
+  *"Connection refused"*) echo "NO ENDPOINTS — connection refused" ;;
+  *) echo "step failed (exit $rc): $OUT" ;;
+esac
 ----
 --
 =====
@@ -663,12 +678,20 @@ parasol-claims-799cbb5958-r7246   0/1     Running   0          9m
 ----
 
 The container is still *Running* — it did not crash — but it is *not Ready*, because it cannot open its database connection.
+
+[NOTE]
+====
+`0/1` proves default-deny *only if* `STATUS` says `Running`. A pod in `ImagePullBackOff`/`ErrImagePull` is also `0/1` — but that means the image never pulled, an environment problem, not your policy working (see the instructor pre-flight / troubleshooting). Read the `STATUS` column before you credit the NetworkPolicy.
+====
+
 And it is not only the app: default-deny on *egress* also killed *DNS*, so nothing in the namespace can even resolve a name:
 
 [source,sh,role=execute]
 ----
-echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db && echo RESOLVED' || echo "DNS BLOCKED (timed out)"
-echo -n "demo-client -> claims-db:5432      : "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c '</dev/tcp/claims-db/5432 && echo OPEN' || echo "BLOCKED (timed out)"
+echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db >/dev/null && echo RESOLVED'; rc=$?
+[ $rc -eq 124 ] && echo "DNS BLOCKED (timed out)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists"; }
+echo -n "demo-client -> claims-db:5432      : "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'; rc=$?
+[ $rc -eq 124 ] && echo "BLOCKED (timed out)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists"; }
 ----
 
 .Expected output
@@ -719,7 +742,8 @@ spec:
           port: dns-tcp
 EOF
 sleep 4
-echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db && echo RESOLVED' || echo "still blocked"
+echo -n "demo-client DNS lookup of claims-db: "; oc exec deploy/demo-client -n $NS -- timeout 6 bash -c 'getent hosts claims-db >/dev/null && echo RESOLVED'; rc=$?
+[ $rc -eq 124 ] && echo "still blocked (lookup timed out — re-check the policy's named ports)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists"; }
 ----
 
 .Expected output
@@ -741,13 +765,14 @@ DNS resolves now — but the database is still unreachable (you only allowed DNS
 *Next, the one real east-west hop:* the API tier to the database.
 That needs *two* rules — an *ingress* allow on `claims-db` ("accept 5432 from `parasol-claims` pods") and the matching *egress* allow on `parasol-claims` (egress is default-denied too):
 
-// [CAPTURE-VERIFY] Networking → NetworkPolicies → Create NetworkPolicy → YAML view accepts a multi-document paste (OCP 4.21) — CLI authoritative.
+// [CAPTURE-VERIFY] Console: masthead + (Quick create) → Import YAML accepts multi-document paste (OCP 4.21; the resource-scoped Create NetworkPolicy editor is single-object) — CLI authoritative.
 [tabs]
 ====
 Console::
 +
 --
-*Networking* → *NetworkPolicies* → *Create NetworkPolicy* → *YAML view*, paste the two policies from the *CLI* tab, *Create*.
+Use the masthead *+* (*Import YAML*) in project `{user}-dev`, paste *both* policies from the *CLI* tab (the Import YAML page accepts a multi-document paste), and *Create*.
+(The resource-scoped *Create NetworkPolicy* YAML editor expects a *single* object — the generic Import YAML page is the one that takes both at once.)
 --
 CLI::
 +
@@ -826,7 +851,8 @@ CLI::
 [source,sh,role=execute]
 ----
 echo -n "parasol-claims (API, ALLOWED)     -> claims-db:5432 : "; oc exec deploy/parasol-claims -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'
-echo -n "demo-client (unauthorized)        -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN' || echo "BLOCKED (timed out)"
+echo -n "demo-client (unauthorized)        -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'; rc=$?
+[ $rc -eq 124 ] && echo "BLOCKED (timed out — no allow rule admits this pod)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists (oc get pods -n $NS -l app=demo-client)"; }
 ----
 --
 ====
@@ -835,7 +861,7 @@ echo -n "demo-client (unauthorized)        -> claims-db:5432 : "; oc exec deploy
 [source,texinfo]
 ----
 parasol-claims (API, ALLOWED)     -> claims-db:5432 : OPEN
-demo-client (unauthorized)        -> claims-db:5432 : BLOCKED (timed out)
+demo-client (unauthorized)        -> claims-db:5432 : BLOCKED (timed out — no allow rule admits this pod)
 ----
 
 *Same database, same namespace, two different pods, two different answers.*
@@ -975,8 +1001,15 @@ The partner workload can still *resolve* names (DNS is a shared cluster service)
 
 [source,sh,role=execute]
 ----
-echo -n "resolve parasol-web.$NS.svc            : "; oc exec deploy/partner-workload -n $PARTNER -- timeout 6 bash -c "getent hosts parasol-web.$NS.svc.cluster.local && echo RESOLVED" || echo "no answer"
-echo -n "partner-workload -> parasol-web:8080   : "; oc exec deploy/partner-workload -n $PARTNER -- timeout 6 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080 && echo OPEN" || echo "BLOCKED (isolated network)"
+echo -n "resolve parasol-web.$NS.svc            : "; oc exec deploy/partner-workload -n $PARTNER -- timeout 6 bash -c "getent hosts parasol-web.$NS.svc.cluster.local >/dev/null && echo RESOLVED"; rc=$?
+[ $rc -ne 0 ] && echo "no answer (exit $rc) — DNS is a shared service and should resolve; check the partner-workload pod exists (oc get pods -n $PARTNER)"
+echo -n "partner-workload -> parasol-web:8080   : "
+OUT=$(oc exec deploy/partner-workload -n $PARTNER -- timeout 6 bash -c "</dev/tcp/parasol-web.$NS.svc.cluster.local/8080 && echo OPEN" 2>&1); rc=$?
+case "$rc:$OUT" in
+  0:*OPEN*) echo "OPEN — NOT isolated (unexpected: is partner-workload really on the UDN?)" ;;
+  124:*|*"No route to host"*|*"Network is unreachable"*) echo "BLOCKED (isolated network)" ;;
+  *) echo "step failed (exit $rc): $OUT" ;;
+esac
 ----
 
 .Expected output
@@ -1022,12 +1055,16 @@ Your instructor demonstrates three things (all read-only):
 oc get gatewayclass
 ----
 +
-.Expected output
+.Expected output (three implementations — `openshift-default` is the platform's; the two `istio*` classes belong to the shared Service Mesh)
 [source,texinfo]
 ----
 NAME                CONTROLLER                           ACCEPTED   AGE
-openshift-default   openshift.io/gateway-controller/v1   True       52m
+istio               istio.io/gateway-controller          True       3d
+istio-remote        istio.io/unmanaged-gateway           True       3d
+openshift-default   openshift.io/gateway-controller/v1   True       2d
 ----
++
+One API, several implementations, each advertised by a `GatewayClass` — on this cluster the Service Mesh control plane registers `istio`/`istio-remote` alongside the platform's own `openshift-default`, which is the one this exercise is about.
 
 . *The honest L4 boundary.* Routes and today's Gateway API are HTTP(S)/SNI-centric — the experimental `TCPRoute`/`TLSRoute`/`UDPRoute` APIs are deliberately *not* installed on the supported channel, so raw-TCP and TLS-passthrough ingress belong to the *service mesh* (a later module), not here.
 . *The bare-metal gap.* Creating a `Gateway` here would leave it unaddressed (`Programmed=False`) because no LoadBalancer provider answers — which is precisely why the *Route* is what you ran in exercise 2 and the Gateway API is what you *model* for the future.
@@ -1036,7 +1073,7 @@ You'll find the exact commands, expected output, and the TLS-on-the-listener dir
 
 [.checkpoint]
 ****
-✔ *Verify (observed):* You saw the `openshift-default` GatewayClass `Accepted`, learned the GatewayClass → Gateway → HTTPRoute model and its weighted-split capability, and understood why the Route — not the Gateway — is the runnable exposure on this bare-metal cluster.
+✔ *Verify (observed):* You listed the cluster's GatewayClasses — the platform's `openshift-default` (`Accepted`, the one this exercise is about) alongside the mesh's `istio`/`istio-remote` — learned the GatewayClass → Gateway → HTTPRoute model and its weighted-split capability, and understood why the Route — not the Gateway — is the runnable exposure on this bare-metal cluster.
 ****
 
 == Challenge (optional)

@@ -263,6 +263,7 @@ demo-client-...                        true    <none>
 parasol-claims-...                     true    istio-validation,istio-proxy
 parasol-fraud-...                      true    istio-validation,istio-proxy
 parasol-web-...                        true    istio-validation,istio-proxy
+partner-tcp-backend-...                true    <none>
 ----
 
 Notice `istio-proxy` is an *init container*, not a regular one — that's the OpenShift Service Mesh 3 *native sidecar*.
@@ -468,7 +469,7 @@ The one thing that's manual is the *traffic itself*: the sample app doesn't auto
 
 [.checkpoint]
 ****
-✔ *Verify:* You generated live traffic through the mesh, grounded it with `istioctl` (a 3-proxy data plane and recorded requests to fraud), and read the Kiali *Traffic Graph* for `{user}-mesh` — nodes, traffic-driven edges, mutual-TLS padlocks, and green health — the live picture of your service-to-service traffic.
+✔ *Verify:* You generated live traffic through the mesh and grounded that it flowed — your `istioctl` *client* matches the control plane (`--remote=false`), and the claims sidecar's own `istio_requests_total` telemetry recorded the calls to fraud — then read the Kiali *Traffic Graph* for `{user}-mesh`: nodes, traffic-driven edges, mutual-TLS padlocks, and green health, the live picture of your service-to-service traffic.
 ****
 
 == 4. Shift traffic between service versions
@@ -640,14 +641,18 @@ Finally, the *header route* — pin test users to v2. Send 30 requests *with* th
 B=$(split)
 oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 30); do curl -s -o /dev/null -H "x-parasol-test: true" http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
 A=$(split)
-echo "before: $B"; echo "after:  $A   (all +30 on v2)"
+echo "before: $B"; echo "after:  $A"
+B1=${B%% *}; B1=${B1#v1=}; A1=${A%% *}; A1=${A1#v1=}; B2=${B##*v2=}; A2=${A##*v2=}
+[ "$A1" = "$B1" ] && [ $((A2-B2)) -eq 30 ] && echo "verdict: v1 unchanged, all +30 on v2 — the header route is deterministic" \
+  || echo "verdict: v1 +$((A1-B1)), v2 +$((A2-B2)) (expected +0/+30) — re-check the x-parasol-test rule in the VirtualService, or re-run"
 ----
 
-.Expected output (the header route sends every test request to v2)
+.Expected output (the header route sends every test request to v2 — the verdict line is computed from the two readings)
 [source,texinfo]
 ----
 before: v1=273 v2=49
-after:  v1=273 v2=79   (all +30 on v2)
+after:  v1=273 v2=79
+verdict: v1 unchanged, all +30 on v2 — the header route is deterministic
 ----
 
 `v1` didn't move; all 30 header-tagged requests went to v2 — a deterministic override on top of the weighted split.
@@ -676,13 +681,17 @@ healthy: HTTP 200 in 0.017s
 
 Now *inject a 5-second delay* on the fraud route with a `VirtualService` fault, and add the resilience policy — a request *timeout*, *retries*, and (on the `DestinationRule`) a *circuit breaker* via connection limits and outlier detection:
 
-// [CAPTURE-VERIFY] Console: edit the VirtualService/DestinationRule YAML (Networking -> VirtualServices / DestinationRules) or masthead + (Quick create) -> Import YAML (OCP 4.21) -- CLI authoritative.
+// [CAPTURE-VERIFY] Console: Search -> Resources dropdown -> DestinationRule / VirtualService (networking.istio.io), open parasol-fraud -> YAML tab -> Save (OCP 4.21; Istio CRs have no left-nav entry for tenants) -- CLI authoritative.
 [tabs]
 ====
 Console::
 +
 --
-Edit the two resources (via *Import YAML* / the resource's *YAML* tab), replacing them with the versions in the *CLI* tab, and *Save*.
+Both resources already *exist* (you created them in exercise 4), so *Import YAML* would refuse them with `AlreadyExists` — edit them in place instead.
+Istio's custom resources have no left-nav entry, so reach them through *Search*: open *Search* (left nav) in project `{user}-mesh`, and in the *Resources* dropdown pick *DestinationRule* (`networking.istio.io`).
+Open `parasol-fraud` → *YAML* tab, replace the `spec` with the version in the *CLI* tab, and *Save*.
+Repeat for kind *VirtualService*.
+(The *CLI* tab applies both in one paste — it's the quicker path here.)
 --
 CLI::
 +
@@ -861,22 +870,29 @@ EOF
 authorizationpolicy.security.istio.io/fraud-allow-claims created
 ----
 
-Give the proxies a moment, then test *three* callers — the allowed identity, a different meshed identity, and the un-meshed client:
+Give the proxies a moment, then test *three* callers — the allowed identity, a different meshed identity, and the un-meshed client.
+The verdicts are *derived from the status codes you actually got*, so a policy that hasn't taken effect says so instead of pretending:
 
 [source,sh,role=execute]
 ----
 sleep 5
-oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud:       HTTP %{http_code}  (allowed)\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
-oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud:          HTTP %{http_code}  (denied)\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
-oc exec deploy/demo-client -n $NS -- curl -s -m5 -w "demo-client -> fraud:  HTTP %{http_code}  (denied)\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
+verdict() { [ "$1" = "403" ] && echo "(denied)" || echo "(NOT denied — HTTP $1 — the AuthorizationPolicy has not taken effect; wait and re-run)"; }
+C=$(oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w '%{http_code}' http://parasol-fraud:8080/api/fraud/score/CLM-1001)
+W=$(oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -o /dev/null -w '%{http_code}' http://parasol-fraud:8080/api/fraud/score/CLM-1001)
+D=$(oc exec deploy/demo-client -n $NS -- curl -s -m5 -o /dev/null -w '%{http_code}' http://parasol-fraud:8080/api/fraud/score/CLM-1001)
+echo "claims -> fraud:       HTTP $C  $([ "$C" = "200" ] && echo '(allowed)' || echo "(NOT allowed — HTTP $C — check the policy's principals against exercise 2's SPIFFE identity)")"
+echo "web -> fraud:          HTTP $W  $(verdict $W)"
+echo "demo-client -> fraud:  HTTP $D  $(verdict $D)"
+echo -n "fraud's refusal body (web's denied call): "; oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 http://parasol-fraud:8080/api/fraud/score/CLM-1001; echo
 ----
 
-.Expected output (only the claims identity is allowed; Envoy's `RBAC: access denied` body has no trailing newline, so it runs straight into the next line's `-w` summary)
+.Expected output (only the claims identity is allowed)
 [source,texinfo]
 ----
 claims -> fraud:       HTTP 200  (allowed)
-RBAC: access deniedweb -> fraud:          HTTP 403  (denied)
-RBAC: access denieddemo-client -> fraud:  HTTP 403  (denied)
+web -> fraud:          HTTP 403  (denied)
+demo-client -> fraud:  HTTP 403  (denied)
+fraud's refusal body (web's denied call): RBAC: access denied
 ----
 
 That's the whole point: `claims` (identity `sa/parasol-claims`, over mutual TLS) is allowed; the `web` tier — a perfectly healthy pod with a *different* identity — is refused with `403 RBAC: access denied`; and the un-meshed `demo-client` (no mesh identity at all) is refused too.
