@@ -70,6 +70,10 @@ Each shorter path is a complete arc rather than a truncated one. The half day is
 
 ## Quick Installation on OpenShift
 
+The steps below get a cluster running. For sizing the cluster before you order it, verifying the
+install, and the failure modes we have actually hit — including one that can quietly stop an operator
+the cluster's owner cares about from upgrading — see **[INSTALL.md](INSTALL.md)**.
+
 **Prerequisites**
 
 * An OpenShift **4.20+** cluster with a default StorageClass (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket).
