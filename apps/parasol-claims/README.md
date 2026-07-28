@@ -21,6 +21,45 @@ Small enough to read in ten minutes: two entities, one resource class.
 The 30 seeded claims (`CLM-1001..CLM-1030`) and the `claim_event` timeline are
 deterministic so lab text can reference exact values.
 
+## Claim numbering
+
+`POST /api/claims` assigns the number itself, from the **`claim_number_seq` database
+sequence** declared in `import.sql`. It starts at 1031 — just past the `CLM-1030` seeds —
+and is recreated on every `drop-and-create` boot, so the first created claim is always
+`CLM-1031`.
+
+This **must** stay a sequence. `nextval` is atomic, so two concurrent requests — and,
+crucially, two concurrent **replicas** — can never be handed the same number. Several
+modules run this service at more than one replica (M11's HPA scales it to `min=2`, others
+run it at 3), which makes any "read the highest number, add one" scheme wrong by
+construction: both pods read the same maximum and both try to insert it.
+
+Two consequences worth knowing before tidying this up:
+
+- **Gaps are normal.** Sequence values are not rolled back, so a rejected or failed create
+  burns a number. That is the correct trade for a primary key.
+- **Numbers are never reused.** Deleting a claim does not free its number.
+
+> **Fixed 2026-07-28.** This was previously `max(claim_number) + 1` computed in
+> application code via `order by claimNumber desc` — a *string* sort. It worked while every
+> number had four digits, then broke permanently: once `CLM-10000` exists, `CLM-9999` still
+> sorts highest (`'9' > '1'` at the fifth character), so every later create recomputed
+> `10000` and died on the primary key. Measured in `user1-dev`: 8970 creates succeeded, then
+> **every** create after that returned 500. `ClaimResourceTest` now pins both the
+> four-to-five-digit boundary crossing and the concurrent-create case.
+
+### Known wart — list ordering past `CLM-9999`
+
+`GET /api/claims` sorts by claim number as a **string**, so a five-digit number sorts
+*before* `CLM-1001`. Nothing errors, but the first row of the list changes once numbering
+passes `CLM-9999`. Reaching that takes roughly six hours of continuous load-generator
+traffic, so a normal module run against a freshly materialized entry state never sees it,
+and every lab that quotes `CLM-1001` as the first row stays correct. Left alone
+deliberately: sorting on a cast of the numeric suffix would change the query behind the
+single most-used endpoint in the workshop — a bigger risk than the cosmetic oddity it
+fixes. If a namespace has been left under load overnight, re-materialize it (`ws start`)
+rather than reading the list order as a defect.
+
 ## Site awareness & the M21 cross-site drop-in
 
 `GET /` returns a small JSON landing so clicking the Route in the console shows

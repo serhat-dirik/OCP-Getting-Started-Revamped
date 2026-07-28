@@ -163,18 +163,25 @@ public class ClaimResource {
         return Response.ok(claim).build();
     }
 
-    /** Next claim number = highest existing suffix + 1 (first created claim is CLM-1031). */
+    /**
+     * Next claim number, allocated from the {@code claim_number_seq} database sequence
+     * (created by {@code import.sql}, which starts it at 1031 — just past the CLM-1030 seeds).
+     *
+     * <p>The sequence is the ONLY safe way to do this. {@code nextval} is atomic and never
+     * hands the same value to two callers, so concurrent requests — and, crucially, concurrent
+     * <em>replicas</em> — cannot collide. Several modules run this service at 2-3 replicas
+     * (the M11 HPA scales it to min=2), and any "read the max, add one" scheme is broken by
+     * construction there: two pods read the same max and both try to insert it.
+     *
+     * <p>Sequence values are NOT rolled back with the transaction, so a rejected or failed
+     * create burns a number. Gaps in the claim numbering are therefore normal and expected —
+     * that is the price of never colliding, and it is the right trade for a primary key.
+     */
     private static String nextClaimNumber() {
-        Claim last = Claim.find("order by claimNumber desc").firstResult();
-        int next = 1001;
-        if (last != null) {
-            try {
-                next = Integer.parseInt(last.claimNumber.substring("CLM-".length())) + 1;
-            } catch (NumberFormatException e) {
-                next = (int) (Claim.count() + 1001);
-            }
-        }
-        return "CLM-" + next;
+        Number next = (Number) Panache.getEntityManager()
+                .createNativeQuery("select nextval('claim_number_seq')")
+                .getSingleResult();
+        return "CLM-" + next.longValue();
     }
 
     private static Response notFound(String claimNumber) {

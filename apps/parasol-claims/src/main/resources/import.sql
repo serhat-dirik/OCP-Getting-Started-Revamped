@@ -8,6 +8,15 @@
 -- Columns: claim_number, claimant, claim_type, status, amount, incident_date, adjuster
 -- Spread: 12 auto / 11 home / 7 life; statuses across the workflow; freshly
 -- Submitted claims are Unassigned.
+--
+-- Claim-number allocation. POST /api/claims takes its number from this sequence
+-- (see ClaimResource.nextClaimNumber), NOT from "max(claim_number) + 1" — nextval is
+-- atomic, so concurrent replicas can never be handed the same number. It starts at
+-- 1031, just past the CLM-1030 seeds, so the first created claim is always CLM-1031.
+-- Recreated on every drop-and-create boot, which keeps that starting point deterministic.
+-- Standard SQL: verified identical on PostgreSQL 15.18 (prod/dev) and H2 2.4.240 (tests).
+DROP SEQUENCE IF EXISTS claim_number_seq;
+CREATE SEQUENCE claim_number_seq START WITH 1031 INCREMENT BY 1;
 INSERT INTO claim (claim_number, claimant, claim_type, status, amount, incident_date, adjuster) VALUES ('CLM-1001', 'Alice Nguyen', 'auto', 'UnderReview', 4200.00, '2026-05-14', 'Rebecca Torres');
 INSERT INTO claim (claim_number, claimant, claim_type, status, amount, incident_date, adjuster) VALUES ('CLM-1002', 'Marcus Feld', 'home', 'Approved', 12850.00, '2026-05-09', 'Marcus Johnson');
 INSERT INTO claim (claim_number, claimant, claim_type, status, amount, incident_date, adjuster) VALUES ('CLM-1003', 'Priya Raman', 'auto', 'Submitted', 1975.50, '2026-06-01', 'Unassigned');
