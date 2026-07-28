@@ -32,6 +32,25 @@ character. Concretely:
 
 The litmus test for any change: **would anything of the customer's differ after uninstall?**
 
+### Four things that look odd until you know why
+
+These are the choices most likely to make you think something is broken or wasteful. Each was
+deliberate.
+
+- **Two Argo CD instances, not one** (~5 extra pods). The platform instance owns the machinery that
+  builds every attendee's world; a second, namespace-scoped instance is where attendees create their
+  own Applications in the GitOps modules. Split that way, an attendee mistake cannot delete the
+  machinery. Merging them saves five pods and costs you that guarantee.
+- **A `LoadBalancer` Service will sit `<pending>` forever.** There is no MetalLB, on purpose — it is a
+  cluster-wide networking component and installing it would change the character of a cluster we do not
+  own. The workshop exposes everything through Routes; the networking module teaches the `<pending>`
+  as the real bare-metal behaviour rather than hiding it.
+- **The AI modules need a model endpoint** and do not run one for you. They point at a shared
+  Models-as-a-Service endpoint you configure in `vars.yaml`. No GPU is provisioned on your cluster.
+- **Every attendee's starting state is an Argo Application**, not a script. `ws start <module>` writes
+  a small Application and lets Argo materialise it, so a module's entry state is reproducible and
+  `ws reset` is a delete-and-resync rather than a cleanup script trying to guess what changed.
+
 ---
 
 ## 2. Before you install
