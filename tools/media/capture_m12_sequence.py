@@ -18,11 +18,17 @@ Two facts collide:
 A jobs YAML cannot express "now scale a Deployment to 0 and wait two minutes". This can.
 
 Everything mutating happens through `oc` with the caller's own kubeconfig; nothing here reads or
-types a credential. Run it immediately after `login.py` succeeds.
+types a credential.
 
-    export KUBECONFIG=~/.kube/ksls5.config
-    export OGSR_DOMAIN=apps.cluster-<id>.<base>
-    .venv/bin/python capture_m12_sequence.py --profile ~/.ogsr-shot-profile --user user1
+USE --login. It opens a headed window, waits for a human to complete the OAuth hop, and then
+captures in the SAME context. Do not use the old login.py -> capture handoff: the second process
+cannot open the profile until the first releases its lock, and by the time it does the session
+may already be gone. One process, one context, no gap:
+
+    cd tools/media
+    KUBECONFIG=~/.kube/<cluster>.config \
+    OGSR_DOMAIN=apps.cluster-<id>.<base> \
+      .venv/bin/python capture_m12_sequence.py --login --profile ~/.ogsr-shot-profile --user user1
 """
 
 from __future__ import annotations
@@ -75,11 +81,35 @@ def shoot(page, url: str, wait_text: str, dest: Path, settle: int = 9000) -> boo
     return True
 
 
+def wait_for_login(page, con: str, deadline_s: int = 900) -> bool:
+    """Park on the console and wait for a human to finish the OAuth hop IN THIS WINDOW."""
+    page.goto(con, wait_until="domcontentloaded", timeout=60_000)
+    print("\n" + "=" * 72)
+    print("  A BROWSER WINDOW IS OPEN. Log in as the attendee (IdP: workshop-users).")
+    print("  Capture starts BY ITSELF the moment the console appears — don't close it.")
+    print("=" * 72 + "\n", flush=True)
+    start = time.time()
+    while time.time() - start < deadline_s:
+        try:
+            u = page.url
+            if "console-openshift-console" in u and not any(s in u for s in ("/oauth", "/login", "/auth/")):
+                page.wait_for_timeout(3000)
+                if len(page.inner_text("body")) > 200:
+                    print("  logged in — starting capture\n", flush=True)
+                    return True
+        except PWError:
+            pass
+        time.sleep(2)
+    return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--profile", required=True)
     ap.add_argument("--user", default="user1")
     ap.add_argument("--domain", default=os.environ.get("OGSR_DOMAIN"))
+    ap.add_argument("--login", action="store_true",
+                    help="open HEADED, wait for a human login, then capture in the SAME context")
     a = ap.parse_args()
     if not a.domain:
         sys.exit("set --domain or $OGSR_DOMAIN")
@@ -89,11 +119,21 @@ def main() -> int:
     ok = fail = 0
 
     with sync_playwright() as p:
+        # --login keeps login and capture in ONE process and ONE context. The two-process
+        # handoff (login.py writes a profile, capture reads it) is unreliable here: the console
+        # session expires within minutes, and the second process cannot even open the profile
+        # until the first releases its lock. Same context = no handoff, no expiry gap, no lock.
         ctx = p.chromium.launch_persistent_context(
-            a.profile, channel="chrome", headless=True,
+            a.profile, channel="chrome", headless=not a.login,
             viewport={"width": 1600, "height": 1000}, ignore_https_errors=True, locale="en-US",
+            args=["--no-first-run", "--no-default-browser-check"],
         )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+        if a.login and not wait_for_login(page, con):
+            print("TIMEOUT — no console session detected; nothing captured")
+            ctx.close()
+            return 1
 
         # ---- PHASE 1: healthy baseline -------------------------------------------------
         print("PHASE 1 — healthy baseline")
