@@ -133,35 +133,84 @@ Update the module's `media-manifest.md` row from `⬜ NOT CAPTURED` to captured,
 `// media-pass: …` comment in the `.adoc` with the real `image::` macro plus alt text.
 A captured file that nothing embeds is not done.
 
-## Diagram sources vs manifests — the 2026-07-26 reconciliation
+## Writing `.mmd` sources — two traps the renderer cannot warn you about
 
-Rendering every source exposed a mismatch that was invisible while nothing was rendered:
-manifests name **89** SVGs, sources yield **81**, and only **73** names match. That is three
-separate situations, and only one is a defect. Re-run the comparison after any diagram change —
-`render_diagrams.py --dry-run` lists what would be produced.
+Both come from `htmlLabels: false`, which the SVG export needs (HTML labels become
+`<foreignObject>`, which PowerPoint renders blank). Neither raises an error; both are only visible
+if you **look at a raster of the output**.
 
-**1. The `platform-accretion` family is by design (11 of the 16 absent).** Only two sources exist
+**1. Label spaces were silently stripped — fixed in the renderer, 2026-07-28.** With HTML labels
+off, mermaid emits each word as its own `<tspan>` carrying the separator as a *leading* space
+(`<tspan>on</tspan><tspan> repeated</tspan>`). SVG's default `xml:space` strips leading whitespace
+per chunk, so labels rendered `onrepeatedfailure`. It afflicted **all 81** committed diagrams
+("every5min", "you:POSTaCloudEvent", "dead-lettersink") and nothing caught it: mermaid raises no
+error, the SVG is well-formed, and the file size looks healthy. `preserve_label_spaces()` now adds
+`xml:space="preserve"` to every `<text>`, and `spacing_is_broken()` fails the render if it ever
+stops being applied. Note the live lab pages were never affected — the Antora sites set
+`html_labels: true` — which is precisely why it survived: the surface everyone looks at was fine.
+
+**2. HTML-only entities render literally; XML built-ins do not.** `&lt; &gt; &amp; &quot; &apos;`
+are XML built-ins, so they survive into the SVG as proper escapes and display correctly (verified:
+`networking-dev-devops/02-exposure-tree.mmd` renders `<pending>` exactly right). But `&nbsp;` — and
+any other HTML-only entity — has no XML meaning and shows up **as the literal text `&nbsp;`**.
+Mermaid's own `#lt;` form is decoded to the same XML escape, so it is equivalent, not safer. Use
+literal Unicode instead (`—`, `·`, `→`); it renders correctly in both label modes.
+
+## Diagram sources vs manifests — reconciled 2026-07-28
+
+Re-run this after any diagram change; it is the only thing that compares the two sides:
+
+```bash
+# manifest names vs rendered SVGs vs .mmd sources
+python3 - <<'EOF'
+import pathlib, re
+root = pathlib.Path("content/modules/ROOT")
+wanted = set()
+for m in (root/"assets/images").glob("*/media-manifest.md"):
+    wanted |= set(re.findall(r"`([a-z0-9-]+\.svg)`", m.read_text()))
+have = {p.name for p in (root/"assets/images").glob("*/*.svg")}
+print(f"wanted {len(wanted)} | rendered {len(have)} | matched {len(wanted & have)}")
+print("absent  :", sorted(wanted - have))
+print("unlisted:", sorted(have - wanted))
+EOF
+```
+
+**Current state: 96 wanted, 84 rendered, 84 matched, 0 unlisted.** The only gap left is the
+`platform-accretion` family below — one decision, not twelve chores.
+
+### The one open question: `platform-accretion` (12 absent)
+
+Twelve module manifests name a `<module>-NN-platform-accretion.svg`, and only two sources exist
 (`platform-orientation/02-platform-accretion-v1.mmd`,
-`observability-health-scale/04-platform-accretion.mmd`), while eleven module manifests name a
-variant. The manifests describe them as *"the master accretion diagram, M03 layer highlighted on
-the M01/M02 base"* — one cumulative picture re-rendered per module with a different layer
-emphasised. This will never resolve by rendering. It needs a call: author the variants as real
-sources, teach the renderer a highlight parameter, or share one image. Nothing is broken today —
-lab pages render Mermaid client-side; the gap only bites the slide reuse the manifests promise.
+`observability-health-scale/04-platform-accretion.mmd`). The manifests describe them as *"the
+master accretion diagram, M03 layer highlighted on the M01/M02 base"* — one cumulative picture of
+the Parasol platform, re-rendered per module with a different layer lit up. That is deliberate, so
+**it will never resolve by rendering**. It needs a call:
 
-**2. Four genuinely missing sources.** `eventing-deep-dive-02-retries-dlq`,
-`serverless-zero-to-hero-02-cold-start-timeline`,
-`service-mesh-advanced-gateways-02-traffic-split`, `pipelines-fundamentals-02-pac-flow`. Check the
-module's `concept.adoc` before authoring: if the page never carried that diagram, the manifest row
-is stale and should go.
+- author the twelve variants as real sources (explicit; twelve files to keep in step), or
+- keep one source and teach the renderer a highlight parameter (one file; the renderer grows), or
+- share a single image everywhere and drop the per-module framing.
 
-**3. One probable rename, and the interesting one.** The manifest wants
-`pipelines-fundamentals-02-pac-flow.svg` ("push → Gitea webhook → PaC controller → new
-PipelineRun"); what exists is `pipelines-fundamentals-02-pipeline-choices.svg`. Same module, same
-number, different subject. The PaC flow is a real teaching beat in exercise 4, so if it was dropped
-rather than renamed, the module lost something.
+Nothing is broken today — lab pages render Mermaid client-side. The gap only bites the slide reuse
+the manifests promise.
 
-**4. Eight rendered files no manifest lists** — `ai-assisted-development` (3),
-`packaging-distributing` (3), `networking-dev-devops-05-network-policy-layers`,
-`pipelines-fundamentals-02-pipeline-choices`. Modules whose manifests predate the extraction.
-Mechanical to add, but do it alongside the accretion decision so the row format matches.
+### What the earlier (2026-07-26) version of this section got wrong
+
+Recorded because the reasoning failure is reusable, not just the facts:
+
+- It called four sources *"genuinely missing."* They were **planned but never authored** — each had
+  a live teaching beat in the page and a design brief in the manifest detailed enough to author
+  from (`retry: 3`, `1s/2s/4s`, `knativeerrorcode: 404`). Three are now authored and embedded;
+  a manifest row is a **brief**, not an inventory entry, so "wanted ≠ have" is backlog, not loss.
+- It called `pipelines-fundamentals-02-pac-flow` a *"probable rename."* It was neither renamed nor
+  dropped: `git log -S pac-flow -- content/` shows the string only ever existed in the manifest row
+  and a `// media-pass:` marker. No such diagram was ever drawn. Slot 02 was later taken by
+  `02-pipeline-choices`, which *is* authored — so the row was repointed at it. And the PaC flow is
+  already drawn, inside `03-what-you-built.mmd` (`push → Gitea webhook → Pipelines-as-Code →
+  PipelineRun`) — exactly what the row asked for.
+- It said eight files belonged to *"modules whose manifests predate the extraction."*
+  `ai-assisted-development` and `packaging-distributing` **had no manifest at all**. Both now have
+  one, flagged as diagram-only.
+
+The common error: inferring history from a filename mismatch instead of asking `git log -S`, and
+assuming a shortfall meant something was lost rather than never built.
