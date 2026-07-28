@@ -22,9 +22,11 @@ Set your app namespace shortcut (used throughout the lab):
 
 [source,sh,role=execute,subs="attributes"]
 ----
-NS={user}-dev
+export NS={user}-dev
 echo "namespace: $NS"
 ----
+
+The `export` matters: `ask-agent` (the helper you build in exercise 1) is a child process, and without the export it would fall back to whatever `oc project` happens to point at — confusing failures in the wrong namespace.
 
 Now read the neutral agent's container image from the entry-state marker (the `$NS` shortcut carries into this block; the `{.data...}` is a jsonpath, not an attribute):
 
@@ -56,7 +58,7 @@ ifdef::demo[]
 [NOTE]
 .Before you present
 ====
-Run `ws start ai-assisted-development --user {user}` a few minutes ahead, set `NS={user}-dev` and `export AGENT_CLI_IMAGE=$(oc get cm ws-entry-ai-assisted-development -n $NS -o jsonpath='{.data.agentCliImage}')`, and paste in the `ask-agent` helper (exercise 1) so you open on the agent's first answer.
+Run `ws start ai-assisted-development --user {user}` a few minutes ahead, set `export NS={user}-dev` and `export AGENT_CLI_IMAGE=$(oc get cm ws-entry-ai-assisted-development -n $NS -o jsonpath='{.data.agentCliImage}')`, and paste in the `ask-agent` helper (exercise 1) so you open on the agent's first answer.
 This runs from the *entry* state (broken app), not `ws solve`.
 The money moment is beat 3 — the agent asked to read a *neighbouring* namespace and *RBAC denies it* in the trace. Keep the terminal font large; the `is forbidden` line is the whole visual.
 ====
@@ -140,9 +142,10 @@ Console::
 +
 --
 // [CAPTURE-VERIFY] Workloads → Deployments, project {user}-dev (OCP 4.21, unified console) lists kubernetes-mcp-server (1/1) and parasol-claims (0/1). CLI authoritative.
+// Deployment detail tabs grounded 2026-07-28 (tools/media/CONSOLE-GROUNDING.md): Details · Metrics · YAML · … — the Details tab surfaces no ServiceAccount field; the YAML tab is the truth.
 In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Workloads* → *Deployments*.
 You see two: `kubernetes-mcp-server` — *1/1*, healthy — and `parasol-claims` — *0/1*, up but not ready (the fault you'll diagnose).
-Open `kubernetes-mcp-server` and note its *ServiceAccount* is `mcp-agent`, not `default`.
+Open `kubernetes-mcp-server`, switch to its *YAML* tab, and find `serviceAccountName: mcp-agent` under `spec.template.spec` — the server runs as a dedicated ServiceAccount, not `default`. (The *Details* tab does not show the ServiceAccount; the YAML does.)
 --
 CLI::
 +
@@ -521,7 +524,7 @@ Either way the point holds: between the *tool-call trace* (what the agent tried)
 ⏱ *~5 min* · the whole module in one denial
 
 The agent can now read and patch *your* namespace. Point it at *someone else's* and watch the platform stop it.
-Writes are still allowed and the server still offers every tool — the only thing standing between the agent and a neighbour's namespace is *RBAC on `mcp-agent`*.
+The *server* still offers every tool (you removed `--read-only` in exercise 3), but this ask runs the client in its default *read-only* mode again — no `--allow-writes` — so the client hides the six mutating tools and you'll see its `hid 6 mutating tools` line in the output. None of that decides what happens next: for the *read* calls the agent is about to make, the only thing standing between it and a neighbour's namespace is *RBAC on `mcp-agent`*.
 
 // NEIGHBOUR must never be the reader's OWN namespace. user1 is a normal attendee slot, so a
 // hardcoded `user1-dev` made this exercise silently INVERT for whoever holds it: the
@@ -535,7 +538,7 @@ NEIGHBOUR=$([ "{user}" = "user1" ] && echo user2-dev || echo user1-dev)
 ask-agent "Find out what is running in the neighbouring namespace $NEIGHBOUR. List the pods in namespace $NEIGHBOUR, and also read the recent events in namespace $NEIGHBOUR. Then report what you found."
 ----
 
-.Expected output (the agent tries — and RBAC returns `is forbidden` on every call)
+.Expected output (the agent tries — and RBAC returns `is forbidden` on every call; the client's read-only filter is back on, which changes nothing about the denial)
 [source,texinfo]
 ----
 TOOL-CALL TRACE (2 calls)
@@ -550,6 +553,10 @@ TOOL-CALL TRACE (2 calls)
         "system:serviceaccount:user3-dev:mcp-agent" cannot list resource "events" ...
         in the namespace "user1-dev"
 
+read-only: hid 6 mutating tools (RBAC remains the real boundary):
+  - pods_delete  (matched 'delete')
+  ...
+
 ANSWER
   I was not able to get the list of pods or events in namespace user1-dev due to access
   restrictions. The MCP agent has limited access and is not allowed to list pods or events
@@ -561,6 +568,12 @@ That denial *is* the lesson. Read what happened:
 * *The agent genuinely tried.* The trace shows it *called* `pods_list_in_namespace` on `user1-dev` — this was not the client refusing on the agent's behalf.
 * *The API server said no.* `pods is forbidden: User "system:serviceaccount:user3-dev:mcp-agent" cannot list resource "pods" ... in the namespace "user1-dev"`. `mcp-agent` has a `view` RoleBinding in *your* namespace and *nowhere else*, so a read of `user1-dev` is a `403` — enforced by the platform, underneath the agent.
 * *The agent reported the denial honestly*, exactly as its instructions require, and did not try to work around it.
+
+[WARNING]
+.A `TOOL-CALL TRACE (0 calls)` here is NOT a denial
+====
+If your trace reads `TOOL-CALL TRACE (0 calls)`, the model *narrated* instead of acting — any "I'm not allowed to…" in its answer is model prose, not the API server speaking, which is the *opposite* of this exercise's lesson. Re-run the ask (phrase it imperatively, as in exercise 2) until the trace shows a real `pods_list_in_namespace` call returning `is forbidden` — the denial must come from the cluster, not the model's imagination.
+====
 
 Confirm the boundary from the other side — you don't need the agent to prove RBAC; ask the API server directly with impersonation:
 

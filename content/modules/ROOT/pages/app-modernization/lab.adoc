@@ -195,13 +195,13 @@ The report totals *24 story points* — the per-rule efforts above, multiplied b
 
 The consultant's read:
 
-* *Start with mandatory.* Seven of these are the whole job; the technology tags are context, not work.
-* *Group by fix, not by finding.* Three of the mandatory issues (`javax` package, `javax.activation`, the Spring/Jakarta incompatibility) are *one migration* — the `javax`→`jakarta` move. The hardcoded IP and the filesystem write are the *externalize-config* theme. Grouped, "seven issues" becomes "three pieces of work."
+* *Start with mandatory.* Six of these are the whole job (the one *potential* finding is a check, not a blocker); the technology tags are context, not work.
+* *Group by fix, not by finding.* Three of the mandatory issues (`javax` package, `javax.activation`, the Spring/Jakarta incompatibility) are *one migration* — the `javax`→`jakarta` move. The hardcoded IP and the filesystem write are the *externalize-config* theme. Grouped, "six issues" becomes "three pieces of work."
 * *Effort is relative.* The Spring/Jakarta issue (effort 3) is the heaviest; the config externalizations (effort 1) are the cheap, high-value wins you do first.
 
 [.checkpoint]
 ====
-✔ *Verify:* You can name the *mandatory* blockers, point to the *highest-effort* one (Spring/Jakarta EE 9, effort 3), and group the seven issues into ~three pieces of work — the config externalization, the `javax`→`jakarta` migration, and the runtime move.
+✔ *Verify:* You can name the *mandatory* blockers, point to the *highest-effort* one (Spring/Jakarta EE 9, effort 3), and group the six mandatory issues into ~three pieces of work — the config externalization, the `javax`→`jakarta` migration, and the runtime move.
 ====
 
 == 4. Fix an issue with Developer Lightspeed for MTA `[ADS]`
@@ -212,18 +212,36 @@ You'll fix the *Hardcoded IP address* issue — the cheap, high-value win. *Red 
 [IMPORTANT]
 .This section is `[ADS]` — and degrades gracefully
 ====
-Developer Lightspeed for MTA is part of the *Red Hat Advanced Developer Suite* `[ADS]`. If your cluster has it, follow the *AI path*. If it doesn't, follow the *Manual path* — you fix the *same* issue by hand and the rest of the lab is identical. Check which applies: if the command below prints a model name, the AI path is wired for you.
+Developer Lightspeed for MTA is part of the *Red Hat Advanced Developer Suite* `[ADS]`. If your cluster has it, follow the *AI path*. If it doesn't, follow the *Manual path* — you fix the *same* issue by hand and the rest of the lab is identical. Check which applies — the command below asks the model endpoint for a real (1-token) completion with your cluster's key, so it reports the AI path only when the wiring *actually answers* (a ConfigMap and Secret can be present with an expired or mis-scoped key; only an `HTTP 200` proves the path works):
 
 [source,sh,role=execute]
 ----
-oc get configmap maas-config -n $NS -o jsonpath='{.data.model}{"\n"}' 2>/dev/null \
-  && oc get secret maas-credentials -n $NS >/dev/null 2>&1 \
-  && echo "AI path: Developer Lightspeed is wired." \
-  || echo "Manual path: fix by hand (graceful degradation)."
+code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 \
+  "$(oc get cm maas-config -n $NS -o jsonpath='{.data.endpoint}' 2>/dev/null)/chat/completions" \
+  -H "Authorization: Bearer $(oc get secret maas-credentials -n $NS -o jsonpath='{.data.GENAI_API_KEY}' 2>/dev/null | base64 -d)" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"'"$(oc get cm maas-config -n $NS -o jsonpath='{.data.model}' 2>/dev/null)"'","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
+  2>/dev/null)
+case "$code" in
+  200)     echo "AI path: Developer Lightspeed is wired (the model answered HTTP 200)." ;;
+  401|403) echo "Manual path: the MaaS key is missing, expired, or not scoped to this model (HTTP $code) — fix by hand (graceful degradation)." ;;
+  *)       echo "Manual path: the model endpoint did not answer (HTTP ${code:-000}) — fix by hand (graceful degradation)." ;;
+esac
 ----
 ====
 
-*AI path (Dev Spaces + MTA extension).* Open your fork in {devspaces_url}[Dev Spaces^]. The workspace preloads the *MTA extension* and the model wiring (the `{maas_model}` model on the workshop Models-as-a-Service endpoint, mounted as the `GENAI_API_KEY`/`GENAI_MODEL`/`GENAI_ENDPOINT` environment). In the MTA extension view, open the *Hardcoded IP address* issue and choose the Developer Lightspeed *fix* action.
+*AI path (Dev Spaces + MTA extension).* Open your fork in {devspaces_url}[Dev Spaces^]. The fork's `.vscode/extensions.json` *recommends* the *MTA extension* (and its `redhat.java` prerequisite) — accept the recommendation prompt when the workspace opens (or install it from the extensions view).
+The model wiring is *not* mounted into the workspace automatically: Dev Spaces provisions your workspace in its own `{user}-devspaces` namespace, while the workshop's model credentials live in `{user}-modernize`. You are logged in as yourself in the *workspace terminal*, so export the three values the extension reads — type this in the *workspace* terminal (not the cockpit terminal):
+
+[source,sh,subs="attributes"]
+----
+export GENAI_API_KEY=$(oc get secret maas-credentials -n {user}-modernize -o jsonpath='{.data.GENAI_API_KEY}' | base64 -d)
+export GENAI_ENDPOINT=$(oc get cm maas-config -n {user}-modernize -o jsonpath='{.data.endpoint}')
+export GENAI_MODEL=$(oc get cm maas-config -n {user}-modernize -o jsonpath='{.data.model}')
+echo "model: $GENAI_MODEL @ $GENAI_ENDPOINT"
+----
+
+In the MTA extension view, open the *Hardcoded IP address* issue and choose the Developer Lightspeed *fix* action.
 // [CAPTURE-VERIFY] the exact MTA-extension command name / lightbulb action in Dev Spaces {devspaces_version}.
 
 The model returns a diff. For this issue, the real proposal (captured live against `{maas_model}`) replaces the compiled-in URL in `PersistenceConfig.java` with a runtime lookup:
@@ -301,9 +319,11 @@ Console::
 +
 --
 In the {ocp_console_url}[OpenShift web console^] (project `{user}-modernize`), choose the masthead *Quick create* (+) menu → *Container images*.
-Set the image to the modernized claims image, name it `parasol-claims-modernized`, and under *Health checks* add a *Readiness probe* — but point it at the *wrong* path `/health` on port `8080` (the real Quarkus health endpoint is `/q/health/ready`). Deploy.
-// [CAPTURE-VERIFY] the Quick create (+) → Container images → Health checks pane labels on OCP {ocp_version}.
-Watch *Topology*: the pod never turns ready — the readiness probe 404s on `/health`.
+Set the image to `image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1` and the name to `parasol-claims-modernized`.
+Before you deploy, add *two environment variables* in the form's environment-variables section (the same Name/Value rows the Deployment's *Environment* tab shows): `QUARKUS_DATASOURCE_ACTIVE` = `false` and `QUARKUS_HIBERNATE_ORM_ACTIVE` = `false`. This exercise deploys the modernized *service* DB-inactive (a real migration wires its datasource to a database next) — without these two values the pod crash-loops on a missing `parasol-db`, a different failure from the probe break you are about to study.
+Then under *Health checks* add a *Readiness probe* — but point it at the *wrong* path `/health` on port `8080` (the real Quarkus health endpoint is `/q/health/ready`). Deploy.
+// [CAPTURE-VERIFY] the Quick create (+) → Container images form labels (image field, environment-variable rows, Health checks pane) on OCP {ocp_version}. The CLI tab is the grounded equivalent (same image, same env, same probe).
+Watch *Topology*: the pod runs but never turns ready — the readiness probe 404s on `/health`.
 --
 CLI::
 +
@@ -349,8 +369,8 @@ The pod runs but never becomes *Ready* — the readiness probe hits `/health`, w
 Console::
 +
 --
-In *Topology*, open the `parasol-claims-modernized` deployment, edit the *Readiness probe*, change the path from `/health` to `/q/health/ready`, and save. The pod turns *Ready*.
-// [CAPTURE-VERIFY] the edit-probe control on this OCP build.
+In *Topology*, open the `parasol-claims-modernized` deployment, and from its *Actions* menu choose *Edit Health Checks* (the item reads *Edit* — not *Add* — because the deployment already carries a probe). Change the readiness probe path from `/health` to `/q/health/ready` and save. The pod turns *Ready*.
+// Actions → Edit Health Checks grounded 2026-07-28 (tools/media/CONSOLE-GROUNDING.md): the item is state-dependent — "Add Health Checks" with no probes, "Edit Health Checks" once any probe exists, as here.
 --
 CLI::
 +

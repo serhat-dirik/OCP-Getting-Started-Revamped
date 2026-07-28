@@ -169,7 +169,7 @@ spec:
           volumeMounts: [{name: data, mountPath: /data}]
       volumes: [{name: data, persistentVolumeClaim: {claimName: claims-data}}]
 EOF
-oc -n $NS wait --for=condition=complete job/fraud-inference --timeout=120s
+oc -n $NS wait --for=condition=complete job/fraud-inference --timeout=180s
 oc -n $NS logs -l job-name=fraud-inference --prefix=false | grep fraud-risk
 ----
 +
@@ -700,11 +700,12 @@ job-batch-low-5-ace1f   100        <none>
 
 *Two admitted, three pending.*
 The two admitted jobs' Pods are running; the other three are held suspended — their quota isn't available.
-Confirm the Jobs themselves: the admitted two have `suspend: false`, the pending three `suspend: true`:
+Confirm the Jobs themselves: the admitted two have `suspend: false`, the pending three `suspend: true`.
+The label selector keeps the view honest — Jobs from the earlier exercises never joined the queue, so they carry no `queue-name` label and would only clutter this list (unlabeled Jobs show `SUSPEND: <none>`, which means "not managed by Kueue", not "pending"):
 
 [source,sh,role=execute]
 ----
-oc -n $NS get jobs -o custom-columns='JOB:.metadata.name,SUSPEND:.spec.suspend'
+oc -n $NS get jobs -l kueue.x-k8s.io/queue-name=user-queue -o custom-columns='JOB:.metadata.name,SUSPEND:.spec.suspend'
 ----
 
 Now the moment the whole module is built around.
@@ -850,10 +851,12 @@ spec:
         - name: data
           persistentVolumeClaim: {claimName: claims-data}
 EOF
-oc -n $NS wait --for=condition=complete job/fraud-inference --timeout=120s
+# 180s, not 120s: a worker's model-call budget is 3 claims x 40s --max-time — on a dead endpoint
+# it can legitimately spend ~120s before finishing, and the wait must outlast that worst case.
+oc -n $NS wait --for=condition=complete job/fraud-inference --timeout=180s
 ----
 
-It finishes in well under a minute.
+It finishes in well under a minute when the model answers (only a dead endpoint pushes it toward the timeout).
 Read the risk verdicts the model returned:
 
 [source,sh,role=execute]
@@ -871,6 +874,8 @@ CLM-0004 (commercial/1048) -> fraud-risk: medium
 CLM-0005 (auto/1185) -> fraud-risk: medium
 CLM-0006 (home/1322) -> fraud-risk: medium
 ----
+
+If your rows read `fraud-risk: unknown` instead, the *model endpoint* failed (an expired/mis-scoped key returns `401`, or the call timed out) — the Job still runs to *Complete* by design, because a worker degrades to `unknown` rather than crashing. A green `oc wait` therefore proves the *scheduling*, not the model: see the troubleshooting page's `401` entry for the fix.
 
 [NOTE]
 ====

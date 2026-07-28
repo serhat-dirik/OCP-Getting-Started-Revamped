@@ -63,7 +63,7 @@ check "legacy fork parasol-legacy-claims reachable in Gitea" repo_reachable     
 
 # INFO: [ADS] Developer Lightspeed for MTA wiring (optional — never fails the entry state).
 if maas_secret_present; then
-  info "[ADS] maas-credentials present — Developer Lightspeed for MTA is wired (auto-mounts into the Dev Spaces workspace as GENAI_API_KEY)"
+  info "[ADS] maas-credentials present — Developer Lightspeed for MTA is wired (the lab exports GENAI_API_KEY/GENAI_MODEL/GENAI_ENDPOINT from ${NS} in the Dev Spaces workspace terminal; workspaces live in {user}-devspaces, so nothing automounts)"
 else
   info "[ADS] maas-credentials absent — Developer Lightspeed disabled (graceful degradation); the [OCP] MTA assess/analyze/replatform flow is unaffected"
 fi
