@@ -47,14 +47,14 @@ unified-console click-paths while shooting (no perspective switch).
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
 | 4 | `service-mesh-advanced-gateways-05-deployment-inject-label.png` | Console → Workloads → Deployments → `parasol-web` → YAML, the `sidecar.istio.io/inject: "true"` label under `spec.template.metadata.labels` | Circle: the injection label on the **pod template** | lab.adoc ex. 1 Console tab |
-| 5 | `service-mesh-advanced-gateways-06-import-virtualservice.png` | Console → +Add → Import YAML with the `VirtualService` (90/10) pasted | Circle: the `weight: 90` / `weight: 10` route entries | lab.adoc ex. 4 Console tab |
+| 5 | `service-mesh-advanced-gateways-06-import-virtualservice.png` | Console → masthead **+** (Quick create) → **Import YAML** with the `VirtualService` (90/10) pasted | Circle: the `weight: 90` / `weight: 10` route entries | lab.adoc ex. 4 Console tab |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console; Kiali 2.27.1) — these
 confirm the click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc` (the CLI tabs are authoritative):
 
 1. **Kiali → Traffic Graph** scopes to the signed-in user's `{user}-mesh` namespace, shows traffic-driven edges, per-edge mTLS padlocks, and version grouping (ex. 3–4).
 2. **Console → Workloads → Deployments → YAML** accepts the `sidecar.istio.io/inject` pod-template label (ex. 1).
-3. **Console → +Add → Import YAML** accepts the PeerAuthentication / DestinationRule / VirtualService / AuthorizationPolicy manifests (ex. 2, 4, 5, 6).
+3. **Console** → masthead **+** (Quick create) → **Import YAML** accepts the PeerAuthentication / DestinationRule / VirtualService / AuthorizationPolicy manifests (ex. 2, 4, 5, 6).
 4. **Console → Networking → VirtualServices / DestinationRules** list the mesh CRs after apply (ex. 4–5).
 
 ## Recordings

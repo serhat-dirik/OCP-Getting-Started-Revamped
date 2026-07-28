@@ -37,20 +37,20 @@ the attribute). Do **not** print the real cluster domain or node names — use `
 
 Capture in the OCP 4.21 **unified** console (no Developer/Administrator perspective switch). The resilient-tier
 views are the attendee's `{user}-site-a` project (**Workloads → Deployments**); the mesh CRs live in
-`{user}-client` (**Networking → ServiceEntries / DestinationRules / VirtualServices**, or **+Add → Import
-YAML**); Service Interconnect is **Networking → Service Interconnect**.
+`{user}-client` (**Networking → ServiceEntries / DestinationRules / VirtualServices**, or masthead **+**
+(Quick create) → **Import YAML**); Service Interconnect is **Networking → Service Interconnect**.
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
 | 1 | `resilience-multicluster-dr-01-failover-log-flip.png` | The Terminal tailing `oc logs -f deploy/claims-client` showing the moment it flips from `HTTP 200 served-by-site=A` to `HTTP 200 served-by-site=B` (with the `oc scale ... --replicas=0` visible above) | Circle: the A→B flip line + a run of `200`s on both sides — "the whole site A is gone; not one request dropped" | lab.adoc ex. 2 (failover) — **the marquee** (gif/mp4 preferred over a still — the flip is motion) |
 | 2 | `resilience-multicluster-dr-02-resilient-site.png` | Console → **Workloads → Deployments** (project `{user}-site-a`) with `parasol-claims` **3/3**, plus its **HorizontalPodAutoscaler** and **PodDisruptionBudget** | Circle: **3 of 3** pods on **different nodes** + the PDB "min available 2" — "what absorbs a pod/node loss" | lab.adoc ex. 1 (inspect) |
 | 3 | `resilience-multicluster-dr-03-service-interconnect-topology.png` | Console → **Networking → Service Interconnect** showing the **two-site** topology (`dc-a` ↔ `dc-b`), the link, and the exposed `claims` service | Circle: the **link between the two sites** + the exposed service — "DC-A reads DC-B's claims over this" | lab.adoc ex. 3 (RHSI) `[ADD-ON]` — **second marquee** |
-| 4 | `resilience-multicluster-dr-04-mesh-failover-crs.png` | Console → **+Add → Import YAML** (project `{user}-client`) with the three failover CRs pasted, or the created **VirtualService**/**DestinationRule**/**ServiceEntry** list | Circle: the three resources — "one ServiceEntry (both sites), a locality/outlier DestinationRule, a retry VirtualService on the gateway" | lab.adoc ex. 2 (wire the routing) |
+| 4 | `resilience-multicluster-dr-04-mesh-failover-crs.png` | Console → masthead **+** (Quick create) → **Import YAML** (project `{user}-client`) with the three failover CRs pasted, or the created **VirtualService**/**DestinationRule**/**ServiceEntry** list | Circle: the three resources — "one ServiceEntry (both sites), a locality/outlier DestinationRule, a retry VirtualService on the gateway" | lab.adoc ex. 2 (wire the routing) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
 
-1. **+Add → Import YAML** (project `{user}-client`) accepts a multi-document paste of the `ServiceEntry` +
+1. Masthead **+** (Quick create) → **Import YAML** (project `{user}-client`) accepts a multi-document paste of the `ServiceEntry` +
    `DestinationRule` + `VirtualService` and creates all three (ex. 2). The created resources appear under
    **Networking → VirtualServices / DestinationRules / ServiceEntries**.
 2. **Workloads → Deployments** (project `{user}-site-a`) shows `parasol-claims` 3/3 and links to its

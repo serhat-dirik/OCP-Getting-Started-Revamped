@@ -46,7 +46,7 @@ it on a disposable cluster, never a shared workshop cluster mid-session.**
 |---|----------|------|----------|-------------|
 | 1 | `registry-images-catalog-governance-01-imagestream-detail.png` | Console → Builds → ImageStreams → `parasol-claims` (project `{user}-dev`), the tag + `sha256` visible | Circle: the `1.0` tag and its resolved `sha256` digest | lab.adoc ex. 1 Console tab |
 | 2 | `registry-images-catalog-governance-02-imagestream-two-tags.png` | Console → Builds → ImageStreams → `parasol-claims` after the promote, showing `1.0` **and** `prod` | Circle: both tags pointing at the same `sha256` | lab.adoc ex. 2 Console tab |
-| 3 | `registry-images-catalog-governance-03-developer-catalog-template.png` | Console → +Add → Developer Catalog filtered to *Template*, the **Parasol Claims Quickstart** tile | Circle: the custom tile (present only in `{user}-dev`) | lab.adoc ex. 5 Console tab |
+| 3 | `registry-images-catalog-governance-03-developer-catalog-template.png` | Console → **Ecosystem → Software Catalog** filtered to *Template* (sub-filter unverified), the **Parasol Claims Quickstart** tile | Circle: the custom tile (present only in `{user}-dev`) | lab.adoc ex. 5 Console tab |
 | 4 | `registry-images-catalog-governance-04-cluster-image-config.png` | Console → Administration → Cluster Settings → Configuration → **Image**, the allowed-registries fields | Circle: `allowedRegistriesForImport` (empty = open) | lab.adoc ex. 6 (governance read) |
 
 **Animated gif (PREFERRED for the promote-by-digest story):**
@@ -61,7 +61,7 @@ switch); these confirm the Console-tab click-paths written with `[CAPTURE-VERIFY
 1. **Builds → ImageStreams → `parasol-claims`** shows the tag + resolved `sha256` (ex. 1), and *Actions → Edit ImageStream (YAML)* exposes `spec.tags` for the promote (ex. 2).
 2. **Builds → ImageStreams → Create ImageStream (YAML view)** accepts `importPolicy.scheduled` (ex. 3).
 3. **Workloads → Deployments → Create (YAML view)** accepts `spec.template.spec.imagePullSecrets` (ex. 4).
-4. **+Add → Developer Catalog** (filter *Template*) surfaces the namespaced **Parasol Claims Quickstart** and its *Instantiate Template* form (ex. 5).
+4. **Ecosystem → Software Catalog** (filter *Template*, sub-filter unverified) surfaces the namespaced **Parasol Claims Quickstart** and its *Instantiate Template* form (ex. 5).
 5. **Administration → Cluster Settings → Configuration → Image** surfaces the `allowedRegistriesForImport` / `registrySources` fields the governance read + instructor demo reference (ex. 6).
 
 ## Narration script

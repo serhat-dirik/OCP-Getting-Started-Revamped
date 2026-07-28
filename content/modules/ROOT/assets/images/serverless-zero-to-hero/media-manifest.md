@@ -44,7 +44,7 @@ click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs a
 1. **Console → Serverless → Services** lists the `parasol-claims` ksvc with its URL and revisions (ex. 1, 4).
 2. **Console → Topology** renders the ksvc scale ring (0 pods idle; fills under load) (ex. 1, 3).
 3. **Console → Serverless → Services → YAML** accepts the revision-name + `containerConcurrency` + `traffic` edits (ex. 3, 4).
-4. **Console → Serverless → Eventing** (and **+Add → Import YAML**) create/list the Broker, Trigger, and PingSource (ex. 5).
+4. **Console → Serverless → Eventing** (and masthead **+** (Quick create) → **Import YAML**) create/list the Broker, Trigger, and PingSource (ex. 5).
 
 ## Recordings
 

@@ -38,14 +38,14 @@ consumer's **event-display** web page, signed in as the sample user, project sco
 | 1 | `eventing-deep-dive-01-event-display-envelope.png` | The `claims-consumer` **event-display** page showing a received `☁️ cloudevents.Event` — `type: com.parasol.claim.submitted`, `source`, `id`, `Validation: valid`, and the claim `Data` | Circle: the **context attributes** + `Validation: valid` — "the consumer genuinely received and displayed this" | lab.adoc ex. 2 (consumer-as-processor beat) — **the marquee** |
 | 2 | `eventing-deep-dive-02-dead-letter-event.png` | The `claims-dlq` **event-display** page showing a dead-lettered event with the **`knativeerrorcode: 404`** and `knativeerrordest` extension attributes | Circle: **`knativeerrorcode: 404`** + `knativeerrordest` — "not dropped; dead-lettered with why" | lab.adoc ex. 5 (retries + dead-letter beat) — **the second marquee** |
 | 3 | `eventing-deep-dive-03-eventing-triggers.png` | Console → **Serverless → Eventing**, the `default` Broker with the three Triggers (`claims-events`, `claims-fraud-review`, `claims-audit`) and their filters, and the `claim-ticker` PingSource | Circle: the two **filtered** Triggers' filter attributes (`type`, `claimpriority`) | lab.adoc ex. 4 (attribute-filtering beat) |
-| 4 | `eventing-deep-dive-04-trigger-filter-edit.png` | Console → **Serverless → Eventing → Trigger** editor (or +Add → Import YAML) showing a Trigger's `filter.attributes` and a `delivery` block with `deadLetterSink` | Circle: the **`deadLetterSink`** + `retry` fields | lab.adoc ex. 5 (delivery-spec beat) |
+| 4 | `eventing-deep-dive-04-trigger-filter-edit.png` | Console → **Serverless → Eventing → Trigger** editor (or masthead **+** (Quick create) → **Import YAML**) showing a Trigger's `filter.attributes` and a `delivery` block with `deadLetterSink` | Circle: the **`deadLetterSink`** + `retry` fields | lab.adoc ex. 5 (delivery-spec beat) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
 
 1. **Console → Serverless → Eventing** lists the `default` Broker, the three Triggers with their filters, and the `claim-ticker` PingSource (ex. 1, 4).
 2. **Console → Serverless → Eventing → Create → Trigger** exposes a **filter attribute** key/value and a **subscriber** picker (ex. 4).
-3. **Console → Serverless → Eventing → Trigger → YAML** (or **+Add → Import YAML**) accepts the `delivery` block (`retry`, `backoffPolicy`, `deadLetterSink`) (ex. 5).
+3. **Console → Serverless → Eventing → Trigger → YAML** (or masthead **+** (Quick create) → **Import YAML**) accepts the `delivery` block (`retry`, `backoffPolicy`, `deadLetterSink`) (ex. 5).
 4. The consumer's **event-display page** (`ksvc.status.url`) renders the received CloudEvent envelope, and the `claims-dlq` page renders the dead event with `knativeerror*` attributes (ex. 2, 5) — the product UI, single-path.
 
 ## Recordings
