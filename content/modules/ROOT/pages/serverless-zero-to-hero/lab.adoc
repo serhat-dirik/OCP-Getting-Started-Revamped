@@ -11,11 +11,11 @@ include::partial$version-attributes.adoc[]
 // cold start (HTTP 200 in 15.27s) vs the warm 0.106 s, the concurrency-driven autoscale 0->2->3 (max-scale
 // ceiling), the 80/20 tag-based revision split (both sub-routes 200; both revision Deployments woken), and
 // the source->broker->trigger eventing taste (Broker/Trigger/PingSource Ready; a real delivery returning
-// HTTP 404 because the app has no CloudEvents handler) are REAL captures. NAMESPACE in output is the sample
+// HTTP 405 — the app serves / for GET but has no CloudEvents POST handler, so Method Not Allowed) are REAL captures. NAMESPACE in output is the sample
 // user user6-dev (yours is {user}-dev); the cluster domain in output is a generic placeholder (yours is
 // {cluster_domain}). Knative AUTO-CREATES the ksvc edge Route — the lab NEVER runs `oc create route edge`
 // for a ksvc (documented exception). kn (confirmed in the cockpit) is the primary CLI; CR steps are
-// dual-path [tabs] Console(Serverless / Import YAML)::CLI(kn). The cold-start honesty and the eventing 404
+// dual-path [tabs] Console(Serverless / Import YAML)::CLI(kn). The cold-start honesty and the eventing 405
 // are explicit NOTEs, never // TODO.
 
 ifndef::demo[]
@@ -117,7 +117,7 @@ kn revision list -n $NS
 [NOTE]
 .Optional closer + reset between runs
 ====
-If the room is engaged, the *eventing taste* is a strong closer: `kn broker create default`, a `PingSource`, and a `Trigger` to the `ksvc` — the service *wakes from zero on an event*. Be honest that the delivery returns `HTTP 404` (the app has no event handler yet — that's the next module), so frame it as "the plumbing works; the processing is Eventing."
+If the room is engaged, the *eventing taste* is a strong closer: `kn broker create default`, a `PingSource`, and a `Trigger` to the `ksvc` — the service *wakes from zero on an event*. Be honest that the delivery returns `HTTP 405` — Method Not Allowed is even sharper than a 404: the request genuinely arrived; the app just has no POST event handler yet (that's the next module) — so frame it as "the plumbing works; the processing is Eventing."
 `ws prep serverless-zero-to-hero --yes` returns the world to the entry state (one scale-to-zero revision, no split, no eventing).
 ====
 endif::demo[]
@@ -210,10 +210,12 @@ For a real cold start the service must be at *zero* first — and right after yo
 
 [source,sh,role=execute]
 ----
-# Knative scales the idle pod to zero after ~60-90s — wait for zero before you time the cold start:
-until [ "$(oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | grep -c Running)" = 0 ]; do sleep 10; done
+# Knative scales the idle pod to zero after ~60-90s — wait for ZERO pods (in any state) before you time the cold start:
+until [ "$(oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ]; do sleep 10; done
 echo "scaled to zero — the next request pays a real cold start"
 ----
+
+If this wait never ends and the lingering pod is *not* `Running` (`CrashLoopBackOff`, `ImagePullBackOff`, …), the service is *broken*, not scaling — press kbd:[Ctrl+C] and check `oc get pods -n $NS`.
 
 Now send it a request and *time it* — the first caller pays the *cold start* while Knative schedules a pod, boots the JVM, and hands the request through the activator. Drive the request from the in-cluster `demo-client`:
 
@@ -357,7 +359,7 @@ kn service update parasol-claims -n $NS \
 Service 'parasol-claims' updated in namespace 'user6-dev'.
 ----
 
-Confirm the two revisions now exist, and let the service settle back to zero:
+Confirm the revision set — you're at *four* revisions now: `v1`, the two floor-change revisions exercise 2 minted (`-warm`, `-cold`), and the new `v2` — and let the service settle back to zero:
 
 [source,sh,role=execute]
 ----
@@ -366,12 +368,16 @@ kn revision list -n $NS
 sleep 90; oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l
 ----
 
-.Expected output (v2 is latest at 100%; v1 retained; then zero pods)
+// [CAPTURE-VERIFY] re-capture on a full sequential run — this shape reflects exercises 1-3 in order
+// (v1-warm/v1-cold minted in exercise 2, so v2 is configuration generation 4, not 2).
+.Expected output (v2 — the fourth generation — is latest at 100%; the three earlier revisions are retained; then zero pods)
 [source,texinfo]
 ----
-NAME                SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITIONS   READY   REASON
-parasol-claims-v2   parasol-claims   100%             2            1m    3 OK / 4     True
-parasol-claims-v1   parasol-claims                    1            13m   3 OK / 4     True
+NAME                     SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITIONS   READY   REASON
+parasol-claims-v2        parasol-claims   100%             4            1m    3 OK / 4     True
+parasol-claims-v1-cold   parasol-claims                    3            4m    3 OK / 4     True
+parasol-claims-v1-warm   parasol-claims                    2            5m    3 OK / 4     True
+parasol-claims-v1        parasol-claims                    1            13m   3 OK / 4     True
 0
 ----
 
@@ -429,7 +435,7 @@ Knative's default target is a *soft* concurrency goal (`autoscaling.knative.dev/
 == 4. Split traffic between revisions
 ⏱ *~8 min* · an 80/20 blue-green split, and a one-line rollback
 
-You now have *two* revisions — `v1` and `v2`. Because a revision is a frozen, addressable version, shifting traffic between them is a *one-object change* on the Route: tag `v1` as `stable` at 80% and `v2` as `candidate` at 20%.
+You now have *four* revisions — but *two routable targets*: `v1` (the original) and `v2` (the tuned one); the `-warm`/`-cold` pair from exercise 2 sit unrouted in the history. Because a revision is a frozen, addressable version, shifting traffic between the two targets is a *one-object change* on the Route: tag `v1` as `stable` at 80% and `v2` as `candidate` at 20%.
 
 [tabs]
 ====
@@ -473,12 +479,15 @@ kn revision list -n $NS
 oc get ksvc parasol-claims -n $NS -o jsonpath='{range .status.traffic[*]}tag={.tag} rev={.revisionName} percent={.percent}{"\n"}  url={.url}{"\n"}{end}'
 ----
 
-.Expected output (80% stable / 20% candidate, each with its own sub-route)
+// [CAPTURE-VERIFY] re-capture on a full sequential run (four revisions; v2 is generation 4)
+.Expected output (80% stable / 20% candidate, each with its own sub-route; the unrouted -warm/-cold revisions ride along)
 [source,texinfo]
 ----
-NAME                SERVICE          TRAFFIC   TAGS        GENERATION   AGE   CONDITIONS   READY   REASON
-parasol-claims-v2   parasol-claims   20%       candidate   2            6m    3 OK / 4     True
-parasol-claims-v1   parasol-claims   80%       stable      1            18m   3 OK / 4     True
+NAME                     SERVICE          TRAFFIC   TAGS        GENERATION   AGE   CONDITIONS   READY   REASON
+parasol-claims-v2        parasol-claims   20%       candidate   4            6m    3 OK / 4     True
+parasol-claims-v1-cold   parasol-claims                         3            9m    3 OK / 4     True
+parasol-claims-v1-warm   parasol-claims                         2            10m   3 OK / 4     True
+parasol-claims-v1        parasol-claims   80%       stable      1            18m   3 OK / 4     True
 
 tag=stable rev=parasol-claims-v1 percent=80
   url=https://stable-parasol-claims-user6-dev.<cluster-domain>
@@ -529,12 +538,15 @@ kn service update parasol-claims -n $NS --traffic stable=100 --traffic candidate
 kn revision list -n $NS
 ----
 
+// [CAPTURE-VERIFY] re-capture on a full sequential run (four revisions; v2 is generation 4)
 .Expected output (all traffic back on stable; candidate retained at 0%)
 [source,texinfo]
 ----
-NAME                SERVICE          TRAFFIC   TAGS        GENERATION   AGE   CONDITIONS   READY   REASON
-parasol-claims-v2   parasol-claims   0%        candidate   2            8m    3 OK / 4     True
-parasol-claims-v1   parasol-claims   100%      stable      1            20m   3 OK / 4     True
+NAME                     SERVICE          TRAFFIC   TAGS        GENERATION   AGE   CONDITIONS   READY   REASON
+parasol-claims-v2        parasol-claims   0%        candidate   4            8m    3 OK / 4     True
+parasol-claims-v1-cold   parasol-claims                         3            11m   3 OK / 4     True
+parasol-claims-v1-warm   parasol-claims                         2            12m   3 OK / 4     True
+parasol-claims-v1        parasol-claims   100%      stable      1            20m   3 OK / 4     True
 ----
 
 That's rollout *and* rollback as a *Route weight*. Re-apply the 80/20 split before moving on, so the module ends in its split end state:
