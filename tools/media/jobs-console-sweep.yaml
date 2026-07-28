@@ -1,0 +1,106 @@
+# Console sweep — every remaining screenshot that is "put the cluster in a state, open a URL,
+# wait for real content, shoot". One run, one login, ~40 min.
+#
+# RUN IT WITH --login. The console session cannot survive a browser restart (Chrome does not
+# persist session cookies), so all of this has to happen inside one context:
+#
+#   cd tools/media
+#   KUBECONFIG=~/.kube/ksls5.config OGSR_DOMAIN=apps.cluster-ksls5.dyn.redhatworkshops.io \
+#     .venv/bin/python capture.py --jobs jobs-console-sweep.yaml \
+#       --profile ~/.ogsr-shot-profile \
+#       --login https://console-openshift-console.apps.cluster-ksls5.dyn.redhatworkshops.io
+#
+# ORDER IS LOAD-BEARING. `ws start` EVICTS conflicting modules from the user's namespaces
+# (conflictsWith), so each block re-materialises what it needs. Do not reorder casually, and do
+# not re-run a single block expecting the others to still be live.
+#
+# NOT IN HERE, and why — these are not URL-and-shoot and need separate handling:
+#   gitops-at-scale-01-appset-created      terminal output, not a browser view (asciinema/ttyd)
+#   gitops-at-scale-03-gitea-image-bump    mid-edit Gitea editor — interactive typing
+#   gitops-at-scale-04/05-canary-*         TRANSIENT rollout states; must be caught mid-flight
+#   trusted-supply-chain-01-acs-violation  RHACS is a separate product with its own login
+#   trusted-supply-chain-04-rekor-entry    Rekor Search UI, separate host, needs an SBOM hash
+#   devspaces-inner-loop-02/03             needs a running DevWorkspace + IDE
+#   developer-hub-golden-paths-05/06       requires RUNNING the scaffolder, which creates a repo
+jobs:
+
+  # ===== M12 observability — the alert story ==============================================
+  # 05 (Inactive) and 04 (Firing) are the same rule at opposite states, so they cannot both be
+  # true at once. 05 must come first, then the break, then 04.
+  - slug: observability-health-scale
+    filename: observability-health-scale-01-observe-metrics.png
+    pre_sh: >-
+      ./tools/ws/ws start observability-health-scale --user user1 &&
+      oc apply -n user1-dev -f tools/media/fixtures/m12-prometheusrule.yaml
+    pre_wait_s: 90
+    url: >-
+      https://console-openshift-console.{domain}/monitoring/query-browser?query0=sum(rate(http_server_requests_seconds_count%7Bnamespace%3D%22user1-dev%22%7D%5B5m%5D))
+    wait_text: "Metrics"
+    settle_ms: 12000
+
+  - slug: observability-health-scale
+    filename: observability-health-scale-05-observe-alerting-inactive.png
+    url: https://console-openshift-console.{domain}/monitoring/alertrules
+    wait_text: "ParasolClaimsErrorRateHigh"
+    settle_ms: 8000
+
+  - slug: observability-health-scale
+    filename: observability-health-scale-02-observe-traces.png
+    url: https://console-openshift-console.{domain}/observe/traces
+    wait_text: "Traces"
+    settle_ms: 15000
+
+  # Break the DB, then wait out the rule's `for: 2m` on a 5m rate window. 300s is not padding.
+  - slug: observability-health-scale
+    filename: observability-health-scale-04-alert-firing.png
+    pre_sh: oc scale deploy/claims-db -n user1-dev --replicas=0
+    pre_wait_s: 300
+    url: https://console-openshift-console.{domain}/monitoring/alerts
+    wait_text: "ParasolClaimsErrorRateHigh"
+    settle_ms: 10000
+
+  # Restore, then autoscale and let it settle at the floor of 2.
+  - slug: observability-health-scale
+    filename: observability-health-scale-03-topology-hpa-scale.png
+    pre_sh: >-
+      oc scale deploy/claims-db -n user1-dev --replicas=1 &&
+      oc set resources deploy/parasol-claims -n user1-dev --requests=cpu=100m,memory=256Mi &&
+      (oc autoscale deploy/parasol-claims -n user1-dev --min=2 --max=4 --cpu-percent=60 || true)
+    pre_wait_s: 120
+    url: https://console-openshift-console.{domain}/topology/ns/user1-dev
+    wait_text: "parasol-claims"
+    settle_ms: 12000
+
+  # ===== M04 build-deliver — the build produced the image ==================================
+  - slug: build-deliver
+    filename: build-deliver-03-buildconfig-to-imagestream.png
+    pre_sh: ./tools/ws/ws start build-deliver --user user1
+    pre_wait_s: 120
+    url: https://console-openshift-console.{domain}/topology/ns/user1-dev
+    wait_text: "parasol-claims"
+    settle_ms: 12000
+
+  # ===== M08 trusted-supply-chain — the gate that refused a built image ====================
+  - slug: trusted-supply-chain
+    filename: trusted-supply-chain-02-pipelinerun-scan-failed.png
+    pre_sh: ./tools/ws/ws start trusted-supply-chain --user user1
+    pre_wait_s: 150
+    url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun
+    wait_text: "PipelineRuns"
+    settle_ms: 12000
+
+  - slug: trusted-supply-chain
+    filename: trusted-supply-chain-03-imagestream-tags.png
+    url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/imagestreams
+    wait_text: "ImageStreams"
+    settle_ms: 10000
+
+  # ===== M14 securing-apps-keycloak — bearer protection wired in the console ===============
+  - slug: securing-apps-keycloak
+    filename: securing-apps-keycloak-05-claims-env.png
+    pre_sh: ./tools/ws/ws start securing-apps-keycloak --user user1
+    pre_wait_s: 150
+    url: >-
+      https://console-openshift-console.{domain}/k8s/ns/user1-dev/deployments/parasol-claims/environment
+    wait_text: "Environment"
+    settle_ms: 10000
