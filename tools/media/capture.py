@@ -351,7 +351,16 @@ def main() -> int:
         for job in jobs:
             if job.pre_sh:
                 print(f"  pre: {job.pre_sh[:88]}", flush=True)
-                r = subprocess.run(job.pre_sh, shell=True, capture_output=True, text=True, timeout=1800)
+                # cwd=REPO_ROOT is load-bearing. pre_sh commands are written repo-root-relative
+                # (`./tools/ws/ws start …`) because that is how every other tool in this repo is
+                # invoked. Without this the shell inherits tools/media as its cwd and EVERY
+                # `ws start` dies with rc=127 "No such file or directory" — which then cascades:
+                # the entry state is never materialised, so the follow-on `oc scale` reports
+                # "no objects passed to scale", and the shots that do not need staging still
+                # succeed, so the run reports partial success while the staged shots are junk.
+                # Measured 2026-07-28: 7 of 9 failed exactly this way.
+                r = subprocess.run(job.pre_sh, shell=True, capture_output=True, text=True,
+                                   timeout=1800, cwd=REPO_ROOT)
                 if r.returncode != 0:
                     print(f"FAIL {job.filename}  [pre_sh rc={r.returncode}: {r.stderr.strip()[:120]}]")
                     continue
