@@ -13,6 +13,9 @@ run, the Output-tab results, the Pipeline details graph, and the PaC Repository 
 of them replaced wrong prose: results are on the Output tab (not Details), and the
 Repository page has no "Git provider" field. Still outstanding: the Gitea Add Webhook
 screenshot (#2), which is a Gitea UI view, not a console one.
+Update 2026-07-28: the PipelineRun graph shot (#1) was un-embedded from lab.adoc — it was
+captured before the Tekton console plugin mounted, so it shows only the Details/YAML tabs
+with no five-Task graph. See its `❌ RE-CAPTURE` row below.
 
 Media note: the module's pipeline mechanics — the anatomy run (12m54s, image 391 MB), the
 task-library resolver refs, the break-fix RED/GREEN, and the live PaC git-push fire — were all
