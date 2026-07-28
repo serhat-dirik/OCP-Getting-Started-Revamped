@@ -42,7 +42,7 @@ because the UI *is* the interface being taught.
 | `gitops-fundamentals-01-push-vs-pull.svg` | concept.adoc Mermaid "push vs pull" — `examples/diagrams/gitops-fundamentals/01-push-vs-pull.mmd` | two panels: CI pushes into a namespace (blue) vs a controller in the cluster pulling from Git and reconciling (green). The core mental model |
 | `gitops-fundamentals-02-reconcile-loop.svg` | concept.adoc Mermaid "reconcile loop" — `examples/diagrams/gitops-fundamentals/02-reconcile-loop.mmd` | Git (desired) → Application → reconcile diff → Synced/Healthy or OutOfSync → Sync back to live. Colour desired/live green, the Application/reconcile amber |
 | `gitops-fundamentals-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/gitops-fundamentals/03-what-you-built.mmd` | edit Git → Application → user-dev/stage; the drift/self-heal correction arrow highlighted |
-| `gitops-fundamentals-04-platform-accretion.svg` | (new) master accretion diagram, **GitOps / Argo CD layer** highlighted | reuse the platform base; light up the GitOps reconcile layer (accretion pattern) |
+| `gitops-fundamentals-04-platform-accretion.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/gitops-fundamentals/04-platform-accretion.mmd` | reuse the platform base; light up the GitOps reconcile layer (accretion pattern) |
 
 Diagrams ship as a standalone Mermaid `.mmd` under `examples/diagrams/gitops-fundamentals/`
 (never inline in the `.adoc`); the SVG exports replace/augment them in the pass. **Mermaid labels

@@ -43,7 +43,7 @@ comments, so their absence breaks nothing).
 | `pipelines-fundamentals-01-anatomy-and-layers.svg` | concept.adoc Mermaid "anatomy + three reuse layers" — `examples/diagrams/pipelines-fundamentals/01-anatomy-and-layers.mmd` | the module's key diagram: catalog (openshift-pipelines) → org library (parasol-tasks) → app Pipeline, each Task wired by `resolver: cluster`. Colour the three layers distinctly (blue / amber / green) |
 | `pipelines-fundamentals-02-pipeline-choices.svg` | concept.adoc Mermaid "Pipelines-as-Code is one pattern, not the only way" — `examples/diagrams/pipelines-fundamentals/02-pipeline-choices.mmd` | the three axes of the choice space (who owns it / what triggers it / where it lives), with the corner the lab actually wires — Pipelines-as-Code — picked out in green |
 | `pipelines-fundamentals-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/pipelines-fundamentals/03-what-you-built.mmd` | the happy path green; the "red test stops here" branch red (the gate) |
-| `pipelines-fundamentals-04-platform-accretion.svg` | (new) master accretion diagram, **pipelines/CI layer** highlighted | reuse the platform base; light up the pipelines + task-library layer in red (accretion pattern) |
+| `pipelines-fundamentals-04-platform-accretion.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/pipelines-fundamentals/04-platform-accretion.mmd` | reuse the platform base; light up the pipelines + task-library layer in red (accretion pattern) |
 
 ## Recordings
 

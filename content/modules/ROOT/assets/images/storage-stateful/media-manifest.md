@@ -17,7 +17,7 @@ and every expected-output block were captured on-cluster (OCP 4.21 / ODF externa
 |----------|--------|-------|
 | `storage-stateful-01-storage-chain.svg` | concept.adoc Mermaid "storage abstraction chain" — `examples/diagrams/storage-stateful/01-storage-chain.mmd` | Pod → PVC (namespace) → PV (cluster) → StorageClass → Ceph backend; the module's anchor diagram, reused on slide 2. **Owner review M05-1: was too small.** The Mermaid source is now a vertical (`TB`) chain with concise 2-line labels (interim legibility fix); export the SVG **large** and lightbox-enabled (see Lightbox note below). |
 | `storage-stateful-02-sts-vs-deployment.svg` | concept.adoc Mermaid "StatefulSet vs Deployment" — `examples/diagrams/storage-stateful/02-sts-vs-deployment.mmd` | left: Deployment (one Service, interchangeable Pods); right: StatefulSet (headless Service, pg-sts-0/1 each with its own PVC); reused on slide 5 |
-| `storage-stateful-03-platform-accretion-v5.svg` | concept.adoc TODO(media) | **master accretion diagram**, M05 layer (persistent claims DB + StatefulSet) highlighted on the M01–M04 base |
+| `storage-stateful-03-platform-accretion-v5.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/storage-stateful/03-platform-accretion-v5.mmd` | **master accretion diagram**, M05 layer (persistent claims DB + StatefulSet) highlighted on the M01–M04 base |
 | `storage-stateful-04-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/storage-stateful/04-what-you-built.mmd` | green = persistent (PVC, StatefulSet, per-Pod PVCs); red = the ephemeral trap that was removed |
 
 Shared legend across all four: namespace box, Pod, volume/disk cylinder, StorageClass tag,

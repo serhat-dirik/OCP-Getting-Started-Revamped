@@ -30,7 +30,7 @@ remain the deferred media pass.
 | `config-multienv-01-config-sources.svg` | concept.adoc Mermaid "config sources" — `examples/diagrams/config-multienv/01-config-sources.mmd` | one immutable image fed by env / ConfigMap / Secret / mounted file; shared legend |
 | `config-multienv-02-readiness-gate.svg` | concept.adoc Mermaid "readiness gate" — `examples/diagrams/config-multienv/02-readiness-gate.mmd` | Route → passing pod; NOT → failing pod (503); the module's signature idea |
 | `config-multienv-03-promotion-overlays.svg` | concept.adoc Mermaid "promotion overlays" — `examples/diagrams/config-multienv/03-promotion-overlays.mmd` | one base → dev/stage/prod overlays, same image digest into three namespaces |
-| `config-multienv-04-platform-accretion-v4.svg` | concept.adoc TODO(media) | **master accretion diagram**, M04 layer (config + multi-env) highlighted on the M01–M03 base |
+| `config-multienv-04-platform-accretion-v4.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/config-multienv/04-platform-accretion-v4.mmd` | **master accretion diagram**, M04 layer (config + multi-env) highlighted on the M01–M03 base |
 | `config-multienv-05-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/config-multienv/05-what-you-built.mmd` | green = what the attendee ran (ConfigMap + Secret + probes → promote to stage/prod) |
 
 ## Recordings

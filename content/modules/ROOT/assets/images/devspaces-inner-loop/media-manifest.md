@@ -80,7 +80,7 @@ The `vscode-java-pack` meta-extension is not in the embedded registry and would 
 |----------|--------|-------|
 | `devspaces-inner-loop-01-inner-outer-loop.svg` | concept.adoc Mermaid "inner vs outer loop" — `examples/diagrams/devspaces-inner-loop/01-inner-outer-loop.mmd` | red inner loop hands off via git push to the grey outer loop; reuse across the delivery block. **Owner review M03-2: this diagram (the one after "currency is minutes to hours…") was too small.** The Mermaid source has been tightened to concise labels (`Edit → Build → Run → Observe`; `Pipeline · Image · GitOps · Prod`) as the interim legibility fix; export the SVG **~25% larger** and lightbox-enabled (see Lightbox note below). |
 | `devspaces-inner-loop-02-workspace-gateway-services.svg` | concept.adoc Mermaid "workspace ↔ gateway ↔ services" — `examples/diagrams/devspaces-inner-loop/02-workspace-gateway-services.mmd` | shared legend (browser, gateway, container, DB, namespace box); the "IDE is in the cluster" picture |
-| `devspaces-inner-loop-03-platform-accretion-v3.svg` | concept.adoc TODO(media) | **master accretion diagram**, M03 layer (Dev Spaces workspace) highlighted on the M01/M02 base |
+| `devspaces-inner-loop-03-platform-accretion-v3.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/devspaces-inner-loop/03-platform-accretion-v3.mmd` | **master accretion diagram**, M03 layer (Dev Spaces workspace) highlighted on the M01/M02 base |
 | `devspaces-inner-loop-04-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/devspaces-inner-loop/04-what-you-built.mmd` | green = what the attendee ran (workspace → dev mode → hot reload → push) |
 
 ### Lightbox (click-to-enlarge) — shared fix SW-3 / CC-5

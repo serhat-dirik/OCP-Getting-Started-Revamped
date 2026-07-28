@@ -45,7 +45,7 @@ deck and richer rendering; keep the `.mmd` as the editable master (do not delete
 | 1 | `observability-health-scale-01-three-signals.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/observability-health-scale/01-three-signals.mmd` | one request fanning into metrics/logs/traces, each labeled with the question it answers |
 | 2 | `observability-health-scale-02-servicemonitor-bridge.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/observability-health-scale/02-servicemonitor-bridge.mmd` | app `/q/metrics` → ServiceMonitor → user-workload monitoring → console + your PrometheusRule |
 | 3 | `observability-health-scale-03-scaling-decision-tree.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/observability-health-scale/03-scaling-decision-tree.mmd` | "what is the pressure?" → HPA (highlighted) / Serverless / KEDA / VPA |
-| 4 | `observability-health-scale-04-platform-accretion.svg` | ✅ RENDERED 2026-07-26| concept.adoc — `examples/diagrams/observability-health-scale/04-platform-accretion.mmd` | the observe-&-steer layer (metrics/traces/HPA/PDB) over the M01–M11 Parasol platform |
+| 4 | `observability-health-scale-04-platform-accretion.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/observability-health-scale/04-platform-accretion.mmd` | concept.adoc — `examples/diagrams/observability-health-scale/04-platform-accretion.mmd` | the observe-&-steer layer (metrics/traces/HPA/PDB) over the M01–M11 Parasol platform |
 | 5 | `observability-health-scale-05-what-you-built.svg` | ✅ RENDERED 2026-07-26| wrapup.adoc — `examples/diagrams/observability-health-scale/05-what-you-built.mmd` | the claims service with ServiceMonitor→UWM→alert, Tempo traces, HPA 2→4, and PDB, all green |
 
 ## Recording (demo-arc happy path)

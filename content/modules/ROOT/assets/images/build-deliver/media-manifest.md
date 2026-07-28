@@ -52,7 +52,7 @@ and is deferred to the next media pass. It has no `// media-pass:` embed comment
 | Filename | Source | Notes |
 |----------|--------|-------|
 | `build-deliver-01-build-spectrum.svg` | concept.adoc Mermaid "build spectrum decision tree" — `examples/diagrams/build-deliver/01-build-spectrum.mmd` | the module's key diagram: image? / source? / need control? / workflow? |
-| `build-deliver-02-platform-accretion-v2.svg` | (new) master accretion diagram, **build layer** highlighted | reuse the M01 platform base; light up the build/registry layer in red (accretion pattern) |
+| `build-deliver-02-platform-accretion-v2.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/build-deliver/02-platform-accretion-v2.mmd` | reuse the M01 platform base; light up the build/registry layer in red (accretion pattern) |
 | `build-deliver-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/build-deliver/03-what-you-built.mmd` | green = objects the attendee created (source→S2I→image→Deployment + DB + Secret + Route) |
 
 ## Recordings

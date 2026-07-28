@@ -47,7 +47,7 @@ of the nav. The landmarks re-shoot (screenshot 4) must reflect this current nav.
 | Filename | Source | Notes |
 |----------|--------|-------|
 | `platform-orientation-01-desired-state.svg` | concept.adoc Mermaid "desired state / reconcile loop" — `examples/diagrams/platform-orientation/01-desired-state.mmd` | shared legend (pod, deployment, service, human) |
-| `platform-orientation-02-platform-accretion-v1.svg` | concept.adoc Mermaid platform diagram — `examples/diagrams/platform-orientation/02-platform-accretion-v1.mmd` | **master accretion diagram**, M01 layer in red; later modules highlight their own layer on this base |
+| `platform-orientation-02-platform-accretion-v1.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/platform-orientation/02-platform-accretion-v1.mmd` | **master accretion diagram**, M01 layer in red; later modules highlight their own layer on this base |
 | `platform-orientation-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/platform-orientation/03-what-you-built.mmd` | green = objects the attendee created |
 
 ## Recordings

@@ -86,7 +86,7 @@ table, the `jq` SBOM query, `cosign verify` "verified against the specified publ
 |----------|--------|-------|
 | `trusted-supply-chain-01-trust-triangle.svg` | concept.adoc Mermaid — `examples/diagrams/trusted-supply-chain/01-trust-triangle.mmd` | the key diagram: source → SBOM → build+sign → scan gate → registry (image + .sig + .att) → ImagePolicy admission. Colour the two refusals (gate + admission) red, the trustworthy path green |
 | `trusted-supply-chain-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/trusted-supply-chain/03-what-you-built.mmd` | the rebalanced spine: scanning as one red beat (seeded → refused), then the pre-scanned signed image → cosign verify → provenance/SBOM → keyless/Rekor → admission |
-| `trusted-supply-chain-04-platform-accretion.svg` | (new) master accretion diagram, **trust/supply-chain layer** highlighted | reuse the platform base; light up the scan-gate + signing + admission layer |
+| `trusted-supply-chain-04-platform-accretion.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/trusted-supply-chain/04-platform-accretion.mmd` | reuse the platform base; light up the scan-gate + signing + admission layer |
 
 ## Recordings
 
