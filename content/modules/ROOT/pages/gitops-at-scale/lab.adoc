@@ -104,14 +104,25 @@ Do:: After committing in Gitea, click *Refresh* on `claims-prod-{user}`, switch 
 +
 [source,sh,role=execute]
 ----
-for i in $(seq 1 24); do
-  S=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.currentStepIndex}')
-  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
-  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}')
-  echo "  $(date +%T)  step $S/5   $P   analysis:${A:-none}"
-  [ "$P" = "Healthy" ] && [ "$S" = "5" ] && break
-  sleep 7
+CANARY_STARTED=""
+for i in $(seq 1 20); do
+  oc get rollout parasol-claims -n $PROD \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' | grep -q ':1.1' \
+    && { CANARY_STARTED=yes; break; }
+  sleep 6
 done
+if [ -z "$CANARY_STARTED" ]; then
+  echo "  ✗ the canary has not started — Argo has not synced the commit yet; press Refresh and re-run"
+else
+  for i in $(seq 1 24); do
+    S=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.currentStepIndex}')
+    P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+    A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}')
+    echo "  $(date +%T)  step $S/5   $P   analysis:${A:-none}"
+    [ "$P" = "Healthy" ] && [ "$S" = "5" ] && { echo "  ✔ promoted to 100%"; break; }
+    sleep 7
+  done
+fi
 ----
 +
 "25% to the canary, a pause, 50%, then an *analysis* Job probes the new pods — it passes — and only now does 1.1 take 100%. The new version earned its traffic."
@@ -544,7 +555,7 @@ Open your fork in the *Gitea* tab at {gitea_url}/{user}/claims-config[{user}/cla
 // See media-manifest.md.
 
 Argo CD picks up your commit and syncs the new image into the Rollout on its own within about a minute — or, to apply it at once, open `claims-prod-{user}` in the {student_argo_url}[student Argo CD UI^] and press *Refresh*, then switch to the app's *Rollout* view to watch the canary animate.
-Either way, poll it from the terminal: the loop below *first waits for the canary to actually start* (the Rollout's image flips to `1.1`) so it does not mistake the current steady state for a finished rollout, then follows the steps to 100%.
+Either way, poll it from the terminal: the loop below *first waits for the canary to actually start* (the Rollout's image flips to `1.1`) so it does not mistake the current steady state for a finished rollout, then follows the steps to 100% — and if the image never flips, it says so plainly instead of reporting a rollout that never happened.
 
 // media-pass: screenshot gitops-at-scale-04-canary-progressing.png — the Argo CD Rollout view
 // mid-canary: revision 2 (canary, image 1.1) alongside revision 1 (stable, 1.0), SetWeight 25 or 50,
@@ -553,20 +564,28 @@ Either way, poll it from the terminal: the loop below *first waits for the canar
 [source,sh,role=execute]
 ----
 echo "waiting for the canary to start (Argo syncing your commit)…"
+CANARY_STARTED=""
 for i in $(seq 1 20); do
   oc get rollout parasol-claims -n $PROD \
-    -o jsonpath='{.spec.template.spec.containers[0].image}' | grep -q ':1.1' && break
+    -o jsonpath='{.spec.template.spec.containers[0].image}' | grep -q ':1.1' \
+    && { CANARY_STARTED=yes; break; }
   sleep 6
 done
-for i in $(seq 1 30); do
-  S=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.currentStepIndex}')
-  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
-  U=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.updatedReplicas}')
-  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null)
-  echo "  $(date +%T)  step $S/5   $P   canary-pods:${U:-0}/4   analysis:${A:-none}"
-  [ "$P" = "Healthy" ] && [ "$S" = "5" ] && { echo "  ✔ promoted to 100%"; break; }
-  sleep 7
-done
+if [ -z "$CANARY_STARTED" ]; then
+  echo "  ✗ the canary never started — Argo has not synced your commit yet."
+  echo "    Press Refresh on the prod app in Argo CD (the fallback reconcile can take ~90s) and re-run this block,"
+  echo "    or check that you edited rollouts/claims-rollout.yaml on branch main."
+else
+  for i in $(seq 1 30); do
+    S=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.currentStepIndex}')
+    P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+    U=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.updatedReplicas}')
+    A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null)
+    echo "  $(date +%T)  step $S/5   $P   canary-pods:${U:-0}/4   analysis:${A:-none}"
+    [ "$P" = "Healthy" ] && [ "$S" = "5" ] && { echo "  ✔ promoted to 100%"; break; }
+    sleep 7
+  done
+fi
 ----
 
 .Expected output — the canary earns its way to 100%
@@ -713,31 +732,56 @@ stable ReplicaSet still serving: 5485b86bcd  (the canary was scaled away)
 
 Now *fix it*, the GitOps way.
 A real fix is two things: clear the fault, and *revert the bad change in Git*.
-Clear the knob (the regression is "resolved" — set `verdict` back to `pass`, with the command below or the same *Workloads* → *ConfigMaps* → `gitops-at-scale-canary-control` edit you used above), then in the *Gitea* tab change the image tag back to `parasol-claims:1.1` and *Commit Changes* to `main` (message e.g. "Revert bad release; restore 1.1").
-Then open `claims-prod-{user}` in the {student_argo_url}[student Argo CD UI^] and press *Refresh* so Argo re-reads the revert.
-Because you are reverting to the version that is *already* the stable one, the Rollout clears the abort and returns to `Healthy` — no new canary needed, because production is already running that version.
+First clear the knob (the regression is "resolved" — set `verdict` back to `pass`, with the command below or the same *Workloads* → *ConfigMaps* → `gitops-at-scale-canary-control` edit you used above):
 
 [source,sh,role=execute]
 ----
 oc patch configmap gitops-at-scale-canary-control -n $PROD --type merge -p '{"data":{"verdict":"pass"}}'
-# after committing the revert to 1.1 in Gitea and pressing Refresh in Argo CD, watch it recover.
-# Clearing the abort can take up to ~90s; if the loop ends still Degraded, press Refresh again + re-run.
-for i in $(seq 1 22); do
-  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
-  echo "  $(date +%T)  rollout: $P"
-  [ "$P" = "Healthy" ] && { echo "  ✔ recovered — production Healthy on the good version"; break; }
-  sleep 7
-done
 ----
 
 .Expected output
 [source,texinfo]
 ----
 configmap/gitops-at-scale-canary-control patched
-  08:50:05  rollout: Degraded
-  08:50:14  rollout: Degraded
-  08:50:22  rollout: Healthy
-  ✔ recovered — production Healthy on the good version
+----
+
+Then revert the bad change: in the *Gitea* tab change the image tag back to `parasol-claims:1.1` and *Commit Changes* to `main` (message e.g. "Revert bad release; restore 1.1"), then open `claims-prod-{user}` in the {student_argo_url}[student Argo CD UI^] and press *Refresh* so Argo re-reads the revert.
+If exercise 3 completed, you are reverting to the version that is *already* the stable one, so the Rollout clears the abort and returns to `Healthy` — no new canary, because production is already running `1.1`.
+(If your exercise-3 canary never actually ran, this revert *starts* one instead — that is expected: in that case `1.1` is a genuinely new version for prod, and it earns its way in like any other.)
+
+Now watch the recovery.
+The proof is a *pair* of observations, not `Healthy` alone — a Rollout that never aborted is also `Healthy`.
+The latest `AnalysisRun` must still be the *Failed* one (the abort really happened, and this revert starts no new analysis) *and* the Rollout must be `Healthy` again:
+
+[source,sh,role=execute]
+----
+# Clearing the abort can take up to ~90s; if the loop ends still Degraded, press Refresh again + re-run.
+RECOVERED=""
+for i in $(seq 1 22); do
+  P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
+  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null)
+  echo "  $(date +%T)  rollout: $P   last analysis: ${A:-none}"
+  [ "$P" = "Healthy" ] && [ "$A" = "Failed" ] \
+    && { RECOVERED=yes; echo "  ✔ recovered — production Healthy again after the aborted release"; break; }
+  sleep 7
+done
+if [ -z "$RECOVERED" ]; then
+  if [ "$P" = "Degraded" ]; then
+    echo "  ✗ still Degraded — Argo may not have re-read your revert yet; press Refresh and re-run this block."
+  else
+    echo "  ✗ nothing to recover: the Rollout is ${P:-unknown} but no analysis ever Failed —"
+    echo "    the abort never happened (did your bad-build commit sync?). Re-run this exercise from the knob step."
+  fi
+fi
+----
+
+.Expected output
+[source,texinfo]
+----
+  08:50:05  rollout: Degraded   last analysis: Failed
+  08:50:14  rollout: Degraded   last analysis: Failed
+  08:50:22  rollout: Healthy   last analysis: Failed
+  ✔ recovered — production Healthy again after the aborted release
 ----
 
 [.checkpoint]
