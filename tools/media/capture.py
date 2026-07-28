@@ -14,9 +14,16 @@ WHY THIS EXISTS. The media pass kept not happening because the obvious tools can
 So captures must WAIT ON REAL CONTENT, which needs a driver. This is that driver.
 
 AUTHENTICATION. The console needs an OAuth session, and nothing here handles a credential.
-Run `login.py` once: it opens a HEADED window on a throwaway profile directory, a human logs
-in, and the session cookie persists in that profile. This script then reuses the profile
-headlessly. No password is ever read, typed, stored or transmitted by either script.
+Use `--login <console-url>`: it opens a HEADED window, a human completes the OAuth hop, and
+capture then proceeds IN THE SAME CONTEXT. No password is ever read, typed, stored or
+transmitted.
+
+Do NOT use the old `login.py` -> capture handoff on this cluster. It fails two ways, both
+measured 2026-07-28: Chrome holds a ProcessSingleton lock on the profile so capture cannot
+open it until login.py exits, and the console session expires within minutes so by the time
+the handoff completes every shot can silently be a login page. (Injecting the API token as an
+`openshift-session-token` cookie does not work either — the console wants a real OAuth
+session.) login.py is kept only for warming a profile for LONG-LIVED sessions like Gitea.
 
 CLUSTER DOMAIN. Job URLs must NOT hardcode a live cluster domain — CI's privacy guard fails
 the build on one in any tracked file. Write `{domain}` in job URLs; it is substituted from
@@ -24,7 +31,8 @@ the build on one in any tracked file. Write `{domain}` in job URLs; it is substi
 
 USAGE
     export OGSR_DOMAIN=apps.<your-cluster>.<base>
-    python capture.py --jobs jobs.yaml --profile /path/to/shot-profile [--only <slug>]
+    python capture.py --jobs jobs.yaml --profile /path/to/shot-profile \
+        --login https://console-openshift-console.$OGSR_DOMAIN [--only <slug>]
     python capture.py --jobs jobs.yaml --no-auth      # public pages, fresh context
 
 Each job writes to content/modules/ROOT/assets/images/<slug>/<filename>, which is where the
@@ -37,7 +45,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -80,6 +90,16 @@ class Job:
     # Argo persists its "Compact diff" toggle across visits, so a blind click turned it OFF on
     # the second capture and silently produced the full manifest instead of the one-line diff.
     check_text: list[str] = field(default_factory=list)
+    # Shell run BEFORE this job, to put the CLUSTER in the state the shot needs — materialise an
+    # entry state, scale a Deployment, run a lab step. This exists because the shots are
+    # state-dependent and the whole run must happen inside ONE browser session: the console
+    # session cannot survive a context restart (Chrome does not persist session cookies), so
+    # "capture, quit, change state, re-launch, capture" loses the login every time. Keeping the
+    # context open and mutating the cluster from inside the run is the only shape that works.
+    # Trusted input: these job files are repo-controlled maintainer tooling, same as a Makefile.
+    pre_sh: str | None = None
+    # Seconds to wait after pre_sh before shooting (rollouts, Argo syncs, alert `for:` windows).
+    pre_wait_s: int = 0
 
     @property
     def out_path(self) -> Path:
@@ -174,6 +194,30 @@ def ensure_checked(page: Any, label: str) -> bool | None:
     return bool(state["checked"])
 
 
+def wait_for_login(page: Any, url: str, deadline_s: int = 900) -> bool:
+    """Park on `url` and wait for a human to finish the OAuth hop IN THIS WINDOW.
+
+    Returns once the browser is past /oauth|/login|/auth/ and the page has real content.
+    """
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    print("\n" + "=" * 72)
+    print("  A BROWSER WINDOW IS OPEN — log in there (attendee IdP: workshop-users).")
+    print("  Capture starts BY ITSELF once you are through. Do not close the window.")
+    print("=" * 72 + "\n", flush=True)
+    start = time.time()
+    while time.time() - start < deadline_s:
+        try:
+            u = page.url
+            if not any(s in u for s in ("/oauth", "/login", "/auth/")) and len(page.inner_text("body")) > 200:
+                print("  logged in — starting capture\n", flush=True)
+                page.wait_for_timeout(2000)
+                return True
+        except PlaywrightError:
+            pass
+        time.sleep(2)
+    return False
+
+
 def capture(page: Any, job: Job) -> tuple[bool, str]:
     """Navigate, wait for REAL content, shoot. Returns (ok, detail)."""
     try:
@@ -247,6 +291,11 @@ def main() -> int:
     ap.add_argument("--only", help="capture just this slug")
     ap.add_argument("--no-auth", action="store_true", help="fresh context, public pages only")
     ap.add_argument(
+        "--login", metavar="URL",
+        help="open HEADED at URL, wait for a human to log in, then capture in the SAME context. "
+             "Use this instead of the login.py handoff — see the comment at the context setup.",
+    )
+    ap.add_argument(
         "--domain",
         default=os.environ.get("OGSR_DOMAIN", ""),
         help="cluster apps domain substituted for {domain} in job URLs (or $OGSR_DOMAIN)",
@@ -277,17 +326,38 @@ def main() -> int:
                 viewport=DEFAULT_VIEWPORT, ignore_https_errors=True, locale="en-US"
             )
         else:
+            # --login runs HEADED so a human can complete the OAuth hop, then captures in this
+            # SAME context. Do not go back to the login.py -> capture handoff: Chrome holds a
+            # ProcessSingleton lock on the profile (so the capture cannot open it until login.py
+            # exits), and this cluster's console session expires within minutes (so by the time
+            # the handoff completes the session may be gone and every shot is a login page).
             ctx = p.chromium.launch_persistent_context(
                 str(args.profile),
                 channel="chrome",
-                headless=True,
+                headless=not args.login,
                 viewport=DEFAULT_VIEWPORT,
                 ignore_https_errors=True,
                 locale="en-US",
+                args=["--no-first-run", "--no-default-browser-check"],
             )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
+        if getattr(args, "login", False):
+            if not wait_for_login(page, args.login):
+                print("TIMEOUT — no session detected in the window; nothing captured")
+                ctx.close()
+                return
+
         for job in jobs:
+            if job.pre_sh:
+                print(f"  pre: {job.pre_sh[:88]}", flush=True)
+                r = subprocess.run(job.pre_sh, shell=True, capture_output=True, text=True, timeout=1800)
+                if r.returncode != 0:
+                    print(f"FAIL {job.filename}  [pre_sh rc={r.returncode}: {r.stderr.strip()[:120]}]")
+                    continue
+                if job.pre_wait_s:
+                    print(f"  waiting {job.pre_wait_s}s for the cluster to settle", flush=True)
+                    time.sleep(job.pre_wait_s)
             ok, detail = capture(page, job)
             mark = "OK  " if ok else "FAIL"
             rel = job.out_path.relative_to(REPO_ROOT)
