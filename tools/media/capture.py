@@ -71,7 +71,7 @@ class Job:
 
     slug: str
     filename: str
-    url: str
+    url: str = ""
     wait_text: str | None = None
     wait_selector: str | None = None
     settle_ms: int = SETTLE_MS
@@ -100,6 +100,17 @@ class Job:
     pre_sh: str | None = None
     # Seconds to wait after pre_sh before shooting (rollouts, Argo syncs, alert `for:` windows).
     pre_wait_s: int = 0
+    # Text to type into the page's name-filter box before waiting/shooting. Needed for the
+    # console's long list views: Observe -> Alerting lists every PLATFORM rule in a virtualized
+    # table, so one user-defined rule is neither on screen nor in the DOM — `wait_text` for it
+    # times out on a page that is actually fine. Filtering is also what the lab tells the
+    # attendee to do, so the filtered list is the honest shot, not a workaround.
+    filter_text: str | None = None
+    # Shell whose STDOUT is the URL to shoot, used instead of `url`. Exists because the objects
+    # some shots need are named at materialisation time: `ws start` seeds PipelineRuns with a
+    # random suffix, so a hardcoded run name in a job file is correct exactly once and silently
+    # 404s on every later cluster. Runs after pre_sh, from REPO_ROOT, same trust model.
+    url_sh: str | None = None
 
     @property
     def out_path(self) -> Path:
@@ -121,9 +132,14 @@ def load_jobs(path: Path, domain: str) -> list[Job]:
 
     jobs = [Job(**entry) for entry in data["jobs"]]
     for job in jobs:
+        if bool(job.url) == bool(job.url_sh):
+            sys.exit(f"{job.filename}: set exactly one of `url` or `url_sh`")
         # Substituted here, never stored: keeps live cluster domains out of the tracked tree,
-        # which CI's privacy guard fails the build on.
+        # which CI's privacy guard fails the build on. url_sh gets the same treatment so a
+        # generated URL can interpolate the domain too.
         job.url = job.url.replace("{domain}", domain)
+        if job.url_sh:
+            job.url_sh = job.url_sh.replace("{domain}", domain)
         if "{domain}" in job.url:  # unreachable, but fail loud if the token ever changes
             sys.exit(f"unsubstituted {{domain}} in {job.filename}")
     return jobs
@@ -194,10 +210,120 @@ def ensure_checked(page: Any, label: str) -> bool | None:
     return bool(state["checked"])
 
 
-def wait_for_login(page: Any, url: str, deadline_s: int = 900) -> bool:
+# The console's name-filter input is not one stable thing: PatternFly versions and console
+# releases move between a `data-test-id`, an aria-label and a bare placeholder. Try the known
+# ids first, then fall back to the first VISIBLE text/search input on the page — on a list view
+# that is the toolbar filter. Checked in DOM order so a page-level search wins over any
+# later-rendered input inside a drawer.
+_FILTER_SELECTORS = (
+    'input[data-test-id="item-filter"]',
+    'input[data-test="name-filter-input"]',
+    'input[aria-label="Search input"]',
+    'input[placeholder*="Search" i]',
+    'input[placeholder*="Filter" i]',
+    'input[placeholder*="name" i]',
+)
+
+_ANY_FILTER_INPUT = """() => {
+    const el = [...document.querySelectorAll('input')].find(e => {
+        const t = (e.type || 'text').toLowerCase();
+        if (t !== 'text' && t !== 'search') return false;
+        const r = e.getBoundingClientRect();
+        return r.width > 40 && r.height > 10;
+    });
+    if (!el) return null;
+    el.scrollIntoView({block: 'center'});
+    const r = el.getBoundingClientRect();
+    return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+}"""
+
+
+def fill_filter(page: Any, text: str, deadline_s: int = 45) -> bool:
+    """Type `text` into the list view's name-filter box. Returns whether a box was found.
+
+    Retries to a deadline: the toolbar mounts with the rest of the SPA, so on a cold page the
+    input does not exist yet when navigation commits.
+    """
+    end = time.time() + deadline_s
+    while time.time() < end:
+        for sel in _FILTER_SELECTORS:
+            try:
+                box = page.locator(sel).first
+                if box.count() and box.is_visible():
+                    box.click(timeout=5000)
+                    box.fill(text)
+                    page.wait_for_timeout(2000)
+                    return True
+            except PlaywrightError:
+                continue
+        try:
+            rect = page.evaluate(_ANY_FILTER_INPUT)
+            if rect:
+                page.mouse.click(rect["x"], rect["y"])
+                page.keyboard.type(text, delay=40)
+                page.wait_for_timeout(2000)
+                return True
+        except PlaywrightError:
+            pass
+        page.wait_for_timeout(1500)
+    return False
+
+
+def session_file(profile: Path) -> Path:
+    """Where this profile's session cookies are cached. Beside the profile, never in the repo."""
+    return profile.parent / f"{profile.name}.session.json"
+
+
+def load_session(ctx: Any, path: Path) -> int:
+    """Re-inject previously saved cookies. Returns how many were restored.
+
+    THE PROBLEM THIS SOLVES. A persistent profile does NOT keep you logged into the console.
+    Chrome only writes cookies that carry an expiry to its on-disk store; the console's session
+    cookie has none, so it lives in memory and dies with the browser. Every capture run therefore
+    began by asking a human to log in again — which made unattended capture impossible and put a
+    person in the loop for what is otherwise a batch job.
+
+    Playwright's storage_state serializes in-memory session cookies too (expires = -1), so saving
+    it at the end of a run and re-adding it at the start carries the session across runs. The
+    login then lasts as long as the OAuth token itself rather than as long as the process.
+    """
+    if not path.exists():
+        return 0
+    try:
+        cookies = json.loads(path.read_text()).get("cookies", [])
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not cookies:
+        return 0
+    try:
+        ctx.add_cookies(cookies)
+    except PlaywrightError:
+        return 0
+    return len(cookies)
+
+
+def save_session(ctx: Any, path: Path) -> None:
+    """Cache this context's cookies for the next run. Best-effort; never fatal.
+
+    The file holds a live session token, so it is written 0600 and lives OUTSIDE the repo. Do not
+    move it into the tree: CI's privacy guard reads text and would fail the build, and rightly so.
+    """
+    try:
+        ctx.storage_state(path=str(path))
+        path.chmod(0o600)
+    except (PlaywrightError, OSError) as exc:
+        print(f"  (could not cache session: {exc})", flush=True)
+
+
+def wait_for_login(page: Any, url: str, deadline_s: int = 3600) -> bool:
     """Park on `url` and wait for a human to finish the OAuth hop IN THIS WINDOW.
 
-    Returns once the browser is past /oauth|/login|/auth/ and the page has real content.
+    Returns once the browser is past /oauth|/login|/auth/ and the page has real content — so a
+    profile that still holds a session proceeds immediately and nobody has to touch anything.
+
+    The deadline is an hour because the wait is ASYNCHRONOUS in practice: the run is parked in
+    the background and whoever owns the cluster logs in when they get to it. A 15-minute window
+    meant a sweep that was staged and ready silently expired while its cluster state went stale.
     """
     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
     print("\n" + "=" * 72)
@@ -232,6 +358,11 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
             state = ensure_checked(page, label)
             if state is None:
                 print(f"      (no '{label}' checkbox — continuing)")
+
+        if job.filter_text and not fill_filter(page, job.filter_text):
+            # Fatal on purpose. A job asks to filter because the target is NOT findable on the
+            # unfiltered page; shooting it anyway would write a valid PNG of the wrong view.
+            return False, f"no filter box found for {job.filter_text!r}"
 
         if job.wait_selector:
             page.wait_for_selector(job.wait_selector, timeout=60_000)
@@ -340,13 +471,25 @@ def main() -> int:
                 locale="en-US",
                 args=["--no-first-run", "--no-default-browser-check"],
             )
+        sess_path = session_file(Path(args.profile)) if args.profile else None
+        if sess_path:
+            n = load_session(ctx, sess_path)
+            if n:
+                print(f"  restored {n} cached cookies from a previous run", flush=True)
+
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         if getattr(args, "login", False):
             if not wait_for_login(page, args.login):
                 print("TIMEOUT — no session detected in the window; nothing captured")
+                if sess_path:
+                    save_session(ctx, sess_path)
                 ctx.close()
                 return
+            # Cache immediately, not at the end: if a later job crashes the run, the session a
+            # human just spent time establishing must not die with it.
+            if sess_path:
+                save_session(ctx, sess_path)
 
         for job in jobs:
             if job.pre_sh:
@@ -367,6 +510,17 @@ def main() -> int:
                 if job.pre_wait_s:
                     print(f"  waiting {job.pre_wait_s}s for the cluster to settle", flush=True)
                     time.sleep(job.pre_wait_s)
+            if job.url_sh:
+                # Resolved AFTER pre_sh: the object being addressed is usually the one pre_sh
+                # just created. An empty result means the object is not there — fail loudly
+                # rather than navigating to a truncated URL and shooting whatever answers.
+                u = subprocess.run(job.url_sh, shell=True, capture_output=True, text=True,
+                                   timeout=120, cwd=REPO_ROOT)
+                job.url = u.stdout.strip()
+                if u.returncode != 0 or not job.url:
+                    print(f"FAIL {job.filename}  [url_sh rc={u.returncode}: "
+                          f"{(u.stderr.strip() or 'empty URL')[:120]}]")
+                    continue
             ok, detail = capture(page, job)
             mark = "OK  " if ok else "FAIL"
             rel = job.out_path.relative_to(REPO_ROOT)

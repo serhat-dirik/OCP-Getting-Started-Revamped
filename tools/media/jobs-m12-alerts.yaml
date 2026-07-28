@@ -1,0 +1,42 @@
+# M12 alert story — the two shots the full console sweep could not get (2026-07-28).
+#
+# WHY THIS IS A SEPARATE FILE. Both shots are the SAME rule at OPPOSITE states, so they cannot
+# both be true at once: 05 must be shot at the healthy baseline, then the database is broken,
+# then 04 is shot ~5 min later. That ordering is the file. Re-running the big sweep just to get
+# these two would re-materialise four other modules and cost ~40 min.
+#
+# PRECONDITION — the entry state must already be up and the rule applied:
+#     ./tools/ws/ws start observability-health-scale --user user1
+#     oc apply -n user1-dev -f tools/media/fixtures/m12-prometheusrule.yaml
+# Give the ruler ~1 min to load the rule before starting the capture.
+#
+# RUN:
+#     OGSR_DOMAIN=apps.<cluster>.<base> tools/media/.venv/bin/python tools/media/capture.py \
+#       --jobs tools/media/jobs-m12-alerts.yaml --profile ~/.ogsr-shot-profile \
+#       --login https://console-openshift-console.$OGSR_DOMAIN
+#
+# AFTERWARDS, RESTORE THE CLUSTER (this file deliberately leaves the DB down):
+#     oc scale deploy/claims-db -n user1-dev --replicas=1
+#     oc rollout restart deploy/parasol-claims -n user1-dev
+# The restart is not optional — the app holds a poisoned connection pool, exactly as the lab says.
+jobs:
+
+  # The "before": the rule is loaded and armed, and Inactive because the load generator only
+  # produces 404s at the healthy baseline. Filtering is mandatory — see capture.py's filter_text.
+  - slug: observability-health-scale
+    filename: observability-health-scale-05-observe-alerting-inactive.png
+    url: https://console-openshift-console.{domain}/monitoring/alertrules
+    filter_text: "ParasolClaimsErrorRateHigh"
+    wait_text: "ParasolClaimsErrorRateHigh"
+    settle_ms: 8000
+
+  # Break the database, then wait out the rule's `for: 2m` on top of a 5m rate window. The lab
+  # measures Pending at ~50s and Firing ~2 min after that, so 300s is the real number, not padding.
+  - slug: observability-health-scale
+    filename: observability-health-scale-04-alert-firing.png
+    pre_sh: oc scale deploy/claims-db -n user1-dev --replicas=0
+    pre_wait_s: 300
+    url: https://console-openshift-console.{domain}/monitoring/alerts
+    filter_text: "ParasolClaimsErrorRateHigh"
+    wait_text: "ParasolClaimsErrorRateHigh"
+    settle_ms: 10000
