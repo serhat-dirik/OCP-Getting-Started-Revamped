@@ -62,11 +62,24 @@ check "MaaS config present (endpoint + model)"     oc get cm maas-config -n "$NS
 check "legacy fork parasol-legacy-claims reachable in Gitea" repo_reachable           || hint "the fork {user}/parasol-legacy-claims is missing — check the gitea-fork Job (ws reset app-modernization --user ${USER_NAME}); needs parasol/parasol-legacy-claims seeded (workshop-config app-repo-seed)"
 
 # INFO: [ADS] Developer Lightspeed for MTA wiring (optional — never fails the entry state).
-if maas_secret_present; then
-  info "[ADS] maas-credentials present — Developer Lightspeed for MTA is wired (the lab exports GENAI_API_KEY/GENAI_MODEL/GENAI_ENDPOINT from ${NS} in the Dev Spaces workspace terminal; workspaces live in {user}-devspaces, so nothing automounts)"
-else
-  info "[ADS] maas-credentials absent — Developer Lightspeed disabled (graceful degradation); the [OCP] MTA assess/analyze/replatform flow is unaffected"
-fi
+# PRESENCE IS NOT PROOF: the entry hook validates the credential against the endpoint before staging
+# it and records the verdict in maas-config (aiPathAvailable). Report the VERDICT, not the Secret's
+# existence — reporting existence is what let a wrong-provider credential read as "wired" while every
+# model call 401'd (the same defect that broke M23 on cluster ksls5, 2026-07-29).
+case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/dev/null || true)" in
+  true)
+    info "[ADS] maas-credentials staged AND accepted by the model endpoint — Developer Lightspeed for MTA is wired (the lab exports GENAI_API_KEY/GENAI_MODEL/GENAI_ENDPOINT from ${NS} in the Dev Spaces workspace terminal; workspaces live in {user}-devspaces, so nothing automounts)" ;;
+  unverified)
+    info "[ADS] maas-credentials staged but UNPROVEN — the cluster could not reach the model endpoint when this namespace materialized; Developer Lightspeed may 401 (oc logs job/maas-copy-app-modernization-${USER_NAME} -n ${NS})" ;;
+  false)
+    info "[ADS] Developer Lightspeed disabled — no usable MaaS credential ($(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || echo 'reason unrecorded')); the [OCP] MTA assess/analyze/replatform flow is unaffected" ;;
+  *)
+    if maas_secret_present; then
+      info "[ADS] maas-credentials present but UNVALIDATED (entry state predates the credential-validation hook) — re-materialize to get a verdict: ws reset app-modernization --user ${USER_NAME}"
+    else
+      info "[ADS] maas-credentials absent — Developer Lightspeed disabled (graceful degradation); the [OCP] MTA assess/analyze/replatform flow is unaffected"
+    fi ;;
+esac
 # INFO: the shared MTA Hub is a platform-stack concern (openshift-mta), not per-user state.
 info "shared MTA Hub namespace: $(oc get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.mtaNamespace}' 2>/dev/null || echo openshift-mta) (installed by the platform-portfolio mta stack; analysis targets $(oc get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.analysisTargets}' 2>/dev/null || echo 'cloud-readiness,openshift,containerization'))"
 

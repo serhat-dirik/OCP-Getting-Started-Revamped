@@ -73,6 +73,17 @@ check "claims-data PVC is Bound"                        pvc_bound claims-data   
 check "claims-data seed Job succeeded (or cleaned up)"  seed_ok                                      || hint "seed Job present but not Complete — ws reset jobs-batch-kueue --user ${USER_NAME} (check the claims-data-seed-jobs-batch-kueue-${USER_NAME} Job)"
 check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset jobs-batch-kueue --user ${USER_NAME} (check maas-copy-jobs-batch-kueue-${USER_NAME})"
 check "MaaS endpoint/model present (configmap maas-config)" oc get cm maas-config -n "$NS"            || hint "entry app not synced — ws reset jobs-batch-kueue --user ${USER_NAME}"
+# PRESENCE IS NOT PROOF: the check above says the Secret exists, not that its key works. The entry hook
+# validates the credential against the endpoint before staging it and records the verdict here. Reported
+# as INFO because this module's graded outcome is the Kueue queueing behaviour, not the inference —
+# but a `false` here means the batch inference itself will 401. (Reported, not asserted: whether a dead
+# AI path should fail this module's entry state is the module owner's call, not this script's.)
+case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/dev/null || true)" in
+  true)       info "MaaS credential accepted by the model endpoint (live probe at materialization)" ;;
+  unverified) info "MaaS credential staged but UNPROVEN — the cluster could not reach the endpoint when this namespace materialized; batch inference may 401" ;;
+  false)      info "MaaS credential NOT usable ($(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || echo 'reason unrecorded')) — batch inference will fail its model call; queueing/admission beats are unaffected" ;;
+  *)          info "MaaS credential UNVALIDATED (entry state predates the credential-validation hook) — ws reset jobs-batch-kueue --user ${USER_NAME} for a verdict" ;;
+esac
 
 # ClusterQueue is cluster-scoped — attendees can't read it. Assert it only when the caller can
 # (admin/CI); attendees see the same fact via the LocalQueue Active check above.

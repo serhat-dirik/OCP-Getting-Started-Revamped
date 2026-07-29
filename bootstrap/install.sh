@@ -184,7 +184,21 @@ discover_maas_model() {
     err "   401/403 → maas.api_key is wrong, expired, or not entitled on this endpoint"
     err "   404     → maas.endpoint is not an OpenAI-compatible base (it should end in /v1)"
     err "   000     → endpoint unreachable from this machine (DNS / proxy / TLS)"
-    die "refusing to guess a model name: MaaS keys are model-scoped, so a guess fails inside the AI modules rather than here. Fix maas.endpoint / maas.api_key in ${VARS}, or set 'lightspeed: false' to install without the AI modules."
+    # How hard this fails depends on what the key is FOR on this cluster. If we are installing
+    # Lightspeed ourselves the key is a hard dependency of that install, so abort. If Lightspeed was
+    # already here (adopted) the key only feeds the AI *modules*: aborting would deny the operator the
+    # other 22 modules over an optional beat. Their entry-state hooks now validate the credential
+    # themselves and degrade to an explicit aiPathAvailable=false, so a loud warning is the honest
+    # stopping point — the failure is visible here AND recorded per module, not silently swallowed.
+    if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
+      die "refusing to guess a model name: MaaS keys are model-scoped, so a guess fails inside the AI modules rather than here. Fix maas.endpoint / maas.api_key in ${VARS}, or set 'lightspeed: false' to install without the AI modules."
+    fi
+    warn "continuing WITHOUT a usable MaaS credential — the AI beats (agentic-ai, ai-assisted-development,"
+    warn "   app-modernization, jobs-batch-kueue) will report 'AI path unavailable'; every other module is unaffected."
+    warn "   To enable them: fix maas.endpoint / maas.api_key in ${VARS}, re-run this installer, then"
+    warn "   ws reset <module> --user <userN> for each AI module."
+    MAAS_KEY=""
+    return 0
   fi
 
   count="$(printf '%s\n' "$ids" | grep -c . | tr -d ' ')"
@@ -237,7 +251,12 @@ if oc get olsconfig cluster >/dev/null 2>&1; then
   PROVIDER="$(oc get olsconfig cluster -o jsonpath='{.spec.llm.providers[0].type}' 2>/dev/null || echo '?')"
   ok "OpenShift Lightspeed pre-installed (provider: ${PROVIDER}) — reusing it; ai-assist stack skipped"
 fi
-if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
+# Discovery runs whenever a MaaS key is CONFIGURED — not only when we install Lightspeed ourselves.
+# An adopted Lightspeed says nothing about OUR key: on cluster ksls5 (adopted, Azure-OpenAI-wired) the
+# old condition skipped discovery entirely, nothing validated maas.api_key, and the AI modules sourced
+# Lightspeed's Azure AD JWT instead — green install, 401 for every attendee (2026-07-29). If the
+# operator put a key in vars.yaml they mean the AI modules to work; prove it here, at the gate.
+if [[ "$maas_configured" == "true" ]]; then
   discover_maas_model
 fi
 
@@ -768,6 +787,28 @@ if [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]]; then
     --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
   record_once lightspeed_secret_created true
   ok "credentials (openshift-lightspeed/apitoken + model=${MAAS_MODEL}) — MaaS token + model"
+fi
+
+# 2b'. The WORKSHOP'S OWN MaaS credential, in OUR namespace, written whenever vars.yaml carries one —
+# independent of whether Lightspeed is ours, adopted, or absent. This is the secret the AI entry states
+# PREFER, and it exists precisely because the block above does not run on an adopted-Lightspeed cluster:
+# there the modules had only Lightspeed's provider secret to read, and on an Azure-OpenAI wiring that
+# is an Azure AD JWT for a different provider — it staged green and returned 401 for every attendee
+# (cluster ksls5, 2026-07-29). endpoint travels WITH key+model so the entry states never pair a
+# credential from one source with an endpoint from another. Torn down with ogsr-system by the uninstall.
+# MAAS_KEY is blanked by discover_maas_model when the endpoint refused it on an adopted-Lightspeed
+# cluster, so a key that failed its gate is NEVER staged — that is the whole point of this change.
+if [[ "$maas_configured" == "true" && -n "$MAAS_KEY" ]]; then
+  oc create secret generic ogsr-maas-credentials \
+    --from-literal=apitoken="$MAAS_KEY" \
+    --from-literal=model="$MAAS_MODEL" \
+    --from-literal=endpoint="$MAAS_ENDPOINT" \
+    -n "$STATE_NS" --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
+  ok "ogsr-maas-credentials (${STATE_NS}) — the workshop's own MaaS key + model ${MAAS_MODEL} (the AI entry states prefer this over any adopted Lightspeed secret)"
+elif [[ "$maas_configured" == "true" ]]; then
+  warn "MaaS key configured but rejected by ${MAAS_ENDPOINT} — NOT staging it; the AI beats will report 'AI path unavailable' rather than fail at workshop time"
+else
+  info "no MaaS key in ${VARS} — the AI beats degrade to an explicit 'AI path unavailable' state (set maas.api_key + maas.endpoint to enable them)"
 fi
 
 # ── 3. wait for the in-cluster Gitea mirror (git-localize) ────────────────────

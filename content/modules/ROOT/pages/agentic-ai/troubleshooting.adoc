@@ -21,12 +21,13 @@ Each entry is symptom → cause → fix. All were seen (or deliberately induced)
 
 *Symptom:* Every question returns HTTP `502` and a body like `{"error":"model authentication failed - check the MaaS key ...","authFailure":true,...}`.
 
-*Cause:* The model server rejected the agent's key with a `401`, and the agent *degrades gracefully* to a clean `502` instead of a stack trace. Three different key problems produce the same `502`, and the model server's own message tells them apart. Read it in the agent log (the `cut` keeps the diagnosis and drops the rejected key itself, so nothing sensitive lands in your terminal):
+*Cause:* The model server rejected the agent's key with a `401`, and the agent *degrades gracefully* to a clean `502` instead of a stack trace. Three different key problems produce the same `502`, and the model server's own message tells them apart. Read it in the agent log — the `sed` replaces the rejected key (the server echoes it back in full) and the `cut` trims the rest, so nothing sensitive lands in your terminal:
 
 [source,sh,role=execute,subs="attributes"]
 ----
 oc logs deploy/parasol-agent -n {user}-ai --tail=200 \
-  | grep -i "Agent model call failed" | tail -1 | cut -c1-200
+  | grep -i "Agent model call failed" | tail -1 \
+  | sed 's/Received=[^,]*/Received=<redacted>/' | cut -c1-240
 ----
 
 [cols="1,2"]
@@ -43,7 +44,17 @@ oc logs deploy/parasol-agent -n {user}-ai --tail=200 \
 | The key is fine but *model-scoped* to a different model than `GENAI_MODEL`. Workshop MaaS keys grant one model; the key and the `maas-config` `model` value must name the same one.
 |===
 
-*Fix:* `ws prep agentic-ai --yes` re-copies the key and re-converges the model/endpoint into your namespace — that clears the expired case. The other two are *platform-side*: the source credential is wrong or scoped to another model, so tell your instructor rather than editing the Secret yourself. Note the *entry* checks still pass 6/6 with a bad key — only live `/agent/ask` and the 7th (end) check need a working key, because only they call the model.
+*Fix:* `ws prep agentic-ai --yes` re-resolves the key and re-converges the model/endpoint into your namespace — that clears the expired case. The other two are *platform-side*: the source credential is wrong or scoped to another model, so tell your instructor rather than editing the Secret yourself.
+
+*You should not normally reach this page for a wrong-kind key.* The entry state now validates the credential before staging it: it prefers the workshop's own MaaS credential over any credential belonging to a platform assistant on the cluster, rejects anything that is structurally not an API key, and spends one token proving the rest against the endpoint. Its verdict is recorded where you can read it:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get cm maas-config -n {user}-ai \
+  -o jsonpath='{.data.aiPathAvailable}{"  "}{.data.aiPathReason}{"  "}{.data.credentialSource}{"\n"}'
+----
+
+`true` means the endpoint accepted the key when your namespace was materialized. `false` names the reason (`credential-is-a-jwt-not-an-api-key`, `credential-rejected-by-endpoint`, `no-maas-credential`) and `ws prep` will have printed the same reason. `unverified` means the cluster could not reach the endpoint at that moment, so the key was staged unproven — a `502` after that is expected and is an environment problem, not a key problem. `ws verify agentic-ai` reports the same three states as ✅ / ❌ / ⚠.
 
 == `POST /agent/ask` returns `400` "question is required"
 
