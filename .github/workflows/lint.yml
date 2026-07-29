@@ -237,6 +237,39 @@ jobs:
           fi
           python3 tools/lint/image-pull-policy-guard.py
 
+  hook-env:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Hook scripts must not reference undefined variables
+        # Entry-state Jobs embed bash that runs under `set -euo pipefail`. A ${VAR} that is neither a
+        # declared container env var nor assigned in-script is FATAL at the referencing line — and it
+        # lands on the least-exercised branch, which is nearly always the error path. Measured on
+        # ksls5 2026-07-29: jobs-batch-kueue's hook died with `DST_USER: unbound variable` PART-WAY
+        # THROUGH PRINTING ITS OWN ERROR, taking its deliberate exit-0 degrade with it. The Job failed
+        # 5/5 and the module's sync failed on exactly the clusters meant to degrade quietly. d53dccb
+        # fixed it; this stops it returning.
+        run: |
+          rc=0
+          python3 tools/lint/hook-env-guard.py --self-test || rc=$?
+          # Exactly 1 = the DST_USER shape and a Template-nested script are both detected, AND
+          # inline/loop/read/local assignments are correctly NOT reported. 0 = blind; 2 = a shape went
+          # undetected or a benign assignment fired. Either way detection is unproven.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::hook-env-guard self-test must exit 1 (canary shapes detected);" \
+                 "got rc=$rc. Detection is unproven — refusing to trust a clean tree scan."
+            exit 1
+          fi
+          python3 tools/lint/hook-env-guard.py
+
   module-order:
     runs-on: ubuntu-latest
     steps:
