@@ -857,22 +857,34 @@ oc rollout restart deploy/parasol-claims -n $NS >/dev/null
 wait
 ----
 
-// [CAPTURE-VERIFY] the ok count varies; `dropped=0` is the deterministic expectation once the boot-time reseed is removed.
-// STILL OPEN after the 2026-07-28 quota fix, for the same reason as the first probe: on a cluster that
-// cannot place the surge pod, this reads dropped=0 because nothing rolled — a false pass, not a result.
-// Capture it only from a run where `oc rollout status` reports "successfully rolled out".
-.Expected output (zero dropped — deterministically, because the reseed is gone)
+// Grounded live on OCP 4.22.5 as user2, 2026-07-29, at limits.cpu=1 / three replicas / quota 4300m of 6.
+// FOUR probe runs, every one on a roll `oc rollout status` confirmed as "successfully rolled out" (so
+// none is the wedged false pass the WARNING below describes):
+//   with schema-management=none (this step's full fix): ok=285 dropped=1 · ok=282 dropped=3
+//   with the reseed still on, strategy hardened only:   ok=270 dropped=3 · ok=266 dropped=4
+// The earlier "deterministically zero" claim did NOT survive measurement — see the NOTE below.
+.Expected output (single digits, down from ~15 — your exact numbers will differ)
 [source,texinfo]
 ----
-hardened roll: ok=274 dropped=0
+hardened roll: ok=285 dropped=1
 ----
 
+[NOTE]
+.Why a drop or two survives — and why this is still the win
+====
+`maxUnavailable: 0` guarantees *capacity*, not that every in-flight request lands.
+When a pod is retired, its removal from the Service's endpoints propagates through the network layer asynchronously, so for a fraction of a second a request can still be routed to a pod that is already shutting down.
+Four measured runs on this cluster: *1* and *3* drops out of ~285 with the reseed removed, *3* and *4* with the reseed still in place — against ~*15* before any of this exercise's changes.
+Read the shape, not the digit: the cause you removed was structural (every new pod re-seeded the shared database on boot), and what is left is the ordinary, bounded cost of retiring a pod.
+Chasing it to a true zero is a different technique — a `preStop` hook plus graceful shutdown, so the pod keeps serving while it is being de-registered.
+====
+
 [WARNING]
-.`dropped=0` on its own does *not* mean the hardened roll succeeded
+.A low `dropped` count on its own does *not* mean the hardened roll succeeded
 ====
 The probe only counts failed requests. If the new pods can never be created — a quota refusal, or no node with room for the surge pod — the old ones keep serving and the probe happily prints `dropped=0` for the whole window while *nothing rolls*.
 `maxUnavailable: 0` is exactly what makes that failure invisible: it is doing its job of never dropping the floor, so the only symptom is that the roll doesn't finish.
-`dropped=0` only counts if the roll actually happened — always confirm it landed before you believe the number.
+A clean number only counts if the roll actually happened — always confirm it landed before you believe it.
 ====
 
 [source,sh,role=execute]
@@ -960,7 +972,7 @@ Back at `minAvailable: 1`, a drain can evict one claims pod (the reschedule resp
 
 [.checkpoint]
 ****
-✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~15 s) that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured a drop count of *zero*, and protected the service with a `PodDisruptionBudget` that reported `ALLOWED DISRUPTIONS: 2` then *blocked* an eviction once exhausted.
+✔ *Verify:* You traced the drops to a *boot-time reseed* of the shared database (a planted `CLM-1001` value reverted to its seed after one pod restart), fixed it at the source with `schema-management=none` (the value now *survives* a restart), sped the cold-start with a raised CPU limit (~27 s → ~15 s) that still fits the namespace's `limits.cpu` quota, held *available replicas flat at 3* through a roll (18/18 samples) *and confirmed the roll actually landed* with `oc rollout status`, re-measured the drop count down to *single digits* (from ~15), and protected the service with a `PodDisruptionBudget` that reported `ALLOWED DISRUPTIONS: 2` then *blocked* an eviction once exhausted.
 ****
 
 == 6. Read how the platform shapes the cluster (instructor demo)
