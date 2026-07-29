@@ -48,9 +48,28 @@ seed_ok() {
   oc get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null | grep -q True
 }
 
-# At least one Job in the namespace has Completed (end state).
-any_job_complete() {
-  oc get jobs -n "$NS" -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Complete")].status}{"\n"}{end}' 2>/dev/null | grep -q True
+# An ATTENDEE-created Job has Completed (end state).
+#
+# This used to scan every Job in the namespace and pass if ANY had Complete=True. It could not fail:
+# `ws start` itself materializes two Jobs that complete — claims-data-seed-… and maas-copy-… — so the
+# check went green on a namespace where the attendee had done nothing, while the very Job its own hint
+# names ("run the monthly-statement Job") did not exist. Measured on ksls5 2026-07-29:
+#
+#   claims-data-seed-jobs-batch-kueue-user1 -> Complete=True     <- ws start artifact
+#   maas-copy-jobs-batch-kueue-user1        -> Complete=True     <- ws start artifact
+#   Error from server (NotFound): jobs.batch "monthly-statement" not found
+#
+# An assertion is worth exactly what it DISTINGUISHES, and this one distinguished nothing. Both entry
+# Jobs carry workshop.redhat.com/owner=ogsr, which the attendee's own Jobs do not — so excluding our
+# own artifacts is the discriminator, and it was already in the data.
+#
+# Label-absence is expressed as a selector rather than filtered in shell: `!key` is a real selector,
+# and letting the API server do it means a Job created by some future entry-state addition is excluded
+# the moment it carries the owner label, without this function needing to learn its name.
+any_attendee_job_complete() {
+  oc get jobs -n "$NS" -l '!workshop.redhat.com/owner' \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Complete")].status}{"\n"}{end}' \
+    2>/dev/null | grep -q True
 }
 
 # At least one Kueue Workload carries Admitted=True (admission control was exercised).
@@ -103,7 +122,7 @@ fi
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / `ws solve jobs-batch-kueue` looks like) -----------
-  check "at least one Job has Completed"                 any_job_complete                             || hint "run the monthly-statement Job (lab exercise 1) — or ws solve jobs-batch-kueue --user ${USER_NAME}"
+  check "an attendee-created Job has Completed"          any_attendee_job_complete                    || hint "run the monthly-statement Job (lab exercise 1) — or ws solve jobs-batch-kueue --user ${USER_NAME}"
   check "nightly-statement CronJob exists"               oc get cronjob nightly-statement -n "$NS"    || hint "create the CronJob (lab exercise 4) — or ws solve jobs-batch-kueue --user ${USER_NAME}"
   check "a Kueue Workload shows Admitted=True"           any_workload_admitted                        || hint "submit a Job through the LocalQueue (lab exercise 5/6) — or ws solve jobs-batch-kueue --user ${USER_NAME}"
 fi

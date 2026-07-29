@@ -101,8 +101,18 @@ else
   # correct solution stays green (rule 14). READY, not just present: a crash-looping modernized deploy
   # (see the READINESS NOTE — it currently does) fails HERE, which deploy_present missed. RED until the
   # crash-loop fix lands is correct and desired.
+  # The hint DISCRIMINATES, because one red had two entirely different causes and the reader could not
+  # tell them apart: the deployment being ABSENT (the attendee simply has not done the lab — expected,
+  # not a fault) versus PRESENT-BUT-NOT-READY (something is actually broken, e.g. the known crash-loop).
+  # Offering both hypotheses in one hint made the reader do the triage the script was able to do for
+  # them — and no_modernized() was already sitting three functions up, used only in the entry branch.
+  # Naming the wrong cause first is how a correct ❌ gets ignored.
   check "modernized service parasol-claims-modernized deployed + Ready" deploy_ready parasol-claims-modernized \
-    || hint "parasol-claims-modernized is not Ready — if it CrashLoops it needs QUARKUS_DATASOURCE_ACTIVE=false (DB-free), the crash-loop fix; otherwise deploy it (ws solve app-modernization --user ${USER_NAME})"
+    || { if no_modernized; then
+           hint "parasol-claims-modernized does not exist — the lab has not been done yet. That is the expected state on a fresh entry, not a fault (ws solve app-modernization --user ${USER_NAME} materializes it)"
+         else
+           hint "parasol-claims-modernized EXISTS but is not Ready — this one is broken, not undone. If it CrashLoops it needs QUARKUS_DATASOURCE_ACTIVE=false (DB-free); check: oc logs deploy/parasol-claims-modernized -n ${NS}"
+         fi; }
 fi
 
 verify_summary
