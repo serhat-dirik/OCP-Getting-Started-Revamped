@@ -139,22 +139,19 @@ KUSTOMIZE_DIRS = (
 
 # --------------------------------------------------------------------------------- exemptions
 
-EXEMPTIONS = [
-    {
-        "id": "knative-service",
-        # serving.knative.dev/v1 Service — the ksvc in serverless-zero-to-hero and eventing-deep-dive.
-        "group": "serving.knative.dev",
-        "kind": "Service",
-        "reason":
-            "Knative resolves the image tag to an immutable DIGEST when it creates the Revision, so "
-            "the pod already pulls by digest and the mutable-tag defect cannot reach it. Adding "
-            "Always would only buy a registry round-trip on every scale-from-zero — and it would buy "
-            "it in serverless-zero-to-hero, the one module whose cold-start timings are a measured "
-            "teaching artifact. A rebuilt image reaches a ksvc through `ws reset`, which creates a "
-            "new Revision. NOTE: tag resolution can be switched off per-registry, so this premise is "
-            "not assumed — check_knative_premise() re-derives it from the portfolio on every run.",
-    },
-]
+# DELIBERATELY EMPTY. There was one entry — serving.knative.dev/v1 Service — resting on the premise
+# that Knative resolves an image tag to an immutable digest at Revision creation, so a ksvc could not
+# suffer the mutable-tag defect. The premise is false HERE, and this guard is what caught it: the
+# portfolio sets registries-skipping-tag-resolving for the internal registry
+# (platform-portfolio/components/serverless/knative-serving.yaml), which is exactly the switch that
+# turns that resolution off for our images. Confirmed against the live cluster's config-deployment
+# 2026-07-29. Both ksvcs now carry Always like everything else, and the exemption is retired.
+#
+# check_knative_premise() below is KEPT, not deleted: it re-derives the setting from the CR on every
+# run, so if anyone ever removes the internal registry from that skip list, the guard says so and the
+# exemption can be reconsidered on evidence rather than on memory. That re-derivation is the reason
+# this was caught at all — an exemption whose premise is a comment is an exemption nobody rechecks.
+EXEMPTIONS: list[dict] = []
 
 # The portfolio CR whose config decides whether the Knative exemption's premise holds.
 KNATIVE_SERVING_CR = "platform-portfolio/components/serverless/knative-serving.yaml"
@@ -393,19 +390,21 @@ def knative_premise_findings(path: pathlib.Path, label: str) -> list[str]:
         skipping = (((document.get("spec") or {}).get("config") or {})
                     .get("deployment") or {}).get("registries-skipping-tag-resolving")
         if isinstance(skipping, str) and INTERNAL_REGISTRY.rstrip("/") in skipping:
-            return [
-                f"{label} sets registries-skipping-tag-resolving to {skipping!r}, which INCLUDES "
-                "the internal registry that holds every workshop-built image.",
-                "That is precisely the switch that turns OFF tag->digest resolution, so a ksvc on "
-                "ogsr-parasol-images/parasol-claims:1.1 keeps the MUTABLE TAG in its Revision and "
-                "pulls it with the IfNotPresent default — the exact defect 4efc931 fixed everywhere "
-                "else.",
-                "The exemption's stated premise ('Knative resolves the tag to an immutable digest') "
-                "does not hold for OUR images on a cluster built from this portfolio. Either drop "
-                "the exemption and set Always on the two ksvcs, or drop the internal registry from "
-                "registries-skipping-tag-resolving. This is a PM call — the guard reports it, it "
-                "does not decide it.",
-            ]
+            # EXPECTED STATE, so: silence. The skip list includes our registry, Knative therefore
+            # keeps the mutable tag in the Revision, and both ksvcs carry imagePullPolicy: Always to
+            # compensate. That is handled, and a warning repeated on every green run is how a project
+            # teaches itself to stop reading warnings.
+            return []
+        return [
+            f"{label} no longer lists the internal registry in registries-skipping-tag-resolving.",
+            "That restores Knative's default tag->digest resolution for workshop-built images, so a "
+            "ksvc would pull by digest and the mutable-tag defect could not reach it.",
+            "Consequence worth acting on: the imagePullPolicy: Always on the two ksvcs "
+            "(serverless-zero-to-hero, eventing-deep-dive) becomes an avoidable registry round-trip "
+            "on every scale-from-zero — and it is paid in the one module whose cold-start timings "
+            "are a measured teaching artifact. Re-examine the exemption, do not just delete this "
+            "check. The guard reports the change; the call is a human's.",
+        ]
     return []
 
 
@@ -454,16 +453,24 @@ def self_test(root: pathlib.Path) -> int:
 
     # (2) The renderer + walker + policy check, against a fixture chart that reproduces every shape
     #     the real tree has: a plain Deployment, a Deployment emitted only from a NAMED TEMPLATE (the
-    #     config-multienv blind spot), a PodSpec nested in a Template.objects[], an exempt Knative
-    #     Service, and upstream images that must NOT be demanded.
+    #     config-multienv blind spot), a PodSpec nested in a Template.objects[], two Knative Services,
+    #     and upstream images that must NOT be demanded.
+    #
+    #     The two ksvcs deliberately carry NO pull policy and are now expected to be DETECTED. They
+    #     used to assert the opposite — that they were exempt — and that assertion is what would have
+    #     locked in a false premise: EXEMPTIONS held a Knative entry on the belief that Knative
+    #     resolves the tag to a digest, which this portfolio switches off for our own registry. A
+    #     canary that asserts an exemption is a canary that defends a mistake. Keeping the ksvcs
+    #     policy-less and demanding they be flagged tests the thing that actually protects attendees.
     canary_chart = fixture / "chart"
     expectations = [
         # (solve, expected violating object names, expected workshop-container count)
         #   solve=false — canary-plain-bad(1) + canary-plain-good(1) + canary-init-good(2) = 4
         #   solve=true  — the above + canary-helper-{good,bad}(2) + canary-template-bad(1)
-        #                 + two exempt ksvcs(2)                                            = 9
+        #                 + the two ksvcs(2)                                               = 9
         ("false", {"canary-plain-bad"}, 4),
-        ("true", {"canary-plain-bad", "canary-helper-bad", "canary-template-bad"}, 9),
+        ("true", {"canary-plain-bad", "canary-helper-bad", "canary-template-bad",
+                  "canary-ksvc-a", "canary-ksvc-b"}, 9),
     ]
     for solve, expected_bad, expected_workshop in expectations:
         values = {"user": "user1", "clusterDomain": "example.com", "solve": solve}
@@ -487,9 +494,13 @@ def self_test(root: pathlib.Path) -> int:
             failures.append(f"canary (solve={solve}): expected {expected_workshop} workshop "
                             f"containers, saw {stats['workshop']}. The walker is not reaching every "
                             "shape the fixture plants.")
-        if solve == "true" and stats["exempt"] != 2:
-            failures.append(f"canary (solve={solve}): expected 2 exempt Knative containers, saw "
-                            f"{stats['exempt']}.")
+        # Nothing is exempt any more, and that must stay true by assertion rather than by nobody
+        # noticing: a re-introduced exemption silently turns real violations into ignored ones, which
+        # is exactly how the Knative case survived. If a future exemption is genuinely warranted, this
+        # line is where the evidence for it has to be re-stated.
+        if stats["exempt"] != 0:
+            failures.append(f"canary (solve={solve}): expected 0 exempt containers, saw "
+                            f"{stats['exempt']}. An exemption was re-introduced — justify it here.")
 
     # (3a) Every declared container key must actually be honoured by the walker. Asserted in Python
     #      rather than as a chart fixture: the devfile `container` key has no workshop-image instance
@@ -524,12 +535,18 @@ def self_test(root: pathlib.Path) -> int:
 
     # (4) The Knative premise re-derivation, both ways. Written to a temp dir, never into the tree:
     #     a fixture that only exists during the run cannot be committed by accident.
+    #
+    #     The polarity is the inverse of what it was, and the inversion is the point. It used to warn
+    #     when the skip list INCLUDED our registry, because an exemption depended on it not doing so.
+    #     That exemption is gone — both ksvcs now carry Always — so skip-present is the handled state
+    #     and silence is correct. What is worth reporting is the OPPOSITE change: if our registry ever
+    #     leaves that list, digest resolution returns and the Always becomes a cost to re-examine.
     premise_off = {"kind": "KnativeServing", "spec": {"config": {"deployment": {}}}}
     premise_on = {"kind": "KnativeServing", "spec": {"config": {"deployment": {
         "registries-skipping-tag-resolving": INTERNAL_REGISTRY.rstrip("/")}}}}
     with tempfile.TemporaryDirectory() as tmp:
-        for document, should_warn, label in ((premise_off, False, "no skip list"),
-                                             (premise_on, True, "internal registry in skip list")):
+        for document, should_warn, label in ((premise_off, True, "no skip list"),
+                                             (premise_on, False, "internal registry in skip list")):
             probe = pathlib.Path(tmp) / "knative-serving.yaml"
             probe.write_text(yaml.safe_dump(document), encoding="utf-8")
             if bool(knative_premise_findings(probe, label)) != should_warn:
