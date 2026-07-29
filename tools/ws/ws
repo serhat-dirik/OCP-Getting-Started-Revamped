@@ -17,6 +17,7 @@
 #   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
 #   ws diag [--user U] [<module>]    SA/admin: read-only troubleshooting bundle for a stuck attendee
 #   ws maas show|set [options]       SA/admin: inspect / change the MaaS model+key (no reinstall)
+#   ws rebuild-images [--check]      SA/admin: rebuild workshop images and roll every stale consumer
 #
 # <module> is a position number (m08) OR a slug (app-security-testing) — both resolve via modules.yaml
 # (position → slug); everything internal keys off the slug. `ws list` shows the mapping.
@@ -1219,6 +1220,473 @@ cmd_git_refresh() {
   elif [[ "$all" == true || -n "$target" || ${#excludes[@]} -gt 0 ]]; then
     info "note: --user/--all/--exclude take effect only with --restart-terminals (bare git-refresh never restarts pods)."
   fi
+}
+
+# ── ws rebuild-images: make a rebuilt image REACH every running consumer ──────────────────────────
+# `imagePullPolicy: Always` (4efc931) makes a pod restart LAND a rebuilt image. It does not make a
+# rebuild REACH anything: a running container keeps the digest it was started with until something
+# rolls it. Between `oc start-build` and a live session, "now roll every consumer in every per-user
+# namespace" is the step a human forgets — and that consumer list cannot be written down in advance,
+# because WHICH per-user namespaces exist depends on which entry states are materialized right now.
+# The hand-run this command was specified from found 9 workloads across 4 namespaces that no static
+# list would have predicted, so the enumeration below is dynamic and never a hardcoded namespace set.
+#
+# The comparison is at the POD — containerStatuses[].imageID — against the ImageStream tag's CURRENT
+# digest. A workload's spec says `…/parasol-claims:1.1` before AND after a rebuild, so the spec can
+# never answer "is the running container the new build". Only the digest can. That is also what makes
+# the write path safe to re-run: a workload already on the current digest is not restarted, so a
+# rebuild that changed nothing restarts nothing — restarting an attendee's namespace mid-lab costs
+# them their work, and the digest compare is the whole reason this command may run at all.
+#
+# --check is the read-only half (scan + compare, no build, no restart, exit 1 on drift) — the piece
+# `ws doctor` and CI can consume. Deliberately NOT folded into `ws git-refresh`: that command is
+# non-disruptive by contract and build agents call it constantly. Same opt-in shape as its
+# --restart-terminals, including the "a disruptive scope must be named" rule (--user U or --all).
+REBUILD_TIMEOUT="${WS_REBUILD_TIMEOUT:-300}"   # per-workload rollout/readiness budget, seconds
+REBUILD_TMP=""                                 # per-run work dir (namespace-owner map + digest cache)
+REBUILD_NSMAP=""
+REBUILD_DIGESTS=""
+
+rebuild_owned_ns() {  # → "ns<TAB>owner" for every namespace this command recognizes as the workshop's:
+  # each attendee-labelled namespace (owner = that attendee) plus the shared images namespace
+  # (owner = "shared"). workshop.redhat.com/user is the same label ws status/ws diag already read.
+  oc get ns -l workshop.redhat.com/user \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\n"}{end}' 2>/dev/null || true
+  printf '%s\tshared\n' "$PARASOL_IMAGES_NS"
+}
+
+rebuild_begin() {  # open the per-run caches (namespace-owner map + ImageStreamTag digests). Pair with
+  # rebuild_end. This is the whole setup the READ-ONLY core needs, so a future `ws doctor` drift row is
+  #   rebuild_begin; rebuild_scan "" "" > "$rows"; rebuild_print_table "$rows"; rebuild_end
+  # and inherits none of the build/restart path.
+  REBUILD_TMP="$(mktemp -d)"
+  REBUILD_NSMAP="${REBUILD_TMP}/nsmap"
+  REBUILD_DIGESTS="${REBUILD_TMP}/digests"
+  rebuild_owned_ns > "$REBUILD_NSMAP"
+  : > "$REBUILD_DIGESTS"
+}
+
+rebuild_end() {  # drop the per-run caches; safe to call twice
+  if [[ -n "$REBUILD_TMP" && -d "$REBUILD_TMP" ]]; then rm -rf "$REBUILD_TMP"; fi
+  REBUILD_TMP=""; REBUILD_NSMAP=""; REBUILD_DIGESTS=""
+  return 0
+}
+
+rebuild_ns_owner() {  # ns → its owner from the per-run map, or empty when the namespace is not ours
+  [[ -n "$REBUILD_NSMAP" && -f "$REBUILD_NSMAP" ]] || return 0
+  awk -F'\t' -v n="$1" '$1==n{print $2; exit}' "$REBUILD_NSMAP"
+}
+
+rebuild_image_parts() {  # image-ref → "srcns<TAB>name<TAB>tag|digest<TAB>value"; 1 when the ref has no
+  # <ns>/<name> shape at all. Splitting from the RIGHT is what keeps the registry's own port out of it:
+  # `…svc:5000/ogsr-parasol-images/parasol-claims:1.1` has two colons and only the last one is a tag.
+  local ref="$1" last rest ns
+  last="${ref##*/}"                  # parasol-claims:1.1  ·  parasol-claims@sha256:…
+  rest="${ref%/*}"                   # image-registry…svc:5000/ogsr-parasol-images
+  [[ "$rest" == */* ]] || return 1   # no namespace segment (a bare registry/name) → cannot be ours
+  ns="${rest##*/}"
+  [[ -n "$ns" && -n "$last" ]] || return 1
+  if [[ "$last" == *@* ]]; then
+    printf '%s\t%s\tdigest\t%s\n' "$ns" "${last%%@*}" "${last#*@}"
+  elif [[ "$last" == *:* ]]; then
+    printf '%s\t%s\ttag\t%s\n' "$ns" "${last%%:*}" "${last##*:}"
+  else
+    printf '%s\t%s\ttag\tlatest\n' "$ns" "$last"
+  fi
+}
+
+istag_digest() {  # ns name tag → that ImageStreamTag's CURRENT digest (sha256:…), empty when absent.
+  # Cached per run: the same tag is consumed by many workloads and the answer cannot change mid-scan.
+  # NOTE the tags in ogsr-parasol-images (1.0/1.1) TRACK :latest — the BuildConfig writes :latest and
+  # every tracking tag moves with it (verified on-cluster 2026-07-29) — so reading the tag the workload
+  # actually names, rather than the build output tag, is correct for pinned and tracking tags alike.
+  local key="${1}/${2}:${3}" hit digest
+  if [[ -n "$REBUILD_DIGESTS" && -f "$REBUILD_DIGESTS" ]]; then
+    hit="$(awk -F'\t' -v k="$key" '$1==k{print $2; exit}' "$REBUILD_DIGESTS")"
+    if [[ -n "$hit" ]]; then
+      [[ "$hit" == "-" ]] && return 0
+      echo "$hit"; return 0
+    fi
+  fi
+  digest="$(oc get istag "${2}:${3}" -n "$1" -o jsonpath='{.image.metadata.name}' 2>/dev/null || true)"
+  if [[ -n "$REBUILD_DIGESTS" && -f "$REBUILD_DIGESTS" ]]; then
+    printf '%s\t%s\n' "$key" "${digest:--}" >> "$REBUILD_DIGESTS"
+  fi
+  echo "$digest"
+}
+
+rebuild_enumerate() {  # → TSV "kind ns workload selector container image" for EVERY workload container
+  # on the cluster. The caller filters to ours; enumerating first and filtering on the image's SOURCE
+  # namespace is what keeps the command honest when a new entry state invents a namespace nobody listed.
+  # go-template (not jq — no jq anywhere in this repo's shell tooling) because only a template can walk
+  # the selector MAP into a label query. CronJobs keep their containers one level deeper, under
+  # .spec.jobTemplate; ranging over a missing path on unstructured JSON is a no-op, so both paths emit.
+  #
+  # The selector falls back to a literal "-" rather than the empty string, and that is load-bearing: TAB
+  # is IFS *whitespace*, so `IFS=$'\t' read` COLLAPSES a run of tabs and an empty field silently shifts
+  # every later field left. A CronJob has no .spec.selector, so emitting "" for it made the reader bind
+  # the container name to the image column and drop the row entirely — every CronJob vanished from the
+  # scan without a word (caught on ksls5 2026-07-29 with a probe CronJob that never appeared).
+  # shellcheck disable=SC2016  # $k/$ns/$n/$s are go-template variables; shell expansion would break it
+  local tmpl='{{range .items}}{{$k := .kind}}{{$ns := .metadata.namespace}}{{$n := .metadata.name}}{{$s := ""}}{{range $kk, $vv := .spec.selector.matchLabels}}{{$s = printf "%s%s=%s," $s $kk $vv}}{{end}}{{if not $s}}{{$s = "-"}}{{end}}{{range .spec.template.spec.containers}}{{$k}}{{"\t"}}{{$ns}}{{"\t"}}{{$n}}{{"\t"}}{{$s}}{{"\t"}}{{.name}}{{"\t"}}{{.image}}{{"\n"}}{{end}}{{range .spec.jobTemplate.spec.template.spec.containers}}{{$k}}{{"\t"}}{{$ns}}{{"\t"}}{{$n}}{{"\t"}}{{$s}}{{"\t"}}{{.name}}{{"\t"}}{{.image}}{{"\n"}}{{end}}{{end}}'
+  oc get deployments,statefulsets,daemonsets,cronjobs -A -o go-template="$tmpl" 2>/dev/null || true
+  # Knative Services are a SEPARATE query on purpose: their kind is the ambiguous "Service", they have no
+  # spec selector, and a single-container ksvc usually names no container at all — the pod's container is
+  # then Knative's own `user-container`.
+  #
+  # Their pods are matched by the revisions currently RECEIVING TRAFFIC, not by the service label. Two
+  # reasons, both measured on ksls5 2026-07-29: a ksvc that was just given a new Revision keeps the old
+  # Revision's pods Running (not Terminating) until they scale down, so a service-wide match reports the
+  # freshly-rolled service as still stale; and a solve-state traffic split serves TWO revisions on
+  # purpose, so "the latest one" would under-report. .status.traffic is exactly "what a request can hit".
+  if oc get crd services.serving.knative.dev >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # $ns/$n/$r/$sel are go-template variables, not shell ones
+    local ktmpl='{{range .items}}{{$ns := .metadata.namespace}}{{$n := .metadata.name}}{{$r := ""}}{{range .status.traffic}}{{if .revisionName}}{{if $r}}{{$r = printf "%s,%s" $r .revisionName}}{{else}}{{$r = printf "%s" .revisionName}}{{end}}{{end}}{{end}}{{$sel := printf "serving.knative.dev/service=%s" $n}}{{if $r}}{{$sel = printf "serving.knative.dev/revision in (%s)" $r}}{{end}}{{range .spec.template.spec.containers}}KnativeService{{"\t"}}{{$ns}}{{"\t"}}{{$n}}{{"\t"}}{{$sel}}{{"\t"}}{{if .name}}{{.name}}{{else}}user-container{{end}}{{"\t"}}{{.image}}{{"\n"}}{{end}}{{end}}'
+    oc get services.serving.knative.dev -A -o go-template="$ktmpl" 2>/dev/null || true
+  fi
+}
+
+rebuild_pod_digests() {  # ns selector container → the digest each RUNNING pod's container is ACTUALLY on
+  # (one per line). Terminating pods are excluded so a re-verify run immediately after a rollout is not
+  # fooled by the outgoing ReplicaSet, and non-Running pods are excluded because they have no imageID yet.
+  local ns="$1" sel="${2%,}" cname="$3"
+  [[ -n "$sel" && "$sel" != "-" ]] || return 0   # no selector (a CronJob) → no long-lived pod to read
+  oc get pods -n "$ns" -l "$sel" \
+    -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{if eq .status.phase "Running"}}{{range .status.containerStatuses}}{{.name}}{{"\t"}}{{.imageID}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' 2>/dev/null \
+    | awk -F'\t' -v c="$cname" '$1==c && $2 ~ /@/ {sub(/^.*@/, "", $2); print $2}'
+}
+
+rebuild_scan() {  # scope_user image_filter → one TSV row per workload CONTAINER we own:
+  #   kind ns workload container owner module src want running stale state
+  # state: current · stale · no-pods · pinned · no-tag.  Pure and read-only — this and rebuild_image_parts
+  # are the reusable core `ws doctor` can call later without inheriting any of the write path.
+  local scope="$1" filter="$2"
+  local kind ns name sel cname image parts src_ns src_name reftype refval
+  local wl_owner want module running stale d state
+  while IFS=$'\t' read -r kind ns name sel cname image; do
+    [[ -n "$kind" && -n "$image" ]] || continue
+    # Knative runs each Revision as its OWN Deployment (<revision>-deployment, selector keyed by
+    # serving.knative.dev/revisionUID). Reporting that Deployment would double-count the ksvc row below
+    # it and invite an `oc rollout restart` against a resource the Serving controller owns — restarting
+    # a Revision's pods does not give the ksvc a new Revision, so it would look fixed and not be.
+    case "$sel" in *serving.knative.dev/revisionUID*) continue ;; esac
+    parts="$(rebuild_image_parts "$image")" || continue
+    IFS=$'\t' read -r src_ns src_name reftype refval <<< "$parts"
+    # Ours only if the image is BUILT in a namespace the workshop owns: ogsr-parasol-images (the shared
+    # images) or an attendee namespace (a per-user pipeline build — on this cluster that is
+    # <user>-cicd/parasol-claims:latest, built by the module's own Tekton run, not a <user>-dev build).
+    [[ -n "$(rebuild_ns_owner "$src_ns")" ]] || continue
+    if [[ -n "$filter" && "$src_name" != "$filter" ]]; then continue; fi
+    # Scope is the WORKLOAD's namespace, not the image's: --user user2 must re-roll what user2 runs.
+    wl_owner="$(rebuild_ns_owner "$ns")"
+    [[ -n "$wl_owner" ]] || wl_owner="shared"
+    if [[ -n "$scope" && "$wl_owner" != "$scope" ]]; then continue; fi
+    # The module label is read ONLY for the Knative branch, which is the one place a row turns into a
+    # `ws reset <module> --user <u>` instruction. Two reasons not to read it for every row: it would be
+    # one extra API call per workload on the hot path, and "KnativeService" is this command's OWN label
+    # for the kind — `oc get KnativeService` is not a resource, so the lookup has to say `ksvc` anyway.
+    module="-"
+    if [[ "$kind" == "KnativeService" ]]; then
+      module="$(oc get ksvc "$name" -n "$ns" -o jsonpath='{.metadata.labels.workshop\.redhat\.com/module}' 2>/dev/null || true)"
+    fi
+
+    if [[ "$reftype" == "digest" ]]; then
+      # Already pinned to a digest: it cannot drift from a moving tag, so there is nothing to compare
+      # and nothing a restart would change.
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t0\t0\tpinned\n' \
+        "$kind" "$ns" "$name" "$cname" "$wl_owner" "${module:--}" "${src_ns}/${src_name}@digest" "$refval"
+      continue
+    fi
+    want="$(istag_digest "$src_ns" "$src_name" "$refval")"
+    running=0; stale=0
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      running=$((running + 1))
+      if [[ -n "$want" && "$d" != "$want" ]]; then stale=$((stale + 1)); fi
+    done < <(rebuild_pod_digests "$ns" "$sel" "$cname")
+    if [[ -z "$want" ]]; then
+      state="no-tag"
+    elif [[ "$running" -eq 0 ]]; then
+      state="no-pods"
+    elif [[ "$stale" -gt 0 ]]; then
+      state="stale"
+    else
+      state="current"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$kind" "$ns" "$name" "$cname" "$wl_owner" "${module:--}" \
+      "${src_ns}/${src_name}:${refval}" "${want:--}" "$running" "$stale" "$state"
+  done < <(rebuild_enumerate)
+}
+
+rebuild_state_mark() {  # state → the ✅/❌/➖ this row prints as (same vocabulary as every other command)
+  case "$1" in
+    current) echo "✅ current" ;;
+    stale)   echo "❌ stale" ;;
+    no-pods) echo "➖ no running pod" ;;
+    pinned)  echo "➖ digest-pinned" ;;
+    no-tag)  echo "❌ tag missing" ;;
+    *)       echo "➖ $1" ;;
+  esac
+}
+
+rebuild_print_table() {  # rows-file → the report; → 0 when nothing needs action, 1 when something does
+  local file="$1"
+  local kind ns name cname owner module src want running stale state
+  local n=0 n_stale=0 n_bad=0
+  printf "  %-15s %-18s %-22s %-16s %-40s %-6s %s\n" KIND NAMESPACE WORKLOAD CONTAINER IMAGE PODS STATE
+  while IFS=$'\t' read -r kind ns name cname owner module src want running stale state; do
+    [[ -n "$kind" ]] || continue
+    n=$((n + 1))
+    printf "  %-15s %-18s %-22s %-16s %-40s %-6s %s\n" \
+      "$kind" "$ns" "$name" "$cname" "$src" "$((running - stale))/${running}" "$(rebuild_state_mark "$state")"
+    case "$state" in
+      stale)   n_stale=$((n_stale + 1)) ;;
+      no-tag)  n_bad=$((n_bad + 1)) ;;
+    esac
+  done < "$file"
+  echo
+  if [[ "$n" -eq 0 ]]; then
+    info "no workshop-built image consumers found in scope."
+    echo "   Nothing consumes ${PARASOL_IMAGES_NS} or a per-user build here — materialize a module first (ws start <module> --user userN)."
+    return 0
+  fi
+  if [[ "$n_stale" -eq 0 && "$n_bad" -eq 0 ]]; then
+    ok "${n} consumer(s) — every running pod is on its tag's current digest (no drift)."
+    return 0
+  fi
+  # `cond && cmd` is deliberately avoided here: it is fatal under set -e as a function's last statement
+  # when the function is called bare, and this file is all functions (repo rule, measured 2026-07-25).
+  if [[ "$n_stale" -gt 0 ]]; then
+    err "${n_stale} of ${n} consumer(s) run a digest OLDER than their tag."
+  fi
+  if [[ "$n_bad" -gt 0 ]]; then
+    err "${n_bad} consumer(s) reference a tag that does not exist — those pods will ImagePullBackOff on their next restart (see: ws doctor)."
+  fi
+  return 1
+}
+
+rebuild_buildconfigs() {  # [name] → the BuildConfig(s) to rebuild in the shared images namespace
+  if [[ -n "${1:-}" ]]; then
+    oc get bc "$1" -n "$PARASOL_IMAGES_NS" -o jsonpath='{.metadata.name}' 2>/dev/null || true
+  else
+    oc get bc -n "$PARASOL_IMAGES_NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true
+  fi
+}
+
+rebuild_start_builds() {  # image-filter → build each BuildConfig, reporting its output tag's digest
+  # before/after. An UNCHANGED digest means the build produced the same image (or never updated the tag):
+  # say so and let the consumer pass below come out a no-op, rather than rolling anything on faith.
+  local filter="$1" bcs bc out oname otag before after rc=0 changed=0
+  bcs="$(rebuild_buildconfigs "$filter")"
+  if [[ -z "${bcs//[[:space:]]/}" ]]; then
+    if [[ -n "$filter" ]]; then
+      die "no BuildConfig '${filter}' in ${PARASOL_IMAGES_NS} — available: $(rebuild_buildconfigs "" | paste -sd' ' -)"
+    fi
+    info "no BuildConfigs in ${PARASOL_IMAGES_NS} — skipping the build (the consumer scan still runs)."
+    return 0
+  fi
+  info "Building in ${PARASOL_IMAGES_NS}: $(echo "$bcs" | paste -sd' ' -)"
+  echo "   each build is a couple of minutes; narrow with --image <name>, or skip with --no-build"
+  echo
+  while IFS= read -r bc; do
+    [[ -n "$bc" ]] || continue
+    out="$(oc get bc "$bc" -n "$PARASOL_IMAGES_NS" -o jsonpath='{.spec.output.to.name}' 2>/dev/null || true)"
+    oname="${out%%:*}"; otag="${out##*:}"
+    [[ -n "$oname" && "$oname" != "$otag" ]] || { oname="$bc"; otag="latest"; }
+    before="$(istag_digest "$PARASOL_IMAGES_NS" "$oname" "$otag")"
+    info "  oc start-build ${bc} -n ${PARASOL_IMAGES_NS} --wait --follow"
+    # </dev/null is not decoration: this loop's stdin IS the BuildConfig list, and a child that reads
+    # stdin eats the remaining names. With one BuildConfig nothing shows; with seven, builds 2..7 would
+    # silently never start. Detach the build from the loop's input.
+    if ! oc start-build "$bc" -n "$PARASOL_IMAGES_NS" --wait --follow </dev/null; then
+      err "  ${bc}: build FAILED — logs: oc logs -f bc/${bc} -n ${PARASOL_IMAGES_NS}"
+      rc=1; continue
+    fi
+    # The digest cache was populated with the PRE-build answer; drop it so `after` is a fresh read.
+    if [[ -n "$REBUILD_DIGESTS" && -f "$REBUILD_DIGESTS" ]]; then : > "$REBUILD_DIGESTS"; fi
+    after="$(istag_digest "$PARASOL_IMAGES_NS" "$oname" "$otag")"
+    if [[ -n "$after" && "$after" != "$before" ]]; then
+      ok "  ${oname}:${otag} ${before:0:19}… → ${after:0:19}…  (rebuilt)"
+      changed=$((changed + 1))
+    else
+      skip "  ${oname}:${otag} ${after:0:19}… unchanged — no-op, consumers below stay as they are"
+    fi
+  done <<< "$bcs"
+  echo
+  if [[ "$changed" -eq 0 && "$rc" -eq 0 ]]; then
+    info "No image digest moved — nothing new to roll out (the consumer pass below will confirm)."
+  fi
+  return "$rc"
+}
+
+rebuild_roll_one() {  # kind ns name owner module → 0 rolled+ready · 1 could not roll · 2 nothing to roll
+  local kind="$1" ns="$2" name="$3" owner="$4" module="$5" pinned stamp
+  case "$kind" in
+    Deployment|StatefulSet|DaemonSet)
+      local lk; lk="$(echo "$kind" | tr '[:upper:]' '[:lower:]')"
+      if ! oc rollout restart "${lk}/${name}" -n "$ns" >/dev/null 2>&1; then
+        err "  ${ns}/${name}: rollout restart failed (RBAC? this is an SA/admin action)"; return 1
+      fi
+      if ! oc rollout status "${lk}/${name}" -n "$ns" --timeout="${REBUILD_TIMEOUT}s" >/dev/null 2>&1; then
+        # Say this out loud: a stalled rollout is NOT an outage. The previous ReplicaSet keeps serving
+        # until the new one is ready, so the attendee sees the old image, not a broken app. Measured on
+        # ksls5 2026-07-29 — a namespace whose ResourceQuota was exhausted by concurrent PipelineRuns
+        # could not create the new pod, and the 85-minute-old pod carried on untouched.
+        err "  ${ns}/${name}: new pods not ready in ${REBUILD_TIMEOUT}s — the PREVIOUS pods are still serving (old image), nothing is down."
+        err "     why:  oc describe ${lk}/${name} -n ${ns}   ·   oc get events -n ${ns} --sort-by=.lastTimestamp | tail"
+        err "     often a full ResourceQuota or an unschedulable node; retry when it clears, or abandon: oc rollout undo ${lk}/${name} -n ${ns}"
+        return 1
+      fi
+      ok "  ${ns}/${name}: rolled"
+      return 0 ;;
+    CronJob)
+      # Nothing to restart: a CronJob has no long-lived pod. Its NEXT run creates a fresh pod, and with
+      # imagePullPolicy: Always that pod pulls the new digest on its own.
+      skip "  ${ns}/${name}: CronJob — next scheduled run picks the new image up (imagePullPolicy: Always)"
+      return 2 ;;
+    KnativeService)
+      # `oc rollout restart` does not exist for a ksvc: a Knative container image only changes with a NEW
+      # Revision. Bumping a template annotation makes one — BUT ONLY when the Revision name is not pinned.
+      # Both of this repo's ksvc entry states pin spec.template.metadata.name (parasol-claims-v1/-v2, so
+      # the solve traffic split can address revisions by name), and Knative's validating webhook rejects
+      # ANY template change that keeps the same revision name. Measured on ksls5 2026-07-29:
+      #   admission webhook "validation.webhook.serving.knative.dev" denied the request: validation
+      #   failed: Saw the following changes without a name change (-old +new): spec.template.metadata.name
+      # So do not attempt the patch there — re-materializing the entry state is the only honest route.
+      pinned="$(oc get ksvc "$name" -n "$ns" -o jsonpath='{.spec.template.metadata.name}' 2>/dev/null || true)"
+      if [[ -n "$pinned" ]]; then
+        err "  ${ns}/${name}: Knative Service with a PINNED revision name (${pinned}) — a new Revision cannot be forced by patch."
+        if [[ "$module" != "-" && "$owner" != "shared" ]]; then
+          err "     re-materialize it instead:  ws reset ${module} --user ${owner}"
+        else
+          err "     re-materialize it instead:  ws reset <module> --user <userN>"
+        fi
+        return 1
+      fi
+      stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      if ! oc patch ksvc "$name" -n "$ns" --type merge \
+             -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"workshop.redhat.com/rolledAt\":\"${stamp}\"}}}}}" >/dev/null 2>&1; then
+        err "  ${ns}/${name}: could not patch the ksvc template (RBAC? webhook?)"; return 1
+      fi
+      if ! oc wait "ksvc/${name}" -n "$ns" --for=condition=Ready --timeout="${REBUILD_TIMEOUT}s" >/dev/null 2>&1; then
+        err "  ${ns}/${name}: new Revision not Ready in ${REBUILD_TIMEOUT}s — check: oc get revision -n ${ns}"; return 1
+      fi
+      ok "  ${ns}/${name}: new Revision created"
+      return 0 ;;
+    *)
+      skip "  ${ns}/${name}: ${kind} — no restart verb for this kind"
+      return 2 ;;
+  esac
+}
+
+cmd_rebuild_images() {
+  local check=false no_build=false filter="" scope="" all=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --check)     check=true; shift ;;
+      --no-build)  no_build=true; shift ;;
+      --image)     filter="${2:-}"; shift 2
+                   [[ -n "$filter" ]] || die "rebuild-images: --image needs an image name (e.g. --image parasol-claims)" ;;
+      # rebuild-images self-parses, so main()'s --user validation never sees this value.
+      --user)      scope="${2:-}"; require_user_token "$scope" "rebuild-images --user"; shift 2 ;;
+      user[0-9]*)  scope="$1"; require_user_token "$scope" "rebuild-images"; shift ;;
+      --all)       all=true; shift ;;
+      -h|--help)   grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,23p'; return 0 ;;
+      *) die "rebuild-images: unknown option '$1' — see: ws help" ;;
+    esac
+  done
+  if [[ -n "$scope" && "$all" == true ]]; then
+    die "rebuild-images: pass --user ${scope} OR --all, not both"
+  fi
+  # A disruptive cohort-wide action must be NAMED, exactly as restart_terminals demands. --check is
+  # read-only, so it needs no scope and defaults to the whole cluster.
+  if [[ "$check" != true && -z "$scope" && "$all" != true ]]; then
+    die "rebuild-images: rolling restarts need a scope: --user <userN> (one attendee) or --all (every attendee). Read-only drift report: ws rebuild-images --check"
+  fi
+  need_oc
+
+  rebuild_begin; trap 'rm -rf "$REBUILD_TMP"' EXIT
+
+  local who server banner="ws rebuild-images"
+  who="$(oc whoami 2>/dev/null || true)"
+  server="$(oc whoami --show-server 2>/dev/null || true)"
+  # NOT ${check:+ --check}: `check` holds the STRING "false" when the flag is absent, which is non-empty,
+  # so :+ would print "--check" on every run and mislabel a write run as read-only.
+  if [[ "$check" == true ]]; then banner="ws rebuild-images --check"; fi
+  echo "${banner} — do the running pods carry the current image?   (cluster: ${server:-?} as ${who:-?})"
+  echo "   scope: ${scope:-every attendee + shared}${filter:+ · image ${filter}}"
+  echo
+
+  local build_rc=0
+  if [[ "$check" == true ]]; then
+    info "Read-only drift report (--check): no build, no restart."
+    echo
+  elif [[ "$no_build" == true ]]; then
+    info "Skipping the build (--no-build) — comparing and rolling against the tags as they stand."
+    echo
+  else
+    rebuild_start_builds "$filter" || build_rc=$?
+  fi
+
+  info "Consumers"
+  local rows="${REBUILD_TMP}/rows"
+  rebuild_scan "$scope" "$filter" > "$rows"
+  local drift=0
+  rebuild_print_table "$rows" || drift=$?
+
+  if [[ "$check" == true ]]; then
+    if [[ "$drift" -ne 0 ]]; then
+      local hint_scope="--all"
+      if [[ -n "$scope" ]]; then hint_scope="--user ${scope}"; fi
+      echo "   roll them:  ws rebuild-images --no-build ${hint_scope}${filter:+ --image ${filter}}"
+      rebuild_end; trap - EXIT
+      return 1
+    fi
+    rebuild_end; trap - EXIT
+    return 0
+  fi
+
+  # ── re-roll ONLY what is stale ──
+  local kind ns name cname owner module src want running stale state
+  local rolled=0 failed=0 skipped=0 seen=""
+  while IFS=$'\t' read -r kind ns name cname owner module src want running stale state; do
+    [[ "$state" == "stale" ]] || continue
+    # One restart per WORKLOAD even when several of its containers are stale.
+    case " ${seen} " in *" ${kind}/${ns}/${name} "*) continue ;; esac
+    seen="${seen} ${kind}/${ns}/${name}"
+    local rc=0
+    rebuild_roll_one "$kind" "$ns" "$name" "$owner" "$module" || rc=$?
+    case "$rc" in
+      0) rolled=$((rolled + 1)) ;;
+      2) skipped=$((skipped + 1)) ;;
+      *) failed=$((failed + 1)) ;;
+    esac
+  done < "$rows"
+  if [[ "$rolled" -eq 0 && "$failed" -eq 0 && "$skipped" -eq 0 ]]; then
+    echo
+    ok "Nothing was stale — no workload was restarted. (Idempotent: re-running this changes nothing.)"
+    rebuild_end; trap - EXIT
+    if [[ "$build_rc" -ne 0 ]]; then return 1; fi
+    return 0
+  fi
+
+  # ── re-verify at the pod, the same way ──
+  echo
+  info "Re-verifying (pod digests again, after the rollouts)"
+  : > "$REBUILD_DIGESTS"
+  rebuild_scan "$scope" "$filter" > "${rows}.after"
+  local after_drift=0
+  rebuild_print_table "${rows}.after" || after_drift=$?
+
+  echo "Summary: ${rolled} workload(s) rolled · ${skipped} needed no restart · ${failed} could not be rolled"
+  rebuild_end; trap - EXIT
+  if [[ "$after_drift" -ne 0 || "$failed" -ne 0 || "$build_rc" -ne 0 ]]; then
+    err "some consumers are still off-digest — see the table above"
+    return 1
+  fi
+  ok "every consumer in scope now runs its tag's current digest."
+  return 0
 }
 
 cmd_doctor() {
@@ -2980,6 +3448,9 @@ main() {
   # maas has its own SUBCOMMAND (show|set) plus value-taking flags (--model/--endpoint/--key-file/
   # --vars) whose values are free-form strings, not modules — route its raw args straight through.
   [[ "$cmd" == "maas" ]] && { cmd_maas "$@"; return; }
+  # rebuild-images self-parses too: --image takes a free-form image NAME (parasol-claims), which the
+  # generic parser below would otherwise bin as the module argument.
+  [[ "$cmd" == "rebuild-images" ]] && { cmd_rebuild_images "$@"; return; }
   local user="" module="" extra=()
   # collect --user anywhere; a bare userN (e.g. `ws start m07 user2`) is the target user, exactly like
   # --user user2 — the first OTHER bare arg is the module. Honoring positional userN closes a footgun:
@@ -3024,7 +3495,7 @@ main() {
     preflight)   cmd_preflight;;
     status)      cmd_status "$user";;
     diag)        cmd_diag "$user" "$module";;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,22p';;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,23p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }

@@ -249,6 +249,8 @@ module by running verify at the wrong point.
 | Push new content to cockpits | `ws git-refresh --restart-terminals --all` |
 | Change the AI model / rotate the MaaS key | `ws maas set` — **no reinstall** |
 | Check what the AI modules run on | `ws maas show` |
+| Are any pods running an old image? | `ws rebuild-images --check` — read-only |
+| Rebuild an app image and land it everywhere | `ws rebuild-images --image <name> --all` |
 
 ### Changing the MaaS model or rotating the key
 
@@ -297,6 +299,46 @@ safe to run mid-session and safe to run twice. Scope it with `--user userN`, or 
 `--no-converge`.
 
 Finish with `ws maas show` and confirm every attendee reads `working`.
+
+### Rebuilding a Parasol app image mid-cluster
+
+`oc start-build` produces a new image. It does **not** put that image into anything that is already
+running: a container keeps the digest it started with until something rolls it. Every workshop
+Deployment sets `imagePullPolicy: Always`, so a restart *lands* the rebuild — but somebody still has to
+perform the restart, in every namespace that consumes the image, and that list changes every time an
+attendee starts a module.
+
+`ws rebuild-images` is that step:
+
+```
+ws rebuild-images --check                              # read-only: which pods are behind their tag?
+ws rebuild-images --image parasol-claims --all         # build it, then roll every stale consumer
+ws rebuild-images --no-build --user user3              # roll one attendee against the tags as they are
+```
+
+It enumerates every Deployment, StatefulSet, DaemonSet, CronJob and Knative Service on the cluster
+whose image comes from `ogsr-parasol-images` or from a per-user build, and compares **the digest each
+running pod reports** (`containerStatuses[].imageID`) against the digest its ImageStream tag points at
+now. The workload's own spec cannot answer this — it says `parasol-claims:1.1` before and after a
+rebuild — which is exactly why the check has to happen at the pod.
+
+Three consequences worth knowing:
+
+- **A rebuild that changed nothing restarts nothing.** Workloads already on the current digest are left
+  alone, so the command is safe to re-run and safe to run against a live cohort. That is also why
+  rolling restarts require you to name a scope — `--user userN` or `--all` — while `--check` needs none.
+- **`--check` exits 1 when anything is behind**, so it is usable as a gate in CI or a pre-session check.
+  It never builds and never restarts.
+- **Knative Services cannot be rolled.** A ksvc only picks up a new image via a new *Revision*, and
+  both serverless entry states pin their revision name so the traffic split can address revisions
+  by name — Knative's webhook rejects any template change that keeps the same name. The command detects
+  this and tells you to re-materialize instead: `ws reset <module> --user userN`.
+
+A stalled rollout is not an outage: the previous ReplicaSet keeps serving the old image until the new
+pods are ready, so a namespace whose `ResourceQuota` is full will report a failure with its old pods
+still up. Clear the quota and re-run, or `oc rollout undo` to abandon the change.
+
+This is deliberately **not** part of `ws git-refresh`, which is non-disruptive by contract.
 
 ### Cockpit content is built at pod start
 
@@ -469,14 +511,14 @@ Three commands, in order. Never skip the dry run on a customer cluster.
 **`ogsr-check-clean.sh` never deletes.** It reports leftover namespaces, owner-labelled cluster-scoped
 objects, stale APIServices, dead webhooks and created-by-us CRDs with instance counts, and prints the
 exact `oc` command to remove each — then the cluster's admin decides. That separation is deliberate:
+the tool that proves cleanliness must not be the tool that changes things.
+
 **How long it takes.** Its runtime tracks the number of leftovers, not the size of the cluster, because
 it classifies each marked object it finds. In the position above — straight after an uninstall — that is
 well under a minute. Run against a *full* install, where every object is a finding, it takes a couple of
 minutes; that is normal and it is not stuck. Every section prints its elapsed time as `(t+NNs)` and
 section `[8/9]` announces how many objects it is about to classify, so you can always see it moving. On
 a rate-limited cluster, lower the fan-out with `OGSR_CHECK_JOBS=2`.
-
-the tool that proves cleanliness must not be the tool that changes things.
 
 ### What is preserved
 

@@ -5,7 +5,7 @@ _ws_complete() {
   local cur prev subcmds mods repo
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
-  subcmds="list prep verify smoke reset start solve git-refresh doctor passwd cohort-reset preflight status diag scale-users"
+  subcmds="list prep verify smoke reset start solve git-refresh doctor passwd cohort-reset preflight status diag scale-users maas rebuild-images"
 
   # First word after `ws` → a subcommand.
   if [ "$COMP_CWORD" -eq 1 ]; then
@@ -26,6 +26,14 @@ _ws_complete() {
       ;;
     git-refresh)
       mapfile -t COMPREPLY < <(compgen -W "--restart-terminals --user --all --exclude" -- "$cur")
+      return
+      ;;
+    rebuild-images)
+      mapfile -t COMPREPLY < <(compgen -W "--check --image --user --all --no-build" -- "$cur")
+      return
+      ;;
+    maas)
+      mapfile -t COMPREPLY < <(compgen -W "show set" -- "$cur")
       return
       ;;
   esac
