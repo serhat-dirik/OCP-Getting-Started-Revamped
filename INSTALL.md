@@ -215,6 +215,10 @@ ws status                 # cohort dashboard: every platform app + every attende
 ws status --user user1    # drill into one attendee: namespaces + quota headroom
 ```
 
+`ws doctor` also takes `--user userN`. It keeps every platform row (that is usually what explains a
+broken attendee) and drops the other attendees' entry apps and image drift, so a mid-session check on
+one person is not eight people's state to read past.
+
 `ws status` is the one you will live in. A healthy cluster looks like:
 
 ```
@@ -541,7 +545,8 @@ Uninstall de-labels the namespaces it adopted rather than deleting them.
 Before raising anything, collect:
 
 ```bash
-ws doctor
+ws doctor                             # whole cluster
+ws doctor --user <userN>              # the same checks, other attendees' state filtered out
 ws status
 ws diag --user <userN> [<module>]     # read-only bundle for one stuck attendee
 oc get applications -n openshift-gitops

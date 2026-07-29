@@ -34,7 +34,14 @@
 # of the cluster. Measured on a 220-namespace cluster (RHDP, 2026-07-29):
 #
 #   after ogsr-uninstall.sh, nothing left ....... ~45s   (this is the case it was built for)
-#   against a FULL install, 601 marked objects ... ~2m   (the pathological input: everything is a finding)
+#   against a FULL install, ~500 marked objects .. ~1m50s (the pathological input: everything is a finding)
+#
+# That second figure was ~2m20s until the markers stopped being fetched one object at a time. Every
+# index and sweep now carries the eight marker fields in the SAME list call that finds the object, so
+# classification makes no cluster call at all; the only per-object read left is a ClusterServiceVersion's
+# (a CSV embeds its whole install strategy, so it is not worth listing in bulk to get a label). Paired
+# alternating runs, three each, same cluster: 138/136/147s before, 101/110/113s after — the two ranges
+# do not overlap. Byte-identical output across the change.
 #
 # Every section prints its elapsed time as `t+NNs`, and section [8/9] announces how many objects it is
 # about to classify before it starts, so a long run is visibly making progress rather than hung. On a
@@ -243,11 +250,34 @@ echo "  the two cannot be told apart."
 DISCOVERY_NOTE=""
 NS_INDEX=""; SVC_INDEX=""; CSV_INDEX=""; OG_INDEX=""; CRD_INDEX=""; STATE_KV=""; STATE_SRC=""
 
-# The seven marker fields this script cares about on ANY object, in one jsonpath:
-#   owner|component|stack|user|layer|tracking-id|sync-options
+# ns|name|installedCSV|currentCSV|<the 8 marker fields> — ONE cluster-wide Subscription read, shared by
+# the four call sites that each used to pay for it: section [3/9]'s orphan test, build_adoption_index's
+# per-adopted-operator probe, ns_has_foreign_csv's per-namespace label query, and section [8/9]'s marks
+# lookup (seeded into the cache from these very rows). Measured on ksls5 2026-07-29.
+#
+# THE DANGEROUS READ, and the reason its exit status is kept in a variable of its own. If this list
+# fails and the failure is swallowed, every CSV on the cluster looks unowned and section [3/9] hands an
+# admin `oc delete` for the org's entire operator estate. Verified on ksls5 2026-07-28 with
+# `--as=system:serviceaccount:default:default`: a forbidden list exits 1 with EMPTY stdout — identical
+# output to a cluster with no Subscriptions, distinguishable only by status. Every consumer below
+# therefore branches on SUB_INDEX_RC and degrades to what it did before this index existed, never to
+# "the list was empty".
+#
+# subscriptions.operators.coreos.com in full, never `subscriptions`: three API groups claim that plural
+# and messaging.knative.dev shadows OLM's, which once reported every operator as absent (SEV1, fixed in
+# 437bbf4). In section [3/9] the same mistake would report every operator as an orphan.
+SUB_INDEX=""
+SUB_INDEX_RC=1     # 0 = the list is trustworthy and may be answered from; anything else = fall back
+SUB_INDEX_ERR=""   # first line of stderr from that read, quoted verbatim wherever the failure is reported
+
+# The eight marker fields this script cares about on ANY object, in one jsonpath. The count is load-
+# bearing — every index that embeds MARKS_JP is parsed by FIELD POSITION, so it is stated here and
+# repeated nowhere else:
+#   owner|component|stack|user|layer|tracking-id|sync-options|che-user
 MARKS_JP="{.metadata.labels.${OWNER_KEY//./\\.}}|{.metadata.labels.${COMPONENT_KEY//./\\.}}|{.metadata.labels.${STACK_KEY//./\\.}}|{.metadata.labels.${USER_KEY//./\\.}}|{.metadata.labels.${LAYER_KEY//./\\.}}|{.metadata.annotations.${TRACK_ANN//./\\.}}|{.metadata.annotations.${SYNC_OPTS_ANN//./\\.}}|{.metadata.annotations.${CHE_USER_ANN//./\\.}}"
 
 load_indexes() {
+  local sub_ef
   echo
   echo "collecting cluster state (one read per resource class, ${SWEEP_JOBS} at a time)…"
   # Opened here, in the MAIN shell, before anything forks: every subshell must inherit the same path or
@@ -277,8 +307,26 @@ load_indexes() {
   # interesting reason, and a healthy cluster has none, so this costs nothing in the normal case.
   csv_fill_reasons
 
-  # ns|name|ourownerlabel|sync-options — OperatorGroups are the TooManyOperatorGroups class in section 2
-  OG_INDEX="$(oc get operatorgroups.operators.coreos.com -A -o jsonpath="{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.metadata.labels.${OWNER_KEY//./\\.}}|{.metadata.annotations.${SYNC_OPTS_ANN//./\\.}}{\"\n\"}{end}" 2>/dev/null)"
+  # ns|name|<the 8 marker fields> — OperatorGroups are the TooManyOperatorGroups class in section 2,
+  # which reads field 3 (our owner label). That is still field 3: MARKS_JP leads with the owner label,
+  # so widening the tail from "just sync-options" to the full marker set costs the same call and lets
+  # section [8/9] classify an adopted operator's OperatorGroup without re-reading the object.
+  OG_INDEX="$(oc get operatorgroups.operators.coreos.com -A -o jsonpath="{range .items[*]}{.metadata.namespace}|{.metadata.name}|${MARKS_JP}{\"\n\"}{end}" 2>/dev/null)"
+  seed_index_marks operatorgroups.operators.coreos.com "$OG_INDEX"
+
+  # The shared Subscription list. Read AFTER the marks cache is open (above) and BEFORE
+  # build_adoption_index, which is its first consumer.
+  sub_ef=""
+  [ -n "$TMPROOT" ] && sub_ef="${TMPROOT}/sub-list.err"
+  SUB_INDEX="$(oc get subscriptions.operators.coreos.com -A \
+    -o jsonpath="{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.installedCSV}|{.status.currentCSV}|${MARKS_JP}{\"\n\"}{end}" 2>"${sub_ef:-/dev/null}")"
+  SUB_INDEX_RC=$?
+  if [ -n "$sub_ef" ] && [ -s "$sub_ef" ]; then SUB_INDEX_ERR="$(head -1 "$sub_ef")"; fi
+  if [ "$SUB_INDEX_RC" -eq 0 ]; then
+    # cut off the four status fields: seed_index_marks wants "ns|name|<marks>"
+    seed_index_marks subscriptions.operators.coreos.com \
+      "$(printf '%s\n' "$SUB_INDEX" | awk -F'|' 'NF>=12 {out=$1"|"$2; for(i=5;i<=12;i++) out=out"|"$i; print out}')"
+  fi
 
   # name|group — also a table read. A CRD carries its full OpenAPI schema, so the jsonpath form measured
   # 8–31s against 2.2s for the table. The group is not lost: apiextensions REQUIRES a CRD to be named
@@ -392,13 +440,28 @@ build_adoption_index() {
 # shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
 # (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
 adopted_probe() {  # "name ns" → "name|ns|ok|<csv>" or "name|ns|missing|"
-  local name="${1%% *}" ns="${1#* }" csv
+  local name="${1%% *}" ns="${1#* }" csv row
+  # Answer from the ONE cluster-wide list when it succeeded: absence from a list that came back clean
+  # IS "the Subscription is gone", and it costs no round trip. Only a list that FAILED sends us back to
+  # probing object by object — because "the list errored" and "there are no Subscriptions" print the
+  # same empty string, and reading the second as the first would report every adopted operator's
+  # Subscription as GONE, which is the loudest false alarm section [1/9] can raise.
+  if [ "$SUB_INDEX_RC" -eq 0 ]; then
+    row="$(awk -F'|' -v n="$ns" -v s="$name" '$1==n && $2==s {print; exit}' <<< "$SUB_INDEX")"
+    if [ -n "$row" ]; then
+      printf '%s|%s|ok|%s\n' "$name" "$ns" "$(cut -d'|' -f3 <<< "$row")"
+    else
+      printf '%s|%s|missing|\n' "$name" "$ns"
+    fi
+    return 0
+  fi
   if csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" \
               -o jsonpath='{.status.installedCSV}' 2>/dev/null)"; then
     printf '%s|%s|ok|%s\n' "$name" "$ns" "$csv"
   else
     printf '%s|%s|missing|\n' "$name" "$ns"
   fi
+  return 0
 }
 
 # One memoised read per object, giving every marker at once. Namespaces are pre-seeded from NS_INDEX,
@@ -457,6 +520,19 @@ seed_ns_marks() {  # feed the namespace markers we already listed into the cache
     marks_put "namespace||${name}|${marks}"
   done < <(printf '%s\n' "$NS_INDEX" | awk -F'|' 'NF>=10 {print $1"|"$2"|"$3"|"$4"|"$5"|"$6"|"$7"|"$8"|"$9"|"$10}')
 }
+seed_index_marks() {  # kind  "ns|name|<the 8 marker fields>" lines → into the cache, no cluster call
+  # The same trick section [8/9]'s namespaced sweep already uses: an index that had to be read anyway
+  # carries the markers, so classify/strip/summarise all answer from memory. Rows shorter than the ten
+  # fields the layout promises are dropped rather than mis-split — a half-read row would cache a WRONG
+  # marker set for a real object, and a wrong marker is how "the org's" and "ours" get swapped.
+  local kind="$1" ns name marks
+  [ -n "${2:-}" ] || return 0
+  while IFS='|' read -r ns name marks; do
+    [ -n "$name" ] || continue
+    marks_put "${kind}|${ns}|${name}|${marks}"
+  done < <(printf '%s\n' "$2" | awk -F'|' 'NF>=10')
+  return 0
+}
 mark_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }
 
 is_argo_own_kind() { case "$ARGO_OWN_KINDS" in *" $1 "*) return 0;; esac; return 1; }
@@ -466,13 +542,36 @@ is_ns_kind()       { case "${1%%.*}" in namespace|namespaces|ns|project|projects
 # when there is no install state at all — the case where guessing would be at its most expensive.
 FOREIGN_CSV_CACHE=""
 ns_has_foreign_csv() {  # ns → 0 = holds a CSV we cannot account for
-  local ns="$1" ans
+  local ns="$1" ans mine
   ans="$(printf '%s\n' "$FOREIGN_CSV_CACHE" | awk -F'|' -v n="$ns" '$1==n {print $2; exit}')"
   if [ -z "$ans" ]; then
     ans="no"
-    if printf '%s\n' "$CSV_INDEX" | grep -q "^${ns}|"; then
-      oc get subscriptions.operators.coreos.com -n "$ns" -l "$OWNER_LABEL" -o name \
-        --ignore-not-found 2>/dev/null | grep -q . || ans="yes"
+    # HERE-STRING, never `printf … | grep -q`. `grep -q` exits on its FIRST match while printf is still
+    # writing 3760 CSV rows; printf takes SIGPIPE and, under the `set -o pipefail` at the top of this
+    # file, the PIPELINE's status becomes 141 — so a match reports as a NON-match. Whether printf has
+    # finished is a scheduling race, which made this whole branch a coin flip: two runs of the
+    # unmodified script against one idle cluster (ksls5, 2026-07-29) returned 609 vs 602 "ours: delete"
+    # and 28 vs 35 "needs a human decision", 130 differing lines. The false side is the dangerous one —
+    # "no CSV here" means "ours", so the report printed `oc delete namespace` for namespaces holding an
+    # operator CSV it could not attribute. state_get() documents the same trap for a different reason
+    # (the stderr noise); this is the same shape deciding a destructive command.
+    if grep -q "^${ns}|" <<< "$CSV_INDEX"; then
+      # "does this namespace hold a Subscription of OURS" — field 5 of SUB_INDEX is the owner label's
+      # VALUE, so the label selector this replaces becomes a local field test. Same fallback rule as
+      # adopted_probe: only a FAILED list sends us back to the per-namespace query, because on this
+      # path an empty answer means "no Subscription of ours" and would flip the verdict to DECIDE for
+      # every namespace at once.
+      if [ "$SUB_INDEX_RC" -eq 0 ]; then
+        awk -F'|' -v n="$ns" -v v="$OWNER_VAL" '$1==n && $5==v {f=1; exit} END{exit !f}' \
+          <<< "$SUB_INDEX" || ans="yes"
+      else
+        # Captured, not piped into `grep -q`, for the same SIGPIPE-under-pipefail reason as above: oc
+        # would be killed mid-write and the pipeline's 141 would fire the `||`, reporting "no
+        # Subscription of ours" for a namespace that has one.
+        mine="$(oc get subscriptions.operators.coreos.com -n "$ns" -l "$OWNER_LABEL" -o name \
+          --ignore-not-found 2>/dev/null)"
+        [ -n "$mine" ] || ans="yes"
+      fi
     fi
     FOREIGN_CSV_CACHE="${FOREIGN_CSV_CACHE}${ns}|${ans}
 "
@@ -727,7 +826,14 @@ section_operatorgroups() {
     hit=1
     ours=""
     found ws "namespace/${ns} has more than one OperatorGroup — OLM cannot pick one, so it manages none"
-    while IFS='|' read -r _ name owner; do
+    # A trailing `_` so `owner` is FIELD 3 and not "field 3 onwards". bash's `read` hands the last
+    # variable the unsplit remainder, so with three variables `owner` silently became
+    # `ogsr|Prune=false,Delete=false` whenever the OperatorGroup carried sync-options — and
+    # `[ "$owner" = "ogsr" ]` is then false, so an OperatorGroup WE added to an adopted operator's
+    # namespace (the exact object that causes TooManyOperatorGroups, and the only one that always
+    # carries Delete=false) printed as "not ours — never delete this one". Positional, not remainder:
+    # this row decides whether an admin is handed a delete command for their own object.
+    while IFS='|' read -r _ name owner _; do
       [ -n "$name" ] || continue
       if [ "$owner" = "$OWNER_VAL" ]; then
         sub "${name}  ← ADDED BY THIS WORKSHOP (${OWNER_KEY}=${owner})"
@@ -776,7 +882,6 @@ section_operatorgroups() {
 # ADOPTED resources alone. On a CSV, therefore, a mark of ours is evidence the object is the ORG'S; it
 # is never evidence that it is ours. The Subscription is the only signal that can answer the question.
 ORPHAN_CSV_JP='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|{.spec.replaces}|{.metadata.labels.olm\.clusteroperator\.name}|{.metadata.annotations.olm\.copiedFrom}{"\n"}{end}'
-ORPHAN_SUB_JP='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.installedCSV}|{.status.currentCSV}{"\n"}{end}'
 
 section_orphan_csvs() {
   hdr "3/9" "ClusterServiceVersions that no Subscription owns" \
@@ -806,20 +911,16 @@ section_orphan_csvs() {
   csv_rows="$(printf '%s\n' "$csv_rows" | grep -v '^ *$')"
   [ -n "$csv_rows" ] || { none "no ClusterServiceVersion is installed on this cluster"; return 0; }
 
-  # THE dangerous read. If this one fails and its failure is swallowed, every CSV on the cluster looks
-  # unowned and this section hands an admin `oc delete` for the org's entire operator estate. Verified
-  # on ksls5 2026-07-28 with `--as=system:serviceaccount:default:default`: a forbidden list exits 1 with
-  # EMPTY stdout — identical output to a cluster with no Subscriptions, distinguishable only by status.
-  #
-  # subscriptions.operators.coreos.com in full, never `subscriptions`: three API groups claim that
-  # plural and messaging.knative.dev shadows OLM's, which once reported every operator as absent (SEV1,
-  # fixed in 437bbf4). Here the same mistake would report every operator as an orphan.
-  sub_rows="$(oc get subscriptions.operators.coreos.com -A \
-    -o jsonpath="$ORPHAN_SUB_JP" 2>"${ef:-/dev/null}")"
-  rc=$?
+  # THE dangerous read — now made ONCE, in load_indexes, and shared (see SUB_INDEX for the full
+  # reasoning and the forbidden-list measurement). Nothing about the failure contract changes here: the
+  # status is carried alongside the rows precisely so this section can still tell "the list errored"
+  # from "there are no Subscriptions", which print the same empty string. It is only read once instead
+  # of twice.
+  sub_rows="$(printf '%s\n' "$SUB_INDEX" | cut -d'|' -f1-4 | grep -v '^ *$')"
+  rc="$SUB_INDEX_RC"
   if [ "$rc" -ne 0 ]; then
     note "could not list Subscriptions (oc exited ${rc}) — NOT reporting any orphan"
-    if [ -n "$ef" ] && [ -s "$ef" ]; then sub "$(head -1 "$ef")"; fi
+    if [ -n "$SUB_INDEX_ERR" ]; then sub "$SUB_INDEX_ERR"; fi
     sub "without the Subscription list every CSV would read as unowned, so this section reports"
     sub "nothing rather than name the org's operators as ours. Re-run as an admin who can list"
     sub "subscriptions.operators.coreos.com cluster-wide."
@@ -1166,6 +1267,45 @@ sweep_ns_kind() {  # kind → "ns|kind/name|<the 8 marker fields>"
   return 0
 }
 
+# The cluster-scoped sweep above lists with `-o name`, which carries NO markers — so every object it
+# found was then read back one at a time by obj_marks, in the main shell, serially. Measured on ksls5
+# 2026-07-29: 35 such reads, 39.5s of `oc` wall clock inside a 128s scan, ~31% of the run, for objects
+# the API server had already served once.
+#
+# The fix is not to widen the `-o name` sweep — a comma-list get answers with `{.kind}`, the CamelCase
+# singular, and there is no reliable way back from `StorageClass` to `storageclasses.storage.k8s.io`
+# for the `oc delete` line — but to make a SECOND pass keyed on what the first one found: one labelled
+# list per DISTINCT kind that actually returned a hit, run at SWEEP_JOBS concurrency, seeding the same
+# cache. 11 lists replaced 32 serial reads here.
+#
+# On the case this script exists for — a cluster with nothing left — there are no hits, so there are no
+# distinct kinds and this costs exactly zero extra calls.
+seed_cluster_marks() {  # "kind/name" lines → their markers into the cache, one list per kind
+  local hits="$1" kinds row
+  [ -n "$hits" ] || return 0
+  kinds="$(printf '%s\n' "$hits" | awk -F/ 'NF>=2 && $1!="" {print $1}' | sort -u)"
+  [ -n "$kinds" ] || return 0
+  # marks_put runs HERE, in the main shell, not in the workers — the cache has exactly one writer by
+  # construction and this keeps it that way (see marks_put).
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    marks_put "$row"
+  done < <(printf '%s\n' "$kinds" | run_parallel sweep_cluster_marks)
+  return 0
+}
+# shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
+# (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
+sweep_cluster_marks() {  # kind → "kind||name|<the 8 marker fields>" rows, already shaped for marks_put
+  # The kind is echoed back as LITERAL text inside the template so the row keys off the exact string
+  # the `-o name` sweep produced — that string is what report_swept later looks the object up by, and a
+  # normalised or re-derived spelling would miss the cache and re-read the object anyway. The empty ns
+  # field between the two pipes is the cluster-scoped marker: these objects have no namespace.
+  oc get "$1" -l "$OWNER_LABEL" --ignore-not-found \
+    -o jsonpath="{range .items[*]}${1}||{.metadata.name}|${MARKS_JP}{\"\n\"}{end}" 2>/dev/null \
+    | grep -v '^ *$'
+  return 0
+}
+
 # shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
 # (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
 sweep_chunk() {  # comma-list — echo "kind/name" (or "ns kind/name" when SWEEP_EXTRA=-A) lines
@@ -1255,6 +1395,9 @@ section_labeled_objects() {
   failed="$(sweep_failed_kinds)"
   [ -n "$failed" ] && DISCOVERY_NOTE="${DISCOVERY_NOTE}batched list failed for [${failed% }], retried per kind; "
   prog "$(printf '%s\n' "$swept" | grep -c .) cluster-scoped object(s) to classify"
+  # Fetch their markers in one list per kind BEFORE classifying, so the loop below makes no cluster
+  # call at all — the same contract the namespaced sweep already gets for free from its own list.
+  seed_cluster_marks "$swept"
   while IFS= read -r obj; do
     [ -n "$obj" ] || continue
     hit=1
@@ -1338,7 +1481,10 @@ section_crds() {
   if [ -n "$exact" ]; then
     mode="exact (captured from each operator's CSV during uninstall)"
     for crd in $exact; do
-      printf '%s\n' "$CRD_INDEX" | grep -q "^${crd}|" || continue
+      # Here-string, same SIGPIPE-under-pipefail trap as ns_has_foreign_csv: `grep -q` exits on its
+      # first hit, printf is killed mid-write, pipefail turns the match into a 141, and the `|| continue`
+      # then DROPS a CRD that is registered — silently shrinking the only list section [9/9] can offer.
+      grep -q "^${crd}|" <<< "$CRD_INDEX" || continue
       todo="${todo}${crd}|\n"
     done
   else
@@ -1379,10 +1525,16 @@ crd_count() {  # "crd|op" → "crd|op|<instance count>"
   printf '%s|%s\n' "$1" "$(oc get "${1%%|*}" -A --no-headers 2>/dev/null | grep -c .)"
 }
 crd_matches_adopted() {  # crd-name → 0 when an ADOPTED operator's name tokens also claim this CRD
-  local crd="$1" op
+  local crd="$1" op cands
   while read -r op _; do
     [ -n "$op" ] || continue
-    crd_candidates_for "$op" | grep -qx "$crd" && return 0
+    # Captured first, then matched. `crd_candidates_for … | grep -qx` is the same SIGPIPE trap: the
+    # function's own `| sort -u` is killed once grep exits on a hit, pipefail makes the pipeline 141,
+    # the `&&` does not fire, and the answer flips to "no adopted operator claims this CRD". That
+    # answer is what decides between a DECIDE line and `oc delete crd` — and deleting an adopted
+    # operator's CRD deletes every instance of it cluster-wide (cert-manager's, every certificate).
+    cands="$(crd_candidates_for "$op")"
+    if grep -qx "$crd" <<< "$cands"; then return 0; fi
   done < <(state_ops adopted)
   return 1
 }

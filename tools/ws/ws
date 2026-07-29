@@ -9,7 +9,8 @@
 #   ws reset  <module> [--user U]    return the user's world to the module's entry state
 #   ws solve  <module> [--user U]    materialize the END state (instructor only)
 #   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
-#   ws doctor                        environment sanity: login, argo, gitea, operators, image drift
+#   ws doctor [--user U]             environment sanity: login, argo, gitea, operators, image drift
+#                                    (--user narrows the cohort-wide rows to one attendee)
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
 #   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
 #   ws scale-users N [--yes]         SA/admin: grow/shrink the workshop cohort to N users
@@ -1722,9 +1723,26 @@ cmd_rebuild_images() {
   return 0
 }
 
-cmd_doctor() {
+cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT-WIDE row to one attendee;
+  # empty = the whole cohort (unchanged default). The platform rows (gitops operator, gitea, mirror,
+  # workshop layer, build images, IdP, cohort size) are NOT scoped: when one attendee is broken, the
+  # platform is the first thing that explains it, so hiding it would make the scoped report useless.
+  # What --user removes is OTHER attendees' state — the entry Applications and running-image drift that
+  # an SA debugging user3 has to read past today, on a full cohort ~8x more rows than the ones they want.
+  local scope_user="${1:-}"
   need_oc
-  echo "ws doctor — environment sanity"
+  # Reuse the ONE canonical identity check rather than write a second one. main() already applies it to
+  # the --user FLAG VALUE, so `ws doctor --user 3` dies at the gate — this is the belt-and-braces for a
+  # direct cmd_doctor call, worded exactly like cmd_status's. Task #12's phantom `entry-agentic-ai-1`
+  # Application is what a bare number costs when a verb skips this.
+  if [[ -n "$scope_user" ]]; then
+    require_user_token "$scope_user" "doctor --user"
+    # Say the scope in the FIRST line. A report that silently omits seven attendees looks exactly like
+    # a report that found nothing wrong with them.
+    echo "ws doctor — environment sanity   (scoped to ${scope_user}; whole cohort: ws doctor)"
+  else
+    echo "ws doctor — environment sanity"
+  fi
   local fail=0
   printf "  %-28s" "cluster login"
   if oc whoami >/dev/null 2>&1; then ok "$(oc whoami) @ $(oc whoami --show-server)"; else err "not logged in"; fail=1; fi
@@ -1739,21 +1757,28 @@ cmd_doctor() {
   # row used to red-flag the same app as unhealthy: a false ❌ on a module that is working exactly as
   # designed destroys attendee/SA trust in every OTHER ✅ (the repo's own rule). Split those out here
   # instead of counting them against the row; genuinely broken apps still fail it.
-  local bad="" expect_ok="" name health module
-  while IFS='=' read -r name health; do
+  #
+  # The owner and module LABELS ride along in the same list call that finds the apps. They cost nothing
+  # here (the API server is already serving these items) and they replace a per-app `oc get` that only
+  # fired on unhealthy entry-* apps — the one round trip this row made per object.
+  local bad="" expect_ok="" name health app_user module
+  while IFS=$'\t' read -r name health app_user module; do
     [[ -n "$name" ]] || continue
+    # --user scope: drop the OTHER attendees' apps, by LABEL rather than by name shape — the label is
+    # what `ws status`/`ws diag` already key off, and an app named outside entry-<module>-<user> still
+    # carries it. An app with NO user label is platform (pp-*, workshop-config) and is always kept.
+    if [[ -n "$scope_user" && -n "$app_user" && "$app_user" != "$scope_user" ]]; then continue; fi
     [[ "$health" == "Healthy" ]] && continue
-    module=""
-    if [[ "$name" == entry-* ]]; then
-      module="$(oc get application "$name" -n "$ARGO_NS" -o jsonpath='{.metadata.labels.workshop\.redhat\.com/module}' 2>/dev/null || true)"
-    fi
-    if [[ -n "$module" && "$(meta_expect_degraded "$module")" == "true" ]]; then
+    # The `entry-*` guard is kept from the per-app read this replaced. Without it, ANY app carrying a
+    # module label could be excused as "Degraded by design", which is a licence to hide a broken
+    # platform app behind a module's intentional fault. Only entry states are allowed that excuse.
+    if [[ "$name" == entry-* && -n "$module" && "$(meta_expect_degraded "$module")" == "true" ]]; then
       expect_ok="${expect_ok} ${name}=${health}"
     else
       bad="${bad} ${name}=${health}"
     fi
-  done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}={.status.health.status}{"\n"}{end}' 2>/dev/null)
-  if [[ -z "${bad// }" ]]; then ok "all Healthy"; else err "unhealthy:${bad}"; fail=1; fi
+  done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\n"}{end}' 2>/dev/null)
+  if [[ -z "${bad// }" ]]; then ok "all Healthy${scope_user:+ (platform + ${scope_user})}"; else err "unhealthy:${bad}"; fail=1; fi
   if [[ -n "${expect_ok// }" ]]; then
     printf "  %-28s" ""
     ok "(Degraded by design):${expect_ok}"
@@ -1838,7 +1863,12 @@ cmd_doctor() {
     rebuild_begin
     trap 'rebuild_end' EXIT
     drift_rows="${REBUILD_TMP}/doctor-rows"
-    rebuild_scan "" "" > "$drift_rows" || true
+    # rebuild_scan's first argument IS the user scope, and it filters on the WORKLOAD's namespace owner
+    # (--user user2 means what user2 runs, not what user2's images are called) — exactly the scoping this
+    # row needs, already written and already covered by the rebuild fixture gate. Passing it also makes
+    # the scoped run cheaper: the scan costs ~1s per materialized consumer, so one attendee's slice of a
+    # full cohort is where most of `ws doctor --user`'s wall clock comes back.
+    rebuild_scan "$scope_user" "" > "$drift_rows" || true
     IFS=$'\t' read -r d_total d_stale d_bad d_names < <(rebuild_row_summary "$drift_rows")
     rebuild_end; trap - EXIT
     if [[ "${d_total:-0}" -eq 0 ]]; then
@@ -1853,7 +1883,9 @@ cmd_doctor() {
       d_what=""; d_fix=""
       if [[ "$d_stale" -gt 0 ]]; then
         d_what="${d_stale} of ${d_total} run a digest OLDER than their tag"
-        d_fix=" · roll them: ws rebuild-images --no-build --all"
+        # The hint has to name the SCOPE that was actually measured. Telling an SA who scoped to user3
+        # to roll `--all` proposes rolling seven attendees they never looked at.
+        d_fix=" · roll them: ws rebuild-images --no-build ${scope_user:+--user ${scope_user}}${scope_user:---all}"
       fi
       if [[ "$d_bad" -gt 0 ]]; then
         d_what="${d_what}${d_what:+; }${d_bad} reference a tag that does not exist"
@@ -1871,7 +1903,19 @@ cmd_doctor() {
     err "IdP missing — bootstrap adds it"; fail=1
   fi
   printf "  %-28s" "user namespaces"
-  if oc get ns user1-dev >/dev/null 2>&1; then ok "user1-dev exists"; else err "missing — workshop-config not synced"; fail=1; fi
+  # Whole-cohort scope keeps probing user1-dev: it is the canary for "workshop-config rendered the
+  # per-user namespaces at all". In --user scope the useful question is about THAT attendee, and this
+  # row is also where `ws doctor --user user9` on an 8-user cohort tells you user9 was never
+  # provisioned — so the fix hint splits: a missing user1-dev is an unsynced platform, a missing
+  # userN-dev on a synced platform is a cohort-size problem.
+  local ns_probe="${scope_user:-user1}-dev"
+  if oc get ns "$ns_probe" >/dev/null 2>&1; then
+    ok "${ns_probe} exists"
+  elif [[ -n "$scope_user" ]]; then
+    err "${ns_probe} missing — is ${scope_user} provisioned? check the cohort: ws status (grow it: ws scale-users N)"; fail=1
+  else
+    err "missing — workshop-config not synced"; fail=1
+  fi
   printf "  %-28s" "workshop cohort size"
   # Honest after a `ws scale-users`: cross-check the LIVE helm parameter against the group it should
   # have converged to. A mismatch usually means a scale is still mid-sync — re-run shortly.
@@ -3574,11 +3618,14 @@ main() {
     smoke)       cmd_smoke "$user" "$module" ${extra[@]:+"${extra[@]}"};;
     reset)       cmd_reset "$user" "$module";;
     solve)       cmd_solve "$user" "$module";;
-    doctor)      cmd_doctor;;
+    doctor)      cmd_doctor "$user";;
     preflight)   cmd_preflight;;
     status)      cmd_status "$user";;
     diag)        cmd_diag "$user" "$module";;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,23p';;
+    # The range is a LINE COUNT into the header block, so it drifts the moment the block grows — adding
+    # doctor's --user line pushed the closing "<module> is a position number…" note out of it. Bumped
+    # with that line; anything else added above must bump it again (verify with: ws help | tail -2).
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,24p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
