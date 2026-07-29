@@ -55,6 +55,10 @@ public class ClaimResource {
     @Inject
     MeterRegistry registry;
 
+    /** Hands out claim numbers from the database sequence it also creates at startup. */
+    @Inject
+    ClaimNumberSequence claimNumbers;
+
     /**
      * List claims, sorted by claim number. Returns every claim by default so lab text and
      * dashboards see all 30 seeds; pass {@code ?page=N&size=M} to page through them. The
@@ -123,8 +127,14 @@ public class ClaimResource {
 
     /**
      * Create a claim. The caller supplies the claimant, type, amount and incident date;
-     * the server assigns the next claim number (CLM-1031, CLM-1032, ...) and opens it in
-     * the {@code Submitted} state with an {@code Unassigned} adjuster.
+     * the server assigns the next claim number and opens it in the {@code Submitted} state
+     * with an {@code Unassigned} adjuster.
+     *
+     * <p>The number comes from the {@code claim_number_seq} database sequence — never from
+     * "the highest number I can see, plus one", which two replicas lose the race on. Where the
+     * numbering starts depends on what the database already holds: {@code CLM-1031} on the
+     * 30-claim seeded database most modules run, {@code CLM-1001} on the empty one the storage
+     * module starts from. See {@link ClaimNumberSequence}.
      */
     @POST
     @Transactional
@@ -133,7 +143,7 @@ public class ClaimResource {
             return badRequest("claimant is required and type must be one of " + TYPES);
         }
         Claim claim = new Claim();
-        claim.claimNumber = nextClaimNumber();
+        claim.claimNumber = claimNumbers.next();
         claim.claimant = input.claimant();
         claim.type = input.type();
         claim.amount = input.amount() == null ? BigDecimal.ZERO : input.amount();
@@ -161,27 +171,6 @@ public class ClaimResource {
         }
         claim.status = update.status();
         return Response.ok(claim).build();
-    }
-
-    /**
-     * Next claim number, allocated from the {@code claim_number_seq} database sequence
-     * (created by {@code import.sql}, which starts it at 1031 — just past the CLM-1030 seeds).
-     *
-     * <p>The sequence is the ONLY safe way to do this. {@code nextval} is atomic and never
-     * hands the same value to two callers, so concurrent requests — and, crucially, concurrent
-     * <em>replicas</em> — cannot collide. Several modules run this service at 2-3 replicas
-     * (the M11 HPA scales it to min=2), and any "read the max, add one" scheme is broken by
-     * construction there: two pods read the same max and both try to insert it.
-     *
-     * <p>Sequence values are NOT rolled back with the transaction, so a rejected or failed
-     * create burns a number. Gaps in the claim numbering are therefore normal and expected —
-     * that is the price of never colliding, and it is the right trade for a primary key.
-     */
-    private static String nextClaimNumber() {
-        Number next = (Number) Panache.getEntityManager()
-                .createNativeQuery("select nextval('claim_number_seq')")
-                .getSingleResult();
-        return "CLM-" + next.longValue();
     }
 
     private static Response notFound(String claimNumber) {

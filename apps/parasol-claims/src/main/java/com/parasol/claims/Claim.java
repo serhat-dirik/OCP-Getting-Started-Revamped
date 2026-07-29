@@ -16,11 +16,11 @@ import jakarta.persistence.Table;
  * IS the primary key — there is no separate surrogate id, which keeps the JSON and the
  * seed script ({@code import.sql}) easy to read.
  *
- * <p>New numbers are allocated from the {@code claim_number_seq} sequence declared in
- * {@code import.sql} — see {@link ClaimResource#create}. The key is assigned by the
- * application rather than by {@code @GeneratedValue} only because it is a formatted
- * String ({@code CLM-nnnn}) rather than a bare number; the uniqueness guarantee still
- * comes from the database sequence, so concurrent replicas cannot collide.
+ * <p>New numbers are allocated from the {@code claim_number_seq} database sequence — see
+ * {@link ClaimNumberSequence}, which creates it at startup and hands out its values. The key
+ * is assigned by the application rather than by {@code @GeneratedValue} only because it is a
+ * formatted String ({@code CLM-nnnn}) rather than a bare number; the uniqueness guarantee
+ * still comes from the database sequence, so concurrent replicas cannot collide.
  *
  * <p>The 30 seeded rows (CLM-1001..CLM-1030) are deterministic so workshop lab text can
  * reference exact claim numbers, statuses, and amounts.

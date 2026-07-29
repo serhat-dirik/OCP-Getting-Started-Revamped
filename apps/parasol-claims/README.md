@@ -24,9 +24,13 @@ deterministic so lab text can reference exact values.
 ## Claim numbering
 
 `POST /api/claims` assigns the number itself, from the **`claim_number_seq` database
-sequence** declared in `import.sql`. It starts at 1031 — just past the `CLM-1030` seeds —
-and is recreated on every `drop-and-create` boot, so the first created claim is always
-`CLM-1031`.
+sequence**. Where the numbering starts depends on what the database already holds, and both
+answers are contractual:
+
+| Database the app boots against | First created claim | Who runs that way |
+|--------------------------------|---------------------|-------------------|
+| The 30 deterministic seeds     | `CLM-1031`          | every module on the shipped `drop-and-create` config |
+| Empty                          | `CLM-1001`          | `storage-stateful` (`…STRATEGY=update`, nothing seeded) |
 
 This **must** stay a sequence. `nextval` is atomic, so two concurrent requests — and,
 crucially, two concurrent **replicas** — can never be handed the same number. Several
@@ -38,7 +42,34 @@ Two consequences worth knowing before tidying this up:
 
 - **Gaps are normal.** Sequence values are not rolled back, so a rejected or failed create
   burns a number. That is the correct trade for a primary key.
-- **Numbers are never reused.** Deleting a claim does not free its number.
+- **Numbers are never reused** while a database lives. Deleting a claim does not free its
+  number. (A `drop-and-create` boot resets the whole database, data and counter together —
+  that is what keeps `CLM-1031` deterministic.)
+
+### Two places create the sequence, and both are needed
+
+`ClaimNumberSequence` creates it on `StartupEvent`, `import.sql` creates it in the seed
+script, and neither is redundant:
+
+- **`ClaimNumberSequence` guarantees it EXISTS**, under every schema-management strategy.
+  Quarkus runs `sql-load-script` only under `drop-and-create`/`create`, so on the `update`
+  and `none` paths `import.sql` never executes. It creates the sequence positioned one past
+  the highest `CLM-<integer>` already stored (values that do not parse that way are ignored),
+  which is what produces both rows of the table above.
+- **`import.sql` RESETS it**, together with the data, on every `drop-and-create` boot.
+  Hibernate drops the tables it manages and never touches a sequence that is not in the
+  entity model, so without those two lines a reseeded database keeps counting from wherever
+  it was. Measured: sequence pushed to 5000, app rebooted — with the lines, the reseeded
+  database hands out `CLM-1031`; without them, `CLM-5001`.
+
+The startup path deliberately **never repositions a sequence that already exists**, and its
+create-and-position is a *single* `create sequence if not exists … start with N` statement.
+Both properties are about replicas: a pod booting while another is already serving must not
+be able to rewind a live sequence (that would re-issue numbers that are already committed
+rows), and there must be no window where the sequence exists but is positioned wrongly. If
+two replicas issue the `CREATE` in the same instant, `IF NOT EXISTS` is a check rather than a
+lock and PostgreSQL may fail the loser — harmless, since the winner created exactly the same
+object, so the initializer logs it and the pod carries on rather than crash-looping.
 
 > **Fixed 2026-07-28.** This was previously `max(claim_number) + 1` computed in
 > application code via `order by claimNumber desc` — a *string* sort. It worked while every
@@ -47,6 +78,12 @@ Two consequences worth knowing before tidying this up:
 > `10000` and died on the primary key. Measured in `user1-dev`: 8970 creates succeeded, then
 > **every** create after that returned 500. `ClaimResourceTest` now pins both the
 > four-to-five-digit boundary crossing and the concurrent-create case.
+>
+> **Followed up 2026-07-29.** That fix put the sequence *only* in `import.sql`, which meant it
+> did not exist on the `update`/`none` paths — every `POST /api/claims` on `storage-stateful`
+> would have returned 500 (`sequence claim_number_seq does not exist`) from the next image
+> build onward, killing three of that module's exercises. Hence `ClaimNumberSequence` and the
+> two numbering tests (`ClaimNumberingEmptyDbTest`, `ClaimNumberingSeededDbTest`).
 
 ### Known wart — list ordering past `CLM-9999`
 
@@ -131,6 +168,29 @@ Pointing dev mode at the in-cluster PostgreSQL (export
 `QUARKUS_DATASOURCE_JDBC_URL/_USERNAME/_PASSWORD`) is the M03 (Dev Spaces) story.
 OIDC Dev Services are disabled, so dev mode and `./mvnw test` never start a
 Keycloak container.
+
+### Tests
+
+`./mvnw test` — everything runs against in-memory H2, no PostgreSQL and no containers.
+Five of the seven test classes carry a `@TestProfile`, so the suite boots the app more than
+once; that is deliberate, and three details are load-bearing:
+
+- **Each profile that writes claims uses its own H2 database name.** `DB_CLOSE_DELAY=-1`
+  keeps an in-memory H2 alive for the whole JVM, so classes sharing `mem:claims` also share
+  rows. The three `ClaimNumbering*Test` classes assert what the *first* create returns;
+  folding any of them back into `ClaimResourceTest` (whose sibling tests create claims in an
+  order JUnit does not promise) silently destroys the assertion.
+- **`ClaimNumberingMixedDataTest` is the only test that exercises the startup positioning.**
+  On the seeded path `import.sql` creates the sequence, so the computed start value is never
+  used; that test's fixture creates no sequence, and holds deliberately unparseable claim
+  numbers to pin that they are skipped rather than thrown on.
+- **`DatabaseFreeBootTest` guards the datasource-inactive mode**, which is the mode M21 and
+  the modernization modules run this image in. It is the test that fails if anyone adds
+  startup work that touches the database unconditionally.
+
+Each app restart wants a few hundred MB — a small container VM can OOM the surefire fork
+partway through. Run the classes in batches (`-Dtest=…`) if that happens locally; it is a
+memory limit, not a test failure.
 
 ## Building the image in-cluster
 

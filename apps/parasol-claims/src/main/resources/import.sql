@@ -2,18 +2,31 @@
 -- Values are FIXED so workshop lab text can reference exact claim numbers,
 -- statuses, amounts, and adjusters. Do NOT randomize or reorder.
 --
--- Loaded by Hibernate on drop-and-create (see application.properties). Portable
--- across PostgreSQL (prod/dev) and H2 (tests): plain INSERTs, no sequences.
+-- Loaded by Hibernate ONLY under the drop-and-create/create schema-management
+-- strategies (see application.properties) — that limit is why the sequence below is
+-- not the only place claim_number_seq is created. Portable across PostgreSQL
+-- (prod/dev) and H2 (tests).
 --
 -- Columns: claim_number, claimant, claim_type, status, amount, incident_date, adjuster
 -- Spread: 12 auto / 11 home / 7 life; statuses across the workflow; freshly
 -- Submitted claims are Unassigned.
 --
--- Claim-number allocation. POST /api/claims takes its number from this sequence
--- (see ClaimResource.nextClaimNumber), NOT from "max(claim_number) + 1" — nextval is
--- atomic, so concurrent replicas can never be handed the same number. It starts at
--- 1031, just past the CLM-1030 seeds, so the first created claim is always CLM-1031.
--- Recreated on every drop-and-create boot, which keeps that starting point deterministic.
+-- Claim-number allocation. POST /api/claims takes its number from this sequence (see
+-- ClaimNumberSequence), NOT from "max(claim_number) + 1" — nextval is atomic, so
+-- concurrent replicas can never be handed the same number.
+--
+-- WHY THIS STAYS HERE even though ClaimNumberSequence creates the sequence at startup
+-- under every strategy: the two do different jobs. The startup path guarantees the
+-- sequence EXISTS. These two lines RESET it, together with the data, on every
+-- drop-and-create boot — and that is what makes "the first created claim is CLM-1031"
+-- deterministic for the modules that reseed. Measured with the sequence pushed to 5000
+-- and the app rebooted: with these lines the reseeded database hands out CLM-1031; with
+-- them removed it hands out CLM-5001, because Hibernate drops the TABLES it manages and
+-- never touches a sequence that is not in the entity model. The startup path cannot
+-- substitute: it deliberately leaves an existing sequence alone (rewinding one another
+-- replica is drawing from would re-issue live claim numbers).
+-- Harmless overlap: under drop-and-create these run first, so the startup path finds the
+-- sequence present and its CREATE ... IF NOT EXISTS is a no-op.
 -- Standard SQL: verified identical on PostgreSQL 15.18 (prod/dev) and H2 2.4.240 (tests).
 DROP SEQUENCE IF EXISTS claim_number_seq;
 CREATE SEQUENCE claim_number_seq START WITH 1031 INCREMENT BY 1;
