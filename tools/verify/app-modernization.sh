@@ -58,7 +58,7 @@ no_modernized() { ! oc get deploy parasol-claims-modernized -n "$NS" >/dev/null 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                     oc get ns "$NS"                    || hint "run: ws prep app-modernization (or ws start app-modernization --user ${USER_NAME}); ${NS} is workshop-layer (per-user-modernize)"
 check "entry marker ws-entry-app-modernization present"          oc get cm ws-entry-app-modernization -n "$NS"    || hint "entry app not synced — ws reset app-modernization --user ${USER_NAME}"
-check "MaaS config present (endpoint + model)"     oc get cm maas-config -n "$NS"     || hint "entry app not synced — ws reset app-modernization --user ${USER_NAME}"
+check "MaaS config carries the resolved model (configmap maas-config)" cm_key_set "$NS" maas-config model || hint "the MaaS copy hook did not fill maas-config — ws reset app-modernization --user ${USER_NAME}"
 check "legacy fork parasol-legacy-claims reachable in Gitea" repo_reachable           || hint "the fork {user}/parasol-legacy-claims is missing — check the gitea-fork Job (ws reset app-modernization --user ${USER_NAME}); needs parasol/parasol-legacy-claims seeded (workshop-config app-repo-seed)"
 
 # INFO: [ADS] Developer Lightspeed for MTA wiring (optional — never fails the entry state).

@@ -60,8 +60,14 @@ check "entry marker ws-entry-ai-assisted-development present"            oc get 
 check "scoped ServiceAccount mcp-agent present"      oc get sa "$SA" -n "$NS"               || hint "the MCP server's least-privilege SA is missing — ws reset ai-assisted-development --user ${USER_NAME}"
 check "mcp-agent read-only RoleBinding (view) present" oc get rolebinding "${SA}-view" -n "$NS" || hint "the namespaced view grant is missing — ws reset ai-assisted-development --user ${USER_NAME}"
 check "MCP server deployed + Ready"                  deploy_available kubernetes-mcp-server || hint "kubernetes-mcp-server not Ready — check pods in ${NS} (ws reset ai-assisted-development --user ${USER_NAME}); pulls the digest-pinned ghcr.io/containers/kubernetes-mcp-server"
-check "MaaS config present (endpoint + model)"       oc get cm maas-config -n "$NS"         || hint "entry app not synced — ws reset ai-assisted-development --user ${USER_NAME}"
+check "MaaS config carries the resolved model (configmap maas-config)" cm_key_set "$NS" maas-config model || hint "the MaaS copy hook did not fill maas-config — ws reset ai-assisted-development --user ${USER_NAME}"
 check "MaaS credentials Secret present"              oc get secret maas-credentials -n "$NS" || hint "the MaaS copy hook did not run — ws reset ai-assisted-development --user ${USER_NAME}"
+# The workspace's own env surface, which nothing checked before. It is now hook-written like maas-config
+# (the chart renders metadata only), and the DevWorkspace mounts EVERY key of it as an env var — so a
+# hook that stopped before this patch would hand the attendee a CLI agent with no GENAI_MODEL and no
+# error anywhere. That is precisely the failure this check exists to make loud.
+check "DevWorkspace env config carries GENAI_MODEL (configmap maas-config-env)" cm_key_set "$NS" maas-config-env GENAI_MODEL \
+  || hint "the MaaS copy hook did not fill maas-config-env — ws reset ai-assisted-development --user ${USER_NAME}"
 check "Dev Spaces workspace present"                 oc get devworkspaces.workspace.devfile.io "$(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.devWorkspaceName}' 2>/dev/null || echo parasol-ai-assist)" -n "$NS" \
   || hint "the DevWorkspace is missing — ws reset ai-assisted-development --user ${USER_NAME}"
 

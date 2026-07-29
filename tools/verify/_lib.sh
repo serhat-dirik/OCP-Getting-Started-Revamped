@@ -24,6 +24,15 @@ check() {  # check "<description>" <command...>  — pass/fail one assertion
 
 hint() { echo "   ↳ fix: $*"; }
 
+# A ConfigMap whose values are written by an Argo Sync hook rather than rendered by the chart —
+# maas-config / maas-config-env in the AI entry states — EXISTS from the moment the chart applies, so
+# `oc get cm` passing is no longer evidence that anything wired it up. The chart deliberately renders
+# metadata only (the model comes from the cluster's MaaS Secret, not from git), which means an existence
+# check would go green on a ConfigMap the hook never filled. Assert the key the workloads actually read.
+cm_key_set() {  # namespace configmap key → 0 when that key exists and is non-empty
+  [ -n "$(oc get configmap "$2" -n "$1" -o jsonpath="{.data.$3}" 2>/dev/null)" ]
+}
+
 # INCONCLUSIVE, never a failure — for a check the CALLER cannot evaluate (no impersonation rights, an
 # in-cluster-only endpoint on an off-cluster run). Deliberately does NOT touch the pass/fail counters:
 # a false ❌ destroys attendee trust in every other ✅ (tools/verify/README.md, contract).

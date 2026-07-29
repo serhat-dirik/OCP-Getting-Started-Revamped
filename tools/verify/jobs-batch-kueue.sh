@@ -72,7 +72,7 @@ check "LocalQueue user-queue is Active (bound to ${CQ})" localqueue_active      
 check "claims-data PVC is Bound"                        pvc_bound claims-data                        || hint "dataset PVC not bound — needs an RWX StorageClass; check: oc get pvc claims-data -n ${NS}"
 check "claims-data seed Job succeeded (or cleaned up)"  seed_ok                                      || hint "seed Job present but not Complete — ws reset jobs-batch-kueue --user ${USER_NAME} (check the claims-data-seed-jobs-batch-kueue-${USER_NAME} Job)"
 check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset jobs-batch-kueue --user ${USER_NAME} (check maas-copy-jobs-batch-kueue-${USER_NAME})"
-check "MaaS endpoint/model present (configmap maas-config)" oc get cm maas-config -n "$NS"            || hint "entry app not synced — ws reset jobs-batch-kueue --user ${USER_NAME}"
+check "MaaS config carries the resolved model (configmap maas-config)" cm_key_set "$NS" maas-config model || hint "the MaaS copy hook did not fill maas-config — ws reset jobs-batch-kueue --user ${USER_NAME}"
 # PRESENCE IS NOT PROOF: the check above says the Secret exists, not that its key works. The entry hook
 # validates the credential against the endpoint before staging it and records the verdict here. Reported
 # as INFO because this module's graded outcome is the Kueue queueing behaviour, not the inference —
