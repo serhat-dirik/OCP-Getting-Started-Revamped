@@ -79,6 +79,14 @@ SYNC_OPTS_ANN="argocd.argoproj.io/sync-options"
 # apps are deliberately NOT matched: their objects live in namespaces we delete outright, and a loose
 # prefix here would claim someone else's Argo trace as our own.
 TRACK_ANN="argocd.argoproj.io/tracking-id"
+# Dev Spaces stamps this on every namespace it auto-provisions for a user (CheCluster
+# devEnvironments.defaultNamespace {autoProvision: true, template: "<username>-devspaces"}). We never
+# create those namespaces and they carry NONE of our labels, so before this they were invisible here:
+# an attendee who opened Dev Spaces left `userN-devspaces` behind and the report said the cluster was
+# clean. A false clean is worse than a named leftover — it is the one thing this script exists to
+# prevent. Namespaces are cluster-scoped so nothing garbage-collects them either (no ownerReferences,
+# and a namespaced controller could not own one anyway). Measured on ksls5 2026-07-29.
+CHE_USER_ANN="che.eclipse.org/username"
 PORTFOLIO_APP_PREFIX="pp-"
 
 # Argo's own objects are exempt from the "lives in an adopted operator's namespace" rule: the portfolio
@@ -208,7 +216,7 @@ NS_INDEX=""; SVC_INDEX=""; CSV_INDEX=""; OG_INDEX=""; CRD_INDEX=""; STATE_KV="";
 
 # The seven marker fields this script cares about on ANY object, in one jsonpath:
 #   owner|component|stack|user|layer|tracking-id|sync-options
-MARKS_JP="{.metadata.labels.${OWNER_KEY//./\\.}}|{.metadata.labels.${COMPONENT_KEY//./\\.}}|{.metadata.labels.${STACK_KEY//./\\.}}|{.metadata.labels.${USER_KEY//./\\.}}|{.metadata.labels.${LAYER_KEY//./\\.}}|{.metadata.annotations.${TRACK_ANN//./\\.}}|{.metadata.annotations.${SYNC_OPTS_ANN//./\\.}}"
+MARKS_JP="{.metadata.labels.${OWNER_KEY//./\\.}}|{.metadata.labels.${COMPONENT_KEY//./\\.}}|{.metadata.labels.${STACK_KEY//./\\.}}|{.metadata.labels.${USER_KEY//./\\.}}|{.metadata.labels.${LAYER_KEY//./\\.}}|{.metadata.annotations.${TRACK_ANN//./\\.}}|{.metadata.annotations.${SYNC_OPTS_ANN//./\\.}}|{.metadata.annotations.${CHE_USER_ANN//./\\.}}"
 
 load_indexes() {
   echo
@@ -865,8 +873,8 @@ section_orphan_csvs() {
 }
 
 # ── [4/9] workshop namespaces ─────────────────────────────────────────────────
-ns_is_ours() {  # name owner component stack user layer track → 0 and echoes the marker that identified it
-  local name="$1" owner="$2" comp="$3" stack="$4" user="$5" layer="$6" track="${7:-}"
+ns_is_ours() {  # name owner component stack user layer track che-user → 0 and echoes the marker that identified it
+  local name="$1" owner="$2" comp="$3" stack="$4" user="$5" layer="$6" track="${7:-}" che="${8:-}"
   [ -n "$owner" ] && { echo "${OWNER_KEY}=${owner}"; return 0; }
   [ -n "$comp" ]  && { echo "${COMPONENT_KEY}=${comp}"; return 0; }
   [ -n "$stack" ] && { echo "${STACK_KEY}=${stack}"; return 0; }
@@ -874,6 +882,13 @@ ns_is_ours() {  # name owner component stack user layer track → 0 and echoes t
   [ -n "$layer" ] && { echo "${LAYER_KEY}=${layer}"; return 0; }
   # A namespace whose labels were stripped but which an Argo portfolio app still claims is STILL a trace.
   case "$track" in "${PORTFOLIO_APP_PREFIX}"*) echo "${TRACK_ANN} → ${track%%:*}"; return 0;; esac
+  # A Dev Spaces workspace namespace auto-provisioned FOR ONE OF OUR ATTENDEES. Gate on the attendee
+  # identity, not merely on the annotation being present: on a cluster whose Dev Spaces we adopted,
+  # the org's own users have these too and they are emphatically not ours. userN is the canonical
+  # workshop identity (install.sh USER_PREFIX="user", the same rule `ws` validates --user against).
+  case "$che" in
+    user[0-9]*) echo "${CHE_USER_ANN}=${che} — Dev Spaces auto-provisioned this for our attendee"; return 0;;
+  esac
   case "$name" in "${NS_PREFIX}"*) echo "name prefix ${NS_PREFIX}* (no label — teardown could not see it)"; return 0;; esac
   return 1
 }
@@ -884,9 +899,9 @@ section_namespaces() {
     "A mark is not proof of ownership: Argo stamps our labels onto resources it ADOPTED, so the org's own operator namespace ends up labelled by us. Each line below says whether the namespace is ours to delete, ours only to un-mark, or genuinely undecidable."
   local name phase owner comp stack user layer track marker cls why hit=0
   if [ -z "$NS_INDEX" ]; then note "could not list namespaces — skipping"; return 0; fi
-  while IFS='|' read -r name phase owner comp stack user layer track _; do
+  while IFS='|' read -r name phase owner comp stack user layer track _ che _; do
     [ -n "$name" ] || continue
-    marker="$(ns_is_ours "$name" "$owner" "$comp" "$stack" "$user" "$layer" "$track")" || continue
+    marker="$(ns_is_ours "$name" "$owner" "$comp" "$stack" "$user" "$layer" "$track" "$che")" || continue
     hit=1
     OURS_NS_LIST="${OURS_NS_LIST}${name} "
     cls="$(classify_finding namespace "$name" "")"
