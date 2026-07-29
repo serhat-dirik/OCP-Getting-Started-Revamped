@@ -3,6 +3,9 @@ package com.parasol.claims;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -42,11 +45,31 @@ import jakarta.ws.rs.core.Response;
 @Consumes(MediaType.APPLICATION_JSON)
 public class ClaimResource {
 
-    /** Allowed lines of business — POST is rejected with 400 for anything else. */
-    static final Set<String> TYPES = Set.of("auto", "home", "life");
+    /** Allowed lines of business — POST is rejected with 400 for anything else. Alphabetical. */
+    static final Set<String> TYPES = ordered("auto", "home", "life");
 
     /** Allowed workflow states — the status update is rejected with 400 for anything else. */
-    static final Set<String> STATUSES = Set.of("Submitted", "UnderReview", "Approved", "Denied");
+    static final Set<String> STATUSES = ordered("Submitted", "UnderReview", "Approved", "Denied");
+
+    /**
+     * An unmodifiable set that iterates in declaration order — deliberately NOT {@code Set.of}.
+     *
+     * <p>Both sets above are rendered verbatim into the 400 bodies below, which are read by an
+     * attendee trying to correct a request. {@code Set.of} iterates in an order derived from a
+     * per-JVM random SALT, so the same mistake printed {@code [auto, life, home]} on one restart
+     * and something else on the next — no captured output in the docs could be trusted, and any
+     * test asserting the message text would be flaky. Declaration order also lets STATUSES read as
+     * the workflow it is (Submitted → UnderReview → Approved/Denied) rather than as noise.
+     *
+     * <p>Secondary, and the reason this was found: {@code Set.of(...).contains(null)} <em>throws</em>
+     * NullPointerException instead of answering false, so a validation guard written as
+     * {@code !TYPES.contains(input.type())} blew up inside its own condition whenever the field was
+     * absent. A HashSet-family set answers false. The guards below null-check explicitly anyway —
+     * correctness there must not depend on which Set implementation someone picks later.
+     */
+    private static Set<String> ordered(String... values) {
+        return Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(values)));
+    }
 
     private static final int DEFAULT_PAGE_SIZE = 20;
     private static final int MAX_PAGE_SIZE = 100;
@@ -139,8 +162,28 @@ public class ClaimResource {
     @POST
     @Transactional
     public Response create(NewClaim input) {
-        if (input == null || isBlank(input.claimant()) || !TYPES.contains(input.type())) {
-            return badRequest("claimant is required and type must be one of " + TYPES);
+        // One check per field, each naming the field it rejected. The old single combined guard
+        // answered three different mistakes with one message that named none of them — and it
+        // never ran at all when 'type' was absent, because the set lookup threw first (see
+        // ordered()). Null is checked BEFORE the lookup so the order of operations is the fix,
+        // not the collection type.
+        if (input == null) {
+            return badRequest("a JSON request body is required, with at least 'claimant' and "
+                    + "'type' (one of " + TYPES + ")");
+        }
+        if (isBlank(input.claimant())) {
+            return badRequest("field 'claimant' is required");
+        }
+        if (isBlank(input.type())) {
+            // The common way in: 'type' appears in only two places in the whole workshop (the
+            // lab's JSON and this app's README), so a near-miss like "claimType" is easy — and
+            // Jackson drops unknown properties silently, leaving 'type' null. Say so, or the
+            // attendee stares at a body that plainly contains a type.
+            return badRequest("field 'type' is required and must be one of " + TYPES
+                    + "; any other field name in the body is ignored");
+        }
+        if (!TYPES.contains(input.type())) {
+            return badRequest("field 'type' must be one of " + TYPES + ", not '" + input.type() + "'");
         }
         Claim claim = new Claim();
         claim.claimNumber = claimNumbers.next();
@@ -162,8 +205,18 @@ public class ClaimResource {
     @Path("/{claimNumber}/status")
     @Transactional
     public Response updateStatus(@PathParam("claimNumber") String claimNumber, StatusUpdate update) {
-        if (update == null || !STATUSES.contains(update.status())) {
-            return badRequest("status must be one of " + STATUSES);
+        // Same shape, same fix as create() above: null before lookup, one message per mistake.
+        if (update == null) {
+            return badRequest("a JSON request body is required, with the field 'status' (one of "
+                    + STATUSES + ")");
+        }
+        if (isBlank(update.status())) {
+            return badRequest("field 'status' is required and must be one of " + STATUSES
+                    + "; any other field name in the body is ignored");
+        }
+        if (!STATUSES.contains(update.status())) {
+            return badRequest("field 'status' must be one of " + STATUSES + ", not '"
+                    + update.status() + "'");
         }
         Claim claim = Claim.findById(claimNumber);
         if (claim == null) {

@@ -21,6 +21,32 @@ Small enough to read in ten minutes: two entities, one resource class.
 The 30 seeded claims (`CLM-1001..CLM-1030`) and the `claim_event` timeline are
 deterministic so lab text can reference exact values.
 
+### Request bodies
+
+The two write endpoints are the only place field names matter, and unknown properties are
+**ignored** (Quarkus/Jackson default), so a misspelled field looks exactly like a missing one.
+Spelling these out here because until 2026-07-29 they appeared nowhere but the lab's own JSON:
+
+```jsonc
+// POST /api/claims
+{
+  "claimant":     "Alice Nguyen",   // required, non-blank
+  "type":         "auto",           // required, one of: auto | home | life
+  "amount":       1234.56,          // optional, defaults to 0
+  "incidentDate": "2026-07-01",     // optional, defaults to today
+  "adjuster":     "Rebecca Torres"  // optional, defaults to "Unassigned"
+}
+
+// PUT /api/claims/{claimNumber}/status
+{ "status": "Approved" }            // required, one of: Submitted | UnderReview | Approved | Denied
+```
+
+Every rejection is a **400** naming the single field it rejected and listing the accepted
+values — never a 500. (It used to be a 500: the guard called `contains()` on a `Set.of`, which
+throws on a null argument instead of returning false, so omitting `type` blew the validation up
+inside its own condition. Regression tests: `ClaimResourceTest#createWithoutTypeReturns400…`
+and siblings.)
+
 ## Claim numbering
 
 `POST /api/claims` assigns the number itself, from the **`claim_number_seq` database

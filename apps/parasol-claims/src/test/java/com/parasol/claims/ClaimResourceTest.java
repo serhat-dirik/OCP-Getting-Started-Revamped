@@ -111,7 +111,106 @@ class ClaimResourceTest {
                 .body("{\"claimant\":\"Bad Type\",\"type\":\"boat\"}")
                 .when().post("/api/claims")
                 .then()
-                .statusCode(400);
+                .statusCode(400)
+                // The body has to name the field AND the accepted values, or the attendee has
+                // nothing to correct against but the lab's own JSON.
+                .body("error", containsString("'type'"))
+                .body("error", containsString("auto"))
+                .body("error", containsString("boat"));
+    }
+
+    /**
+     * Regression (measured live on a workshop cluster 2026-07-29): a POST that omits {@code type}
+     * returned <strong>500</strong> with a raw
+     * {@code java.lang.NullPointerException at ImmutableCollections$SetN.contains}, not the 400 the
+     * guard plainly intends. {@code TYPES} was a {@code Set.of(...)}, and {@code Set.of} rejects a
+     * null argument to {@code contains} by throwing rather than answering false — so the validation
+     * blew up inside its own condition, before it could ever reach its own error path.
+     */
+    @Test
+    void createWithoutTypeReturns400NamingTheField() {
+        given()
+                .contentType("application/json")
+                .body("{\"claimant\":\"No Type At All\"}")
+                .when().post("/api/claims")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("'type'"))
+                .body("error", containsString("auto"))
+                .body("error", containsString("home"))
+                .body("error", containsString("life"));
+    }
+
+    /**
+     * The way an attendee actually hits the case above: the field name is {@code type}, and it
+     * appears in exactly two places in the whole workshop (the lab's JSON and the app README), so
+     * a plausible-looking {@code claimType} is an easy typo. Quarkus/Jackson ignores unknown
+     * properties by default, so the misspelled field is silently dropped and {@code type} arrives
+     * null — indistinguishable, to the resource, from omitting it. The response must still be a
+     * 400 that names the field the server actually wants.
+     */
+    @Test
+    void createWithMisspelledTypeFieldReturns400NamingTheRealField() {
+        given()
+                .contentType("application/json")
+                .body("{\"claimant\":\"Typo Tester\",\"claimType\":\"auto\",\"amount\":100.00}")
+                .when().post("/api/claims")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("'type'"));
+    }
+
+    @Test
+    void createWithoutClaimantReturns400NamingTheField() {
+        given()
+                .contentType("application/json")
+                .body("{\"type\":\"auto\"}")
+                .when().post("/api/claims")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("'claimant'"));
+    }
+
+    /**
+     * The same defect, one endpoint over: {@code STATUSES} was a {@code Set.of(...)} too, so a
+     * status update whose {@code status} field is missing or misspelled threw the identical NPE
+     * inside the identical guard.
+     */
+    @Test
+    void updateStatusWithoutStatusFieldReturns400NamingTheField() {
+        given()
+                .contentType("application/json")
+                .body("{\"state\":\"Approved\"}")
+                .when().put("/api/claims/CLM-1006/status")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("'status'"))
+                .body("error", containsString("Approved"));
+    }
+
+    /**
+     * The accepted values are rendered straight into a message an attendee reads, so their order
+     * must not move. {@code Set.of} iterates in an order derived from a per-JVM random SALT, which
+     * means the identical mistake printed a different list on every restart — and no captured
+     * output in the docs could ever be trusted. Both sets are ordered now: {@code TYPES}
+     * alphabetically, {@code STATUSES} in workflow order, which is the more useful reading.
+     */
+    @Test
+    void errorMessagesListAcceptedValuesInAStableOrder() {
+        given()
+                .contentType("application/json")
+                .body("{\"claimant\":\"Order Probe\",\"type\":\"boat\"}")
+                .when().post("/api/claims")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("[auto, home, life]"));
+        given()
+                .contentType("application/json")
+                .body("{\"status\":\"Frozen\"}")
+                .when().put("/api/claims/CLM-1007/status")
+                .then()
+                .statusCode(400)
+                .body("error", containsString("[Submitted, UnderReview, Approved, Denied]"));
     }
 
     @Test
