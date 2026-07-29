@@ -270,6 +270,44 @@ jobs:
           fi
           python3 tools/lint/hook-env-guard.py
 
+  rebuild-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # The recorded cluster is YAML. A missing parser exits 2, which the self-test assertion
+        # below turns into a failure — it can never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: The image-drift scan must still report what a recorded cluster produces
+        # `ws rebuild-images --check` and `ws doctor`'s drift row answer "is this pod on the image
+        # we think it is". That needs a cluster, so the SCAN cannot run here — but the reporting
+        # can, against a recording of one. The point is the failure mode: a wrong answer here is a
+        # clean report, never an error, so nothing about it is visible by reading the diff. Its
+        # author's first draft shipped four such defects (collapsed CronJob selector column,
+        # double-counted Knative Revisions, a service-wide ksvc pod match calling a rolled service
+        # stale, an image ref split from the left) and every one was found by running it.
+        #
+        # This is NOT a substitute for `ws rebuild-images --check` on a live cluster: the recording
+        # is of TEMPLATED oc output, so the go-templates inside rebuild_enumerate are data here.
+        # Their emptiness guards are pinned statically instead, and the guard's own header says so.
+        run: |
+          rc=0
+          python3 tools/lint/rebuild-scan-guard.py --self-test || rc=$?
+          # Exactly 1 = every reintroduced defect was caught AND the unmutated tree passed its own
+          # suite. 0 = the guard is blind; 2 = a mutant slipped through, a mutation became a no-op
+          # because the code was reworded, the control failed, or a fixture is missing. Either way
+          # detection is unproven, so fail rather than trust a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::rebuild-scan-guard self-test must exit 1 (every reintroduced defect" \
+                 "detected); got rc=$rc. The guard's detection is unproven — refusing to trust a" \
+                 "clean result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/rebuild-scan-guard.py
+
   module-order:
     runs-on: ubuntu-latest
     steps:

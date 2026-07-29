@@ -9,7 +9,7 @@
 #   ws reset  <module> [--user U]    return the user's world to the module's entry state
 #   ws solve  <module> [--user U]    materialize the END state (instructor only)
 #   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
-#   ws doctor                        environment sanity: login, argo, gitea, operators
+#   ws doctor                        environment sanity: login, argo, gitea, operators, image drift
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
 #   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
 #   ws scale-users N [--yes]         SA/admin: grow/shrink the workshop cohort to N users
@@ -1466,6 +1466,39 @@ rebuild_print_table() {  # rows-file → the report; → 0 when nothing needs ac
   return 1
 }
 
+rebuild_row_summary() {  # rows-file → "total<TAB>stale<TAB>no-tag<TAB>offenders" — the ONE-LINE verdict
+  # `ws doctor` needs. rebuild_print_table is the full REPORT: it prints a column header, a line per
+  # row, a blank line and its own ok/err. Dropping that into doctor would break its one-row-per-check
+  # rendering, so this reads the SAME rows file with the SAME field order and state vocabulary and
+  # returns counts instead of printing. They must agree; the CI fixture gate asserts they do.
+  #
+  # The offender list is "-" when empty, NEVER the empty string. TAB is IFS *whitespace*, so a caller
+  # doing `IFS=$'\t' read -r a b c d` binds nothing to d and silently keeps whatever it held before —
+  # the same collapse that made every CronJob vanish from the scan (see rebuild_enumerate's selector
+  # column). Capped at four names because a doctor row is one line: the count stays exact and
+  # `ws rebuild-images --check` prints the rest.
+  local file="$1"
+  local kind ns name cname owner module src want running stale state
+  local n=0 n_stale=0 n_bad=0 names="" shown=0 extra=0
+  while IFS=$'\t' read -r kind ns name cname owner module src want running stale state; do
+    [[ -n "$kind" ]] || continue
+    n=$((n + 1))
+    case "$state" in
+      stale)   n_stale=$((n_stale + 1)) ;;
+      no-tag)  n_bad=$((n_bad + 1)) ;;
+      *)       continue ;;
+    esac
+    if [[ "$shown" -lt 4 ]]; then
+      names="${names}${names:+ }${ns}/${name}"
+      shown=$((shown + 1))
+    else
+      extra=$((extra + 1))
+    fi
+  done < "$file"
+  if [[ "$extra" -gt 0 ]]; then names="${names} (+${extra} more)"; fi
+  printf '%s\t%s\t%s\t%s\n' "$n" "$n_stale" "$n_bad" "${names:--}"
+}
+
 rebuild_buildconfigs() {  # [name] → the BuildConfig(s) to rebuild in the shared images namespace
   if [[ -n "${1:-}" ]]; then
     oc get bc "$1" -n "$PARASOL_IMAGES_NS" -o jsonpath='{.metadata.name}' 2>/dev/null || true
@@ -1778,6 +1811,56 @@ cmd_doctor() {
     skip "not checked (needs access to ${PARASOL_IMAGES_NS})"
   else
     ok "n/a (parasol-images build not deployed)"
+  fi
+  printf "  %-28s" "running image drift"
+  # The row above answers "does the tag exist". This one answers the question that actually bites:
+  # is the pod ON it? A rebuilt tag reaches nothing until the workloads consuming it are rolled, and
+  # imagePullPolicy: Always only decides what a restart PULLS, never whether one happens. So the
+  # workload's spec cannot answer it either — it reads parasol-claims:1.1 before and after a rebuild.
+  # Only the digest each RUNNING pod reports can, which is what `ws rebuild-images` compares. This is
+  # its read-only core, the four-call contract 6138e8c left ready: begin, scan, summarize, end. None
+  # of the build or restart path is reachable from here.
+  #
+  # ALWAYS ON, not behind a flag, for two reasons that pull the same way. A gate nobody runs is worse
+  # than no gate (this repo's own rule) — and the live proof is that user1-cicd/parasol-claims sat
+  # stale on ksls5 until someone ran --check by hand. And the cost lands on the identity that can act
+  # on it: the scan needs a CLUSTER-WIDE workload list, so an attendee pays one `oc auth can-i` and
+  # skips, while an SA pays ~1s per materialized consumer (24s / 11 consumers, ksls5 2026-07-29 —
+  # doctor's own fixed ~25 reads already cost 22s, and `ws status` costs 40s, so it stays in band).
+  #
+  # The can-i is not politeness, it is the difference between a verdict and a guess: every read in
+  # the scan is swallowed by `2>/dev/null || true`, so an attendee running it ungated gets zero rows
+  # and a clean-looking "no consumers" produced by having looked at nothing.
+  if ! oc auth can-i list deployments --all-namespaces >/dev/null 2>&1; then
+    skip "not checked (needs cluster-wide read — ask your instructor for: ws rebuild-images --check)"
+  else
+    local drift_rows d_total d_stale d_bad d_names d_what d_fix
+    rebuild_begin
+    trap 'rebuild_end' EXIT
+    drift_rows="${REBUILD_TMP}/doctor-rows"
+    rebuild_scan "" "" > "$drift_rows" || true
+    IFS=$'\t' read -r d_total d_stale d_bad d_names < <(rebuild_row_summary "$drift_rows")
+    rebuild_end; trap - EXIT
+    if [[ "${d_total:-0}" -eq 0 ]]; then
+      ok "n/a (nothing running consumes a workshop-built image yet)"
+    elif [[ "$d_stale" -eq 0 && "$d_bad" -eq 0 ]]; then
+      ok "${d_total} consumer(s) — every running pod is on its tag's current digest"
+    else
+      # Same wording as rebuild_print_table's own verdict, so the row and the full report read as one
+      # finding. The two hints are NOT interchangeable and must not be merged: rolling a workload
+      # whose tag is missing replaces a working pod with an ImagePullBackOff, so a no-tag row is a
+      # BUILD problem and says so.
+      d_what=""; d_fix=""
+      if [[ "$d_stale" -gt 0 ]]; then
+        d_what="${d_stale} of ${d_total} run a digest OLDER than their tag"
+        d_fix=" · roll them: ws rebuild-images --no-build --all"
+      fi
+      if [[ "$d_bad" -gt 0 ]]; then
+        d_what="${d_what}${d_what:+; }${d_bad} reference a tag that does not exist"
+        d_fix="${d_fix} · build the missing tag(s) first — rolling them only trades a working pod for an ImagePullBackOff"
+      fi
+      err "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1
+    fi
   fi
   printf "  %-28s" "workshop IdP"
   if ! oc auth can-i get oauths.config.openshift.io >/dev/null 2>&1; then

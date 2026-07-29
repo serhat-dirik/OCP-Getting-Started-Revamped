@@ -1,0 +1,137 @@
+# A recorded cluster for `ws rebuild-images --check` / `ws doctor`'s image-drift row.
+#
+# Every key is a NORMALIZED `oc` call (see oc-stub.py for the argv → key mapping) and every value is
+# the stdout that call produced. Shapes 1-6 and 11 are transcribed from cluster ksls5 on 2026-07-29;
+# 7-10 and 12 are authored, because that cluster had no ksvc, no digest-pinned workload and no
+# missing tag materialized at the time, and those are exactly the branches with a measured history.
+#
+# `<TAB>` is written out rather than embedded. Two reasons, and the first is the whole point of this
+# fixture: the field separator has to be VISIBLE in review, because a field that collapses to nothing
+# is the bug this guards against and an invisible tab hides it. The second is that YAML tab handling
+# is its own footgun. oc-stub.py substitutes them.
+#
+# Digests are readable stand-ins (sha256:<40 chars>), not the real 64-hex ones. The scan compares
+# them for EQUALITY only — it never parses them — and a legible fixture is worth more here than a
+# realistic one. Two of them differing is the entire stale signal.
+
+calls:
+
+  # ── identity ────────────────────────────────────────────────────────────────────────────────
+  "whoami": "admin\n"
+  "whoami --show-server": "https://api.cluster-fixture.example.com:6443\n"
+  # ws doctor gates the drift row on this: the scan needs a cluster-wide workload list.
+  "can-i:list deployments --all-namespaces": ""
+
+  # ── 1. namespaces the workshop owns (rebuild_owned_ns) ──────────────────────────────────────
+  # rebuild_owned_ns APPENDS `ogsr-parasol-images<TAB>shared` itself, so it is absent here.
+  "ns": |
+    user1-dev<TAB>user1
+    user1-cicd<TAB>user1
+    user1-ai<TAB>user1
+    user1-serverless<TAB>user1
+    user2-dev<TAB>user2
+
+  # ── 2-9. every workload container on the cluster (rebuild_enumerate, first query) ────────────
+  "workloads": |
+    Deployment<TAB>user1-dev<TAB>parasol-claims<TAB>app=parasol-claims,<TAB>parasol-claims<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1
+    Deployment<TAB>user1-dev<TAB>parasol-web<TAB>app=parasol-web,<TAB>parasol-web<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web:1.1
+    Deployment<TAB>user1-dev<TAB>claims-db<TAB>app=claims-db,<TAB>postgresql<TAB>image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+    Deployment<TAB>user1-cicd<TAB>parasol-claims<TAB>app=parasol-claims,<TAB>parasol-claims<TAB>image-registry.openshift-image-registry.svc:5000/user1-cicd/parasol-claims:latest
+    Deployment<TAB>user1-ai<TAB>parasol-agent<TAB>app=parasol-agent,<TAB>parasol-agent<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-agent@sha256:a9e1pinnedpinnedpinnedpinnedpinnedpinnedpi
+    Deployment<TAB>user1-ai<TAB>policy-docs<TAB>app=policy-docs,<TAB>policy-docs<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/policy-docs:9.9
+    CronJob<TAB>user1-dev<TAB>claims-nightly<TAB>-<TAB>report<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1
+    Deployment<TAB>user1-serverless<TAB>parasol-claims-v1-deployment<TAB>serving.knative.dev/revisionUID=1111-2222,<TAB>user-container<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1
+    Deployment<TAB>user1-serverless<TAB>parasol-claims-v2-deployment<TAB>serving.knative.dev/revisionUID=3333-4444,<TAB>user-container<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1
+    Deployment<TAB>user2-dev<TAB>parasol-web<TAB>app=parasol-web,<TAB>parasol-web<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web:1.1
+    Deployment<TAB>openshift-monitoring<TAB>prometheus-operator<TAB>app=prometheus-operator,<TAB>prometheus-operator<TAB>quay.io/openshift-release-dev/ocp-v4.0-art-dev:v4.20
+
+  # ── 10. Knative Serving is installed ────────────────────────────────────────────────────────
+  "crd:services.serving.knative.dev": ""
+
+  # ── 11. Knative Services (rebuild_enumerate, second query) ──────────────────────────────────
+  # The selector is the revisions RECEIVING TRAFFIC, which is why the v1 pod below is not counted.
+  "ksvcs": |
+    KnativeService<TAB>user1-serverless<TAB>parasol-claims<TAB>serving.knative.dev/revision in (parasol-claims-v2)<TAB>user-container<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.1
+
+  "ksvclabel:user1-serverless:parasol-claims": "serverless-apps"
+
+  # ── 12. what each RUNNING pod is actually on (rebuild_pod_digests) ───────────────────────────
+  # Keyed ns:selector, with rebuild_pod_digests' trailing comma already stripped.
+  "pods:user1-dev:app=parasol-claims": |
+    parasol-claims<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims@sha256:c1a1msclaimsclaimsclaimsclaimsclaims11a1
+  "pods:user1-dev:app=parasol-web": |
+    parasol-web<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web@sha256:web11web11web11web11web11web11web11web11
+  # THE DRIFT. The pod runs the digest the tag pointed at before another lane's PipelineRun rebuilt
+  # it; the workload spec still says :latest, which is why only the pod can answer.
+  "pods:user1-cicd:app=parasol-claims": |
+    parasol-claims<TAB>image-registry.openshift-image-registry.svc:5000/user1-cicd/parasol-claims@sha256:01dc1c01dc1c01dc1c01dc1c01dc1c01dc1c01dc
+  "pods:user1-ai:app=policy-docs": |
+    policy-docs<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/policy-docs@sha256:p011cyd0csp011cyd0csp011cyd0csp011cyd0cs
+  # Two replicas, both current.
+  "pods:user2-dev:app=parasol-web": |
+    parasol-web<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web@sha256:web11web11web11web11web11web11web11web11
+    parasol-web<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web@sha256:web11web11web11web11web11web11web11web11
+  # Only the revision serving traffic.
+  "pods:user1-serverless:serving.knative.dev/revision in (parasol-claims-v2)": |
+    user-container<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims@sha256:c1a1msclaimsclaimsclaimsclaimsclaims11a1
+  # NOT reached by correct code, and that is the point: the retired v1 Revision's pod is still
+  # Running on the previous digest. A service-wide match picks it up and reports a just-rolled ksvc
+  # as stale — the self-test's knative-service-wide-selector mutant does exactly that.
+  "pods:user1-serverless:serving.knative.dev/service=parasol-claims": |
+    user-container<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims@sha256:c1a1msclaimsclaimsclaimsclaimsclaims11a1
+    user-container<TAB>image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims@sha256:01dc1a1ms01dc1a1ms01dc1a1ms01dc1a1ms0000
+
+  # ── 13. what each tag points at NOW (istag_digest) ──────────────────────────────────────────
+  "istag:ogsr-parasol-images:parasol-claims:1.1": "sha256:c1a1msclaimsclaimsclaimsclaimsclaims11a1"
+  "istag:ogsr-parasol-images:parasol-web:1.1": "sha256:web11web11web11web11web11web11web11web11"
+  # Rebuilt since the pod started — the digest below differs from the pod's above.
+  "istag:user1-cicd:parasol-claims:latest": "sha256:new1a1esnew1a1esnew1a1esnew1a1esnew1a1es"
+  # A workload pointing at a tag nobody built. @ABSENT is the recorded answer "this object does not
+  # exist" (no output, rc 1) — stated rather than implied by omission, so that leaving a tag out of
+  # this map is a stub error and not a silent extra test case.
+  "istag:ogsr-parasol-images:policy-docs:9.9": "@ABSENT"
+
+# ── what the four consumers must produce from the cluster above ───────────────────────────────
+# Rows are (kind, namespace, workload, container, image, pods, state) in emission order:
+# rebuild_enumerate's workload query first, then its ksvc query.
+expect:
+
+  full:
+    argv: ["rebuild-images", "--check"]
+    exit: 1
+    rows:
+      - [Deployment, user1-dev, parasol-claims, parasol-claims, "ogsr-parasol-images/parasol-claims:1.1", "1/1", "✅ current"]
+      - [Deployment, user1-dev, parasol-web, parasol-web, "ogsr-parasol-images/parasol-web:1.1", "1/1", "✅ current"]
+      - [Deployment, user1-cicd, parasol-claims, parasol-claims, "user1-cicd/parasol-claims:latest", "0/1", "❌ stale"]
+      - [Deployment, user1-ai, parasol-agent, parasol-agent, "ogsr-parasol-images/parasol-agent@digest", "0/0", "➖ digest-pinned"]
+      - [Deployment, user1-ai, policy-docs, policy-docs, "ogsr-parasol-images/policy-docs:9.9", "1/1", "❌ tag missing"]
+      - [CronJob, user1-dev, claims-nightly, report, "ogsr-parasol-images/parasol-claims:1.1", "0/0", "➖ no running pod"]
+      - [Deployment, user2-dev, parasol-web, parasol-web, "ogsr-parasol-images/parasol-web:1.1", "2/2", "✅ current"]
+      - [KnativeService, user1-serverless, parasol-claims, user-container, "ogsr-parasol-images/parasol-claims:1.1", "1/1", "✅ current"]
+
+  # --user scopes by the WORKLOAD's namespace, not the image's.
+  scoped:
+    argv: ["rebuild-images", "--check", "--user", "user2"]
+    exit: 0
+    rows:
+      - [Deployment, user2-dev, parasol-web, parasol-web, "ogsr-parasol-images/parasol-web:1.1", "2/2", "✅ current"]
+
+  # --image filters on the image NAME, across every namespace that consumes it.
+  filtered:
+    argv: ["rebuild-images", "--check", "--image", "parasol-web"]
+    exit: 0
+    rows:
+      - [Deployment, user1-dev, parasol-web, parasol-web, "ogsr-parasol-images/parasol-web:1.1", "1/1", "✅ current"]
+      - [Deployment, user2-dev, parasol-web, parasol-web, "ogsr-parasol-images/parasol-web:1.1", "2/2", "✅ current"]
+
+# ws doctor renders the same rows as ONE line. Its counts must be the counts of `full` above (8 rows,
+# 1 stale, 1 missing tag) and it must name both offenders in row order — that agreement between the
+# table and the summary is the thing most likely to silently rot.
+doctor_row:
+  label: "running image drift"
+  contains:
+    - "1 of 8 run a digest OLDER than their tag"
+    - "1 reference a tag that does not exist"
+    - "user1-cicd/parasol-claims user1-ai/policy-docs"
+    - "ws rebuild-images --check"
+  mark: "❌"
