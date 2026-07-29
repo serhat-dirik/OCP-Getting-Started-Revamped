@@ -30,6 +30,18 @@ gitea_host() {
   echo "$host"
 }
 
+# Attendee-visibility of the catalog Templates in the shared `openshift` namespace. `--as` needs
+# impersonation rights (admin/CI only); when the attendee runs this themselves their own
+# SelfSubjectAccessReview IS the attendee answer. Flags stay LITERAL in both branches — an --as
+# string built from a variable silently reviews the wrong subject.
+attendee_reads_catalog_templates() {
+  if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
+    oc auth can-i get templates.template.openshift.io -n openshift --as="$USER_NAME" --as-group=workshop-attendees
+  else
+    oc auth can-i get templates.template.openshift.io -n openshift
+  fi
+}
+
 # A Gitea repo exists → the (public) repo API answers 2xx anonymously.
 gitea_repo_exists() {
   local owner="$1" repo="$2" host
@@ -69,6 +81,9 @@ check "workshop quota present in ${NS}"              oc get resourcequota worksh
 check "Gitea fork ${USER_NAME}/parasol-claims answers"        gitea_repo_exists "$USER_NAME" parasol-claims        || hint "fork missing — re-run: ws start build-deliver --user ${USER_NAME} (fork job)"
 check "Gitea fork ${USER_NAME}/parasol-notifications answers" gitea_repo_exists "$USER_NAME" parasol-notifications || hint "fork missing — re-run: ws start build-deliver --user ${USER_NAME} (fork job)"
 check "Parasol PostgreSQL catalog Template present"  oc get template parasol-postgresql-ephemeral -n openshift || hint "template missing — sync the workshop-config Argo app"
+# The Template object existing is not the outcome — the attendee FINDING it in the Software Catalog
+# is. The catalog lists namespace-visible templates from openshift/, so the attendee needs the read.
+check "attendee can read catalog Templates (Software Catalog tile)" attendee_reads_catalog_templates || hint "the Software Catalog tile the lab tells them to open will not appear — the attendee cannot read templates in the openshift namespace; check the platform-observer ClusterRole and its binding to workshop-attendees"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------

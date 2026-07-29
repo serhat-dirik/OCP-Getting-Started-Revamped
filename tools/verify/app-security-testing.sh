@@ -24,6 +24,20 @@ devsecops_run_succeeded() {
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' 2>/dev/null | grep -qx True
 }
 
+# Attendee-visibility of the curated Task library. The four `oc get tasks -n ogsr-parasol-tasks`
+# checks below read as the CALLER — green as admin even if the per-user parasol-tasks-readers
+# RoleBinding is gone, in which case the attendee's pipeline fails at task resolution mid-run with no
+# earlier signal. `--as` needs impersonation rights (admin/CI); the attendee's own
+# SelfSubjectAccessReview is the attendee answer. Flags stay LITERAL — an --as built from a variable
+# reviews the wrong subject.
+attendee_reads_task_library() {
+  if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
+    oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks --as="$USER_NAME" --as-group=workshop-attendees
+  else
+    oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks
+  fi
+}
+
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
 check "namespace ${NS} exists"                              oc get ns "$NS"                                        || hint "run: ws start app-security-testing --user ${USER_NAME}"
 check "entry marker ws-entry-app-security-testing present"                   oc get cm ws-entry-app-security-testing -n "$NS"                        || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
@@ -35,6 +49,8 @@ check "curated task sonar-scan reachable"                   oc get tasks.tekton.
 check "curated task trivy-scan reachable"                   oc get tasks.tekton.dev trivy-scan -n ogsr-parasol-tasks                || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
 check "curated task roxctl-deployment-check reachable"      oc get tasks.tekton.dev roxctl-deployment-check -n ogsr-parasol-tasks   || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
 check "curated task zap-baseline reachable"                 oc get tasks.tekton.dev zap-baseline -n ogsr-parasol-tasks              || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
+# The Tasks existing is not the outcome — the attendee's PipelineRun resolving them is.
+check "attendee can read the curated task library (parasol-tasks-readers)" attendee_reads_task_library || hint "the devsecops PipelineRun will fail at task resolution — the ${USER_NAME} parasol-tasks-readers RoleBinding in ogsr-parasol-tasks is missing; sync workshop-config"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   :  # entry-only stops here — no PipelineRun has run yet on a fresh entry state.

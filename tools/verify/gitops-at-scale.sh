@@ -66,6 +66,26 @@ student_argo_up() {
   [[ "$code" == "200" ]]
 }
 
+# --- the attendee's Argo CD ACCESS PLANE, not just the objects ---------------
+# `/healthz` answers 200 anonymously and the AppProject exists as an object — neither says the
+# ATTENDEE can log in and see anything. The real gates are argocd-cm's `accounts.{user}` (the local
+# account) and argocd-rbac-cm's policy.csv lines binding it to proj-{user}. Drop either and the
+# attendee lands on an EMPTY Argo CD while every object-exists check stays green. Both ConfigMaps are
+# cross-namespace for an attendee (measured 2026-07-29), so unreadable => INCONCLUSIVE (⚠), never ❌
+# (rule 10 — verify scripts run as the attendee; docs/module-template/README.md).
+ARGO_NS="ogsr-student-gitops"
+
+argo_rbac_readable() { oc get cm argocd-rbac-cm -n "$ARGO_NS" >/dev/null 2>&1; }
+
+argo_account_exists() {
+  oc get cm argocd-cm -n "$ARGO_NS" -o jsonpath="{.data.accounts\\.${USER_NAME}}" 2>/dev/null | grep -q .
+}
+
+argo_rbac_binds_user() {
+  oc get cm argocd-rbac-cm -n "$ARGO_NS" -o jsonpath='{.data.policy\.csv}' 2>/dev/null \
+    | grep -q "proj-${USER_NAME}"
+}
+
 # The student server serves its own argocd CLI (gitops-at-scale beat 1 downloads it — Argo 3.4 has no appset UI,
 # so the attendee creates the ApplicationSet via the CLI). A byte-range probe, not a ~300MB pull.
 cli_download_ready() {
@@ -123,6 +143,15 @@ check "entry marker ws-entry-gitops-at-scale in ${GITOPS}"           oc get cm w
 check "student-gitops Argo CD instance reachable"        student_argo_up                                     || hint "student instance missing — sync workshop-config (student-argocd.yaml)"
 check "argocd CLI served for the appset-create beat"     cli_download_ready                                   || hint "server not serving /download/argocd-linux-amd64 — check the student-gitops server route"
 check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n ogsr-student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
+# The object above is not the outcome — the attendee logging in AND being able to create the
+# ApplicationSet into proj-{user} is (this module's whole beat 1).
+if argo_rbac_readable; then
+  check "Argo CD account accounts.${USER_NAME} exists (attendee can log in)"  argo_account_exists  || hint "no local Argo account for ${USER_NAME} — the argocd CLI login in beat 1 is rejected; sync workshop-config (student-argocd.yaml, .spec.extraConfig accounts.${USER_NAME}: login)"
+  check "Argo CD RBAC binds ${USER_NAME} to proj-${USER_NAME}"                argo_rbac_binds_user || hint "argocd-rbac-cm policy.csv has no proj-${USER_NAME} lines — the ApplicationSet create is denied and the UI is empty; sync workshop-config (student-argocd.yaml rbac.policy)"
+else
+  warn "Argo CD access plane (account + RBAC policy) not readable from here"
+  hint "argocd-cm/argocd-rbac-cm live in ogsr-student-gitops, which attendees cannot read — run this check as the instructor/CI identity, or confirm by running the beat-1 argocd login as ${USER_NAME}"
+fi
 check "Gitea fork ${USER_NAME}/claims-config exists"     fork_exists                                         || hint "fork job didn't run — ws reset gitops-at-scale --user ${USER_NAME} (or check gitea-fork-gitops-at-scale-${USER_NAME} Job in ns gitea)"
 check "fork carries rollouts/ overlay (prod-personalized)" fork_file_matches "rollouts/kustomization.yaml" "namespace: ${PROD}" || hint "fork missing gitops-at-scale source — ws reset gitops-at-scale --user ${USER_NAME}"
 check "fork carries applicationset.yaml (personalized)"  fork_file_matches "applicationset.yaml" "proj-${USER_NAME}"            || hint "fork missing the ApplicationSet source — ws reset gitops-at-scale --user ${USER_NAME}"

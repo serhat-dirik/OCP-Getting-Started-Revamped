@@ -24,6 +24,12 @@ check() {  # check "<description>" <command...>  — pass/fail one assertion
 
 hint() { echo "   ↳ fix: $*"; }
 
+# INCONCLUSIVE, never a failure — for a check the CALLER cannot evaluate (no impersonation rights, an
+# in-cluster-only endpoint on an off-cluster run). Deliberately does NOT touch the pass/fail counters:
+# a false ❌ destroys attendee trust in every other ✅ (tools/verify/README.md, contract).
+# Follow every warn with a hint saying WHERE the check can be answered.
+warn() { echo "⚠ $* — SKIPPED (not a failure)"; }
+
 # Neutral note (skipped/context lines) — matches ws's own info style so smoke output is unchanged
 # when a verify script shadows it. Standalone verify scripts (multi-tenancy-workload-security/networking-dev-devops) rely on this being defined.
 info() { echo "▶ $*"; }

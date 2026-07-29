@@ -1,6 +1,13 @@
 # Verify scripts — the module truth harness
 
-One script per module: `tools/verify/mNN.sh`. Called by `ws verify mNN [--user U]`, by CI (cluster-e2e), and standalone by instructors.
+One script per module, named for the module slug: `tools/verify/<slug>.sh` (e.g. `gitops-at-scale.sh`).
+Called by `ws verify <slug> [--user U]` — `mNN` also resolves, a module's number being its position in
+`/modules.yaml` — by CI, and standalone by instructors.
+
+**"rule 10"**, cited across these scripts and the entry charts, is
+[`docs/module-template/README.md`](../../docs/module-template/README.md) rule 10: *verify scripts run as
+the attendee — no reads outside the user's namespaces* (derive the Gitea host from the ingress domain
+rather than reading the route cross-namespace, and so on). The two bullets below extend it.
 
 ## Contract
 

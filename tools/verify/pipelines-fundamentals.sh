@@ -19,6 +19,18 @@ NS="${USER_NAME}-cicd"
 
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
+# Attendee-visibility of the curated Task library. `--as` needs impersonation rights (admin/CI only);
+# when the attendee runs this in their own cockpit terminal their SelfSubjectAccessReview IS the
+# attendee answer. Flags stay LITERAL in both branches — an --as string built from a variable
+# silently reviews the wrong subject (measured 2026-07-29).
+attendee_reads_task_library() {
+  if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
+    oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks --as="$USER_NAME" --as-group=workshop-attendees
+  else
+    oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks
+  fi
+}
+
 # Gitea host, discovered environment-agnostically (route if readable, else derived from the
 # cluster ingress domain — the attendee-safe pattern; attendees can't read the gitea route).
 gitea_host() {
@@ -71,6 +83,11 @@ check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$US
 check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset pipelines-fundamentals --user ${USER_NAME} re-asserts the fork's app content from the mirror"
 check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset pipelines-fundamentals --user ${USER_NAME}"
 check "curated library task image-size-report reachable"  oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"
+# The Task existing is not the outcome: lab.adoc's step has the ATTENDEE run this exact `oc get`
+# cross-namespace, which only works through the per-user parasol-tasks-readers RoleBinding. Read as
+# admin it is green even with that binding gone. Impersonate where we can; the attendee's own run is
+# already the attendee answer (same idiom as observability-health-scale).
+check "attendee can read the curated task library (parasol-tasks-readers)" attendee_reads_task_library || hint "the graded cross-namespace read in the lab returns Forbidden — the ${USER_NAME} parasol-tasks-readers RoleBinding in ogsr-parasol-tasks is missing; sync workshop-config"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / solve looks like) -------------------
