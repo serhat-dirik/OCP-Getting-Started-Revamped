@@ -300,7 +300,11 @@ load_state() {
   STATE_SRC=""
 }
 
-state_get() { printf '%s\n' "$STATE_KV" | grep -m1 "^${1}=" | cut -d= -f2- ; }
+# Here-string, NOT `printf … | grep -m1`: grep exits on its first match while printf is still
+# writing, printf takes SIGPIPE, and bash prints `printf: write error: Broken pipe` to stderr —
+# straight into an admin-facing report that is supposed to be trustworthy. Measured on ksls5
+# 2026-07-29. A here-string has no upstream process to kill.
+state_get() { grep -m1 "^${1}=" <<< "$STATE_KV" | cut -d= -f2- ; }
 state_ops() {  # created|adopted → "name namespace" lines
   printf '%s\n' "$STATE_KV" | grep "^op_" | grep "=${1}:" \
     | sed "s/^op_\([^=]*\)=${1}:\(.*\)$/\1 \2/" | grep -v '^ *$'
@@ -620,8 +624,12 @@ section_adopted_health() {
         "oc describe subscriptions.operators.coreos.com ${name} -n ${ns}   # read status.conditions"
       continue
     fi
-    phase="$(printf '%s\n' "$CSV_INDEX" | grep -m1 "^${ns}|${csv}|" | cut -d'|' -f3)"
-    reason="$(printf '%s\n' "$CSV_INDEX" | grep -m1 "^${ns}|${csv}|" | cut -d'|' -f4)"
+    # One lookup, not two, and via a here-string — see state_get() above for why `printf | grep -m1`
+    # emits a Broken pipe error into the report. This is the site that actually did it (twice, once
+    # per line) on every adopted operator the checker examined.
+    csv_row="$(grep -m1 "^${ns}|${csv}|" <<< "$CSV_INDEX")"
+    phase="$(cut -d'|' -f3 <<< "$csv_row")"
+    reason="$(cut -d'|' -f4 <<< "$csv_row")"
     if [ "$phase" = "Succeeded" ]; then
       [ "$QUIET" = "true" ] || echo "   ✅ ${ns}/${name} — ${csv} Succeeded"
     else
