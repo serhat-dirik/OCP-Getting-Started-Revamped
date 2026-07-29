@@ -29,6 +29,17 @@
 #   1  findings are listed above (works as a CI gate and as a yes/no for an SA)
 #   2  the scan could not run at all (no oc, not logged in)
 #
+# HOW LONG IT TAKES. The scan is latency-bound — it makes one list call per resource class and then
+# classifies each marked object it found — so its runtime tracks the number of LEFTOVERS, not the size
+# of the cluster. Measured on a 220-namespace cluster (RHDP, 2026-07-29):
+#
+#   after ogsr-uninstall.sh, nothing left ....... ~45s   (this is the case it was built for)
+#   against a FULL install, 601 marked objects ... ~2m   (the pathological input: everything is a finding)
+#
+# Every section prints its elapsed time as `t+NNs`, and section [8/9] announces how many objects it is
+# about to classify before it starts, so a long run is visibly making progress rather than hung. On a
+# rate-limited cluster lower the fan-out (OGSR_CHECK_JOBS=2) and expect proportionally longer.
+#
 # Usage
 #   ./ogsr-check-clean.sh                     scan the cluster in the current kubecontext
 #   ./ogsr-check-clean.sh --state-file PATH   read install state from a file. ogsr-uninstall.sh
@@ -135,8 +146,17 @@ done
 
 # ── output helpers ────────────────────────────────────────────────────────────
 RULE="──────────────────────────────────────────────────────────────────────────"
+# Elapsed seconds, stamped on every section header and progress line. An admin deciding whether to run
+# destructive commands is watching this output; "no output for fifteen minutes" reads as a hang, which
+# is exactly how a slow-but-working scan got killed twice by `timeout 900` (ksls5, 2026-07-29). SECONDS
+# is a bash builtin, so this costs no process and cannot itself fail.
+elapsed() { printf 't+%ss' "$SECONDS"; }
+prog() {  # one progress line, with a count wherever a count exists
+  [ "$QUIET" = "true" ] || printf '      … %s  (%s)\n' "$1" "$(elapsed)"
+  return 0
+}
 hdr() {  # n/N  title  one-line-explanation
-  echo; echo "$RULE"; echo "[$1] $2"
+  echo; echo "$RULE"; printf '[%s] %s  (%s)\n' "$1" "$2" "$(elapsed)"
   [ "$QUIET" = "true" ] || echo "      $3"
 }
 found() {  # bucket  what  [command]
@@ -209,6 +229,15 @@ echo "  owner label: ${OWNER_LABEL}"
 echo "  NOTHING below is changed for you. Each finding carries the command for ITS remedy — 'remove:'"
 echo "  where we created the object, 'strip:' where we only marked one of the org's, and neither where"
 echo "  the two cannot be told apart."
+# Said BEFORE the first long read, not after it. This tool is meant to be run after an uninstall, where
+# it finishes in well under a minute; run against a FULL install every object is a finding and the scan
+# takes minutes. Without this line that is indistinguishable from a hang, at exactly the moment someone
+# is deciding whether to run destructive commands on their own cluster.
+[ "$QUIET" = "true" ] || {
+  echo "  Runtime scales with the number of LEFTOVERS, not with the size of the cluster: seconds on a"
+  echo "  cleanly uninstalled cluster, a few minutes against a full install. Each section prints its"
+  echo "  elapsed time as (t+NNs), so you can always see it moving."
+}
 
 # ── indexes: one cluster read each, reused by every section ───────────────────
 DISCOVERY_NOTE=""
@@ -221,6 +250,9 @@ MARKS_JP="{.metadata.labels.${OWNER_KEY//./\\.}}|{.metadata.labels.${COMPONENT_K
 load_indexes() {
   echo
   echo "collecting cluster state (one read per resource class, ${SWEEP_JOBS} at a time)…"
+  # Opened here, in the MAIN shell, before anything forks: every subshell must inherit the same path or
+  # the shared marks cache silently degrades to one `oc get` per call site (see obj_marks).
+  if tmproot; then MARKS_FILE="${TMPROOT}/marks.idx"; : > "$MARKS_FILE" || MARKS_FILE=""; fi
 
   # name|phase|<the 7 marker fields>. Namespaces are the most dangerous thing this script can be wrong
   # about, so their markers are read up front and seeded into the marks cache — no later object-by-object
@@ -256,7 +288,10 @@ load_indexes() {
 
   load_state
   build_adoption_index
-  echo "  done."
+  printf '  done — %s namespaces, %s CSVs, %s CRDs.  (%s)\n' \
+    "$(printf '%s\n' "$NS_INDEX"  | grep -c .)" \
+    "$(printf '%s\n' "$CSV_INDEX" | grep -c .)" \
+    "$(printf '%s\n' "$CRD_INDEX" | grep -c .)" "$(elapsed)"
 }
 
 csv_fill_reasons() {
@@ -366,19 +401,52 @@ adopted_probe() {  # "name ns" → "name|ns|ok|<csv>" or "name|ns|missing|"
   fi
 }
 
-# One memoised read per object, giving every marker at once. Namespaces are pre-seeded from NS_INDEX.
-MARKS_CACHE=""
-obj_marks() {  # kind name [ns] → "owner|component|stack|user|layer|tracking-id|sync-options"
+# One memoised read per object, giving every marker at once. Namespaces are pre-seeded from NS_INDEX,
+# and section [8/9]'s namespaced sweep seeds everything IT lists, so on a normal run this makes no
+# cluster call at all.
+#
+# THE CACHE IS A FILE, not a shell variable, and that is the whole point of this block. Almost every
+# caller reaches obj_marks through a command substitution — `cls="$(classify_finding …)"`,
+# `c="$(strip_label_cmd …)"`, `"$(marks_summary …)"` — and an assignment made inside a subshell dies
+# with it. A variable therefore memoised NOTHING across call sites: a single object reported as a trace
+# cost four identical `oc get`s (classify, strip labels, strip annotations, summarise), one ~0.7s round
+# trip each. Measured on ksls5 2026-07-29: 601 swept objects cost 604 per-object reads and ~1.15s per
+# object, which is what pushed section [8/9] past a 900s timeout twice without ever reaching a verdict.
+# A file is visible to every subshell in both directions, so a marker is read once or not at all.
+MARKS_CACHE=""   # in-process fallback for a run with no writable tmpdir (inherited downward, never up)
+MARKS_FILE=""    # set ONCE, before any fork, so every subshell inherits the same path
+marks_lookup() {  # kind ns name → the cached row, or empty
+  # Prefix match on "kind|ns|name|": the row's own separator makes it exact, and no k8s name can hold a
+  # `|` to forge one. index() rather than -F'|' field equality because a marker VALUE may contain `|`.
+  local p="${1}|${2}|${3}|"
+  if [ -n "$MARKS_FILE" ]; then
+    awk -v p="$p" 'index($0,p)==1 {print; exit}' "$MARKS_FILE" 2>/dev/null
+  else
+    printf '%s\n' "$MARKS_CACHE" | awk -v p="$p" 'index($0,p)==1 {print; exit}'
+  fi
+  return 0
+}
+marks_put() {  # row  → remember it for every later lookup, in this shell or any other
+  # Writers are SERIAL by construction: classification runs in the main shell's loops, and none of the
+  # functions run_parallel dispatches (sweep_*, csv_probe, adopted_probe, crd_count) touches the cache.
+  # Parallelising a classification loop later would need a per-worker file merged at the end instead.
+  if [ -n "$MARKS_FILE" ]; then
+    printf '%s\n' "$1" >> "$MARKS_FILE"
+  else
+    MARKS_CACHE="${MARKS_CACHE}${1}
+"
+  fi
+  return 0
+}
+obj_marks() {  # kind name [ns] → "owner|component|stack|user|layer|tracking-id|sync-options|che-user"
   local kind="$1" name="$2" ns="${3:-}" row out
-  row="$(printf '%s\n' "$MARKS_CACHE" | awk -F'|' -v k="$kind" -v n="$ns" -v m="$name" \
-          '$1==k && $2==n && $3==m {print; exit}')"
+  row="$(marks_lookup "$kind" "$ns" "$name")"
   if [ -z "$row" ]; then
     if [ -n "$ns" ]; then out="$(oc get "$kind" "$name" -n "$ns" -o jsonpath="$MARKS_JP" 2>/dev/null)"
     else                  out="$(oc get "$kind" "$name" -o jsonpath="$MARKS_JP" 2>/dev/null)"; fi
-    [ -n "$out" ] || out="||||||"
+    [ -n "$out" ] || out="|||||||"
     row="${kind}|${ns}|${name}|${out}"
-    MARKS_CACHE="${MARKS_CACHE}${row}
-"
+    marks_put "$row"
   fi
   printf '%s\n' "$(printf '%s' "$row" | cut -d'|' -f4-)"
 }
@@ -386,9 +454,8 @@ seed_ns_marks() {  # feed the namespace markers we already listed into the cache
   local name marks
   while IFS='|' read -r name _ marks; do
     [ -n "$name" ] || continue
-    MARKS_CACHE="${MARKS_CACHE}namespace||${name}|${marks}
-"
-  done < <(printf '%s\n' "$NS_INDEX" | awk -F'|' 'NF>=9 {print $1"|"$2"|"$3"|"$4"|"$5"|"$6"|"$7"|"$8"|"$9}')
+    marks_put "namespace||${name}|${marks}"
+  done < <(printf '%s\n' "$NS_INDEX" | awk -F'|' 'NF>=10 {print $1"|"$2"|"$3"|"$4"|"$5"|"$6"|"$7"|"$8"|"$9"|"$10}')
 }
 mark_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }
 
@@ -1014,6 +1081,27 @@ imagestreams.image.openshift.io secrets configmaps serviceaccounts
 rolebindings.rbac.authorization.k8s.io roles.rbac.authorization.k8s.io
 localqueues.kueue.x-k8s.io"
 
+# Cluster-scoped kinds discovery returns that must NOT be swept, one line each for `grep -vxF`.
+#
+# The last three are LEGACY OpenShift MIRRORS: a second endpoint onto objects another API group already
+# serves. `projects.project.openshift.io` is the namespace list, and the two
+# `authorization.openshift.io` kinds are the RBAC objects. Sweeping a mirror does not find anything new
+# — it finds the SAME object again — so every finding is printed twice, once per group, with two
+# different `oc delete` commands for one object, and the VERDICT counts stop being a count of things.
+# It also costs a classification round trip per duplicate. Measured on ksls5 2026-07-29: 150 of the 182
+# cluster-scoped hits were mirrors — 136 Projects, which section [4/9] already reports WITH the stuck-
+# namespace diagnosis a bare `oc delete project` line cannot give, plus 14 duplicate ClusterRole and
+# ClusterRoleBinding lines. Verified as mirrors, not coincidence: both groups returned identical name
+# sets for the same label selector.
+# componentstatuses is deprecated and holds nothing; projectrequests is a request-only virtual resource
+# that answers a list with a Status object (see drop_phantoms — it is filtered there as well).
+SWEEP_SKIP_KINDS="componentstatuses
+namespaces
+projectrequests.project.openshift.io
+projects.project.openshift.io
+clusterroles.authorization.openshift.io
+clusterrolebindings.authorization.openshift.io"
+
 SWEEP_EXTRA=""   # "" or "-A"; set by sweep_labeled, read by the workers run_parallel forks
 SWEEP_FAILED=""  # path of the file workers append a failed chunk to (a subshell cannot set a parent var)
 
@@ -1035,9 +1123,17 @@ sweep_labeled() {  # scope(cluster|ns) kinds… — batched gets, run SWEEP_JOBS
   [ -n "$list" ] || return 0
   if tmproot; then SWEEP_FAILED="${TMPROOT}/sweep-failed"; : > "$SWEEP_FAILED"; else SWEEP_FAILED=""; fi
   printf '%s' "$list" | run_parallel sweep_chunk
-  if [ -n "$SWEEP_FAILED" ] && [ -s "$SWEEP_FAILED" ]; then
-    DISCOVERY_NOTE="${DISCOVERY_NOTE}batched list failed for [$(tr '\n' ' ' < "$SWEEP_FAILED")], retried per kind; "
-  fi
+  # The "(partial scan: …)" note is built by the CALLER, from the file, not here. This function's own
+  # output is consumed through a command substitution, so its body runs in a subshell and any
+  # DISCOVERY_NOTE it appended would be discarded when that subshell exits — the note was silently lost
+  # for every failed batch (the previous `< <(sweep_labeled …)` process substitution lost it the same
+  # way). A warning that cannot reach the verdict is worse than no warning at all.
+  return 0
+}
+sweep_failed_kinds() {  # → the chunks whose batched list failed, or empty. Readable from the parent.
+  [ -n "$TMPROOT" ] || return 0
+  [ -s "${TMPROOT}/sweep-failed" ] || return 0
+  tr '\n' ' ' < "${TMPROOT}/sweep-failed"
   return 0
 }
 # Some endpoints answer a list request with a Status object instead of a list, and `-o name` renders
@@ -1054,14 +1150,18 @@ drop_phantoms() { grep -v '^ *$' | grep -vE '^status/|/<unknown>$'; }
 # only be used where there is no namespace to lose: cluster-scoped kinds. Namespaced kinds are swept one
 # per call with an explicit jsonpath, because the classifier cannot apply its most important rule —
 # "does this live in an adopted operator's namespace?" — without knowing which namespace that is.
-sweep_ns_kinds() {  # kinds… → "ns|kind/name" lines, SWEEP_JOBS at a time
+sweep_ns_kinds() {  # kinds… → "ns|kind/name|<the 8 marker fields>" lines, SWEEP_JOBS at a time
   printf '%s\n' "$*" | tr ' ' '\n' | grep -v '^ *$' | run_parallel sweep_ns_kind
 }
 # shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
 # (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
-sweep_ns_kind() {  # kind → "ns|kind/name"
+sweep_ns_kind() {  # kind → "ns|kind/name|<the 8 marker fields>"
+  # The markers ride along in the SAME list call that finds the object. They cost nothing here — the
+  # API server is already serving these items — and they save a per-object round trip in every one of
+  # the four places that later asks for them (classify, strip labels, strip annotations, summarise).
+  # This is the read the caller seeds the marks cache with; without it, 419 objects meant 419+ `oc get`s.
   oc get "$1" -A -l "$OWNER_LABEL" --ignore-not-found \
-    -o jsonpath="{range .items[*]}{.metadata.namespace}|${1}/{.metadata.name}{\"\n\"}{end}" 2>/dev/null \
+    -o jsonpath="{range .items[*]}{.metadata.namespace}|${1}/{.metadata.name}|${MARKS_JP}{\"\n\"}{end}" 2>/dev/null \
     | grep -v '^ *$'
   return 0
 }
@@ -1112,7 +1212,7 @@ report_swept() {  # kind/name  ns  scope-suffix
 section_labeled_objects() {
   hdr "8/9" "objects carrying a mark of this workshop" \
     "Our kustomize label transformer stamps these labels on every resource in a component, adopted ones included — so a workshop label on an object is NOT proof the workshop created it. Objects we only marked get an un-mark command; only objects we created get a delete. Argo Applications come first: they actively reconcile, so while one exists it re-creates whatever you delete."
-  local obj kinds hit=0 app apps="" ns name owner comp stack layer og st csv kindres seen=" "
+  local obj kinds hit=0 app apps="" ns name owner comp stack layer og st csv kindres seen=" " swept marks failed
 
   # (a) Argo Applications / AppProjects — matched on ANY of our labels, then deduped. Child
   #     portfolio Applications carry ONLY portfolio.redhat.com/component (31 of 32 of them), so an
@@ -1124,6 +1224,7 @@ section_labeled_objects() {
     apps="${apps}${name}
 "
   done < <(oc get applications.argoproj.io,applicationsets.argoproj.io -n "$ARGO_NS" -o jsonpath="{range .items[*]}{.kind}/{.metadata.name}|{.metadata.labels.${OWNER_KEY//./\\.}}|{.metadata.labels.${COMPONENT_KEY//./\\.}}|{.metadata.labels.${STACK_KEY//./\\.}}|{.metadata.labels.${LAYER_KEY//./\\.}}{\"\n\"}{end}" 2>/dev/null)
+  prog "$(printf '%s\n' "$apps" | grep -c .) Argo Application(s)/ApplicationSet(s) to report"
   while IFS= read -r app; do
     [ -n "$app" ] || continue
     hit=1
@@ -1138,30 +1239,41 @@ section_labeled_objects() {
   done < <(printf '%s\n' "$apps" | grep -v '^ *$' | sort -u)
 
   # (b) cluster-scoped sweep, driven by live discovery so nothing is missed by a stale hardcoded
-  #     list. namespaces are excluded — section [4/9] already reports them, with diagnosis.
-  # projectrequests is excluded by name as well as filtered by drop_phantoms: listing it is pure noise
-  # (it never holds objects) and skipping it saves the API call that produces the Status response.
+  #     list, minus the kinds in SWEEP_SKIP_KINDS (namespaces — section [4/9] reports those with
+  #     diagnosis — plus the legacy mirrors and the two virtual resources; see that list for why).
   kinds="$(oc api-resources --namespaced=false --verbs=list -o name 2>/dev/null \
-            | grep -vE '^(componentstatuses|namespaces|projectrequests\.project\.openshift\.io)$' | tr '\n' ' ')"
+            | grep -vxF "$SWEEP_SKIP_KINDS" | tr '\n' ' ')"
   if [ -z "$kinds" ]; then
     DISCOVERY_NOTE="${DISCOVERY_NOTE}api-resources discovery failed, used the fallback kind list; "
     kinds="$CLUSTER_KINDS_FALLBACK"
   fi
+  # The list phase and the classify phase are announced separately: they fail differently, and an admin
+  # watching a long scan needs to know which one is running and how much of it is left.
+  prog "listing $(printf '%s\n' "$kinds" | wc -w | tr -d ' ') cluster-scoped kinds…"
   # shellcheck disable=SC2086  # $kinds is a deliberately word-split list of resource names
+  swept="$(sweep_labeled cluster $kinds | sort -u)"
+  failed="$(sweep_failed_kinds)"
+  [ -n "$failed" ] && DISCOVERY_NOTE="${DISCOVERY_NOTE}batched list failed for [${failed% }], retried per kind; "
+  prog "$(printf '%s\n' "$swept" | grep -c .) cluster-scoped object(s) to classify"
   while IFS= read -r obj; do
     [ -n "$obj" ] || continue
     hit=1
     report_swept "$obj" "" "cluster-scoped"
-  done < <(sweep_labeled cluster $kinds | sort -u)
+  done < <(printf '%s\n' "$swept")
 
   # (c) namespaced sweep over the kinds we actually label, cluster-wide
   # shellcheck disable=SC2086  # $NAMESPACED_KINDS is a deliberately word-split list
-  while IFS='|' read -r ns obj; do
+  swept="$(sweep_ns_kinds $NAMESPACED_KINDS | sort -u)"
+  prog "$(printf '%s\n' "$swept" | grep -c .) namespaced object(s) to classify"
+  while IFS='|' read -r ns obj marks; do
     [ -n "$obj" ] || continue
     hit=1
     seen="${seen}${obj#*/} "
+    # Seed the shared cache from the row the sweep already carried back, so classify/strip/summarise
+    # all answer from memory. Without this the four of them make four identical round trips per object.
+    [ -n "$marks" ] && marks_put "${obj%%/*}|${ns}|${obj#*/}|${marks}"
     report_swept "$obj" "$ns" "namespaced, in a namespace we preserved"
-  done < <(sweep_ns_kinds $NAMESPACED_KINDS | sort -u)
+  done < <(printf '%s\n' "$swept")
 
   # (d) The OLM objects of every ADOPTED operator, checked by name rather than by label selector.
   #     A label selector cannot find a trace once the label is gone, and the Argo tracking-id outlives
@@ -1298,7 +1410,7 @@ section_crds
 # ── verdict ───────────────────────────────────────────────────────────────────
 echo
 echo "$RULE"
-echo "VERDICT"
+printf 'VERDICT   (scan completed in %ss)\n' "$SECONDS"
 printf '   %-42s %s\n' "the org's operators harmed"          "$N_ADOPTED"
 printf '   %-42s %s\n' "cluster-health findings"             "$N_HEALTH"
 printf '   %-42s %s\n' "workshop leftovers (ours: delete)"   "$N_WS"

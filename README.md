@@ -144,6 +144,8 @@ tools/ws/ws cohort-reset
 
 This is **read-only**: it never deletes, patches, or labels anything. It scans the cluster for whether every adopted operator (and its OperatorGroup) is still healthy, ClusterServiceVersions that no Subscription installs (an orphan left behind when a Subscription went and its CSV did not — worth acting on, because OLM resolves the *next* install against the leftover and fails), workshop namespaces — and any other namespace — stuck `Terminating`, APIServices whose backing Service is gone, admission webhooks pointing at a Service that no longer exists, objects still carrying a workshop label, and CRDs from operators the install created, each reported with a live instance count (deleting a CRD deletes every instance of it, cluster-wide). For every finding it prints the exact `oc` command that would remove it, and it exits non-zero while anything remains. It does not remove anything itself: that decision belongs to the cluster admin, not the script, because the workshop has no way to know whether a given object is now load-bearing for something else on the cluster.
 
+Its runtime tracks the number of *leftovers*, not the size of the cluster: run where it belongs — after the uninstall — it finishes in well under a minute. Run against a full install, where every object is a finding, it takes a couple of minutes. Each section prints its elapsed time as `(t+NNs)` so a long scan is visibly working rather than hung.
+
 ## Local Content Preview
 
 To read or edit the content without a cluster, build any of the three renderings locally:
