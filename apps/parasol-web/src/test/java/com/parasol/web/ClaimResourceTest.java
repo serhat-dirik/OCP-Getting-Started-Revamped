@@ -10,7 +10,8 @@ import io.quarkus.test.junit.QuarkusTest;
 
 /**
  * Build-time smoke test over the seeded endpoint and the readiness probe.
- * Feeds the CI "apps" job so a broken frontend fails the pipeline, not the lab.
+ * Run by the {@code apps-test} workflow ({@code .github/workflows/apps-test.yml}) on
+ * every change under {@code apps/}, so a broken frontend fails the pipeline, not the lab.
  */
 @QuarkusTest
 class ClaimResourceTest {

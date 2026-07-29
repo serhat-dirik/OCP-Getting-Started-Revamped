@@ -27,8 +27,9 @@ import io.quarkus.test.junit.QuarkusTest;
 
 /**
  * Build-time smoke tests over the seeded API and the readiness probe, run against
- * in-memory H2 (no PostgreSQL needed). Feeds the CI "apps" job so a broken claims
- * service fails the pipeline, not the lab.
+ * in-memory H2 (no PostgreSQL needed). Run by the {@code apps-test} workflow
+ * ({@code .github/workflows/apps-test.yml}) on every change under {@code apps/}, so a
+ * broken claims service fails the pipeline, not the lab.
  *
  * <p>Assertions are order-independent: the create test adds a row, so list checks
  * assert "at least 30" plus exact seeded values rather than a brittle exact count.

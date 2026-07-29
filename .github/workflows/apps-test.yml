@@ -1,0 +1,191 @@
+---
+name: apps-test
+
+# Runs the test suites of every Java service under apps/.
+#
+# Why this exists (2026-07-29): there was no CI job that ran Maven at all — a
+# `grep -rn 'mvn|maven|java|jdk|temurin' .github/workflows/` over the tree returned
+# nothing. Commit 51ac270 fixed the parasol-claims claim-numbering defect and shipped
+# good regression tests for it, and nothing ever executed them; the next image build
+# would have carried a defect of that class straight into a module. The suites were
+# fine. The gate was missing. This is the gate.
+#
+# Deliberately NOT triggered by gitops/** or helm/** chart changes. These are
+# @QuarkusTest suites that boot each app against in-memory H2 and its own
+# src/main/resources; a Helm chart is not on their classpath and cannot move a single
+# assertion, so a chart-triggered run has no detection power and buys only noise and
+# queue time. The one genuine chart-to-app coupling — the hand-copied claims seed in
+# gitops/entry-states/deployment-targets-scheduling/files/import.sql — is already
+# covered by the "Claims seed drift gate" in content-build.yml, which is the right
+# tool for it: it diffs the two files, which is what actually drifts.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/**'
+      - '.github/workflows/apps-test.yml'
+  pull_request:
+    paths:
+      - 'apps/**'
+      - '.github/workflows/apps-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.enumerate.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enumerate apps/ modules that carry a test suite
+        id: enumerate
+        # Walked, not hardcoded. The hardcoded list this job was specced with named 3
+        # modules; the tree actually has 7 with suites. A list that was wrong the day it
+        # was written will be wrong again — a tree walk cannot drift.
+        run: |
+          modules=()
+          while IFS= read -r pom; do
+            d="$(dirname "$pom")"
+            # This is the TEST gate, so a pom with no suite is out of scope. Exactly one
+            # falls out here: apps/parasol-legacy-claims, a deliberately-legacy Java 8 WAR
+            # kept as raw material for the modernization module. It has no src/test at all.
+            if [ ! -d "$d/src/test/java" ]; then continue; fi
+            # Backstage/RHDH software-template skeletons are not buildable Maven projects:
+            # their coordinates are scaffolder placeholders (dollar-brace-brace), which Maven
+            # rejects outright with "does not match a valid id pattern". The regex below is
+            # written escaped so this file does not contain that literal sequence, which
+            # Actions would try to evaluate as an expression. Verified against
+            # apps/parasol-service-template/skeleton, which does have a src/test/java and
+            # would otherwise redden this job on its very first run.
+            if grep -qE '\$\{\{' "$pom"; then
+              echo "skip (scaffolder template, not a buildable POM): $d"
+              continue
+            fi
+            modules+=("$d")
+          done < <(find apps -name pom.xml | sort)
+
+          printf 'discovered: %s\n' "${modules[@]}"
+
+          # A discovery step that finds nothing is a green job that tested nothing — the
+          # exact failure mode tools/lint/route-tls-guard.sh already learned the hard way.
+          # Two floors: non-empty, and parasol-claims present by name, since that is the
+          # module whose unrun tests created this job. If the walk stops finding it, the
+          # walk is broken, not the tree.
+          if [ ${#modules[@]} -eq 0 ]; then
+            echo "::error::Discovered zero testable modules under apps/. Either the tree" \
+                 "moved or this walk is broken — refusing to report a green test gate that" \
+                 "ran no tests."
+            exit 1
+          fi
+          case " ${modules[*]} " in
+            *" apps/parasol-claims "*) ;;
+            *)
+              echo "::error::apps/parasol-claims has a test suite but discovery did not" \
+                   "find it. Discovery is broken; a green run here would be meaningless."
+              exit 1
+              ;;
+          esac
+
+          # slug = path with slashes flattened; upload-artifact rejects '/' in names.
+          json="$(printf '%s\n' "${modules[@]}" \
+            | jq -R '{path: ., slug: (. | gsub("/"; "-"))}' | jq -sc .)"
+          echo "modules=$json" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # One red module must not hide a second red module — always run every leg.
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.discover.outputs.modules) }}
+    name: test (${{ matrix.module.path }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Every discovered pom sets <maven.compiler.release>21</maven.compiler.release>;
+          # read from the poms, not assumed. (apps/parasol-legacy-claims is the only Java 8
+          # pom in the tree and is out of scope here — it has no tests.)
+          java-version: '21'
+
+      # One shared cache across all matrix legs: they resolve the same Quarkus BOM
+      # (3.33.2.1), so per-leg caches would store the same ~1 GB seven times and blow
+      # through the repo cache budget. The legs race to save and the losers log a benign
+      # "cache already exists" warning; that is a warning, not a failure.
+      # ~/.m2 rather than ~/.m2/repository so the Maven wrapper's own distribution
+      # (~/.m2/wrapper/dists) is cached too.
+      - name: Cache ~/.m2
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: >-
+            m2-${{ runner.os }}-${{ hashFiles('apps/**/pom.xml',
+            'apps/**/maven-wrapper.properties') }}
+          restore-keys: |
+            m2-${{ runner.os }}-
+
+      # ./mvnw, not the runner's preinstalled mvn: the wrapper pins Maven 3.9.9 for every
+      # module, so CI runs what a contributor runs. (Measured: the same container that
+      # ships mvn 3.9.16 resolves ./mvnw to 3.9.9.) `test` and not `verify` on purpose —
+      # verify would also run the CycloneDX SBOM plugin bound to `package` in
+      # parasol-claims, which is build-artifact work this gate does not need.
+      - name: mvn test
+        working-directory: ${{ matrix.module.path }}
+        run: ./mvnw -B -ntp test
+
+      - name: Name the failing tests
+        if: failure()
+        working-directory: ${{ matrix.module.path }}
+        env:
+          MODULE: ${{ matrix.module.path }}
+        # Surefire's own tail already lists failures, but it scrolls off inside a matrix
+        # leg. This republishes them as ::error:: annotations (which surface on the PR
+        # without opening the log) and into the run summary, each one prefixed with the
+        # module so "which app broke" is answerable at a glance.
+        run: |
+          shopt -s nullglob
+          reports=(target/surefire-reports/*.txt)
+          if [ ${#reports[@]} -eq 0 ]; then
+            echo "::error title=$MODULE::Failed before any test reported — compile error," \
+                 "dependency resolution failure, or a crashed test JVM. Read the mvn output" \
+                 "in the step above."
+            exit 0
+          fi
+          {
+            echo "### Failed tests in \`$MODULE\`"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          found=0
+          for r in "${reports[@]}"; do
+            while IFS= read -r line; do
+              found=1
+              echo "::error title=$MODULE::$line"
+              echo "- \`$line\`" >> "$GITHUB_STEP_SUMMARY"
+            done < <(
+              grep -hE '<<< (FAILURE|ERROR)!' "$r" \
+                | grep -v '^Tests run:' \
+                | sed -E 's/[[:space:]]*--[[:space:]]*Time elapsed.*//'
+            )
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error title=$MODULE::mvn test failed but no surefire report names a" \
+                 "failing test — look for a crashed fork or a plugin error above."
+            echo "(no per-test failure lines in the surefire reports)" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload surefire reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ matrix.module.slug }}
+          path: ${{ matrix.module.path }}/target/surefire-reports/
+          retention-days: 7
