@@ -247,6 +247,56 @@ module by running verify at the wrong point.
 | Grow/shrink the cohort | `ws scale-users N` |
 | Fresh cohort, same platform | `ws cohort-reset --yes` |
 | Push new content to cockpits | `ws git-refresh --restart-terminals --all` |
+| Change the AI model / rotate the MaaS key | `ws maas set` — **no reinstall** |
+| Check what the AI modules run on | `ws maas show` |
+
+### Changing the MaaS model or rotating the key
+
+**You do not need to reinstall.** Nothing about the model is baked into an image or a chart: at runtime
+each AI module reads its model and endpoint from a per-namespace `maas-config` ConfigMap and its key
+from a `maas-credentials` Secret, both derived from one upstream Secret
+(`ogsr-system/ogsr-maas-credentials`). `ws maas` is the entry point to that Secret.
+
+Two commands:
+
+```
+ws maas show                      # what are the AI modules actually running on?
+ws maas set                       # validate, stage, and re-converge the AI modules
+```
+
+`ws maas set` reads `bootstrap/vars.yaml` (`.maas.api_key`, `.maas.endpoint`, `.maas.model`) by
+default. Any field you do not supply falls back to that file, then to what is already on the cluster —
+so the common changes are one flag each:
+
+```
+ws maas set --model qwen3-14b               # same key, different model
+ws maas set --key-file ~/new-maas.key       # rotate the key, keep model + endpoint
+pbpaste | ws maas set --key-stdin           # paste a key without it touching disk or your shell history
+```
+
+There is deliberately **no `--key <value>` flag**: an API key passed on the command line is readable by
+every user on the machine through `ps`. Use `--key-file`, `--key-stdin`, or `vars.yaml`.
+
+**Nothing is staged until the whole key + endpoint + model triple is proven.** `ws maas set` rejects a
+3-segment JWT by shape, asks the endpoint's `/v1/models` whether it offers your model, and then spends
+one token on a real `/v1/chat/completions` call — capturing the **status code only**, because a
+LiteLLM 401 body echoes the whole token back. A 401/403 refuses the change outright and cannot be
+overridden. All three values are then written together, because a credential from one source paired
+with an endpoint from another is what took a cluster down on 2026-07-29.
+
+**MaaS keys are model-scoped**, so "wrong model" and "wrong key" produce the same 401. This is the
+single most common cause of AI-module failures, and it is why the model travels with the credential
+rather than being a chart default. If `ws maas set` reports the model is not among the ones the
+endpoint offers, believe it — the chart default is not necessarily what your key covers.
+
+After staging, `ws maas set` re-runs each AI module's converge hook (`agentic-ai`,
+`ai-assisted-development`, `app-modernization`, `jobs-batch-kueue`) for every attendee who has that
+module materialized. It does this by deleting the hook Job and driving a fresh Argo sync operation —
+**not** by `ws reset`, which would purge the attendee's namespaces and cost them their lab work. It is
+safe to run mid-session and safe to run twice. Scope it with `--user userN`, or skip it with
+`--no-converge`.
+
+Finish with `ws maas show` and confirm every attendee reads `working`.
 
 ### Cockpit content is built at pod start
 
@@ -384,6 +434,18 @@ For credential handoff between an init container and the main container, use a m
 MaaS keys are **model-scoped**. A key issued for one model will not authenticate against another, and
 the failure looks like a generic auth error rather than "wrong model". Confirm the model your key
 actually covers against the endpoint's `/v1/models` before debugging anything else.
+
+Start with `ws maas show` — it prints, per namespace, the model and endpoint each AI module is actually
+using plus the verdict its converge hook recorded (`aiPathAvailable` / `aiPathReason`), and a
+working / degraded / unknown line per attendee. Two verdicts name this exact problem:
+
+- `credential-rejected-by-endpoint` — the key is wrong for this endpoint, **or** right for a different
+  model.
+- `credential-is-a-jwt-not-an-api-key` — the modules fell back to an adopted OpenShift Lightspeed
+  secret whose bearer belongs to another provider (an Azure-OpenAI-wired Lightspeed writes one). Stage
+  the workshop's own credential so the hooks stop guessing.
+
+The fix is `ws maas set` (see §5, "Changing the MaaS model or rotating the key"), not a reinstall.
 
 ### 6.10 `parasol-web` / `parasol-claims` never become Ready
 

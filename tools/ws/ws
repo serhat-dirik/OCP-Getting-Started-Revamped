@@ -16,6 +16,7 @@
 #   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
 #   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
 #   ws diag [--user U] [<module>]    SA/admin: read-only troubleshooting bundle for a stuck attendee
+#   ws maas show|set [options]       SA/admin: inspect / change the MaaS model+key (no reinstall)
 #
 # <module> is a position number (m08) OR a slug (app-security-testing) — both resolve via modules.yaml
 # (position → slug); everything internal keys off the slug. `ws list` shows the mapping.
@@ -225,6 +226,32 @@ module_arg() {  # mNN (position, zero-padded) OR a slug → the canonical SLUG (
     [[ -n "$(position_of_slug "$raw")" ]] || die "unknown module '${raw}' — expected mNN (e.g. m08) or a slug (see: ws list)"
     echo "$raw"
   fi
+}
+
+# The ONE canonical attendee-identity check, applied to every --user VALUE before it can reach a
+# template. `^user[0-9]+$` is not a guessed regex: bootstrap/install.sh provisions the cohort with a
+# fixed `user` prefix (its USER_PREFIX constant), the authoritative workshop-attendees group carries
+# exactly those names, and every namespace ({user}-dev), label and Argo app name (entry-<module>-<user>)
+# is derived from them — an identity outside this shape cannot correspond to anything provisioned.
+#
+# Task #12 hardened the POSITIONAL userN token but left the --user FLAG VALUE unchecked, and the two
+# are equivalent everywhere else. Live cost on ksls5 (2026-07-29): `--user 1` templated user=1, derived
+# namespace `1-ai`, and created a permanently-OutOfSync entry-agentic-ai-1 Application whose 17
+# resources target a namespace that does not exist. That is worse than an error — a rejected command
+# then looks like a broken module, and it drags down the very health signal `ws doctor`/CI read (the
+# same signal this repo had to invent expectOutOfSync for). A typo must look like a typo.
+# ctx is the "<command> <flag>" the value came from, so the same helper reads correctly for --user
+# and --exclude alike.
+require_user_token() {  # value [context] → die unless the value is a canonical attendee identity
+  local v="${1:-}" ctx="${2:-ws}"
+  if [[ "$v" =~ ^user[0-9]+$ ]]; then return 0; fi
+  if [[ -z "$v" ]]; then
+    die "${ctx}: needs an attendee identity — e.g. user1 (see: ws status)"
+  fi
+  if [[ "$v" =~ ^[0-9]+$ ]]; then
+    die "${ctx}: '${v}' is not an attendee identity — you meant 'user${v}' (attendees are user1, user2, …; see: ws status)"
+  fi
+  die "${ctx}: '${v}' is not an attendee identity — expected userN, e.g. user1 (see: ws status)"
 }
 
 user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee self-service)
@@ -1160,8 +1187,11 @@ cmd_git_refresh() {
     case "$1" in
       --restart-terminals|--restart) do_restart=true; shift;;
       --all)                         all=true; shift;;
-      --user)                        target="$2"; shift 2;;
-      --exclude)                     excludes+=("$2"); shift 2;;
+      # git-refresh self-parses, so main()'s --user validation never sees these. Both flags name
+      # attendees (restart_terminals resolves them to showroom-<user> Deployments), so both get the
+      # canonical check — a typo here silently restarts nothing and reads as "the refresh did not work".
+      --user)                        target="${2:-}"; require_user_token "$target" "git-refresh --user"; shift 2;;
+      --exclude)                     require_user_token "${2:-}" "git-refresh --exclude"; excludes+=("$2"); shift 2;;
       *) die "git-refresh: unknown option '$1' — see: ws help";;
     esac
   done
@@ -1352,6 +1382,7 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
     case "$1" in
       --user)
         [[ $# -ge 2 ]] || die "passwd: --user needs a value (e.g. user3)"
+        require_user_token "$2" "passwd --user"
         target_user="$2"; shift 2 ;;
       -*) die "passwd: unknown option '$1' — usage: ws passwd [--user userN] [NEWPASS]" ;;
       *)
@@ -1369,7 +1400,6 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
 
   # Validate --user against the authoritative group before mutating anything.
   if [[ -n "$target_user" ]]; then
-    [[ "$target_user" =~ ^user[0-9]+$ ]] || die "passwd: --user must look like userN, got '$target_user'"
     local found="false" gu
     for gu in "${users_arr[@]}"; do [[ "$gu" == "$target_user" ]] && found="true"; done
     [[ "$found" == "true" ]] || die "passwd: ${target_user} is not in the workshop-attendees group (${users_str})"
@@ -2082,7 +2112,7 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   local scope_user="${1:-}"
   need_oc
   if [[ -n "$scope_user" ]]; then
-    [[ "$scope_user" =~ ^user[0-9]+$ ]] || die "status: --user must look like userN, got '$scope_user'"
+    require_user_token "$scope_user" "status --user"
   fi
 
   local who server
@@ -2332,6 +2362,609 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
   return 0
 }
 
+# ── ws maas — the MaaS credential as an ADMIN operation, not a reinstall ───────────────────────────
+# Nothing about the model is baked: at runtime the AI modules read GENAI_MODEL/GENAI_ENDPOINT from the
+# per-namespace `maas-config` ConfigMap and GENAI_API_KEY from the `maas-credentials` Secret, both
+# materialized by each entry state's Sync-hook Job from ONE upstream secret — ogsr-system/
+# ogsr-maas-credentials. Until this command existed, the only code that wrote that secret lived inside
+# bootstrap/install.sh, which takes no flags — so "use a different model" or "the key was rotated" meant
+# a full installer re-run (portfolio sync + up to 15m waiting on the Gitea mirror) to change three
+# strings. An installer is a bootstrap tool; this is the admin entry point it was missing.
+#
+# `ws maas set` writes apitoken + model + endpoint TOGETHER, always. A credential from one source paired
+# with an endpoint from another is an unvalidated pairing — exactly how cluster ksls5 broke on
+# 2026-07-29 — so the three travel as one unit and the whole TRIPLE is proven against the live endpoint
+# before anything is staged.
+MAAS_NS="${WS_MAAS_NS:-ogsr-system}"
+MAAS_SECRET="${WS_MAAS_SECRET:-ogsr-maas-credentials}"
+MAAS_LIGHTSPEED_NS="${WS_MAAS_LIGHTSPEED_NS:-openshift-lightspeed}"
+MAAS_LIGHTSPEED_SECRET="${WS_MAAS_LIGHTSPEED_SECRET:-credentials}"
+# The four modules whose entry states carry a MaaS converge hook (each chart's maas-credentials.yaml).
+# Keep in lockstep with `grep -l maasWorkshopSecret gitops/entry-states/*/values.yaml`.
+MAAS_MODULES="agentic-ai ai-assisted-development app-modernization jobs-batch-kueue"
+MAAS_VARS_DEFAULT="${REPO_ROOT}/bootstrap/vars.yaml"
+
+maas_api_base() {  # endpoint → the OpenAI-compatible base ending in /v1 (same normalization as
+  # install.sh's discover_maas_model, so `ws maas` and the installer probe the identical URL).
+  local base="${1%/}"
+  case "$base" in
+    */v1) printf '%s' "$base" ;;
+    *)    printf '%s/v1' "$base" ;;
+  esac
+}
+
+maas_is_placeholder() {  # value → 0 when it is an unfilled vars.example.yaml stand-in rather than a value.
+  # vars.example.yaml ships `<your-maas-endpoint>` / `CHANGEME`, and a vars.yaml written for a
+  # lightspeed:false cluster carries `<unused-when-lightspeed-false>` — install.sh treats all three as
+  # "not configured" and so must we, or `set` stages a literal angle-bracket string as an endpoint.
+  case "${1:-}" in
+    ""|null|CHANGEME|*"<"*">"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+maas_is_jwt() {  # token → 0 when it is a 3-segment JSON Web Token.
+  # A JWT is a control-plane bearer for SOME OTHER provider (an adopted Azure-OpenAI Lightspeed writes
+  # exactly this into its `Bearer` key) and can never be an OpenAI-compatible API key. Rejecting it by
+  # shape costs no network round-trip and is the cheap half of the gate the entry-state hooks apply.
+  [[ "${1:-}" == eyJ* ]] || return 1
+  local dots
+  dots="$(printf '%s' "$1" | tr -cd '.' | wc -c | tr -d ' ')"
+  [[ "$dots" -ge 2 ]]
+}
+
+maas_redact() {  # token → "<N chars, redacted>". The ONLY representation of a key this CLI ever prints.
+  printf '<%d chars, redacted>' "${#1}"
+}
+
+maas_curl_cfg() {  # token → path of a 0600 curl config carrying the Authorization header.
+  # The key never enters argv: a `curl -H "Authorization: Bearer sk-…"` is visible to `ps` for every
+  # user on the machine. install.sh's secret write uses --from-literal (same exposure); this does not.
+  # Caller removes the file.
+  local cfg; cfg="$(mktemp "${TMPDIR:-/tmp}/.ws-maas-probe.XXXXXX")"
+  ( umask 077; printf 'header = "Authorization: Bearer %s"\n' "$1" > "$cfg" )
+  printf '%s' "$cfg"
+}
+
+maas_list_models() {  # cfg base → newline-separated model ids the endpoint offers (empty on failure).
+  # OpenAI list-models contract: {"object":"list","data":[{"id":"…"},…]}. Parsed without yq — `ws` runs
+  # in the attendee cockpit image too and must not gain a hard dependency the installer can assume.
+  curl -sS --max-time 30 --config "$1" -H 'Accept: application/json' "${2}/models" 2>/dev/null \
+    | tr ',' '\n' | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+maas_probe() {  # cfg base model → the HTTP status of ONE 1-token chat/completions call, or 000.
+  # STATUS CODE ONLY, deliberately: LiteLLM's 401 body echoes the whole token back, so capturing the
+  # body would put the credential in this terminal's scrollback. Same discipline as the hook Jobs.
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 25 \
+    --config "$1" -H 'content-type: application/json' -X POST "${2}/chat/completions" \
+    -d "{\"model\":\"${3}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+    2>/dev/null || echo 000
+}
+
+maas_secret_field() {  # key → one field of the workshop credential as plaintext, or empty.
+  oc get secret "$MAAS_SECRET" -n "$MAAS_NS" -o jsonpath="{.data.${1}}" 2>/dev/null | base64 -d 2>/dev/null || true
+}
+
+maas_configs() {  # → TSV "ns<TAB>user<TAB>module<TAB>model<TAB>endpoint<TAB>avail<TAB>reason<TAB>source"
+  # for every per-namespace maas-config across the cluster. This is the AI modules' RUNTIME truth: what
+  # the converge hook actually resolved, not what anyone intended. Absent optional fields print as "-".
+  oc get cm -A -l workshop.redhat.com/owner=ogsr --field-selector metadata.name=maas-config \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.data.model}{"\t"}{.data.endpoint}{"\t"}{.data.aiPathAvailable}{"\t"}{.data.aiPathReason}{"\t"}{.data.credentialSource}{"\n"}{end}' 2>/dev/null \
+    | awk -F'\t' 'NF{for(i=1;i<=8;i++) if($i=="") $i="-"; print $1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7"\t"$8}' OFS='\t'
+}
+
+cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee. Always exits 0 (a report).
+  local scope_user="${1:-}"
+  need_oc
+  local who server
+  who="$(oc whoami 2>/dev/null || true)"
+  server="$(oc whoami --show-server 2>/dev/null || true)"
+  echo "ws maas — MaaS credential + AI-path state   (cluster: ${server:-?} as ${who:-?})"
+  echo
+
+  # ── 1. the upstream credential every AI module resolves from ──
+  info "Workshop credential (${MAAS_NS}/${MAAS_SECRET})"
+  local s_model="" s_endpoint="" s_token=""
+  if oc get secret "$MAAS_SECRET" -n "$MAAS_NS" >/dev/null 2>&1; then
+    s_model="$(maas_secret_field model)"
+    s_endpoint="$(maas_secret_field endpoint)"
+    s_token="$(maas_secret_field apitoken)"
+    ok "present"
+    printf "     %-10s %s\n" "model"    "${s_model:-(unset — the entry charts fall back to their maasModel default)}"
+    printf "     %-10s %s\n" "endpoint" "${s_endpoint:-(unset — the entry charts fall back to their maasEndpoint default)}"
+    if [[ -z "$s_token" ]]; then
+      printf "     %-10s %s\n" "apitoken" "(unset — this credential cannot authenticate anything)"
+    elif maas_is_jwt "$s_token"; then
+      printf "     %-10s %s\n" "apitoken" "$(maas_redact "$s_token") ❌ a 3-segment JWT — never an OpenAI-compatible key; re-stage: ws maas set --key-file <file>"
+    else
+      printf "     %-10s %s\n" "apitoken" "$(maas_redact "$s_token")"
+    fi
+  elif ! oc auth can-i get secrets -n "$MAAS_NS" >/dev/null 2>&1; then
+    skip "not checked (reading ${MAAS_NS} secrets needs cluster-admin — run this from the SA kubeconfig)"
+  else
+    err "absent — nothing staged"
+    if oc get secret "$MAAS_LIGHTSPEED_SECRET" -n "$MAAS_LIGHTSPEED_NS" >/dev/null 2>&1; then
+      echo "     the converge hooks will FALL BACK to ${MAAS_LIGHTSPEED_NS}/${MAAS_LIGHTSPEED_SECRET} (an adopted"
+      echo "     OpenShift Lightspeed provider secret) — a guess, not a workshop credential. Stage ours: ws maas set"
+    else
+      echo "     stage one: ws maas set   (sources bootstrap/vars.yaml; see: ws maas set --help)"
+    fi
+  fi
+  echo
+
+  # ── 2. per-namespace runtime state ──
+  info "Per-namespace maas-config (what the AI modules actually run on)"
+  # `|| true` on both collectors: an empty/failed read is a REPORT state ("nothing materialized"), not
+  # a reason for set -e to kill a read-only command mid-page.
+  local rows; rows="$(maas_configs || true)"
+  if [[ -z "${rows//[[:space:]]/}" ]]; then
+    echo "  (none — no AI module entry state is materialized on this cluster yet)"
+    echo
+    echo "Summary: nothing to report — materialize one with: ws start agentic-ai --user user1"
+    return 0
+  fi
+  printf "  %-18s %-26s %-18s %-9s %s\n" "NAMESPACE" "MODULE" "MODEL" "AI PATH" "SOURCE"
+  local ns u m model ep avail reason src
+  local endpoints="" broken=""
+  while IFS=$'\t' read -r ns u m model ep avail reason src; do
+    [[ -n "$ns" ]] || continue
+    printf "  %-18s %-26s %-18s %-9s %s\n" "$ns" "$m" "$model" "$avail" "$src"
+    case "$endpoints" in *"|${ep}|"*) : ;; *) endpoints="${endpoints}|${ep}|" ;; esac
+    if [[ "$avail" != "true" ]]; then
+      broken="${broken}${ns}"$'\t'"${avail}"$'\t'"${reason}"$'\t'"${ep}"$'\n'
+    fi
+  done <<< "$rows"
+  echo
+  # Endpoint agreement: every namespace disagreeing with the staged credential's endpoint is a module
+  # talking to a host the credential was never proven against — the ksls5 failure shape.
+  local n_ep; n_ep="$(printf '%s' "$endpoints" | tr '|' '\n' | grep -c . || true)"
+  if [[ "$n_ep" == "1" ]]; then
+    local only_ep="${endpoints//|/}"
+    if [[ -n "$s_endpoint" && "$only_ep" != "$s_endpoint" ]]; then
+      err "  every namespace points at ${only_ep} but the staged credential names ${s_endpoint} — re-converge: ws maas set"
+    else
+      echo "  All namespaces point at ${only_ep}"
+    fi
+  else
+    err "  namespaces disagree on the endpoint ($(printf '%s' "$endpoints" | tr '|' ' ' | xargs)) — re-converge: ws maas set"
+  fi
+  if [[ -n "$broken" ]]; then
+    echo
+    info "Why the non-working namespaces are down"
+    while IFS=$'\t' read -r ns avail reason ep; do
+      [[ -n "$ns" ]] || continue
+      if [[ "$avail" == "-" ]]; then
+        printf "  %-18s %s\n" "$ns" "the converge hook recorded NO verdict — it never completed; check: oc get jobs -n ${ns}"
+      else
+        printf "  %-18s aiPathAvailable=%s · %s · %s\n" "$ns" "$avail" "$reason" "$ep"
+      fi
+    done <<< "$broken"
+  fi
+  echo
+
+  # ── 3. one verdict per attendee ──
+  info "Verdict per attendee"
+  local users u2
+  users="$(printf '%s\n' "$rows" | cut -f2 | grep -v '^-$' | sort -u | grep . || true)"
+  if [[ -n "$scope_user" ]]; then users="$scope_user"; fi
+  local n_work=0 n_deg=0 n_unk=0
+  # Degraded and unknown are tracked SEPARATELY, each carrying its own module's reason. Folding them
+  # into one reason list reads as "app-modernization is broken because no-verdict-recorded", which
+  # names the wrong module for the wrong cause — the kind of near-miss that sends an SA down a blind
+  # alley. Each module is named next to the reason that is actually its own.
+  for u2 in $users; do
+    local bad="" unk="" n_mod=0 why
+    while IFS=$'\t' read -r ns u m model ep avail reason src; do
+      [[ "$u" == "$u2" ]] || continue
+      n_mod=$((n_mod + 1))
+      case "$avail" in
+        true) : ;;
+        false)
+          why="${reason}"
+          if [[ "$why" == "-" ]]; then why="no reason recorded"; fi
+          bad="${bad}${bad:+, }${m} (${why})" ;;
+        *)
+          if [[ "$avail" == "-" ]]; then
+            why="the converge hook never recorded a verdict"
+          else
+            why="${avail}: ${reason}"
+          fi
+          unk="${unk}${unk:+, }${m} (${why})" ;;
+      esac
+    done <<< "$rows"
+    if [[ "$n_mod" -eq 0 ]]; then
+      skip "${u2} — unknown: no AI module materialized for this attendee"
+      n_unk=$((n_unk + 1))
+    elif [[ -n "$bad" ]]; then
+      err "${u2} — degraded: ${bad}${unk:+ · unknown: ${unk}}"
+      n_deg=$((n_deg + 1))
+    elif [[ -n "$unk" ]]; then
+      echo "⚠ ${u2} — unknown: ${unk}"
+      n_unk=$((n_unk + 1))
+    else
+      ok "${u2} — working (${n_mod} AI module(s))"
+      n_work=$((n_work + 1))
+    fi
+  done
+  echo
+  echo "Summary: ${n_work} working · ${n_deg} degraded · ${n_unk} unknown"
+  if [[ "$n_deg" -gt 0 || "$n_unk" -gt 0 ]]; then
+    echo "   fix without a reinstall:  ws maas set [--model <name>] [--key-file <file>]"
+  fi
+  return 0
+}
+
+maas_converge_targets() {  # [user] → TSV "module<TAB>user<TAB>app" for every LIVE AI entry app.
+  # Derived from the Applications that exist, never from an assumed cohort: converging a module a user
+  # never started would create nothing and only muddy the report.
+  local want_user="${1:-}" m apps name u
+  for m in $MAAS_MODULES; do
+    apps="$(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/module=${m}" \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\n"}{end}' 2>/dev/null || true)"
+    [[ -n "$apps" ]] || continue
+    while IFS=$'\t' read -r name u; do
+      [[ -n "$name" && -n "$u" ]] || continue
+      [[ "$name" == entry-* ]] || continue
+      # Skip an app whose user label is not a real attendee identity. require_user_token now stops
+      # `--user 1` at the gate, but apps created BEFORE that fix still sit on live clusters (ksls5 has
+      # entry-agentic-ai-1, targeting a namespace `1-ai` that does not exist). Enumerating by label
+      # would pick it up, and the converge wait would then block its full 4m timeout on a namespace
+      # that can never report a verdict — measured, it did exactly that. Litter must not cost time.
+      [[ "$u" =~ ^user[0-9]+$ ]] || continue
+      if [[ -n "$want_user" && "$u" != "$want_user" ]]; then continue; fi
+      printf '%s\t%s\t%s\n' "$m" "$u" "$name"
+    done <<< "$apps"
+  done
+}
+
+maas_converge() {  # module user app — re-run the module's MaaS converge hook for one attendee.
+  # WHY THIS AND NOT `ws reset`: reset purges the attendee's namespaces before re-materializing, so
+  # rotating a key mid-session would cost every attendee their lab work. The converge hook is
+  # idempotent and touches exactly two objects (maas-config + maas-credentials), so re-running it
+  # alone is the surgical equivalent. The Job delete matters because the hook is a SYNC-phase hook:
+  # Argo re-runs Sync hooks on a sync OPERATION but auto-heal will not fire one when nothing drifted,
+  # and a completed Job left in place is what a stale reconcile sees. Delete it, then drive a real
+  # operation through sync_app_operation (which already waits out a running op and hard-refreshes).
+  local module="$1" user="$2" app="$3" jobs ns job
+  jobs="$(oc get jobs -A -l "workshop.redhat.com/module=${module},workshop.redhat.com/user=${user}" \
+            -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  while IFS=$'\t' read -r ns job; do
+    [[ -n "$ns" && "$job" == maas-copy-* ]] || continue
+    # --wait: the delete must COMPLETE before the sync recreates the hook, because that is what makes
+    # "a maas-copy Job exists and is Complete" a fresh-run signal for maas_await_converge below.
+    # Deleting an already-finished Job is quick; the timeout only guards a stuck finalizer.
+    oc delete job "$job" -n "$ns" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+    info "  ${module}/${user}: deleted the previous hook Job ${ns}/${job}"
+  done <<< "$jobs"
+  sync_app_operation "$app"
+}
+
+maas_cm_field() {  # module user field → one maas-config value for this module instance, or empty.
+  oc get cm -A -l "workshop.redhat.com/owner=ogsr,workshop.redhat.com/module=${1},workshop.redhat.com/user=${2}" \
+    --field-selector metadata.name=maas-config \
+    -o jsonpath="{.items[0].data.${3}}" 2>/dev/null || true
+}
+
+maas_await_converge() {  # module user want-model timeout → 0 once a FRESH hook run has recorded
+  # aiPathAvailable=true FOR THE MODEL WE JUST STAGED. All three conditions are load-bearing:
+  #
+  #   Job Complete — `ws maas set` must be safe to re-run, so the common case is a cluster where
+  #     aiPathAvailable is ALREADY true. Polling that flag alone would return instantly and report
+  #     success for work that had not started yet — a green ✅ for nothing, which is the one failure
+  #     mode this repo treats as worse than a red ❌. We delete the hook Job with --wait before
+  #     syncing, so a maas-copy Job that exists and is Complete is necessarily the new run.
+  #   model match — proves the value that actually landed is the one we staged, which is the whole
+  #     point of a model change (the owner's question: why should that need a reinstall?).
+  #   aiPathAvailable — the hook's own verdict, re-probed from INSIDE the cluster.
+  local module="$1" user="$2" want="$3" timeout="$4" t=0 jobs_done
+  while [[ "$t" -lt "$timeout" ]]; do
+    jobs_done="$(oc get jobs -A -l "workshop.redhat.com/module=${module},workshop.redhat.com/user=${user}" \
+                   -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.status.succeeded}{"\n"}{end}' 2>/dev/null \
+                 | grep '^maas-copy-' || true)"
+    if [[ "$jobs_done" == *"=1"* ]]; then
+      if [[ "$(maas_cm_field "$module" "$user" aiPathAvailable)" == "true" \
+         && "$(maas_cm_field "$module" "$user" model)" == "$want" ]]; then
+        return 0
+      fi
+    fi
+    sleep 5; t=$((t + 5))
+  done
+  return 1
+}
+
+cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge the AI modules. WRITES.
+  local vars_file="$MAAS_VARS_DEFAULT" key_file="" key_stdin="false"
+  local opt_model="" opt_endpoint="" scope_user="" converge="true" force="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --vars)     vars_file="${2:-}"; shift 2 ;;
+      --key-file) key_file="${2:-}"; shift 2 ;;
+      --key-stdin) key_stdin="true"; shift ;;
+      --model)    opt_model="${2:-}"; shift 2 ;;
+      --endpoint) opt_endpoint="${2:-}"; shift 2 ;;
+      --user)     scope_user="${2:-}"; shift 2 ;;
+      user[0-9]*) scope_user="$1"; shift ;;
+      --no-converge) converge="false"; shift ;;
+      --force)    force="true"; shift ;;
+      -h|--help)  maas_usage; return 0 ;;
+      # There is deliberately no --key <value>: an API key in argv is readable by every user on the
+      # box through `ps`. --key-file / --key-stdin / vars.yaml are the three ways in.
+      --key)      die "maas set: --key is refused on purpose — an API key in argv is visible to \`ps\`. Use --key-file <file>, --key-stdin, or bootstrap/vars.yaml" ;;
+      *)          die "maas set: unknown argument '$1' — see: ws maas --help" ;;
+    esac
+  done
+  if [[ -n "$scope_user" ]]; then require_user_token "$scope_user" "maas set --user"; fi
+  need_oc
+  oc get namespace "$MAAS_NS" >/dev/null 2>&1 \
+    || die "namespace ${MAAS_NS} does not exist — the workshop layer is not installed here (run ./bootstrap/install.sh first)"
+  oc auth can-i create secrets -n "$MAAS_NS" >/dev/null 2>&1 \
+    || die "cannot write secrets in ${MAAS_NS} as $(oc whoami 2>/dev/null || echo '?') — ws maas set is an SA/admin operation; log in with the platform kubeconfig"
+
+  echo "ws maas set — stage the workshop MaaS credential (no reinstall required)"
+  echo
+
+  # ── 1. resolve the triple, recording where each part came from ──
+  # Precedence per field: explicit flag → vars.yaml → the credential already on the cluster. The last
+  # step is what makes "just change the model" a one-flag command; it is safe because NOTHING is staged
+  # until the assembled triple has been proven end-to-end against the live endpoint below.
+  info "Sources"
+  local key="" key_from="" model="" model_from="" endpoint="" endpoint_from=""
+  if [[ -n "$key_file" ]]; then
+    [[ -r "$key_file" ]] || die "maas set: --key-file ${key_file} is not readable"
+    key="$(tr -d '\r\n' < "$key_file")"
+    key_from="--key-file ${key_file}"
+  elif [[ "$key_stdin" == "true" ]]; then
+    IFS= read -r key || true
+    key="$(printf '%s' "$key" | tr -d '\r\n')"
+    key_from="stdin"
+  fi
+  local have_vars="false"
+  if [[ -f "$vars_file" ]] && command -v yq >/dev/null 2>&1; then have_vars="true"; fi
+  local v_key="" v_model="" v_endpoint=""
+  if [[ "$have_vars" == "true" ]]; then
+    v_key="$(yq -r '.maas.api_key' "$vars_file" 2>/dev/null || true)"
+    v_model="$(yq -r '.maas.model' "$vars_file" 2>/dev/null || true)"
+    v_endpoint="$(yq -r '.maas.endpoint' "$vars_file" 2>/dev/null || true)"
+  fi
+  if [[ -z "$key" && "$have_vars" == "true" ]] && ! maas_is_placeholder "$v_key"; then
+    key="$v_key"; key_from="${vars_file} (.maas.api_key)"
+  fi
+  if [[ -n "$opt_model" ]]; then
+    model="$opt_model"; model_from="--model"
+  elif [[ "$have_vars" == "true" ]] && ! maas_is_placeholder "$v_model"; then
+    model="$v_model"; model_from="${vars_file} (.maas.model)"
+  fi
+  if [[ -n "$opt_endpoint" ]]; then
+    endpoint="$opt_endpoint"; endpoint_from="--endpoint"
+  elif [[ "$have_vars" == "true" ]] && ! maas_is_placeholder "$v_endpoint"; then
+    endpoint="$v_endpoint"; endpoint_from="${vars_file} (.maas.endpoint)"
+  fi
+  # Fall back to what is already staged, per field, so a model-only or key-only change needs one flag.
+  local cur_key cur_model cur_endpoint
+  cur_key="$(maas_secret_field apitoken)"
+  cur_model="$(maas_secret_field model)"
+  cur_endpoint="$(maas_secret_field endpoint)"
+  if [[ -z "$key" && -n "$cur_key" ]]; then key="$cur_key"; key_from="${MAAS_NS}/${MAAS_SECRET} (reused)"; fi
+  if [[ -z "$model" && -n "$cur_model" ]]; then model="$cur_model"; model_from="${MAAS_NS}/${MAAS_SECRET} (reused)"; fi
+  if [[ -z "$endpoint" && -n "$cur_endpoint" ]]; then endpoint="$cur_endpoint"; endpoint_from="${MAAS_NS}/${MAAS_SECRET} (reused)"; fi
+
+  if [[ -z "$key" ]]; then
+    err "no MaaS API key to stage."
+    if [[ "$have_vars" == "true" ]] && maas_is_placeholder "$v_key"; then
+      err "   ${vars_file} still has the placeholder .maas.api_key: ${v_key} — that is not a credential."
+    elif [[ "$have_vars" != "true" ]]; then
+      err "   ${vars_file} is missing or yq is not installed, so no key could be read from it."
+    fi
+    die "supply one: ws maas set --key-file <file>   ·   pbpaste | ws maas set --key-stdin   ·   or fill .maas.api_key in ${vars_file}"
+  fi
+  if [[ -z "$endpoint" ]]; then
+    die "no MaaS endpoint to stage — pass --endpoint https://<host>/v1, or fill .maas.endpoint in ${vars_file} (the placeholder value does not count)"
+  fi
+  printf "  %-10s %s\n" "key"      "${key_from} → $(maas_redact "$key")"
+  printf "  %-10s %s\n" "endpoint" "${endpoint_from} → ${endpoint}"
+  if [[ -n "$model" ]]; then
+    printf "  %-10s %s\n" "model"  "${model_from} → ${model}"
+  else
+    printf "  %-10s %s\n" "model"  "(none given — will be discovered from the endpoint)"
+  fi
+  echo
+
+  # ── 2. validate the WHOLE triple before staging anything ──
+  info "Validating before staging (the key travels in a 0600 file, never in argv, never printed)"
+  if maas_is_jwt "$key"; then
+    err "shape — this is a 3-segment JSON Web Token, not an OpenAI-compatible API key."
+    err "   A JWT is a control-plane bearer for another provider; an adopted Azure-OpenAI OpenShift"
+    err "   Lightspeed writes exactly one into its secret. Staging it would 401 every attendee."
+    die "refusing to stage it (cluster ksls5 lost a session to this exact value on 2026-07-29)"
+  fi
+  ok "shape — not a JWT ($(maas_redact "$key"))"
+
+  local base cfg
+  base="$(maas_api_base "$endpoint")"
+  cfg="$(maas_curl_cfg "$key")"
+  local ids count
+  ids="$(maas_list_models "$cfg" "$base" || true)"
+  count="$(printf '%s\n' "$ids" | grep -c . | tr -d ' ')"
+  if [[ -z "${ids//[[:space:]]/}" ]]; then
+    rm -f "$cfg"
+    err "catalog — GET ${base}/models returned no model list."
+    err "   401/403 → the key is wrong, expired, or not entitled on this endpoint"
+    err "   404     → --endpoint is not an OpenAI-compatible base (it should end in /v1)"
+    err "   000     → the endpoint is unreachable from THIS machine (DNS / proxy / TLS)"
+    die "refusing to stage an unvalidated credential"
+  fi
+  if [[ -z "$model" ]]; then
+    model="$(printf '%s\n' "$ids" | head -1)"
+    model_from="discovered from ${base}/models"
+    if [[ "$count" == "1" ]]; then
+      ok "catalog — ${count} model offered; using it: ${model}"
+    else
+      ok "catalog — ${count} models offered; using the first: ${model} ($(printf '%s' "$ids" | tr '\n' ' '))"
+      info "   pin a different one with --model if your key is scoped elsewhere"
+    fi
+  elif printf '%s\n' "$ids" | grep -qxF "$model"; then
+    ok "catalog — ${base}/models offers '${model}' (${count} model(s) available)"
+  else
+    # Not fatal on its own: /models is a catalogue, the chat call below is the honest gate. But say it
+    # loudly — on this endpoint the chart default llama-scout-17b is absent and 401s, which is exactly
+    # the failure an operator would otherwise chase inside the modules.
+    echo "⚠ catalog — '${model}' is NOT among the ${count} model(s) ${base}/models offers: $(printf '%s' "$ids" | tr '\n' ' ')"
+  fi
+
+  local code; code="$(maas_probe "$cfg" "$base" "$model")"
+  rm -f "$cfg"
+  case "$code" in
+    2*)
+      ok "live probe — HTTP ${code}: the endpoint accepted this key for model '${model}'" ;;
+    401|403)
+      err "live probe — HTTP ${code}: the endpoint REJECTED this key for model '${model}'."
+      err "   MaaS keys are MODEL-SCOPED, so this is as likely a wrong MODEL as a wrong key."
+      err "   models this key can list: $(printf '%s' "$ids" | tr '\n' ' ')"
+      die "refusing to stage a credential the endpoint will not honour (--force cannot override a 401/403)" ;;
+    *)
+      err "live probe — HTTP ${code}: inconclusive (no verdict from the endpoint)."
+      err "   The cluster may still reach it while this machine cannot (proxy / split DNS)."
+      if [[ "$force" != "true" ]]; then
+        die "refusing to stage an unproven credential — re-run with --force if you know the cluster can reach ${base}"
+      fi
+      echo "⚠ --force given: staging UNPROVEN. The entry-state hooks re-probe from inside the cluster and will record the real verdict in maas-config." ;;
+  esac
+  echo
+
+  # ── 3. stage all three keys together, from a 0600 file ──
+  info "Staging ${MAAS_NS}/${MAAS_SECRET}"
+  local manifest; manifest="$(mktemp "${TMPDIR:-/tmp}/.ws-maas-secret.XXXXXX")"
+  # The key reaches the cluster as base64 inside a 0600 file that `oc apply -f` reads — never as an
+  # `--from-literal` argument (install.sh's shape), which puts the plaintext in this process's argv.
+  ( umask 077
+    cat > "$manifest" <<YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${MAAS_SECRET}
+  namespace: ${MAAS_NS}
+  labels:
+    workshop.redhat.com/owner: ogsr
+type: Opaque
+data:
+  apitoken: $(printf '%s' "$key" | base64 | tr -d '\n')
+  model: $(printf '%s' "$model" | base64 | tr -d '\n')
+  endpoint: $(printf '%s' "$endpoint" | base64 | tr -d '\n')
+YAML
+  )
+  local applied=0
+  oc apply -f "$manifest" >/dev/null 2>&1 || applied=$?
+  rm -f "$manifest"
+  if [[ "$applied" -ne 0 ]]; then
+    die "could not apply ${MAAS_NS}/${MAAS_SECRET} — check: oc auth can-i create secrets -n ${MAAS_NS}"
+  fi
+  ok "apitoken + model=${model} + endpoint=${endpoint} written together (idempotent — safe to re-run)"
+  echo
+
+  # ── 4. re-converge the AI modules ──
+  if [[ "$converge" != "true" ]]; then
+    info "Skipping the re-converge (--no-converge)."
+    echo "   The AI modules keep their OLD model/key until their hook re-runs:"
+    echo "     ws maas set${scope_user:+ --user ${scope_user}}     # re-run without --no-converge"
+    echo "   Check what they run on now:  ws maas show"
+    return 0
+  fi
+  local targets; targets="$(maas_converge_targets "$scope_user" || true)"
+  if [[ -z "${targets//[[:space:]]/}" ]]; then
+    info "No AI module entry states are materialized${scope_user:+ for ${scope_user}} — nothing to re-converge."
+    echo "   The next \`ws start <ai-module>\` picks the new credential up automatically."
+    echo "   Check: ws maas show"
+    return 0
+  fi
+  info "Re-converging the AI modules (delete the Sync hook Job, then drive a fresh sync operation)"
+  local m u app pairs=""
+  while IFS=$'\t' read -r m u app; do
+    [[ -n "$m" ]] || continue
+    maas_converge "$m" "$u" "$app"
+    pairs="${pairs}${m}"$'\t'"${u}"$'\n'
+  done <<< "$targets"
+  echo
+
+  info "Waiting for each module to record aiPathAvailable=true in maas-config (up to 4m each)"
+  local n_ok=0 n_bad=0 reason
+  while IFS=$'\t' read -r m u; do
+    [[ -n "$m" ]] || continue
+    if maas_await_converge "$m" "$u" "$model" 240; then
+      ok "  ${u}/${m} — AI path available (model ${model})"
+      n_ok=$((n_ok + 1))
+    else
+      reason="$(maas_cm_field "$m" "$u" aiPathReason)"
+      err "  ${u}/${m} — still not available (${reason:-no verdict recorded}) — ws diag --user ${u} ${m}"
+      n_bad=$((n_bad + 1))
+    fi
+  done <<< "$pairs"
+  echo
+  if [[ "$n_bad" -eq 0 ]]; then
+    ok "MaaS credential staged and ${n_ok} module instance(s) converged — no reinstall was needed."
+  else
+    err "${n_ok} converged, ${n_bad} did not — the credential IS staged; inspect the stragglers above."
+  fi
+  echo "   confirm: ws maas show"
+  if [[ "$n_bad" -ne 0 ]]; then return 1; fi
+  return 0
+}
+
+maas_usage() {
+  cat <<'USAGE'
+ws maas — inspect and change the MaaS credential WITHOUT reinstalling the workshop
+
+  ws maas show [--user userN]      read-only: staged credential + per-namespace AI-path state
+  ws maas set  [options]           validate, stage, and re-converge the AI modules
+
+The model is not baked into anything: the AI modules read it from a per-namespace ConfigMap at
+runtime. `ws maas set` rewrites the one upstream Secret (ogsr-system/ogsr-maas-credentials) and
+re-runs each AI module's converge hook. bootstrap/install.sh is NOT needed for this.
+
+set options
+  --key-file <file>    read the API key from a file (never from argv — `ps` is public)
+  --key-stdin          read the API key from stdin   (e.g. pbpaste | ws maas set --key-stdin)
+  --model <name>       model to stage; default: bootstrap/vars.yaml, else the one already staged,
+                       else discovered from the endpoint's /models
+  --endpoint <url>     OpenAI-compatible base ending in /v1
+  --vars <file>        alternate vars file (default: bootstrap/vars.yaml)
+  --user userN         re-converge only this attendee (default: every attendee with an AI module)
+  --no-converge        stage the Secret only; leave the modules on their current values
+  --force              stage despite an INCONCLUSIVE probe (never despite a 401/403)
+
+Any field not given falls back to bootstrap/vars.yaml, then to what is already on the cluster — so
+"use a different model" is one flag. Nothing is staged until the assembled key+endpoint+model triple
+has been proven with a real 1-token call against the live endpoint.
+
+examples
+  ws maas show                                  # what are the AI modules actually running on?
+  ws maas set --model qwen3-14b                 # same key, different model
+  ws maas set --key-file ~/new-maas.key         # rotate the key, keep model + endpoint
+  ws maas set --key-stdin --endpoint https://maas.example.com/v1 --model qwen3-14b
+USAGE
+}
+
+cmd_maas() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    show)
+      local u=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --user) u="${2:-}"; shift 2 ;;
+          user[0-9]*) u="$1"; shift ;;
+          -h|--help) maas_usage; return 0 ;;
+          *) die "maas show: unknown argument '$1' — see: ws maas --help" ;;
+        esac
+      done
+      if [[ -n "$u" ]]; then require_user_token "$u" "maas show --user"; fi
+      cmd_maas_show "$u" ;;
+    set) cmd_maas_set "$@" ;;
+    ""|-h|--help|help) maas_usage ;;
+    *) die "unknown subcommand 'maas ${sub}' — try: ws maas show | ws maas set (see: ws maas --help)" ;;
+  esac
+}
+
 main() {
   local cmd="${1:-}"; shift || true
   # git-refresh self-parses its own flags (--restart-terminals/--user/--all/--exclude, where
@@ -2344,6 +2977,9 @@ main() {
   [[ "$cmd" == "passwd" ]] && { cmd_passwd "$@"; return; }
   [[ "$cmd" == "cohort-reset" ]] && { cmd_cohort_reset "$@"; return; }
   [[ "$cmd" == "scale-users" ]] && { cmd_scale_users "$@"; return; }
+  # maas has its own SUBCOMMAND (show|set) plus value-taking flags (--model/--endpoint/--key-file/
+  # --vars) whose values are free-form strings, not modules — route its raw args straight through.
+  [[ "$cmd" == "maas" ]] && { cmd_maas "$@"; return; }
   local user="" module="" extra=()
   # collect --user anywhere; a bare userN (e.g. `ws start m07 user2`) is the target user, exactly like
   # --user user2 — the first OTHER bare arg is the module. Honoring positional userN closes a footgun:
@@ -2352,7 +2988,9 @@ main() {
   # userN; routing it here makes every verb consistent.
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --user) user="$2"; shift 2;;
+      # Validate the FLAG VALUE with the same rule the positional token below already enforces —
+      # `--user 1` must die here, not become an Application named entry-<module>-1.
+      --user) user="${2:-}"; require_user_token "$user" "${cmd} --user"; shift 2;;
       --all-users) user="--all-users"; shift;;
       user[0-9]*)
         [[ "$1" =~ ^user[0-9]+$ ]] || die "bad user token '$1' — expected userN, e.g. user2"
@@ -2386,7 +3024,7 @@ main() {
     preflight)   cmd_preflight;;
     status)      cmd_status "$user";;
     diag)        cmd_diag "$user" "$module";;
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,21p';;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,22p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
