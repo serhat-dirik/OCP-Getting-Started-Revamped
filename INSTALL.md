@@ -469,6 +469,13 @@ Three commands, in order. Never skip the dry run on a customer cluster.
 **`ogsr-check-clean.sh` never deletes.** It reports leftover namespaces, owner-labelled cluster-scoped
 objects, stale APIServices, dead webhooks and created-by-us CRDs with instance counts, and prints the
 exact `oc` command to remove each — then the cluster's admin decides. That separation is deliberate:
+**How long it takes.** Its runtime tracks the number of leftovers, not the size of the cluster, because
+it classifies each marked object it finds. In the position above — straight after an uninstall — that is
+well under a minute. Run against a *full* install, where every object is a finding, it takes a couple of
+minutes; that is normal and it is not stuck. Every section prints its elapsed time as `(t+NNs)` and
+section `[8/9]` announces how many objects it is about to classify, so you can always see it moving. On
+a rate-limited cluster, lower the fan-out with `OGSR_CHECK_JOBS=2`.
+
 the tool that proves cleanliness must not be the tool that changes things.
 
 ### What is preserved
