@@ -584,15 +584,15 @@ oc rollout restart deploy/parasol-claims -n $NS >/dev/null
 wait
 ----
 
-// [CAPTURE-VERIFY] exact counts come from your run; dropped is well above zero across the reseed windows of the roll.
-// STILL OPEN after the 2026-07-28 quota fix: this probe only means anything while a roll is actually
-// progressing, and the cluster it was re-run on (5 nodes, platform stacks holding every schedulable node
-// at 97-99% of its CPU requests) could not place the surge pod at all, so no pod ever booted and the
-// probe would have read a misleading dropped=0. Fill it on a cluster with node headroom to spare.
-.Expected output (your exact counts vary — the point is `dropped` is *not zero*, and not a stray one or two)
+// Grounded live on OCP 4.22.5 as user2, 2026-07-29, on a roll `oc rollout status` confirmed as
+// completed, at the entry state (three replicas, limits.cpu 500m, default 25%/25% strategy,
+// schema-management=drop-and-create): ok=292 dropped=4. The older ok=241 dropped=15 capture came
+// from an earlier cluster generation; drop counts are timing-sensitive, so the block below no
+// longer promises a magnitude.
+.Expected output (your exact counts vary — the point is that `dropped` is *not zero*)
 [source,texinfo]
 ----
-default roll: ok=241 dropped=15
+default roll: ok=292 dropped=4
 ----
 
 The tally only means something if the roll actually ran — confirm it landed before you read anything into the numbers:
@@ -732,8 +732,21 @@ The real-world pattern is a decoupled *migration Job* (Flyway or Liquibase) that
 Your `claims-db` is already populated (the app seeded it while it was still `drop-and-create`), so there's nothing to run here — but the principle *is* the fix: *setup work belongs to the deploy, not to every pod's startup path.*
 ====
 
-*Step 2 — harden the roll (hold capacity, and speed the cold-start).*
-`maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one, and raising the container's CPU *limit* gives the JVM cold-start more headroom to burn — so a fresh pod reaches `Ready` in about *15 s* instead of ~27 s, shrinking the brief capacity dip while the roll waits on it:
+*Step 2 — harden the roll (pin the capacity floor, and speed the cold-start).*
+`maxSurge: 1`/`maxUnavailable: 0` brings a new pod up *before* retiring an old one, and raising the container's CPU *limit* gives the JVM cold-start more headroom to burn — so a fresh pod reaches `Ready` in about *15 s* instead of ~27 s.
+
+[IMPORTANT]
+.The default is a *percentage* — it protects you at three replicas and quietly stops at four
+====
+You did not lose capacity in the probe above, and that is not luck.
+The `RollingUpdate` default is `maxSurge: 25%` / `maxUnavailable: 25%`, and Kubernetes resolves those against your replica count — rounding *surge up* and *unavailable down*.
+At *3* replicas that is `25% of 3 = 0.75` → surge *1*, unavailable *0*: numerically identical to what you are about to set by hand.
+At *4* it is `25% of 4 = 1` → unavailable *1*, and the floor drops.
+Measured on this cluster (2026-07-29, same deployment, default strategy, sampled every 3–4 s through a full roll): at three replicas *18 of 18* samples read `3/3`; at four replicas *16 of 16* read `3/4`.
+So the point of setting it explicitly is not to fix today's roll — it is to make the floor *independent of how many replicas you happen to be running*, so scaling up never silently re-introduces a dip.
+====
+
+Set it explicitly:
 
 // Verified live OCP 4.22.5, 2026-07-26: parasol-claims's detail page carries a YAML tab directly
 // (Details · Metrics · YAML · ReplicaSets · Pods · Environment · Events · Security) — no need to go via
@@ -819,6 +832,7 @@ done | sort | uniq -c
 ----
 
 Capacity never dropped below 3 — the Deployment surged a replacement to `Ready` *before* retiring each old pod.
+As the IMPORTANT box above says, the percentage default happened to give you the same behaviour at *this* replica count; what you changed is that it now holds at *any* count.
 
 [WARNING]
 .`available=N/N` on its own does *not* mean the rollout succeeded
