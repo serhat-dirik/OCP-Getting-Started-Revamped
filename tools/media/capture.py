@@ -73,6 +73,18 @@ class Job:
     filename: str
     url: str = ""
     wait_text: str | None = None
+    # EVERY string here must be on the page before the shot. `wait_text` alone repeatedly proved
+    # too weak: a single landmark that a list page and its detail pages BOTH carry passes on the
+    # wrong screen, and eleven committed screenshots were wrong exactly that way. Name the object
+    # AND the state — e.g. ["ParasolClaimsErrorRateHigh", "Firing"] cannot be satisfied by the same
+    # rule sitting Pending, whereas the rule name alone can.
+    wait_all_text: list[str] = field(default_factory=list)
+    # Strings that must be ABSENT at shoot time. The positive waits cannot catch a page that
+    # rendered its own error: "Access restricted" / "No datapoints found" arrive WITH the heading
+    # the wait is looking for, so the shot succeeds and a picture of a broken query gets committed
+    # (it was — observability-health-scale-01, pulled 2026-07-28). Checked after settle_ms, before
+    # the screenshot, and fatal.
+    forbid_text: list[str] = field(default_factory=list)
     wait_selector: str | None = None
     settle_ms: int = SETTLE_MS
     viewport: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_VIEWPORT))
@@ -111,13 +123,25 @@ class Job:
     # random suffix, so a hardcoded run name in a job file is correct exactly once and silently
     # 404s on every later cluster. Runs after pre_sh, from REPO_ROOT, same trust model.
     url_sh: str | None = None
+    # Permission to OVERWRITE a screenshot that is already on disk. Default false, and that default
+    # is the point: most of these shots are state-dependent, so re-running a jobs file after the lab
+    # has moved on replaces a good capture with a valid-but-wrong one and nothing looks broken (it
+    # cost the M10 drift diff, 2026-07-26). A job may only clobber if the manifest actually marks
+    # that row ❌ RE-CAPTURE — say so in a comment beside the flag.
+    reshoot: bool = False
+    # Why this shot is NOT in the run. A job carrying `parked` is never executed; the string is
+    # printed instead. Keeps the reason next to the job rather than in a commit message nobody
+    # re-reads (see jobs-rekor.yaml for the pattern this generalises).
+    parked: str | None = None
+    # Set by main() from --out-root so a grounding run can write outside the repo.
+    out_root: Path = ASSETS
 
     @property
     def out_path(self) -> Path:
-        return ASSETS / self.slug / self.filename
+        return self.out_root / self.slug / self.filename
 
 
-def load_jobs(path: Path, domain: str) -> list[Job]:
+def load_jobs(path: Path, domain: str, out_root: Path = ASSETS) -> list[Job]:
     """Read jobs from YAML if PyYAML is present, else JSON. Keeps the dependency optional."""
     raw = path.read_text()
     data: Any
@@ -130,8 +154,11 @@ def load_jobs(path: Path, domain: str) -> list[Job]:
     else:
         data = json.loads(raw)
 
-    jobs = [Job(**entry) for entry in data["jobs"]]
+    jobs = [Job(**entry) for entry in data["jobs"] or []]
     for job in jobs:
+        job.out_root = out_root
+        if job.parked:
+            continue  # a parked job carries a reason instead of a URL; it is never executed
         if bool(job.url) == bool(job.url_sh):
             sys.exit(f"{job.filename}: set exactly one of `url` or `url_sh`")
         # Substituted here, never stored: keeps live cluster domains out of the tracked tree,
@@ -366,19 +393,25 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
 
         if job.wait_selector:
             page.wait_for_selector(job.wait_selector, timeout=60_000)
-        if job.wait_text:
-            # Not a selector: plugin tabs and table columns are plain text, and the whole point
-            # is to outlast a half-mounted render that already has a title and a sidebar.
-            # document.body can still be null on the first evaluation — the predicate runs as soon
-            # as navigation commits, which on a redirect chain (Keycloak's account console bounces
-            # through /protocol/openid-connect/auth) can be before any body exists. Without the
-            # guard that raises TypeError and aborts the job instead of simply polling again.
-            page.wait_for_function(
-                "t => !!document.body && document.body.innerText.includes(t)",
-                arg=job.wait_text,
-                timeout=60_000,
-            )
-        if not (job.wait_selector or job.wait_text):
+        # Not selectors: plugin tabs, table columns and status words are plain text, and the whole
+        # point is to outlast a half-mounted render that already has a title and a sidebar.
+        # document.body can still be null on the first evaluation — the predicate runs as soon as
+        # navigation commits, which on a redirect chain (Keycloak's account console bounces through
+        # /protocol/openid-connect/auth) can be before any body exists. Without the guard that
+        # raises TypeError and aborts the job instead of simply polling again.
+        waits = ([job.wait_text] if job.wait_text else []) + list(job.wait_all_text)
+        for needle in waits:
+            try:
+                page.wait_for_function(
+                    "t => !!document.body && document.body.innerText.includes(t)",
+                    arg=needle,
+                    timeout=60_000,
+                )
+            except PlaywrightError:
+                # Name the string that was missing. "TimeoutError: waiting for function" alone
+                # sends you re-reading the whole job to guess which assertion failed.
+                return False, f"never saw {needle!r} — wrong view, or the state was not reached"
+        if not (job.wait_selector or waits):
             page.wait_for_load_state("networkidle", timeout=60_000)
 
         if job.scroll_to_text:
@@ -403,6 +436,14 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
 
         page.wait_for_timeout(job.settle_ms)
 
+        if job.forbid_text:
+            # AFTER the settle, so a late-arriving error banner is caught. A positive wait cannot
+            # see these: "Access restricted" renders beside the very heading the wait matched.
+            body = page.evaluate("() => document.body ? document.body.innerText : ''")
+            hit = next((t for t in job.forbid_text if t in body), None)
+            if hit:
+                return False, f"page shows {hit!r} — refusing to shoot a broken view"
+
         job.out_path.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(job.out_path), full_page=job.full_page)
         size = job.out_path.stat().st_size
@@ -415,12 +456,66 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {str(exc).splitlines()[0][:160]}"
 
 
+def print_plan(jobs: list[Job], path: Path) -> int:
+    """Dry-run the jobs file: what runs, what is skipped, what each shot will cost.
+
+    Exists because the expensive input to a capture run is a human being available to complete an
+    OAuth login. Discovering a broken job file, or that six jobs would overwrite good screenshots,
+    AFTER that person has logged in wastes the one thing the run cannot manufacture.
+    """
+    print(f"\nPLAN for {path.name}\n" + "=" * 72)
+    will_run = 0
+    budget_s = 0
+    for job in jobs:
+        if job.parked:
+            print(f"  PARK  {job.slug}/{job.filename}")
+            print(f"        {' '.join(job.parked.split())[:150]}")
+            continue
+        if job.out_path.exists() and not job.reshoot:
+            print(f"  KEEP  {job.slug}/{job.filename}  (on disk; no `reshoot: true`)")
+            continue
+        will_run += 1
+        budget_s += job.pre_wait_s + job.settle_ms // 1000
+        flag = "  [RESHOOT — replaces a file on disk]" if job.reshoot else ""
+        print(f"  RUN   {job.slug}/{job.filename}{flag}")
+        if job.pre_sh:
+            print(f"        pre: {' '.join(job.pre_sh.split())[:140]}")
+        if job.pre_wait_s:
+            print(f"        then wait {job.pre_wait_s}s")
+        asserts = ([job.wait_text] if job.wait_text else []) + list(job.wait_all_text)
+        print(f"        assert present: {asserts or '(none — WEAK, the shot is unguarded)'}")
+        if job.forbid_text:
+            print(f"        assert absent : {job.forbid_text}")
+    print("-" * 72)
+    print(f"  {will_run} to capture · at least ~{budget_s // 60}m{budget_s % 60:02d}s of waiting, "
+          f"excluding pre_sh run time (ws start/solve can each be 5-25 min)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--jobs", required=True, type=Path)
     ap.add_argument("--profile", type=Path, help="persistent profile dir from login.py")
-    ap.add_argument("--only", help="capture just this slug")
+    ap.add_argument(
+        "--only",
+        help="run only jobs whose SLUG equals this, or whose FILENAME contains it. The filename "
+             "form is what you want after a partial run: `--only 04-alert-firing` retries one shot "
+             "instead of re-staging the module's other four.",
+    )
+    ap.add_argument(
+        "--out-root", type=Path, default=ASSETS,
+        help="where screenshots are written (default: content/modules/ROOT/assets/images). Point it "
+             "OUTSIDE the repo for a grounding run — pages shot only to read a console label are "
+             "reference material, not workshop assets, and must not land in the tree.",
+    )
     ap.add_argument("--no-auth", action="store_true", help="fresh context, public pages only")
+    ap.add_argument(
+        "--plan", action="store_true",
+        help="print what this file WOULD do — run / KEEP / PARK per job, plus the staging commands "
+             "— and exit. No browser, no cluster, no login. Run this before the real capture: the "
+             "console login is a human's time and a jobs file that fails to load, or that would "
+             "clobber a good screenshot, should be found before anyone is asked for it.",
+    )
     ap.add_argument(
         "--login", metavar="URL",
         help="open HEADED at URL, wait for a human to log in, then capture in the SAME context. "
@@ -436,11 +531,14 @@ def main() -> int:
     if not args.domain:
         sys.exit("set --domain or $OGSR_DOMAIN (e.g. apps.cluster-abcde.dyn.example.com)")
 
-    jobs = load_jobs(args.jobs, args.domain)
+    jobs = load_jobs(args.jobs, args.domain, args.out_root)
     if args.only:
-        jobs = [j for j in jobs if j.slug == args.only]
+        jobs = [j for j in jobs if j.slug == args.only or args.only in j.filename]
     if not jobs:
         sys.exit("no jobs matched")
+
+    if args.plan:
+        return print_plan(jobs, args.jobs)
 
     if not args.no_auth and not args.profile:
         sys.exit("--profile is required unless --no-auth is given (run login.py first)")
@@ -485,13 +583,27 @@ def main() -> int:
                 if sess_path:
                     save_session(ctx, sess_path)
                 ctx.close()
-                return
+                return 1  # not `return` — a bare return exits 0 and a wrapper reads that as success
             # Cache immediately, not at the end: if a later job crashes the run, the session a
             # human just spent time establishing must not die with it.
             if sess_path:
                 save_session(ctx, sess_path)
 
+        attempted = 0
         for job in jobs:
+            rel = f"{job.slug}/{job.filename}"
+            if job.parked:
+                print(f"PARK {rel}  [{job.parked}]")
+                continue
+            if job.out_path.exists() and not job.reshoot:
+                # The screenshots are state-dependent, so a second run of a jobs file does not
+                # produce the same picture — it produces whatever the lab looks like NOW, which is
+                # a valid PNG of the wrong moment and silently replaces a good one. Overwriting is
+                # therefore opt-in per job (`reshoot: true`), set only when the module's
+                # media-manifest.md actually marks that row ❌ RE-CAPTURE.
+                print(f"KEEP {rel}  [already on disk; set `reshoot: true` to replace it]")
+                continue
+            attempted += 1
             if job.pre_sh:
                 print(f"  pre: {job.pre_sh[:88]}", flush=True)
                 # cwd=REPO_ROOT is load-bearing. pre_sh commands are written repo-root-relative
@@ -523,15 +635,20 @@ def main() -> int:
                     continue
             ok, detail = capture(page, job)
             mark = "OK  " if ok else "FAIL"
-            rel = job.out_path.relative_to(REPO_ROOT)
             print(f"{mark} {rel}  [{detail}]")
             sys.stdout.flush()
             ok_count += ok
 
+        # Re-cache at the end too, not only right after --login. The console can rotate its session
+        # cookie mid-run, and the point of the cache is that ONE human login serves every later
+        # run: a stale cached copy quietly puts a person back in the loop.
+        if sess_path:
+            save_session(ctx, sess_path)
         ctx.close()
 
-    print(f"\n{ok_count}/{len(jobs)} captured")
-    return 0 if ok_count == len(jobs) else 1
+    skipped = len(jobs) - attempted
+    print(f"\n{ok_count}/{attempted} captured ({skipped} parked or already on disk)")
+    return 0 if ok_count == attempted else 1
 
 
 if __name__ == "__main__":

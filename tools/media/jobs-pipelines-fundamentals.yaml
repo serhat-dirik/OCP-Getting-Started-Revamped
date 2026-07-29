@@ -1,44 +1,97 @@
-# M07 (pipelines-fundamentals) capture list — see tools/media/README.md.
+# M07 (pipelines-fundamentals) capture list — see tools/media/README.md and RUNBOOK.md.
 #
-# `{domain}` is substituted at run time from --domain / $OGSR_DOMAIN. NEVER hardcode a live
-# cluster domain here: CI's privacy guard fails the build on one in any tracked file.
+# CONFLICT WARNING, READ FIRST. pipelines-fundamentals and trusted-supply-chain both own
+# {user}-cicd and declare each other in `conflictsWith`. Starting either one EVICTS the other's
+# entry app and PURGES the namespace — including the signed ImageStream that
+# trusted-supply-chain-03 needs. Take every M08 shot before running anything in this file.
 #
-# The `wait_text` values are not guesses — each was read off the live 4.22.5 console during the
-# 2026-07-26 grounding pass. They are chosen to appear ONLY on the settled page: the console
-# shell, its nav sidebar and even document.title all resolve seconds before the plugin-provided
-# tabs and tables mount, so waiting on anything less captures a half-rendered page.
+# WHAT WAS WRONG WITH THE OLD VERSION (2026-07-29 audit). Every job hardcoded a PipelineRun name
+# captured on 2026-07-26 — `…-run-2762r`, `…-run-s2cns`. Those runs no longer exist on any cluster;
+# the namespace currently holds trusted-supply-chain's world instead. Four jobs would have spent a
+# minute each timing out on a 404. Runs are created with `generateName`, so a literal name in a job
+# file is correct exactly once. They are resolved with `url_sh` now.
 #
-# RUN NAMES ARE PER-CLUSTER. The two PipelineRun jobs below reference runs created on
-# 2026-07-26. Re-point them at your own runs before capturing: `oc get pipelineruns -n
-# <user>-cicd`. A green run and a failed run are both needed (the failed one is the whole
-# point of exercise 3).
+# `{domain}` is substituted at run time from --domain / $OGSR_DOMAIN, in `url` and `url_sh` only.
+# NEVER hardcode a live cluster domain: CI's privacy guard fails the build on one in any tracked
+# file.
+#
+# Four of these six are already on disk and marked ✅ CAPTURED in the manifest, so capture.py skips
+# them (`KEEP`) unless a job says `reshoot: true`. That is intentional — see RUNBOOK.md "the
+# clobber guard". Only shot 01 is a genuine re-shoot.
 jobs:
+
+  # --- 01: the RE-SHOOT. The asset on disk predates the Tekton console plugin and has no graph.
+  # `ws solve` runs the real build-test-deploy pipeline and BLOCKS until it succeeds (~9 min, cold
+  # cluster longer; ws-meta waitSeconds is 1200, and capture.py allows pre_sh 1800s). That is the
+  # only way a green 5-Task graph exists — the entry state ships the Pipeline, never a run.
   - slug: pipelines-fundamentals
     filename: pipelines-fundamentals-01-pipelinerun-graph.png
-    url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun/parasol-claims-build-test-deploy-run-2762r
-    # Only present once the run's Conditions table has rendered, well after the graph frame.
-    wait_text: "Tasks Completed"
+    reshoot: true                       # manifest row 1: ❌ RE-CAPTURE (no task graph in the old asset)
+    pre_sh: >-
+      ./tools/ws/ws start pipelines-fundamentals --user user1 &&
+      ./tools/ws/ws solve pipelines-fundamentals --user user1
+    # The newest SUCCEEDED run, whatever it is called. Empty output fails the job loudly rather
+    # than navigating to a truncated URL and shooting whatever answers.
+    url_sh: >-
+      run=$(oc get pipelinerun -n user1-cicd --sort-by=.metadata.creationTimestamp
+      -o jsonpath='{range .items[?(@.status.conditions[0].status=="True")]}{.metadata.name}{"\n"}{end}'
+      | tail -1);
+      test -n "$run" && echo "https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun/$run"
+    # Both: the Conditions table renders well after the graph frame, and the task name proves the
+    # pipelines-console-plugin actually mounted. A page with only Details and YAML tabs is a plugin
+    # that failed to load in this browser session, not a cluster without it (CONSOLE-GROUNDING.md)
+    # — and "Tasks Completed" alone cannot tell those apart.
+    wait_all_text: ["Tasks Completed", "image-report"]
+    settle_ms: 8000
 
+  # --- 03: the RED break-fix run. NOT materialisable by any entry state or solve hook: the failure
+  # is the attendee breaking a unit test in their fork in exercise 3. `ws solve` only ever produces
+  # a green run. The asset on disk is ✅ CAPTURED, so this job is a placeholder that documents why
+  # there is nothing to re-run — do not point it at a green run's URL.
   - slug: pipelines-fundamentals
     filename: pipelines-fundamentals-03-pipelinerun-failed.png
-    url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun/parasol-claims-build-test-deploy-run-s2cns
-    # A failed run's Details page grows this panel; it is absent on a green run.
-    wait_text: "Log snippet"
+    parked: >-
+      Needs a FAILED run, which only exists after a human breaks a test in their Gitea fork
+      (exercise 3). No entry state or solve hook produces one. The captured asset is good; leave it.
 
+  # --- 04: results on the Output tab, not Details. Same run as 01, resolved the same way.
   - slug: pipelines-fundamentals
     filename: pipelines-fundamentals-04-pipelinerun-results.png
-    url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun/parasol-claims-build-test-deploy-run-2762r/output
-    # Corrects a long-standing content error: results are on the Output tab, NOT on Details.
-    wait_text: "PipelineRun results"
+    url_sh: >-
+      run=$(oc get pipelinerun -n user1-cicd --sort-by=.metadata.creationTimestamp
+      -o jsonpath='{range .items[?(@.status.conditions[0].status=="True")]}{.metadata.name}{"\n"}{end}'
+      | tail -1);
+      test -n "$run" && echo "https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun/$run/output"
+    # Corrects a long-standing content error: results are on the Output tab, NOT on Details. The
+    # result NAME is the proof the tab rendered its table; the heading alone is on the empty tab.
+    wait_all_text: ["PipelineRun results", "image-within-budget"]
 
+  # --- 05: the Pipeline (not PipelineRun) topology graph.
   - slug: pipelines-fundamentals
     filename: pipelines-fundamentals-05-pipeline-details-graph.png
     url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~Pipeline/parasol-claims-build-test-deploy
-    # The Tasks list naming each resolved Task renders after the topology graph.
-    wait_text: "image-size-report"
+    # `image-report` is the pipelineTask name the graph draws; `shared-workspace` is the workspace
+    # row further down the Details page. Neither is on the Pipelines LIST page, which is what a
+    # weaker wait would have accepted. NOTE: the resolved Task name (`image-size-report`) lives in
+    # the cluster-resolver params and may only be visible on the YAML tab — do not wait on it.
+    wait_all_text: ["image-report", "shared-workspace"]
 
+  # --- 06: the Pipelines-as-Code Repository. Shipped by the entry state, so `ws start` is enough.
   - slug: pipelines-fundamentals
     filename: pipelines-fundamentals-06-pac-repository.png
     url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/pipelinesascode.tekton.dev~v1alpha1~Repository/parasol-claims
     # Note there is NO "Git provider" field on this page, despite what the lab used to claim.
-    wait_text: "Webhook secret"
+    # `parasol-claims` pairs the object with the field so the Repositories LIST page cannot satisfy
+    # this wait on its own.
+    wait_all_text: ["Webhook secret", "parasol-claims"]
+
+  # --- 02: the Gitea webhook form. Interactive: the attendee fills Target URL, content type and
+  # secret in Gitea's Add Webhook page. A URL-only job can reach the empty form, which is not the
+  # shot the manifest describes.
+  - slug: pipelines-fundamentals
+    filename: pipelines-fundamentals-02-gitea-webhook.png
+    parked: >-
+      Gitea's Add Webhook form has to be FILLED to be worth a picture (PaC controller route,
+      application/json, the shared secret, Push Events). Nothing pre-fills it from a URL, and Gitea
+      has its own local login that the console session does not carry. Needs a human. Remember
+      ?lang=en-US on any Gitea URL — Gitea honours Accept-Language and renders translated.

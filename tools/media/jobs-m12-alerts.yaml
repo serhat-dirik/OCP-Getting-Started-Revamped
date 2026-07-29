@@ -1,11 +1,17 @@
-# M12 alert story — the two shots the full console sweep could not get (2026-07-28).
+# M12 alert story — the "before" and the "after" of the same rule, on their own.
 #
-# WHY THIS IS A SEPARATE FILE. Both shots are the SAME rule at OPPOSITE states, so they cannot
-# both be true at once: 05 must be shot at the healthy baseline, then the database is broken,
-# then 04 is shot ~5 min later. That ordering is the file. Re-running the big sweep just to get
-# these two would re-materialise four other modules and cost ~40 min.
+# WHY THIS FILE EXISTS SEPARATELY. Both shots are the SAME rule at OPPOSITE states, so they cannot
+# both be true at once: 05 must be taken at the healthy baseline, then the fault is injected, then
+# 04 is taken ~3 minutes later. That ordering IS the file. Re-running the full console sweep just
+# to redo these two would re-materialise the other modules and cost ~40 minutes.
 #
-# PRECONDITION — the entry state must already be up and the rule applied:
+# THE FIX THAT MADE THIS RUNNABLE (2026-07-29). The earlier version pointed at the CLUSTER-scoped
+# /monitoring/alertrules and /monitoring/alerts, which show an attendee `0 - 0 of 0` — grounded
+# 2026-07-28 and stated outright in the lab. Both jobs could only ever time out. They now use the
+# project-scoped pages the lab itself links. The other half of the fix is that scaling claims-db to
+# zero does NOT fire this rule on its own; see tools/media/stage-m12-alert.sh.
+#
+# PRECONDITION — the entry state must be up and the rule loaded:
 #     ./tools/ws/ws start observability-health-scale --user user1
 #     oc apply -n user1-dev -f tools/media/fixtures/m12-prometheusrule.yaml
 # Give the ruler ~1 min to load the rule before starting the capture.
@@ -15,28 +21,35 @@
 #       --jobs tools/media/jobs-m12-alerts.yaml --profile ~/.ogsr-shot-profile \
 #       --login https://console-openshift-console.$OGSR_DOMAIN
 #
-# AFTERWARDS, RESTORE THE CLUSTER (this file deliberately leaves the DB down):
+# AFTERWARDS, RESTORE THE CLUSTER (this file deliberately leaves the database down):
+#     ./tools/media/stage-m12-hpa.sh user1     # restores, restarts, and stages the HPA shot
+#   or, if you only want the world back:
 #     oc scale deploy/claims-db -n user1-dev --replicas=1
 #     oc rollout restart deploy/parasol-claims -n user1-dev
 # The restart is not optional — the app holds a poisoned connection pool, exactly as the lab says.
 jobs:
 
-  # The "before": the rule is loaded and armed, and Inactive because the load generator only
-  # produces 404s at the healthy baseline. Filtering is mandatory — see capture.py's filter_text.
+  # The "before": the rule is loaded and armed, and inactive because the load generator only
+  # produces 404s at the healthy baseline. forbid_text is what makes "inactive" an assertion rather
+  # than a caption.
   - slug: observability-health-scale
     filename: observability-health-scale-05-observe-alerting-inactive.png
-    url: https://console-openshift-console.{domain}/monitoring/alertrules
-    filter_text: "ParasolClaimsErrorRateHigh"
-    wait_text: "ParasolClaimsErrorRateHigh"
+    url: https://console-openshift-console.{domain}/dev-monitoring/ns/user1-dev/alertrules?alert-source=user
+    wait_all_text: ["ParasolClaimsErrorRateHigh", "Warning"]
+    forbid_text: ["Firing", "Pending"]
     settle_ms: 8000
 
-  # Break the database, then wait out the rule's `for: 2m` on top of a 5m rate window. The lab
-  # measures Pending at ~50s and Firing ~2 min after that, so 300s is the real number, not padding.
+  # The "after". stage-m12-alert.sh scales the database away AND drives the concurrent burst the
+  # lab prescribes — the 5xx signal only exists for ~30 seconds, between the database draining and
+  # the readiness probe pulling the pod out of the router, and the steady generator's 404s never
+  # clear 0.1/s. The script fails if it observed no server errors, which skips this job rather than
+  # photographing an inactive rule under a "firing" caption.
   - slug: observability-health-scale
     filename: observability-health-scale-04-alert-firing.png
-    pre_sh: oc scale deploy/claims-db -n user1-dev --replicas=0
-    pre_wait_s: 300
-    url: https://console-openshift-console.{domain}/monitoring/alerts
-    filter_text: "ParasolClaimsErrorRateHigh"
-    wait_text: "ParasolClaimsErrorRateHigh"
+    pre_sh: ./tools/media/stage-m12-alert.sh user1
+    # Pending from ~45s, Firing from ~165s, resolved ~360s when the burst leaves the 5m rate
+    # window. The script returns at ~100s, so this lands the shot near 200s.
+    pre_wait_s: 90
+    url: https://console-openshift-console.{domain}/dev-monitoring/ns/user1-dev/alertrules?alert-source=user
+    wait_all_text: ["ParasolClaimsErrorRateHigh", "Firing"]
     settle_ms: 10000

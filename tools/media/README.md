@@ -4,6 +4,11 @@ Repeatable console / product-UI screenshots for the workshop media pass. Output 
 `content/modules/ROOT/assets/images/<slug>/`, which is where each module's
 `media-manifest.md` expects it.
 
+> **Doing a capture run? Read [RUNBOOK.md](RUNBOOK.md) first.** This file explains how the harness
+> works; the runbook is the order to execute in, what must be true before the login window opens,
+> which blocks destroy which, and what is not capturable at all. The order is not optional — the
+> shots are state-dependent and several pairs are the same object at opposite states.
+
 ## Why a driver, and not just `chrome --screenshot`
 
 Both obvious approaches fail, and they fail *quietly* — which is why the media pass stalled
@@ -90,20 +95,43 @@ Public, password-free pages (the Showroom cockpit) need no profile:
 
 ```yaml
 jobs:
-  - slug: pipelines-fundamentals                      # module slug = output directory
-    filename: pipelines-fundamentals-01-graph.png     # 04-STYLE-GUIDE §4 naming
-    url: https://console-openshift-console.{domain}/k8s/ns/user1-cicd/...
-    wait_text: "Tasks Completed"                      # text ONLY the settled page has
+  - slug: observability-health-scale                   # module slug = output directory
+    filename: observability-health-scale-04-alert-firing.png   # 04-STYLE-GUIDE §4 naming
+    pre_sh: ./tools/media/stage-m12-alert.sh user1     # put the CLUSTER in the state (repo-root cwd)
+    pre_wait_s: 90                                     # let the state settle before shooting
+    url: https://console-openshift-console.{domain}/dev-monitoring/ns/user1-dev/alertrules
+    wait_all_text: ["ParasolClaimsErrorRateHigh", "Firing"]   # object AND state, both required
+    forbid_text: ["Access restricted"]                 # refuse to shoot a page that errored
+    reshoot: false                                     # never overwrite an existing file
 ```
 
-Two rules that matter:
+Four rules that matter:
 
 1. **Never hardcode a cluster domain in the job file.** Write `{domain}`; it is substituted from
-   `--domain` / `$OGSR_DOMAIN` at run time. This keeps the job files portable between clusters —
-   it is not a privacy rule (see "Cluster domains in captured images" below for that).
-2. **Pick `wait_text` that a half-rendered page does not have.** The console shell, its nav
-   sidebar and `document.title` all arrive early. Wait on a plugin-rendered tab label, a table
-   column header, or a status string — something from the part of the page you are shooting.
+   `--domain` / `$OGSR_DOMAIN` at run time, in `url` and `url_sh` **only** — never in `pre_sh`, so
+   a staging command must read hosts from the cluster (`oc get route …`). This keeps the job files
+   portable — it is not a privacy rule (see "Cluster domains in captured images" below for that).
+2. **Assert the view AND the state, with `wait_all_text`.** Every string in the list must be
+   present. A single landmark that a list page and its detail pages both carry passes on the wrong
+   screen — that is how eleven committed screenshots went wrong. `wait_text` (one string) still
+   works and is fine where the string is genuinely unique to the settled page.
+3. **Use `forbid_text` for pages that render their own errors.** A positive wait cannot see
+   "Access restricted" or "No datapoints found": they arrive *beside* the heading it matched. Checked
+   after the settle, before the shot, and fatal.
+4. **`reshoot` defaults to false and should usually stay there.** `capture.py` refuses to overwrite
+   an existing screenshot without it, because these shots are state-dependent and a re-run captures
+   whatever the lab looks like *now*. Set it only where the module's `media-manifest.md` says
+   ❌ RE-CAPTURE, and say so in a comment beside the flag.
+
+A job that cannot be captured at all takes `parked: "<the reason>"` instead of a URL. It is never
+executed and the reason is printed — that is how a decision stays next to the job rather than in a
+commit message nobody re-reads.
+
+Dry-run any file with `--plan` (no browser, no cluster, no login):
+
+```bash
+.venv/bin/python capture.py --jobs jobs-console-sweep.yaml --domain apps.example.com --plan
+```
 
 `capture.py` flags any output under 20 KB as suspicious, because that is what a splash screen
 or an error page weighs. It is a smoke alarm, not a correctness check — **look at the images**.
