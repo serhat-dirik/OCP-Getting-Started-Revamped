@@ -93,7 +93,11 @@ public class AgentCommand implements Callable<Integer> {
         } catch (Exception e) {
             // Print whatever the agent managed to call before it failed - the trace is never silently lost.
             System.out.println(TraceFormatter.trace(tracer.trace()));
-            String detail = rootMessage(e);
+            // Redact BEFORE branching, not inside the safe branch: looksLikeAuthFailure is a
+            // substring heuristic over six tokens, so a 429/500 whose body happens to echo the key
+            // without saying "401"/"authentication" falls through to the "+ detail" branch and lands
+            // in `oc logs`. The redaction has to hold on the path the heuristic does not recognise.
+            String detail = redactCredentials(rootMessage(e));
             System.err.println();
             System.err.println(looksLikeAuthFailure(detail)
                     ? "error: model authentication failed - check the MaaS key (GENAI_API_KEY); it may be expired."
@@ -101,6 +105,46 @@ public class AgentCommand implements Callable<Integer> {
             return 1;
         }
     }
+
+    /**
+     * Blank credential material out of an upstream message before it is printed.
+     *
+     * <p>WHY THIS EXISTS. This CLI runs as a one-shot pod with the MaaS key in its environment, and
+     * M24 reads its output with {@code oc logs "$POD"} straight into the attendee's terminal. The
+     * model gateway echoes a rejected key back in full inside its 401 body
+     * ({@code Virtual Key expected. Received=<the key>, ...}), and {@link #rootMessage} deliberately
+     * unwraps to exactly that deepest message. So the key was one unrecognised status code away from
+     * being printed.
+     *
+     * <p>Redaction, never truncation - the sibling near-miss was a {@code cut -c1-200} that cleared
+     * an echoed key by ten characters. A character count is not a defence. Kept narrow on purpose:
+     * the {@code sk-}/{@code eyJ} prefix survives so "you sent a JWT where an API key was expected"
+     * is still diagnosable, and a {@code models=[...]} scope list is left intact.
+     *
+     * <p>Mirrors {@code AgentResource.redactCredentials} in parasol-agent. Duplicated rather than
+     * shared: these are two independent Maven modules with no common artifact, and a shared library
+     * for three regexes would cost more than it saves.
+     */
+    static String redactCredentials(String message) {
+        if (message == null) {
+            return null;
+        }
+        String out = RECEIVED_FIELD.matcher(message).replaceAll("Received=<redacted>");
+        out = BEARER_TOKEN.matcher(out).replaceAll("$1 <redacted>");
+        return KEY_SHAPED.matcher(out).replaceAll("$1<redacted>");
+    }
+
+    /** The gateway's echo-back field. Value ends at the comma (or space) that resumes the sentence. */
+    private static final java.util.regex.Pattern RECEIVED_FIELD =
+            java.util.regex.Pattern.compile("Received=[^,\\s]*");
+
+    /** An Authorization header quoted back at us by a client library that logs the request. */
+    private static final java.util.regex.Pattern BEARER_TOKEN =
+            java.util.regex.Pattern.compile("(?i)(Bearer)\\s+[A-Za-z0-9._~+/=-]{8,}");
+
+    /** The two credential shapes this workshop actually handles: a MaaS virtual key, and a JWT. */
+    private static final java.util.regex.Pattern KEY_SHAPED =
+            java.util.regex.Pattern.compile("(sk-|eyJ)[A-Za-z0-9._~+/=-]{8,}");
 
     /** Unwrap to the deepest cause so the message is the real reason (e.g. the HTTP 401), not a wrapper. */
     static String rootMessage(Throwable t) {

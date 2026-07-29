@@ -85,9 +85,13 @@ public class AgentResource {
                     modelName,
                     usage(result.tokenUsage()))).build();
         } catch (Exception e) {
-            String detail = rootMessage(e);
+            String detail = redactCredentials(rootMessage(e));
             boolean auth = looksLikeAuthFailure(detail);
-            LOG.warnf(e, "Agent model call failed (authFailure=%s): %s", auth, detail);
+            // The throwable is deliberately NOT handed to the logger: printStackTrace writes every
+            // cause's raw getMessage(), which is the exact text the gateway echoes the key back in,
+            // and it lands BELOW the line a reader greps for. Log the redacted detail plus the cause
+            // chain (types only) - same diagnostic value, no credential on any line.
+            LOG.warnf("Agent model call failed (authFailure=%s): %s [%s]", auth, detail, causeChain(e));
             String error = auth
                     ? "model authentication failed - check the MaaS key (GENAI_API_KEY); it may be expired"
                     : "the model call failed";
@@ -119,6 +123,65 @@ public class AgentResource {
                 tokenUsage.inputTokenCount(),
                 tokenUsage.outputTokenCount(),
                 tokenUsage.totalTokenCount());
+    }
+
+    /**
+     * Blank credential material out of an upstream message before it is logged or returned.
+     *
+     * <p>WHY THIS EXISTS. The model gateway echoes the rejected key back <em>in full</em> inside its
+     * own 401 body ({@code Virtual Key expected. Received=<the key>, expected to start with 'sk-'}).
+     * That body becomes {@code detail}, and {@code detail} goes to two places a person reads: the
+     * pod log, and {@link AskError#detail()} - which is serialised into the 502 JSON the attendee
+     * gets back from {@code POST /agent/ask}. So the credential was one wording change away from
+     * being printed in an attendee's terminal.
+     *
+     * <p>Redaction, never truncation. The near-miss that prompted this was a {@code cut -c1-200} on
+     * the log line that cleared the echoed key by TEN characters - safety by accident of arithmetic.
+     * A character count is not a defence; naming the thing is.
+     *
+     * <p>Deliberately shape-based and deliberately narrow. It blanks the value of the gateway's
+     * {@code Received=} field and any {@code sk-} or JWT shaped token, and leaves the rest of the
+     * sentence alone: the reader still has to be able to tell the three key faults apart (expired /
+     * wrong kind of credential / scoped to a different model), and the last of those is diagnosed
+     * from a {@code models=[...]} list that must survive. The {@code sk-}/{@code eyJ} prefix is kept
+     * on purpose so "you sent a JWT where an API key was expected" is still readable after redaction.
+     */
+    static String redactCredentials(String message) {
+        if (message == null) {
+            return null;
+        }
+        String out = RECEIVED_FIELD.matcher(message).replaceAll("Received=<redacted>");
+        out = BEARER_TOKEN.matcher(out).replaceAll("$1 <redacted>");
+        return KEY_SHAPED.matcher(out).replaceAll("$1<redacted>");
+    }
+
+    /** The gateway's echo-back field. Value ends at the comma (or space) that resumes the sentence. */
+    private static final java.util.regex.Pattern RECEIVED_FIELD =
+            java.util.regex.Pattern.compile("Received=[^,\\s]*");
+
+    /** An Authorization header quoted back at us by a client library that logs the request. */
+    private static final java.util.regex.Pattern BEARER_TOKEN =
+            java.util.regex.Pattern.compile("(?i)(Bearer)\\s+[A-Za-z0-9._~+/=-]{8,}");
+
+    /** The two credential shapes this workshop actually handles: a MaaS virtual key, and a JWT. */
+    private static final java.util.regex.Pattern KEY_SHAPED =
+            java.util.regex.Pattern.compile("(sk-|eyJ)[A-Za-z0-9._~+/=-]{8,}");
+
+    /**
+     * The exception chain as class names only, root-ward - e.g. {@code RuntimeException -> HttpException}.
+     * Types, never messages: this is the part of a stack trace that is safe to log verbatim.
+     */
+    static String causeChain(Throwable t) {
+        StringBuilder chain = new StringBuilder();
+        Throwable current = t;
+        while (current != null) {
+            if (chain.length() > 0) {
+                chain.append(" -> ");
+            }
+            chain.append(current.getClass().getSimpleName());
+            current = current.getCause() == current ? null : current.getCause();
+        }
+        return chain.toString();
     }
 
     /** Unwrap to the deepest cause so the caller sees the real reason (e.g. the HTTP 401). */

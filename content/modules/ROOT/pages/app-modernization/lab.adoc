@@ -267,13 +267,26 @@ curl -sS -k "$(oc get cm maas-config -n $NS -o jsonpath='{.data.endpoint}')/chat
   -H 'Content-Type: application/json' \
   -d '{"model":"'"$(oc get cm maas-config -n $NS -o jsonpath='{.data.model}')"'","temperature":0,"max_tokens":120,
        "messages":[{"role":"user","content":"Rewrite this to read the JDBC URL from env var CLAIMS_DB_URL, return only the Java line: dataSource.setUrl(\"jdbc:oracle:thin:@10.14.221.9:1521/CLAIMSDB\");"}]}' \
+  | sed -E -e 's#Received=[^,]*#Received=<redacted>#g' \
+           -e 's#(sk-|eyJ)[A-Za-z0-9._~+/=-]{8,}#\1<redacted>#g' \
   | python3 -c 'import sys,json
 b=sys.stdin.read()
 try: print(json.loads(b)["choices"][0]["message"]["content"])
-except Exception: print("MaaS did not return a completion (a 401 — your key is not scoped to the model in maas-config — is the usual cause). Raw response:\n"+b[:400])'
+except Exception: print("MaaS did not return a completion (a 401 — your key is not scoped to the model in maas-config — is the usual cause). Response follows, credentials already redacted:\n"+b)'
 ----
 
-Live, this returns `HTTP 200` and the `System.getenv("CLAIMS_DB_URL")` rewrite above. It never prints your key. This is *exactly* the wiring the module fixes: the MaaS key is scoped per cluster and the model (`{maas_model}` here) is sourced on-cluster, so the same content targets a cluster whose key is scoped to a different model without a code change.
+That `sed` is not decoration. When the key is rejected, the model gateway echoes it *back in full* inside its own error body — and the `except` branch prints that body, so without the redaction the failure path would print your key into your terminal. It replaces the value by *name* (the gateway's `Received=` field) and by *shape* (anything `sk-…` or JWT-shaped), which is why the rest of the message survives: you can still read which of the three key faults you hit, and the `sk-`/`eyJ` prefix is kept so "a JWT was staged where an API key was expected" is still diagnosable.
+
+// 5-'=' delimiter: this WARNING is nested inside the enclosing [NOTE] ==== block, and a same-length
+// ==== silently CLOSES the outer block instead of opening a nested one (the build stays green and
+// the page renders wrong).
+[WARNING]
+.Never trim output to hide a credential
+=====
+It is tempting to cut the body to a fixed number of characters instead. Don't — this repo shipped exactly that, and measured the echoed key starting at character *201* behind a `cut -c1-200`. It was safe by ten characters, and any reword upstream would have printed it. Truncation makes a leak *look* fixed while leaving it one message-format change away. Redact the thing by name or by shape; a character count is not a control.
+=====
+
+Live, this returns `HTTP 200` and the `System.getenv("CLAIMS_DB_URL")` rewrite above. This is *exactly* the wiring the module fixes: the MaaS key is scoped per cluster and the model (`{maas_model}` here) is sourced on-cluster, so the same content targets a cluster whose key is scoped to a different model without a code change.
 ====
 
 *Manual path (graceful degradation).* No `[ADS]` entitlement? Make the *same* change by hand in `PersistenceConfig.java` — replace the compiled-in `getProperty("jdbc.url")` with `System.getenv("CLAIMS_DB_URL")`. The point of the lesson — *externalize the config* — is identical; only the typing assistant differs.

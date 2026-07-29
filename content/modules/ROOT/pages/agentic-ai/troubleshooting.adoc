@@ -21,14 +21,17 @@ Each entry is symptom → cause → fix. All were seen (or deliberately induced)
 
 *Symptom:* Every question returns HTTP `502` and a body like `{"error":"model authentication failed - check the MaaS key ...","authFailure":true,...}`.
 
-*Cause:* The model server rejected the agent's key with a `401`, and the agent *degrades gracefully* to a clean `502` instead of a stack trace. Three different key problems produce the same `502`, and the model server's own message tells them apart. Read it in the agent log — the `sed` replaces the rejected key (the server echoes it back in full) and the `cut` trims the rest, so nothing sensitive lands in your terminal:
+*Cause:* The model server rejected the agent's key with a `401`, and the agent *degrades gracefully* to a clean `502` instead of a stack trace. Three different key problems produce the same `502`, and the model server's own message tells them apart. Read it in the agent log:
 
 [source,sh,role=execute,subs="attributes"]
 ----
 oc logs deploy/parasol-agent -n {user}-ai --tail=200 \
   | grep -i "Agent model call failed" | tail -1 \
-  | sed 's/Received=[^,]*/Received=<redacted>/' | cut -c1-240
+  | sed -E -e 's#Received=[^,]*#Received=<redacted>#g' \
+           -e 's#(sk-|eyJ)[A-Za-z0-9._~+/=-]{8,}#\1<redacted>#g'
 ----
+
+The agent *already* redacts this line before it writes it, so the `sed` is a second pair of hands, not the only one — it re-applies the same two rules to whatever the log actually contains. Both work by naming the thing: the gateway's `Received=` field by name, and `sk-…`/JWT-shaped tokens by shape. Neither is a length limit, and that is deliberate — see the warning below.
 
 [cols="1,2"]
 |===
@@ -43,6 +46,14 @@ oc logs deploy/parasol-agent -n {user}-ai --tail=200 \
 | `key not allowed to access model. This key can only access models=[…]`
 | The key is fine but *model-scoped* to a different model than `GENAI_MODEL`. Workshop MaaS keys grant one model; the key and the `maas-config` `model` value must name the same one.
 |===
+
+[WARNING]
+.Why this redacts instead of truncating
+====
+An earlier version of this page trimmed the log line with `cut -c1-200` instead. Measured against the real line, the echoed key started at character *201* — the truncation cleared it by *ten characters*. That is not a control, it is a coincidence: one reword upstream and the same command prints a bearer token into your terminal.
+
+If you write a diagnostic that displays output which might carry a credential, redact the credential *by name or by shape*. Never rely on a character count falling short of it — and never rely on the credential staying in the field you expect, which is why the shape rule above is there alongside the field rule.
+====
 
 *Fix:* `ws prep agentic-ai --yes` re-resolves the key and re-converges the model/endpoint into your namespace — that clears the expired case. The other two are *platform-side*: the source credential is wrong or scoped to another model, so tell your instructor rather than editing the Secret yourself.
 

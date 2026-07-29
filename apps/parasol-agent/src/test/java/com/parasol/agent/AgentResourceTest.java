@@ -2,6 +2,7 @@ package com.parasol.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -44,6 +45,73 @@ class AgentResourceTest {
         assertFalse(AgentResource.looksLikeAuthFailure("Connection reset by peer"));
         assertFalse(AgentResource.looksLikeAuthFailure("Read timed out"));
         assertFalse(AgentResource.looksLikeAuthFailure(null));
+    }
+
+    // ---- credential redaction -------------------------------------------------------------------
+    // The gateway echoes a rejected key back in full, and `detail` is BOTH logged AND serialised
+    // into the 502 body the attendee receives. These pin the redaction that keeps it out of each.
+    // Every literal below is a synthetic stand-in of realistic length - never a real credential.
+
+    private static final String FAKE_KEY = "sk-SYNTHETIC-not-a-real-key-0123456789";
+    private static final String FAKE_JWT =
+            "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0Iiwibn0.c2lnbmF0dXJlLXBsYWNlaG9sZGVy";
+
+    @Test
+    void gatewayEchoOfTheRejectedKeyIsRedacted() {
+        String body = "Authentication Error, Virtual Key expected. Received=" + FAKE_KEY
+                + ", expected to start with 'sk-'";
+        String redacted = AgentResource.redactCredentials(body);
+        assertFalse(redacted.contains(FAKE_KEY), "the echoed key must not survive redaction");
+        assertTrue(redacted.contains("Received=<redacted>"));
+        // The diagnostic must stay usable: this is how the attendee tells "wrong kind of key" from
+        // the other two faults, so the trailing clause has to survive intact.
+        assertTrue(redacted.contains("expected to start with 'sk-'"));
+    }
+
+    @Test
+    void aJwtStagedWhereAnApiKeyWasExpectedIsRedactedButStillDiagnosable() {
+        String redacted = AgentResource.redactCredentials("Virtual Key expected. Received=" + FAKE_JWT);
+        assertFalse(redacted.contains(FAKE_JWT));
+        assertFalse(redacted.contains("c2lnbmF0dXJlLXBsYWNlaG9sZGVy"), "the signature must not survive");
+        assertTrue(redacted.contains("Received=<redacted>"));
+    }
+
+    @Test
+    void aKeyAnywhereInTheMessageIsRedactedNotJustInTheReceivedField() {
+        // The whole point: safety must not depend on the credential sitting in a known field at a
+        // known offset. A bare key, or one behind an Authorization header, is caught by shape.
+        assertFalse(AgentResource.redactCredentials("upstream rejected " + FAKE_KEY + " at /chat/completions")
+                .contains(FAKE_KEY));
+        assertFalse(AgentResource.redactCredentials("sent header Authorization: Bearer " + FAKE_JWT)
+                .contains(FAKE_JWT));
+        assertTrue(AgentResource.redactCredentials("Authorization: Bearer " + FAKE_KEY)
+                .contains("Bearer <redacted>"));
+    }
+
+    @Test
+    void theModelScopeFaultSurvivesRedactionWordForWord() {
+        // The third key fault is diagnosed purely from this list. Over-eager redaction would make
+        // the page's troubleshooting table unusable, which is its own kind of failure.
+        String scoped = "key not allowed to access model. This key can only access models=[qwen3-14b]";
+        assertEquals(scoped, AgentResource.redactCredentials(scoped));
+    }
+
+    @Test
+    void ordinaryTransportFailuresArePassedThroughUnchanged() {
+        assertEquals("Connection reset by peer", AgentResource.redactCredentials("Connection reset by peer"));
+        assertEquals("Read timed out", AgentResource.redactCredentials("Read timed out"));
+        assertNull(AgentResource.redactCredentials(null));
+    }
+
+    @Test
+    void causeChainReportsTypesAndNeverMessages() {
+        // The logger is handed this instead of the throwable, because printStackTrace would write
+        // every cause's raw getMessage() - the exact text the key is echoed inside.
+        Exception e = new RuntimeException("wrapper carrying " + FAKE_KEY,
+                new IllegalStateException("status code: 401, Received=" + FAKE_KEY));
+        String chain = AgentResource.causeChain(e);
+        assertEquals("RuntimeException -> IllegalStateException", chain);
+        assertFalse(chain.contains(FAKE_KEY));
     }
 
     @Test
