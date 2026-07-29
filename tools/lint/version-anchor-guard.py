@@ -19,12 +19,18 @@ moves is a defect generator, which is what makes this a lint gate and not a styl
 
 WHAT IS AND IS NOT IN SCOPE
 
-  IN — concept.adoc, lab.adoc, wrapup.adoc. What the attendee reads.
+  IN — concept.adoc, lab.adoc, wrapup.adoc. Owner ruling 2026-07-29: "only showroom pages".
+  That is precisely this set — showroom/site.yml sets `workshop: true`, which makes
+  modules/ROOT/nav.adoc select nav-workshop.adoc, whose sidebar is exactly concept + lab + wrapup.
+  If the cockpit's flavor or nav ever changes, this list must be re-derived from it, not guessed.
 
-  OUT — instructor.adoc and troubleshooting.adoc. Their version statements are PROVENANCE
-  ("Last verified on OpenShift X, 2026-07-13"), and stripping the version there destroys the
-  assertion instead of improving it: an SA needs to know what a timing or a symptom was measured
-  against. 80 such lines exist today and all of them are correct.
+  OUT — instructor.adoc and troubleshooting.adoc. Note this is a DELIBERATE owner call, not an
+  oversight, and specifically not an argument that attendees cannot reach these pages — they can.
+  Nine lab pages xref troubleshooting directly, and the built workshop site publishes all 26
+  troubleshooting AND all 26 instructor pages with live hrefs. The exclusion stands anyway because
+  the version text there is PROVENANCE ("Last verified on OpenShift X, 2026-07-13"): a dated
+  freshness signal, not a claim about the product, so it cannot go wrong the way "GA on 4.22.5"
+  did. 80 such lines exist and all are correct. Do not "close the gap" — it was measured and kept.
 
   OUT — `//` authoring comments, on every page. Recording "grounded on OCP 4.22.5 as user1" next to
   a click-path is exactly how a capture should be attributed. Comments do not render.
