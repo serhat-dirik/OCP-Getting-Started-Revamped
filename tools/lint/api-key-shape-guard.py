@@ -16,10 +16,16 @@ current tree, and a guard that cries wolf gets deleted:
     apps/parasol-agent/…/AgentResourceTest.java    sk-SYNTHETIC-not-a-real-key-0123456789
     pipelines/tasks/image-size-report.yaml         parasol-ta|sk-image-size-report
     pipelines/tasks/roxctl-deployment-check.yaml   parasol-ta|sk-roxctl-deployment-check
-    tools/lint/credential-redaction-guard.canary.adoc  sk-9f3b7c1d-2e4a6b8c-0d1e3f5a7b9c
+    tools/lint/credential-redaction-guard.canary.adoc  <sk- + three hex groups; see that file>
 
 (The last three are not keys at all: two are the substring `task-` inside a Tekton Task name, and one
 is a lint fixture whose entire job is to contain a scary-looking string.)
+
+That last row is DESCRIBED rather than reproduced, and the reason is worth the line: writing the
+literal here made this file itself key-shaped, and this guard does not exempt its own source (see
+EXCLUDED_PATHS). While the file was untracked that was invisible — the scope is `git ls-files`, so
+the guard could not see itself and every local run passed. Committing it turned main red. Documenting
+a detector must not mean shipping a specimen of what it detects.
 
 THE DISCRIMINATOR: OPACITY. A credential is opaque — it carries a long unbroken run of random
 alphanumerics. A slug is words — short chunks separated by hyphens, and the words are either all
@@ -97,6 +103,14 @@ EXCLUDED_PATHS = [
      "this guard's own fixture — eight constructed key shapes that MUST be detectable by "
      "--self-test and must not redden the tree scan."),
 ]
+# NOT excluded, deliberately: THIS FILE. The self-test asserts it stays that way. Excluding the
+# guard's own source would make the one place a maintainer edits while holding a real key the one
+# place the guard cannot see — the worst possible hole. The docstring above therefore DESCRIBES the
+# shapes it detects instead of reproducing one; the literal that used to sit there reddened main the
+# moment this file became tracked (the scope is `git ls-files`, so while untracked it could not see
+# itself, and every local run passed). Two lessons, both cheap to forget: a guard that scopes to the
+# tracked set must be tested FROM the tracked set, and documentation of a detector must not be a
+# specimen of what it detects.
 
 # Skip anything that is not plausibly source. A binary is not something a key gets pasted into by
 # accident, and decoding one wastes the scan.
