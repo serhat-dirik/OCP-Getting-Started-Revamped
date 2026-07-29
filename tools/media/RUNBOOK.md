@@ -6,6 +6,12 @@ day. Follow it top to bottom; nothing here is a judgement call to be made under 
 **The scarce resource is a human completing one OAuth login.** Everything in Phase 0 exists to keep
 cluster time, build time and mistakes out of that window.
 
+> **Read `CAPTURE-PLAN.md` first, once.** It is the verified pre-flight: what the login actually
+> buys (8 files change — 5 new, 3 replacements), the job-by-job state/staging table, and the list
+> of things that would waste or damage the run. Two of them matter *before* you start: the `mNN`
+> module numbers used throughout this directory are wrong (type **slugs**, never `m08`/`m12`/`m13`),
+> and two of the eight job files exit non-zero in Phase 0.1 **by design**.
+
 ---
 
 ## The three rules the job files now enforce for you
@@ -14,8 +20,8 @@ cluster time, build time and mistakes out of that window.
 that job carries `reshoot: true`. These shots are state-dependent, so re-running a jobs file does
 not reproduce the same picture — it produces whatever the lab looks like *now*, which is a valid
 PNG of the wrong moment and looks fine in review. It cost the M10 drift diff on 2026-07-26. Of the
-28 jobs in this directory, 13 pointed at files the manifests mark ✅ CAPTURED; before the guard, a
-single wholesale run would have replaced all thirteen. Set `reshoot: true` only where the module's
+26 jobs in this directory, 18 point at files that are already on disk; before the guard, a single
+wholesale run would have replaced all eighteen. Set `reshoot: true` only where the module's
 `media-manifest.md` says ❌ RE-CAPTURE, and say so in a comment beside the flag.
 
 **2. Waits assert the VIEW and the STATE, not a landmark.** `wait_all_text` takes a list and every
