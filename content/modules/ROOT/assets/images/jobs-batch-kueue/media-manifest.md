@@ -42,10 +42,11 @@ eviction. Warm the images first so there is no cold-pull dead air before the fir
 | 1 | `jobs-batch-kueue-01-workloads-admitted.png` | Console → search `Workload` (kueue.x-k8s.io) in `user1-batch`, the list showing 2 Admitted / 3 Pending | Circle: the two `Admitted=True` rows vs the three pending | lab.adoc ex. 5 (optional) |
 | 2 | `jobs-batch-kueue-02-preempted-conditions.png` | Console → the preempted Workload's Conditions (`Evicted`/`Preempted`/`Requeued`) | Circle: `Preempted: True` and `Requeued: True` | lab.adoc ex. 5 (optional) |
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 console): the Workload list is reached
-via the top **search** box (there is no dedicated Kueue nav item in 4.21) — confirm `Workload` and
-`LocalQueue` resolve under `kueue.x-k8s.io`; the Job list shows the Kueue-suspended jobs with
-`0` active while pending. These are enrichment only — no lab step depends on a screenshot.
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the cluster's current release): the Workload list
+is reached via the top **search** box (no dedicated Kueue nav item observed on 4.21, 2026-07-09 —
+reverify on the cluster's current release) — confirm `Workload` and `LocalQueue` resolve under
+`kueue.x-k8s.io`; the Job list shows the Kueue-suspended jobs with `0` active while pending. These are
+enrichment only — no lab step depends on a screenshot.
 
 ## Narration script
 Draft from the demo-flavor Say/Show/Do blocks in `lab.adoc` (`ifdef::demo[]`, the 10-min arc).

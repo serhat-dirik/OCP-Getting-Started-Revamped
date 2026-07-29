@@ -54,7 +54,7 @@ it on a disposable cluster, never a shared workshop cluster mid-session.**
 `parasol-claims` with one `1.0` tag → `oc tag` → **two tags, identical `sha256`** side by side. The
 matching-digest reveal is the payoff; hold the two `dockerImageReference` lines together.
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console — no perspective
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console — no perspective
 switch); these confirm the Console-tab click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc`
 (the CLI tabs are authoritative):
 

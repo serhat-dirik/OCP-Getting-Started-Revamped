@@ -29,7 +29,7 @@ names — use `{user}-dev` and a generic `apps.example.com`.
 
 ## Screenshots — the event-display UI (MARQUEE) + OpenShift console, Eventing
 
-Capture in the OCP 4.21 **unified** console (no Developer/Administrator perspective switch) and in the
+Capture in the **unified** console (no Developer/Administrator perspective switch) and in the
 consumer's **event-display** web page, signed in as the sample user, project scoped to the user's
 `{user}-dev`. The event-display page needs an event **just delivered** (drive one per the lab before the shot).
 
@@ -40,7 +40,7 @@ consumer's **event-display** web page, signed in as the sample user, project sco
 | 3 | `eventing-deep-dive-03-eventing-triggers.png` | Console → **Serverless → Eventing**, the `default` Broker with the three Triggers (`claims-events`, `claims-fraud-review`, `claims-audit`) and their filters, and the `claim-ticker` PingSource | Circle: the two **filtered** Triggers' filter attributes (`type`, `claimpriority`) | lab.adoc ex. 4 (attribute-filtering beat) |
 | 4 | `eventing-deep-dive-04-trigger-filter-edit.png` | Console → **Serverless → Eventing → Trigger** editor (or masthead **+** (Quick create) → **Import YAML**) showing a Trigger's `filter.attributes` and a `delivery` block with `deadLetterSink` | Circle: the **`deadLetterSink`** + `retry` fields | lab.adoc ex. 5 (delivery-spec beat) |
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console) — these confirm the Console
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
 
 1. **Console → Serverless → Eventing** lists the `default` Broker, the three Triggers with their filters, and the `claim-ticker` PingSource (ex. 1, 4).

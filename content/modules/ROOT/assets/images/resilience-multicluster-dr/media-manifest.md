@@ -35,7 +35,7 @@ the attribute). Do **not** print the real cluster domain or node names — use `
 
 ## Screenshots — the failover payoff (MARQUEE) + OpenShift console
 
-Capture in the OCP 4.21 **unified** console (no Developer/Administrator perspective switch). The resilient-tier
+Capture in the **unified** console (no Developer/Administrator perspective switch). The resilient-tier
 views are the attendee's `{user}-site-a` project (**Workloads → Deployments**); the mesh CRs live in
 `{user}-client` (**Networking → ServiceEntries / DestinationRules / VirtualServices**, or masthead **+**
 (Quick create) → **Import YAML**); Service Interconnect is **Networking → Service Interconnect**.
@@ -47,7 +47,7 @@ views are the attendee's `{user}-site-a` project (**Workloads → Deployments**)
 | 3 | `resilience-multicluster-dr-03-service-interconnect-topology.png` | Console → **Networking → Service Interconnect** showing the **two-site** topology (`dc-a` ↔ `dc-b`), the link, and the exposed `claims` service | Circle: the **link between the two sites** + the exposed service — "DC-A reads DC-B's claims over this" | lab.adoc ex. 3 (RHSI) `[ADD-ON]` — **second marquee** |
 | 4 | `resilience-multicluster-dr-04-mesh-failover-crs.png` | Console → masthead **+** (Quick create) → **Import YAML** (project `{user}-client`) with the three failover CRs pasted, or the created **VirtualService**/**DestinationRule**/**ServiceEntry** list | Circle: the three resources — "one ServiceEntry (both sites), a locality/outlier DestinationRule, a retry VirtualService on the gateway" | lab.adoc ex. 2 (wire the routing) |
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console) — these confirm the Console
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
 
 1. Masthead **+** (Quick create) → **Import YAML** (project `{user}-client`) accepts a multi-document paste of the `ServiceEntry` +

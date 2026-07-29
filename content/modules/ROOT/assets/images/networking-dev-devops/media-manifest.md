@@ -54,7 +54,7 @@ don't cut them short in the edit.
 apply `default-deny` (parasol-claims → `0/1`) → apply the DNS + db allows (parasol-claims → `1/1`) →
 the two probes (API `OPEN`, demo-client `BLOCKED`). The "two answers" frame is the payoff; hold it.
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console — no perspective
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console — no perspective
 switch); these confirm the Console-tab click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc`
 (the CLI tabs are authoritative):
 

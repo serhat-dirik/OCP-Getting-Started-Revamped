@@ -48,7 +48,7 @@ show a minted token on screen (decode claims only).
 User Management → RoleBindings → Create binding → pick ServiceAccount subject + `edit` role → Create,
 then the binding appears. Multi-click console flow → gif beats static shots (Serhat 2026-07-11).
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console — no perspective
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console — no perspective
 switch): (1) Deployment **Events** tab surfaces the `FailedCreate`/SCC message; (2) **User
 Management → RoleBindings → Create binding** offers a *ServiceAccount* subject type with a subject
 namespace field; (3) **Administration → ResourceQuotas** shows the used/hard gauges. These confirm the

@@ -53,7 +53,7 @@ Warm the app first so there is no cold-boot dead air before seeding.
 | 1 | `storage-stateful-01-pvc-bound.png` | Console → Storage → PersistentVolumeClaims, `claims-db-data` = `Bound`, 2Gi, its StorageClass | Circle: Status `Bound`, Capacity, StorageClass link | lab.adoc ex. 3 (optional) |
 | 2 | `storage-stateful-02-storageclass.png` | Console → Storage → StorageClasses, the default class detail (provisioner, binding mode, expansion) | Circle: the `default` badge, `WaitForFirstConsumer`, `Allow volume expansion` | lab.adoc ex. 5 (optional) |
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 console): the PVC list Status/Capacity/StorageClass
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the console): the PVC list Status/Capacity/StorageClass
 columns; the StorageClass detail page fields (provisioner `openshift-storage.rbd.csi.ceph.com`, binding
 `WaitForFirstConsumer`, expansion allowed). These are enrichment only — no lab step depends on a screenshot.
 

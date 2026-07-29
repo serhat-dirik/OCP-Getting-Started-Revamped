@@ -41,7 +41,7 @@ appearing on the edges. The "mesh for free" reveal is the payoff.
 
 ## Screenshots — OpenShift console (optional; the CR-application dual-path tabs)
 
-CLI is authoritative for every CR step; these give the Console tabs visual support. Confirm the OCP 4.21
+CLI is authoritative for every CR step; these give the Console tabs visual support. Confirm the
 unified-console click-paths while shooting (no perspective switch).
 
 | # | Filename | View | Annotate | Embed point |
@@ -49,7 +49,7 @@ unified-console click-paths while shooting (no perspective switch).
 | 4 | `service-mesh-advanced-gateways-05-deployment-inject-label.png` | Console → Workloads → Deployments → `parasol-web` → YAML, the `sidecar.istio.io/inject: "true"` label under `spec.template.metadata.labels` | Circle: the injection label on the **pod template** | lab.adoc ex. 1 Console tab |
 | 5 | `service-mesh-advanced-gateways-06-import-virtualservice.png` | Console → masthead **+** (Quick create) → **Import YAML** with the `VirtualService` (90/10) pasted | Circle: the `weight: 90` / `weight: 10` route entries | lab.adoc ex. 4 Console tab |
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console; Kiali 2.27.1) — these
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console; Kiali 2.27.1) — these
 confirm the click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc` (the CLI tabs are authoritative):
 
 1. **Kiali → Traffic Graph** scopes to the signed-in user's `{user}-mesh` namespace, shows traffic-driven edges, per-edge mTLS padlocks, and version grouping (ex. 3–4).

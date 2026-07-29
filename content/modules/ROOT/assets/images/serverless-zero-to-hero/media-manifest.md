@@ -27,7 +27,7 @@ names — use `{user}-dev` and a generic `apps.example.com`.
 
 ## Screenshots — OpenShift console, Serverless (MARQUEE; the scale-to-zero picture)
 
-Capture in the OCP 4.21 **unified** console (no Developer/Administrator perspective switch), signed in as the
+Capture in the **unified** console (no Developer/Administrator perspective switch), signed in as the
 sample user, project scoped to the user's `{user}-dev`. **Topology needs the traffic state first** — drive
 (or stop) traffic per the note before each shot.
 
@@ -38,7 +38,7 @@ sample user, project scoped to the user's `{user}-dev`. **Topology needs the tra
 | 3 | `serverless-zero-to-hero-03-serverless-services-revisions.png` | Console → **Serverless → Services → parasol-claims**, the Revisions list showing **v1 (stable, 80%)** and **v2 (candidate, 20%)** | Circle: the **80% / 20%** per-revision traffic split | lab.adoc ex. 4 (traffic-split beat) |
 | 4 | `serverless-zero-to-hero-04-serverless-eventing.png` | Console → **Serverless → Eventing**, the `default` Broker with the `claims-processor` Trigger and `claim-ticker` PingSource wired to the ksvc | Circle: the **Trigger → parasol-claims** subscriber edge | lab.adoc ex. 5 (eventing-taste beat) |
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console) — these confirm the Console
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
 
 1. **Console → Serverless → Services** lists the `parasol-claims` ksvc with its URL and revisions (ex. 1, 4).

@@ -54,7 +54,7 @@ placement is the whole visual. The `sleep 10` after the `nodeSelector` patch is 
 toleration → **Running on the pool node**. The Pending→snap transition is the payoff; hold the two
 `-o wide` frames side by side.
 
-`[CAPTURE-VERIFY]` labels to confirm while shooting (OCP 4.21 unified console — no perspective
+`[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console — no perspective
 switch); these confirm the Console-tab click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc`
 (the CLI tabs are authoritative):
 
