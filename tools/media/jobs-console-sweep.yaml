@@ -57,7 +57,12 @@ jobs:
   # its wait on the word "Metrics" passed happily. forbid_text is what stops that recurring.
   - slug: observability-health-scale
     filename: observability-health-scale-01-observe-metrics.png
-    reshoot: true                       # manifest row 1: ❌ RE-CAPTURE (asset on disk is an error page)
+    # The `reshoot: true` that used to sit here is GONE, and taking it off is part of the capture,
+    # not tidying afterwards. The replacement was captured and committed in df7acda; leaving the
+    # flag set meant this job still said RUN in `--plan`, so the next wholesale sweep would have
+    # overwritten a good committed shot with whatever the lab looked like then — and, worse, run the
+    # `ws start` below to get there, purging {user}-dev on the way. Rule 6 in README.md: the flag
+    # comes off the moment the good shot is on disk.
     pre_sh: >-
       ./tools/ws/ws start observability-health-scale --user user1 &&
       oc apply -n user1-dev -f tools/media/fixtures/m12-prometheusrule.yaml
@@ -122,6 +127,42 @@ jobs:
   - slug: observability-health-scale
     filename: observability-health-scale-03-topology-hpa-scale.png
     reshoot: true                       # manifest row 3: ❌ RE-CAPTURE (asset is a calm 3-node topology)
+    # PARKED 2026-07-29 — NOT a defect in this job or in stage-m12-hpa.sh. The staging script did
+    # exactly what it promises: it refused to shoot, with "parasol-claims reached only 2/4 ready
+    # replicas — the shot would show a ring that never grew."
+    #
+    # THE CLUSTER CANNOT SCHEDULE THE PODS. Measured, not inferred, on the shared build cluster:
+    #
+    #   node          free CPU   free memory   note
+    #   control-1       300m       24549Mi
+    #   control-2       105m       21679Mi
+    #   control-3       227m       25673Mi
+    #   worker-1      13421m        8745Mi     TAINTED workshop.redhat.com/pool=batch:NoSchedule
+    #   worker-2       5975m           9Mi     <- the only untainted worker, and its memory is gone
+    #
+    # A parasol-claims replica requests cpu=200m memory=256Mi. Cluster-wide headroom for that pod:
+    # TWO, and only because two control planes have a few hundred millicores left. The shot needs
+    # THREE more replicas resident at once (1 -> 4) plus the claims-burst load generator, which is
+    # a fourth pod and takes one of the two slots itself. It is arithmetically out of reach; the
+    # scheduler agrees, in the words it gives every pending pod on this cluster right now:
+    # "0/5 nodes are available: 1 Insufficient memory, 1 node(s) had untolerated taint(s),
+    #  3 Insufficient cpu."
+    #
+    # DO NOT "fix" this by lowering CEILING in stage-m12-hpa.sh. lab.adoc:561 tells the attendee the
+    # ring grows 2 -> 4; a shot of three pods would contradict the prose it illustrates, which is
+    # worse than no shot. DO NOT tolerate the batch taint either — that pool belongs to
+    # jobs-batch-kueue and borrowing it changes another module's world.
+    #
+    # TO UN-PARK: delete this `parked:` key when `tools/media/mediafix-capacity.py`-style arithmetic
+    # (or simply `oc describe node`) shows room for four 200m/256Mi pods — i.e. on a cluster with a
+    # second untainted worker, or after enough entry states have been torn down. Everything below
+    # this comment is correct and was left intact so the job runs the moment that is true.
+    parked: >-
+      The HPA ceiling of 4 replicas cannot be scheduled. Measured 2026-07-29: cluster-wide headroom
+      is TWO pods of 200m/256Mi (the one untainted worker has 9Mi of memory left; the control planes
+      have ~100-300m of CPU left; the third worker is reserved for the batch pool by taint). The
+      shot needs three new replicas plus a load-generator pod. stage-m12-hpa.sh already refuses the
+      shot in this situation and was right to.
     pre_sh: ./tools/media/stage-m12-hpa.sh user1
     pre_wait_s: 20
     url: https://console-openshift-console.{domain}/topology/ns/user1-dev
@@ -137,6 +178,10 @@ jobs:
   # instead of eating the session.
   - slug: trusted-supply-chain
     filename: trusted-supply-chain-03-imagestream-tags.png
+    # NO `reshoot: true`. There was one, for exactly one run: the 2026-07-29 capture framed the Tags
+    # table off-screen and had to be replaced. It was, the replacement was checked by eye, and the
+    # flag came straight back off — leaving it set is how a good state-dependent shot gets silently
+    # overwritten by a later, valid-looking one from the wrong moment.
     # Was pointed at the ImageStreams LIST page while the manifest asks for the DETAIL page's Tags
     # section — the list page satisfied `wait_text: ImageStreams` instantly and would have written
     # a valid PNG of the wrong view.
@@ -147,6 +192,16 @@ jobs:
     # `.sig` is the Tekton Chains signature tag, grounded on this console 2026-07-28. It exists only
     # on the detail page's Tags section — the list page never renders it.
     wait_all_text: ["Tags", ".sig"]
+    # 1000px was not enough and the first capture proved it: the page was right, `.sig` was in the
+    # DOM, every wait passed, and the Tags table sat at y=1047..1281 — entirely below the fold. At
+    # 1400 the whole record fits in one frame, from the breadcrumb down to the last tag row, with no
+    # scrolling and nothing cropped. Measured on this console, not guessed.
+    viewport: {width: 1600, height: 1400}
+    # The three tag rows the module is actually about, asserted as PIXELS rather than as DOM text.
+    # `latest` is the trusted build; `.att` is the Chains attestation and `.sig` its signature —
+    # that trio IS the shot, and lab.adoc:524 names them. wait_all_text above cannot tell you
+    # whether they were in the picture; this can, and it is fatal when they are not.
+    require_in_frame: ["Tags", "parasol-claims:latest", ".att", ".sig"]
     settle_ms: 10000
 
   # ===== M13 securing-apps-keycloak — LAST: starting it PURGES {user}-dev and evicts M12 ========
@@ -166,7 +221,20 @@ jobs:
     url: >-
       https://console-openshift-console.{domain}/k8s/ns/user1-dev/deployments/parasol-claims/environment
     # Name the variables, not the tab. "Environment" is on the shell before any row renders.
-    wait_all_text:
+    #
+    # …but they must be asserted as FORM FIELDS, not as text. This tab is an editable form: every
+    # variable name and value is an <input value="…">, and input values are not part of
+    # document.body.innerText. `wait_all_text` here was unsatisfiable by construction — it timed out
+    # on 2026-07-29 against a cluster where `oc set env deploy/parasol-claims --list` returned all
+    # five variables and the console was rendering every one of them on screen. The bug was in the
+    # assertion, not the state; nothing about the staging needed to change.
+    wait_all_field_values:
       - "QUARKUS_OIDC_TENANT_ENABLED"
       - "QUARKUS_HTTP_AUTH_PERMISSION_CLAIMS_PATHS"
+    # And they must be in the picture. Six rows fit the default viewport with room to spare —
+    # asserted rather than assumed, so a seventh variable or a taller masthead fails the job
+    # instead of silently pushing the OIDC rows out of frame.
+    require_in_frame:
+      - "QUARKUS_OIDC_TENANT_ENABLED"
+      - "QUARKUS_HTTP_AUTH_PERMISSION_CLAIMS_POLICY"
     settle_ms: 10000

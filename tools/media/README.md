@@ -101,11 +101,13 @@ jobs:
     pre_wait_s: 90                                     # let the state settle before shooting
     url: https://console-openshift-console.{domain}/dev-monitoring/ns/user1-dev/alertrules
     wait_all_text: ["ParasolClaimsErrorRateHigh", "Firing"]   # object AND state, both required
+    wait_all_field_values: ["QUARKUS_OIDC_TENANT_ENABLED"]    # for FORM views: <input value="…">
     forbid_text: ["Access restricted"]                 # refuse to shoot a page that errored
+    require_in_frame: ["Firing"]                       # …and it must be IN THE PICTURE
     reshoot: false                                     # never overwrite an existing file
 ```
 
-Four rules that matter:
+Six rules that matter:
 
 1. **Never hardcode a cluster domain in the job file.** Write `{domain}`; it is substituted from
    `--domain` / `$OGSR_DOMAIN` at run time, in `url` and `url_sh` **only** — never in `pre_sh`, so
@@ -118,10 +120,21 @@ Four rules that matter:
 3. **Use `forbid_text` for pages that render their own errors.** A positive wait cannot see
    "Access restricted" or "No datapoints found": they arrive *beside* the heading it matched. Checked
    after the settle, before the shot, and fatal.
-4. **`reshoot` defaults to false and should usually stay there.** `capture.py` refuses to overwrite
+4. **Assert the FRAME with `require_in_frame`, not just the DOM.** Every wait above reads
+   `document.body.innerText`, which includes text scrolled far out of view — so all of them pass on
+   a perfect page whose subject is below the fold. `trusted-supply-chain-03` was committed that way:
+   right page, `.sig` present, Tags table at y=1047 in a 1000px viewport. `require_in_frame`
+   measures each string's box against the frame and is fatal. Fix a failure with a taller
+   `viewport` or `scroll_to_text` — never by removing the assertion.
+5. **On editable forms, use `wait_all_field_values`.** An `<input>`'s `value` is not part of
+   innerText, so on views like Deployment → Environment a `wait_all_text` for a variable name can
+   never pass, however correct the cluster is. If a wait fails on a page that is visibly showing the
+   string, suspect the assertion before you re-stage anything.
+6. **`reshoot` defaults to false and should usually stay there.** `capture.py` refuses to overwrite
    an existing screenshot without it, because these shots are state-dependent and a re-run captures
    whatever the lab looks like *now*. Set it only where the module's `media-manifest.md` says
-   ❌ RE-CAPTURE, and say so in a comment beside the flag.
+   ❌ RE-CAPTURE, say so in a comment beside the flag — and take the flag back off once the good
+   shot is on disk.
 
 A job that cannot be captured at all takes `parked: "<the reason>"` instead of a URL. It is never
 executed and the reason is printed — that is how a decision stays next to the job rather than in a
@@ -133,8 +146,17 @@ Dry-run any file with `--plan` (no browser, no cluster, no login):
 .venv/bin/python capture.py --jobs jobs-console-sweep.yaml --domain apps.example.com --plan
 ```
 
+Retry one shot with `--only <filename fragment>`. Add `--no-pre` when the failure was on the
+capture side rather than the cluster side — it skips every `pre_sh` and shoots the state as it is,
+which matters because most `pre_sh` lines begin with `ws start` and that **purges the namespace**. A
+retry that re-stages can destroy a good state and, on a loaded cluster, fail to rebuild it. Prove
+the state yourself first (`oc get`, `oc set env --list`); with `--no-pre` nothing else will.
+`url_sh` still runs — it resolves the target, it does not create it.
+
 `capture.py` flags any output under 20 KB as suspicious, because that is what a splash screen
 or an error page weighs. It is a smoke alarm, not a correctness check — **look at the images**.
+Nothing in the harness can tell you a screenshot is *worth* keeping. `require_in_frame` narrows the
+gap by proving the subject was in the picture, but the last gate is a person opening the PNG.
 
 ## Cluster domains in captured images
 

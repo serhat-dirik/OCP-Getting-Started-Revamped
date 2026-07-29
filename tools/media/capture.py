@@ -79,12 +79,40 @@ class Job:
     # AND the state — e.g. ["ParasolClaimsErrorRateHigh", "Firing"] cannot be satisfied by the same
     # rule sitting Pending, whereas the rule name alone can.
     wait_all_text: list[str] = field(default_factory=list)
+    # Strings that must appear as the VALUE OF A FORM FIELD rather than as page text.
+    # `wait_all_text` tests document.body.innerText, and innerText does not include the `value` of
+    # an <input>. Some console views are editable FORMS, not read-only tables: the Deployment ->
+    # Environment tab renders every variable name and value in its own <input>, so
+    # `wait_all_text: ["QUARKUS_OIDC_TENANT_ENABLED"]` can NEVER pass there — not because the state
+    # is wrong but because the assertion is unsatisfiable by construction. Measured 2026-07-29: the
+    # keycloak env shot failed that way while `oc set env deploy/parasol-claims --list` showed all
+    # five variables and the page was rendering them correctly on screen.
+    wait_all_field_values: list[str] = field(default_factory=list)
     # Strings that must be ABSENT at shoot time. The positive waits cannot catch a page that
     # rendered its own error: "Access restricted" / "No datapoints found" arrive WITH the heading
     # the wait is looking for, so the shot succeeds and a picture of a broken query gets committed
     # (it was — observability-health-scale-01, pulled 2026-07-28). Checked after settle_ms, before
     # the screenshot, and fatal.
     forbid_text: list[str] = field(default_factory=list)
+    # Strings that must be VISIBLE IN THE FRAME the screenshot actually covers — not merely present
+    # somewhere in the document.
+    #
+    # THIS IS THE ONLY ASSERTION THAT CATCHES A CORRECTLY-LOADED PAGE SHOT AT THE WRONG SCROLL
+    # POSITION, and no amount of `wait_all_text` substitutes for it. Measured 2026-07-29:
+    # trusted-supply-chain-03 asked for the ImageStream's Tags table, landed on exactly the right
+    # detail page, and every wait passed — including `.sig`, which is only ever rendered by the Tags
+    # rows. The rows were at y=1047..1281 in a 1000px viewport. innerText contains text that is
+    # scrolled out of view, so a text wait is blind to this by definition; the shot was a valid PNG
+    # of a page whose entire subject was below the fold, and only a human opening the file caught it.
+    #
+    # Cheap to satisfy: raise `viewport.height`, or name the section in `scroll_to_text`. Cheap to
+    # get right: name the thing the caption promises, not the heading above it.
+    #
+    # Limits, stated honestly: this measures the element's own box against the frame. It does not
+    # model an ancestor with `overflow: hidden` clipping a box that is nominally on screen, and it
+    # does not know whether something is painted on top. It catches the failure that actually
+    # happens — content below the fold — and it is fatal when it fires.
+    require_in_frame: list[str] = field(default_factory=list)
     wait_selector: str | None = None
     settle_ms: int = SETTLE_MS
     viewport: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_VIEWPORT))
@@ -371,6 +399,37 @@ def wait_for_login(page: Any, url: str, deadline_s: int = 3600) -> bool:
     return False
 
 
+# Is each string inside the rectangle the screenshot will cover? Searches text nodes first, then
+# form-field values, so the same job field works on a read-only table and on an editable form.
+# `full` widens the frame to the whole scrollable document, which is what `full_page: true` shoots.
+_IN_FRAME = """(args) => {
+    const H = args.full ? document.documentElement.scrollHeight : window.innerHeight;
+    const W = args.full ? document.documentElement.scrollWidth : window.innerWidth;
+    const out = [];
+    for (const t of args.needles) {
+        let el = null;
+        const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (walk.nextNode()) {
+            if (walk.currentNode.textContent.includes(t)) { el = walk.currentNode.parentElement; break; }
+        }
+        if (!el) {
+            el = [...document.querySelectorAll('input, textarea')]
+                .find(e => (e.value || '').includes(t)) || null;
+        }
+        if (!el) { out.push([t, 'not on the page at all']); continue; }
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) { out.push([t, 'present but has no box (hidden)']); continue; }
+        if (r.top < 0 || r.left < 0 || r.bottom > H || r.right > W) {
+            out.push([t, `below/outside the fold: box is ${Math.round(r.top)}..${Math.round(r.bottom)}px, `
+                        + `the frame is ${W}x${H}`]);
+            continue;
+        }
+        out.push([t, null]);
+    }
+    return out;
+}"""
+
+
 def capture(page: Any, job: Job) -> tuple[bool, str]:
     """Navigate, wait for REAL content, shoot. Returns (ok, detail)."""
     try:
@@ -411,7 +470,18 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
                 # Name the string that was missing. "TimeoutError: waiting for function" alone
                 # sends you re-reading the whole job to guess which assertion failed.
                 return False, f"never saw {needle!r} — wrong view, or the state was not reached"
-        if not (job.wait_selector or waits):
+        for needle in job.wait_all_field_values:
+            try:
+                page.wait_for_function(
+                    "t => [...document.querySelectorAll('input, textarea')]"
+                    "        .some(e => (e.value || '').includes(t))",
+                    arg=needle,
+                    timeout=60_000,
+                )
+            except PlaywrightError:
+                return False, (f"never saw {needle!r} in any form field — wrong view, or the state "
+                               f"was not reached (if the page shows it as TEXT, use wait_all_text)")
+        if not (job.wait_selector or waits or job.wait_all_field_values):
             page.wait_for_load_state("networkidle", timeout=60_000)
 
         if job.scroll_to_text:
@@ -443,6 +513,16 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
             hit = next((t for t in job.forbid_text if t in body), None)
             if hit:
                 return False, f"page shows {hit!r} — refusing to shoot a broken view"
+
+        if job.require_in_frame:
+            # LAST check before the shutter, because it measures the frame as it will be shot —
+            # after every click, filter, scroll and settle has moved the page around.
+            misses = [(t, why) for t, why in
+                      page.evaluate(_IN_FRAME, {"needles": job.require_in_frame,
+                                                "full": job.full_page}) if why]
+            if misses:
+                return False, ("not in frame: "
+                               + "; ".join(f"{t!r} {why}" for t, why in misses))
 
         job.out_path.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(job.out_path), full_page=job.full_page)
@@ -483,9 +563,18 @@ def print_plan(jobs: list[Job], path: Path) -> int:
         if job.pre_wait_s:
             print(f"        then wait {job.pre_wait_s}s")
         asserts = ([job.wait_text] if job.wait_text else []) + list(job.wait_all_text)
+        asserts += [f"{v} (form field)" for v in job.wait_all_field_values]
         print(f"        assert present: {asserts or '(none — WEAK, the shot is unguarded)'}")
         if job.forbid_text:
             print(f"        assert absent : {job.forbid_text}")
+        if job.require_in_frame:
+            print(f"        assert in frame: {job.require_in_frame}  "
+                  f"(viewport {job.viewport['width']}x{job.viewport['height']})")
+        else:
+            # Not fatal, but say it every time: a job with no framing assertion can produce a
+            # perfect page with its subject scrolled off screen, and nothing but a human opening
+            # the PNG will ever notice.
+            print("        assert in frame: (none — the subject could be below the fold)")
     print("-" * 72)
     print(f"  {will_run} to capture · at least ~{budget_s // 60}m{budget_s % 60:02d}s of waiting, "
           f"excluding pre_sh run time (ws start/solve can each be 5-25 min)")
@@ -507,6 +596,16 @@ def main() -> int:
         help="where screenshots are written (default: content/modules/ROOT/assets/images). Point it "
              "OUTSIDE the repo for a grounding run — pages shot only to read a console label are "
              "reference material, not workshop assets, and must not land in the tree.",
+    )
+    ap.add_argument(
+        "--no-pre", action="store_true",
+        help="skip every job's `pre_sh` (and its pre_wait_s) and shoot the cluster AS IT IS. For "
+             "retrying a shot that failed on the CAPTURE side — a wrong wait, a bad viewport — "
+             "when the state it needs is already staged and correct. Re-running `pre_sh` there is "
+             "not free: most of these begin with `ws start`, which PURGES the namespace and "
+             "re-materialises it, so a retry can destroy a good state and, on a loaded cluster, "
+             "fail to bring it back. Verify the state yourself first (`oc get`/`oc set env --list`) "
+             "— with this flag nothing else will. `url_sh` still runs; it resolves the target.",
     )
     ap.add_argument("--no-auth", action="store_true", help="fresh context, public pages only")
     ap.add_argument(
@@ -604,7 +703,10 @@ def main() -> int:
                 print(f"KEEP {rel}  [already on disk; set `reshoot: true` to replace it]")
                 continue
             attempted += 1
-            if job.pre_sh:
+            if job.pre_sh and args.no_pre:
+                print(f"  pre: SKIPPED (--no-pre) — shooting the cluster as it is: {job.pre_sh[:60]}",
+                      flush=True)
+            elif job.pre_sh:
                 print(f"  pre: {job.pre_sh[:88]}", flush=True)
                 # cwd=REPO_ROOT is load-bearing. pre_sh commands are written repo-root-relative
                 # (`./tools/ws/ws start …`) because that is how every other tool in this repo is

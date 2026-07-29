@@ -9,6 +9,27 @@ Everything below was produced by reading `capture.py`, loading all eight `jobs-*
 
 ---
 
+## Outcome of the 2026-07-29 run — read this before trusting the forecast below
+
+The forecast said **8 PNGs change**. Six did. The rest is worth knowing, because none of the three
+failures was a bad prediction about *state* — two were bad assertions and one was the cluster.
+
+| shot | outcome |
+|---|---|
+| `observability-01-observe-metrics` · `-04-alert-firing` · `-05-alerting-inactive` | captured, committed `df7acda` |
+| `trusted-supply-chain-03-imagestream-tags` | captured, then **re-shot**: the first frame was the right page with the Tags table below the fold. `require_in_frame` exists because of it. |
+| `securing-apps-keycloak-05-claims-env` | captured on the retry. The first failure was an **unsatisfiable assertion**, not a state problem — see rule 5 in `RUNBOOK.md`. The cluster had been correct the whole time. |
+| `observability-03-topology-hpa-scale` | **PARKED** — the cluster cannot schedule four replicas. Numbers in the job file. |
+| `trusted-supply-chain-02-pipelinerun-scan-failed` | **PARKED** — Phase 3 ran early and took `{user}-cicd` with it. |
+| `pipelines-fundamentals-01-pipelinerun-graph` | not attempted here; its `ws solve` was still running when this was written |
+
+Two lessons that outlive this cluster, both now enforced in code rather than prose: **a wait that
+passes tells you nothing about what is in the frame**, and **a wait can be impossible to satisfy on
+a page that is displaying exactly what you asked for**. Between them they cost the first two shots
+above, and one of them had already been committed before a human noticed.
+
+---
+
 ## What your one login buys
 
 **8 PNGs change. 5 are shots that do not exist at all; 3 replace assets the manifests mark

@@ -14,7 +14,7 @@ cluster time, build time and mistakes out of that window.
 
 ---
 
-## The three rules the job files now enforce for you
+## The five rules the job files now enforce for you
 
 **1. The clobber guard.** `capture.py` refuses to overwrite a screenshot that already exists unless
 that job carries `reshoot: true`. These shots are state-dependent, so re-running a jobs file does
@@ -34,7 +34,24 @@ Pending, while the rule name alone can.
 "Access restricted" — it arrives *beside* the heading the wait matched. That is exactly how a
 screenshot of a 403'd query browser got committed as `observability-health-scale-01`.
 
-Run `--plan` on any jobs file to see all three applied, with no browser and no cluster:
+**4. `require_in_frame` is the only assertion that sees the PICTURE.** Every wait above tests
+`document.body.innerText`, and innerText contains text that is scrolled far out of view — so all of
+them pass happily on a perfect page whose subject is below the fold. That is not hypothetical:
+`trusted-supply-chain-03` landed on exactly the right ImageStream detail page, satisfied a wait on
+`.sig` (a string only the Tags rows ever render), and shot a frame in which the Tags table sat at
+y=1047..1281 of a 1000px viewport. Nothing in the harness noticed; a human opening the PNG did.
+`require_in_frame` measures each string's bounding box against the frame and fails the job. **Name
+the thing the caption promises**, not the heading above it, and fix a failure by raising
+`viewport.height` or setting `scroll_to_text` — never by deleting the assertion.
+
+**5. Editable forms need `wait_all_field_values`, not `wait_all_text`.** Some console views are
+forms: the Deployment → Environment tab renders every variable name and value inside an
+`<input value="…">`, and input values are **not** part of innerText. `wait_all_text` there is
+unsatisfiable no matter how correct the cluster is — it timed out on 2026-07-29 against a Deployment
+whose `oc set env --list` showed all five variables and whose page was displaying every one of them.
+If a wait fails on a view full of boxes-with-text-in-them, suspect the assertion before the state.
+
+Run `--plan` on any jobs file to see all five applied, with no browser and no cluster:
 
 ```bash
 tools/media/.venv/bin/python tools/media/capture.py \
@@ -135,11 +152,11 @@ Expect ~35–50 minutes. The order inside the file is load-bearing twice over:
 | 2 | `observability-05-alerting-inactive` | rule armed, **nothing firing** | it is literally the "before" of shot 4 |
 | — | `observability-02-observe-traces` | — | **PARKED**, see below |
 | 3 | `observability-04-alert-firing` | database down, 5xx banked | destroys the baseline shot 2 needs — must come after it |
-| 4 | `observability-03-topology-hpa-scale` | database restored, HPA at ceiling under load | must come after 3; the staging script restores what 3 broke |
-| 5 | `trusted-supply-chain-03-imagestream-tags` | `{user}-cicd` from Phase 0 | read-only; no staging |
-| 6 | `securing-apps-keycloak-05-claims-env` | M13 entry + exercise 2's `oc set env` | **LAST** — `ws start securing-apps-keycloak` purges `{user}-dev` and evicts M12 |
+| — | `observability-03-topology-hpa-scale` | — | **PARKED** on a capacity-bound cluster, see below |
+| 4 | `trusted-supply-chain-03-imagestream-tags` | `{user}-cicd` from Phase 0 | read-only; no staging |
+| 5 | `securing-apps-keycloak-05-claims-env` | M13 entry + exercise 2's `oc set env` | **LAST** — `ws start securing-apps-keycloak` purges `{user}-dev` and evicts M12 |
 
-**Nothing above row 6 can be re-run after row 6 without redoing `ws start observability-health-scale`.**
+**Nothing above the last row can be re-run after it without redoing `ws start observability-health-scale`.**
 
 If a single shot fails, retry just that one — `--only` matches a filename fragment:
 
@@ -148,8 +165,25 @@ If a single shot fails, retry just that one — `--only` matches a filename frag
   --only 04-alert-firing
 ```
 
-...but read the failure first. `never saw 'Firing'` means the state was not reached, and re-running
-the same job will fail the same way; re-stage instead (`./tools/media/stage-m12-alert.sh user1`).
+...but read the failure first, and sort it into one of two piles.
+
+**The state was not reached** — `never saw 'Firing'`, `pre_sh rc=1`. Re-running the same job fails
+the same way; re-stage instead (`./tools/media/stage-m12-alert.sh user1`).
+
+**The capture was wrong, the state was fine** — `not in frame: …`, or a wait that names something
+the page is visibly showing (see rule 5). Here re-running `pre_sh` is actively harmful: most of
+these begin with `ws start`, which purges the namespace and rebuilds it, so a retry can destroy a
+good state and — on a loaded cluster — fail to bring it back. Fix the job, verify the state by hand,
+and shoot what is already there:
+
+```bash
+oc set env deploy/parasol-claims -n user1-dev --list     # prove the state yourself first
+.venv/bin/python capture.py --jobs jobs-console-sweep.yaml --profile ~/.ogsr-shot-profile \
+  --only 05-claims-env --no-pre
+```
+
+`--no-pre` skips every `pre_sh` and its `pre_wait_s`; `url_sh` still runs, because it resolves the
+target rather than creating it. Both of the 2026-07-29 recoveries went this way.
 
 **Cluster hygiene after Phase 1.** The HPA staging leaves a load pod running:
 
@@ -167,6 +201,15 @@ oc delete pod claims-burst -n user1-dev --ignore-not-found
 
 Fast: the run was built in Phase 0. `url_sh` resolves the newest FAILED PipelineRun, so if Phase 0.4
 was skipped this exits loudly instead of shooting the green warm run.
+
+> **Currently PARKED** (2026-07-29) — and the way it failed is the argument for Phase 3 coming last.
+> Phase 3 had already run, so `{user}-cicd` belonged to `pipelines-fundamentals`;
+> `trusted-supply-chain` had been evicted and the namespace purged. `url_sh` did precisely what it
+> promises — resolved the newest **failed** run in that namespace — and got an M07
+> `solve-parasol-claims-…`, whose tasks are fetch-source / unit-test / build-image / image-report /
+> deploy. The wait on `acs-scan` refused it. A run existing is not the same as the right run
+> existing, and `url_sh` cannot tell the difference; the task-name wait is what does. Reason and
+> un-park instructions are in the job file.
 
 ---
 
@@ -214,6 +257,8 @@ These are parked in their job files with the same reasoning. None is a workaroun
 
 | shot | blocker |
 |---|---|
+| `observability-03-topology-hpa-scale` | **Cluster capacity, measured 2026-07-29.** The shot needs `parasol-claims` at four ready replicas plus the `claims-burst` load pod. A replica requests 200m/256Mi; cluster-wide headroom for that pod was **two** — the one untainted worker had 9Mi of free memory, the control planes 100–300m of free CPU, and the third worker is reserved for the batch pool by `workshop.redhat.com/pool=batch:NoSchedule`. `stage-m12-hpa.sh` refused the shot rather than photograph a ring that never grew, which is the behaviour you want. Do **not** lower its `CEILING` to fit — `lab.adoc:561` promises 2→4, and an asset that contradicts its own prose is worse than a gap. Un-parks by itself on a cluster with room. |
+| `trusted-supply-chain-02-pipelinerun-scan-failed` | `{user}-cicd` was taken over by `pipelines-fundamentals` (Phase 3 ran early), so the supply-chain Pipeline does not exist and `stage-m08-scan.sh` exits on its own pre-flight. Recovering it means purging a namespace with another lane's `ws solve` still running three PipelineRuns in it, then two 6–12 minute builds on a cluster that could not schedule the ones already queued. Coordinator decision. |
 | `observability-02-observe-traces` | The Traces page needs four interactions — Tempo instance dropdown, service, TraceQL query, open a trace — with no grounded deep-link. A URL-only job can only reach the "No Tempo instance selected" landing state, which is exactly the asset pulled on 2026-07-28. Needs a human, or somebody grounds the query-parameter format. |
 | `gitops-fundamentals-07-gitea-edit-overlay` | Wants an **uncommitted** edit (`count: 2` → `count: 3`) with the Commit Changes panel. The entry state re-asserts the fork's canonical content on every start/reset, so a clean cluster shows `count: 2`. Fixing it means typing in the editor, or pushing exercise 4's commit with the attendee's Gitea credentials. |
 | `gitops-fundamentals-02-new-app-form` | The `+ NEW APP` panel is a modal with no route, and the shot must show it **filled**. |
