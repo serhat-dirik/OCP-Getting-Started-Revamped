@@ -125,10 +125,36 @@ jobs:
             "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.0/kustomize_v5.8.0_linux_amd64.tar.gz"
           tar -xzf kustomize.tar.gz
           sudo install -m 0755 kustomize /usr/local/bin/kustomize
-      - name: kustomize build every platform-portfolio overlay/base
+      - name: kustomize build every tracked platform-portfolio overlay/base
+        # git ls-files, not a filesystem walk — the same determinism defect fixed in the shellcheck
+        # job (9549990). The walk descends into platform-portfolio/components/*/charts/, which is
+        # gitignored (.gitignore:34) and inflated at build time by this very step's --enable-helm.
+        # Today the two selections agree exactly (47 = 47) only because the pinned sonarqube chart
+        # happens to ship no kustomization.yaml of its own — a property of an upstream tarball we
+        # do not control and that is re-decided on every chart bump. The descent is real, not
+        # theoretical: a canary kustomization.yaml planted under that directory is picked up by the
+        # walk and correctly ignored by git ls-files. The tracked set is what we actually ship.
+        #
+        # `git ls-files -- <dir> | grep` rather than a '**/' pathspec on purpose: in git PATHSPECS
+        # (unlike .gitignore patterns) '**/' does not match zero directories, so
+        # 'platform-portfolio/**/kustomization.yaml' silently drops a future top-level
+        # platform-portfolio/kustomization.yaml. The grep is the literal equivalent of find's
+        # -name — a basename match at any depth — and was verified against both cases.
         run: |
           rc=0
-          while IFS= read -r k; do
+          files=()
+          # No `sort`: git ls-files already emits bytewise-sorted paths, and unlike sort(1) that
+          # order does not shift with the runner's locale.
+          while IFS= read -r k; do files+=("$k"); done < <(
+            git ls-files -- platform-portfolio | grep -E '(^|/)kustomization\.yaml$'
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::kustomize selected zero kustomization.yaml files. The portfolio ships" \
+                 "dozens, so an empty selection means this step is broken — refusing to pass on" \
+                 "an empty scope."
+            exit 1
+          fi
+          for k in "${files[@]}"; do
             d="$(dirname "$k")"
             echo "::group::kustomize build $d"
             if ! kustomize build --enable-helm "$d" >/dev/null; then
@@ -136,7 +162,7 @@ jobs:
               rc=1
             fi
             echo "::endgroup::"
-          done < <(find platform-portfolio -name kustomization.yaml | sort)
+          done
           exit "$rc"
 
   module-order:
@@ -147,6 +173,50 @@ jobs:
         # Asserts the Antora sidebar order equals the modules.yaml catalog order (position =
         # number). Dependency-light: yq if present, else a built-in awk fallback.
         run: bash tools/check-module-order.sh
+
+  copy-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The copy side of most pairs is a Helm template, which is not valid YAML until Helm has
+      # rendered it. Same pin as the helm job so both read the same render.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      # setup-python rather than the runner's system python3: this step pip-installs, and a
+      # PEP 668 "externally-managed-environment" python would refuse. The tool-cache interpreter
+      # has its own site-packages and installs cleanly.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # This guard parses YAML properly rather than pattern-matching it, so the parser is a hard
+        # dependency and is installed explicitly — not assumed to be in the runner image. If it
+        # were ever missing the guard exits 2, which the self-test assertion below turns into a
+        # failure; it can never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Hand-maintained copies must stay in sync with their source
+        # ABSORBED the former content-build "Claims seed drift gate"
+        # (tools/lint/seed-drift-guard.sh, deleted): that one gated a single pair with `cmp -s`,
+        # and byte identity could not express the four other pairs — three of them are correctly
+        # in sync yet deliberately NOT byte-identical (the chart copy injects a namespace, an owner
+        # label, or extra evidence comments), so a byte gate would have reddened main on work that
+        # is right. They therefore went unguarded. This guard parses both sides and compares them
+        # as data against a per-pair allow-list of INJECTED keys; the seed pair lives on here as
+        # mode="bytes". Same self-test discipline as the credential/curl guards — prove the
+        # detectors fire on the canary fixtures before believing a clean result on the real tree.
+        run: |
+          rc=0
+          python3 tools/lint/copy-drift-guard.py --self-test || rc=$?
+          # Exactly 1 = every canary detected. 0 = guard blind; 2 = fixture missing, a canary went
+          # undetected, or a dependency is absent. Either way detection is unproven.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::copy-drift-guard self-test must exit 1 (canaries detected); got" \
+                 "rc=$rc. The guard's detection is unproven — refusing to trust a clean" \
+                 "result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/copy-drift-guard.py
 
   namespace-drift:
     runs-on: ubuntu-latest

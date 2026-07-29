@@ -189,3 +189,44 @@ jobs:
           name: surefire-reports-${{ matrix.module.slug }}
           path: ${{ matrix.module.path }}/target/surefire-reports/
           retention-days: 7
+
+  # apps/parasol-legacy-claims is the single module the discovery walk above deliberately drops
+  # (no src/test/java, and it never will have one — it is the deliberately-legacy Java 8 WAR that
+  # M22 hands to MTA as raw material). That exclusion is correct, but it left the module with no
+  # gate of ANY kind: nothing checked that it even compiles.
+  #
+  # It is not inert. gitops/workshop-config/values.yaml seeds this directory verbatim into every
+  # attendee's Gitea fork; MTA analyzes it in SOURCE mode, which resolves the Maven tree to build
+  # the analyzer's classpath; and its own devfile.yaml ships the default build command
+  # `mvn -B -DskipTests package`, which attendees run inside Dev Spaces. So a pom that stops
+  # resolving does not fail here — it fails live, in front of a room, as a broken IDE build or as a
+  # shifted effort score in a report whose numbers the lab quotes verbatim ("twenty-four story
+  # points", "six mandatory"). Twelve of those coordinates are external, including a proprietary
+  # Oracle driver (com.oracle.database.jdbc:ojdbc8:21.1.0.0) whose presence on Central is the least
+  # guaranteed of the set.
+  #
+  # Compile-only, on purpose. The anti-patterns MTA flags — hardcoded IP, Oracle pin, Java 8,
+  # create-drop — are the POINT of this module; a linter or a test suite here would gate away the
+  # very thing being taught. This asserts exactly one thing: the declared dependencies still
+  # resolve and the sources still compile.
+  legacy-compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The toolchain is the container, not setup-java + the runner's preinstalled mvn: this pom
+    # targets Java 8 while the matrix above uses 21, and pinning the image is what makes a local
+    # reproduction identical to CI. Verified locally against this exact tag — it carries Maven
+    # 3.9.16 on Temurin 1.8.0_492, and git 2.43.0, which actions/checkout needs to avoid silently
+    # falling back to its tarball path.
+    container: maven:3.9-eclipse-temurin-8
+    steps:
+      - uses: actions/checkout@v4
+
+      # No ~/.m2 cache by design. Measured cold: 62 jars / 38 MB in ~19 s. Restoring the matrix
+      # legs' ~1 GB Quarkus cache to save that would cost more time than it saves, and would add a
+      # seventh racer to the shared cache key whose contention the comment above already flags.
+      # These dependencies are disjoint from the Quarkus BOM anyway.
+      - name: mvn package (resolve + compile the legacy WAR)
+        working-directory: apps/parasol-legacy-claims
+        # The devfile's own default build command, so CI runs what the attendee runs in Dev Spaces.
+        # Plain `mvn`, not ./mvnw — this module ships no wrapper.
+        run: mvn -B -ntp -DskipTests package
