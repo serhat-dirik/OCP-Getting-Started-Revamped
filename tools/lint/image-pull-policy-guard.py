@@ -1,0 +1,633 @@
+#!/usr/bin/env python3
+"""image-pull-policy-guard.py — every workshop-built image must be pulled with `Always`.
+
+WHY THIS EXISTS. Every image this workshop builds is tagged `1.0`/`1.1` and rebuilt IN PLACE, so the
+tag is MUTABLE. Kubernetes defaults any tag other than `:latest` to `imagePullPolicy: IfNotPresent`,
+and a node that already has that tag cached serves the OLD layers forever. Measured on cluster ksls5
+(2026-07-29): all three `parasol-claims` tags had moved to a new digest, and `oc rollout restart`
+brought the old digest back up. Commit 4efc931 fixed all 29 sites; this guard is what stops the 30th.
+
+THIS GUARD RENDERS, IT DOES NOT GREP — that is the entire point.
+`config-multienv` emits two of its three claims Deployments from a NAMED TEMPLATE in
+`templates/_helpers.tpl` (`claims.stack`, called twice). Those Deployments do not exist as text in any
+`templates/*.yaml`, so `grep 'image:' templates/*.yaml` cannot see them. That blind spot swallowed
+that chart TWICE — this sweep, and the Route-TLS sweep of 2026-07-27 (see route-tls-guard.sh's
+header). Every other author-facing check in this repo is line-oriented, so the defect class recurs by
+construction until one gate renders. This is that gate.
+
+Charts are rendered at BOTH `solve=false` and `solve=true`, because solve worlds emit Deployments the
+default render never produces, and the promotion template is built through kustomize for all three
+overlays plus the rollouts directory.
+
+WHAT COUNTS AS "OURS" (the load-bearing question, and the reason this file is not a list of names).
+The signal is the REGISTRY, not the repository name:
+
+    an image is workshop-built  <=>  it is served by the OpenShift internal registry
+                                     AND its namespace is not `openshift`
+
+Everything this workshop builds is built ON the cluster — binary builds and Tekton pipelines pushing
+into `ogsr-parasol-images` (shared, built once) or into a per-user `{user}-dev` (the
+packaging-distributing BuildConfig) — and reached over the internal registry Service, whose DNS name
+is identical on every OpenShift cluster. Verified 2026-07-29 that nothing we build is pushed anywhere
+else: `git grep -nE 'quay\\.io/(ogsr|parasol)|IMAGE_REGISTRY|imageRepo' -- gitops/ pipelines/ apps/
+bootstrap/` returns nothing. So "in the internal registry" and "we built it, in place, under a
+mutable tag" are the same set.
+
+The one carve-out is the cluster's own `openshift` namespace — the Samples Operator's shared
+imagestreams (`postgresql:15-el9`, `tools:latest`, `nodejs:20-ubi9`). Those are populated by the
+cluster, not by us; we never rebuild them, so a cached layer is not our defect and they correctly stay
+`IfNotPresent`. That is ONE documented exception to a derived rule, not a hand-maintained inventory
+that goes stale the day someone adds a service.
+
+Everything outside the internal registry is upstream and deliberately untouched: `:latest` already
+defaults to `Always`, and digest- or version-pinned references (`registry.redhat.io/devspaces/
+udi-rhel9:3.29`, `rhel9/postgresql-16@sha256:…`) are immutable by construction.
+
+FINDING IMAGES. The walk is generic: any dict anywhere in any rendered document that carries a string
+`image` key is an image site, wherever it sits. That is deliberately broader than "parse the PodSpec":
+it picks up PodSpecs nested inside an OpenShift `Template.objects[]`
+(registry-images-catalog-governance ships one), Tekton `taskSpec.steps[]`, CronJob
+`jobTemplate.spec.template.spec`, Argo `Rollout`, and the devfile `components[].container` of a
+DevWorkspace — none of which a PodSpec-shaped walk reaches. A workshop image found at a container key
+this guard does not recognize is an EXIT 2, never a pass: better to stop and make a person look than
+to quietly not check something.
+
+EXEMPTIONS are declared in EXEMPTIONS below, keyed by (API group, kind), each with its reason. There
+is exactly one today (Knative Services) and its premise is machine-checked — see
+`check_knative_premise`.
+
+USAGE
+    tools/lint/image-pull-policy-guard.py                # check the tree
+    tools/lint/image-pull-policy-guard.py --list-images  # every image found, and how it is classified
+    tools/lint/image-pull-policy-guard.py --self-test    # scan the canary fixtures; MUST exit 1
+
+EXIT CODES (same contract as copy-drift-guard.py / credential-redaction-guard.py, so the workflow
+steps read alike):
+    0  every workshop container pulls with Always
+    1  at least one does not — or, under --self-test, every canary was correctly detected
+    2  the guard could not do its job (helm/kustomize/PyYAML missing, a render failed, an empty
+       scope, a workshop image at an unrecognized container key, or an undetected canary). Never
+       confuse this with a clean result.
+
+LOCAL YAMLLINT: the canary chart's templates carry Helm actions and are not plain YAML, exactly like
+the real chart template dirs and like copy-drift-guard's fixture. The maintainer yamllint config is
+gitignored (2026-07-19 owner review) so it cannot ship that exclusion with this commit — add
+
+    tools/lint/image-pull-policy-guard.canary/chart/templates/
+
+to the `ignore:` block of your own .yamllint.yaml, next to the copy-drift-guard.canary line.
+"""
+from __future__ import annotations
+
+import argparse
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - exercised only on a machine without PyYAML
+    print("image-pull-policy-guard: PyYAML is not installed. This guard parses rendered manifests "
+          "properly rather than pattern-matching them, so it cannot run without a parser — refusing "
+          "to report clean. Install it (python3 -m pip install PyYAML) and re-run.", file=sys.stderr)
+    sys.exit(2)
+
+
+# The OpenShift internal registry Service. Identical on every OpenShift cluster, which is why the
+# rule below is portable and not a property of any one cluster.
+INTERNAL_REGISTRY = "image-registry.openshift-image-registry.svc:5000/"
+
+# The cluster's own shared imagestream namespace (Samples Operator). Populated by OpenShift, never
+# rebuilt by us — the single documented carve-out from "internal registry means ours".
+CLUSTER_OWNED_NAMESPACE = "openshift"
+
+REQUIRED_POLICY = "Always"
+
+# Keys under which a container object legitimately appears. A workshop image found anywhere else is
+# an exit 2 rather than a silent skip: an unknown shape means the guard does not know whether it is
+# even looking at something that can carry imagePullPolicy.
+CONTAINER_KEYS = {
+    "containers",          # PodSpec / Knative RevisionSpec / Rollout
+    "initContainers",      # PodSpec
+    "ephemeralContainers",  # PodSpec
+    "steps",               # Tekton TaskSpec
+    "sidecars",            # Tekton TaskSpec
+    "stepTemplate",        # Tekton TaskSpec (single object, not a list)
+    "container",           # devfile v2 / DevWorkspace components[].container
+}
+
+# --------------------------------------------------------------------------------- what to render
+
+# Helm charts, rendered under every values permutation that changes WHAT IS EMITTED. `solve` is not
+# cosmetic: solve worlds materialize Deployments the default render never produces. Any future flag
+# that gates extra workloads belongs here too.
+HELM_VALUE_SETS = (
+    {"user": "user1", "clusterDomain": "example.com", "solve": "false"},
+    {"user": "user1", "clusterDomain": "example.com", "solve": "true"},
+)
+
+# The promotion template is kustomize, not Helm: three environment overlays plus the progressive-
+# delivery directory, which carries an Argo Rollout and a migration Job that the overlays do not.
+KUSTOMIZE_DIRS = (
+    "gitops/promotion/claims-config-template/overlays/dev",
+    "gitops/promotion/claims-config-template/overlays/stage",
+    "gitops/promotion/claims-config-template/overlays/prod",
+    "gitops/promotion/claims-config-template/rollouts",
+)
+
+# --------------------------------------------------------------------------------- exemptions
+
+EXEMPTIONS = [
+    {
+        "id": "knative-service",
+        # serving.knative.dev/v1 Service — the ksvc in serverless-zero-to-hero and eventing-deep-dive.
+        "group": "serving.knative.dev",
+        "kind": "Service",
+        "reason":
+            "Knative resolves the image tag to an immutable DIGEST when it creates the Revision, so "
+            "the pod already pulls by digest and the mutable-tag defect cannot reach it. Adding "
+            "Always would only buy a registry round-trip on every scale-from-zero — and it would buy "
+            "it in serverless-zero-to-hero, the one module whose cold-start timings are a measured "
+            "teaching artifact. A rebuilt image reaches a ksvc through `ws reset`, which creates a "
+            "new Revision. NOTE: tag resolution can be switched off per-registry, so this premise is "
+            "not assumed — check_knative_premise() re-derives it from the portfolio on every run.",
+    },
+]
+
+# The portfolio CR whose config decides whether the Knative exemption's premise holds.
+KNATIVE_SERVING_CR = "platform-portfolio/components/serverless/knative-serving.yaml"
+
+
+class GuardError(Exception):
+    """The guard cannot do its job. Always an exit 2, never a silent pass."""
+
+
+def repo_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[2]
+
+
+# --------------------------------------------------------------------------------- classification
+
+
+def image_namespace(image: str) -> str | None:
+    """The internal-registry namespace an image lives in, or None if it is not internal."""
+    if not image.startswith(INTERNAL_REGISTRY):
+        return None
+    remainder = image[len(INTERNAL_REGISTRY):]
+    return remainder.split("/", 1)[0] if "/" in remainder else None
+
+
+def is_workshop_image(image: str) -> bool:
+    """True when WE build this image, in place, under a mutable tag. See the module docstring."""
+    namespace = image_namespace(image)
+    return namespace is not None and namespace != CLUSTER_OWNED_NAMESPACE
+
+
+def api_group(api_version: str) -> str:
+    return api_version.split("/", 1)[0] if "/" in api_version else ""
+
+
+def exemption_for(api_version: str, kind: str) -> dict | None:
+    group = api_group(api_version)
+    for exemption in EXEMPTIONS:
+        if exemption["group"] == group and exemption["kind"] == kind:
+            return exemption
+    return None
+
+
+# --------------------------------------------------------------------------------- walking
+
+
+def _enclosing_key(path: list) -> str | None:
+    """The key the container object hangs off — `containers` for …/containers/0, `container` for
+    …/components/0/container. Anything else is a shape this guard has not been taught."""
+    if not path:
+        return None
+    if isinstance(path[-1], int):
+        return str(path[-2]) if len(path) >= 2 else None
+    return str(path[-1])
+
+
+def find_image_sites(document, source: str) -> list[dict]:
+    """Every dict carrying a string `image`, anywhere in the document, with where it was found.
+
+    Generic on purpose — see the module docstring. Template.objects[], CronJob jobTemplate, Tekton
+    taskSpec.steps[] and DevWorkspace components[].container all fall out of this for free, and none
+    of them are reachable by a walk that only knows the PodSpec shape.
+    """
+    kind = document.get("kind", "<no kind>") if isinstance(document, dict) else "<not a mapping>"
+    name = "<unnamed>"
+    if isinstance(document, dict) and isinstance(document.get("metadata"), dict):
+        name = document["metadata"].get("name", "<unnamed>")
+    api_version = document.get("apiVersion", "") if isinstance(document, dict) else ""
+
+    sites: list[dict] = []
+
+    def walk(node, path: list) -> None:
+        if isinstance(node, dict):
+            if isinstance(node.get("image"), str):
+                sites.append({
+                    "image": node["image"],
+                    "policy": node.get("imagePullPolicy"),
+                    "container_name": node.get("name"),
+                    "path": list(path),
+                    "enclosing_key": _enclosing_key(path),
+                    "kind": kind,
+                    "name": name,
+                    "apiVersion": api_version,
+                    "source": source,
+                })
+            for key, value in node.items():
+                walk(value, path + [key])
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, path + [index])
+
+    walk(document, [])
+    return sites
+
+
+def fmt_path(path: list) -> str:
+    return "/".join(str(step) for step in path)
+
+
+# --------------------------------------------------------------------------------- rendering
+
+
+def _require(tool: str) -> None:
+    if shutil.which(tool) is None:
+        raise GuardError(
+            f"{tool} is not on PATH. This guard RENDERS the charts rather than grepping them — that "
+            "is the whole reason it exists (a named template in _helpers.tpl is invisible to a grep) "
+            "— so it cannot run without it. Refusing to report clean.")
+
+
+def render_helm(root: pathlib.Path, chart: pathlib.Path, values: dict) -> str:
+    _require("helm")
+    cmd = ["helm", "template", "t", str(chart)]
+    for key, value in values.items():
+        cmd += ["--set", f"{key}={value}"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=root)
+    if proc.returncode != 0:
+        label = " ".join(f"{k}={v}" for k, v in values.items())
+        raise GuardError(
+            f"`helm template` failed for {chart.relative_to(root)} ({label}), rc={proc.returncode}:\n"
+            f"{proc.stderr.strip()}\n"
+            "A chart that will not render is a chart this guard did not check. Skipping it would "
+            "turn a broken chart into a passing gate.")
+    return proc.stdout
+
+
+def render_kustomize(root: pathlib.Path, directory: str) -> str:
+    _require("kustomize")
+    proc = subprocess.run(["kustomize", "build", directory],
+                          capture_output=True, text=True, check=False, cwd=root)
+    if proc.returncode != 0:
+        raise GuardError(f"`kustomize build {directory}` failed (rc={proc.returncode}):\n"
+                         f"{proc.stderr.strip()}")
+    return proc.stdout
+
+
+def parse_documents(text: str, source: str) -> list:
+    try:
+        return [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
+    except yaml.YAMLError as exc:
+        raise GuardError(f"{source} rendered output that is not parseable as YAML: {exc}") from exc
+
+
+def collect_sites(root: pathlib.Path, charts: list[pathlib.Path],
+                  kustomize_dirs: tuple) -> list[dict]:
+    sites: list[dict] = []
+    for chart in charts:
+        for values in HELM_VALUE_SETS:
+            label = f"{chart.relative_to(root)} (solve={values['solve']})"
+            for document in parse_documents(render_helm(root, chart, values), label):
+                sites += find_image_sites(document, label)
+    for directory in kustomize_dirs:
+        if not (root / directory).is_dir():
+            raise GuardError(f"{directory} does not exist. It was moved or renamed; update "
+                             "KUSTOMIZE_DIRS rather than leaving the gate pointing at nothing.")
+        for document in parse_documents(render_kustomize(root, directory), directory):
+            sites += find_image_sites(document, directory)
+    return sites
+
+
+# --------------------------------------------------------------------------------- the check
+
+
+def evaluate(sites: list[dict]) -> tuple[list[str], list[str], dict]:
+    """Return (violations, blockers, stats). A blocker is an exit-2 condition, not a violation."""
+    violations: list[str] = []
+    blockers: list[str] = []
+    stats = {"images": 0, "workshop": 0, "always": 0, "exempt": 0}
+
+    for site in sites:
+        stats["images"] += 1
+        if not is_workshop_image(site["image"]):
+            continue
+        stats["workshop"] += 1
+
+        if site["enclosing_key"] not in CONTAINER_KEYS:
+            blockers.append(
+                f"{site['source']} {site['kind']}/{site['name']} at {fmt_path(site['path'])}\n"
+                f"      carries the workshop image {site['image']} under the key "
+                f"{site['enclosing_key']!r}, which this guard does not recognize as a container "
+                "position.\n"
+                "      Refusing to guess whether that shape can even carry imagePullPolicy. Add the "
+                "key to CONTAINER_KEYS if it is a container, or declare an EXEMPTIONS entry with the "
+                "reason if the shape genuinely cannot express a pull policy.")
+            continue
+
+        exemption = exemption_for(site["apiVersion"], site["kind"])
+        if exemption is not None:
+            stats["exempt"] += 1
+            continue
+
+        if site["policy"] == REQUIRED_POLICY:
+            stats["always"] += 1
+            continue
+
+        policy_text = site["policy"] or (
+            "<unset — Kubernetes defaults any tag other than :latest to IfNotPresent>")
+        violations.append(
+            f"{site['source']} {site['kind']}/{site['name']} "
+            f"container {site['container_name'] or '<unnamed>'} at {fmt_path(site['path'])}\n"
+            f"      image  : {site['image']}\n"
+            f"      policy : {policy_text}\n"
+            f"      fix    : add `imagePullPolicy: {REQUIRED_POLICY}` to this container, and bump "
+            "the chart version so Argo's manifest cache picks the change up.")
+
+    return violations, blockers, stats
+
+
+# ------------------------------------------------------------------- the Knative premise, re-derived
+
+
+def knative_premise_findings(path: pathlib.Path, label: str) -> list[str]:
+    """Re-derive the Knative exemption's premise from a KnativeServing CR file.
+
+    The exemption holds only while Knative actually resolves our tags to digests. That behaviour is
+    switchable PER REGISTRY via `KnativeServing.spec.config.deployment.registries-skipping-tag-
+    resolving`, so the premise is a property of the portfolio, not a fact about Knative — and it is
+    re-derived on every run rather than trusted to a comment.
+
+    Warns rather than fails: whether to drop the exemption is an architecture decision for the PM,
+    not something a lint gate should take unilaterally. But it is re-checked and re-printed on every
+    CI run, so it cannot rot the way a comment does.
+    """
+    if not path.is_file():
+        return [f"{label} is missing, so the Knative exemption's premise cannot be re-derived. "
+                "Update KNATIVE_SERVING_CR if the portfolio moved it."]
+    try:
+        documents = [d for d in yaml.safe_load_all(path.read_text(encoding="utf-8"))
+                     if isinstance(d, dict)]
+    except yaml.YAMLError as exc:
+        return [f"{label} is not parseable as YAML ({exc}), so the Knative exemption's premise "
+                "cannot be re-derived."]
+
+    for document in documents:
+        if document.get("kind") != "KnativeServing":
+            continue
+        skipping = (((document.get("spec") or {}).get("config") or {})
+                    .get("deployment") or {}).get("registries-skipping-tag-resolving")
+        if isinstance(skipping, str) and INTERNAL_REGISTRY.rstrip("/") in skipping:
+            return [
+                f"{label} sets registries-skipping-tag-resolving to {skipping!r}, which INCLUDES "
+                "the internal registry that holds every workshop-built image.",
+                "That is precisely the switch that turns OFF tag->digest resolution, so a ksvc on "
+                "ogsr-parasol-images/parasol-claims:1.1 keeps the MUTABLE TAG in its Revision and "
+                "pulls it with the IfNotPresent default — the exact defect 4efc931 fixed everywhere "
+                "else.",
+                "The exemption's stated premise ('Knative resolves the tag to an immutable digest') "
+                "does not hold for OUR images on a cluster built from this portfolio. Either drop "
+                "the exemption and set Always on the two ksvcs, or drop the internal registry from "
+                "registries-skipping-tag-resolving. This is a PM call — the guard reports it, it "
+                "does not decide it.",
+            ]
+    return []
+
+
+def check_knative_premise(root: pathlib.Path) -> list[str]:
+    return knative_premise_findings(root / KNATIVE_SERVING_CR, KNATIVE_SERVING_CR)
+
+
+# --------------------------------------------------------------------------------- self-test
+
+
+def _canary_root(root: pathlib.Path) -> pathlib.Path:
+    return root / "tools/lint/image-pull-policy-guard.canary"
+
+
+def self_test(root: pathlib.Path) -> int:
+    """Prove each detector on static fixtures. A result other than 1 means detection is unproven.
+
+    Static fixtures, not a mutated copy of a real chart: what has to be tested here is the DETECTOR,
+    and a canary derived from live content quietly becomes an exit 2 the day that content changes
+    shape.
+    """
+    fixture = _canary_root(root)
+    if not fixture.is_dir():
+        print("::error::image-pull-policy-guard: the canary fixture directory is missing — "
+              "detection is unproven, so a clean result on the real tree means nothing.",
+              file=sys.stderr)
+        return 2
+
+    failures: list[str] = []
+
+    # (1) The classifier: the rule that decides what is ours, exercised on the real shapes.
+    classifier_cases = [
+        (f"{INTERNAL_REGISTRY}ogsr-parasol-images/parasol-claims:1.1", True, "shared built image"),
+        (f"{INTERNAL_REGISTRY}user1-dev/parasol-notifications:1.0", True, "per-user built image"),
+        (f"{INTERNAL_REGISTRY}openshift/postgresql:15-el9", False, "Samples Operator imagestream"),
+        (f"{INTERNAL_REGISTRY}openshift/tools:latest", False, "Samples Operator imagestream"),
+        ("registry.redhat.io/devspaces/udi-rhel9:3.29", False, "upstream, version-pinned"),
+        ("quay.io/openshift-knative/showcase:latest", False, "upstream, :latest"),
+        ("registry.redhat.io/rhel9/postgresql-16@sha256:" + "0" * 64, False, "upstream, digest"),
+        ("auto", False, "Istio gateway injection placeholder"),
+    ]
+    for image, expected, why in classifier_cases:
+        if is_workshop_image(image) != expected:
+            failures.append(f"classifier: {image} ({why}) should be "
+                            f"{'workshop-built' if expected else 'upstream'} and is not.")
+
+    # (2) The renderer + walker + policy check, against a fixture chart that reproduces every shape
+    #     the real tree has: a plain Deployment, a Deployment emitted only from a NAMED TEMPLATE (the
+    #     config-multienv blind spot), a PodSpec nested in a Template.objects[], an exempt Knative
+    #     Service, and upstream images that must NOT be demanded.
+    canary_chart = fixture / "chart"
+    expectations = [
+        # (solve, expected violating object names, expected workshop-container count)
+        #   solve=false — canary-plain-bad(1) + canary-plain-good(1) + canary-init-good(2) = 4
+        #   solve=true  — the above + canary-helper-{good,bad}(2) + canary-template-bad(1)
+        #                 + two exempt ksvcs(2)                                            = 9
+        ("false", {"canary-plain-bad"}, 4),
+        ("true", {"canary-plain-bad", "canary-helper-bad", "canary-template-bad"}, 9),
+    ]
+    for solve, expected_bad, expected_workshop in expectations:
+        values = {"user": "user1", "clusterDomain": "example.com", "solve": solve}
+        try:
+            documents = parse_documents(render_helm(root, canary_chart, values),
+                                        f"canary (solve={solve})")
+        except GuardError as exc:
+            failures.append(f"canary chart (solve={solve}) could not be rendered: {exc}")
+            continue
+        sites: list[dict] = []
+        for document in documents:
+            sites += find_image_sites(document, f"canary (solve={solve})")
+        violations, blockers, stats = evaluate(sites)
+        if blockers:
+            failures.append(f"canary (solve={solve}) produced unexpected blockers: {blockers}")
+        got_bad = {line.split(" container ")[0].split("/")[-1] for line in violations}
+        if got_bad != expected_bad:
+            failures.append(f"canary (solve={solve}): expected violations on {sorted(expected_bad)}, "
+                            f"got {sorted(got_bad)}.")
+        if stats["workshop"] != expected_workshop:
+            failures.append(f"canary (solve={solve}): expected {expected_workshop} workshop "
+                            f"containers, saw {stats['workshop']}. The walker is not reaching every "
+                            "shape the fixture plants.")
+        if solve == "true" and stats["exempt"] != 2:
+            failures.append(f"canary (solve={solve}): expected 2 exempt Knative containers, saw "
+                            f"{stats['exempt']}.")
+
+    # (3a) Every declared container key must actually be honoured by the walker. Asserted in Python
+    #      rather than as a chart fixture: the devfile `container` key has no workshop-image instance
+    #      in the tree today, and shipping a rendered fixture that carries one would imply a devfile
+    #      schema claim this guard has no business making. What is being proven here is only that the
+    #      walker REACHES the shape and does not treat it as unknown.
+    devworkspace = {
+        "apiVersion": "workspace.devfile.io/v1alpha2", "kind": "DevWorkspace",
+        "metadata": {"name": "canary-devworkspace"},
+        "spec": {"template": {"components": [
+            {"name": "tools",
+             "container": {"image": f"{INTERNAL_REGISTRY}ogsr-parasol-images/mcp-agent-cli:1.0",
+                           "imagePullPolicy": REQUIRED_POLICY}}]}},
+    }
+    dw_sites = find_image_sites(devworkspace, "canary-devworkspace")
+    if [s["enclosing_key"] for s in dw_sites] != ["container"]:
+        failures.append("the walker did not reach a devfile components[].container image, or "
+                        "classified its position wrongly — a PodSpec-shaped walk's blind spot.")
+    _, dw_blockers, dw_stats = evaluate(dw_sites)
+    if dw_blockers or dw_stats["always"] != 1:
+        failures.append("the `container` key is declared in CONTAINER_KEYS but is not honoured: a "
+                        "workshop image there was blocked or not counted.")
+
+    # (3) The unknown-shape blocker: a workshop image somewhere this guard has not been taught must
+    #     stop the run, not be silently skipped.
+    odd = {"apiVersion": "example.com/v1", "kind": "Widget", "metadata": {"name": "canary-odd"},
+           "spec": {"somethingElse": {"image": f"{INTERNAL_REGISTRY}ogsr-parasol-images/x:1.0"}}}
+    _, odd_blockers, _ = evaluate(find_image_sites(odd, "canary-unknown-shape"))
+    if len(odd_blockers) != 1:
+        failures.append("the unknown-container-key blocker did not fire on a workshop image planted "
+                        "at an unrecognized path — the guard would silently skip that shape.")
+
+    # (4) The Knative premise re-derivation, both ways. Written to a temp dir, never into the tree:
+    #     a fixture that only exists during the run cannot be committed by accident.
+    premise_off = {"kind": "KnativeServing", "spec": {"config": {"deployment": {}}}}
+    premise_on = {"kind": "KnativeServing", "spec": {"config": {"deployment": {
+        "registries-skipping-tag-resolving": INTERNAL_REGISTRY.rstrip("/")}}}}
+    with tempfile.TemporaryDirectory() as tmp:
+        for document, should_warn, label in ((premise_off, False, "no skip list"),
+                                             (premise_on, True, "internal registry in skip list")):
+            probe = pathlib.Path(tmp) / "knative-serving.yaml"
+            probe.write_text(yaml.safe_dump(document), encoding="utf-8")
+            if bool(knative_premise_findings(probe, label)) != should_warn:
+                failures.append(f"the Knative premise check gave the wrong answer for the {label} "
+                                "case — the exemption's premise is not actually being re-derived.")
+        # …and a missing CR must be reported, not read as "premise holds".
+        if not knative_premise_findings(pathlib.Path(tmp) / "absent.yaml", "absent"):
+            failures.append("the Knative premise check reported nothing for a MISSING CR, which "
+                            "would read as 'premise holds' the day the portfolio file moves.")
+
+    if failures:
+        for failure in failures:
+            print(f"::error::image-pull-policy-guard SELF-TEST FAILED — {failure}", file=sys.stderr)
+        return 2
+
+    print("self-test ok — classifier, renderer, named-template walk, Template.objects[] walk, "
+          "Knative exemption, unknown-shape blocker and the Knative premise check all behaved as "
+          "declared.")
+    return 1
+
+
+# --------------------------------------------------------------------------------- main
+
+
+def discover_charts(root: pathlib.Path) -> list[pathlib.Path]:
+    charts = sorted(p.parent for p in (root / "gitops/entry-states").glob("*/Chart.yaml"))
+    if not charts:
+        raise GuardError("no entry-state charts found under gitops/entry-states/*/Chart.yaml. The "
+                         "repo ships two dozen, so an empty selection means this guard is broken — "
+                         "refusing to pass on an empty scope.")
+    return charts
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--self-test", action="store_true",
+                        help="scan the canary fixtures instead of the tree; a result other than 1 "
+                             "means detection is unproven, not that the tree is fine")
+    parser.add_argument("--list-images", action="store_true",
+                        help="print every image found and how it is classified, then exit")
+    args = parser.parse_args(argv)
+
+    root = repo_root()
+
+    if args.self_test:
+        try:
+            return self_test(root)
+        except GuardError as exc:
+            print(f"::error::image-pull-policy-guard self-test could not run: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        charts = discover_charts(root)
+        sites = collect_sites(root, charts, KUSTOMIZE_DIRS)
+    except GuardError as exc:
+        print(f"::error::image-pull-policy-guard: {exc}", file=sys.stderr)
+        return 2
+
+    if not sites:
+        print("::error::image-pull-policy-guard found zero image references across every rendered "
+              "chart and overlay. The workshop ships dozens — an empty scope means this guard is "
+              "broken, not that the tree is clean.", file=sys.stderr)
+        return 2
+
+    if args.list_images:
+        for image in sorted({s["image"] for s in sites}):
+            marker = "WORKSHOP" if is_workshop_image(image) else "upstream"
+            print(f"{marker:9s} {image}")
+        return 0
+
+    violations, blockers, stats = evaluate(sites)
+
+    for line in check_knative_premise(root):
+        print(f"::warning::image-pull-policy-guard: {line}")
+
+    if blockers:
+        print("\n::error::image-pull-policy-guard cannot judge every workshop image:", file=sys.stderr)
+        for blocker in blockers:
+            print(f"  {blocker}", file=sys.stderr)
+        return 2
+
+    if violations:
+        print(f"\nWorkshop-built images pulled with something other than {REQUIRED_POLICY}:")
+        for violation in violations:
+            print(f"  {violation}")
+        print(f"\n::error::{len(violations)} workshop container(s) would keep serving a STALE image "
+              "after a rebuild. Every image we build is rebuilt in place under a mutable tag, so "
+              f"`imagePullPolicy: {REQUIRED_POLICY}` is what makes a restart actually land the new "
+              "layers.", file=sys.stderr)
+        return 1
+
+    print(f"image-pull-policy-guard: clean — {len(charts)} charts rendered at "
+          f"solve={{false,true}} plus {len(KUSTOMIZE_DIRS)} kustomize builds; "
+          f"{stats['images']} image references seen, {stats['workshop']} workshop-built, "
+          f"{stats['always']} with {REQUIRED_POLICY}, {stats['exempt']} declared-exempt.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

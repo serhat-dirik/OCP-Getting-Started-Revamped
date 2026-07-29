@@ -1,0 +1,65 @@
+{{- if .Values.solve }}
+{{/*
+Emitted ONLY under solve=true. Rendering a chart with default values never produces any of this,
+which is exactly how a plain-HTTP Route reached a live cluster twice — so the guard renders every
+chart at BOTH solve values and this fixture proves that it does.
+
+Five more workshop containers: two from the named template (one violating), one nested inside an
+OpenShift Template.objects[] (violating), and two in exempt Knative Services.
+*/}}
+{{- include "canary.stack" (dict "name" "canary-helper-good" "policy" "Always" "root" $) }}
+---
+{{ include "canary.stack" (dict "name" "canary-helper-bad" "policy" "" "root" $) }}
+---
+# why: a PodSpec nested inside an OpenShift Template's objects[] — the shape
+# registry-images-catalog-governance ships. A walker that only knows the top-level PodSpec never
+# descends here, so a workshop image can sit inside a Template with the default pull policy forever.
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: canary-template-bad
+objects:
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: canary-quickstart
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: canary-quickstart
+      template:
+        metadata:
+          labels:
+            app: canary-quickstart
+        spec:
+          containers:
+            - name: claims
+              image: {{ .Values.workshopImage }}
+---
+# why: the declared exemption, in both of the shapes the real tree has (serverless-zero-to-hero and
+# eventing-deep-dive each ship one ksvc on a workshop image with no pull policy). These must be
+# counted as workshop containers and then EXEMPTED — not silently ignored, which would look
+# identical from the outside and would hide a broken classifier.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: canary-ksvc-a
+spec:
+  template:
+    spec:
+      containers:
+        - name: claims
+          image: {{ .Values.workshopImage }}
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: canary-ksvc-b
+spec:
+  template:
+    spec:
+      containers:
+        - name: claims
+          image: {{ .Values.workshopImage }}
+{{- end }}

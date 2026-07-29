@@ -13,16 +13,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Privacy guard (no private domains/emails/keys in tracked files)
+      - name: Privacy guard (no private domains/emails in tracked files)
+        # LITERAL patterns only. The API-key pattern that used to live in this alternation moved to
+        # the guard below (task #97): `sk-[A-Za-z0-9]{20}` needs twenty CONSECUTIVE alphanumerics,
+        # so a single `_` in the first twenty characters breaks the run — measured 2026-07-29, it
+        # does not match a real key of the shape this project actually uses, and this step printed
+        # "clean". The fix needs an opacity test that a POSIX ERE cannot express (no lookahead), and
+        # more importantly needs a canary, which an inline grep cannot have.
         run: |
-          # Ephemeral-cluster domains, personal emails, API keys. (The shared RHDP MaaS host is
+          # Ephemeral-cluster domains and personal emails. (The shared RHDP MaaS host is
           # semi-public — referenced in public rhpds repos — and is queued for parameterization
           # in the packaging wave rather than blocked here.)
-          if git grep -nE "dynamic2\.redhatworkshops|cluster-qvkd|@gmail\.com|sk-[A-Za-z0-9]{20}" -- . ':!.github/workflows/lint.yml'; then
+          if git grep -nE "dynamic2\.redhatworkshops|cluster-qvkd|@gmail\.com" -- . ':!.github/workflows/lint.yml'; then
             echo "::error::Private-info pattern found in tracked files (see matches above). Private material belongs in ../Project-Shared (outside the repo) or gitignored vars.yaml."
             exit 1
           fi
           echo "Privacy guard clean."
+
+      - name: API keys must not be committed, whatever separators they carry
+        # Catches a key by SHAPE — token-start `sk-`, >=20 chars of [A-Za-z0-9_-], and an unbroken
+        # alphanumeric chunk of >=12 carrying both a letter and a digit. That last layer is what
+        # separates a credential (opaque) from a slug (words): it clears all five false positives
+        # the naive widening `sk-[A-Za-z0-9_-]{16,}` produces on this tree, including the two
+        # `parasol-task-…` names whose `task-` contains `sk-`. Stdlib only — no pip step.
+        run: |
+          rc=0
+          python3 tools/lint/api-key-shape-guard.py --self-test || rc=$?
+          # Exactly 1 = every constructed key shape detected AND every benign look-alike ignored.
+          # 0 = guard blind; 2 = fixture missing, a shape went undetected, or a benign line fired.
+          # Either way detection is unproven, so fail rather than trust a clean tree scan.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::api-key-shape-guard self-test must exit 1 (canary shapes detected);" \
+                 "got rc=$rc. The guard's detection is unproven — refusing to trust a clean" \
+                 "result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/api-key-shape-guard.py
 
   credential-redaction:
     runs-on: ubuntu-latest
@@ -164,6 +190,52 @@ jobs:
             echo "::endgroup::"
           done
           exit "$rc"
+
+  image-pull-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Same helm pin as the helm/copy-drift jobs so every job reads the same render.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Install kustomize (pinned)
+        # Same pin as the kustomize job — the promotion template is kustomize, not Helm.
+        run: |
+          curl -sfL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.0/kustomize_v5.8.0_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # Hard dependency: this guard parses rendered manifests rather than pattern-matching them.
+        # A missing parser exits 2, which the self-test assertion turns into a failure — it can
+        # never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Workshop-built images must be pulled with Always
+        # Every image we build is tagged 1.0/1.1 and rebuilt IN PLACE, so the tag is mutable, and
+        # Kubernetes defaults any non-:latest tag to IfNotPresent — a node with that tag cached
+        # serves the OLD layers. Measured on ksls5 2026-07-29; 4efc931 fixed all 29 sites.
+        #
+        # This guard RENDERS rather than greps, which is the whole point: config-multienv emits two
+        # of its three claims Deployments from a named template in _helpers.tpl, invisible to
+        # `grep image: templates/*.yaml`. That blind spot swallowed the chart twice — this sweep and
+        # the Route-TLS sweep of 2026-07-27. Every other author-facing check here is line-oriented,
+        # so the defect class recurs by construction until one gate renders.
+        run: |
+          rc=0
+          python3 tools/lint/image-pull-policy-guard.py --self-test || rc=$?
+          # Exactly 1 = every canary detected. 0 = guard blind; 2 = fixture missing, a canary went
+          # undetected, or a dependency is absent. Either way detection is unproven.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::image-pull-policy-guard self-test must exit 1 (canaries detected);" \
+                 "got rc=$rc. The guard's detection is unproven — refusing to trust a clean" \
+                 "result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/image-pull-policy-guard.py
 
   module-order:
     runs-on: ubuntu-latest
