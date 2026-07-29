@@ -154,7 +154,7 @@ cd content && npx antora site-workshop.yml    # also: site-demo.yml, site-instru
 ./utilities/lab-serve
 ```
 
-Before pushing a block with `subs="attributes"`, run `tools/lint/curl-format-guard.py` — it catches `curl -w` format fields like `%{http_code}` being eaten as AsciiDoc attribute references (content-build runs antora at `--log-failure-level=warn`, so that warning fails the build).
+Before pushing a block with `subs="attributes"`, run `tools/lint/curl-format-guard.py` — it catches brace expressions eaten as AsciiDoc attribute references: `curl -w` format fields like `%{http_code}`, and the bare `{end}` that closes a `{range …}` jsonpath. Both produce "skipping reference to missing attribute", and content-build runs antora at `--log-failure-level=warn`, so that warning fails the build. Escape as `%\{http_code}` / `\{end}`, or drop `subs="attributes"` from the block.
 
 ## Credits
 

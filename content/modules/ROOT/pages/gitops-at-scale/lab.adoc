@@ -766,7 +766,14 @@ If exercise 3 completed, you are reverting to the version that is *already* the 
 
 Now watch the recovery.
 The proof is a *pair* of observations, not `Healthy` alone — a Rollout that never aborted is also `Healthy`.
-The latest `AnalysisRun` must still be the *Failed* one (the abort really happened, and this revert starts no new analysis) *and* the Rollout must be `Healthy` again:
+An `AnalysisRun` that reached *Failed* must *exist* (the abort really happened) *and* the Rollout must be `Healthy` again.
+The loop below lists *every* analysis this namespace has run, so it reads the same whether your revert started a fresh canary or not — a later `Successful` run does not erase the abort you are recovering from:
+
+// capture note (2026-07-29): the gate changed from "the NEWEST AnalysisRun is Failed" to "a Failed
+// AnalysisRun EXISTS". The old form printed a misleading "nothing to recover" in exactly the case the
+// paragraph above blesses — a revert that starts a fresh (Successful) canary because exercise 3 never
+// ran. The sample below is the SAME live run as before, re-rendered in the new form: the exercise-3
+// canary (Successful) then the exercise-4 abort (Failed), oldest-first.
 
 [source,sh,role=execute]
 ----
@@ -774,9 +781,10 @@ The latest `AnalysisRun` must still be the *Failed* one (the abort really happen
 RECOVERED=""
 for i in $(seq 1 22); do
   P=$(oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.phase}')
-  A=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null)
-  echo "  $(date +%T)  rollout: $P   last analysis: ${A:-none}"
-  [ "$P" = "Healthy" ] && [ "$A" = "Failed" ] \
+  PHASES=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[*].status.phase}' 2>/dev/null)
+  ABORTS=$(printf '%s\n' "$PHASES" | tr ' ' '\n' | grep -cx Failed || true)
+  echo "  $(date +%T)  rollout: $P   analyses so far: ${PHASES:-none}"
+  [ "$P" = "Healthy" ] && [ "$ABORTS" -gt 0 ] \
     && { RECOVERED=yes; echo "  ✔ recovered — production Healthy again after the aborted release"; break; }
   sleep 7
 done
@@ -784,18 +792,18 @@ if [ -z "$RECOVERED" ]; then
   if [ "$P" = "Degraded" ]; then
     echo "  ✗ still Degraded — Argo may not have re-read your revert yet; press Refresh and re-run this block."
   else
-    echo "  ✗ nothing to recover: the Rollout is ${P:-unknown} but no analysis ever Failed —"
+    echo "  ✗ nothing to recover: the Rollout is ${P:-unknown} and no AnalysisRun ever reached Failed —"
     echo "    the abort never happened (did your bad-build commit sync?). Re-run this exercise from the knob step."
   fi
 fi
 ----
 
-.Expected output
+.Expected output — the abort is still on the record, and prod is Healthy again
 [source,texinfo]
 ----
-  08:50:05  rollout: Degraded   last analysis: Failed
-  08:50:14  rollout: Degraded   last analysis: Failed
-  08:50:22  rollout: Healthy   last analysis: Failed
+  08:50:05  rollout: Degraded   analyses so far: Successful Failed
+  08:50:14  rollout: Degraded   analyses so far: Successful Failed
+  08:50:22  rollout: Healthy   analyses so far: Successful Failed
   ✔ recovered — production Healthy again after the aborted release
 ----
 

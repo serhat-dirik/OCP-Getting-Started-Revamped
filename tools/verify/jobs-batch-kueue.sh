@@ -78,10 +78,20 @@ check "MaaS endpoint/model present (configmap maas-config)" oc get cm maas-confi
 # as INFO because this module's graded outcome is the Kueue queueing behaviour, not the inference —
 # but a `false` here means the batch inference itself will 401. (Reported, not asserted: whether a dead
 # AI path should fail this module's entry state is the module owner's call, not this script's.)
+# CHOICE vs MISTAKE: `no-maas-credential` means nobody configured a key — bootstrap/install.sh
+# supports that install and the documented consequence is exactly this degraded AI beat. A credential
+# that was FOUND and refused (wrong kind / rejected by the endpoint) is somebody's mistake. Both are
+# INFO here, but they must not read the same. Reason strings are the literal ones written by
+# gitops/entry-states/jobs-batch-kueue/templates/maas-credentials.yaml.
+ai_reason="$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || true)"
 case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/dev/null || true)" in
   true)       info "MaaS credential accepted by the model endpoint (live probe at materialization)" ;;
   unverified) info "MaaS credential staged but UNPROVEN — the cluster could not reach the endpoint when this namespace materialized; batch inference may 401" ;;
-  false)      info "MaaS credential NOT usable ($(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || echo 'reason unrecorded')) — batch inference will fail its model call; queueing/admission beats are unaffected" ;;
+  false)      if [[ "$ai_reason" == "no-maas-credential" ]]; then
+                info "no MaaS credential reached this cluster — a supported, degraded install, not a fault of this module; the batch-inference beat reports the AI path unavailable and the queueing/admission beats are unaffected"
+              else
+                info "MaaS credential NOT usable (${ai_reason:-reason unrecorded}) — batch inference will fail its model call; queueing/admission beats are unaffected"
+              fi ;;
   *)          info "MaaS credential UNVALIDATED (entry state predates the credential-validation hook) — ws reset jobs-batch-kueue --user ${USER_NAME} for a verdict" ;;
 esac
 

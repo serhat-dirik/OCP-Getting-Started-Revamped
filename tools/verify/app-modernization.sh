@@ -72,7 +72,16 @@ case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/
   unverified)
     info "[ADS] maas-credentials staged but UNPROVEN — the cluster could not reach the model endpoint when this namespace materialized; Developer Lightspeed may 401 (oc logs job/maas-copy-app-modernization-${USER_NAME} -n ${NS})" ;;
   false)
-    info "[ADS] Developer Lightspeed disabled — no usable MaaS credential ($(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || echo 'reason unrecorded')); the [OCP] MTA assess/analyze/replatform flow is unaffected" ;;
+    # CHOICE vs MISTAKE: `no-maas-credential` means nobody configured a key (a supported install —
+    # bootstrap/install.sh's no-credential path); anything else means a credential was FOUND and
+    # refused. Both leave [ADS] off, but they must not read the same. Reason strings are the literal
+    # ones written by gitops/entry-states/app-modernization/templates/maas-credentials.yaml.
+    ads_reason="$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || true)"
+    if [[ "$ads_reason" == "no-maas-credential" ]]; then
+      info "[ADS] Developer Lightspeed disabled — no MaaS credential reached this cluster (a supported, degraded install, not a fault of this module); the [OCP] MTA assess/analyze/replatform flow is unaffected"
+    else
+      info "[ADS] Developer Lightspeed disabled — the MaaS credential this cluster carries is not usable (${ads_reason:-reason unrecorded}); the [OCP] MTA assess/analyze/replatform flow is unaffected"
+    fi ;;
   *)
     if maas_secret_present; then
       info "[ADS] maas-credentials present but UNVALIDATED (entry state predates the credential-validation hook) — re-materialize to get a verdict: ws reset app-modernization --user ${USER_NAME}"
