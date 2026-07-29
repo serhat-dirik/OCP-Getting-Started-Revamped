@@ -21,9 +21,29 @@ Each entry is symptom → cause → fix. All were seen (or deliberately induced)
 
 *Symptom:* Every question returns HTTP `502` and a body like `{"error":"model authentication failed - check the MaaS key ...","authFailure":true,...}`.
 
-*Cause:* The agent's MaaS key (the `GENAI_API_KEY` in the `maas-credentials` Secret) has *expired* — workshop MaaS keys are short-lived, provisioned per event. The agent catches the model's `401` and *degrades gracefully* to a clean `502` instead of a stack trace.
+*Cause:* The model server rejected the agent's key with a `401`, and the agent *degrades gracefully* to a clean `502` instead of a stack trace. Three different key problems produce the same `502`, and the model server's own message tells them apart. Read it in the agent log (the `cut` keeps the diagnosis and drops the rejected key itself, so nothing sensitive lands in your terminal):
 
-*Fix:* Refresh the key: `ws prep agentic-ai --yes` re-copies a fresh key from the platform Lightspeed secret into your namespace (or ask your instructor to refresh the source key). Note the *entry* checks still pass 6/6 with an expired key — only live `/agent/ask` and the 7th (end) check need a working key, because only they call the model.
+[source,sh,role=execute,subs="attributes"]
+----
+oc logs deploy/parasol-agent -n {user}-ai --tail=200 \
+  | grep -i "Agent model call failed" | tail -1 | cut -c1-200
+----
+
+[cols="1,2"]
+|===
+| What the message says | What it means
+
+| `Expired`, or nothing more specific
+| The key has *expired* — workshop MaaS keys are short-lived, provisioned per event. The common case.
+
+| `Virtual Key expected. Received=…, expected to start with 'sk-'`
+| The key is the *wrong kind*: something that is not a MaaS virtual key was copied into the Secret. Seen when the platform's source credential belongs to a different model provider entirely.
+
+| `key not allowed to access model. This key can only access models=[…]`
+| The key is fine but *model-scoped* to a different model than `GENAI_MODEL`. Workshop MaaS keys grant one model; the key and the `maas-config` `model` value must name the same one.
+|===
+
+*Fix:* `ws prep agentic-ai --yes` re-copies the key and re-converges the model/endpoint into your namespace — that clears the expired case. The other two are *platform-side*: the source credential is wrong or scoped to another model, so tell your instructor rather than editing the Secret yourself. Note the *entry* checks still pass 6/6 with a bad key — only live `/agent/ask` and the 7th (end) check need a working key, because only they call the model.
 
 == `POST /agent/ask` returns `400` "question is required"
 

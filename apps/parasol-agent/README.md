@@ -49,8 +49,12 @@ agent **degrades gracefully**.
   **HTTP-SSE** at startup and lets the model choose which to call. The method returns a
   LangChain4j `Result<String>`, which is how `/agent/ask` reports the answer **and** the exact
   `toolExecutions()` + `tokenUsage()`.
-- The service is **stateless** (`NoChatMemoryProviderSupplier`) and runs at **temperature 0**,
-  so answers are reproducible — the workshop demo lands the same way every time.
+- The service is **stateless per request** and runs at **temperature 0**, so answers are
+  reproducible — the workshop demo lands the same way every time. `ask` takes a `@MemoryId` and
+  `AgentResource` passes a **fresh UUID on every call**, so no two requests share history; the
+  per-request memory window (40 messages) exists only so the tool-calling round-trip — model asks
+  for a tool, tool result is fed back, model answers — has somewhere to hold its intermediate
+  messages.
 
 ## Configuration — model-agnostic, env-driven
 
@@ -67,6 +71,46 @@ deploy time (committed defaults are harmless local-dev placeholders, **never** w
 
 The same image runs against any OpenAI-compatible model — only these env values change.
 `OTEL_EXPORTER_OTLP_ENDPOINT` + `QUARKUS_OTEL_SDK_DISABLED=false` turn on tracing to Tempo (M12).
+
+### `GENAI_MODEL` is a curriculum choice, not just a config value
+
+The **wiring** is model-agnostic; the **teaching** is not. The Agentic AI module's whole point is
+that the agent *calls tools* and grounds its answers in seeded facts, so `GENAI_MODEL` must name a
+model that **elects tool calls on its own** (OpenAI-style `tool_calls` with `tool_choice` absent or
+`auto`). A model that only tool-calls when a specific function is *forced* by name is not enough —
+see the rejected lever below.
+
+Measured 2026-07-29 by replaying this agent's **exact wire payload** (the system prompt and all six
+MCP tool schemas, captured verbatim from the pod log with `log-requests=true`) against the MaaS
+endpoint at temperature 0, three trials per prompt, over the four load-bearing lab prompts:
+
+| `GENAI_MODEL`                  | Happy-path grounding (imperative "use your tools…" prompts) |
+|--------------------------------|--------------------------------------------------------------|
+| `llama-scout-17b`              | Grounds — the module's captured outputs were performed on it. **Not re-verified on 2026-07-29** (no key on hand is scoped to it). |
+| `deepseek-r1-distill-qwen-14b` | **0/12.** Never emits a `tool_call`; narrates one in prose instead ("*To determine the status of claim CLM-1001, I will use the claims tool…*") and then invents the record. **Do not point the workshop at it.** |
+
+Levers tried against `deepseek-r1-distill-qwen-14b` and **rejected because none measurably helped**
+(each still 0/12), recorded so nobody pays for this experiment twice:
+
+- **Sharpening the system prompt** — an explicit "you MUST call a tool for any claim or policy fact,
+  never answer from memory" mandate plus an anti-transcription rule ("never write a call to a tool
+  as text"). The model kept writing the call as text, in the very sentence the rule forbids.
+- **Shortening or removing the system prompt** (in case the prose was baiting narration): no change.
+- **Sending `tool_choice: "auto"` explicitly** instead of omitting it, in case the serving stack only
+  arms its tool parser when the field is present: no change.
+
+Two request-level findings on that endpoint, for whoever debugs this next:
+
+- `tool_choice: "required"` **breaks the endpoint** — the connection is closed without a response,
+  not a clean 4xx.
+- `tool_choice: {"type":"function","function":{"name":"get_claim"}}` **works** and returns correct
+  arguments — proof the model *can* emit a call and simply never *chooses* to.
+
+That named-function forcing is the one lever that would make this model ground, and it is
+**deliberately not used**: forcing a named tool on every request would fake the grounding the module
+asks attendees to verify, and it would erase the exercise-2 break-and-fix beat (the terse question
+that returns an empty `toolCalls`). Grounding here is engineered with the system prompt and the tool
+schemas — and, when a model cannot elect a tool at all, by choosing a different model.
 
 ## Tech
 
