@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""click-to-run-guard.py — an interactive `read` must be the LAST line of a click-to-run block.
+
+WHY THIS EXISTS (fixed in 76ae9d3, 2026-07-29; shipped TWICE before anyone noticed). Read
+content/supplemental-ui/js/click-to-run.js yourself: commandText() takes a
+`.listingblock.execute`'s WHOLE textContent, and sendToTerminal() posts it to the terminal as ONE
+`execute` message. ttyd's listener strips only the trailing newline and writes `cmd + "\\r"` in a
+single call — every INTERNAL newline in the block lands in the tty's input queue right along with
+it. A `read` mid-stream drains that queue for its own answer, so whatever line follows it in the
+same block is swallowed as the read's input, not typed by the attendee.
+
+Measured on bash 3.2 and bash 5.1 (the cockpit's family) with a PTY harness: on both, `read`
+captured the next line verbatim; on 5.1 the ENTIRE remainder of the block was discarded outright,
+so the failure surfaces later as something that looks unrelated. Two real victims, both in
+`content/modules/ROOT/pages/`:
+
+  - gitops-at-scale/lab.adoc: `read -rsp "Your workshop password: " PW; echo` was followed in the
+    same block by the ARGOCD_AUTH_TOKEN exchange. PW ate that export line, the exchange never ran,
+    and the attendee met a bare 401 two blocks later at the ApplicationSet create — nothing at the
+    read step itself looked wrong.
+  - pipelines-fundamentals/lab.adoc: `read -rsp "paste your Gitea token, then press Enter: "
+    GITEA_TOKEN; echo` was followed by `WEBHOOK_SECRET="parasol-$(openssl rand -hex 6)"` and the
+    `oc create secret` call. GITEA_TOKEN ate the WEBHOOK_SECRET line and the Secret was never
+    created at all.
+
+Both are fixed today — each split into two blocks, the first ending at the `read` — and both carry
+a `// DO NOT merge this block with the one below it` comment. Nothing but this guard stops a future
+edit (a "tidy up the lab" pass, a copy-paste from an older draft) from re-merging them, because
+nothing else in CI exercises this mechanism.
+
+DETECTION RULE. Inside every AsciiDoc `[source,<lang>,role=execute...]` delimited block, find every
+shell `read` invocation that reads interactively from the terminal — i.e. is not fed by a pipe and
+carries no explicit input redirection — and flag it if it is not the block's last non-blank line
+(comments count as content: the swallowed line does not have to be code to break the read).
+
+WHAT COUNTS AS INTERACTIVE, precisely (false positives get a guard disabled, which is worse than no
+guard — see the curl-format-guard docstring for the same lesson learned earlier):
+
+  - `read -rsp "..." VAR` with nothing feeding it — interactive; must be the block's last line.
+  - `cmd | while IFS=, read -r a b c; do …; done` — `read`'s stdin is the pipe from `cmd`, not the
+    terminal. Harmless anywhere in the block. Detected by walking command separators (`;` `&` `|`
+    `&&` `||` `(` `{` and the keywords `do`/`then`/`while`/`until`) and checking whether the token
+    immediately before `read` is a single `|`.
+  - `read -t 3 -n1 reply <&3` — an explicit fd (or file) redirect on the read itself. Whatever it
+    reads, it is not the attendee's next keystroke. Detected by a literal `<` anywhere in the
+    command chunk that starts with `read`.
+  - `read` inside a heredoc body (`oc apply -f - <<'EOF' … EOF`) — that text is DATA the shell
+    writes into a file/manifest, not a command the terminal executes at click time. The scanner
+    tracks heredoc open/close per block and never inspects lines inside one.
+  - the word "read" in prose or a `#`-comment — never a command at all; comment-only lines are
+    skipped for detection (though they still count as "content" for the last-line check above).
+
+QUOTES ARE MASKED before any of the above runs (see mask_quoted): a `;`, `|`, or the word `read`
+sitting inside a quoted string is not shell syntax and must never be mistaken for it. The first real
+run of this guard against content/ proved why — it flagged
+`echo "... failed; read its logs: oc logs job/..."` in packaging-distributing/lab.adoc as an
+offender, because the semicolon INSIDE that echo string reads as a command separator and "read its
+logs" then looks like a `read` invocation. Masking fixed it, and as a side effect also closes what
+would otherwise be a blind spot: a `<` inside a read's own prompt string (`read -rsp "value
+<required>: " X`) no longer suppresses a real flag either, because that `<` is masked away too.
+
+Verified against the real tree, 2026-07-30: `grep -rn "read " content/modules/ROOT/pages/` surfaces
+~9 lines; of those, exactly two are genuinely interactive terminal reads (the two fixed victims
+above), and both are correctly the last line of their block today. The rest are prose, a `read`
+fed by a pipe inside a heredoc-embedded Job script (jobs-batch-kueue, twice), and an explicit-fd
+read outside any role=execute block (devspaces-inner-loop). This guard must report ZERO offenders
+on that tree — a guard that fires on the already-fixed state is useless.
+
+USAGE
+    tools/lint/click-to-run-guard.py [path ...]     # default: content
+    tools/lint/click-to-run-guard.py --self-test     # scans the canary fixture; must exit non-zero
+
+A guard that silently inspects zero files, or zero role=execute blocks, always "passes" — this repo
+relearned that lesson on tools/lint/route-tls-guard.sh. This script refuses to report clean over an
+empty file scope AND over a zero-block scan. --self-test exists so CI (and a human) can prove the
+detector fires on a deliberately broken canary case, does NOT fire on every safe form beside it, and
+exits 2 (not 1) if either check fails — only a clean self-test earns trust in a clean real-tree run.
+"""
+from __future__ import annotations
+
+import argparse
+import pathlib
+import re
+import sys
+
+# The block-opener line. Accepts both forms seen in this repo (`role=execute` bare, and quoted
+# multi-word roles like `role="execute send-to-tty-bottom"` that click-to-run.js also understands
+# for the second/bottom terminal) without hard-coding either shape.
+OPENER_RE = re.compile(
+    r'^\[source\b[^\]]*\brole\s*=\s*(?:"(?P<qval>[^"]*)"|(?P<uval>[^,"\]]+))'
+)
+
+# A delimiter line opens/closes an AsciiDoc listing block: 2+ repeats of `-` (the only delimiter
+# character this repo's [source] blocks use).
+DELIMITER_RE = re.compile(r"^-{2,}\s*$")
+
+# A heredoc opener anywhere on a line: `<<EOF`, `<<'EOF'`, `<<"EOF"`, or the tab-stripping `<<-EOF`.
+# Group 1 is the `-` (or empty) that permits an indented terminator; group 3 is the delimiter word.
+HEREDOC_START_RE = re.compile(r"<<(-?)\s*(['\"]?)(\w+)\2")
+
+# Command separators/keywords that can precede a `read` invocation. `do`/`then` are normalized to
+# `;` before splitting so `while … read …; do` and `if …; then read …` both split cleanly.
+_NORMALIZE_RE = re.compile(r"\b(?:do|then)\b")
+_SPLIT_RE = re.compile(r"(\|\||&&|[;&|(){}])")
+_LEADING_LOOP_RE = re.compile(r"^(?:while|until)\s+")
+_LEADING_ASSIGN_RE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
+_READ_RE = re.compile(r"^read\b")
+
+
+def repo_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[2]
+
+
+def mask_quoted(text: str) -> str:
+    """Blank out everything strictly inside single/double quotes, same length, same offsets.
+
+    Without this, `echo "... failed; read its logs: ..."` reads as a `;`-separated command whose
+    second chunk starts with the word `read` — a real false positive this guard hit on the first
+    real-tree run (packaging-distributing/lab.adoc:664, an `echo` string that just SAYS "read its
+    logs"). Masking removes the semicolon and the word from consideration without touching command
+    text outside the quotes, so separator-splitting and the `read`/redirect checks below only ever
+    see real shell syntax.
+    """
+    out = list(text)
+    quote = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote is None:
+            if c in ("'", '"'):
+                quote = c
+        else:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out[i] = out[i + 1] = "x"
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            else:
+                out[i] = "x"
+        i += 1
+    return "".join(out)
+
+
+def is_execute_block_opener(line: str) -> bool:
+    m = OPENER_RE.match(line.strip())
+    if not m:
+        return False
+    val = m.group("qval") if m.group("qval") is not None else m.group("uval")
+    return "execute" in val.split()
+
+
+def line_has_interactive_read(text: str) -> bool:
+    """True if `text` invokes `read` in a way that blocks on the terminal's next keystrokes."""
+    normalized = _NORMALIZE_RE.sub(";", mask_quoted(text))
+    last_sep = None
+    for tok in _SPLIT_RE.split(normalized):
+        if tok in ("||", "&&", ";", "&", "|", "(", ")", "{", "}"):
+            last_sep = tok
+            continue
+        chunk = tok.strip()
+        if not chunk:
+            continue
+        chunk = _LEADING_LOOP_RE.sub("", chunk)
+        chunk = _LEADING_ASSIGN_RE.sub("", chunk)
+        if _READ_RE.match(chunk):
+            piped = last_sep == "|"
+            redirected = "<" in chunk
+            if not piped and not redirected:
+                return True
+        last_sep = None
+    return False
+
+
+def iter_execute_blocks(lines: list[str]):
+    """Yield each [source,...,role=execute...] block's body as a list of (line_no, text)."""
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if is_execute_block_opener(line):
+            j = i + 1
+            if j < n and DELIMITER_RE.match(lines[j]):
+                delim = lines[j].rstrip()
+                k = j + 1
+                body = []
+                while k < n and lines[k].rstrip() != delim:
+                    body.append((k + 1, lines[k]))
+                    k += 1
+                yield body
+                i = k  # resume after the closing delimiter (or EOF if unterminated)
+        i += 1
+
+
+def find_offenders_in_block(body: list[tuple[int, str]]):
+    """Yield (line_no, stripped_text) for every interactive `read` not at the block's last
+    non-blank line. `body` is the block's content lines, excluding the [source] and delimiter
+    lines themselves."""
+    last_nonblank = None
+    for line_no, text in body:
+        if text.strip():
+            last_nonblank = line_no
+
+    offenders = []
+    in_heredoc = False
+    heredoc_delim = None
+    heredoc_strip_leading = False
+    for line_no, text in body:
+        if in_heredoc:
+            terminator = text.rstrip("\n")
+            candidate = terminator.lstrip() if heredoc_strip_leading else terminator
+            if candidate == heredoc_delim:
+                in_heredoc = False
+            continue  # heredoc body is DATA — never scanned for `read`
+
+        stripped = text.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            if line_has_interactive_read(text) and line_no != last_nonblank:
+                offenders.append((line_no, stripped))
+            m = HEREDOC_START_RE.search(text)
+            if m:
+                in_heredoc = True
+                heredoc_delim = m.group(3)
+                heredoc_strip_leading = bool(m.group(1))
+    return offenders
+
+
+def find_offenders(path: pathlib.Path):
+    """Yield (line_no, snippet) for every offending block body line, and count blocks scanned."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (UnicodeDecodeError, OSError):
+        return 0
+    blocks_scanned = 0
+    for body in iter_execute_blocks(lines):
+        blocks_scanned += 1
+        for line_no, snippet in find_offenders_in_block(body):
+            yield (line_no, snippet)
+    return blocks_scanned
+
+
+def scan_file(path: pathlib.Path):
+    """Return (offenders, blocks_scanned) for one file — a plain wrapper because `find_offenders`
+    is a generator and its `return` value (the block count) is otherwise unreachable without
+    exhausting it first."""
+    offenders = []
+    gen = find_offenders(path)
+    while True:
+        try:
+            offenders.append(next(gen))
+        except StopIteration as stop:
+            blocks_scanned = stop.value or 0
+            break
+    return offenders, blocks_scanned
+
+
+def collect_files(roots):
+    files = []
+    for root in roots:
+        p = pathlib.Path(root)
+        if p.is_file():
+            files.append(p)
+        elif p.is_dir():
+            files.extend(sorted(p.rglob("*.adoc")))
+    return files
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="*", default=["content"],
+                     help="file(s) or director(ies) to scan (default: content)")
+    ap.add_argument("--self-test", action="store_true",
+                     help="scan only the canary fixture next to this script; anything but a "
+                          "precise match (one offender, every safe form silent) means the "
+                          "detector itself is broken")
+    args = ap.parse_args(argv)
+
+    if args.self_test:
+        fixture = pathlib.Path(__file__).resolve().parent / "click-to-run-guard.canary.adoc"
+        roots = [fixture]
+    else:
+        roots = args.paths
+
+    files = collect_files(roots)
+    if not files:
+        print(f"click-to-run-guard: no .adoc files found under {roots!r} — refusing to report "
+              "clean over an empty scope.", file=sys.stderr)
+        return 2
+
+    all_offenders = []
+    total_blocks = 0
+    for f in files:
+        offenders, blocks_scanned = scan_file(f)
+        total_blocks += blocks_scanned
+        for line_no, snippet in offenders:
+            all_offenders.append((f, line_no, snippet))
+
+    if total_blocks == 0:
+        print(f"click-to-run-guard: {len(files)} file(s) scanned but zero "
+              "[source,...,role=execute...] blocks found — refusing to report clean over an "
+              "empty scope.", file=sys.stderr)
+        return 2
+
+    if args.self_test:
+        # The canary carries exactly one broken case. Any other count means the detector missed
+        # it, double-counted it, or wrongly fired on one of the safe forms sitting beside it.
+        expected = 1
+        if len(all_offenders) != expected:
+            print(f"click-to-run-guard: SELF-TEST FAILED — expected exactly {expected} offender "
+                  f"(the broken canary case), got {len(all_offenders)}: "
+                  f"{[(str(f), n) for f, n, _ in all_offenders]}. The guard, not the fixture, is "
+                  "broken.", file=sys.stderr)
+            return 2
+
+    for f, line_no, snippet in all_offenders:
+        print(f'{f}:{line_no}: interactive `read` is not the last line of its click-to-run '
+              f'block — content/supplemental-ui/js/click-to-run.js sends the whole block to the '
+              f'terminal in one write, so the next line is swallowed as this read\'s input. '
+              f'Split the block so the read ends it. ({snippet!r})')
+
+    if all_offenders:
+        print(f"\nclick-to-run-guard: {len(all_offenders)} offender(s) across {total_blocks} "
+              f"execute block(s) in {len(files)} file(s) scanned.", file=sys.stderr)
+        return 1
+
+    print(f"click-to-run-guard: clean ({total_blocks} execute block(s) across {len(files)} "
+          f"file(s) scanned).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,76 @@
+// Canary fixture for tools/lint/click-to-run-guard.py — NOT content, never built by antora, never
+// linked from any nav. Its only job is to hold one deliberately BROKEN click-to-run block plus one
+// example of every safe form beside it, so `click-to-run-guard.py --self-test` can prove the
+// detector fires on the broken shape and stays silent on every safe one. DO NOT "fix" the broken
+// block below — that is the point of this file. See the postmortem in the script's own docstring
+// (commit 76ae9d3): content/supplemental-ui/js/click-to-run.js sends an entire block to the
+// terminal in ONE write, so a `read` that is not a block's last line eats the line after it.
+
+// Case 1 (BROKEN) — an interactive `read` followed by another line in the SAME block. On a real
+// cockpit this line becomes the read's answer and the export below it never runs.
+[source,sh,role=execute]
+----
+read -rsp "Your workshop password: " PW; echo
+export TOKEN_EXCHANGE="uses $PW"
+----
+
+// Case 2 (safe — pipe-fed) — `read` here drains the pipe from `head`, not the terminal. Harmless
+// no matter where it sits in the block; this one deliberately is NOT the last line either.
+[source,sh,role=execute]
+----
+tail -n +2 /data/claims.csv | head -4 | while IFS=, read -r id claimant type amount; do
+  echo "$id $claimant $type $amount"
+done
+echo "loop finished"
+----
+
+// Case 3 (safe — explicit fd redirect) — `<&3` means this read's input is fd 3, never the
+// attendee's keystrokes, regardless of position in the block.
+[source,sh,role=execute]
+----
+exec 3<>/dev/tcp/localhost/5432
+printf '\x00\x00\x00\x08\x04\xd2\x16\x2f' >&3
+read -t 3 -n1 reply <&3 && echo "answered with: $reply"
+----
+
+// Case 4 (safe — read inside a heredoc body) — this `read` is DATA destined for a manifest via
+// `oc apply -f -`, never a command the terminal executes at click time. It sits mid-block on
+// purpose to prove the heredoc tracker, not the last-line rule, is what keeps it quiet.
+[source,sh,role=execute]
+----
+oc apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fraud-inference
+spec:
+  template:
+    spec:
+      containers:
+        - name: infer
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              tail -n +2 /data/claims.csv | while IFS=, read -r id amount; do
+                echo "$id $amount"
+              done
+EOF
+oc wait --for=condition=complete job/fraud-inference --timeout=180s
+----
+
+// Case 5 (safe — prose/comment, not a command at all) — the word "read" here never invokes the
+// shell builtin, so it must never be flagged, wherever it sits in the block.
+[source,sh,role=execute]
+----
+# read the Job's logs if this step looks stuck before re-running it
+oc get pods -n {user}-dev
+----
+
+// Case 6 (safe — correct usage) — an interactive `read` that correctly IS the block's last line.
+// This is the fixed shape from gitops-at-scale/lab.adoc and pipelines-fundamentals/lab.adoc; the
+// guard must stay silent on it or every module that already did this right would start failing CI.
+[source,sh,role=execute]
+----
+export ARGOCD_SERVER=student-gitops-server-student-gitops.example.com
+read -rsp "Your workshop password: " PW; echo
+----
