@@ -9,21 +9,29 @@ replacement for the removed `ClusterTask` kind. No bundled-Task YAML is ever cop
 | Layer | Where it lives | Example |
 |---|---|---|
 | Catalog (shipped) | `openshift-pipelines` namespace | `git-clone`, `buildah`, `openshift-client` — cluster resolver |
-| Org library (curated) | `ogsr-parasol-tasks` namespace | `image-size-report`, `maven-jdk21` — cluster resolver |
-| App pipeline | `{user}-cicd` namespace | `parasol-claims-build-test-deploy` |
+| Org library (curated) | `ogsr-parasol-tasks` namespace | `image-size-report`, `maven-jdk21`, `acs-image-check`, `sonar-scan`, `trivy-scan`, `roxctl-deployment-check`, `zap-baseline`, `k6-load-test` — cluster resolver |
+| App pipeline | `{user}-cicd` namespace | `parasol-claims-build-test-deploy`, `parasol-claims-devsecops` |
 
 ## Contents
 
 ```
 pipelines/
-├── tasks/                         curated org library (installed into the ogsr-parasol-tasks namespace)
-│   ├── image-size-report.yaml     reports image pull-size + budget; emits results (flagship example)
-│   ├── maven-jdk21.yaml           JDK 21 Maven runner (the shipped maven task is JDK 17)
-│   └── kustomization.yaml         `oc apply -k pipelines/tasks`
+├── tasks/                             curated org library (installed into the ogsr-parasol-tasks namespace)
+│   ├── image-size-report.yaml         reports image pull-size + budget; emits results (flagship example, pipelines-fundamentals)
+│   ├── maven-jdk21.yaml                JDK 21 Maven runner (the shipped maven task is JDK 17, pipelines-fundamentals)
+│   ├── acs-image-check.yaml           RHACS build-time image check (trusted-supply-chain scan gate)
+│   ├── sonar-scan.yaml                SonarQube SAST gate (app-security-testing)
+│   ├── trivy-scan.yaml                Trivy SCA gate: dep CVEs + CycloneDX SBOM (app-security-testing)
+│   ├── roxctl-deployment-check.yaml   RHACS deploy-time config-security gate (app-security-testing)
+│   ├── zap-baseline.yaml              ZAP baseline DAST gate (app-security-testing)
+│   ├── k6-load-test.yaml              k6 perf gate: p95 latency + error-rate budget (app-security-testing)
+│   └── kustomization.yaml             `oc apply -k pipelines/tasks`
 ├── pipeline/
-│   └── parasol-claims-build.yaml  fetch -> unit-test -> build-image -> image-report -> deploy
+│   ├── parasol-claims-build.yaml      fetch -> unit-test -> build-image -> image-report -> deploy (pipelines-fundamentals)
+│   └── parasol-claims-devsecops.yaml  12-stage DevSecOps capstone: SAST/SCA/build/image-scan/sign/config-check/deploy/DAST/perf (app-security-testing)
 ├── pipelinerun/
-│   └── parasol-claims-run.yaml    ad-hoc run (the "run it by hand" beat) + workspace/memory shape
+│   ├── parasol-claims-run.yaml            ad-hoc run for the pipelines-fundamentals pipeline + workspace/memory shape
+│   └── parasol-claims-devsecops-run.yaml  ad-hoc run for the DevSecOps capstone (shared-workspace + zap-work + k6-work + taskRunSpecs)
 ├── .tekton/
 │   └── parasol-claims-pull-request.yaml   Pipelines-as-Code entrypoint (the git-push beat)
 └── rbac/
@@ -32,14 +40,17 @@ pipelines/
 
 ## Who owns what (layering)
 
-- **The shared `parasol-tasks` library** (namespace + both Tasks + cluster-resolver read-RBAC for
+- **The shared `parasol-tasks` library** (namespace + all eight Tasks + cluster-resolver read-RBAC for
   every `{user}-cicd` ServiceAccount) is owned by the **workshop layer**, GitOps-installed via
   `gitops/workshop-config/templates/parasol-tasks.yaml`. It is shared and survives `ws reset`. The
   Task bodies there are kept byte-identical to `tasks/*.yaml` by hand (Helm can't read outside its
-  chart). It is workshop-layer, not `platform-portfolio/`, because it is Parasol-branded content and
-  its RBAC is parameterized by the per-user model — the portfolio stays workshop-agnostic.
+  chart) — verified in lockstep by `tools/lint/copy-drift-guard.py`. It is workshop-layer, not
+  `platform-portfolio/`, because it is Parasol-branded content and its RBAC is parameterized by the
+  per-user model — the portfolio stays workshop-agnostic.
 - **The per-user pipeline** (the `Pipeline`, a `PipelineRun`/`.tekton` run) is materialized in
-  `{user}-cicd` by the **pipelines-fundamentals entry state** (`gitops/entry-states/pipelines-fundamentals/`, built later). The push +
+  `{user}-cicd` by the **pipelines-fundamentals entry state** (`gitops/entry-states/pipelines-fundamentals/`) for
+  `parasol-claims-build-test-deploy`, and by the **app-security-testing entry state**
+  (`gitops/entry-states/app-security-testing/`) for the `parasol-claims-devsecops` capstone. The push +
   deploy RBAC is free: the operator pre-creates a `pipeline` SA bound to `edit` + `system:image-builder`
   in every namespace (see `rbac/pipeline-rbac.example.yaml`).
 
@@ -54,6 +65,15 @@ tkn pipelinerun logs -Lf -n <user>-cicd
 
 The `image` target defaults to the run's own namespace, so the same files work in any `-cicd`
 namespace. The run builds from the shared `parasol/parasol-claims` repo in the in-cluster Gitea.
+
+The app-security-testing DevSecOps capstone runs the same way, but needs the `sonar-auth` and
+`rox-api-token` Secrets in the namespace (the app-security-testing entry state copies them per-user):
+
+```sh
+oc apply -f pipelines/pipeline/parasol-claims-devsecops.yaml -n <user>-cicd
+oc create -f pipelines/pipelinerun/parasol-claims-devsecops-run.yaml -n <user>-cicd
+tkn pipelinerun logs -Lf -n <user>-cicd
+```
 
 ## Notes verified on-cluster (OCP 4.21.22 / OpenShift Pipelines 1.22.4)
 

@@ -1049,6 +1049,30 @@ cmd_solve() {  # instructor: materialize the module END state (entry chart with 
   grep -q '^solve:' "${ENTRY_DIR}/${module}/values.yaml" 2>/dev/null \
     || die "${module}'s chart defines no solve state (values.yaml lacks 'solve:')"
   gc_conflicts "$user" "$module"
+
+  # ENTRY FIRST, then solve. Found 2026-07-31 by running `ws solve serverless-zero-to-hero` against a
+  # namespace that had never been started: it produced a ksvc stuck Ready=False / RevisionMissing and
+  # still printed "demo-ready".
+  #
+  # The cause is specific to charts whose solve MORPHS an object rather than adding one. serverless's
+  # ksvc names its revision `parasol-claims-v1` at entry and `parasol-claims-v2` under solve, and its
+  # solve traffic block splits 80/20 across BOTH names. Knative mints a revision when the template
+  # changes, so applying solve to an empty namespace creates v2 and only v2 — v1 never existed, the
+  # traffic reference dangles, and the Route never becomes ready. Applying entry first mints v1;
+  # revisions are immutable and persist, so the subsequent solve mints v2 alongside it and the split
+  # resolves. Verified both ways on a live cluster: solve-alone gives
+  # `RevisionMissing: Revision "parasol-claims-v1" referenced in traffic not found`, while
+  # start-then-solve gives Ready=True with both revisions present.
+  #
+  # This is the same principle as the build-deliver fix (d72d3d5): solve must represent the FINISHED
+  # lab, and the finished serverless lab has two revisions because the attendee made one and then the
+  # other. A solve that skips the intermediate state is not the end state, it is a different state.
+  # Additive charts are unaffected — for them the entry apply is what solve would have produced anyway.
+  info "materializing ${module} entry state first (solve builds on it)…"
+  render_app "$module" "$user" | oc apply -f - >/dev/null
+  sync_app_operation "$(app_name "$module" "$user")"
+  wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")" "false" || true
+
   info "materializing ${module} END state for ${user} (instructor solve)…"
   render_app "$module" "$user" "true" | oc apply -f -
   # solve flips a helm parameter on an EXISTING app — without a hard-refresh + operation Argo
