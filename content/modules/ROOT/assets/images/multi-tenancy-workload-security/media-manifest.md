@@ -46,7 +46,7 @@ show a minted token on screen (decode claims only).
 **Animated gif (PREFERRED for the multi-click RoleBinding flow):**
 `multi-tenancy-workload-security-04-grant-role.gif` (<30 s, silent) — the Console path of ex. 3:
 User Management → RoleBindings → Create binding → pick ServiceAccount subject + `edit` role → Create,
-then the binding appears. Multi-click console flow → gif beats static shots (Serhat 2026-07-11).
+then the binding appears. Multi-click console flow → gif beats static shots (project owner, 2026-07-11).
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console — no perspective
 switch): (1) Deployment **Events** tab surfaces the `FailedCreate`/SCC message; (2) **User
