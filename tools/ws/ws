@@ -2087,21 +2087,28 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
   # the secret contents + IdP reference only, which is what actually gates a successful attendee login.
   echo
   info "verifying…"
-  local dec missing="" present=0 vu
+  local dec missing="" present=0 vu passwd_verify_bad=0
   dec="$(oc get secret htpasswd-workshop-users -n openshift-config -o jsonpath='{.data.htpasswd}' 2>/dev/null | base64 -d || true)"
   for vu in "${users_arr[@]}"; do
     if grep -q "^${vu}:" <<< "$dec"; then present=$((present+1)); else missing="${missing} ${vu}"; fi
   done
-  if [[ -z "$missing" ]]; then ok "htpasswd secret carries all ${present}/${#users_arr[@]} users"; else err "htpasswd secret MISSING:${missing}"; fi
+  if [[ -z "$missing" ]]; then ok "htpasswd secret carries all ${present}/${#users_arr[@]} users"; else err "htpasswd secret MISSING:${missing}"; passwd_verify_bad=1; fi
   if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
     ok "OAuth IdP 'workshop-users' still wired to the secret"
   else
-    err "OAuth IdP 'workshop-users' NOT present — attendees cannot log in (bootstrap adds it)"
+    err "OAuth IdP 'workshop-users' NOT present — attendees cannot log in (bootstrap adds it)"; passwd_verify_bad=1
   fi
 
   # Report: surface the oauth-pod roll delay, the verification caveat, and the new (non-secret) password.
+  # The banner must not claim more than the checks above proved (the class of bug 'ws solve' had: a
+  # success message printing after a step it never confirmed) — a missing user or a detached IdP means
+  # some attendees CANNOT log in with this password, so say that instead of "rotated."
   echo
-  ok "workshop login password rotated."
+  if [[ "$passwd_verify_bad" == 0 ]]; then
+    ok "workshop login password rotated."
+  else
+    err "password written, but verification above found a problem — do NOT assume every attendee can log in."
+  fi
   info "the oauth-openshift pods roll (~1 min) before the new password takes effect (the console login"
   echo "   itself is not scriptable, so only the secret + IdP wiring are verified above)."
   echo "   watch the roll: oc rollout status deploy/oauth-openshift -n openshift-authentication"
@@ -2118,6 +2125,7 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
   # exit, so leaving it armed tripped `set -u` ("htp: unbound variable") → ws passwd returned rc 1 on
   # success. die() paths still fire the trap in-scope; this covers the normal return.
   rm -f "$htp"; trap - EXIT
+  [[ "$passwd_verify_bad" == 0 ]] || return 1
 }
 
 delete_app_with_finalizer() {  # app — delete an entry Argo app in ARGO_NS, stripping a stuck finalizer as
@@ -3623,6 +3631,18 @@ main() {
       *) [[ -z "$module" ]] && module="$1" || extra+=("$1"); shift;;
     esac
   done
+  # --all-users is ONLY meaningful to `ws start` (cmd_start's own instructor-cohort branch, line ~785).
+  # Every other verb has no such branch and would treat the literal string "--all-users" as an attendee
+  # identity: app_name/meta_namespaces interpolate it straight into an Application name and namespace
+  # list (entry-<module>---all-users, "--all-users-dev", …) — garbage that either no-ops silently
+  # (cmd_prep/cmd_reset's purge steps find nothing to purge) or, worse, falls through cmd_reset/cmd_prep's
+  # trailing `cmd_start "$user" "$module"` call STRAIGHT INTO cmd_start's all-users branch: `ws reset
+  # <module> --all-users` materializes (never resets) the module for the WHOLE COHORT — the exact
+  # scope-widening this repo's require_user_token was written to stop for `--user 1`, just reached by a
+  # different token. Reject it here, before it ever reaches user_arg/module_arg or a cmd_* body.
+  if [[ "$user" == "--all-users" && "$cmd" != "start" ]]; then
+    die "${cmd}: --all-users is only valid for 'ws start' — for ${cmd}, name one attendee (--user userN) and repeat per user"
+  fi
   # Canonicalize <user>/<module> to their internal keys BEFORE dispatch. module_arg/user_arg die
   # (exit 1) on a bad token — but inside a $(…) substitution passed as a command ARGUMENT that exit
   # ends only the SUBSHELL, and set -e does NOT act on a failed substitution in argument position,
