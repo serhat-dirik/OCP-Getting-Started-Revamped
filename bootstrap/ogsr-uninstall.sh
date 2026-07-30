@@ -1881,6 +1881,38 @@ step_cluster_rbac() {  # 6 — cluster-scoped objects the cascade CANNOT reach, 
   # cascade has drained and the guard inside del_appprojects re-checks anyway.
   sub remove_argo_tls_cert_key
   sub sweep_dead_webhooks
+  sub del_labeled_rbac_in_preserved_ns
+  return 0
+}
+
+del_labeled_rbac_in_preserved_ns() {
+  # Owner-labelled RBAC we placed in namespaces we PRESERVE. Found by the #84 regression, 2026-07-30:
+  # a completed teardown left roles/maas-copy-agentic-ai-1 and its RoleBinding in openshift-lightspeed.
+  #
+  # Why nothing caught it. Everything else we create lives in a namespace we delete outright, and
+  # deleting a namespace takes its contents with it — so namespaced cleanup has never been needed.
+  # del_labeled_cluster only handles CLUSTER-scoped kinds, as its own name says. The leak is exactly
+  # the intersection: objects WE created, inside a namespace we deliberately do NOT delete because the
+  # org owns it. RBAC is the class that matters there — a leftover Role/RoleBinding grants standing
+  # access after a teardown, which is the one leftover kind with a security consequence rather than
+  # merely an untidy one.
+  #
+  # Deliberately narrow, and it must stay narrow. Our kustomize label transformer stamps the owner
+  # label on every resource in a component INCLUDING adopted ones, so an owner label is not proof we
+  # created something — ogsr-check-clean.sh says so in its own section [8/9]. A blanket "delete every
+  # owner-labelled object everywhere" sweep would therefore delete the org's resources that we merely
+  # marked. Restricting this to Roles and RoleBindings keeps it to objects this installer creates by
+  # hook rather than inherits, and leaves anything ambiguous to the checker's report and a human.
+  local kind ns name preserved
+  preserved="$(oc get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  [[ -n "$preserved" ]] || return 0
+  for kind in roles.rbac.authorization.k8s.io rolebindings.rbac.authorization.k8s.io; do
+    while IFS='|' read -r ns name; do
+      [[ -n "$ns" && -n "$name" ]] || continue
+      del_obj "$kind" "$name" "$ns"
+    done < <(oc get "$kind" -A -l "$OWNER_LABEL" \
+               -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  done
   return 0
 }
 
