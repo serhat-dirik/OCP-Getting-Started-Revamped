@@ -1,4 +1,4 @@
-"""Open a HEADED browser on a dedicated throwaway profile so Serhat can log into the
+"""Open a HEADED browser on a dedicated throwaway profile so a human can log into the
 OpenShift console once. The session cookie is then persisted in PROFILE_DIR, and the
 capture script reuses it headlessly.
 
@@ -20,11 +20,45 @@ PROFILE_DIR = os.environ.get("OGSR_PROFILE", "./shot-profile")
 DEADLINE_S = 900  # 15 minutes to log in, then give up rather than hang forever
 
 
-def logged_in(url: str) -> bool:
-    """On the console host and past the OAuth/login hop."""
-    return "console-openshift-console" in url and not any(
-        s in url for s in ("/oauth", "/login", "/auth/")
-    )
+def logged_in(page) -> bool:
+    """Ask the console who it thinks we are, from inside the page.
+
+    WHY NOT THE URL. This used to sniff page.url: on the console host, and not on /oauth,
+    /login or /auth/ — and it was wrong twice, in opposite directions, which is what makes it
+    worth a comment rather than a quiet fix.
+
+      · False POSITIVE (2026-07-29): an empty single-page-app shell satisfies both halves. The
+        capture run then started against a session that was not authenticated and produced
+        screenshots of a login wall. The capture runbook warns about exactly this trap; the
+        script meant to prevent it was built out of the trap.
+      · False NEGATIVE (2026-07-30): a real, successful login was never recognised, so the
+        window sat open until the 15-minute deadline while the human waited on it, and the
+        session it had in fact captured looked like a failure.
+
+    A URL cannot answer "am I authenticated" because authentication is not a property of the
+    address bar. So ask the thing that knows. The console proxies the Kubernetes API at
+    /api/kubernetes/, and `users/~` is the API's own answer to "who is this request from" — it
+    needs no privileges beyond being someone. 200 with a username is proof; 401 is proof of the
+    negative; anything else (proxy hiccup, page mid-navigation, fetch rejected) is not an answer
+    and we keep waiting rather than guess. Returns the username, or None.
+    """
+    try:
+        return page.evaluate(
+            """async () => {
+                try {
+                    const r = await fetch(
+                        '/api/kubernetes/apis/user.openshift.io/v1/users/~',
+                        {headers: {Accept: 'application/json'}, credentials: 'same-origin'}
+                    );
+                    if (!r.ok) return null;
+                    const j = await r.json();
+                    return (j && j.metadata && j.metadata.name) || null;
+                } catch (e) { return null; }
+            }"""
+        )
+    except Exception:
+        # Page navigating, context torn down, evaluate raced a reload — not an answer.
+        return None
 
 
 with sync_playwright() as p:
@@ -39,24 +73,34 @@ with sync_playwright() as p:
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.goto(CONSOLE, wait_until="domcontentloaded", timeout=60_000)
 
-    print("WINDOW OPEN — log in as kubeadmin or user1 in the browser window that just appeared.")
+    # Not kubeadmin: every grounding marker is a claim about what an ATTENDEE can see and click,
+    # and cluster-admin renders a different console. An admin login produces confident wrong answers.
+    print(
+        "WINDOW OPEN — in the window that just appeared, choose the 'workshop-users' identity\n"
+        "provider and sign in as an attendee (user1). Do NOT use kubeadmin or the 'rhbk' provider."
+    )
     sys.stdout.flush()
 
     started = time.time()
-    ok = False
+    who = None
     while time.time() - started < DEADLINE_S:
-        try:
-            if logged_in(page.url):
-                # Confirm it is really the console shell, not a redirect in flight.
-                page.wait_for_timeout(3000)
-                if logged_in(page.url) and len(page.inner_text("body")) > 200:
-                    ok = True
-                    break
-        except Exception:
-            pass
+        # Every tab, not just the first. ctx.pages[0] is the tab we opened; if the login flow
+        # or the human lands the console in a NEW tab, that first tab can sit on a stale login
+        # page forever while a perfectly good session exists one tab over. Polling all of them
+        # costs nothing and removes a whole class of "it worked but the script disagreed".
+        for candidate in ctx.pages:
+            who = logged_in(candidate)
+            if who:
+                page = candidate
+                break
+        if who:
+            break
         time.sleep(3)
 
-    print("LOGGED_IN" if ok else "TIMEOUT — no console session detected")
+    if who:
+        print(f"LOGGED_IN as {who}")
+    else:
+        print("TIMEOUT — no console session detected")
     print("final url:", page.url)
     sys.stdout.flush()
     ctx.close()
