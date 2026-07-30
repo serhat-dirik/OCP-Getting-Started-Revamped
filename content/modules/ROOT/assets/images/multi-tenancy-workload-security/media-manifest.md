@@ -4,7 +4,9 @@ Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-shor
 This module is **CLI-first** — the console is dual-path but not the content — so the mandatory
 recording is a **terminal cast** of the demo arc; screenshots are optional enrichment for the
 Console tabs. All lab mechanics and every expected-output block were captured on-cluster (OCP 4.21.22,
-2026-07-12 as user1); the diagram SVG exports below are the deferred media pass. Every screenshot
+2026-07-12 as user1); the diagram SVG exports below are already rendered and committed (2026-07-26,
+label fix + platform-accretion diagram 2026-07-28) — the mandatory terminal cast and the optional
+screenshots remain the deferred media pass. Every screenshot
 needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc` files with a
 commented `// media-pass:` line — replace with the `image::…` when the asset lands.
 

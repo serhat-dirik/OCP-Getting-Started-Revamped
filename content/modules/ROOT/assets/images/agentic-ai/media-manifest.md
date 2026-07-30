@@ -11,7 +11,9 @@ endpoint) on 2026-07-13/14; the OpenShift **console** click-paths (Topology, pod
 are the deferred media pass and carry `[CAPTURE-VERIFY]` in the `.adoc`. Every screenshot needs alt text
 (what it shows + what to notice). Embed points are marked in the `.adoc` files with a commented
 `// media-pass:` (diagrams) or `[CAPTURE-VERIFY]` (console) line — replace with the `image::…` when the
-asset lands. **Do not shoot yet** — this is the spec; capture in the media phase, and scrub the cluster
+asset lands. **The three diagrams below are already rendered and committed** (2026-07-26, label-space
+fix 2026-07-28) — only the screenshots and recording remain the pending capture. **Do not shoot those
+yet** — this is the spec; capture in the media phase, and scrub the cluster
 domain to a placeholder (`apps.example.com`) and the user to `{user}` in every frame. **Never show the
 MaaS key** — the attendee never handles it, and it must not appear in any terminal frame or pod-log capture.
 

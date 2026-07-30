@@ -4,18 +4,20 @@ Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-shor
 This module is **CLI-first** — the console is not the content, so the mandatory recording is a
 **terminal cast** of the demo arc, and screenshots are optional enrichment. All lab mechanics and
 every expected-output block were captured on-cluster (OCP 4.21 / Red Hat build of Kueue 1.3.1,
-2026-07-09 as user8); the diagram SVG exports below are the deferred media pass. Every screenshot
-needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc` files with a
-commented `// media-pass: image::…` line — uncomment when the asset lands.
+2026-07-09 as user8); the diagram SVG exports below are all rendered (2026-07-26, label fix and
+platform-accretion diagram 2026-07-28) — the recordings and optional screenshots are the remaining
+media pass. Every screenshot needs alt text (what it shows + what to notice). Embed points are
+marked in the `.adoc` files with a commented `// media-pass: image::…` line — uncomment when the
+asset lands.
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
-| Filename | Source | Notes |
-|----------|--------|-------|
-| `jobs-batch-kueue-01-async-spectrum.svg` | concept.adoc Mermaid "async spectrum" — `examples/diagrams/jobs-batch-kueue/01-async-spectrum.mmd` | request-driven → event-driven → **batch** (highlighted); the framing diagram, reused on slide 2 |
-| `jobs-batch-kueue-02-kueue-admission.svg` | concept.adoc Mermaid "admission flow" — `examples/diagrams/jobs-batch-kueue/02-kueue-admission.mmd` | Job (labelled) → LocalQueue → ClusterQueue quota → **admitted / pending / preempted**; the module's anchor diagram, reused on slide 5 |
-| `jobs-batch-kueue-03-platform-accretion-v23.svg` | ✅ RENDERED 2026-07-28 — `examples/diagrams/jobs-batch-kueue/03-platform-accretion-v23.mmd` | **master accretion diagram**, the M06 layer (batch tier + admission control) highlighted on the running Parasol platform |
-| `jobs-batch-kueue-04-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/jobs-batch-kueue/04-what-you-built.mmd` | Job/CronJob → LocalQueue → ClusterQueue (admitted / pending / preempted), with the AI inference job feeding the *same* LocalQueue (green = ran to completion; amber = queued/preempted) |
+| Filename | Status | Source | Notes |
+|----------|--------|--------|-------|
+| `jobs-batch-kueue-01-async-spectrum.svg` | ✅ RENDERED 2026-07-26 (label fix 2026-07-28) | concept.adoc Mermaid "async spectrum" — `examples/diagrams/jobs-batch-kueue/01-async-spectrum.mmd` | request-driven → event-driven → **batch** (highlighted); the framing diagram, reused on slide 2 |
+| `jobs-batch-kueue-02-kueue-admission.svg` | ✅ RENDERED 2026-07-26 (label fix 2026-07-28) | concept.adoc Mermaid "admission flow" — `examples/diagrams/jobs-batch-kueue/02-kueue-admission.mmd` | Job (labelled) → LocalQueue → ClusterQueue quota → **admitted / pending / preempted**; the module's anchor diagram, reused on slide 5 |
+| `jobs-batch-kueue-03-platform-accretion-v23.svg` | ✅ RENDERED 2026-07-28 | concept.adoc — `examples/diagrams/jobs-batch-kueue/03-platform-accretion-v23.mmd` | **master accretion diagram**, the M06 layer (batch tier + admission control) highlighted on the running Parasol platform |
+| `jobs-batch-kueue-04-what-you-built.svg` | ✅ RENDERED 2026-07-26 (label fix 2026-07-28) | wrapup.adoc Mermaid recap — `examples/diagrams/jobs-batch-kueue/04-what-you-built.mmd` | Job/CronJob → LocalQueue → ClusterQueue (admitted / pending / preempted), with the AI inference job feeding the *same* LocalQueue (green = ran to completion; amber = queued/preempted) |
 
 Shared legend across all four: namespace box, Job/Pod, queue (LocalQueue/ClusterQueue) tag, quota
 gauge, priority chevron — same palette as M01–M05 (Red Hat-neutral, no vendor-logo soup).

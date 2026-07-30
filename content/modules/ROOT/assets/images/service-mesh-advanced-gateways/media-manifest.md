@@ -4,10 +4,11 @@ Media pass shopping list. Filenames follow `04-STYLE-GUIDE §4` (`<slug>-NN-shor
 This module's **marquee visual is the Kiali service graph** — a screenshot no CLI output can replace — so
 the Kiali captures below are the priority of the media pass. All lab mechanics and every expected-output
 block were captured on-cluster (OCP 4.21.22, Kubernetes 1.34, OpenShift Service Mesh 3.3.5 / Istio v1.28.6,
-2026-07-13 as user4); the diagram SVG exports and the Kiali/console screenshots are the deferred media pass.
+2026-07-13 as user4); the diagram SVG exports are already rendered and committed (2026-07-26, label fix +
+traffic-split diagram 2026-07-28) — the Kiali/console screenshots remain the deferred media pass.
 Every screenshot needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc`
 files with a commented `// media-pass:` (diagrams) or `// [CAPTURE-VERIFY]` (console/Kiali) line — replace
-with the `image::…` when the asset lands. **Do not shoot yet** — this is the spec; capture in the media phase.
+with the `image::…` when the asset lands. **Do not shoot those yet** — this is the spec; capture in the media phase.
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 

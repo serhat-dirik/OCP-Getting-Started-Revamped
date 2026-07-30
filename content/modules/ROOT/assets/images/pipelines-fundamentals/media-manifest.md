@@ -19,11 +19,11 @@ with no five-Task graph. See its `❌ RE-CAPTURE` row below.
 
 Media note: the module's pipeline mechanics — the anatomy run (12m54s, image 391 MB), the
 task-library resolver refs, the break-fix RED/GREEN, and the live PaC git-push fire — were all
-performed and captured from the CLI/API as `user6` on 2026-07-10. The console screenshots and the
-SVG diagram exports below are the **deferred media pass** (no screenshots captured yet — the build
-was CLI-driven). Diagrams ship as a standalone Mermaid `.mmd` under
-`examples/diagrams/pipelines-fundamentals/` (never inline in the `.adoc`); the SVG exports
-replace/augment them in the pass.
+performed and captured from the CLI/API as `user6` on 2026-07-10. The SVG diagram exports are already
+rendered and committed (2026-07-26, label fix + platform-accretion diagram 2026-07-28). Diagrams ship
+as a standalone Mermaid `.mmd` under `examples/diagrams/pipelines-fundamentals/` (never inline in the
+`.adoc`); the console screenshots below are the **deferred media pass** (no screenshots captured yet —
+the build was CLI-driven).
 
 ## Screenshots (console/UI views — the view IS the content)
 

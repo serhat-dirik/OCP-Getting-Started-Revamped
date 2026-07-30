@@ -7,19 +7,20 @@ claim `Data`, and the **dead-letter sink page showing a dead event stamped `knat
 static diagram conveys "the consumer genuinely received and displayed this event," so the event-display and
 dead-letter screenshots are the priority of the media pass. All lab mechanics and every expected-output
 block were captured on-cluster (OCP 4.21.22, Kubernetes 1.34, OpenShift Serverless Eventing 1.37.1 / Knative
-Eventing 1.17, 2026-07-13 in namespace user7-dev); the diagram SVG exports and the console/event-display
-screenshots are the deferred media pass. Every screenshot needs alt text (what it shows + what to notice).
-Embed points are marked in the `.adoc` files with a commented `// media-pass:` (diagrams) or
+Eventing 1.17, 2026-07-13 in namespace user7-dev); the diagram SVG exports are rendered (2026-07-26,
+label fix + the retries/DLQ diagram 2026-07-28) — the console/event-display screenshots and the
+recording are the remaining media pass. Every screenshot needs alt text (what it shows + what to
+notice). Embed points are marked in the `.adoc` files with a commented `// media-pass:` (diagrams) or
 `// [CAPTURE-VERIFY]` (console) line — replace with the `image::…` when the asset lands. **Do not shoot
-yet** — this is the spec; capture in the media phase.
+yet** — the screenshots and recording below are still the spec; capture in the media phase.
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
-| Filename | Source | Notes |
-|----------|--------|-------|
-| `eventing-deep-dive-01-eventing-model.svg` | concept.adoc Mermaid "The four primitives" — `examples/diagrams/eventing-deep-dive/01-eventing-model.mmd` | amber seeded PingSource + a "you: POST" actor both feeding a blue in-memory Broker; three green triggers (catch-all, filter `type`, filter `claimpriority`) to the light-blue `claims-consumer`; a dashed "on repeated failure" edge to `claims-dlq`. The module's spine — reused on slide 2 |
-| `eventing-deep-dive-02-retries-dlq.svg` | concept.adoc "Filtering, delivery, and the dead-letter sink" — `examples/diagrams/eventing-deep-dive/02-retries-dlq.mmd` | a trigger→consumer edge with the consumer marked **broken**; the event bouncing through attempt 0 + retries at **1s/2s/4s** (~8s), then a fat arrow to the dead-letter sink showing a dead-event card with **`knativeerrorcode: 404`** and `knativeerrordest` highlighted. The "not dropped — dead-lettered, with why" visual |
-| `eventing-deep-dive-03-what-you-built.svg` | wrapup.adoc Mermaid recap — `examples/diagrams/eventing-deep-dive/03-what-you-built.mmd` | amber seeded source; blue in-memory broker; the three green triggers (incl. the filtered + retry/DLQ `claims-fraud-review`); light-blue `claims-consumer` + `claims-dlq` dead-letter sink |
+| Filename | Status | Source | Notes |
+|----------|--------|--------|-------|
+| `eventing-deep-dive-01-eventing-model.svg` | ✅ RENDERED 2026-07-26 (label fix 2026-07-28) | concept.adoc Mermaid "The four primitives" — `examples/diagrams/eventing-deep-dive/01-eventing-model.mmd` | amber seeded PingSource + a "you: POST" actor both feeding a blue in-memory Broker; three green triggers (catch-all, filter `type`, filter `claimpriority`) to the light-blue `claims-consumer`; a dashed "on repeated failure" edge to `claims-dlq`. The module's spine — reused on slide 2 |
+| `eventing-deep-dive-02-retries-dlq.svg` | ✅ RENDERED 2026-07-28 | concept.adoc "Filtering, delivery, and the dead-letter sink" — `examples/diagrams/eventing-deep-dive/02-retries-dlq.mmd` | a trigger→consumer edge with the consumer marked **broken**; the event bouncing through attempt 0 + retries at **1s/2s/4s** (~8s), then a fat arrow to the dead-letter sink showing a dead-event card with **`knativeerrorcode: 404`** and `knativeerrordest` highlighted. The "not dropped — dead-lettered, with why" visual |
+| `eventing-deep-dive-03-what-you-built.svg` | ✅ RENDERED 2026-07-26 (label fix 2026-07-28) | wrapup.adoc Mermaid recap — `examples/diagrams/eventing-deep-dive/03-what-you-built.mmd` | amber seeded source; blue in-memory broker; the three green triggers (incl. the filtered + retry/DLQ `claims-fraud-review`); light-blue `claims-consumer` + `claims-dlq` dead-letter sink |
 
 Shared legend across the diagrams: the Broker hub, the Trigger-with-filter chip, the CloudEvents envelope
 card (type/source/id + extension attr), the scale-to-zero consumer, the dead-letter sink — Red Hat-neutral

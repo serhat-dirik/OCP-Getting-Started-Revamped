@@ -9,10 +9,11 @@ failover capture is the priority of the media pass**. The **Service Interconnect
 All lab mechanics and every expected-output block were captured on-cluster (OCP 4.21.22, OpenShift Service
 Mesh 3.3.5 / Istio 1.28, Red Hat Service Interconnect 2.2.1 / Skupper v2, 2026-07-13 in namespaces
 user1-client / user1-site-a / user1-site-b — the failover flip was measured across ~90 continuous requests
-with zero errors). The diagram SVG exports and the console/Service-Interconnect screenshots are the deferred
-media pass. Every screenshot needs alt text (what it shows + what to notice). Embed points are marked in the
+with zero errors). The diagram SVG exports are already rendered and committed (2026-07-26, label fix
+2026-07-28) — the console/Service-Interconnect screenshots remain the deferred media pass. Every
+screenshot needs alt text (what it shows + what to notice). Embed points are marked in the
 `.adoc` files with a commented `// media-pass:` (diagrams) or `// [CAPTURE-VERIFY]` (console) line — replace
-with the `image::…` when the asset lands. **Do not shoot yet** — this is the spec; capture in the media phase.
+with the `image::…` when the asset lands. **Do not shoot those yet** — this is the spec; capture in the media phase.
 **Redact the cluster domain** in every screenshot/URL (use `apps.example.com`); never show the live RHDP
 cluster domain (privacy guard — the ingress Route and RHSI AccessGrant URLs carry it on-cluster).
 

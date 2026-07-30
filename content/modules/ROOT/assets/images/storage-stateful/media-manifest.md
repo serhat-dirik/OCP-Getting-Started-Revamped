@@ -9,7 +9,9 @@ commented `// TODO(media): image::…` line — uncomment when the asset lands.
 This module is **CLI-first** — the console is not the content, so the mandatory recording is a
 **terminal cast** of the demo arc, and screenshots are optional enrichment. All lab mechanics
 and every expected-output block were captured on-cluster (OCP 4.21 / ODF external Ceph,
-2026-07-09); the diagram SVG exports below are the deferred media pass.
+2026-07-09); the diagram SVG exports below are already rendered and committed (2026-07-26, label fix
++ platform-accretion diagram 2026-07-28) — the mandatory terminal cast and the optional screenshots
+remain the deferred media pass.
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 

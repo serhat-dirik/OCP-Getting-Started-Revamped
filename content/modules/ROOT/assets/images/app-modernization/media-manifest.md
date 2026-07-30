@@ -11,7 +11,9 @@ MaaS endpoint, 2026-07-13) by driving the MTA Hub API and a real completion; the
 the Dev Spaces extension UI are the deferred media pass and carry `[CAPTURE-VERIFY]` in the `.adoc`. Every
 screenshot needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc` files with
 a commented `// media-pass:` (diagrams) or `[CAPTURE-VERIFY]` (console/IDE) line — replace with the
-`image::…` when the asset lands. **Do not shoot yet** — this is the spec; capture in the media phase, and
+`image::…` when the asset lands. **The two diagrams below are already rendered and committed**
+(2026-07-26, label-space fix 2026-07-28) — only the screenshots and recording remain the pending
+capture. **Do not shoot those yet** — this is the spec; capture in the media phase, and
 scrub the cluster domain to a placeholder (`apps.example.com`) and the user to `{user}` in every frame.
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)

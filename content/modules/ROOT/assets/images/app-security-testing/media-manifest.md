@@ -13,7 +13,9 @@ media pass and carry `[CAPTURE-VERIFY]` / `// CAPTURE-PENDING` in the `.adoc`. E
 text (what it shows + what to notice). Embed points are marked in the `.adoc` files with a commented
 `// media-pass:` (diagrams) or `[CAPTURE-VERIFY]` / `// CAPTURE-PENDING` (console) line — replace with the
 `image::…` when the asset lands. Capture **through the password-free authenticated attendee cockpit**
-(project convention — never the raw console OAuth login). **Do not shoot yet** — this is the spec; capture
+(project convention — never the raw console OAuth login). **The two diagrams below are already rendered
+and committed** (2026-07-26, label-space fix 2026-07-28) — only the screenshots and recording remain the
+pending capture. **Do not shoot those yet** — this is the spec; capture
 in the media phase, and scrub the live cluster domain to a placeholder (`apps.example.com`) and the user to
 `{user}` in every frame. **Never show a credential or token** — the Gitea push login, the SonarQube token,
 and the RHACS API token must not appear in any terminal frame or pod-log capture.

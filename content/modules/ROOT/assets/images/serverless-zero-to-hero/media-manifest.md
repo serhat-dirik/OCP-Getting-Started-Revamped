@@ -6,10 +6,11 @@ request, then ~0.1 s warm) and the Topology view of a service at **0 pods** waki
 static diagram fully conveys, so the terminal cast and the Topology screenshots are the priority of the
 media pass. All lab mechanics and every expected-output block were captured on-cluster (OCP 4.21.22,
 Kubernetes 1.34, OpenShift Serverless 1.37.1 / Knative Serving + Eventing, 2026-07-13 in namespace
-user6-dev); the diagram SVG exports and the console/Topology screenshots are the deferred media pass.
+user6-dev); the diagram SVG exports are already rendered and committed (2026-07-26, cold-start-timeline
+diagram + label fix 2026-07-28) — the console/Topology screenshots remain the deferred media pass.
 Every screenshot needs alt text (what it shows + what to notice). Embed points are marked in the `.adoc`
 files with a commented `// media-pass:` (diagrams) or `// [CAPTURE-VERIFY]` (console) line — replace with
-the `image::…` when the asset lands. **Do not shoot yet** — this is the spec; capture in the media phase.
+the `image::…` when the asset lands. **Do not shoot those yet** — this is the spec; capture in the media phase.
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 

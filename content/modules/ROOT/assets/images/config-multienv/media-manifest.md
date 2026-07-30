@@ -10,8 +10,9 @@ Constrained-environment note: the lab's CLI spine was built entirely from the **
 `oc` commands** and is cluster-grounded. The 2026-07-11 dual-path retrofit added Console tabs whose
 5 novel form/label references carry `[CAPTURE-VERIFY]` markers in `lab.adoc` — they map 1:1 onto
 the screenshots below, so one browser pass confirms the labels and captures the shots together.
-The screenshots are the console *alternatives* to the CLI spine plus the SVG diagram exports; both
-remain the deferred media pass.
+The screenshots are the console *alternatives* to the CLI spine. The SVG diagram exports are already
+rendered and committed (2026-07-26, label fix + platform-accretion diagram 2026-07-28) — the
+screenshots and recordings remain the deferred media pass.
 
 ## Screenshots (console views — the view IS the content)
 

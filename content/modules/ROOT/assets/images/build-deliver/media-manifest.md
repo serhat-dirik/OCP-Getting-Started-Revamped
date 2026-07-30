@@ -10,7 +10,8 @@ Media note: the module's build/template/end-state mechanics were verified from t
 `user2`; the console screenshots below were then captured on the live 4.21 console during the
 2026-07-10 browser-verification pass (see the Status column). Diagrams ship as a standalone
 Mermaid `.mmd` under `examples/diagrams/build-deliver/` (never inline in the `.adoc`); the SVG
-diagram exports remain the deferred media pass.
+diagram exports are already rendered and committed (2026-07-26, label fix + platform-accretion
+diagram 2026-07-28) — the remaining table rows below are the deferred media pass.
 
 ## Screenshots (console views — the view IS the content)
 
