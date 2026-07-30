@@ -687,7 +687,10 @@ mirror_host_namespaces() {  # namespaces whose Route serves a repo our Applicati
   [[ -n "$hosts" ]] || return 0
   while IFS='|' read -r rhost ns; do
     [[ -n "$rhost" && -n "$ns" ]] || continue
-    if printf '%s\n' "$hosts" | grep -qxF -- "$rhost"; then echo "$ns"; fi
+    # here-string, not `printf | grep -qxF` — same SIGPIPE-under-pipefail trap as install.sh's
+    # resolve_slug(): $hosts can carry more than one line, and an early match would otherwise risk
+    # reading as a non-match, misordering the cascade's mirror-last phase.
+    if grep -qxF -- "$rhost" <<< "$hosts"; then echo "$ns"; fi
   done < <(oc get routes --all-namespaces \
              -o jsonpath='{range .items[*]}{.spec.host}{"|"}{.metadata.namespace}{"\n"}{end}' 2>/dev/null || true) \
     | sort -u

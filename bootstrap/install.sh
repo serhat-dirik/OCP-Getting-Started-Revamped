@@ -80,14 +80,21 @@ resolve_slug() {
   local tok n slug
   tok="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
   [[ -z "$tok" || "$tok" == "null" ]] && return 1
-  if printf '%s' "$tok" | grep -qE '^m[0-9]+$'; then
+  # Here-strings, not `printf | grep -q`: under `set -o pipefail` a `grep -q`/`-qxF` that matches
+  # EARLY can exit before printf finishes writing the rest of $ALL_SLUGS, printf then dies of SIGPIPE,
+  # and the pipeline's reported status becomes printf's (141) instead of grep's success — a genuine
+  # match reads as a non-match. Reproduced with `bash -c 'set -o pipefail; printf ...| grep -q ...'`
+  # on a multi-line producer; ALL_SLUGS is exactly that (one line per module). A `<<<` here-string has
+  # no upstream process to kill, so the match can never be lost this way. Same class already fixed in
+  # ogsr-check-clean.sh (state_get, ns_has_foreign_csv, csv_matches_adopted) — audited 2026-07-30.
+  if grep -qE '^m[0-9]+$' <<< "$tok"; then
     n="${tok#m}"
     [[ "$n" -ge 1 ]] || return 1                       # m0 (yq index -1 = last) is not a module
     slug="$(yq -r ".modules[$((n - 1))].slug // \"\"" "$MODULES_YAML" 2>/dev/null || true)"
     [[ -n "$slug" && "$slug" != "null" ]] || return 1
     printf '%s' "$slug"; return 0
   fi
-  printf '%s\n' "$ALL_SLUGS" | grep -qxF "$tok" || return 1
+  grep -qxF "$tok" <<< "$ALL_SLUGS" || return 1
   printf '%s' "$tok"; return 0
 }
 
@@ -203,7 +210,9 @@ discover_maas_model() {
 
   count="$(printf '%s\n' "$ids" | grep -c . | tr -d ' ')"
   if [[ -n "$MAAS_MODEL" ]]; then
-    if printf '%s\n' "$ids" | grep -qxF "$MAAS_MODEL"; then
+    # here-string, not `printf | grep -qxF` — see resolve_slug() for why an early match on a
+    # multi-line producer can SIGPIPE the producer and read a real match as a non-match under pipefail.
+    if grep -qxF "$MAAS_MODEL" <<< "$ids"; then
       ok "maas.model '${MAAS_MODEL}' confirmed — the endpoint offers it (${count} model(s) available)"
     else
       warn "maas.model '${MAAS_MODEL}' is NOT among the ${count} model(s) ${url} offers — using it anyway because you set it explicitly."
@@ -559,9 +568,12 @@ oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1 \
 if oc get configmap cluster-monitoring-config -n openshift-monitoring >/dev/null 2>&1; then
   record_once monitoring_cm_existed true
   UWM_NOW="$(oc get configmap cluster-monitoring-config -n openshift-monitoring -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
-  if echo "$UWM_NOW" | grep -qE 'enableUserWorkload:[[:space:]]*true'; then
+  # here-string, not `echo | grep -q` — same SIGPIPE-under-pipefail trap as resolve_slug(): this
+  # ConfigMap's config.yaml can be multi-line, and a mid-file match could otherwise read as absent,
+  # which would misrecord the prior monitoring state ogsr-uninstall.sh restores from.
+  if grep -qE 'enableUserWorkload:[[:space:]]*true' <<< "$UWM_NOW"; then
     record_once monitoring_uwm_prior true
-  elif echo "$UWM_NOW" | grep -qE 'enableUserWorkload:[[:space:]]*false'; then
+  elif grep -qE 'enableUserWorkload:[[:space:]]*false' <<< "$UWM_NOW"; then
     record_once monitoring_uwm_prior false
   else
     record_once monitoring_uwm_prior absent
@@ -680,7 +692,13 @@ ADOPTION_PLAN="$("$PORTFOLIO_INSTALL" --stacks "$STACKS" --adoption-plan)" \
 
 # Refusals first: fail HERE, before the state ConfigMap grows records and before we annotate a single
 # resource of the org's. The portfolio prints the full explanation and the options.
-if printf '%s\n' "$ADOPTION_PLAN" | grep -q '^refuse'; then
+# here-string, never `printf | grep -q`: ADOPTION_PLAN is one line per component across every
+# selected stack, so a '^refuse' match that is not the LAST line can SIGPIPE the printf mid-write —
+# under pipefail the pipeline then reports printf's death (141), not grep's match, and this gate
+# would silently read a genuine refusal as "clean", letting the install proceed against a component
+# it explicitly cannot make safe. Confirmed with `bash -c 'set -o pipefail; printf ... | grep -q ...'`
+# on a multi-line producer (see resolve_slug() above for the same class, first found 2026-07-30).
+if grep -q '^refuse' <<< "$ADOPTION_PLAN"; then
   err "this cluster already runs component(s) the portfolio cannot safely skip:"
   printf '%s\n' "$ADOPTION_PLAN" \
     | awk -F'\t' '$1 == "refuse" { printf "      • %s (stack %s): %s\n", $3, $2, $7 }'
@@ -754,7 +772,12 @@ ok "htpasswd-workshop-users (openshift-config) — ${USERS} users"
 # Deliberately NOT GitOps-managed: clusters arrive with pre-existing IdPs (this RHDP cluster
 # has an 'rhbk' OpenID provider backing the admin login) and a forced server-side apply from
 # Argo would replace the atomic identityProviders list — locking everyone out.
-if oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' | grep -qw "workshop-users"; then
+# Captured first, then matched via here-string — never `oc get ... | grep -qw`: with more than one
+# existing IdP this list is not guaranteed to be one short line forever, and the same
+# SIGPIPE-under-pipefail trap documented in resolve_slug() applies to any producer piped into an
+# early-exiting grep -q.
+_idp_names="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null || true)"
+if grep -qw "workshop-users" <<< "$_idp_names"; then
   # first-write-wins: only records false if WE did not already claim ownership on an earlier run.
   record_once oauth_idp_ownedbyus false
   ok "OAuth IdP 'workshop-users' already present"
