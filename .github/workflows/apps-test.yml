@@ -230,3 +230,74 @@ jobs:
         # The devfile's own default build command, so CI runs what the attendee runs in Dev Spaces.
         # Plain `mvn`, not ./mvnw — this module ships no wrapper.
         run: mvn -B -ntp -DskipTests package
+
+  # apps/parasol-notifications ships TWO implementations - node/ and python/ - and the discovery
+  # walk at the top of this file (find apps -name pom.xml) cannot see either of them: neither is a
+  # Maven module. Audited 2026-07-30: nothing anywhere ran either implementation's code.
+  # node/package.json already declares "test": "node --test", but running it today finds zero
+  # test files and exits 0 ("0 tests, 0 pass, 0 fail") - wiring that in as-is would have added a
+  # gate that passes while inspecting nothing, which is worse than no gate: it would read as
+  # coverage on the PR checks list without providing any. These two jobs are the real gate: they
+  # run genuine behavioural tests against each implementation's actual HTTP responses (status
+  # codes and bodies), not just "did it throw". Each also has its own floor so a future deletion of
+  # the test file(s) fails loudly instead of quietly reporting green on nothing.
+  notifications-node-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/parasol-notifications/node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches package.json's engines.node (>=20) and the nodejs:22-ubi9 S2I builder the lab
+          # itself uses (see apps/parasol-notifications/Containerfile) - CI runs the same major.
+          node-version: '22'
+
+      - name: Refuse to report green if the test file is gone (anti-vacuity floor)
+        run: |
+          if [ ! -f test/server.test.js ]; then
+            echo "::error::apps/parasol-notifications/node/test/server.test.js is missing." \
+                 "node --test would exit 0 having run nothing - refusing to report a green gate" \
+                 "that tested nothing."
+            exit 1
+          fi
+
+      - name: node --test (zero-dependency service - no npm install needed)
+        run: npm test
+
+  notifications-python-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/parasol-notifications/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the python:3.12-ubi9 S2I builder the build-deliver lab uses to import this
+          # service (content/modules/ROOT/pages/build-deliver/lab.adoc).
+          python-version: '3.12'
+
+      - name: Refuse to report green if the test file is gone (anti-vacuity floor)
+        run: |
+          if [ ! -f test_app.py ]; then
+            echo "::error::apps/parasol-notifications/python/test_app.py is missing. Refusing to" \
+                 "report a green gate that tested nothing."
+            exit 1
+          fi
+
+      - name: Install runtime + test dependencies
+        # requirements-test.txt is test-only (pytest + httpx for FastAPI's TestClient) and
+        # deliberately kept out of requirements.txt, which is what the S2I build installs into the
+        # running service image.
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: pytest
+        # pytest itself exits 5 ("no tests ran") if collection finds nothing, which already fails
+        # this step - the explicit file-presence floor above is defense in depth, not the only gate.
+        run: python -m pytest -v
