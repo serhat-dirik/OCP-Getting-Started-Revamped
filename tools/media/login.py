@@ -1,15 +1,33 @@
 """Open a HEADED browser on a dedicated throwaway profile so a human can log into the
-OpenShift console once. The session cookie is then persisted in PROFILE_DIR, and the
-capture script reuses it headlessly.
+OpenShift console once, then SAVE that session to disk so headless capture runs reuse it.
 
 Nothing here reads, types, stores or transmits a credential — it opens a window, waits
 for the console to be reached, and exits. The password is typed by the human into the
 real OpenShift login page.
+
+WHY THE SAVE IS THE WHOLE POINT (measured 2026-07-30, after a login was lost).
+The profile directory alone does NOT keep you logged into the console. Chrome only writes
+cookies that carry an expiry to its on-disk store, and the console's session cookie has
+none — it lives in memory and dies with the browser. Measured on a profile whose human
+login had just succeeded: `openshift-refresh-token` persisted with a 30-day expiry, while
+the session cookie and csrf-token showed `expires = NULL`, and a later headless run got
+401 and was bounced to /oauth/authorize. The refresh token on its own is NOT enough — the
+console demands the interactive hop again.
+
+So a login that is not exported dies with the window it was typed into. capture.py already
+knew this and caches storage_state (see its load_session docstring); login.py did not, which
+is why it could report success and still leave nothing behind. Both now write the SAME file,
+`<profile>.session.json`, so either one can establish the session and the other picks it up.
+
+That file holds a live session token: 0600, outside the repo, never committed. CI's privacy
+guard reads text and would fail the build on it, rightly.
 """
 
+import json
 import os
 import sys
 import time
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
@@ -18,6 +36,10 @@ CONSOLE = os.environ.get("OGSR_CONSOLE") or sys.exit(
 )
 PROFILE_DIR = os.environ.get("OGSR_PROFILE", "./shot-profile")
 DEADLINE_S = 900  # 15 minutes to log in, then give up rather than hang forever
+
+# Must match capture.py's session_file() exactly — the two scripts share this file, and a
+# disagreement about its name is a silent "please log in again" for the human.
+SESSION_FILE = Path(PROFILE_DIR).parent / f"{Path(PROFILE_DIR).name}.session.json"
 
 
 def logged_in(page) -> bool:
@@ -70,8 +92,31 @@ with sync_playwright() as p:
         ignore_https_errors=True,
         args=["--no-first-run", "--no-default-browser-check"],
     )
+    # Re-inject a session cached by an earlier login.py or capture.py run. If it is still good the
+    # human is never asked to do anything — which is the difference between "one login per window"
+    # and "one login per token lifetime".
+    restored = 0
+    if SESSION_FILE.exists():
+        try:
+            cookies = json.loads(SESSION_FILE.read_text()).get("cookies", [])
+            if cookies:
+                ctx.add_cookies(cookies)
+                restored = len(cookies)
+        except Exception as exc:  # corrupt/unreadable cache is not a reason to fail the login
+            print(f"(ignoring unusable session cache: {exc})")
+
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.goto(CONSOLE, wait_until="domcontentloaded", timeout=60_000)
+
+    if restored:
+        page.wait_for_timeout(3000)
+        already = logged_in(page)
+        if already:
+            print(f"ALREADY_LOGGED_IN as {already} — {restored} cookies restored, nothing to do.")
+            sys.stdout.flush()
+            ctx.close()
+            sys.exit(0)
+        print(f"(cached session no longer valid — {restored} cookies restored but the console said no)")
 
     # Not kubeadmin: every grounding marker is a claim about what an ATTENDEE can see and click,
     # and cluster-admin renders a different console. An admin login produces confident wrong answers.
@@ -98,7 +143,18 @@ with sync_playwright() as p:
         time.sleep(3)
 
     if who:
-        print(f"LOGGED_IN as {who}")
+        # Export BEFORE closing. storage_state serializes in-memory session cookies too
+        # (expires = -1), which is the only way this login outlives the window it was typed
+        # into. Skipping this is exactly how a successful login was lost on 2026-07-30.
+        try:
+            ctx.storage_state(path=str(SESSION_FILE))
+            SESSION_FILE.chmod(0o600)
+            n = len(json.loads(SESSION_FILE.read_text()).get("cookies", []))
+            print(f"LOGGED_IN as {who} — session saved ({n} cookies) to {SESSION_FILE}")
+        except Exception as exc:
+            # Loud, because the login succeeded but bought nothing: the next run will ask again.
+            print(f"LOGGED_IN as {who} — BUT COULD NOT SAVE THE SESSION: {exc}")
+            print("  The next capture run will have to ask for a login again.")
     else:
         print("TIMEOUT — no console session detected")
     print("final url:", page.url)

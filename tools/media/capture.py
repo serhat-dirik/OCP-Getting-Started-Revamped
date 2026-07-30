@@ -387,16 +387,49 @@ def wait_for_login(page: Any, url: str, deadline_s: int = 3600) -> bool:
     print("=" * 72 + "\n", flush=True)
     start = time.time()
     while time.time() - start < deadline_s:
-        try:
-            u = page.url
-            if not any(s in u for s in ("/oauth", "/login", "/auth/")) and len(page.inner_text("body")) > 200:
-                print("  logged in — starting capture\n", flush=True)
-                page.wait_for_timeout(2000)
-                return True
-        except PlaywrightError:
-            pass
+        who = console_identity(page)
+        if who:
+            print(f"  logged in as {who} — starting capture\n", flush=True)
+            page.wait_for_timeout(2000)
+            return True
         time.sleep(2)
     return False
+
+
+def console_identity(page: Any) -> str | None:
+    """Who does the console say this session is? Returns a username, or None.
+
+    This replaced a URL test — "not on /oauth|/login|/auth/, and body text > 200 chars" — that
+    was wrong in both directions, which is the tell that it was measuring the wrong thing rather
+    than measuring the right thing too loosely:
+
+      · False POSITIVE (2026-07-29): an empty single-page-app shell passes both halves, so a
+        sweep started against an unauthenticated session and photographed the login wall. The
+        job's own `check_text` then matched a word that appears on the error page too.
+      · False NEGATIVE (2026-07-30): a genuine login went unrecognised in login.py's copy of
+        this same test, and the window sat open until its deadline with a human waiting on it.
+
+    Authentication is not a property of the address bar. The console proxies the Kubernetes API
+    at /api/kubernetes/, and `users/~` is the API's own answer to "who is this request from",
+    requiring no privilege beyond being someone. 200 with a name is proof; 401 is proof of the
+    negative; anything else is not an answer, so callers keep waiting rather than guess.
+    """
+    try:
+        return page.evaluate(
+            """async () => {
+                try {
+                    const r = await fetch(
+                        '/api/kubernetes/apis/user.openshift.io/v1/users/~',
+                        {headers: {Accept: 'application/json'}, credentials: 'same-origin'}
+                    );
+                    if (!r.ok) return null;
+                    const j = await r.json();
+                    return (j && j.metadata && j.metadata.name) || null;
+                } catch (e) { return null; }
+            }"""
+        )
+    except PlaywrightError:
+        return None
 
 
 # Is each string inside the rectangle the screenshot will cover? Searches text nodes first, then

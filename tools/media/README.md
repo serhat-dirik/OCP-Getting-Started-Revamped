@@ -37,12 +37,29 @@ Uses your installed Google Chrome (`channel="chrome"`), so there is no browser d
 
 ## Authenticating — without handing over a password
 
-`login.py` opens a **headed** window on a throwaway profile directory. A human logs in there;
-the session cookie persists in that profile, and `capture.py` reuses it headlessly.
+`login.py` opens a **headed** window on a throwaway profile directory. A human logs in there,
+and the session is exported to `<profile>.session.json`, which `capture.py` re-injects on every
+later run — headless, unattended, no human present.
 
-Neither script reads, types, stores or transmits a credential. The password goes from the
-human into the real OpenShift login page and nowhere else. The profile directory is
-disposable — delete it and log in again when the token expires.
+**The profile directory does not hold the login, and believing it does costs a re-login.**
+Chrome only writes cookies that carry an expiry to its on-disk store. The console's session
+cookie has none, so it lives in memory and dies with the browser. Measured 2026-07-30 on a
+profile whose human login had just succeeded: `openshift-refresh-token` persisted with a
+30-day expiry, while the session cookie and `csrf-token` showed `expires = NULL` — and the
+next headless run got `401` and was bounced to `/oauth/authorize`. The refresh token alone is
+**not** enough; the console demands the interactive hop again.
+
+What carries the login across processes is Playwright's `storage_state`, which serializes
+in-memory session cookies too (`expires = -1`). Both scripts write and read the same file, so
+either one can establish the session and the other picks it up. A login therefore lasts as
+long as the OAuth token, not as long as the window it was typed into.
+
+`<profile>.session.json` holds a **live session token**: written `0600`, gitignored, and it
+must never enter the tree — CI's privacy guard reads text and would fail the build on it.
+
+Neither script reads, types, stores or transmits a password. The password goes from the human
+into the real OpenShift login page and nowhere else. Both the profile directory and the session
+file are disposable — delete them and log in again when the token expires.
 
 ```bash
 .venv/bin/python login.py            # log in in the window that opens, then it exits
