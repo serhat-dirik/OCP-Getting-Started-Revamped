@@ -360,7 +360,7 @@ if ! oc get subscriptions.operators.coreos.com openshift-gitops-operator \
     say "❌ namespace openshift-gitops-operator already has an OperatorGroup that is not ours: ${_foreign}"
     say "   but no openshift-gitops-operator Subscription — so something installed a group without an"
     say "   operator. Installing ours next to it would fail every CSV in that namespace. Refusing."
-    say "   Inspect: oc get operatorgroups,subscriptions,csv -n openshift-gitops-operator"
+    say "   Inspect: oc get operatorgroups,subscriptions.operators.coreos.com,csv -n openshift-gitops-operator"
   fi
 fi
 
