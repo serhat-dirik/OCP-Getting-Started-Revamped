@@ -80,6 +80,24 @@ oc get endpoints parasol-claims -n $NS          # endpoints return
 +
 `ENDPOINTS <none>` almost always means selector-vs-label mismatch, not a firewall.
 
+== The Route returns `503` for the first few seconds right after Create
+
+Symptom:: You clicked *Create* on the edge Route (or ran `oc create route edge`), then immediately `curl`-ed its *Location*, and got `503`/"Application is not available" instead of the claims JSON — even though `parasol-web` was already `1/1 Ready` before the Route existed.
+Cause:: The router does not carry live config for a Route the instant the object is created — a new Route triggers a reload across the router replicas, and that reload takes a few seconds to reach all of them. A request that lands on a replica that has not yet picked up the new Route gets a `503` from the router itself, not from the app.
+Fix:: Wait a few seconds and retry — this is a one-time settle, not a broken Route:
++
+[source,sh,role=execute]
+----
+ROUTE=$(oc get route parasol-web -n $NS -o jsonpath='{.spec.host}')
+for i in $(seq 1 10); do
+  code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$ROUTE/api/claims")
+  echo "attempt $i: $code"; [ "$code" = "200" ] && break
+  sleep 2
+done
+----
++
+A `503` that persists past ~20 seconds (not a one-off) means something else is wrong — check `parasol-web` is really `1/1` (`oc get pods -n $NS -l app=parasol-web`) before suspecting the Route.
+
 == The Route stopped working after I applied default-deny
 
 Symptom:: The edge Route served the front end fine, then you applied `default-deny` and now the Route returns an application error.
@@ -132,6 +150,21 @@ oc set volume deploy/parasol-web -n $NS   # confirm the tls secret is actually m
 +
 You want `Listening on: http://0.0.0.0:8080 and https://0.0.0.0:8443` and `ports=http:8080 https:8443`.
 If the `https://` half is missing, the environment variables or the mount are wrong — fix those, not the Route.
+
+== `openssl` is missing on `demo-client` when reading the two-hop certificate
+
+Symptom:: The hop-2 commands (`oc exec deploy/demo-client -n $NS -- timeout 10 openssl s_client -connect parasol-web:8443 ...`) fail immediately — the exec errors out or reports the binary cannot be found — while hop 1's plain `curl` command above it worked fine.
+Cause:: `demo-client` runs the cluster's `openshift/tools` imagestream specifically because it is expected to carry both `curl` and `openssl`, but that imagestream is resolved per-cluster: on a cluster where it has been re-pointed, mirrored, or swapped for a slimmer image, `openssl` is not guaranteed to be present even though `curl` still is.
+Fix:: Confirm what the image actually carries, then fall back to `curl`'s own verbose TLS output — the same tool hop 1 already used — which prints the same `subject:`/`issuer:` lines without needing `openssl` at all:
++
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- which openssl || echo "openssl not present in this image"
+echo -n "hop 2  router -> pod    : "; oc exec deploy/demo-client -n $NS -- curl -skv --max-time 10 https://parasol-web:8443/api/claims -o /dev/null 2>&1 | grep -m1 -o 'subject: CN=.*'
+echo -n "hop 2  issued by        : "; oc exec deploy/demo-client -n $NS -- curl -skv --max-time 10 https://parasol-web:8443/api/claims -o /dev/null 2>&1 | grep -m1 -o 'issuer: CN=.*'
+----
++
+This gives the same two lines the lab is after — the inside hop's certificate `subject`/`issuer` — using only `curl`, which every step in this module already relies on.
 
 == The serving-cert Secret never appears
 

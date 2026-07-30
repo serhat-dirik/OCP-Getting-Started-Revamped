@@ -140,6 +140,23 @@ curl -sI {gitea_url}/{user}/claims-config | head -1
 A `200`/`301` means the repo is there — retry the clone.
 If it is missing, the fork job has not run; ask your instructor to `ws reset {module-id} --user {user}`.
 
+== The three-environment digest comparison shows a mismatch, not three identical values
+
+Symptom:: In exercise 6's final promotion check, one namespace's `digest=` differs from the other two, even though `dev`/`stage`/`prod` all run the same `overlays/*` referencing the identical `parasol-claims:1.0` tag.
+Cause:: This is the mutable-tag trap, not a broken promotion — and it is called out in the lab's own note right after this comparison. The overlays name the image by *tag*, and `imagePullPolicy: IfNotPresent` means a node that already cached an earlier build of `:1.0` (from a previous run of this module, or an image rebuild that landed after that node last pulled) keeps serving its cached bytes instead of pulling what the tag currently points to. Only the pod scheduled onto that stale-cache node shows the odd digest.
+Fix:: Delete the pod in the odd namespace so a fresh pull lands, then re-compare:
++
+[source,sh,role=execute,subs="attributes"]
+----
+# substitute whichever namespace showed the odd digest above, e.g. {user}-stage or {user}-prod
+NS={user}-stage
+oc delete pod -l app=parasol-claims -n "$NS"
+oc -n "$NS" rollout status deploy/parasol-claims
+oc -n "$NS" get pod -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' | sed 's#.*@##' | cut -c1-16
+----
++
+All three digests should now match. This is exactly why a real promotion pipeline references images by *digest* (`@sha256:…`), never by a mutable tag — the fix done properly is in the trusted-supply-chain module.
+
 '''
 
 _Last verified on the build cluster (2026-07-09; exercise-1 readiness-gate rework re-verified 2026-07-15)._
