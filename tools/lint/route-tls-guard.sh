@@ -64,12 +64,31 @@ for chart in gitops/entry-states/*/Chart.yaml gitops/workshop-config/Chart.yaml 
   # default render omits entirely. Any future flag that gates extra Routes belongs here too.
   for vals in "" "solve=true"; do
     out="$tmp/render.yaml"
+    err="$tmp/render.err"
+    # A FAILED render used to pass this guard silently. stderr went to /dev/null and the exit status
+    # was never read, so `helm template` blowing up left an EMPTY $out — and an empty file contains
+    # no plain-HTTP Routes, so check_file happily reported clean. The guard would have gone green on
+    # a chart that cannot render at all, which is the same inspects-nothing failure this repo has
+    # now hit in three different tools. The status is checked, and a render failure is fatal.
     if [ -z "$vals" ]; then
-      helm template t "$d" --set user=user1 >"$out" 2>/dev/null
+      helm template t "$d" --set user=user1 >"$out" 2>"$err"; hrc=$?
       label="$d (defaults)"
     else
-      helm template t "$d" --set user=user1 --set "$vals" >"$out" 2>/dev/null
+      helm template t "$d" --set user=user1 --set "$vals" >"$out" 2>"$err"; hrc=$?
       label="$d ($vals)"
+    fi
+    if [ "$hrc" -ne 0 ]; then
+      echo "  ❌ $label — helm template FAILED (exit $hrc); this guard cannot inspect what did not render"
+      sed 's/^/       /' "$err" | head -5
+      rc=1
+      continue
+    fi
+    # An empty render is not a pass either: a chart that emits nothing under a flag that is supposed
+    # to add Routes is a defect worth surfacing, not a clean scan.
+    if [ ! -s "$out" ]; then
+      echo "  ❌ $label — rendered EMPTY; refusing to count that as inspected"
+      rc=1
+      continue
     fi
     check_file "$out" "$label" || rc=1
     inspected=$((inspected + 1))
