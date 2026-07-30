@@ -5,8 +5,10 @@
 #          claims-config promotion repo. With --entry-only, also asserts stage/prod start empty.
 #   End:   dev claims app is externalized (references a claims-config ConfigMap AND a
 #          claims-creds Secret), carries all three probes and explicit resource requests; the
-#          app is promoted to stage (2 replicas, APP_ENV=stage) and prod (3 replicas,
-#          APP_ENV=prod). End checks are mechanism-agnostic: they pass for BOTH the attendee's
+#          app is promoted to stage (>=2 replicas, APP_ENV=stage) and prod (>=3 replicas,
+#          APP_ENV=prod — the overlay's canonical counts; the optional Challenge has the attendee
+#          scale prod to 4, so this is >=, not ==, or a correctly-completed lab false-fails).
+#          End checks are mechanism-agnostic: they pass for BOTH the attendee's
 #          `oc set env --from` wiring (per-key valueFrom) AND `ws solve`'s envFrom wiring.
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
 set -euo pipefail
@@ -46,11 +48,15 @@ deploy_ready() {
   [[ -n "$ready" && "$ready" -ge 1 ]]
 }
 
-# Deployment reports exactly N ready replicas (proves the per-env replica delta).
-deploy_ready_count() {
+# Deployment reports AT LEAST N ready replicas (proves the per-env replica delta). >=, not ==: the
+# module's own optional Challenge (lab.adoc "In your claims-config fork, change the prod overlay to
+# *4* replicas, commit, and re-apply overlays/prod... When you are done, run `ws verify`") has the
+# attendee deliberately exceed the overlay's canonical count and then re-verify — an exact-match check
+# here would false-fail that correctly-completed lab (same fix as gitops-fundamentals deploy_ready_min).
+deploy_ready_min() {
   local name="$1" ns="$2" want="$3" ready
   ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ "$ready" == "$want" ]]
+  [[ -n "$ready" && "$ready" -ge "$want" ]]
 }
 
 # Deployment does NOT exist (entry-only: stage/prod start empty).
@@ -123,9 +129,9 @@ else
   check "dev app has all three probes"                 deploy_has_all_probes parasol-claims "$DEV" || hint "add them — lab exercise 4 (oc set probe --startup/--readiness/--liveness)"
   check "dev app sets explicit resource requests"      deploy_has_requests parasol-claims "$DEV"   || hint "set them — lab exercise 5 (oc set resources deploy/parasol-claims --requests=... --limits=...)"
   # promotion: same image, different config, in stage and prod.
-  check "stage parasol-claims ready (2 replicas)"      deploy_ready_count parasol-claims "$STAGE" 2 || hint "promote — lab exercise 6 (oc apply -k overlays/stage from your claims-config fork)"
+  check "stage parasol-claims ready (>=2 replicas)"    deploy_ready_min parasol-claims "$STAGE" 2   || hint "promote — lab exercise 6 (oc apply -k overlays/stage from your claims-config fork)"
   check "stage config is APP_ENV=stage"                cm_app_env "$STAGE" stage                   || hint "the stage overlay sets APP_ENV=stage — re-apply overlays/stage"
-  check "prod parasol-claims ready (3 replicas)"       deploy_ready_count parasol-claims "$PROD" 3  || hint "promote — lab exercise 6 (oc apply -k overlays/prod from your claims-config fork)"
+  check "prod parasol-claims ready (>=3 replicas)"     deploy_ready_min parasol-claims "$PROD" 3    || hint "promote — lab exercise 6 (oc apply -k overlays/prod from your claims-config fork)"
   check "prod config is APP_ENV=prod"                  cm_app_env "$PROD" prod                     || hint "the prod overlay sets APP_ENV=prod — re-apply overlays/prod"
 fi
 
