@@ -160,6 +160,20 @@ oc delete deploymentconfig --all
 oc process openshift//parasol-postgresql-ephemeral -p APP_NAME=claims-db | oc apply -f -
 ----
 
+== A build's Pod won't start when other builds or Deployments are still around
+
+Symptom:: You start `parasol-claims`, `claims-docker`, and `parasol-notifications` back-to-back instead of letting each finish and roll out, and the newest one's build Pod stays `Pending` (or never appears) while an earlier build or Deployment Pod is still up; `oc describe pod <name> -n {user}-dev` (or `oc get events -n {user}-dev`) names the `workshop-quota` `ResourceQuota`, not an image-pull or node-scheduling problem.
+Cause:: `{user}-dev` carries a shared per-namespace `ResourceQuota` (`workshop-quota`, defined in `gitops/workshop-config/templates/per-user-limits.yaml`) capped at `limits.memory: 12Gi`, `limits.cpu: 6`, and `pods: 30`, with every container defaulting to a `1Gi` memory limit from the namespace `LimitRange`. Run one exercise at a time and you never get close. But this module creates *three* BuildConfigs (`parasol-claims`, `claims-docker`, `parasol-notifications`) plus their Deployments and `claims-db`, and nothing here serializes them — starting all three builds at once stacks their build Pods on top of whatever app Pods are already running. It gets tight fast if you already applied the `OutOfMemoryError` fix above (bumping a BuildConfig's memory limit to `3Gi`) to more than one of them: three `3Gi` builds alone is `9Gi`, and the running `claims`/`claims-db`/`notifications` Pods add more on top of the `12Gi` ceiling.
+Fix:: Let each build finish — and its Deployment roll out — before starting the next; the lab's exercises are written to run in that order for exactly this reason. If you do hit the ceiling, check current usage and free headroom:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc describe resourcequota workshop-quota -n {user}-dev
+oc get pods -n {user}-dev
+----
++
+Delete a finished build Pod or a Deployment you no longer need, then retry the stalled one.
+
 '''
 
 _Last verified on OpenShift {ocp_version} (2026-07-09)._

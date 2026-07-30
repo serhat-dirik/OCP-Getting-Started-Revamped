@@ -14,7 +14,7 @@ lab text can reference exact values.
 | **parasol-claims** | Quarkus (Java 21) | Core claims service (REST + PostgreSQL). Star of the inner-loop, pipeline, and GitOps modules; owns the full `CLM-1001..CLM-1030` dataset. | M02+ |
 | **parasol-notifications** | Node or Python (kept intentionally simple) | The polyglot moment — a second runtime to contrast build strategies. | M02, M25 |
 | **parasol-fraud** | Quarkus (Java 21) | Bearer-only fraud-scoring service; the token-exchange target (`aud=fraud`) for the security module. | M29 |
-| **parasol-legacy-claims** | Legacy Java on JWS/Tomcat | Deliberately un-modern (servlet-era patterns, hardcoded config) — the modernization target. | M21 |
+| **parasol-legacy-claims** | Legacy Java on JWS/Tomcat | Deliberately un-modern (servlet-era patterns, hardcoded config) — the modernization target. | M22 |
 | **parasol-agent** | Quarkus + LangChain4j | Agentic AI service: model calls, RAG, MCP tool use. | M23 |
 | **mcp-servers/** | Quarkus (MCP servers) | MCP servers for the agent: `claims-db` (claims dataset as tools), `policy-docs` (RAG-style policy retrieval). | M23, M24 |
 | **mcp-agent-cli** | Quarkus + LangChain4j (picocli) | Assistant-neutral MCP client: prompts a MaaS model with cluster MCP tools bound and prints the full tool-call trace. Read-only by default. | M24 |
