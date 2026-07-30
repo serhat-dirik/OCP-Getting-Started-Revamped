@@ -1899,18 +1899,58 @@ sweep_dead_webhooks() {  # admission webhooks whose backing Service died with a 
   # problem to diagnose, not ours to delete — ogsr-check-clean.sh reports those instead.
   # Read the owned-namespace set from the installed stacks' MANIFESTS, not from the cluster: by the
   # time this runs the namespaces are already deleted, so a live query would return nothing.
+  # SECOND SCOPE — operators WE created inside a SHARED namespace. Found by the #84 teardown
+  # regression, 2026-07-30: a full uninstall left three Tekton webhooks
+  # (config./validation./webhook.operator.tekton.dev) pointing at
+  # openshift-operators/tekton-operator-webhook, a Service that no longer existed. All three carry
+  # failurePolicy=Fail, so with their backend gone they REJECT OR HANG every create/update they
+  # intercept — cluster-wide, for anyone touching Tekton objects, including orgs that never ran this
+  # workshop. ogsr-check-clean flagged them as its only cluster-health findings (0 before, 3 after).
+  #
+  # The first scope above cannot catch them, and correctly so on its own terms: it requires the
+  # webhook's Service to sit in a namespace we OWNED AND REMOVED, and skips any namespace that still
+  # exists. But three components — openshift-pipelines, devspaces, web-terminal — deliberately
+  # install into `openshift-operators`, because that namespace already carries the cluster-wide
+  # OperatorGroup and adding a second one is the singleton violation that silently breaks the org's
+  # operators. So their webhooks live in a namespace that is not ours and does not go away, while the
+  # operator that created them IS ours and step 3 removed it.
+  #
+  # The safe discriminator is not the namespace, it is: did WE create the operator that owns this
+  # webhook, and is its backing Service actually gone? A missing Service means the webhook cannot
+  # function for anyone, so leaving it serves nobody — while an org webhook whose Service is alive is
+  # untouched by the Service check alone. Both conditions are required.
+  local shared_created
+  shared_created=" $(created_operator_namespaces 2>/dev/null | tr '\n' ' ') "
+
   local kind name svc_ns svc_nm owned
   owned=" $(enumerate_installed_stack_ns | tr '\n' ' ') "
   for kind in validatingwebhookconfigurations mutatingwebhookconfigurations; do
     while IFS='|' read -r name svc_ns svc_nm; do
       [[ -n "$name" && -n "$svc_ns" ]] || continue
-      case "$owned" in *" ${svc_ns} "*) ;; *) continue ;; esac
-      oc get namespace "$svc_ns" >/dev/null 2>&1 && continue        # namespace still there: not ours to judge
+      if [[ " $owned " == *" ${svc_ns} "* ]]; then
+        oc get namespace "$svc_ns" >/dev/null 2>&1 && continue      # namespace still there: not ours to judge
+      elif [[ " $shared_created " == *" ${svc_ns} "* ]]; then
+        :                                                            # shared ns, but the operator was ours
+      else
+        continue                                                     # neither: the org's to diagnose
+      fi
       oc get service "$svc_nm" -n "$svc_ns" >/dev/null 2>&1 && continue
       del_obj "$kind" "$name"
     done < <(oc get "$kind" -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.webhooks[0].clientConfig.service.namespace}{"|"}{.webhooks[0].clientConfig.service.name}{"\n"}{end}' 2>/dev/null || true)
   done
   return 0
+}
+
+# Namespaces where the recorded state says WE created an operator. Used to widen the orphaned-webhook
+# sweep above into shared namespaces without widening it to namespaces the org owns outright: an
+# operator marked `adopted` never contributes its namespace here, so an adopted operator's webhooks
+# stay untouched even when they sit beside one of ours.
+created_operator_namespaces() {
+  local name ns st pkg
+  while read -r name ns st pkg; do
+    [[ -n "$name" && "$st" == "created" ]] || continue
+    printf '%s\n' "$ns"
+  done < <(enumerate_operators 2>/dev/null || true) | sort -u
 }
 
 step_delete_namespaces() {  # 8 — whatever the cascade did not own, then the state namespace last
