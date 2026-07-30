@@ -962,6 +962,59 @@ wait_for_phase() {  # <label> <member-set> <budget> — bounded, progress-printi
   return 1
 }
 
+# Release the operands a timed-out phase could not prune, BEFORE the next phase removes their operator.
+#
+# WHY THIS IS NOT "JUST WAIT LONGER" (measured 2026-07-29, and 2026-07-25 before it). The phase wait is
+# bounded, and on expiry cascade_phase used to log "moving to the next phase anyway" and proceed. That
+# turns a RECOVERABLE stall into a PERMANENT one: phase 1 leaves workshop-config holding ClusterQueues
+# on kueue.x-k8s.io/resource-in-use, phase 2 then deletes the Kueue operator, and from that moment the
+# finalizer has no controller and can never clear — by any amount of waiting, ever. On 2026-07-29 three
+# Applications sat wedged 3.5 hours with 0 kueue pods and 0 kueue CSV; cq-user2/cq-user3 still carried
+# the finalizer with deletionTimestamp NONE.
+#
+# So the ordered phases were real but the block was ADVISORY, and advisory ordering fails exactly when
+# it matters. Clearing a stuck operand's finalizer while its operator is still alive is strictly better
+# than stranding it after the operator is gone: same objects orphaned either way, but the cluster is
+# left removable instead of requiring hand surgery. Deliberately touches ONLY the Application's managed
+# objects, never the Application's own finalizer — that is the advice diagnose_stuck_app already gives.
+release_operand_blockers() {  # <label> <member-set> — clear finalizers on what this phase left behind
+  local label="$1" members="$2" app group kind ns name res fins cleared=0
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    # Same membership test apps_remaining_in uses — the member set is a space-delimited string, so the
+    # app must be matched with its surrounding spaces or `pp-git` would match `pp-gitea`.
+    case "$members" in *" $app "*) ;; *) continue;; esac
+    while IFS='|' read -r group kind ns name; do
+      [[ -n "$kind" && -n "$name" ]] || continue
+      res="$kind"; [[ -n "$group" ]] && res="${kind}.${group}"
+      if [[ -n "$ns" ]]; then
+        fins="$(oc get "$res" "$name" -n "$ns" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)"
+      else
+        fins="$(oc get "$res" "$name" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)"
+      fi
+      [[ -n "$fins" && "$fins" != "[]" ]] || continue
+      if [[ "$DRY_RUN" == "true" ]]; then
+        echo "   • WOULD clear finalizers on ${res}/${name}${ns:+ -n $ns} (holds ${fins}) so ${label} can complete"
+        continue
+      fi
+      if [[ -n "$ns" ]]; then
+        oc patch "$res" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+      else
+        oc patch "$res" "$name" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+      fi
+      cleared=$((cleared + 1))
+      err "   ↳ FORCE-CLEARED finalizers on ${res}/${name}${ns:+ -n $ns} — it held ${fins} and the next"
+      err "     phase is about to remove the controller that owns it. Its operator cleanup will NOT run."
+    done < <(oc get applications.argoproj.io "$app" -n "$ARGO_NS" \
+               -o jsonpath='{range .status.resources[*]}{.group}{"|"}{.kind}{"|"}{.namespace}{"|"}{.name}{"\n"}{end}' 2>/dev/null || true)
+  done < <(our_applications)
+  if [[ "$cleared" -gt 0 ]]; then
+    err "   ${cleared} operand(s) force-cleared. Anything they owned is ORPHANED — ogsr-check-clean.sh"
+    err "   names it afterwards. This is the cost of the phase timing out, not of clearing them."
+  fi
+  return 0
+}
+
 cascade_phase() {  # <label> <roots> <member-set> — delete this phase's roots, then BLOCK on them
   local label="$1" roots="$2" members="$3" app budget n
   n="$(apps_remaining_in "$members")"
@@ -992,8 +1045,18 @@ cascade_phase() {  # <label> <roots> <member-set> — delete this phase's roots,
   budget="$(phase_budget)"
   info "waiting for ${label} to finish pruning (${n} Application(s), up to ${budget}s)"
   if wait_for_phase "$label" "$members" "$budget"; then return 0; fi
-  err "${label} did not finish pruning within ${budget}s — moving to the next phase anyway"
-  err "   ordering is best-effort for whatever is left; the straggler sweep and the report below cover it"
+  err "${label} did not finish pruning within ${budget}s"
+  # DO NOT simply proceed. Proceeding is what converts a stalled prune into an unrecoverable one: the
+  # next phase deletes the operator whose finalizer is holding these operands, and after that no wait
+  # can ever clear them. Release them here, while that is still merely a stall, then give the cascade a
+  # short second chance now that nothing is blocking it.
+  release_operand_blockers "$label" "$members"
+  if wait_for_phase "${label} (after releasing blockers)" "$members" "$PHASE_FLOOR"; then
+    ok "${label} completed once its blocked operands were released"
+    return 0
+  fi
+  err "   still not finished after releasing blockers — moving on; the straggler sweep and the report"
+  err "   below cover whatever is left, and ogsr-check-clean.sh names anything orphaned"
   return 0
 }
 
