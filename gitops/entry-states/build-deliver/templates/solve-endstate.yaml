@@ -1,8 +1,23 @@
 {{- if .Values.solve }}
 # END state for instructor demos (`ws solve build-deliver`): what an attendee finishes build-deliver with —
-# the claims service running behind a Route, wired to an ephemeral PostgreSQL. To stay
-# demo-fast and reliable this uses the SHARED prebuilt claims image (parasol-claims:1.0),
-# NOT a per-user S2I build; the hands-on lab is where the real build happens.
+# the claims service running behind a Route, wired to an ephemeral PostgreSQL, PLUS the Node
+# notifications service the lab's polyglot exercise imports, all grouped into one "parasol"
+# application in Topology with the claims -> claims-db connector drawn. To stay
+# demo-fast and reliable this uses the SHARED prebuilt images (parasol-claims:1.0,
+# parasol-notifications:1.0), NOT a per-user S2I build; the hands-on lab is where the real build happens.
+#
+# NOTIFICATIONS (added 2026-07-29): solve used to stop at claims+claims-db, so `ws solve` printed
+# "demo-ready" over a namespace the lab's exercise 3 (S2I import of parasol-notifications from the
+# attendee's fork, node/ context dir) never appeared in — and the module's topology screenshot
+# (build-deliver-04-topology-built-and-wired), which promises claims + claims-db + notifications
+# grouped and connected, was un-takeable by any code path in this repo. parasol-web is deliberately
+# NOT here: this module's lab never deploys it (it belongs to platform-orientation and the
+# networking/deployment-targets modules).
+#
+# TOPOLOGY (part-of + connects-to): the lab's last step labels the workloads
+# `app.kubernetes.io/part-of=parasol` and annotates the claims Deployment
+# `app.openshift.io/connects-to=["claims-db"]`. Solve reproduces BOTH — they are what the console
+# renders as one application box with an arrow, i.e. the thing the demo and the screenshot show.
 #
 # One Secret carries the DB credentials in the app's env contract (POSTGRESQL_*) so both
 # the database and the claims service consume it with envFrom — one source of truth.
@@ -13,6 +28,9 @@ metadata:
   namespace: {{ .Values.user }}-dev
   labels:
     app: claims-db
+    # part-of mirrors what the Parasol PostgreSQL catalog Template stamps on the objects it creates
+    # (gitops/workshop-config/templates/parasol-db-template.yaml) — the attendee's DB lands grouped.
+    app.kubernetes.io/part-of: parasol
     workshop.redhat.com/module: build-deliver
     workshop.redhat.com/owner: ogsr
 stringData:
@@ -28,6 +46,7 @@ metadata:
   namespace: {{ .Values.user }}-dev
   labels:
     app: claims-db
+    app.kubernetes.io/part-of: parasol
     workshop.redhat.com/module: build-deliver
     workshop.redhat.com/owner: ogsr
 spec:
@@ -45,6 +64,8 @@ metadata:
   namespace: {{ .Values.user }}-dev
   labels:
     app: claims-db
+    app.kubernetes.io/part-of: parasol
+    app.kubernetes.io/component: database
     workshop.redhat.com/module: build-deliver
     workshop.redhat.com/owner: ogsr
 spec:
@@ -93,8 +114,17 @@ metadata:
   namespace: {{ .Values.user }}-dev
   labels:
     app: parasol-claims
+    # part-of = the console's grouping key: claims, notifications and the DB render as ONE "parasol"
+    # application box (the lab's `oc label … app.kubernetes.io/part-of=parasol` step).
+    app.kubernetes.io/part-of: parasol
     workshop.redhat.com/module: build-deliver
     workshop.redhat.com/owner: ogsr
+  annotations:
+    # connects-to = the console's connector arrow parasol-claims -> claims-db (the lab's
+    # `oc annotate deploy/parasol-claims app.openshift.io/connects-to='["claims-db"]'` step).
+    # Nothing else draws it: without this annotation the topology screenshot's promised connector
+    # cannot exist, whatever else is running.
+    app.openshift.io/connects-to: '["claims-db"]'
 spec:
   replicas: 1
   selector:
@@ -131,6 +161,7 @@ metadata:
   namespace: {{ .Values.user }}-dev
   labels:
     app: parasol-claims
+    app.kubernetes.io/part-of: parasol
     workshop.redhat.com/module: build-deliver
     workshop.redhat.com/owner: ogsr
 spec:
@@ -163,6 +194,90 @@ spec:
     # very route 2026-07-26 (http 200 / https 503).
     # insecureEdgeTerminationPolicy: Allow, NOT Redirect — Redirect makes `curl http://...` return
     # an empty 302, which breaks the terminal steps that drive traffic with curl.
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow
+---
+# The polyglot half of the lab (exercise 3): the Node notifications service the attendee S2I-imports
+# from their fork's node/ context dir. Same shortcut as claims — the SHARED prebuilt image
+# (ogsr-parasol-images/parasol-notifications:1.0, built by gitops/workshop-config/templates/
+# parasol-images-build.yaml) stands in for the per-user build, so solve stays a pull, not a build.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-notifications
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-notifications
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/module: build-deliver
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      deployment: parasol-notifications
+  template:
+    metadata:
+      labels:
+        deployment: parasol-notifications
+        app: parasol-notifications
+    spec:
+      containers:
+        - name: parasol-notifications
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-notifications:1.0
+          # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          # No env at all: the attendee's `oc new-app` import sets none either, and the service is
+          # standalone (in-memory store, no DB) — SITE is a packaging-distributing concern.
+          readinessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 3
+          livenessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-notifications
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-notifications
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/module: build-deliver
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    deployment: parasol-notifications
+  ports:
+    - name: 8080-tcp
+      port: 8080
+      targetPort: 8080
+---
+# The lab exposes notifications too (`oc create route edge parasol-notifications …`), so the demo
+# has the same clickable Open-URL arrow in Topology. Edge + Allow for the reasons on the claims Route.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-notifications
+  namespace: {{ .Values.user }}-dev
+  labels:
+    app: parasol-notifications
+    app.kubernetes.io/part-of: parasol
+    workshop.redhat.com/module: build-deliver
+    workshop.redhat.com/owner: ogsr
+spec:
+  to:
+    kind: Service
+    name: parasol-notifications
+  port:
+    targetPort: 8080-tcp
+  tls:
     termination: edge
     insecureEdgeTerminationPolicy: Allow
 {{- end }}
