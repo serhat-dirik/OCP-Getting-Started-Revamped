@@ -52,12 +52,21 @@ Warm the app first so there is no cold-boot dead air before seeding.
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `storage-stateful-01-pvc-bound.png` | Console → Storage → PersistentVolumeClaims, `claims-db-data` = `Bound`, 2Gi, its StorageClass | Circle: Status `Bound`, Capacity, StorageClass link | lab.adoc ex. 3 (optional) |
-| 2 | `storage-stateful-02-storageclass.png` | Console → Storage → StorageClasses, the default class detail (provisioner, binding mode, expansion) | Circle: the `default` badge, `WaitForFirstConsumer`, `Allow volume expansion` | lab.adoc ex. 5 (optional) |
+| 1 | `storage-stateful-01-pvc-bound.png` | ⬜ NOT CAPTURED — the `claims-db-data` PVC does not currently exist. Console → Storage → PersistentVolumeClaims, `claims-db-data` = `Bound`, 2Gi, its StorageClass | Circle: Status `Bound`, Capacity, StorageClass link | lab.adoc ex. 3 (optional) |
+| 2 | `storage-stateful-02-storageclass.png` | ✅ CAPTURED 2026-07-30 — Console → Storage → StorageClasses, the default class detail (`/k8s/cluster/storageclasses/ocs-external-storagecluster-ceph-rbd`) | Circle: `Default class` = `True`, `Volume binding mode` = `WaitForFirstConsumer`, `Provisioner` = `openshift-storage.rbd.csi.ceph.com`. **Correction: this console build's StorageClass details page does not render an "Allow volume expansion" field at all** — the row above's original Annotate note is wrong; the field simply is not on screen (checked the full rendered page, nothing scrolled off). Drop that circle from the caption. | lab.adoc ex. 5 (optional) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (the console): the PVC list Status/Capacity/StorageClass
 columns; the StorageClass detail page fields (provisioner `openshift-storage.rbd.csi.ceph.com`, binding
 `WaitForFirstConsumer`, expansion allowed). These are enrichment only — no lab step depends on a screenshot.
+**Update 2026-07-30:** row 2's detail page shows Name, Labels, Annotations, Provisioner, Created at,
+Owner, Reclaim policy, Default class, Volume binding mode — **no "Allow volume expansion" field
+renders anywhere on this page** on this console build, so "expansion allowed" is not confirmable from
+this view (the CLI (`oc get sc … -o jsonpath='{.allowVolumeExpansion}'`) remains authoritative for
+that fact). Row 1 (`claims-db-data` PVC) is currently unreachable: `storage-stateful` and
+`observability-health-scale` both own `{user}-dev` and are mutual `conflictsWith` entries
+(`gitops/entry-states/*/ws-meta.yaml`); a later `ws solve observability-health-scale` evicted
+storage-stateful and purged its StatefulSet/PVC (`oc get pvc,statefulset -n user1-dev` → no
+resources). Needs a fresh `ws solve storage-stateful` to re-shoot.
 
 ## Narration script
 Draft from the demo-flavor Say/Show/Do blocks in `lab.adoc` (`ifdef::demo[]`, the 8-min arc).

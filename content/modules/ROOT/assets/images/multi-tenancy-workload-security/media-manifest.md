@@ -41,9 +41,9 @@ show a minted token on screen (decode claims only).
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `multi-tenancy-workload-security-01-deploy-0of1-event.png` | Console → Workloads → Deployments → `root-demander` → Events tab, showing the SCC `FailedCreate` | Circle: `0 of 1` pods + the `restricted-v2 … runAsUser` event line | lab.adoc ex. 1 Console tab |
-| 2 | `multi-tenancy-workload-security-02-create-rolebinding.png` | Console → User Management → RoleBindings → Create binding form (subject=ServiceAccount payments-ci, role=edit) | Circle: Subject type=ServiceAccount, Role name=edit | lab.adoc ex. 3 Console tab |
-| 3 | `multi-tenancy-workload-security-03-resourcequota-gauges.png` | Console → Administration → ResourceQuotas → `workshop-quota` donut gauges | Circle: requests.memory used-vs-hard (6Gi cap) | lab.adoc ex. 5 Console tab |
+| 1 | `multi-tenancy-workload-security-01-deploy-0of1-event.png` | ⬜ NOT CAPTURED — no `root-demander` Deployment exists on the cluster right now (`oc get deploy --all-namespaces` has none); reaching this state needs creating/scaling it. Console → Workloads → Deployments → `root-demander` → Events tab, showing the SCC `FailedCreate` | Circle: `0 of 1` pods + the `restricted-v2 … runAsUser` event line | lab.adoc ex. 1 Console tab |
+| 2 | `multi-tenancy-workload-security-02-create-rolebinding.png` | ⬜ NOT CAPTURED — modal form that must land already-filled; no deep-link reaches it pre-filled, needs a human to type. Console → User Management → RoleBindings → Create binding form (subject=ServiceAccount payments-ci, role=edit) | Circle: Subject type=ServiceAccount, Role name=edit | lab.adoc ex. 3 Console tab |
+| 3 | `multi-tenancy-workload-security-03-resourcequota-gauges.png` | ✅ CAPTURED 2026-07-30 — Console → Administration → ResourceQuotas → `workshop-quota` donut gauges (`/k8s/ns/user1-dev/resourcequotas/workshop-quota`) | Circle: requests.memory used-vs-hard gauge — captured at 13.5% used (832Mi/6Gi). Six gauges render: limits.cpu 26.7%, limits.memory 13.5%, persistentvolumeclaims 0 of 10, pods 4 of 30, requests.cpu 18.3%, requests.memory 13.5% | lab.adoc ex. 5 Console tab |
 
 **Animated gif (PREFERRED for the multi-click RoleBinding flow):**
 `multi-tenancy-workload-security-04-grant-role.gif` (<30 s, silent) — the Console path of ex. 3:
