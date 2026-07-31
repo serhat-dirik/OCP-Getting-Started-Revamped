@@ -2,8 +2,8 @@
 :module-id: service-mesh-advanced-gateways
 include::partial$version-attributes.adoc[]
 
-// Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version}, Kubernetes 1.34)
-// against OpenShift Service Mesh {service_mesh_version} / Istio v1.28.6 as user4 on 2026-07-13 by performing
+// Internal delivery runbook. Timings MEASURED on the build cluster (OCP 4.21.22, Kubernetes 1.34)
+// against OpenShift Service Mesh 3.3.5 / Istio v1.28.6 as user4 on 2026-07-13 by performing
 // every exercise: injected rollouts ~30-40s each on a cache-warm node; a 200-request in-pod loop 6.1s; the
 // fault call 5.0s; policy propagation ~5s. The shared control plane (istiod + Kiali in istio-system) is
 // platform substrate and was NOT mutated. The {user}-mesh image-pull grant SHIPS in workshop-config
@@ -40,7 +40,7 @@ Total core (exercises 1–6): *~40 min*; with ~15 min of concept up front that's
 [NOTE]
 .How this timing was measured
 ====
-On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-13, every exercise was performed as `user4` against the live OpenShift Service Mesh {service_mesh_version} control plane and timed.
+On the build cluster (OCP 4.21.22, Kubernetes 1.34) on 2026-07-13, every exercise was performed as `user4` against the live OpenShift Service Mesh 3.3.5 control plane and timed.
 The `oc` commands themselves are fast: applying a mesh custom resource is instant; a proxy picks up a new policy in about 5 seconds; a 200-request in-pod loop runs in *6.1 s*; the injected 5-second fault call takes *5.0 s* on the nose.
 The real time-sink is the *rollouts*: each enrolled tier restarts to gain its sidecar (*~30–40 s* on a cache-warm node), and exercises 1, 4, and 7 each roll at least one Deployment. Budget for the rollouts and for *reading* — the SPIFFE identity, the Kiali graph, the telemetry split — not for command latency.
 ====
@@ -135,13 +135,13 @@ The mTLS beat applies a namespace-wide STRICT `PeerAuthentication`, which blocks
 * *Sidecar overhead scales with users.*
 Each meshed pod carries an Envoy proxy (~100 m CPU / 128 Mi request, and up to the tier's limit). With the app tier meshed across many users, that's a real footprint on a shared cluster. The per-user quota is sized for it, but watch scheduling on a busy cluster; ambient mode is the direction to evaluate if the sidecar footprint becomes the constraint.
 * *`EnvoyFilter` in the encore is version-sensitive.*
-The rate-limit `EnvoyFilter` patches Envoy's config directly; its `typed_config` is tied to the proxy's Envoy version and can break on a mesh upgrade. It's verified against Istio {istio_version} here. If the encore's `429` beat doesn't fire after a control-plane bump, re-verify the `local_ratelimit` `typed_config` against the new Envoy version. It's the escape hatch, not a first-class resource — frame it accordingly.
+The rate-limit `EnvoyFilter` patches Envoy's config directly; its `typed_config` is tied to the proxy's Envoy version and can break on a mesh upgrade. It's verified against Istio v1.28.6 here. If the encore's `429` beat doesn't fire after a control-plane bump, re-verify the `local_ratelimit` `typed_config` against the new Envoy version. It's the escape hatch, not a first-class resource — frame it accordingly.
 * *Kiali needs traffic *and* a moment.*
 The Kiali graph draws from recent telemetry; if an attendee opens it before generating traffic (or picks too-narrow a time range), it looks empty. Generate the traffic first (exercise 3 does), then select a recent range. The `istioctl` grounding in the lab confirms traffic flowed regardless of what the console shows.
 
 == Provenance
 
 Service Mesh is a net-new module built against this repo's live cluster.
-Everything it teaches for the attendee was *performed* on OpenShift {ocp_version} (Kubernetes 1.34) against a live OpenShift Service Mesh {service_mesh_version} (Istio {istio_version}, Sail operator) control plane with Kiali {kiali_version}, as `user4` on 2026-07-13: the per-workload sidecar injection and native-sidecar init-container structure; the namespace-label `Forbidden` (RBAC reality); the STRICT `PeerAuthentication` block-and-allow and the SPIFFE workload identity read off the certificate; the weighted/header `VirtualService` + `DestinationRule` split *measured from `istio_requests_total`* (v1≈185 / v2≈15 over 200 requests, and +30-to-v2 for the header route); the fault injection (5-second delay returning `200` in 5.0 s — the honest fault-vs-router-timeout behavior) and the live circuit-breaker config; the `AuthorizationPolicy` giving `claims → fraud 200` while `web → fraud` and the un-meshed `demo-client` get `403 RBAC: access denied`; and the advanced-gateway encore — a raw-TCP feed served end-to-end through an Istio `Gateway` (`PARASOL-PARTNER-FEED-ACK`) and a `429` gateway rate limit via `EnvoyFilter`.
+Everything it teaches for the attendee was *performed* on OpenShift 4.21.22 (Kubernetes 1.34) against a live OpenShift Service Mesh 3.3.5 (Istio v1.28.6, Sail operator) control plane with Kiali 2.27.1, as `user4` on 2026-07-13: the per-workload sidecar injection and native-sidecar init-container structure; the namespace-label `Forbidden` (RBAC reality); the STRICT `PeerAuthentication` block-and-allow and the SPIFFE workload identity read off the certificate; the weighted/header `VirtualService` + `DestinationRule` split *measured from `istio_requests_total`* (v1≈185 / v2≈15 over 200 requests, and +30-to-v2 for the header route); the fault injection (5-second delay returning `200` in 5.0 s — the honest fault-vs-router-timeout behavior) and the live circuit-breaker config; the `AuthorizationPolicy` giving `claims → fraud 200` while `web → fraud` and the un-meshed `demo-client` get `403 RBAC: access denied`; and the advanced-gateway encore — a raw-TCP feed served end-to-end through an Istio `Gateway` (`PARASOL-PARTNER-FEED-ACK`) and a `429` gateway rate limit via `EnvoyFilter`.
 OpenShift Service Mesh 3 is named as *upstream Istio on the Sail operator* throughout; the 2.x control-plane and member-roll resources appear only as the *replaced* predecessors (04-STYLE-GUIDE §6 ban), never as a recommended path.
 Two honesty notes are carried into the content as explicit limitations, not open items: the sample app does not auto-generate the web→claims→fraud cascade (all east-west traffic is driven by hand through the real sidecars), and fraud v1/v2 share an image (the split is read from mesh telemetry, not response bodies). The `{user}-mesh` image-pull grant ships in workshop-config and was re-verified 2026-07-29 with `oc auth can-i get imagestreams --subresource=layers … --as=system:serviceaccount:user4-mesh:default` → `yes` (the earlier "blocker" was the slash-form `can-i` parsing artifact); pre-flight #3 checks the sync.

@@ -29,8 +29,23 @@ WHAT IS AND IS NOT IN SCOPE
   Nine lab pages xref troubleshooting directly, and the built workshop site publishes all 26
   troubleshooting AND all 26 instructor pages with live hrefs. The exclusion stands anyway because
   the version text there is PROVENANCE ("Last verified on OpenShift X, 2026-07-13"): a dated
-  freshness signal, not a claim about the product, so it cannot go wrong the way "GA on 4.22.5"
-  did. 80 such lines exist and all are correct. Do not "close the gap" — it was measured and kept.
+  freshness signal, not a claim about the product, so it cannot go wrong the way "GA on 4.22.5" did.
+
+  This paragraph used to end "80 such lines exist and all are correct. Do not close the gap — it was
+  measured and kept." That was FALSE, and saying so with confidence made it durable: 48 of those
+  lines interpolated LIVE attributes ({ocp_version}, {istio_version}, …) rather than literals, so
+  every versions.yaml bump silently re-dated them and made each page assert a verification that
+  never happened. versions.yaml moved twice on 2026-07-31 alone. Worse, commit 9f0ff1e9 had
+  deliberately re-templated a CORRECT literal (Istio v1.28.6) into {istio_version} in six places,
+  believing templating was always the fix — this very sentence is what would have blessed that.
+
+  All 48 were frozen to literals on 2026-07-31, sourced from a versions.yaml timeline reconstructed
+  with `git log -p` — never from the current file, which is the one whose movement caused the bug.
+
+  So the exclusion still stands, but for the honest reason: provenance must be a FROZEN record of
+  what was observed. A provenance line containing `{...}` is a defect, not a convention. What stays
+  dynamic is guidance about the reader's own cluster ("Expect `istio {istio_version} Healthy`") —
+  that describes their present, not our past.
 
   OUT — `//` authoring comments, on every page. Recording "grounded on OCP 4.22.5 as user1" next to
   a click-path is exactly how a capture should be attributed. Comments do not render.
