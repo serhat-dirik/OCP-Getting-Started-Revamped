@@ -4,6 +4,14 @@ Repeatable console / product-UI screenshots for the workshop media pass. Output 
 `content/modules/ROOT/assets/images/<slug>/`, which is where each module's
 `media-manifest.md` expects it.
 
+> **Policy vs. mechanics.** This file (and `RUNBOOK.md`) explain how the driver works. The
+> *rules* — the privacy-guard blind spot that makes a manifest row the only gate, the
+> cluster-domain-vs-credential line, why a state-dependent shot is one-shot, forcing light theme,
+> and the unauthenticated `/static/locales/en/` label check — are in
+> [`docs/media-capture-conventions.md`](../../docs/media-capture-conventions.md), because they
+> apply to every capture (hand-shot screenshots, demo `.cast` recordings) and not just this
+> harness. Read that file first; it is short.
+
 > **Doing a capture run? Read [RUNBOOK.md](RUNBOOK.md) first.** This file explains how the harness
 > works; the runbook is the order to execute in, what must be true before the login window opens,
 > which blocks destroy which, and what is not capturable at all. The order is not optional — the
