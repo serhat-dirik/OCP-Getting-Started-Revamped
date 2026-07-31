@@ -296,7 +296,10 @@ The client gave up at 5 seconds, before the ~15-second cold start could complete
 oc exec deploy/demo-client -n $NS -- curl -s -k -m 30 -o /dev/null -w "with -m30: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
 # fix option B — pin a warm floor so scale-from-zero never hits the critical path.
 # Knative revisions are IMMUTABLE: changing the template (here, the min-scale floor) needs a NEW
-# revision name, or the webhook rejects "changes without a name change" — so name this one:
+# revision name, or the webhook rejects "changes without a name change" — so name this one.
+# `ws start` does NOT remove revisions a previous pass left in this namespace (only `ws reset`/
+# `ws prep` do), so clear any same-named leftover first — safe even on a first run (no-op if absent):
+oc delete revision parasol-claims-v1-warm -n $NS --ignore-not-found=true >/dev/null 2>&1 || true
 kn service update parasol-claims -n $NS --scale-min 1 --revision-name parasol-claims-v1-warm --no-wait
 ----
 
@@ -314,6 +317,7 @@ Service 'parasol-claims' updated in namespace 'user6-dev'.
 
 [source,sh,role=execute]
 ----
+oc delete revision parasol-claims-v1-cold -n $NS --ignore-not-found=true >/dev/null 2>&1 || true
 kn service update parasol-claims -n $NS --scale-min 0 --revision-name parasol-claims-v1-cold --no-wait
 ----
 ====
@@ -326,7 +330,14 @@ kn service update parasol-claims -n $NS --scale-min 0 --revision-name parasol-cl
 == 3. Autoscale under load, and tune concurrency
 ⏱ *~8 min* · watch it climb from zero to the ceiling on concurrency, then melt back down
 
-Knative's autoscaler scales on *concurrency* — how many requests are in flight at once — not on CPU. To make that visible, first *tune* the service: cap each pod at a *hard* concurrency of `2` and a *max-scale* of `3`. Changing the template mints a new revision — name it `parasol-claims-v2`:
+Knative's autoscaler scales on *concurrency* — how many requests are in flight at once — not on CPU. To make that visible, first *tune* the service: cap each pod at a *hard* concurrency of `2` and a *max-scale* of `3`. Changing the template mints a new revision — name it `parasol-claims-v2`.
+
+`ws start` does NOT remove revisions a previous pass left in this namespace (only `ws reset`/`ws prep` do) — a leftover `parasol-claims-v2` from an earlier pass whose content differs even slightly (a rebuilt image, a different concurrency setting) makes *this exact step* fail with `Ready=False` / a rejected "changes without a name change" (or `already exists`) error, and no new revision gets created. Clear it first — safe even on a first run (no-op if absent), and covers both tabs below:
+
+[source,sh,role=execute]
+----
+oc delete revision parasol-claims-v2 -n $NS --ignore-not-found=true
+----
 
 [tabs]
 ====
@@ -391,16 +402,28 @@ sleep 90; oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-
 // coexisting. The burst afterward was watched directly (`oc get pods -w` sampled every 3s): pods
 // climbed 0 -> 2 -> 3 within ~21s and held at 3, then drained back to 0 within ~70s of the load
 // ending — matching this block's own expected shape.
-// One real finding along the way, worth keeping: `ws start` resets the ksvc SPEC but does NOT delete
-// old Knative Revision objects left behind by a previous pass in the same namespace. user1-dev still
-// held an orphaned `parasol-claims-v2` revision (0% traffic, unrouted, 8h old) from an earlier
-// session on this same cluster. Running this exercise's literal command against that namespace hit a
-// real collision: the ksvc went `Ready=False reason=RevisionNameTaken`, and Configuration status
-// reported `revisions.serving.knative.dev "parasol-claims-v2" already exists`. No new revision was
-// created until the stale object was removed (`oc delete revision parasol-claims-v2 -n user1-dev`),
-// after which the SAME already-queued `kn service update` reconciled on its own without being
-// re-run. An attendee re-running this module in a namespace that already ran it before could hit the
-// identical collision; a namespace that has never run this module will not.
+// One real finding along the way, worth keeping (root-caused and fixed 2026-07-31 as user3): `ws
+// start <module> --user <u>`, when the module is ALREADY the resident one in that namespace, purges
+// NOTHING — `gc_conflicts` (tools/ws/ws) only calls purge_ns when EVICTING a DIFFERENT conflicting
+// module, never on a same-module re-invocation. Verified live: re-running `ws start
+// serverless-zero-to-hero --user user3` against a namespace already running it left the Configuration
+// object's UID byte-for-byte unchanged and a manually-minted `parasol-claims-v2` untouched — a
+// complete no-op purge-wise. `ws reset`/`ws prep` DO purge (confirmed live: a full reset correctly
+// cascade-deleted a leftover v2 with no orphan), so purge_ns's own Knative coverage (`oc delete
+// services.serving.knative.dev`) is not the gap; the gap is that `ws start` never calls it for this
+// case. Reproduced the actual failure mode by minting v2, re-running `ws start` (no-op, confirmed),
+// then re-minting v2 with different immutable content (`--concurrency-limit` changed): the admission
+// webhook denied it (`Saw the following changes without a name change … Spec.ContainerConcurrency`).
+// The originally-observed 8h-old orphan and its `RevisionNameTaken`/`already exists` symptom is the
+// same defect via a sibling path (the Configuration itself had also been recreated in between, so the
+// stale Revision blocked a fresh CREATE rather than an in-place PATCH). Fix applied here (content-
+// level, contained to this module): each fixed-name `kn service update --revision-name` step below now
+// clears any same-named leftover first (`oc delete revision <name> --ignore-not-found=true`), making
+// every mint idempotent regardless of how the namespace got into its current state. The engine-level
+// question of whether `ws start` should ALWAYS purge on a same-module re-run is a bigger, cross-
+// cutting decision (it would remove the start/reset distinction platform-wide and silently wipe
+// attendee work with no confirmation, unlike `ws prep`) — flagged for the platform owner, not decided
+// here.
 // Also observed: GENERATION numbers are session-dependent, not a fixed 1/2/3/4 — every reconcile
 // attempt (including the failed one above) burns a generation, so this run actually landed on
 // generations 1 / 4 / 5 / 6, not the illustrative 1/2/3/4 in the sample output below. The four-

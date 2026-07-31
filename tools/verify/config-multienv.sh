@@ -66,6 +66,23 @@ deploy_absent() {
   ! oc get deploy "$1" -n "$2" >/dev/null 2>&1
 }
 
+# A named object of any kind is ABSENT from a namespace. Entry ships neither claims-config nor
+# claims-creds in dev — both are rendered ONLY under .Values.solve (solve-endstate.yaml is wholly
+# gated by `{{- if .Values.solve }}`, and parasol-claims.yaml references them only in its solve
+# branch), so asserting their absence at entry cannot false-red a correctly-materialized entry state.
+# WHY THIS EXISTS: the lab creates both with the CREATE-only verb and a FIXED name
+# (`oc create configmap claims-config …` ex 2, `oc create secret generic claims-creds …` ex 3), so a
+# leftover is a COLLISION ("already exists"), not residue. The pre-existing entry block only proved
+# stage/prod were empty, which a PARTIAL run leaves true — an attendee who did ex 2-3 and stopped
+# before the promotion beat passed every entry check, so `ws prep`'s fast path returned "already
+# prepared — nothing to do" WITHOUT purging and the next pass hard-failed on its own commands.
+# Same class as the serverless-zero-to-hero orphan-revision defect measured 2026-07-31; the fix is the
+# same shape observability-health-scale/networking-dev-devops already use (assert the clean slate you claim).
+obj_absent() {
+  oc get ns "$3" >/dev/null 2>&1 || return 1
+  ! oc get "$1" "$2" -n "$3" >/dev/null 2>&1
+}
+
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves DB connectivity,
 # since readiness gates on the datasource). API-only service: "/" is 404 by design.
 route_ready_200() {
@@ -121,6 +138,8 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove stage/prod start EMPTY (they fill in during the promotion exercise).
   check "no parasol-claims in ${STAGE} yet (clean)"    deploy_absent parasol-claims "$STAGE"       || hint "stage already has the app — ws reset config-multienv --user ${USER_NAME} for a clean entry"
   check "no parasol-claims in ${PROD} yet (clean)"     deploy_absent parasol-claims "$PROD"        || hint "prod already has the app — ws reset config-multienv --user ${USER_NAME} for a clean entry"
+  check "no claims-config ConfigMap in ${DEV} yet (attendee creates it)" obj_absent configmap claims-config "$DEV" || hint "a leftover claims-config is present; exercise 2's 'oc create configmap claims-config …' will fail 'already exists' against it — ws reset config-multienv --user ${USER_NAME} for a clean entry"
+  check "no claims-creds Secret in ${DEV} yet (attendee creates it)"     obj_absent secret claims-creds "$DEV"     || hint "a leftover claims-creds is present; exercise 3's 'oc create secret generic claims-creds …' will fail 'already exists' against it — ws reset config-multienv --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab looks like) ---------------------------
   # dev: config externalized to a ConfigMap + a Secret, all three probes, explicit resources.

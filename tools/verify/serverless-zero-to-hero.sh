@@ -68,6 +68,24 @@ no_eventing() {
   oc get ns "$NS" >/dev/null 2>&1 || return 1
   [[ -z "$(oc get broker.eventing.knative.dev,trigger.eventing.knative.dev,pingsource.sources.knative.dev -n "$NS" -o name 2>/dev/null || true)" ]]
 }
+# Entry ships EXACTLY ONE revision (parasol-claims-v1) — this file's header and the entry block below
+# both already claimed "one revision", but nothing tested it, so an ORPHANED revision from an earlier
+# pass passed every entry check (measured 2026-07-31). That false green is load-bearing: `ws prep`'s
+# fast path returns "already prepared — nothing to do" WITHOUT purging when the entry checks pass, so a
+# stale revision survived prep, and the lab's own exercise-3 command (`kn service update … --revision-name
+# parasol-claims-v2`) then hard-failed `Ready=False reason=RevisionNameTaken` /
+# `revisions.serving.knative.dev "parasol-claims-v2" already exists` with NO new revision created.
+# Revision names are FIXED (the chart pins v1; the lab pins v2), so a leftover is a collision, not
+# residue. Asserting the count here makes prep purge, which is the only thing that clears it.
+# == not >= on purpose: this runs ONLY under --entry-only, where a clean slate is the assertion; the
+# lab legitimately mints v1-warm/v1-cold/v2 later and those are checked in the END branch, not here.
+single_revision() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  local revs
+  revs="$(oc get revision.serving.knative.dev -n "$NS" \
+            -l "serving.knative.dev/service=parasol-claims" -o name 2>/dev/null || true)"
+  [[ "$revs" == "revision.serving.knative.dev/parasol-claims-v1" ]]
+}
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                       oc get ns "$NS"                 || hint "run: ws prep serverless-zero-to-hero (or ws start serverless-zero-to-hero --user ${USER_NAME}); the ${NS} namespace is workshop-layer (workshop-config)"
@@ -82,6 +100,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — one revision, no split, no eventing --------------------------------
   check "no tag-based traffic split yet (attendee splits revisions)" no_traffic_split || hint "entry ships one revision; if the ksvc traffic is tag-split the lab already started — ws reset serverless-zero-to-hero --user ${USER_NAME}"
   check "no eventing objects yet (attendee wires source->broker->trigger)" no_eventing || hint "entry ships no Broker/Trigger/PingSource; if they exist the lab already started — ws reset serverless-zero-to-hero --user ${USER_NAME}"
+  check "exactly one revision (parasol-claims-v1) — no orphan from an earlier pass" single_revision || hint "a leftover revision is present. Revision names are FIXED, so exercise 3's 'kn service update --revision-name parasol-claims-v2' will fail RevisionNameTaken against it. Clear it: ws reset serverless-zero-to-hero --user ${USER_NAME} (or, targeted: oc delete revision <name> -n ${NS})"
 else
   # --- end state: the lab's OUTCOMES — tuned + split + eventing wired ---------------------------------
   # Assert OUTCOMES (ksvc tag-split; a Broker, Trigger and PingSource exist), never the exact CR wording,
