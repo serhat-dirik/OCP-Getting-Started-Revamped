@@ -65,10 +65,24 @@ secret_referenced() {
 }
 
 # Entry clean-slate helpers: return 0 when the lab outcome is ABSENT (attendee has done nothing).
-no_promote_tag()    { ! has_tag "$PROMOTE_TAG"; }
-no_ext_stream()     { ! oc get is "$EXT_STREAM" -n "$NS" >/dev/null 2>&1; }
-no_custom_template(){ [[ "$(custom_template_count)" == "0" ]]; }
-secret_unreferenced() { ! secret_referenced; }
+# Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
+# cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+no_promote_tag() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! has_tag "$PROMOTE_TAG"
+}
+no_ext_stream() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! oc get is "$EXT_STREAM" -n "$NS" >/dev/null 2>&1
+}
+no_custom_template() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  [[ "$(custom_template_count)" == "0" ]]
+}
+secret_unreferenced() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! secret_referenced
+}
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                     || hint "run: ws prep registry-images-catalog-governance (or ws start registry-images-catalog-governance --user ${USER_NAME})"

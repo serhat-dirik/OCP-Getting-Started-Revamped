@@ -54,7 +54,10 @@ rhdh_guest_token() {
   local h; h="$(rhdh_host)"
   [[ -n "$h" ]] || return 1
   curl -ks --max-time 15 "https://${h}/api/auth/guest/refresh" 2>/dev/null \
-    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("backstageIdentity",{}).get("token",""))' 2>/dev/null
+    | python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except Exception: d={}
+print(d.get("backstageIdentity",{}).get("token",""))' 2>/dev/null || true
 }
 
 # The Parasol catalog is populated: the catalog API returns the parasol-claims Component.
@@ -87,11 +90,17 @@ scaffold_org_exists() {
 scaffold_repo_count() {
   local h; h="$(gitea_host)"
   [[ -n "$h" ]] || { echo 0; return; }
+  # `|| true`, not `|| echo 0` — the python3 try/except already guarantees exactly one line of
+  # output even when curl fails to connect (empty stdin → caught, prints 0). Under pipefail the
+  # pipe's exit status is curl's non-zero code (not python3's 0), so a trailing `|| echo 0` fires
+  # too, duplicating the line into a corrupt "0\n0" that any exact-match caller compares wrong; and
+  # under `set -e` the bare pipe with no `|| true` at all would kill the whole script on that same
+  # curl failure since this is the function's last statement.
   curl -ks --max-time 15 "https://${h}/api/v1/orgs/${SCAFFOLD_ORG}/repos?limit=50" 2>/dev/null \
     | python3 -c 'import sys,json
 try: d=json.load(sys.stdin)
 except Exception: d=[]
-print(len(d) if isinstance(d,list) else 0)' 2>/dev/null || echo 0
+print(len(d) if isinstance(d,list) else 0)' 2>/dev/null || true
 }
 
 # Count catalog Locations registered against this user's scaffold org. The golden-path scaffolder's
@@ -103,17 +112,27 @@ print(len(d) if isinstance(d,list) else 0)' 2>/dev/null || echo 0
 user_catalog_location_count() {
   local h tok; h="$(rhdh_host)"; tok="$(rhdh_guest_token)"
   [[ -n "$h" && -n "$tok" ]] || { echo 0; return; }
+  # `|| true`, not `|| echo 0` — see the matching comment in scaffold_repo_count(): python3's
+  # try/except already guarantees one valid line, and `|| echo 0` on the whole pipe would duplicate
+  # it into a corrupt two-line value whenever curl itself is the thing that failed.
   curl -ks --max-time 15 -H "Authorization: Bearer ${tok}" "https://${h}/api/catalog/locations" 2>/dev/null \
     | python3 -c 'import sys,json
 try: d=json.load(sys.stdin)
 except Exception: d=[]
 org=sys.argv[1]
-print(sum(1 for e in d if isinstance(e,dict) and ("/"+org+"/") in ((e.get("data",e) or {}).get("target") or "")))' "$SCAFFOLD_ORG" 2>/dev/null || echo 0
+print(sum(1 for e in d if isinstance(e,dict) and ("/"+org+"/") in ((e.get("data",e) or {}).get("target") or "")))' "$SCAFFOLD_ORG" 2>/dev/null || true
 }
 
 # A clean scaffold slate = the Gitea org is empty AND no orphan catalog Location points at it. Both are
 # what the entry cleanup hook guarantees; asserting both closes the multi-tenancy loop (G3 FAIL).
-scaffold_slate_clean() { [[ "$(scaffold_repo_count)" == "0" && "$(user_catalog_location_count)" -eq 0 ]]; }
+# Requires BOTH the scaffold org (Gitea) and the portal (RHDH) to actually be reachable first —
+# otherwise scaffold_repo_count/user_catalog_location_count degrade to "0" for "couldn't ask", which
+# is not the same fact as "asked, and it was empty", and must not be reported as a clean slate.
+scaffold_slate_clean() {
+  scaffold_org_exists || return 1
+  rhdh_up || return 1
+  [[ "$(scaffold_repo_count)" == "0" && "$(user_catalog_location_count)" -eq 0 ]]
+}
 scaffold_repo_present() { [[ "$(scaffold_repo_count)" -ge 1 ]]; }
 
 # --- entry state (what `ws start developer-hub-golden-paths` materializes) --------------------------

@@ -64,7 +64,15 @@ observer_reads_crd() { _can_i_as_attendee get customresourcedefinitions.apiexten
 
 # Deployment presence in {user}-dev (the notifications app the finished lab leaves running).
 deploy_present() { oc get deploy "$(marker imageName)" -n "$NS" >/dev/null 2>&1; }
-no_deploy()      { ! oc get deploy "$(marker imageName)" -n "$NS" >/dev/null 2>&1; }
+# Namespace and a resolved image name are required first — otherwise an empty name / missing
+# namespace makes `oc get deploy ""` error and the negation is vacuously true, not evidence of a
+# clean, correctly-seeded entry state.
+no_deploy() {
+  local name; name="$(marker imageName)"
+  [[ -n "$name" ]] || return 1
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! oc get deploy "$name" -n "$NS" >/dev/null 2>&1
+}
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep packaging-distributing (or ws start packaging-distributing --user ${USER_NAME}); ${NS} is workshop-layer (per-user-namespaces)"

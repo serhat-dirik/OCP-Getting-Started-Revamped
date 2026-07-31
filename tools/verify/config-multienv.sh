@@ -59,8 +59,10 @@ deploy_ready_min() {
   [[ -n "$ready" && "$ready" -ge "$want" ]]
 }
 
-# Deployment does NOT exist (entry-only: stage/prod start empty).
+# Deployment does NOT exist (entry-only: stage/prod start empty). Namespace must actually exist
+# first — otherwise this is vacuously true on a cluster where nothing materialized at all.
 deploy_absent() {
+  oc get ns "$2" >/dev/null 2>&1 || return 1
   ! oc get deploy "$1" -n "$2" >/dev/null 2>&1
 }
 

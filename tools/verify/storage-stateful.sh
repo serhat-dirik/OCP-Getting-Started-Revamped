@@ -60,9 +60,11 @@ claims_db_persistent() {
   [[ "$claim" == "claims-db-data" ]]
 }
 
-# There are zero PVCs in the namespace (entry state — persistence exercise not started).
+# There are zero PVCs in the namespace (entry state — persistence exercise not started). Namespace
+# must actually exist first — otherwise a zero count is vacuous, not evidence of a clean entry.
 no_pvcs_yet() {
   local n
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
   n="$(oc get pvc -n "$NS" --no-headers 2>/dev/null | grep -c . || true)"
   [[ "$n" -eq 0 ]]
 }

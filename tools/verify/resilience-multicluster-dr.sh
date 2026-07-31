@@ -65,7 +65,10 @@ failover_routing_present() {
   [[ -n "$(oc get virtualservice -n "$CLIENT_NS" -o name 2>/dev/null || true)" ]]
 }
 # Entry clean-slate: NO failover routing yet (attendee builds the ServiceEntry + VirtualService).
+# CLIENT_NS must actually exist first — otherwise an empty result is vacuous (true on a cluster
+# where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
 no_failover_routing() {
+  oc get ns "$CLIENT_NS" >/dev/null 2>&1 || return 1
   [[ -z "$(oc get serviceentry,virtualservice -n "$CLIENT_NS" -o name 2>/dev/null || true)" ]]
 }
 
@@ -106,7 +109,11 @@ failover_proof() {
 
 # Solve marker (end-state only) lives in the client ns.
 solved() { oc get cm ws-solve-resilience-multicluster-dr -n "$CLIENT_NS" >/dev/null 2>&1; }
-not_solved() { ! solved; }
+# CLIENT_NS must actually exist first — otherwise "absent" is vacuous, not evidence of a clean entry.
+not_solved() {
+  oc get ns "$CLIENT_NS" >/dev/null 2>&1 || return 1
+  ! solved
+}
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${CLIENT_NS} exists"                  oc get ns "$CLIENT_NS"                   || hint "run: ws prep resilience-multicluster-dr (or ws start resilience-multicluster-dr --user ${USER_NAME}); the three namespaces are workshop-layer (per-user-resilience)"
@@ -147,9 +154,23 @@ else
   else
     info "closing verify: the failover OUTCOME above is the proof (the ws-solve marker is stamped only by ws solve; a hand-completed lab legitimately has none)"
   fi
-  info "failover drill: briefly scaling site-a to 0 to prove the client fails over to site-b (auto-restores)…"
-  check "FAILOVER proven: site-a down -> the client is served by site-b" failover_proof \
-    || hint "with site-a scaled to 0 the client should be served by site-b within ~30s — check the DestinationRule outlierDetection + locality LB and the VirtualService retries"
+  # Guard the drill on its own prerequisites (rule 14 idiom, matching deployment-targets-scheduling.sh):
+  # failover_proof() scales site-a to 0 and then polls served_site() for up to 45s. On a cluster where
+  # the sites/client/gateway aren't even up yet — or the routing was never wired — there is ZERO chance
+  # the client is ever served by site-b, so the poll always exhausts its full window before giving up.
+  # Measured on an empty cluster (no workshop installed, CRC 2026-07-31): this burned ~45s on every run,
+  # entirely inside a loop with no early-exit, the same "written against a populated cluster" shape as
+  # the ogsr-uninstall.sh/install.sh incidents. Only run the live drill once the prerequisites make it
+  # gradeable; otherwise skip it the same way the earlier OUTCOME checks already did (uncounted, not a ❌).
+  if deploy_ready parasol-claims "$SITEA_NS" && deploy_ready parasol-claims "$SITEB_NS" \
+     && deploy_ready claims-client "$CLIENT_NS" && deploy_ready claims-gateway "$CLIENT_NS" \
+     && failover_routing_present; then
+    info "failover drill: briefly scaling site-a to 0 to prove the client fails over to site-b (auto-restores)…"
+    check "FAILOVER proven: site-a down -> the client is served by site-b" failover_proof \
+      || hint "with site-a scaled to 0 the client should be served by site-b within ~30s — check the DestinationRule outlierDetection + locality LB and the VirtualService retries"
+  else
+    info "(skipped the live failover drill — sites/client/gateway not all Ready yet, or routing not wired — see the checks above)"
+  fi
 fi
 
 verify_summary

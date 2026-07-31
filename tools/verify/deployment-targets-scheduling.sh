@@ -72,12 +72,19 @@ claims_distinct_nodes() {
 pdb_present() { oc get pdb parasol-claims -n "$NS" >/dev/null 2>&1; }
 
 # Entry-clean-slate helpers: return 0 when the solve shaping is ABSENT (nothing built yet).
-no_claims_pdb() { ! oc get pdb parasol-claims -n "$NS" >/dev/null 2>&1; }
+# Each requires the underlying Deployment to actually exist first — otherwise "absent" is vacuous
+# (true on a cluster where the entry state never materialized at all), not evidence of a clean entry.
+no_claims_pdb() {
+  oc get deploy parasol-claims -n "$NS" >/dev/null 2>&1 || return 1
+  ! oc get pdb parasol-claims -n "$NS" >/dev/null 2>&1
+}
 no_claims_antiaffinity() {
+  oc get deploy parasol-claims -n "$NS" >/dev/null 2>&1 || return 1
   [[ -z "$(oc get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity}' 2>/dev/null || true)" ]]
 }
 batch_unpinned() {
   # No batch-pool nodeSelector on statement-batch yet (the attendee adds it).
+  oc get deploy statement-batch -n "$NS" >/dev/null 2>&1 || return 1
   [[ -z "$(oc get deploy statement-batch -n "$NS" -o jsonpath="{.spec.template.spec.nodeSelector.${POOL_KEY//./\\.}}" 2>/dev/null || true)" ]]
 }
 
@@ -91,7 +98,11 @@ claims_schema_strategy() {
     | grep '^QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=' | head -1 | cut -d= -f2- || true
 }
 # ENTRY fault-present: the app reseeds on boot (drop-and-create explicitly, or unset → same image default).
-claims_schema_is_reseed() { local v; v="$(claims_schema_strategy)"; [[ -z "$v" || "$v" == "drop-and-create" ]]; }
+# Requires the Deployment to exist — an absent Deployment also reads as "unset" and must not pass.
+claims_schema_is_reseed() {
+  oc get deploy parasol-claims -n "$NS" >/dev/null 2>&1 || return 1
+  local v; v="$(claims_schema_strategy)"; [[ -z "$v" || "$v" == "drop-and-create" ]]
+}
 # END fix-applied: the app is OFF drop-and-create (none/validate/…) so a new pod boot no longer reseeds.
 claims_schema_not_reseed() { local v; v="$(claims_schema_strategy)"; [[ -n "$v" && "$v" != "drop-and-create" ]]; }
 # END fix-applied: the parasol-claims CPU limit is raised above the 500m entry floor that throttled the

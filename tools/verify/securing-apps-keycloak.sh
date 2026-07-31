@@ -67,6 +67,14 @@ exchanged_token() {  # subject_token
     | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
 }
 
+# Entry clean-slate: NO parasol-fraud yet (the optional token-exchange beat hasn't started). Namespace
+# must actually exist first — otherwise an empty result is vacuous (true on a cluster where nothing
+# materialized at all), not evidence of a clean, correctly-seeded entry state.
+no_fraud_yet() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  [[ -z "$(oc get deploy parasol-fraud -n "$NS" -o name 2>/dev/null)" ]]
+}
+
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                         || hint "run: ws start securing-apps-keycloak --user ${USER_NAME}"
 check "entry marker ws-entry-securing-apps-keycloak present"               oc get cm ws-entry-securing-apps-keycloak -n "$NS"         || hint "entry app not synced — ws start securing-apps-keycloak --user ${USER_NAME}"
@@ -80,8 +88,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: apps are UNPROTECTED and the advanced beat has not started -----------------
   check "claims API is OPEN — GET /api/claims is 200 with no token" \
         test "$(route_code parasol-claims /api/claims)" = "200"                                 || hint "entry is unprotected; if this is 401 the app is already secured — ws reset securing-apps-keycloak --user ${USER_NAME}"
-  check "no parasol-fraud yet (token-exchange beat not started)" \
-        test -z "$(oc get deploy parasol-fraud -n "$NS" -o name 2>/dev/null)"                   || hint "entry has no fraud service — ws reset securing-apps-keycloak --user ${USER_NAME}"
+  check "no parasol-fraud yet (token-exchange beat not started)" no_fraud_yet || hint "entry has no fraud service — ws reset securing-apps-keycloak --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — the API is bearer-protected and role-enforced -------------
   # Assert outcomes (HTTP behaviour), never the mechanism (env vars / annotation), so any correct

@@ -68,8 +68,10 @@ route_answers_200() {
 
 # No DeploymentConfig objects anywhere in the namespace (every Parasol workload is a
 # Deployment; the custom PostgreSQL Template exists precisely to avoid the stock DC).
+# Namespace must actually exist first — otherwise a zero count is vacuous, not evidence.
 no_deploymentconfig() {
   local ns="$1" n
+  oc get ns "$ns" >/dev/null 2>&1 || return 1
   n="$(oc get deploymentconfig -n "$ns" -o name 2>/dev/null | grep -c . || true)"
   [[ "$n" == "0" ]]
 }
@@ -83,7 +85,17 @@ check "Gitea fork ${USER_NAME}/parasol-notifications answers" gitea_repo_exists 
 check "Parasol PostgreSQL catalog Template present"  oc get template parasol-postgresql-ephemeral -n openshift || hint "template missing — sync the workshop-config Argo app"
 # The Template object existing is not the outcome — the attendee FINDING it in the Software Catalog
 # is. The catalog lists namespace-visible templates from openshift/, so the attendee needs the read.
-check "attendee can read catalog Templates (Software Catalog tile)" attendee_reads_catalog_templates || hint "the Software Catalog tile the lab tells them to open will not appear — the attendee cannot read templates in the openshift namespace; check the platform-observer ClusterRole and its binding to workshop-attendees"
+# NOTE ON WHAT THIS CHECK CAN AND CANNOT TELL YOU (measured 2026-07-31 on a cluster that had never
+# had the workshop installed). The capability is real and worth asserting — without it the Software
+# Catalog tile the lab sends attendees to simply is not there. But it is NOT evidence that our RBAC
+# landed: stock OpenShift ships a `shared-resource-viewer` Role in the `openshift` namespace bound by
+# `shared-resource-viewers` to the group `system:authenticated`, so EVERY authenticated user already
+# has this read. Verified on bare CRC: `platform-observer` did not exist at all, and this same
+# can-i returned `yes`. So it passes with platform-observer deleted entirely, and the old hint sent
+# you to inspect a ClusterRole that has nothing to do with the outcome. Exactly the trap CLAUDE.md
+# records — stock cluster roles carry more than anyone remembers. Keep the check, believe it only as
+# a statement about the tile.
+check "attendee can read catalog Templates (Software Catalog tile)" attendee_reads_catalog_templates || hint "the Software Catalog tile the lab tells them to open will not appear — the attendee cannot read templates in the openshift namespace. NOTE this read normally comes from STOCK OpenShift (Role shared-resource-viewer, bound to system:authenticated in the openshift namespace), not from platform-observer — so a failure here means that stock binding is missing or the identity is not authenticated, and inspecting platform-observer will not explain it"
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------

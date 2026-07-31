@@ -45,7 +45,11 @@ deploy_idle() {
 sa_can() {  # sa check-ns verb resource
   oc auth can-i "$3" "$4" --as="system:serviceaccount:${NS}:$1" -n "$2" >/dev/null 2>&1
 }
-sa_cannot() { ! sa_can "$@"; }
+# A negative RBAC assertion is only meaningful once the SA it's about actually exists — `oc auth
+# can-i --as` evaluates hypothetically even for a nonexistent SA, so on a cluster where nothing
+# materialized this would be vacuously true (denied because there is nothing to grant it, not
+# because the entry state correctly left it ungoverned).
+sa_cannot() { oc get sa "$1" -n "$NS" >/dev/null 2>&1 || return 1; ! sa_can "$@"; }
 
 # Guard for the RBAC-outcome checks: only a caller who can impersonate SAs (admin/CI) can evaluate them.
 IMPERSONATE_OK="false"

@@ -41,8 +41,15 @@ np_present() { oc get networkpolicy "$1" -n "$NS" >/dev/null 2>&1; }
 udn_present() { oc get userdefinednetwork partner-udn -n "$PARTNER" >/dev/null 2>&1; }
 
 # Entry-clean-slate helpers: return 0 when the solve object is ABSENT (nothing built yet).
-no_default_deny() { ! oc get networkpolicy default-deny-all -n "$NS" >/dev/null 2>&1; }
-no_web_route()    { ! oc get route parasol-web -n "$NS" >/dev/null 2>&1; }
+# Namespace must exist first — otherwise "absent" is vacuous, not evidence of a clean entry state.
+no_default_deny() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! oc get networkpolicy default-deny-all -n "$NS" >/dev/null 2>&1
+}
+no_web_route() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! oc get route parasol-web -n "$NS" >/dev/null 2>&1
+}
 
 # A Route somewhere in the namespace terminates re-encrypt — the exercise-2 outcome, matched on the
 # termination mode rather than on a Route name, so an attendee who names theirs differently still

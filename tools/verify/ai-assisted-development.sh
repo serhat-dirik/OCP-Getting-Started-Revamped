@@ -51,6 +51,7 @@ seed_probe_is_bad() {
 # carries impersonate on serviceaccounts — proven live) and as cluster-admin in CI. `patch deployments`
 # is the write the lab grants (the agent fixes the seed's readinessProbe).
 scoped_write_absent() {
+  oc get sa "$SA" -n "$NS" >/dev/null 2>&1 || return 1   # SA absent = nothing materialized to assert about
   ! oc auth can-i patch deployments --as="system:serviceaccount:${NS}:${SA}" -n "$NS" >/dev/null 2>&1
 }
 

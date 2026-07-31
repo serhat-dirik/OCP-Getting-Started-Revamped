@@ -57,7 +57,9 @@ check "Gitea account ${USER_NAME} answers (API 200)" gitea_user_exists "$USER_NA
 # instead of letting the lab's `oc new-app parasol-web` collide with "already exists".
 # Entry-only: at END, parasol-web SHOULD exist, so this must not run in completion mode.
 if [[ "$ENTRY_ONLY" == "true" ]]; then
-  check "clean slate: parasol-web not yet deployed" bash -c "! oc get deploy parasol-web -n $NS >/dev/null 2>&1" \
+  # Namespace must exist first — otherwise "not deployed" is vacuous (true on a cluster where
+  # nothing materialized at all), not evidence of a clean, correctly-prepared entry state.
+  check "clean slate: parasol-web not yet deployed" bash -c "oc get ns $NS >/dev/null 2>&1 && ! oc get deploy parasol-web -n $NS >/dev/null 2>&1" \
     || hint "leftover from a previous run — reset with: ws prep platform-orientation --yes"
 fi
 

@@ -142,6 +142,13 @@ tenancy_rules_fetch() {
       TENANCY_STATE="denied"
       return 0
     fi
+    # code 000 means curl never got an HTTP response at all (DNS/connection failure — off-cluster,
+    # or the service genuinely isn't there). That is not a transient service-side condition a sleep
+    # + retry can wait out, unlike an actual 5xx from thanos-querier — so stop immediately instead
+    # of burning 2 more rounds of sleep-and-hope for an outcome that cannot change.
+    if [[ "$code" == "000" ]]; then
+      break
+    fi
     sleep 3
   done
   return 0
@@ -161,6 +168,22 @@ tenancy_lists_an_alerting_rule() {
   local n
   n="$(tenancy_alerting_rule_count)"
   [[ "$n" -ge 1 ]]
+}
+
+# Entry clean-slate helpers: the scale/alert/resilience beats haven't been built yet. Each requires
+# the namespace to actually exist first — otherwise an empty `oc get` result is vacuous (true on a
+# cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+no_hpa_yet() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  [[ -z "$(oc get hpa parasol-claims -n "$NS" -o name 2>/dev/null)" ]]
+}
+no_rule_yet() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  [[ -z "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)" ]]
+}
+no_pdb_yet() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  [[ -z "$(oc get pdb parasol-claims -n "$NS" -o name 2>/dev/null)" ]]
 }
 
 # The HPA targets parasol-claims on CPU.
@@ -200,9 +223,9 @@ fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the scale/resilience objects the lab builds do NOT exist yet ---------------
-  check "no HorizontalPodAutoscaler yet (scale beat not started)"   test -z "$(oc get hpa parasol-claims -n "$NS" -o name 2>/dev/null)"            || hint "entry state has no HPA — ws reset observability-health-scale --user ${USER_NAME}"
-  check "no PrometheusRule yet (alert beat not started)"            test -z "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)"               || hint "entry state has no alert rule — ws reset observability-health-scale --user ${USER_NAME}"
-  check "no PodDisruptionBudget yet (resilience beat not started)"  test -z "$(oc get pdb parasol-claims -n "$NS" -o name 2>/dev/null)"           || hint "entry state has no PDB — ws reset observability-health-scale --user ${USER_NAME}"
+  check "no HorizontalPodAutoscaler yet (scale beat not started)"   no_hpa_yet   || hint "entry state has no HPA — ws reset observability-health-scale --user ${USER_NAME}"
+  check "no PrometheusRule yet (alert beat not started)"            no_rule_yet  || hint "entry state has no alert rule — ws reset observability-health-scale --user ${USER_NAME}"
+  check "no PodDisruptionBudget yet (resilience beat not started)"  no_pdb_yet   || hint "entry state has no PDB — ws reset observability-health-scale --user ${USER_NAME}"
 else
   # --- end state: the lab's outcomes exist (HPA + alert + PDB); >= replicas, never == ----------
   check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "create the HPA: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"

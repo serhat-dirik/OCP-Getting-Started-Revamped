@@ -107,8 +107,10 @@ deploy_gitops_managed() {
   oc get deploy "$1" -n "$2" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null | grep -q .
 }
 
-# Deployment does NOT exist (entry-only: dev/stage start empty).
+# Deployment does NOT exist (entry-only: dev/stage start empty). Namespace must exist first —
+# otherwise "absent" is vacuous, not evidence of a clean entry state.
 deploy_absent() {
+  oc get ns "$2" >/dev/null 2>&1 || return 1
   ! oc get deploy "$1" -n "$2" >/dev/null 2>&1
 }
 

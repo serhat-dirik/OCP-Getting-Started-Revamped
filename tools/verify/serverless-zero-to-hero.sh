@@ -58,8 +58,14 @@ trigger_present()    { oc get trigger.eventing.knative.dev claims-processor -n "
 pingsource_present() { oc get pingsource.sources.knative.dev claim-ticker -n "$NS" >/dev/null 2>&1; }
 
 # Entry clean-slate helpers: return 0 when the solve object is ABSENT (attendee has built nothing yet).
-no_traffic_split() { ! ksvc_traffic_split; }
+# Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
+# cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+no_traffic_split() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! ksvc_traffic_split
+}
 no_eventing() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
   [[ -z "$(oc get broker.eventing.knative.dev,trigger.eventing.knative.dev,pingsource.sources.knative.dev -n "$NS" -o name 2>/dev/null || true)" ]]
 }
 

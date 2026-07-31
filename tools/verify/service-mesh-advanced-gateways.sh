@@ -41,8 +41,10 @@ ns_discovery_labeled() {
   [[ "$(oc get ns "$NS" -o jsonpath='{.metadata.labels.istio-discovery}' 2>/dev/null || true)" == "enabled" ]]
 }
 
-# The namespace is NOT injection-labelled (the attendee enrolls it in the first lab beat).
+# The namespace is NOT injection-labelled (the attendee enrolls it in the first lab beat). Namespace
+# must actually exist first — otherwise an empty label read is vacuous, not evidence of a clean entry.
 ns_not_injection_labeled() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
   [[ -z "$(oc get ns "$NS" -o jsonpath='{.metadata.labels.istio-injection}' 2>/dev/null || true)" ]]
 }
 
@@ -66,8 +68,14 @@ dr_present() { oc get destinationrule "$1" -n "$NS" >/dev/null 2>&1; }
 ap_present() { oc get authorizationpolicy "$1" -n "$NS" >/dev/null 2>&1; }
 
 # Entry-clean-slate helpers: return 0 when the solve object is ABSENT (attendee has built nothing).
-claims_unmeshed() { ! pod_meshed parasol-claims; }
+# Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
+# cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+claims_unmeshed() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! pod_meshed parasol-claims
+}
 no_mesh_config() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
   [[ -z "$(oc get virtualservice,destinationrule,authorizationpolicy -n "$NS" -o name 2>/dev/null || true)" ]]
 }
 

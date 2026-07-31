@@ -124,7 +124,9 @@ rollout_healthy() {
 }
 
 # A named Rollout is ABSENT (entry-only: prod starts without the Rollout — converting it is the lab).
+# Namespace must exist first — otherwise "absent" is vacuous, not evidence of a clean entry state.
 rollout_absent() {
+  oc get ns "$2" >/dev/null 2>&1 || return 1
   ! oc get rollout "$1" -n "$2" >/dev/null 2>&1
 }
 

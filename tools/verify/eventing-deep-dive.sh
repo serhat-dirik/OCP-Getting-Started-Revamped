@@ -67,8 +67,16 @@ dlq_trigger_present() {
     -o jsonpath='{range .items[*]}{.spec.delivery.deadLetterSink}{"\n"}{end}' 2>/dev/null | grep -q '[a-zA-Z]'
 }
 # Entry clean-slate helpers: return 0 when the outcome is ABSENT (attendee has built nothing yet).
-no_filtered_trigger() { ! filtered_trigger_present; }
-no_dlq_trigger()      { ! dlq_trigger_present; }
+# Require the namespace to exist first — otherwise "absent" is vacuous (true on a cluster where
+# nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+no_filtered_trigger() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! filtered_trigger_present
+}
+no_dlq_trigger() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! dlq_trigger_present
+}
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep eventing-deep-dive (or ws start eventing-deep-dive --user ${USER_NAME}); the ${NS} namespace is workshop-layer (workshop-config)"

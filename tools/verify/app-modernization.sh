@@ -53,7 +53,12 @@ repo_reachable() {
 maas_secret_present() { oc get secret maas-credentials -n "$NS" >/dev/null 2>&1; }
 
 # Entry clean-slate: the modernized service is NOT deployed yet (attendee hasn't finished the lab).
-no_modernized() { ! oc get deploy parasol-claims-modernized -n "$NS" >/dev/null 2>&1; }
+# Namespace must actually exist first — otherwise this is vacuously true on a cluster where nothing
+# materialized at all, which is not evidence of a clean entry state.
+no_modernized() {
+  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  ! oc get deploy parasol-claims-modernized -n "$NS" >/dev/null 2>&1
+}
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                     oc get ns "$NS"                    || hint "run: ws prep app-modernization (or ws start app-modernization --user ${USER_NAME}); ${NS} is workshop-layer (per-user-modernize)"
