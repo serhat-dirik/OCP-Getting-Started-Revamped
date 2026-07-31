@@ -218,16 +218,16 @@ oc get pods -n $NS -o wide
 --
 ====
 
-.Expected output (your node names differ; the scatter is the point)
+.Expected output (a sample — your node names, IPs, restarts, and ages differ; the scatter is the point)
 [source,texinfo]
 ----
-NAME                              READY   STATUS    NODE              NOMINATED NODE
-claims-db-8976f6bdb-wkh4r         1/1     Running   worker-3          <none>
-claims-load-6dd4499cbd-qj2px      1/1     Running   worker-2          <none>
-parasol-claims-74b5d4fb86-4cl9x   1/1     Running   worker-2          <none>
-parasol-claims-74b5d4fb86-q7gnw   1/1     Running   control-plane-1   <none>
-parasol-web-bf7d5f795-f7r4z       1/1     Running   control-plane-2   <none>
-statement-batch-db8794f7c-88cvm   1/1     Running   worker-2          <none>
+NAME                              READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
+claims-db-8976f6bdb-wkh4r         1/1     Running   0          42m   10.128.2.11   worker-3          <none>            <none>
+claims-load-6dd4499cbd-qj2px      1/1     Running   0          42m   10.129.2.19   worker-2          <none>            <none>
+parasol-claims-74b5d4fb86-4cl9x   1/1     Running   0          42m   10.129.2.20   worker-2          <none>            <none>
+parasol-claims-74b5d4fb86-q7gnw   1/1     Running   0          42m   10.128.0.14   control-plane-1   <none>            <none>
+parasol-web-bf7d5f795-f7r4z       1/1     Running   0          42m   10.128.1.9    control-plane-2   <none>            <none>
+statement-batch-db8794f7c-88cvm   1/1     Running   0          42m   10.129.2.21   worker-2          <none>            <none>
 ----
 
 The scheduler placed each pod by its *resource requests* — the CPU and memory it reserves.
@@ -334,7 +334,11 @@ oc rollout status deploy/parasol-claims -n $NS --timeout=90s
 --
 ====
 
-.Expected output (the roll takes ~40 s — anti-affinity makes it deliberate)
+// Re-measured live on OCP {ocp_version}, 2026-07-31: the required podAntiAffinity forces the scheduler
+// to find a distinct node for each replacement before the old pod retires, so the roll runs closer to
+// ~70 s than the ~40 s an earlier capture claimed (measured 72 s). Treat the number as a sample — actual
+// wall-clock time depends on image-pull and node availability on your cluster.
+.Expected output (a sample — the roll takes closer to ~70 s than a plain rollout would, because anti-affinity makes it deliberate)
 [source,texinfo]
 ----
 deployment.apps/parasol-claims patched
@@ -481,7 +485,7 @@ parasol-claims-...-xrcc7         1/1     Running   control-plane-3
 ----
 
 The topology key is a *knob*.
-Point it at a *zone* label instead of the hostname, and the same constraint spreads your replicas across *failure zones* — one per zone:
+Point it at a *zone* label instead of the hostname, and the same constraint now scores placement across *failure zones* instead of nodes — watch closely what it actually produces:
 
 [source,sh,role=execute]
 ----
@@ -490,19 +494,39 @@ oc rollout status deploy/parasol-claims -n $NS --timeout=120s
 oc get pods -n $NS -l app=parasol-claims --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | while read n; do echo "$n zone=$(oc get node $n -o jsonpath='{.metadata.labels.workshop\.redhat\.com/zone}')"; done
 ----
 
-.Expected output (one replica per zone)
+// Measured TWICE on a live cluster, 2026-07: the post-rollout distribution came back a:1 b:2 c:0 — a
+// genuine maxSkew:1 violation, not a copy error. See the IMPORTANT box below for why, and for the field
+// that would deliver the even guarantee instead.
+.Expected output (a sample shape — not the even one-per-zone you might expect from `maxSkew: 1`)
 [source,texinfo]
 ----
 control-plane-2 zone=b
-control-plane-1 zone=a
-control-plane-3 zone=c
+control-plane-1 zone=b
+control-plane-3 zone=a
 ----
+
+[IMPORTANT]
+.`ScheduleAnyway` is a preference, not a guarantee — this is why the layout above can skew
+====
+That output is a genuine capture, not a mistake: measured twice on a live cluster, this same patch settled as `a:1 b:2 c:0` — one zone holding two replicas, another holding none — even with `maxSkew: 1` set.
+
+Here's why.
+`whenUnsatisfiable: ScheduleAnyway` scores each pod placement *once*, at the moment the scheduler admits it, against the zone counts visible *right then* — it never revisits or rebalances a pod once it is running.
+During a rolling update the constraint's `labelSelector` (`app: parasol-claims`) matches pods from *both* the outgoing and incoming ReplicaSet, so each new replica gets scored against a zone count that still includes an old pod about to be removed.
+By the time the last old pod terminates, the skew that justified each placement no longer describes the pods left standing — and `ScheduleAnyway` has no mechanism to go back and correct it.
+That is the whole meaning of "preference": the scheduler tries, does not enforce, and never rebalances after the fact.
+
+If you need the *"one replica per zone"* guarantee this might imply, the field for it is `whenUnsatisfiable: DoNotSchedule` — it turns the identical skew check into a hard admission-time stop: a placement that would push a zone's skew past `maxSkew` is refused outright, so whatever layout the Deployment settles into really is bounded.
+The trade-off is real: with `DoNotSchedule`, if the zone that needs the next replica genuinely has no room for it — capacity, a taint, another constraint — that pod goes `Pending` and the *rollout stalls* instead of finishing with a slightly uneven spread.
+`ScheduleAnyway` trades the guarantee away specifically so a rollout can never get stuck on it.
+You'll test `DoNotSchedule`'s blocking behavior yourself in this module's Challenge, below.
+====
 
 [NOTE]
 .These zones are synthetic — real ones ride the provider
 ====
 This bare-metal cluster has no real failure zones, so the workshop *synthesized* `workshop.redhat.com/zone={a,b,c}` on the nodes to make the spread visible.
-On a cloud cluster you'd point `topologyKey` at the provider's real `topology.kubernetes.io/zone` and the same one-per-zone spread would protect you from a whole *zone* outage.
+On a cloud cluster you'd point `topologyKey` at the provider's real `topology.kubernetes.io/zone`, and the same constraint would score placement across those zones the same way — reducing, but (per the IMPORTANT box above) not *guaranteeing*, the chance a single zone outage takes out more than one replica.
 The `kubernetes.io/hostname` spread, by contrast, is *always* true — every node carries that label on every cluster — so put the topology key back to hostname for the rest of the lab:
 ====
 
@@ -513,7 +537,7 @@ oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spe
 
 [.checkpoint]
 ****
-✔ *Verify:* A `topologySpreadConstraints` on `kubernetes.io/hostname` spread the three replicas evenly across nodes; flipping the topology key to `workshop.redhat.com/zone` spread them one-per-zone (synthetic here, real on a cloud); and you set the key back to hostname.
+✔ *Verify:* A `topologySpreadConstraints` on `kubernetes.io/hostname` spread the three replicas evenly across nodes; flipping the topology key to `workshop.redhat.com/zone` scored placement across zones the same way (synthetic here, real on a cloud) — and you saw that `ScheduleAnyway` is a *preference*, not a guarantee, so a rolling update can still leave a zone skewed (`DoNotSchedule` is the field for a hard guarantee, at the cost of a rollout that can stall); and you set the key back to hostname.
 ****
 
 == 4. Reserve a dedicated pool for the batch worker
@@ -754,11 +778,13 @@ oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/clai
 
 // Captured live on OCP 4.22.5 as user2, 2026-07-28. Two things vary and are not defects: `oc delete`
 // on a 4.21+ client appends "from <namespace> namespace" to the confirmation line, and `oc wait -l`
-// prints ONE "condition met" line per matching pod — so the line count tracks your replica count.
+// prints ONE "condition met" line per matching pod — so the line count tracks your replica count (three
+// at this point in the lab: the two undisturbed replicas plus the just-recreated replacement).
 .Expected output (your marker is *gone* — one pod boot reseeded the shared database)
 [source,texinfo]
 ----
 pod "parasol-claims-655664d848-dw7mp" deleted from user2-dev namespace
+pod/parasol-claims-655664d848-q8rmz condition met
 pod/parasol-claims-655664d848-tztsq condition met
 pod/parasol-claims-655664d848-vw86s condition met
 "status":"UnderReview"
@@ -816,12 +842,14 @@ oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/clai
 ----
 
 // Captured live on OCP 4.22.5 as user2, 2026-07-28: same restart, opposite outcome — with the reseed
-// gone the planted value is still there. (As above, one "condition met" line per replica.)
+// gone the planted value is still there. (As above, one "condition met" line per replica — three at
+// this point in the lab.)
 .Expected output (this time your write *survives* the restart)
 [source,texinfo]
 ----
 wrote HTTP 200
 pod "parasol-claims-c6965c5b6-glwzc" deleted from user2-dev namespace
+pod/parasol-claims-c6965c5b6-4hpxn condition met
 pod/parasol-claims-c6965c5b6-9r9fk condition met
 pod/parasol-claims-c6965c5b6-x72rm condition met
 "status":"Approved"
