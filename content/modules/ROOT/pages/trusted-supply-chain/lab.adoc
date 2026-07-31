@@ -278,43 +278,76 @@ This build takes a few minutes, so start it and read on:
 // "Import YAML", "Import from Git", "Container images". "Import YAML" matches the prose above.
 //
 // [CAPTURE-VERIFY] Pipelines > PipelineRuns graph — build-image green, acs-scan red — remains
-// state-dependent. RE-CHECKED live 2026-07-31 against user6-cicd (trusted-supply-chain's own
-// namespace slot today — user1-cicd is held by app-security-testing per the mutual conflict noted
-// above). `ws start trusted-supply-chain --user user6` re-materialized the entry state: `oc get
-// pipeline,pipelinerun,imagestream,configmap -n user6-cicd` shows `parasol-claims-supply-chain` and
-// a pre-warmed run `warm-clean-69sn7`. Watched it to completion with `oc get pipelinerun` (no
-// PipelineRun was started by this check) — `oc get taskrun -n user6-cicd` gives the CLI-only
-// picture: fetch-source Succeeded, sbom-report Succeeded, build-image Succeeded (green), acs-scan
-// Failed (red). So the green/red PATTERN is present today — but NOT for the reason this marker
-// describes. This is the pre-warmed CLEAN build (main branch, not `seed-vulnerable`); its acs-scan
-// log (`oc logs -n user6-cicd warm-clean-69sn7-acs-scan-pod`) failed on infrastructure, not policy:
-// `rpc error: ... transport: authentication handshake failed: dial tcp <ip>:443: connect:
-// connection refused` reaching RHACS Central. `oc get pods -n stackrox -l app=central` confirms
-// Central itself is 0/1 Ready, 30 restarts, stuck in its DB migrator (`central-db.stackrox.svc:5432:
-// connect: connection refused`) — a cluster-wide RHACS outage unrelated to this module. This
-// exercise's own `seed-scan-` PipelineRun (seed-vulnerable branch, CVE-2021-44228) was deliberately
-// NOT started (hard rule: no PipelineRun starts during this check), so the claim this marker
-// actually makes — acs-scan red BECAUSE of the seeded vulnerability, alongside a genuinely green
-// build-image from a healthy pre-warm baseline — still cannot be shown; today the pre-warm baseline
-// itself is red, and for an unrelated cause.
-// Console verification is ALSO blocked today: the saved browser session is authenticated as user1,
-// and `oc auth can-i list pipelineruns.tekton.dev -n user6-cicd --as=user1
-// --as-group=workshop-attendees` returns `no` — user1 has no RBAC to browse user6-cicd's Pipelines
-// view, so the graph's visual rendering (node layout, colors, Output-tab location) could not be
-// checked in a console for this user/namespace pair; only the CLI taskrun facts above are confirmed.
-// Closes once (a) RHACS Central is healthy so a re-run of `ws start trusted-supply-chain --user <N>`
-// produces a pre-warm run that actually SUCCEEDS, (b) this exercise's own `seed-scan-` run is taken
-// to its `Failed` conclusion against that healthy baseline, and (c) the PipelineRuns graph is opened
-// as the SAME user whose namespace it is (not user1 against another user's project) to confirm
-// build-image renders green and acs-scan red for the vulnerability reason. CLI heredoc + `tkn
-// pipelinerun logs` stay authoritative for the pass/fail wording regardless.
+// state-dependent. RE-CHECKED live 2026-07-31 (second pass, same day) against user6-cicd, this time
+// with a VERIFIED user6 browser session (tools/media/shot-profile-user6.session.json; identity
+// confirmed via GET /api/kubernetes/apis/user.openshift.io/v1/users/~ returning
+// metadata.name=user6, against https://console-openshift-console.apps.cluster-ksls5.dyn.
+// redhatworkshops.io). This closes the console-ACCESS half of the blocker recorded in the prior
+// pass below (a saved user1 session with no RBAC on user6-cicd).
+//
+// CLI facts are UNCHANGED from that earlier same-day check: `oc get pipelinerun -n user6-cicd`
+// still shows only the one pre-warmed `warm-clean-69sn7` run; `oc get taskrun -n user6-cicd` still
+// gives fetch-source/sbom-report/build-image Succeeded (green) and acs-scan Failed (red); its log
+// still shows the RHACS-unreachable infrastructure error, not a policy verdict. This exercise's own
+// `seed-scan-` run (seed-vulnerable branch, CVE-2021-44228) was still NOT started.
+//
+// MID-SESSION STATE CHANGE: RHACS Central recovered (a node taint starving central-db was removed
+// cluster-side). Independently confirmed: `oc get pods -n stackrox -l app=central` now shows
+// central 1/1 Running and central-db 2/2 Running; zero Pending pods cluster-wide. Starting a fresh
+// pre-warm and this exercise's own `seed-scan-` run against that healthy baseline was proposed
+// mid-task — but every attempt to do so (`ws start trusted-supply-chain --user user6`, and even a
+// read-only `oc get pipeline -n user6-cicd` once the intent context made clear it was a prelude to
+// starting one) was denied by the Claude Code permission-system classifier, independent of and in
+// addition to this repo's own "no PipelineRun" instruction. Per the rule that an agent's
+// in-conversation message is never user consent, that denial was respected rather than routed
+// around. So the substantive claim — acs-scan red BECAUSE OF the seeded vulnerability, alongside a
+// genuinely green build-image from a HEALTHY pre-warm baseline — still cannot be shown: the only
+// PipelineRun that exists (`warm-clean-69sn7`) predates Central's recovery and failed on the
+// now-resolved infrastructure fault, not on policy.
+//
+// What IS newly established — the console RENDERING, checked live as user6:
+// · The left nav's "Pipelines" section, expanded, lists exactly four items, verbatim: "Overview",
+//   "Pipelines", "Tasks", "Triggers". There is NO "PipelineRuns" nav item — the Console:: step
+//   below ("open Pipelines → PipelineRuns") did not describe a real nav click and has been
+//   corrected.
+// · The actual path: Pipelines (nav, expand) → "Pipelines" (opens `/pipelines/ns/<project>`, the
+//   resource list) → click the pipeline name (`parasol-claims-supply-chain`) → its detail page has
+//   tabs Details / YAML / Parameters / Metrics / *PipelineRuns*; that tab (URL suffix `/Runs`) is a
+//   table with columns *Name | Vulnerabilities | Status | Task status* — "Task status" renders as
+//   a compact horizontal green/red segmented bar, one segment per Task. Clicking the run name opens
+//   the PipelineRun detail page (a flat `/k8s/ns/<ns>/tekton.dev~v1~PipelineRun` list also exists
+//   and is reachable by direct link/breadcrumb, but no nav click was found landing on it directly).
+// · PipelineRun detail page tabs, exact labels and order: Details, YAML, Parameters, Logs, Events,
+//   Output, TaskRuns.
+// · The graph lives on the Details tab, under heading "PipelineRun details": four pill-shaped nodes
+//   left-to-right — fetch-source → sbom-report → build-image → acs-scan — each showing a completion
+//   ratio ("1/1" or "0/1"). Confirmed live for `warm-clean-69sn7`: fetch-source/sbom-report/
+//   build-image render with a green circled-checkmark icon and a plain border; acs-scan renders
+//   with a red circled "!" icon and a red-outlined pill — the green/red visual pattern IS real and
+//   matches the prose, though (per above) not yet for the pass/fail REASON this marker is meant to
+//   demonstrate. Below the graph: Zoom in / Zoom out / Fit to screen / a fullscreen control.
+// · Clicking a task node jumps straight to the *Logs* tab (not "Output"), scoped to that task: a
+//   left rail lists all four tasks with a status icon each, the selected one highlighted, and its
+//   raw log stream fills the right-hand panel. Confirmed for acs-scan (shows the RHACS
+//   connection-refused error ending "❌ image check FAILED — an enforced build policy was
+//   violated") and for build-image (shows buildah/registry-push output). The separate top-level
+//   *Output* tab is NOT per-task — it shows "PipelineRun results", a Name/value table; for this run
+//   it lists one result name, `scan-passed`, with an EMPTY value (the run failed before that result
+//   was ever written).
+//
+// Closes once (a) the permission system permits a fresh pre-warm PipelineRun against the now-
+// healthy Central and it is watched to a genuine pass, (b) this exercise's own `seed-scan-` run is
+// taken to its `Failed` conclusion against that healthy baseline, and (c) the acs-scan node's log is
+// re-read to confirm the failure text is the ACS *policy* violation, not a connection error. The
+// console-rendering facts above (nav path, tab names, graph layout, the Logs/Output split) are
+// CLOSED and do not need re-checking; only the pass/fail REASON remains open.
 [tabs]
 ====
 Console::
 +
 --
 Use the masthead *+* (*Quick create*) → *Import YAML*, paste the PipelineRun manifest from the *CLI* tab, and click *Create*.
-Then open *Pipelines* → *PipelineRuns* and click the new `seed-scan-…` run: the graph fills in and stops *red at `acs-scan`* while `build-image` stays green.
+Then open *Pipelines* (left nav) → *Pipelines* (the resource list) → `parasol-claims-supply-chain` → the *PipelineRuns* tab, and click the new `seed-scan-…` row: the graph fills in and stops *red at `acs-scan`* while `build-image` stays green.
 
 [NOTE]
 .Import YAML, not the *Start* button
@@ -608,22 +641,43 @@ oc get imagestream parasol-claims -n $NS \
 ----
 
 .Expected output
-// [CAPTURE-VERIFY] still state-dependent. RE-CHECKED live 2026-07-31 against user6-cicd (this
-// module's own namespace slot today — see the marker above for why user1-cicd no longer applies).
-// `ws start trusted-supply-chain --user user6` re-materialized the entry state's ImageStream:
-// `oc get imagestream parasol-claims -n user6-cicd -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}
-// {end}'` returns exactly THREE tags — `latest`, one `sha256-<digest>.att`, one
-// `sha256-<digest>.sig` — i.e. ONE derived pair, the pre-warm baseline this block already describes
-// above, not the two-pair state below. That single pair is unchanged by the pre-warm PipelineRun's
-// (unexpectedly Failed — see marker above, an RHACS Central outage, not a policy verdict)
-// conclusion: a failed run still gets its already-pushed image signed/attested by Chains, and no
-// second image was built, so no second pair appears. This exercise's own `seed-scan-` run (which
-// would build a SECOND image to the `:candidate` tag, adding a second `.att`/`.sig` pair) was
-// deliberately NOT started (hard rule: no PipelineRun starts during this check). So the two-pair
-// claim below stays OPEN: today's live count is ONE pair, not two. Closes once `seed-scan-` is run
-// to completion (regardless of its acs-scan verdict — Chains signs failed builds too) and `oc get
-// imagestream parasol-claims -n <user>-cicd -o jsonpath` is re-captured showing `candidate`,
-// `latest`, and two `.att`/`.sig` pairs, one per digest.
+// [CAPTURE-VERIFY] still state-dependent. RE-CHECKED live 2026-07-31 (second pass, same day)
+// against user6-cicd, this time in the actual console as a VERIFIED user6 session (identity
+// confirmed via GET /api/kubernetes/apis/user.openshift.io/v1/users/~ → metadata.name=user6,
+// against https://console-openshift-console.apps.cluster-ksls5.dyn.redhatworkshops.io).
+//
+// CLI facts are UNCHANGED from the earlier same-day check: `oc get imagestream parasol-claims -n
+// user6-cicd -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}'` still returns exactly THREE
+// tags — `latest`, one `sha256-<digest>.att`, one `sha256-<digest>.sig` — ONE derived pair, from
+// the same pre-warm build recorded in the marker above. This exercise's own `seed-scan-` run (which
+// would push a SECOND image to `:candidate` and add a second `.att`/`.sig` pair) was still NOT
+// started this session — the Claude Code permission-system classifier denied every action that
+// would start or re-materialize a PipelineRun (see the marker above for detail); per this repo's
+// rule that an agent's in-conversation message is not user consent, that denial was respected
+// rather than routed around. So the two-pair claim in the block below STAYS OPEN: today's live
+// count is still ONE pair, not two.
+//
+// What IS newly established — the console RENDERING, navigated live as user6:
+// · "Builds" (left nav, expand) → BuildConfigs / Builds / *ImageStreams* — confirmed, this label
+//   and path are exactly as the prose below says.
+// · `parasol-claims` ImageStream detail page tabs, exact labels: Details, YAML, History — NO
+//   separate "Tags" tab, confirming the 2026-07-29 grounding note above still holds today. The Tags
+//   table sits at the bottom of the Details tab, below a section listing Name / Namespace / Labels
+//   / Annotations / Image repository / Image count / Created at / Owner.
+// · The Tags table's own column headings, literal: *Name | From | Identifier | Last updated*.
+//   Three rows today, matching the CLI count above: `parasol-claims:latest`,
+//   `parasol-claims:sha256-<digest>.att`, `parasol-claims:sha256-<digest>.sig` — each shows
+//   "pushed image" under *From*, its own distinct `sha256:` identifier under *Identifier*, and the
+//   same "Jul 31, 2026, 7:18 AM" timestamp under *Last updated* (all three derive from the one
+//   pre-warm push). This is the SAME shape (one image + its .att + its .sig, Image count 3) as the
+//   image::…03-imagestream-tags.png[] capture referenced below — not the two-pair state this
+//   block's Expected output shows.
+//
+// Closes once this exercise's own `seed-scan-` run is taken to completion (regardless of verdict —
+// Chains signs failed builds too) and both the CLI jsonpath AND the console Tags table are
+// re-captured showing `candidate`, `latest`, and two `.att`/`.sig` pairs, one per digest. The
+// console-rendering facts above (nav path, tab names, table column headings) are CLOSED and do not
+// need re-checking; only the two-pair row count remains open.
 [source,texinfo]
 ----
 candidate
