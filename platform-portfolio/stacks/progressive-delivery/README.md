@@ -83,6 +83,27 @@ This stack is workshop-agnostic. The **per-user** wiring is the M11 entry state
 GitOps-managed in `{user}-dev`/`stage`), the `{user}/claims-config` fork extended with a `rollouts/`
 source (Rollout + `AnalysisTemplate` + `ApplicationSet`), and a per-user analysis SA in `{user}-prod`.
 
+## Argo CD Rollout UI extension (also NOT installed here)
+
+The `RolloutManager` controller above makes `Rollout`/`AnalysisTemplate` reconcile; it does not put a
+visual **Rollout view** in any Argo CD Web UI — that is a separate, per-**ArgoCD-instance** opt-in
+(`spec.server.enableRolloutsUI: true` on the consuming `ArgoCD` CR, GitOps 1.21+; see
+[Red Hat docs, "Enabling Argo Rollouts UI on an Argo CD instance"](https://docs.redhat.com/en/documentation/red_hat_openshift_gitops/1.21/html/argo_rollouts/using-argo-rollouts-for-progressive-deployment-delivery)).
+Left out of this stack on purpose — same reasoning as the entry-state seam above: it is a property of
+*which Argo CD instance a consumer points at this stack*, not of the cluster-scoped controller. A
+consumer wiring their own `ArgoCD` CR against this stack sets the field there.
+
+Our own attendee-facing instance (`student-gitops`, workshop layer) sets it in
+`gitops/workshop-config/templates/student-argocd.yaml`. **Known gap, live-tested on GitOps 1.21.1
+(2026-07-31):** the field correctly runs the operator's `rollout-extension` initContainer (files land
+under `/tmp/extensions` on the server pod, digest-pinned via the operator's own
+`ARGOCD_EXTENSION_IMAGE`), but `argocd-server` does not serve those files at any URL pattern tried —
+not the on-disk path, not the `<group>/<kind>/ui/extensions.js` convention documented upstream
+(`argoproj/argo-cd#7454`). No further supported CR/ConfigMap field was found to close this
+(`spec.cmdParams` on this CRD build allowlists only two unrelated keys). See `versions.yaml`
+(`gitops.notes`) for the full trail. Needs either an upstream/Red Hat bug report or an in-browser
+check by someone with an Argo CD login before M11 content relies on this view.
+
 ## Verify
 
 ```bash
