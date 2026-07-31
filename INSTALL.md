@@ -159,6 +159,14 @@ It splits into two layers, and knowing which is which is what lets you cut it:
 single line is the biggest lever you have: dropping the RHACS-dependent modules via `modules_disabled`
 takes ~26 Gi off the fixed cost before you tune anything else.
 
+> **Correction, 2026-07-31.** An earlier edition of this section put a Dev Spaces workspace at
+> "8 Gi per workspace" and built the heavy row on it. A cold-start smoke measured a real workspace
+> built from the actual forked devfile: **~448 Mi memory / 2.5 CPU requested, ~4.25 Gi limit.** The
+> 8 Gi figure was never measured. It matters because the *request* is what the scheduler enforces —
+> stated two paragraphs above and then contradicted by the table below it — so the heavy row was
+> over-reserving memory by roughly an order of magnitude while under-stating CPU. Dev Spaces is
+> still the heaviest per-attendee module; it is not the memory hog this document claimed.
+
 **Per attendee, actively working, it is far less than the quotas suggest.** With 1–2 modules
 materialized, attendees measured **2–6 pods, 0.3–1.1 Gi of requests, and 28–514 Mi actually in use**.
 Note the gap: *actual* CPU ran 4–61 m against requests an order of magnitude higher. Requests are what
@@ -181,7 +189,7 @@ So plan for the **peak concurrent module**, not the sum of quotas:
 |---|---|---|
 | Light | ~1 CPU / 1 Gi | networking, config, GitOps, observability |
 | Medium | ~2 CPU / 4 Gi | pipelines and the security-scanning runs |
-| **Heavy** | **~4 CPU / 8–10 Gi** | Dev Spaces (8 Gi per workspace), MTA analysis, the AI modules |
+| **Heavy** | **~2.5 CPU / 0.5 Gi requested, ~4.25 Gi limit** | Dev Spaces workspace (measured), MTA analysis, the AI modules |
 
 **The planning formula:**
 
@@ -210,7 +218,7 @@ that must spread cannot borrow capacity from a node it is forbidden to use. If y
 give the workers real slack or drop this module via `modules_disabled`.
 
 **Memory is the binding constraint, not CPU.** The heavy modules are memory-hungry and CPU-idle — a
-Dev Spaces workspace reserves 8 Gi and then mostly waits for a human to type. Order fewer, larger nodes
+Dev Spaces workspace mostly waits for a human to type. Order fewer, larger nodes
 rather than many small ones: a 4 CPU / 16 Gi node cannot host a single Dev Spaces workspace plus its
 share of platform pods, so small nodes strand capacity.
 
