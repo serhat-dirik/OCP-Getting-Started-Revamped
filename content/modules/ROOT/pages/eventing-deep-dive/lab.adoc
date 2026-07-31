@@ -79,19 +79,29 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "cl
 
 [demo-block]
 [TIME 4m]
-Say:: "Filters decide *who cares*. I'll send two events: a `claim.submitted` and an unrelated `claim.rejected`. The fraud-review trigger filters on `type=claim.submitted` — so the rejected one is simply *dropped* by that trigger. Routing lives in the trigger, not in anyone's code."
-Show:: `kn trigger list` with the filters; two POSTs; the consumer displaying the `submitted` event but *not* the filtered-out one on the fraud path.
-Do:: Show attribute filtering — matching delivered, non-matching dropped:
+Say:: "Filters decide *who cares*. I'll send two events: a `claim.submitted` and an unrelated `claim.rejected`. The fraud-review trigger filters on `type=claim.submitted`, and the baseline trigger catches everything — so the *submitted* event reaches the consumer through *two* triggers, the *rejected* one only through the catch-all. Routing lives in the trigger, not in anyone's code."
+Show:: `kn trigger list` with the filters; two POSTs; the consumer's log showing `submitted` delivered *twice* (catch-all + fraud-review) and `rejected` only *once* (catch-all only) — the match count is the filter at work.
+Do:: Show attribute filtering by *match count* — every event reaches the shared consumer through the catch-all regardless, so a filtered trigger's contribution is an *extra* delivery, not a missing one:
 +
 [source,sh,role=execute]
 ----
+# ws solve materializes fraud-review filtering on the seeded PingSource's own type; align it to the
+# CloudEvent type this beat sends — the same filter exercise 4 builds by hand:
+oc patch trigger claims-fraud-review -n $NS --type=merge -p '{"spec":{"filter":{"attributes":{"type":"com.parasol.claim.submitted"}}}}'
 kn trigger list -n $NS
-oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 20 -o /dev/null -w "rejected (filtered out): HTTP %{http_code} in %{time_total}s\n" \
-  -X POST -H "Ce-Id: rej-1" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.rejected" \
-  -H "Ce-Source: /demo/claims" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-REJ\"}" "'$BROKER'"'
+for kind in "cnt-submitted:com.parasol.claim.submitted" "cnt-rejected:com.parasol.claim.rejected"; do
+  id=${kind%%:*}; typ=${kind#*:}
+  oc exec deploy/demo-client -n $NS -- sh -c "curl -s -k -m 20 -o /dev/null -w '$id: HTTP %{http_code}\n' \
+    -X POST -H 'Ce-Id: $id' -H 'Ce-Specversion: 1.0' -H 'Ce-Type: $typ' \
+    -H 'Ce-Source: /demo/claims' -H 'Content-Type: application/json' -d '{\"claimId\":\"$id\"}' '$BROKER'"
+done
+sleep 5
+for id in cnt-submitted cnt-rejected; do
+  echo "$id displayed: $(oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -c "id: $id")x"
+done
 ----
 +
-"The rejected event got a `202` too — the broker accepted it — but the fraud-review trigger's filter *dropped* it in a tenth of a second: no delivery, no woken consumer. Change routing by editing a trigger, never by redeploying an app."
+"Both events got a `202` — the broker accepts everything. But `submitted` shows up *twice* in the log — the catch-all *and* fraud-review both delivered it — while `rejected` shows up *once*, the catch-all only. Fraud-review's filter is what made the difference. Change routing by editing a trigger, never by redeploying an app."
 
 [demo-block]
 [TIME 4m]
