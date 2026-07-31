@@ -73,6 +73,18 @@ wait
 With the burst the 5-minute 5xx rate peaks around ~1.1/s and the rule reaches *Pending* at ~50s and *Firing* at ~170s (about 3 minutes).
 The `for: 2m` window over a `rate(...[5m])` is deliberately slow so a brief blip does not page anyone — confirm the rule loaded (`oc get prometheusrule parasol-claims-alerts -n <user>-dev`) and give it the full window.
 
+== My PromQL query returns nothing, but the metric obviously exists
+
+Symptom:: The alert says it is *Firing*, or the counter clearly has hundreds of samples, yet a PromQL query you run by hand for `http_server_requests_seconds_count` comes back *completely empty* — not a low number, literally zero series. Nothing errors; the answer is just blank.
+Cause:: You queried the *wrong Prometheus*. This cluster runs *two independent* monitoring stacks, and they do not share data:
++
+* *Platform monitoring* (`prometheus-k8s`, in `openshift-monitoring`) scrapes the cluster's own components. It never scrapes ServiceMonitors in your project, so it has *no knowledge whatsoever* of your application's metrics.
+* *User-workload monitoring* (`prometheus-user-workload`, in `openshift-user-workload-monitoring`) is the one that scrapes your `ServiceMonitor`. `thanos-querier` federates both and is what the console's *Observe* pages query.
++
+Measured on this cluster, same metric, same instant — platform returned *0* series, user-workload returned *4*.
+This is a silent trap rather than an error, because an empty result is a perfectly valid PromQL answer. It is worth knowing beyond this lab: it is one of the most common ways a working alert looks broken on OpenShift.
+Fix:: Query through `thanos-querier` (what the console uses) or the user-workload Prometheus directly — never `prometheus-k8s` — for anything your own application emits. The console's *Observe → Metrics* page in your project already does the right thing, so if the console shows data and your terminal does not, this is why.
+
 == I brought the database back, but the claims API still returns 500
 
 Symptom:: You ran `oc scale deploy/claims-db --replicas=1`, the database pod is `Running`, but `curl $CLAIMS/api/claims` keeps returning `HTTP 500`.
