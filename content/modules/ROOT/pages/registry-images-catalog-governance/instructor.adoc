@@ -7,9 +7,14 @@ include::partial$version-attributes.adoc[]
 // (allowedRegistriesForImport / registrySources / IDMS-ITMS / samples-skip / ConsoleSample) were NOT
 // applied on the shared build cluster — they are singletons that affect every tenant, and the build
 // harness (correctly) blocks shared-singleton writes. Their commands are grounded from the field
-// structure + OCP docs; the exact apiserver denial string is marked CAPTURE-VERIFY to confirm on a
-// disposable cluster. IDMS/ITMS are the CURRENT mirroring APIs; ICSP is named only as the deprecated
-// predecessor. NAMESPACE in output is the sample user user3-dev.
+// structure + OCP docs. The allowedRegistriesForImport denial string was subsequently VERIFIED on a
+// disposable CRC 4.22.1 cluster on 2026-07-31 (see the note at the block below) — the shared cluster
+// itself can never host this check, permanently, because the mutation triggers a real
+// openshift-apiserver rollout affecting every tenant; that is a structural property of the object,
+// not a stale gap. registrySources / IDMS-ITMS / samples-skip / ConsoleSample remain grounded from
+// docs only (they roll every node or touch the shared catalog — not disposable-cluster-safe to
+// verify casually either, and out of scope for this pass). IDMS/ITMS are the CURRENT mirroring APIs;
+// ICSP is named only as the deprecated predecessor. NAMESPACE in output is the sample user user3-dev.
 
 This module has two beats that land, and they bracket the hands-on.
 The *promotion by digest* is exercise 2 — `prod` and `1.0` resolving to the *identical* `sha256` — which makes "an ImageStream pins a tag to immutable content" concrete and provable, not abstract.
@@ -41,7 +46,7 @@ Total hands-on: *~30 min* (add ~8 min of concept up front — the two-supply-cha
 On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-13, every attendee exercise was performed as `user3` and timed.
 The `oc` commands themselves return in about a second — `oc tag` in *~0.9 s*, `oc import-image` in *~1.5 s*, the pull-secret Deployment rollout in *~1.5 s* (the internal claims image is already pull-through-cached), the Template `oc apply` in *~4 s* and `oc process | oc apply` + rollout in *~5 s*.
 There are *no* long waits in this module — nothing reboots, nothing drains. *Attendee time is dominated by reading*: the digests, the import status, the governance objects. Budget the time for comprehension, not command latency.
-The cluster-wide governance segment (exercise 6) was *not* mutated on the shared build cluster; its commands are grounded from the object schema and docs, with the exact denial string marked to capture on a disposable cluster.
+The cluster-wide governance segment (exercise 6) was *not* mutated on the shared build cluster; its commands are grounded from the object schema and docs. The `allowedRegistriesForImport` denial string was verified separately on a disposable CRC 4.22.1 cluster (2026-07-31) — see the instructor demo section below.
 ====
 
 == Pre-flight checklist
@@ -101,7 +106,7 @@ All four operations are *cluster singletons* — they affect *every* tenant on a
 
 === Block a registry for import (instant, live-safe with care)
 
-`allowedRegistriesForImport` is admission-level — it limits which registries a *normal user* may import from, with *no* node reboot. It's the one cluster-wide control safe to toggle live in a tight window (it blocks imports for *all* concurrent users, so announce it).
+`allowedRegistriesForImport` is admission-level — it limits which registries *any* user, including cluster-admin, may import from, with *no* node reboot. It's the one cluster-wide control safe to toggle live in a tight window (it blocks imports for *all* concurrent users, so announce it).
 
 [source,sh,role=execute]
 ----
@@ -111,8 +116,24 @@ oc patch image.config.openshift.io/cluster --type=merge \
 oc import-image demo-blocked -n user3-dev --from=docker.io/library/nginx:latest --confirm
 ----
 
-// [CAPTURE-VERIFY] exact apiserver denial on OCP 4.21 — a Forbidden admission error stating the docker.io registry is not permitted by the import policy. Capture the precise string on your demo cluster; it was NOT applied on the shared build cluster (singleton).
-Talk track: the import is *refused* by admission with a `Forbidden` error naming `docker.io` as a registry the import policy doesn't allow — *instantly*, with no node change. Cluster-admins are exempt (the policy limits normal users), so demonstrate the denial from a user context or note the exemption. Then revert:
+// VERIFIED on a disposable CRC 4.22.1 cluster (kubeadmin, 2026-07-31) — not on the shared build
+// cluster, which is live with four attendee identities and cannot take a cluster-wide image-policy
+// mutation. Command: `oc import-image demo-blocked -n test --from=docker.io/library/nginx:latest --confirm`
+// with `spec.allowedRegistriesForImport` set to `[registry.redhat.io, registry.access.redhat.com]`.
+// Literal denial (identical via both `oc import-image -v=6` and a raw POST to
+// `imagestreamimports`, HTTP 422 Unprocessable Entity — an admission-time *validation* error, not
+// a 403 Forbidden):
+//   The ImageStream "demo-blocked" is invalid:
+//   * spec.tags[latest].from.name: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
+//   * status.tags[latest].items[0].dockerImageReference: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
+// CORRECTION to the talk track below: cluster-admin is NOT exempt. Tested as `kubeadmin` (confirmed
+// `oc auth can-i '*' '*' --all-namespaces` → yes) and the import was denied identically to a normal
+// user. The prior "cluster-admins are exempt" line was ungrounded guesswork; removed.
+// Side note from this run: patching this singleton triggers a real openshift-apiserver pod rollout
+// (it's config the apiserver operator watches) — on the shared cluster that's a live, if brief,
+// disruption to the whole image/route/project API surface for every tenant, which is exactly why
+// the module restricts this beat to a tight announced window. Marker resolved; not reopening.
+Talk track: the import is *refused* at admission time with an `Invalid` (HTTP 422) error — not a `403 Forbidden` — whose field-level causes name `docker.io` as a registry not on the whitelist. It's *instant*, with no node change. It applies to *everyone*, cluster-admin included — there is no exemption, so demonstrate it from whatever identity is convenient. Then revert:
 
 [source,sh,role=execute]
 ----
@@ -219,5 +240,5 @@ Thirty users' multi-day image churn lands on a single volume with a `Recreate` (
 Registry, Images & Catalog Governance is a net-new module (the spec's "fresh; MAD provisioning guide hints; docs" — the old content yielded no portable registry/pruning/catalog material), built against this repo's live cluster.
 Everything Registry, Images & Catalog Governance teaches for the attendee is *core* OpenShift — GA on the cluster, no operator or subscription.
 Every attendee command, output, and timing — the registry hostname and route-free check, the `parasol-claims` digest resolution and `referencePolicy: Local` pull-through, the `oc tag` promote proving `prod` == `1.0` by `sha256`, the `oc import-image --scheduled` and the "name unknown: Repo not found" break-and-fix, the `oc secrets link` and pod-level `imagePullSecrets` wiring, the namespaced Template create + `oc process` deploy, and the whole governance-surface read (empty `allowedRegistriesForImport`/mirrors, the `keepTagRevisions=3` daily pruner and its `0 0 * * *` CronJob, the `Managed` samples operator with its roughly 60 image streams + 50-odd templates, and the catalog sources including the curated `redhat-rhpds-gitea` — clusters provisioned without the Red Hat Marketplace catalog (common on RHDP/bare-metal) show four sources; clusters with it show five) — was captured on OpenShift {ocp_version} as `user3` on 2026-07-13 during the build.
-The *cluster-wide governance mutations* (`allowedRegistriesForImport` block, `registrySources`/IDMS/ITMS mirroring, samples-skip, `ConsoleSample`) were *not* applied on the shared build cluster — they are singletons affecting every tenant, and the build harness blocks shared-singleton writes. Their commands are grounded from the object schema and OCP docs; the exact apiserver *denial string* for the allowed-registries block is marked `[CAPTURE-VERIFY]` to confirm on a disposable cluster.
+The *cluster-wide governance mutations* (`allowedRegistriesForImport` block, `registrySources`/IDMS/ITMS mirroring, samples-skip, `ConsoleSample`) were *not* applied on the shared build cluster — they are singletons affecting every tenant, and the build harness blocks shared-singleton writes. Their commands are grounded from the object schema and OCP docs. The `allowedRegistriesForImport` *denial string* was verified on a disposable CRC 4.22.1 cluster on 2026-07-31 (as `kubeadmin`): an `Invalid` (HTTP 422) error, not a `403 Forbidden`, with field-level causes naming the disallowed registry — see the instructor demo section for the literal text and the correction it produced (cluster-admin is *not* exempt from this policy). The shared cluster cannot host this check itself, ever — the mutation triggers a live `openshift-apiserver` rollout affecting every tenant — so that constraint is permanent, not a gap to revisit. `registrySources`/IDMS/ITMS/samples-skip/`ConsoleSample` remain grounded from docs only.
 IDMS/ITMS are named as the *current* mirroring APIs throughout; `ImageContentSourcePolicy` appears only as the *deprecated predecessor* (convert with `oc adm migrate icsp`), never as a recommended path.
