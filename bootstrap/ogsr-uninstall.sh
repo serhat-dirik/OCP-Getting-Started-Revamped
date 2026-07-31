@@ -593,7 +593,31 @@ del_created_csv() {  # <csv> <ns> <subname> <package> <how> — the ONE place th
     return 0
   fi
   if [[ -n "$how" ]]; then echo "   • csv/${csv} -n ${ns} identified via ${how}"; fi
+  # Read BEFORE the delete, from the object we are about to remove — its .spec is still there to read
+  # either side of that call, but reading first means a failed/absent delete (DRY_RUN, or the object
+  # already gone under us) never leaves this half-run.
+  record_created_crds "$csv" "$ns"
   del_obj clusterserviceversions.operators.coreos.com "$csv" "$ns"
+  return 0
+}
+
+# `crds_created` populated HERE — the only writer in the codebase before this change (verified:
+# `grep -rn crds_created bootstrap/*.sh` found only the READ in ogsr-check-clean.sh:1480). That guard's
+# "exact" mode has therefore never run on any cluster; every real run fell through to the heuristic
+# name-token guesser, which has already misattributed one operator's CRD to an operator that was never
+# installed. This makes the exact mode reachable instead of deleting it: del_created_csv is the ONE place
+# a CREATED operator's CSV is deleted (the adopted guard above refuses everywhere else), so reading each
+# CSV's OWNED CRDs right there, and only there, can never record the org's CRDs alongside ours.
+CRDS_CREATED_SET=" "   # space-padded " crd1 crd2 " — same de-dup idiom as ATTENDEE_USERS/PROTECTED_CSVS
+
+record_created_crds() {  # csv ns — remember every CRD that CSV's spec says it owns, skipping dupes
+  local csv="$1" ns="$2" crd
+  while IFS= read -r crd; do
+    [[ -n "$crd" ]] || continue
+    case "$CRDS_CREATED_SET" in *" ${crd} "*) continue;; esac
+    CRDS_CREATED_SET="${CRDS_CREATED_SET}${crd} "
+  done < <(oc get clusterserviceversions.operators.coreos.com "$csv" -n "$ns" \
+             -o jsonpath='{range .spec.customresourcedefinitions.owned[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
   return 0
 }
 
@@ -1541,32 +1565,129 @@ handle_lightspeed() {  # remove our MaaS secret / namespace only when WE install
 # hang, which is the failure mode report_stuck_namespaces exists to avoid elsewhere in this file).
 ARGOCD_CR_FINALIZER_TIMEOUT=120
 
-# ns name budget → 0 once the CR is gone (incl. "was already gone"), 1 on timeout (still present).
-# Mirrors wait_for_phase's shape: bounded, sleeps in 10s ticks, prints progress so a silent two minutes
-# never reads as a hang.
+# <ns> <name> → "<uid>|<deletionTimestamp>", or "" if the object is absent. The ONE read both loop
+# bodies below use to tell "still the object we deleted" from "a new one wearing the same name" — see
+# wait_for_argocd_cr_gone's header for why that distinction, not presence/absence, is the real question.
+argocd_cr_identity() {
+  local ns="$1" name="$2"
+  oc get argocd "$name" -n "$ns" -o jsonpath='{.metadata.uid}|{.metadata.deletionTimestamp}' 2>/dev/null || true
+  return 0
+}
+
+# Set by wait_for_argocd_cr_gone() and read back by it alone (the generation count is logged inline as
+# it happens, not summarised afterward) — kept as a global rather than a local return value only because
+# a future caller may want to branch on the outcome without re-deriving it.
+ARGOCD_WAIT_OUTCOME=""       # gone | resurrected-then-gone | force-cleared-original | force-cleared-resurrected
+
+# ns name budget → ALWAYS returns 0 (forward progress is guaranteed within `budget` seconds; the caller
+# never has to branch on failure). What happened is reported through the global above and logged as it
+# occurs below — a fresh generation being recreated, or the budget running out, is worth knowing about
+# the moment it happens, not just in a post-hoc summary.
+#
+# SEV1, reproduced live 2026-07-31 AGAINST THE FIRST FIX (a plain bounded wait for the CR to disappear,
+# commit 67b8bd4): that fix is necessary but not sufficient. OpenShift GitOps self-heals a missing
+# default instance — proof from that run: argocd/openshift-gitops's creationTimestamp landed AFTER this
+# function's delete was issued and BEFORE the Subscription/CSV were removed, i.e. the operator recreated
+# the CR while it was still alive to do so. The plain wait cannot tell that apart from "still terminating
+# normally" — both read as "argocd/openshift-gitops exists" — so it burned its whole budget watching a
+# resurrection loop and force-cleared at the end anyway, and namespace/openshift-gitops stayed
+# Terminating: the object it patched had never had a delete issued against ITS generation, so stripping
+# its finalizers did not make it go away (a finalizer-null patch only removes an object that ALREADY has
+# a deletionTimestamp — it does not itself request deletion), and the org's own operator was already gone
+# by the time anything tried to enumerate the namespace's contents again.
+#
+# The tension: operator alive → it can run the finalizer, but also resurrects the CR; operator dead →
+# neither. Resolved by SEQUENCING plus a THIRD state this function distinguishes explicitly: a
+# resurrection is proven, not guessed, by comparing the object's UID. Kubernetes never reuses a UID and
+# never lets two live objects hold one namespaced name at once, so a NEW uid under the same name is proof
+# — not an inference — that the OLD generation's delete (finalizer included) already ran to completion.
+# That is what makes clearing a resurrected generation's finalizer a DIFFERENT decision from clearing the
+# first one: by the time a new uid shows up, the real operand cleanup this whole wait exists to protect
+# has already happened, on the generation before it. What is sitting under the name now is, at most,
+# `budget` seconds old and had the operator alive to run a real delete on it via del_obj below — the
+# force-clear at the end is reached only if THAT ALSO does not finish in time.
+#
+# ACCEPTED FAILURE MODE: if the operator keeps recreating the CR faster than each generation can tear
+# down, this loop chases it for the full budget and then force-clears whatever generation is current. The
+# risk that orphans is bounded to that last generation's brief lifetime, never to the original's full
+# operand set — and the loop always terminates and always hands control back in ≤`budget` seconds, which
+# is the property the old unbounded assumption did not have. Rejected alternatives: scaling the operator's
+# Deployment to zero mid-loop (adds a second object whose name/replica-count is not guaranteed by the
+# component manifests, a new failure surface to fix a problem UID-tracking already solves); deleting the
+# Subscription/CSV first and handling the finalizer with no operator at all (guarantees the finalizer
+# NEVER runs, the strictly worse case this whole function exists to avoid).
 wait_for_argocd_cr_gone() {
-  local ns="$1" name="$2" budget="$3" waited=0
+  local ns="$1" name="$2" budget="$3" waited=0 id uid orig_uid gens=1
+  ARGOCD_WAIT_OUTCOME="gone"
+
   if [[ "$DRY_RUN" == "true" ]]; then
     if obj_exists argocd "$name" "$ns"; then
-      echo "   • WOULD wait up to ${budget}s for argocd/${name} -n ${ns}'s finalizer before removing the operator"
+      echo "   • WOULD wait up to ${budget}s for argocd/${name} -n ${ns}'s finalizer before removing the operator,"
+      echo "     watching for OpenShift GitOps recreating its own default instance while its operator is still alive"
     fi
     return 0
   fi
-  if ! obj_exists argocd "$name" "$ns"; then
+
+  id="$(argocd_cr_identity "$ns" "$name")"
+  if [[ -z "$id" ]]; then
     return 0   # already gone — idempotent re-run, or a finalizer that cleared before we even checked
   fi
+  orig_uid="${id%%|*}"
+
   info "waiting for argocd/${name} -n ${ns} finalizer (argoproj.io/finalizer) to clear (up to ${budget}s) before removing its operator"
   while (( waited < budget )); do
-    if ! obj_exists argocd "$name" "$ns"; then
+    id="$(argocd_cr_identity "$ns" "$name")"
+    if [[ -z "$id" ]]; then
       ok "argocd/${name} -n ${ns}: finalizer cleared after ${waited}s"
+      if (( gens > 1 )); then
+        ARGOCD_WAIT_OUTCOME="resurrected-then-gone"
+        echo "   • it was recreated $((gens - 1)) time(s) by the operator's self-heal while we waited; the last generation also finished cleanly"
+      fi
       return 0
+    fi
+    uid="${id%%|*}"
+    if [[ "$uid" != "$orig_uid" ]]; then
+      gens=$((gens + 1))
+      echo "   • argocd/${name} -n ${ns} was RECREATED (new uid) after ${waited}s — OpenShift GitOps self-heals a"
+      echo "     missing default instance while its operator is alive. This PROVES the previous generation's"
+      echo "     finalizer already completed (a new object cannot take the name while the old one is still"
+      echo "     there), so re-issuing delete on the new one orphans nothing the first generation owned:"
+      del_obj argocd "$name" "$ns"
+      orig_uid="$uid"
     fi
     if (( waited > 0 && waited % 30 == 0 )); then
       echo "   … still waiting for argocd/${name} -n ${ns} to finish deleting (${waited}s of ${budget}s)"
     fi
     sleep 10; waited=$((waited + 10))
   done
-  return 1
+
+  if (( gens > 1 )); then
+    ARGOCD_WAIT_OUTCOME="force-cleared-resurrected"
+    err "argocd/${name} -n ${ns} did not finish deleting within ${budget}s, across ${gens} generations — the"
+    err "operator keeps recreating it faster than it tears one down. The REAL operand cleanup already"
+    err "happened, on an earlier generation (proven by the uid change logged above); force-clearing this"
+    err "one orphans at most a few seconds of a brand-new instance, not the workshop's actual deployment."
+  else
+    ARGOCD_WAIT_OUTCOME="force-cleared-original"
+    err "argocd/${name} -n ${ns} did not finish deleting within ${budget}s,"
+    err "and the operator that is the only thing able to run its finalizer is about to be removed next."
+  fi
+  err "Force-clearing the CR's OWN finalizer now, while its operator is still here to have tried:"
+  oc patch argocd "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+  # Stripping finalizers alone does not delete an object with no deletionTimestamp — only an object
+  # ALREADY marked for deletion disappears once its finalizer list empties. Every generation reachable
+  # here had delete issued against it (the caller's own del_obj for the first, the del_obj call above for
+  # each resurrection), so this reissue is what actually removes the object; without it a resurrected
+  # generation could sit forever as a live, finalizer-less object — which is what left
+  # namespace/openshift-gitops Terminating even after the earlier fix's force-clear.
+  del_obj argocd "$name" "$ns"
+  if [[ "$ARGOCD_WAIT_OUTCOME" == "force-cleared-original" ]]; then
+    err "   ↳ FORCE-CLEARED finalizers on argocd/${name} -n ${ns}. Its own cleanup"
+    err "     (server/repo-server/redis/appset-controller Deployments + the RBAC it owned) will NOT run —"
+    err "     those objects are ORPHANED, not deleted. Deleting the openshift-gitops namespace below still"
+    err "     removes what lives inside it; ogsr-check-clean.sh reports anything that survives that too."
+  fi
+  return 0
 }
 
 handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise preserve (+ note the memory bump)
@@ -1576,26 +1697,14 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
     info "GitOps was installed by us — removing operator + default instance"
     del_obj argocd openshift-gitops openshift-gitops
     # Bounded wait for the CR's OWN finalizer before the next lines remove the only controller that can
-    # ever run it (see the comment above wait_for_argocd_cr_gone for the SEV1 this fixes). On expiry we
-    # force-clear the finalizer on the CR ITSELF — never on the namespace (the repo's own recorded rule:
-    # patching the namespace's finalizer ORPHANS its content instead of deleting it; patching the
-    # blocking object is the same choice release_operand_blockers already makes for stalled cascade
-    # phases, for the same reason — "clearing a stuck operand's finalizer while its operator is still
-    # alive is strictly better than stranding it after the operator is gone: same objects orphaned
-    # either way, but the cluster is left removable instead of requiring hand surgery"). The operator is
-    # still installed at this exact point (we have not deleted its Subscription/CSV yet), so this is the
-    # last moment that choice is even available — refusing to proceed here would just move the manual
-    # fix-up to a human later with strictly less information than we have right now.
-    if ! wait_for_argocd_cr_gone openshift-gitops openshift-gitops "$ARGOCD_CR_FINALIZER_TIMEOUT"; then
-      err "argocd/openshift-gitops -n openshift-gitops did not finish deleting within ${ARGOCD_CR_FINALIZER_TIMEOUT}s,"
-      err "and the operator that is the only thing able to run its finalizer is about to be removed next."
-      err "Force-clearing the CR's OWN finalizer now, while its operator is still here to have tried:"
-      oc patch argocd openshift-gitops -n openshift-gitops --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
-      err "   ↳ FORCE-CLEARED finalizers on argocd/openshift-gitops -n openshift-gitops. Its own cleanup"
-      err "     (server/repo-server/redis/appset-controller Deployments + the RBAC it owned) will NOT run —"
-      err "     those objects are ORPHANED, not deleted. Deleting the openshift-gitops namespace below still"
-      err "     removes what lives inside it; ogsr-check-clean.sh reports anything that survives that too."
-    fi
+    # ever run it (see wait_for_argocd_cr_gone's header for the SEV1 this fixes, and the resurrection it
+    # has to detect and chase). It ALWAYS returns having made forward progress — never leaves this
+    # function branching on a failure it would otherwise have to re-implement force-clear logic for — but
+    # every outcome, including a bare "the CR's finalizer just ran on schedule", is logged inside it, so
+    # nothing here duplicates that reasoning. The operator is still installed for the whole call (its
+    # Subscription/CSV are not deleted until below), which is what gives the finalizer — and any re-issued
+    # delete on a resurrected generation — a real controller to run against.
+    wait_for_argocd_cr_gone openshift-gitops openshift-gitops "$ARGOCD_CR_FINALIZER_TIMEOUT"
     # Same resolution as step 4, and routed through the same single delete path. argocd-bootstrap
     # applies this Subscription imperatively so the cascade does not normally reach it — but "normally"
     # is exactly the assumption that broke step 4, and del_created_csv re-derives the authorization
@@ -2208,6 +2317,12 @@ step_delete_namespaces() {  # 9 — whatever the cascade did not own, then the s
   # readable, and a dry-run must not point at a dump left behind by some earlier run.
   if [[ "$DRY_RUN" != "true" && -n "$STATE_SNAPSHOT" ]]; then
     STATE_DUMP="${TMPDIR:-/tmp}/ogsr-uninstall-state.txt"
+    # crds_created exists ONLY in this in-memory snapshot, never in the live ConfigMap install.sh wrote
+    # (it is populated during THIS run — see record_created_crds) — so it has to be folded in here, the
+    # one place that snapshot gets persisted, or it is lost the moment the ogsr-system namespace goes.
+    if [[ "$CRDS_CREATED_SET" != " " ]]; then
+      STATE_SNAPSHOT="${STATE_SNAPSHOT}"$'\n'"crds_created=$(printf '%s' "$CRDS_CREATED_SET" | sed -e 's/^ //' -e 's/ $//' -e 's/ /,/g')"
+    fi
     if printf '%s\n' "$STATE_SNAPSHOT" > "$STATE_DUMP" 2>/dev/null; then
       ok "install state saved to ${STATE_DUMP}"
     else
