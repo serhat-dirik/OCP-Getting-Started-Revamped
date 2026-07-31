@@ -553,19 +553,41 @@ assert_single_operatorgroup() {
 }
 
 # Post-install check for the exact failure diagnosed 2026-07-30: the batch-pool taint (if applied above)
-# starving an unrelated pod's scheduling. A pod's FailedScheduling event lists EVERY reason it can't
-# land ("1 Insufficient memory, 1 node(s) had untolerated taint(s), 3 Insufficient cpu") in one message,
-# so this reads "blocked by the taint" as: the pod is Pending, its latest FailedScheduling event cites an
-# untolerated taint, AND the pod itself carries no toleration for our taint key — a pod that DOES
-# tolerate it is meant to be eligible for the batch node, so a resource crunch there is a capacity
-# question, not a defect of this taint. Must report what it inspected even when the scope is empty
-# (zero Pending pods is a real, reportable outcome, not a silent pass).
+# starving an unrelated pod's scheduling.
+#
+# ATTRIBUTION IS THE HARD PART, and the scheduler will not do it for us. Measured on OCP 4.22
+# (2026-07-31, single-node CRC): the FailedScheduling message names the COUNT of tainted nodes but never
+# the taint KEY —
+#     "0/1 nodes are available: 1 node(s) had untolerated taint(s). no new claims to deallocate, ..."
+# and on the 5-node RHDP cluster the same day, "0/5 nodes are available: 1 Insufficient memory,
+# 1 node(s) had untolerated taint(s), 3 Insufficient cpu". So a grep for "untolerated taint" alone
+# CANNOT tell our taint apart from node.kubernetes.io/disk-pressure, /not-ready, or anything else —
+# and the CRC node carries exactly such a disk-pressure taint, which would have made this gate blame
+# our taint and fail an install for something that is not ours.
+#
+# So we decide attribution from the NODE, not the message: if our taint is the only NoSchedule/NoExecute
+# taint on the batch node, "untolerated taint" can only mean ours and we hard-fail. If the node carries
+# other blocking taints too, the pod is stuck whether or not our taint exists — we report it in full and
+# name the competing taints, but we do NOT fail the install for it.
+#
+# Pods that DO tolerate our key are out of scope: they are meant to be eligible for the batch node, so a
+# crunch there is a capacity question, not a defect of this taint. Must report what it inspected even
+# when the scope is empty (zero Pending pods is a real, reportable outcome, not a silent pass).
 assert_no_batch_taint_pending() {
   if [[ "${BATCH_TAINTED:-false}" != "true" ]]; then
     info "batch-taint Pending-pod check: skipped — no taint was applied this run (pool was below the ${MIN_BATCH_POOL_FOR_TAINT}-worker floor, or shaping found no node)"
     return 0
   fi
-  local total=0 flagged=0 ns pod evt
+  # Other NoSchedule/NoExecute taints on the batch node — the competing explanations for the message.
+  local other_taints="" _tkey _teffect
+  while IFS='=' read -r _tkey _teffect; do
+    [[ -n "$_tkey" ]] || continue
+    [[ "$_tkey" != "$POOL_LABEL_KEY" ]] || continue
+    [[ "$_teffect" == "NoSchedule" || "$_teffect" == "NoExecute" ]] || continue
+    other_taints+="${_tkey}:${_teffect} "
+  done < <(oc get node "$BATCH_NODE" -o jsonpath='{range .spec.taints[*]}{.key}{"="}{.effect}{"\n"}{end}' 2>/dev/null)
+
+  local total=0 flagged=0 ambiguous=0 ns pod evt
   while read -r ns pod; do
     [[ -n "$pod" ]] || continue
     total=$((total + 1))
@@ -574,21 +596,30 @@ assert_no_batch_taint_pending() {
     fi
     evt="$(oc get events -n "$ns" --field-selector "involvedObject.name=${pod},reason=FailedScheduling" \
             -o jsonpath='{.items[-1:].message}' 2>/dev/null || true)"
-    if grep -qi 'untolerated taint' <<<"$evt"; then
+    grep -qi 'untolerated taint' <<<"$evt" || continue
+    if [[ -n "$other_taints" ]]; then
+      ambiguous=$((ambiguous + 1))
+      warn "  ${ns}/${pod} is Pending citing an untolerated taint, but ${BATCH_NODE} also carries ${other_taints}— not attributable to ${POOL_LABEL_KEY}: ${evt}"
+    else
       flagged=$((flagged + 1))
-      err "  ${ns}/${pod} is Pending and its scheduling failure cites an untolerated taint (pod has no toleration for ${POOL_LABEL_KEY}): ${evt}"
+      err "  ${ns}/${pod} is Pending and ${POOL_LABEL_KEY} is the ONLY blocking taint on ${BATCH_NODE} (pod does not tolerate it): ${evt}"
     fi
   done < <(oc get pods -A --field-selector=status.phase=Pending \
              -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
   if [[ "$total" -eq 0 ]]; then
     ok "batch-taint Pending-pod check: inspected 0 Pending pods cluster-wide — nothing to flag"
     return 0
   fi
   if [[ "$flagged" -eq 0 ]]; then
-    ok "batch-taint Pending-pod check: inspected ${total} Pending pod(s) cluster-wide, none blocked by the ${POOL_LABEL_KEY} taint on ${BATCH_NODE}"
+    # NB: not "${ambiguous:+...}" — ambiguous holds a NUMBER, and the string "0" is non-empty, so :+
+    # would expand on a clean run and report "(0 cited a taint...)". Test the value, not the emptiness.
+    local amb_note=""
+    [[ "$ambiguous" -gt 0 ]] && amb_note=" (${ambiguous} cited a taint, but ${BATCH_NODE} carries other blocking taints — see warnings above)"
+    ok "batch-taint Pending-pod check: inspected ${total} Pending pod(s) cluster-wide, none blocked by the ${POOL_LABEL_KEY} taint on ${BATCH_NODE}${amb_note}"
     return 0
   fi
-  err "batch-taint Pending-pod check: ${flagged}/${total} Pending pod(s) inspected are blocked (at least in part) by the ${POOL_LABEL_KEY} taint this install added to ${BATCH_NODE}"
+  err "batch-taint Pending-pod check: ${flagged}/${total} Pending pod(s) inspected are blocked by the ${POOL_LABEL_KEY} taint this install added to ${BATCH_NODE}"
   err "  this is the exact failure mode diagnosed 2026-07-30 (RHACS central-db Pending behind this same taint on a 2-worker cluster, Central crashlooping, ACS scans failing) — free capacity on the other worker(s), or reduce load until the ${MIN_BATCH_POOL_FOR_TAINT}-worker floor would skip the taint on a re-install"
   return 1
 }
