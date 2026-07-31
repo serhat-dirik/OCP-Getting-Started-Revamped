@@ -30,11 +30,32 @@ Argo CD maps that identity to `role:{user}`, scoped to `proj-{user}` — you wil
 == My scale-up (drift) did not revert — even with self-heal on
 
 Symptom:: You enabled *Self Heal*, scaled the Deployment to 3, and a minute later it is *still* at 3.
-Cause:: Self-heal normally reverts drift in a few seconds — it is *watch-triggered*, so a lingering drift means something is off.
-Usually one of two things: *auto-sync or self-heal is not actually enabled* on the app (it is easy to toggle one and not the other), or the shared controller is unhealthy and not processing events.
+Cause:: Self-heal normally reverts a *fresh* drift in a few seconds — it is *watch-triggered*, so a lingering drift means something is off.
+Usually one of three things: *auto-sync or self-heal is not actually enabled* on the app (it is easy to toggle one and not the other); this is a *repeat* drift against the same Application and the same Git revision, which runs into Argo CD's own self-heal backoff (see "Self-heal reverted my first drift in seconds — a later one takes minutes" below); or the shared controller is unhealthy and not processing events.
 Fix:: Confirm *both* *AUTO-SYNC* and *SELF HEAL* are enabled in the app's *Sync Policy* (the app card shows a sync-policy badge when they are).
-If they are on and the drift still lingers past ~90 seconds, the controller is the suspect — an instructor/admin can check it (see "A sync will not complete" below).
+If they are on, check whether this is a repeat drift on the same revision (see below) before assuming a controller problem.
+If it still lingers past ~90 seconds and is not backoff, the controller is the suspect — an instructor/admin can check it (see "A sync will not complete" below).
 Either way, *SYNC → SYNCHRONIZE* reverts the drift immediately.
+
+== Self-heal reverted my first drift in seconds — a later one takes minutes
+
+Symptom:: Your *first* drift on an Application reverted in a few seconds, exactly as expected.
+A *later* drift — on the *same* Application, against the *same* Git revision (nothing new was committed) — sits `OutOfSync` for minutes instead.
+Cause:: This is Argo CD's own *self-heal backoff*, not a stuck or unhealthy controller.
+Repeated sync attempts against the same target revision back off, with each successive attempt waiting longer than the last; the platform team measured a run of waits as long as 4m48s before it recovered.
+An instructor rehearsing the demo beats before the room, or the optional Challenge's config-map-deletion drift on top of the live beats, both drift the *same* app against the *same*, still-unchanged revision — exactly the condition that triggers this.
+Fix:: Waiting works — the backoff always retries and reverts the drift, it is just slower each time it repeats.
+To confirm this is backoff and not a controller problem, check the application-controller log for the backoff message:
++
+[source,sh,role=execute]
+----
+oc logs student-gitops-application-controller-0 -n ogsr-student-gitops --tail=200 \
+  | grep -i "already attempted sync"
+----
++
+A line like `Skipping auto-sync: already attempted sync to […] with timeout 0s (retrying in …)` confirms it — the Application's status also carries a climbing self-heal attempt count for the same reason.
+If you need the revert to land quickly *right now*, make a real (even trivial) change in Git and Sync/Refresh: a new commit is a new revision, not "the same sync again," so self-heal reverts the next drift on it in seconds, same as the very first time.
+If the log shows no such line and the app is still stuck, the controller itself may be unhealthy — see "A sync will not complete" below.
 
 == Argo CD did not notice my Git commit
 

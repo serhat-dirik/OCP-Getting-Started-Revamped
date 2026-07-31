@@ -5,7 +5,8 @@ include::partial$version-attributes.adoc[]
 // Internal delivery runbook. Timings MEASURED on the build cluster (OCP {ocp_version} / OpenShift
 // GitOps {gitops_version}, Argo CD 3.4) as user7 on 2026-07-10/11 by performing every exercise and
 // timing the operations. The student Argo CD instance is SHARED; read "Watchouts → controller memory"
-// before running this module for a room — it is the one thing that will bite you.
+// AND "Watchouts → self-heal backoff" before running this module for a room, and especially before
+// rehearsing the demo flavor — a repeat drift against the same Application/revision is slow by design.
 
 The module's signature beat is exercise 3: a console `oc scale` that Argo CD *erases* — first when you press Sync, then, with self-heal on, on its own in a few seconds.
 Both reverts are fast (self-heal measured ~4s, watch-triggered), so the drift-revert arc lands *live* with no waiting to narrate around.
@@ -36,7 +37,9 @@ The NEW APP card can take up to ~90s to first populate while the repo-server clo
 * *Manual Sync revert (exercise 3)* — the `replicas` field reverts to the Git value within seconds of clicking Sync; the operation shows a longer *Duration* only because it waits for the extra pods to terminate and the rollout to settle.
 * *Self-heal revert (exercise 3)* — measured *~4 seconds* from `oc scale` to reverted, three trials (4s / 4s / 4s), on the 2&nbsp;Gi controller with `appSync: 90s`.
 Self-heal is *watch-triggered* — Argo CD reacts to the live change, not a poll — so the 90s reconcile interval is only the ceiling, never the typical revert time.
-(An earlier build measured ~190s; that was an artifact of the controller OOMing at 1&nbsp;Gi, since fixed — see Provenance.)
+That ~4s figure is for a *fresh* drift on a revision Argo CD has not just synced.
+A *repeat* drift against the same Application and the same Git revision runs into Argo CD's own self-heal backoff and can take minutes — see Watchouts and Troubleshooting.
+(An earlier build measured ~190s; at the time that was attributed to the controller OOMing at 1&nbsp;Gi, since fixed — see Provenance for why that attribution is no longer certain.)
 * *Git-driven change (exercise 4)* — after a commit to `main`, a UI *Refresh* re-resolved the branch to the new commit in *~20s* and the app went OutOfSync; Sync then converged in seconds.
 ====
 
@@ -113,6 +116,10 @@ Run `ws solve gitops-fundamentals --user {user}` early (blocks ~4–6 min) so a 
 * *Both reverts are fast — the whole drift arc lands live.*
 Beat 3 (drift → click Sync → snaps back to 1) is instant.
 Beat 4 (enable self-heal, drift, it reverts unaided) lands in a few seconds — watch-triggered, measured ~4s — so there is nothing to wait out; let it happen on screen and let the room see the replica count drop by itself.
+* *You are already two sync cycles deep before you say a word — a rehearsal or the Challenge can tip you into backoff.*
+`ws solve` performs one sync to the entry Git revision as part of its own prep, and if you privately rehearse beats 3–4 before the room, that rehearsal is a second sync/self-heal cycle against that *same* revision.
+Argo CD's own self-heal backoff (see Watchouts, Troubleshooting) applies per Application per revision, so the live beat 4 drift can land slower than the ~4s you rehearsed with, and the optional Challenge's config-map-deletion drift (same app, same still-unchanged revision) is a further repeat on top of that.
+If you must rehearse, either commit a trivial real Git change afterward (a new revision resets the counter) or expect the live self-heal revert may take longer than ~4s and have the fallback below ready.
 * *Show the annotation, not just the tree.*
 The `oc get deploy … tracking-id` line is the crisp "this came from Git, not from `oc apply`" proof — it turns the abstract "GitOps-managed" into a concrete fingerprint.
 * *Have a fallback.*
@@ -130,7 +137,8 @@ This is the tenancy model that makes one Argo CD safe for many users.
 Effectively yes: self-heal is *watch-triggered*, so Argo CD reacts to the live change and reverts it in a few seconds (measured ~4s here), not on a slow poll.
 The controller's periodic reconcile interval (`appSync: 90s` on this cluster) is only the *ceiling* — the longest a drift could linger if a watch event were ever missed under load.
 The manual *Sync* button is also instant, so an attendee cannot out-edit Git: drift is reverted within seconds whether they Sync it or leave self-heal to do it.
-(If a revert ever takes minutes, suspect the controller's health, not Argo CD's design — see Watchouts.)
+That is true for a *fresh* drift against a revision Argo CD has not just synced.
+(If a revert ever takes minutes, suspect a *repeat* drift against the same Application and the same Git revision first — Argo CD's own self-heal backoff, not the controller's health — see Watchouts and Troubleshooting.)
 
 *3. "Kustomize or Helm — which should we use?"*::
 Both, and Argo CD renders either — an Application's `source` can point at a Kustomize path *or* a Helm chart with values.
@@ -153,11 +161,15 @@ Self-heal is automated Sync on drift; auto-sync is automated Sync on new Git rev
 
 * *Verify the student Argo CD controller has adequate memory.*
 The Argo CD application-controller caches the whole cluster's resource tree (across every user namespace and CRD), so it is memory-hungry regardless of how few Applications exist.
-At *1&nbsp;Gi* it OOMKilled and crash-looped during the build (even with two apps), which stalled syncs and self-heal and inflated the self-heal timing to minutes; the platform team raised it to *2&nbsp;Gi* with `appSync: 90s`, and the beats are fast again.
+At *1&nbsp;Gi* it OOMKilled and crash-looped during the build (even with two apps), which stalled syncs and self-heal; the platform team raised it to *2&nbsp;Gi* with `appSync: 90s`, and the beats have run fast since.
+(Whether the OOM alone accounts for the minutes-long self-heal timing seen at the time, or Argo CD's own self-heal backoff — see below — was also a factor, was never distinguished; see Provenance.)
 Pre-flight check 2 confirms the controller is `ready` with a stable restart count — if it is crash-looping, escalate to the platform team; it is not something an instructor can fix from the UI.
-* *Self-heal is fast (watch-triggered), not a slow poll.*
-Measured ~4s on this cluster; the `appSync: 90s` interval is only the ceiling.
-If a self-heal revert ever takes minutes, the controller's memory or health is the suspect, not Argo CD's design.
+* *Self-heal is fast (watch-triggered) on a fresh drift — a repeat drift against the same Application and revision backs off.*
+Measured ~4s on this cluster for a first drift; the `appSync: 90s` interval is only the ceiling for that case.
+A *second* drift against the same Application and the *same* Git revision runs into Argo CD's own self-heal backoff — a smoke pass measured successive waits of 4m48s, 4m20s, 3m2s, 2m8s, 1m17s as `SelfHealAttemptsCount` climbed.
+This is documented Argo CD behavior (the `argocd-cm` here carries no override), not a fault.
+Confirm it via `Skipping auto-sync: already attempted sync to […] with timeout 0s (retrying in …)` in the application-controller log and `SelfHealAttemptsCount` on the Application, rather than assuming the controller is unhealthy — see Troubleshooting.
+If a self-heal revert ever takes minutes, suspect this backoff *first*; the controller's memory or health is the second suspect, not the first.
 * *Attendee Applications live in the shared control plane and are created via the UI.*
 There is no per-user Argo CD instance and no `oc apply` path (GitOps {gitops_version} refuses per-user source namespaces on a namespace-scoped instance — see ADR-0002).
 Each attendee's Applications live in `ogsr-student-gitops` with `.spec.project: proj-{user}`.
@@ -180,5 +192,7 @@ Exercise 4's git-driven change is easiest via the *Gitea UI* pencil (a commit wi
 
 GitOps Fundamentals is built fresh on OpenShift GitOps {gitops_version} (Argo CD {argocd_version}, `argoproj.io/v1alpha1`) against the Parasol `claims-config` Kustomize repo, on a shared student Argo CD instance with per-user AppProjects and OpenShift-SSO login, then performed end-to-end on OpenShift {ocp_version} as `user7` on 2026-07-10/11.
 Every command, output, and timing — the `oc apply` Forbidden denial, the 3s/26s first sync of seven objects, the drift diff (`replicas: 3` vs `1`), the instant manual-Sync revert, the ~4s watch-triggered self-heal revert, and the git-driven stage promotion (edit `main`, Refresh in ~20s, Sync) — was captured on-cluster.
-An earlier build measured self-heal at ~190s; that was an artifact of the controller OOMing at 1&nbsp;Gi, and after the platform team raised it to 2&nbsp;Gi (`appSync: 90s`) the revert was re-measured at ~4s across three trials — the number above.
+An earlier build measured self-heal at ~190s; at the time that was attributed to the controller OOMing at 1&nbsp;Gi, and after the platform team raised it to 2&nbsp;Gi (`appSync: 90s`) the revert was re-measured at ~4s across three trials — the number above.
+That attribution is now uncertain, not confirmed wrong: a second, independently documented mechanism — Argo CD's own self-heal backoff on a repeat sync to the same Application and the same Git revision — produces waits in the same range (a later smoke pass measured 4m48s down to 1m17s across six backed-off attempts), and the three re-measurement trials were all early attempts against a revision each was the first drift on, so they would read fast under either explanation.
+The OOM was real and the memory increase to 2&nbsp;Gi may well have been necessary regardless; what was not done at the time was distinguish "controller OOMing" from "self-heal backoff on a repeated sync" as the cause of the original ~190s reading, and that distinction cannot be reconstructed now.
 No content ported from stale material.
