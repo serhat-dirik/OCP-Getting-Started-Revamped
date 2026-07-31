@@ -663,13 +663,25 @@ else
 fi
 
 # GitOps operator: adopted (pre-existing) or created by us? Recorded first-write-wins, so a RE-install
-# still knows we were the original installer. The controller.resources snapshot stays as prior-state
-# evidence (a pre-2026-07-25 install did raise an adopted controller to 6Gi and could only print a
-# manual restore hint); we no longer resize an adopted instance at all — see GITOPS_PREEXISTED below.
+# still knows we were the original installer.
+#
+# The controller.resources snapshot is the RESTORE SOURCE, not just evidence: on an ADOPTED instance
+# the portfolio's argocd-bootstrap asks the admin for consent to raise the controller memory, and if
+# they say yes it records argocd_controller_resources_changed_by_us=true alongside this same key.
+# ogsr-uninstall.sh's restore_argocd_controller_resources() reads BOTH and puts the CR back — writing
+# the recorded block back, or REMOVING .spec.controller.resources when this key is absent (absence is
+# how "the CR carried no explicit resources" is encoded; that is why the write below is skipped when
+# ARGO_RES_PRIOR is empty, and why nothing may start writing an empty value here).
+# One key for the prior value, one for the consent, one restore path — see that function's header.
 if oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
   record_once gitops_preexisted true
   ARGO_RES_PRIOR="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources}' 2>/dev/null | base64 | tr -d '\n' || true)"
-  [[ -n "$ARGO_RES_PRIOR" ]] && record_once gitops_argocd_controller_resources_b64 "$ARGO_RES_PRIOR"
+  # `if`, not `cond && cmd`: measured harmless here (top level, so `set -e` does not fire), but this
+  # is the line the empty-means-absent contract rests on and it must survive being wrapped in a
+  # function by a later refactor.
+  if [[ -n "$ARGO_RES_PRIOR" ]]; then
+    record_once gitops_argocd_controller_resources_b64 "$ARGO_RES_PRIOR"
+  fi
 else
   record_once gitops_preexisted false
 fi

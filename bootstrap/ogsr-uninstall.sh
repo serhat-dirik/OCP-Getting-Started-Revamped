@@ -1722,130 +1722,12 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
     # Probed on the operator's own namespace: the Subscription/CSV live there, so its presence is what
     # distinguishes "an adopted GitOps is really here" from "no GitOps on this cluster at all".
     info "GitOps operator + instance preserved ($(preserve_reason "$(state gitops_preexisted)" namespace openshift-gitops-operator))"
-    # Put the org's controller sizing back. Deliberately the LAST thing step 8 does to the adopted
-    # instance: the cascade in step 2 needs the raised memory to prune ~600 resources without
-    # OOM-wedging, and by the time we get here every workshop Application is gone, so handing the
-    # controller back at its own smaller size cannot starve anything of ours that is still running.
-    sub restore_argocd_controller_resources
+    # The adopted instance's controller SIZING is put back by restore_argocd_controller_resources(),
+    # which runs in step 5 beside the other imperative reversals (monitoring, node shaping, OAuth IdP)
+    # — it is one of those, not part of operator lifecycle. It is safe there and not here: it is gated
+    # on a recorded consent that only an ADOPTED instance can ever carry, and step 2's cascade — the
+    # one thing that needs the raised memory — has already drained by then.
   fi
-  return 0
-}
-
-# ── adopted Argo CD controller sizing ─────────────────────────────────────────
-# Put an ADOPTED openshift-gitops controller back EXACTLY as we found it. Reaching the "no trace" bar
-# for the one org-owned object the installer is allowed to mutate (with consent — see the adopted
-# branch of platform-portfolio/argocd-bootstrap/install.sh).
-#
-# ONE FACT, ONE KEY. The prior value is gitops_argocd_controller_resources_b64: base64 of the CR's
-# WHOLE .spec.controller.resources, written first-write-wins by every install entry point
-# (bootstrap/install.sh, helm/bootstrap's job-state-capture Job, and the portfolio's consent gate).
-# It has to be the whole block, not just the memory: the override sets limits.cpu, limits.memory,
-# requests.cpu and requests.memory, so a memory-only record could never undo it.
-#
-# argocd_controller_resources_changed_by_us is the ORTHOGONAL fact and the reason it is a second key
-# rather than an inference: two of the three writers above snapshot the prior WITHOUT mutating
-# anything, so "a prior was recorded" never meant "we changed it". Only a recorded consent authorizes
-# a restore; without it we are back to the pre-2026-07-31 behaviour of naming the value and standing
-# down (the legacy branch below), because writing to someone's CR on a guess is the very harm this
-# whole path exists to avoid.
-#
-# AN EMPTY PRIOR IS MEANINGFUL, and is recorded by the ABSENCE of the b64 key: the CR carried no
-# explicit .spec.controller.resources at all. Restoring that means REMOVING the field — a
-# JSON-merge-patch null — never writing a number back. Every writer of the key already skips it when
-# the value is empty and the state ConfigMap cannot represent an empty string distinguishably from an
-# unset one, so absence is the unambiguous encoding and needs no sentinel.
-restore_argocd_controller_resources() {
-  local changed b64 prior target_mem prior_mem live_mem rc=0 out
-  changed="$(state argocd_controller_resources_changed_by_us)"
-  b64="$(state gitops_argocd_controller_resources_b64)"
-  prior=""
-  if [[ -n "$b64" ]]; then
-    prior="$(printf '%s' "$b64" | base64 --decode 2>/dev/null || true)"
-  fi
-
-  if [[ "$changed" != "true" ]]; then
-    # LEGACY state, written before consent was recorded (or by a snapshot pass that never patched).
-    # Behaviour preserved verbatim, including its reasoning: install only RAISES the controller memory
-    # limit (operator default 2Gi → 6Gi). If the org was ALREADY at the target, install changed nothing
-    # and there is nothing to restore — so gate the warning on prior≠target instead of firing whenever
-    # a prior spec was recorded (false alarm on a cluster that shipped at 6Gi). Target is read from the
-    # canonical override so it never drifts.
-    if [[ -z "$b64" ]]; then return 0; fi
-    target_mem="$(yq '.spec.controller.resources.limits.memory' "${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/operator/argocd-controller-resources.yaml" 2>/dev/null || true)"
-    if [[ -z "$target_mem" || "$target_mem" == "null" ]]; then target_mem="6Gi"; fi
-    prior_mem="$(printf '%s' "$prior" | yq -p=json '.limits.memory' 2>/dev/null || true)"
-    live_mem="$(oc get argocd openshift-gitops -n "$ARGO_NS" -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
-    if [[ "$prior_mem" == "$target_mem" ]]; then
-      echo "   • openshift-gitops controller memory was already ${target_mem} before install — not raised, nothing to restore"
-    elif [[ "$live_mem" != "$target_mem" ]]; then
-      # Second, independent proof that nothing of ours is on this CR: the live limit is not the value
-      # this workshop applies, so no install path ever raised it (the FSC/helm entry point records the
-      # same b64 snapshot but never patches the controller at all — without this check that path fires
-      # a "cannot prove the change was ours" alarm on every teardown, about a change that never
-      # happened). If we HAD raised it, the live value would be the target.
-      echo "   • openshift-gitops controller memory is ${live_mem:-the operator default} — not ${target_mem}, so this workshop never raised it; nothing to restore"
-    else
-      err "a prior openshift-gitops controller spec was recorded, but NO consent to change it was —"
-      err "   this install predates the consent gate, so we cannot prove the change was ours and will"
-      err "   not write to an adopted CR on a guess. Prior spec.controller.resources:"
-      echo "      ${prior:-<unreadable>}"
-      echo "      restore manually if the org relied on it: oc -n ${ARGO_NS} edit argocd openshift-gitops"
-    fi
-    return 0
-  fi
-
-  # Tolerant of the object already being absent — an adopted instance can still have been removed by
-  # its owner between install and teardown, and that is not our failure to report as one.
-  if ! oc get argocd openshift-gitops -n "$ARGO_NS" >/dev/null 2>&1; then
-    echo "   • skip controller-resources restore (argocd/openshift-gitops -n ${ARGO_NS} absent)"
-    return 0
-  fi
-
-  if [[ -z "$b64" ]]; then
-    if [[ "$DRY_RUN" == "true" ]]; then
-      echo "   • WOULD remove spec.controller.resources from argocd/openshift-gitops (the CR carried none before install)"
-      return 0
-    fi
-    out="$(oc patch argocd openshift-gitops -n "$ARGO_NS" --type merge \
-             -p '{"spec":{"controller":{"resources":null}}}' 2>&1)" || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-      err "could not remove spec.controller.resources from argocd/openshift-gitops: ${out}"
-      echo "      by hand: oc -n ${ARGO_NS} patch argocd openshift-gitops --type merge -p '{\"spec\":{\"controller\":{\"resources\":null}}}'"
-      return 1
-    fi
-    ok "removed spec.controller.resources from argocd/openshift-gitops (it carried no explicit sizing before install; the operator restarts the controller)"
-    return 0
-  fi
-
-  # The recorded value is `oc get -o jsonpath='{.spec.controller.resources}'` output, which kubectl
-  # marshals as JSON for a map — so it can go straight back as a patch VALUE. Refuse anything that is
-  # not an object rather than feed the CR a malformed patch: a client old enough to have printed Go's
-  # map[…] form would otherwise turn a restore into a corruption.
-  case "$prior" in
-    '{'*'}') ;;
-    *)
-      err "recorded prior controller resources are not a JSON object — refusing to patch argocd/openshift-gitops with them."
-      echo "      recorded value: ${prior:-<unreadable>}"
-      echo "      restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops"
-      return 1 ;;
-  esac
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    echo "   • WOULD restore argocd/openshift-gitops spec.controller.resources to ${prior}"
-    return 0
-  fi
-  # JSON patch `add`, not a merge patch: `add` REPLACES the whole value at the path, while a merge
-  # patch would union our four keys with the prior's — leaving requests.memory=2Gi behind on a CR
-  # whose prior block only set limits.memory. Union is not restoration.
-  out="$(oc patch argocd openshift-gitops -n "$ARGO_NS" --type json \
-           -p "[{\"op\":\"add\",\"path\":\"/spec/controller/resources\",\"value\":${prior}}]" 2>&1)" || rc=$?
-  if [[ "$rc" -ne 0 ]]; then
-    err "could not restore argocd/openshift-gitops spec.controller.resources: ${out}"
-    echo "      recorded prior value: ${prior}"
-    echo "      restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops"
-    return 1
-  fi
-  ok "restored argocd/openshift-gitops spec.controller.resources to ${prior} (the operator restarts the controller)"
   return 0
 }
 
@@ -2265,39 +2147,129 @@ step_remove_devspaces_namespaces() {  # 3 — Dev Spaces namespaces auto-provisi
   return 0
 }
 
-restore_argocd_controller_memory() {  # put an ADOPTED Argo CD's controller sizing back
-  # Only ever acts on a value WE changed. argocd-bootstrap/install.sh asks the deployer before raising
-  # an adopted controller to 6Gi (below that it is OOMKilled and nothing the workshop installs ever
-  # syncs), and records the prior value here. Without this the consent prompt would be making a promise
-  # nothing kept: measured on cluster-tb7fj 2026-07-31, a full teardown left the adopted controller at
-  # 6Gi — the org's sizing permanently changed by a workshop that claims to leave no trace.
-  #
-  # An EMPTY prior value is meaningful, not missing: it means the CR carried no explicit limit before
-  # us, so restoring means REMOVING the field, not writing a number back.
-  [[ "$(state argocd_controller_memory_changed_by_us)" == "true" ]] || return 0
-  oc get argocd openshift-gitops -n openshift-gitops >/dev/null 2>&1 || return 0
-  local prior; prior="$(state argocd_controller_memory_prior)"
-  if [[ "$DRY_RUN" == "true" ]]; then
-    if [[ -n "$prior" ]]; then echo "   • WOULD restore adopted Argo CD controller memory to ${prior}"
-    else echo "   • WOULD REMOVE the controller memory limit we added (there was none before us)"; fi
+# ── adopted Argo CD controller sizing ─────────────────────────────────────────
+# Put an ADOPTED openshift-gitops controller back EXACTLY as we found it. Reaching the "no trace" bar
+# for the one org-owned object the installer is allowed to mutate (with consent — see the adopted
+# branch of platform-portfolio/argocd-bootstrap/install.sh).
+#
+# SUPERSEDES restore_argocd_controller_memory() (d79d088), which stood here and restored ONLY
+# .spec.controller.resources.limits.memory. That could not reach the bar it was written for: the
+# override applies limits.cpu="2", limits.memory=6Gi, requests.cpu=250m AND requests.memory=2Gi, so
+# putting one of those four back leaves three of ours on the org's CR — and its empty-prior branch
+# (`remove /spec/controller/resources/limits/memory`) left behind a whole `resources:` block the CR
+# never had. Same contract, same consent semantics, same step; whole block instead of one field, and
+# on the key the other two install entry points already write. Placement kept from that commit.
+#
+# ONE FACT, ONE KEY. The prior value is gitops_argocd_controller_resources_b64: base64 of the CR's
+# WHOLE .spec.controller.resources, written first-write-wins by every install entry point
+# (bootstrap/install.sh, helm/bootstrap's job-state-capture Job, and the portfolio's consent gate).
+# It has to be the whole block, not just the memory: the override sets limits.cpu, limits.memory,
+# requests.cpu and requests.memory, so a memory-only record could never undo it.
+#
+# argocd_controller_resources_changed_by_us is the ORTHOGONAL fact and the reason it is a second key
+# rather than an inference: two of the three writers above snapshot the prior WITHOUT mutating
+# anything, so "a prior was recorded" never meant "we changed it". Only a recorded consent authorizes
+# a restore; without it we are back to the pre-2026-07-31 behaviour of naming the value and standing
+# down (the legacy branch below), because writing to someone's CR on a guess is the very harm this
+# whole path exists to avoid.
+#
+# AN EMPTY PRIOR IS MEANINGFUL, and is recorded by the ABSENCE of the b64 key: the CR carried no
+# explicit .spec.controller.resources at all. Restoring that means REMOVING the field — a
+# JSON-merge-patch null — never writing a number back. Every writer of the key already skips it when
+# the value is empty and the state ConfigMap cannot represent an empty string distinguishably from an
+# unset one, so absence is the unambiguous encoding and needs no sentinel.
+restore_argocd_controller_resources() {
+  local changed b64 prior target_mem prior_mem live_mem rc=0 out
+  changed="$(state argocd_controller_resources_changed_by_us)"
+  b64="$(state gitops_argocd_controller_resources_b64)"
+  prior=""
+  if [[ -n "$b64" ]]; then
+    prior="$(printf '%s' "$b64" | base64 --decode 2>/dev/null || true)"
+  fi
+
+  if [[ "$changed" != "true" ]]; then
+    # LEGACY state, written before consent was recorded (or by a snapshot pass that never patched).
+    # Behaviour preserved verbatim, including its reasoning: install only RAISES the controller memory
+    # limit (operator default 2Gi → 6Gi). If the org was ALREADY at the target, install changed nothing
+    # and there is nothing to restore — so gate the warning on prior≠target instead of firing whenever
+    # a prior spec was recorded (false alarm on a cluster that shipped at 6Gi). Target is read from the
+    # canonical override so it never drifts.
+    if [[ -z "$b64" ]]; then return 0; fi
+    target_mem="$(yq '.spec.controller.resources.limits.memory' "${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/operator/argocd-controller-resources.yaml" 2>/dev/null || true)"
+    if [[ -z "$target_mem" || "$target_mem" == "null" ]]; then target_mem="6Gi"; fi
+    prior_mem="$(printf '%s' "$prior" | yq -p=json '.limits.memory' 2>/dev/null || true)"
+    live_mem="$(oc get argocd openshift-gitops -n "$ARGO_NS" -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
+    if [[ "$prior_mem" == "$target_mem" ]]; then
+      echo "   • openshift-gitops controller memory was already ${target_mem} before install — not raised, nothing to restore"
+    elif [[ "$live_mem" != "$target_mem" ]]; then
+      # Second, independent proof that nothing of ours is on this CR: the live limit is not the value
+      # this workshop applies, so no install path ever raised it (the FSC/helm entry point records the
+      # same b64 snapshot but never patches the controller at all — without this check that path fires
+      # a "cannot prove the change was ours" alarm on every teardown, about a change that never
+      # happened). If we HAD raised it, the live value would be the target.
+      echo "   • openshift-gitops controller memory is ${live_mem:-the operator default} — not ${target_mem}, so this workshop never raised it; nothing to restore"
+    else
+      err "a prior openshift-gitops controller spec was recorded, but NO consent to change it was —"
+      err "   this install predates the consent gate, so we cannot prove the change was ours and will"
+      err "   not write to an adopted CR on a guess. Prior spec.controller.resources:"
+      echo "      ${prior:-<unreadable>}"
+      echo "      restore manually if the org relied on it: oc -n ${ARGO_NS} edit argocd openshift-gitops"
+    fi
     return 0
   fi
-  if [[ -n "$prior" ]]; then
-    if oc -n openshift-gitops patch argocd openshift-gitops --type merge \
-         -p "{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${prior}\"}}}}}" >/dev/null 2>&1; then
-      ok "restored adopted Argo CD controller memory to ${prior} (we had raised it)"
-    else
-      err "could NOT restore the adopted Argo CD controller memory to ${prior} — set it back by hand:"
-      err "  oc -n openshift-gitops patch argocd openshift-gitops --type merge -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${prior}\"}}}}}'"
-    fi
-  else
-    if oc -n openshift-gitops patch argocd openshift-gitops --type json \
-         -p '[{"op":"remove","path":"/spec/controller/resources/limits/memory"}]' >/dev/null 2>&1; then
-      ok "removed the controller memory limit we added (the CR carried none before us)"
-    else
-      info "no controller memory limit to remove (already absent)"
-    fi
+
+  # Tolerant of the object already being absent — an adopted instance can still have been removed by
+  # its owner between install and teardown, and that is not our failure to report as one.
+  if ! oc get argocd openshift-gitops -n "$ARGO_NS" >/dev/null 2>&1; then
+    echo "   • skip controller-resources restore (argocd/openshift-gitops -n ${ARGO_NS} absent)"
+    return 0
   fi
+
+  if [[ -z "$b64" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "   • WOULD remove spec.controller.resources from argocd/openshift-gitops (the CR carried none before install)"
+      return 0
+    fi
+    out="$(oc patch argocd openshift-gitops -n "$ARGO_NS" --type merge \
+             -p '{"spec":{"controller":{"resources":null}}}' 2>&1)" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      err "could not remove spec.controller.resources from argocd/openshift-gitops: ${out}"
+      echo "      by hand: oc -n ${ARGO_NS} patch argocd openshift-gitops --type merge -p '{\"spec\":{\"controller\":{\"resources\":null}}}'"
+      return 1
+    fi
+    ok "removed spec.controller.resources from argocd/openshift-gitops (it carried no explicit sizing before install; the operator restarts the controller)"
+    return 0
+  fi
+
+  # The recorded value is `oc get -o jsonpath='{.spec.controller.resources}'` output, which kubectl
+  # marshals as JSON for a map — so it can go straight back as a patch VALUE. Refuse anything that is
+  # not an object rather than feed the CR a malformed patch: a client old enough to have printed Go's
+  # map[…] form would otherwise turn a restore into a corruption.
+  case "$prior" in
+    '{'*'}') ;;
+    *)
+      err "recorded prior controller resources are not a JSON object — refusing to patch argocd/openshift-gitops with them."
+      echo "      recorded value: ${prior:-<unreadable>}"
+      echo "      restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops"
+      return 1 ;;
+  esac
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "   • WOULD restore argocd/openshift-gitops spec.controller.resources to ${prior}"
+    return 0
+  fi
+  # JSON patch `add`, not a merge patch: `add` REPLACES the whole value at the path, while a merge
+  # patch would union our four keys with the prior's — leaving requests.memory=2Gi behind on a CR
+  # whose prior block only set limits.memory. Union is not restoration.
+  out="$(oc patch argocd openshift-gitops -n "$ARGO_NS" --type json \
+           -p "[{\"op\":\"add\",\"path\":\"/spec/controller/resources\",\"value\":${prior}}]" 2>&1)" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    err "could not restore argocd/openshift-gitops spec.controller.resources: ${out}"
+    echo "      recorded prior value: ${prior}"
+    echo "      restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops"
+    return 1
+  fi
+  ok "restored argocd/openshift-gitops spec.controller.resources to ${prior} (the operator restarts the controller)"
   return 0
 }
 
@@ -2308,7 +2280,7 @@ step_reverse_cluster_mutations() {  # 5 — the imperative, cluster-global chang
   sub handle_lightspeed
   sub restore_monitoring
   sub reverse_node_shaping
-  sub restore_argocd_controller_memory
+  sub restore_argocd_controller_resources
   return 0
 }
 

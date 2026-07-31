@@ -478,10 +478,10 @@ else
     echo "  ✓ controller RBAC applied"
 
     # The operator-default controller memory (2Gi) OOM-wedges under cohort-scale concurrent entry-state
-    # materializations; raise it to 6Gi. ONLY on an Argo CD we installed ourselves. On an ADOPTED
-    # instance this is an unreversible mutation of something the org owns — uninstall could do no better
-    # than print a manual restore hint, which fails the "no trace" bar. Their instance keeps their sizing
-    # and we tell the admin exactly what to raise if the controller starts OOMing under load.
+    # materializations; raise it to 6Gi. On an instance WE installed that is unconditional. On an
+    # ADOPTED one it is a mutation of something the org owns, so it is asked for, recorded, and undone
+    # by ogsr-uninstall.sh's restore_argocd_controller_resources() — which is what makes it survivable
+    # rather than the "unreversible, manual restore hint only" it used to be.
     if [[ "$GITOPS_ADOPTED" == "true" ]]; then
       # ADOPTED Argo CD: the controller sizing belongs to the org, so we ASK before changing it.
       #
