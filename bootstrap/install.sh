@@ -1305,18 +1305,26 @@ EOF
 ok "workshop-config Application applied (source: local mirror)"
 
 # ── 6. wait for the workshop layer to be Healthy ──────────────────────────────
-info "[6/6] waiting for workshop-config to become Healthy (up to 10m)…"
-HEALTH=""; SYNC=""
-for _ in $(seq 1 60); do
-  HEALTH="$(oc get application workshop-config -n openshift-gitops -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
-  SYNC="$(oc get application workshop-config -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
-  [[ "$HEALTH" == "Healthy" && "$SYNC" == "Synced" ]] && break
-  printf '.'; sleep 10
-done
-echo
-if [[ "$HEALTH" == "Healthy" && "$SYNC" == "Synced" ]]; then
-  ok "workshop-config is Synced/Healthy"
-else
+# Extracted to a function so the poll itself — not just its WORKSHOP_LAYER_OK output — can be driven
+# under a stubbed `oc` (tools/lint/workshop-layer-gate-guard.sh): up to 60 attempts at a 10s interval,
+# same as the real cluster wait. Sets the global WORKSHOP_LAYER_OK=false on timeout; leaves it
+# untouched (default true, see emit_bootstrap_verdict) on success. Called bare below with `|| true`:
+# under `set -e` a bare function call that returns 1 IS fatal here (unlike the original inline
+# `if/else`, which had no exit in its else branch), so the `|| true` is load-bearing, not decorative.
+wait_for_workshop_layer_healthy() {
+  HEALTH=""; SYNC=""
+  local _i
+  for _i in $(seq 1 60); do
+    HEALTH="$(oc get application workshop-config -n openshift-gitops -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+    SYNC="$(oc get application workshop-config -n openshift-gitops -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+    [[ "$HEALTH" == "Healthy" && "$SYNC" == "Synced" ]] && break
+    printf '.'; sleep 10
+  done
+  echo
+  if [[ "$HEALTH" == "Healthy" && "$SYNC" == "Synced" ]]; then
+    ok "workshop-config is Synced/Healthy"
+    return 0
+  fi
   err "workshop-config not ready yet (health=${HEALTH:-?} sync=${SYNC:-?}) — selfHeal continues; inspect: oc describe application workshop-config -n openshift-gitops"
   # …and REMEMBER it. This used to print the ❌ above and then fall straight through to
   # "✅ workshop bootstrap complete" with exit 0, so a run whose entire workshop layer never
@@ -1326,7 +1334,11 @@ else
   # the chart made Argo refuse to sync at all. Anything scripting this installer — CI, the RHDP
   # catalog item, an SA in a hurry — reads the exit code, and the exit code said fine.
   WORKSHOP_LAYER_OK=false
-fi
+  return 1
+}
+
+info "[6/6] waiting for workshop-config to become Healthy (up to 10m)…"
+wait_for_workshop_layer_healthy || true
 
 # ── credentials summary + next steps ──────────────────────────────────────────
 CONSOLE_URL="$(oc whoami --show-console 2>/dev/null || true)"
@@ -1389,21 +1401,34 @@ if ! assert_no_batch_taint_pending; then
   exit 1
 fi
 
+# ── final verdict: the success banner is EARNED, never unconditional ──────────
+# Split into its own function so the failure-vs-success decision can be driven in isolation, under a
+# stubbed `oc`, instead of only ever being provable by breaking a real cluster (tools/lint/
+# workshop-layer-gate-guard.sh does exactly that). Returns 1 — and prints nothing that could be
+# mistaken for success — when the workshop layer never reached Synced/Healthy; returns 0 and prints
+# the credentials banner when it did. The function only decides WHAT gets printed and the verdict;
+# the caller decides whether to exit, so this stays a plain `return`, testable without exiting the
+# caller's shell (see the CLAUDE.md note on `set -e` turning a bare-called function's failure fatal —
+# harmless here since the caller always branches on the result explicitly).
+emit_bootstrap_verdict() {
+  if [[ "${WORKSHOP_LAYER_OK:-true}" != "true" ]]; then
+    err "workshop bootstrap INCOMPLETE — the platform installed but the workshop layer did not"
+    echo "   what is missing: the workshop-config Application never reached Synced/Healthy, so the"
+    echo "     per-user namespaces, quotas, RBAC, Gitea seeding and cockpits were NOT created."
+    echo "   attendees CANNOT use this cluster yet. Do not hand out links."
+    echo "   diagnose : oc get application workshop-config -n ${ARGO_NS:-openshift-gitops} -o yaml"
+    echo "              a RepeatedResourceWarning condition means the chart renders one object twice —"
+    echo "              Argo refuses to sync at all in that case and records no operation."
+    echo "   re-run   : this installer is idempotent; fix the cause and run it again."
+    return 1
+  fi
+  ok "workshop bootstrap complete"
+  echo "   console : ${CONSOLE_URL:-<run: oc whoami --show-console>}"
+  echo "   gitea   : https://${GITEA_HOST}"
+  echo "   users   : ${USER_PREFIX}1 … ${USER_PREFIX}${USERS} (shared password)"
+  echo "   creds   : ${CREDS_FILE} (gitignored)"
+  echo "   next    : ws doctor   ·   ws start m01 --user ${USER_PREFIX}1"
+}
+
 echo
-if [[ "${WORKSHOP_LAYER_OK:-true}" != "true" ]]; then
-  err "workshop bootstrap INCOMPLETE — the platform installed but the workshop layer did not"
-  echo "   what is missing: the workshop-config Application never reached Synced/Healthy, so the"
-  echo "     per-user namespaces, quotas, RBAC, Gitea seeding and cockpits were NOT created."
-  echo "   attendees CANNOT use this cluster yet. Do not hand out links."
-  echo "   diagnose : oc get application workshop-config -n ${ARGO_NS:-openshift-gitops} -o yaml"
-  echo "              a RepeatedResourceWarning condition means the chart renders one object twice —"
-  echo "              Argo refuses to sync at all in that case and records no operation."
-  echo "   re-run   : this installer is idempotent; fix the cause and run it again."
-  exit 1
-fi
-ok "workshop bootstrap complete"
-echo "   console : ${CONSOLE_URL:-<run: oc whoami --show-console>}"
-echo "   gitea   : https://${GITEA_HOST}"
-echo "   users   : ${USER_PREFIX}1 … ${USER_PREFIX}${USERS} (shared password)"
-echo "   creds   : ${CREDS_FILE} (gitignored)"
-echo "   next    : ws doctor   ·   ws start m01 --user ${USER_PREFIX}1"
+emit_bootstrap_verdict || exit 1
