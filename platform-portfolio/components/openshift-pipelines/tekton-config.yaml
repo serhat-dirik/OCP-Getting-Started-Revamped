@@ -1,0 +1,46 @@
+# TektonConfig "config" is created by the operator itself with cluster defaults the moment the
+# CSV reconciles (see subscription.yaml's wave-0 comment) — we never own the object's lifecycle.
+# This manifest patches ONLY the fields below via strategic-merge; every other section (pipeline,
+# chain, dashboard, platforms, ...) is left untouched at whatever the operator defaults to.
+#
+# result.route_tls_termination: reencrypt
+#   tekton-results-api terminates TLS itself — its Service carries
+#   service.beta.openshift.io/serving-cert-secret-name: tekton-results-tls (a service-ca-signed
+#   cert), confirmed live on cluster2. The operator's own default is "edge" (router terminates
+#   client TLS, forwards PLAIN HTTP to the backend); against a TLS-only backend that plaintext
+#   hits the backend's TLS listener and comes back "Client sent an HTTP request to an HTTPS
+#   server" (reproduced live 2026-08-01: curl against the public Route). "passthrough" is wrong
+#   too — the service-ca cert's SANs are the in-cluster Service DNS names, not the Route's public
+#   hostname, so passthrough would leave TLS verification failing for any client that checks
+#   server identity against the hostname it dialed. reencrypt lets the router terminate the
+#   client leg with its own cert and open a fresh TLS connection to the backend for the second
+#   leg, which is exactly what a self-TLS-terminating backend needs.
+#   destinationCACertificate is deliberately left unset: every other service-ca-backed reencrypt
+#   Route on this cluster (openshift-console/console, openshift-monitoring/alertmanager-main,
+#   openshift-monitoring/prometheus-k8s, openshift-storage/noobaa-mgmt, ...) also leaves it unset
+#   and works — the router's default trust bundle already trusts the service-ca signer, so no
+#   extra CA needs to be handed to it.
+#
+# result.logs_api: false (explicit, matches the operator default)
+#   TaskRun run metadata still archives either way; this only gates whether log BODIES are
+#   archived too. Enabling it needs LOGS_TYPE=File backed by a PVC (logging_pvc_name) or an
+#   external log store (Loki/S3) — this portfolio is workshop-agnostic and provisions neither, so
+#   turning it on here would silently lose logs on every results-api pod restart instead of
+#   archiving them. Attendees still get live logs via `tkn` / `oc logs` while the TaskRun pod
+#   exists. Revisit only if a sizing tier adds a logging backend.
+apiVersion: operator.tekton.dev/v1alpha1
+kind: TektonConfig
+metadata:
+  name: config
+  annotations:
+    # Wave 1: after the operator Subscription (wave 0) so the CRD is registered first.
+    argocd.argoproj.io/sync-wave: "1"
+    # First sync can still race operator reconciliation before the CRD exists — don't hard-fail
+    # a dry-run against a not-yet-registered kind (same pattern as components/rhtas/securesign.yaml).
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+  labels:
+    app.kubernetes.io/part-of: tekton-results
+spec:
+  result:
+    route_tls_termination: reencrypt
+    logs_api: false
