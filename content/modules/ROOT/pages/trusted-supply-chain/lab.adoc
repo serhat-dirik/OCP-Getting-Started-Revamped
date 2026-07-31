@@ -278,21 +278,36 @@ This build takes a few minutes, so start it and read on:
 // "Import YAML", "Import from Git", "Container images". "Import YAML" matches the prose above.
 //
 // [CAPTURE-VERIFY] Pipelines > PipelineRuns graph — build-image green, acs-scan red — remains
-// state-dependent. RE-CHECKED live 2026-07-30 (later in the same day than the `warm-clean-xxxxx`
-// finding this note previously recorded): that finding is now STALE. `oc get pipelinerun,
-// pipeline, imagestream -n user1-cicd` all return NO resources — trusted-supply-chain's entire
-// entry state (including the pre-warmed `warm-clean-xxxxx` build) is gone. trusted-supply-chain
-// shares {user}-cicd and is a MUTUAL conflict with app-security-testing (both ws-meta.yaml
-// conflictsWith lists); app-security-testing's entry app (entry-app-security-testing-user1,
-// Synced/Healthy) has since evicted trusted-supply-chain from that namespace — `oc get pipeline
-// -n user1-cicd` now lists only `parasol-claims-devsecops`. So today there is LESS state than the
-// prior check found, not the same: no pre-warmed build to read a graph from at all, let alone the
-// red acs-scan this marker asks about. Closes once `ws start trusted-supply-chain` (evicts
-// app-security-testing from user1-cicd and re-materializes the warm-clean pre-built pipeline +
-// ImageStream) is run, THIS exercise's own `seed-scan-` PipelineRun (built from `seed-vulnerable`
-// to the CVE-2021-44228 image) is run to its `Failed` conclusion, and the PipelineRuns graph is
-// opened to confirm build-image renders green and acs-scan red. CLI heredoc + `tkn pipelinerun
-// logs` stay authoritative for the pass/fail wording regardless.
+// state-dependent. RE-CHECKED live 2026-07-31 against user6-cicd (trusted-supply-chain's own
+// namespace slot today — user1-cicd is held by app-security-testing per the mutual conflict noted
+// above). `ws start trusted-supply-chain --user user6` re-materialized the entry state: `oc get
+// pipeline,pipelinerun,imagestream,configmap -n user6-cicd` shows `parasol-claims-supply-chain` and
+// a pre-warmed run `warm-clean-69sn7`. Watched it to completion with `oc get pipelinerun` (no
+// PipelineRun was started by this check) — `oc get taskrun -n user6-cicd` gives the CLI-only
+// picture: fetch-source Succeeded, sbom-report Succeeded, build-image Succeeded (green), acs-scan
+// Failed (red). So the green/red PATTERN is present today — but NOT for the reason this marker
+// describes. This is the pre-warmed CLEAN build (main branch, not `seed-vulnerable`); its acs-scan
+// log (`oc logs -n user6-cicd warm-clean-69sn7-acs-scan-pod`) failed on infrastructure, not policy:
+// `rpc error: ... transport: authentication handshake failed: dial tcp <ip>:443: connect:
+// connection refused` reaching RHACS Central. `oc get pods -n stackrox -l app=central` confirms
+// Central itself is 0/1 Ready, 30 restarts, stuck in its DB migrator (`central-db.stackrox.svc:5432:
+// connect: connection refused`) — a cluster-wide RHACS outage unrelated to this module. This
+// exercise's own `seed-scan-` PipelineRun (seed-vulnerable branch, CVE-2021-44228) was deliberately
+// NOT started (hard rule: no PipelineRun starts during this check), so the claim this marker
+// actually makes — acs-scan red BECAUSE of the seeded vulnerability, alongside a genuinely green
+// build-image from a healthy pre-warm baseline — still cannot be shown; today the pre-warm baseline
+// itself is red, and for an unrelated cause.
+// Console verification is ALSO blocked today: the saved browser session is authenticated as user1,
+// and `oc auth can-i list pipelineruns.tekton.dev -n user6-cicd --as=user1
+// --as-group=workshop-attendees` returns `no` — user1 has no RBAC to browse user6-cicd's Pipelines
+// view, so the graph's visual rendering (node layout, colors, Output-tab location) could not be
+// checked in a console for this user/namespace pair; only the CLI taskrun facts above are confirmed.
+// Closes once (a) RHACS Central is healthy so a re-run of `ws start trusted-supply-chain --user <N>`
+// produces a pre-warm run that actually SUCCEEDS, (b) this exercise's own `seed-scan-` run is taken
+// to its `Failed` conclusion against that healthy baseline, and (c) the PipelineRuns graph is opened
+// as the SAME user whose namespace it is (not user1 against another user's project) to confirm
+// build-image renders green and acs-scan red for the vulnerability reason. CLI heredoc + `tkn
+// pipelinerun logs` stay authoritative for the pass/fail wording regardless.
 [tabs]
 ====
 Console::
@@ -593,20 +608,22 @@ oc get imagestream parasol-claims -n $NS \
 ----
 
 .Expected output
-// [CAPTURE-VERIFY] still state-dependent. RE-CHECKED live 2026-07-30 (later the same day the
-// single-pair `warm-clean-xxxxx` finding below was recorded): that finding is now STALE — `oc get
-// imagestream -n user1-cicd` returns NO resources at all, not even the one-pair entry state.
-// trusted-supply-chain shares {user}-cicd and is a MUTUAL conflict with app-security-testing;
-// app-security-testing's entry app has since evicted trusted-supply-chain's entry state from that
-// namespace entirely (see the marker above this one in the file for the same finding against the
-// PipelineRun/Pipeline objects). So today there is no ImageStream to read tags from at all, let
-// alone the two-pair state this block describes. Closes once `ws start trusted-supply-chain`
-// (evicts app-security-testing from user1-cicd) re-materializes the warm-clean pre-built
-// ImageStream (confirm the 1-pair `latest`/`.att`/`.sig` baseline first), THEN this exercise's own
-// `seed-scan-` PipelineRun (building `seed-vulnerable` to the `:candidate` tag) is run to
-// completion — Chains signs that build too, even though `acs-scan` fails it, adding the second
-// `.att`/`.sig` pair — and `oc get imagestream parasol-claims -o jsonpath` plus the console's Tags
-// table are re-captured against that live 2-pair state.
+// [CAPTURE-VERIFY] still state-dependent. RE-CHECKED live 2026-07-31 against user6-cicd (this
+// module's own namespace slot today — see the marker above for why user1-cicd no longer applies).
+// `ws start trusted-supply-chain --user user6` re-materialized the entry state's ImageStream:
+// `oc get imagestream parasol-claims -n user6-cicd -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}
+// {end}'` returns exactly THREE tags — `latest`, one `sha256-<digest>.att`, one
+// `sha256-<digest>.sig` — i.e. ONE derived pair, the pre-warm baseline this block already describes
+// above, not the two-pair state below. That single pair is unchanged by the pre-warm PipelineRun's
+// (unexpectedly Failed — see marker above, an RHACS Central outage, not a policy verdict)
+// conclusion: a failed run still gets its already-pushed image signed/attested by Chains, and no
+// second image was built, so no second pair appears. This exercise's own `seed-scan-` run (which
+// would build a SECOND image to the `:candidate` tag, adding a second `.att`/`.sig` pair) was
+// deliberately NOT started (hard rule: no PipelineRun starts during this check). So the two-pair
+// claim below stays OPEN: today's live count is ONE pair, not two. Closes once `seed-scan-` is run
+// to completion (regardless of its acs-scan verdict — Chains signs failed builds too) and `oc get
+// imagestream parasol-claims -n <user>-cicd -o jsonpath` is re-captured showing `candidate`,
+// `latest`, and two `.att`/`.sig` pairs, one per digest.
 [source,texinfo]
 ----
 candidate
