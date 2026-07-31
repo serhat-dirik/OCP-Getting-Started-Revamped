@@ -54,7 +54,11 @@ PY
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-inspected=0
+# Counted per HALF, not in total: the two halves fail independently (a renamed chart directory
+# empties the first; a moved manifest tree or a broken grep empties the second), and a single
+# counter lets a healthy half hide a dead one behind a reassuring "74 inputs inspected".
+helm_inspected=0
+static_inspected=0
 
 echo "== rendered Helm charts =="
 for chart in gitops/entry-states/*/Chart.yaml gitops/workshop-config/Chart.yaml helm/bootstrap/Chart.yaml; do
@@ -91,7 +95,7 @@ for chart in gitops/entry-states/*/Chart.yaml gitops/workshop-config/Chart.yaml 
       continue
     fi
     check_file "$out" "$label" || rc=1
-    inspected=$((inspected + 1))
+    helm_inspected=$((helm_inspected + 1))
   done
 done
 
@@ -101,7 +105,7 @@ while IFS= read -r f; do
     */charts/*) continue ;;   # vendored upstream chart internals — not ours to patch
   esac
   check_file "$f" "$f" || rc=1
-  inspected=$((inspected + 1))
+  static_inspected=$((static_inspected + 1))
 done < <(grep -rl --include='*.yaml' --include='*.yml' '^kind: Route' gitops platform-portfolio 2>/dev/null)
 
 # Self-test. A guard that silently inspects nothing reports a perfect score — this one did
@@ -112,7 +116,26 @@ if check_file "$tmp/canary.yaml" "canary" >/dev/null 2>&1; then
   echo "  SELF-TEST FAILED: guard accepted a Route with no TLS — it is not actually checking."
   rc=1
 else
-  echo "  self-test ok — guard rejects a TLS-less Route (${inspected} inputs inspected)"
+  echo "  self-test ok — guard rejects a TLS-less Route"
+fi
+
+# …and the canary only proves check_file works. It says NOTHING about whether either half fed it
+# anything: both loops can drop to zero inputs while the line above still prints "self-test ok".
+# Assert each half separately, naming the half that went dark and what to look at.
+if [ "$helm_inspected" -eq 0 ]; then
+  echo "  ❌ SELF-TEST FAILED: the Helm half rendered ZERO inputs — no chart matched"
+  echo "       gitops/entry-states/*/Chart.yaml, gitops/workshop-config, helm/bootstrap."
+  echo "       A renamed or moved chart directory silently empties this half; fix the glob."
+  rc=1
+fi
+if [ "$static_inspected" -eq 0 ]; then
+  echo "  ❌ SELF-TEST FAILED: the static half inspected ZERO manifests — no file under gitops/ or"
+  echo "       platform-portfolio/ matched '^kind: Route'. Either every Route moved, or the grep"
+  echo "       stopped matching (indented kind:, .yml vs .yaml, a new tree not in the search list)."
+  rc=1
+fi
+if [ "$rc" -eq 0 ]; then
+  echo "  inputs inspected: ${helm_inspected} rendered chart(s) + ${static_inspected} static manifest(s)"
 fi
 
 if [ "$rc" -ne 0 ]; then

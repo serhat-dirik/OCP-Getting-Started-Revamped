@@ -59,6 +59,8 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/lint/_extract-func.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
+# shellcheck source=tools/lint/_check-coverage.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_check-coverage.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -179,6 +181,7 @@ STUBS
 }
 
 check_capture() {  # <func_file> → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local func_file="$1" out crds phase rc=0
   if [[ ! -s "$func_file" ]]; then
     bad "[1] could not extract the capture functions — the guard cannot inspect what it claims to."
@@ -230,6 +233,7 @@ run_step_line() {  # <file> <fn> → the line number of its run_step invocation 
 }
 
 check_order() {  # <uninstall-file> → 0 correct, 1 wrong, 2 nothing to inspect
+  ran_check
   local f="$1" l_stop l_operand l_cascade rc=0
   if [[ ! -f "$f" ]]; then bad "[2] ${f} not found"; return 2; fi
   l_stop="$(run_step_line "$f" "$STEP_STOP")"
@@ -334,6 +338,7 @@ STUBS
 }
 
 check_operand_scope() {  # <func_file> → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local func_file="$1" out rc=0
   if [[ ! -s "$func_file" ]]; then
     bad "[3] could not extract step_delete_operator_operands — the guard cannot inspect what it claims to."
@@ -424,6 +429,7 @@ STUBS
 }
 
 check_exact_needs_proof() {  # <func_file> → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local func_file="$1" out rc=0
   if [[ ! -s "$func_file" ]]; then
     bad "[4] could not extract section_crds — the guard cannot inspect what it claims to."
@@ -475,6 +481,7 @@ op_ours-operator=created:ours-ns')"
 
 # ── driver ────────────────────────────────────────────────────────────────────
 run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
+  coverage_reset
   local root="$1" rc=0 sub=0 f
   local cap_f op_f sec_f
   for f in "$UNINSTALL" "$CHECKCLEAN"; do
@@ -501,6 +508,9 @@ run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
   fi
 
   rm -f "$cap_f" "$op_f" "$sec_f"
+  # Nothing above proves run_check still CALLS what this guard declares — a deleted call site
+  # leaves every canary passing and the real run reporting clean (see _check-coverage.sh).
+  if [[ "$rc" -ne 2 ]]; then assert_all_checks_ran || rc=2; fi
   return "$rc"
 }
 

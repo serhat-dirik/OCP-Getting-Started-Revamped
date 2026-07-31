@@ -52,6 +52,8 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/lint/_extract-func.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
+# shellcheck source=tools/lint/_check-coverage.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_check-coverage.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -91,6 +93,7 @@ keys_read() {  # root →
 }
 
 check_key_symmetry() {  # root → 0 clean, 1 asymmetric, 2 nothing to inspect
+  ran_check
   local root="$1" written read_ k rc=0 n=0
   written="$(keys_written "$root")"
   read_="$(keys_read "$root")"
@@ -202,6 +205,7 @@ STUBS
 }
 
 check_restore_behaviour() {  # func_file → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local func_file="$1" out rc=0
   local prior_json='{"limits":{"memory":"3Gi"},"requests":{"memory":"1Gi"}}'
   local prior_b64
@@ -272,6 +276,7 @@ check_restore_behaviour() {  # func_file → 0 correct, 1 wrong, 2 harness broke
 }
 
 run_check() {  # root → 0 clean, 1 broken, 2 uninspectable
+  coverage_reset
   local root="$1" func_file rc=0 sub=0
   if [[ ! -f "${root}/${UNINSTALL}" ]]; then
     bad "${root}/${UNINSTALL} not found"
@@ -288,6 +293,9 @@ run_check() {  # root → 0 clean, 1 broken, 2 uninspectable
   rm -f "$func_file"
   if [[ "$sub" -eq 2 ]]; then return 2; fi
   if [[ "$sub" -ne 0 ]]; then rc=1; fi
+  # Nothing above proves run_check still CALLS what this guard declares — a deleted call site
+  # leaves every canary passing and the real run reporting clean (see _check-coverage.sh).
+  if [[ "$rc" -ne 2 ]]; then assert_all_checks_ran || rc=2; fi
   return "$rc"
 }
 

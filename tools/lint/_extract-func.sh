@@ -92,6 +92,52 @@ FIXTURE
   fi
   rm -f "$tmp"
 
+  # ── the SECOND walker ───────────────────────────────────────────────────────────────────────────
+  # extract_func_indented had no canary at all until 2026-08-01: blinding it, or giving it the wrong
+  # de-indent width, left this self-test at 1 because the first walker's canary still passed. Its one
+  # caller drives a DESTRUCTIVE teardown gate (uninstall-state-lifetime-guard.sh reads record_once
+  # out of the capture Job's YAML block scalar), and an empty extraction there reads as "nothing to
+  # inspect" — so it gets the same treatment as the walker above: prove the fixture is the real
+  # shape, then prove the walker handles it verbatim.
+  tmp="$(mktemp)"
+  # 14 columns of YAML block-scalar indent, exactly as helm/bootstrap/templates/job-state-capture.yaml
+  # carries it. Written with printf so no editor or linter can "tidy" the leading whitespace away.
+  # The $1/$2 are fixture TEXT, not this script's arguments — single quotes are the point.
+  # shellcheck disable=SC2016
+  printf '%14srecord_once() {\n%14s  echo "$1=$2"\n%14s}\n%14safter() { echo "after-body"; }\n' \
+    "" "" "" "" > "$tmp"
+
+  # Proof A: the fixture really is the indented shape — the COLUMN-0 walker cannot see it at all.
+  # Without this, a fixture that both walkers handle would prove nothing about the de-indent.
+  if [[ -n "$(extract_func "$tmp" record_once)" ]]; then
+    echo "❌ SELF-TEST FAILED: the indented fixture is matched by the column-0 walker too — it is not testing the de-indent." >&2
+    rm -f "$tmp"
+    return 2
+  fi
+
+  # Proof B: the de-indenting walker extracts it VERBATIM. The exact-text comparison is what pins the
+  # WIDTH: at 13 or 15 columns the opening line no longer starts with "record_once() {" and the walker
+  # yields nothing, which this catches as loudly as a blinded walker.
+  out="$(extract_func_indented "$tmp" record_once)"
+  # The comparison target below is the fixture's literal text ($1/$2 included), not an expansion.
+  # The directive sits on the whole `if`: shellcheck rejects one in front of a bare `elif` (SC1123).
+  # shellcheck disable=SC2016
+  if [[ -z "$out" ]]; then
+    echo "❌ SELF-TEST FAILED: extract_func_indented found nothing in a 14-column-indented fixture — the walker is blind, or the de-indent width is wrong." >&2
+    rc=2
+  elif grep -q 'after' <<< "$out"; then
+    echo "❌ SELF-TEST FAILED: extract_func_indented swallowed the definition after its target." >&2
+    rc=2
+  elif [[ "$out" != 'record_once() {
+  echo "$1=$2"
+}' ]]; then
+    echo "❌ SELF-TEST FAILED: extract_func_indented did not de-indent by exactly 14 columns (got: '${out}')." >&2
+    rc=2
+  else
+    echo "✅ indented extraction de-indents by exactly 14 columns and stops at its target's closing brace"
+  fi
+  rm -f "$tmp"
+
   # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
   if [[ "$rc" -eq 0 ]]; then return 1; fi
   return "$rc"
@@ -123,5 +169,22 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit 1
   fi
   echo "✅ extract_func handles ${CHECKCLEAN}'s one-line state_get() without swallowing state_ops()"
+
+  # The second walker gets the same real-tree proof, against its ONE production input.
+  CAPTURE_JOB="${REPO_ROOT}/helm/bootstrap/templates/job-state-capture.yaml"
+  if [[ ! -f "$CAPTURE_JOB" ]]; then
+    echo "❌ ${CAPTURE_JOB} not found — extract_func_indented's only caller has no input" >&2
+    exit 2
+  fi
+  indented_out="$(extract_func_indented "$CAPTURE_JOB" record_once)"
+  if [[ -z "$indented_out" ]]; then
+    echo "❌ extract_func_indented could not find record_once() in ${CAPTURE_JOB} — the block-scalar indent moved" >&2
+    exit 1
+  fi
+  if [[ "$indented_out" == " "* ]]; then
+    echo "❌ extract_func_indented left leading whitespace on record_once() — the extraction is not sourceable" >&2
+    exit 1
+  fi
+  echo "✅ extract_func_indented de-indents the capture Job's record_once() out of its YAML block scalar"
   exit 0
 fi

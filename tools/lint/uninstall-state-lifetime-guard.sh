@@ -46,6 +46,11 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/lint/_extract-func.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
+# shellcheck source=tools/lint/_check-coverage.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_check-coverage.sh"
+# [3] runs once per record_once writer (bootstrap/install.sh and the capture Job), so its expected
+# multiplicity is declared: dropping EITHER call site must fail the coverage assertion, not half of it.
+CHECK_COVERAGE_EXPECT="check_carried_keys=2"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -164,6 +169,7 @@ ARGO_KEY="gitops_argocd_controller_resources_b64"
 MON_KEY="monitoring_uwm_prior"
 
 check_residue_accounting() {  # <argo_func_file> <mon_func_file> → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local af="$1" mf="$2" rc=0
   local prior_2g prior_6g garbage
   prior_2g="$(printf '%s' '{"limits":{"memory":"2Gi"}}' | base64 | tr -d '\n')"
@@ -269,6 +275,7 @@ STUBS
 }
 
 check_state_deletion() {  # <func_file> → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local func_file="$1" out rc=0
   if [[ ! -s "$func_file" ]]; then
     bad "[2] could not extract carry_residue_or_delete_state_ns() — the guard cannot inspect what it claims to."
@@ -350,6 +357,7 @@ STUBS
 }
 
 check_carried_keys() {  # <label> <func_file> → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local label="$1" func_file="$2" out rc=0
   local key="gitops_argocd_controller_resources_b64"
   if [[ ! -s "$func_file" ]]; then
@@ -398,6 +406,7 @@ check_carried_keys() {  # <label> <func_file> → 0 correct, 1 wrong, 2 harness 
 RESTORE_SOURCE_KEY="gitops_argocd_controller_resources_b64"
 
 check_writers_read_residue() {  # <root> → 0 clean, 1 broken, 2 nothing to inspect
+  ran_check
   local root="$1" f rc=0 n=0
   for f in "${WRITERS[@]}"; do
     [[ -f "${root}/${f}" ]] || continue
@@ -422,6 +431,7 @@ check_writers_read_residue() {  # <root> → 0 clean, 1 broken, 2 nothing to ins
 
 # ── driver ────────────────────────────────────────────────────────────────────
 run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
+  coverage_reset
   local root="$1" rc=0 sub=0 f
   local argo_f mon_f carry_f ro_install_f ro_job_f
   for f in "$UNINSTALL" "$INSTALL" "$CAPTURE_JOB"; do
@@ -457,6 +467,9 @@ run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
   fi
 
   rm -f "$argo_f" "$mon_f" "$carry_f" "$ro_install_f" "$ro_job_f"
+  # Nothing above proves run_check still CALLS what this guard declares — a deleted call site
+  # leaves every canary passing and the real run reporting clean (see _check-coverage.sh).
+  if [[ "$rc" -ne 2 ]]; then assert_all_checks_ran || rc=2; fi
   return "$rc"
 }
 

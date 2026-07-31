@@ -35,10 +35,24 @@ WHAT IT DELIBERATELY DOES NOT FLAG — and why (the pushback is part of the desi
 
 USAGE
     tools/lint/credential-redaction-guard.py [path ...]   # default: the repo's code+content roots
-    tools/lint/credential-redaction-guard.py --self-test  # scans the canary; MUST exit 1
+    tools/lint/credential-redaction-guard.py --self-test  # per-rule canary assertions; MUST exit 1
 
 Like curl-format-guard.py, this refuses to report clean over an empty scope, and ships a canary so
 CI (and a human) can prove the detector fires before trusting a clean result on the real tree.
+
+THE SELF-TEST IS PER-RULE, AND PER-EXEMPTION (2026-08-01). It used to be "scan the canary, exit 1 if
+anything was found", which is no evidence about anything: an audit measured that blinding rule 1
+still exited 1 because rule 2 fired, and vice versa, and that breaking REDACTION_RE,
+SYNTHETIC_MARKERS or GENERATION_RE changed nothing either — the canary's three "NOT an offender"
+sections were decorative, since nothing asserted they stayed SILENT. This is one of only two things
+between a pasted API key and main, so "something fired" is not good enough.
+
+Now every canary section declares what it must produce and which ONE regex it exists to exercise
+(see the header of credential-redaction-guard.canary.adoc), and the self-test asserts each section
+independently, then MUTATES that regex and requires the section's outcome to flip. A rule that dies
+takes its own section down with it; an exemption that dies shows up as a false positive in its own
+section. The self-test also fails if any rule or any mutable pattern has no section naming it, so a
+new rule cannot ship without a canary for it.
 """
 from __future__ import annotations
 
@@ -114,6 +128,19 @@ SYNTHETIC_MARKERS = re.compile(
     r"abcdef0123456789|xxxx|<the-?key>|your-?key|test"
 )
 
+# The rules this guard can emit, and every regex a canary section is allowed to mutate. Both are
+# coverage requirements: --self-test fails if any entry here has no canary section naming it, which
+# is what stops a new rule (or a new exemption) from shipping with no evidence behind it.
+RULE_TRUNCATION = "truncation-as-redaction"
+RULE_LITERAL = "literal-credential"
+RULES = (RULE_TRUNCATION, RULE_LITERAL)
+
+MUTABLE_PATTERNS = (
+    "TRUNCATION_RE", "CREDENTIAL_CONTEXT_RE", "UNAUDITABLE_STREAM_RE",
+    "REDACTION_RE", "GENERATION_RE", "LITERAL_KEY_RE", "LITERAL_JWT_RE",
+    "SYNTHETIC_MARKERS",
+)
+
 
 def _adoc_blocks(lines):
     """Yield (start_index, end_index_exclusive) for each ---- delimited source block."""
@@ -184,7 +211,7 @@ def find_offenders(path: pathlib.Path):
                 continue                          # prose and comments describe the rule, not break it
             match = TRUNCATION_RE.search(line)
             if match:
-                finding = (start + offset + 1, "truncation-as-redaction",
+                finding = (start + offset + 1, RULE_TRUNCATION,
                            f"fixed-width truncation ({match.group(0).strip()}) guards output that "
                            f"can carry credential material — redact the thing instead")
                 if finding[:2] not in seen:
@@ -200,7 +227,7 @@ def find_offenders(path: pathlib.Path):
             continue
         for regex, what in ((LITERAL_KEY_RE, "API key"), (LITERAL_JWT_RE, "JWT")):
             if regex.search(line):
-                finding = (i + 1, "literal-credential",
+                finding = (i + 1, RULE_LITERAL,
                            f"a literal {what} appears here — use a $VARIABLE from a gitignored vars "
                            f"file, or a clearly synthetic stand-in")
                 if finding[:2] not in seen:
@@ -241,21 +268,166 @@ def _has_shebang(path: pathlib.Path) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------------------------
+# Self-test — per rule, per exemption. "Something fired" is not evidence about anything.
+# ---------------------------------------------------------------------------------------------
+
+CANARY_PATH = pathlib.Path(__file__).resolve().parent / "credential-redaction-guard.canary.adoc"
+
+# A mutation is how a section proves it is testing what it claims: blind the pattern it names (make
+# it match nothing) or flood it (make it match everything), and the section's outcome must FLIP.
+NEVER_MATCH = re.compile(r"(?!)")
+ALWAYS_MATCH = re.compile(r"")
+
+# // EXPECT: <rule[,rule]|none> | <blind|flood|-> <PATTERN_NAME> — prose
+EXPECT_RE = re.compile(
+    r"^//\s*EXPECT:\s*(?P<rules>[^|]+?)\s*\|\s*(?P<mode>blind|flood|-)\s*(?P<pattern>[A-Z_]*)"
+)
+
+
+def _canary_sections(lines):
+    """Parse the canary into `== ` sections, each carrying its own EXPECT contract."""
+    heads = [i for i, line in enumerate(lines) if line.startswith("== ")]
+    sections = []
+    for n, start in enumerate(heads):
+        end = heads[n + 1] if n + 1 < len(heads) else len(lines)
+        sec = {"title": lines[start][3:].strip(), "start": start, "end": end,
+               "rules": None, "mode": None, "pattern": None}
+        for line in lines[start:end]:
+            m = EXPECT_RE.match(line.strip())
+            if m:
+                raw = m.group("rules").strip()
+                sec["rules"] = set() if raw == "none" else {r.strip() for r in raw.split(",")}
+                sec["mode"] = m.group("mode")
+                sec["pattern"] = m.group("pattern") or None
+                break
+        sections.append(sec)
+    return heads[0] if heads else len(lines), sections
+
+
+def _findings_between(path, start, end):
+    """Findings whose line number falls inside [start, end) — 0-based indices, 1-based line nos."""
+    return [f for f in find_offenders(path) if start < f[0] <= end]
+
+
+def _mutate(name, mode):
+    """Swap a module-level pattern for a never/always-matching one; returns the original."""
+    original = globals()[name]
+    globals()[name] = NEVER_MATCH if mode == "blind" else ALWAYS_MATCH
+    return original
+
+
+def self_test():
+    """Assert every canary section INDIVIDUALLY, then prove each one's named pattern is load-bearing.
+
+    Exit 1 = every rule fired where it must, every exemption stayed silent where it must, and
+    mutating each named pattern flipped its section. Exit 2 = a rule or an exemption is blind, or
+    the fixture no longer states what it is testing.
+    """
+    if not CANARY_PATH.is_file():
+        print(f"❌ SELF-TEST FAILED: canary fixture {CANARY_PATH} is missing — there is nothing to "
+              "prove the detectors with.", file=sys.stderr)
+        return 2
+
+    lines = CANARY_PATH.read_text(encoding="utf-8").splitlines()
+    first_head, sections = _canary_sections(lines)
+    problems = []
+    if not sections:
+        print("❌ SELF-TEST FAILED: the canary has no `== ` sections — the harness cannot attribute "
+              "a finding to a rule.", file=sys.stderr)
+        return 2
+
+    # The preamble is prose ABOUT the rules; a finding there means the fixture drifted.
+    stray = _findings_between(CANARY_PATH, 0, first_head)
+    if stray:
+        problems.append(f"the canary preamble produced {len(stray)} finding(s) — it is documentation, "
+                        f"not a fixture: {stray[0][0]}:{stray[0][1]}")
+
+    covered_rules, covered_patterns = set(), set()
+    for sec in sections:
+        title = sec["title"]
+        if sec["rules"] is None:
+            problems.append(f"section {title!r} carries no `// EXPECT:` line — an unasserted section "
+                            f"is decorative, which is the defect this self-test exists to remove")
+            continue
+        if sec["pattern"] and sec["pattern"] not in MUTABLE_PATTERNS:
+            problems.append(f"section {title!r} names {sec['pattern']}, which is not one of this "
+                            f"guard's mutable patterns {MUTABLE_PATTERNS}")
+            continue
+
+        base = _findings_between(CANARY_PATH, sec["start"], sec["end"])
+        base_rules = {rule for _, rule, _ in base}
+        silent = not sec["rules"]
+
+        if silent:
+            if base:
+                problems.append(f"[false positive] section {title!r} must stay SILENT but produced "
+                                f"{len(base)} finding(s) — first at line {base[0][0]}: {base[0][2]}")
+        else:
+            missing = sec["rules"] - base_rules
+            if missing:
+                problems.append(f"[blind rule] section {title!r} produced no {sorted(missing)} "
+                                f"finding — that rule is broken, and the other rules firing elsewhere "
+                                f"would have masked it")
+            covered_rules |= sec["rules"]
+
+        if sec["mode"] and sec["mode"] != "-" and sec["pattern"]:
+            original = _mutate(sec["pattern"], sec["mode"])
+            try:
+                mutated = _findings_between(CANARY_PATH, sec["start"], sec["end"])
+            finally:
+                globals()[sec["pattern"]] = original
+            mutated_rules = {rule for _, rule, _ in mutated}
+            if silent:
+                if not mutated:
+                    problems.append(f"[exemption not load-bearing] section {title!r} stayed silent "
+                                    f"even with {sec['pattern']} {sec['mode']}ed — its silence is an "
+                                    f"accident, so it proves nothing about {sec['pattern']}")
+            elif sec["rules"] & mutated_rules:
+                problems.append(f"[detector not load-bearing] section {title!r} still reported "
+                                f"{sorted(sec['rules'] & mutated_rules)} with {sec['pattern']} "
+                                f"{sec['mode']}ed — the section is not testing {sec['pattern']}")
+            covered_patterns.add(sec["pattern"])
+
+        state = "silent" if silent else "+".join(sorted(sec["rules"]))
+        proof = f"{sec['mode']} {sec['pattern']}" if sec["pattern"] else "baseline only"
+        print(f"   [{state:>24}] {title}  ({proof})")
+
+    # Coverage: a rule or a pattern with no section naming it has no evidence behind it at all.
+    for missing in sorted(set(RULES) - covered_rules):
+        problems.append(f"[uncovered] rule {missing!r} is never asserted by any canary section")
+    for missing in sorted(set(MUTABLE_PATTERNS) - covered_patterns):
+        problems.append(f"[uncovered] pattern {missing} is never mutated by any canary section — "
+                        f"nothing would notice if it stopped working")
+
+    if problems:
+        for p in problems:
+            print(f"❌ SELF-TEST FAILED: {p}", file=sys.stderr)
+        return 2
+
+    print(f"✅ self-test ok — {len(sections)} canary section(s): every rule in {list(RULES)} fires in "
+          f"its own section, every exemption stays silent in its own section, and mutating each of "
+          f"the {len(MUTABLE_PATTERNS)} named patterns flips its section.")
+    # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
+    return 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="*", help=f"file(s)/dir(s) to scan (default: {' '.join(DEFAULT_ROOTS)})")
     ap.add_argument("--self-test", action="store_true",
-                    help="scan only the canary fixture; a clean (0) result here means the detector "
-                         "is broken, not that the fixture is fine")
+                    help="assert the canary section by section: each rule fires in its own section, "
+                         "each exemption stays silent in its own, and each named pattern is proven "
+                         "load-bearing by mutating it. MUST exit 1")
     args = ap.parse_args(argv)
 
     if args.self_test:
-        roots = [pathlib.Path(__file__).resolve().parent / "credential-redaction-guard.canary.adoc"]
-    else:
-        roots = args.paths or [r for r in DEFAULT_ROOTS if pathlib.Path(r).exists()]
+        return self_test()
 
-    files = collect_files(roots, skip_self=not args.self_test)
+    roots = args.paths or [r for r in DEFAULT_ROOTS if pathlib.Path(r).exists()]
+
+    files = collect_files(roots, skip_self=True)
     if not files:
         print(f"credential-redaction-guard: no scannable files under {[str(r) for r in roots]!r} — "
               "refusing to report clean over an empty scope.", file=sys.stderr)

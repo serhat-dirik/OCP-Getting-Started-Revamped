@@ -62,6 +62,8 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/lint/_extract-func.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
+# shellcheck source=tools/lint/_check-coverage.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_check-coverage.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -156,6 +158,7 @@ STUBS
 }
 
 check_batch_taint_gate() {  # <func_file> → 0 correct, 1 wrong, 2 harness broken
+  ran_check
   local func_file="$1" out rc=0
   if [[ ! -s "$func_file" ]]; then
     bad "could not extract ${FN_ASSERT}() — the guard cannot inspect what it claims to."
@@ -246,6 +249,7 @@ check_batch_taint_gate() {  # <func_file> → 0 correct, 1 wrong, 2 harness brok
 
 # ── driver ────────────────────────────────────────────────────────────────────
 run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
+  coverage_reset
   local root="$1" rc=0 sub=0 func_file
   if [[ ! -f "${root}/${INSTALL}" ]]; then
     bad "${root}/${INSTALL} not found"
@@ -257,6 +261,9 @@ run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
   check_batch_taint_gate "$func_file" || sub=$?
   rm -f "$func_file"
   if [[ "$sub" -eq 2 ]]; then rc=2; elif [[ "$sub" -ne 0 ]]; then rc=1; fi
+  # Nothing above proves run_check still CALLS what this guard declares — a deleted call site
+  # leaves every canary passing and the real run reporting clean (see _check-coverage.sh).
+  if [[ "$rc" -ne 2 ]]; then assert_all_checks_ran || rc=2; fi
   return "$rc"
 }
 

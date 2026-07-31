@@ -813,3 +813,31 @@ jobs:
           fi
           echo "self-test ok -- all three canaries are detected and the real tree stays clean (rc=1)."
           bash tools/lint/verify-summary-skip-guard.sh
+
+  check-coverage-wiring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every guard's driver still calls every detector it declares
+        # The house rule "the self-test must exit exactly 1" proves a detector FUNCTION works and
+        # says nothing about whether the DRIVER still calls it. Measured across six guards and
+        # fifteen call sites: deleting a check_* CALL from run_check() left BOTH the self-test at 1
+        # and the real run at 0, because self_test() invokes the detectors directly. Two of those
+        # guards gate a destructive teardown of clusters we do not own.
+        #
+        # Each detector now registers that it ran, and the driver asserts every DECLARED detector
+        # did. The expectation comes from `declare -F`, not from a hand-maintained count and not
+        # from the driver's own source -- the one place a deleted call site cannot also edit. This
+        # step runs the meta-scan too: a NEW guard that skips the wiring fails it. Two guards
+        # shipped with this exact hole hours after the audit found it, which is why it is a gate
+        # and not a convention.
+        run: |
+          rc=0
+          bash tools/lint/_check-coverage.sh --self-test || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::_check-coverage.sh --self-test must exit 1 (real tree clean, all five" \
+                 "canaries detected); got rc=$rc. The coverage assertion is unproven."
+            exit 1
+          fi
+          echo "self-test ok -- the wiring assertion is proven against five canaries."
+          bash tools/lint/_check-coverage.sh
