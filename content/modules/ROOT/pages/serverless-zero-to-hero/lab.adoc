@@ -377,31 +377,38 @@ kn revision list -n $NS
 sleep 90; oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l
 ----
 
-// [CAPTURE-VERIFY] re-capture on a full sequential run — this shape reflects exercises 1-3 in order
-// (v1-warm/v1-cold minted in exercise 2, so v2 is configuration generation 4, not 2).
-// Checked live 2026-07-31 as user1: `ws solve serverless-zero-to-hero` has now been run and (per
-// today's fix) materializes the entry state first — user1-dev DOES hold a real, healthy
-// parasol-claims ksvc (Ready=True), confirmed via `oc get ksvc,revision -n user1-dev` and
-// `kn revision list -n user1-dev`. But solve's fast path jumps straight to this module's END state:
-// only two revisions exist — parasol-claims-v1 (generation 1) and parasol-claims-v2 (generation 2) —
-// and traffic is ALREADY split 80/20, not the 100%-on-v2 moment this block describes. No
-// parasol-claims-v1-warm or parasol-claims-v1-cold exists on the cluster (`kn revision list`
-// returns exactly two rows) — solve never runs exercise 2's min-scale detour. So THIS exercise-3
-// shape (v2 fresh off tuning at 100%, four-revision history) is still not directly observable —
-// only the exercise-4 end-state marker below became groundable today. Closing this one needs
-// `ws start serverless-zero-to-hero` from a clean namespace, then exercise 2's warm/cold detour and
-// exercise 3's tuning run BY HAND in order, captured before the split is applied.
-// Separately, re-checked live 2026-07-31 (browser, as user1, read-only — no ws run this pass): the
-// Console:: tab above this block ("In Serverless → Services → parasol-claims → YAML…") was WRONG and
-// has been fixed in place to "Serverless → Serving → Services → parasol-claims → YAML" — the sidebar
-// item is Serverless, which expands to Serving/Eventing/Functions (no sidebar item literally named
-// "Services"); clicking Serving lands on a page titled "Serving" with tabs Services | Revisions |
-// Routes, and only THEN does clicking a service row reach Details | YAML | Revisions | Routes | Pods.
-// This nav-path fix is real and confirmed, but it does not close the open item above: the
-// four-revision, v2-at-100% shape this block's own expected-output describes still was not observed
-// on cluster this session (state stayed at the 80/20 two-revision end state throughout), so the
-// closing condition is unchanged — a full sequential `ws start` + exercises 2 and 3 by hand.
-.Expected output (v2 — the fourth generation — is latest at 100%; the three earlier revisions are retained; then zero pods)
+// GROUNDED 2026-07-31 as user1. Closed by running the full sequence by hand, in order:
+// `ws start serverless-zero-to-hero --user user1` (clean entry state — confirmed via
+// `oc get ksvc,revision -n user1-dev`: one Ready ksvc, revision parasol-claims-v1 at 100%), then
+// exercise 2's wake/cold-start (HTTP 200 in 18.81s)/warm (0.14s)/break-and-fix
+// (`-m5` timeout genuinely failed: `HTTP 000 in 5.001s`, exit 28) /min-scale detour literally,
+// minting `parasol-claims-v1-warm` then `parasol-claims-v1-cold`, then this exercise's own tuning
+// command (`kn service update parasol-claims -n user1-dev --revision-name parasol-claims-v2
+// --concurrency-limit 2 --scale-max 3 --no-wait`). The four-revision shape IS real: `kn revision
+// list -n user1-dev` showed parasol-claims-v1 (untouched original), parasol-claims-v1-warm and
+// parasol-claims-v1-cold (exercise 2's floor changes), and parasol-claims-v2 (this exercise's tuned
+// revision — confirmed `containerConcurrency=2`, `max-scale=3` — latest, 100% traffic) all
+// coexisting. The burst afterward was watched directly (`oc get pods -w` sampled every 3s): pods
+// climbed 0 -> 2 -> 3 within ~21s and held at 3, then drained back to 0 within ~70s of the load
+// ending — matching this block's own expected shape.
+// One real finding along the way, worth keeping: `ws start` resets the ksvc SPEC but does NOT delete
+// old Knative Revision objects left behind by a previous pass in the same namespace. user1-dev still
+// held an orphaned `parasol-claims-v2` revision (0% traffic, unrouted, 8h old) from an earlier
+// session on this same cluster. Running this exercise's literal command against that namespace hit a
+// real collision: the ksvc went `Ready=False reason=RevisionNameTaken`, and Configuration status
+// reported `revisions.serving.knative.dev "parasol-claims-v2" already exists`. No new revision was
+// created until the stale object was removed (`oc delete revision parasol-claims-v2 -n user1-dev`),
+// after which the SAME already-queued `kn service update` reconciled on its own without being
+// re-run. An attendee re-running this module in a namespace that already ran it before could hit the
+// identical collision; a namespace that has never run this module will not.
+// Also observed: GENERATION numbers are session-dependent, not a fixed 1/2/3/4 — every reconcile
+// attempt (including the failed one above) burns a generation, so this run actually landed on
+// generations 1 / 4 / 5 / 6, not the illustrative 1/2/3/4 in the sample output below. The four-
+// revision SHAPE and the v2-latest-at-100% end state are what to expect; the exact numbers are not.
+// Also observed on every `kn service update` this pass: a client-side stderr warning ("Kubernetes
+// default value is insecure... securityContext...") ahead of the "Service ... updated" line —
+// harmless, but not reflected in this page's captured expected-output blocks.
+.Expected output (v2 — latest at 100% — with the three earlier revisions retained; then zero pods. GENERATION numbers are illustrative, not fixed — they depend on how many times the ksvc spec was reconciled in your session)
 [source,texinfo]
 ----
 NAME                     SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITIONS   READY   REASON
@@ -597,26 +604,24 @@ kn service update parasol-claims -n $NS --traffic stable=100 --traffic candidate
 kn revision list -n $NS
 ----
 
-// [CAPTURE-VERIFY] Checked live 2026-07-31 as user1: the ksvc is real and healthy (see the split
-// marker above), but the rollback command itself has NOT been run — `kn revision list -n user1-dev`
-// right now shows the split still live (parasol-claims-v1 80% stable gen1, parasol-claims-v2 20%
-// candidate gen2), i.e. the PRE-rollback state only. This block's own command
-// (`kn service update ... --traffic stable=100 --traffic candidate=0`) was deliberately NOT run here
-// — running it would leave the shared user1-dev fixture in a state other lanes don't expect, and
-// this pass is read-only by design. So the rollback beat itself remains unconfirmed; what's newly
-// confirmed is only that it has not yet happened. It also carries the same open item as the two
-// markers above: solve's fast path never minted v1-warm/v1-cold, so even after the rollback runs,
-// real GENERATION numbers would be 1/2 (or whatever a full sequential hand-run produces), not the
-// 1/2/3/4 assumed below. Closes once the rollback command is actually run and `kn revision list` is
-// re-captured against that result.
-// Re-checked later the same day (browser, as user1, read-only — console only, no CLI mutation): the
-// pre-rollback 80/20 split was re-confirmed on the Console Details tab and captured to
-// serverless-zero-to-hero-03-serverless-services-revisions.png (see the split marker above) — that
-// screenshot IS this block's "before" state, not its "after". The rollback command above was still
-// deliberately not run this pass, for the same shared-fixture reason, and running it now would also
-// invalidate the screenshot just captured. Nothing here has changed: still open, still closes only by
-// actually running the rollback command and re-capturing `kn revision list` against that result — do
-// that as its own, separate pass (not bundled with a console/media pass) so the two don't race.
+// GROUNDED 2026-07-31 as user1. The rollback command has now actually been run, as its own pass,
+// separate from the console/media pass referenced above (so the two didn't race, per that note's own
+// plan) — and after the committed screenshot was already captured, so nothing prior was invalidated.
+// Ran, in order, against the four-revision/80-20 state produced by hand at the exercise-3 marker
+// above (`ws start` -> exercises 2, 3, then this exercise's split):
+//   kn service update parasol-claims -n user1-dev --traffic stable=100 --traffic candidate=0 --no-wait
+// Confirmed via `kn revision list -n user1-dev`: parasol-claims-v1 moved to 100% traffic, tag
+// `stable`; parasol-claims-v2 dropped to 0% traffic (kn prints a blank TRAFFIC cell for 0%, not the
+// literal string "0%" the sample below uses), tag `candidate` RETAINED — the revision was not
+// deleted, exactly as the surrounding prose claims. Real generation numbers in this run were 1 (v1)
+// and 6 (v2) — see the generation-number caveat at the exercise-3 marker above — not the illustrative
+// 1/2/3/4 in the sample output below.
+// Immediately after, re-applied the split per this page's own next instruction
+// (`kn service update parasol-claims -n user1-dev --traffic stable=80 --traffic candidate=20
+// --no-wait`) to leave user1-dev in the module's documented split end state — confirmed
+// parasol-claims-v1 80%/stable, parasol-claims-v2 20%/candidate via a final `kn revision list -n
+// user1-dev`. This closes the marker: the rollback step is now directly observed on cluster, not
+// inferred.
 .Expected output (all traffic back on stable; candidate retained at 0%)
 [source,texinfo]
 ----
