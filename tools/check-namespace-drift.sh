@@ -24,15 +24,21 @@
 #   • prose/comments (they say "the gitea namespace", never "namespace: gitea")
 #
 # Runnable standalone (CI lint gate) and by hand; no dependencies beyond git + grep.
+#
+# --self-test builds a scratch git repo under mktemp with the exact scan dirs, proves the check
+# stays clean on an ogsr-prefixed fixture, then proves it FIRES on a bare `namespace: gitea` —
+# the precise SEV1 defect shape (a bare pre-rename short-name where the ogsr- prefix, or a chart
+# attribute, belongs). Never reads or writes the real tree (git grep only sees tracked files, and
+# the fixture repo is its own throwaway git root). Exit 1 = both proofs held (fires on the bare
+# name, stays quiet on the prefixed one) — a *pass*, matching the house convention of the
+# tools/lint/*.py self-tests, where CI asserts the self-test step exits exactly 1. Exit 2 = the
+# guard is blind or the fixture harness itself is broken.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
 
 ok()  { echo "✅ $*"; }
 err() { echo "❌ $*" >&2; }
-
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { err "not a git work tree ($REPO_ROOT)"; exit 2; }
 
 # The six pre-ogsr-rename workshop namespace short-names. Their correct forms all carry ogsr-.
 names='student-gitops|gitea|showroom|parasol-tasks|parasol-images|observability-workshop'
@@ -54,27 +60,95 @@ patterns=(
 
 # The rename touched these trees; bootstrap/ added per the coordinator's scope.
 scan=(gitops platform-portfolio helm tools bootstrap)
-# This script necessarily embeds the bare names in its own patterns — exclude it from its own scan.
+# This script necessarily embeds the bare names in its own patterns — exclude it from its own
+# scan. A no-op pathspec against a fixture repo that never has this file.
 self='tools/check-namespace-drift.sh'
 
-found=0
-for pat in "${patterns[@]}"; do
-  status=0
-  git grep -nE "$pat" -- "${scan[@]}" ":!${self}" || status=$?
-  case "$status" in
-    0) found=1 ;;   # matches were printed above
-    1) ;;           # no matches — clean for this pattern
-    *) err "git grep failed (exit ${status}) on pattern: ${pat}"; exit 2 ;;
-  esac
-done
+# Runs the drift scan against a given git work tree root. Prints ✅/❌ lines and returns 0
+# (clean), 1 (a bare pre-rename namespace found), or 2 (not a git work tree / grep itself broke).
+run_check() {  # root →
+  local root="$1"
+  if ! ( cd "$root" && git rev-parse --is-inside-work-tree ) >/dev/null 2>&1; then
+    err "not a git work tree ($root)"
+    return 2
+  fi
 
-if [[ "$found" -ne 0 ]]; then
-  err "Bare pre-rename workshop namespace found in a namespace-valued position (see matches above)."
-  err "When one of these names identifies a NAMESPACE it must carry the ogsr- prefix (or be a chart value):"
-  err "  student-gitops→ogsr-student-gitops   gitea→ogsr-gitea   showroom→ogsr-showroom"
-  err "  parasol-tasks→ogsr-parasol-tasks   parasol-images→ogsr-parasol-images   observability-workshop→ogsr-observability-workshop"
-  err "Prefer the chart value: .Values.studentArgoNamespace / giteaNamespace / showroom.namespace / parasolImages.namespace."
-  err "(Instance/resource NAMEs, the pinned Route host, and the 'gitea' CRD kind are not namespace positions and never trip this.)"
-  exit 1
+  local found=0 pat status
+  for pat in "${patterns[@]}"; do
+    status=0
+    ( cd "$root" && git grep -nE "$pat" -- "${scan[@]}" ":!${self}" ) || status=$?
+    case "$status" in
+      0) found=1 ;;   # matches were printed above
+      1) ;;           # no matches — clean for this pattern
+      *) err "git grep failed (exit ${status}) on pattern: ${pat}"; return 2 ;;
+    esac
+  done
+
+  if [[ "$found" -ne 0 ]]; then
+    err "Bare pre-rename workshop namespace found in a namespace-valued position (see matches above)."
+    err "When one of these names identifies a NAMESPACE it must carry the ogsr- prefix (or be a chart value):"
+    err "  student-gitops→ogsr-student-gitops   gitea→ogsr-gitea   showroom→ogsr-showroom"
+    err "  parasol-tasks→ogsr-parasol-tasks   parasol-images→ogsr-parasol-images   observability-workshop→ogsr-observability-workshop"
+    err "Prefer the chart value: .Values.studentArgoNamespace / giteaNamespace / showroom.namespace / parasolImages.namespace."
+    err "(Instance/resource NAMEs, the pinned Route host, and the 'gitea' CRD kind are not namespace positions and never trip this.)"
+    return 1
+  fi
+  ok "namespace-drift guard clean — no bare pre-rename workshop namespaces in namespace-valued positions (gitops/ platform-portfolio/ helm/ tools/ bootstrap/)."
+  return 0
+}
+
+self_test() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+
+  ( cd "$tmp" && git init -q && git config user.email self-test@example.com && git config user.name self-test )
+  mkdir -p "$tmp/gitops/workshop-config/templates" "$tmp/platform-portfolio" "$tmp/helm" "$tmp/tools" "$tmp/bootstrap"
+
+  # GOOD fixture: the correctly-prefixed form — must stay silent (proves the guard isn't just
+  # flagging the word "gitea" anywhere).
+  cat > "$tmp/gitops/workshop-config/templates/canary.yaml" <<'YAML'
+apiVersion: v1
+kind: RoleBinding
+metadata:
+  name: canary
+  namespace: ogsr-gitea
+YAML
+  ( cd "$tmp" && git add -A )
+
+  local good_rc=0
+  run_check "$tmp" >/dev/null 2>&1 || good_rc=$?
+
+  # BAD fixture: a bare pre-rename short-name in a namespace-valued position — the exact SEV1
+  # defect shape this guard exists for.
+  cat > "$tmp/gitops/workshop-config/templates/canary.yaml" <<'YAML'
+apiVersion: v1
+kind: RoleBinding
+metadata:
+  name: canary
+  namespace: gitea
+YAML
+  ( cd "$tmp" && git add -A )
+
+  local bad_rc=0
+  run_check "$tmp" >/dev/null 2>&1 || bad_rc=$?
+
+  if [[ "$good_rc" -ne 0 ]]; then
+    err "SELF-TEST FAILED: the ogsr-prefixed fixture was wrongly flagged (rc=$good_rc)."
+    return 2
+  fi
+  if [[ "$bad_rc" -ne 1 ]]; then
+    err "SELF-TEST FAILED: the bare 'namespace: gitea' canary was NOT detected (rc=$bad_rc) — the guard is blind."
+    return 2
+  fi
+  ok "self-test ok — ogsr-prefixed fixture stays clean (rc=0) and the bare-namespace canary is caught (rc=1)."
+  return 1
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  self_test
+  exit $?
 fi
-ok "namespace-drift guard clean — no bare pre-rename workshop namespaces in namespace-valued positions (gitops/ platform-portfolio/ helm/ tools/ bootstrap/)."
+
+run_check "$REPO_ROOT"
+exit $?
