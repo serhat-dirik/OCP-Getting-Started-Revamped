@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
-# ogsr-uninstall.sh — non-destructive uninstall for the OCP-Getting-Started workshop.
+# ogsr-uninstall.sh — non-destructive, full-removal uninstall for the OCP-Getting-Started workshop.
+#
+# STATUS (2026-08-01): this is NOT the normal way to end a delivery or hand a cluster over between
+# cohorts. Two other scripts own that job now — reach for one of them first:
+#   bootstrap/ogsr-reset.sh       — keeps every user; deletes all lab/attendee content and returns
+#                                    the cluster to its immediately-post-install state. Run this
+#                                    between cohorts on a cluster you are keeping.
+#   bootstrap/ogsr-wipe-users.sh  — removes user2..userN entirely (namespaces, Keycloak identities,
+#                                    Gitea repos), keeping user1 as a working sample login. Run this
+#                                    when handing the cluster to someone else but leaving the
+#                                    platform installed.
+#
+# THIS script is for what those two deliberately do not do: remove the workshop from the cluster
+# ENTIRELY — the platform, Gitea (with every attendee repository), Keycloak (with every login), and
+# every cockpit — so the cluster goes back to its owner exactly as it was before install.sh touched
+# it. That is the "I borrowed someone else's cluster and must return it untouched" case: a
+# customer's cluster, a colleague's, a shared pool that is not yours to keep running. If the cluster
+# is yours and you are just turning it over for the next cohort, use reset or wipe-users above
+# instead — full removal throws away the platform stand-up time for no reason in that case.
+#
+# Because reset/wipe-users now cover the routine turnover, this script runs far less often than it
+# used to. That has not made it less correct — the guarantees below, and the guards enforcing them,
+# are unchanged — but it does mean this path is proven by its guards rather than by weekly use.
+# Read the guarantees below before trusting a run against a cluster you cannot easily fix by hand.
 #
 # Removes EXACTLY what this workshop installed onto a cluster and reverses every shared/default-object
 # mutation, while NEVER touching operators, namespaces, or config the org already had. It is the
@@ -38,7 +61,7 @@
 # the workshop-users OAuth IdP entry is removed while every other IdP is preserved; node labels/taint
 # are reversed; the GatewayClass / GitOps operator are removed only if we created them.
 #
-# Usage:
+# Usage (rare case — see STATUS above; ogsr-reset.sh / ogsr-wipe-users.sh have their own --help):
 #   ./ogsr-uninstall.sh --dry-run     # print the WIPE/PRESERVE plan and intended actions; change nothing
 #   ./ogsr-uninstall.sh               # interactive confirm, then uninstall
 #   ./ogsr-uninstall.sh --yes         # no prompt (CI / scripted)
@@ -106,9 +129,9 @@ warn() { echo "⚠️  $*" >&2; }   # CALLED by del_appprojects but never define
 info() { echo "▶ $*"; }         # install.sh's own header already fixed once (undefined command under
 die()  { err "$*"; exit 1; }    # `set -u` normally aborts; sub()'s `"$@" || rc=$?` masked it here)
 
-# 66 = the last line of the header block above (the TODO(verify-on-cluster) note). Re-count it whenever
+# 89 = the last line of the header block above (the TODO(verify-on-cluster) note). Re-count it whenever
 # that block grows, or --help silently truncates mid-sentence.
-usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,66p'; exit 1; }
+usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,89p'; exit 1; }
 
 # ── step resilience ───────────────────────────────────────────────────────────
 # On 2026-07-25 this script printed "[3/8]" and stopped. No error, no summary. Steps 4-8 — OAuth IdP
@@ -2102,6 +2125,7 @@ print_plan() {
   roots="$(root_applications | grep -c . || true)"; roots="${roots:-0}"
 
   echo "ogsr-uninstall — WIPE the workshop, PRESERVE everything the org owns"
+  echo "(full removal — not the routine path; for cohort turnover use ogsr-reset.sh or ogsr-wipe-users.sh instead)"
   echo
   echo "WILL WIPE:"
   echo "  • ${apps} of our Argo Applications (pp-*, workshop-config, entry-*), CASCADE-deleted:"

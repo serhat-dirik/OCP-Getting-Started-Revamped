@@ -28,9 +28,37 @@ character. Concretely:
 - We never alter cluster-wide default behaviour. (This is why the OpenShift console is opened in a new
   tab rather than embedded in the cockpit — embedding would need a global IngressController header
   rewrite, and that changes behaviour for every workload on the cluster.)
-- Uninstall reverses what we created and leaves the rest, then a read-only checker proves it.
+- Full removal reverses what we created and leaves the rest, then a read-only checker proves it — see
+  the lifecycle note below for why that is no longer the routine end-of-delivery step.
 
-The litmus test for any change: **would anything of the customer's differ after uninstall?**
+The litmus test for any change: **would anything of the customer's differ after a full removal?**
+
+**The cluster lifecycle.** Install once. What you run next depends on what you are doing, not on
+"tearing down":
+
+- **Between cohorts, same cluster, same admin:** `bootstrap/ogsr-reset.sh` — keeps every attendee
+  account, deletes all lab/attendee content, and returns the cluster to its immediately-post-install
+  state. This is the normal way to end a delivery.
+- **Handing the cluster to someone else, platform staying installed:** `bootstrap/ogsr-wipe-users.sh` —
+  removes `user2`…`userN` entirely (namespaces, Keycloak identities, Gitea repos) and leaves **`user1`**
+  behind as a working sample — including their login — so whoever inherits the cluster can see the
+  workshop running before touching anything.
+- **Giving the cluster itself back, untouched:** `bootstrap/ogsr-uninstall.sh` — full removal, covered in
+  §7. This is now the exception: reach for it only when the *cluster*, not just the attendee content, has
+  to go back to its owner (a borrowed customer or colleague's cluster, a shared pool you do not keep).
+
+Both `ogsr-reset.sh` and `ogsr-wipe-users.sh` deliberately leave the platform, **Gitea with every
+attendee repository**, **Keycloak with every login**, and every cockpit in place — that is the point,
+not an oversight, and it is worth saying plainly to whoever inherits the cluster rather than letting
+them discover it. One known cosmetic side effect of `ogsr-wipe-users.sh`: the **Developer Hub catalog is
+kept** while the namespaces its entries were scaffolded from are removed, so the portal will list
+components that no longer exist for the removed users. That trade was made on purpose — the alternative
+was ripping user1's working catalog entries out along with everyone else's — so a stale-looking RHDH
+catalog row after a wipe-users run is expected, not a bug worth filing.
+
+// TODO(verify-on-cluster): confirm how `bootstrap/ogsr-reset.sh` relates to the existing `ws
+cohort-reset` (§5) — whether reset supersedes it, wraps it, or the two remain separate tools with
+different scopes — once `ogsr-reset.sh` lands, and update §5/§7 to say so precisely.
 
 **The attendee-isolation promise — and its limit.** Attendees are walled off from the organisation's own
 namespaces: the `workshop-entries` AppProject enumerates every destination an attendee's Application may
@@ -104,7 +132,8 @@ install will ADOPT what is already there or CREATE its own. Example:
 it is the moment to catch a component you did not expect them to have.
 
 A `⚠ prior install detected` row means the cluster already ran the installer. Re-running is idempotent;
-if you want a clean slate, uninstall first (§7).
+if you want a clean slate for a new cohort, run `bootstrap/ogsr-reset.sh` first (§7) rather than a full
+uninstall — reinstalling the platform costs far more time than resetting it.
 
 ### 2.3 Where to get a cluster
 
@@ -575,7 +604,57 @@ tiers and **readiness** only for tiers on always-present platform images.
 
 ---
 
-## 7. Uninstalling
+## 7. Ending a delivery — reset, wipe-users, and uninstall
+
+Three tools cover this now, at three different scopes. Most deliveries only ever need the first two —
+read the lifecycle note in §1 before jumping to uninstall.
+
+### 7.1 Between cohorts, same cluster: `ogsr-reset.sh` (the normal path)
+
+```bash
+./bootstrap/ogsr-reset.sh
+```
+
+Keeps every attendee account and the platform exactly as installed; deletes all lab/attendee content
+and returns the cluster to its immediately-post-install state. Run this when the same cluster is about
+to host the next cohort.
+
+// TODO(verify-on-cluster): confirm the script's real flags (dry-run / confirm-skip equivalents) and
+exact output once it lands, and update the invocation above and its relationship to `ws cohort-reset`
+(§5) — whether one wraps the other or they stay separate tools with different scopes.
+
+### 7.2 Handing the cluster to someone else, platform staying installed: `ogsr-wipe-users.sh`
+
+```bash
+./bootstrap/ogsr-wipe-users.sh
+```
+
+Removes `user2`…`userN` entirely — namespaces, Keycloak identities, Gitea repositories — and keeps
+**`user1`** behind as a working sample, login included, so whoever takes the cluster next can see the
+workshop running before they touch anything.
+
+// TODO(verify-on-cluster): confirm the script's real flags and exact output once it lands.
+
+**What both of the above deliberately leave behind.** Neither script touches the platform, **Gitea
+with every attendee repository**, **Keycloak with every login**, or any cockpit — that is the design,
+not an oversight, and it is worth saying plainly to whoever inherits the cluster rather than letting
+them find it by accident.
+
+**One known cosmetic consequence of `ogsr-wipe-users.sh`:** the Developer Hub catalog is **kept**, so
+once the removed users' namespaces are gone the portal still lists the software components they
+scaffolded there. The owner decided to keep the catalog rather than prune it alongside the namespaces —
+the alternative was ripping out user1's still-live entries along with everyone else's. Expect a
+stale-looking RHDH catalog row after a wipe-users run; it is expected, not a bug worth filing.
+
+### 7.3 Giving the cluster itself back, untouched: `ogsr-uninstall.sh` (rare)
+
+This is **no longer the normal end-of-delivery step** — §7.1 and §7.2 cover that. Reach for full
+uninstall only when the *cluster*, not just the attendee content, has to go back to its owner: a
+borrowed customer or colleague's cluster, a shared pool you were never going to keep running. It still
+carries every non-invasive guarantee it always did — adopted operators are never touched, and adopted-
+resource protection is verified before any cascade runs — but because §7.1/§7.2 now cover routine
+turnover, this path is exercised far less often. Trust it because of its guards, not because it is
+anyone's weekly command.
 
 Three commands, in order. Never skip the dry run on a customer cluster.
 
@@ -597,19 +676,19 @@ minutes; that is normal and it is not stuck. Every section prints its elapsed ti
 section `[8/9]` announces how many objects it is about to classify, so you can always see it moving. On
 a rate-limited cluster, lower the fan-out with `OGSR_CHECK_JOBS=2`.
 
-### What is preserved
+**What is preserved.** Anything the adoption forecast marked ADOPT: operators the cluster already had,
+their namespaces, Subscriptions, CSVs and OperatorGroups, plus pre-existing cluster settings the install
+merely read. Uninstall de-labels the namespaces it adopted rather than deleting them.
 
-Anything the adoption forecast marked ADOPT: operators the cluster already had, their namespaces,
-Subscriptions, CSVs and OperatorGroups, plus pre-existing cluster settings the install merely read.
-Uninstall de-labels the namespaces it adopted rather than deleting them.
-
-### Reset vs uninstall
+### Which one do I run?
 
 | | Scope | Use when |
 |---|---|---|
 | `ws reset <module> --user U` | One attendee, one module | Someone wants to redo an exercise |
-| `ws cohort-reset --yes` | All attendee state; platform stays | New cohort on the same cluster |
-| `ogsr-uninstall.sh` | Everything we created | Giving the cluster back |
+| `ws cohort-reset --yes` | All attendee state; platform stays | Mid-delivery attendee-state clear from inside `ws` |
+| `bootstrap/ogsr-reset.sh` | All lab/attendee content; platform + every account stay | **End of a delivery, same cluster hosts the next cohort — the normal path** |
+| `bootstrap/ogsr-wipe-users.sh` | `user2`…`userN` removed entirely; `user1` kept as a sample | Handing the cluster to someone else, platform staying installed |
+| `bootstrap/ogsr-uninstall.sh` | Everything the workshop created, cluster-wide | Giving the *cluster* back to its owner — rare |
 
 ---
 

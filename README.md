@@ -121,22 +121,50 @@ tools/ws/ws status                     # fleet health at a glance
 tools/ws/ws git-refresh                # publish content updates to a live session
 ```
 
-## Reset & Uninstall
+## Ending a Delivery
 
-**a) Reset the workshop** — wipe all attendee work so a *new group of users* can start fresh; the platform and content stay installed:
+Install once; what you run next depends on what you're doing — see **[INSTALL.md](INSTALL.md)** §7
+for the full picture. In order of how often you'll actually reach for them:
+
+**a) One attendee, one module** — reset a single exercise so someone can redo it; nothing else changes:
 
 ```bash
-tools/ws/ws cohort-reset
+tools/ws/ws reset <module> --user userN
 ```
 
-**b) Delete the workshop** — remove it from the cluster entirely. Always preview first; the uninstall is non-invasive by design (adopted operators and anything the cluster had before the install are preserved):
+**b) Between cohorts, same cluster** — the normal end-of-delivery step. Wipes all attendee/lab content
+and returns the cluster to its immediately-post-install state; the platform, every attendee account,
+Gitea (with its repos), Keycloak (with its logins) and every cockpit stay exactly as installed:
+
+```bash
+tools/ws/ws cohort-reset          # attendee-state clear from inside ws
+./bootstrap/ogsr-reset.sh         # cluster-level equivalent — the normal path between cohorts
+```
+
+**c) Handing the cluster to someone else, platform staying installed** — removes `user2`…`userN`
+entirely (namespaces, Keycloak identities, Gitea repos) and leaves **`user1`** behind as a working
+sample, login included, so whoever inherits the cluster sees it running before touching anything:
+
+```bash
+./bootstrap/ogsr-wipe-users.sh
+```
+
+One known, deliberate side effect: the Developer Hub catalog is **kept**, so it will list components
+scaffolded by the removed users after their namespaces are gone — the owner chose to keep the catalog
+rather than prune user1's live entries along with everyone else's. Expected, not a bug.
+
+**d) Giving the cluster itself back, untouched** — this is now the **rare** case, not the routine one:
+reach for it only when the *cluster*, not just the attendee content, must be returned to its owner (a
+borrowed customer or colleague's cluster). It is still fully non-invasive by design (adopted operators
+and anything the cluster had before the install are preserved) — always preview first:
 
 ```bash
 ./bootstrap/ogsr-uninstall.sh --dry-run   # prints the full removal plan; changes nothing
-./bootstrap/ogsr-uninstall.sh             # removes the workshop
+./bootstrap/ogsr-uninstall.sh             # removes the workshop entirely
 ```
 
-**c) Confirm the cluster is clean** — run this *after* the uninstall to check for anything left behind or damaged:
+**e) Confirm the cluster is clean** — run this *after* a full uninstall to check for anything left
+behind or damaged:
 
 ```bash
 ./bootstrap/ogsr-check-clean.sh
