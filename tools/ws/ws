@@ -742,9 +742,15 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
   # HistoryLimit, postCommit, nodeSelector:null) that Argo diffs, and selfHeal is off (m25, ws-meta
   # expectOutOfSync). Health + a Succeeded op still gate readiness, so a genuine failure is still caught;
   # `ws verify` is the correctness gate regardless.
-  local app="$1" timeout="${2:-300}" require_sync="${3:-true}" t=0 health sync phase empty_ok=0 sync_ok
+  # TIMEOUT IS WALL-CLOCK, not a loop counter. It used to add 5 per iteration and assume an
+  # iteration costs only its sleep — but each pass makes THREE `oc get` calls, and against a slow or
+  # remote API server those dominate. Measured on a real cluster: a declared 1500s budget ran 2980s,
+  # very nearly double, so the number in the message was not the number the attendee experienced.
+  local app="$1" timeout="${2:-300}" require_sync="${3:-true}" health sync phase empty_ok=0 sync_ok
+  local deadline fail_ok=0
+  deadline=$(( $(date +%s) + timeout ))
   info "waiting for ${app} to sync (up to ${timeout}s)…"
-  while (( t < timeout )); do
+  while (( $(date +%s) < deadline )); do
     health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
     sync="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
     # Hooks keep the sync OPERATION Running after the app already reads Synced/Healthy — and a
@@ -771,7 +777,27 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
     else
       empty_ok=0
     fi
-    sleep 5; t=$((t+5))
+    # BAIL ON A DEFINITIVE FAILURE instead of waiting out the whole budget for something that will
+    # never become Healthy. wait_materialized() three hundred lines below already treats Failed and
+    # Error as terminal; this function did not, so `ws prep` on a cluster whose RHACS scanner was
+    # still loading sat for ~50 minutes and then failed anyway. The attendee-facing prereq says the
+    # command is safe to run any time, and 50 minutes is most of a workshop session.
+    #
+    # Required to HOLD for three consecutive reads, matching how this same loop already treats an
+    # empty phase: a PostSync hook between retries can show a transient Failed, and bailing on the
+    # first sighting would trade a hang for a false alarm.
+    if [[ "$phase" == "Failed" || "$phase" == "Error" ]]; then
+      fail_ok=$((fail_ok+1))
+      if (( fail_ok >= 3 )); then
+        err "entry state sync ${phase} for ${app} — this will not become Healthy by waiting."
+        echo "   inspect: oc describe application ${app} -n ${ARGO_NS}"
+        echo "   a common cause is a dependency still starting (e.g. the RHACS scanner) — retry once it is up."
+        return 1
+      fi
+    else
+      fail_ok=0
+    fi
+    sleep 5
   done
   err "entry state not ready after ${timeout}s (health=${health:-?} sync=${sync:-?} op=${phase:-?})"
   echo "   inspect: oc describe application ${app} -n ${ARGO_NS}"
