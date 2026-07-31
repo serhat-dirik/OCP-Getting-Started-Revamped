@@ -552,6 +552,47 @@ assert_single_operatorgroup() {
   return 1
 }
 
+# Post-install check for the exact failure diagnosed 2026-07-30: the batch-pool taint (if applied above)
+# starving an unrelated pod's scheduling. A pod's FailedScheduling event lists EVERY reason it can't
+# land ("1 Insufficient memory, 1 node(s) had untolerated taint(s), 3 Insufficient cpu") in one message,
+# so this reads "blocked by the taint" as: the pod is Pending, its latest FailedScheduling event cites an
+# untolerated taint, AND the pod itself carries no toleration for our taint key — a pod that DOES
+# tolerate it is meant to be eligible for the batch node, so a resource crunch there is a capacity
+# question, not a defect of this taint. Must report what it inspected even when the scope is empty
+# (zero Pending pods is a real, reportable outcome, not a silent pass).
+assert_no_batch_taint_pending() {
+  if [[ "${BATCH_TAINTED:-false}" != "true" ]]; then
+    info "batch-taint Pending-pod check: skipped — no taint was applied this run (pool was below the ${MIN_BATCH_POOL_FOR_TAINT}-worker floor, or shaping found no node)"
+    return 0
+  fi
+  local total=0 flagged=0 ns pod evt
+  while read -r ns pod; do
+    [[ -n "$pod" ]] || continue
+    total=$((total + 1))
+    if oc get pod "$pod" -n "$ns" -o jsonpath='{.spec.tolerations[*].key}' 2>/dev/null | grep -q "$POOL_LABEL_KEY"; then
+      continue   # this pod opted in to the batch node; not this check's concern
+    fi
+    evt="$(oc get events -n "$ns" --field-selector "involvedObject.name=${pod},reason=FailedScheduling" \
+            -o jsonpath='{.items[-1:].message}' 2>/dev/null || true)"
+    if grep -qi 'untolerated taint' <<<"$evt"; then
+      flagged=$((flagged + 1))
+      err "  ${ns}/${pod} is Pending and its scheduling failure cites an untolerated taint (pod has no toleration for ${POOL_LABEL_KEY}): ${evt}"
+    fi
+  done < <(oc get pods -A --field-selector=status.phase=Pending \
+             -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+  if [[ "$total" -eq 0 ]]; then
+    ok "batch-taint Pending-pod check: inspected 0 Pending pods cluster-wide — nothing to flag"
+    return 0
+  fi
+  if [[ "$flagged" -eq 0 ]]; then
+    ok "batch-taint Pending-pod check: inspected ${total} Pending pod(s) cluster-wide, none blocked by the ${POOL_LABEL_KEY} taint on ${BATCH_NODE}"
+    return 0
+  fi
+  err "batch-taint Pending-pod check: ${flagged}/${total} Pending pod(s) inspected are blocked (at least in part) by the ${POOL_LABEL_KEY} taint this install added to ${BATCH_NODE}"
+  err "  this is the exact failure mode diagnosed 2026-07-30 (RHACS central-db Pending behind this same taint on a 2-worker cluster, Central crashlooping, ACS scans failing) — free capacity on the other worker(s), or reduce load until the ${MIN_BATCH_POOL_FOR_TAINT}-worker floor would skip the taint on a re-install"
+  return 1
+}
+
 info "[0/6] capturing uninstall-state (prior cluster state for a non-destructive uninstall)"
 oc apply -f - >/dev/null <<EOF
 apiVersion: v1
@@ -622,15 +663,50 @@ fi
 # objects can't be cleanly GitOps-reconciled and this is workshop substrate, not an operator install.
 info "shaping workshop node substrate (M16 batch pool + M16/M21 synthetic zones)"
 POOL_LABEL="workshop.redhat.com/pool=batch"
+POOL_LABEL_KEY="${POOL_LABEL%%=*}"
 ZONE_KEY="workshop.redhat.com/zone"
 # Pick a real worker (worker role, NOT also control-plane) as the batch pool node; deterministic (first
 # by name). Fall back to any node if a cluster has no pure-worker split (so the beat always has a target).
-BATCH_NODE="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
-[[ -n "$BATCH_NODE" ]] || BATCH_NODE="$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
+# This same pool is also the capacity floor below: it is exactly the set of nodes that would lose one
+# member to the taint, so its size is what decides whether tainting is affordable.
+BATCH_POOL_RAW="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
+[[ -n "$(echo "$BATCH_POOL_RAW" | xargs || true)" ]] || BATCH_POOL_RAW="$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
+read -ra BATCH_POOL_NODES <<<"$BATCH_POOL_RAW"
+BATCH_POOL_COUNT=${#BATCH_POOL_NODES[@]}
+# Guard the expansion on the count: under `set -u`, "${arr[@]}" on an EMPTY array is an "unbound
+# variable" fatal on bash < 4.4 — and macOS still ships 3.2, which is what `env bash` resolves to on a
+# stock admin laptop (measured 2026-07-31). Without this guard an unreachable cluster (oc fails, both
+# node queries return empty) kills the installer with a cryptic `BATCH_POOL_NODES[@]: unbound variable`
+# instead of reaching the `err "no nodes found..."` branch below that exists to explain exactly that.
+BATCH_NODE=""
+if [[ "$BATCH_POOL_COUNT" -gt 0 ]]; then
+  BATCH_NODE="$(printf '%s\n' "${BATCH_POOL_NODES[@]}" | sort | head -1)"
+fi
+# Taint floor. Diagnosed live on a 2-worker cluster (2026-07-30): tainting one of two workers left the
+# survivor at 99% memory requests, RHACS central-db (8Gi + 4 CPU) Pending for 3h+, Central crashlooping
+# on a DB that never came up, and the trusted-supply-chain module's scan gate dead — with the install
+# reporting every Argo app Healthy throughout. 3 is the smallest pool that can give up a worker and still
+# leave TWO general-purpose schedulable workers standing (2 workers, taint one → 1 left, the catastrophic
+# case above; 3 workers, taint one → 2 left, real spare capacity remains). Below the floor we still LABEL
+# the node — a label alone never removes scheduling capacity, so the nodeSelector half of the lesson is
+# free — but we withhold the taint.
+MIN_BATCH_POOL_FOR_TAINT=3
+BATCH_TAINTED=false
 if [[ -n "$BATCH_NODE" ]]; then
   oc label node "$BATCH_NODE" "$POOL_LABEL" --overwrite >/dev/null
-  oc adm taint nodes "$BATCH_NODE" "${POOL_LABEL}:NoSchedule" --overwrite >/dev/null
-  ok "batch pool: worker ${BATCH_NODE} labeled+tainted ${POOL_LABEL}:NoSchedule"
+  if [[ "$BATCH_POOL_COUNT" -ge "$MIN_BATCH_POOL_FOR_TAINT" ]]; then
+    oc adm taint nodes "$BATCH_NODE" "${POOL_LABEL}:NoSchedule" --overwrite >/dev/null
+    BATCH_TAINTED=true
+    ok "batch pool: worker ${BATCH_NODE} labeled+tainted ${POOL_LABEL}:NoSchedule (${BATCH_POOL_COUNT} workers in pool, floor is ${MIN_BATCH_POOL_FOR_TAINT})"
+  else
+    # Idempotent re-run safety: if an EARLIER install tainted this node while the pool was still at/above
+    # the floor, and the cluster has since shrunk below it, clear the stale taint instead of leaving a
+    # silent landmine — the whole point of the floor is that a too-small pool must never carry this taint.
+    oc adm taint nodes "$BATCH_NODE" "${POOL_LABEL}:NoSchedule-" >/dev/null 2>&1 || true
+    warn "batch pool taint SKIPPED: only ${BATCH_POOL_COUNT} worker(s) available (need ${MIN_BATCH_POOL_FOR_TAINT}+ to spare one without starving the rest of the cluster — see 2026-07-30 incident: 2 workers, 1 tainted, RHACS central-db Pending 3h+, trusted-supply-chain's scan gate dead)"
+    warn "  worker ${BATCH_NODE} is labeled ${POOL_LABEL} but left fully schedulable — no taint was applied"
+    warn "  consequence for M16: the nodeSelector half of the batch-pool beat still works (pods requesting the label land on ${BATCH_NODE}); the TOLERATION half degrades to label-only — there is no tainted node left on this cluster to demonstrate 'an untolerated pod is refused, a tolerating pod is admitted' against"
+  fi
 else
   err "no nodes found to shape a batch pool — M16's dedicated-pool beat will have no target"
 fi
@@ -638,7 +714,9 @@ fi
 read -ra SHAPE_NODES <<<"$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
 ZONES=(a b c)
 zi=0
-for n in "${SHAPE_NODES[@]}"; do
+# Same empty-array/`set -u` guard as BATCH_POOL_NODES above — on bash 3.2 an unreachable cluster would
+# die here on "SHAPE_NODES[@]: unbound variable" rather than reporting "0 node(s)".
+for n in ${SHAPE_NODES[@]+"${SHAPE_NODES[@]}"}; do
   oc label node "$n" "${ZONE_KEY}=${ZONES[zi % 3]}" --overwrite >/dev/null
   zi=$((zi + 1))
 done
@@ -646,6 +724,7 @@ ok "synthetic ${ZONE_KEY} labels applied across ${#SHAPE_NODES[@]} node(s) (a/b/
 # Record the node mutations for the uninstall report. (Uninstall reverses by label selector, so this
 # is documentation — it removes pool/zone labels + the batch taint from ANY node still carrying them.)
 record_once nodes_batch "${BATCH_NODE:-}"
+record_once nodes_batch_tainted "${BATCH_TAINTED}"
 record_once nodes_zoned "${SHAPE_NODES[*]:-}"
 
 # ── 1. portfolio stacks ───────────────────────────────────────────────────────
@@ -1187,6 +1266,17 @@ fi
 echo
 if ! assert_single_operatorgroup; then
   err "install did NOT complete cleanly — fix the OperatorGroup collision above before running the workshop"
+  exit 1
+fi
+
+# ── hard gate: batch-pool taint did not starve unrelated scheduling ───────────
+# Same spirit as the OperatorGroup gate above: the batch-pool taint is workshop substrate we chose to
+# add, so if it is quietly starving something (RHACS central-db was Pending 3h+ behind it on a
+# 2-worker cluster, 2026-07-30, with every Argo app reporting Healthy the whole time) that is OUR defect
+# to catch before handing the cluster to attendees, not something to discover three modules later.
+echo
+if ! assert_no_batch_taint_pending; then
+  err "install did NOT complete cleanly — the batch-pool taint above is starving a pod's scheduling; fix capacity or re-run once the ${MIN_BATCH_POOL_FOR_TAINT}-worker floor would skip the taint"
   exit 1
 fi
 
