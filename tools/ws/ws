@@ -1858,6 +1858,20 @@ cmd_rebuild_images() {
   return 0
 }
 
+doctor_verify_rc_outcome() {  # rc → pass|skip|fail on stdout — classifies a VERIFY_STRICT=1 verify
+  # script's exit code for `ws doctor`'s entry-verify row (tools/verify/_lib.sh's verify_summary
+  # contract: 0 clean, 1 a check genuinely failed, 2 usage error, 3 skip-only under VERIFY_STRICT).
+  # rc 3 MUST read as skip, never fail — the whole point of opting doctor into strict mode is to see
+  # "this run did not fully verify" as information, not to manufacture a doctor failure out of it.
+  # A standalone function (not inlined in cmd_doctor) so tools/lint/verify-summary-skip-guard.sh can
+  # extract and pin this mapping the same way it pins _lib.sh's own verify_summary.
+  case "$1" in
+    0) echo pass ;;
+    3) echo skip ;;
+    *) echo fail ;;
+  esac
+}
+
 cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT-WIDE row to one attendee;
   # empty = the whole cohort (unchanged default). The platform rows (gitops operator, gitea, mirror,
   # workshop layer, build images, IdP, cohort size) are NOT scoped: when one attendee is broken, the
@@ -1933,6 +1947,51 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     if [[ -n "${expect_ok// }" ]]; then
       printf "  %-28s" ""
       ok "(Degraded by design):${expect_ok}"
+    fi
+  fi
+  printf "  %-28s" "entry verify (strict)"
+  # Real correctness gate, not just Argo health — a Healthy Application can still carry an empty/
+  # missing value a chart never guaranteed (935b3d7's maas-config lesson). VERIFY_STRICT=1 opts INTO
+  # the machine-reader behaviour _lib.sh added for exactly this: rc 3 means "this run did not fully
+  # verify" (some checks were SKIPPED, not failed) and must NOT count as a doctor failure — an operator
+  # wants to know a check was inconclusive, not be told the world is broken over it. rc 1 (a check
+  # genuinely failed, or the rare rc 2 usage error) still fails this row. `ws prep`/`ws smoke`/`ws
+  # verify` are untouched — their default stays exit 0 (owner decision: only doctor and CI opt in).
+  #
+  # Scoped-only: an entry verify script runs several oc calls of its own (unlike the one cheap list
+  # read the Argo row above reuses), so a cohort-wide sweep multiplies that by every materialized entry
+  # app at once. `ws diag` is the existing precedent for a per-attendee-only deep check; this row
+  # follows it rather than ballooning doctor's ~22s cohort-wide baseline. Flagged as friction in the
+  # handoff — cohort-wide strict verify may be worth its own opt-in flag; not decided here.
+  if [[ -z "$scope_user" ]]; then
+    skip "not checked cohort-wide (expensive — narrow with: ws doctor --user U)"
+  elif [[ "$csv" != *Succeeded* ]]; then
+    skip "n/a (gitops operator not installed)"
+  else
+    local ev_total=0 ev_pass=0 ev_skip=0 ev_fail=0 ev_fail_names="" ev_skip_names=""
+    local ev_name ev_user ev_module ev_script ev_rc
+    while IFS=$'\t' read -r ev_name ev_user ev_module; do
+      [[ -n "$ev_name" && "$ev_name" == entry-* && -n "$ev_module" ]] || continue
+      [[ "$ev_user" == "$scope_user" ]] || continue
+      ev_script="${VERIFY_DIR}/${ev_module}.sh"
+      [[ -x "$ev_script" ]] || continue
+      ev_total=$((ev_total+1))
+      ev_rc=0
+      VERIFY_STRICT=1 "$ev_script" --user "$scope_user" --entry-only >/dev/null 2>&1 || ev_rc=$?
+      case "$(doctor_verify_rc_outcome "$ev_rc")" in
+        pass) ev_pass=$((ev_pass+1));;
+        skip) ev_skip=$((ev_skip+1)); ev_skip_names="${ev_skip_names} ${ev_module}";;
+        *)    ev_fail=$((ev_fail+1)); ev_fail_names="${ev_fail_names} ${ev_module}(rc=${ev_rc})";;
+      esac
+    done < <(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${scope_user}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\n"}{end}' 2>/dev/null)
+    if [[ "$ev_total" -eq 0 ]]; then
+      ok "n/a (no entry states materialized for ${scope_user})"
+    elif [[ "$ev_fail" -gt 0 ]]; then
+      err "${ev_fail} of ${ev_total} FAILED:${ev_fail_names} — detail: ws verify <module> --user ${scope_user} --entry-only"; fail=1
+    elif [[ "$ev_skip" -gt 0 ]]; then
+      skip "${ev_pass} fully passed · ${ev_skip} did NOT fully verify (not a failure):${ev_skip_names} — detail: ws verify <module> --user ${scope_user} --entry-only"
+    else
+      ok "${ev_pass}/${ev_total} entry verify(ies) fully passed"
     fi
   fi
   printf "  %-28s" "gitea"

@@ -841,3 +841,30 @@ jobs:
           fi
           echo "self-test ok -- the wiring assertion is proven against five canaries."
           bash tools/lint/_check-coverage.sh
+
+  verify-strict-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict mode must exit 3 on an ungraded run and 0 on a clean one
+        # The attendee summary gained a third outcome (pass/fail/SKIP) because 11 of 26 verify
+        # scripts could report "all N checks passed" having graded nothing. VERIFY_STRICT=1 gives
+        # automation a distinct exit 3 for "did not fully verify", while the attendee-facing DEFAULT
+        # stays 0 -- deliberately, because ws prep reads that rc as a boolean and turns non-zero into
+        # the WIPE prompt. A healthy environment must never offer to destroy itself over an
+        # inconclusive check.
+        #
+        # This asserts the CONTRACT, not a lab grade: grading a real lab needs a cluster CI does not
+        # have, and a job that pretended otherwise would be the false-green this all exists to stop.
+        run: |
+          set -euo pipefail
+          run_case() { ( set -euo pipefail; source tools/verify/_lib.sh; eval "$1"; verify_summary ); }
+          rc=0; run_case 'check "passes" true; warn "cannot evaluate"' || rc=$?
+          [ "$rc" -eq 0 ] || { echo "::error::default, pass+skip: expected 0, got $rc"; exit 1; }
+          rc=0; VERIFY_STRICT=1 run_case 'check "passes" true; warn "cannot evaluate"' || rc=$?
+          [ "$rc" -eq 3 ] || { echo "::error::strict, pass+skip: expected 3, got $rc"; exit 1; }
+          rc=0; VERIFY_STRICT=1 run_case 'check "passes" true' || rc=$?
+          [ "$rc" -eq 0 ] || { echo "::error::strict, clean: expected 0, got $rc"; exit 1; }
+          rc=0; VERIFY_STRICT=1 run_case 'check "fails" false; warn "cannot evaluate"' || rc=$?
+          [ "$rc" -eq 1 ] || { echo "::error::strict, real failure: expected 1, got $rc"; exit 1; }
+          echo "contract holds: default 0 - strict 3 on skip - strict 0 clean - strict 1 on failure."

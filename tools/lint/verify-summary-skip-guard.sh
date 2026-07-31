@@ -32,14 +32,19 @@
 #       prepared?", and a non-zero rc tells the attendee their healthy environment is broken and
 #       offers to WIPE it; ws smoke reads the same rc as a G1 ❌. Automation that must fail closed
 #       opts in with VERIFY_STRICT=1 → rc 3, distinct from 1 (a check FAILED) and 2 (usage error).
+#   [4] WS DOCTOR'S RC MAPPING. `ws doctor` (tools/ws/ws) is the first opted-in caller: its "entry
+#       verify (strict)" row runs a module's verify script under VERIFY_STRICT=1 and classifies the rc
+#       through doctor_verify_rc_outcome(). Executed the real function, extracted like [1]-[3] extract
+#       the real _lib.sh: rc 3 must map to skip (never fail) — a doctor that turned VERIFY_STRICT's
+#       information back into a false failure would defeat the reason it opted in.
 #
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + grep + sed + awk.
 #
-# --self-test plants three canaries, each a real regression shape: the pre-fix counter-blind warn()
-# for [1], the pre-fix two-outcome verify_summary() for [2], and a strict-by-default flip for [3].
-# Exit 1 = every canary was caught AND the real tree is clean under the same detectors; that is a
-# PASS, matching the house convention where CI asserts the self-test step exits exactly 1.
-# Exit 2 = a detector is blind, or the harness itself is broken.
+# --self-test plants four canaries, each a real regression shape: the pre-fix counter-blind warn()
+# for [1], the pre-fix two-outcome verify_summary() for [2], a strict-by-default flip for [3], and
+# ws doctor's classifier miscounting rc 3 as fail for [4]. Exit 1 = every canary was caught AND the
+# real tree is clean under the same detectors; that is a PASS, matching the house convention where CI
+# asserts the self-test step exits exactly 1. Exit 2 = a detector is blind, or the harness is broken.
 #
 # Exit codes:
 #   0  contract holds
@@ -58,6 +63,10 @@ bad()  { echo "❌ $*" >&2; }
 note() { echo "   $*"; }
 
 LIB="tools/verify/_lib.sh"
+# `ws doctor` (2026-08-01) gained its own VERIFY_STRICT=1 call site — an "entry verify (strict)" row
+# — and the rc it gets back is classified by a standalone doctor_verify_rc_outcome() precisely so this
+# guard can pin it the same way it pins _lib.sh's own verify_summary, instead of a second guard file.
+WS_CLI="tools/ws/ws"
 
 # ── harness ───────────────────────────────────────────────────────────────────
 # The library is EXECUTED, not pattern-matched: the only thing that matters is what an attendee sees
@@ -198,6 +207,32 @@ check_exit_contract() {  # warn_file summary_file → 0 correct, 1 wrong
   return "$rc"
 }
 
+# ── [4] ws doctor's strict-mode rc → outcome mapping ─────────────────────────
+# `ws doctor` opts into VERIFY_STRICT=1 on its "entry verify (strict)" row and reads the rc back
+# through doctor_verify_rc_outcome() (tools/ws/ws). The whole point of that opt-in collapses if the
+# mapping quietly turns rc 3 (skip-only) back into a doctor FAILURE — this executes the REAL function,
+# extracted the same way [1]-[3] execute the real _lib.sh, so a regression there is caught here rather
+# than only in a human reading doctor's output.
+check_doctor_rc_mapping() {  # doctor_fn_file → 0 correct, 1 wrong
+  ran_check
+  local fn_file="$1" rc=0 pair code expect actual
+  for pair in "0=pass" "3=skip" "1=fail" "2=fail"; do
+    code="${pair%%=*}"; expect="${pair##*=}"
+    actual="$(bash -c "$(cat "$fn_file"); doctor_verify_rc_outcome ${code}" 2>/dev/null)" || actual=""
+    if [[ "$actual" != "$expect" ]]; then
+      bad "[4] doctor_verify_rc_outcome ${code} => '${actual:-<empty>}', want '${expect}'."
+      if [[ "$code" == "3" ]]; then
+        note "    rc 3 is VERIFY_STRICT's skip-only signal — mapping it to fail would make ws doctor"
+        note "    manufacture a failure out of information an operator asked for (owner decision: doctor"
+        note "    and CI opt in, ws prep/ws smoke stay untouched)."
+      fi
+      rc=1
+    fi
+  done
+  [[ "$rc" -eq 0 ]] && ok "[4] ws doctor's rc classifier: 0→pass, 3→skip (never fail), 1/2→fail"
+  return "$rc"
+}
+
 # ── driver ────────────────────────────────────────────────────────────────────
 extract_pair() {  # lib_file warn_out summary_out → 0 ok, 2 extraction failed
   local lib="$1"
@@ -210,12 +245,23 @@ extract_pair() {  # lib_file warn_out summary_out → 0 ok, 2 extraction failed
   return 0
 }
 
-run_check() {  # warn_file summary_file → 0 clean, 1 broken
+extract_doctor_fn() {  # ws_cli_file fn_out → 0 ok, 2 extraction failed
+  local ws_cli="$1"
+  extract_func "$ws_cli" doctor_verify_rc_outcome > "$2"
+  if [[ ! -s "$2" ]]; then
+    bad "could not extract doctor_verify_rc_outcome() from ${ws_cli} — the guard cannot inspect what it claims to."
+    return 2
+  fi
+  return 0
+}
+
+run_check() {  # warn_file summary_file doctor_fn_file → 0 clean, 1 broken
   coverage_reset
-  local wf="$1" sf="$2" rc=0
+  local wf="$1" sf="$2" dff="$3" rc=0
   check_skip_counted  "$wf" "$sf" || rc=1
   check_banner_honesty "$wf" "$sf" || rc=1
   check_exit_contract  "$wf" "$sf" || rc=1
+  check_doctor_rc_mapping "$dff" || rc=1
   # Nothing above proves run_check still CALLS what this guard declares — a deleted call site
   # leaves every canary passing and the real run reporting clean (see _check-coverage.sh).
   if [[ "$rc" -ne 2 ]]; then assert_all_checks_ran || rc=2; fi
@@ -223,21 +269,22 @@ run_check() {  # warn_file summary_file → 0 clean, 1 broken
 }
 
 # ── self-test ─────────────────────────────────────────────────────────────────
-# Three canaries, each a real regression shape. All must be CAUGHT, and the real tree must be clean
+# Four canaries, each a real regression shape. All must be CAUGHT, and the real tree must be clean
 # under the same detectors — anything else means the gate is decorative.
 self_test() {
-  local tmp wf sf real_rc got
+  local tmp wf sf dff real_rc got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
-  wf="$tmp/warn.sh"; sf="$tmp/summary.sh"
+  wf="$tmp/warn.sh"; sf="$tmp/summary.sh"; dff="$tmp/doctor-rc.sh"
   extract_pair "${REPO_ROOT}/${LIB}" "$wf" "$sf" || return 2
+  extract_doctor_fn "${REPO_ROOT}/${WS_CLI}" "$dff" || return 2
 
   # Proof 0: the real tree passes. A detector that fires on everything proves nothing either.
   real_rc=0
-  run_check "$wf" "$sf" >/dev/null 2>&1 || real_rc=$?
+  run_check "$wf" "$sf" "$dff" >/dev/null 2>&1 || real_rc=$?
   if [[ "$real_rc" -ne 0 ]]; then
-    bad "SELF-TEST FAILED: the real ${LIB} does not satisfy the contract (rc=${real_rc}). Run without --self-test."
+    bad "SELF-TEST FAILED: the real ${LIB}/${WS_CLI} do not satisfy the contract (rc=${real_rc}). Run without --self-test."
     return 2
   fi
 
@@ -286,7 +333,20 @@ CANARY
     return 2
   fi
 
-  ok "self-test ok — real ${LIB} clean (rc=0); counter-blind warn, two-outcome banner and strict-by-default canaries all caught."
+  # Canary D — ws doctor's classifier miscounting rc 3 (skip-only) as fail instead of skip. Byte-for-
+  # byte the real doctor_verify_rc_outcome() with its rc-3 arm changed from `skip` to `fail`.
+  sed 's/3) echo skip ;;/3) echo fail ;;/' "$dff" > "$tmp/doctor-rc-miscounts-skip.sh"
+  if ! grep -q '3) echo fail ;;' "$tmp/doctor-rc-miscounts-skip.sh"; then
+    bad "SELF-TEST FAILED: could not build the doctor-rc-miscounts-skip canary — the rc-3 arm it mutates was not found."
+    return 2
+  fi
+  got=0; check_doctor_rc_mapping "$tmp/doctor-rc-miscounts-skip.sh" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: the doctor-rc-miscounts-skip canary was NOT detected (rc=${got}) — detector [4] is blind."
+    return 2
+  fi
+
+  ok "self-test ok — real ${LIB}/${WS_CLI} clean (rc=0); counter-blind warn, two-outcome banner, strict-by-default and doctor-rc-miscounts-skip canaries all caught."
   return 1
 }
 
@@ -299,9 +359,16 @@ if [[ ! -f "${REPO_ROOT}/${LIB}" ]]; then
   bad "${REPO_ROOT}/${LIB} not found"
   exit 2
 fi
-WARN_FILE="$(mktemp)"; SUMMARY_FILE="$(mktemp)"
-extract_pair "${REPO_ROOT}/${LIB}" "$WARN_FILE" "$SUMMARY_FILE" || { rm -f "$WARN_FILE" "$SUMMARY_FILE"; exit 2; }
+if [[ ! -f "${REPO_ROOT}/${WS_CLI}" ]]; then
+  bad "${REPO_ROOT}/${WS_CLI} not found"
+  exit 2
+fi
+WARN_FILE="$(mktemp)"; SUMMARY_FILE="$(mktemp)"; DOCTOR_FN_FILE="$(mktemp)"
+extract_pair "${REPO_ROOT}/${LIB}" "$WARN_FILE" "$SUMMARY_FILE" \
+  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE"; exit 2; }
+extract_doctor_fn "${REPO_ROOT}/${WS_CLI}" "$DOCTOR_FN_FILE" \
+  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE"; exit 2; }
 RC=0
-run_check "$WARN_FILE" "$SUMMARY_FILE" || RC=$?
-rm -f "$WARN_FILE" "$SUMMARY_FILE"
+run_check "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" || RC=$?
+rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE"
 exit "$RC"
