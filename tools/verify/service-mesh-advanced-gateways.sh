@@ -105,8 +105,8 @@ else
   # --- end state: the lab's OUTCOMES — enrolled + traffic-managed + secured ------------------------------
   # Assert OUTCOMES (app meshed; a weighted route, a circuit-breaker DR, an authz policy, a v2 exist),
   # never the exact CR wording, so any correct solution stays green (rule 14).
-  check "parasol-claims is MESHED (istio-proxy sidecar)"        pod_meshed parasol-claims      || hint "enroll + restart: oc label ns ${NS} istio-injection=enabled --overwrite && oc rollout restart deploy -n ${NS}"
-  check "parasol-fraud is MESHED (istio-proxy sidecar)"         pod_meshed parasol-fraud       || hint "the fraud tier must be in the mesh — enroll ${NS} and restart its Deployments"
+  check "parasol-claims is MESHED (istio-proxy sidecar)"        pod_meshed parasol-claims      || hint "enroll per WORKLOAD, not the namespace — namespace-level istio-injection is cluster-admin-only (you'll get Forbidden, see exercise 1): oc patch deploy parasol-claims -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"sidecar.istio.io/inject\":\"true\"}}}}}' && oc rollout status deploy/parasol-claims -n ${NS}"
+  check "parasol-fraud is MESHED (istio-proxy sidecar)"         pod_meshed parasol-fraud       || hint "same per-workload fix as claims (not the namespace): oc patch deploy parasol-fraud -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"sidecar.istio.io/inject\":\"true\"}}}}}' && oc rollout status deploy/parasol-fraud -n ${NS}"
   check "fraud v2 Deployment present (weighted-shift target)"   deploy_present parasol-fraud-v2 || hint "deploy a distinguishable parasol-fraud v2 (version:v2 label) for the 90/10 shift"
   check "DestinationRule parasol-fraud present (subsets + circuit breaker)" dr_present parasol-fraud \
     || hint "create a DestinationRule on host parasol-fraud with v1/v2 subsets + outlierDetection (see the lab)"
