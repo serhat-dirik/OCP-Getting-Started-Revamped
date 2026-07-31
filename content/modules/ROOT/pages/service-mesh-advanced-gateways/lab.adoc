@@ -99,14 +99,64 @@ oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 40); do curl -s -o 
 [TIME 4m]
 Say:: "Parasol wants to ship fraud-scoring v2, but carefully — 10% of traffic first. No load balancer, no second rollout dance. One resource."
 Show:: `oc apply` of a `DestinationRule` + weighted `VirtualService`; then the split read straight from the mesh's telemetry — roughly 90/10.
-Do:: Deploy v2 and shift 90/10, then read the split (v2 Deployment + DestinationRule + VirtualService are the exercise-4 manifests):
+Do:: Deploy v2 and shift 90/10, then read the split (v2 Deployment + DestinationRule + VirtualService lifted from exercise 4):
 +
 [source,sh,role=execute]
 ----
-# apply the exercise-4 manifests: parasol-fraud-v2 Deployment, then the v1/v2 DestinationRule + 90/10 VirtualService
+oc apply -n $NS -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-fraud-v2
+  labels: {app: parasol-fraud, version: v2}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: parasol-fraud, version: v2}}
+  template:
+    metadata:
+      labels: {app: parasol-fraud, version: v2, sidecar.istio.io/inject: "true"}
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-fraud:1.0
+          ports: [{name: http, containerPort: 8080}]
+          env: [{name: FRAUD_VERSION, value: v2}]
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 500m, memory: 512Mi}}
+          readinessProbe: {httpGet: {path: /q/health/ready, port: 8080}, initialDelaySeconds: 5, periodSeconds: 10}
+EOF
 oc rollout status deploy/parasol-fraud-v2 -n $NS --timeout=120s
+
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: parasol-fraud
+spec:
+  host: parasol-fraud
+  subsets:
+    - {name: v1, labels: {version: v1}}
+    - {name: v2, labels: {version: v2}}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: parasol-fraud
+spec:
+  hosts: [parasol-fraud]
+  http:
+    - match: [{headers: {x-parasol-test: {exact: "true"}}}]
+      route: [{destination: {host: parasol-fraud, subset: v2}}]
+    - route:
+        - {destination: {host: parasol-fraud, subset: v1}, weight: 90}
+        - {destination: {host: parasol-fraud, subset: v2}, weight: 10}
+EOF
+
 CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
 oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 100); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
+  | grep reporter.source | grep response_code.200 \
+  | sed -nE 's/.*destination_version\.(v[12])\..*: ([0-9]+)/\1 \2/p' \
+  | awk '{s[$1]+=$2} END{printf "v1=%d v2=%d\n", s["v1"], s["v2"]}'
 ----
 +
 "I sent a hundred requests from the claims pod. The mesh's own metrics show about ninety went to v1 and ten to v2 — the exact split I asked for, and I can pin *test users* to v2 with a header while everyone else stays on v1."
@@ -115,13 +165,62 @@ oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 100); do cur
 [TIME 3m]
 Say:: "Now the nightmare: the fraud service gets slow. Watch what a hanging dependency does — and what the mesh gives me to survive it."
 Show:: A 5-second fault delay injected on the fraud route; the claims→fraud call now taking 5 seconds; the resilience policy (timeout, retry, circuit breaker) that's already in place.
-Do:: Inject a fault and show the caller feel it (add a 100%/5s `fault.delay` to the fraud VirtualService — the exercise-5 manifest):
+Do:: Inject a fault and show the caller feel it (DestinationRule + VirtualService with a 100%/5s `fault.delay`, lifted from exercise 5, then a clean re-apply):
 +
 [source,sh,role=execute]
 ----
-# re-apply the fraud VirtualService with a 5s fault.delay (exercise 5), then send one call:
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: parasol-fraud
+spec:
+  host: parasol-fraud
+  trafficPolicy:
+    connectionPool:
+      tcp: {maxConnections: 10}
+      http: {http1MaxPendingRequests: 10, maxRequestsPerConnection: 1}
+    outlierDetection: {consecutive5xxErrors: 3, interval: 10s, baseEjectionTime: 30s, maxEjectionPercent: 50}
+  subsets:
+    - {name: v1, labels: {version: v1}}
+    - {name: v2, labels: {version: v2}}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: parasol-fraud
+spec:
+  hosts: [parasol-fraud]
+  http:
+    - match: [{headers: {x-parasol-test: {exact: "true"}}}]
+      route: [{destination: {host: parasol-fraud, subset: v2}}]
+    - fault:
+        delay: {percentage: {value: 100}, fixedDelay: 5s}
+      route:
+        - {destination: {host: parasol-fraud, subset: v1}, weight: 90}
+        - {destination: {host: parasol-fraud, subset: v2}, weight: 10}
+      timeout: 3s
+      retries: {attempts: 2, perTryTimeout: 1s, retryOn: "5xx,reset,connect-failure"}
+EOF
+sleep 3
 oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "claims felt: %{time_total}s\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
-# then re-apply the clean (fault-free) route
+
+# restore the clean (fault-free) route — the resilience policy (timeout/retry/circuit breaker) stays
+oc apply -n $NS -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: parasol-fraud}
+spec:
+  hosts: [parasol-fraud]
+  http:
+    - match: [{headers: {x-parasol-test: {exact: "true"}}}]
+      route: [{destination: {host: parasol-fraud, subset: v2}}]
+    - route:
+        - {destination: {host: parasol-fraud, subset: v1}, weight: 90}
+        - {destination: {host: parasol-fraud, subset: v2}, weight: 10}
+      timeout: 3s
+      retries: {attempts: 2, perTryTimeout: 1s, retryOn: "5xx,reset,connect-failure"}
+EOF
 ----
 +
 "Five seconds — the caller *feels* every bit of that hang. This is why the route carries a timeout, a retry, and a circuit breaker: so a slow dependency fails *fast* instead of taking the caller's threads down with it. And note the honest bit — Istio injects the fault *ahead* of the router, so it tests how the *caller* copes; the timeout fires on a genuinely slow upstream."
@@ -130,11 +229,29 @@ oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m8 -o /dev/null -w "claims 
 [TIME 4m]
 Say:: "Last and most important: who is even allowed to call fraud? Right now, anyone in the mesh. Watch me lock it to *one* identity — the claims workload — and watch the web tier get refused."
 Show:: An `AuthorizationPolicy` applied; then `claims → fraud` succeeding (`200`) while `web → fraud` and the un-meshed client are refused with a `403`.
-Do:: Lock the call path to identity (apply the exercise-6 `fraud-allow-claims` AuthorizationPolicy):
+Do:: Lock the call path to identity (apply the exercise-6 `fraud-allow-claims` AuthorizationPolicy, ALLOWing only `sa/parasol-claims`, then test two callers):
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc apply -n $NS -f - <<EOF
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: fraud-allow-claims
+spec:
+  selector:
+    matchLabels: {app: parasol-fraud}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/{user}-mesh/sa/parasol-claims"]
+EOF
+----
 +
 [source,sh,role=execute]
 ----
-# apply the AuthorizationPolicy that ALLOWs only sa/parasol-claims (exercise 6), then test two callers:
+sleep 5
 WEB=$(oc get pod -n $NS -l app=parasol-web -o jsonpath='{.items[0].metadata.name}')
 oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
