@@ -720,3 +720,34 @@ jobs:
           fi
           echo "self-test ok -- the one-line fix is proven against the old walker's behaviour."
           bash tools/lint/_extract-func.sh
+
+  workshop-layer-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The workshop-layer FAILURE branch actually fails, and actually hides the success banner
+        # a6407a5 added this gate because install.sh once printed the failure line and then
+        # "✅ workshop bootstrap complete", exit 0, on a run whose entire workshop layer never
+        # materialized. Anything scripting the installer reads the exit code, and the exit code said
+        # fine. The SUCCESS path was proven live; the FAILURE path had only ever been READ, because
+        # proving it live meant breaking a cluster others were testing on.
+        #
+        # The guard drives the real extracted functions under a stubbed `oc`: the poll loop
+        # (wait_for_workshop_layer_healthy, both never-healthy and eventual-success) and the verdict
+        # (emit_bootstrap_verdict), asserting the exit code AND the banner text as two SEPARATE
+        # checks — a gate that exits 1 while still printing "complete" is exactly the false-green
+        # this exists to prevent. Its second canary reproduces the original a6407a5 defect
+        # byte-for-byte.
+        run: |
+          rc=0
+          bash tools/lint/workshop-layer-gate-guard.sh --self-test || rc=$?
+          # Exactly 1 = the real tree satisfies the contract AND both canaries were detected. 0 = a
+          # detector is blind; 2 = the real tree, the extraction or the harness is broken. Either way
+          # detection is unproven, so fail rather than trust a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::workshop-layer-gate-guard self-test must exit 1 (real tree clean, both" \
+                 "canaries detected); got rc=$rc. The guard's detection is unproven."
+            exit 1
+          fi
+          echo "self-test ok -- both canaries are detected and the real tree stays clean (rc=1)."
+          bash tools/lint/workshop-layer-gate-guard.sh
