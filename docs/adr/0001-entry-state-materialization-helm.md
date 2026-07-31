@@ -53,3 +53,39 @@ Two field-proven semantics were added to the engine after the M04/M05 smoke test
 Consequence for authors: a module whose chart re-materializes an existing named workload OR shares a namespace
 with another module MUST list the other owners in `conflictsWith` (both directions); the G3 smoke deliberately
 probes cross-module coexistence to catch omissions.
+
+## Amendment — 2026-07-31 (item 3's "repo pin" never existed; the real control is an admission-layer guard)
+
+Item 3 above says the unscoped `create` grant is "guarded by the workshop-entries AppProject repo pin." There
+was never such a pin to rely on. Verified directly against both facts it depends on:
+
+- `workshop-entries` sourceRepos was, and is, `["*"]` — not a pin:
+  `oc get appproject workshop-entries -n openshift-gitops -o jsonpath='{.spec.sourceRepos}'` → `["*"]`.
+- k8s RBAC cannot scope a `create` verb by resource name in the first place — there is no name yet at
+  admission time — so "create accepted un-scoped, guarded by X" was never a coherent claim about *any* X
+  expressed as an AppProject field; the grant was simply open.
+
+This is the same false premise ADR-0002 carried and has now corrected in its own Amendment 2 — that ADR
+is the canonical account of the escalation, the measurement that proved it live (an attendee `Application`
+naming `project: default` was accepted and reconciled Synced/Healthy by the cluster-admin platform
+controller), and the fix. Summary as it bears on this ADR's engine: the escalation is now closed at
+admission, not by any AppProject repo pin.
+
+- `gitops/workshop-config/templates/attendee-entry-app-guard.yaml` (commit `79c694c`) adds the
+  ValidatingAdmissionPolicy `ogsr-attendee-entry-app-guard` + binding, with four validations bounding an
+  attendee-authored Application's name, its AppProject, and its source path. Verified live on cluster2
+  today, not merely committed:
+  `oc get validatingadmissionpolicy,validatingadmissionpolicybinding | grep entry` →
+  `validatingadmissionpolicy.../ogsr-attendee-entry-app-guard` and
+  `validatingadmissionpolicybinding.../ogsr-attendee-entry-app-guard`, both present, age 161m at check time.
+- `workshop-entries` destinations were narrowed from `"*"` to an enumerated list (commit `7b526ac`),
+  including the empty-namespace entry entry-state Applications need. Verified live on cluster2 today:
+  `oc get appproject workshop-entries -n openshift-gitops -o jsonpath='{range .spec.destinations[*]}[{.namespace}] {end}'`
+  → `[] [user1-*] [user2-*] ... [user8-*] [ogsr-gitea] [ogsr-system] [openshift-lightspeed] [sonarqube] [stackrox]`
+  — no `"*"`.
+- `sourceRepos` itself is unchanged (`["*"]`, confirmed above) — the admission policy and the destination
+  enumeration are the controls; the source-repo field never was and still is not one.
+
+One residual is accepted, not closed: all eight attendees share this one AppProject, so an attendee can
+still name a *peer's* namespace pattern. Cooperative-classroom risk, not a customer-data risk — see
+ADR-0002 Amendment 2 and `INSTALL.md` for the full threat model.
