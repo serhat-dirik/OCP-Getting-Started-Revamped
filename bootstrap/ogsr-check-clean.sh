@@ -1537,10 +1537,29 @@ section_crds() {
     note "the ${STATE_NS} namespace. Without it this section cannot be checked."
     return 0
   fi
-  local exact op crd n hit=0 mode counts todo=""
+  local exact op crd n hit=0 mode counts todo="" phase
   exact="$(state_get crds_created | tr ',' ' ')"
+  # WHEN the list was taken decides whether it may be called exact. ogsr-uninstall.sh used to capture
+  # crds_created from each CSV in its CSV-cleanup step, which runs AFTER the cascade has already taken
+  # most of those CSVs — measured on a live teardown 2026-07-31, 15 of 19 CSVs were gone by then, and
+  # the list came back with 17 CRDs while 165 were still registered. This section reported those 17 as
+  # the complete answer, in its highest-confidence mode, and the run ended "clean". A truncated list
+  # presented as complete is worse than no list: it converts an unknown into a false all-clear.
+  #
+  # crds_created_capture is the proof, written by the same run that wrote the list. Anything else — an
+  # older dump, a hand-edited state file, a capture that could not run — is NOT exact, and this section
+  # says so out loud and falls back to the heuristic rather than quietly narrowing its own scope.
+  phase="$(state_get crds_created_capture)"
+  if [ -n "$exact" ] && [ "$phase" != "pre-cascade" ]; then
+    found decide "CRDs cannot be verified: the recorded crds_created list carries no proof it was captured before the cascade (crds_created_capture=${phase:-<absent>})"
+    note "a capture taken after the cascade sees only the CSVs the cascade had not yet deleted, so the"
+    note "list is a fragment of unknown size — it is NOT the set of CRDs this workshop left behind."
+    note "Re-run the teardown with a current ogsr-uninstall.sh, or treat the heuristic list below as the"
+    note "starting point and confirm each CRD by hand before deleting anything."
+    exact=""
+  fi
   if [ -n "$exact" ]; then
-    mode="exact (captured from each operator's CSV during uninstall)"
+    mode="exact (captured from each operator's CSV BEFORE the cascade, proven by crds_created_capture)"
     for crd in $exact; do
       # Here-string, same SIGPIPE-under-pipefail trap as ns_has_foreign_csv: `grep -q` exits on its
       # first hit, printf is killed mid-write, pipefail turns the match into a 141, and the `|| continue`

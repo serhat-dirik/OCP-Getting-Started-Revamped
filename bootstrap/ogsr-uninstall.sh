@@ -19,6 +19,15 @@
 #      prunes WITHIN one Application (reverse sync-wave); it has no ordering BETWEEN app-of-apps roots,
 #      so deleting all roots at once races. See § cascade ordering for the two dependencies that cross
 #      that boundary and what each one cost.
+#   3b. Guarantee 2 only covers operands ARGO created. An operator also creates operands of its OWN
+#      accord (the Pipelines operator creates TektonConfig; the Subscription manifest says so in its
+#      own comment), and those carry no Argo tracking-id, so no cascade can ever prune them. Left
+#      alone they OUTLIVE their operator: measured 2026-07-31, after a full uninstall the Pipelines
+#      CSV and Subscription were gone while TektonConfig was still alive with 18 pods and a bound 1Gi
+#      PVC, every pod reading 1/1, nothing managing it and nothing that would ever remove it. Step 2
+#      below deletes them FIRST — after step 1 has stopped reconciliation (so nothing re-creates them)
+#      and before the cascade, which is the last moment their operator is still running to process
+#      their finalizers. Same ordering argument as guarantee 2, applied to the operands Argo never saw.
 #   4. No step can silently skip the ones after it. Every step runs through run_step(), which reports a
 #      failure and continues, and an EXIT trap always prints a ledger of which steps actually ran.
 #      A half-finished uninstall that says nothing is worse than a reported failure: the imperative
@@ -87,7 +96,7 @@ CASCADE_TIMEOUT=900
 # Namespaces we actually issued a delete for — F6 waits on exactly these to finish terminating.
 DELETED_WS_NS=()
 # " user1 user2 … " — the exact attendee usernames THIS install created, captured before either of its
-# two sources can go. See capture_attendee_users() for why there are two, and step 3's own header for
+# two sources can go. See capture_attendee_users() for why there are two, and step 4's own header for
 # why a Dev Spaces auto-provisioned namespace can be identified as ours ONLY by intersecting with this.
 ATTENDEE_USERS=""
 
@@ -97,7 +106,9 @@ warn() { echo "⚠️  $*" >&2; }   # CALLED by del_appprojects but never define
 info() { echo "▶ $*"; }         # install.sh's own header already fixed once (undefined command under
 die()  { err "$*"; exit 1; }    # `set -u` normally aborts; sub()'s `"$@" || rc=$?` masked it here)
 
-usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,57p'; exit 1; }
+# 66 = the last line of the header block above (the TODO(verify-on-cluster) note). Re-count it whenever
+# that block grows, or --help silently truncates mid-sentence.
+usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,66p'; exit 1; }
 
 # ── step resilience ───────────────────────────────────────────────────────────
 # On 2026-07-25 this script printed "[3/8]" and stopped. No error, no summary. Steps 4-8 — OAuth IdP
@@ -118,12 +129,12 @@ usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,57p'; exit 1; }
 #   3. this wrapper. `set -e` is suppressed for the whole dynamic extent of a command whose status is
 #      tested, so a non-zero return anywhere inside a step is RECORDED and the run continues.
 #      `set -euo pipefail` stays on: unset variables are still fatal, containment is per-step.
-STEP_TOTAL=9
+STEP_TOTAL=10
 STEP_LEDGER=""        # "<status>|<label>" per step, in run order — the EXIT summary reads only this
 STEP_FAILED=0
 STEP_SUB_FAILED=0     # non-zero returns from sub-actions inside the step currently running
 STEPS_STARTED="false"
-STATE_DUMP=""         # set in step 9; the EXIT summary references it, so it must always be defined
+STATE_DUMP=""         # set in step 10; the EXIT summary references it, so it must always be defined
 # The residue ledger. Declared HERE, with the other EXIT-summary globals rather than beside
 # residue_record() 100 lines down, because print_run_summary() reads them and `set -u` makes an
 # unset variable fatal — the summary must survive an early death at any point after the trap is set.
@@ -255,7 +266,7 @@ if ! oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1; then
 fi
 
 # ── state helpers ─────────────────────────────────────────────────────────────
-STATE_SNAPSHOT=""    # whole state CM cached as key=value lines — it is immutable until step 9 deletes it,
+STATE_SNAPSHOT=""    # whole state CM cached as key=value lines — it is immutable until step 10 deletes it,
 STATE_LOADED="false" # so one read serves the ~60 lookups a full run makes (a per-lookup oc call is minutes).
 state() {  # key [default] — echo a recorded value from the uninstall-state ConfigMap (or the default)
   local k="$1" def="${2:-}" v
@@ -271,7 +282,7 @@ state() {  # key [default] — echo a recorded value from the uninstall-state Co
 }
 
 # ── the residue ledger ────────────────────────────────────────────────────────
-# THE RECORD OF WHAT TO UNDO USED TO LIVE INSIDE THE THING BEING UNDONE. Step 9 deletes ${STATE_NS},
+# THE RECORD OF WHAT TO UNDO USED TO LIVE INSIDE THE THING BEING UNDONE. Step 10 deletes ${STATE_NS},
 # and with it the ConfigMap that is the ONLY record of what the org's cluster looked like before this
 # workshop touched it. That is correct exactly when this teardown put everything back — and a lie
 # every other time: whatever we could NOT restore stays on the cluster as OUR value, and the next
@@ -281,7 +292,7 @@ state() {  # key [default] — echo a recorded value from the uninstall-state Co
 # the recorded baseline, permanently, with the teardown reporting "complete".
 #
 # So the state is deleted only when this teardown has nothing left to confess. Every restore path
-# that walks away leaving OUR value on an object we do not own calls residue_record; step 9 then
+# that walks away leaving OUR value on an object we do not own calls residue_record; step 10 then
 # PRUNES the ConfigMap down to exactly those keys and KEEPS ${STATE_NS} as the receipt. What remains
 # is one namespace holding one ConfigMap of true prior values — and it remains only on a cluster that
 # already carries a change of ours, so it documents an existing trace rather than adding a new one.
@@ -362,9 +373,9 @@ enumerate_operators() {
 # Measured on ksls5 2026-07-25: that exact orphan drove pp-devspaces Degraded with `CheCluster/devspaces
 # Missing` and took M03 out of the workshop; deleting the CSV by hand let OLM resolve immediately.
 #
-# Step 4 used to name the CSV by reading `.status.installedCSV` off the Subscription. That was correct
-# only while teardown deleted Subscriptions itself. Since teardown became a cascade, step 2 removes the
-# Subscription (it IS an Argo-managed resource) long before step 4 runs, so the lookup returned "" for
+# Step 5 used to name the CSV by reading `.status.installedCSV` off the Subscription. That was correct
+# only while teardown deleted Subscriptions itself. Since teardown became a cascade, step 3 removes the
+# Subscription (it IS an Argo-managed resource) long before step 5 runs, so the lookup returned "" for
 # EVERY operator, every CSV survived, and the log said `skip subscriptions…/<name> (absent)` — a total
 # miss that read as success. The CSV name is therefore obtained without needing the Subscription:
 #
@@ -457,7 +468,7 @@ capture_installed_csvs() {  # main calls this ONCE, before step 1 — see mechan
   # Ordering is the whole point: called any later than step 1 it captures nothing, because the cascade
   # has already taken the Subscriptions. It is read-only, so it runs in --dry-run too — which is what
   # lets the plan name the exact CSVs the run would remove.
-  local name ns st pkg csv n=0 total=0
+  local name ns st pkg csv n=0 total=0 c=0
   if [[ "$CSV_SNAPSHOT_TAKEN" == "true" ]]; then return 0; fi
   CSV_SNAPSHOT_TAKEN="true"
   # ONE cluster-wide read, not one per operator: an `oc get` against a remote cluster costs ~3s
@@ -475,13 +486,24 @@ capture_installed_csvs() {  # main calls this ONCE, before step 1 — see mechan
     csv="$(resolve_operator_csv "$name" "$ns" "$pkg" | cut -d'|' -f1)"
     [[ -n "$csv" ]] || continue
     n=$((n + 1))
+    # The owned-CRD capture, in the only moment it can be complete — see § the owned-CRD capture.
+    # Gated on the SAME predicate that authorises a CSV deletion, so an adopted operator's CRDs are
+    # never filed as ours; a `decide` line in the checker is recoverable, `oc delete crd` is not.
+    if csv_delete_authorized_by_state "$name" "$ns"; then
+      record_created_crds "$csv" "$ns"
+      c=$((c + 1))
+    fi
   done < <(enumerate_operators)
+  # Set even when c is 0 (nothing on this cluster is recorded as created by us): the flag records that
+  # the pass RAN before the cascade, which is what makes an empty list trustworthy rather than unknown.
+  CRDS_CAPTURE_PHASE="pre-cascade"
   if [[ "$total" -eq 0 ]]; then return 0; fi
   ok "resolved a CSV for ${n} of ${total} recorded operators, before anything can delete a Subscription"
   if [[ "$n" -lt "$total" ]]; then
     echo "   • the other $((total - n)) have neither a Subscription nor a CSV on this cluster — either the"
     echo "     component was never installed, or an earlier uninstall already removed both"
   fi
+  ok "recorded $(printf '%s' "${CRDS_CREATED_SET}" | wc -w | tr -d ' ') CRD(s) owned by the ${c} operator(s) this install created, pre-cascade"
   return 0
 }
 
@@ -490,24 +512,24 @@ capture_installed_csvs() {  # main calls this ONCE, before step 1 — see mechan
 # (devEnvironments.defaultNamespace {autoProvision: true, template: "<username>-devspaces"}). It carries
 # NONE of our labels — the only mark on it is che.eclipse.org/username, which is stamped on EVERY
 # namespace Dev Spaces auto-provisions, including the org's own users on a cluster whose Dev Spaces we
-# ADOPTED. So the annotation alone is not proof of ownership; step 3 below needs to intersect it against
+# ADOPTED. So the annotation alone is not proof of ownership; step 4 below needs to intersect it against
 # the exact usernames THIS install created, and that list has to be read before either place it lives
 # on the cluster is gone.
 ATTENDEE_USERS_CAPTURED="false"
 capture_attendee_users() {  # main calls this ONCE, before step 1 — same reasoning as capture_installed_csvs()
   # TWO independent sources, unioned, because their failure modes do not overlap and either can be gone
-  # by the time step 3 needs to classify a Dev Spaces namespace:
+  # by the time step 4 needs to classify a Dev Spaces namespace:
   #   Group/workshop-attendees — rendered by the workshop-config Application (gitops/workshop-config/
-  #     templates/group-workshop-attendees.yaml: one user1..userN entry per Values.userCount). Step 2's
+  #     templates/group-workshop-attendees.yaml: one user1..userN entry per Values.userCount). Step 3's
   #     cascade deletes it along with everything else that Application manages, so it must be read
-  #     before step 2 runs, not after.
+  #     before step 3 runs, not after.
   #   secret/htpasswd-workshop-users -n openshift-config — created directly by install.sh with `oc
-  #     create secret` (never through Argo), so the cascade cannot touch it; step 5 below deletes it
+  #     create secret` (never through Argo), so the cascade cannot touch it; step 6 below deletes it
   #     explicitly. Its `htpasswd` key is the apache-htpasswd file install.sh wrote, one
   #     `username:hash` line per attendee — the same identities the Group is rendered from, kept as a
   #     second source in case the Group was never healthy (workshop-config degraded at install time).
   # A re-run that finds BOTH already gone (e.g. an earlier, interrupted run already removed them) has
-  # nothing to intersect against and step 3 skips, exactly like every other "no state" branch in this
+  # nothing to intersect against and step 4 skips, exactly like every other "no state" branch in this
   # script — it does not fall back to guessing from the namespace name.
   if [[ "$ATTENDEE_USERS_CAPTURED" == "true" ]]; then return 0; fi
   ATTENDEE_USERS_CAPTURED="true"
@@ -539,10 +561,10 @@ operator_package() {  # <subname> <ns> → its OLM package from the component ma
 
 CSV_RESOLVED=""            # memo: "<subname>|<ns>|<csv>|<how>" — an empty <csv> means "probed, nothing"
 resolve_operator_csv() {  # <subname> <ns> <package> → "<csv>|<how>" ("" when nothing matches)
-  # MEMOISED, and not only to save round-trips. The plan (pre-cascade) and step 4 (post-cascade) both
+  # MEMOISED, and not only to save round-trips. The plan (pre-cascade) and step 5 (post-cascade) both
   # resolve the same operator, and one of the mechanisms — reading a live Subscription — gives a
   # different answer either side of the cascade. Without the memo a plan line could promise a CSV that
-  # step 4 then fails to name; with it, the answer is fixed at the first, pre-cascade, resolution.
+  # step 5 then fails to name; with it, the answer is fixed at the first, pre-cascade, resolution.
   local name="$1" ns="$2" pkg="$3" csv out="" hit
   hit="$(printf '%s\n' "$CSV_RESOLVED" | awk -F'|' -v n="$name" -v s="$ns" '$1==n && $2==s {print $3"|"$4; exit}' || true)"
   if [[ -n "$hit" ]]; then
@@ -661,23 +683,69 @@ del_created_csv() {  # <csv> <ns> <subname> <package> <how> — the ONE place th
   return 0
 }
 
-# `crds_created` populated HERE — the only writer in the codebase before this change (verified:
-# `grep -rn crds_created bootstrap/*.sh` found only the READ in ogsr-check-clean.sh:1480). That guard's
-# "exact" mode has therefore never run on any cluster; every real run fell through to the heuristic
-# name-token guesser, which has already misattributed one operator's CRD to an operator that was never
-# installed. This makes the exact mode reachable instead of deleting it: del_created_csv is the ONE place
-# a CREATED operator's CSV is deleted (the adopted guard above refuses everywhere else), so reading each
-# CSV's OWNED CRDs right there, and only there, can never record the org's CRDs alongside ours.
-CRDS_CREATED_SET=" "   # space-padded " crd1 crd2 " — same de-dup idiom as ATTENDEE_USERS/PROTECTED_CSVS
+# ── the owned-CRD capture, and why it happens BEFORE the cascade ──────────────
+# `crds_created` is what lets ogsr-check-clean.sh's section [9/9] run in its "exact" mode — the list of
+# CRDs that came onto this cluster because WE installed an operator, read from each CSV's own
+# .spec.customresourcedefinitions.owned instead of guessed from name tokens.
+#
+# IT USED TO BE CAPTURED IN THE WRONG PLACE. The only call site was del_created_csv, which runs in the
+# CSV-cleanup step — AFTER the cascade. But the cascade deletes Subscriptions AND, transitively, most
+# of the CSVs: measured on a live teardown 2026-07-31, 15 of 19 CSVs were already gone by the time the
+# capture ran, so it recorded 17 CRDs while 165 were actually still registered. Section [9/9] then
+# reported those 17 as the complete list, in its HIGHEST-confidence mode, and called the cluster clean.
+# A capture that runs after the thing it is capturing has been deleted does not measure a small number;
+# it measures nothing, and dresses the nothing up as certainty.
+#
+# So the capture now runs in the SAME pre-cascade moment as capture_installed_csvs(), off the same
+# resolved (csv, namespace) pairs, gated by the SAME authorization predicate del_created_csv uses
+# (csv_delete_authorized_by_state): an ADOPTED operator's CRDs are the org's and are never recorded as
+# ours. del_created_csv still calls it, for an operator the pre-pass could not resolve; the memo below
+# makes that a no-op in the ordinary case.
+#
+# CRDS_CAPTURE_PHASE is the honesty half. Anything downstream that wants to treat this list as complete
+# has to prove it was taken before the cascade, and a state dump written by an older uninstall carries
+# no such proof — see ogsr-check-clean.sh section [9/9], which refuses "exact" without it rather than
+# reporting a truncated list as the whole truth.
+CRDS_CREATED_SET=" "     # space-padded " crd1 crd2 " — same de-dup idiom as ATTENDEE_USERS/PROTECTED_CSVS
+CRDS_CAPTURED_CSVS=" "   # " ns/csv … " already read, so two callers cost one round trip
+CRDS_CAPTURE_PHASE=""    # "pre-cascade" once capture_installed_csvs() has run its authorized pass
+
+# ONE cluster-wide read for every CSV's owned-CRD list, in the same shape and for the same reason as
+# csv_index(): 19 operators would otherwise be 19 serial `oc get`s (~3s each, measured on ksls5) added
+# to the pre-cascade moment, which --dry-run pays for too. Nested `range` is a documented jsonpath form
+# (the same one kubectl's own docs use for containers within pods), and if it ever fails the index
+# simply comes back empty and record_created_crds falls through to the per-CSV read it has always used
+# — slower, never silent.
+CRD_OWNED_INDEX=""
+CRD_OWNED_INDEX_LOADED="false"
+crd_owned_index() {  # → "<ns>|<csv>|<crd> <crd> …" per ORIGINAL CSV (cached, one call)
+  if [[ "$CRD_OWNED_INDEX_LOADED" != "true" ]]; then
+    CRD_OWNED_INDEX="$(oc get clusterserviceversions.operators.coreos.com -A -l '!olm.copiedFrom' \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{range .spec.customresourcedefinitions.owned[*]}{.name}{" "}{end}{"\n"}{end}' 2>/dev/null || true)"
+    CRD_OWNED_INDEX_LOADED="true"
+  fi
+  printf '%s\n' "$CRD_OWNED_INDEX"
+  return 0
+}
 
 record_created_crds() {  # csv ns — remember every CRD that CSV's spec says it owns, skipping dupes
-  local csv="$1" ns="$2" crd
-  while IFS= read -r crd; do
-    [[ -n "$crd" ]] || continue
+  local csv="$1" ns="$2" crd owned
+  [[ -n "$csv" && -n "$ns" ]] || return 0
+  case "$CRDS_CAPTURED_CSVS" in *" ${ns}/${csv} "*) return 0;; esac
+  CRDS_CAPTURED_CSVS="${CRDS_CAPTURED_CSVS}${ns}/${csv} "
+  # Field-exact match on the first two columns, never a substring grep: one CSV name can be a suffix
+  # of another in the same namespace, and a substring hit would attribute its CRDs to the wrong one.
+  owned="$(crd_owned_index | awk -F'|' -v n="$ns" -v c="$csv" '$1==n && $2==c {print $3; exit}')"
+  if [[ -z "$owned" ]]; then
+    owned="$(oc get clusterserviceversions.operators.coreos.com "$csv" -n "$ns" \
+               -o jsonpath='{range .spec.customresourcedefinitions.owned[*]}{.name}{" "}{end}' 2>/dev/null || true)"
+  fi
+  # Word splitting is the point here — the field is a space-separated CRD list — and a CRD name is
+  # DNS-subdomain-shaped, so it can carry no glob character.
+  for crd in $owned; do
     case "$CRDS_CREATED_SET" in *" ${crd} "*) continue;; esac
     CRDS_CREATED_SET="${CRDS_CREATED_SET}${crd} "
-  done < <(oc get clusterserviceversions.operators.coreos.com "$csv" -n "$ns" \
-             -o jsonpath='{range .spec.customresourcedefinitions.owned[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
+  done
   return 0
 }
 
@@ -724,7 +792,7 @@ enumerate_installed_stack_ns() {  # namespace-only view of the pairs above
 # (workshop.redhat.com/* and portfolio.redhat.com/* are workshop-invented domains), and all five are
 # needed: the CHILD component apps carry ONLY portfolio.redhat.com/component — 31 of the 32 have no
 # owner label — so the previous owner-or-stack pair never saw them. That mattered twice over. Step 1
-# left every child app on `automated: {prune, selfHeal}` while step 2 orphaned its parent, so the
+# left every child app on `automated: {prune, selfHeal}` while step 3 orphaned its parent, so the
 # children kept reconciling the stack back into existence mid-teardown (a stale pp-mta on C2 re-created
 # pp-mta-hub and re-added openshift-mta's owner label immediately after F7 stripped it); and the
 # cascade wait below cannot know Argo has finished if it cannot see the apps still pruning.
@@ -1003,7 +1071,7 @@ assert_adopted_protection() {
     # ALWAYS fully qualified — Knative's subscriptions.messaging.knative.dev shadows OLM's, and the bare
     # name reported every operator as absent (SEV1, fixed in 437bbf4). Do not regress it here.
     check_adopted subscriptions.operators.coreos.com "$name" "$ns" "adopted operator (the org installed it)"
-    # Resolve the CSV the way step 4 does, NOT from the Subscription — this guard had the SAME defect.
+    # Resolve the CSV the way step 5 does, NOT from the Subscription — this guard had the SAME defect.
     # Live on ksls5 2026-07-25: the org's adopted openshift-pipelines-operator-rh and web-terminal have
     # Succeeded CSVs and NO Subscription at all, so the old installedCSV read returned "" and the guard
     # printed no line for them — it silently verified nothing about the two objects it exists to
@@ -1432,8 +1500,8 @@ preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, remove every 
     return 0
   fi
   # The caller's namespace classification is a snapshot; by the time we get here another step's cascade
-  # may have already deleted this same namespace out from under it (measured 2026-07-31: step 8 logged
-  # "deleted namespace/openshift-gitops-operator", then step 9's own independent re-scan caught it
+  # may have already deleted this same namespace out from under it (measured 2026-07-31: step 9 logged
+  # "deleted namespace/openshift-gitops-operator", then step 10's own independent re-scan caught it
   # mid-Terminating and logged "preserved" the SAME namespace — self-contradictory, even though the end
   # state was correct). Check live and say which one actually happened.
   if ! obj_exists namespace "$ns" ""; then
@@ -1482,7 +1550,7 @@ remove_oauth_idp() {  # remove ONLY the workshop-users IdP entry, preserving eve
   owned="$(state oauth_idp_ownedbyus)"
   if [[ "$owned" != "true" ]]; then
     # Retrofit safety: a pre-Wave-1 install (no state ConfigMap) leaves oauth_idp_ownedbyus unrecorded,
-    # so this branch would PRESERVE 'workshop-users' — but step 5 deletes the htpasswd secret it points
+    # so this branch would PRESERVE 'workshop-users' — but step 6 deletes the htpasswd secret it points
     # at, stranding a broken login provider on the org's cluster (fails "uninstall fully reverses"). The
     # IdP is unambiguously ours when it is backed by OUR htpasswd-workshop-users secret; remove it then.
     backing="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[?(@.name=="workshop-users")].htpasswd.fileData.name}' 2>/dev/null || true)"
@@ -1771,9 +1839,9 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
     # Subscription/CSV are not deleted until below), which is what gives the finalizer — and any re-issued
     # delete on a resurrected generation — a real controller to run against.
     wait_for_argocd_cr_gone openshift-gitops openshift-gitops "$ARGOCD_CR_FINALIZER_TIMEOUT"
-    # Same resolution as step 4, and routed through the same single delete path. argocd-bootstrap
+    # Same resolution as step 5, and routed through the same single delete path. argocd-bootstrap
     # applies this Subscription imperatively so the cascade does not normally reach it — but "normally"
-    # is exactly the assumption that broke step 4, and del_created_csv re-derives the authorization
+    # is exactly the assumption that broke step 5, and del_created_csv re-derives the authorization
     # from gitops_preexisted anyway, so an adopted GitOps can never be removed through it.
     res="$(resolve_operator_csv openshift-gitops-operator openshift-gitops-operator openshift-gitops-operator)"
     csv="${res%%|*}"
@@ -1789,9 +1857,9 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
     # distinguishes "an adopted GitOps is really here" from "no GitOps on this cluster at all".
     info "GitOps operator + instance preserved ($(preserve_reason "$(state gitops_preexisted)" namespace openshift-gitops-operator))"
     # The adopted instance's controller SIZING is put back by restore_argocd_controller_resources(),
-    # which runs in step 5 beside the other imperative reversals (monitoring, node shaping, OAuth IdP)
+    # which runs in step 6 beside the other imperative reversals (monitoring, node shaping, OAuth IdP)
     # — it is one of those, not part of operator lifecycle. It is safe there and not here: it is gated
-    # on a recorded consent that only an ADOPTED instance can ever carry, and step 2's cascade — the
+    # on a recorded consent that only an ADOPTED instance can ever carry, and step 3's cascade — the
     # one thing that needs the raised memory — has already drained by then.
   fi
   return 0
@@ -1810,7 +1878,7 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
     sub_here="false"
     case "$live_subs" in *" ${ns}/${name} "*) sub_here="true";; esac
     if [[ "$st" == "created" ]]; then
-      # Resolve the CSV WITHOUT depending on the Subscription — by step 4 the cascade has normally
+      # Resolve the CSV WITHOUT depending on the Subscription — by step 5 the cascade has normally
       # taken it. See § operator CSV identity for the mechanisms and why the old installedCSV-only
       # lookup silently found nothing for every operator.
       res="$(resolve_operator_csv "$name" "$ns" "$pkg")"
@@ -1869,7 +1937,7 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
     fi
   done < <(enumerate_operators)
   # Say so when there is nothing to act on, rather than printing an empty step. This is the ordinary
-  # shape of a RE-RUN after a completed uninstall: run 1 deleted the state ConfigMap in step 9, so
+  # shape of a RE-RUN after a completed uninstall: run 1 deleted the state ConfigMap in step 10, so
   # created-vs-adopted is unknowable and NOTHING here is authorized to delete an operator's CSV.
   if [[ "$n" -eq 0 ]]; then
     echo "   • no operators recorded in ${STATE_NS}/${STATE_CM} — nothing here is authorized for removal."
@@ -1934,7 +2002,7 @@ delete_workshop_namespaces() {  # act on the classification: delete ours, preser
 # F6 — a namespace whose operator we PRESERVED can wedge in Terminating on an operator-instance CR
 # finalizer (e.g. CheCluster che.eclipse.org). We refuse to auto-strip arbitrary CR finalizers: the
 # operator may still need to run its cleanup, and after the cascade the ordinary case is that it CAN —
-# step 2 removed operand CRs while their operators were alive, so anything still holding here is a
+# steps 2-3 removed operand CRs while their operators were alive, so anything still holding here is a
 # genuine exception worth a human. We wait (bounded, early-exit) for our deletes to finish, then REPORT
 # what remains with the finalizer-holding objects and the exact manual clear command.
 report_ns_finalizer_holders() {  # ns — surface what blocks termination, from the namespace's OWN status
@@ -1982,13 +2050,13 @@ report_stuck_namespaces() {  # names… — bounded wait for termination, then r
 
 # ── plan ──────────────────────────────────────────────────────────────────────
 print_plan() {
-  local apps roots created adopted name ns st pkg gitops_plan mon_plan gw_plan mirror_plan
+  local apps roots created adopted name ns st pkg gitops_plan mon_plan gw_plan mirror_plan operand_plan
   local verb wn reason nwipe=0 wipe_stack="" strip_list="" csv_plan="" res
   mirror_plan="$(mirror_stack)"
   # `grep -c .` prints 0 AND exits 1 on empty input, so a `|| echo '?'` fallback appended a second line
   # and the plan read "0\n?". Take the count and normalise it instead.
   apps="$(our_applications | grep -c . || true)"; apps="${apps:-0}"
-  # Drive the namespace plan from the SAME classifier step 9 uses, so the summary is exactly the action.
+  # Drive the namespace plan from the SAME classifier step 10 uses, so the summary is exactly the action.
   while IFS=$'\t' read -r verb wn reason; do
     case "$verb" in
       delete) nwipe=$((nwipe + 1)); case "$reason" in installed-stack*) wipe_stack="${wipe_stack} ${wn}";; esac;;
@@ -2000,7 +2068,7 @@ print_plan() {
     [[ -n "$name" ]] || continue
     if [[ "$st" != "created" ]]; then adopted="${adopted} ${name}(${st})"; continue; fi
     created="${created} ${name}"
-    # Name the CSVs, resolved by the SAME call step 4 makes, so the plan and the action cannot
+    # Name the CSVs, resolved by the SAME call step 5 makes, so the plan and the action cannot
     # disagree. This is the line whose absence hid the defect: a plan that says only "operators WE
     # created: devspaces …" is silent about the object that actually blocks the next install.
     res="$(resolve_operator_csv "$name" "$ns" "$pkg")"
@@ -2013,7 +2081,7 @@ print_plan() {
 
   # Three-way plans: created-by-us → REMOVE/restore; recorded-adopted → PRESERVE; NO state record at all
   # (pre-Wave-1 install, or the state CM was lost) → PRESERVE and say so honestly. Found in the 2026-07-17
-  # verification pass: the old two-way else printed "restore → ?" on a stateless cluster while step 4
+  # verification pass: the old two-way else printed "restore → ?" on a stateless cluster while step 5
   # correctly skipped — the summary must match the action.
   case "$(state gitops_preexisted '')" in
     false) gitops_plan="REMOVE (we installed it)";;
@@ -2047,20 +2115,33 @@ print_plan() {
   echo "        2. the platform stacks;"
   echo "        3. the stack hosting the in-cluster git mirror${mirror_plan:+ (${mirror_plan})}, last."
   echo "  • ${nwipe} owner-labeled namespaces (per-user {user}-*, shared ogsr-*, installed-stack:${wipe_stack:- <none>} )"
-  echo "    — most are pruned by the cascade; step 9 deletes any Argo did not manage, and waits."
-  echo "  • Dev Spaces namespaces auto-provisioned for our attendees (<username>-devspaces, step 3) —"
+  echo "    — most are pruned by the cascade; step 10 deletes any Argo did not manage, and waits."
+  echo "  • Dev Spaces namespaces auto-provisioned for our attendees (<username>-devspaces, step 4) —"
   if [[ -n "${ATTENDEE_USERS// /}" ]]; then
     echo "    matched against $(printf '%s' "${ATTENDEE_USERS}" | wc -w | tr -d ' ') usernames this install created (Group/workshop-attendees + htpasswd-workshop-users);"
     echo "    a Dev Spaces namespace belonging to anyone else is the org's and is never touched"
   else
     echo "    no attendee usernames captured — nothing here is authorized for removal"
   fi
+  echo "  • cluster-scoped operands their operator created for itself (step 2) — no Argo Application owns"
+  echo "    them, so no cascade can prune them, and after their operator goes nothing ever will:"
+  if [[ "$CRDS_CAPTURE_PHASE" == "pre-cascade" ]]; then
+    operand_plan="$(cluster_scoped_created_crds \
+      | while IFS= read -r crd; do
+          [[ -n "$crd" ]] || continue
+          oc get "$crd" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+            | sed "s|^|      - ${crd}/|"
+        done || true)"
+    printf '%s\n' "${operand_plan:-      - <none present>}"
+  else
+    echo "      - <the owned-CRD capture did not run; step 2 will delete nothing>"
+  fi
   echo "  • the argo controller ClusterRoleBinding + ClusterRoles (applied imperatively by argocd-bootstrap)"
   echo "  • imperative bootstrap objects: htpasswd-workshop-users, workshop-users OAuth IdP entry, node labels/taint"
   echo "  • console plugins WE added to consoles.operator.openshift.io (backlog #24): $(state console_plugins_added '<none recorded>')"
   echo "  • operators WE created:${created:-<none recorded>}"
   echo "  • their ClusterServiceVersions — OLM creates a CSV from a Subscription and Argo never manages"
-  echo "    it, so the cascade cannot prune it and only step 4 can. Left behind, a CSV BLOCKS the next"
+  echo "    it, so the cascade cannot prune it and only step 5 can. Left behind, a CSV BLOCKS the next"
   echo "    install of this workshop (OLM: constraints not satisfiable / @existing):"
   printf '%b\n' "${csv_plan:-\n      - <none>}"
   echo
@@ -2156,7 +2237,124 @@ step_stop_reconciliation() {  # 1 — no app-of-apps may re-create a child mid-t
   return 0
 }
 
-step_remove_devspaces_namespaces() {  # 3 — Dev Spaces namespaces auto-provisioned for our attendees (#84)
+# ── operator-created operands ─────────────────────────────────────────────────
+# THE DEFECT (measured 2026-07-31, after a full uninstall reported success). openshift-pipelines was
+# still up: 18 pods Running 1/1, a bound 1Gi PVC, and a live TektonConfig — while the Pipelines CSV and
+# Subscription were both gone. Nothing managed it and nothing ever would. Every check on the cluster
+# read healthy, because the pods genuinely were.
+#
+# WHY THE CASCADE CANNOT REACH IT. Argo prunes what Argo applied, identified by its own tracking-id
+# annotation. TektonConfig was never applied by Argo — the Pipelines operator creates it itself the
+# moment it starts (the portfolio's own subscription.yaml says exactly that in its wave-0 comment).
+# So it carries no tracking-id, no Application owns it, and no `oc delete application` will ever touch
+# it. Deleting its Subscription and CSV removes the only controller that could have cleaned it up and
+# leaves the operand, and everything the operand stood up, running forever.
+#
+# WHY HERE, BETWEEN STEP 1 AND STEP 2 — the same ordering argument the cascade itself is built on, one
+# layer further out. It has to be AFTER step 1, because an app-of-apps still on `automated: {selfHeal}`
+# would re-create anything we removed. It has to be BEFORE step 3, because step 3 is what starts
+# dismantling the operators: the operand's finalizer can only run while its own controller is alive,
+# and after the cascade + step 5 that controller is gone, at which point the finalizer can NEVER
+# complete and the object needs a human with a finalizer patch. This is the last moment everything is
+# still running.
+#
+# SCOPE: CLUSTER-SCOPED operands only, of CRDs owned by an operator the state records as created BY US.
+# The scope restriction is the argument, not a shortcut. A NAMESPACED operand sits in a namespace this
+# teardown deletes, and dies with it (and the one case where a namespaced finalizer needs its operator
+# alive — Dev Spaces' DevWorkspaces — already has its own step, 4). A CLUSTER-SCOPED operand has no
+# namespace to take it: if this step does not remove it, nothing ever does. That is the whole of the
+# measured defect and it is the whole of what this step claims.
+#
+# TWO THINGS ARE NEVER TOUCHED, checked per object rather than assumed:
+#   • anything Argo currently tracks — the ordered cascade prunes it in reverse sync-wave order, which
+#     is strictly better ordering than this step has; racing it would only break that.
+#   • anything carrying Prune=false,Delete=false — install.sh's protection mark for an adopted
+#     resource. An adopted operator's operand belongs to the org.
+#
+# TWO PASSES, because an operator can re-create a child operand from a parent that has not gone yet
+# (TektonConfig owns TektonPipeline/TektonTrigger/…, and the CRDS_CREATED_SET has no parent-child
+# order in it). The second pass is the idempotency proof as well: on a clean first pass it finds
+# nothing, which is exactly what re-running the whole script must also do.
+cluster_scoped_created_crds() {  # → CRDs owned by an operator WE created that are CLUSTER-scoped
+  local scopes crd
+  [[ "$CRDS_CREATED_SET" != " " ]] || return 0
+  # One read for every CRD's scope. Asking per CRD would be ~165 round trips on a full install.
+  scopes="$(oc get customresourcedefinitions.apiextensions.k8s.io \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.scope}{"\n"}{end}' 2>/dev/null || true)"
+  for crd in $CRDS_CREATED_SET; do
+    case "$(printf '%s\n' "$scopes" | awk -F'|' -v c="$crd" '$1==c {print $2; exit}')" in
+      Cluster) printf '%s\n' "$crd";;
+    esac
+  done
+  return 0
+}
+
+step_delete_operator_operands() {  # 2 — operands only their own operator can finalize, deleted first
+  local crd inst pass deleted=0 skipped=0 left stuck=0 budget deadline
+  if [[ "$CRDS_CAPTURE_PHASE" != "pre-cascade" ]]; then
+    err "the owned-CRD capture did not run before this step — refusing to guess which operands are ours."
+    err "   Nothing was deleted. ./bootstrap/ogsr-check-clean.sh will report what is left."
+    # Non-zero on purpose: the ledger the EXIT trap prints must say this step did not do its job.
+    # Reporting "ok" for a step that declined to act is the shape of defect this whole file fights.
+    return 1
+  fi
+  # A third of the cascade budget, floor 60s: someone who shortens --cascade-timeout means "do not sit
+  # here", and a fixed wait would ignore that. Shared across both passes, so the step is bounded.
+  budget=$(( CASCADE_TIMEOUT / 3 ))
+  if [[ "$budget" -lt 60 ]]; then budget=60; fi
+  deadline=$(( $(date +%s) + budget ))
+  for pass in 1 2; do
+    while IFS= read -r crd; do
+      [[ -n "$crd" ]] || continue
+      while IFS= read -r inst; do
+        [[ -n "$inst" ]] || continue
+        if argo_manages "$crd" "$inst"; then
+          if [[ "$pass" == "1" ]]; then
+            skipped=$((skipped + 1))
+            echo "   • skip ${crd}/${inst} — Argo tracks it, so the ordered cascade prunes it in wave order"
+          fi
+          continue
+        fi
+        if is_protected "$crd" "$inst"; then
+          if [[ "$pass" == "1" ]]; then
+            skipped=$((skipped + 1))
+            echo "   • skip ${crd}/${inst} — marked Prune=false,Delete=false; this operand is the org's"
+          fi
+          continue
+        fi
+        if [[ "$DRY_RUN" == "true" ]]; then
+          if [[ "$pass" == "1" ]]; then
+            echo "   • WOULD delete ${crd}/${inst} (operator-created, cluster-scoped, no Argo owner)"
+          fi
+          continue
+        fi
+        # BLOCKING on purpose. --wait=true is what proves the finalizer completed while the operator
+        # was still there; returning early and hoping is how the operand ends up orphaned anyway.
+        left=$(( deadline - $(date +%s) ))
+        if [[ "$left" -lt 15 ]]; then left=15; fi
+        if oc delete "$crd" "$inst" --ignore-not-found --wait=true --timeout="${left}s" >/dev/null 2>&1; then
+          deleted=$((deleted + 1))
+          ok "deleted ${crd}/${inst} — its finalizer ran while its operator was still up"
+        else
+          stuck=$((stuck + 1))
+          err "   ${crd}/${inst} did not finish deleting within ${left}s. Its operator is about to be"
+          err "      removed, after which the finalizer can never complete. Clear it by hand NOW:"
+          err "      oc patch ${crd} ${inst} --type=merge -p '{\"metadata\":{\"finalizers\":null}}'"
+        fi
+      done < <(oc get "$crd" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+    done < <(cluster_scoped_created_crds)
+    if [[ "$DRY_RUN" == "true" ]]; then break; fi
+  done
+  if [[ "$deleted" -eq 0 && "$stuck" -eq 0 ]]; then
+    echo "   • no operator-created cluster-scoped operand of ours is present (${skipped} left to the cascade)"
+  fi
+  # An operand still holding after its bounded wait is the exact outcome this step exists to prevent,
+  # and the operator that could still clear it is removed two steps from now. Say so in the ledger.
+  if [[ "$stuck" -gt 0 ]]; then return 1; fi
+  return 0
+}
+
+step_remove_devspaces_namespaces() {  # 4 — Dev Spaces namespaces auto-provisioned for our attendees (#84)
   # Dev Spaces auto-provisions ONE namespace per attendee the first time they open a workspace
   # (devEnvironments.defaultNamespace {autoProvision: true, template: "<username>-devspaces"}), so a
   # cohort of N attendees leaves N of these behind. It carries NONE of our labels —
@@ -2173,17 +2371,17 @@ step_remove_devspaces_namespaces() {  # 3 — Dev Spaces namespaces auto-provisi
   # see that function for why there are two sources and why a re-run with neither reachable skips
   # rather than guesses).
   #
-  # WHY STEP 3, between the cascade (2) and the CSV cleanup (4) — and not folded into step 9's final
+  # WHY STEP 4, between the cascade (3) and the CSV cleanup (5) — and not folded into step 10's final
   # namespace sweep, where it would sit more tidily alongside every other namespace deletion. A Dev
   # Spaces workspace can leave DevWorkspace custom resources in the attendee namespace, and those carry
   # a devworkspace-operator finalizer that only that operator's own controller can ever clear (the same
   # rule diagnose_stuck_ns in ogsr-check-clean.sh applies to every other operator-owned finalizer: a
-  # controller that is still installed can still complete it; one that is gone never will). Step 2's
+  # controller that is still installed can still complete it; one that is gone never will). Step 3's
   # cascade removes the Dev Spaces Subscription (Argo owns it), but a Subscription's removal does not
   # touch the CSV it installed — the operator's Deployment is owned by the CSV, not the Subscription,
-  # so the controller is STILL RUNNING when step 2 returns. Step 4 is what deletes that CSV, and with
-  # it the controller. Namespace deletion issued HERE, before step 4, gives any such finalizer its only
-  # real chance to run to completion; issued after step 4, or deferred all the way to step 9, the
+  # so the controller is STILL RUNNING when step 3 returns. Step 5 is what deletes that CSV, and with
+  # it the controller. Namespace deletion issued HERE, before step 5, gives any such finalizer its only
+  # real chance to run to completion; issued after step 5, or deferred all the way to step 10, the
   # controller that could have cleared it is already gone and the namespace is left to wedge in
   # Terminating for a human to diagnose. // TODO(verify-on-cluster): no attendee had an open workspace
   # to confirm a live DevWorkspace's finalizer actually blocks in that state — the CSV-alive-vs-gone
@@ -2377,7 +2575,7 @@ step_gateway_api() {  # 6 — remove only if we created it. Argo manages this CR
 }
 
 step_cluster_rbac() {  # 7 — cluster-scoped objects the cascade CANNOT reach, because Argo never
-  # managed them. Everything else that used to be swept here is now pruned by step 2 and has been
+  # managed them. Everything else that used to be swept here is now pruned by step 3 and has been
   # removed from this step: Group/workshop-attendees, the Kueue ResourceFlavor/WorkloadPriorityClass/
   # ClusterQueue triple (all gitops/workshop-config/templates/kueue-queues.yaml), AppProjects
   # (student-appprojects.yaml + appproject-workshop-entries.yaml) and the openshift/java-21
@@ -2391,7 +2589,7 @@ step_cluster_rbac() {  # 7 — cluster-scoped objects the cascade CANNOT reach, 
   sub del_labeled_cluster clusterroles.rbac.authorization.k8s.io
   # NOTE: del_appprojects deliberately does NOT run here. It moved to the LAST step, because an
   # AppProject removed while any Application still names it freezes those Applications permanently
-  # (Argo will not process an app whose project is missing, not even to delete it). By step 9 the
+  # (Argo will not process an app whose project is missing, not even to delete it). By step 10 the
   # cascade has drained and the guard inside del_appprojects re-checks anyway.
   sub remove_argo_tls_cert_key
   sub sweep_dead_webhooks
@@ -2459,7 +2657,7 @@ sweep_dead_webhooks() {  # admission webhooks whose backing Service died with a 
   # install into `openshift-operators`, because that namespace already carries the cluster-wide
   # OperatorGroup and adding a second one is the singleton violation that silently breaks the org's
   # operators. So their webhooks live in a namespace that is not ours and does not go away, while the
-  # operator that created them IS ours and step 4 removed it.
+  # operator that created them IS ours and step 5 removed it.
   #
   # The safe discriminator is not the namespace, it is: did WE create the operator that owns this
   # webhook, and is its backing Service actually gone? A missing Service means the webhook cannot
@@ -2516,6 +2714,13 @@ step_delete_namespaces() {  # 9 — whatever the cascade did not own, then the s
     # one place that snapshot gets persisted, or it is lost the moment the ogsr-system namespace goes.
     if [[ "$CRDS_CREATED_SET" != " " ]]; then
       STATE_SNAPSHOT="${STATE_SNAPSHOT}"$'\n'"crds_created=$(printf '%s' "$CRDS_CREATED_SET" | sed -e 's/^ //' -e 's/ $//' -e 's/ /,/g')"
+    fi
+    # WHEN the list was taken, written alongside it and never inferred from it. A list captured after
+    # the cascade is a fragment (measured: 17 of 165), and a fragment presented as complete is worse
+    # than no list at all — ogsr-check-clean.sh reads this key and refuses its "exact" mode without it.
+    # An older dump carries no such key, which is exactly the "cannot verify" answer that dump deserves.
+    if [[ -n "$CRDS_CAPTURE_PHASE" ]]; then
+      STATE_SNAPSHOT="${STATE_SNAPSHOT}"$'\n'"crds_created_capture=${CRDS_CAPTURE_PHASE}"
     fi
     if printf '%s\n' "$STATE_SNAPSHOT" > "$STATE_DUMP" 2>/dev/null; then
       ok "install state saved to ${STATE_DUMP}"
@@ -2610,13 +2815,13 @@ echo
 # decline to do. The check itself is read-only, so running it in dry-run costs nothing.
 # FIRST, before anything else reads or touches the cluster: this is the only moment at which OLM's own
 # `.status.installedCSV` is still readable for every operator, and both the protection guard below and
-# step 4 resolve CSVs through the memo it fills. Read-only, so it also runs in --dry-run — which is
+# step 5 resolve CSVs through the memo it fills. Read-only, so it also runs in --dry-run — which is
 # what lets the plan name the exact CSVs a real run would remove.
 info "capturing operator CSV identity before anything can delete a Subscription"
 capture_installed_csvs
 
 # Same reasoning, same moment: Group/workshop-attendees is rendered by the workshop-config Application,
-# so step 2's cascade removes it, and step 3 needs the exact usernames it named to identify a Dev Spaces
+# so step 3's cascade removes it, and step 4 needs the exact usernames it named to identify a Dev Spaces
 # namespace as ours. Read-only, so it also runs in --dry-run.
 info "capturing attendee usernames before the cascade can remove Group/workshop-attendees"
 capture_attendee_users
@@ -2640,7 +2845,15 @@ else
   fi
 fi
 
-run_step "[1/9] stopping reconciliation on workshop Argo Applications" step_stop_reconciliation
+run_step "[1/10] stopping reconciliation on workshop Argo Applications" step_stop_reconciliation
+
+# Operands the operator created for ITSELF, which Argo therefore never tracked and no cascade can
+# prune. They must go while their operator is still running to process their finalizers, and that
+# window closes the moment step 3 starts. After step 1 (nothing re-creates them), before step 3 (the
+# controllers are all still up) — see § operator-created operands for the TektonConfig that survived a
+# "successful" uninstall with 18 pods and a bound PVC and nothing left that would ever remove it.
+run_step "[2/10] deleting operator-created operands while their operators are still running" \
+  step_delete_operator_operands
 
 # CASCADE-delete our apps: deleting the Application IS the uninstall. Argo removes what it installed,
 # in reverse sync-wave order, so each operator is still running when its own operand CR is deleted and
@@ -2648,14 +2861,14 @@ run_step "[1/9] stopping reconciliation on workshop Argo Applications" step_stop
 # removed at the source instead of being swept up afterwards. The previous --cascade=orphan protected
 # adopted operators by exempting EVERYTHING, which threw away Argo's ordering and forced the
 # incomplete bash re-implementation below it; adopted resources are now exempted individually.
-run_step "[2/9] cascade-deleting workshop Argo Applications (Argo prunes what it installed)" \
+run_step "[3/10] cascade-deleting workshop Argo Applications (Argo prunes what it installed)" \
   cascade_delete_applications
 
-# Dev Spaces namespaces auto-provisioned for our attendees (#84). Placed HERE, before step 4 deletes
+# Dev Spaces namespaces auto-provisioned for our attendees (#84). Placed HERE, before step 5 deletes
 # the Dev Spaces CSV: the CSV owns the operator's Deployment, not the Subscription the cascade just
 # removed, so the controller is still running now and any DevWorkspace finalizer in an attendee
 # namespace has its one real chance to clear. See the step's own header for the full reasoning.
-run_step "[3/9] removing Dev Spaces namespaces auto-provisioned for our attendees" \
+run_step "[4/10] removing Dev Spaces namespaces auto-provisioned for our attendees" \
   step_remove_devspaces_namespaces
 
 # CSVs for operators WE created. The cascade already pruned their Subscriptions (those ARE in our
@@ -2664,19 +2877,19 @@ run_step "[3/9] removing Dev Spaces namespaces auto-provisioned for our attendee
 # This is the one operator-removal step GitOps cannot do for us — and the one that must not depend on
 # the Subscription still being there, because by now it usually is not (§ operator CSV identity). The
 # Subscription delete remains for the degraded-Argo / imperative case.
-run_step "[4/9] removing CSVs for operators we created (adopted operators preserved)" \
+run_step "[5/10] removing CSVs for operators we created (adopted operators preserved)" \
   cleanup_created_operators
 
-run_step "[5/9] reversing imperative cluster mutations (OAuth IdP, console plugins, monitoring, nodes, htpasswd)" \
+run_step "[6/10] reversing imperative cluster mutations (OAuth IdP, console plugins, monitoring, nodes, htpasswd)" \
   step_reverse_cluster_mutations
 
-run_step "[6/9] Gateway API" step_gateway_api
+run_step "[7/10] Gateway API" step_gateway_api
 
-run_step "[7/9] deleting owner-labeled cluster RBAC that no Application manages" step_cluster_rbac
+run_step "[8/10] deleting owner-labeled cluster RBAC that no Application manages" step_cluster_rbac
 
-run_step "[8/9] GitOps operator (removed only if we created it)" handle_gitops
+run_step "[9/10] GitOps operator (removed only if we created it)" handle_gitops
 
-run_step "[9/9] deleting workshop namespaces (org / adopted-operator namespaces preserved + de-labeled)" \
+run_step "[10/10] deleting workshop namespaces (org / adopted-operator namespaces preserved + de-labeled)" \
   step_delete_namespaces
 
 # The step ledger and the closing verdict are printed by the EXIT trap, so they are emitted on an early
@@ -2692,11 +2905,15 @@ cat <<'VERIFY'
      oc get ns -l workshop.redhat.com/owner=ogsr                 # expect: no resources
      oc get applications -n openshift-gitops | grep -E 'pp-|entry-|workshop-config'   # expect: none
      oc get clusterrole,clusterrolebinding -l workshop.redhat.com/owner=ogsr          # expect: none
+     # Operands their operator created for ITSELF: no Argo Application owns them, so only step [2/10]
+     # can remove them, and a leftover here is a whole product still running with nothing managing it
+     # (measured: TektonConfig alive with 18 pods and a bound 1Gi PVC after a "successful" teardown):
+     oc get tektonconfig 2>/dev/null   # expect: no resources — unless the org installed Pipelines themselves
      oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}'; echo       # expect: workshop-users absent
      oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}'; echo  # expect: names WE added absent, everything else preserved
      # Adopted operators must still be Present/Succeeded:
      oc get csv -A | grep -Ev 'ogsr'                             # org operators intact
-     # A CSV that no Subscription installs is an ORPHAN — step [4/9] above deletes only the CSVs the
+     # A CSV that no Subscription installs is an ORPHAN — step [5/10] above deletes only the CSVs the
      # state records as ours, so anything it could not authorise is still here, and a leftover CSV
      # makes the NEXT install fail to resolve that operator. Section [3/9] of ogsr-check-clean.sh
      # names them with the removal command; by hand it is the difference of two lists:
