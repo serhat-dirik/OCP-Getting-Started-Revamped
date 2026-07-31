@@ -97,3 +97,37 @@ One residual is accepted and documented rather than closed: all attendees share 
 AppProject, so an attendee can still target a *peer's* namespace. That is a cooperative-classroom
 risk, not a customer-data risk; see `INSTALL.md` for the threat model and the per-attendee
 AppProject pattern that closes it if the audience is ever strangers.
+
+## Amendment 3 (2026-08-01) — two corrections to Amendment 2: the per-attendee AppProject it named now exists (but is inert), and its own "five shared namespaces" was itself one of the bugs this cluster of changes fixed
+
+**1. The per-attendee AppProject pattern.** Amendment 2 named this as what "closes [the peer-
+namespace residual] if the audience is ever strangers," without it existing yet. It now exists:
+`gitops/workshop-config/templates/appproject-entries-per-user.yaml` (committed `dac87dc`) renders
+an `entries-{user}` AppProject per attendee, and all eight are live on cluster2 today
+(`oc get appproject -n openshift-gitops --no-headers | awk '{print $1}' | sort` →
+`entries-user1` … `entries-user8`, verified). It is not yet load-bearing: the admission guard this
+ADR's escalation depends on (`ogsr-attendee-entry-app-guard`) still carries the committed
+`workshop-entries` expression on cluster2, and `tools/ws/ws` still renders that project by default.
+A local, uncommitted edit to the guard would switch it, but it is deliberately held until it ships
+in the same commit as the `ws` change plus a `ws git-refresh --restart-terminals`. Full command
+evidence is in ADR-0001's matching 2026-08-01 amendment; not repeated here. Until that lands, this
+ADR's residual paragraph above still holds exactly as written: attendees remain on one shared
+AppProject.
+
+**2. Amendment 2's own destination count was wrong** — a small, on-topic instance of the standing
+lesson this whole change teaches. Amendment 2 said `workshop-entries` "enumerates the attendee
+namespace patterns plus five shared namespaces." That five-item list (added in `7b526ac`) was
+itself short by two — `ogsr-student-gitops` and `openshift-pipelines` — which broke `ws start
+gitops-at-scale` and `ws start trusted-supply-chain` at Argo sync time, on both clusters, until
+`dac87dc` fixed it the same night ("my destination narrowing was missing two shared namespaces —
+two modules break at sync"). The fix was not "add the two missing entries": the list is now
+generated from one Helm helper (`workshop-config.entryDestinationsShared` in
+`gitops/workshop-config/templates/_helpers.tpl`), shared by both `workshop-entries` and the new
+`entries-{user}` projects so the two can never drift apart again, with the regeneration recipe
+(render every entry chart at `solve=false` and `solve=true`, collect every `metadata.namespace`,
+drop the `{user}-` ones, sort -u) written beside the list instead of left to memory. The count today
+is seven, not five: `ogsr-gitea`, `ogsr-student-gitops`, `ogsr-system`, `openshift-lightspeed`,
+`openshift-pipelines`, `sonarqube`, `stackrox`. The lesson for this ADR: a hand-maintained
+enumeration of a fact that is mechanically derivable from other files (here, every entry chart's
+own rendered manifests) will drift out from under you — the fix is to derive it, not to proofread
+it harder.

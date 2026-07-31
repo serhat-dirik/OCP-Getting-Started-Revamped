@@ -89,3 +89,35 @@ admission, not by any AppProject repo pin.
 One residual is accepted, not closed: all eight attendees share this one AppProject, so an attendee can
 still name a *peer's* namespace pattern. Cooperative-classroom risk, not a customer-data risk — see
 ADR-0002 Amendment 2 and `INSTALL.md` for the full threat model.
+
+## Amendment — 2026-08-01 (per-user AppProjects exist now; they are not yet load-bearing)
+
+The residual noted just above has a fix in progress, not a finished one. Verified against cluster2
+today, not recalled:
+
+- `entries-user1` … `entries-user8` AppProjects exist
+  (`gitops/workshop-config/templates/appproject-entries-per-user.yaml`, committed `dac87dc`):
+  `oc get appproject -n openshift-gitops --no-headers | awk '{print $1}' | sort` →
+  `default`, `entries-user1` … `entries-user8`, `ogsr-platform`, `workshop-entries`.
+- Nothing routes an attendee into their own project yet. A live entry Application still names the
+  shared one: `oc get application entry-gitops-fundamentals-user2 -n openshift-gitops -o
+  jsonpath='{.spec.project}'` → `workshop-entries`. `tools/ws/ws` still defaults to it
+  (`ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"`, line 44 — unmodified; `git diff HEAD --
+  tools/ws/ws` is empty). And the admission guard from the Amendment above still requires the
+  shared project on cluster2: `oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o
+  jsonpath='{.spec.validations[0].expression}'` → `has(object.spec.project) &&
+  object.spec.project == 'workshop-entries'`.
+- The guard-side half of the switch is written but deliberately held back, not lost: the working
+  tree carries an unstaged edit to `attendee-entry-app-guard.yaml` (`git status --short` shows it
+  modified, not committed) that repoints validation 1 to
+  `entries-' + request.userInfo.username`. Its own file header explains why it is not committed
+  alone: it must land together with a `tools/ws/ws` change that renders `entries-${user}`, because a
+  cockpit terminal only picks up a new `ws` at pod start — shipping the guard first would make every
+  running attendee's `ws prep` Forbidden. The rollout order is written down in
+  `appproject-entries-per-user.yaml`'s own header: sync the Gitea mirror and wait for its HEAD to
+  match origin's, sync `workshop-config`, then `ws git-refresh --restart-terminals`.
+
+Net for this ADR: the per-user AppProjects are correctly scoped and materialized, but "per-user
+AppProjects" is not yet true of the *running* system — every attendee is still on `workshop-entries`
+until the guard, `ws`, and a terminal restart land together. Do not cite this ADR as evidence the
+per-user isolation is enforced; it is provisioned, not wired in.

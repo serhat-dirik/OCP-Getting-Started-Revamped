@@ -19,10 +19,10 @@ screenshots and recordings remain the deferred media pass.
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
 | 1 | `config-multienv-01-crashloop-pod.png` | Topology/Pods in `user1-dev` after the bad-config break: `parasol-claims` pod `CrashLoopBackOff`, restart count climbing; the Logs tab showing `UnknownHostException` | Circle: the CrashLoopBackOff badge, the restart count, the `Caused by:` line in Logs | lab.adoc ex. 1 |
-| 2 | `config-multienv-02-configmap-secret.png` | Console: the `claims-config` ConfigMap (Data tab) and `claims-creds` Secret (with "Reveal values" showing base64→plaintext) | Circle: the ConfigMap keys; the Secret's base64 value and its revealed plaintext | lab.adoc ex. 2–3 |
+| 2 | `config-multienv-02-configmap-secret.png` | Console: the `claims-config` ConfigMap (Data tab, plaintext keys/values) and `claims-creds` Secret (Data tab, **"Reveal values" left OFF** — masked/base64 form only; do NOT toggle Reveal on for this capture) | Circle: the ConfigMap keys; the Secret's key names and its masked/base64 display | lab.adoc ex. 2–3 |
 | 3 | `config-multienv-03-readiness-503.png` | The `parasol-claims` Service/Route while readiness is broken: empty Endpoints and the Route returning 503 (browser or console) | Circle: the empty endpoints list; the 503 response | lab.adoc ex. 4 |
 | 4 | `config-multienv-04-quota-replicafailure.png` | Console: the `claims-hog` Deployment with its `ReplicaFailure`/`exceeded quota` event, next to the namespace ResourceQuota view | Circle: the `exceeded quota: workshop-quota` event; the quota's requests.cpu used/hard | lab.adoc ex. 5 |
-| 5 | `config-multienv-05-three-envs.png` | Three Topology tiles side by side — `user1-dev` (1 pod), `user1-stage` (2 pods), `user1-prod` (3 pods) — all `parasol-claims` | Circle: the differing replica counts; note "same image" | lab.adoc ex. 6 |
+| 5 | `config-multienv-05-three-envs.png` | Three Topology tiles side by side — `user1-dev` (1 pod), `user1-stage` (2 pods), `user1-prod` (3 pods) — all `parasol-claims`. **Composite image: this is THREE separate console captures (one per namespace) manually assembled side by side — not a single screenshot.** | Circle: the differing replica counts; note "same image" | lab.adoc ex. 6 |
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
