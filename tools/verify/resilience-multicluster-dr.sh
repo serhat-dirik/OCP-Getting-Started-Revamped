@@ -169,7 +169,7 @@ else
     check "FAILOVER proven: site-a down -> the client is served by site-b" failover_proof \
       || hint "with site-a scaled to 0 the client should be served by site-b within ~30s — check the DestinationRule outlierDetection + locality LB and the VirtualService retries"
   else
-    info "(skipped the live failover drill — sites/client/gateway not all Ready yet, or routing not wired — see the checks above)"
+    warn "the live failover drill — sites/client/gateway not all Ready yet, or routing not wired (see the checks above)"
   fi
 fi
 

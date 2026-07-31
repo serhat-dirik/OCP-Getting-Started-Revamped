@@ -165,10 +165,8 @@ esac
 cq_err="$(oc get clusterqueue "$CQ" -o name 2>&1 >/dev/null || true)"
 case "$cq_err" in
   *orbidden*)
-    info "ClusterQueue ${CQ} check SKIPPED — cluster-scoped and not readable as this identity."
-    info "   ↳ not a failure, and not yours to fix: the LocalQueue Active check above asserts the same"
-    info "     health from inside your namespace (Kueue marks a LocalQueue inactive when its"
-    info "     ClusterQueue is missing or inactive)."
+    warn "ClusterQueue ${CQ} check — cluster-scoped and not readable as this identity"
+    hint "not yours to fix: the LocalQueue Active check above asserts the same health from inside your namespace (Kueue marks a LocalQueue inactive when its ClusterQueue is missing or inactive)"
     ;;
   *)
     check "ClusterQueue ${CQ} is Active (admits workloads)" cq_active                                 || hint "the workshop layer's per-user ClusterQueue is missing or inactive. This is a PLATFORM check, not an attendee one — an SA should confirm the workshop-config Argo app is Synced: oc get clusterqueue ${CQ}"

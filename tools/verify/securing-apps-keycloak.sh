@@ -114,8 +114,7 @@ else
     check "Ex7 token-exchange: fraud ACCEPTS a token exchanged to aud=parasol-fraud — 200" \
           test "$(route_code parasol-fraud /api/fraud/score/CLM-1001 "$XCHG")" = "200"          || hint "wire RFC 8693 exchange: parasol-claims (confidential) exchanges the user token to audience=parasol-fraud — see Ex7"
   else
-    echo "⏭  SKIP Ex7 [ADVANCED] token-exchange — parasol-fraud is not deployed (the module's only optional"
-    echo "    exercise; this is NOT a pass — deploy the fraud service and wire the RFC 8693 exchange to finish it)."
+    warn "Ex7 [ADVANCED] token-exchange — parasol-fraud is not deployed (the module's only optional exercise; deploy the fraud service and wire the RFC 8693 exchange to finish it)"
   fi
 fi
 

@@ -215,7 +215,7 @@ check "attendee can read alerting rules in ${NS} (tenancy RBAC)" attendee_reads_
 # is end-state only, below.
 tenancy_rules_fetch
 if [[ "$TENANCY_STATE" == "unreachable" ]]; then
-  echo "⚠ project-scoped Alerting rules endpoint unreachable from here — attendee-visibility check SKIPPED (not a failure)"
+  warn "project-scoped Alerting rules endpoint unreachable from here — attendee-visibility check"
   hint "run it where the attendee is — from the cockpit terminal: ws verify observability-health-scale (thanos-querier:9093 is in-cluster only, it has no Route, so an off-cluster run cannot answer this)"
 else
   check "project-scoped Alerting rules endpoint answers for ${NS}"  tenancy_endpoint_ok                     || hint "UWM tenancy rules API rejected this identity (401/403) — the attendee's Alerting rules page would be empty; check the monitoring-edit RoleBinding and that enableUserWorkload is true"

@@ -128,7 +128,7 @@ else
   # app=parasol-claims, so default-deny + the 'db only from api' allow must BLOCK it — but a probe
   # that has not been shown to work must never be allowed to certify that.
   if ! deploy_ready claims-db "$NS" || ! deploy_ready demo-client "$NS"; then
-    info "(skipped the live db-block probe — claims-db/demo-client not both Ready)"
+    warn "the live db-block probe — claims-db/demo-client not both Ready"
   elif ! probe_machinery_ok; then
     warn "cannot grade the db-block outcome — the probe machinery itself does not run (oc exec into demo-client, or bash/timeout in its image)"
     hint "a probe that cannot run proves nothing about what is blocked: oc exec deploy/demo-client -n ${NS} -- timeout 5 bash -c 'exit 0'"

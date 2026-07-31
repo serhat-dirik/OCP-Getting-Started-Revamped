@@ -183,14 +183,14 @@ else
   if deploy_ready statement-batch; then
     check "statement-batch runs ON the dedicated batch pool node" batch_on_pool                || hint "pin it: add a toleration for ${POOL_KEY}=${POOL_VALUE}:NoSchedule AND nodeSelector ${POOL_KEY}=${POOL_VALUE} to statement-batch"
   else
-    info "(skipped the batch-placement outcome — statement-batch not Ready)"
+    warn "the batch-placement outcome — statement-batch not Ready"
   fi
   # Node-spread outcome needs the parasol-claims image running; guard on Ready (image-gap) and use `>=`
   # (lab-exceedable — more replicas/nodes is fine).
   if deploy_ready parasol-claims; then
     check "parasol-claims replicas span >=2 distinct nodes (anti-affinity/TSC)" test "$(claims_distinct_nodes)" -ge 2 || hint "spread the replicas: add podAntiAffinity on kubernetes.io/hostname (and/or topologySpreadConstraints) so no two claims pods share a node"
   else
-    info "(skipped the claims node-spread outcome — parasol-claims not Ready; needs the parasol-images build)"
+    warn "the claims node-spread outcome — parasol-claims not Ready; needs the parasol-images build"
   fi
   # Zero-downtime is a real, gradeable OUTCOME (deployment-targets-scheduling re-diagnosis 2026-07-16). The fault: the shared
   # claims-db is reseeded on EVERY parasol-claims boot (Hibernate drop-and-create), so a rolling-update
@@ -205,7 +205,7 @@ else
     check "no parasol-claims ReplicaSet is being refused its pods (no ReplicaFailure)" claims_no_replica_failure \
       || hint "a ReplicaSet cannot create pods — read it: oc describe rs -n ${NS} \$(oc get rs -n ${NS} -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}'). 'exceeded quota: workshop-quota' means the CPU limit you set is too large for the namespace cap (use cpu=1); the roll is wedged even though availableReplicas still reads N/N"
   else
-    info "(skipped the zero-downtime outcomes — parasol-claims not Ready; needs the parasol-images build)"
+    warn "the zero-downtime outcomes — parasol-claims not Ready; needs the parasol-images build"
   fi
 fi
 

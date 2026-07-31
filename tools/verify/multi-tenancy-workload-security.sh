@@ -113,7 +113,7 @@ else
     check "payments-ops can create Deployments in ${NS} (deployer Role)"  sa_can payments-ops "$NS" create deployments   || hint "bind the custom deployer Role to payments-ops in ${NS} (see the lab)"
     check "payments-ops CANNOT read Secrets in ${NS} (deployer excludes secrets)" sa_cannot payments-ops "$NS" get secrets || hint "the deployer Role must NOT grant secrets read — that's the least-privilege point"
   else
-    info "(RBAC-outcome checks skipped — caller cannot impersonate ServiceAccounts; run as admin/CI to grade them)"
+    warn "RBAC-outcome checks — caller cannot impersonate ServiceAccounts; run as admin/CI to grade them"
   fi
 fi
 
