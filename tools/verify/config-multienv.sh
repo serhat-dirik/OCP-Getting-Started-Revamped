@@ -93,12 +93,20 @@ route_ready_200() {
   [[ "$code" == "200" ]]
 }
 
-# The dev Deployment references a resource (ConfigMap/Secret) by name anywhere in its
-# container env/envFrom — matches both `envFrom` (solve) and per-key `valueFrom` (attendee).
+# The dev Deployment references a resource (ConfigMap/Secret) by name from its containers' ENV —
+# matching both `envFrom` (what `oc set env --from=` and the solve produce) and per-key
+# `valueFrom.configMapKeyRef`/`secretKeyRef` (what an attendee wiring single keys produces).
+# NARROWED 2026-08-01: this used to grep the whole Deployment JSON for `"name": "<ref>"`, which is
+# satisfied by ANY object in the manifest carrying that name — a volume, a volume mount, even the
+# container itself. A Deployment that merely MOUNTS claims-config, or one whose container happens to
+# be named claims-config, passed a check whose whole subject is "is it wired into the environment".
+# The jsonpath asks the containers' env/envFrom directly; `grep -qx` anchors the whole line so a
+# longer name never matches a shorter one. Nested `range` with absent keys yields empty output and
+# exit 0 (verified on-cluster 2026-08-01) — no jq, no python3.
 deploy_references() {
   local name="$1" ns="$2" ref="$3"
-  oc get deploy "$name" -n "$ns" -o json 2>/dev/null \
-    | grep -q "\"name\": \"${ref}\""
+  oc get deploy "$name" -n "$ns" -o jsonpath='{range .spec.template.spec.containers[*]}{range .envFrom[*]}{.configMapRef.name}{"\n"}{.secretRef.name}{"\n"}{end}{range .env[*]}{.valueFrom.configMapKeyRef.name}{"\n"}{.valueFrom.secretKeyRef.name}{"\n"}{end}{end}' 2>/dev/null \
+    | grep -qx -- "$ref"
 }
 
 # The dev Deployment carries all three probes.

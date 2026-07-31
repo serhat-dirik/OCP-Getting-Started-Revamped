@@ -35,17 +35,23 @@ localqueue_active() {
   [[ "$(oc get localqueue user-queue -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Active")].status}' 2>/dev/null || true)" == "True" ]]
 }
 
-# The dataset seed succeeded. The seed Job is a Sync hook: after `ws start`/`ws reset` it is
-# present and Complete, but a completed hook can be cleaned up later — so absence is treated as
-# "ran and cleaned up" (the PVC-Bound check covers the volume). A seed Job that is PRESENT but not
-# Complete (Failed/Running) is a real problem and fails the check. Gate on the namespace first:
-# with the namespace itself missing, "job absent" must read as FAILURE, not cleanup (G3-jobs-batch-kueue F4
-# false-positive — the check printed green while nothing existed at all).
-seed_ok() {
+# The dataset seed succeeded. ABSENCE IS NOT SUCCESS. This check used to `return 0` when the Job was
+# missing, calling that "ran and was cleaned up" — which made a Sync hook that NEVER FIRED
+# indistinguishable from one that completed, and the companion PVC-Bound check cannot cover the gap
+# because an EMPTY volume Binds exactly as well as a seeded one.
+# The Job is annotated `argocd.argoproj.io/hook-delete-policy: BeforeHookCreation`
+# (gitops/entry-states/jobs-batch-kueue/templates/claims-data.yaml): Argo deletes it only when it is
+# about to create the NEXT one, so a successful seed LEAVES THE JOB BEHIND. Verified on-cluster
+# 2026-08-01 — the namespaces whose entry state had synced still carried
+# claims-data-seed-jobs-batch-kueue-<user> with Complete=True; the ones it had never synced into
+# carried no Job at all. So absence means "never seeded", and it must fail.
+# 0 = seeded · 1 = Job present but not Complete · 2 = Job ABSENT · 3 = namespace missing.
+seed_state() {
   local job="claims-data-seed-jobs-batch-kueue-${USER_NAME}"
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  oc get job "$job" -n "$NS" >/dev/null 2>&1 || return 0
-  oc get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null | grep -q True
+  oc get ns "$NS" >/dev/null 2>&1 || return 3
+  oc get job "$job" -n "$NS" >/dev/null 2>&1 || return 2
+  oc get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null | grep -q True || return 1
+  return 0
 }
 
 # An ATTENDEE-created Job has Completed (end state).
@@ -89,7 +95,23 @@ check "workshop quota present in ${NS}"                 oc get resourcequota wor
 check "namespace opted into Kueue (kueue.openshift.io/managed=true)" ns_kueue_managed                || hint "without this label Kueue ignores labeled Jobs — ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "LocalQueue user-queue is Active (bound to ${CQ})" localqueue_active                            || hint "LocalQueue missing/inactive — check the workshop layer created ${CQ}: ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "claims-data PVC is Bound"                        pvc_bound claims-data                        || hint "dataset PVC not bound — needs an RWX StorageClass; check: oc get pvc claims-data -n ${NS}"
-check "claims-data seed Job succeeded (or cleaned up)"  seed_ok                                      || hint "seed Job present but not Complete — ws reset jobs-batch-kueue --user ${USER_NAME} (check the claims-data-seed-jobs-batch-kueue-${USER_NAME} Job)"
+SEED_DESC="claims-data seed Job Completed (the dataset was actually written)"
+seed_rc=0; seed_state || seed_rc=$?
+case "$seed_rc" in
+  0) check "$SEED_DESC" true ;;
+  1) check "$SEED_DESC" false \
+       || hint "the seed Job exists but has not Completed — read it, then re-materialize: oc describe job/claims-data-seed-jobs-batch-kueue-${USER_NAME} -n ${NS}; ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
+  2) check "$SEED_DESC" false \
+       || hint "there is NO claims-data seed Job in ${NS} — the Sync hook never ran, so claims-data is an empty volume (a Bound PVC says nothing about its contents) and every lab Job that reads /data/claims.csv will fail. A successful seed leaves its Job behind, so this is not cleanup: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
+  *) check "$SEED_DESC" false \
+       || hint "namespace ${NS} does not exist — ws start jobs-batch-kueue --user ${USER_NAME}" ;;
+esac
+# The seed prints its own row count on success. Reported (not asserted) because a completed Job keeps
+# its Complete condition long after the pod's logs can be GC'd — a missing log is not a missing dataset.
+if [[ "$seed_rc" == "0" ]]; then
+  seed_summary="$(oc logs "job/claims-data-seed-jobs-batch-kueue-${USER_NAME}" -n "$NS" 2>/dev/null | grep '^seeded ' || true)"
+  if [[ -n "$seed_summary" ]]; then info "seed job reported: ${seed_summary}"; fi
+fi
 check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset jobs-batch-kueue --user ${USER_NAME} (check maas-copy-jobs-batch-kueue-${USER_NAME})"
 check "MaaS config carries the resolved model (configmap maas-config)" cm_key_set "$NS" maas-config model || hint "the MaaS copy hook did not fill maas-config — ws reset jobs-batch-kueue --user ${USER_NAME}"
 # PRESENCE IS NOT PROOF: the check above says the Secret exists, not that its key works. The entry hook

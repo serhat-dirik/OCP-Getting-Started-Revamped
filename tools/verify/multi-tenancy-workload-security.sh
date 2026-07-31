@@ -51,6 +51,28 @@ sa_can() {  # sa check-ns verb resource
 # because the entry state correctly left it ungoverned).
 sa_cannot() { oc get sa "$1" -n "$NS" >/dev/null 2>&1 || return 1; ! sa_can "$@"; }
 
+# The FIXED workload is actually running as a NON-ROOT uid — asserted on the running Pod, not inferred
+# from the Deployment being Ready. "Ready" alone cannot tell the taught fix from the [INSTRUCTOR-DEMO]
+# alternative the content also teaches: grant root-demander a permissive SCC (anyuid) and the UNCHANGED
+# root-demanding pod admits, goes Ready, and the old check called that "now runs non-root".
+# The effective uid: a container-level securityContext.runAsUser wins over the pod-level one. When the
+# attendee's fix pins no uid at all, restricted-v2's MustRunAsRange STAMPS one onto the container at
+# admission (verified on-cluster 2026-08-01: a restricted-v2 pod carries
+# .spec.containers[0].securityContext.runAsUser=1001420000 with the pod-level field empty). So an
+# absent uid on a running pod means a RunAsAny SCC admitted it and it is running as the image's own
+# user — root, for the tools image this workload uses. Either way: no non-zero uid = not the fix.
+# Mechanism-agnostic: any securityContext that yields a non-root uid passes (template rule 14).
+root_demander_runs_nonroot() {
+  local pod uid
+  pod="$(oc get pods -n "$NS" -l app=root-demander --field-selector=status.phase=Running -o name 2>/dev/null | head -1)"
+  [[ -n "$pod" ]] || return 1
+  uid="$(oc get "$pod" -n "$NS" -o jsonpath='{.spec.containers[0].securityContext.runAsUser}' 2>/dev/null || true)"
+  if [[ -z "$uid" ]]; then
+    uid="$(oc get "$pod" -n "$NS" -o jsonpath='{.spec.securityContext.runAsUser}' 2>/dev/null || true)"
+  fi
+  [[ -n "$uid" && "$uid" != "0" ]]
+}
+
 # Guard for the RBAC-outcome checks: only a caller who can impersonate SAs (admin/CI) can evaluate them.
 IMPERSONATE_OK="false"
 oc auth can-i impersonate serviceaccounts >/dev/null 2>&1 && IMPERSONATE_OK="true"
@@ -82,7 +104,8 @@ else
   # --- end state: the lab's OUTCOME — workload fixed + the team RBAC in place ----------------------
   # Assert OUTCOMES (the workload runs; effective permissions), never the mechanism (which RoleBinding
   # name / which securityContext field), so any correct solution stays green (template rule 14).
-  check "root-demander now runs non-root (>=1 ready replica)" deploy_ready root-demander             || hint "fix the image (drop runAsUser:0) and scale up — or ws solve multi-tenancy-workload-security --user ${USER_NAME}"
+  check "root-demander is running (>=1 ready replica)"        deploy_ready root-demander             || hint "fix the workload (drop runAsUser:0) and scale up — or ws solve multi-tenancy-workload-security --user ${USER_NAME}"
+  check "root-demander's pod actually runs as a NON-ROOT uid" root_demander_runs_nonroot            || hint "the pod runs, but not as a non-root uid — that is the scoped-SCC route ([INSTRUCTOR-DEMO]), not the fix. Drop runAsUser:0 from the pod spec so restricted-v2 assigns a uid from the namespace range: oc get pod -l app=root-demander -n ${NS} -o jsonpath='{.items[0].spec.containers[0].securityContext}'"
   if [[ "$IMPERSONATE_OK" == "true" ]]; then
     check "payments-ci can update Deployments in ${NS} (edit)"     sa_can payments-ci "$NS" update deployments      || hint "grant payments-ci edit in ${NS}: oc adm policy add-role-to-user edit -z payments-ci -n ${NS}"
     check "payments-ci can read pods in ${PROD} (view)"            sa_can payments-ci "$PROD" get pods              || hint "grant payments-ci view in ${PROD}: oc adm policy add-role-to-user view -z payments-ci -n ${PROD}"

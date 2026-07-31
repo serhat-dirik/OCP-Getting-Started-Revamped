@@ -42,25 +42,53 @@ repo_reachable() {
   curl -ksf --max-time 10 "$u" >/dev/null 2>&1
 }
 
-# platform-observer OLM-dissection reads (fully-qualified — the bare kinds are live traps). As the
-# attendee these prove the extended grant; as admin they are trivially true (the cockpit smoke is the
-# authoritative attendee-perspective test).
-# Impersonate the attendee (user + group, literal flags): ws verify run by an instructor/CI is
-# cluster-admin, and a bare can-i answers for the ADMIN — trivially yes, green while the attendee
-# gets Forbidden. But `--as` needs impersonate rights, which the ATTENDEE does not have (measured
-# 2026-07-29: `can-i impersonate users --as=user1 --as-group=workshop-attendees` → no), and `ws`
-# runs these from inside the cockpit AS userN — so an unguarded --as errors there and produces a
-# false ❌ on a correctly-prepared world. When the caller IS the attendee, their own
-# SelfSubjectAccessReview is already the attendee answer.
-_can_i_as_attendee() {  # _can_i_as_attendee <verb> <resource> [extra oc args…]
+# platform-observer OLM-dissection reads (fully-qualified — the bare kinds are live traps).
+#
+# ASK THE OBJECT, NOT `can-i`. These two checks exist to catch a MISSING platform-observer grant, and
+# `oc auth can-i` cannot answer that reliably for either of them:
+#   · clusterserviceversions is NAMESPACED, and the stock `admin` ClusterRole — which every attendee
+#     holds on their own namespaces via a RoleBinding — grants operators.coreos.com/
+#     clusterserviceversions get,list,watch outright (verified on-cluster 2026-08-01). So a can-i that
+#     lands on the attendee's OWN namespace answers "yes" without the observer grant existing at all.
+#   · customresourcedefinitions is CLUSTER-SCOPED, and a namespaced RoleBinding to a ClusterRole
+#     carrying a cluster-scoped rule can make can-i report it granted from inside that namespace while
+#     the real GET is refused — the trap that showed every attendee a red ❌ on a healthy ClusterQueue
+#     (jobs-batch-kueue, 2026-07-31). Measured here 2026-08-01: `admin`'s apiextensions rules are
+#     resourceNames-scoped, so THIS cluster happens to answer "no" — but a check must not rest on an
+#     accident of which operators aggregate into `admin`.
+# So: attempt the real read and classify the server's answer. Forbidden IS the failure these checks
+# exist for (platform-observer is meant to grant both, cluster-wide); anything else means the caller
+# could not ask, which is inconclusive (⚠), never a ❌.
+#
+# IDENTITY (unchanged reasoning): `ws verify` run by an instructor/CI is cluster-admin, and an
+# unimpersonated read answers for the ADMIN — green while the attendee gets Forbidden. But `--as`
+# needs impersonate rights the ATTENDEE does not have (measured 2026-07-29), and `ws` runs these from
+# inside the cockpit AS userN, where an unguarded --as errors and produces a false ❌ on a correct
+# world. When the caller IS the attendee, their own read is already the attendee answer. Both
+# impersonation flags are literal, never an unquoted variable.
+# Returns: 0 = readable · 1 = Forbidden · 2 = could not ask (API error / namespace absent / unreachable).
+_attendee_read() {  # _attendee_read <oc get args…>
+  local err rc=0 tmp="/tmp/.pkgdist-read.$$"
   if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
-    oc auth can-i "$@" --as="$USER_NAME" --as-group=workshop-attendees >/dev/null 2>&1
+    oc get "$@" -o name --as="$USER_NAME" --as-group=workshop-attendees >/dev/null 2>"$tmp" || rc=$?
   else
-    oc auth can-i "$@" >/dev/null 2>&1
+    oc get "$@" -o name >/dev/null 2>"$tmp" || rc=$?
   fi
+  err="$(cat "$tmp" 2>/dev/null || true)"; rm -f "$tmp"
+  if (( rc == 0 )); then return 0; fi
+  case "$err" in *orbidden*) return 1 ;; *) return 2 ;; esac
 }
-observer_reads_csv() { _can_i_as_attendee get clusterserviceversions.operators.coreos.com -n "$(marker dissectionOperatorNamespace)"; }
-observer_reads_crd() { _can_i_as_attendee get customresourcedefinitions.apiextensions.k8s.io; }
+
+# Same returns as _attendee_read, plus 3 = the entry marker names NO dissection namespace. A blank
+# marker must never fall through to `-n ""`: oc then silently substitutes the CALLER'S context
+# namespace, which for an attendee is one of their own — where stock `admin` grants CSV read outright,
+# so the check would report the observer grant healthy without ever having looked at it.
+observer_reads_csv() {
+  local ns; ns="$(marker dissectionOperatorNamespace)"
+  [[ -n "$ns" ]] || return 3
+  _attendee_read clusterserviceversions.operators.coreos.com -n "$ns"
+}
+observer_reads_crd() { _attendee_read customresourcedefinitions.apiextensions.k8s.io; }
 
 # Deployment presence in {user}-dev (the notifications app the finished lab leaves running).
 deploy_present() { oc get deploy "$(marker imageName)" -n "$NS" >/dev/null 2>&1; }
@@ -80,10 +108,27 @@ check "entry marker ws-entry-packaging-distributing present"               oc ge
 check "Helm target fork parasol-notifications reachable in Gitea" repo_reachable        || hint "the fork {user}/parasol-notifications is missing — check the gitea-fork Job (ws reset packaging-distributing --user ${USER_NAME}); needs parasol/parasol-notifications seeded (workshop-config app-repo-seed)"
 check "prebuilt image istag $(marker imageName):$(marker imageTag) present in ${NS}" istag_present \
   || hint "the notifications image is not built — check the notifications-build Job (ws reset packaging-distributing --user ${USER_NAME}); inspect: oc logs -f bc/$(marker imageName) -n ${NS}"
-check "platform-observer: attendee can read OLM ClusterServiceVersions (bundle dissection)" observer_reads_csv \
-  || hint "extend platform-observer with operators.coreos.com {clusterserviceversions,subscriptions,installplans,operatorgroups} — gitops/workshop-config/templates/platform-observer-clusterrole.yaml, then sync workshop-config"
-check "platform-observer: attendee can read CustomResourceDefinitions"                observer_reads_crd \
-  || hint "extend platform-observer with apiextensions.k8s.io/customresourcedefinitions (get,list,watch)"
+CSV_DESC="platform-observer: attendee can read OLM ClusterServiceVersions (bundle dissection)"
+csv_rc=0; observer_reads_csv || csv_rc=$?
+case "$csv_rc" in
+  0) check "$CSV_DESC" true ;;
+  1) check "$CSV_DESC" false \
+       || hint "extend platform-observer with operators.coreos.com {clusterserviceversions,subscriptions,installplans,operatorgroups} — gitops/workshop-config/templates/platform-observer-clusterrole.yaml, then sync workshop-config" ;;
+  3) check "$CSV_DESC" false \
+       || hint "the entry marker carries no dissectionOperatorNamespace, so this check has no target namespace to read — re-materialize the entry state: ws reset packaging-distributing --user ${USER_NAME}" ;;
+  *) warn "OLM ClusterServiceVersion read could not be evaluated — the API did not answer, or namespace $(marker dissectionOperatorNamespace) does not exist on this cluster"
+     hint "re-run from the cockpit terminal as ${USER_NAME}, or check the dissection target: oc get ns $(marker dissectionOperatorNamespace)" ;;
+esac
+
+CRD_DESC="platform-observer: attendee can read CustomResourceDefinitions"
+crd_rc=0; observer_reads_crd || crd_rc=$?
+case "$crd_rc" in
+  0) check "$CRD_DESC" true ;;
+  1) check "$CRD_DESC" false \
+       || hint "extend platform-observer with apiextensions.k8s.io/customresourcedefinitions (get,list,watch)" ;;
+  *) warn "CustomResourceDefinition read could not be evaluated — the API did not answer"
+     hint "re-run from the cockpit terminal as ${USER_NAME}, or check cluster reachability: oc whoami" ;;
+esac
 
 # INFO: the OCI-capable helm client (hard-checked by the cockpit smoke gate, not failed here so
 # standalone/CI verify on a runner without helm stays green).

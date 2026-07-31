@@ -59,12 +59,40 @@ reencrypt_route() {
             -o jsonpath='{.items[?(@.spec.tls.termination=="reencrypt")].metadata.name}' 2>/dev/null)" ]
 }
 
-# From the demo-client pod, is claims-db:5432 BLOCKED? Returns 0 (success) when the connection does
-# NOT open — the "db only from api" outcome, since demo-client is not an app=parasol-claims pod. A
-# netpol drop makes the connect time out (timeout → non-zero); an open connect exits 0 → NOT blocked.
-db_blocked_from_demo_client() {
-  ! oc exec deploy/demo-client -n "$NS" -- timeout 5 bash -c '</dev/tcp/claims-db/5432' >/dev/null 2>&1
+# --- the db-block probe and its CONTROLS -------------------------------------
+# Proving micro-segmentation by a command FAILING is only evidence if the same machinery SUCCEEDS
+# where it should. `! oc exec … </dev/tcp/claims-db/5432` returns "blocked" for a pod that is
+# restarting, an exec the API refuses, an image without bash or timeout, a broken DNS path, a deleted
+# claims-db Service and a claims-db that simply is not listening — every one of which would have
+# certified the lesson on a namespace where nothing was ever blocked. So three controls run first,
+# and the block is graded ONLY behind them. Images verified on-cluster 2026-08-01: the RHEL tools
+# image (demo-client) carries bash + timeout + getent, and the parasol-claims runtime
+# (ubi9/openjdk-21-runtime) carries bash + timeout.
+
+# Does a TCP connection OPEN from <deployment>'s pod to host:port? Same shape the lab teaches.
+tcp_open_from() {  # tcp_open_from <deployment> <host> <port>
+  oc exec "deploy/$1" -n "$NS" -- timeout 5 bash -c "</dev/tcp/$2/$3" >/dev/null 2>&1
 }
+
+# CONTROL 1 — the probe machinery itself: exec works, and bash+timeout exist in the image.
+probe_machinery_ok() {
+  oc exec deploy/demo-client -n "$NS" -- timeout 5 bash -c 'exit 0' >/dev/null 2>&1
+}
+
+# CONTROL 2 — the NAME resolves from the probing pod: cluster DNS answers (the lab's allow-dns-egress
+# is doing its job) and a claims-db Service still exists. Without this, "no route to a name that does
+# not resolve" reads identically to "policy dropped the packet".
+db_name_resolves_from_demo_client() {
+  oc exec deploy/demo-client -n "$NS" -- timeout 5 getent hosts claims-db >/dev/null 2>&1
+}
+
+# CONTROL 3 (strongest, needs a Ready parasol-claims) — the POSITIVE control: the same connection
+# OPENS from the one identity allow-db-from-claims admits. This is what tells "the policy blocks the
+# unauthorized pod" from "nothing can reach this database at all".
+db_open_from_allowed_pod() { tcp_open_from parasol-claims claims-db 5432; }
+
+# The graded outcome: from demo-client (NOT app=parasol-claims), claims-db:5432 must NOT open.
+db_blocked_from_demo_client() { ! tcp_open_from demo-client claims-db 5432; }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                          || hint "run: ws prep networking-dev-devops (or ws start networking-dev-devops --user ${USER_NAME})"
@@ -96,13 +124,26 @@ else
   check "'db only from api' policy present"               np_present allow-db-from-claims         || hint "allow ingress to claims-db:5432 only from parasol-claims pods"
   check "parasol-web is exposed via a Route"              oc get route parasol-web -n "$NS"       || hint "expose parasol-web: oc create route edge parasol-web --service=parasol-web -n ${NS}"
   check "a re-encrypt Route exists (last hop encrypted)"  reencrypt_route                         || hint "the edge Route leaves router→pod in plaintext; re-encrypt it: oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n ${NS}"
-  # Behavioural proof — only meaningful when the substrate (claims-db + demo-client) is up, which it is
-  # on any cluster (platform images). demo-client is NOT app=parasol-claims, so default-deny + the
-  # 'db only from api' allow must BLOCK it. A >= -style outcome check: it must be UNreachable.
-  if deploy_ready claims-db "$NS" && deploy_ready demo-client "$NS"; then
-    check "unauthorized pod CANNOT reach claims-db:5432 (policy blocks it)" db_blocked_from_demo_client || hint "the 'db only from api' policy must drop demo-client→claims-db; check default-deny + allow-db-from-claims"
-  else
+  # Behavioural proof, gated behind its controls (see the helpers above). demo-client is NOT
+  # app=parasol-claims, so default-deny + the 'db only from api' allow must BLOCK it — but a probe
+  # that has not been shown to work must never be allowed to certify that.
+  if ! deploy_ready claims-db "$NS" || ! deploy_ready demo-client "$NS"; then
     info "(skipped the live db-block probe — claims-db/demo-client not both Ready)"
+  elif ! probe_machinery_ok; then
+    warn "cannot grade the db-block outcome — the probe machinery itself does not run (oc exec into demo-client, or bash/timeout in its image)"
+    hint "a probe that cannot run proves nothing about what is blocked: oc exec deploy/demo-client -n ${NS} -- timeout 5 bash -c 'exit 0'"
+  elif ! db_name_resolves_from_demo_client; then
+    warn "cannot grade the db-block outcome — 'claims-db' does not RESOLVE from demo-client, so a failed connect would only prove the name is gone, not that a policy dropped it"
+    hint "check the Service and cluster DNS (default-deny blocks DNS too — that is what allow-dns-egress is for): oc get svc claims-db -n ${NS}; oc get networkpolicy allow-dns-egress -n ${NS}"
+  elif deploy_ready parasol-claims "$NS" && ! db_open_from_allowed_pod; then
+    warn "cannot grade the db-block outcome — the POSITIVE CONTROL failed: claims-db:5432 does not open even from an app=parasol-claims pod, which 'db only from api' is supposed to ALLOW"
+    hint "usually the missing EGRESS counterpart — default-deny denies egress too, so parasol-claims needs an egress allow to claims-db:5432 as well as the ingress allow. Reproduce: oc exec deploy/parasol-claims -n ${NS} -- timeout 5 bash -c '</dev/tcp/claims-db/5432'"
+  else
+    if ! deploy_ready parasol-claims "$NS"; then
+      info "(the strongest control could not run — parasol-claims is not Ready, so the allowed-path connection was not proven; grading the block on the machinery + name-resolution controls only)"
+    fi
+    check "unauthorized pod CANNOT reach claims-db:5432 (allowed path proven first)" db_blocked_from_demo_client \
+      || hint "the 'db only from api' policy must drop demo-client→claims-db, and the controls above show the probe works — check default-deny-all + allow-db-from-claims in ${NS}"
   fi
 fi
 

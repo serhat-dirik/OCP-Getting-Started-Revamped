@@ -200,7 +200,7 @@ else
   ask_rc=0; tool_grounded_answer || ask_rc=$?
   case "$ask_rc" in
     0) echo "✅ agent executed a tool-grounded query (get_claim on CLM-1001)"; VERIFY_PASS=$((VERIFY_PASS+1)) ;;
-    1) echo "❌ agent executed a tool-grounded query (get_claim on CLM-1001)"
+    1) echo "❌ agent answered WITHOUT executing a tool — get_claim was never called for CLM-1001 (ungrounded)"
        VERIFY_FAIL=$((VERIFY_FAIL+1))
        hint "POST /agent/ask did not EXECUTE get_claim (empty toolCalls) — the MaaS key may be rejected (agent returns 502 authFailure; see the credential checks above), the agent is not Ready, or the model text-echoed the call; ws solve agentic-ai --user ${USER_NAME} then retry" ;;
     *) warn "the agent Route did not answer — cannot evaluate the tool-grounded query from here"
