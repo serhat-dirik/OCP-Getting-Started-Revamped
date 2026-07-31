@@ -150,25 +150,38 @@ Your project has a Deployment called `root-demander`, seeded at *zero replicas* 
 Its container demands to run as root (`runAsUser: 0`).
 Scale it up and watch what OpenShift does:
 
-// [CAPTURE-VERIFY] Topology/Deployments list → root-demander → scale arrows, or Details > Pods count; the SCC rejection is on the REPLICASET's Events tab (Deployment → ReplicaSets → current RS → Events), NOT the Deployment's (OCP 4.21) — CLI authoritative.
-// Re-checked live 2026-07-31 with `ws start multi-tenancy-workload-security --user user3` (module
-// conflicts are per-user; user1-dev still has a conflicting module's solved state, so this run
-// materialized into user3-dev instead). `entry-multi-tenancy-workload-security-user3` is
-// Synced/Healthy. `oc get deploy,rs -n user3-dev` confirms `root-demander` at 0/0 replicas with
-// `spec.template...securityContext.runAsUser: 0` — matches the lab's "seeded at zero replicas,
-// demands root" claim — AND a ReplicaSet (`root-demander-74656644c4`) already exists at 0/0/0, so
-// the "Deployment → ReplicaSets → current RS" click-path has a real RS to land on before any scale.
-// `oc get events -n user3-dev --field-selector involvedObject.name=root-demander` (the Deployment)
-// and the same for `root-demander-74656644c4` (the ReplicaSet) both return "No resources found";
-// `oc get events --all-namespaces | grep demander` is empty cluster-wide too — no instance anywhere
-// has triggered the restricted-v2 rejection yet, so the RS-vs-Deployment Events-tab claim itself
-// remains unconfirmed (it is produced only by the scale this check must not perform). Cross-user
-// console grounding was also attempted and ruled out: `oc auth can-i list deployments -n user3-dev
-// --as=user1 --as-group=workshop-attendees` → "no" — the saved user1 console session cannot list
-// this namespace's Deployments, let alone open its ReplicaSets/Events tabs, so no screenshot check
-// was possible either. Closes when an attendee (or a smoke run authenticated as the owning user)
-// scales root-demander in their own console session and confirms the FailedCreate/restricted-v2
-// event renders on the RS's Events tab and not the Deployment's.
+// Grounded live 2026-07-31 in the browser as user3 (session tools/media/shot-profile-user3.session.json;
+// identity confirmed via /api/kubernetes/apis/user.openshift.io/v1/users/~ → user3), read-only —
+// no scale performed. Deployments list (project user3-dev) → click `root-demander` →
+// /k8s/ns/user3-dev/deployments/root-demander, tabs exactly `Details | Metrics | YAML | ReplicaSets
+// | Pods | Environment | Events`. The Details tab shows a "Scaled to 0" gauge with up/down chevron
+// arrows beside it — the "scale arrows" — observed, not clicked. *Actions* dropdown's first item is
+// literally `Edit Pod count`, matching the prose exactly. Clicking *ReplicaSets* lists the one RS
+// `root-demander-74656644c4` at "0 of 0 pods"; clicking it opens ReplicaSet details (breadcrumb
+// "ReplicaSets > ReplicaSet details") with tabs `Details | YAML | Pods | Environment | Events` (no
+// Metrics tab, unlike the Deployment) — every click-path label/menu item in the prose below is
+// confirmed correct.
+//
+// The CONTENT distinction is now established too — the exercise was PERFORMED rather than inferred.
+// `oc --as=user3 --as-group=workshop-attendees scale deploy/root-demander -n user3-dev --replicas=1`,
+// then read the events back by involvedObject.kind. The split is exactly as the prose claims:
+//   Deployment/root-demander        → Normal  ScalingReplicaSet ("Scaled up replica set
+//                                     root-demander-74656644c4 from 0 to 1") — and nothing else.
+//                                     The rejection does NOT appear here.
+//   ReplicaSet/root-demander-…4c4   → Warning FailedCreate, carrying the whole SCC verdict:
+//     `Error creating: pods "root-demander-74656644c4-" is forbidden: unable to validate against any
+//      security context constraint: [… provider restricted-v2: .containers[0].runAsUser: Invalid
+//      value: 0: must be in the ranges: [1002820000, 1002829999] …]`
+// So "the SCC rejection is on the REPLICASET's Events tab, not the Deployment's" is verified on OCP
+// {ocp_version}, not carried over from 4.21. Note the message enumerates EVERY SCC on the cluster and
+// why each one refused, so its length depends on what else is installed — quote the restricted-v2
+// clause, never the whole string.
+//
+// One anomaly, recorded because it was seen and not explained: on the FIRST scale the Deployment's
+// spec.replicas returned to 0 within ~20s (its own events show "Scaled down replica set … from 1 to
+// 0"), while an immediately repeated scale held at 1 for 45s+. Argo did not do it — this app has
+// selfHeal:false and its last sync finished hours earlier. Not reproduced, cause unknown. If an
+// attendee reports their scale "not sticking", this is the thing to chase.
 [tabs]
 ====
 Console::
