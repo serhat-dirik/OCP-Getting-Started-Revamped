@@ -1,0 +1,86 @@
+# Closes a PROVEN attendee -> cluster-admin escalation. Verified end-to-end on a live cluster on
+# 2026-07-31: an attendee-created Application naming the built-in `default` AppProject was accepted
+# AND reconciled to Synced/Healthy by the platform application-controller, which runs as
+# cluster-admin. `default` permits `*` source repos, `*` destinations and `*` cluster-scoped kinds.
+#
+# Why the RBAC alone cannot fix this: Role/{user}-entry-apps MUST grant `create` on Applications --
+# k8s RBAC cannot scope `create` by name (no name exists at admission time), and `ws prep` ->
+# cmd_reset -> `oc apply` genuinely creates the app when the attendee has none. The grant is
+# correct; what was missing is a constraint on WHAT they may create. Any "attendee may create X"
+# grant needs an admission-layer partner -- treat that as a standing rule.
+#
+# Argo's own RBAC is NOT the control here and never sees this: attendees have zero rights in the
+# Argo API/UI (defaultPolicy ""), because the escalation is a k8s-API side door.
+#
+# This policy re-imposes the invariant ADR-0002 merely assumed: an attendee may only ever
+# materialize the exact Application `ws` would have rendered for them.
+#
+# KNOWN RESIDUAL, not closed here: `workshop-entries` is ONE AppProject for eight tenants and its
+# destinations are "*", so an attendee can still have the cluster-admin controller create a
+# RoleBinding in any namespace. Blacklisting RBAC kinds is not available -- entry charts
+# legitimately render 37 RoleBindings, 34 Roles and 26 ServiceAccounts across 16 modules. The real
+# fix is per-user AppProjects for entry states, mirroring proj-{user}.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ogsr-attendee-entry-app-guard
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  # Fail closed. Only attendees are matched, so a broken policy can never wedge the platform
+  # portfolio or the instructor path — the blast radius of a failure is `ws prep` for attendees.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # UPDATE is as important as CREATE: patch IS resourceNames-scoped to the attendee's own
+      # entry-<slug>-<user> apps, so without this they could simply repoint an app they legitimately
+      # own at project `default` and an arbitrary source.
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["applications"]
+  matchConditions:
+    # Attendee identities only. Instructors, `ws` run as admin, and every controller ServiceAccount
+    # (including the Argo application-controller writing status) are outside this policy entirely.
+    - name: attendee-identity-only
+      expression: "'workshop-attendees' in request.userInfo.groups"
+  validations:
+    # 1. The AppProject is the whole ballgame — `default` permits `*` repos, `*` destinations and
+    #    `*` cluster-scoped kinds, and the controller that would reconcile it is cluster-admin.
+    - expression: "has(object.spec.project) && object.spec.project == 'workshop-entries'"
+      message: "attendees may only use the 'workshop-entries' AppProject"
+      reason: Forbidden
+    # 2. Single-source only. A `spec.sources` (plural) app would slip past every source check below.
+    - expression: "!has(object.spec.sources) && has(object.spec.source)"
+      message: "attendees may only create single-source Applications"
+      reason: Forbidden
+    # 3. The app must be named exactly as `ws` names it, and end in the requester's own username —
+    #    this is the create-side equivalent of the resourceNames scoping on patch/delete.
+    - expression: "object.metadata.name.startsWith('entry-') && object.metadata.name.endsWith('-' + request.userInfo.username)"
+      message: "attendees may only create Applications named entry-<module-slug>-<their own username>"
+      reason: Forbidden
+    # 4. The source path must be an entry state, not an arbitrary directory of the repo (the
+    #    platform-portfolio paths, for instance, are cluster-scoped by nature).
+    - expression: "has(object.spec.source.path) && object.spec.source.path.startsWith('gitops/entry-states/')"
+      message: "attendees may only source Applications from gitops/entry-states/"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ogsr-attendee-entry-app-guard
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+spec:
+  policyName: ogsr-attendee-entry-app-guard
+  validationActions: ["Deny"]
+  matchResources:
+    # Bound to the platform Argo namespace only — the one place attendees hold Application write
+    # rights, and the one instance whose controller is cluster-admin. Keeps the workshop
+    # non-invasive on an adopted cluster: nothing outside this namespace is evaluated.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.argoNamespace | default "openshift-gitops" }}
