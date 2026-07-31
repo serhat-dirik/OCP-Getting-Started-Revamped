@@ -15,13 +15,24 @@ app-of-apps. Everything here is a **single shared install** — never per-user; 
 
 | Component | Operator (channel) | Config CRs | Wave |
 |---|---|---|---|
-| `service-mesh` | `servicemeshoperator3` (`stable-3.3` = v3.3.5) | `Istio` (istiod, revision `default`, istio-system) + `IstioCNI` (istio-cni) | 0 |
+| `service-mesh` | `servicemeshoperator3` (channel **unset** → package default, `stable`) | `Istio` (istiod, revision `default`, istio-system) + `IstioCNI` (istio-cni) | 0 |
 | `kiali` | `kiali-ossm` (`stable` = v2.27.1) | `Kiali` (istio-system, OpenShift OAuth) | 1 |
+
+**The OSSM operator channel is deliberately not pinned.** The workshop must drop onto a cluster you do
+not own without fighting its operator lifecycle, so the Subscription omits `spec.channel` and follows
+whatever `redhat-operators` declares as the package default. **Minimum: OSSM 3.3.0** — anything newer is
+expected and supported. Content and screenshots were *grounded on* v3.3.5 / Istio v1.28.6 (see
+`versions.yaml` `service_mesh`); on a cluster running 3.4.x the operator version in the console will read
+higher, which is correct, not drift.
 
 **Sidecar-default per ADR-0003** — no `ZTunnel` (ambient is an M19 concept + optional exercise, not the
 platform baseline). SMCP/SMMR do **not** exist in 3.x (Sail uses `sailoperator.io/v1` — ban-clean). The
-Istio build is pinned via `spec.version` in `components/service-mesh/istio.yaml` (versions.yaml
-`service_mesh.istio_version`).
+Istio build is requested via `spec.version` in `components/service-mesh/istio.yaml` (versions.yaml
+`service_mesh.istio_version`). That field is a **CRD enum owned by the operator**, so it is the one thing
+a float can invalidate: before assuming a new OSSM minor is safe, check that `v1.28.6` still appears in
+`pkg/istioversion/versions.ossm.yaml` on the matching `release-3.N` branch of
+`openshift-service-mesh/sail-operator`. Verified 2026-07-31: `release-3.4` still ships it (only the 1.26
+line is `eol: true`), so a 3.3 → 3.4 float needs no manifest change.
 
 ## Coexistence with the OpenShift Gateway API (the load-bearing design point)
 
