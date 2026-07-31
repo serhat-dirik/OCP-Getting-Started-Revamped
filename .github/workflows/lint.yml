@@ -583,3 +583,111 @@ jobs:
           fi
           echo "self-test ok — all three canaries are detected and the real tree stays clean (rc=1)."
           bash tools/lint/uninstall-state-lifetime-guard.sh
+
+  uninstall-operand-order:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Operands die before their operator, and the CRD list is captured before the cascade
+        # 2026-07-31, one teardown, two defects that both reported success.
+        #
+        # (a) ogsr-uninstall.sh captured `crds_created` — the CRDs that exist because WE installed an
+        # operator — inside its CSV-cleanup step, which runs AFTER the cascade has already deleted
+        # most of the CSVs it reads. Measured: 17 CRDs recorded while 165 were still registered, and
+        # ogsr-check-clean.sh section [9/9] reported those 17 as the complete list in its highest-
+        # confidence "exact" mode and called the cluster clean.
+        #
+        # (b) The Pipelines operator creates TektonConfig for itself, so it carries no Argo
+        # tracking-id and no cascade can prune it. After the uninstall the CSV and Subscription were
+        # gone while TektonConfig was still up with 18 pods and a bound 1Gi PVC — every pod 1/1,
+        # nothing managing it, nothing that would ever remove it.
+        #
+        # The guard proves four things by EXECUTING the real functions against stubs: the capture runs
+        # pre-cascade and refuses an adopted operator's CRDs; the operand step sits between
+        # step_stop_reconciliation and the cascade in main; the step deletes only our cluster-scoped,
+        # non-Argo-tracked, non-adopted operands, blocking, in two passes; and the checker refuses
+        # "exact" without crds_created_capture=pre-cascade. Invisible to every other gate here — both
+        # halves are valid, lint-clean shell whose only symptom is a cluster nobody re-inspects.
+        run: |
+          rc=0
+          bash tools/lint/uninstall-operand-order-guard.sh --self-test || rc=$?
+          # Exactly 1 = the real tree satisfies all four contracts AND all six canaries (capture call
+          # removed, authorization gate removed, operand step moved after the cascade, Argo-tracked
+          # guard removed, second pass removed, capture-phase proof removed) were detected. 0 = a
+          # detector is blind; 2 = the real tree is broken, extraction failed, or the harness is.
+          # Either way detection is unproven, so fail rather than trust a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::uninstall-operand-order-guard self-test must exit 1 (real tree clean, all" \
+                 "six canaries detected); got rc=$rc. The guard's detection is unproven — refusing" \
+                 "to trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — all six canaries are detected and the real tree stays clean (rc=1)."
+          bash tools/lint/uninstall-operand-order-guard.sh
+
+  operatorgroup-uniqueness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A second OperatorGroup in an adopted operator's namespace is a hard install failure
+        # assert_single_operatorgroup() is the last line of defense against the 2026-07-25 incident:
+        # our component applied its own OperatorGroup into a namespace that already had one (an
+        # org-owned cert-manager-operator's). OLM then fails EVERY CSV in that namespace silently
+        # (phase Failed, reason TooManyOperatorGroups) while the Deployments keep running 1/1 --
+        # nothing looks wrong until the org's next upgrade. The assert had never been driven; proving
+        # it live means breaking a namespace someone else depends on, so it gets a guard instead.
+        #
+        # Three scenarios, and the third is what makes this a real gate rather than a blunt one: a
+        # clean cluster passes; OUR OperatorGroup landing next to the org's fails with the degradation
+        # warning and an undo hint naming ours, never theirs; and a pre-existing collision we did NOT
+        # cause still PASSES. A check that failed every multi-OperatorGroup namespace would block
+        # installs on states we have no business fixing, and would be switched off the first time it
+        # fired on a customer cluster.
+        run: |
+          rc=0
+          bash tools/lint/operatorgroup-uniqueness-guard.sh --self-test || rc=$?
+          # Exactly 1 = the real tree satisfies the contract AND the canary (our own collision going
+          # unflagged) was detected. 0 = the detector is blind; 2 = the real tree is broken,
+          # extraction failed, or the harness is. Either way detection is unproven, so fail rather
+          # than trust a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::operatorgroup-uniqueness-guard self-test must exit 1 (real tree clean," \
+                 "canary detected); got rc=$rc. The guard's detection is unproven -- refusing to" \
+                 "trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok -- the canary is detected and the real tree stays clean (rc=1)."
+          bash tools/lint/operatorgroup-uniqueness-guard.sh
+
+  batch-taint-pending:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The batch-pool taint is not silently starving an unrelated pod's scheduling
+        # assert_no_batch_taint_pending() exists because of the 2026-07-30 incident: on a 2-worker
+        # cluster, tainting one worker for the batch pool left the survivor at 99% memory requests,
+        # RHACS central-db Pending for 3h+ and Central crashlooping -- while every Argo application
+        # reported Healthy throughout. The assert had never been driven; proving it live means
+        # starving a real namespace, so it gets a guard instead.
+        #
+        # Five scenarios: no taint applied this run skips cleanly and touches oc ZERO times (proven
+        # with a call-count file, not by reading the code); zero Pending pods and a Pending pod that
+        # tolerates our taint both pass; a pod blocked SOLELY by our taint fails, naming the real
+        # incident; and a pod citing an untolerated taint on a node that ALSO carries an unrelated
+        # taint does NOT fail but still surfaces the ambiguity -- the exact false positive the
+        # function's own header comment warns about.
+        run: |
+          rc=0
+          bash tools/lint/batch-taint-pending-guard.sh --self-test || rc=$?
+          # Exactly 1 = the real tree satisfies the contract AND the canary (a Pending pod blocked by
+          # our taint going uncounted) was detected. 0 = the detector is blind; 2 = the real tree is
+          # broken, extraction failed, or the harness is. Either way detection is unproven, so fail
+          # rather than trust a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::batch-taint-pending-guard self-test must exit 1 (real tree clean, canary" \
+                 "detected); got rc=$rc. The guard's detection is unproven -- refusing to trust a" \
+                 "clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok -- the canary is detected and the real tree stays clean (rc=1)."
+          bash tools/lint/batch-taint-pending-guard.sh
