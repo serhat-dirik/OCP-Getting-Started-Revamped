@@ -116,9 +116,42 @@ esac
 
 # ClusterQueue is cluster-scoped — attendees can't read it. Assert it only when the caller can
 # (admin/CI); attendees see the same fact via the LocalQueue Active check above.
-if oc auth can-i get clusterqueues.kueue.x-k8s.io >/dev/null 2>&1; then
-  check "ClusterQueue ${CQ} is Active (admits workloads)" cq_active                                   || hint "workshop layer's per-user ClusterQueue missing/inactive — run bootstrap/install.sh"
-fi
+#
+# ASK THE OBJECT, NOT `can-i`. This guard used to be `oc auth can-i get clusterqueues…`, and it
+# returned the WRONG ANSWER for exactly the identity it exists to protect. Measured 2026-07-31:
+#
+#     can-i (context -n default     ) -> no
+#     can-i (context -n user6-batch ) -> yes     <- the attendee's OWN namespace
+#     the real GET                   -> Forbidden, either way
+#
+# `<user>-admin` is a NAMESPACED RoleBinding to the stock `admin` ClusterRole, and that ClusterRole
+# carries a get/list/watch rule for clusterqueues. A namespaced binding can never actually authorize
+# a cluster-scoped resource — but `can-i`, evaluated from inside that namespace, reports the rule as
+# granted anyway. An attendee's terminal runs in their own namespace, so the guard said "yes", the
+# read was refused, and every attendee saw a red ❌ on a ClusterQueue that was Active the whole time.
+# The old hint then told them to run bootstrap/install.sh: a maintainer-only cluster installer they
+# have no access to and must never run. A false ❌ destroys trust in every other ✅ on the page.
+#
+# This is a THIRD can-i trap for this repo's collection, and the nastiest, because the other two
+# (`--as` without `--as-group`; `resource/name` parsing as TYPE/NAME) produce fabricated BLOCKERS
+# while this one produces false FAILURES.
+#
+# So: attempt the read and branch on what actually comes back. Forbidden means the caller is an
+# attendee and the check is not theirs to run — skip, and say so, because a silent skip and a pass
+# look identical. Anything else (including NotFound) means the caller CAN ask, so a missing or
+# inactive ClusterQueue still fails loudly for admin/CI, which is the case this check exists for.
+cq_err="$(oc get clusterqueue "$CQ" -o name 2>&1 >/dev/null || true)"
+case "$cq_err" in
+  *orbidden*)
+    info "ClusterQueue ${CQ} check SKIPPED — cluster-scoped and not readable as this identity."
+    info "   ↳ not a failure, and not yours to fix: the LocalQueue Active check above asserts the same"
+    info "     health from inside your namespace (Kueue marks a LocalQueue inactive when its"
+    info "     ClusterQueue is missing or inactive)."
+    ;;
+  *)
+    check "ClusterQueue ${CQ} is Active (admits workloads)" cq_active                                 || hint "the workshop layer's per-user ClusterQueue is missing or inactive. This is a PLATFORM check, not an attendee one — an SA should confirm the workshop-config Argo app is Synced: oc get clusterqueue ${CQ}"
+    ;;
+esac
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / `ws solve jobs-batch-kueue` looks like) -----------
