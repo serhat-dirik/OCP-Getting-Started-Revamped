@@ -94,12 +94,34 @@ if you want a clean slate, uninstall first (§7).
 **What the cluster must give you**, however you obtain it:
 
 - OpenShift 4.x with **cluster-admin** — the installer creates operators, CRDs and cluster-scoped objects.
+- **`linux/amd64` worker nodes.** See the note below — this rules out OpenShift Local on Apple Silicon.
 - The node count and shape from §2.4. This is the one to get right up front; it is not adjustable later
   without disruption, and an undersized cluster fails in ways that look like workshop bugs.
 - Outbound access to the image registries the operators pull from.
 
 Any cluster meeting that runs the installer unmodified — `bootstrap/install.sh` reads `vars.yaml` and
 takes no cluster-specific flags.
+
+**OpenShift Local (CRC) on Apple Silicon will not complete the install.** It is the obvious thing to
+reach for when you want a throwaway cluster on your laptop, so it is worth knowing why it fails before
+you spend an afternoon on it. The Gitea operator is not in OperatorHub, so the platform portfolio
+installs it from the RHPDS `gitea-operator` OLMDeploy base, whose CatalogSource image is
+`quay.io/rhpds/gitea-catalog:latest`. That image is published as a **single-arch `linux/amd64` OCI
+manifest with no manifest list** — there is no `arm64` variant to pull, so on an `arm64` CRC the
+CatalogSource pod cannot run natively, and under emulation it panics. Nothing downstream of it can
+install, because Gitea is where every attendee's repositories come from.
+
+```console
+$ skopeo inspect docker://quay.io/rhpds/gitea-catalog:latest | jq '{Architecture, Os}'
+{
+  "Architecture": "amd64",
+  "Os": "linux"
+}
+```
+
+CRC on an `amd64` host is unaffected, but see §2.4 before assuming a single-node cluster has the
+headroom. For laptop work the supported path is content preview (`./utilities/lab-serve`), which needs
+no cluster at all.
 
 **If you are at Red Hat**, order the **OpenShift Field Asset** item from the Red Hat Demo Platform
 (internal; the link will not resolve for anyone else):

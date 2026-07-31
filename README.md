@@ -76,7 +76,7 @@ the cluster's owner cares about from upgrading — see **[INSTALL.md](INSTALL.md
 
 **Prerequisites**
 
-* An OpenShift **4.20+** cluster with a default StorageClass (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket).
+* An OpenShift **4.20+** cluster with a default StorageClass and **`linux/amd64` workers** (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket). OpenShift Local on Apple Silicon cannot complete the install — the Gitea catalog image is amd64-only; see [INSTALL.md §2.3](INSTALL.md).
 * `cluster-admin` access, with the `oc` CLI logged in to that cluster.
 * `git` on the machine you install from.
 * The installer is **non-invasive on existing clusters**: operators already present are adopted (never overwritten or upgraded), attendees live in their own identity provider, and nothing about the cluster's default behavior is changed.
