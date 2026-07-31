@@ -231,14 +231,46 @@ spec:
         echo "▶ RHACS build-time image check: ${IMAGE} (categories: ${POLICY_CATEGORIES})"
         # --insecure-skip-tls-verify: Central serves its own service cert; the call is cluster-internal.
         # --categories scopes the gate to the deterministic trust-stack policies (see POLICY_CATEGORIES).
-        roxctl image check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify \
-          --categories "${POLICY_CATEGORIES}" --image "${IMAGE}"
+        # --retries/--retry-delay are roxctl's OWN flags for a backend that is not ready yet
+        # (help: "number of retries before exiting as error"). Using them means a scanner still
+        # warming up resolves itself instead of surfacing as a workshop failure at all.
+        OUT="$(roxctl image check --endpoint "${ROX_ENDPOINT}" --insecure-skip-tls-verify \
+                 --retries 6 --retry-delay 10 \
+                 --categories "${POLICY_CATEGORIES}" --image "${IMAGE}" 2>&1)"
         RC=$?
+        printf '%s\n' "$OUT"
         if [ "$RC" -eq 0 ]; then
           echo "✅ image check passed — no enforced build-time policy violations"
           printf 'true' > "$(results.check-passed.path)"
           exit 0
         fi
+
+        # DO NOT infer "policy violated" from a non-zero exit. roxctl documents no exit-code
+        # taxonomy — verified against the pinned image's own `image check --help`, which describes
+        # retries and nothing about distinguishing a violation from a backend error — so the exit
+        # code cannot tell the two apart. Deciding it means "violated" is how a clean build was
+        # told to "remove the vulnerable dependency" while the real cause was RHACS reporting
+        # `matcher is not initialized`, i.e. the scanner had not finished loading. In the module
+        # that teaches people to TRUST security gates, a gate that cries wolf on clean code
+        # teaches the opposite lesson, and the attendee cannot tell the difference.
+        #
+        # The discriminator is whether roxctl produced a policy ASSESSMENT at all. If it never
+        # evaluated policies, we have no grounds to claim one was violated — whatever the exit
+        # code. The known-signature check below only sharpens the message; the assessment test is
+        # what makes this correct for infrastructure failures nobody has seen yet.
+        if printf '%s' "$OUT" | grep -qiE 'matcher is not initialized|scanner is not ready|context deadline exceeded|connection refused|no such host|unavailable desc'; then
+          echo "⏳ image check COULD NOT RUN — RHACS is not ready yet, this is NOT a policy result."
+          echo "   Your build is not implicated. Wait for the scanner to finish loading and re-run."
+          echo "   check: oc get pods -n stackrox | grep scanner"
+          exit "$RC"
+        fi
+        if ! printf '%s' "$OUT" | grep -qiE 'policy|violation'; then
+          echo "⏳ image check COULD NOT RUN — roxctl exited ${RC} without assessing any policy."
+          echo "   That is an infrastructure or connectivity failure, NOT a finding about your image."
+          echo "   Your build is not implicated. See the output above, then re-run."
+          exit "$RC"
+        fi
+
         printf 'false' > "$(results.check-passed.path)"
         if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
           echo "⚠️  policy violation(s) found (reporting only — FAIL_ON_VIOLATION=false)"
