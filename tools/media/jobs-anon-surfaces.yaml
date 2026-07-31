@@ -1,0 +1,137 @@
+# Screenshots reachable WITHOUT any login — the anonymous-surface capture pass (2026-08-01).
+#
+# WHY THIS FILE EXISTS. Most of the workshop's outstanding media needs a session we cannot get
+# without a human typing a password (OCP console, Argo CD, Gitea, RHACS). Four surfaces do not:
+#
+#   * Rekor Search UI          — public by design (no auth at all).
+#   * Red Hat Developer Hub    — `app-config-rhdh` enables the GUEST provider outside development
+#                                (`auth.providers.guest.dangerouslyAllowOutsideDevelopment: true`),
+#                                so one click on "Enter" is the whole sign-in. That is the
+#                                `click_text: [Enter]` on every RHDH job below; it is a no-op once
+#                                a session exists, so the jobs work cold and warm.
+#   * SonarQube  /api/*        — anonymous read is on (but see the m08 note at the bottom).
+#   * Showroom ttyd terminal   — 200 with no auth, runs as the attendee.
+#
+# Run with --no-auth: these need a FRESH context, not the console profile.
+#
+#     export OGSR_DOMAIN=apps.<cluster>.<base>
+#     tools/media/.venv/bin/python tools/media/capture.py \
+#       --jobs tools/media/jobs-anon-surfaces.yaml --no-auth
+#
+# NOTE on tools/media/jobs-rekor.yaml: that file is PARKED with a note saying the Rekor row cannot
+# be shot until an image is genuinely signed and a digest exists to search by. That prerequisite is
+# now DONE (see the trusted-supply-chain row below) and the row is captured here instead, so that
+# file's parked reason is obsolete.
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # trusted-supply-chain row 4 — the transparency-log receipt.
+  #
+  # PREREQUISITE, and it is not optional: Rekor on a fresh cluster has treeSize 0, so the search UI
+  # has literally nothing to return and any shot of it is a picture of an empty form. Perform the
+  # module's exercise 4 first, as the attendee, to put a real entry in the log:
+  #
+  #   oc exec -n ogsr-showroom <showroom-{user}-pod> -c terminal -- bash -lc '...'
+  #     (the exec runs as `lab-user`, already `oc whoami` == {user} — same container, same tools,
+  #      same identity the ttyd terminal gives an attendee)
+  #   ... curl cosign+rekor-cli from $CLI, clone seed-vulnerable, mvn ...:makeBom,
+  #       cosign initialize --mirror=$TUF, TOKEN=$(oc create token pipeline
+  #       --audience trusted-artifact-signer -n {user}-cicd),
+  #       cosign sign-blob -y --identity-token="$TOKEN" --bundle ~/sbom.bundle \
+  #         target/parasol-claims-sbom.json
+  #
+  # then take the SBOM's sha256 (`sha256sum target/parasol-claims-sbom.json`) and put it in the URL
+  # below. The UI accepts `?hash=sha256:<digest>` (bare `<digest>`, `?uuid=`, and `?logIndex=` all
+  # work too) and runs the search on load — no typing needed.
+  #
+  # The digest below is from the 2026-08-01 run as user4. It is NOT stable across clusters: the SBOM
+  # is regenerated per run, so re-derive it rather than trusting this literal.
+  - slug: trusted-supply-chain
+    filename: trusted-supply-chain-04-rekor-entry.png
+    url: "https://rekor-search-ui-trusted-artifact-signer.{domain}/?hash=sha256:5da69fb0c90d80f2d7601acdfbb18240885f749331b614ba4bc6db6e8730a5e1"
+    # "Rekor" is in <title> but NOT in the body — a wait on it can never pass. The body's own words
+    # are Attribute / Email / Hash / Commit SHA / Entry UUID / Log Index / Search, and every one of
+    # those is on the EMPTY form too. Only a RESULT carries "Showing 1 - 1 of 1", "hashedrekord" and
+    # an "Entry UUID:" line, so those are what the waits name.
+    wait_all_text:
+      - "Showing 1 - 1 of 1"
+      - "Entry UUID:"
+      - "hashedrekord"
+      - "Log Index"
+      - "Integrated time"
+    # The caption promises a log index and an integrated time. Both sit in the result card, and a
+    # text wait cannot tell whether that card is above or below the fold.
+    #
+    # Do NOT put "Log Index" here even though the card carries it: the *Attribute* dropdown's
+    # closed menu also contains an option with that exact text, and the frame check resolves the
+    # hidden menu item first and fails with "present but has no box (hidden)" on a page that is
+    # perfectly correct. "Integrated time" and "Entry UUID:" are unique to the result card.
+    require_in_frame:
+      - "Entry UUID:"
+      - "Integrated time"
+    forbid_text:
+      - "No matching entries"
+      - "Showing 0"
+    settle_ms: 6000
+
+  # ---------------------------------------------------------------------------------------------
+  # developer-hub-golden-paths rows 5 and 6 — the scaffolder task pages.
+  #
+  # These are the two halves of the module's break-and-fix: the same template run twice with the
+  # same service name, so the second one collides on the repo that the first one created.
+  #
+  # The task IDs are per-cluster. Enumerate them with the guest token rather than guessing:
+  #   TOKEN=$(curl -sk https://<rhdh>/api/auth/guest/refresh \
+  #     | python3 -c 'import sys,json;print(json.load(sys.stdin)["backstageIdentity"]["token"])')
+  #   curl -sk -H "Authorization: Bearer $TOKEN" https://<rhdh>/api/scaffolder/v2/tasks?limit=20
+  # then read `status` (completed / failed) and `spec.parameters` to pick the right pair.
+  - slug: developer-hub-golden-paths
+    filename: developer-hub-golden-paths-05-scaffold-steps.png
+    url: "https://backstage-developer-hub-rhdh.{domain}/create/tasks/4ddf753e-a2fe-49b5-931a-a173425898cf"
+    click_text: ["Enter"]
+    # Naming the three steps is not enough on its own — a RUNNING task lists all three too, with
+    # spinners. The elapsed-time labels and the output links only exist once it has finished.
+    wait_all_text:
+      - "Fetch skeleton and substitute values"
+      - "Publish to Gitea"
+      - "Register in the software catalog"
+      - "Open the new repository"
+      - "Open in the software catalog"
+    require_in_frame:
+      - "Register in the software catalog"
+      - "Open in the software catalog"
+    forbid_text: ["Run completed with status: failed"]
+    settle_ms: 9000
+
+  - slug: developer-hub-golden-paths
+    filename: developer-hub-golden-paths-06-scaffold-409.png
+    url: "https://backstage-developer-hub-rhdh.{domain}/create/tasks/5a6d4d06-fe21-4e20-aa66-3a71f6b71e5a"
+    click_text: ["Enter"]
+    # The 409 text is the whole point of the shot, so it is a wait, not a hope.
+    #
+    # "Run completed with status: failed" is NOT usable here even though the task's eventstream
+    # emits it: that line exists only in the API stream, never in the rendered page. What the page
+    # renders is a red error banner above the steps, and the same text again in the step log.
+    wait_all_text:
+      - "Publish to Gitea"
+      - "409 Conflict"
+      - "The repository with the same name already exists."
+    require_in_frame:
+      - "409 Conflict"
+      - "Publish to Gitea"
+    forbid_text: ["Open in the software catalog"]
+    settle_ms: 9000
+
+# ---------------------------------------------------------------------------------------------
+# NOT HERE, and why — app-security-testing row 3 (the SonarQube quality-gate / S2068 finding).
+#
+# SonarQube answers `/api/issues/search` anonymously, so the surface is reachable. The DATA is not:
+# the only analysed project on this cluster has been driven to its GREEN end state, so the S2068
+# "hard-coded password" issue is `CLOSED / FIXED`, `vulnerabilities` measures 0 and the gate reads
+# OK. The row needs the RED state. Shooting it now would produce a valid PNG of a passing project,
+# which is the exact failure this harness exists to prevent.
+#
+# TO FINISH IT: re-run the module's SAST stage against the seeded branch so a fresh analysis
+# reopens the finding, then shoot
+# `/project/issues?id=parasol-claims-<user>&open=<issueKey>&types=VULNERABILITY`, waiting on
+# "S2068" AND the file name, never on "SonarQube".

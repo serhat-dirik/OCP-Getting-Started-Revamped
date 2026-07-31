@@ -28,6 +28,47 @@ screen-captured** (no browser in the build environment). Capture them in the med
 > a UI create form, which does not exist in Argo 3.4. The three-app cards in the Argo CD **Applications**
 > view (`02`) are the UI counterpart (the ApplicationSet detail/read view also does not exist in 3.4).
 
+> **Row 4 was two screenshots wearing one filename** (fixed 2026-08-01). The old row 4 asked for the
+> terminal watch loop *and* "a second shot of the console's Workloads → Pods view at the same moment",
+> both under `gitops-at-scale-04-canary-progressing.png`. One file cannot hold two views, and the pair
+> is not equally reachable: **4a** is a terminal shot and needs no login, while **4b** needs a console
+> OAuth session. They are now separate rows so the blocked one cannot hold the reachable one hostage.
+> They must still be shot at the **same instant** to mean anything — that is the one genuinely
+> human-timed capture in this module.
+
+## Capturing the terminal rows (1, 4a, 5) — the mechanism, established 2026-08-01
+
+**The Showroom ttyd terminal is reachable anonymously and IS drivable**, which is worth stating plainly
+because it was assumed otherwise. Measured on this cluster:
+
+* `https://showroom-{user}.<domain>/tty-top/` returns **200 with no auth**, and the shell it hands you is
+  already the attendee — typing `oc whoami` returned `user4`.
+* Playwright **can** type into it: click `.xterm-screen`, then `page.keyboard.type("…\n")`. The keystrokes
+  reach the real shell and the real output renders.
+* **`capture.py`'s safety model does not survive the trip**, and this is the part that matters. xterm.js
+  paints to a canvas, so `document.body.innerText` is the **empty string** — `wait_all_text`,
+  `forbid_text` and `require_in_frame` are all silently blind here and a job would happily shoot a
+  half-rendered or wrong screen. **Do not point a plain `capture.py` job at ttyd.**
+* The way to keep the assertions honest: ttyd exposes the terminal object as **`window.term`**, and its
+  scrollback is readable —
+
+  ```js
+  const b = window.term.buffer.active;
+  [...Array(b.length).keys()].map(i => b.getLine(i).translateToString(true)).join("\n")
+  ```
+
+  Assert against **that string**, not against `innerText`. Verified live: it returned the login banner
+  and every command's output.
+
+What is still missing for these three rows is therefore **not the input mechanism** — it is the **lab
+state**. Row 1 needs exercise 1 actually performed (argocd CLI download + token + `appset create`); rows
+4a and 5 need a canary caught mid-flight and then caught again at the abort. A capture script for these
+must drive the lab itself, in one session, the way `capture_m12_sequence.py` drives the console.
+
+**These terminal frames are dark, and that is correct** — it is the attendee's real terminal, not an app
+whose theme we pin. The "all images are light" rule is about product UIs (console, Argo, Developer Hub,
+Gitea), which render dark on a fresh profile unless `color_scheme="light"` is set explicitly.
+
 ## Screenshots (terminal + Argo CD Applications / Gitea UI views, plus console Pods views — the view IS the content)
 
 | # | Filename | Status | View | Notice | Embed point |
@@ -35,7 +76,8 @@ screen-captured** (no browser in the build environment). Capture them in the med
 | 1 | `gitops-at-scale-01-appset-created.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal** after `~/argocd appset create` + `~/argocd app list -p proj-user1` | the `ApplicationSet 'claims-user1' created` line and the three generated apps (dev/stage Synced, prod Progressing on the `rollouts` path) | lab.adoc ex. 1 (create the ApplicationSet) |
 | 2 | `gitops-at-scale-02-three-app-cards.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Applications view** (the appset detail/read view does NOT exist in 3.4) | the THREE generated app cards `claims-dev/stage/prod-user1`, all Synced/Healthy — dev/stage adopted, prod new | lab.adoc ex. 1 (after create) |
 | 3 | `gitops-at-scale-03-gitea-image-bump.png` | ⬜ NOT CAPTURED | **Gitea editor on `rollouts/claims-rollout.yaml`** | the image tag changed `1.0` → `1.1`, the Commit Changes panel | lab.adoc ex. 3 (ship a new version) |
-| 4 | `gitops-at-scale-04-canary-progressing.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal**, mid-canary (the Argo CD Rollout view does not render on this cluster — extension enabled, assets 404; see the module note above) | the ex. 3 watch loop at step 2/5 or 3/5, showing `canary-pods:2/4` and `analysis:Running`; pair with a second shot of the console's *Workloads → Pods* view (Project `user1-prod`) at the same moment, showing the 2-stable/2-canary replica split — the module's signature moment, now on the CLI + Pods view | lab.adoc ex. 3 (watch the canary) |
+| 4a | `gitops-at-scale-04-canary-progressing.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal**, mid-canary (the Argo CD Rollout view does not render on this cluster — extension enabled, assets 404; see the module note above) | the ex. 3 watch loop at step 2/5 or 3/5, showing `canary-pods:2/4` and `analysis:Running` — the module's signature moment on the CLI | lab.adoc ex. 3 (watch the canary) |
+| 4b | `gitops-at-scale-04b-canary-pods-split.png` | ⬜ NOT CAPTURED — **HIGH · BLOCKED (console session)** | **Console → Workloads → Pods**, Project `{user}-prod`, at the *same instant* as 4a | the 2-stable / 2-canary replica split — the same moment 4a shows on the CLI, seen as running Pods | lab.adoc ex. 3 (watch the canary) |
 | 5 | `gitops-at-scale-05-canary-aborted.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal**, at the abort (the Argo CD Rollout view does not render on this cluster — same gap as row 4) | the ex. 4 watch loop printing `rollout: Degraded   analysis: Failed`, plus the follow-on `AnalysisRun` message and the `prod health through the abort: 200` line — the payoff, now on the CLI | lab.adoc ex. 4 (the auto-rollback) |
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
