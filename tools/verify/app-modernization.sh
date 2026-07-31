@@ -29,14 +29,11 @@ NS="${USER_NAME}-modernize"
 
 # --- helpers (oc + curl only) ------------------------------------------------
 
-# A Deployment is READY (>=1 ready replica) in {user}-modernize. Readiness — not mere presence — so the
-# Ex6 crash-loop content bug is caught (a deployed-but-crashlooping modernized service fails here, which
-# is correct and desired until that content fix lands). `>=1` is lab-exceedable.
-deploy_ready() {
-  local ready
-  ready="$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
+# WHY READINESS AND NOT MERE PRESENCE, for this module: the Ex6 crash-loop content bug must be caught —
+# a deployed-but-crashlooping modernized service fails here, which is correct and desired until that
+# content fix lands. `>=1` is lab-exceedable.
 
 # The attendee's legacy-repo fork URL, as recorded in the entry marker (attendee-safe: no gitea route
 # read cross-namespace — the URL was computed from the cluster domain at materialization).

@@ -93,21 +93,10 @@ argo_rbac_binds_user() {
     | grep -q "proj-${USER_NAME}"
 }
 
-# Deployment has at least one ready replica.
-deploy_ready() {
-  local name="$1" ns="$2" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
-# Deployment reports AT LEAST N ready replicas. Stage starts at 2 (the overlay's canonical count,
-# which `ws solve` produces) but the completed lab deliberately ends at 3 (Exercise D scales up) —
-# so the end check must accept >= 2, not == 2, or a correct attendee gets a false red.
-deploy_ready_min() {
-  local name="$1" ns="$2" want="$3" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge "$want" ]]
-}
+# deploy_ready_min (<deployment> <namespace> <n>) is shared — tools/verify/_lib.sh (>=, never ==).
 
 # The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student
 # instance (annotation tracking), NOT applied by hand — the point of gitops-fundamentals vs the config-multienv hand-config.

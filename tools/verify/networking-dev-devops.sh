@@ -27,12 +27,8 @@ PARTNER="${USER_NAME}-partner"
 # A Deployment exists (materialized) in a namespace.
 deploy_present() { oc get deploy "$1" -n "$2" >/dev/null 2>&1; }
 
-# A Deployment has at least one ready replica.
-deploy_ready() {
-  local ready
-  ready="$(oc get deploy "$1" -n "$2" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # A NetworkPolicy exists in {user}-dev.
 np_present() { oc get networkpolicy "$1" -n "$NS" >/dev/null 2>&1; }

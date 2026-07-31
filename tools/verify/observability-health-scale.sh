@@ -19,18 +19,17 @@ NS="${USER_NAME}-dev"
 
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
-# Deployment has at least one ready replica.
-deploy_ready() {
-  local name="$1" ns="$2" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves the app reached its
 # datasource — readiness gates on the DB connection). parasol-claims is API-only, so probe /q/health/ready.
 route_ready_200() {
   local host code
-  host="$(oc get route parasol-claims -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  # Route read classified via oc_read (_lib.sh); the HTTP probe below stays graded — "the app does
+  # not answer" IS the outcome under test, unlike "the API could not be asked".
+  oc_read get route parasol-claims -n "$NS" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   [[ -n "$host" ]] || return 1
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]
@@ -38,23 +37,24 @@ route_ready_200() {
 
 # parasol-claims has the OpenTelemetry SDK turned ON (the seam that emits traces to the collector).
 claims_otel_enabled() {
-  oc get deploy parasol-claims -n "$NS" \
-    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUARKUS_OTEL_SDK_DISABLED")].value}' 2>/dev/null \
-    | grep -q '^false$'
+  oc_read get deploy parasol-claims -n "$NS" \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUARKUS_OTEL_SDK_DISABLED")].value}' || return 1
+  [[ "$OC_OUT" == "false" ]]
 }
 
 # parasol-claims exports OTLP to the shared observability-workshop collector.
 claims_otel_endpoint() {
-  oc get deploy parasol-claims -n "$NS" \
-    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_ENDPOINT")].value}' 2>/dev/null \
-    | grep -q 'otel-collector.ogsr-observability-workshop'
+  oc_read get deploy parasol-claims -n "$NS" \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_ENDPOINT")].value}' || return 1
+  [[ "$OC_OUT" == *"otel-collector.ogsr-observability-workshop"* ]]
 }
 
 # /q/metrics (scraped by the ServiceMonitor) exposes a given metric name. Retries briefly: a
 # Micrometer counter (claims_created_total) only appears after the load generator's first POST.
 metrics_expose() {
   local needle="$1" host out
-  host="$(oc get route parasol-claims -n "$NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  oc_read get route parasol-claims -n "$NS" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   [[ -n "$host" ]] || return 1
   for _ in $(seq 1 10); do
     out="$(curl -ks --max-time 15 "http://${host}/q/metrics" 2>/dev/null || true)"
@@ -66,9 +66,8 @@ metrics_expose() {
 
 # The parasol-claims Deployment has at least N ready replicas (>= so the lab may scale past the floor).
 claims_replicas_at_least() {
-  local want="$1" ready
-  ready="$(oc get deploy parasol-claims -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge "$want" ]]
+  oc_read get deploy parasol-claims -n "$NS" -o jsonpath='{.status.readyReplicas}' || return 1
+  [[ -n "$OC_OUT" && "$OC_OUT" -ge "$1" ]]
 }
 
 # The parasol-claims ServiceMonitor scrapes every 10s. Not cosmetic: the alert beat (Ex3) needs the
@@ -76,9 +75,8 @@ claims_replicas_at_least() {
 # counter and the rule fires deterministically. A 30s scrape re-introduces the G3 "never fires" flake
 # (the counter is sampled once, at its frozen value -> rate()==0). Guards both entry and end state.
 servicemonitor_scrape_10s() {
-  local iv
-  iv="$(oc get servicemonitor parasol-claims -n "$NS" -o jsonpath='{.spec.endpoints[0].interval}' 2>/dev/null || true)"
-  [[ "$iv" == "10s" ]]
+  oc_read get servicemonitor parasol-claims -n "$NS" -o jsonpath='{.spec.endpoints[0].interval}' || return 1
+  [[ "$OC_OUT" == "10s" ]]
 }
 
 # --- attendee-visible alerting (the guard the SEV1 was missing) --------------
@@ -173,25 +171,34 @@ tenancy_lists_an_alerting_rule() {
 # Entry clean-slate helpers: the scale/alert/resilience beats haven't been built yet. Each requires
 # the namespace to actually exist first — otherwise an empty `oc get` result is vacuous (true on a
 # cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
-no_hpa_yet() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get hpa parasol-claims -n "$NS" -o name 2>/dev/null)" ]]
+# NEGATION IS THE DANGEROUS DIRECTION: `[[ -z "$(oc get … 2>/dev/null)" ]]` certifies a clean slate
+# from an API that never answered. ns_exists_then_absent asks both questions through oc_read, so an
+# unanswerable read is ⚠ SKIP — never the silent PASS the old shape produced.
+ns_exists_then_absent() {  # <resource> [name] → 0 when the namespace exists and the object does not
+  oc_present get ns "$NS" -o name || return 1
+  if [[ -n "${2:-}" ]]; then oc_absent get "$1" "$2" -n "$NS" -o name
+  else                       oc_absent get "$1" -n "$NS" -o name
+  fi
 }
-no_rule_yet() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)" ]]
+# At least one PrometheusRule in the namespace. Was an inline `test -n "$(oc get … 2>/dev/null)"` at
+# the call site — the substitution ran BEFORE check() ever saw it, so the error was gone by then and
+# no amount of work inside check() could have classified it. Moved into a predicate for that reason.
+prometheusrule_exists() {
+  oc_read get prometheusrule -n "$NS" -o name || return 1
+  [[ -n "$OC_OUT" ]]
 }
-no_pdb_yet() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get pdb parasol-claims -n "$NS" -o name 2>/dev/null)" ]]
-}
+
+no_hpa_yet()  { ns_exists_then_absent hpa parasol-claims; }
+no_rule_yet() { ns_exists_then_absent prometheusrule; }
+no_pdb_yet()  { ns_exists_then_absent pdb parasol-claims; }
 
 # The HPA targets parasol-claims on CPU.
 hpa_on_cpu() {
-  local tgt metric
-  tgt="$(oc get hpa parasol-claims -n "$NS" -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null || true)"
-  metric="$(oc get hpa parasol-claims -n "$NS" -o jsonpath='{.spec.metrics[?(@.type=="Resource")].resource.name}' 2>/dev/null || true)"
-  [[ "$tgt" == "parasol-claims" && "$metric" == "cpu" ]]
+  local tgt
+  oc_read get hpa parasol-claims -n "$NS" -o jsonpath='{.spec.scaleTargetRef.name}' || return 1
+  tgt="$OC_OUT"
+  oc_read get hpa parasol-claims -n "$NS" -o jsonpath='{.spec.metrics[?(@.type=="Resource")].resource.name}' || return 1
+  [[ "$tgt" == "parasol-claims" && "$OC_OUT" == "cpu" ]]
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
@@ -230,7 +237,7 @@ else
   # --- end state: the lab's outcomes exist (HPA + alert + PDB); >= replicas, never == ----------
   check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "create the HPA: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"
   check "parasol-claims has >=2 ready replicas (HPA floor)"        claims_replicas_at_least 2                    || hint "HPA floor is 2 — wait: oc get hpa parasol-claims -n ${NS}"
-  check "a PrometheusRule alert exists in ${NS}"                   test -n "$(oc get prometheusrule -n "$NS" -o name 2>/dev/null)"               || hint "create an alerting rule (PrometheusRule) in ${NS} — see the alert beat"
+  check "a PrometheusRule alert exists in ${NS}"                   prometheusrule_exists                         || hint "create an alerting rule (PrometheusRule) in ${NS} — see the alert beat"
   # The object existing is not the outcome — the attendee SEEING it is. Only assert this when the
   # endpoint answered; unreachable already printed its ⚠, and a denied endpoint already failed above.
   if [[ "$TENANCY_STATE" == "ok" ]]; then

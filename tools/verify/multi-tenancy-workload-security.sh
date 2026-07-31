@@ -26,12 +26,8 @@ PROD="${USER_NAME}-prod"
 # A ServiceAccount exists in the team's home namespace.
 sa_exists() { oc get sa "$1" -n "$NS" >/dev/null 2>&1; }
 
-# The Deployment has at least one ready replica (the fixed workload is running).
-deploy_ready() {
-  local ready
-  ready="$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # The Deployment exists but is NOT running yet (entry: scaled to 0, nothing admitted).
 deploy_idle() {

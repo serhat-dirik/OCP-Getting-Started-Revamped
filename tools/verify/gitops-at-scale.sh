@@ -105,19 +105,10 @@ cli_download_ready() {
   [[ "$code" == "200" || "$code" == "206" ]]
 }
 
-# Deployment has at least one ready replica.
-deploy_ready() {
-  local name="$1" ns="$2" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
-# Deployment reports AT LEAST N ready replicas (stage starts at 2; a completed promotion may exceed).
-deploy_ready_min() {
-  local name="$1" ns="$2" want="$3" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge "$want" ]]
-}
+# deploy_ready_min (<deployment> <namespace> <n>) is shared — tools/verify/_lib.sh (>=, never ==).
 
 # The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student instance.
 deploy_gitops_managed() {

@@ -31,12 +31,8 @@ SITEA_RESTORE=""   # set by failover_proof; used by the EXIT trap to guarantee s
 # A Deployment exists (materialized) in a namespace: $1=name $2=namespace.
 deploy_present() { oc get deploy "$1" -n "$2" >/dev/null 2>&1; }
 
-# A Deployment has at least one ready replica: $1=name $2=namespace.
-deploy_ready() {
-  local ready
-  ready="$(oc get deploy "$1" -n "$2" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # A namespace carries istio-discovery=enabled (the shared-istiod discoverySelectors label): $1=namespace.
 ns_discovery_labeled() {

@@ -15,73 +15,70 @@ NS="${USER_NAME}-dev"
 
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
-# Deployment has at least one ready replica.
-deploy_ready() {
-  local name="$1" ns="$2" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
+
+# Every oc read in the helpers below goes through oc_read (_lib.sh) rather than `2>/dev/null`, so a
+# cluster that could not be asked reports ⚠ SKIP instead of blaming the attendee's storage work.
+# curl probes stay graded on purpose: "the app does not answer" IS an outcome these checks measure.
 
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves the app reached
 # its datasource — readiness gates on the DB connection). parasol-claims is API-only, so "/"
 # is 404 by design; probe /q/health/ready.
 route_ready_200() {
   local ns="$1" host code
-  host="$(oc get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  oc_read get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   [[ -n "$host" ]] || return 1
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]
 }
 
-# The name of the cluster's default StorageClass (annotation is-default-class=true), or empty.
-default_sc() {
-  oc get sc -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -1
-}
-
 # A default StorageClass is set — without one, a PVC that omits storageClassName cannot bind.
-has_default_sc() { [[ -n "$(default_sc)" ]]; }
+has_default_sc() {
+  oc_read get sc -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' || return 1
+  [[ -n "${OC_OUT%%$'\n'*}" ]]
+}
 
 # A PVC exists and is Bound.
 pvc_bound() {
-  local name="$1" ns="$2" phase
-  phase="$(oc get pvc "$name" -n "$ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  [[ "$phase" == "Bound" ]]
+  oc_read get pvc "$1" -n "$2" -o jsonpath='{.status.phase}' || return 1
+  [[ "$OC_OUT" == "Bound" ]]
 }
 
 # The claims-db Deployment's data volume is an emptyDir (ephemeral entry state).
 claims_db_ephemeral() {
-  oc get deploy claims-db -n "$NS" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")].emptyDir}' 2>/dev/null | grep -q '{}'
+  oc_read get deploy claims-db -n "$NS" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")].emptyDir}' || return 1
+  [[ "$OC_OUT" == *'{}'* ]]
 }
 
 # The claims-db Deployment's data volume is a PVC named claims-db-data (persistent end state).
 claims_db_persistent() {
-  local claim
-  claim="$(oc get deploy claims-db -n "$NS" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}' 2>/dev/null || true)"
-  [[ "$claim" == "claims-db-data" ]]
+  oc_read get deploy claims-db -n "$NS" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}' || return 1
+  [[ "$OC_OUT" == "claims-db-data" ]]
 }
 
 # There are zero PVCs in the namespace (entry state — persistence exercise not started). Namespace
 # must actually exist first — otherwise a zero count is vacuous, not evidence of a clean entry.
+# An UNANSWERABLE list must not read as "zero": that is the one way this fix could invent a pass.
 no_pvcs_yet() {
-  local n
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  n="$(oc get pvc -n "$NS" --no-headers 2>/dev/null | grep -c . || true)"
-  [[ "$n" -eq 0 ]]
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent  get pvc -n "$NS" -o name
 }
 
 # The StatefulSet has all replicas ready (readyReplicas == spec.replicas, and >= 2).
 sts_ready() {
-  local name="$1" ns="$2" want ready
-  want="$(oc get statefulset "$name" -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  ready="$(oc get statefulset "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$want" && -n "$ready" && "$ready" == "$want" && "$ready" -ge 2 ]]
+  local name="$1" ns="$2" want
+  oc_read get statefulset "$name" -n "$ns" -o jsonpath='{.spec.replicas}' || return 1
+  want="$OC_OUT"
+  oc_read get statefulset "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' || return 1
+  [[ -n "$want" && -n "$OC_OUT" && "$OC_OUT" == "$want" && "$OC_OUT" -ge 2 ]]
 }
 
 # The pg-sts Service is headless (clusterIP: None).
 headless_svc() {
-  local ip
-  ip="$(oc get svc pg-sts -n "$NS" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
-  [[ "$ip" == "None" ]]
+  oc_read get svc pg-sts -n "$NS" -o jsonpath='{.spec.clusterIP}' || return 1
+  [[ "$OC_OUT" == "None" ]]
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------

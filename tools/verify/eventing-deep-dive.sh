@@ -25,12 +25,8 @@ NS="${USER_NAME}-dev"
 
 # --- helpers (oc only) -------------------------------------------------------
 
-# A Deployment has at least one ready replica.
-deploy_ready() {
-  local ready
-  ready="$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # A named Knative Service exists in {user}-dev.
 ksvc_present() { oc get ksvc "$1" -n "$NS" >/dev/null 2>&1; }

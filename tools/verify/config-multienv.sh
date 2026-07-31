@@ -41,29 +41,19 @@ fork_exists() {
   curl -ksf -o /dev/null "https://${host}/api/v1/repos/${USER_NAME}/claims-config"
 }
 
-# Deployment has at least one ready replica.
-deploy_ready() {
-  local name="$1" ns="$2" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
-# Deployment reports AT LEAST N ready replicas (proves the per-env replica delta). >=, not ==: the
-# module's own optional Challenge (lab.adoc "In your claims-config fork, change the prod overlay to
-# *4* replicas, commit, and re-apply overlays/prod... When you are done, run `ws verify`") has the
-# attendee deliberately exceed the overlay's canonical count and then re-verify — an exact-match check
-# here would false-fail that correctly-completed lab (same fix as gitops-fundamentals deploy_ready_min).
-deploy_ready_min() {
-  local name="$1" ns="$2" want="$3" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge "$want" ]]
-}
+# deploy_ready_min (<deployment> <namespace> <n>) is shared — tools/verify/_lib.sh (>=, never ==).
 
 # Deployment does NOT exist (entry-only: stage/prod start empty). Namespace must actually exist
 # first — otherwise this is vacuously true on a cluster where nothing materialized at all.
+# NEGATION NEEDS THE THIRD OUTCOME MOST: `! oc get … 2>/dev/null` turns a cluster that could not be
+# asked into a PASS — the one direction the fix must never take. oc_read's rc is checked explicitly
+# so an unanswerable read stays inconclusive (⚠) instead of quietly certifying a clean slate.
 deploy_absent() {
-  oc get ns "$2" >/dev/null 2>&1 || return 1
-  ! oc get deploy "$1" -n "$2" >/dev/null 2>&1
+  oc_present get ns "$2" -o name || return 1
+  oc_absent  get deploy "$1" -n "$2" -o name
 }
 
 # A named object of any kind is ABSENT from a namespace. Entry ships neither claims-config nor
@@ -79,15 +69,18 @@ deploy_absent() {
 # Same class as the serverless-zero-to-hero orphan-revision defect measured 2026-07-31; the fix is the
 # same shape observability-health-scale/networking-dev-devops already use (assert the clean slate you claim).
 obj_absent() {
-  oc get ns "$3" >/dev/null 2>&1 || return 1
-  ! oc get "$1" "$2" -n "$3" >/dev/null 2>&1
+  oc_present get ns "$3" -o name || return 1
+  oc_absent  get "$1" "$2" -n "$3" -o name
 }
 
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves DB connectivity,
 # since readiness gates on the datasource). API-only service: "/" is 404 by design.
+# The ROUTE READ is classified (no Route object vs no answer from the API are different things); the
+# HTTP probe that follows stays graded, because "the app does not answer" IS the outcome under test.
 route_ready_200() {
   local ns="$1" host code
-  host="$(oc get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  oc_read get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   [[ -n "$host" ]] || return 1
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]
@@ -103,30 +96,35 @@ route_ready_200() {
 # The jsonpath asks the containers' env/envFrom directly; `grep -qx` anchors the whole line so a
 # longer name never matches a shorter one. Nested `range` with absent keys yields empty output and
 # exit 0 (verified on-cluster 2026-08-01) — no jq, no python3.
+# `oc … 2>/dev/null | grep -q` was the worst shape in this file: the pipe discards oc's exit status
+# outright, so "the API refused to answer" and "nothing is wired" were the same empty stdin to grep.
+# oc_read first, then match its captured output — the classification survives.
 deploy_references() {
   local name="$1" ns="$2" ref="$3"
-  oc get deploy "$name" -n "$ns" -o jsonpath='{range .spec.template.spec.containers[*]}{range .envFrom[*]}{.configMapRef.name}{"\n"}{.secretRef.name}{"\n"}{end}{range .env[*]}{.valueFrom.configMapKeyRef.name}{"\n"}{.valueFrom.secretKeyRef.name}{"\n"}{end}{end}' 2>/dev/null \
-    | grep -qx -- "$ref"
+  oc_read get deploy "$name" -n "$ns" -o jsonpath='{range .spec.template.spec.containers[*]}{range .envFrom[*]}{.configMapRef.name}{"\n"}{.secretRef.name}{"\n"}{end}{range .env[*]}{.valueFrom.configMapKeyRef.name}{"\n"}{.valueFrom.secretKeyRef.name}{"\n"}{end}{end}' || return 1
+  grep -qx -- "$ref" <<<"$OC_OUT"
 }
 
 # The dev Deployment carries all three probes.
 deploy_has_all_probes() {
   local name="$1" ns="$2" p
   for p in startupProbe readinessProbe livenessProbe; do
-    oc get deploy "$name" -n "$ns" -o jsonpath="{.spec.template.spec.containers[0].${p}}" 2>/dev/null | grep -q . || return 1
+    oc_read get deploy "$name" -n "$ns" -o jsonpath="{.spec.template.spec.containers[0].${p}}" || return 1
+    [[ -n "$OC_OUT" ]] || return 1
   done
 }
 
 # The dev Deployment sets an explicit CPU request (not just the LimitRange default).
 deploy_has_requests() {
-  oc get deploy "$1" -n "$2" -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' 2>/dev/null | grep -q .
+  oc_read get deploy "$1" -n "$2" -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 # The claims-config ConfigMap in a namespace carries APP_ENV=<want> (the per-env config marker).
 cm_app_env() {
-  local ns="$1" want="$2" got
-  got="$(oc get configmap claims-config -n "$ns" -o jsonpath='{.data.APP_ENV}' 2>/dev/null || true)"
-  [[ "$got" == "$want" ]]
+  local ns="$1" want="$2"
+  oc_read get configmap claims-config -n "$ns" -o jsonpath='{.data.APP_ENV}' || return 1
+  [[ "$OC_OUT" == "$want" ]]
 }
 
 # --- entry state (what `ws start config-multienv` materializes) --------------------------

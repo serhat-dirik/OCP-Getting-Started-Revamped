@@ -14,12 +14,8 @@ NS="${USER_NAME}-dev"
 
 # --- helpers (oc + curl only) ------------------------------------------------
 
-# Deployment has at least one ready replica.
-deploy_ready() {
-  local name="$1" ns="$2" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # HTTP status of an app Route path (edge TLS → curl https; -k because the edge cert is the cluster's).
 route_code() {  # route path [authHeader]

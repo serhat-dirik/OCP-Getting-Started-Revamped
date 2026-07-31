@@ -19,8 +19,31 @@ rather than reading the route cross-namespace, and so on). The two bullets below
   `--entry-only`'s rc as "is this world already prepared?" and would otherwise offer to wipe a
   healthy environment — but its banner says so: `⚠ 7 passed · 6 SKIPPED (not graded)`. Automation
   that must fail closed sets `VERIFY_STRICT=1` and gets rc **3** (1 = a check failed, 2 = usage).
-- Source `_lib.sh` for `check`, `hint`, `warn`, `parse_verify_args`, `verify_summary`.
+- Source `_lib.sh` for `check`, `hint`, `warn`, `parse_verify_args`, `verify_summary`, and the
+  cluster-read helpers below.
 - Scripts must be runnable with only `oc` + `curl` available (Showroom terminal reality).
+- **Never write `oc get … 2>/dev/null`.** It cannot tell "the object is not there" (a real ❌) from
+  "the cluster did not answer" — throttling, an apiserver blip, an expired token, a network hiccup —
+  and both come back as an empty string, so a transient failure blames the attendee's correct work.
+  Read the cluster through `_lib.sh` instead; all three set `OC_OUT` (stdout) and `OC_ERR` (stderr):
+
+  | helper | use it for | rc |
+  |---|---|---|
+  | `oc_read <args…>` | any value read | `0` oc succeeded · `1` real NO (NotFound, or the server's own answer) · `2` **could not ask** — sets `VERIFY_INCONCLUSIVE` |
+  | `oc_present <args…>` | "this exists / is non-empty" | `0` only when the API answered AND something is there |
+  | `oc_absent <args…>` | "this does NOT exist" | `0` only when the API answered AND nothing is there |
+
+  In a predicate, `oc_read … \|\| return 1` is almost always right: a real NO and an unanswerable read
+  both return non-zero, and the flag — not the exit code — tells `check` which one it was. Negation is
+  the dangerous direction: `! oc get … 2>/dev/null` and `[[ -z "$(oc get …)" ]]` certify a clean slate
+  from an API that never answered, which is why `oc_absent` exists. `check "…" oc get …` is classified
+  automatically, so those call sites need no change.
+- **Three outcomes, and the third is not optimism.** A check whose answer could not be determined
+  prints `⚠ … SKIPPED (not a failure)` and touches neither counter; a genuinely absent thing is a real,
+  gradeable answer and stays `❌`. `Forbidden` is a skip (rule 10 — not this identity's check to run)
+  and says so with a different hint from a connection failure, because "retry" is the wrong advice for
+  an RBAC denial. Shared, correct implementations of the common predicates — `deploy_ready`,
+  `deploy_ready_min`, `cm_key_set` — live in `_lib.sh`; do not copy them back into a module.
 - **Prove the ATTENDEE-visible state, not the admin-visible one.** An object existing is not proof the
   attendee's page, UI or API call works — `observability-health-scale` shipped a green
   `oc get prometheusrule` while the attendee's Alerting rules page was empty (403 on the backing API).

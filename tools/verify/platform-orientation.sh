@@ -29,12 +29,8 @@ gitea_user_exists() {
   curl -ksf -o /dev/null "https://${host}/api/v1/users/${user}"
 }
 
-# Deployment has at least one ready replica (attendee may leave it at 1 or 3).
-deploy_ready() {
-  local name="$1" ns="$2" ready
-  ready="$(oc get deploy "$name" -n "$ns" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # Route resolves and answers HTTP 200 on / (the app's landing page).
 # Asserts what the lab actually teaches: an EDGE-terminated Route, reachable over HTTPS.

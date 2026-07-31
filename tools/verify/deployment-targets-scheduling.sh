@@ -29,12 +29,8 @@ POOL_VALUE="batch"
 # A Deployment exists (materialized) in {user}-dev.
 deploy_present() { oc get deploy "$1" -n "$NS" >/dev/null 2>&1; }
 
-# A Deployment has at least one ready replica.
-deploy_ready() {
-  local ready
-  ready="$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -n "$ready" && "$ready" -ge 1 ]]
-}
+# deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
+# answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # The dedicated batch pool node LABEL exists: at least one node carries workshop.redhat.com/pool=batch.
 # Cluster-scoped bootstrap substrate (Rule 13 — never chart-owned); fail closed so a missing/recycled
