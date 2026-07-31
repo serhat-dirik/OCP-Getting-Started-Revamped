@@ -201,7 +201,7 @@ _module_rows() {  # → "slug<TAB>title" per module, in catalog order (position 
   fi
 }
 _module_slugs()    { _module_rows | cut -f1; }                                 # ordered slug list
-module_count()     { _module_rows | grep -c . ; }                             # module total
+module_count()     { _module_rows | grep -c . || true; }                      # module total
 slug_at_position() { _module_slugs | sed -n "${1}p"; }                         # 1-based position → slug
 position_of_slug() { _module_slugs | grep -nxF "$1" | head -1 | cut -d: -f1; } # slug → position ('' if absent)
 module_title()     { _module_rows | awk -F'\t' -v s="$1" '$1==s{print $2; exit}'; }
@@ -1785,27 +1785,37 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # The owner and module LABELS ride along in the same list call that finds the apps. They cost nothing
   # here (the API server is already serving these items) and they replace a per-app `oc get` that only
   # fired on unhealthy entry-* apps — the one round trip this row made per object.
-  local bad="" expect_ok="" name health app_user module
-  while IFS=$'\t' read -r name health app_user module; do
-    [[ -n "$name" ]] || continue
-    # --user scope: drop the OTHER attendees' apps, by LABEL rather than by name shape — the label is
-    # what `ws status`/`ws diag` already key off, and an app named outside entry-<module>-<user> still
-    # carries it. An app with NO user label is platform (pp-*, workshop-config) and is always kept.
-    if [[ -n "$scope_user" && -n "$app_user" && "$app_user" != "$scope_user" ]]; then continue; fi
-    [[ "$health" == "Healthy" ]] && continue
-    # The `entry-*` guard is kept from the per-app read this replaced. Without it, ANY app carrying a
-    # module label could be excused as "Degraded by design", which is a licence to hide a broken
-    # platform app behind a module's intentional fault. Only entry states are allowed that excuse.
-    if [[ "$name" == entry-* && -n "$module" && "$(meta_expect_degraded "$module")" == "true" ]]; then
-      expect_ok="${expect_ok} ${name}=${health}"
-    else
-      bad="${bad} ${name}=${health}"
+  # "No apps found" is NOT the same answer as "checked N apps, all Healthy" — an Argo CD without the
+  # Applications CRD (gitops operator not installed) also returns zero rows here, and `oc get` fails
+  # silently into the 2>/dev/null. Verified live (CRC, no workshop installed, 2026-07-31): this row
+  # printed "✅ all Healthy" while `applications.argoproj.io` did not exist on the cluster at all — the
+  # same "recorded as absent" / "no record at all" conflation as the ogsr-uninstall.sh adoption bug.
+  # Gate on the gitops-operator row already computed above so a genuinely-uninstalled Argo reads n/a.
+  if [[ "$csv" != *Succeeded* ]]; then
+    skip "n/a (gitops operator not installed)"
+  else
+    local bad="" expect_ok="" name health app_user module
+    while IFS=$'\t' read -r name health app_user module; do
+      [[ -n "$name" ]] || continue
+      # --user scope: drop the OTHER attendees' apps, by LABEL rather than by name shape — the label is
+      # what `ws status`/`ws diag` already key off, and an app named outside entry-<module>-<user> still
+      # carries it. An app with NO user label is platform (pp-*, workshop-config) and is always kept.
+      if [[ -n "$scope_user" && -n "$app_user" && "$app_user" != "$scope_user" ]]; then continue; fi
+      [[ "$health" == "Healthy" ]] && continue
+      # The `entry-*` guard is kept from the per-app read this replaced. Without it, ANY app carrying a
+      # module label could be excused as "Degraded by design", which is a licence to hide a broken
+      # platform app behind a module's intentional fault. Only entry states are allowed that excuse.
+      if [[ "$name" == entry-* && -n "$module" && "$(meta_expect_degraded "$module")" == "true" ]]; then
+        expect_ok="${expect_ok} ${name}=${health}"
+      else
+        bad="${bad} ${name}=${health}"
+      fi
+    done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\n"}{end}' 2>/dev/null)
+    if [[ -z "${bad// }" ]]; then ok "all Healthy${scope_user:+ (platform + ${scope_user})}"; else err "unhealthy:${bad}"; fail=1; fi
+    if [[ -n "${expect_ok// }" ]]; then
+      printf "  %-28s" ""
+      ok "(Degraded by design):${expect_ok}"
     fi
-  done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\n"}{end}' 2>/dev/null)
-  if [[ -z "${bad// }" ]]; then ok "all Healthy${scope_user:+ (platform + ${scope_user})}"; else err "unhealthy:${bad}"; fail=1; fi
-  if [[ -n "${expect_ok// }" ]]; then
-    printf "  %-28s" ""
-    ok "(Degraded by design):${expect_ok}"
   fi
   printf "  %-28s" "gitea"
   local host
@@ -3413,7 +3423,10 @@ cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge t
   cfg="$(maas_curl_cfg "$key")"
   local ids count
   ids="$(maas_list_models "$cfg" "$base" || true)"
-  count="$(printf '%s\n' "$ids" | grep -c . | tr -d ' ')"
+  # count is only meaningful once we know $ids is non-empty — compute it AFTER the empty check below,
+  # not before: `grep -c .` on an empty $ids exits 1 (no matching lines), and under pipefail that took
+  # down the whole pipeline (tr -d exits 0 but pipefail still surfaces grep's failure), killing the
+  # script one line before the handler written to catch exactly this case. Verified with a bash -c repro.
   if [[ -z "${ids//[[:space:]]/}" ]]; then
     rm -f "$cfg"
     err "catalog — GET ${base}/models returned no model list."
@@ -3422,6 +3435,8 @@ cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge t
     err "   000     → the endpoint is unreachable from THIS machine (DNS / proxy / TLS)"
     die "refusing to stage an unvalidated credential"
   fi
+  # $ids is confirmed non-empty past this point, so `grep -c .` always has at least one match — safe now.
+  count="$(printf '%s\n' "$ids" | grep -c . | tr -d ' ')"
   if [[ -z "$model" ]]; then
     model="$(printf '%s\n' "$ids" | head -1)"
     model_from="discovered from ${base}/models"

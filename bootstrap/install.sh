@@ -89,8 +89,11 @@ resolve_slug() {
   # ogsr-check-clean.sh (state_get, ns_has_foreign_csv, csv_matches_adopted) — audited 2026-07-30.
   if grep -qE '^m[0-9]+$' <<< "$tok"; then
     n="${tok#m}"
-    [[ "$n" -ge 1 ]] || return 1                       # m0 (yq index -1 = last) is not a module
-    slug="$(yq -r ".modules[$((n - 1))].slug // \"\"" "$MODULES_YAML" 2>/dev/null || true)"
+    # Force base-10: bash arithmetic context treats a leading-zero literal as octal, and "08"/"09"
+    # are invalid octal digits — m08/m09 died with "value too great for base" before this guard
+    # (reproduced live 2026-07-31). `10#$n` pins the read to decimal regardless of leading zeros.
+    (( 10#$n >= 1 )) || return 1                       # m0 (yq index -1 = last) is not a module
+    slug="$(yq -r ".modules[$((10#$n - 1))].slug // \"\"" "$MODULES_YAML" 2>/dev/null || true)"
     [[ -n "$slug" && "$slug" != "null" ]] || return 1
     printf '%s' "$slug"; return 0
   fi
