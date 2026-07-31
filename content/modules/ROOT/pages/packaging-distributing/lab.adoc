@@ -410,16 +410,34 @@ Console::
 +
 --
 // [CAPTURE-VERIFY] Helm → Helm Releases → parasol-notifications (project {user}-dev, OCP 4.21) shows Revision 1 / Deployed and the resources; the Route opens from Networking → Routes. CLI authoritative.
-// Checked live 2026-07-30 as user1: no Helm release exists anywhere on the cluster (`oc get
-// secret --all-namespaces -l owner=helm` returns nothing) and this module's entry app is not
-// Synced for user1 (only entry-agentic-ai/entry-app-security-testing/entry-jobs-batch-kueue/
-// entry-observability-health-scale are). packaging-distributing shares {user}-dev and is a MUTUAL
-// conflict with observability-health-scale, which currently holds that namespace, so there is no
-// parasol-notifications Deployment/Service/Route/Helm-release-secret to open the console panel
-// against. Closes once `ws start packaging-distributing` (evicts observability-health-scale from
-// user1-dev) re-materializes the entry state and the lab's own `helm install` step is run through
-// to a rolled-out Deployment, then Helm → Helm Releases → parasol-notifications is opened to
-// confirm Revision 1 / Deployed and the resource list render as described.
+// Checked live 2026-07-31 in user2-dev (packaging-distributing held via `ws start
+// packaging-distributing --user user2`, a different attendee slot than the prior pass). Polled
+// the entry Application (entry-packaging-distributing-user2) to Health=Healthy,
+// operationState.phase=Succeeded (the build hook + S2I build both completed) — this app is
+// expectOutOfSync:true by design (server-defaulted BuildConfig fields), so Health+Succeeded, not
+// Synced, is the completion signal (see gitops/entry-states/packaging-distributing/ws-meta.yaml).
+// `oc get all -n user2-dev` at that point shows ONLY the build infrastructure (BuildConfig,
+// completed Build, ImageStream, the finished build-runner Job/pod) — no Deployment/Service/Route.
+// `helm list -n user2-dev` is empty and `oc get secret -A -l owner=helm` has no
+// parasol-notifications entry anywhere on the cluster. This is expected, not a gap: per
+// gitops/entry-states/packaging-distributing/templates/solve-endstate.yaml line 1
+// (`{{- if .Values.solve }}`), the Deployment/Service/Route this marker describes render ONLY
+// under `ws solve` (solve=true — and even then the chart applies raw Deployment/Service/Route
+// manifests that MIRROR a helm-installed release; it does not itself run `helm install`, so no
+// helm.sh/release.v1 Secret or `helm list` entry would exist even at solve) or by the attendee
+// actually running this page's own `helm install` step; `ws start` (solve=false) intentionally
+// renders none of it. Additionally,
+// `oc auth can-i list deployments -n user2-dev --as=user1 --as-group=workshop-attendees` and the
+// `get secrets` form both return "no" (only `list routes` returns "yes") — the one saved,
+// authenticated console session (user1) cannot browse user2's Helm Releases panel even once a
+// release exists, so a screenshot needs a user2-authenticated session, not just a materialized
+// object. Marker stays open. Closes once, IN THE SAME NAMESPACE: (a) the lab's `helm install
+// parasol-notifications ./parasol-notifications -n $NS` step is actually run (as the owning
+// attendee, e.g. via the cockpit terminal authenticated as user2) or `ws solve
+// packaging-distributing --user user2` is used instead, rolling out the Deployment, AND (b) the
+// console is opened as that same attendee (not user1) to confirm Helm → Helm Releases →
+// parasol-notifications shows Revision 1 / Deployed and the resource list, and that Networking →
+// Routes opens the landing page from there.
 In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Helm* → *Helm Releases* → `parasol-notifications`.
 You see revision *1*, status *Deployed*, and the resources the chart created (Deployment, Service, Route).
 Open *Networking* → *Routes* → `parasol-notifications` and click the *Location* URL — the landing page shows the service JSON, including `"site":"{user}-dev"`.
@@ -548,14 +566,25 @@ Console::
 +
 --
 // [CAPTURE-VERIFY] Helm → Helm Releases → parasol-notifications → Revision history → revision 2 → Roll back (project {user}-dev, OCP 4.21). CLI authoritative.
-// Checked live 2026-07-30 as user1: same finding as the marker above this one in the file — no
-// Helm release exists on the cluster at all right now (packaging-distributing's entry state is
-// evicted from user1-dev by observability-health-scale's mutual conflict), so there is no
-// Revision history tab, no revision 2, and no revision 3 Failed to roll back from. Closing this
-// needs the FULL sequence run in order after `ws start packaging-distributing`: install (revision
-// 1), the lab's upgrade-that-fails step (revision 3, Failed), THEN opening Helm → Helm Releases →
-// parasol-notifications → Revision history to confirm revision 2 is offered and Roll back returns
-// the release to two healthy `/health` pods.
+// Checked live 2026-07-31, same pass as the marker above this one in the file, using user2-dev
+// (packaging-distributing held via `ws start packaging-distributing --user user2` — a different
+// attendee than the prior 2026-07-30 pass, which used user1). Same root cause, confirmed fresh:
+// the entry Application is Health=Healthy/operationState Succeeded (expectOutOfSync:true by
+// design — see the marker above), but `ws start` only materializes the S2I build infrastructure
+// (BuildConfig/Build/ImageStream) in user2-dev, not a Helm release — `helm list -n user2-dev` is
+// empty and no helm.sh/release.v1 Secret exists anywhere on the cluster. So there is no revision
+// 1, no Revision history tab, no revision 2 to select, and no revision 3 Failed to roll back from
+// — none of this page's own `helm install` → `helm upgrade` (good) → `helm upgrade` (broken
+// probe, fails) sequence has been run yet in this namespace. Per hard-rule constraints this pass
+// could not run `helm install`/`helm upgrade`/`ws solve` to materialize it (and `ws solve`
+// wouldn't produce a real Helm release anyway — its solve-endstate chart mirrors the Deployment/
+// Service/Route without calling Helm, so it can never populate a Revision history tab). Marker
+// stays open. Closes once, in the SAME namespace, as the OWNING attendee (the saved user1 console
+// session cannot browse another user's namespace — confirmed above): the lab's `helm install`,
+// then `helm upgrade --set replicaCount=2`, then the broken-probe `helm upgrade --wait` (which
+// fails, leaving revision 3 Failed) are actually run in order, and THEN Helm → Helm Releases →
+// parasol-notifications → Revision history is opened to confirm revision 2 is offered and Roll
+// back returns the release to two healthy `/health` pods.
 In the {ocp_console_url}[web console^], open *Helm* → *Helm Releases* → `parasol-notifications` → the *Revision history* tab.
 Revision 3 shows *Failed*. Select revision *2*, choose *Roll back*, and confirm.
 The release returns to the two healthy `/health` pods.
