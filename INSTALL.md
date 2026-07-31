@@ -140,14 +140,40 @@ session** — see §3 for the install budget. Never plan to install in front of 
 
 All numbers below were **measured on a live 8-attendee cluster**, not estimated.
 
-**The workshop's own platform costs roughly 19 CPU / 59 Gi in requests** across ~80 pods — operators,
+**The workshop's own platform costs roughly 32 CPU / 56 Gi in requests** across ~170 pods — operators,
 Argo CD, Gitea, the cockpits, RHACS, SonarQube, MTA, Keycloak, mesh and observability. That is a fixed
-cost before a single attendee does anything, and it is the number people underestimate.
+cost before a single attendee does anything, and it is the number people underestimate. Re-measured
+2026-07-31 on a full 8-attendee cluster; an earlier edition of this section said 19 CPU / ~80 pods,
+which understated both.
 
-**Per attendee, actively working, it is far less than the quotas suggest.** One attendee with a typical
-module materialized measured **5 pods / 0.6 CPU / 0.8 Gi**. The per-user quota *ceiling* across all 13
-namespaces is 420 pods / 41 CPU / 82 Gi — but that is a guard rail, not a forecast. No attendee is ever
-in thirteen namespaces at once; modules are independent and they work through one at a time.
+It splits into two layers, and knowing which is which is what lets you cut it:
+
+| Layer | Pods | Memory requests | CPU requests |
+|---|---|---|---|
+| Operators (RHACS, Keycloak, GitOps, mesh, MTA, Dev Spaces, …) | 132 | 47.6 Gi | 27.3 |
+| Workshop shared services (`ogsr-*`: Gitea, cockpits, seeded apps) | 38 | 8.5 Gi | 4.4 |
+| 8 attendees, 1–2 modules each | ~27 | 6.5 Gi | — |
+
+**RHACS alone is 26 Gi — 46% of the entire platform's memory.** It dwarfs everything else (Keycloak
+4.3 Gi, Argo CD 3.5 Gi, mesh 2.1 Gi, MTA 2.0 Gi, Dev Spaces 1.6 Gi). If you are ordering lean, that
+single line is the biggest lever you have: dropping the RHACS-dependent modules via `modules_disabled`
+takes ~26 Gi off the fixed cost before you tune anything else.
+
+**Per attendee, actively working, it is far less than the quotas suggest.** With 1–2 modules
+materialized, attendees measured **2–6 pods, 0.3–1.1 Gi of requests, and 28–514 Mi actually in use**.
+Note the gap: *actual* CPU ran 4–61 m against requests an order of magnitude higher. Requests are what
+the scheduler enforces, so size on requests — but do not panic-buy on the strength of a `top` reading,
+and do not size on `top` either, because a cluster that looks 90% idle can still refuse to place a pod.
+
+The per-user quota *ceiling* across all 13 namespaces is 420 pods / 41 CPU / 82 Gi — a guard rail, not
+a forecast. No attendee is ever in thirteen namespaces at once; modules are independent and they work
+through one at a time.
+
+> **Footprint grows with modules *materialized*, not modules *in progress*.** `ws start` only evicts
+> modules that declare a `conflictsWith` in the same namespace, so an attendee who works through
+> several non-conflicting modules accumulates all of them until a `ws reset`. Measured above at 1–2
+> modules each; a cohort deep into the catalog sits higher. If a long delivery starts crowding the
+> cluster, `ws reset` on finished modules reclaims it.
 
 So plan for the **peak concurrent module**, not the sum of quotas:
 
