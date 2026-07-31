@@ -502,7 +502,14 @@ self_test() {
     return 2
   fi
   canary_rc=0
-  check_residue_accounting "$f" <(extract_func "${REPO_ROOT}/${UNINSTALL}" restore_monitoring) >/dev/null 2>&1 || canary_rc=$?
+  # Materialize to a REAL file rather than passing <(extract_func …). check_residue_accounting
+  # guards its inputs with `[[ ! -s "$mf" ]]`, and `-s` on a process-substitution pipe is
+  # platform-dependent: BSD/macOS reports the bytes currently buffered in the pipe as st_size, so
+  # the test passes, while Linux reports 0, so it fails. That is why this self-test returned 1
+  # locally and 2 on CI ubuntu — the guard decided it "could not extract the restore functions" and
+  # declared its own detector blind. A guard whose result depends on the OS is not a guard.
+  extract_func "${REPO_ROOT}/${UNINSTALL}" restore_monitoring > "$tmp/canary-mon.sh"
+  check_residue_accounting "$f" "$tmp/canary-mon.sh" >/dev/null 2>&1 || canary_rc=$?
   if [[ "$canary_rc" -ne 1 ]]; then
     bad "SELF-TEST FAILED: the silent-no-restore canary was NOT detected (rc=${canary_rc}) — detector [1] is blind."
     return 2
