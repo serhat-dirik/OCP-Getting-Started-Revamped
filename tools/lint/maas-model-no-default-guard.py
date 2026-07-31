@@ -61,10 +61,23 @@ SITES = [
      re.compile(r'^\s*maasEndpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M), "values.yaml maasEndpoint"),
 ]
 
-# A value is acceptable ONLY if it is visibly not a real setting. Angle brackets are the repo's
-# chosen marker; example.com is the long-standing placeholder host. The trailing "@" is Antora's
+# A value is acceptable ONLY if it is visibly not a real setting. The trailing "@" is Antora's
 # soft-set marker and is stripped before judging.
-PLACEHOLDER = re.compile(r"^<[^>]+>$|(^|\.)example\.com(/|$)")
+#
+# ANGLE BRACKETS WERE THE MARKER UNTIL 2026-07-31, AND THEY WERE INVISIBLE TO ATTENDEES. This
+# guard required `<set-from-ogsr-maas-credentials>`, Asciidoctor emitted those brackets unescaped
+# inside <code>, and every browser then parsed `<set-from-ogsr-maas-credentials>` as an unknown
+# HTML tag and dropped it. The built page read "On this workshop it is " and "serving " — the
+# sentence lost its subject, in five places across two files, with no build warning at any log
+# level. Verified in the built HTML, not inferred. So the guard was mandating a placeholder that
+# could never be seen: it enforced the right RULE through a mechanism that defeated the rule's
+# purpose, which is the same shape as every "check that inspects nothing" fixed here today.
+#
+# `set-from-…` (no brackets) is now the marker. It is still visibly not a model name, it still
+# cannot be mistaken for a real setting, and it survives rendering. Bracketed forms stay accepted
+# so an endpoint written `<set-from-…>` in a YAML comment or a non-rendered file is not a failure —
+# what changed is that the bracket-free form is no longer rejected.
+PLACEHOLDER = re.compile(r"^<[^>]+>$|^set-from-[\w.-]+$|(^|\.)example\.com(/|$)")
 
 
 def judge(value: str) -> str | None:
