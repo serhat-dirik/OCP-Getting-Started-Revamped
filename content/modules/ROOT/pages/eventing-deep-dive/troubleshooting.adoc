@@ -133,6 +133,14 @@ Pick `ref` *or* `uri` and stick with it for that Trigger across edits.
 Symptom:: `oc logs deploy/claims-consumer-v1-deployment …` (or the `claims-dlq` equivalent) returns `error: timed out waiting for the condition` instead of the event display.
 Cause:: `claims-consumer` and `claims-dlq` are *scale-to-zero* Knative Services. If you paused after sending an event, the consumer settled back to zero — its Deployment now has no pod, so `oc logs deploy/…` waits for one and times out. It is not a failure of the consumer or the delivery.
 Fix:: Re-run the *event-send* command from that step (it wakes the consumer through the broker), then read the log again within a few seconds — before it settles back to zero. Keeping the send and the read in the *same* step, back to back, avoids the gap.
++
+IMPORTANT: This recovers your ability to read *a* log. It does *not* recover the *earlier* event you were trying to read. Waking the consumer starts a *new pod with an empty log*, and the pod that displayed the earlier event is gone for good. Measured on cluster (2026-07-31): send event A, let it scale to zero, re-send as event B — the read then succeeds and shows B, with *zero* occurrences of A. If you needed A specifically, send it again; if you were waiting on the scheduled PingSource, see the next entry.
+
+== A consumer log-read SUCCEEDS but comes back empty
+
+Symptom:: `oc logs deploy/claims-consumer-v1-deployment …` exits cleanly — no timeout, no error — but your `grep` matches nothing. Most confusingly this happens right after you *did* wake the consumer.
+Cause:: You are reading a *different pod* from the one that displayed the event. `claims-consumer` scales to zero ~60-90 s after it goes idle, and the log lives in the pod, so the log dies with it. Waking the Service creates a fresh pod whose log starts empty. This is the same root cause as the timeout above, but it presents as *success* rather than failure — which is why it is easy to read as "the event never arrived" when in fact it arrived and was displayed by a pod that no longer exists.
+Fix:: Do not try to recover a past event — re-create it. Send the event again and read the log in the *same* step. For the scheduled `claim-ticker` ping specifically, either send a ping-shaped event yourself (`Ce-Type: dev.knative.sources.ping` with `ce-claimpriority: high`, which takes the same trigger route) or hold the consumer awake across a tick with a short poll loop. Exercise 6 gives both commands. Waiting idle for the next tick is the one thing that cannot work: the tick wakes a new pod, and the tick you waited for is unreadable.
 
 == The consumer returns `404` for my CloudEvent POST
 

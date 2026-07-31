@@ -130,7 +130,7 @@ EOF
 oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "fails -> retries -> DLQ: HTTP %{http_code} in %{time_total}s\n" \
   -X POST -H "Ce-Id: dead-99" -H "Ce-Specversion: 1.0" -H "Ce-Type: com.parasol.claim.submitted" \
   -H "Ce-Source: /demo/claims" -H "Content-Type: application/json" -d "{\"claimId\":\"CLM-DEAD-99\"}" "'$BROKER'"'
-oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=20 | grep -iE 'id:|knativeerror'
+oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=200 | grep -iE 'id:|knativeerror'
 ----
 +
 "Eight seconds — that's *one try plus three retries* with exponential backoff. The event failed every time, so instead of *dropping* it, Knative dead-lettered it to `claims-dlq` — stamped `knativeerrorcode: 404` and the destination that kept failing. No event silently lost, and a diagnosable record of why."
@@ -262,7 +262,7 @@ POST CloudEvent: HTTP 204 in 0.406753s
 
 [source,sh,role=execute]
 ----
-oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=20 | grep -A12 'Received event'
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -A16 'Received event'
 ----
 
 [NOTE]
@@ -360,7 +360,7 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "cl
   -H "Ce-Type: com.parasol.claim.submitted" -H "Ce-Source: /demo/broker" \
   -H "Content-Type: application/json" \
   -d "{\"claimId\":\"CLM-7778\",\"amount\":9200}" "'"$BROKER"'"'
-oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=40 | grep -E 'id: broker-'
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -E 'id: broker-'
 ----
 
 .Expected output (warm delivery is sub-second; both broker-routed events reached the consumer)
@@ -591,7 +591,15 @@ spec:
 EOF
 ----
 
-Send a claim event. It will fail, retry three times with backoff, then dead-letter. Because the broker is *synchronous*, the `202` returns only after all of that completes — *~8 s* if the consumer is warm (just the 1s/2s/4s backoff), but *~20 s or more* when the failing consumer cold-starts on the retries — so give `curl` a *generous* `-m 90` and *don't* let it cancel:
+Send a claim event. It will fail, retry three times with backoff, then dead-letter. Because the broker is *synchronous*, the `202` returns only after all of that completes.
+
+How long that takes depends on what is already warm, and on a first run it is usually the *slowest* case:
+
+* *~8 s* — everything warm. Just the 1s/2s/4s backoff.
+* *~20 s+* — the failing consumer cold-starts on the retries.
+* *~30 s+* — the *dead-letter sink* also cold-starts. `claims-dlq` is itself a scale-to-zero Service, and the synchronous broker holds your `202` until the dead-letter delivery completes too — so on a first dead-letter you pay its startup as well. Measured at *32 s* on a run where the consumer was already warm.
+
+So give `curl` a *generous* `-m 90` and *don't* let it cancel:
 
 [source,sh,role=execute]
 ----
@@ -601,17 +609,17 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "fa
   -d "{\"claimId\":\"CLM-DEAD-99\",\"fraudScore\":0.99}" "'"$BROKER"'"'
 ----
 
-.Expected output (the synchronous 202 returns only after the retries — the value below is a warm run; a cold consumer pushes it to ~20 s+ — then the event dead-letters)
+.Expected output (the synchronous 202 returns only after the retries AND the dead-letter delivery — the value below is an all-warm run; expect 20-35 s on a first run, then the event dead-letters)
 [source,texinfo]
 ----
 failing claim -> retries -> DLQ: HTTP 202 in 7.867066s
 ----
 
-That ~8 seconds *is* the retry policy: the initial attempt plus three retries with 1s, 2s, 4s exponential backoff. The event failed every time — so instead of being *dropped*, it was *dead-lettered*. Open the dead-letter sink and read the dead event — Knative stamps it with *why* it died:
+In an all-warm run that ~8 seconds *is* the retry policy: the initial attempt plus three retries with 1s, 2s, 4s exponential backoff. If yours took closer to 30 s, subtract the two cold starts and the same 8 seconds is in there — the arithmetic still holds, it is just wearing a scale-to-zero coat. The event failed every time — so instead of being *dropped*, it was *dead-lettered*. Open the dead-letter sink and read the dead event — Knative stamps it with *why* it died:
 
 [source,sh,role=execute]
 ----
-oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=40 | grep -A16 'dead-99'
+oc logs deploy/claims-dlq-v1-deployment -c showcase -n $NS --tail=200 | grep -A16 'dead-99'
 ----
 
 .Expected output (abridged — the dead event, with the `knativeerror*` extension attributes that record the failure; the `knativeerrordata` value is a longer JSON blob, truncated here)
@@ -717,7 +725,46 @@ Data,
   }
 ----
 
-That's the *whole loop* running unattended: a scheduled source → the broker → a filtered trigger → the consumer displaying the event. (If no ping is in the log yet, wait for the next five-minute tick, or send one yourself as in exercise 4.)
+That's the *whole loop* running unattended: a scheduled source → the broker → a filtered trigger → the consumer displaying the event.
+
+[IMPORTANT]
+.If the log is empty, do NOT just wait — waiting is what loses it
+====
+`claims-consumer` scales to zero roughly 60-90 seconds after it goes idle, and *the pod holding the log goes with it*.
+The ticker fires every five minutes, so the window in which a tick is readable is under 90 seconds out of every 300.
+
+That makes "wait for the next tick" actively wrong advice: by the time the next tick wakes the consumer, it wakes a *brand-new pod with an empty log*, and the tick you were waiting for is unreadable forever.
+Re-sending an event to wake it does not help either, for the same reason — it is a new pod.
+(Measured on cluster: send an event, let it scale to zero, re-send, and the first event is gone from the log while the second is present.)
+
+You have two honest options:
+
+*Send a ping-shaped event yourself* — deterministic and immediate, and it exercises exactly the same trigger route the real ticker uses:
+
+[source,sh,role=execute]
+----
+oc exec deploy/demo-client -n $NS -- sh -c "curl -s -k -m 30 -o /dev/null -w 'self-ping: HTTP %{http_code}\n' \
+  -X POST -H 'Ce-Id: self-ping-1' -H 'Ce-Specversion: 1.0' -H 'Ce-Type: dev.knative.sources.ping' \
+  -H 'ce-claimpriority: high' -H 'Ce-Source: /demo/self-ping' -H 'Content-Type: application/json' \
+  -d '{\"claimId\":\"CLM-0000\",\"note\":\"self-sent ping-shaped event\"}' '$BROKER'"
+sleep 5
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -A10 'dev.knative.sources.ping' | head -14
+----
+
+*Or catch the real tick* by holding the consumer awake across it. This blocks for up to five and a half minutes — only worth it if you specifically want to see the scheduled source fire:
+
+[source,sh,role=execute]
+----
+END=$(( $(date +%s) + 330 ))
+while [ "$(date +%s)" -lt "$END" ]; do
+  oc exec deploy/demo-client -n $NS -- curl -s -k -m 5 -o /dev/null "$CONSUMER" >/dev/null 2>&1 || true
+  sleep 20
+done
+oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | grep -A10 'dev.knative.sources.ping' | head -14
+----
+====
+
+See xref:eventing-deep-dive/troubleshooting.adoc[the troubleshooting page] if a log read times out or comes back empty — it covers the scale-to-zero cases in more detail.
 
 Now the decisions, which you take back to your own systems:
 
