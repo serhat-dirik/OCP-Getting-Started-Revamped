@@ -53,6 +53,10 @@
 #                                             writes one before it deletes the state namespace,
 #                                             and prints the path in its closing summary.
 #   ./ogsr-check-clean.sh --quiet             findings and verdict only, no explanations
+#   ./ogsr-check-clean.sh --self-test         offline proof that the olm.copiedFrom exclusion works
+#                                             and that a copy-only namespace is never misread as
+#                                             foreign. Touches no cluster. Exit 1 = both proofs held
+#                                             (house convention — see .github/workflows/lint.yml).
 #
 # `set -e` is deliberately NOT used. This script runs on a cluster whose state it cannot predict —
 # including one whose API discovery is already broken, which is one of the things it reports. A
@@ -120,6 +124,7 @@ case "$SWEEP_JOBS" in ''|*[!0-9]*|0) SWEEP_JOBS=8;; esac
 STATE_FILE=""
 STATE_FILE_DEFAULT="${TMPDIR:-/tmp}/ogsr-uninstall-state.txt"
 QUIET="false"
+SELF_TEST="false"
 
 N_ADOPTED=0   # the org's own operators left unhealthy — the worst outcome this design can produce
 N_HEALTH=0    # cluster-wide health damage (wedged namespaces, broken discovery)
@@ -146,6 +151,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "❌ --state-file needs a path" >&2; exit 2; }
       STATE_FILE="$2"; shift 2;;
     --quiet|-q)   QUIET="true"; shift;;
+    --self-test)  SELF_TEST="true"; shift;;
     -h|--help)    usage;;
     *) echo "unknown flag: $1" >&2; usage;;
   esac
@@ -222,29 +228,34 @@ run_parallel() {  # worker-fn < newline-separated work items → concatenated st
 }
 
 # ── preflight ─────────────────────────────────────────────────────────────────
-command -v oc >/dev/null 2>&1 || { echo "❌ oc not found in PATH — cannot scan"; exit 2; }
-oc whoami >/dev/null 2>&1 || {
-  echo "❌ not logged in to a cluster — cannot scan"
-  echo "   fix: export KUBECONFIG=/path/to/kubeconfig   (this script never runs oc login itself)"
-  exit 2
-}
+# --self-test proves the olm.copiedFrom exclusion offline, against a stubbed `oc` — it must never
+# require a live cluster (CI runs it with no kubeconfig at all), so it skips preflight and the banner
+# entirely and jumps straight to self_test() at the bottom, where the functions it needs are defined.
+if [ "$SELF_TEST" != "true" ]; then
+  command -v oc >/dev/null 2>&1 || { echo "❌ oc not found in PATH — cannot scan"; exit 2; }
+  oc whoami >/dev/null 2>&1 || {
+    echo "❌ not logged in to a cluster — cannot scan"
+    echo "   fix: export KUBECONFIG=/path/to/kubeconfig   (this script never runs oc login itself)"
+    exit 2
+  }
 
-echo "ogsr-check-clean — read-only leftover report"
-echo "  cluster: $(oc whoami --show-server 2>/dev/null || echo '?')"
-echo "  as:      $(oc whoami 2>/dev/null || echo '?')     $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-echo "  owner label: ${OWNER_LABEL}"
-echo "  NOTHING below is changed for you. Each finding carries the command for ITS remedy — 'remove:'"
-echo "  where we created the object, 'strip:' where we only marked one of the org's, and neither where"
-echo "  the two cannot be told apart."
-# Said BEFORE the first long read, not after it. This tool is meant to be run after an uninstall, where
-# it finishes in well under a minute; run against a FULL install every object is a finding and the scan
-# takes minutes. Without this line that is indistinguishable from a hang, at exactly the moment someone
-# is deciding whether to run destructive commands on their own cluster.
-[ "$QUIET" = "true" ] || {
-  echo "  Runtime scales with the number of LEFTOVERS, not with the size of the cluster: seconds on a"
-  echo "  cleanly uninstalled cluster, a few minutes against a full install. Each section prints its"
-  echo "  elapsed time as (t+NNs), so you can always see it moving."
-}
+  echo "ogsr-check-clean — read-only leftover report"
+  echo "  cluster: $(oc whoami --show-server 2>/dev/null || echo '?')"
+  echo "  as:      $(oc whoami 2>/dev/null || echo '?')     $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "  owner label: ${OWNER_LABEL}"
+  echo "  NOTHING below is changed for you. Each finding carries the command for ITS remedy — 'remove:'"
+  echo "  where we created the object, 'strip:' where we only marked one of the org's, and neither where"
+  echo "  the two cannot be told apart."
+  # Said BEFORE the first long read, not after it. This tool is meant to be run after an uninstall, where
+  # it finishes in well under a minute; run against a FULL install every object is a finding and the scan
+  # takes minutes. Without this line that is indistinguishable from a hang, at exactly the moment someone
+  # is deciding whether to run destructive commands on their own cluster.
+  [ "$QUIET" = "true" ] || {
+    echo "  Runtime scales with the number of LEFTOVERS, not with the size of the cluster: seconds on a"
+    echo "  cleanly uninstalled cluster, a few minutes against a full install. Each section prints its"
+    echo "  elapsed time as (t+NNs), so you can always see it moving."
+  }
+fi
 
 # ── indexes: one cluster read each, reused by every section ───────────────────
 DISCOVERY_NOTE=""
@@ -276,6 +287,16 @@ SUB_INDEX_ERR=""   # first line of stderr from that read, quoted verbatim wherev
 #   owner|component|stack|user|layer|tracking-id|sync-options|che-user
 MARKS_JP="{.metadata.labels.${OWNER_KEY//./\\.}}|{.metadata.labels.${COMPONENT_KEY//./\\.}}|{.metadata.labels.${STACK_KEY//./\\.}}|{.metadata.labels.${USER_KEY//./\\.}}|{.metadata.labels.${LAYER_KEY//./\\.}}|{.metadata.annotations.${TRACK_ANN//./\\.}}|{.metadata.annotations.${SYNC_OPTS_ANN//./\\.}}|{.metadata.annotations.${CHE_USER_ANN//./\\.}}"
 
+# ns|name|phase|  for every ORIGINAL ClusterServiceVersion — OLM's per-namespace copies excluded
+# server-side. See the call site in load_indexes() for the full why; kept as its own function so
+# --self-test can point it at a stubbed `oc` and prove the exclusion fires, rather than trusting that
+# the flag is merely present somewhere in this file's source.
+csv_index_read() {
+  oc get clusterserviceversions.operators.coreos.com -A -l '!olm.copiedFrom' --no-headers 2>/dev/null \
+    | awk 'NF>=3 { p=$NF; if (p !~ /^(Pending|InstallReady|Installing|Succeeded|Failed|Replacing|Deleting|Unknown)$/) p=""; print $1"|"$2"|"p"|" }'
+  return 0
+}
+
 load_indexes() {
   local sub_ef
   echo
@@ -293,16 +314,35 @@ load_indexes() {
   # " ns/name ns/name … " — membership test for the APIService and webhook sections
   SVC_INDEX=" $(oc get services -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{" "}{end}' 2>/dev/null) "
 
-  # ns|name|phase|reason   (copied CSVs appear once per namespace; harmless — every section below asks
-  # "does ANY row match", never "how many rows")
+  # ns|name|phase|reason
+  #
+  # `-l '!olm.copiedFrom'` drops OLM's per-namespace COPIES server-side — same flag, same reason, as
+  # ogsr-uninstall.sh's csv_index() and this file's own section [3/9] (search ORPHAN_CSV_JP). OLM copies
+  # a CSV into every namespace its OperatorGroup targets, which for an AllNamespaces-mode operator is
+  # EVERY namespace on the cluster — so without this filter, CSV_INDEX previously said "yes, this
+  # namespace holds a CSV" about nearly the whole cluster regardless of what any namespace actually is.
+  # That is NOT harmless the way it once looked: ns_has_foreign_csv() below asks exactly "does ANY row
+  # match this namespace", so every extra copy row flips more namespaces from "no CSV here" to "holds
+  # one we can't account for" — which reads as SAFER (classify_finding's no-state fallback answers
+  # `decide` instead of `ours`, printing no delete command) but actually just drowns the one case this
+  # heuristic exists to catch — a namespace that genuinely hosts an unaccounted operator — under false
+  # positives from namespaces that were never anything but a copy target. Excluding copies does not
+  # remove real signal: an operator's ORIGINAL CSV still lives, un-filtered, in the namespace that
+  # actually hosts it (adopted or ours), so a truly ambiguous namespace still classifies as `decide`.
+  # Older OLM recorded the copy as an ANNOTATION instead of a label, which this selector cannot catch —
+  # accepted here (as it is in section [3/9]'s own filtered read) because every OCP 4.20+ cluster this
+  # portfolio targets stamps the label form.
   #
   # Read as a SERVER-SIDE TABLE, not as jsonpath. A CSV embeds its whole install strategy, alm-examples
   # and a base64 icon, so `-o jsonpath`/`-o name` pull the full objects: measured 5.8–12.9s here versus
   # 2.3s for the table. The table gives NAMESPACE …spaces-in-DISPLAY… PHASE, so only $1, $2 and $NF are
   # positionally safe; $NF is validated against OLM's phase vocabulary and anything unrecognised is
   # re-read per object below rather than guessed at.
-  CSV_INDEX="$(oc get clusterserviceversions.operators.coreos.com -A --no-headers 2>/dev/null \
-    | awk 'NF>=3 { p=$NF; if (p !~ /^(Pending|InstallReady|Installing|Succeeded|Failed|Replacing|Deleting|Unknown)$/) p=""; print $1"|"$2"|"p"|" }')"
+  #
+  # Pulled out to its own function (rather than inlined here) so --self-test can call the exact same
+  # code path against a stubbed `oc` and prove the copiedFrom exclusion actually fires, instead of
+  # grepping this file's own source for the flag.
+  CSV_INDEX="$(csv_index_read)"
   # status.reason is not in the table and section [2/9] needs it. Only non-Succeeded CSVs can carry an
   # interesting reason, and a healthy cluster has none, so this costs nothing in the normal case.
   csv_fill_reasons
@@ -1538,6 +1578,100 @@ crd_matches_adopted() {  # crd-name → 0 when an ADOPTED operator's name tokens
   done < <(state_ops adopted)
   return 1
 }
+
+# ── self-test: offline proof for the olm.copiedFrom exclusion ────────────────
+# ORIGIN: CSV_INDEX used to be read with no `-l '!olm.copiedFrom'` filter — unlike this file's own
+# section [3/9] (search ORPHAN_CSV_JP) and ogsr-uninstall.sh's csv_index(), both of which filter OLM's
+# per-namespace copies server-side and document why. OLM copies a CSV into every namespace its
+# OperatorGroup targets — for an AllNamespaces-mode operator that is EVERY namespace on the cluster —
+# so the unfiltered read made ns_has_foreign_csv() answer "yes, this namespace holds a CSV we cannot
+# account for" about nearly the whole cluster. That reads as the SAFE side (classify_finding's
+# no-state fallback answers `decide`, never `ours`, so no delete command gets printed) but it is not
+# free: it drowns the one namespace that genuinely hosts an unaccounted operator under false
+# positives from namespaces that never held anything but a copy.
+#
+# Two things have to be PROVEN, never asserted:
+#   1. the exclusion actually fires — against a stubbed `oc`, not a grep of this file's own source
+#      for the flag (a comment can lie about what the code does; a stub cannot).
+#   2. with the copy excluded, a namespace holding a genuine, unaccounted ORIGINAL CSV is STILL
+#      caught — proving the fix narrows the false-positive net without cutting a hole in it.
+# Never touches a real cluster: `oc` is shadowed by a fixture-returning function for the duration of
+# this test only, and unset again before it returns.
+self_test() {
+  local rc=0 idx canary_leaked copy_only_rc orig_rc
+
+  # ── proof 1: csv_index_read() excludes OLM's per-namespace copies ──────────
+  # The stub is ARGV-sensitive: it answers as a real FILTERED list would (the copy never comes back)
+  # only when it sees the exact selector this script is supposed to pass. Drop the selector — the
+  # historical bug — and the stub hands the copy back too, exactly as an unfiltered `oc get` would on
+  # a real cluster carrying one global (AllNamespaces-mode) operator.
+  oc() {
+    case " $* " in
+      *' clusterserviceversions.operators.coreos.com '*'!olm.copiedFrom'*)
+        printf 'real-operator-ns real-operator.v1.0.0 Succeeded\n' ;;
+      *' clusterserviceversions.operators.coreos.com '*)
+        printf 'real-operator-ns real-operator.v1.0.0 Succeeded\nogsr-selftest-canary real-operator.v1.0.0 Succeeded\n' ;;
+    esac
+    return 0
+  }
+  idx="$(csv_index_read)"
+  unset -f oc
+  canary_leaked=1
+  case "$idx" in *"ogsr-selftest-canary|"*) canary_leaked=0;; esac
+
+  if [ "$canary_leaked" -eq 0 ]; then
+    echo "❌ SELF-TEST: csv_index_read() let a copy's namespace through — the -l '!olm.copiedFrom' selector is missing or broken"
+    rc=1
+  else
+    echo "✅ self-test 1/2: csv_index_read() excludes a namespace whose only CSV is OLM's copy"
+  fi
+
+  # ── proof 2: the downstream bias is actually fixed, not just the read ──────
+  # No `oc` needed — ns_has_foreign_csv() reads only the globals set below, which is what makes it
+  # directly testable. SUB_INDEX_RC=0 means "the Subscription list is trustworthy", so the function
+  # answers from these fixtures instead of falling back to a live probe.
+  SUB_INDEX_RC=0
+  SUB_INDEX=""              # no Subscription anywhere carries our owner label in this fixture
+
+  # copy-only namespace: CSV_INDEX (as proof 1 established) has NO row for it, so it must NOT be
+  # reported as holding a CSV we cannot account for — this is the exact bias the fix removes.
+  FOREIGN_CSV_CACHE=""
+  CSV_INDEX="real-operator-ns|real-operator.v1.0.0|Succeeded|"
+  copy_only_rc=1
+  ns_has_foreign_csv "ogsr-selftest-canary" && copy_only_rc=0
+
+  # genuine unaccounted operator: an ORIGINAL CSV actually sits in this namespace with no Subscription
+  # of ours anywhere — the real case this heuristic exists to catch. Excluding copies must not have
+  # broken it.
+  FOREIGN_CSV_CACHE=""
+  CSV_INDEX="an-adopted-operator-ns|some-operator.v2.0.0|Succeeded|"
+  orig_rc=1
+  ns_has_foreign_csv "an-adopted-operator-ns" && orig_rc=0
+
+  if [ "$copy_only_rc" -eq 0 ]; then
+    echo "❌ SELF-TEST: a namespace holding only a copied CSV was reported as foreign — the exact bias this fix removes"
+    rc=1
+  else
+    echo "✅ self-test 2/2a: a copy-only namespace is no longer misreported as foreign"
+  fi
+  if [ "$orig_rc" -ne 0 ]; then
+    echo "❌ SELF-TEST: a namespace holding a genuine, unaccounted ORIGINAL CSV was NOT flagged — this is a regression in detection, not just a fix"
+    rc=1
+  else
+    echo "✅ self-test 2/2b: a namespace holding a genuine unaccounted CSV is still flagged"
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    echo "self-test ok — both proofs held (copy excluded from CSV_INDEX; a real foreign CSV is still caught)"
+    return 1
+  fi
+  return 2
+}
+
+if [ "$SELF_TEST" = "true" ]; then
+  self_test
+  exit $?
+fi
 
 # ── run ───────────────────────────────────────────────────────────────────────
 load_indexes
