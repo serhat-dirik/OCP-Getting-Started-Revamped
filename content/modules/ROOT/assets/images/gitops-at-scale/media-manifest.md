@@ -7,30 +7,36 @@ numbered red circles matching the referenced step. Every screenshot needs alt te
 commented `// media-pass: …` line — replace with the `image::` (screenshot) or the SVG
 `image::` (diagram) when the asset lands.
 
-**Why this module's screenshots matter.** M10 is a **terminal + UI** module. The **ApplicationSet is
-created from the terminal with the served `argocd` CLI** — Argo CD 3.4 has *no ApplicationSet screen*
-in its web UI (neither create nor read), which G3 confirmed live; the CLI is the interface. The
-**canary is watched in the Argo CD Rollout view** (that view *does* exist). The build performed the
-real attendee CLI flow (download + token + `appset create` + `app list`, plus the `PermissionDenied`
-a neighbour's project returns) and verified every **workload outcome** from the terminal (the
-generated Rollout, the wave-ordered migration Job, the canary steps, the failed `AnalysisRun`, route
-200) — but the **browser views were not screen-captured** (no browser in the build environment).
-Capture them in the media pass.
+**Why this module's screenshots matter.** This module is a **terminal + UI** module. The **ApplicationSet
+is created from the terminal with the served `argocd` CLI** — Argo CD 3.4 has *no ApplicationSet
+screen* in its web UI (neither create nor read), which G3 confirmed live; the CLI is the interface.
+The **canary is watched from the terminal too** — the Argo CD *Rollout view* (the richer, animated
+canary visualization) is **enabled** on this instance (`spec.server.enableRolloutsUI`, `d622a6f`) but
+**does not render**: its assets 404 through every route/localhost convention tried, with no
+extension-registration line in any log, which reads as a packaging gap in the downstream GitOps
+extensions image for this CSV rather than something this workshop's config can fix. If a later GitOps
+release closes that gap, screenshots 4–5 below can be re-shot from that view; until then they are
+captured as described in their rows (terminal watch-loop output, paired with the console's Pods view
+for the replica-split visual). The build performed the real attendee CLI flow (download + token +
+`appset create` + `app list`, plus the `PermissionDenied` a neighbour's project returns) and verified
+every **workload outcome** from the terminal (the generated Rollout, the wave-ordered migration Job,
+the canary steps, the failed `AnalysisRun`, route 200) — but the **browser views were not
+screen-captured** (no browser in the build environment). Capture them in the media pass.
 
 > **Note on `01-appset-created`:** the money shot is the **terminal** right after `~/argocd appset
 > create` + `~/argocd app list -p proj-{user}` (the "created" line + the three generated apps) — *not*
 > a UI create form, which does not exist in Argo 3.4. The three-app cards in the Argo CD **Applications**
 > view (`02`) are the UI counterpart (the ApplicationSet detail/read view also does not exist in 3.4).
 
-## Screenshots (terminal + Argo CD Rollout / Gitea UI views — the view IS the content)
+## Screenshots (terminal + Argo CD Applications / Gitea UI views, plus console Pods views — the view IS the content)
 
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
 | 1 | `gitops-at-scale-01-appset-created.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal** after `~/argocd appset create` + `~/argocd app list -p proj-user1` | the `ApplicationSet 'claims-user1' created` line and the three generated apps (dev/stage Synced, prod Progressing on the `rollouts` path) | lab.adoc ex. 1 (create the ApplicationSet) |
 | 2 | `gitops-at-scale-02-three-app-cards.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Applications view** (the appset detail/read view does NOT exist in 3.4) | the THREE generated app cards `claims-dev/stage/prod-user1`, all Synced/Healthy — dev/stage adopted, prod new | lab.adoc ex. 1 (after create) |
 | 3 | `gitops-at-scale-03-gitea-image-bump.png` | ⬜ NOT CAPTURED | **Gitea editor on `rollouts/claims-rollout.yaml`** | the image tag changed `1.0` → `1.1`, the Commit Changes panel | lab.adoc ex. 3 (ship a new version) |
-| 4 | `gitops-at-scale-04-canary-progressing.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Rollout view, mid-canary** | revision 2 (canary, 1.1) alongside revision 1 (stable, 1.0), SetWeight 25 or 50, the analysis step running — the module's signature visual | lab.adoc ex. 3 (watch the canary) |
-| 5 | `gitops-at-scale-05-canary-aborted.png` | ⬜ NOT CAPTURED — **HIGH** | **Argo CD Rollout view, aborted** | the Rollout Degraded/aborted at the analysis step, the failed AnalysisRun, stable still serving — the payoff | lab.adoc ex. 4 (the auto-rollback) |
+| 4 | `gitops-at-scale-04-canary-progressing.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal**, mid-canary (the Argo CD Rollout view does not render on this cluster — extension enabled, assets 404; see the module note above) | the ex. 3 watch loop at step 2/5 or 3/5, showing `canary-pods:2/4` and `analysis:Running`; pair with a second shot of the console's *Workloads → Pods* view (Project `user1-prod`) at the same moment, showing the 2-stable/2-canary replica split — the module's signature moment, now on the CLI + Pods view | lab.adoc ex. 3 (watch the canary) |
+| 5 | `gitops-at-scale-05-canary-aborted.png` | ⬜ NOT CAPTURED — **HIGH** | **Terminal**, at the abort (the Argo CD Rollout view does not render on this cluster — same gap as row 4) | the ex. 4 watch loop printing `rollout: Degraded   analysis: Failed`, plus the follow-on `AnalysisRun` message and the `prod health through the abort: 200` line — the payoff, now on the CLI | lab.adoc ex. 4 (the auto-rollback) |
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
@@ -51,5 +57,7 @@ and richer rendering; keep the `.mmd` as the editable master (do not delete it).
 
 - `gitops-at-scale-demo.cast` (asciinema) OR `<90s` silent screen capture — ⬜ NOT CAPTURED.
   The canary + auto-rollback arc is the flagship: ship 1.1 (green canary), then `verdict=fail` + ship
-  (abort + rollback), route 200 throughout. Console-heavy (the Argo Rollout view animates), so a
-  short screen capture of the Rollout view during the abort is the highest-value clip.
+  (abort + rollback), route 200 throughout. Terminal-heavy now (the Argo CD Rollout view does not
+  render on this cluster — see the module note above), so an asciinema capture of the polling loop
+  through the abort, ending on the `prod health through the abort: 200` line, is the highest-value
+  clip.
