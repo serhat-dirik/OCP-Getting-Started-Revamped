@@ -312,13 +312,20 @@ spec:
   destination:
     server: https://kubernetes.default.svc
   syncPolicy:
-    automated:
-      prune: true
-      # selfHeal OFF by design: attendee edits to chart-owned workloads ARE the lab
-      # (G3-M05: selfHeal reverted the attendee's 'oc set volume' within ~1s, so the
-      # module's central exercise could never complete). Creation still auto-syncs;
-      # 'ws reset' is the deliberate re-convergence path.
-      selfHeal: false
+    # NO 'automated' block — sync is MANUAL, and every materialize triggers it explicitly.
+    #
+    # selfHeal was already off by design: attendee edits to chart-owned workloads ARE the lab
+    # (G3-M05: selfHeal reverted the attendee's 'oc set volume' within ~1s, so the module's central
+    # exercise could never complete). But selfHeal:false only governs drift at a CONSTANT revision.
+    # Every one of these apps tracked the same branch, so ANY commit to ANY module bumped the
+    # revision for ALL of them, and a revision bump is a normal sync, not drift — selfHeal never
+    # entered into it. Result: pushing a fix to one module could revert an attendee's deliberate
+    # change mid-exercise, in a different module. Confirmed three times. (Owner decision 2026-07-31.)
+    #
+    # Manual sync is only safe because ws triggers one itself at every point that used to rely on
+    # creation auto-syncing — see sync_app_operation and its callers. If you add a new code path that
+    # applies an Application, it MUST call sync_app_operation or the materialize silently does
+    # nothing: the object appears, Argo reports OutOfSync, and no workload is ever created.
     syncOptions:
       - CreateNamespace=false
     retry:
@@ -819,12 +826,37 @@ cmd_start() {
     n="$(oc get group workshop-attendees -o jsonpath='{.users[*]}' 2>/dev/null | wc -w | xargs)"
     [[ "$n" -gt 0 ]] || die "cannot enumerate workshop-attendees group"
     info "materializing ${module} for all ${n} attendees…"
+    local bulk_apps=()
     for u in $(oc get group workshop-attendees -o jsonpath='{.users[*]}'); do
       gc_conflicts "$u" "$module"
       render_app "$module" "$u" | oc apply -f - >/dev/null
+      bulk_apps+=("$(app_name "$module" "$u")")
       echo "  ✓ ${u}"
     done
-    ok "entry apps applied for ${n} users — sync continues in-cluster (watch: oc get applications -n ${ARGO_NS})"
+    # Sync is MANUAL (see render_app), so this path can no longer rely on creation auto-syncing —
+    # without an explicit operation every one of these apps would sit OutOfSync with no workloads,
+    # and the only symptom would be a "successful" command that materialized nothing.
+    #
+    # Batched deliberately rather than calling sync_app_operation per user: that helper sleeps 10s
+    # between refresh and operation, which for eight attendees would be ~80s of dead time. Refresh
+    # them all, pay the settle once, then start every operation.
+    info "starting sync operations for ${n} entry apps…"
+    for a in "${bulk_apps[@]}"; do
+      oc annotate application "$a" -n "$ARGO_NS" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+    done
+    sleep 10
+    local started=0
+    # if/then, NOT `patch && started=… || warn`: that shape is SC2015, and inside a function under
+    # `set -e` an && chain whose left side fails takes the whole script down with it.
+    for a in "${bulk_apps[@]}"; do
+      if oc patch application "$a" -n "$ARGO_NS" --type merge \
+           -p '{"operation":{"initiatedBy":{"username":"ws"},"sync":{"revision":"'"${SOURCE_REVISION}"'","prune":true}}}' >/dev/null 2>&1; then
+        started=$((started+1))
+      else
+        warn "could not start a sync on ${a} — retry with: ws start ${module} --user ${a##*-}"
+      fi
+    done
+    ok "entry apps applied and ${started}/${n} sync operations started (watch: oc get applications -n ${ARGO_NS})"
     return 0
   fi
   gc_conflicts "$user" "$module"
@@ -1132,8 +1164,12 @@ sync_app_operation() {  # app — start a fresh sync OPERATION (hooks only re-ru
   done
   oc annotate application "$app" -n "$ARGO_NS" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
   sleep 10
+  # prune:true is REQUIRED now that syncPolicy has no automated block — pruning used to come from
+  # `automated.prune`, and without it here a reset would leave removed resources behind forever.
+  # revision follows SOURCE_REVISION rather than a hardcoded "main": ws already supports WS_REVISION,
+  # and a hardcoded branch would sync the wrong content the moment anyone used it.
   if oc patch application "$app" -n "$ARGO_NS" --type merge \
-    -p '{"operation":{"initiatedBy":{"username":"ws-git-refresh"},"sync":{"revision":"main"}}}' >/dev/null 2>&1; then
+    -p '{"operation":{"initiatedBy":{"username":"ws"},"sync":{"revision":"'"${SOURCE_REVISION}"'","prune":true}}}' >/dev/null 2>&1; then
     ok "sync operation started on ${app}"
   else
     err "could not start a sync on ${app} (still busy?) — retry shortly"
