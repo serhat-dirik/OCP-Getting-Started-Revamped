@@ -1346,6 +1346,15 @@ preserve_and_strip() {  # ns reason — F2/F7: keep the namespace, remove every 
     echo "   • WOULD preserve namespace/${ns} + strip ${key} / portfolio.redhat.com/component labels and ${TRACK_ANN} (${reason})"
     return 0
   fi
+  # The caller's namespace classification is a snapshot; by the time we get here another step's cascade
+  # may have already deleted this same namespace out from under it (measured 2026-07-31: step 8 logged
+  # "deleted namespace/openshift-gitops-operator", then step 9's own independent re-scan caught it
+  # mid-Terminating and logged "preserved" the SAME namespace — self-contradictory, even though the end
+  # state was correct). Check live and say which one actually happened.
+  if ! obj_exists namespace "$ns" ""; then
+    echo "   • namespace/${ns} is already gone (deleted or caught mid-Terminating elsewhere) — nothing to preserve or strip"
+    return 0
+  fi
   oc label namespace "$ns" "${key}-" "${TRACK_LABEL}-" portfolio.redhat.com/component- --overwrite >/dev/null 2>&1 || true
   oc annotate namespace "$ns" "${TRACK_ANN}-" >/dev/null 2>&1 || true
   echo "   • preserved namespace/${ns}, removed our labels + Argo tracking-id (${reason})"
@@ -1515,12 +1524,77 @@ handle_lightspeed() {  # remove our MaaS secret / namespace only when WE install
   return 0
 }
 
+# SEV1, reproduced live 2026-07-31: this used to delete the argocd/openshift-gitops CR fire-and-forget
+# (`del_obj` → `--wait=false`) and then immediately delete the operator's Subscription+CSV. The CR's
+# `argoproj.io/finalizer` runs ONLY inside the operator's own reconcile loop — it is what tears down the
+# server/repo-server/redis/appset-controller Deployments and the RBAC the CR owns. Removing the operator
+# before that finalizer had any chance to run left namespace/openshift-gitops wedged Terminating forever;
+# ogsr-check-clean.sh diagnosed it exactly ("NO operator on this cluster owns argocds.argoproj.io —
+# nothing will ever run this finalizer"). This is the one uninstall path NOT delivered by the Argo
+# cascade (deleting the operator's OWN operand, not something Argo prunes), so it inherits none of the
+# cascade's ordering guarantee and has to earn its own.
+#
+# Budget: 120s. An ArgoCD CR's own teardown is a handful of Deployments + RBAC — not a cascade phase
+# pruning dozens of Applications — so it does not share CASCADE_TIMEOUT's 900s budget; 120s is generous
+# against normal operator reconcile latency while still bounded (an unbounded wait turns a wedge into a
+# hang, which is the failure mode report_stuck_namespaces exists to avoid elsewhere in this file).
+ARGOCD_CR_FINALIZER_TIMEOUT=120
+
+# ns name budget → 0 once the CR is gone (incl. "was already gone"), 1 on timeout (still present).
+# Mirrors wait_for_phase's shape: bounded, sleeps in 10s ticks, prints progress so a silent two minutes
+# never reads as a hang.
+wait_for_argocd_cr_gone() {
+  local ns="$1" name="$2" budget="$3" waited=0
+  if [[ "$DRY_RUN" == "true" ]]; then
+    if obj_exists argocd "$name" "$ns"; then
+      echo "   • WOULD wait up to ${budget}s for argocd/${name} -n ${ns}'s finalizer before removing the operator"
+    fi
+    return 0
+  fi
+  if ! obj_exists argocd "$name" "$ns"; then
+    return 0   # already gone — idempotent re-run, or a finalizer that cleared before we even checked
+  fi
+  info "waiting for argocd/${name} -n ${ns} finalizer (argoproj.io/finalizer) to clear (up to ${budget}s) before removing its operator"
+  while (( waited < budget )); do
+    if ! obj_exists argocd "$name" "$ns"; then
+      ok "argocd/${name} -n ${ns}: finalizer cleared after ${waited}s"
+      return 0
+    fi
+    if (( waited > 0 && waited % 30 == 0 )); then
+      echo "   … still waiting for argocd/${name} -n ${ns} to finish deleting (${waited}s of ${budget}s)"
+    fi
+    sleep 10; waited=$((waited + 10))
+  done
+  return 1
+}
+
 handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise preserve (+ note the memory bump)
   local preexisted csv res b64 prior_res prior_mem target_mem
   preexisted="$(state gitops_preexisted)"
   if [[ "$preexisted" == "false" ]]; then
     info "GitOps was installed by us — removing operator + default instance"
     del_obj argocd openshift-gitops openshift-gitops
+    # Bounded wait for the CR's OWN finalizer before the next lines remove the only controller that can
+    # ever run it (see the comment above wait_for_argocd_cr_gone for the SEV1 this fixes). On expiry we
+    # force-clear the finalizer on the CR ITSELF — never on the namespace (the repo's own recorded rule:
+    # patching the namespace's finalizer ORPHANS its content instead of deleting it; patching the
+    # blocking object is the same choice release_operand_blockers already makes for stalled cascade
+    # phases, for the same reason — "clearing a stuck operand's finalizer while its operator is still
+    # alive is strictly better than stranding it after the operator is gone: same objects orphaned
+    # either way, but the cluster is left removable instead of requiring hand surgery"). The operator is
+    # still installed at this exact point (we have not deleted its Subscription/CSV yet), so this is the
+    # last moment that choice is even available — refusing to proceed here would just move the manual
+    # fix-up to a human later with strictly less information than we have right now.
+    if ! wait_for_argocd_cr_gone openshift-gitops openshift-gitops "$ARGOCD_CR_FINALIZER_TIMEOUT"; then
+      err "argocd/openshift-gitops -n openshift-gitops did not finish deleting within ${ARGOCD_CR_FINALIZER_TIMEOUT}s,"
+      err "and the operator that is the only thing able to run its finalizer is about to be removed next."
+      err "Force-clearing the CR's OWN finalizer now, while its operator is still here to have tried:"
+      oc patch argocd openshift-gitops -n openshift-gitops --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+      err "   ↳ FORCE-CLEARED finalizers on argocd/openshift-gitops -n openshift-gitops. Its own cleanup"
+      err "     (server/repo-server/redis/appset-controller Deployments + the RBAC it owned) will NOT run —"
+      err "     those objects are ORPHANED, not deleted. Deleting the openshift-gitops namespace below still"
+      err "     removes what lives inside it; ogsr-check-clean.sh reports anything that survives that too."
+    fi
     # Same resolution as step 4, and routed through the same single delete path. argocd-bootstrap
     # applies this Subscription imperatively so the cascade does not normally reach it — but "normally"
     # is exactly the assumption that broke step 4, and del_created_csv re-derives the authorization

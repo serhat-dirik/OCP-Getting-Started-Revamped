@@ -378,10 +378,14 @@ snapshot_operators() {
 # 8 namespaces on 2026-07-25). Argo honours both keys in one annotation:
 #     argocd.argoproj.io/sync-options: Prune=false,Delete=false
 #
-# merge_sync_options is a PURE string function (no cluster) so it can be unit-tested offline by
-# tools/verify/adopted-protection-selftest.sh. It preserves any sync options the org already set —
-# clobbering their annotation would itself be a mutation of a resource we do not own — and re-asserts
-# our two keys authoritatively, because protection must win over a stale Prune=true.
+# merge_sync_options is a PURE string function (no cluster), which is called out here because it makes
+# the function a natural offline-unit-test candidate — no such test exists in tools/verify/ today (a
+# prior version of this comment pointed at tools/verify/adopted-protection-selftest.sh, a file that was
+# never written; found stale 2026-07-31). The live equivalent that DOES exist and run today is
+# ogsr-uninstall.sh's own protection guard (check_adopted / PROT_BAD), which verifies every adopted
+# resource against the actual cluster — see its --dry-run output. It preserves any sync options the org
+# already set — clobbering their annotation would itself be a mutation of a resource we do not own — and
+# re-asserts our two keys authoritatively, because protection must win over a stale Prune=true.
 merge_sync_options() {  # <current-annotation-value> → merged value (order-preserving, no duplicates)
   local cur="${1:-}" out="" opt
   local IFS=','
@@ -1287,7 +1291,8 @@ fi
 if [[ "$PROTECTED_COUNT" -gt 0 ]]; then
   ok "adopted resources protected from teardown: ${PROTECTED_COUNT}"
   printf '%s\n' "$PROTECTED_LIST"
-  echo "   re-check any time: tools/verify/adopted-protection-selftest.sh"
+  echo "   re-check any time: ./bootstrap/ogsr-uninstall.sh --dry-run  (verifies every adopted resource"
+  echo "   against the live cluster and refuses to cascade if any of them is unprotected)"
 else
   info "adopted resources protected from teardown: none (nothing pre-existing was adopted)"
 fi
