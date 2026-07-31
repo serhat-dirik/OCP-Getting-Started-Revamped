@@ -14,46 +14,47 @@ spec:
   description: Per-user module entry states (materialized by the ws CLI)
   sourceRepos:
     - "*"
-  # Destinations are ENUMERATED, not "*" (owner decision 2026-07-31). Attendees hold unscoped
-  # `create` on Applications -- k8s RBAC cannot scope create by name -- and the controller that
-  # reconciles them is cluster-admin, so this list is what stops an attendee-authored Application
-  # writing into the CUSTOMER's namespaces. The admission guard already forces the Application's
-  # name, project and source path; this bounds where the result can land.
+  # Destinations are ENUMERATED, not "*". Attendees hold unscoped `create` on Applications -- k8s
+  # RBAC cannot scope a create by name, because the name does not exist when permission is checked --
+  # and the controller that reconciles them is cluster-admin. The admission guard bounds WHAT they
+  # may create (name, project, source path); this bounds WHERE the result may land.
   #
-  # KNOWN RESIDUAL, deliberately accepted for now: every attendee shares this one project, so the
-  # list permits all attendee namespaces and an attendee can therefore still target a PEER's. That
-  # is a cooperative-classroom risk, not a customer-data one. Closing it properly means one
-  # AppProject per attendee, mirroring the proj-{user} pattern the student Argo instance already
-  # uses -- tracked, not done here.
+  # THE EMPTY ENTRY IS LOAD-BEARING. Do not "tidy" it away.
+  # Entry-state Applications carry NO spec.destination.namespace -- the entry chart creates its own
+  # namespaces, so the Application names none (see render_app in tools/ws/ws). "*" matched empty; an
+  # enumerated list without "" does not, and a first attempt at this narrowing (8490ddf) put every
+  # entry app on both clusters into InvalidSpecError/Unknown and left `ws reset` dropping attendees
+  # into an empty namespace. Reverted in 317e444.
   #
-  # The five shared namespaces below are NOT decoration and must not be trimmed "for tidiness":
-  # entry charts genuinely manage objects in each, verified live rather than assumed --
+  # Permitting "" does NOT reopen the hole, and that was measured rather than assumed. Argo checks
+  # the project TWICE: once against the Application's own spec.destination, and again against EACH
+  # RESOURCE's namespace at sync time. Proved on-cluster with a throwaway project allowing only "":
+  #   Route/parasol-claims ns=user1-dev SyncFailed:
+  #     namespace user1-dev is not permitted in project 'ogsr-dest-probe'
+  # So "" satisfies the spec check while every manifest still has to land in a listed namespace.
+  #
+  # KNOWN RESIDUAL, deliberately accepted: all attendees share this one project, so an attendee can
+  # still target a PEER's namespace. Cooperative-classroom risk, not customer-data risk. The fix is
+  # one AppProject per attendee, mirroring the proj-{user} pattern in student-appprojects.yaml.
+  #
+  # The five shared namespaces are NOT decoration and must not be trimmed: entry charts genuinely
+  # manage objects in each, read off live Applications rather than guessed --
   #   ogsr-gitea            ConfigMap, Job, Role, RoleBinding, ServiceAccount  (per-user repo seeding)
   #   ogsr-system           Role, RoleBinding
   #   openshift-lightspeed  Role, RoleBinding
   #   sonarqube             Role, RoleBinding                                  (app-security-testing)
   #   stackrox              Role, RoleBinding                                  (RHACS reads)
-  # Narrowing to attendee namespaces alone would break `ws start` for every module that needs one.
-  # REVERTED to "*" on 2026-07-31 after the enumerated list broke 13 live Applications.
-  #
-  # What went wrong, recorded so the next attempt does not repeat it: entry-state Applications
-  # declare an EMPTY spec.destination.namespace -- the entry chart creates its own namespaces, so
-  # the Application itself names none. "*" matched empty; an enumerated list does not, and every
-  # entry app went InvalidSpecError / Unknown with
-  #   "namespace '' do not match any of the allowed destinations".
-  #
-  # The verification that missed it checked the namespaces the Applications MANAGE
-  # (status.resources) and confirmed none would be rejected. That was the wrong object: the project
-  # check runs against spec.destination.namespace, which is a different field and was empty in all
-  # of them. Checking the thing next to the thing.
-  #
-  # A correct narrowing must permit the empty destination explicitly AND still bound where manifests
-  # land -- which for these apps is governed by the manifests' own namespaces, not the Application's
-  # destination. Containment today therefore comes from the admission guard (name, project, source
-  # path) plus clusterResourceWhitelist below, as it did before.
   destinations:
-    - namespace: "*"
+    - namespace: ""
       server: https://kubernetes.default.svc
+{{- range $i := until (int .Values.userCount) }}
+    - namespace: "{{ $.Values.userPrefix }}{{ add $i 1 }}-*"
+      server: https://kubernetes.default.svc
+{{- end }}
+{{- range $ns := list "ogsr-gitea" "ogsr-system" "openshift-lightspeed" "sonarqube" "stackrox" }}
+    - namespace: {{ $ns | quote }}
+      server: https://kubernetes.default.svc
+{{- end }}
   # Entry charts may create their module-extra namespaces (e.g. {user}-mesh) — nothing else cluster-scoped.
   clusterResourceWhitelist:
     - group: ""
