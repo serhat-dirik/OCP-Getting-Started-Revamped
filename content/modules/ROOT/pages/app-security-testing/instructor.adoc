@@ -2,51 +2,99 @@
 :module-id: app-security-testing
 include::partial$version-attributes.adoc[]
 
-// Instructor runbook for Application Security Testing. Timings MEASURED on OCP 4.21.22 against the live appsec + trust stacks
-// on 2026-07-15 (the seeded capstone run to each gate, and the ws lifecycle), not guessed. Pre-flight
-// commands show captured expected output (domains scrubbed to placeholders). Environment values via
-// attributes only.
+// Instructor runbook for Application Security Testing. Timings MEASURED against the live appsec + trust
+// stacks, not guessed. Pre-flight commands show captured expected output (domains scrubbed to
+// placeholders). Environment values via attributes only.
+//
+// TIMING PROVENANCE (re-measured 2026-07-31, cluster 2, attendee slot user5). The previous table was
+// wrong by a wide margin — it claimed ~60 min hands-on and a ~7 min Exercise 3; both were roughly half
+// of reality. Replaced from THREE real runs, not one: two complete green capstone runs on clean `main`
+// (17m01s and 17m33s wall) and one seeded red run on `seed-appsec` (2m50s to the SAST failure). Per-stage
+// spread across the two green runs was under ~5%, which is why the stage table gives single ~figures but
+// the EXERCISE table gives ranges — the exercise numbers add human reading/fix/commit time on top, which
+// is the genuinely variable part. Do not replace these with fresh point estimates from a single sample.
+// The dominant, non-negotiable costs are unit-test (~5.5 min) and build-image (~4 min), paid on EVERY
+// re-run because no dependency cache survives a run (each PipelineRun claims a fresh workspace PVC).
 
 == Timing (measured)
 
-Total hands-on: *~60 min* (double slot). Exercise timings from a live run of the seeded capstone on OCP 4.21.22; each *re-run* of the pipeline to the next gate is the pacing unit, and the *build* stage (Quarkus fast-jar under buildah) is the long pole at *~6–8 min*.
+*Read this before you schedule the module.* Total hands-on is *~85–105 min*, not one hour. With the
+concept and wrap-up, budget *~115–135 min* — a genuine double slot with no slack in it.
+
+The lab is *pipeline-bound*: from Exercise 3 onward, most of each exercise is *waiting for a re-run*,
+not doing the work. Nothing is cached between runs, so every re-run pays the full unit-test and image
+build again.
+
+Measured per stage on OCP {ocp_version}, from *two complete green capstone runs plus one seeded (red)
+run* on the same cluster on 2026-07-31. Ranges are the observed spread across those runs — treat them
+as typical, not as guarantees; a busier cluster or a cold Maven mirror pushes the long stages up.
+
+[cols="3,1,4",options="header"]
+|===
+| Stage | Time | Notes
+
+| `fetch-source` | ~20 s | git clone of the fork
+| `sast-sonar` | ~2.5 min | SonarQube analysis + quality-gate poll; same cost pass or fail
+| `sca-trivy` | ~20 s | Trivy filesystem scan
+| `unit-test` | *~5.5 min* | Maven test — no dependency cache survives a run, so this is paid *every* time
+| `build-image` | *~4 min* | buildah; the second long pole
+| `image-scan` / `sign-check` / `image-report` | ~40 s | run in parallel after the build
+| `deployment-check` | ~10 s | roxctl deployment check
+| `deploy` | ~45 s | applies the manifest, creates the Route
+| `dast-zap` | ~2.5 min | ZAP baseline against the running Service
+| `perf-k6` | ~40 s | k6 load test
+| *A complete run* | *~17–18 min* | measured 17m01s and 17m33s
+|===
+
+What that means for pacing — *how long a re-run takes to reach each gate*:
 
 [cols="3,1,4",options="header"]
 |===
 | Segment | Time | Notes
 
 | Concept (five pillars, shift-left/right, defense-in-depth, reporting) | ~15 min | ≤15-min read; slides carry it
-| 1. Meet the seeded app + start the capstone | ~10 min | Read five flaws; start from console; fails at SAST in ~3 min (fetch + compile + scan)
-| 2. SAST gate — externalize the credential | ~10 min | Fix commit + re-run; SonarQube re-analysis ~2–3 min
-| 3. SCA gate — drop the vulnerable dep | ~7 min | Fix + re-run; the re-run now builds the image (~6–8 min) to reach the image gate
-| 4. Image scan — log4shell + defense-in-depth | ~10 min | The key beat; RHACS console read; full rebuild each re-run
-| 5. Config check — harden the manifest | ~7 min | roxctl deployment check; deploy + Route created on pass
-| 6. DAST — add the security headers | ~10 min | ZAP baseline ~1–2 min; final rebuild → whole run green
-| 7. Read the whole green run in the consoles | ~6 min | The reporting takeaway
+| 1. Meet the seeded app + start the capstone | ~6–8 min | Read five flaws, start the run; it fails at SAST after *~3 min*
+| 2. SAST gate — externalize the credential | ~8–10 min | Read SonarQube, fix, commit; the re-run reaches the SCA gate in *~3–4 min*
+| 3. SCA gate — drop the vulnerable dep | *~15–18 min* | *The step-change.* This re-run is the first to build: fetch + SAST + SCA + unit-test + build + image-scan = *~13 min of pipeline* before it fails
+| 4. Image scan — log4shell + defense-in-depth | *~16–19 min* | The key beat; another full rebuild to reach `deployment-check` (*~13 min*)
+| 5. Config check — harden the manifest | *~18–21 min* | Full rebuild *plus* deploy and DAST — *~16.5–17 min* of pipeline before it fails at `dast-zap`
+| 6. DAST — add the security headers | *~19–22 min* | The final run goes the whole way: *~17–18 min*
+| 7. Read the whole green run — *instructor-led* | ~5–8 min | You drive this one (see below)
 | Wrap-up + org mapping | ~15 min | Reporting, break-glass, pin-vs-float discussion
 |===
 
-Because each re-run rebuilds the image, the lab is *build-bound*. If you are tight on time, run the *demo* flavor (one narrated red-to-green, ~15 min) instead of six attendee re-runs, or pre-warm by having attendees start their first run *before* the concept discussion so the SAST failure is waiting when they return.
+*Running this in the time you actually have.* The six re-runs are ~66 min of pipeline on their own and
+that floor cannot be negotiated down. Options, in order of preference:
 
-Measured `ws` lifecycle (admin/builder context on OCP 4.21.22, 2026-07-15):
+* *Pre-warm.* Have attendees clone and start their first run *before* you deliver the concept. The SAST
+  failure is then waiting for them, which removes Exercise 1's wait entirely.
+* *Teach into the wait.* Exercises 3–6 each leave 13–18 idle minutes. That is where the concept material
+  on defense in depth, the org-mapping discussion, and the wrap-up questions belong — not bolted on at
+  the end. Do not let the room watch a progress bar.
+* *Run the demo flavor instead.* One narrated red-to-green pass, ~15 min, from a pre-run green end state.
+  If you have a single 60-minute slot, this is the honest choice — the hands-on lab does not fit and
+  compressing it means attendees abandon it half-finished.
+
+Measured `ws` lifecycle (admin/builder context, OCP {ocp_version}, 2026-07-31):
 
 [cols="2,1,3",options="header"]
 |===
 | Command | Time | What it does
 
-| `ws verify app-security-testing --user <u> --entry-only` | ~8 s | 10/10 entry checks
-| `ws verify app-security-testing --user <u>` | ~11 s | 12/12 (10 entry + 2 end) once a capstone run has Succeeded
+| `ws verify app-security-testing --user <u> --entry-only` | ~15–17 s | 11/11 entry checks
+| `ws verify app-security-testing --user <u>` | ~15–18 s | 13/13 (11 entry + 2 end) once a capstone run has Succeeded
 | `ws smoke app-security-testing <u>` | ~55 s | 11/11 attendee-cockpit gate (ws-on-PATH, identity, isolation, prep convergence)
-| `ws reset app-security-testing --user <u>` | ~2–2.5 min | purge `<u>-cicd` + re-materialize entry (Argo sync)
-| `ws solve app-security-testing --user <u>` | ~13–15 min | runs the capstone on clean `main` (every gate passes) — blocks while it runs
+| `ws reset app-security-testing --user <u>` | ~2 min | purge `<u>-cicd` + re-materialize entry (Argo sync)
+| `ws solve app-security-testing --user <u>` | *~17–19 min* | runs the capstone on clean `main` (every gate passes) — blocks while it runs
 |===
 
-A full capstone run was measured end-to-end at *~13 min* (the image build alone is 6–10 min depending on
-cluster load and Maven cache warmth). `ws smoke` needs the entry state materialized first; if the
-attendee-`ws prep` convergence check fails, run `ws reset app-security-testing --user <u>` (or `ws git-refresh
---restart-terminals --user <u>` for a stale cockpit) and re-smoke.
+`ws smoke` needs the entry state materialized first; if the attendee-`ws prep` convergence check fails,
+run `ws reset app-security-testing --user <u>` (or `ws git-refresh --restart-terminals --user <u>` for a
+stale cockpit) and re-smoke.
 
-`ws solve` is *slow by design*: it runs the real eleven-stage pipeline to completion so the green end state genuinely exists. Start it *well before* a demo.
+`ws solve` is *slow by design*: it runs the real capstone to completion so the green end state genuinely
+exists. It wraps the same ~17–18 min pipeline measured above, so start it *at least 25 minutes* before a
+demo — not five.
 
 == Pre-flight checklist
 
@@ -118,13 +166,21 @@ ws verify app-security-testing --user user2 --entry-only
 
 [source,texinfo]
 ----
-✔ namespace user2-cicd exists
-✔ Pipeline parasol-claims-devsecops present
-✔ sonar-auth copied into user2-cicd (SAST-gate secret)
-✔ rox-api-token copied into user2-cicd (scan-gate secret)
-✔ curated task sonar-scan reachable
-... 10/10 entry checks pass
+✅ namespace user2-cicd exists
+✅ entry marker ws-entry-app-security-testing present
+✅ Pipeline parasol-claims-devsecops present
+✅ sonar-auth copied into user2-cicd (SAST-gate secret)
+✅ rox-api-token copied into user2-cicd (scan-gate secret)
+✅ ephemeral claims-db present (deploy target)
+✅ curated task sonar-scan reachable
+...
+✅ all 11 checks passed
 ----
+
+Run this *after* a `ws reset`, not after a `ws solve`: in full mode (no `--entry-only`) the script adds
+two end-state checks and reports *13*, and those two correctly fail on a freshly reset slot because no
+capstone run has Succeeded yet. A red `2 of 13 checks failed` immediately after a reset is the script
+working, not a broken entry state.
 
 *6. The seeded fork exists* (the lab's build target). For a sample user, the `seed-appsec` branch carries the flaws:
 
@@ -163,4 +219,12 @@ Complementary. Trusted Software Supply Chain proves the image is *provably yours
 * *The cluster-resolver task cache.* The pipeline references tasks by cluster resolver, which caches resolved Tasks briefly. If you *update* a curated task (e.g. `roxctl-deployment-check`), a run started within the cache TTL may still use the old body. Re-run after a minute, or bump nothing mid-session.
 * *`git push` prompts once.* The lab's fixes push to the attendee's fork; the first push prompts for their Gitea login. The lab sets `git config --global credential.helper store` so subsequent pushes are silent. If a push errors with "could not read Username", that helper line is the fix (also in Troubleshooting).
 * *ZAP gate is `FAIL_ON_WARN=true`.* The pipeline promotes missing-header *warnings* to build failures so the DAST gate bites. That means the *clean* app must set its headers or `ws solve` (clean `main`) would also fail DAST — the hardened `application.properties` on `main` carries them. If you fork the app, keep the headers.
-* *Build-bound lab.* Every re-run rebuilds the image (~6–8 min). Budget the double slot accordingly, or pre-warm the first run.
+* *Build-bound lab.* Every re-run pays unit-test (~5.5 min) *and* the image build (~4 min) again — no cache survives a run. See the timing section: hands-on is ~85–105 min, not 60. Pre-warm the first run and teach into the waits, or run the demo flavor.
+
+* *You drive Exercise 7, and it needs your RHACS login.* Exercise 7 is an *instructor-led walkthrough*, not a hands-on exercise. Have the four surfaces open before you start it: SonarQube (`parasol-claims-<user>`, passed), the Pipelines console on a green run, the *RHACS console* on Violations, and an attendee's PipelineRun list. Only the RHACS tab needs a login attendees do not have — see the next watchout.
+
+* *Attendees cannot sign in to RHACS Central, by design of the product, not an oversight in the setup.* Central keeps its own user database; its sign-in page offers only a username-and-password form, and it *rejects OpenShift bearer tokens outright* (verified: presenting even a cluster-admin OpenShift token to Central returns "token validation failed"). The `advanced-cluster-security` OpenShift console plugin is not a workaround — it proxies the same OpenShift token to the same Central. So *every* RHACS screen in this module is yours to show. The lab says so plainly and routes attendees to the `image-scan` / `deployment-check` TaskRun logs, which carry the identical verdict. If an attendee asks to see the console, show it on the shared display; do not hand out Central credentials.
+
+* *The ZAP, k6 and SBOM report files are not retrievable, and the lab no longer pretends otherwise.* Each is written into a pipeline workspace — a scratch volume on the stage's own pod — and once the stage finishes there is no running container to copy it out of (`oc exec` into a completed pod is refused, PVC-backed or `emptyDir`, attendee or admin). Expect the question; the honest answer is that publishing artifacts durably is a real platform decision this teaching pipeline deliberately skips, and it is raised as an org-mapping prompt in the wrap-up. Do not improvise a `oc debug` workaround in front of the room — it will not work for the `emptyDir` workspaces at all.
+
+* *Tekton Results is present and attendees can read it — do not tell them otherwise.* The `tekton-results-api`, `-watcher` and `-postgres` pods run on this cluster and archive every PipelineRun, including the failed ones, so the red-to-green history genuinely persists. Attendee identities are authorized for their own namespace (verified: an attendee identity reads its own namespace's results and is denied another attendee's). Two caveats worth knowing if you go digging: the `tekton-results-api` Route is misconfigured (edge termination onto a TLS-speaking backend, so the public URL just errors) — the OpenShift console reaches the API through its own service proxy instead, which works; and the API runs with `LOGS_API=false`, so run *metadata* is archived but TaskRun *logs* are not. Report both to the platform owner rather than working around them.

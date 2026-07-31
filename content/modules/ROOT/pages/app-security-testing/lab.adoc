@@ -36,8 +36,25 @@ Your job is to run the *DevSecOps capstone* — an eleven-stage pipeline with a 
 [TIP]
 .How this lab is driven — console for the pipeline, terminal for the fixes
 =====
-You *start the pipeline* from the *OpenShift Pipelines console* (a real button, with a `tkn`/`oc` alternative beside it). You *read each finding* in its native console — the *SonarQube dashboard*, the *RHACS console*, the *TaskRun logs* — with a command-line alternative every time. And you *fix* each finding with a *real commit* to your `seed-appsec` branch from the terminal. Five gates, five fixes, one green run.
+You *start the pipeline* from the *OpenShift Pipelines console* (a real button, with a `tkn`/`oc` alternative beside it). You *read each finding* in its native console — the *SonarQube dashboard*, the *TaskRun logs* — with a command-line alternative every time. And you *fix* each finding with a *real commit* to your `seed-appsec` branch from the terminal. Five gates, five fixes, one green run.
+
+One console is the exception: *RHACS Central* has its own user database and the workshop does not issue
+you an account there, so the RHACS screens are *shown by your instructor*. Everything RHACS finds is in
+your `image-scan` and `deployment-check` TaskRun logs, which you read yourself.
 =====
+
+[IMPORTANT]
+.This lab is build-bound — budget ~85–105 minutes of hands-on time
+====
+Every fix means a *re-run*, and every re-run rebuilds the application from scratch: the unit-test stage
+and the image build together account for roughly *nine of the seventeen minutes* a full run takes, and
+nothing is cached between runs. The later exercises are therefore *dominated by waiting for the
+pipeline*, not by the work you do — the fix itself is usually one command block. Each exercise's timing
+chip below is a *measured range* covering both the reading and the re-run.
+
+Use the wait. While a run is in flight, read the next section, or open the previous gate's report in its
+console. Do not sit and watch the progress bar.
+====
 endif::demo[]
 
 // ============================================================================
@@ -90,7 +107,7 @@ endif::demo[]
 ifndef::demo[]
 
 == 1. Meet the seeded app and start the capstone
-⏱ *~10 min* · see the five flaws, then start the pipeline from the console and watch it fail fast
+⏱ *~6–8 min* · see the five flaws, then start the pipeline from the console and watch it fail fast (the run reaches the SAST gate in ~3 min)
 
 First, look at what your colleague shipped. Clone the `seed-appsec` branch and read the five regressions — each carries an "Intentional flaws — do not fix on this branch" marker:
 
@@ -196,7 +213,7 @@ The run *stops at `sast-sonar`* — the first security gate. That is the point: 
 ====
 
 == 2. Gate 1 — SAST: the hard-coded credential
-⏱ *~10 min* · read the SonarQube finding, externalize the secret, watch the gate go green
+⏱ *~8–10 min* · read the SonarQube finding, externalize the secret, watch the gate go green (the re-run reaches the next gate in ~3–4 min)
 
 SAST (Static Application Security Testing) analyzes the *source you wrote*. Read *why* it failed — in SonarQube's own dashboard, then confirm from the terminal.
 
@@ -330,7 +347,7 @@ oc delete pipelinerun <an-old-finished-run> -n {user}-cicd
 ====
 
 == 3. Gate 2 — SCA: the vulnerable dependency
-⏱ *~7 min* · read the Trivy finding, drop the dependency, re-run
+⏱ *~15–18 min* · read the Trivy finding, drop the dependency, re-run — *this is the long one*
 
 SCA (Software Composition Analysis) checks the *dependencies you pulled in*. Read the Trivy finding from the TaskRun log:
 
@@ -349,7 +366,7 @@ Total: 2 (HIGH: 1, CRITICAL: 1)
 ❌ SCA scan FAILED — a HIGH,CRITICAL dependency CVE was found.
 ----
 
-`commons-collections` 3.2.1 carries *CVE-2015-7501* — the infamous *InvokerTransformer* deserialization *RCE* (Remote Code Execution) gadget. Your code never calls it; it's a landmine you inherited by declaring the dependency. The fix is to *remove it*. Trivy also wrote a *CycloneDX SBOM* (`trivy-sbom.json`) into the workspace — the full bill of materials for the build. Drop the dependency and commit:
+`commons-collections` 3.2.1 carries *CVE-2015-7501* — the infamous *InvokerTransformer* deserialization *RCE* (Remote Code Execution) gadget. Your code never calls it; it's a landmine you inherited by declaring the dependency. The fix is to *remove it*. Trivy also wrote a *CycloneDX SBOM* (`trivy-sbom.json`) into the run's workspace — the full bill of materials for the build. Drop the dependency and commit:
 
 [source,sh,role=execute]
 ----
@@ -369,30 +386,52 @@ git push origin seed-appsec
 ====
 
 == 4. Gate 3 — Image scan: log4shell, and defense in depth
-⏱ *~10 min* · read the RHACS finding, stop baking the flaw in, understand why a source scan missed it
+⏱ *~16–19 min* · read the image-scan finding, stop baking the flaw in, understand why a source scan missed it
 
 This is the module's key beat. The *image scan* (RHACS, shift-right) failed on *log4shell* — but your *SCA* scan (Trivy, shift-left) was *clean*. How? Because log4shell is *not in `pom.xml`*: the seeded `Containerfile` bakes a vulnerable `log4j-core` 2.14.1 jar *directly into the image* at build time. A source scan has nothing to find; the image scan inspects the *assembled image* and catches it. That gap is exactly why you scan at *both* layers.
 
-Read the finding — in the RHACS console, then the TaskRun log:
+Read the finding in the TaskRun log — and watch your instructor open the same violation in the RHACS console:
 
 [tabs]
 ====
 Console::
 +
 --
-Open {acs_console_url}[the RHACS console^] → *Violations*. Find the `parasol-claims` image violation for policy *"Block Log4Shell (CVE-2021-44228) at build"*, severity *Critical*. Open it to see the CVE, the component (`log4j-core` 2.14.1), and the image digest.
+[NOTE]
+.Instructor-shown — your instructor drives this screen
+=====
+RHACS Central keeps its *own* user database, separate from OpenShift, and the workshop does not create
+an account there for you — Central's sign-in page offers only a username-and-password form, and it does
+not accept your OpenShift session. So this screen is *demonstrated*, not performed: your instructor
+opens it on the shared display while you read the same finding in the CLI tab beside this one. Nothing
+in the gauntlet depends on you reaching it.
+=====
+
+Your instructor opens {acs_console_url}[the RHACS console^] → *Violations* and finds the `parasol-claims` image violation for policy *"Block Log4Shell (CVE-2021-44228) at build"*, severity *Critical*, then opens it to show the CVE, the component (`log4j-core` 2.14.1), and the image digest.
 // media-pass: screenshot app-security-testing-04-rhacs-log4shell-violation.png — the RHACS console
 // -> Violations: the parasol-claims image violation for the Block Log4Shell (CVE-2021-44228)
 // policy, severity Critical, showing the CVE, the log4j-core component, and the image digest.
 // Notice the image scan caught what the clean Trivy source scan could not — defense in depth. See
 // media-manifest.md.
-// [UNVERIFIABLE-PERMANENT] exact Violations column labels on RHACS {acs_version} — RHACS Central
-// redirects to /login offering only username/password, with no SSO passthrough from the OpenShift
-// console session, so confirming live column names needs a human typing RHACS credentials, which
-// automated verification passes are barred from doing. What would close this: a human with RHACS
-// Central credentials (or a private demo cluster) confirming the Violations screen above. The CLI path
-// alongside (tkn taskrun logs, grepped for the policy name and CVE) is the authoritative, already-
-// grounded alternative and does not depend on this UI claim.
+// [UNVERIFIABLE-PERMANENT] exact Violations column labels on RHACS {acs_version} — confirming live
+// column names needs a human typing RHACS credentials, which automated verification passes are barred
+// from doing. What would close this: a human with RHACS Central credentials confirming the Violations
+// screen above. The CLI path alongside (tkn taskrun logs, grepped for the policy name and CVE) is the
+// authoritative, already-grounded alternative and does not depend on this UI claim.
+//
+// GROUNDED 2026-07-31 (cluster 2) — WHY this tab is now marked instructor-shown rather than an attendee
+// step. Measured, not inferred from the repo:
+//   - GET /v1/login/authproviders on the Central route returns exactly ONE provider:
+//     {"name":"Login with username/password","type":"basic"}. There is no OpenShift/OIDC provider,
+//     despite the Central Deployment carrying ROX_ENABLE_OPENSHIFT_AUTH=true (that env var enables the
+//     capability; an auth provider object still has to be created, and none is).
+//   - Central rejects an OpenShift bearer token outright. Presenting a cluster-admin OpenShift token to
+//     /v1/auth/status returns: "credentials not found: token-based: cannot extract identity: token
+//     validation failed". If it will not accept cluster-admin's token it will not accept an attendee's.
+//   - That also disqualifies the advanced-cluster-security OpenShift console plugin as a back door: its
+//     ConsolePlugin proxies with authorization "UserToken" to the stackrox sensor-proxy Service, i.e. it
+//     forwards the same OpenShift token to the same Central that just rejected one.
+// The workshop issues no RHACS Central account to attendees, so this screen cannot be an attendee step.
 --
 CLI::
 +
@@ -443,7 +482,7 @@ If you *only* ran SCA on the source, this vulnerable image would have shipped �
 ====
 
 == 5. Gate 4 — Config check: the insecure Deployment
-⏱ *~7 min* · read the roxctl violations, restore the hardened manifest, re-run
+⏱ *~18–21 min* · read the roxctl violations, restore the hardened manifest, re-run (this re-run also deploys and then runs DAST, so it is the longest wait yet)
 
 Config security checks the *manifest you're about to apply*, before it reaches the cluster. The seeded `deploy/parasol-claims-deployment.yaml` runs *privileged*, as *root*, adds *SYS_ADMIN* and *NET_ADMIN*, and sets *no resource limits*. RHACS `roxctl deployment check` flagged every one. Read the finding:
 
@@ -516,7 +555,7 @@ git push origin seed-appsec
 ====
 
 == 6. Gate 5 — DAST: the missing security headers
-⏱ *~10 min* · read the ZAP finding, add the headers, and watch the whole run go green
+⏱ *~19–22 min* · read the ZAP finding, add the headers, and watch the whole run go green (a complete run is ~17–18 min)
 
 DAST (Dynamic Application Security Testing) exercises the *running* app — something you can only do *after* deploy. The `zap-baseline` stage ran a ZAP (Zed Attack Proxy) scan against the live service and found it never sets its HTTP security headers, so a browser is free to MIME-sniff it, frame it, and leak its URLs. Read the finding:
 
@@ -571,7 +610,22 @@ git push origin seed-appsec
 The graph doesn't stop at `dast-zap`, though: one more stage runs after it, `perf-k6`.
 It isn't a security check — it's a *performance* gate, a short k6 load test (10 virtual users for 30 seconds) against the same running Service, exercising `/api/claims` and the health endpoint and failing the build if p95 latency exceeds 800ms or the error rate exceeds 1%.
 It sits alongside the security gates because the same discipline applies to speed as to safety: a change can pass every security check and still make the app too slow or too flaky under load, and this gate catches that before it ships.
-The seeded app has no performance regression, so `perf-k6` passes without a fix — watch for it going green after `dast-zap`, and open its HTML report from the `k6-work` workspace if you want to see the numbers.
+The seeded app has no performance regression, so `perf-k6` passes without a fix — watch for it going green after `dast-zap`, and read the p95 and error-rate numbers in its *TaskRun log*, which is where the summary is printed.
+
+[NOTE]
+.Where the HTML reports go — and why you read the logs instead
+====
+The ZAP and k6 stages each write a self-contained *HTML report*, and the SCA stage writes a *CycloneDX
+SBOM*, into their pipeline *workspaces*. Those workspaces live and die with the run: they are scratch
+volumes attached to the stage's pod, and once a stage finishes, its pod has *stopped* — there is no
+running container left to copy a file out of. Treat the reports as artifacts a *real* pipeline would
+publish somewhere durable (an artifact repository, an S3 bucket, a Tekton Results log store) and that
+this teaching pipeline deliberately does not.
+
+Everything the gates decide on is printed in the *TaskRun logs*, which persist for the life of the
+PipelineRun and are what you read throughout this lab. Publishing the reports durably is a good exercise
+for your own platform — see the wrap-up.
+====
 
 // media-pass: screenshot app-security-testing-07-route-security-headers.png — the deployed
 // parasol-claims Route open in the browser with the dev-tools Network → Headers panel (or the
@@ -584,25 +638,86 @@ The seeded app has no performance regression, so `perf-k6` passes without a fix 
 ====
 
 == 7. Read the whole green run — where every finding lives
-⏱ *~6 min* · tour the four consoles so a red build is never a mystery again
+⏱ *~5–8 min* · *instructor-led walkthrough* — tour the consoles so a red build is never a mystery again
 
-The point of the gauntlet was not just to make it green — it was to *read each finding where it lives*. Confirm you can find all five:
+The point of the gauntlet was not just to make it green — it was to know *where each finding lives*, so
+that the next red build is a five-minute diagnosis instead of an afternoon.
 
-[cols="2,3",options="header"]
+This closing beat is a *guided walkthrough your instructor drives*, with you following along on your own
+run where you can. It is deliberately not a hands-on exercise: two of the surfaces worth showing sit
+behind an account the workshop does not issue you (RHACS Central), and the tour is far more useful
+narrated once than reproduced six times in parallel.
+
+Follow along as your instructor opens each surface, and note *which* of them you could reach on your
+own during the lab:
+
+[cols="2,3,1",options="header"]
 |===
-| Gate | Open it and confirm green
+| Gate | Where the finding lives | You reached it?
 
-| SAST | {sonarqube_url}[SonarQube^] → `parasol-claims-{user}` → quality gate *Passed*
-| SCA | Pipelines console → the green run → `sca-trivy` TaskRun → *0 findings*, and the `trivy-sbom.json` artifact
-| Image scan | {acs_console_url}[RHACS^] → *Violations* → no `parasol-claims` log4shell violation on the new image
-| Config check | Pipelines console → `deployment-check` TaskRun → *0 MEDIUM+ violations*, JUnit clean
-| DAST | Pipelines console → `dast-zap` TaskRun → *no gating alerts*; the ZAP HTML report in the `zap-work` workspace
-| The whole run | Pipelines console *graph* all green, and *Tekton Results* has the historical red-then-green runs
+| SAST | {sonarqube_url}[SonarQube^] → `parasol-claims-{user}` → quality gate *Passed* | Yes — the dashboard is readable without signing in
+| SCA | Pipelines console → the green run → `sca-trivy` TaskRun log → *0 findings* | Yes
+| Image scan | {acs_console_url}[RHACS^] → *Violations* → no `parasol-claims` log4shell violation on the new image | No — instructor-shown; your `image-scan` TaskRun log carries the same verdict
+| Config check | Pipelines console → `deployment-check` TaskRun log → *0 MEDIUM+ violations* | Yes
+| DAST | Pipelines console → `dast-zap` TaskRun log → *no gating alerts* | Yes
+| The whole run | Pipelines console → *PipelineRuns* in `{user}-cicd` — the full red-then-green history of every run you started | Yes
 |===
+
+[NOTE]
+.The question worth taking away
+====
+Notice how much of that tour ran through *TaskRun logs*. Logs are the lowest common denominator: always
+there, always readable, and useless six months from now when someone asks "when did this CVE first
+appear in our builds?" A production platform answers that from a *durable* store — archived runs,
+published SBOMs, a vulnerability-management dashboard with history — not from logs that age out with
+their PipelineRuns.
+
+This cluster has one piece of that already: *Tekton Results* is running, and it has been quietly
+archiving every run you started — including the failed ones — into a database that outlives the
+PipelineRun objects themselves. Ask your instructor how your organization would answer that question
+today. That gap, not the green graph, is usually the real finding.
+====
+
+// GROUNDED 2026-07-31 (cluster 2) — Exercise 7 was re-scoped to an instructor-led walkthrough. The
+// three claimed blockers were each tested live before demoting anything, and only TWO held:
+//
+// (1) REPORT ARTIFACTS — REAL BLOCKER, and the decisive one. Ran the full capstone green
+//     (PipelineRun gauntlet-green-9df58, Succeeded, all 12 stages). Then, as the attendee identity
+//     (--as=user5 --as-group=workshop-attendees), tried to retrieve the artifacts the old Exercise 7
+//     told attendees to open:
+//       oc exec <run>-dast-zap-pod  -> error: cannot exec into a container in a completed pod
+//       oc exec <run>-perf-k6-pod   -> error: cannot exec into a container in a completed pod
+//       oc cp   <run>-fetch-source-pod:/workspace/... -> same error (that is the shared PVC path, so
+//               trivy-sbom.json is equally unreachable, PVC or not)
+//     The dast-zap pod's zap-work volume is confirmed kind emptyDir. There is no attendee-reachable
+//     path to the ZAP HTML report, the k6 HTML report, or the SBOM. All three references removed.
+//
+// (2) "TEKTON RESULTS IS ABSENT" — NOT TRUE. Do not repeat this claim. Measured: tekton-results-api,
+//     -watcher and -postgres all 1/1 Running; TektonResult CR "result" v0.19.0 Ready=True. It had
+//     already archived this module's runs for the attendee namespace (35 records; one summary SUCCESS
+//     alongside several FAILUREs — i.e. the red-then-green history really is there). And attendees are
+//     AUTHORIZED: proxying to the API with Impersonate-User: user5 returned HTTP 200 with the results
+//     payload, while the same request as user6 returned 401 "permission denied" — so the API's
+//     authorization is real, namespace-scoped, and user5 passes it. NOTE the trap: `oc auth can-i get
+//     results.results.tekton.dev` answers "no" for user5, because those are not registered API
+//     resources and the Results API checks a different SAR; the can-i answer is a FALSE NEGATIVE here.
+//     Exercise 7 therefore keeps run history as an attendee-reachable row, not a demoted one.
+//     (Two unrelated real defects found in passing, for the platform owner, NOT content bugs: the
+//     tekton-results-api Route is broken — termination "edge" onto a backend that speaks TLS, so it
+//     returns "Client sent an HTTP request to an HTTPS server" — and the API has LOGS_API=false, so
+//     TaskRun logs are not archived even though run metadata is. The OpenShift console plugin does not
+//     use that Route; it proxies to the Service directly, which is the path that works.)
+//
+// (3) RHACS HAS NO ATTENDEE CREDENTIALS — REAL BLOCKER. Evidence recorded at the Exercise 4 comment.
+//
+// Demotion rests on (1) and (3) only.
 
 [.checkpoint]
 ====
-✔ *Verify:* You can open each of the five findings in its native console and show it *green*, and you can point at *Tekton Results* to see the whole red-to-green history. That fluency — "a red gate means *this*, and I read it *here*" — is the takeaway.
+✔ *Verify:* You can name, for each of the five gates, *which* tool found it and *where* you would go to
+read it — and you can point at your own PipelineRun history and walk someone through the red-to-green
+sequence you just drove. That fluency — "a red gate means *this*, and I read it *here*" — is the
+takeaway.
 ====
 
 endif::demo[]

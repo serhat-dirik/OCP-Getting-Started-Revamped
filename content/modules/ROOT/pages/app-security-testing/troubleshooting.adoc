@@ -107,11 +107,29 @@ It is an Argo CD *Sync hook*, so re-syncing the `workshop-config` Application re
 
 == The whole run is slow / a re-run seems stuck
 
-*Symptom:* A re-run takes 12–15 minutes; the graph sits on `build-image` for several minutes.
+*Symptom:* A re-run takes the better part of twenty minutes; the graph sits on `unit-test`, then on `build-image`, for several minutes each.
 
-*Cause:* Not stuck — *build-bound*. Every re-run rebuilds the Quarkus fast-jar under buildah (~6–8 min), plus the image scan, sign wait, deploy, and DAST. This is normal.
+*Cause:* Not stuck — *pipeline-bound*, and it is slower than most people expect. A complete run is *~17–18 minutes*. Two stages dominate: `unit-test` (*~5.5 min*) and `build-image` (*~4 min*), and *both are paid on every re-run* because each PipelineRun claims a fresh workspace, so no Maven or layer cache survives from the previous one. `sast-sonar` and `dast-zap` add ~2.5 min each. This is normal.
+
+If you only need to reach a *particular* gate, the run stops there — so an early re-run is much quicker than a late one: ~3 min to the SAST gate, ~3–4 min to SCA, but ~13 min to the image-scan gate and ~16.5–17 min to the DAST gate.
 
 *Fix:* Nothing — wait it out, or watch progress with `tkn pipelinerun logs -f -n <u>-cicd --last`. For a faster classroom, use the *demo* flavor (one narrated red-to-green) instead of six attendee rebuilds, or pre-warm the first run before the concept discussion.
+
+== The RHACS console asks for a username and password I was never given
+
+*Symptom:* You open the RHACS console link and land on a sign-in form asking for a username and password. Your workshop credentials are rejected, and there is no "Log in with OpenShift" button.
+
+*Cause:* This is expected, not a broken setup. RHACS Central keeps its *own* user database, entirely separate from OpenShift, and the workshop does not create an account for you in it. Central will not accept an OpenShift session token either — it rejects them outright, no matter whose token it is.
+
+*Fix:* Nothing to fix; read the finding in the TaskRun log instead. The `image-scan` and `deployment-check` stages run RHACS's own `roxctl` and print the *identical* policy verdict — the policy name, the CVE, the severity, the component — into their logs, which is the path the lab uses. Your instructor shows the RHACS console screens on the shared display.
+
+== I can't open the ZAP HTML report, the k6 report, or `trivy-sbom.json`
+
+*Symptom:* A stage says it wrote a report "to the workspace", but there is no way to open it. `oc exec` or `oc cp` against the stage's pod fails with `cannot exec into a container in a completed pod`.
+
+*Cause:* Also expected. Those files are written into pipeline *workspaces* — scratch volumes attached to the stage's own pod. Once the stage finishes, its container has stopped, so there is nothing left to copy a file out of; and the ZAP and k6 workspaces are `emptyDir` volumes, whose contents are not recoverable at all once the pod ends. This teaching pipeline deliberately does not publish artifacts to durable storage.
+
+*Fix:* Read the *TaskRun logs*, which persist for the life of the PipelineRun and carry every number the gates decide on — the ZAP WARN/FAIL summary, k6's p95 and error rate, and Trivy's CVE table. Making artifacts durable (an artifact repository, an object store, a vulnerability-management dashboard) is a real platform decision, and it is one of the wrap-up's org-mapping questions.
 
 == A later re-run refuses to start: `exceeded quota … persistentvolumeclaims`
 
