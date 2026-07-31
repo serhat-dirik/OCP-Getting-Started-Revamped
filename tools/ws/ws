@@ -1872,6 +1872,165 @@ doctor_verify_rc_outcome() {  # rc → pass|skip|fail on stdout — classifies a
   esac
 }
 
+_cohort_diff_note() {  # <label> <expected space-list> <actual space-list> → diff note on stdout, or ""
+  # when the two lists match as SETS. Used by doctor_cohort_coherence to name precisely which source
+  # disagrees and how (extra members vs missing ones) rather than just flagging "mismatch".
+  local label="$1" exp="$2" act="$3" extra="" missing="" w
+  for w in $act; do
+    case " ${exp} " in
+      *" ${w} "*) : ;;
+      *) extra="${extra}${extra:+ }${w}" ;;
+    esac
+  done
+  for w in $exp; do
+    case " ${act} " in
+      *" ${w} "*) : ;;
+      *) missing="${missing}${missing:+ }${w}" ;;
+    esac
+  done
+  if [[ -z "$extra" && -z "$missing" ]]; then
+    return 0
+  fi
+  local note="; ${label}"
+  if [[ -n "$extra" ]]; then
+    note="${note} has extra: ${extra}"
+  fi
+  if [[ -n "$missing" ]]; then
+    if [[ -n "$extra" ]]; then note="${note},"; fi
+    note="${note} missing: ${missing}"
+  fi
+  printf '%s' "$note"
+}
+
+doctor_cohort_coherence() {  # → verdict message on stdout; rc 0=ok 1=err 2=skip (ws doctor's "cohort
+  # coherence" row). After a wipe or a scale, FOUR independent sources should agree on who the cohort
+  # is: workshop-config's live userCount helm parameter (the target), the workshop-attendees group, the
+  # OpenShift User objects, and the Gitea accounts. A wipe that dies partway (bootstrap/ogsr-wipe-
+  # users.sh, which delegates its cohort prune to `ws scale-users`) is exactly the state where these
+  # stop agreeing — a User object with a working login and NO namespaces is the worst combination this
+  # row exists to catch; today it is only visible by checking all four places by hand.
+  #
+  # SKIP, never ok/err, when a source cannot be READ — Gitea unreachable, or a Forbidden on a cluster-
+  # scoped read. A false green here is worse than an honest "could not check" (this repo's own rule).
+  # An EMPTY-but-readable source (the group genuinely has no members) is a real finding, not a skip.
+  #
+  # `oc auth can-i` is not used as the gate for the cluster-scoped reads (User objects, the group): this
+  # repo measured it giving a false YES for a cluster-scoped resource under some RBAC shapes. Each read
+  # is attempted for real and branches on the word "Forbidden" in its own error output instead.
+  local n out rc
+
+  # 1) userCount — the baseline every other source is compared against.
+  n="$(live_user_count || true)"
+  if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+    printf '%s' "workshop-config's live userCount is unreadable (got '${n:-<empty>}') — inspect: oc get application workshop-config -n ${ARGO_NS} -o yaml"
+    return 2
+  fi
+  local expected_str="" i
+  for (( i = 1; i <= n; i++ )); do
+    expected_str="${expected_str}user${i} "
+  done
+
+  # 2) workshop-attendees group.
+  out="$(oc get group workshop-attendees -o jsonpath='{.users[*]}' 2>&1)"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    if printf '%s' "$out" | grep -qi forbidden; then
+      printf '%s' "workshop-attendees group unreadable (Forbidden — needs cluster-admin)"
+      return 2
+    fi
+    out=""   # NotFound (or transient) reads as a genuinely empty group, not an unreadable one
+  fi
+  local group_str="" w
+  for w in $out; do
+    if [[ "$w" =~ ^user[0-9]+$ ]]; then group_str="${group_str}${w} "; fi
+  done
+
+  # 3) OpenShift User objects — same real-read-then-branch idiom.
+  out="$(oc get users -o jsonpath='{.items[*].metadata.name}' 2>&1)"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    if printf '%s' "$out" | grep -qi forbidden; then
+      printf '%s' "OpenShift User objects unreadable (Forbidden — needs cluster-admin)"
+      return 2
+    fi
+    out=""
+  fi
+  local userobj_str=""
+  for w in $out; do
+    if [[ "$w" =~ ^user[0-9]+$ ]]; then userobj_str="${userobj_str}${w} "; fi
+  done
+
+  # 4) Gitea accounts — LISTED via the admin API and filtered, not probed one candidate at a time.
+  # A candidate-probe over just the other three sources' usernames can only confirm or deny THOSE
+  # names; it can never discover a Gitea account that survives OUTSIDE all three, which is exactly the
+  # realistic partial-wipe shape (ogsr-wipe-users.sh shrinks userCount/the group/the User objects in
+  # step 1, then purges Gitea in step 3 — a failure there leaves a straggler no candidate list would
+  # ever ask about). Verified against a live Gitea (cluster-s7hkp, 2026-08-01): the admin users listing
+  # carries both "login" and "username" for the same value; both are read so a future API change to
+  # either name does not go blind. Reachability failure (route/creds/python3 missing) is the canonical
+  # SKIP here — Gitea being down is routine, not a finding about the cohort.
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s' "python3 not found — cannot parse the Gitea admin API response, could not check Gitea accounts"
+    return 2
+  fi
+  local creds host guser gpass
+  creds="$(_gitea_admin_creds || true)"
+  if [[ -z "$creds" ]]; then
+    printf '%s' "Gitea admin API unreachable (route/admin credential in ${GITEA_NS}) — could not check Gitea accounts"
+    return 2
+  fi
+  read -r host guser gpass <<< "$creds"
+
+  local gitea_str="" gpage=1 gbody gcode gnames gcount
+  gbody="$(mktemp)"
+  while [[ "$gpage" -le 20 ]]; do
+    gcode="$(curl -ks -o "$gbody" -w '%{http_code}' --max-time 15 -u "${guser}:${gpass}" \
+      "https://${host}/api/v1/admin/users?limit=50&page=${gpage}" 2>/dev/null || true)"
+    if [[ "$gcode" != "200" ]]; then
+      rm -f "$gbody"
+      printf '%s' "Gitea admin API gave an unexpected response (HTTP ${gcode:-000}) listing accounts — could not check Gitea accounts"
+      return 2
+    fi
+    gnames="$(python3 -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+if isinstance(data, dict):
+    data = data.get("data", [])
+for item in data or []:
+    if isinstance(item, dict):
+        n = item.get("login") or item.get("username")
+        if n:
+            print(n)
+' "$gbody" 2>/dev/null || true)"
+    if [[ -z "$gnames" ]]; then
+      break
+    fi
+    for w in $gnames; do
+      if [[ "$w" =~ ^user[0-9]+$ ]]; then gitea_str="${gitea_str}${w} "; fi
+    done
+    gcount="$(printf '%s\n' "$gnames" | grep -c . || true)"
+    if [[ "$gcount" -lt 50 ]]; then
+      break
+    fi
+    gpage=$((gpage + 1))
+  done
+  rm -f "$gbody"
+
+  # ── compare all three live sources against EXPECTED (derived from userCount) ────────────────────
+  local mismatch=""
+  mismatch="${mismatch}$(_cohort_diff_note "workshop-attendees group" "$expected_str" "$group_str")"
+  mismatch="${mismatch}$(_cohort_diff_note "Gitea accounts" "$expected_str" "$gitea_str")"
+  mismatch="${mismatch}$(_cohort_diff_note "OpenShift User objects" "$expected_str" "$userobj_str")"
+
+  if [[ -z "$mismatch" ]]; then
+    printf '%s' "${n} user(s) agree across userCount, workshop-attendees, Gitea accounts and User objects"
+    return 0
+  fi
+  printf '%s' "userCount=${n} (user1..user${n})${mismatch} — a wipe may have died partway; finish it: bootstrap/ogsr-wipe-users.sh (or grow back: ws scale-users ${n} --yes)"
+  return 1
+}
+
 cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT-WIDE row to one attendee;
   # empty = the whole cohort (unchanged default). The platform rows (gitops operator, gitea, mirror,
   # workshop layer, build images, IdP, cohort size) are NOT scoped: when one attendee is broken, the
@@ -2144,6 +2303,22 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     else
       err "live userCount=${n_live:-?} but workshop-attendees group has ${n_group:-?} — scale still converging? re-run shortly, or: ws status"; fail=1
     fi
+  fi
+  printf "  %-28s" "cohort coherence"
+  # Wider than the row above: also cross-checks the OpenShift User objects and the Gitea accounts, so
+  # a wipe (bootstrap/ogsr-wipe-users.sh) that dies partway is visible in ONE row instead of four manual
+  # lookups. Not scoped by --user: coherence is a cohort-wide property, and the whole point is to catch
+  # a straggler OTHER than the one an SA happens to be looking at.
+  if ! oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1; then
+    ok "n/a (workshop layer not installed)"
+  else
+    local coh_msg coh_rc=0
+    coh_msg="$(doctor_cohort_coherence)" || coh_rc=$?
+    case "$coh_rc" in
+      0) ok "$coh_msg" ;;
+      2) skip "$coh_msg" ;;
+      *) err "$coh_msg"; fail=1 ;;
+    esac
   fi
   echo
   if (( fail == 0 )); then ok "environment looks good"; else err "issues found — fix hints above"; exit 1; fi
@@ -2624,9 +2799,12 @@ cmd_scale_users() {  # SA/admin: grow or shrink the workshop cohort. ws scale-us
     echo "    SHELLS themselves pruned (the chart stops rendering them once userCount drops)"
     echo "  • their Showroom cockpit + Kueue ClusterQueue cq-<user> + student AppProject (pruned by sync)"
     echo "  • their htpasswd login entry removed"
-    echo "  • NOT removed today: their Gitea account, and their student-Argo local-account password"
-    echo "    hash in argocd-secret — gitea-user-seed/student-argo-accounts only ADD, never delete"
-    echo "    (harmless orphaned credentials for a user with no cluster identity left to use them)"
+    echo "  • NOT removed by ws scale-users ITSELF: their Gitea account, and their student-Argo"
+    echo "    local-account password hash in argocd-secret — gitea-user-seed/student-argo-accounts"
+    echo "    only ADD, never delete, and this command never calls their delete APIs"
+    echo "    (harmless orphaned credentials for a user with no cluster identity left to use them —"
+    echo "    UNLESS you reached this shrink via bootstrap/ogsr-wipe-users.sh, which delegates its"
+    echo "    cohort prune to this exact command and then removes BOTH itself as later steps)"
     echo
     echo "PRESERVED: the platform, and user1..user${target} — UNTOUCHED."
   fi
