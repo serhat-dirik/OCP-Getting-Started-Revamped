@@ -93,8 +93,9 @@ ATTENDEE_USERS=""
 
 ok()   { echo "✅ $*"; }
 err()  { echo "❌ $*" >&2; }
-info() { echo "▶ $*"; }
-die()  { err "$*"; exit 1; }
+warn() { echo "⚠️  $*" >&2; }   # CALLED by del_appprojects but never defined — same class of bug
+info() { echo "▶ $*"; }         # install.sh's own header already fixed once (undefined command under
+die()  { err "$*"; exit 1; }    # `set -u` normally aborts; sub()'s `"$@" || rc=$?` masked it here)
 
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,57p'; exit 1; }
 
