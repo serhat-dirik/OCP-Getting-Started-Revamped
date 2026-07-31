@@ -1,5 +1,13 @@
-# AppProject that boxes entry-state Applications (created by `ws start`): they may create per-user
-# namespaces but nothing else at cluster scope, and may NOT touch the workshop layer's quotas/limits.
+# ADMIN / FALLBACK AppProject for entry-state Applications. No longer the attendee path: each attendee
+# now gets their own `entries-{user}` project (appproject-entries-per-user.yaml) and the admission guard
+# permits an attendee NOTHING else. This one survives for two reasons, both real:
+#   1. tools/ws/ws argo_project() falls back to it when `entries-{user}` is absent — a cluster whose
+#      workshop-config predates the per-user projects, or a --user outside .Values.userCount. Falling
+#      back here is vastly better than falling back to stock `default` (which permits "*" everywhere).
+#   2. WS_ARGO_PROJECT lets an instructor pin every entry app to one project for triage.
+# Keep its rules identical in spirit to the per-user projects; the shared destinations come from the
+# same helper so the two can never drift.
+#
 # Tradeoff: sourceRepos is "*" — the in-cluster Gitea route host can't be templated reliably, so
 # containment comes from the destination + resource whitelists rather than the repo allowlist.
 apiVersion: argoproj.io/v1alpha1
@@ -33,17 +41,16 @@ spec:
   #     namespace user1-dev is not permitted in project 'ogsr-dest-probe'
   # So "" satisfies the spec check while every manifest still has to land in a listed namespace.
   #
-  # KNOWN RESIDUAL, deliberately accepted: all attendees share this one project, so an attendee can
-  # still target a PEER's namespace. Cooperative-classroom risk, not customer-data risk. The fix is
-  # one AppProject per attendee, mirroring the proj-{user} pattern in student-appprojects.yaml.
+  # PEER-NAMESPACE RESIDUAL — no longer accepted, and no longer reachable by an attendee. This project
+  # still lists every user's namespaces because an ADMIN materializing on behalf of any attendee may
+  # legitimately land on it (fallback path above). Attendees cannot use it at all: the admission guard
+  # requires spec.project == 'entries-<their own username>'.
   #
-  # The five shared namespaces are NOT decoration and must not be trimmed: entry charts genuinely
-  # manage objects in each, read off live Applications rather than guessed --
-  #   ogsr-gitea            ConfigMap, Job, Role, RoleBinding, ServiceAccount  (per-user repo seeding)
-  #   ogsr-system           Role, RoleBinding
-  #   openshift-lightspeed  Role, RoleBinding
-  #   sonarqube             Role, RoleBinding                                  (app-security-testing)
-  #   stackrox              Role, RoleBinding                                  (RHACS reads)
+  # The shared namespaces are NOT decoration and must not be trimmed — the helper's header documents
+  # which kind each entry chart puts in each, and how to re-derive the list. Two of them
+  # (ogsr-student-gitops, openshift-pipelines) were MISSING from the enumeration this project shipped
+  # with in 7b526ac, which would have failed `ws start gitops-at-scale` and `ws start
+  # trusted-supply-chain` at sync time on any cluster; both had simply not been materialized since.
   destinations:
     - namespace: ""
       server: https://kubernetes.default.svc
@@ -51,10 +58,7 @@ spec:
     - namespace: "{{ $.Values.userPrefix }}{{ add $i 1 }}-*"
       server: https://kubernetes.default.svc
 {{- end }}
-{{- range $ns := list "ogsr-gitea" "ogsr-system" "openshift-lightspeed" "sonarqube" "stackrox" }}
-    - namespace: {{ $ns | quote }}
-      server: https://kubernetes.default.svc
-{{- end }}
+{{- include "workshop-config.entryDestinationsShared" . | trim | nindent 4 }}
   # Entry charts may create their module-extra namespaces (e.g. {user}-mesh) — nothing else cluster-scoped.
   clusterResourceWhitelist:
     - group: ""

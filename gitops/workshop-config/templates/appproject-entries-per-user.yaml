@@ -1,0 +1,103 @@
+{{- /*
+  ONE AppProject PER ATTENDEE for entry-state Applications — closes the last known attendee-isolation
+  gap. Until this landed, every attendee's entry apps shared the single `workshop-entries` project, so
+  an attendee could have the cluster-admin application-controller create objects (RoleBindings, most
+  pointedly) in a PEER's namespace. That residual is called out in appproject-workshop-entries.yaml,
+  attendee-entry-app-guard.yaml and ADR-0001/0002; this file is the fix all three name.
+
+  Mirrors proj-{user} (student-appprojects.yaml) in shape, but it is an ADAPTATION, not a copy: those
+  serve the namespace-scoped STUDENT Argo instance and its attendee-authored apps, whose destinations
+  are the three plain {user}-dev/stage/prod namespaces. These serve the PLATFORM instance and the
+  ws-rendered entry apps, which need the empty destination, the whole {user}-* family, and the shared
+  workshop namespaces below.
+
+  ── THE EMPTY DESTINATION IS LOAD-BEARING. Do not "tidy" it away. ──
+  Entry-state Applications carry NO spec.destination.namespace at all — read off cluster2, 2026-08-01:
+      oc get application entry-gitops-fundamentals-user2 -n openshift-gitops -o jsonpath='{.spec.destination}'
+      → {"server":"https://kubernetes.default.svc"}          (no `namespace` key ⇒ Go zero value "")
+  The entry chart creates its own namespaces, so the Application names none (render_app in tools/ws/ws).
+  A first attempt at narrowing this project (8490ddf) dropped "" and put EVERY entry app on both
+  clusters into InvalidSpecError; reverted in 317e444. `""` also covers the cluster-scoped Namespace
+  objects the charts create, whose destination namespace is likewise empty.
+
+  Permitting "" does NOT reopen the hole — measured, not assumed. Argo validates the project TWICE:
+  once against the Application's own spec.destination, and again against EACH RESOURCE's namespace at
+  sync time. Proven on-cluster with a throwaway project allowing only "":
+      Route/parasol-claims ns=user1-dev SyncFailed:
+        namespace user1-dev is not permitted in project 'ogsr-dest-probe'
+  So "" satisfies the spec check while every rendered manifest still has to land in a listed namespace.
+  Every namespaced resource in every entry chart carries an explicit metadata.namespace (verified by
+  rendering all 26 charts at solve=false and solve=true), so "" is never a placement, only a predicate.
+
+  ── The shared namespaces, and the residual that survives this change ──
+  The seven namespaces from workshop-config.entryDestinationsShared are genuinely SHARED, so they
+  appear in every attendee's project and Argo cannot scope a destination by resource name. An attendee
+  therefore keeps the ability to have the controller write into those seven workshop-owned namespaces.
+  That is unchanged by this file and is NOT the gap being closed here. Blacklisting the kinds is not
+  available either: the entry charts legitimately render Roles, RoleBindings, ServiceAccounts, Jobs and
+  ConfigMaps into them, and namespaceResourceBlacklist is project-wide, not per-destination.
+  Net: the blast radius shrinks from "any of N attendees' namespaces" to "seven workshop-owned
+  namespaces that hold no attendee work". Peer-tenant isolation is now enforced; shared-infrastructure
+  write is the smaller documented residual, bounded further by the admission guard on WHAT may be
+  created (attendee-entry-app-guard.yaml).
+
+  sourceRepos stays "*" — the in-cluster Gitea route host cannot be templated reliably (same tradeoff
+  as every other AppProject here); containment comes from destinations + resource rules + the guard's
+  `spec.source.path` check.
+
+  PAIRED CHANGES — this file is inert on its own:
+    - attendee-entry-app-guard.yaml pins attendees to `entries-<their own username>` (same commit).
+    - tools/ws/ws render_app must render `entries-${user}`; see argo_project(). Ship together.
+
+  ROLLOUT ON A LIVE DELIVERY — this is not a same-instant flip. A cockpit terminal refreshes the repo
+  (and therefore `ws`) only at POD START (showroom.yaml's init: git fetch + reset --hard origin/main).
+  So a running terminal keeps the OLD ws, which still renders project `workshop-entries`, while the
+  synced guard already demands `entries-{user}` — every attendee-run `ws prep` would be Forbidden with
+  "attendees may only use their own 'entries-<username>' AppProject". Roll out in this order:
+    1. push, then sync the in-cluster Gitea mirror and WAIT until its HEAD equals origin's,
+    2. sync workshop-config (creates entries-{user}, updates the guard),
+    3. `ws git-refresh --restart-terminals` so every cockpit picks up the new ws.
+  Steps 2 and 3 may be swapped; skipping 3 is what breaks. Already-materialized entry Applications
+  keep working untouched — their project only changes on the next `ws start`/`prep`, an admin apply is
+  never evaluated by the guard, and every live entry app on cluster2 was checked to be admissible by
+  its per-user project (spec.destination "" and all managed resource namespaces).
+*/ -}}
+{{- range $i := until (int .Values.userCount) }}
+{{- $user := printf "%s%d" $.Values.userPrefix (add $i 1) }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: entries-{{ $user }}
+  namespace: {{ $.Values.argoNamespace | default "openshift-gitops" }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+spec:
+  description: "Module entry states for {{ $user }} (materialized by the ws CLI)"
+  sourceRepos:
+    - "*"
+  destinations:
+    # Satisfies the Application-level spec check (entry apps name no destination namespace) and the
+    # cluster-scoped Namespace objects the charts create. Resource-level checks still bind — see header.
+    - namespace: ""
+      server: https://kubernetes.default.svc
+    # This attendee's own namespaces ONLY. Covers every suffix the charts use — dev, stage, prod, cicd,
+    # gitops, ai, batch, mesh, modernize, partner, client, site-a, site-b — without enumerating them, and
+    # matches no peer: the glob needs the literal "{{ $user }}-" prefix, so user1-* never matches user10-dev.
+    - namespace: "{{ $user }}-*"
+      server: https://kubernetes.default.svc
+    {{- /* trim: the helper's range emits a leading newline, which would render a whitespace-only line */}}
+{{- include "workshop-config.entryDestinationsShared" $ | trim | nindent 4 }}
+  # Entry charts may create their module-extra namespaces (e.g. {{ $user }}-mesh) — nothing else cluster-scoped.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  # Quotas/limits belong to the workshop layer and must survive ws reset — entry charts can't set them.
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+{{- end }}
