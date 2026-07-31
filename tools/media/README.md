@@ -242,24 +242,73 @@ print("unlisted:", sorted(have - wanted))
 EOF
 ```
 
-**Current state: 96 wanted, 84 rendered, 84 matched, 0 unlisted.** The only gap left is the
-`platform-accretion` family below — one decision, not twelve chores.
+**Current state: 96 wanted, 96 rendered, 96 matched, 0 unlisted.**
 
-### The one open question: `platform-accretion` (12 absent)
+### `platform-accretion` (RESOLVED 2026-07-28)
 
-Twelve module manifests name a `<module>-NN-platform-accretion.svg`, and only two sources exist
-(`platform-orientation/02-platform-accretion-v1.mmd`,
-`observability-health-scale/04-platform-accretion.mmd`). The manifests describe them as *"the
-master accretion diagram, M03 layer highlighted on the M01/M02 base"* — one cumulative picture of
-the Parasol platform, re-rendered per module with a different layer lit up. That is deliberate, so
-**it will never resolve by rendering**. It needs a call:
+This section used to describe an open question: twelve module manifests wanted a
+`<module>-NN-platform-accretion.svg` and only two `.mmd` sources existed. Owner decision
+2026-07-28 (commit `495590e`): author all twelve as real per-module sources rather than a shared
+image or a renderer highlight parameter — explicit and readable, at the cost of keeping the grey
+"platform you have already built" base in step across all twelve when it changes. All twelve now
+exist, are rendered, and are reconciled into the manifests. What was still open after that commit
+— actually *wiring the include into the page* — is closed by the decision below.
 
-- author the twelve variants as real sources (explicit; twelve files to keep in step), or
-- keep one source and teach the renderer a highlight parameter (one file; the renderer grows), or
-- share a single image everywhere and drop the per-module framing.
+## DECISION (2026-07-31): every page diagram is live Mermaid; the SVGs are for slides, not pages
 
-Nothing is broken today — lab pages render Mermaid client-side. The gap only bites the slide reuse
-the manifests promise.
+92 `// media-pass: …` notes across every module's `concept.adoc`/`wrapup.adoc` asked to
+"replace/augment with SVG export `<slug>.svg`" once the export existed. The exports landed
+2026-07-26 (label-space fix 2026-07-28, `ad61743`/`aa63622`) — but they were never wired in, and
+the notes could never close on their own. Resolved as **decided-against**: pages keep the live
+`[mermaid]` block; the note is deleted, not replaced with `image::`. Reasons, checked rather than
+assumed:
+
+- **The legibility problem the SVGs would have fixed is already fixed, live.** `ad61743`'s own
+  message says why the SVGs exist: *"Browsers render \[mermaid] fine, PowerPoint does not"* — they
+  were rendered for the **slide deck**, not the page. The page-legibility complaint (CC-5,
+  diagrams reading too small, worst in the narrow cockpit panel) was root-caused and fixed
+  separately in `content/supplemental-ui/partials/head-styles.hbs`: `.doc .imageblock .mermaid svg`
+  is forced to scale to fill the column (`width:100% !important; max-width:900px`), which a static
+  `image::` does not need and gains nothing from.
+- **Lightbox already treats a live Mermaid SVG exactly like an `image::`.**
+  `content/supplemental-ui/js/lightbox.js` opens the same full-window, click-to-enlarge overlay for
+  `.doc .imageblock .mermaid svg` and `.doc .imageblock img` alike — the "worth converting to a
+  static image so it can be enlarged" reason does not hold; both already can be.
+- **Live Mermaid is the single source of truth; the SVG is a second copy that drifts.** Every page
+  block is `include::example$diagrams/<mod>/NN-*.mmd[]` — the **same** `.mmd` the renderer reads to
+  produce the SVG. Wiring in the SVG would mean every future edit to the `.mmd` has to remember to
+  re-run `render_diagrams.py` and re-commit, with nothing in CI catching a miss (no
+  `copy-drift-guard.py` pair covers `.mmd` → `.svg`). That class of drift already happened once —
+  the `pipelines-fundamentals-02-pac-flow` incident this file documents below.
+- **The SVGs are not orphaned assets — they are slide-deck source material.** Every row in every
+  `media-manifest.md` diagram table says so explicitly (*"reused on slide N"*). Their consumer is
+  the `sa-guides/outlines` → PPTX pipeline, not the Antora page. Do not delete them and do not wire
+  them into pages; leave them exactly where they are, for exactly that job.
+
+**What changed:** 76 of the 92 notes were in-scope pages (18 modules currently being edited by
+other lanes — `build-deliver`, `gitops-at-scale`, `storage-stateful`,
+`observability-health-scale` — were left alone; their 16 notes are the same decision, not yet
+applied). Of the 76: 67 sat next to a diagram already live on the page and were simply deleted. The
+other 9 (`config-multienv`, `developer-hub-golden-paths`, `multi-tenancy-workload-security`,
+`gitops-fundamentals`, `pipelines-fundamentals`, `devspaces-inner-loop`, `networking-dev-devops`,
+`jobs-batch-kueue`, `trusted-supply-chain`) were the `platform-accretion` notes: their `.mmd` source
+and SVG both already existed (per the 2026-07-28 decision above) but no page ever `include::`d the
+diagram — a bare comment, no live equivalent. `platform-orientation` and
+`observability-health-scale` had already done this correctly (a `== The … layer over the Parasol
+platform` section, two sentences, then the live include); the other 9 now follow the same pattern,
+closing the last mechanical step of the 2026-07-28 decision rather than leaving nine bespoke
+half-notes with no consistent rule.
+
+**Consistency fix in the same pass:** `networking-dev-devops-05-network-policy-layers.svg` was the
+only one of that module's five sibling diagrams with no `// media-pass:` marker — it already had a
+live `[mermaid]` include and nothing pointing at the export, i.e. it was already in the end state
+every other diagram is now in. No change needed there beyond the module's own platform-accretion
+note (03) getting the same treatment as its siblings.
+
+**Left for the owner:** the 16 notes in `build-deliver`, `gitops-at-scale`, `storage-stateful`,
+`observability-health-scale` follow the identical pattern (confirmed while researching this) and
+should get the identical treatment — delete the paired ones, wire the unpaired
+`platform-accretion` ones as live Mermaid — once those lanes are done.
 
 ### What the earlier (2026-07-26) version of this section got wrong
 
