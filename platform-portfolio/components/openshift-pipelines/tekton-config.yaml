@@ -1,7 +1,21 @@
 # TektonConfig "config" is created by the operator itself with cluster defaults the moment the
 # CSV reconciles (see subscription.yaml's wave-0 comment) — we never own the object's lifecycle.
 # This manifest patches ONLY the fields below via strategic-merge; every other section (pipeline,
-# chain, dashboard, platforms, ...) is left untouched at whatever the operator defaults to.
+# chain, dashboard, platforms, ...) is left untouched at whatever the operator defaults to. Verified
+# live on cluster2 2026-08-01, which the commit that added this file could not yet claim: the synced
+# object still carries the operator's own result.{disabled,is_external_db,options,performance,
+# route_enabled} alongside our two fields, and Route tekton-results-api is reencrypt/Redirect.
+#
+# ⚠ ADOPTED CLUSTERS — the object below is the ORG'S on a cluster that already ran Pipelines, and
+#   this component no longer protects them. Adding this file is what made components/openshift-
+#   pipelines stop being "operator-only" (lib-components.sh is_operator_only reads FILENAMES:
+#   kustomization/namespace*/operatorgroup*/subscription* only). Before it, §0's adoption preflight
+#   classified an already-installed Pipelines as SKIP and deleted pp-openshift-pipelines from the
+#   render — nothing of theirs was touched. Now the same cluster gets the weaker WARN verdict
+#   (there is no OperatorGroup here, so CC_HARD is false and it does not refuse), the install
+#   proceeds, and Argo takes over BOTH the org's Subscription (re-channelling it to `latest`) and
+#   their cluster-scoped TektonConfig singleton. Restoring the SKIP verdict is the fix, and it needs
+#   a change in argocd-bootstrap-owned code — see the annotation below.
 #
 # result.route_tls_termination: reencrypt
 #   tekton-results-api terminates TLS itself — its Service carries
@@ -35,9 +49,28 @@ metadata:
   annotations:
     # Wave 1: after the operator Subscription (wave 0) so the CRD is registered first.
     argocd.argoproj.io/sync-wave: "1"
-    # First sync can still race operator reconciliation before the CRD exists — don't hard-fail
-    # a dry-run against a not-yet-registered kind (same pattern as components/rhtas/securesign.yaml).
-    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+    # SkipDryRunOnMissingResource: first sync can still race operator reconciliation before the CRD
+    # exists — don't hard-fail a dry-run against a not-yet-registered kind (same pattern as
+    # components/rhtas/securesign.yaml).
+    # Prune=false,Delete=false: we patch this object, we do not own it. It is CLUSTER-SCOPED
+    # (oc api-resources --api-group=operator.tekton.dev → NAMESPACED=false) and carries the
+    # operator's own finalizer `tektonconfigs.operator.tekton.dev`, so letting an Application
+    # cascade take it would tear down the ENTIRE Tekton install on any cluster — and if the CSV
+    # goes first, the finalizer can never run and the object hangs Terminating forever. Same two
+    # keys ogsr-uninstall.sh's merge_sync_options() asserts on adopted resources, for the same
+    # reason: protection has to be a property of the resource.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true,Prune=false,Delete=false
+    # NOT YET HONOURED BY ANYTHING — inert metadata, staged for the argocd-bootstrap owner.
+    # Meaning: "if §0 drops this component as adopted, drop this resource with it; the workshop
+    # requires nothing from it." True here and nowhere else in the portfolio so far — every other
+    # non-skippable component ships operands the workshop genuinely needs (KnativeServing, Kiali,
+    # Securesign, ...), whereas this is a two-field patch on an object the operator creates either
+    # way, and the only content that mentions the Route says it is broken and to route around it
+    # (app-security-testing/instructor.adoc). Honouring it takes two edits in code this component
+    # does not own: is_operator_only() must accept a file whose resources all carry this key, and
+    # check-adoption-skip.sh must widen OPERATOR_ONLY_KINDS to "allowed kind OR this annotation"
+    # so the render-level gate still catches an operand smuggled in under it.
+    portfolio.redhat.com/adoption: drop-with-component
   labels:
     app.kubernetes.io/part-of: tekton-results
 spec:
