@@ -32,6 +32,23 @@ character. Concretely:
 
 The litmus test for any change: **would anything of the customer's differ after uninstall?**
 
+**The attendee-isolation promise — and its limit.** Attendees are walled off from the organisation's own
+namespaces: the `workshop-entries` AppProject enumerates every destination an attendee's Application may
+land in (no wildcard), and an admission policy bounds what an attendee may create — name, project, and
+source path. That gap is closed.
+
+Attendees are **not** walled off from each other. All eight share one Argo permission profile, so a
+determined attendee could hand-craft an object that targets a peer's namespace instead of their own —
+the lab never leads there, but nothing in RBAC stops it (Kubernetes cannot scope a `create` by name,
+since the name doesn't exist yet when permission is checked). This is a deliberate, accepted residual:
+a cooperative-classroom risk on a disposable cluster where attendees already share infrastructure, not a
+customer-data risk.
+
+If you are running this for people who are not colleagues — a public class, strangers on a
+customer-adjacent cluster — mitigate by giving each attendee their own AppProject instead of one shared
+one. `gitops/workshop-config/templates/student-appprojects.yaml` already does this for the GitOps
+modules (the `proj-{user}` pattern); the same shape closes the entry-state gap too.
+
 ### Four things that look odd until you know why
 
 These are the choices most likely to make you think something is broken or wasteful. Each was
