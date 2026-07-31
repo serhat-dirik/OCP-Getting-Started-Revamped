@@ -1,16 +1,34 @@
 # ws reset purges user-created leftovers from these namespaces before re-materializing. multi-tenancy-workload-security's whole
 # sandbox lives in {user}-dev: the 3 ServiceAccounts (payments-ci/payments-ops/root-demander) and the
-# root-demander Deployment are chart-owned (pruned by the Argo finalizer on reset); the solve-only
-# view RoleBinding in {user}-prod is likewise chart-owned and pruned by that finalizer. `oc delete
+# root-demander Deployment are chart-owned (pruned by the Argo finalizer on reset). `oc delete
 # all,pvc` clears the scaled-up root-demander workload the attendee runs.
 #
-# KNOWN LIMITATION (reported to PM 2026-07-12): purge_ns clears workloads/secrets/configmaps but NOT
-# RoleBindings/Roles. multi-tenancy-workload-security is the first module whose attendees CREATE RBAC as the core exercise, so
-# an attendee's own lab-authored RoleBindings/Roles survive `ws reset`. They are inert leftovers (they
-# re-bind the same synthetic SAs) and do NOT fail the entry checks; the impersonation-guarded entry
-# check "teammate SAs are ungoverned" makes the condition VISIBLE to CI/instructor if it ever matters.
+# {user}-prod is deliberately NOT in this list. The lab's only footprint there is one RoleBinding, and
+# purge_ns would `oc delete all,pvc --all` the whole namespace — wiping a cohabitant module's prod
+# workloads to remove a single binding. purgeRbac below removes exactly that binding instead.
 purgeNamespaces:
   - "${USER}-dev"
+
+# The RBAC this module's lab teaches attendees to CREATE. purge_ns sweeps workloads/secrets/configmaps
+# but never RoleBindings/Roles with `--all` — a workshop namespace carries nine it must keep, including
+# the chart-owned {user}-admin that IS the attendee's access to the namespace. So modules declare their
+# own RBAC and `ws reset`/`ws prep` delete exactly these (ns/kind/name; see purge_meta_rbac in tools/ws/ws).
+#
+# CORRECTED 2026-07-31 — the note here previously claimed the {user}-prod `view` RoleBinding was
+# chart-owned and pruned by the Argo finalizer. It is not: the live object carries no labels and no
+# annotations, so nothing owns it, and {user}-prod was not purged at all. It survived every reset,
+# leaving payments-ci still able to `get pods` in prod on the next run — verified on cluster. The
+# earlier "KNOWN LIMITATION" note also held that the entry check made this VISIBLE; it did not, because
+# both "ungoverned" entry checks only ever looked at {user}-dev. Both gaps are closed: the binding is
+# purged here, and the verify script now asserts ungoverned in prod too.
+#
+# Names are what `oc adm policy add-role-to-user` generates — it names the binding after the role
+# (edit / view / deployer), confirmed by running the lab's own grants on cluster 2026-07-31.
+purgeRbac:
+  - "${USER}-dev/rolebinding/edit"
+  - "${USER}-dev/rolebinding/deployer"
+  - "${USER}-dev/role/deployer"
+  - "${USER}-prod/rolebinding/view"
 # multi-tenancy-workload-security materializes into {user}-dev alongside every other dev module (platform-orientation-storage-stateful, gitops-fundamentals-securing-apps-keycloak). It ships no
 # claims stack — its resources are uniquely named — but the same-namespace conflict policy still binds:
 # purge-based prep/reset wipes namespace cohabitants, and with selfHeal off a cohabitant's app goes

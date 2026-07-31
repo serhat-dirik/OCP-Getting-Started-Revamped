@@ -349,6 +349,12 @@ meta_conflicts() {  # module → ws-meta conflictsWith module list
   meta_list "$meta" conflictsWith
 }
 
+meta_rbac() {  # module user → ws-meta purgeRbac entries (ns/kind/name) with ${USER} resolved
+  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml" item
+  [[ -f "$meta" ]] || return 0
+  meta_list "$meta" purgeRbac | while read -r item; do echo "${item//\$\{USER\}/${2}}"; done
+}
+
 meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); empty = engine default.
   # Modules whose hooks do real work (m07 solve runs a ~9-min pipeline) declare a longer window.
   local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
@@ -521,6 +527,31 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   ok "purge requested in ${ns}"
 }
 
+purge_meta_rbac() {  # module user — delete the RBAC a module's lab teaches attendees to CREATE
+  # RoleBindings/Roles are the one leftover class purge_ns deliberately does not sweep with `--all`,
+  # and the reason is not squeamishness: a workshop namespace legitimately carries nine RoleBindings
+  # it must keep (system:deployers/image-builders/image-pullers, openshift-pipelines-edit,
+  # pipelines-scc-rolebinding, two student-gitops ones, plus the chart-owned {user}-admin that IS the
+  # attendee's own access to the namespace). Enumerated on a clean {user}-dev, 2026-07-31.
+  #
+  # So the usual `oc delete <kind> --all` idiom is inverted here: a keep-list FAILS OPEN — the next
+  # operator that ships a namespaced RoleBinding gets purged by a list written today, and the failure
+  # is silent. Modules instead DECLARE what their lab creates (ws-meta purgeRbac: ns/kind/name), which
+  # FAILS CLOSED: anything undeclared is preserved, so an unknown object is never collateral.
+  #
+  # Found via multi-tenancy-workload-security, the first module whose lab's core exercise IS authoring
+  # RBAC: its `view` binding in {user}-prod survived every reset (that namespace was not even in
+  # purgeNamespaces), leaving payments-ci still able to read pods in prod on the next run — while entry
+  # verify passed 10/10, because its "ungoverned" assertions only ever looked at {user}-dev.
+  local module="$1" user="$2" entry ns kind name
+  for entry in $(meta_rbac "$module" "$user"); do
+    ns="${entry%%/*}"; kind="${entry#*/}"; name="${kind#*/}"; kind="${kind%%/*}"
+    [[ -n "$ns" && -n "$kind" && -n "$name" ]] || continue
+    oc get ns "$ns" >/dev/null 2>&1 || continue
+    oc delete "$kind" "$name" -n "$ns" --wait=false >/dev/null 2>&1 || true
+  done
+}
+
 # ── student-gitops attendee-app cleanup (SEV1-A) ──────────────────────────────────────────────────
 # Attendee-created apps live in the student-gitops CONTROL PLANE, where attendees have ZERO k8s RBAC
 # (only ARGO RBAC via proj-{user}, ADR-0002). So `oc delete application -n ogsr-student-gitops` as an
@@ -688,6 +719,7 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
   done
   if [[ "$evicted" == 1 ]]; then
     for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
+    purge_meta_rbac "$module" "$user"
     # The purge also removed THIS module's chart-owned resources if its app pre-existed.
     # With selfHeal off, re-applying an UNCHANGED app never re-syncs them — recycle the
     # app so the fresh apply is a creation, which always auto-syncs.
@@ -1020,6 +1052,7 @@ cmd_reset() {
   purge_apps "$module" "$user"
   local ns
   for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
+  purge_meta_rbac "$module" "$user"
 
   # Now remove the GitOps wrapper. With the namespace already emptied the finalizer has little or
   # nothing left to prune and completes fast; if it still lingers, strip the finalizer rather than

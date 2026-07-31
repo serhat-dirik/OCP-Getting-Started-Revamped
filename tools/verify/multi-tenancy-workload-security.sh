@@ -71,6 +71,12 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
     # A leftover lab binding would fail these — makes a not-fully-clean reset VISIBLE (see ws-meta note).
     check "payments-ci is ungoverned in ${NS} (no edit yet)"   sa_cannot payments-ci "$NS" update deployments   || hint "a leftover RoleBinding governs payments-ci — remove lab-created bindings, then ws reset multi-tenancy-workload-security --user ${USER_NAME}"
     check "payments-ops is ungoverned in ${NS} (no deployer yet)" sa_cannot payments-ops "$NS" create deployments || hint "a leftover RoleBinding governs payments-ops — remove lab-created bindings, then ws reset multi-tenancy-workload-security --user ${USER_NAME}"
+    # PROD too — the lab governs BOTH namespaces (edit in dev, view in prod), so an entry state that
+    # only asserts dev is half a check. This one was missing, and it was exactly the half that broke:
+    # {user}-prod was not in purgeNamespaces, so the lab's `view` binding survived every reset and
+    # payments-ci could still read pods in prod on the next run — while this script reported 10/10.
+    # A green tick that only looks where the leftover isn't is the failure mode, not the leftover.
+    check "payments-ci is ungoverned in ${PROD} (no view yet)" sa_cannot payments-ci "$PROD" get pods || hint "a leftover RoleBinding governs payments-ci in ${PROD} — ws reset multi-tenancy-workload-security --user ${USER_NAME} (purgeRbac now removes it)"
   fi
 else
   # --- end state: the lab's OUTCOME — workload fixed + the team RBAC in place ----------------------
