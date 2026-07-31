@@ -75,7 +75,7 @@ oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTT
 oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "warm:       HTTP %\{http_code} in %\{time_total}s\n" "$URL/api/claims"
 ----
 +
-"Fifteen seconds cold, a tenth of a second warm. That 15 seconds is the honest cost of scale-to-zero — and if a path can't tolerate it, I set a warm floor with `min-scale: 1`. Nothing hidden."
+"Twenty-odd seconds cold, a tenth of a second warm. That wait is the honest cost of scale-to-zero — and if a path can't tolerate it, I set a warm floor with `min-scale: 1`. Nothing hidden."
 
 [demo-block]
 [TIME 3m]
@@ -138,7 +138,7 @@ Start by looking at what's already running. The claims-processor is a *Knative S
 Console::
 +
 --
-In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Serverless → Services* and select *parasol-claims*. Note its *URL* (a ready HTTPS address), its single *Revision*, and — in *Topology* — that it currently shows *0* pods (a dashed ring), because it's scaled to zero.
+In the {ocp_console_url}[OpenShift web console^] (project `{user}-dev`), open *Serverless → Serving → Services* and select *parasol-claims*. Note its *URL* (a ready HTTPS address), its single *Revision*, and — in *Topology* — that it currently shows *0* pods (a dashed ring), because it's scaled to zero.
 The *CLI* tab reads the same facts from the terminal — use it to capture the exact fields.
 
 // CAPTURED 2026-07-30 and embedded below. Shot as an attendee (user1) against the module's own
@@ -183,7 +183,7 @@ oc get ksvc parasol-claims -n $NS -o jsonpath='ready={.status.conditions[?(@.typ
 [source,texinfo]
 ----
 service URL: https://parasol-claims-user6-dev.<cluster-domain>
-ready=True  latestReadyRevisionName=parasol-claims-v1
+ready=True  latestReady=parasol-claims-v1
 ----
 
 Confirm the scale-to-zero claim directly — with no traffic, the service holds *no* pods (only the always-on database and load client run):
@@ -233,7 +233,13 @@ Now send it a request and *time it* — the first caller pays the *cold start* w
 oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
 ----
 
-.Expected output (a real, honest JVM cold start — around 15 seconds)
+// Cold start is a RANGE, not a number. Three measurements on this cluster: 15.27s (original capture),
+// 18.81s (build-time grounding note below), 26.51s (cold-start smoke, 2026-07-31). The page used to
+// say "around 15 seconds" — the fastest of the three — and the recovery step below used `-m 30`,
+// leaving 3.5s of margin against the slowest. A timeout there prints `HTTP 000`, which is the exact
+// symbol the attendee has just been taught means failure, on the block presented to them as the FIX.
+// Hence `-m 60` and a stated range. Do not re-narrow either to a single observed number.
+.Expected output (a real, honest JVM cold start — expect anywhere from ~15 to ~30 seconds; yours will differ)
 [source,texinfo]
 ----
 cold start: HTTP 200 in 15.269703s
@@ -293,7 +299,7 @@ The client gave up at 5 seconds, before the ~15-second cold start could complete
 [source,sh,role=execute]
 ----
 # fix option A — a realistic client timeout that allows for the cold start:
-oc exec deploy/demo-client -n $NS -- curl -s -k -m 30 -o /dev/null -w "with -m30: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -o /dev/null -w "with -m60: HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
 # fix option B — pin a warm floor so scale-from-zero never hits the critical path.
 # Knative revisions are IMMUTABLE: changing the template (here, the min-scale floor) needs a NEW
 # revision name, or the webhook rejects "changes without a name change" — so name this one.
@@ -306,7 +312,7 @@ kn service update parasol-claims -n $NS --scale-min 1 --revision-name parasol-cl
 .Expected output (option A rides out the cold start; option B keeps one pod always warm)
 [source,texinfo]
 ----
-with -m30: HTTP 200 in 15.140s
+with -m60: HTTP 200 in 22.692900s
 Service 'parasol-claims' updated in namespace 'user6-dev'.
 ----
 
@@ -479,7 +485,7 @@ When the burst ends, the autoscaler drains back down; watch it return to zero:
 [source,sh,role=execute]
 ----
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
-# after the load stops you'll see 3 -> 1 -> 0 over roughly half a minute; Ctrl-C when it reaches 0
+# after the load stops you'll see 3 -> 1 -> 0 over about 60-100 seconds; Ctrl-C when it reaches 0
 ----
 
 .Expected output (idle → the pods are removed, back to zero)
