@@ -50,6 +50,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=tools/lint/_extract-func.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -128,13 +130,8 @@ check_key_symmetry() {  # root → 0 clean, 1 asymmetric, 2 nothing to inspect
 # ── [2] restore behaviour ─────────────────────────────────────────────────────
 # The function is extracted, not sourced: ogsr-uninstall.sh runs a full teardown at top level and
 # must never be sourced by a linter. Extraction failure is exit 2, never a silent pass.
-extract_func() {  # file → function text on stdout
-  awk -v fn="${FUNC}() {" '
-    index($0, fn) == 1 { inside = 1 }
-    inside { print }
-    inside && $0 == "}" { exit }
-  ' "$1"
-}
+# extract_func (2-arg: file, name) lives in _extract-func.sh, sourced above, shared with the other
+# guards under tools/lint/; this guard's only target is $FUNC, so every call site passes it explicitly.
 
 # Runs the extracted function once under stubs and echoes every `oc patch` argv it issued.
 # T_* inputs: CHANGED, B64, CR_PRESENT, LIVE_MEM, DRY.
@@ -285,7 +282,7 @@ run_check() {  # root → 0 clean, 1 broken, 2 uninspectable
   if [[ "$sub" -ne 0 ]]; then rc=1; fi
 
   func_file="$(mktemp)"
-  extract_func "${root}/${UNINSTALL}" > "$func_file"
+  extract_func "${root}/${UNINSTALL}" "$FUNC" > "$func_file"
   sub=0
   check_restore_behaviour "$func_file" || sub=$?
   rm -f "$func_file"
@@ -330,7 +327,7 @@ CANARY
   # Canary B — the empty-prior defect: restoring "no explicit resources" by writing a number back
   # instead of removing the field. Byte-for-byte the real function, with one branch broken.
   canary_func="$tmp/canary-func.sh"
-  extract_func "${REPO_ROOT}/${UNINSTALL}" \
+  extract_func "${REPO_ROOT}/${UNINSTALL}" "$FUNC" \
     | sed 's|{"spec":{"controller":{"resources":null}}}|{"spec":{"controller":{"resources":{"limits":{"memory":"2Gi"}}}}}|' \
     > "$canary_func"
   if ! grep -q '"memory":"2Gi"' "$canary_func"; then

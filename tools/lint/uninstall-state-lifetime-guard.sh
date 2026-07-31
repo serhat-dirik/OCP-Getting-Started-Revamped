@@ -44,6 +44,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=tools/lint/_extract-func.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -64,26 +66,9 @@ WRITERS=(
 # ── extraction ────────────────────────────────────────────────────────────────
 # Functions are EXTRACTED, never sourced: ogsr-uninstall.sh runs a full teardown at top level and
 # install.sh runs a full install. Extraction failure is exit 2, never a silent pass.
-extract_func() {  # <file> <name> → function text on stdout
-  awk -v fn="$2" '
-    index($0, fn "() {")  == 1 { inside = 1 }
-    index($0, fn "(){")   == 1 { inside = 1 }
-    inside { print }
-    inside && $0 == "}" { exit }
-  ' "$1"
-}
-
-# The capture Job embeds its record_once inside a YAML block scalar, so every line is indented.
-# De-indent to column 0 first, or extract_func's anchored match never fires and the guard silently
-# skips the third writer — the exact "an unrun gate is worse than none" shape.
-extract_func_indented() {  # <file> <name> → function text on stdout, de-indented
-  sed -E 's/^ {14}//' "$1" | awk -v fn="$2" '
-    index($0, fn "() {")  == 1 { inside = 1 }
-    index($0, fn "(){")   == 1 { inside = 1 }
-    inside { print }
-    inside && $0 == "}" { exit }
-  '
-}
+# extract_func / extract_func_indented (incl. the one-line-function fix, and the de-indent the
+# capture Job's YAML block scalar needs — see _extract-func.sh) live there, sourced above; shared
+# with the other guards under tools/lint/ rather than copy-pasted per guard.
 
 # ── [1] residue accounting ────────────────────────────────────────────────────
 # Runs one restore function under stubs and echoes two lines:

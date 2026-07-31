@@ -70,6 +70,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=tools/lint/_extract-func.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -82,13 +84,8 @@ FN_VERDICT="emit_bootstrap_verdict"
 # ── extraction ────────────────────────────────────────────────────────────────
 # Extracted, never sourced: install.sh runs a full cluster install at top level. Extraction failure
 # is exit 2, never a silent pass. Written to a real FILE (see the portability note above).
-extract_func() {  # <file> <name> → function text on stdout
-  awk -v fn="$2" '
-    index($0, fn "() {") == 1 { inside = 1 }
-    inside { print }
-    inside && $0 == "}" { exit }
-  ' "$1"
-}
+# extract_func lives in _extract-func.sh, sourced above; shared with the other guards under
+# tools/lint/ rather than copy-pasted per guard.
 
 # ── [1] the poll loop ─────────────────────────────────────────────────────────
 # Runs wait_for_workshop_layer_healthy() under a stubbed `oc` (never-healthy, or healthy from

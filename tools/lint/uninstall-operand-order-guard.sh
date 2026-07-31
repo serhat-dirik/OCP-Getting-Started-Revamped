@@ -57,6 +57,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=tools/lint/_extract-func.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -67,21 +69,9 @@ CHECKCLEAN="bootstrap/ogsr-check-clean.sh"
 
 # ── extraction ────────────────────────────────────────────────────────────────
 # Functions are EXTRACTED, never sourced: ogsr-uninstall.sh runs a full teardown at top level.
-# Extraction failure is exit 2, never a silent pass.
-# The one-line-function case is handled explicitly: ogsr-check-clean.sh's state_get() is written on a
-# single line, and a walker that only stops at a bare `}` would swallow every function after it —
-# including ones that would then silently override this harness's own stubs.
-extract_func() {  # <file> <name> → function text on stdout
-  awk -v fn="$2" '
-    index($0, fn "() {")  == 1 || index($0, fn "(){") == 1 {
-      inside = 1
-      if ($0 ~ /}[ \t]*$/) { print; exit }
-    }
-    inside { print }
-    inside && $0 == "}" { exit }
-  ' "$1"
-}
-
+# Extraction failure is exit 2, never a silent pass. extract_func (incl. its one-line-function fix —
+# ogsr-check-clean.sh's state_get() is written on a single line) lives in _extract-func.sh, sourced
+# above; it is shared with the other guards under tools/lint/ rather than copy-pasted per guard.
 extract_many() {  # <file> <out> <name…> — concatenate several functions into one sourceable file
   local file="$1" out="$2" fn
   shift 2
