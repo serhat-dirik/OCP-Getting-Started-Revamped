@@ -1,0 +1,46 @@
+{{/*
+  Sole owner of the cockpit Namespace(s).
+
+  WHY THIS EXISTS — a fresh install could not complete without it.
+
+  templates/showroom.yaml and templates/showroom-demos.yaml each used to declare this Namespace, and
+  showroom-demos.yaml carried a comment asserting it was "safe to declare even when
+  templates/showroom.yaml also declares it (identical object)". That is true of `helm install` —
+  kubectl apply is last-wins and never notices. It is NOT true of Argo CD, which is how this chart is
+  actually delivered: Argo treats a repeated resource as an error condition, refuses to start a sync
+  operation at all, and parks the Application at OutOfSync/Missing with
+
+      RepeatedResourceWarning | Resource /Namespace//ogsr-showroom appeared 2 times
+
+  So the whole workshop layer silently failed to materialize on a clean cluster: 3 namespaces instead
+  of ~70, zero showroom pods, and no sync operation ever recorded (cluster-tb7fj, 2026-07-31).
+  Rendering the object twice is a defect regardless of whether the two copies agree.
+
+  showroomDemos.namespace defaults to inheriting showroom.namespace, so the collision is the DEFAULT
+  configuration, not an edge case. When they are set to different namespaces both are needed — hence
+  a set, deduplicated with `uniq`, rather than simply deleting one of the two declarations.
+
+  If you add another cockpit flavour, add its namespace to $names here; do not re-declare the object
+  in the new template.
+*/}}
+{{- $names := list }}
+{{- if .Values.showroom.enabled }}
+{{- $names = append $names .Values.showroom.namespace }}
+{{- end }}
+{{- if .Values.showroomDemos.enabled }}
+{{- $names = append $names (.Values.showroomDemos.namespace | default .Values.showroom.namespace) }}
+{{- end }}
+{{- range $n := ($names | compact | uniq) }}
+---
+# Shared cockpit namespace. Per-user Deployments/Routes live here; the attendee is never granted
+# access to it — isolation is by the terminal's oc-login identity, not by namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $n }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+{{- end }}

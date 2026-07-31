@@ -1256,6 +1256,14 @@ if [[ "$HEALTH" == "Healthy" && "$SYNC" == "Synced" ]]; then
   ok "workshop-config is Synced/Healthy"
 else
   err "workshop-config not ready yet (health=${HEALTH:-?} sync=${SYNC:-?}) — selfHeal continues; inspect: oc describe application workshop-config -n openshift-gitops"
+  # …and REMEMBER it. This used to print the ❌ above and then fall straight through to
+  # "✅ workshop bootstrap complete" with exit 0, so a run whose entire workshop layer never
+  # materialized reported success — 3 namespaces instead of ~70 and zero cockpit pods, while the
+  # closing banner still printed the console URL, the Gitea URL and "users user1 … user8" as though
+  # they were ready. Measured on a clean cluster (tb7fj, 2026-07-31), where a duplicate Namespace in
+  # the chart made Argo refuse to sync at all. Anything scripting this installer — CI, the RHDP
+  # catalog item, an SA in a hurry — reads the exit code, and the exit code said fine.
+  WORKSHOP_LAYER_OK=false
 fi
 
 # ── credentials summary + next steps ──────────────────────────────────────────
@@ -1320,6 +1328,17 @@ if ! assert_no_batch_taint_pending; then
 fi
 
 echo
+if [[ "${WORKSHOP_LAYER_OK:-true}" != "true" ]]; then
+  err "workshop bootstrap INCOMPLETE — the platform installed but the workshop layer did not"
+  echo "   what is missing: the workshop-config Application never reached Synced/Healthy, so the"
+  echo "     per-user namespaces, quotas, RBAC, Gitea seeding and cockpits were NOT created."
+  echo "   attendees CANNOT use this cluster yet. Do not hand out links."
+  echo "   diagnose : oc get application workshop-config -n ${ARGO_NS:-openshift-gitops} -o yaml"
+  echo "              a RepeatedResourceWarning condition means the chart renders one object twice —"
+  echo "              Argo refuses to sync at all in that case and records no operation."
+  echo "   re-run   : this installer is idempotent; fix the cause and run it again."
+  exit 1
+fi
 ok "workshop bootstrap complete"
 echo "   console : ${CONSOLE_URL:-<run: oc whoami --show-console>}"
 echo "   gitea   : https://${GITEA_HOST}"
