@@ -2989,9 +2989,18 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   return 0
 }
 
-diag_entry_app() {  # app — print one entry app's sync/health/op-phase + .status.conditions + operationState
+diag_entry_app() {  # app user — print one entry app's sync/health/op-phase + .status.conditions + operationState
   # message. Read-only; tolerant of an absent app.
-  local app="$1" sync health phase msg conds cline
+  #
+  # Annotates "(Degraded by design)" using the SAME live-label-first/ws-meta-fallback pattern as
+  # cmd_doctor/entry_app_ok: prefer the live workshop.redhat.com/degraded-by-design label (render_app,
+  # from ws-meta expectDegraded) and fall back to a local meta_expect_degraded read for an app
+  # materialized before the label existed. Without this an SA running `ws diag` against
+  # ai-assisted-development sees a bare "Degraded" with no way to tell "unhealthy on purpose" from
+  # "actually broken" — exactly the ambiguity the label exists to remove. The entry-* guard is kept:
+  # only an app named entry-* may be excused this way, matching cmd_doctor/entry_app_ok (module is
+  # derived from the entry-<module>-<user> name shape callers already use — app_name's own format).
+  local app="$1" user="$2" sync health phase msg conds cline module degraded exp
   if ! oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
     echo "  ${app}: absent (not materialized — ws start/prep it, or re-check the user/module)"
     return 0
@@ -2999,7 +3008,15 @@ diag_entry_app() {  # app — print one entry app's sync/health/op-phase + .stat
   sync="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
   health="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
   phase="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)"
-  printf "  %-30s %s / %s   op:%s\n" "$app" "${sync:-?}" "${health:-?}" "${phase:-none}"
+  degraded="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.metadata.labels.workshop\.redhat\.com/degraded-by-design}' 2>/dev/null || true)"
+  module="${app#entry-}"; module="${module%-"$user"}"
+  exp="$degraded"
+  [[ -z "$exp" && -n "$module" ]] && exp="$(meta_expect_degraded "$module" 2>/dev/null || true)"
+  if [[ "$app" == entry-* && -n "$module" && "$exp" == "true" ]]; then
+    printf "  %-30s %s / %s   op:%s   (Degraded by design)\n" "$app" "${sync:-?}" "${health:-?}" "${phase:-none}"
+  else
+    printf "  %-30s %s / %s   op:%s\n" "$app" "${sync:-?}" "${health:-?}" "${phase:-none}"
+  fi
   conds="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}' 2>/dev/null || true)"
   if [[ -n "$conds" ]]; then
     while IFS= read -r cline; do [[ -n "$cline" ]] || continue; echo "     condition: ${cline}"; done <<< "$conds"
@@ -3039,7 +3056,7 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
   else
     while IFS= read -r app; do
       [[ -n "$app" ]] || continue
-      diag_entry_app "$app"
+      diag_entry_app "$app" "$user"
     done <<< "$apps"
   fi
   echo
