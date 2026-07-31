@@ -202,6 +202,14 @@ demo-client-...                1/1     Running   0          8m
 ----
 
 [NOTE]
+.If a `parasol-claims` pod is still here, that's normal — you're just early
+====
+Right after `ws start` materializes this module, the initial `parasol-claims` pod can still be *Running* for close to a minute (measured 71-84 seconds old on this cluster) before Knative finishes draining it to zero — a normally-paced reader can easily reach this step before that finishes.
+If you see a `parasol-claims-...` pod above, the scale-to-zero claim is still true; the drain is just still in flight.
+Exercise 2 waits for zero pods before timing the cold start — re-run the command above after a minute, or continue on and let that wait catch you up.
+====
+
+[NOTE]
 .What Knative built under the one object you see
 ====
 The `parasol-claims` `ksvc` is the *only* object you'd author. Behind it, `oc get` shows the machinery Knative manages: a `configuration.serving.knative.dev` (the latest desired version), a `route.serving.knative.dev` (whose `URL` matches the `ksvc`), and a `revision.serving.knative.dev` (the immutable snapshot the traffic points at). When a pod *is* running, it carries *two* containers — your `parasol-claims` app *and* a `queue-proxy` sidecar Knative injects to meter concurrency and buffer during scale-up. You'll see that pod appear in the next exercise.
@@ -209,7 +217,7 @@ The `parasol-claims` `ksvc` is the *only* object you'd author. Behind it, `oc ge
 
 [.checkpoint]
 ****
-✔ *Verify:* You found the `parasol-claims` *Knative Service* — *Ready*, one *Revision* (`parasol-claims-v1`) at 100% traffic — read its *auto-created* HTTPS `status.url` (no hand-rolled Route), and confirmed it is holding *zero pods* while idle.
+✔ *Verify:* You found the `parasol-claims` *Knative Service* — *Ready*, one *Revision* (`parasol-claims-v1`) at 100% traffic — read its *auto-created* HTTPS `status.url` (no hand-rolled Route), and confirmed it holds *zero pods* once idle (allowing for the brief post-setup drain window noted above).
 ****
 
 == 2. Scale to zero and back — feel the cold start
@@ -315,6 +323,14 @@ kn service update parasol-claims -n $NS --scale-min 1 --revision-name parasol-cl
 with -m60: HTTP 200 in 22.692900s
 Service 'parasol-claims' updated in namespace 'user6-dev'.
 ----
+
+[NOTE]
+.A stderr warning you'll see on every `kn service update` in this lab
+====
+`kn service update` also prints a client-side warning to stderr, ahead of the `Service '...' updated` line — something like `Kubernetes default value is insecure, Knative default is more secure` about `securityContext`.
+It's harmless — a client-side lint about pod security defaults, not an error — and the expected-output blocks in this lab capture stdout only, so it won't appear in them.
+Expect it on every `kn service update` from here on.
+====
 
 [NOTE]
 .min-scale is a tradeoff, not a fix-all
@@ -612,11 +628,14 @@ Now prove the *main* URL really splits across both revisions — send a batch th
 [source,sh,role=execute]
 ----
 oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 50); do curl -s -k -o /dev/null "'$URL'/api/claims"; done; echo "sent 50"'
+# the candidate revision only gets ~20% of these requests, so it may still be mid cold-start
+# (~15-30s on this cluster) right after the batch — give it a moment before reading READY:
+sleep 30
 oc get deploy -n $NS -l serving.knative.dev/service=parasol-claims \
   -o custom-columns='REVISION-DEPLOYMENT:.metadata.name,READY:.status.readyReplicas'
 ----
 
-.Expected output (both revisions received traffic and scaled up)
+.Expected output (both revisions received traffic and scaled up — if you read this immediately after the batch instead of waiting, the just-woken candidate revision can still show READY <none> for another ~15-30s; that's the cold start finishing, not a missed delivery)
 [source,texinfo]
 ----
 sent 50

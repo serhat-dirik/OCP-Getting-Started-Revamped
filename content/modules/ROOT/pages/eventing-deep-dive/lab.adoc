@@ -201,11 +201,19 @@ oc get pods -n $NS -l 'app in (claims-consumer,claims-dlq)' --no-headers 2>/dev/
 [source,texinfo]
 ----
 broker ingress: http://broker-ingress.knative-eventing.svc.cluster.local/user7-dev/default
-NAME              URL                                                       LATESTREADY          READY
-claims-consumer   https://claims-consumer-user7-dev.<cluster-domain>        claims-consumer-v1   True
-claims-dlq        https://claims-dlq-user7-dev.<cluster-domain>             claims-dlq-v1        True
+NAME              URL                                                       LATESTCREATED         LATESTREADY          READY   REASON
+claims-consumer   https://claims-consumer-user7-dev.<cluster-domain>        claims-consumer-v1    claims-consumer-v1   True
+claims-dlq        https://claims-dlq-user7-dev.<cluster-domain>             claims-dlq-v1         claims-dlq-v1        True
 0
 ----
+
+[NOTE]
+.If you see 1 or 2 pods here instead of 0, that's the just-run `ws start` still draining
+====
+Right after `ws start` materializes this module, `claims-consumer` and/or `claims-dlq` can still be *Running* for a couple of minutes (measured 2 pods at ~70 seconds after start, 0 by roughly 120-140 seconds) before Knative finishes scaling them to zero.
+A normally-paced reader can land here before that finishes — if the count above isn't `0` yet, that's the drain still in flight, not a broken lab.
+Re-run the `oc get pods` command above after a minute or two, or continue on; exercise 2's own cold-start step needs zero pods anyway and will catch you up.
+====
 
 [NOTE]
 .The seeded source is a ticker — and that's honest
@@ -216,7 +224,7 @@ Everything *downstream* is real: the broker, the triggers, the filtering, the co
 
 [.checkpoint]
 ****
-✔ *Verify:* You found the four eventing primitives — the in-memory `default` *Broker* (Ready), the unfiltered `claims-events` *Trigger* routing to `claims-consumer`, the seeded `claim-ticker` *PingSource*, and two scale-to-zero consumer services (`claims-consumer`, `claims-dlq`) holding *zero* pods while idle — and read the broker's ingress address.
+✔ *Verify:* You found the four eventing primitives — the in-memory `default` *Broker* (Ready), the unfiltered `claims-events` *Trigger* routing to `claims-consumer`, the seeded `claim-ticker` *PingSource*, and two scale-to-zero consumer services (`claims-consumer`, `claims-dlq`) holding *zero* pods once idle (allowing for the brief post-setup drain window noted above) — and read the broker's ingress address.
 ****
 
 == 2. The consumer is a real CloudEvents processor
@@ -269,6 +277,14 @@ oc logs deploy/claims-consumer-v1-deployment -c showcase -n $NS --tail=200 | gre
 .If a consumer log-read says "timed out waiting for the condition"
 ====
 `claims-consumer` and `claims-dlq` are *scale-to-zero* Services. If you pause and one settles back to zero, `oc logs deploy/claims-consumer-…` finds no pod and returns `error: timed out waiting for the condition` — that's not a failure. Re-run the *event-send* in the same step to wake the consumer, then read the log again. This applies to *every* consumer log-read below.
+====
+
+[NOTE]
+.The log lines below are trimmed, not literal
+====
+Every "Expected output" block that shows a log line (via `grep` on the pod log) omits the timestamp and logger-name prefix the real log line carries ahead of it.
+The blocks keep only the part that matters for the exercise; your own terminal will show the fuller line.
+This applies to every log-read expected-output block for the rest of this page.
 ====
 
 .Expected output (the consumer displays the full CloudEvents envelope — attributes + your data)
@@ -324,7 +340,7 @@ oc get pods -n $NS -l app=claims-consumer --no-headers 2>/dev/null | wc -l
 0
 ----
 
-Now POST a CloudEvent to the *broker ingress* — not the consumer. Because the in-memory broker delivers *synchronously*, the `202` comes back only after the trigger delivers the event — and delivery has to *wake the consumer from zero*, so this first POST takes about *fourteen seconds* (the Serverless cold start, now on the delivery path). Give `curl` room with `-m 30`:
+Now POST a CloudEvent to the *broker ingress* — not the consumer. Because the in-memory broker delivers *synchronously*, the `202` comes back only after the trigger delivers the event — and delivery has to *wake the consumer from zero*, so this first POST can take anywhere from *~14 to ~23 seconds or more* (the Serverless cold start, now on the delivery path — this cluster measured as high as 22.8s). Give `curl` room with `-m 30`:
 
 [source,sh,role=execute]
 ----
@@ -337,7 +353,7 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 30 -o /dev/null -w "cl
 oc get pods -n $NS -l app=claims-consumer
 ----
 
-.Expected output (202 Accepted — after the consumer cold-started to receive the delivery)
+.Expected output (202 Accepted — after the consumer cold-started to receive the delivery; expect anywhere from ~14 to ~23 seconds or more, not a fixed number)
 [source,texinfo]
 ----
 claim -> broker (cold): HTTP 202 in 13.814156s
@@ -346,9 +362,10 @@ claims-consumer-v1-deployment-...                2/2     Running   0          14
 ----
 
 [NOTE]
-.If your POST comes back fast instead of ~14 s
+.If your POST comes back fast — or slower than ~14 s
 ====
 The seeded `claim-ticker` `PingSource` fires into this *same* broker every five minutes, and the baseline `claims-events` Trigger routes those pings to `claims-consumer` too — so a ping may have *already* woken it. If your first broker POST returns in under a second instead of ~14 s, a ping beat you to it: wait ~2 minutes for the consumer to settle back to zero (`oc get pods … | wc -l` shows `0`), then POST again to see the real cold start.
+The other direction is normal too: this cluster measured a cold POST as high as *22.8 seconds* — well over the "~14 s" figure often quoted for a JVM cold start. Cold-start time varies with cluster load; anywhere up to the `-m 30` timeout is a real cold start, not a problem.
 ====
 
 The consumer *woke from zero on an event* — no client was waiting on it directly; the trigger's delivery scaled it up. Send a *second* event now that the consumer is warm, and watch the difference:
@@ -374,13 +391,13 @@ claim -> broker (warm): HTTP 202 in 0.639711s
 [NOTE]
 .Why the first broker POST is slow — the in-memory broker is *synchronous*
 ====
-The default `MTChannelBasedBroker` is backed by an *in-memory channel*, and it delivers *synchronously*: your POST's `202` comes back only after the trigger *completes* delivery. When the consumer is scaled to zero, that means waiting for its cold start (~14 s here) — the same JVM cold start from Serverless, now paid on the delivery path. Warm, it's sub-second.
+The default `MTChannelBasedBroker` is backed by an *in-memory channel*, and it delivers *synchronously*: your POST's `202` comes back only after the trigger *completes* delivery. When the consumer is scaled to zero, that means waiting for its cold start (~14-23 s or more here) — the same JVM cold start from Serverless, now paid on the delivery path. Warm, it's sub-second.
 This synchronous, in-memory behavior is exactly why the *Kafka* broker exists (durable, buffered, asynchronous) for events you can't afford to lose — the broker-backing decision you'll meet in exercise 6. One practical consequence: never give the producer a `curl` timeout *shorter* than a possible cold start, or you'll cancel a delivery that was about to succeed.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* You sent CloudEvents to the *Broker* (not the consumer), watched the `claims-events` Trigger route them, and saw the consumer *wake from zero on an event* — the first (cold) POST returning `202` in ~14 s as the consumer cold-started, the second (warm) in under a second, with both events landing in the consumer's log.
+✔ *Verify:* You sent CloudEvents to the *Broker* (not the consumer), watched the `claims-events` Trigger route them, and saw the consumer *wake from zero on an event* — the first (cold) POST returning `202` in anywhere from ~14 to ~23 seconds or more as the consumer cold-started, the second (warm) in under a second, with both events landing in the consumer's log.
 ****
 
 == 4. Route by attribute — trigger filters
@@ -597,7 +614,7 @@ How long that takes depends on what is already warm, and on a first run it is us
 
 * *~8 s* — everything warm. Just the 1s/2s/4s backoff.
 * *~20 s+* — the failing consumer cold-starts on the retries.
-* *~30 s+* — the *dead-letter sink* also cold-starts. `claims-dlq` is itself a scale-to-zero Service, and the synchronous broker holds your `202` until the dead-letter delivery completes too — so on a first dead-letter you pay its startup as well. Measured at *32 s* on a run where the consumer was already warm.
+* *~30 s+* — the *dead-letter sink* also cold-starts. `claims-dlq` is itself a scale-to-zero Service, and the synchronous broker holds your `202` until the dead-letter delivery completes too — so on a first dead-letter you pay its startup as well. Measured on this cluster at *22.9-37.0 seconds* on a cold run.
 
 So give `curl` a *generous* `-m 90` and *don't* let it cancel:
 
@@ -615,7 +632,18 @@ oc exec deploy/demo-client -n $NS -- sh -c 'curl -s -k -m 90 -o /dev/null -w "fa
 failing claim -> retries -> DLQ: HTTP 202 in 7.867066s
 ----
 
-In an all-warm run that ~8 seconds *is* the retry policy: the initial attempt plus three retries with 1s, 2s, 4s exponential backoff. If yours took closer to 30 s, subtract the two cold starts and the same 8 seconds is in there — the arithmetic still holds, it is just wearing a scale-to-zero coat. The event failed every time — so instead of being *dropped*, it was *dead-lettered*. Open the dead-letter sink and read the dead event — Knative stamps it with *why* it died:
+In an all-warm run that ~8 seconds *is* the retry policy: the initial attempt plus three retries with 1s, 2s, 4s exponential backoff. If yours took closer to 30 s, subtract the two cold starts and the same 8 seconds is in there — the arithmetic still holds, it is just wearing a scale-to-zero coat. The event failed every time — so instead of being *dropped*, it was *dead-lettered*.
+
+[IMPORTANT]
+.Read the dead event now — the window is real, and a slow POST already spent part of it
+====
+Once the `claims-dlq` delivery above completes, `claims-dlq` scales back to zero roughly *78 seconds later* — and the pod holding the log goes with it, exactly like `claims-consumer` in exercise 2's note.
+So the real budget to read the dead event is *~78-90 seconds from when the POST returns*, not from when you start reading this page.
+If that POST itself was a cold, ~30+ second run, you've already used over a third of that window before you even reach the command below — read the dead event in the very next step, right after the POST returns.
+If you miss it, re-send the failing claim (a fresh `Ce-Id`) and read the log immediately after — waiting for another retry cycle does not help, for the same reason waiting doesn't help in exercise 6.
+====
+
+Open the dead-letter sink and read the dead event now — Knative stamps it with *why* it died:
 
 [source,sh,role=execute]
 ----
@@ -726,6 +754,13 @@ Data,
 ----
 
 That's the *whole loop* running unattended: a scheduled source → the broker → a filtered trigger → the consumer displaying the event.
+
+[NOTE]
+.If you see two overlapping ping blocks, that's more than one ping in the tail window
+====
+`grep -A10` prints 10 lines after *every* match, so if the `--tail=200` window contains more than one `dev.knative.sources.ping` event (the ticker firing twice, or a ticker fire plus a self-sent ping below), their blocks can run together or overlap in the output.
+Read the *last* (bottom-most) block as the most recent event, and use the `claimId`/`note` in its `Data` to tell which ping produced it — the seeded ticker always sends `CLM-0000`, while the self-ping command below labels its own note.
+====
 
 [IMPORTANT]
 .If the log is empty, do NOT just wait — waiting is what loses it
