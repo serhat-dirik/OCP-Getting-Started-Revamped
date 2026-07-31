@@ -56,9 +56,13 @@ components that no longer exist for the removed users. That trade was made on pu
 was ripping user1's working catalog entries out along with everyone else's — so a stale-looking RHDH
 catalog row after a wipe-users run is expected, not a bug worth filing.
 
-// TODO(verify-on-cluster): confirm how `bootstrap/ogsr-reset.sh` relates to the existing `ws
-cohort-reset` (§5) — whether reset supersedes it, wraps it, or the two remain separate tools with
-different scopes — once `ogsr-reset.sh` lands, and update §5/§7 to say so precisely.
+`ogsr-reset.sh` does not replace `ws cohort-reset` (§5) — it **wraps** it. The per-module Kubernetes
+purge (entry-state Applications, attendee Argo apps, the contents of every attendee namespace, in
+`ws`'s SEV1-safe order) stays exactly one delegated call to `ws cohort-reset`; the script adds only
+the half Argo cannot prune because it never created it — attendee Gitea repositories, the attendee's
+scaffold org, and per-user entry-hook leftovers in the Gitea namespace. `ws cohort-reset` is the
+engine; `ogsr-reset.sh` is the admin-facing operation around it, with a printed plan and a
+confirmation prompt. See §7.1 for the exact division of labor.
 
 **The attendee-isolation promise — and its limit.** Attendees are walled off from the organisation's own
 namespaces: the `workshop-entries` AppProject enumerates every destination an attendee's Application may
@@ -612,28 +616,52 @@ read the lifecycle note in §1 before jumping to uninstall.
 ### 7.1 Between cohorts, same cluster: `ogsr-reset.sh` (the normal path)
 
 ```bash
-./bootstrap/ogsr-reset.sh
+./bootstrap/ogsr-reset.sh --dry-run              # print the CLEAR/KEEP plan; change nothing
+./bootstrap/ogsr-reset.sh                        # interactive confirm, then reset
+./bootstrap/ogsr-reset.sh --yes                  # no prompt (CI / scripted)
+./bootstrap/ogsr-reset.sh --restart-terminals    # also cycle the cockpit pods for the new group
 ```
 
 Keeps every attendee account and the platform exactly as installed; deletes all lab/attendee content
 and returns the cluster to its immediately-post-install state. Run this when the same cluster is about
 to host the next cohort.
 
-// TODO(verify-on-cluster): confirm the script's real flags (dry-run / confirm-skip equivalents) and
-exact output once it lands, and update the invocation above and its relationship to `ws cohort-reset`
-(§5) — whether one wraps the other or they stay separate tools with different scopes.
+**How it relates to `ws cohort-reset` (§5).** `ogsr-reset.sh` delegates the entire Kubernetes-side
+purge to `ws cohort-reset` — one call, same SEV1-safe deletion order (attendee Argo apps first, entry
+apps last) — rather than reimplementing it. It then adds only what Argo cannot prune because it never
+created it: attendee Gitea repositories (deleted so the next `ws start` re-forks them clean from the
+canonical `parasol/*` seeds), the attendee's `<user>-svcs` scaffold org (emptied, not deleted — the
+attendee still owns it), and per-user entry-hook `Job`/`ServiceAccount`/`Role` leftovers in the Gitea
+namespace (Helm `BeforeHookCreation` hooks that Argo never tracks). `ws cohort-reset` is the engine;
+this script is the admin-facing operation wrapped around it — a printed plan, a confirmation prompt,
+and that non-Kubernetes cleanup. **Needs a full repo checkout**: it sources
+`bootstrap/ogsr-cohort-lib.sh` and calls `tools/ws/ws` by relative path, so copying `bootstrap/` alone
+will not run.
 
 ### 7.2 Handing the cluster to someone else, platform staying installed: `ogsr-wipe-users.sh`
 
 ```bash
-./bootstrap/ogsr-wipe-users.sh
+./bootstrap/ogsr-wipe-users.sh --dry-run     # print the WIPE/PRESERVE plan; change nothing
+./bootstrap/ogsr-wipe-users.sh               # interactive confirm, then wipe
+./bootstrap/ogsr-wipe-users.sh --yes         # no prompt (CI / scripted)
+./bootstrap/ogsr-wipe-users.sh --keep 2      # keep user1 AND user2 (default 1)
 ```
 
 Removes `user2`…`userN` entirely — namespaces, Keycloak identities, Gitea repositories — and keeps
 **`user1`** behind as a working sample, login included, so whoever takes the cluster next can see the
 workshop running before they touch anything.
 
-// TODO(verify-on-cluster): confirm the script's real flags and exact output once it lands.
+Same delegation pattern as §7.1: the cohort prune itself is one call to `ws scale-users` — lowering
+`userCount` and letting Argo prune everything it rendered for the removed users (namespaces, cockpits,
+Kueue `ClusterQueue`s, student `AppProject`s, `KeycloakRealmImport` CRs), in `ws`'s SEV1-safe order.
+`ogsr-wipe-users.sh` adds the state Argo cannot reach because it never created it: OpenShift `User`
+and `Identity` objects (created lazily by the OAuth server on first login, owned by nobody), purged
+Gitea accounts and their `<user>-svcs` scaffold orgs, Keycloak realms (`KeycloakRealmImport` is
+import-once, so pruning the CR never deletes the realm itself), and the removed users' local Argo
+account password keys in the student-gitops `argocd-secret`. `ws scale-users` is the engine; this
+script is the admin-facing operation — a printed plan, a confirmation prompt, and that non-Kubernetes
+cleanup. Like `ogsr-reset.sh`, it needs a full repo checkout — same shared library, same relative call
+into `tools/ws/ws`.
 
 **What both of the above deliberately leave behind.** Neither script touches the platform, **Gitea
 with every attendee repository**, **Keycloak with every login**, or any cockpit — that is the design,
