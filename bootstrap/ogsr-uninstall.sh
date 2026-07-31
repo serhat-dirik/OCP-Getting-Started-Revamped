@@ -178,8 +178,19 @@ print_run_summary() {  # <shell exit status> — the ONE place that says what ha
     err "   fix the cause above and re-run this script — it will skip what is already gone."
   elif [[ "$STEP_FAILED" -gt 0 ]]; then
     err "all ${STEP_TOTAL} steps ran; ${STEP_FAILED} reported a failure (details above). Re-run when fixed."
+  elif [[ "$DRY_RUN" == "true" && -n "$RESIDUE_KEYS" ]]; then
+    # Qualify the HEADLINE, not just the detail block below it (owner decision 2026-07-31). An SA who
+    # reads one line reads this one, and "complete" next to a namespace we deliberately kept is how a
+    # deliberate receipt gets mistaken for a failed teardown — or worse, gets deleted by hand along
+    # with the only record of the org's original values.
+    warn "ogsr-uninstall dry-run complete — all ${STEP_TOTAL} steps evaluated, nothing changed"
+    warn "   …but this plan ends with ${STATE_NS} KEPT ON PURPOSE — see below."
   elif [[ "$DRY_RUN" == "true" ]]; then
     ok "ogsr-uninstall dry-run complete — all ${STEP_TOTAL} steps evaluated, nothing changed"
+  elif [[ -n "$RESIDUE_KEYS" ]]; then
+    warn "ogsr-uninstall complete — all ${STEP_TOTAL} steps ran, but this cluster is NOT trace-free."
+    warn "   ${STATE_NS} was KEPT ON PURPOSE. It is not leftover junk and it is not a failure:"
+    warn "   it holds the org's own prior values for the change(s) below, and it is the only copy."
   else
     ok "ogsr-uninstall complete — all ${STEP_TOTAL} steps ran"
   fi
