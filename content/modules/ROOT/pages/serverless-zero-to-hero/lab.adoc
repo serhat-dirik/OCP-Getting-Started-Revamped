@@ -55,6 +55,7 @@ ifdef::demo[]
 ====
 Run `ws start serverless-zero-to-hero --user {user}` a few minutes ahead, set `NS={user}-dev` and `URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')`, and let the service settle back to *zero* pods (about a minute of no traffic).
 This demo runs from the *entry* state (a single scale-to-zero revision) — the story is *building* the split live, not starting from `ws solve`.
+Also mint the tuned `parasol-claims-v2` revision off-screen, before the audience arrives — beat 2's "capped at three pods" and beat 3's split both assume it already exists: `kn service update parasol-claims -n $NS --revision-name parasol-claims-v2 --concurrency-limit 2 --scale-max 3 --no-wait` (100% traffic moves to `v2` automatically; let it settle back to zero pods again after).
 Keep a terminal with large font on screen and a second pane running `oc get pods -n $NS -w` so the audience *sees* pods appear and vanish.
 The money moment is beat 1: the *15-second cold start* on screen, then a warm request in a tenth of a second — the tradeoff made visceral.
 ====
@@ -332,7 +333,7 @@ Knative's autoscaler scales on *concurrency* — how many requests are in flight
 Console::
 +
 --
-In *Serverless → Services → parasol-claims → YAML*, set the revision name and the concurrency knobs under `spec.template`, then *Save*:
+In *Serverless → Serving → Services → parasol-claims → YAML*, set the revision name and the concurrency knobs under `spec.template`, then *Save*:
 
 [source,yaml]
 ----
@@ -390,6 +391,16 @@ sleep 90; oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-
 // only the exercise-4 end-state marker below became groundable today. Closing this one needs
 // `ws start serverless-zero-to-hero` from a clean namespace, then exercise 2's warm/cold detour and
 // exercise 3's tuning run BY HAND in order, captured before the split is applied.
+// Separately, re-checked live 2026-07-31 (browser, as user1, read-only — no ws run this pass): the
+// Console:: tab above this block ("In Serverless → Services → parasol-claims → YAML…") was WRONG and
+// has been fixed in place to "Serverless → Serving → Services → parasol-claims → YAML" — the sidebar
+// item is Serverless, which expands to Serving/Eventing/Functions (no sidebar item literally named
+// "Services"); clicking Serving lands on a page titled "Serving" with tabs Services | Revisions |
+// Routes, and only THEN does clicking a service row reach Details | YAML | Revisions | Routes | Pods.
+// This nav-path fix is real and confirmed, but it does not close the open item above: the
+// four-revision, v2-at-100% shape this block's own expected-output describes still was not observed
+// on cluster this session (state stayed at the 80/20 two-revision end state throughout), so the
+// closing condition is unchanged — a full sequential `ws start` + exercises 2 and 3 by hand.
 .Expected output (v2 — the fourth generation — is latest at 100%; the three earlier revisions are retained; then zero pods)
 [source,texinfo]
 ----
@@ -470,7 +481,7 @@ You now have *four* revisions — but *two routable targets*: `v1` (the original
 Console::
 +
 --
-In *Serverless → Services → parasol-claims → YAML*, set the `traffic` block, then *Save*:
+In *Serverless → Serving → Services → parasol-claims → YAML*, set the `traffic` block, then *Save*:
 
 [source,yaml]
 ----
@@ -486,10 +497,7 @@ spec:
 
 Saving re-weights the Route and gives each tag its own sub-route. The *CLI* tab does the same with `kn`.
 
-// media-pass: screenshot serverless-zero-to-hero-03-serverless-services-revisions.png — Serverless →
-// Services → parasol-claims, the Revisions list showing v1 (stable, 80%) and v2 (candidate, 20%).
-// Circle: the 80% / 20% per-revision traffic split. Alt: "The parasol-claims Revisions list showing
-// v1 tagged stable at 80% traffic and v2 tagged candidate at 20%." See media-manifest.md.
+image::serverless-zero-to-hero/serverless-zero-to-hero-03-serverless-services-revisions.png[The parasol-claims Service Details tab (Serverless → Serving → Services → parasol-claims), Revisions section: parasol-claims-v1 at 80% with its stable- prefixed sub-route URL, and parasol-claims-v2 at 20% with its candidate- prefixed sub-route URL — the tag names appear only inside those URLs, not as a separate Tag column.,role=lightbox]
 --
 CLI::
 +
@@ -512,16 +520,27 @@ kn revision list -n $NS
 oc get ksvc parasol-claims -n $NS -o jsonpath='{range .status.traffic[*]}tag={.tag} rev={.revisionName} percent={.percent}{"\n"}  url={.url}{"\n"}{end}'
 ----
 
-// [CAPTURE-VERIFY] Checked live 2026-07-31 as user1: `ws solve serverless-zero-to-hero` now
-// materializes the entry state first (today's fix), and user1-dev holds a real, healthy ksvc —
+// GROUNDED 2026-07-31 as user1. CLI (checked earlier the same day): `ws solve serverless-zero-to-hero`
+// materializes the entry state first (that day's fix), and user1-dev holds a real, healthy ksvc —
 // confirmed via `oc get ksvc,revision -n user1-dev` and `kn revision list -n user1-dev` — with the
 // 80/20 stable/candidate split from THIS exercise already live: parasol-claims-v1 (generation 1,
 // 80%, tag stable) and parasol-claims-v2 (generation 2, 20%, tag candidate), ksvc Ready=True. The
 // split-and-tag mechanism, the TRAFFIC/TAGS columns, and the per-tag sub-route URLs below are real
-// captured output — GROUNDED. What is NOT grounded: solve's fast path never mints the exercise-2
-// min-scale detour, so v1-warm/v1-cold do not exist here and GENERATION is 1/2, not 3/4 — an
-// attendee who completes that optional detour by hand before this step will see two additional,
-// untagged, 0%-traffic rows (v1-warm, v1-cold) and v2 at generation 4 instead of 2.
+// captured output. Console (checked live, same day, browser + session cookie, identity confirmed via
+// /api/kubernetes/apis/user.openshift.io/v1/users/~ = user1): the Console:: tab above was wrong and
+// is now fixed to "Serverless → Serving → Services → parasol-claims → YAML" — clicking the sidebar's
+// Serverless entry expands Serving/Eventing/Functions; Serving lands on tabs Services | Revisions |
+// Routes; the parasol-claims row opens the Details | YAML | Revisions | Routes | Pods service-detail
+// page. The 80%/20% split and both sub-route URLs render on the DEFAULT "Details" tab (not a
+// separate "Revisions list" — that tab exists too, but only carries Name/Service/Created/
+// Conditions/Ready/Reason, no traffic or tags); the tag names "stable"/"candidate" appear only
+// embedded in each sub-route's URL text, never as their own column. Screenshot captured this pass —
+// `serverless-zero-to-hero-03-serverless-services-revisions.png` — and embedded above in the
+// Console:: tab; media-manifest.md row 3 updated to ✅ CAPTURED. What remains NOT grounded, on
+// either side: solve's fast path never mints the exercise-2 min-scale detour, so v1-warm/v1-cold do
+// not exist here and GENERATION is 1/2, not 3/4 — an attendee who completes that optional detour by
+// hand before this step will see two additional, untagged, 0%-traffic rows (v1-warm, v1-cold) and v2
+// at generation 4 instead of 2.
 .Expected output (80% stable / 20% candidate, each with its own sub-route). If you took *fix option B* back in exercise 2, you will also see the untagged `v1-warm` and `v1-cold` rows at 0% traffic, and `v2` will be generation 4 rather than 2 — both are correct; the revision count just reflects how many times you changed the config.
 [source,texinfo]
 ----
@@ -590,6 +609,14 @@ kn revision list -n $NS
 // real GENERATION numbers would be 1/2 (or whatever a full sequential hand-run produces), not the
 // 1/2/3/4 assumed below. Closes once the rollback command is actually run and `kn revision list` is
 // re-captured against that result.
+// Re-checked later the same day (browser, as user1, read-only — console only, no CLI mutation): the
+// pre-rollback 80/20 split was re-confirmed on the Console Details tab and captured to
+// serverless-zero-to-hero-03-serverless-services-revisions.png (see the split marker above) — that
+// screenshot IS this block's "before" state, not its "after". The rollback command above was still
+// deliberately not run this pass, for the same shared-fixture reason, and running it now would also
+// invalidate the screenshot just captured. Nothing here has changed: still open, still closes only by
+// actually running the rollback command and re-capturing `kn revision list` against that result — do
+// that as its own, separate pass (not bundled with a console/media pass) so the two don't race.
 .Expected output (all traffic back on stable; candidate retained at 0%)
 [source,texinfo]
 ----
