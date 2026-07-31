@@ -109,6 +109,7 @@ run_owning_stack() {  # func_file root app → stack name on stdout
 }
 
 check_owning_stack() {  # func_file → 0 correct, 1 wrong, 2 harness broken
+  # shellcheck disable=SC2119  # no arg on purpose - ran_check records its caller
   ran_check
   local func_file="$1" root out rc=0
 
