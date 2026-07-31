@@ -460,7 +460,7 @@ capture_attendee_users() {  # main calls this ONCE, before step 1 — same reaso
   if [[ -n "$b64" ]]; then
     from_htpasswd="$(printf '%s' "$b64" | base64 -d 2>/dev/null | cut -d: -f1)"
   fi
-  ATTENDEE_USERS=" $(printf '%s\n%s\n' "$from_group" "$from_htpasswd" | grep . | sort -u | tr '\n' ' ')"
+  ATTENDEE_USERS=" $(printf '%s\n%s\n' "$from_group" "$from_htpasswd" | grep . | sort -u | tr '\n' ' ' || true)"
   return 0
 }
 
@@ -842,6 +842,28 @@ is_protected() {  # kind name [ns] → 0 if sync-options carries BOTH Prune=fals
 # PREDICATE — its non-zero IS the answer. Never give this one a trailing `return 0`.
 obj_exists() { local k="$1" n="$2" ns="${3:-}"
   if [[ -n "$ns" ]]; then oc get "$k" "$n" -n "$ns" >/dev/null 2>&1; else oc get "$k" "$n" >/dev/null 2>&1; fi
+}
+
+# <state-value> <kind> <name> [ns] → the REASON a preserve decision was taken, told truthfully.
+# The preserve branches used to read `if [[ "$(state X)" == "false" ]]; then delete; else "adopted /
+# pre-existing"; fi`, which collapses two very different situations into one confident sentence:
+# state recorded "true" (install genuinely found it already there) and state recorded NOTHING (no
+# ConfigMap at all — we know nothing and preserve because that is the safe default). Measured on a
+# never-installed cluster 2026-07-31: the dry run announced "GitOps was adopted (pre-existing) —
+# operator + instance preserved", "preserve namespace/openshift-lightspeed (pre-existed…)" and
+# "preserve GatewayClass/openshift-default (adopted / pre-existing)" on a cluster where none of those
+# three objects exist at all. Nothing was at risk — the safe branch was correctly chosen — but an
+# operator reading that output would conclude the cluster has an adopted GitOps to protect.
+# The decision does not change; only the sentence does. Absence is checked live, never assumed.
+preserve_reason() {
+  local st="$1" kind="$2" name="$3" ns="${4:-}"
+  if [[ "$st" == "true" ]]; then
+    echo "adopted — install recorded it as already present"
+  elif obj_exists "$kind" "$name" "$ns"; then
+    echo "no state on record — preserving by default; it IS on this cluster"
+  else
+    echo "no state on record, and it is not on this cluster — nothing here to preserve"
+  fi
 }
 
 check_adopted() {  # kind name ns why — classify ONE adopted resource against the cascade
@@ -1464,7 +1486,10 @@ reverse_node_shaping() {  # remove the batch pool label+taint and the synthetic 
 }
 
 handle_lightspeed() {  # remove our MaaS secret / namespace only when WE installed Lightspeed
-  local preinstalled ns_created secret_created secret_owner
+  # ns_preexisted normalises lightspeed_ns_created's polarity for preserve_reason, which speaks in
+  # "did it pre-exist?" while this key records "did WE create it?" — recorded "false" is a positive
+  # statement that it was already there; empty means no record at all, which is NOT the same thing.
+  local preinstalled ns_created secret_created secret_owner ns_preexisted
   preinstalled="$(state lightspeed_preinstalled)"
   ns_created="$(state lightspeed_ns_created)"
   secret_created="$(state lightspeed_secret_created)"
@@ -1484,7 +1509,8 @@ handle_lightspeed() {  # remove our MaaS secret / namespace only when WE install
   if [[ "$ns_created" == "true" ]]; then
     del_obj namespace openshift-lightspeed
   else
-    echo "   • preserve namespace/openshift-lightspeed (pre-existed; removed only our secret + operator)"
+    case "$ns_created" in false) ns_preexisted="true" ;; *) ns_preexisted="" ;; esac
+    echo "   • preserve namespace/openshift-lightspeed ($(preserve_reason "$ns_preexisted" namespace openshift-lightspeed))"
   fi
   return 0
 }
@@ -1509,7 +1535,9 @@ handle_gitops() {  # remove the GitOps operator ONLY if we created it; otherwise
     del_obj namespace openshift-gitops
     del_obj namespace openshift-gitops-operator
   else
-    info "GitOps was adopted (pre-existing) — operator + instance preserved"
+    # Probed on the operator's own namespace: the Subscription/CSV live there, so its presence is what
+    # distinguishes "an adopted GitOps is really here" from "no GitOps on this cluster at all".
+    info "GitOps operator + instance preserved ($(preserve_reason "$(state gitops_preexisted)" namespace openshift-gitops-operator))"
     b64="$(state gitops_argocd_controller_resources_b64)"
     if [[ -n "$b64" ]]; then
       prior_res="$(echo "$b64" | base64 --decode 2>/dev/null || true)"
@@ -1965,7 +1993,7 @@ step_gateway_api() {  # 6 — remove only if we created it. Argo manages this CR
   if [[ "$(state gatewayclass_preexisted)" == "false" ]]; then
     del_obj gatewayclass.gateway.networking.k8s.io openshift-default
   else
-    echo "   • preserve GatewayClass/openshift-default (adopted / pre-existing)"
+    echo "   • preserve GatewayClass/openshift-default ($(preserve_reason "$(state gatewayclass_preexisted)" gatewayclass.gateway.networking.k8s.io openshift-default))"
   fi
   return 0
 }
