@@ -114,8 +114,10 @@ Say out loud *why* it stayed green first.
 * *Show the digest side by side.*
 The single most convincing frame is the three-line `for ns in ...` output with the *identical* `sha256:` in all three environments.
 Let it sit on screen.
-* *Prod is quieter on purpose.*
+* *Prod is quieter on purpose — but read from a single pod, not the whole selector.*
 If someone notices prod logs almost nothing, that is the `WARN` log level from its config — a live example of "config changes behavior," not a bug.
+Do the comparison the way the current lab page does: one named pod per environment, filtered on the `INFO  \[io\.quarkus` level tag, not a bare `io.quarkus` package-name grep over the whole label selector.
+The naive version (whole selector, bare package-name grep) can show prod *noisier* than stage — every replica in a promoted environment races the others to re-seed the same shared ephemeral Postgres at boot, and the loser's `WARN`-level duplicate-key exception has stack frames that also contain the string `io.quarkus`, so more replicas (prod has 3, stage has 2) means more of that noise, not less.
 
 == Top questions attendees ask
 
@@ -124,6 +126,7 @@ No — that is the readiness gate working.
 Because the attendee adds a readiness probe *before* breaking the datasource, the new (broken) pod never passes readiness, so the rolling update is *gated*: the new pod is held at `0/1` while the old, healthy pod keeps serving (the Route stays `200`).
 Tell the room to watch the `READY` column (`0/1`), not `STATUS` — `STATUS` oscillates `Running`/`Error`/`CrashLoopBackOff` as the container boots and dies, but the pod is never actually ready.
 For the root cause, read the *newest* pod's `--previous` logs by name (as the lab does): a plain `oc logs -l app=parasol-claims --previous` *errors* here, because the healthy old pod has no previous container.
+Even targeted by name, `--previous` can fail with `unable to retrieve container logs for cri-o://…` if the container has already restarted again by the time you look — cri-o rotates old container logs on its own schedule, independent of what the attendee does. The lab's command already falls back to the current container's logs (still crash-looping on the same cause) when that happens; if an attendee typed it by hand and hit the error, just have them drop `--previous`.
 
 *2. "Why did `oc set env --from=configmap/...` not error when those variables already existed inline?"*::
 `oc set env --from` defaults to *overwrite*: for each key in the ConfigMap that matches an existing inline variable, it replaces the inline value with a reference to the ConfigMap.
@@ -165,8 +168,11 @@ The lab waits for the *final* `oc rollout status`; attendees who curl mid-rollou
 * *The promotion clones over HTTPS.*
 `git clone` of the public fork needs no credentials.
 If a proxy or TLS interception is in play, the clone can fail where `oc` succeeds — check the Gitea route is reachable from the Showroom terminal (`curl -sI {gitea_url}`).
+* *Every promoted replica re-seeds the shared database on boot.*
+`drop-and-create` reloads the 30-claim seed on every start (by design, for reproducible claim numbers), so when an environment has more than one replica, they race each other to do it against the *same* ephemeral Postgres. The loser throws a `duplicate key` `WARN`/`ERROR` during startup. This is harmless to the final state (the data ends up seeded either way) but it is exactly what makes a naive whole-selector log-count comparison in exercise 6 unreliable — see the watchout above.
 
 == Provenance
 
 All hands-on steps were freshly built and performed on the build cluster (2026-07-09), with the exercise-1 readiness-gate rework re-measured on 2026-07-15; every command and output in the lab is captured from those runs.
 No content was ported from stale material, and the ConfigMap/Secret/probe mechanics were verified live against the current `parasol-claims` service.
+A cold-start smoke on 2026-07-31 (two full passes) found and fixed three issues: exercise 6's stage-vs-prod log-count comparison inverted on a live cluster (root-caused to the seeding race above, plus a whole-selector/replica-count confound — fixed to read one pod per environment filtered on log level, though the corrected command has not yet been re-measured live; it carries a `TODO(verify-on-cluster)` on the lab page), exercise 1's `--previous` logs intermittently failed on container-log rotation (fixed with a current-log fallback), and exercise 4's `<none>` expected output did not match this OCP version's actual blank-field rendering (fixed to show what was verified with `od -c`).

@@ -261,7 +261,7 @@ Route: 200
 ----
 
 Now do the thing this whole module is about: *read the logs.*
-The broken pod is the *newest* one, so grab its name; then ask for its *previous* container's logs, because a crash-looping container has no current ones (targeting the newest pod also avoids the healthy old pod, which has no previous container to read):
+The broken pod is the *newest* one, so grab its name; then ask for its *previous* container's logs — that is usually where the crash is, because by the time you look, the container has often already been restarted onto a fresh attempt (targeting the newest pod also avoids the healthy old pod, which has no previous container to read):
 
 // No --tail here, deliberately. It used to be --tail=40, which cut the payoff line out of its own
 // expected output: on a measured run the crash log was 129 lines with "Failed to start application"
@@ -270,11 +270,20 @@ The broken pod is the *newest* one, so grab its name; then ask for its *previous
 // verbosity and varies run to run, so ANY fixed number is a guess that silently truncates on the runs
 // where it matters. grep already bounds what reaches the terminal, so searching the whole log costs
 // nothing and always finds the cause. (Found by the config-multienv smoke, 2026-07-31.)
-
+//
+// The --previous | grep fallback below is a second fix from the same smoke: `oc logs --previous`
+// against a fast-restarting CrashLoopBackOff container failed outright with "unable to retrieve
+// container logs for cri-o://..." in 2 of 3 measured attempts, including once at literal lab pacing
+// with only 1 restart — cri-o had already rotated the log the "previous" flag pointed at away by the
+// time the command ran. This is a real race against container-log retention, not a one-off. Because
+// grep against an empty/failed `oc logs` output exits non-zero (no lines matched), the `||` below
+// reliably falls back to the CURRENT container's logs — which, since the pod is still crash-looping
+// on the same root cause, show the identical UnknownHostException even when "previous" is gone.
 [source,sh,role=execute]
 ----
 BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
-oc logs "$BAD" --previous | grep -A2 -iE 'Failed to start|UnknownHost'
+oc logs "$BAD" --previous 2>/dev/null | grep -A2 -iE 'Failed to start|UnknownHost' \
+  || { echo "(previous container log already rotated away by cri-o — reading the current one, which is still crash-looping on the same cause)"; oc logs "$BAD" | grep -A2 -iE 'Failed to start|UnknownHost'; }
 ----
 
 .Expected output
@@ -639,12 +648,17 @@ sleep 40
 oc get endpoints parasol-claims
 ----
 
-.Expected output (endpoints drained — no ready address)
+// Grounded by the config-multienv smoke, 2026-07-31: verified byte-for-byte with `od -c` that this
+// OCP version renders the drained ENDPOINTS column as a genuinely BLANK field, not the literal string
+// `<none>`. Some server versions do print the literal word; either rendering means the same thing —
+// no ready address — so show the blank field actually observed rather than a string that may not
+// print on every cluster.
+.Expected output (endpoints drained — no ready address; the ENDPOINTS column renders blank on some server versions and as the literal `<none>` on others)
 [source,texinfo]
 ----
 Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
 NAME             ENDPOINTS   AGE
-parasol-claims   <none>      ...
+parasol-claims               ...
 ----
 
 (The deprecation warning is expected — the classic Endpoints view is still the quickest way to see the readiness gate; EndpointSlice is its long-form successor.)
@@ -685,7 +699,7 @@ Route: 200
 
 [.checkpoint]
 ****
-✔ *Verify:* while readiness was broken, `oc get endpoints parasol-claims` showed `<none>` and the Route returned `503`; after the fix the Route returns `200`.
+✔ *Verify:* while readiness was broken, `oc get endpoints parasol-claims` showed an empty ENDPOINTS column (rendered blank or as `<none>`, depending on your server version) and the Route returned `503`; after the fix the Route returns `200`.
 ****
 
 == 5. Set requests and limits — and bump into the quota
@@ -921,16 +935,44 @@ and remember the production-grade fix you will meet in the supply-chain module: 
 ====
 
 The log level is a real, running difference too.
-`stage` runs at `INFO` and `prod` at `WARN`, so the prod pods are noticeably quieter — most of the startup banner stage logs is suppressed in prod:
+`stage` runs at `INFO` and `prod` at `WARN`, so the prod pods are noticeably quieter — most of the startup banner stage logs is suppressed in prod.
+
+// Grounded by the config-multienv smoke, 2026-07-31 (2 passes, both reproduced): the original version
+// of this check compared `oc logs -l app=parasol-claims` (the WHOLE label selector — every replica's
+// log concatenated) and counted the literal substring `io.quarkus`. On a live cluster that inverted:
+// stage measured 16, prod measured 28. Two compounding causes, both structural, not flaky: (1) prod
+// runs 3 replicas to stage's 2, and a selector-based `oc logs` fans out to every matching pod, so the
+// comparison was already unfair before log level entered into it; (2) all replicas of a promoted
+// environment race to run Hibernate's drop-and-create schema import against the SAME shared ephemeral
+// Postgres on startup (see apps/parasol-claims/src/main/resources/application.properties — the seed
+// reloads on every boot, by design, so labs get reproducible claim numbers), so every replica that
+// loses that race throws `duplicate key value violates unique constraint "claim_event_pkey"` — a WARN,
+// not an INFO — whose stack frames run through io.quarkus.hibernate.orm.runtime.* classes and so
+// still match a blanket `io.quarkus` grep. More replicas means more of that spam, not less, which is
+// why prod (3 replicas, WARN threshold) out-counted stage (2 replicas, INFO threshold) instead of the
+// other way around. The fix below addresses both causes rather than papering over one: read a SINGLE
+// named pod per environment (removes the replica-count multiplier), and filter on the log-LEVEL field
+// itself rather than a package-name substring (removes the WARN-storm confound, since QUARKUS_LOG_LEVEL
+// governs level, not which package logged the line). This has NOT yet been re-measured with the
+// corrected command on a live cluster — the two-pass smoke that found the original bug used the only
+// available cluster slot for something else by the time this fix was written.
+// TODO(verify-on-cluster): confirm the corrected command's actual stage/prod counts on a live promoted
+// environment (expected: stage > 0, prod at or near 0) and capture a real sample for this comment.
+Compare a *single* pod in each environment, not the whole label selector — a promoted environment can run more than one replica, and a selector-based `oc logs` reads every matching pod, which multiplies noise instead of isolating the one setting your two overlays actually change.
+And instead of matching the literal string `io.quarkus` — which also matches inside a `WARN`/`ERROR` stack trace whose frames simply happen to run through Quarkus-internal classes — filter on the log *level* field itself, since that is the one thing `QUARKUS_LOG_LEVEL` controls:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-echo "stage (INFO):"; oc -n {user}-stage logs -l app=parasol-claims --tail=100 | grep -c 'io.quarkus'
-echo "prod  (WARN):"; oc -n {user}-prod  logs -l app=parasol-claims --tail=100 | grep -c 'io.quarkus'
+STAGE_POD=$(oc -n {user}-stage get pod -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+PROD_POD=$(oc -n {user}-prod  get pod -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
+echo "stage (INFO):"; oc -n {user}-stage logs "$STAGE_POD" | grep -c 'INFO  \[io\.quarkus'
+echo "prod  (WARN):"; oc -n {user}-prod  logs "$PROD_POD"  | grep -c 'INFO  \[io\.quarkus'
 ----
 
-Stage prints its full `INFO` startup banner — 11 matching lines in our capture — while prod at `WARN` keeps only a handful of unavoidable startup lines (5 in ours).
-The `INFO` chatter is gone, not every last line; what matters is the clear stage ≫ prod drop.
+Every `INFO`-level line in this app's own framework chatter is tagged with the literal category `io.quarkus` — the startup banner, the feature list, the access log — so this count is now gated purely by whichever threshold `QUARKUS_LOG_LEVEL` set, on exactly one pod.
+It cannot be swamped by a database-seeding race between replicas, because that race throws `WARN`/`ERROR`, a different level entirely, and by reading one pod instead of the whole selector you are no longer comparing three replicas' worth of noise against two.
+Expect stage's count to be *comfortably greater than zero* (its `INFO` threshold lets its own startup chatter through) and prod's to be *zero, or very close to it* (its `WARN` threshold suppresses that same chatter) — the shape of the comparison is the lesson, not a specific number.
+(If the pod you picked happens to be one that lost the seeding race, you may still see the occasional stray `WARN`/`ERROR` line elsewhere in its log — that will not affect this count, because this grep only ever matches `INFO`-level lines.)
 
 [.checkpoint]
 ****

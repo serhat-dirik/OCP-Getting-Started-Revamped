@@ -13,16 +13,31 @@ Symptom:: After the exercise-1 break, `oc get pods -l app=parasol-claims` shows 
 Cause:: The readiness probe you add first *gates* the rolling update: the new pod cannot reach the database, never passes readiness, and is held at `0/1`, while the old, healthy pod keeps serving.
 So there are two pods, and `oc logs -l …` matches *both* — but the healthy old pod has no previous (crashed) container, which is exactly what triggers the error.
 The `STATUS` column oscillates because the broken container keeps booting, failing, and restarting; the honest signal is the `READY` column staying `0/1`.
-Fix:: Read the *newest* (broken) pod by name instead of by label:
+Fix:: Read the *newest* (broken) pod by name instead of by label, with no `--tail` (see the lab page's own note on why a fixed tail silently truncates the payoff line on some runs):
 +
 [source,sh,role=execute]
 ----
 BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
-oc logs "$BAD" --previous --tail=40 | grep -iE 'Failed to start|Caused by'
+oc logs "$BAD" --previous | grep -A2 -iE 'Failed to start|UnknownHost'
 ----
 +
 The last `Caused by:` is the real cause (here, `UnknownHostException: wrong-db-host`).
 Remove the bad override to recover: `oc set env deploy/parasol-claims QUARKUS_DATASOURCE_JDBC_URL-` (then `oc rollout status deploy/parasol-claims`).
+
+== `oc logs --previous` fails with `unable to retrieve container logs for cri-o://…`
+
+Symptom:: Even with the pod targeted by *name* (not by label), `oc logs "$BAD" --previous` sometimes fails outright with `unable to retrieve container logs for cri-o://…` instead of printing the crash trace — including on a run with only one restart, following the lab's steps at normal pacing.
+Cause:: `--previous` asks cri-o for the *immediately preceding* terminated container instance. A `CrashLoopBackOff` container restarts on its own schedule, and cri-o rotates/garbage-collects old container log files independently of anything you do — by the time the command runs, the instance `--previous` points at may already be gone. This is a real race against container-log retention, not a flaky cluster or a mistake in the command; it reproduced in 2 of 3 measured attempts during the module's cold-start smoke (2026-07-31), so treat it as expected, not exceptional.
+Fix:: The lab's own command already carries the fix — a fallback to the *current* container's logs, which is still crash-looping on the identical cause:
++
+[source,sh,role=execute]
+----
+BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+oc logs "$BAD" --previous 2>/dev/null | grep -A2 -iE 'Failed to start|UnknownHost' \
+  || oc logs "$BAD" | grep -A2 -iE 'Failed to start|UnknownHost'
+----
++
+If you typed the bare `--previous` version by hand and hit the error, just re-run without `--previous` — the current container shows the same `UnknownHostException`.
 
 == I removed an environment variable and the app broke
 
@@ -68,7 +83,7 @@ To see the drained `503` state, roll the whole deployment onto the broken probe 
 oc scale deploy/parasol-claims --replicas=0
 oc scale deploy/parasol-claims --replicas=1
 sleep 40
-oc get endpoints parasol-claims   # ENDPOINTS: <none>
+oc get endpoints parasol-claims   # ENDPOINTS column is empty (blank on some server versions, literal "<none>" on others)
 ----
 +
 Then fix readiness: `oc set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready`.
@@ -157,6 +172,12 @@ oc -n "$NS" get pod -l app=parasol-claims -o jsonpath='{.items[0].status.contain
 +
 All three digests should now match. This is exactly why a real promotion pipeline references images by *digest* (`@sha256:…`), never by a mutable tag — the fix done properly is in the trusted-supply-chain module.
 
+== Exercise 6's stage-vs-prod log count comes out backwards (prod noisier than stage)
+
+Symptom:: Comparing `oc logs -l app=parasol-claims --tail=100 | grep -c 'io.quarkus'` between stage (`INFO`) and prod (`WARN`) shows prod with *more* matching lines, not fewer — the opposite of what the log-level setting should produce.
+Cause:: Two compounding effects, both structural, not flaky: (1) `oc logs -l …` reads *every* pod the selector matches, and prod runs 3 replicas to stage's 2, so the comparison was never apples-to-apples; (2) every replica of a promoted environment runs Hibernate's `drop-and-create` schema import against the *same* shared ephemeral Postgres on startup (the seed reloads every boot, by design — see `apps/parasol-claims/src/main/resources/application.properties`), so replicas that lose that race throw `duplicate key value violates unique constraint "claim_event_pkey"` at `WARN`, and that exception's stack frames run through `io.quarkus.hibernate.orm.runtime.*` classes — so they still match a blanket `io.quarkus` grep even though they are not the `INFO` startup chatter the exercise means to measure. More replicas means more of that noise, which is why prod (more replicas, higher threshold) can out-count stage.
+Fix:: This is fixed in the current lab page — it now reads a single named pod per environment and filters on the log-*level* field (`INFO  \[io\.quarkus`) instead of the bare package-name substring, so a database-seeding race (which throws `WARN`/`ERROR`, a different level) cannot swamp the count. If you are looking at an older capture that still shows the inverted numbers, re-run the corrected command from the current lab page.
+
 '''
 
-_Last verified on the build cluster (2026-07-09; exercise-1 readiness-gate rework re-verified 2026-07-15)._
+_Last verified on the build cluster (2026-07-09; exercise-1 readiness-gate rework re-verified 2026-07-15; exercise-1 `--previous` retry and exercise-6 log-count measurement fix added 2026-07-31 from the config-multienv cold-start smoke — the corrected exercise-6 command has not yet been re-measured live; see the `TODO(verify-on-cluster)` note on lab.adoc)._
