@@ -27,9 +27,66 @@ spec:
     requests:
       storage: {{ .Values.datasetSize }}
 ---
+# why: let the seed hook record how many rows it actually wrote into the ONE named marker
+# ConfigMap it needs (get to read-merge, patch to write) — nothing broader. This is the fix for
+# "the check can only prove the Job reached Complete, not that the data exists": the marker's
+# seededRows field is what `ws verify` will assert on instead.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claims-seed-jobs-batch-kueue-{{ .Values.user }}
+  namespace: {{ include "jobs-batch-kueue.namespace" . }}
+  labels:
+    workshop.redhat.com/module: jobs-batch-kueue
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claims-seed-jobs-batch-kueue-{{ .Values.user }}
+  namespace: {{ include "jobs-batch-kueue.namespace" . }}
+  labels:
+    workshop.redhat.com/module: jobs-batch-kueue
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["ws-entry-jobs-batch-kueue"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claims-seed-jobs-batch-kueue-{{ .Values.user }}
+  namespace: {{ include "jobs-batch-kueue.namespace" . }}
+  labels:
+    workshop.redhat.com/module: jobs-batch-kueue
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claims-seed-jobs-batch-kueue-{{ .Values.user }}
+subjects:
+  - kind: ServiceAccount
+    name: claims-seed-jobs-batch-kueue-{{ .Values.user }}
+    namespace: {{ include "jobs-batch-kueue.namespace" . }}
+---
 # Sync-hook Job: seeds claims-data with ~200 deterministic claim rows. Runs on every entry-state
 # sync (ws start / reset); BeforeHookCreation clears the prior Job so a re-sync re-fires, and the
-# write is idempotent (it rewrites the same file), so re-runs are safe. Wave 1 = after the PVC.
+# write is idempotent (it rewrites the same file), so re-runs are safe. Wave 1 = after the PVC
+# and after the marker ConfigMap + RBAC above (those render at the default wave, i.e. before hooks).
+#
+# 0.1.8: the seed used to only prove itself via its own Complete condition + a best-effort log grep
+# ("seeded N claim rows") — unreliable, because a completed Job keeps Complete long after its pod's
+# logs are garbage-collected, so `ws verify` was asserting the JOB ran, never that the DATA exists.
+# Now the hook also patches its row count into the ws-entry-jobs-batch-kueue marker ConfigMap
+# (RBAC above), so verify can assert seededRows instead. Image switched ubi9-minimal -> ose-cli
+# because the patch needs `oc`; ose-cli needs >=512Mi (measured OOM at 256Mi elsewhere in this
+# repo) — bumped the memory limit accordingly. MUST bump the chart version: this is a hook-only
+# change and Argo will not re-execute an unchanged Sync-phase hook on its own.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -52,18 +109,27 @@ spec:
         app: claims-data-seed
         workshop.redhat.com/module: jobs-batch-kueue
     spec:
+      serviceAccountName: claims-seed-jobs-batch-kueue-{{ .Values.user }}
       restartPolicy: Never
       containers:
         - name: seed
-          # ubi9-minimal ships a POSIX shell; the seed is pure shell (no external tools needed).
-          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          # ose-cli ships oc (needed to patch the marker ConfigMap) and bash; same image choice as
+          # the sibling maas-copy hook in this chart.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          # `oc` is a large Go binary — 256Mi OOMKills it; 512Mi limit gives it headroom (same
+          # numbers as the maas-copy hook in this chart).
           resources:
-            requests: {cpu: 50m, memory: 64Mi}
-            limits: {cpu: 200m, memory: 128Mi}
-          command: ["/bin/sh", "-c"]
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {cpu: 200m, memory: 512Mi}
+          env:
+            - name: MARKER_NS
+              value: {{ include "jobs-batch-kueue.namespace" . | quote }}
+            - name: MARKER_CM
+              value: "ws-entry-jobs-batch-kueue"
+          command: ["/bin/bash", "-c"]
           args:
             - |
-              set -eu
+              set -euo pipefail
               OUT=/data/claims.csv
               echo "id,claimant,type,region,amount,status" > "$OUT"
               # Deterministic pseudo-data: fixed lists indexed by the row number, so every seed
@@ -82,8 +148,16 @@ spec:
                 printf 'CLM-%04d,%s,%s,%s,%d,%s\n' "$i" "$name" "$type" "$region" "$amount" "$status" >> "$OUT"
                 i=$(( i + 1 ))
               done
-              echo "seeded $(( $(wc -l < "$OUT") - 1 )) claim rows into $OUT"
+              ROWS=$(( $(wc -l < "$OUT") - 1 ))
+              echo "seeded ${ROWS} claim rows into $OUT"
               head -3 "$OUT"
+              # THE FIX: record the count durably so verify can assert the DATA, not just the Job's
+              # Complete condition. seededRows is deliberately absent from the chart's rendered
+              # ConfigMap (see templates/entry-marker.yaml) so this patch never fights the render.
+              echo "▶ recording row count in ${MARKER_NS}/${MARKER_CM} (seededRows=${ROWS})…"
+              oc patch configmap "${MARKER_CM}" -n "${MARKER_NS}" --type merge \
+                -p "{\"data\":{\"seededRows\":\"${ROWS}\"}}"
+              echo "✅ marker updated — verify can assert seededRows instead of proxying through Job status"
           volumeMounts:
             - name: data
               mountPath: /data
