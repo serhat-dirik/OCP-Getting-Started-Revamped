@@ -501,10 +501,15 @@ else
       [[ -n "$TARGET_MEM" ]] || TARGET_MEM="6Gi"
       CUR_MEM="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
       DECISION="skip"
+      # Tracks whether argocd-controller-resources.yaml was ACTUALLY applied, which is not the same
+      # question as $DECISION. The already-at-target branch below decides "apply" and then applies
+      # nothing, so keying the closing notice off $DECISION made the Subscription health-check
+      # override go missing SILENTLY on exactly the cluster shape it exists for.
+      HC_APPLIED="false"
 
       if [[ "$CUR_MEM" == "$TARGET_MEM" ]]; then
         echo "  ✓ adopted Argo CD controller already at ${CUR_MEM} — nothing to change"
-        DECISION="apply"   # nothing to do, but the health-check override below is still wanted
+        DECISION="apply"   # no memory change owed; the file is still not applied — see HC_APPLIED
       else
         echo
         echo "  ⚠️  This cluster's OpenShift GitOps is ADOPTED — it belongs to the cluster owner."
@@ -577,17 +582,32 @@ else
               RECORDED="true"
             fi
           fi
-          oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
-          if [[ "$RECORDED" == "true" ]]; then
-            echo "  ✓ adopted controller raised to ${TARGET_MEM} with consent"
-            echo "    prior spec.controller.resources recorded — ogsr-uninstall.sh restores it"
-          else
-            echo "  ✓ adopted controller raised to ${TARGET_MEM} with consent"
-            echo "  ⚠️  the prior value could NOT be recorded in ${STATE_NS}/${STATE_CM}."
-            echo "      ogsr-uninstall.sh will NOT restore it — this change is now yours to keep or"
-            echo "      reverse. Keep this value; it is the only copy:"
-            echo "        spec.controller.resources before install: ${CUR_RES:-<none — the CR carried no explicit resources>}"
+          # If we could not record the prior value, REFUSE — do not patch (owner decision 2026-07-31).
+          # We are about to mutate a CR the org owns. The consent we were given was consent to a
+          # REVERSIBLE change; without the recording it is not reversible, so it is not the thing
+          # they agreed to. Crucially, nothing has been touched at this point, so refusing is free:
+          # the operator loses nothing and can re-run or raise it themselves. The previous behaviour
+          # patched anyway behind a loud warning, but a warning in a 700-line install log is not a
+          # decision anyone actually made — and this is the promise the whole workshop rests on.
+          if [[ "$RECORDED" != "true" ]]; then
+            echo
+            echo "  ❌ could NOT record the prior value in ${STATE_NS}/${STATE_CM} — NOT installing."
+            echo "     Nothing on this cluster has been changed."
+            echo "     You consented to a reversible change. Without that record teardown cannot put"
+            echo "     the controller back, so the change would not be reversible and we will not"
+            echo "     make it on your behalf."
+            echo "     Current value, for your records:"
+            echo "       spec.controller.resources: ${CUR_RES:-<none — the CR carries no explicit resources>}"
+            echo "     Fix the state ConfigMap (check RBAC on ${STATE_NS}) and re-run, or raise it"
+            echo "     yourself and keep that value:"
+            echo "       oc -n openshift-gitops patch argocd openshift-gitops --type merge \\"
+            echo "         -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
+            exit 1
           fi
+          oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
+          HC_APPLIED="true"
+          echo "  ✓ adopted controller raised to ${TARGET_MEM} with consent"
+          echo "    prior spec.controller.resources recorded — ogsr-uninstall.sh restores it"
         else
           echo
           echo "  ❌ declined — NOT installing. Nothing on this cluster has been changed."
@@ -602,10 +622,15 @@ else
 
       # The same file carries the Subscription resourceHealthChecks override. If it was never applied,
       # say so rather than let it go missing silently on exactly the cluster shape where it matters.
-      if [[ "$DECISION" != "apply" ]]; then
+      # Gated on HC_APPLIED, not $DECISION: on an instance already at the target the file is not
+      # applied either, and that case used to print nothing at all — the override was absent and the
+      # log implied it was there.
+      if [[ "$HC_APPLIED" != "true" ]]; then
         echo "  • skipped on this adopted instance: the operators.coreos.com/Subscription health-check"
         echo "    override. Without it an ADOPTED operator whose Subscription carries a stale condition"
-        echo "    can show its Application Degraded while the operator is fine."
+        echo "    can show its Application Degraded while the operator is fine. To opt in (it is a"
+        echo "    change to the org's ArgoCD CR, which is why it is not applied unasked):"
+        echo "      oc apply -f ${SCRIPT_DIR}/operator/argocd-controller-resources.yaml   # NOTE: also sets the ${TARGET_MEM} memory limit"
       fi
     else
       oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"

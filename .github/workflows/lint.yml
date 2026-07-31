@@ -513,3 +513,38 @@ jobs:
           fi
           echo "self-test ok — drift is detected and the clean canary stays clean (rc=1)."
           python3 tools/lint/maas-model-no-default-guard.py
+
+  uninstall-restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Adopted Argo CD controller sizing is recorded on ONE key and actually restored
+        # 2026-07-31: the adopted-Argo consent prompt promised "The prior value is recorded and
+        # ogsr-uninstall.sh restores it" while recording two keys NOTHING read, next to a teardown
+        # branch reading a third key that printed a manual `oc edit` hint instead of restoring. Two
+        # keys for one fact, zero restores, under the workshop's hardest promise (leave no trace on
+        # someone else's cluster). Invisible to every other gate here: both halves are valid shell
+        # that lints clean, and the only symptom is a CR on an adopted cluster nobody inspects.
+        #
+        # The guard checks (1) key symmetry — every argocd/controller uninstall-state key an
+        # installer writes is read by ogsr-uninstall.sh and vice versa, and (2) the restore itself,
+        # by executing restore_argocd_controller_resources() against stub oc/state and asserting the
+        # patches: empty prior REMOVES the field (merge-patch null, never a number written back),
+        # recorded prior is replaced verbatim with a JSON patch, and no-consent / absent-CR /
+        # --dry-run all write nothing.
+        run: |
+          rc=0
+          bash tools/lint/uninstall-restore-guard.sh --self-test || rc=$?
+          # Exactly 1 = the real tree satisfies the contract AND both canaries (a write-only restore
+          # key, and an empty-prior branch that writes 2Gi back instead of removing the field) were
+          # detected. 0 = a detector is blind; 2 = the real tree is broken, extraction failed, or the
+          # fixture harness is. Either way detection is unproven, so fail rather than trust a clean
+          # result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::uninstall-restore-guard self-test must exit 1 (real tree clean, both" \
+                 "canaries detected); got rc=$rc. The guard's detection is unproven — refusing to" \
+                 "trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — both canaries are detected and the real tree stays clean (rc=1)."
+          bash tools/lint/uninstall-restore-guard.sh
