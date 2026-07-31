@@ -37,11 +37,23 @@ deploy_ready() {
 }
 
 # Route resolves and answers HTTP 200 on / (the app's landing page).
+# Asserts what the lab actually teaches: an EDGE-terminated Route, reachable over HTTPS.
+#
+# This used to curl `http://` only, which a plain `oc expose` Route serves perfectly well — so the
+# one check guarding the edge-Route rule passed just as readily on the broken shape as the correct
+# one. It could not tell them apart, which made it a green tick that inspected the wrong thing.
+#
+# The rule it guards: a browser-facing Route must be `oc create route edge … --insecure-policy=Allow`.
+# A plain HTTP Route gets HSTS-upgraded by the browser and the router answers "Application is not
+# available"; edge with Redirect instead of Allow gives an empty 302 on `curl http`. So both the
+# termination AND the https response are asserted here, not one standing in for the other.
 route_answers_200() {
-  local ns="$1" host code
+  local ns="$1" host code term
   host="$(oc get route parasol-web -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   [[ -n "$host" ]] || return 1
-  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/" || true)"
+  term="$(oc get route parasol-web -n "$ns" -o jsonpath='{.spec.tls.termination}' 2>/dev/null || true)"
+  [[ "$term" == "edge" ]] || return 1
+  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "https://${host}/" || true)"
   [[ "$code" == "200" ]]
 }
 
@@ -67,7 +79,7 @@ if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------
   check "parasol-web deployment exists"         oc get deploy parasol-web -n "$NS"   || hint "deploy the image — lab exercise 2 (oc new-app --image=…/parasol-web:1.0 --name=parasol-web)"
   check "parasol-web has >=1 ready replica"     deploy_ready parasol-web "$NS"       || hint "wait for rollout: oc rollout status deploy/parasol-web -n ${NS}"
-  check "route parasol-web answers 200 on /"    route_answers_200 "$NS"              || hint "publish the app — lab exercise 4 (oc expose service/parasol-web --port=8080)"
+  check "route parasol-web is edge-terminated and answers 200 over https" route_answers_200 "$NS" || hint "publish the app the way exercise 4 teaches — oc create route edge parasol-web --service=parasol-web --port=8080 --insecure-policy=Allow. NOT 'oc expose': a plain HTTP Route gets HSTS-upgraded and the router answers 'Application is not available'. If a plain Route already exists, delete it first."
 fi
 
 verify_summary
