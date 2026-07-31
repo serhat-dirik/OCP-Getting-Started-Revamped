@@ -946,18 +946,18 @@ The log level is a real, running difference too.
 // environment race to run Hibernate's drop-and-create schema import against the SAME shared ephemeral
 // Postgres on startup (see apps/parasol-claims/src/main/resources/application.properties — the seed
 // reloads on every boot, by design, so labs get reproducible claim numbers), so every replica that
-// loses that race throws `duplicate key value violates unique constraint "claim_event_pkey"` — a WARN,
-// not an INFO — whose stack frames run through io.quarkus.hibernate.orm.runtime.* classes and so
-// still match a blanket `io.quarkus` grep. More replicas means more of that spam, not less, which is
-// why prod (3 replicas, WARN threshold) out-counted stage (2 replicas, INFO threshold) instead of the
-// other way around. The fix below addresses both causes rather than papering over one: read a SINGLE
-// named pod per environment (removes the replica-count multiplier), and filter on the log-LEVEL field
-// itself rather than a package-name substring (removes the WARN-storm confound, since QUARKUS_LOG_LEVEL
-// governs level, not which package logged the line). This has NOT yet been re-measured with the
-// corrected command on a live cluster — the two-pass smoke that found the original bug used the only
-// available cluster slot for something else by the time this fix was written.
-// TODO(verify-on-cluster): confirm the corrected command's actual stage/prod counts on a live promoted
-// environment (expected: stage > 0, prod at or near 0) and capture a real sample for this comment.
+// loses that race throws `relation "claim_event" does not exist` — a DDL-visibility race where one
+// replica's schema-create has not yet committed when another replica's import runs — a WARN, not an
+// INFO — whose stack frames run through io.quarkus.hibernate.orm.runtime.* classes and so still match
+// a blanket `io.quarkus` grep. More replicas means more of that spam, not less, which is why prod
+// (3 replicas, WARN threshold) out-counted stage (2 replicas, INFO threshold) instead of the other way
+// around. The fix below addresses both causes rather than papering over one: read a SINGLE named pod
+// per environment (removes the replica-count multiplier), and filter on the log-LEVEL field itself
+// rather than a package-name substring (removes the WARN-storm confound, since QUARKUS_LOG_LEVEL
+// governs level, not which package logged the line). Re-measured live on a promoted environment,
+// 2026-07-31: the corrected command read stage=3, prod=0 on 4 of 4 runs, confirming the lesson holds.
+// Those exact counts are a build-banner artefact — they drift with the Quarkus version — so the
+// checkpoint below states the shape of the comparison, not the numbers.
 Compare a *single* pod in each environment, not the whole label selector — a promoted environment can run more than one replica, and a selector-based `oc logs` reads every matching pod, which multiplies noise instead of isolating the one setting your two overlays actually change.
 And instead of matching the literal string `io.quarkus` — which also matches inside a `WARN`/`ERROR` stack trace whose frames simply happen to run through Quarkus-internal classes — filter on the log *level* field itself, since that is the one thing `QUARKUS_LOG_LEVEL` controls:
 
