@@ -278,10 +278,21 @@ argo_project() {  # workshop-entries once the workshop layer exists; default bef
 }
 
 render_app() {  # module user [solve]  → Application manifest on stdout
-  local module="$1" user="$2" solve="${3:-false}" url domain project
+  local module="$1" user="$2" solve="${3:-false}" url domain project degraded_label
   url="$(repo_url)"
   domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo apps.example.com)"
   project="$(argo_project)"
+  # Cluster-visible twin of ws-meta expectDegraded. meta_expect_degraded only answers from a repo
+  # checkout (gitops/entry-states/<module>/ws-meta.yaml) — fine for ws itself, useless to a consumer
+  # that has only API-server access (ws doctor run from a bare install, a CI health probe, an external
+  # monitor). Stamping the SAME verdict as a label in the workshop.redhat.com/* family (alongside
+  # module/user/owner below) makes "Degraded ON PURPOSE" readable off the live Application object with
+  # a plain `oc get`. Only stamped when true — absence means "normal module", the same convention
+  # expectDegraded itself uses (never written as `false` in ws-meta.yaml).
+  degraded_label=""
+  if [[ "$(meta_expect_degraded "$module" 2>/dev/null)" == "true" ]]; then
+    degraded_label=$'\n    workshop.redhat.com/degraded-by-design: "true"'
+  fi
   cat <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -292,7 +303,7 @@ metadata:
     workshop.redhat.com/module: "${module}"
     workshop.redhat.com/user: "${user}"
     # Owner stamp (non-invasive delivery): ogsr-uninstall.sh deletes entry-* apps by this label.
-    workshop.redhat.com/owner: ogsr
+    workshop.redhat.com/owner: ogsr${degraded_label}
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -1882,9 +1893,14 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # designed destroys attendee/SA trust in every OTHER ✅ (the repo's own rule). Split those out here
   # instead of counting them against the row; genuinely broken apps still fail it.
   #
-  # The owner and module LABELS ride along in the same list call that finds the apps. They cost nothing
-  # here (the API server is already serving these items) and they replace a per-app `oc get` that only
-  # fired on unhealthy entry-* apps — the one round trip this row made per object.
+  # The owner, module and degraded-by-design LABELS ride along in the same list call that finds the
+  # apps. They cost nothing here (the API server is already serving these items) and they replace a
+  # per-app `oc get` that only fired on unhealthy entry-* apps — the one round trip this row made per
+  # object. workshop.redhat.com/degraded-by-design (stamped by render_app from ws-meta expectDegraded)
+  # is read straight off the LIVE object and preferred over the local ws-meta.yaml lookup — that is the
+  # whole point: a tool that only has API-server access (no repo checkout) must see the SAME verdict
+  # `ws doctor` does, not one only ws itself can compute. meta_expect_degraded stays as a fallback for
+  # an app materialized before this label existed.
   # "No apps found" is NOT the same answer as "checked N apps, all Healthy" — an Argo CD without the
   # Applications CRD (gitops operator not installed) also returns zero rows here, and `oc get` fails
   # silently into the 2>/dev/null. Verified live (CRC, no workshop installed, 2026-07-31): this row
@@ -1894,8 +1910,8 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   if [[ "$csv" != *Succeeded* ]]; then
     skip "n/a (gitops operator not installed)"
   else
-    local bad="" expect_ok="" name health app_user module
-    while IFS=$'\t' read -r name health app_user module; do
+    local bad="" expect_ok="" name health app_user module degraded exp
+    while IFS=$'\t' read -r name health app_user module degraded; do
       [[ -n "$name" ]] || continue
       # --user scope: drop the OTHER attendees' apps, by LABEL rather than by name shape — the label is
       # what `ws status`/`ws diag` already key off, and an app named outside entry-<module>-<user> still
@@ -1905,12 +1921,14 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
       # The `entry-*` guard is kept from the per-app read this replaced. Without it, ANY app carrying a
       # module label could be excused as "Degraded by design", which is a licence to hide a broken
       # platform app behind a module's intentional fault. Only entry states are allowed that excuse.
-      if [[ "$name" == entry-* && -n "$module" && "$(meta_expect_degraded "$module")" == "true" ]]; then
+      exp="$degraded"
+      [[ -z "$exp" && -n "$module" ]] && exp="$(meta_expect_degraded "$module" 2>/dev/null || true)"
+      if [[ "$name" == entry-* && -n "$module" && "$exp" == "true" ]]; then
         expect_ok="${expect_ok} ${name}=${health}"
       else
         bad="${bad} ${name}=${health}"
       fi
-    done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\n"}{end}' 2>/dev/null)
+    done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.metadata.labels.workshop\.redhat\.com/degraded-by-design}{"\n"}{end}' 2>/dev/null)
     if [[ -z "${bad// }" ]]; then ok "all Healthy${scope_user:+ (platform + ${scope_user})}"; else err "unhealthy:${bad}"; fail=1; fi
     if [[ -n "${expect_ok// }" ]]; then
       printf "  %-28s" ""
@@ -2803,18 +2821,25 @@ ns_pods_ready() {  # ns → "R/T" ready/total pods · "none" if the ns has no po
     END { if (total + 0 == 0) print "none"; else printf "%d/%d", ready + 0, total + 0 }'
 }
 
-entry_apps_for() {  # user → TSV "name<TAB>sync<TAB>health" for every Application labelled with this user
-  # (the caller filters to entry-* names). Read-only; empty output when none / CRD or label absent.
+entry_apps_for() {  # user → TSV "name<TAB>sync<TAB>health<TAB>degraded-label" for every Application
+  # labelled with this user (the caller filters to entry-* names). The 4th field is the live
+  # workshop.redhat.com/degraded-by-design label (render_app) — empty when the app isn't stamped.
+  # Read-only; empty output when none / CRD or label absent.
   oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${1}" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' 2>/dev/null || true
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/degraded-by-design}{"\n"}{end}' 2>/dev/null || true
 }
 
-entry_app_ok() {  # module sync health → exit 0 if the entry app is "healthy enough". Respects ws-meta
-  # expectDegraded / expectOutOfSync so a fault-by-design module (whose Argo app is Degraded/OutOfSync ON
-  # PURPOSE — see meta_expect_degraded / meta_require_sync) is not falsely flagged. Falls back to strict
-  # Synced/Healthy when the module's entry dir is not present locally.
-  local module="$1" sync="$2" health="$3" exp_deg exp_sync
-  exp_deg="$(meta_expect_degraded "$module" 2>/dev/null || true)"
+entry_app_ok() {  # module sync health [degraded_label] → exit 0 if the entry app is "healthy enough".
+  # degraded_label is the LIVE workshop.redhat.com/degraded-by-design label off the Application object
+  # (entry_apps_for's 4th field) — preferred because it is what a consumer with only API-server access
+  # (no repo checkout) also sees. Falls back to the local ws-meta.yaml read (meta_expect_degraded) when
+  # the label is absent — e.g. an app materialized by a ws build that predates the label, or a caller
+  # that never fetched it. Also respects ws-meta expectOutOfSync so a fault-by-design module (whose Argo
+  # app is Degraded/OutOfSync ON PURPOSE — see meta_expect_degraded / meta_require_sync) is not falsely
+  # flagged. Falls back to strict Synced/Healthy when neither the label nor the module's entry dir says otherwise.
+  local module="$1" sync="$2" health="$3" degraded_label="${4:-}" exp_deg exp_sync
+  exp_deg="$degraded_label"
+  [[ -z "$exp_deg" ]] && exp_deg="$(meta_expect_degraded "$module" 2>/dev/null || true)"
   exp_sync="$(meta_require_sync "$module" 2>/dev/null || echo true)"
   if [[ "$health" != "Healthy" && "$exp_deg" != "true" ]]; then return 1; fi
   if [[ "$sync" != "Synced" && "$exp_sync" != "false" && "$exp_deg" != "true" ]]; then return 1; fi
@@ -2900,7 +2925,7 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
   [[ -z "$scope_user" && -n "$live_n" && "$live_n" != "$group_n" ]] \
     && echo "  note: workshop-config userCount=${live_n} (live) but the workshop-attendees group has ${group_n} — a scale may still be converging"
   printf "  %-8s %-9s %-24s %-10s\n" "User" "Cockpit" "Modules active" "Entries"
-  local u cockpit modules entries entries_total entries_ok mods m ready desired
+  local u cockpit modules entries entries_total entries_ok mods m ready desired degraded
   local sum_cockpit_ready=0 sum_entries=0 sum_entries_ok=0
   local attention=() a
   for u in "${users_arr[@]}"; do
@@ -2919,12 +2944,12 @@ cmd_status() {  # SA everyday cohort-health dashboard. READ-ONLY. [--user U] sco
     fi
 
     entries_total=0; entries_ok=0; mods=""
-    while IFS=$'\t' read -r name sync health; do
+    while IFS=$'\t' read -r name sync health degraded; do
       [[ "$name" == entry-*-"$u" ]] || continue
       m="${name#entry-}"; m="${m%-"$u"}"
       mods="${mods}${mods:+,}${m}"
       entries_total=$((entries_total + 1))
-      if entry_app_ok "$m" "$sync" "$health"; then
+      if entry_app_ok "$m" "$sync" "$health" "$degraded"; then
         entries_ok=$((entries_ok + 1))
       else
         attention+=("entry ${name}: ${sync:-?}/${health:-?} — ws diag --user ${u} ${m}")
