@@ -483,24 +483,130 @@ else
     # than print a manual restore hint, which fails the "no trace" bar. Their instance keeps their sizing
     # and we tell the admin exactly what to raise if the controller starts OOMing under load.
     if [[ "$GITOPS_ADOPTED" == "true" ]]; then
-      # Read the target from the canonical override so the hint can never drift from what we'd apply.
-      # grep, not yq: the portfolio installer must run on a box with nothing but oc.
+      # ADOPTED Argo CD: the controller sizing belongs to the org, so we ASK before changing it.
+      #
+      # Why asking beats either extreme (owner decision, 2026-07-31). Silently patching mutates
+      # something the customer owns and restarts THEIR controller mid-workshop. Silently skipping
+      # looks polite and is not: the operator default is 2Gi, the workshop-config Application alone
+      # carries 636 resources, and the controller is OOMKilled (exit 137) before anything
+      # materializes — measured on a clean cluster, where the whole workshop layer came up as 3
+      # namespaces instead of ~70 with no sync operation ever recorded. The old behaviour printed a
+      # hint and carried on, so the failure surfaced only after a full install run had "succeeded".
+      #
+      # So: consent, then act on the answer. Yes -> patch, recording the prior value so teardown can
+      # put it back. No -> stop and do NOT install, because an install that cannot materialize is
+      # worse than no install: it looks done and leaves an empty workshop.
       TARGET_MEM="$(grep -A2 'limits:' "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml" 2>/dev/null \
                      | grep -m1 'memory:' | sed 's/.*memory:[[:space:]]*//' | tr -d '"' || true)"
       [[ -n "$TARGET_MEM" ]] || TARGET_MEM="6Gi"
       CUR_MEM="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
-      echo "  • adopted Argo CD instance — controller resources left at the org's settings (${CUR_MEM:-operator default 2Gi})"
-      echo "    if the application-controller OOMKills while a cohort materializes entry states, raise it:"
-      echo "      oc -n openshift-gitops patch argocd openshift-gitops --type merge \\"
-      echo "        -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
-      echo "    that is YOUR change to make and to keep — this installer will not touch it, and uninstall will not revert it."
-      # Same file also carries the Subscription resourceHealthChecks override; skipping the file skips
-      # that too, so say so rather than let it go missing silently on exactly the cluster shape (adopted
-      # operators) where it matters most. See the header of argocd-controller-resources.yaml for why.
-      echo "  • also skipped on this adopted instance: the operators.coreos.com/Subscription health-check"
-      echo "    override. Without it an ADOPTED operator whose Subscription carries a stale condition can"
-      echo "    show its Application Degraded while the operator is fine. To opt in:"
-      echo "      oc apply -f ${SCRIPT_DIR}/operator/argocd-controller-resources.yaml   # NOTE: also applies the ${TARGET_MEM} memory bump"
+      DECISION="skip"
+
+      if [[ "$CUR_MEM" == "$TARGET_MEM" ]]; then
+        echo "  ✓ adopted Argo CD controller already at ${CUR_MEM} — nothing to change"
+        DECISION="apply"   # nothing to do, but the health-check override below is still wanted
+      else
+        echo
+        echo "  ⚠️  This cluster's OpenShift GitOps is ADOPTED — it belongs to the cluster owner."
+        echo "      Its application-controller memory limit is ${CUR_MEM:-the operator default 2Gi}."
+        echo "      The workshop needs ${TARGET_MEM}: below that the controller is OOMKilled while"
+        echo "      materializing entry states, and NOTHING the workshop installs will ever sync."
+        echo
+        echo "      Applying this changes a resource the org owns and RESTARTS their controller, which"
+        echo "      briefly interrupts their own GitOps reconciliation. Before patching, the CR's whole"
+        echo "      current spec.controller.resources is recorded so ogsr-uninstall.sh can put it back."
+        echo "      If that recording fails you are told so on the spot, with the value to keep — this"
+        echo "      prompt never promises a restore it has not yet been able to arrange."
+        echo
+        # Explicit env var wins (CI / the RHDP catalog item have no TTY); otherwise ask. With no TTY
+        # and no env var we REFUSE — never mutate someone else's cluster on an assumption.
+        DECISION="${OGSR_ADOPTED_ARGOCD_MEMORY:-}"
+        if [[ -z "$DECISION" ]]; then
+          if [[ -t 0 ]]; then
+            printf '      Raise the adopted controller to %s and continue? [y/N] ' "$TARGET_MEM"
+            read -r _reply </dev/tty || _reply=""
+            case "$_reply" in [yY]|[yY][eE][sS]) DECISION="apply" ;; *) DECISION="refuse" ;; esac
+          else
+            DECISION="refuse"
+            echo "      (no terminal to ask on — set OGSR_ADOPTED_ARGOCD_MEMORY=apply to consent up front)"
+          fi
+        fi
+
+        if [[ "$DECISION" == "apply" ]]; then
+          # Record BEFORE mutating: a half-applied patch must still leave us knowing what to restore.
+          #
+          # ONE FACT, ONE KEY. The prior value goes into gitops_argocd_controller_resources_b64 — the
+          # key bootstrap/install.sh and helm/bootstrap's job-state-capture already write and
+          # ogsr-uninstall.sh already reads — so every install entry point feeds ONE restore path.
+          # A memory-only key cannot be that path: the override below sets limits.cpu, limits.memory,
+          # requests.cpu AND requests.memory, so undoing it needs the whole resources block, and a
+          # second key describing the same fact is exactly how the write-only-key drift started.
+          # Written first-write-wins (only when unset): on a re-install the earliest snapshot is the
+          # true prior, and this branch is only reached when the live value is NOT yet the target.
+          #
+          # argocd_controller_resources_changed_by_us is a genuinely DIFFERENT fact and earns its own
+          # key: the b64 snapshot is also taken by passes that never mutate anything, so "a prior was
+          # recorded" has never meant "we changed it", and teardown must only restore what we changed.
+          #
+          # An EMPTY prior is meaningful and is recorded by the ABSENCE of the b64 key: the CR carried
+          # no explicit .spec.controller.resources at all. Teardown restores that by REMOVING the field
+          # (a JSON-merge-patch null), not by writing a number back. Every writer of this key already
+          # skips it when the value is empty, so absence is unambiguous — no sentinel needed.
+          CUR_RES="$(oc get argocd openshift-gitops -n openshift-gitops \
+                       -o jsonpath='{.spec.controller.resources}' 2>/dev/null || true)"
+          # Same producer shape as bootstrap/install.sh:  <jsonpath output> | base64 | tr -d '\n'.
+          # jsonpath emits no trailing newline and printf '%s' adds none, so the two writers produce
+          # byte-identical values — which is what makes them interchangeable for one reader.
+          CUR_RES_B64="$(printf '%s' "$CUR_RES" | base64 | tr -d '\n' || true)"
+          [[ -n "$CUR_RES" ]] || CUR_RES_B64=""
+          RECORDED="false"
+          oc create namespace "$STATE_NS" >/dev/null 2>&1 || true
+          oc create configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1 || true
+          if oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1; then
+            PRIOR_RECORDED="$(oc get configmap "$STATE_CM" -n "$STATE_NS" \
+                                -o jsonpath='{.data.gitops_argocd_controller_resources_b64}' 2>/dev/null || true)"
+            RES_OK="true"
+            if [[ -z "$PRIOR_RECORDED" && -n "$CUR_RES_B64" ]]; then
+              oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
+                -p "{\"data\":{\"gitops_argocd_controller_resources_b64\":\"${CUR_RES_B64}\"}}" >/dev/null 2>&1 \
+                || RES_OK="false"
+            fi
+            if [[ "$RES_OK" == "true" ]] \
+               && oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
+                    -p '{"data":{"argocd_controller_resources_changed_by_us":"true"}}' >/dev/null 2>&1; then
+              RECORDED="true"
+            fi
+          fi
+          oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
+          if [[ "$RECORDED" == "true" ]]; then
+            echo "  ✓ adopted controller raised to ${TARGET_MEM} with consent"
+            echo "    prior spec.controller.resources recorded — ogsr-uninstall.sh restores it"
+          else
+            echo "  ✓ adopted controller raised to ${TARGET_MEM} with consent"
+            echo "  ⚠️  the prior value could NOT be recorded in ${STATE_NS}/${STATE_CM}."
+            echo "      ogsr-uninstall.sh will NOT restore it — this change is now yours to keep or"
+            echo "      reverse. Keep this value; it is the only copy:"
+            echo "        spec.controller.resources before install: ${CUR_RES:-<none — the CR carried no explicit resources>}"
+          fi
+        else
+          echo
+          echo "  ❌ declined — NOT installing. Nothing on this cluster has been changed."
+          echo "     An install against a ${CUR_MEM:-2Gi} controller cannot materialize: it would look"
+          echo "     like it worked and leave you with an empty workshop."
+          echo "     To proceed later, re-run and answer yes, or raise it yourself first:"
+          echo "       oc -n openshift-gitops patch argocd openshift-gitops --type merge \\"
+          echo "         -p '{\"spec\":{\"controller\":{\"resources\":{\"limits\":{\"memory\":\"${TARGET_MEM}\"},\"requests\":{\"memory\":\"2Gi\"}}}}}'"
+          exit 1
+        fi
+      fi
+
+      # The same file carries the Subscription resourceHealthChecks override. If it was never applied,
+      # say so rather than let it go missing silently on exactly the cluster shape where it matters.
+      if [[ "$DECISION" != "apply" ]]; then
+        echo "  • skipped on this adopted instance: the operators.coreos.com/Subscription health-check"
+        echo "    override. Without it an ADOPTED operator whose Subscription carries a stale condition"
+        echo "    can show its Application Degraded while the operator is fine."
+      fi
     else
       oc apply -f "${SCRIPT_DIR}/operator/argocd-controller-resources.yaml"
       echo "  ✓ controller resources raised (6Gi limit / 2Gi request)"
