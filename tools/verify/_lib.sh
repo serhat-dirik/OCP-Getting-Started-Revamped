@@ -8,6 +8,9 @@
 
 VERIFY_PASS=0
 VERIFY_FAIL=0
+# Third outcome, and it is NOT a pass: a check the caller could not evaluate (see warn()). Counted so
+# verify_summary can say so — for eleven of these scripts the summary used to swallow it entirely.
+VERIFY_SKIP=0
 
 check() {  # check "<description>" <command...>  — pass/fail one assertion
   local desc="$1"; shift
@@ -34,24 +37,51 @@ cm_key_set() {  # namespace configmap key → 0 when that key exists and is non-
 }
 
 # INCONCLUSIVE, never a failure — for a check the CALLER cannot evaluate (no impersonation rights, an
-# in-cluster-only endpoint on an off-cluster run). Deliberately does NOT touch the pass/fail counters:
+# in-cluster-only endpoint on an off-cluster run). Deliberately does NOT touch the pass/FAIL counters:
 # a false ❌ destroys attendee trust in every other ✅ (tools/verify/README.md, contract).
-# Follow every warn with a hint saying WHERE the check can be answered.
-warn() { echo "⚠ $* — SKIPPED (not a failure)"; }
+# It DOES count as a skip, because "not a failure" is not the same as "graded and fine" — see
+# verify_summary. Follow every warn with a hint saying WHERE the check can be answered.
+warn() { echo "⚠ $* — SKIPPED (not a failure)"; VERIFY_SKIP=$((VERIFY_SKIP+1)); }
 
 # Neutral note (skipped/context lines) — matches ws's own info style so smoke output is unchanged
 # when a verify script shadows it. Standalone verify scripts (multi-tenancy-workload-security/networking-dev-devops) rely on this being defined.
 info() { echo "▶ $*"; }
 
+# THREE outcomes in, three outcomes out. The banner used to know only pass/fail, so a run in which
+# every GRADED outcome was skipped still ended "✅ all 7 checks passed", exit 0 — false completeness
+# in 11 of 26 scripts (audit 2026-07-31; worst case multi-tenancy-workload-security, where all six
+# end-state RBAC outcomes — the entire lesson — sit behind one impersonation guard). The fix is here,
+# not in warn(): a check that genuinely cannot run must still never print ❌.
+#
+# EXIT CODE, deliberately: skipped-but-nothing-failed exits 0 by DEFAULT. `ws prep` reads
+# `<script> --entry-only`'s rc as a boolean "is this world already prepared?" (tools/ws/ws cmd_prep),
+# and a non-zero rc there tells the attendee their environment is broken and offers to WIPE it — a
+# destructive false alarm on a healthy world. `ws smoke` reads the same rc as a G1 ❌. So the BANNER
+# carries the signal for humans, and automation that must fail closed opts in with VERIFY_STRICT=1
+# and gets rc 3 — distinct from 1 (a check actually FAILED) and 2 (usage error, parse_verify_args).
 verify_summary() {  # call at end of every script
   echo
-  if (( VERIFY_FAIL == 0 )); then
-    echo "✅ all ${VERIFY_PASS} checks passed"
-    exit 0
-  else
-    echo "❌ ${VERIFY_FAIL} of $((VERIFY_PASS+VERIFY_FAIL)) checks failed"
+  local graded=$((VERIFY_PASS+VERIFY_FAIL))
+  if (( VERIFY_FAIL > 0 )); then
+    if (( VERIFY_SKIP > 0 )); then
+      echo "❌ ${VERIFY_FAIL} of ${graded} checks failed · ⚠ ${VERIFY_SKIP} SKIPPED (not graded)"
+    else
+      echo "❌ ${VERIFY_FAIL} of ${graded} checks failed"
+    fi
     exit 1
   fi
+  if (( VERIFY_SKIP > 0 )); then
+    echo "⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded) — this run did NOT fully verify the lab"
+    echo "   ↳ each ⚠ line above says where its check can be answered; re-run there for a complete result"
+    # `if`, not `[[ … ]] && exit 3`: under the callers' `set -e` a false one-liner would return 1 from
+    # this function and kill the script — turning a skip into the exit 1 the whole design avoids.
+    if [[ "${VERIFY_STRICT:-0}" == "1" ]]; then
+      exit 3
+    fi
+    exit 0
+  fi
+  echo "✅ all ${VERIFY_PASS} checks passed"
+  exit 0
 }
 
 parse_verify_args() {  # sets USER_NAME, ENTRY_ONLY, SOLVE_MODE from "$@"

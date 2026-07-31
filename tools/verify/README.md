@@ -14,8 +14,12 @@ rather than reading the route cross-namespace, and so on). The two bullets below
 - Args: `--user <name>` (default `user1`), `--entry-only` (skip end-state checks).
 - **Entry checks**: assert exactly what `ws start mNN` materializes (the world before exercise 1).
 - **End checks**: assert what a *completed* lab looks like (used after `ws solve` and by graders).
-- Exit 0 only when every check passes; one `✅/❌` line per check with a `↳ fix:` hint on failure.
-- Source `_lib.sh` for `check`, `hint`, `parse_verify_args`, `verify_summary`.
+- Exit 0 only when no check failed; one `✅/❌` line per check with a `↳ fix:` hint on failure.
+  A run that SKIPPED checks (see the inconclusive bullet below) still exits 0 — `ws prep` reads
+  `--entry-only`'s rc as "is this world already prepared?" and would otherwise offer to wipe a
+  healthy environment — but its banner says so: `⚠ 7 passed · 6 SKIPPED (not graded)`. Automation
+  that must fail closed sets `VERIFY_STRICT=1` and gets rc **3** (1 = a check failed, 2 = usage).
+- Source `_lib.sh` for `check`, `hint`, `warn`, `parse_verify_args`, `verify_summary`.
 - Scripts must be runnable with only `oc` + `curl` available (Showroom terminal reality).
 - **Prove the ATTENDEE-visible state, not the admin-visible one.** An object existing is not proof the
   attendee's page, UI or API call works — `observability-health-scale` shipped a green
@@ -25,9 +29,13 @@ rather than reading the route cross-namespace, and so on). The two bullets below
   self-review when the attendee runs it themselves, and/or query the real endpoint with the caller's
   own token.
 - A check the CALLER cannot evaluate (missing impersonation rights, an in-cluster-only endpoint on an
-  off-cluster run) is **inconclusive, never a failure**: print a `⚠` line plus a `↳ fix:` retry hint and
-  skip it — it must not touch the pass/fail counters. A reachable endpoint returning the *wrong answer*
-  is still a hard `❌`. A false `❌` destroys attendee trust in every other `✅`.
+  off-cluster run) is **inconclusive, never a failure**: call `warn "<what> — <why not evaluable>"` plus a
+  `↳ fix:` retry hint and skip it — it must not touch the pass/fail counters. A reachable endpoint
+  returning the *wrong answer* is still a hard `❌`. A false `❌` destroys attendee trust in every other `✅`.
+  **Route every skip through `warn`, never a bare `echo`/`info`** — `warn` is what increments the skip
+  counter, and a skip the summary cannot see is a skip the attendee is never told about (11 of 26 scripts
+  once ended `✅ all N checks passed` with the whole graded lesson skipped; guard:
+  `tools/lint/verify-summary-skip-guard.sh`).
 
 ## Skeleton
 
