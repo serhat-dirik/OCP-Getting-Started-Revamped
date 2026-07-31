@@ -3,10 +3,14 @@
 include::partial$version-attributes.adoc[]
 
 // Troubleshooting for Application Modernization. Every entry is a real failure mode seen while performing the module live on
-// OCP {ocp_version} / MTA {mta_version} (2026-07-13). symptom -> cause -> fix. Environment values via
-// attributes only.
+// OCP 4.21.22 / MTA 8.1.2 (2026-07-13), plus the reasoning-model entry added 2026-07-31. symptom ->
+// cause -> fix. Environment values via attributes only — EXCEPT the provenance versions here and in the
+// footer, which are frozen literals on purpose: they record what WE observed on a date, so binding them
+// to {ocp_version}/{mta_version} would silently re-date every entry on each versions.yaml bump. (That is
+// how this page came to claim MTA 8.1.2 in its footer while its sibling lab page rendered 8.0.1 for the
+// same 2026-07-13 run.) See tools/lint/version-anchor-guard.py's docstring.
 
-Each entry is symptom → cause → fix. All were seen (or deliberately induced) while performing this module on OpenShift {ocp_version} with Migration Toolkit for Applications (MTA) {mta_version}.
+Each entry is symptom → cause → fix. All were seen (or deliberately induced) while performing this module on OpenShift 4.21.22 with Migration Toolkit for Applications (MTA) 8.1.2.
 
 == The analysis finishes instantly and reports zero issues
 
@@ -48,6 +52,16 @@ Each entry is symptom → cause → fix. All were seen (or deliberately induced)
 
 *Fix:* Follow the *Manual path* — make the same config-externalization edit by hand. The `[OCP]` MTA analyze → fix → re-analyze loop is unaffected; only the typing assistant is absent.
 
+== The "prove the AI wiring" block prints a reasoning trace, or no answer at all
+
+*Symptom:* The API block in Exercise 4 returns `HTTP 200` but no Java line — either a wall of the model thinking aloud (often between `<think>` and `</think>`), or nothing usable and `finish_reason=length`.
+
+*Cause:* The cluster's model is a *reasoning* model. It spends tokens on a thinking trace before it answers, and a `max_tokens` budget sized for the one-line answer is consumed entirely by the trace — so the reply is truncated before the answer is ever emitted. This is a property of the model your MaaS key is scoped to, not of the lab: the same block on a directly-answering model returns in ~17 tokens.
+
+*Fix:* The shipped block already handles both — it budgets `max_tokens: 1024` and strips the trace from either `reasoning_content` or an inline `<think>` block, then reports whether the answer reads `CLAIMS_DB_URL` through `System.getenv`. If you edited the block down to a smaller budget, restore it. If it still says `finish_reason=length`, raise `max_tokens` further — a longer trace needs more room, and on a directly-answering model raising the ceiling costs nothing because `max_tokens` caps the reply rather than padding it.
+
+Two things *not* to do. Do not "fix" it by pinning the prompt or the expected output to one model's phrasing — the two clusters this workshop runs on are scoped to *different* models, and even one model at `temperature 0` varies its packaging between calls. And do not add a model-specific thinking switch (for example a `chat_template_kwargs` flag) and assume it took effect: the gateway accepts unknown request fields with `HTTP 200` and silently ignores them, so a successful call is *not* evidence the switch did anything.
+
 == Developer Lightspeed proposes a fix that's wrong (or won't compile)
 
 *Symptom:* The AI's suggested diff changes behavior unexpectedly, references something that doesn't exist, or wouldn't compile.
@@ -70,7 +84,9 @@ Each entry is symptom → cause → fix. All were seen (or deliberately induced)
 
 *Cause:* The modernized image isn't present in the cluster's internal registry (`ogsr-parasol-images`) yet — it's populated by the workshop image-load step, and on a fresh cluster it may not be loaded.
 
-*Fix:* This is an environment provisioning gap, not a lab error — tell your instructor. The verify script treats the modernized Deployment as *present* (not necessarily *ready*) for exactly this reason; the deploy step's *shape* is correct even when the image is still loading.
+*Fix:* This is an environment provisioning gap, not a lab error — tell your instructor.
+
+Expect `ws verify app-modernization` to go *red* while this lasts, and that red is correct. The end-state check asserts the modernized Deployment is *Ready* (`readyReplicas >= 1`), not merely present — a deliberate hardening, because the earlier present-only check passed on a pod that was crash-looping and told nobody. A pod that cannot pull its image is not a finished lab. The script's hint discriminates the two causes for you: *absent* means the lab simply has not been done yet (the expected state on a fresh entry, not a fault), while *present but not Ready* means something is actually broken — this case, or a crash-loop needing `QUARKUS_DATASOURCE_ACTIVE=false`.
 
 == Dev Spaces takes minutes to open the workspace
 
@@ -90,4 +106,10 @@ Each entry is symptom → cause → fix. All were seen (or deliberately induced)
 
 '''
 
-_Last verified on OpenShift 4.21.22, Migration Toolkit for Applications 8.1.2, Dev Spaces 3.29.0 — 2026-07-13._
+_Last verified on OpenShift 4.21.22, Migration Toolkit for Applications 8.1.2, Dev Spaces 3.29.0 — 2026-07-13. Reasoning-model behaviour of the Exercise 4 API block re-verified against a live Models-as-a-Service endpoint on 2026-07-31._
+
+[NOTE]
+.The MTA version above is what *we* ran, not what *you* are running
+====
+The workshop's MTA operator deliberately follows the operator catalog's *default channel* rather than pinning a version, so the release differs per cluster and moves over time — two clusters this project uses today carry 8.0.1 and 8.2.0. That is by design (a pinned channel is absent from some catalog snapshots and fails to resolve). Treat the versions in this page as a *dated record of the environment these findings came from*; check yours with `oc get csv -n openshift-mta`. Where a page instead describes *your* cluster it uses the `+{mta_version}+` attribute, which the site build resolves.
+====
