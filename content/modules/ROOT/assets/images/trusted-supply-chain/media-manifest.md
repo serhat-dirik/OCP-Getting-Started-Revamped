@@ -70,8 +70,8 @@ return to a clean slate, `ws prep trusted-supply-chain --user <user> --yes` (re-
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
 | 1 | `trusted-supply-chain-01-acs-violation.png` | ⬜ NOT CAPTURED — **TOP PRIORITY (the money shot)** | **RHACS console** → **Violations** / the `parasol-claims:candidate` image → the **Log4Shell CVE-2021-44228** entry (CVSS 10, `log4j-core` 2.14.1) and the **"Block Log4Shell at build"** policy | the single CRITICAL CVE that breaks the build; the policy that enforces it; the component + version | lab.adoc ex. 1 (the RHACS view of the violation) |
-| 2 | `trusted-supply-chain-02-pipelinerun-scan-failed.png` | ⬜ NOT CAPTURED | **Pipelines → PipelineRuns → the seeded run** — `build-image` green, `acs-scan` **red** | the build **Succeeded** but the run **Failed** at the scan — the gate refused a *built* image | lab.adoc ex. 1 (console view of the failed run) |
-| 3 | `trusted-supply-chain-03-imagestream-tags.png` | ✅ CAPTURED 2026-07-29 | **Builds → ImageStreams → parasol-claims → Tags** — `latest` + `sha256-….sig` + `sha256-….att` | the signature and SLSA attestation stored **beside** the image, by digest | lab.adoc ex. 3 (the artifacts Chains stored) — **provenance caveat:** when this was shot, `{user}-cicd` had been materialized by *pipelines-fundamentals*, which conflicts with this module over that namespace. The `.att`/`.sig` tags are genuine Tekton Chains artifacts on the same ImageStream in the same namespace, so the picture matches what the lab describes — but they were produced by that module's pipeline, not this one's. Re-shoot on a run where this module owns the namespace if the module ever claims the artifacts as its own output. |
+| 2 | `trusted-supply-chain-02-pipelinerun-scan-failed.png` | ✅ CAPTURED 2026-07-31 (as user6, `seed-scan-5zds5` in `user6-cicd`, against a healthy RHACS Central) | **Pipelines → PipelineRuns → the seeded run** — `build-image` green, `acs-scan` **red** | the build **Succeeded** but the run **Failed** at the scan — the gate refused a *built* image; the Details tab also now shows an inline "Log snippet" of the failure | lab.adoc ex. 1 (console view of the failed run) — now embedded |
+| 3 | `trusted-supply-chain-03-imagestream-tags.png` | ✅ CAPTURED 2026-07-29 | **Builds → ImageStreams → parasol-claims → Tags** — `latest` + `sha256-….sig` + `sha256-….att` | the signature and SLSA attestation stored **beside** the image, by digest | lab.adoc ex. 3 (the artifacts Chains stored) — **provenance caveat CLOSED 2026-07-31:** verified live as user6 that `user6-cicd`'s PipelineRuns (including the one that built `latest`) all carry `workshop.redhat.com/module=trusted-supply-chain` — the artifacts in this shot genuinely belong to this module, not a neighboring one. Separately, as of 2026-07-31 the live ImageStream actually carries **9** tags / **3** pairs (`candidate` + `cleancheck` + `latest`, each with its own `.att`/`.sig`) — the `cleancheck` pair is an out-of-band verification build (see lab.adoc's grounding note beside the Chains-artifacts step), not something this exercise's own instructions produce, so this screenshot's 1-pair/3-row/Image-count-3 state was deliberately left as-is rather than re-shot. A 9-tag reference capture exists (reviewed, not committed) if a future pass wants to show three pairs on purpose. |
 | 4 | `trusted-supply-chain-04-rekor-entry.png` | ⬜ NOT CAPTURED (NEW — trust spine) | **Rekor Search UI** (`rekor-search-ui-trusted-artifact-signer.{cluster_domain}`) → search by the SBOM hash → the entry | the keyless signature as a **public, permanent** transparency-log record (log index, integrated time, the issued identity) | lab.adoc ex. 4 (the transparency-log receipt) |
 
 Screenshot **1 (the RHACS violation screen) is the priority capture** — the visual that makes the threat
@@ -79,6 +79,14 @@ concrete. Screenshots 2–4 are **enrichment**; the lab's load-bearing evidence 
 table, the `jq` SBOM query, `cosign verify` "verified against the specified public key", `verify-blob`
 "Verified OK"), shown inline. None is required for the page to read correctly (all embed points are
 `// media-pass:` comments, so their absence breaks nothing).
+
+**Bonus captures, 2026-07-31 (not numbered above, not wired to any embed point):**
+`trusted-supply-chain-05-pipelineruns-list.png` (the PipelineRuns tab for all three `user6-cicd` runs,
+showing the *Vulnerabilities* column rendering a bare "-" for every run — including the one with a live
+CRITICAL CVE) and `trusted-supply-chain-06-pipelinerun-clean-check-succeeded.png` (`clean-check-9mjb2`'s
+Details tab, the all-green counterpart to screenshot 2's all-red-at-acs-scan graph). Both sit in this
+asset directory, untracked, evidence for the grounding notes in lab.adoc rather than lab content in their
+own right; promote to a numbered row if a future media pass wants to use them directly.
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
