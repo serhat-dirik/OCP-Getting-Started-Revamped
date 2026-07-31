@@ -401,14 +401,39 @@ kn service update parasol-claims -n $NS \
 Service 'parasol-claims' updated in namespace 'user6-dev'.
 ----
 
-Confirm the revision set — you're at *four* revisions now: `v1`, the two floor-change revisions exercise 2 minted (`-warm`, `-cold`), and the new `v2` — and let the service settle back to zero:
+Confirm the revision set — you're at *four* revisions now: `v1`, the two floor-change revisions exercise 2 minted (`-warm`, `-cold`), and the new `v2` — then wait for it to settle back to zero before starting the burst:
 
 [source,sh,role=execute]
 ----
 kn revision list -n $NS
-# wait for scale-to-zero so the burst starts from a clean zero:
-sleep 90; oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l
+# minting v2 (no --traffic flag above) gives it 100% of traffic immediately, so it boots its own pod
+# to pass its readiness check — and that pod's stable-window-plus-scale-down-grace can take longer
+# than any fixed guess. Wait for ZERO pods (in any state), not a timed sleep, so the burst below
+# always starts from a clean zero:
+until [ "$(oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ]; do sleep 10; done
+echo "scaled to zero — the burst below starts from a clean zero"
 ----
+
+// HARDENED 2026-07-31 as user6 on cluster2, entry state, exercises 1-3 walked block-by-block. This
+// step used to be `sleep 90; oc get pods ... | wc -l` and could print a NONZERO count that the
+// surrounding prose called "settled back to zero" — a lead reported it as reading "2" and attributed
+// it to `parasol-claims-v1-warm`'s min-scale=1 pod still being counted. Reproduced the misleading
+// read twice on cluster2, but the mechanism differs: by the time this block runs, v1-warm is already
+// fully unrouted (untagged, dropped from .status.traffic by the exercise-2 "min-scale is a tradeoff"
+// step) and contributes ZERO pods throughout — confirmed via `oc get pods -l serving.knative.dev/
+// service=parasol-claims` sampled every 5s across both mint attempts. The actual cause: minting `v2`
+// with no `--traffic` flag routes it 100% immediately, so Knative boots ONE pod for v2 itself to pass
+// its own readiness check; that pod then rides out the stable-window before it's even a scale-down
+// candidate, then the terminate grace. Measured twice: pod age at first "Terminating" was 88s both
+// times, and the pod was still present (Running or Terminating) at the 90s mark in both runs — fully
+// gone only around 108-118s. So the OLD sleep-90 always risked landing mid-drain. Fixed by replacing
+// the fixed sleep with the same until-loop idiom exercise 2 already uses for its own scale-to-zero
+// wait (line ~231) — a condition, not a duration, so the block is correct regardless of which
+// revision(s) happen to be holding a pod. Root cause note for future maintainers: min-scale on an
+// UNROUTED revision (no tag, 0% and absent from .status.traffic) does NOT keep a pod alive on this
+// cluster — confirmed directly (v1-warm's pod drained to 0 replicas once dropped from the Route,
+// despite its min-scale=1 annotation persisting) — so min-scale only pins a pod while the revision is
+// still part of the Route (latest or tagged), not forever.
 
 // GROUNDED 2026-07-31 as user1. Closed by running the full sequence by hand, in order:
 // `ws start serverless-zero-to-hero --user user1` (clean entry state — confirmed via
@@ -453,7 +478,7 @@ sleep 90; oc get pods -n $NS -l serving.knative.dev/service=parasol-claims --no-
 // Also observed on every `kn service update` this pass: a client-side stderr warning ("Kubernetes
 // default value is insecure... securityContext...") ahead of the "Service ... updated" line —
 // harmless, but not reflected in this page's captured expected-output blocks.
-.Expected output (v2 — latest at 100% — with the three earlier revisions retained; then zero pods. GENERATION numbers are illustrative, not fixed — they depend on how many times the ksvc spec was reconciled in your session)
+.Expected output (v2 — latest at 100% — with the three earlier revisions retained; the wait below can take a couple of minutes since v2's own boot-to-Ready pod has to drain. GENERATION numbers are illustrative, not fixed — they depend on how many times the ksvc spec was reconciled in your session)
 [source,texinfo]
 ----
 NAME                     SERVICE          TRAFFIC   TAGS   GENERATION   AGE   CONDITIONS   READY   REASON
@@ -461,7 +486,7 @@ parasol-claims-v2        parasol-claims   100%             4            1m    3 
 parasol-claims-v1-cold   parasol-claims                    3            4m    3 OK / 4     True
 parasol-claims-v1-warm   parasol-claims                    2            5m    3 OK / 4     True
 parasol-claims-v1        parasol-claims                    1            13m   3 OK / 4     True
-0
+scaled to zero — the burst below starts from a clean zero
 ----
 
 Now the payoff. With a hard limit of *2 requests per pod*, a burst of concurrent traffic *forces* Knative to add pods to keep up — up to your ceiling of 3. Drive a burst from the `demo-client` in the background and *watch the pods climb from zero*:
