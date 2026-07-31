@@ -55,6 +55,7 @@ Two tabs in the browser carry the rest:
 Sign in with *Log in via OpenShift* as `{user}`.
 This is where you *create the ApplicationSet* and *watch the canary*.
 * *Gitea* — your config repo: {gitea_url}/{user}/claims-config[{user}/claims-config^].
+*Sign In* (top right) with your workshop username `{user}` and password — editing needs a signed-in session.
 This is where you *ship a new version* by editing Git.
 
 Open both now.
@@ -235,7 +236,8 @@ Clone it and read it:
 [source,sh,role=execute,subs="attributes"]
 ----
 cd ${HOME:-/tmp}
-git clone {gitea_url}/{user}/claims-config 2>/dev/null; cd claims-config
+git clone {gitea_url}/{user}/claims-config 2>/dev/null || (cd claims-config && git fetch && git checkout main && git pull)
+cd claims-config
 cat applicationset.yaml
 ----
 
@@ -247,10 +249,10 @@ cat applicationset.yaml
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: claims-user1
+  name: claims-{user}
   namespace: ogsr-student-gitops
   labels:
-    workshop.redhat.com/user: user1
+    workshop.redhat.com/user: {user}
 spec:
   goTemplate: true
   goTemplateOptions: ["missingkey=error"]
@@ -269,19 +271,19 @@ spec:
             path: rollouts
   template:
     metadata:
-      # one Application per environment: claims-dev-user1, claims-stage-user1, claims-prod-user1
-      name: 'claims-{{.env}}-user1'
+      # one Application per environment: claims-dev-{user}, claims-stage-{user}, claims-prod-{user}
+      name: 'claims-{{.env}}-{user}'
       labels:
-        workshop.redhat.com/user: user1
+        workshop.redhat.com/user: {user}
     spec:
-      project: proj-user1
+      project: proj-{user}
       source:
         repoURL: {gitea_url}/{user}/claims-config.git
         targetRevision: main
         path: '{{.path}}'
       destination:
         server: https://kubernetes.default.svc
-        namespace: 'user1-{{.env}}'
+        namespace: '{user}-{{.env}}'
       syncPolicy:
         automated:
           prune: true
@@ -326,11 +328,17 @@ With the password entered, exchange it for the token and discard it:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-export ARGOCD_AUTH_TOKEN=$(curl -sk -X POST "https://$ARGOCD_SERVER/api/v1/session" \
+SESSION=$(curl -sk -X POST "https://$ARGOCD_SERVER/api/v1/session" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"{user}","password":"'"$PW"'"}' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+  -d '{"username":"{user}","password":"'"$PW"'"}')
 unset PW
+export ARGOCD_AUTH_TOKEN=$(echo "$SESSION" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))')
+if [ -z "$ARGOCD_AUTH_TOKEN" ]; then
+  echo "✗ sign-in failed: $(echo "$SESSION" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("error","unknown error"))')"
+  echo "  Your password was probably mistyped. Re-run the block above (the 'Your workshop password' prompt) and try again."
+else
+  echo "✔ signed in to Argo CD as {user}"
+fi
 ----
 
 Now create the ApplicationSet from your clone (you are already in `claims-config`), and list what it generated:
@@ -633,7 +641,7 @@ Look at the run that made the call, and confirm prod now serves `1.1`:
 [source,sh,role=execute]
 ----
 oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp \
-  -o jsonpath='{.items[-1:].metadata.name}: {.items[-1:].status.phase}{"\n"}'
+  -o jsonpath='{.items[-1:].metadata.name}: {.items[-1:].status.phase}{"\n"}' 2>/dev/null
 oc get rollout parasol-claims -n $PROD \
   -o jsonpath='stable image now: {.spec.template.spec.containers[0].image}{"\n"}' | sed 's|.*/parasol|parasol|'
 ----
@@ -731,7 +739,7 @@ Read it like an incident review — the Rollout tells you exactly what it did an
 [source,sh,role=execute]
 ----
 oc get rollout parasol-claims -n $PROD -o jsonpath='{.status.message}{"\n"}'
-AR=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+AR=$(oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)
 oc get analysisrun "$AR" -n $PROD -o jsonpath='{.metadata.name}: {.status.phase} — {.status.message}{"\n"}'
 ----
 
