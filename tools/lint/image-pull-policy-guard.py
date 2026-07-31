@@ -65,9 +65,17 @@ EXIT CODES (same contract as copy-drift-guard.py / credential-redaction-guard.py
 steps read alike):
     0  every workshop container pulls with Always
     1  at least one does not — or, under --self-test, every canary was correctly detected
-    2  the guard could not do its job (helm/kustomize/PyYAML missing, a render failed, an empty
+    2  the guard could not do its job (helm/kustomize/PyYAML missing, a render failed, a COLLAPSED
        scope, a workshop image at an unrecognized container key, or an undetected canary). Never
        confuse this with a clean result.
+
+SCOPE IS ASSERTED, NOT ASSUMED (2026-08-01). An audit dropped the kustomize half, dropped the
+solve=true half, truncated chart discovery to one chart, and broke the Knative-premise call — each
+one on its own, each leaving this guard printing "clean" and exiting 0. The old check ("zero image
+references is an error") only ever caught total emptiness. Every render loop now raises a counter
+that is measured against a floor (scope_for_tree() below, mechanism in tools/lint/_scope.py), and
+the warn-only premise check reports how many derivations it actually made, because nothing else in
+the run notices when a warning stops being emitted.
 
 LOCAL YAMLLINT: the canary chart's templates carry Helm actions and are not plain YAML, exactly like
 the real chart template dirs and like copy-drift-guard's fixture. The maintainer yamllint config is
@@ -85,6 +93,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _scope import Scope  # noqa: E402  (path must be set first; this file is run as a script)
 
 try:
     import yaml
@@ -155,6 +166,11 @@ EXEMPTIONS: list[dict] = []
 
 # The portfolio CR whose config decides whether the Knative exemption's premise holds.
 KNATIVE_SERVING_CR = "platform-portfolio/components/serverless/knative-serving.yaml"
+
+# The scope dimensions collect_sites() raises, named once so the counters and their floors cannot
+# drift apart. self_test asserts each one has a floor.
+COLLECT_DIMENSIONS = ("helm renders", "solve=false image sites", "solve=true image sites",
+                      "kustomize builds", "kustomize image sites")
 
 
 class GuardError(Exception):
@@ -295,20 +311,30 @@ def parse_documents(text: str, source: str) -> list:
 
 
 def collect_sites(root: pathlib.Path, charts: list[pathlib.Path],
-                  kustomize_dirs: tuple) -> list[dict]:
+                  kustomize_dirs: tuple) -> tuple[list[dict], dict]:
+    """(sites, scope counters). The counters are raised by the loops that render, so dropping the
+    kustomize half or the solve=true half collapses a dimension instead of quietly shrinking the
+    input set — both were blindings that left this guard reporting clean (audit 2026-08-01)."""
     sites: list[dict] = []
+    counts = {dimension: 0 for dimension in COLLECT_DIMENSIONS}
     for chart in charts:
         for values in HELM_VALUE_SETS:
             label = f"{chart.relative_to(root)} (solve={values['solve']})"
+            counts["helm renders"] += 1
             for document in parse_documents(render_helm(root, chart, values), label):
-                sites += find_image_sites(document, label)
+                found = find_image_sites(document, label)
+                counts[f"solve={values['solve']} image sites"] += len(found)
+                sites += found
     for directory in kustomize_dirs:
         if not (root / directory).is_dir():
             raise GuardError(f"{directory} does not exist. It was moved or renamed; update "
                              "KUSTOMIZE_DIRS rather than leaving the gate pointing at nothing.")
+        counts["kustomize builds"] += 1
         for document in parse_documents(render_kustomize(root, directory), directory):
-            sites += find_image_sites(document, directory)
-    return sites
+            found = find_image_sites(document, directory)
+            counts["kustomize image sites"] += len(found)
+            sites += found
+    return sites, counts
 
 
 # --------------------------------------------------------------------------------- the check
@@ -362,7 +388,7 @@ def evaluate(sites: list[dict]) -> tuple[list[str], list[str], dict]:
 # ------------------------------------------------------------------- the Knative premise, re-derived
 
 
-def knative_premise_findings(path: pathlib.Path, label: str) -> list[str]:
+def knative_premise_findings(path: pathlib.Path, label: str) -> tuple[list[str], int]:
     """Re-derive the Knative exemption's premise from a KnativeServing CR file.
 
     The exemption holds only while Knative actually resolves our tags to digests. That behaviour is
@@ -373,16 +399,22 @@ def knative_premise_findings(path: pathlib.Path, label: str) -> list[str]:
     Warns rather than fails: whether to drop the exemption is an architecture decision for the PM,
     not something a lint gate should take unilaterally. But it is re-checked and re-printed on every
     CI run, so it cannot rot the way a comment does.
+
+    Returns (findings, derivations) — the second element counts the KnativeServing CRs from which a
+    conclusion was actually reached. It exists because this check is WARN-ONLY, so breaking it
+    produced no failure of any kind: the audit blinded it and the run stayed clean and silent. It is
+    also the only thing that notices a KNATIVE_SERVING_CR file that parses but carries no
+    KnativeServing document at all, which used to return [] and read as "premise holds".
     """
     if not path.is_file():
-        return [f"{label} is missing, so the Knative exemption's premise cannot be re-derived. "
-                "Update KNATIVE_SERVING_CR if the portfolio moved it."]
+        return ([f"{label} is missing, so the Knative exemption's premise cannot be re-derived. "
+                 "Update KNATIVE_SERVING_CR if the portfolio moved it."], 0)
     try:
         documents = [d for d in yaml.safe_load_all(path.read_text(encoding="utf-8"))
                      if isinstance(d, dict)]
     except yaml.YAMLError as exc:
-        return [f"{label} is not parseable as YAML ({exc}), so the Knative exemption's premise "
-                "cannot be re-derived."]
+        return ([f"{label} is not parseable as YAML ({exc}), so the Knative exemption's premise "
+                 "cannot be re-derived."], 0)
 
     for document in documents:
         if document.get("kind") != "KnativeServing":
@@ -394,8 +426,8 @@ def knative_premise_findings(path: pathlib.Path, label: str) -> list[str]:
             # keeps the mutable tag in the Revision, and both ksvcs carry imagePullPolicy: Always to
             # compensate. That is handled, and a warning repeated on every green run is how a project
             # teaches itself to stop reading warnings.
-            return []
-        return [
+            return ([], 1)
+        return ([
             f"{label} no longer lists the internal registry in registries-skipping-tag-resolving.",
             "That restores Knative's default tag->digest resolution for workshop-built images, so a "
             "ksvc would pull by digest and the mutable-tag defect could not reach it.",
@@ -404,11 +436,13 @@ def knative_premise_findings(path: pathlib.Path, label: str) -> list[str]:
             "on every scale-from-zero — and it is paid in the one module whose cold-start timings "
             "are a measured teaching artifact. Re-examine the exemption, do not just delete this "
             "check. The guard reports the change; the call is a human's.",
-        ]
-    return []
+        ], 1)
+    # The file parses but carries no KnativeServing document at all. Nothing was derived, and
+    # returning "no findings" here reads as "the premise holds" — the scope floor is what stops it.
+    return ([], 0)
 
 
-def check_knative_premise(root: pathlib.Path) -> list[str]:
+def check_knative_premise(root: pathlib.Path) -> tuple[list[str], int]:
     return knative_premise_findings(root / KNATIVE_SERVING_CR, KNATIVE_SERVING_CR)
 
 
@@ -549,13 +583,36 @@ def self_test(root: pathlib.Path) -> int:
                                              (premise_on, False, "internal registry in skip list")):
             probe = pathlib.Path(tmp) / "knative-serving.yaml"
             probe.write_text(yaml.safe_dump(document), encoding="utf-8")
-            if bool(knative_premise_findings(probe, label)) != should_warn:
+            probe_findings, derivations = knative_premise_findings(probe, label)
+            if bool(probe_findings) != should_warn:
                 failures.append(f"the Knative premise check gave the wrong answer for the {label} "
                                 "case — the exemption's premise is not actually being re-derived.")
+            if derivations != 1:
+                failures.append(f"the Knative premise check reported {derivations} derivation(s) "
+                                f"for the {label} case. That count is the only evidence the real "
+                                "run has that this warn-only check ran at all.")
         # …and a missing CR must be reported, not read as "premise holds".
-        if not knative_premise_findings(pathlib.Path(tmp) / "absent.yaml", "absent"):
+        absent_findings, absent_derivations = knative_premise_findings(
+            pathlib.Path(tmp) / "absent.yaml", "absent")
+        if not absent_findings or absent_derivations:
             failures.append("the Knative premise check reported nothing for a MISSING CR, which "
                             "would read as 'premise holds' the day the portfolio file moves.")
+        # A file that parses but carries no KnativeServing derives nothing and must say so.
+        empty_cr = pathlib.Path(tmp) / "empty.yaml"
+        empty_cr.write_text(yaml.safe_dump({"kind": "ConfigMap"}), encoding="utf-8")
+        if knative_premise_findings(empty_cr, "no KnativeServing")[1] != 0:
+            failures.append("a CR file with no KnativeServing document claimed to have derived the "
+                            "premise from it.")
+
+    # The scope ledger is a library no CI step runs on its own; exercising it here is what stops it
+    # from being an unrun gate. Then: every dimension collect_sites() raises must have a floor.
+    failures += Scope.self_check()
+    tree_scope = scope_for_tree()
+    unfloored = [d for d in (*COLLECT_DIMENSIONS, "charts", "knative premise derivations")
+                 if tree_scope.floor_for(d) is None]
+    if unfloored:
+        failures.append(f"scope_for_tree() declares no floor for {unfloored} — a dimension that is "
+                        "measured but not judged proves nothing.")
 
     if failures:
         for failure in failures:
@@ -564,7 +621,7 @@ def self_test(root: pathlib.Path) -> int:
 
     print("self-test ok — classifier, renderer, named-template walk, Template.objects[] walk, "
           "Knative exemption, unknown-shape blocker and the Knative premise check all behaved as "
-          "declared.")
+          "declared, and the scope ledger fails an empty or truncated input set.")
     return 1
 
 
@@ -578,6 +635,32 @@ def discover_charts(root: pathlib.Path) -> list[pathlib.Path]:
                          "repo ships two dozen, so an empty selection means this guard is broken — "
                          "refusing to pass on an empty scope.")
     return charts
+
+
+def scope_for_tree() -> Scope:
+    """The floors for a real-tree run. Measured 2026-08-01: 26 charts, 52 helm renders, 72 image
+    sites at solve=false and 96 at solve=true, 4 kustomize builds carrying 10 sites, 1 Knative
+    premise derivation. Each floor sits under the measurement and far over any truncation."""
+    scope = Scope("image-pull-policy-guard")
+    scope.require("charts", 20,
+                  "gitops/entry-states ships 26 charts; a smaller number means discover_charts() "
+                  "stopped matching, not that six were deleted.")
+    scope.require("helm renders", 40, "two renders per chart, both value sets.")
+    scope.require("solve=false image sites", 40, "image references in the default world.")
+    scope.require("solve=true image sites", 55,
+                  "solve worlds materialize workloads the default render never emits, so this is "
+                  "the LARGER half. Zero means the solve=true render was dropped — the exact half "
+                  "where a real Route and a real pull-policy defect have hidden before.")
+    scope.require("kustomize builds", len(KUSTOMIZE_DIRS),
+                  "every declared overlay in KUSTOMIZE_DIRS must be built. This half renders with a "
+                  "different tool and is the easiest to drop without the run looking any different.")
+    scope.require("kustomize image sites", 8,
+                  "the promotion overlays and the rollouts dir carry 10 image references; a build "
+                  "that emits none is a kustomization that stopped selecting resources.")
+    scope.require("knative premise derivations", 1,
+                  "the exemption's premise is re-derived from the portfolio CR on every run. This "
+                  "check is WARN-ONLY, so nothing else notices when it stops answering.")
+    return scope
 
 
 def main(argv=None) -> int:
@@ -599,17 +682,14 @@ def main(argv=None) -> int:
             print(f"::error::image-pull-policy-guard self-test could not run: {exc}", file=sys.stderr)
             return 2
 
+    scope = scope_for_tree()
     try:
         charts = discover_charts(root)
-        sites = collect_sites(root, charts, KUSTOMIZE_DIRS)
+        scope.add("charts", len(charts))
+        sites, counts = collect_sites(root, charts, KUSTOMIZE_DIRS)
+        scope.merge(counts)
     except GuardError as exc:
         print(f"::error::image-pull-policy-guard: {exc}", file=sys.stderr)
-        return 2
-
-    if not sites:
-        print("::error::image-pull-policy-guard found zero image references across every rendered "
-              "chart and overlay. The workshop ships dozens — an empty scope means this guard is "
-              "broken, not that the tree is clean.", file=sys.stderr)
         return 2
 
     if args.list_images:
@@ -620,8 +700,15 @@ def main(argv=None) -> int:
 
     violations, blockers, stats = evaluate(sites)
 
-    for line in check_knative_premise(root):
+    premise_findings, derivations = check_knative_premise(root)
+    scope.add("knative premise derivations", derivations)
+    for line in premise_findings:
         print(f"::warning::image-pull-policy-guard: {line}")
+
+    # Before reporting anything: did the run actually inspect what it claims to?
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
 
     if blockers:
         print("\n::error::image-pull-policy-guard cannot judge every workshop image:", file=sys.stderr)
@@ -639,8 +726,7 @@ def main(argv=None) -> int:
               "layers.", file=sys.stderr)
         return 1
 
-    print(f"image-pull-policy-guard: clean — {len(charts)} charts rendered at "
-          f"solve={{false,true}} plus {len(KUSTOMIZE_DIRS)} kustomize builds; "
+    print(f"image-pull-policy-guard: clean — {scope.summary()}; "
           f"{stats['images']} image references seen, {stats['workshop']} workshop-built, "
           f"{stats['always']} with {REQUIRED_POLICY}, {stats['exempt']} declared-exempt.")
     return 0

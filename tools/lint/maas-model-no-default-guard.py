@@ -44,6 +44,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _scope import Scope  # noqa: E402  (path must be set first; this file is run as a script)
+
 # tools/lint/<this file> -> tools/lint -> tools -> repo root. Getting this wrong made the first
 # run look for content/ under tools/; the guard refused to report clean rather than passing on a
 # scope it could not find, which is the behaviour that made the bug visible in one run.
@@ -60,6 +63,12 @@ SITES = [
     (REPO / "gitops/workshop-config/values.yaml",
      re.compile(r'^\s*maasEndpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M), "values.yaml maasEndpoint"),
 ]
+
+# A LITERAL, deliberately not len(SITES): the point is that shrinking SITES must not be able to
+# shrink its own floor. Truncating the list the driver iterates (`SITES[:1]`) collapses the count
+# below this; editing SITES itself trips the self-test, which asserts the two agree. Adding a site
+# means bumping this number in the same change.
+MIN_SITES = 4
 
 # A value is acceptable ONLY if it is visibly not a real setting. The trailing "@" is Antora's
 # soft-set marker and is stripped before judging.
@@ -92,7 +101,14 @@ def judge(value: str) -> str | None:
             f"cluster serves something else. Use <set-from-ogsr-maas-credentials>.")
 
 
-def check(sites) -> int:
+def check(sites, min_sites: int = 1) -> int:
+    """`min_sites` is the floor for the number of sites actually judged.
+
+    It defaults to 1 for the self-test's single-site canaries; main() passes MIN_SITES. The old
+    "if not checked" was the weak form of this: it caught SITES = [] and missed SITES[:1], which is
+    the likelier accident and left the guard reporting "clean (1 site checked)" while three places a
+    concrete model can hide went unread (audit 2026-08-01).
+    """
     problems, checked = [], 0
     for path, rx, label in sites:
         if not path.exists():
@@ -106,9 +122,14 @@ def check(sites) -> int:
         why = judge(hits[0])
         if why:
             problems.append(f"  {label}: {why}")
-    if not checked:
-        print("ERROR: inspected nothing", file=sys.stderr)
-        return 2
+    scope = Scope("maas-model-no-default-guard")
+    scope.require("sites judged", min_sites,
+                  "every place the repo can carry a MaaS model or endpoint default. Reading fewer "
+                  "than all of them is not a clean result, it is an unread file.")
+    scope.add("sites judged", checked)
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
     if problems:
         print(f"maas-model-no-default-guard: {len(problems)} offender(s) across {checked} site(s).")
         print("\n".join(problems))
@@ -122,18 +143,61 @@ def self_test() -> int:
     import tempfile
     ok = True
     with tempfile.TemporaryDirectory() as d:
-        bad = Path(d) / "bad.yml"; bad.write_text('    maas_model: "llama-scout-17b@"\n')
-        good = Path(d) / "good.yml"; good.write_text('    maas_model: "<set-from-ogsr-maas-credentials>@"\n')
         rx = re.compile(r'^\s*maas_model\s*:\s*"?([^"\n#]+?)"?\s*$', re.M)
-        if check([(bad, rx, "canary-concrete")]) != 1:
-            print("SELF-TEST FAILED: a concrete model did not trip the guard", file=sys.stderr); ok = False
-        if check([(good, rx, "canary-placeholder")]) != 0:
-            print("SELF-TEST FAILED: a placeholder was wrongly flagged", file=sys.stderr); ok = False
+        cases = [
+            # (filename, contents, expected rc, what it proves)
+            ("bad.yml", '    maas_model: "llama-scout-17b@"\n', 1,
+             "a concrete model did not trip the guard"),
+            ("good.yml", '    maas_model: "<set-from-ogsr-maas-credentials>@"\n', 0,
+             "a bracketed placeholder was wrongly flagged"),
+            ("bare.yml", '    maas_model: "set-from-ogsr-maas-credentials@"\n', 0,
+             "the bracket-free placeholder — the form that actually survives HTML rendering, and "
+             "the reason this rule was rewritten on 2026-07-31 — was wrongly flagged"),
+            # The empty-value rule had no canary at all: judge() rejects an empty value with its own
+            # message and nothing proved the branch was even reachable. An empty value is how a
+            # half-deleted line looks and must not read as "no default is set, so this is fine".
+            #
+            # The shape below is the REACHABLE one, established by measurement rather than assumed:
+            # the value is the Antora soft-set marker with nothing in front of it, which is what a
+            # line looks like when someone clears the model and leaves the `@`. judge() strips the
+            # marker, sees "", and rejects it.
+            ("soft-set-only.yml", '    maas_model: "@"\n', 1,
+             "a value that is nothing but the Antora soft-set marker did not trip the guard — a "
+             "half-deleted line would read as a passing placeholder"),
+            # …and a value that is only whitespace takes the same branch.
+            ("blank.yml", '    maas_model:  \n', 1,
+             "a whitespace-only value did not trip the guard"),
+            # NOTE, measured 2026-08-01: `maas_model: ""` and a key with NOTHING after the colon do
+            # not reach judge() at all — the value regex requires one character, so they produce
+            # zero hits and exit 2 ("expected exactly one value"). That is also a refusal to report
+            # clean, by a different route, and it is recorded here so the next reader does not
+            # "fix" the fixture by adding a case that can only ever exit 2.
+        ]
+        for name, text, expected, complaint in cases:
+            probe = Path(d) / name
+            probe.write_text(text)
+            if check([(probe, rx, f"canary-{name}")]) != expected:
+                print(f"SELF-TEST FAILED: {complaint}", file=sys.stderr)
+                ok = False
+
+    # The declared floor must still equal the declared site list: MIN_SITES is a literal so that
+    # shrinking SITES cannot shrink its own floor, and this is what notices when the two diverge.
+    if MIN_SITES != len(SITES):
+        print(f"SELF-TEST FAILED: MIN_SITES is {MIN_SITES} but SITES declares {len(SITES)} entr"
+              f"(y|ies). A site was added or removed without re-stating the floor, so the floor has "
+              f"stopped asserting the real set.", file=sys.stderr)
+        ok = False
+    for failure in Scope.self_check():
+        print(f"SELF-TEST FAILED: {failure}", file=sys.stderr)
+        ok = False
+
     if not ok:
         return 2
-    print("self-test ok — a concrete value fails and a placeholder passes (both proven).")
+    print("self-test ok — a concrete value fails, an empty value fails, and both placeholder forms "
+          "pass; the site-count floor matches the declared sites; the scope ledger fails an empty "
+          "or truncated input set.")
     return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(self_test() if "--self-test" in sys.argv else check(SITES))
+    raise SystemExit(self_test() if "--self-test" in sys.argv else check(SITES, MIN_SITES))

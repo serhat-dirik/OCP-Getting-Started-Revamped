@@ -52,6 +52,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _scope import Scope, fixture_line_expectations  # noqa: E402  (path must be set first)
+
 # Curl -w format fields most likely to show up in this repo's labs. Informational only — the
 # scanner below flags ANY %{lowercase_identifier} shape inside a subs="attributes" block, because
 # that is exactly the shape Asciidoctor's own attribute-reference syntax matches, and a field we
@@ -157,15 +160,22 @@ def collect_defined_attributes(root: pathlib.Path) -> frozenset:
 
 
 def find_offenders(path: pathlib.Path, defined: frozenset):
-    """Yield (line_no, kind, name) for every brace reference at risk inside a subs="attributes" body.
+    """Return (offenders, scope counters) for one file.
 
-    kind is "curl" for `%{name}` (the SEV's shape) or "attr" for a bare `{name}` that no attribute
-    defines (the `{end}`-of-jsonpath shape).
+    Each offender is (line_no, kind, name); kind is "curl" for `%{name}` (the SEV's shape) or "attr"
+    for a bare `{name}` that no attribute defines (the `{end}`-of-jsonpath shape).
+
+    The counters are raised by the walk itself — one per subs="attributes" block ENTERED and one per
+    body line actually fed to the detector. That second one is the only thing that would notice the
+    scanner quietly inspecting just the first line of each block: the offender list looks identical
+    on this tree either way, because every defect it currently knows about happens to sit on line 1.
     """
+    offenders: list[tuple[int, str, str]] = []
+    counts = {"attribute-substitution blocks": 0, "block body lines inspected": 0}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (UnicodeDecodeError, OSError):
-        return
+        return offenders, counts
     i, n = 0, len(lines)
     while i < n:
         line = lines[i]
@@ -175,16 +185,19 @@ def find_offenders(path: pathlib.Path, defined: frozenset):
             if j < n and DELIMITER_RE.match(lines[j]):
                 delim = lines[j].rstrip()
                 k = j + 1
+                counts["attribute-substitution blocks"] += 1
                 while k < n and lines[k].rstrip() != delim:
+                    counts["block body lines inspected"] += 1
                     for m in REFERENCE_RE.finditer(lines[k]):
                         name = m.group(2)
                         if m.group(1) == "%":
-                            yield (k + 1, "curl", name)
+                            offenders.append((k + 1, "curl", name))
                         elif name not in defined and not name.startswith(ALLOWED_PREFIXES):
-                            yield (k + 1, "attr", name)
+                            offenders.append((k + 1, "attr", name))
                     k += 1
                 i = k  # resume scanning after the closing delimiter (or at EOF if unterminated)
         i += 1
+    return offenders, counts
 
 
 def collect_files(roots):
@@ -196,6 +209,43 @@ def collect_files(roots):
         elif p.is_dir():
             files.extend(sorted(p.rglob("*.adoc")))
     return files
+
+
+def scope_for_tree() -> Scope:
+    """Floors for a real-tree run over content/. Measured 2026-08-01: 139 .adoc files, 198
+    subs="attributes" blocks carrying 919 body lines, 118 attribute names collected."""
+    scope = Scope("curl-format-guard")
+    scope.require("files scanned", 90,
+                  "content/ holds ~139 .adoc pages. A handful means the walk stopped recursing — "
+                  "the shape that let a one-file scan report the whole tree clean.")
+    scope.require("attribute-substitution blocks", 120,
+                  'blocks that actually opened a subs="attributes" body. Zero means the opener or '
+                  "delimiter match broke and every page now looks defect-free.")
+    scope.require("block body lines inspected", 500,
+                  "lines fed to the detector INSIDE those blocks. This is what collapses (to ~198, "
+                  "one per block) if the scanner ever reads only a block's first line — a shrink "
+                  "that changes no finding on today's tree and would therefore be invisible.")
+    scope.require("attribute names collected", 60,
+                  "the defined-attribute set. If it collapses, every legitimate {user}/{gitea_url} "
+                  "reference in the tree becomes an 'undefined attribute' finding instead.")
+    return scope
+
+
+def scope_for_self_test() -> Scope:
+    """The canary is one small file; only the floors it can meet are asserted, and they still prove
+    the walk reached inside the blocks."""
+    scope = Scope("curl-format-guard --self-test")
+    scope.require("files scanned", 1, "the canary fixture.")
+    scope.require("attribute-substitution blocks", 4, "the fixture declares four blocks.")
+    scope.require("block body lines inspected", 6,
+                  "the fixture's blocks are deliberately multi-line so a first-line-only scan is "
+                  "visible here too, not just on the real tree.")
+    scope.require("attribute names collected", 60, "same collection as the real run.")
+    return scope
+
+
+def fixture_expectation_failures(fixture: pathlib.Path, fired_lines) -> list[str]:
+    return fixture_line_expectations(fixture, fired_lines)
 
 
 def main(argv=None):
@@ -219,13 +269,20 @@ def main(argv=None):
               "clean over an empty scope.", file=sys.stderr)
         return 2
 
+    scope = scope_for_self_test() if args.self_test else scope_for_tree()
     defined = collect_defined_attributes(repo_root())
+    scope.add("files scanned", len(files))
+    scope.add("attribute names collected", len(defined))
     offenders = 0
     kinds_seen = set()
+    fired_lines: set[int] = set()
     for f in files:
-        for line_no, kind, name in find_offenders(f, defined):
+        file_offenders, counts = find_offenders(f, defined)
+        scope.merge(counts)
+        for line_no, kind, name in file_offenders:
             offenders += 1
             kinds_seen.add(kind)
+            fired_lines.add(line_no)
             if kind == "curl":
                 print(f'{f}:{line_no}: %{{{name}}} is inside a subs="attributes" block — '
                       f'escape as %\\{{{name}}}')
@@ -236,12 +293,21 @@ def main(argv=None):
                       f'as \\{{{name}}}, or drop subs="attributes" from the block '
                       f'(jsonpath {{range …}}…{{end}} is the usual source).')
 
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
+
     if args.self_test:
+        failures = []
         missing = {"curl", "attr"} - kinds_seen
         if missing:
-            print(f"curl-format-guard: SELF-TEST FAILED — the canary fixture did not trigger the "
-                  f"{sorted(missing)} detector(s). The guard, not the fixture, is broken.",
-                  file=sys.stderr)
+            failures.append(f"the canary fixture did not trigger the {sorted(missing)} detector(s).")
+        failures += fixture_expectation_failures(files[0], fired_lines)
+        failures += Scope.self_check()
+        if failures:
+            for failure in failures:
+                print(f"curl-format-guard: SELF-TEST FAILED — {failure} The guard, not the "
+                      f"fixture, is broken.", file=sys.stderr)
             return 2
 
     if offenders:
@@ -249,8 +315,7 @@ def main(argv=None):
               file=sys.stderr)
         return 1
 
-    print(f"curl-format-guard: clean ({len(files)} file(s) scanned, "
-          f"{len(defined)} attribute names known).")
+    print(f"curl-format-guard: clean ({scope.summary()}).")
     return 0
 
 

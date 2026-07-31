@@ -99,6 +99,9 @@ import subprocess
 import sys
 import textwrap
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _scope import Scope  # noqa: E402  (path must be set first; this file is run as a script)
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - exercised only on a machine without PyYAML
@@ -197,6 +200,17 @@ for _task in PARASOL_TASKS:
                "the standalone artifact. The two drifted before (9549990) and the lab taught a "
                "Task nobody was running.",
     })
+
+
+# A LITERAL, deliberately not len(PAIRS): the point is that shrinking PAIRS must not be able to
+# shrink its own floor. Truncating the list the driver iterates (`PAIRS[:1]`) collapses the "pairs
+# compared" count below this; editing PAIRS itself trips the self-test, which asserts the two agree.
+# Adding a pair means bumping this number in the same change.
+MIN_PAIRS = 12
+
+# Structural comparison nodes across all pairs, measured 2026-08-01: 995. The floor is well under
+# that (Task bodies and pipelines grow and shrink) and far over what a fragment comparison yields.
+MIN_STRUCTURAL_NODES = 600
 
 
 class GuardError(Exception):
@@ -382,12 +396,16 @@ class Comparison:
         self.allow_added = [list(p) for p in (allow_added or [])]
         self.lua_paths = [list(p) for p in (lua_paths or [])]
         self.findings: list[tuple[str, list, str]] = []
+        # How many nodes this walk actually visited. Reported up to the scope ledger so a pair that
+        # silently compares a fragment of what it used to — or nothing — fails instead of passing.
+        self.nodes = 0
 
     def _record(self, kind, path, detail):
         self.findings.append((kind, list(path), detail))
 
     def compare(self, source, copy, path=None):
         path = list(path or [])
+        self.nodes += 1
 
         if path in self.lua_paths:
             if not isinstance(source, str) or not isinstance(copy, str):
@@ -460,7 +478,28 @@ def _first_line_delta(source: str, copy: str) -> str:
 # ---------------------------------------------------------------------------- per-pair drivers
 
 
-def check_bytes_pair(root: pathlib.Path, pair: dict) -> list[str]:
+class PairResult:
+    """What checking one pair produced: the human problems, the DETECTOR KINDS behind them, and how
+    much was actually inspected.
+
+    The kinds are carried here for one reason. The self-test used to reach past check_pair() and
+    call load_side + Comparison itself, so `check_structural_pair` — the production path for 11 of
+    the 12 pairs and the ONLY route to four of the six detectors — could be blinded to return no
+    findings and BOTH the self-test and the real run stayed green (audit, 2026-08-01). The self-test
+    now goes through check_pair() like main() does, which it can only do if the kinds survive the
+    trip.
+    """
+
+    def __init__(self, problems=None, kinds=None, nodes: int = 0):
+        self.problems: list[str] = list(problems or [])
+        self.kinds: set[str] = set(kinds or ())
+        self.nodes = nodes
+
+    def __bool__(self) -> bool:
+        return bool(self.problems)
+
+
+def check_bytes_pair(root: pathlib.Path, pair: dict) -> PairResult:
     problems = []
     paths = {}
     for label, spec in (("source", pair["source"]), ("copy", pair["copy"])):
@@ -481,19 +520,25 @@ def check_bytes_pair(root: pathlib.Path, pair: dict) -> list[str]:
             fromfile=pair["source"]["file"], tofile=pair["copy"]["file"], lineterm="")
         for line in list(diff)[:40]:
             problems.append(f"      {line}")
-    return problems
+    # One node per side actually read. Raised HERE, past the two is_file() gates, so a driver that
+    # stops reaching this function cannot satisfy the floor by other means.
+    return PairResult(problems, {"bytes"} if problems else set(), nodes=2)
 
 
-def check_structural_pair(root: pathlib.Path, pair: dict) -> list[str]:
+def check_structural_pair(root: pathlib.Path, pair: dict) -> PairResult:
     source, _ = load_side(root, pair["source"], "source")
     copy, _ = load_side(root, pair["copy"], "copy")
     comparison = Comparison(pair.get("allow_added"), pair.get("lua_paths"))
     comparison.compare(source, copy)
-    return [f"  {kind}: {_fmt_path(path)}\n      {detail}"
-            for kind, path, detail in comparison.findings]
+    return PairResult(
+        [f"  {kind}: {_fmt_path(path)}\n      {detail}"
+         for kind, path, detail in comparison.findings],
+        {kind for kind, _, _ in comparison.findings},
+        nodes=comparison.nodes)
 
 
-def check_pair(root: pathlib.Path, pair: dict) -> list[str]:
+def check_pair(root: pathlib.Path, pair: dict) -> PairResult:
+    """THE production entry point. main() and self_test() both go through here — see PairResult."""
     if pair["mode"] == "bytes":
         return check_bytes_pair(root, pair)
     return check_structural_pair(root, pair)
@@ -614,26 +659,26 @@ def self_test(root: pathlib.Path) -> int:
     for pair in canaries:
         expected = pair["expect"]
         try:
-            if pair["mode"] == "bytes":
-                problems = check_bytes_pair(root, pair)
-                got = {"bytes"} if problems else set()
-            else:
-                source, _ = load_side(root, pair["source"], "source")
-                copy, _ = load_side(root, pair["copy"], "copy")
-                comparison = Comparison(pair.get("allow_added"), pair.get("lua_paths"))
-                comparison.compare(source, copy)
-                got = {kind for kind, _, _ in comparison.findings}
+            # THROUGH check_pair, deliberately. The previous version called load_side + Comparison
+            # directly, which meant check_structural_pair — the production path for 11 of the 12
+            # real pairs — was never executed by the self-test at all, and could be blinded to
+            # return nothing with both the self-test and the real run staying green.
+            result = check_pair(root, pair)
         except GuardError as exc:
             failures.append(f"{pair['id']}: the guard could not evaluate its own canary — {exc}")
             continue
+        got = result.kinds
         kinds_seen |= got
         if got != expected:
             verb = ("detected nothing" if not got else f"detected {sorted(got)}")
             failures.append(f"{pair['id']}: expected {sorted(expected) or 'a clean result'}, "
                             f"{verb}.")
+        elif result.nodes < 1:
+            failures.append(f"{pair['id']}: behaved as declared but reported inspecting 0 nodes — "
+                            "the count the real run's scope floor depends on is not being raised.")
         else:
             print(f"self-test: {pair['id']} → "
-                  f"{sorted(got) if got else 'clean, as declared'} ✅")
+                  f"{sorted(got) if got else 'clean, as declared'} ({result.nodes} nodes) ✅")
 
     required = {"bytes", "value", "added", "missing", "allowlist-misuse", "lua-value"}
     missing_detectors = required - kinds_seen
@@ -641,17 +686,45 @@ def self_test(root: pathlib.Path) -> int:
         failures.append(f"the canary set never exercised detector(s) {sorted(missing_detectors)} — "
                         "the guard, not the fixture, is unproven for that class.")
 
+    # The scope ledger is a library no CI step runs on its own; exercising it here is what stops it
+    # from being an unrun gate.
+    failures += Scope.self_check()
+    # …and the declared floor must still match the declared pair list. PAIRS[:1] was undetected.
+    if scope_for_tree().floor_for("pairs compared") != len(PAIRS):
+        failures.append(f"MIN_PAIRS ({scope_for_tree().floor_for('pairs compared')}) no longer "
+                        f"equals len(PAIRS) ({len(PAIRS)}). A pair was added or removed without "
+                        "re-stating the floor, so the floor has stopped asserting the real set.")
+
     if failures:
         for failure in failures:
             print(f"::error::copy-drift-guard SELF-TEST FAILED — {failure}", file=sys.stderr)
         return 2
 
-    print(f"self-test ok — every canary behaved as declared "
-          f"({len(canaries)} fixture pairs, {len(required)} detectors proven).")
+    print(f"self-test ok — every canary behaved as declared, all through check_pair() as main() "
+          f"uses it ({len(canaries)} fixture pairs, {len(required)} detectors proven), and the "
+          f"scope ledger fails an empty or truncated input set.")
     return 1
 
 
 # ---------------------------------------------------------------------------- main
+
+
+def scope_for_tree() -> Scope:
+    """Floors for a full run (every declared pair). `--pair ID` is local debugging and gets the
+    reduced ledger built in main() instead — a floor of 12 on a deliberate one-pair run would be a
+    false alarm, and false alarms are how gates get deleted."""
+    scope = Scope("copy-drift-guard")
+    scope.require("pairs compared", MIN_PAIRS,
+                  f"the guard declares {MIN_PAIRS} hand-maintained duplicates. Fewer means the "
+                  "driver is iterating a truncated list, not that duplicates were retired.")
+    scope.require("structural nodes compared", MIN_STRUCTURAL_NODES,
+                  "YAML nodes actually walked by Comparison.compare(). This is the count that "
+                  "collapses when check_structural_pair stops doing the comparison — the blinding "
+                  "that kept BOTH the self-test and the real run green (audit 2026-08-01).")
+    scope.require("byte-identical pairs compared", 1,
+                  "the claims-seed pair is the one non-YAML duplicate; its mode has its own reader "
+                  "and would otherwise be provable only by the canary.")
+    return scope
 
 
 def main(argv=None) -> int:
@@ -677,12 +750,17 @@ def main(argv=None) -> int:
         return self_test(root)
 
     pairs = PAIRS
+    scope = scope_for_tree()
     if args.pair:
         pairs = [p for p in PAIRS if p["id"] == args.pair]
         if not pairs:
             print(f"copy-drift-guard: no declared pair with id {args.pair!r} — refusing to report "
                   f"clean over an empty scope. Try --list.", file=sys.stderr)
             return 2
+        # Deliberate single-pair debugging: the only floor that still means anything is "the pair
+        # was actually compared".
+        scope = Scope("copy-drift-guard --pair")
+        scope.require("pairs compared", 1, "the requested pair must actually be compared.")
 
     if not pairs:
         print("::error::copy-drift-guard has no pairs declared — refusing to report clean over an "
@@ -692,17 +770,27 @@ def main(argv=None) -> int:
     drifted = 0
     for pair in pairs:
         try:
-            problems = check_pair(root, pair)
+            result = check_pair(root, pair)
         except GuardError as exc:
             print(f"::error::copy-drift-guard [{pair['id']}] cannot be checked: {exc}",
                   file=sys.stderr)
             return 2
-        if problems:
+        scope.add("pairs compared")
+        if pair["mode"] == "bytes":
+            scope.add("byte-identical pairs compared")
+        else:
+            scope.add("structural nodes compared", result.nodes)
+        if result.problems:
             drifted += 1
             print(f"\nDRIFT [{pair['id']}]")
-            for problem in problems:
+            for problem in result.problems:
                 print(problem)
             print(f"  why it matters: {pair['why']}")
+
+    # Before reporting anything: did the run actually inspect what it claims to?
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
 
     if drifted:
         print(f"\n::error::{drifted} of {len(pairs)} hand-maintained copies drifted from their "
@@ -711,7 +799,7 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
-    print(f"copy-drift-guard: clean ({len(pairs)} pair(s) checked).")
+    print(f"copy-drift-guard: clean ({scope.summary()}).")
     return 0
 
 

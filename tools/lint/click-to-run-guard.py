@@ -83,6 +83,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _scope import Scope  # noqa: E402  (path must be set first)
+
 # The block-opener line. Accepts both forms seen in this repo (`role=execute` bare, and quoted
 # multi-word roles like `role="execute send-to-tty-bottom"` that click-to-run.js also understands
 # for the second/bottom terminal) without hard-coding either shape.
@@ -192,15 +195,20 @@ def iter_execute_blocks(lines: list[str]):
 
 
 def find_offenders_in_block(body: list[tuple[int, str]]):
-    """Yield (line_no, stripped_text) for every interactive `read` not at the block's last
-    non-blank line. `body` is the block's content lines, excluding the [source] and delimiter
-    lines themselves."""
+    """Return (offenders, command lines examined) for one block.
+
+    An offender is (line_no, stripped_text) for every interactive `read` not at the block's last
+    non-blank line. `body` is the block's content lines, excluding the [source] and delimiter lines
+    themselves. The second value counts only lines that actually reached the `read` test — past
+    blanks, past heredoc bodies, past comments — so it is evidence the walk went INSIDE the block.
+    """
     last_nonblank = None
     for line_no, text in body:
         if text.strip():
             last_nonblank = line_no
 
     offenders = []
+    examined = 0
     in_heredoc = False
     heredoc_delim = None
     heredoc_strip_leading = False
@@ -216,6 +224,7 @@ def find_offenders_in_block(body: list[tuple[int, str]]):
         if not stripped:
             continue
         if not stripped.startswith("#"):
+            examined += 1
             if line_has_interactive_read(text) and line_no != last_nonblank:
                 offenders.append((line_no, stripped))
             m = HEREDOC_START_RE.search(text)
@@ -223,36 +232,53 @@ def find_offenders_in_block(body: list[tuple[int, str]]):
                 in_heredoc = True
                 heredoc_delim = m.group(3)
                 heredoc_strip_leading = bool(m.group(1))
-    return offenders
-
-
-def find_offenders(path: pathlib.Path):
-    """Yield (line_no, snippet) for every offending block body line, and count blocks scanned."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (UnicodeDecodeError, OSError):
-        return 0
-    blocks_scanned = 0
-    for body in iter_execute_blocks(lines):
-        blocks_scanned += 1
-        for line_no, snippet in find_offenders_in_block(body):
-            yield (line_no, snippet)
-    return blocks_scanned
+    return offenders, examined
 
 
 def scan_file(path: pathlib.Path):
-    """Return (offenders, blocks_scanned) for one file — a plain wrapper because `find_offenders`
-    is a generator and its `return` value (the block count) is otherwise unreachable without
-    exhausting it first."""
-    offenders = []
-    gen = find_offenders(path)
-    while True:
-        try:
-            offenders.append(next(gen))
-        except StopIteration as stop:
-            blocks_scanned = stop.value or 0
-            break
-    return offenders, blocks_scanned
+    """Return (offenders, scope counters) for one file."""
+    counts = {"execute blocks": 0, "block command lines examined": 0}
+    offenders: list[tuple[int, str]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (UnicodeDecodeError, OSError):
+        return offenders, counts
+    for body in iter_execute_blocks(lines):
+        counts["execute blocks"] += 1
+        block_offenders, examined = find_offenders_in_block(body)
+        counts["block command lines examined"] += examined
+        offenders += block_offenders
+    return offenders, counts
+
+
+def scope_for_tree() -> Scope:
+    """Floors for a real-tree run over content/. Measured 2026-08-01: 139 .adoc files carrying 978
+    execute blocks and 2641 command lines inside them."""
+    scope = Scope("click-to-run-guard")
+    scope.require("files scanned", 90,
+                  "content/ holds ~139 .adoc pages. A handful means the walk stopped recursing — "
+                  "the shape that lets a one-file scan report the whole tree clean.")
+    scope.require("execute blocks", 600,
+                  "blocks that actually opened a role=execute body. Zero, or a fraction of 978, "
+                  "means the opener or the delimiter match broke and every page looks defect-free.")
+    scope.require("block command lines examined", 1500,
+                  "lines fed to the detector INSIDE those blocks. Deliberately set ABOVE the block "
+                  "count (978): if the scanner ever reads only each block's FIRST line this "
+                  "collapses to at most one per block and trips the floor. That regression changes "
+                  "no finding on today's tree, so nothing else here would notice it.")
+    return scope
+
+
+def scope_for_self_test() -> Scope:
+    """The canary is one small fixture; only the floors it can meet are asserted, and they still
+    prove the walk reached inside the blocks rather than merely counting them."""
+    scope = Scope("click-to-run-guard --self-test")
+    scope.require("files scanned", 1, "the canary fixture.")
+    scope.require("execute blocks", 6, "the fixture declares six blocks.")
+    scope.require("block command lines examined", 10,
+                  "above the fixture's six blocks on purpose, so a first-line-only scan is visible "
+                  "here too and not only on the real tree.")
+    return scope
 
 
 def collect_files(roots):
@@ -288,18 +314,22 @@ def main(argv=None):
               "clean over an empty scope.", file=sys.stderr)
         return 2
 
+    scope = scope_for_self_test() if args.self_test else scope_for_tree()
+    scope.add("files scanned", len(files))
+
     all_offenders = []
-    total_blocks = 0
     for f in files:
-        offenders, blocks_scanned = scan_file(f)
-        total_blocks += blocks_scanned
+        offenders, counts = scan_file(f)
+        scope.merge(counts)
         for line_no, snippet in offenders:
             all_offenders.append((f, line_no, snippet))
 
-    if total_blocks == 0:
-        print(f"click-to-run-guard: {len(files)} file(s) scanned but zero "
-              "[source,...,role=execute...] blocks found — refusing to report clean over an "
-              "empty scope.", file=sys.stderr)
+    total_blocks = scope.get("execute blocks")
+
+    # The old check here fired only on TOTAL emptiness, which let a scope that had merely SHRUNK
+    # report clean. The ledger asserts a floor per dimension instead, so a truncated walk or a
+    # first-line-only read fails rather than passing quietly over a smaller tree.
+    if scope.enforce() != 0:
         return 2
 
     if args.self_test:

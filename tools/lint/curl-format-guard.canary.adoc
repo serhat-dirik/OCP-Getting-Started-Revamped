@@ -3,25 +3,51 @@
 // reject, so `curl-format-guard.py --self-test` can prove the detector actually fires instead of
 // silently scanning nothing. DO NOT "fix" the %{http_code} / %{time_total} below — that is the
 // point of this file. See the postmortem in the script's own docstring (commit 2e6fc1c).
+//
+// EVERY LINE INSIDE A BLOCK CARRIES ITS OWN EXPECTATION, as a trailing marker: the positive one
+// says the guard has to flag that line, the negative one says it has to stay silent. (They are not
+// spelled out in this header — the self-test scans the whole file for them, so naming them here
+// would declare an expectation on a comment line.) The self-test compares the flagged line numbers
+// against those markers, so blinding any single rule flips a specific line and names it. A
+// total-only assertion cannot: it stays correct while a rule quietly stops mattering.
 
+// Case 1 — the curl `-w` format field the SEV was made of.
 [source,sh,role=execute,subs="attributes"]
 ----
-oc exec deploy/demo-client -n {user}-dev -- curl -s -k -m 30 -o /dev/null -w "claim -> broker: HTTP %{http_code} in %{time_total}s\n" "$URL"
+# MUST-NOT-FIRE — a comment line with no brace reference at all
+oc exec deploy/demo-client -n {user}-dev -- curl -s -k -m 30 -o /dev/null -w "claim -> broker: HTTP %{http_code} in %{time_total}s\n" "$URL"   # MUST-FIRE
 ----
 
 // Case 2 — the jsonpath `{end}`. Same defect, no percent sign in sight: `{range .items[*]}` and
 // `{.metadata.name}` cannot start an attribute name (a space, a leading dot), but `{end}` is
 // EXACTLY an attribute reference, and antora warns "skipping reference to missing attribute: end".
 // DO NOT "fix" the {end} below — proving the bare-attribute detector fires is this block's whole job.
+//
+// The offending line is deliberately the THIRD line of its block, not the first. Every real defect
+// this guard has ever seen sat on a block's opening line, so a scanner that inspected only the
+// first body line of each block would have found them all and called this fixture clean too.
 [source,sh,role=execute,subs="attributes"]
 ----
-oc get pods -n {user}-dev -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'
+echo "gathering pod names"                                                   # MUST-NOT-FIRE
+oc project {user}-dev                                                        # MUST-NOT-FIRE
+oc get pods -n {user}-dev -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'   # MUST-FIRE
 ----
 
 // Counter-case — this block must stay CLEAN, or the guard is too eager to be trusted: {user} is a
 // defined attribute, \{end} is correctly escaped, and %\{http_code} is the documented curl escape.
 [source,sh,role=execute,subs="attributes"]
 ----
-oc get pods -n {user}-dev -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}\{end}'
-curl -s -o /dev/null -w "%\{http_code}\n" "https://parasol-web-{user}-dev.{cluster_domain}/"
+oc get pods -n {user}-dev -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}\{end}'   # MUST-NOT-FIRE
+curl -s -o /dev/null -w "%\{http_code}\n" "https://parasol-web-{user}-dev.{cluster_domain}/"   # MUST-NOT-FIRE
+----
+
+// Counter-case 2 — the ALLOWED_PREFIXES escape hatch. Antora's page-* family is resolved by Antora
+// itself and never appears in the collected attribute set, so it is allowed BY PREFIX rather than
+// by name. Nothing in content/ exercises that branch today, which means deleting ALLOWED_PREFIXES
+// changed no finding anywhere and the self-test stayed green — measured 2026-08-01. This block is
+// the only thing that now notices.
+[source,sh,role=execute,subs="attributes"]
+----
+echo "this page is {page-component-title}, version {page-component-version}"   # MUST-NOT-FIRE
+echo "and the module is {page-module}"                                         # MUST-NOT-FIRE
 ----

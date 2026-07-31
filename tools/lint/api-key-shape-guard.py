@@ -80,6 +80,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _scope import Scope  # noqa: E402  (path must be set first; this file is run as a script)
+
 # Layers 1 and 2. Layer 3 (opacity) is not expressible in a POSIX ERE without lookahead, which is
 # precisely why this moved out of the inline `git grep` in .github/workflows/lint.yml and into a
 # guard that can be self-tested.
@@ -179,8 +182,16 @@ def scan_text(text: str, origin: str) -> list[tuple[str, int, str]]:
     return findings
 
 
-def scan_files(root: pathlib.Path, files: list[str]) -> list[tuple[str, int, str]]:
+def scan_files(root: pathlib.Path, files: list[str]) -> tuple[list[tuple[str, int, str]], dict]:
+    """(findings, scope counters).
+
+    The counters are raised INSIDE this loop, past every `continue`, because the audit blinded this
+    function to return [] and the guard printed "clean (1253 tracked files scanned)" and exited 0 —
+    that message was counting the SELECTION, not what was read. A number that can be printed without
+    the reading happening is not evidence that it happened.
+    """
     findings = []
+    counts = {"files read": 0, "lines scanned": 0}
     for name in files:
         path = root / name
         if not path.is_file() or path.is_symlink():
@@ -191,8 +202,10 @@ def scan_files(root: pathlib.Path, files: list[str]) -> list[tuple[str, int, str
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue  # binary or unreadable: not somewhere a key is pasted by accident
+        counts["files read"] += 1
+        counts["lines scanned"] += len(text.splitlines())
         findings += scan_text(text, name)
-    return findings
+    return findings, counts
 
 
 # --------------------------------------------------------------------------------- self-test
@@ -271,6 +284,17 @@ def self_test(root: pathlib.Path) -> int:
                             f"{'' if should_exclude else 'NOT '}be excluded. Every exclusion is a "
                             "hole; a wrong one is an unguarded file.")
 
+    # The scope ledger is a library no CI step runs on its own; exercising it here is what stops it
+    # from being an unrun gate. And scan_files must actually count what it read: the audit blinded
+    # it to return [] and the run stayed clean, because the printed number counted the SELECTION.
+    failures += Scope.self_check()
+    probe_findings, probe_counts = scan_files(root, [CANARY])
+    if not probe_findings or probe_counts["files read"] != 1 or probe_counts["lines scanned"] < 10:
+        failures.append(f"scan_files() over the canary reported {probe_counts} and "
+                        f"{len(probe_findings)} finding(s). It is the only function that measures "
+                        "how much of the tree was actually read, and the real run's floors depend "
+                        "on those counts being raised by the reading itself.")
+
     if failures:
         for failure in failures:
             print(f"::error::api-key-shape-guard SELF-TEST FAILED — {failure}", file=sys.stderr)
@@ -283,6 +307,19 @@ def self_test(root: pathlib.Path) -> int:
 
 
 # --------------------------------------------------------------------------------- main
+
+
+def scope_for_tree() -> Scope:
+    """Floors for a real-tree run. Measured 2026-08-01: 1253 tracked files selected, 1210 actually
+    read (the rest are binary, oversized or symlinks), 122,356 lines scanned."""
+    scope = Scope("api-key-shape-guard")
+    scope.require("files read", 800,
+                  "the repo tracks ~1250 files and ~1210 of them are readable text. A smaller "
+                  "number means the reader is skipping, not that the repo shrank.")
+    scope.require("lines scanned", 50_000,
+                  "a key is pasted on ONE line; the number of lines actually fed to the detector is "
+                  "the only measure of how much of the repo it saw.")
+    return scope
 
 
 def main(argv=None) -> int:
@@ -326,7 +363,14 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    findings = scan_files(root, scanned)
+    scope = scope_for_tree()
+    findings, counts = scan_files(root, scanned)
+    scope.merge(counts)
+    # Before reporting anything: did the run actually read what it claims to have scanned?
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
+
     if findings:
         print("Key-shaped strings in tracked files (redacted — see the guard's docstring):")
         for origin, lineno, shape in findings:
@@ -337,7 +381,7 @@ def main(argv=None) -> int:
               "hyphenated words, no opaque chunk — rather than adding an exclusion.", file=sys.stderr)
         return 1
 
-    print(f"api-key-shape-guard: clean ({len(scanned)} tracked files scanned, "
+    print(f"api-key-shape-guard: clean ({scope.summary()}; {len(scanned)} tracked files selected, "
           f"{len(files) - len(scanned)} declared fixture path(s) excluded).")
     return 0
 

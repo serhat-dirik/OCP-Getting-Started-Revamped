@@ -86,6 +86,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _scope import Scope, fixture_line_expectations  # noqa: E402  (path must be set first)
+
 # The attendee-facing renderings. Numbers may not appear here; instructor/troubleshooting are
 # provenance surfaces and are deliberately absent.
 ATTENDEE_PAGES = ("concept.adoc", "lab.adoc", "wrapup.adoc")
@@ -113,14 +116,23 @@ COMMENT_RE = re.compile(r"^\s*//")
 
 
 def find_offenders(path: pathlib.Path):
-    """Yield (line_no, kind, text) for each version anchor in rendered attendee prose.
+    """Return (offenders, scope counters) for one page.
 
-    kind is "attr" ({ocp_version}), "literal" (4.22), or "marker" (an opt-out with no reason).
+    Each offender is (line_no, kind, text); kind is "attr" ({ocp_version}), "literal" (4.22), or
+    "marker" (an opt-out with no reason).
+
+    "prose lines inspected" counts only lines that reached the two detectors — past the verbatim
+    blocks, the `//` comments and any active opt-out. It is what collapses if the page walk breaks,
+    and it is measured HERE rather than as len(lines) in main() so it cannot be satisfied by a walk
+    that never happened.
     """
+    offenders: list[tuple[int, str, str]] = []
+    counts = {"attendee pages read": 0, "prose lines inspected": 0}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (UnicodeDecodeError, OSError):
-        return
+        return offenders, counts
+    counts["attendee pages read"] += 1
 
     in_verbatim = False
     verbatim_delim = ""
@@ -145,7 +157,7 @@ def find_offenders(path: pathlib.Path):
             continue
 
         if OPT_OUT_BARE_RE.match(line):
-            yield (i, "marker", "// version-anchor-ok with no reason given")
+            offenders.append((i, "marker", "// version-anchor-ok with no reason given"))
             exempt = True
             continue
         if OPT_OUT_RE.match(line):
@@ -159,10 +171,12 @@ def find_offenders(path: pathlib.Path):
         if exempt:
             continue
 
+        counts["prose lines inspected"] += 1
         for m in ATTR_RE.finditer(line):
-            yield (i, "attr", m.group(0))
+            offenders.append((i, "attr", m.group(0)))
         for m in LITERAL_RE.finditer(line):
-            yield (i, "literal", m.group(0))
+            offenders.append((i, "literal", m.group(0)))
+    return offenders, counts
 
 
 def collect_files(roots):
@@ -199,15 +213,17 @@ def main(argv=None):
               f"{args.paths!r} — refusing to report clean over an empty scope.", file=sys.stderr)
         return 2
 
+    scope = scope_for_self_test() if args.self_test else scope_for_tree()
     offenders = 0
     kinds_seen = set()
-    exempt_leak = False
+    fired_lines: set[int] = set()
     for f in files:
-        for line_no, kind, text in find_offenders(f):
+        file_offenders, counts = find_offenders(f)
+        scope.merge(counts)
+        for line_no, kind, text in file_offenders:
             offenders += 1
             kinds_seen.add(kind)
-            if args.self_test and "EXEMPT-MUST-NOT-FIRE" in text:
-                exempt_leak = True
+            fired_lines.add(line_no)
             if kind == "attr":
                 print(f"{f}:{line_no}: {text} anchors attendee prose to the build cluster's "
                       f"release. It also makes any 'GA in'/'shipped with' claim re-assert a new "
@@ -222,17 +238,26 @@ def main(argv=None):
                 print(f"{f}:{line_no}: {text} — the opt-out requires a reason so the next reader "
                       f"can judge whether it still applies.")
 
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
+
     if args.self_test:
+        failures = []
         missing = {"attr", "literal", "marker"} - kinds_seen
         if missing:
-            print(f"version-anchor-guard: SELF-TEST FAILED — the canary did not trigger the "
-                  f"{sorted(missing)} detector(s). The guard, not the fixture, is broken.",
-                  file=sys.stderr)
-            return 2
-        if exempt_leak:
-            print("version-anchor-guard: SELF-TEST FAILED — the opt-out marker did not suppress "
-                  "its paragraph. An exemption that does not exempt would push authors to delete "
-                  "the guard instead of using it.", file=sys.stderr)
+            failures.append(f"the canary did not trigger the {sorted(missing)} detector(s).")
+        # Per-LINE expectations, not a total. The old check looked for "EXEMPT-MUST-NOT-FIRE" in the
+        # offender's TEXT — but text is the matched token ("4.22"), never the line — so it could
+        # never fire, and blinding the opt-out left the self-test at 1. The markers in the fixture
+        # now pin which lines must be flagged and which must not, including the first line AFTER the
+        # exempted paragraph's blank line, which is what proves the exemption ENDS.
+        failures += fixture_line_expectations(files[0], fired_lines)
+        failures += Scope.self_check()
+        if failures:
+            for failure in failures:
+                print(f"version-anchor-guard: SELF-TEST FAILED — {failure} The guard, not the "
+                      f"fixture, is broken.", file=sys.stderr)
             return 2
 
     if offenders:
@@ -240,8 +265,33 @@ def main(argv=None):
               f"page(s) scanned.", file=sys.stderr)
         return 1
 
-    print(f"version-anchor-guard: clean ({len(files)} attendee page(s) scanned).")
+    print(f"version-anchor-guard: clean ({scope.summary()}).")
     return 0
+
+
+def scope_for_tree() -> Scope:
+    """Floors for a real-tree run. Measured 2026-08-01: 78 attendee pages, ~9,900 prose lines
+    reaching the detectors."""
+    scope = Scope("version-anchor-guard")
+    scope.require("attendee pages read", 60,
+                  f"the catalog ships 26 modules x {len(ATTENDEE_PAGES)} attendee renderings = 78 "
+                  "pages. A handful means collect_files stopped matching, not that modules were "
+                  "removed — and a one-file scan reporting the whole tree clean is the shape this "
+                  "floor exists for.")
+    scope.require("prose lines inspected", 4000,
+                  "lines that actually reached the two detectors, past verbatim blocks, `//` "
+                  "comments and active opt-outs. If this collapses, the pages were opened and not "
+                  "read.")
+    return scope
+
+
+def scope_for_self_test() -> Scope:
+    scope = Scope("version-anchor-guard --self-test")
+    scope.require("attendee pages read", 1, "the canary fixture.")
+    scope.require("prose lines inspected", 10,
+                  "the fixture's prose must actually reach the detectors; a walk that skips it "
+                  "would otherwise look like a canary with nothing in it.")
+    return scope
 
 
 if __name__ == "__main__":

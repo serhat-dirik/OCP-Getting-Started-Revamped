@@ -56,6 +56,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _scope import Scope  # noqa: E402  (path must be set first; this file is run as a script)
+
 try:
     import yaml
 except ModuleNotFoundError:
@@ -107,26 +110,36 @@ def read_var_lists(body: str) -> list[list[str]]:
     return out
 
 
-def contract_findings(source: str) -> list[str]:
-    """Takes the script TEXT, never the path: the self-test's contract mutants must never be able
-    to leave a mutated tools/ws/ws behind if this process is interrupted."""
+def contract_findings(source: str) -> tuple[list[str], int]:
+    """(findings, pinned invariants actually checked).
+
+    Takes the script TEXT, never the path: the self-test's contract mutants must never be able to
+    leave a mutated tools/ws/ws behind if this process is interrupted.
+
+    The second return value exists because main() runs two independent halves and dropping either
+    one left the guard reporting "clean" and exiting 0 (audit 2026-08-01). Both halves now report
+    how many things they pinned, and main() measures that against a floor.
+    """
     findings: list[str] = []
+    checked = 0
     try:
         bodies = {name: function_body(source, name) for name in (
             "rebuild_enumerate", "rebuild_scan", "rebuild_print_table",
             "rebuild_row_summary", "rebuild_image_parts", "cmd_rebuild_images", "cmd_doctor")}
     except LookupError as missing:
-        return [f"tools/ws/ws no longer defines {missing.args[0]}() — the rebuild path was renamed "
-                f"or removed and this guard is checking nothing. Update it deliberately."]
+        return ([f"tools/ws/ws no longer defines {missing.args[0]}() — the rebuild path was renamed "
+                 f"or removed and this guard is checking nothing. Update it deliberately."], 0)
 
     # 1. rebuild_scan's two row printfs must agree with each other and with all three readers.
     scan_widths = set(printf_field_counts(bodies["rebuild_scan"]))
+    checked += 1
     if scan_widths != {len(SCAN_FIELDS)}:
         findings.append(f"rebuild_scan emits rows of width {sorted(scan_widths)}; the row contract "
                         f"is {len(SCAN_FIELDS)} fields ({' '.join(SCAN_FIELDS)}). Its two printfs "
                         f"(the digest-pinned early return and the normal path) must stay identical "
                         f"in width — a reader binds fewer names in silence.")
     for consumer in ("rebuild_print_table", "rebuild_row_summary", "cmd_rebuild_images"):
+        checked += 1
         lists = [names for names in read_var_lists(bodies[consumer]) if names[:1] == ["kind"]]
         if not lists:
             findings.append(f"{consumer}() no longer reads a rebuild_scan row "
@@ -150,6 +163,7 @@ def contract_findings(source: str) -> list[str]:
         for block in tmpl.split('{{"\\n"}}'):
             if '{{"\\t"}}' in block:
                 enum_tabs.add(block.count('{{"\\t"}}') + 1)
+    checked += 1
     if not enum_reader:
         findings.append("rebuild_scan() no longer reads rebuild_enumerate's rows "
                         "(`IFS=$'\\t' read -r kind ns name sel cname image`).")
@@ -162,6 +176,7 @@ def contract_findings(source: str) -> list[str]:
     # 3. rebuild_row_summary's output and cmd_doctor's reader.
     summary_widths = set(printf_field_counts(bodies["rebuild_row_summary"]))
     doctor_reads = [n for n in read_var_lists(bodies["cmd_doctor"]) if n[0].startswith("d_")]
+    checked += 2
     if summary_widths != {4}:
         findings.append(f"rebuild_row_summary emits {sorted(summary_widths)} field(s); ws doctor "
                         f"reads total/stale/no-tag/offenders.")
@@ -177,6 +192,7 @@ def contract_findings(source: str) -> list[str]:
     # 4. rebuild_image_parts' output and its reader.
     parts_widths = set(printf_field_counts(bodies["rebuild_image_parts"]))
     parts_reads = [n for n in read_var_lists(bodies["rebuild_scan"]) if n[:1] == ["src_ns"]]
+    checked += 2
     if parts_widths != {4}:
         findings.append(f"rebuild_image_parts emits {sorted(parts_widths)} field(s); its three "
                         f"printfs (digest ref, tagged ref, bare ref) must all emit 4.")
@@ -187,31 +203,36 @@ def contract_findings(source: str) -> list[str]:
 
     # 5. The emptiness guards. A collapsed field is only possible where a field CAN be empty, and
     #    each of these is a measured or one-step-away instance rather than a defensive habit.
+    checked += 1
     if '{{if not $s}}{{$s = "-"}}{{end}}' not in bodies["rebuild_enumerate"]:
         findings.append('rebuild_enumerate no longer emits the literal "-" for a workload with no '
                         '.spec.selector. A CronJob has none, so the column goes empty, `IFS=$\'\\t\' '
                         'read` collapses it, and every CronJob leaves the scan silently — measured '
                         'on ksls5 2026-07-29 with a probe CronJob that never appeared.')
     ksvc_tmpl = re.search(r"local\s+ktmpl='([^']*)'", bodies["rebuild_enumerate"])
+    checked += 1
     if ksvc_tmpl and '{{$sel := printf' not in ksvc_tmpl.group(1):
         findings.append("rebuild_enumerate's ksvc template no longer initializes $sel with a "
                         "printf, so a ksvc with no .status.traffic emits an empty selector column "
                         "and collapses the row the same way a CronJob did.")
+    checked += 1
     if "${module:--}" not in bodies["rebuild_scan"] or "${want:--}" not in bodies["rebuild_scan"]:
         findings.append("rebuild_scan must emit ${module:--} and ${want:--}, not bare $module / "
                         "$want. Both come from a lookup that legitimately returns nothing — a ksvc "
                         "without the module label, a tag that does not exist — and an empty field "
                         "in the middle of the row shifts every field after it.")
+    checked += 1
     if "${names:--}" not in bodies["rebuild_row_summary"]:
         findings.append("rebuild_row_summary must emit ${names:--}: with no offenders the field is "
                         "empty, `IFS=$'\\t' read` binds nothing to it, and ws doctor prints "
                         "whatever that variable held before.")
+    checked += 1
     if "revisionUID" not in bodies["rebuild_scan"]:
         findings.append("rebuild_scan no longer skips workloads selected by "
                         "serving.knative.dev/revisionUID. Knative runs each Revision as its own "
                         "Deployment, so those double-count the ksvc row and invite an "
                         "`oc rollout restart` that looks like a fix and is not.")
-    return findings
+    return findings, checked
 
 
 # ── the behaviour half ────────────────────────────────────────────────────────────────────────
@@ -267,11 +288,16 @@ def parse_table(output: str) -> list[tuple[str, ...]]:
     return [match.groups() for match in (ROW.match(line) for line in output.splitlines()) if match]
 
 
-def behaviour_findings(calls: dict, expect: dict, doctor_row: dict, ws_source: str) -> list[str]:
+def behaviour_findings(calls: dict, expect: dict, doctor_row: dict,
+                       ws_source: str) -> tuple[list[str], int]:
+    """(findings, recorded-cluster reproductions actually run). See contract_findings for why the
+    count exists: main() drops either half without the run looking any different."""
     findings: list[str] = []
+    reproductions = 0
     with tempfile.TemporaryDirectory() as tmp:
         rec = Recording(pathlib.Path(tmp), calls, ws_source)
         for case, spec in expect.items():
+            reproductions += 1
             proc = rec.run(spec["argv"])
             got = parse_table(proc.stdout)
             want = [tuple(row) for row in spec["rows"]]
@@ -294,6 +320,7 @@ def behaviour_findings(calls: dict, expect: dict, doctor_row: dict, ws_source: s
         # ws doctor over the same recording. Its other rows fail (nothing else is modelled) and it
         # exits 1 — irrelevant here. What matters is that its ONE line agrees with the table above.
         rec.unknown.write_text("", encoding="utf-8")
+        reproductions += 1
         proc = rec.run(["doctor"])
         line = next((ln for ln in proc.stdout.splitlines() if doctor_row["label"] in ln), "")
         if not line:
@@ -308,7 +335,7 @@ def behaviour_findings(calls: dict, expect: dict, doctor_row: dict, ws_source: s
                     findings.append(f"ws doctor's drift row is missing {fragment!r} — it must carry "
                                     f"the same counts and offenders as the table.\n      "
                                     f"row: {line.strip()}")
-    return findings
+    return findings, reproductions
 
 
 def load_fixture() -> tuple[dict, dict, dict]:
@@ -318,6 +345,20 @@ def load_fixture() -> tuple[dict, dict, dict]:
 
 
 # ── entry points ──────────────────────────────────────────────────────────────────────────────
+
+def scope_for_tree() -> Scope:
+    """Floors for a real run. Measured 2026-08-01: 14 pinned contract invariants, 4 recorded-cluster
+    reproductions (3 `--check` cases plus the ws doctor row)."""
+    scope = Scope("rebuild-scan-guard")
+    scope.require("pinned contract invariants", 12,
+                  "the producer/consumer row-width pairings and the emptiness guards. Zero means "
+                  "the contract half did not run — main() calls two independent halves and dropping "
+                  "either one used to leave a clean exit 0.")
+    scope.require("recorded-cluster reproductions", 4,
+                  "every `--check` case in the recording plus the ws doctor row. Zero means the "
+                  "behaviour half did not run; fewer means the recording was truncated.")
+    return scope
+
 
 def main() -> int:
     if "--self-test" in sys.argv:
@@ -329,8 +370,17 @@ def main() -> int:
             return 2
     calls, expect, doctor_row = load_fixture()
     ws_source = WS.read_text(encoding="utf-8")
-    findings = contract_findings(ws_source)
-    findings += behaviour_findings(calls, expect, doctor_row, ws_source)
+    scope = scope_for_tree()
+    contract, contract_units = contract_findings(ws_source)
+    behaviour, behaviour_units = behaviour_findings(calls, expect, doctor_row, ws_source)
+    scope.add("pinned contract invariants", contract_units)
+    scope.add("recorded-cluster reproductions", behaviour_units)
+    # Before reporting anything: did BOTH halves actually run? Dropping either one used to leave a
+    # clean exit 0 (audit 2026-08-01).
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
+    findings = contract + behaviour
     if findings:
         print("::error::the image-drift scan behind `ws rebuild-images --check` and `ws doctor` no "
               "longer reports what the recorded cluster must produce. Its failure mode is a clean "
@@ -339,8 +389,7 @@ def main() -> int:
         for finding in findings:
             print(f"  {finding}", file=sys.stderr)
         return 1
-    print(f"rebuild-scan-guard: clean — row contract pinned across 4 producer/consumer pairs, and "
-          f"{len(expect)} `--check` case(s) plus the ws doctor row reproduce the recorded cluster "
+    print(f"rebuild-scan-guard: clean — {scope.summary()} "
           f"({len(calls)} recorded oc calls).")
     return 0
 
@@ -411,8 +460,8 @@ def self_test() -> int:
         """The full gate — both halves — against a given script text and recording."""
         data = yaml.safe_load(fixture_text)
         calls = {k: v.replace("<TAB>", "\t") for k, v in data["calls"].items()}
-        return (contract_findings(source)
-                + behaviour_findings(calls, data["expect"], data["doctor_row"], source))
+        return (contract_findings(source)[0]
+                + behaviour_findings(calls, data["expect"], data["doctor_row"], source)[0])
 
     # Control. A suite that fails on the real thing proves nothing about the mutants.
     control = suite(ws_source, raw)
@@ -437,6 +486,23 @@ def self_test() -> int:
         if not found:
             failures.append(f"mutant {name} was NOT caught ({why}). The suite passes with the "
                             f"defect present, so a clean result on the real tree means nothing.")
+
+    # Both halves must report having done work on the UNMUTATED tree, and their floors must be
+    # meetable. A mutation suite proves the halves DETECT; only these counts prove they RAN.
+    _, contract_units = contract_findings(ws_source)
+    data = yaml.safe_load(raw)
+    _, behaviour_units = behaviour_findings(
+        {k: v.replace("<TAB>", "\t") for k, v in data["calls"].items()},
+        data["expect"], data["doctor_row"], ws_source)
+    tree_scope = scope_for_tree()
+    for dimension, actual in (("pinned contract invariants", contract_units),
+                              ("recorded-cluster reproductions", behaviour_units)):
+        floor = tree_scope.floor_for(dimension)
+        if actual < floor:
+            failures.append(f"the unmutated tree reports {actual} {dimension} but the real run's "
+                            f"floor is {floor}, so a clean CI run is impossible — the floor and the "
+                            f"code have diverged.")
+    failures += Scope.self_check()
 
     if failures:
         for failure in failures:
