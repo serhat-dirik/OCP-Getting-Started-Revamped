@@ -52,10 +52,23 @@ oc tag $NS/parasol-claims:1.0 $NS/parasol-claims:prod
 +
 Nothing is created when the source is missing — the command guards you, so just re-run with a real source tag.
 
+== The pull-secret Deployment is `ImagePullBackOff` — "authentication required"
+
+Symptom:: `oc rollout status` on `parasol-registry-demo` ends in `error: timed out waiting for the condition`, the pod sits in `ImagePullBackOff`, and the kubelet event reads `authentication required` for an `image-registry.openshift-image-registry.svc:5000/...` image. Confusingly, the *next* exercise deploys the very same image and succeeds in seconds.
+Cause:: The pod template names a pull secret *and* pulls from the **internal** registry. The ServiceAccount admission plugin injects the SA's `imagePullSecrets` **only when the pod's own list is empty** — so naming one secret *replaces* the injected set rather than adding to it, and the `default-dockercfg-…` credential that authenticates to the internal registry is silently dropped. The secret you named is for `registry.parasol.example.com`, which is fictional, so the pod ends up with no usable credential for the image it is actually pulling. The next exercise works because it names no pull secret, so injection happens normally. This is namespace-independent: pointing at your *own* namespace's ImageStream fails identically.
+Fix:: Pull an image that needs no credential (the lab uses a public Red Hat base image), or name *both* secrets — yours and the SA's `default-dockercfg-…` — on the pod template. Confirm which credentials the admitted pod actually got:
++
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l app=parasol-registry-demo -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.spec.imagePullSecrets[*].name}{"\n"}{end}'
+----
++
+If that prints only your secret and no `default-dockercfg-…`, you are looking at this exact cause.
+
 == The pull-secret Deployment stays Ready but never uses the private registry
 
 Symptom:: The `parasol-registry-demo` Deployment is `Running`, but you expected it to *pull* from `registry.parasol.example.com` and it clearly didn't.
-Cause:: This is *by design*. The sample pull secret's host (`registry.parasol.example.com`) is an *inert placeholder* that doesn't resolve — there is no real private registry behind it. The Deployment runs the *internal* claims image (which is pullable) so the pod is genuinely `Ready`; the `imagePullSecrets` reference is the artifact being wired, not a live external pull.
+Cause:: This is *by design*. The sample pull secret's host (`registry.parasol.example.com`) is an *inert placeholder* that doesn't resolve — there is no real private registry behind it. The Deployment runs a *public* Red Hat base image (which needs no credential at all) so the pod is genuinely `Ready`; the `imagePullSecrets` reference is the artifact being wired, not a live external pull.
 Fix:: Nothing to fix — confirm the reference is present (that's the graded outcome); on a *real* private registry the same wiring performs a real pull:
 +
 [source,sh,role=execute]

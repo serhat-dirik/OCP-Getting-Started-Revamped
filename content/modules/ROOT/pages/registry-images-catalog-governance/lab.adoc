@@ -515,7 +515,21 @@ default SA pull secrets: default-dockercfg-... parasol-registry-creds
 *Mechanic B — name it on the pod.*
 The GitOps-clean form is to name the pull secret directly in a workload's `spec.template.spec.imagePullSecrets`.
 Deploy a small workload that references the secret this way.
-(It runs the *internal* claims image so the pod is genuinely `Ready` — the pull-secret reference is the artifact you're wiring, not a real external pull):
+It runs a *public* Red Hat base image, so the pod is genuinely `Ready` — the pull-secret reference is the artifact you're wiring, not a real external pull.
+
+[IMPORTANT]
+.Naming a pull secret *replaces* the ServiceAccount's — it does not add to it
+====
+This is the trap that makes mechanic B different from mechanic A, and it is worth more than the mechanic itself.
+
+The ServiceAccount admission plugin injects the SA's `imagePullSecrets` into a pod *only when the pod's own list is empty*.
+The moment you name one secret on the pod template, that list is no longer empty and *nothing* is injected — including the `default-dockercfg-…` secret that authenticates every pod to OpenShift's **internal** registry.
+
+So a pod template that names `parasol-registry-creds` and pulls from `image-registry.openshift-image-registry.svc:5000` fails with `authentication required`, even though the pull worked a moment earlier without the line and the SA is correctly linked.
+That is why the workload below deliberately pulls a *public* image: the only credential it needs is none.
+
+On a real private registry the same rule applies — if a pod must pull from *both* your private registry and the internal one, name *both* secrets on the pod template, or use mechanic A and name none.
+====
 
 // Grounded 2026-07-29 on OCP {ocp_version} (server 4.22.5): `oc explain
 // deployment.spec.template.spec.imagePullSecrets` confirms it is a real `[]LocalObjectReference` field
@@ -554,10 +568,12 @@ spec:
       imagePullSecrets:
         - name: parasol-registry-creds
       containers:
-        - name: claims
-          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
-          ports:
-            - containerPort: 8080
+        - name: puller
+          # A PUBLIC image on purpose — see the IMPORTANT note above. Naming a pull secret here
+          # replaces the ServiceAccount's injected default-dockercfg-*, so an internal-registry
+          # image would fail with "authentication required" no matter which namespace it is in.
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["sleep", "infinity"]
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {cpu: 200m, memory: 256Mi}
@@ -597,7 +613,7 @@ parasol-registry-demo-...                1/1     Running   0          5s
 
 [.checkpoint]
 ****
-✔ *Verify:* You decoded the sample dockerconfigjson pull secret, *linked* it to the `default` ServiceAccount for pull (mechanic A), and deployed a workload that *names* it in `imagePullSecrets` (mechanic B) — the pod is `Running` with the pull-secret reference wired. Both are how a workload authenticates to a private registry; the sample host is inert, so no real external pull occurs.
+✔ *Verify:* You decoded the sample dockerconfigjson pull secret, *linked* it to the `default` ServiceAccount for pull (mechanic A), and deployed a workload that *names* it in `imagePullSecrets` (mechanic B) — the pod is `Running` with the pull-secret reference wired. Both are how a workload authenticates to a private registry; the sample host is inert, so no real external pull occurs. And you know the rule that decides between them: naming a secret on the pod template *replaces* the ServiceAccount's injected credentials rather than adding to them, which is why the mechanic-B workload pulls a public image.
 ****
 
 == 5. Publish your own Software Catalog entry

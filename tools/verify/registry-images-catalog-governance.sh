@@ -64,6 +64,34 @@ secret_referenced() {
   return 1
 }
 
+# Any Deployment that NAMES the pull secret must actually be running.
+#
+# secret_referenced() above accepts either mechanic and short-circuits on the ServiceAccount link, so
+# once mechanic A is done it returns 0 without ever looking at mechanic B's workload. That is how this
+# script reported 9/9 green over an exercise-4 pod sitting in ImagePullBackOff for the whole lab
+# (found by the registry-images cold-start smoke, 2026-07-31) — while the lab's own checkpoint and the
+# troubleshooting page independently certified the same non-event. Three safety nets, one blind spot.
+#
+# Rule 14 says assert the OUTCOME, not the mechanism — and the outcome of exercise 4 is not "a
+# reference exists somewhere", it is "the workload carrying that reference runs". Naming a pull secret
+# on a pod template REPLACES the ServiceAccount's injected default-dockercfg-*, so getting this wrong
+# is a live failure mode rather than a theoretical one: it is exactly what happened.
+pull_secret_deploy_ready() {
+  local names name ready
+  # shellcheck disable=SC2016  # {{$n}} and {{"\n"}} are GO-TEMPLATE syntax evaluated by oc, not shell
+  # expansions — single quotes are required here. Only "$PULL_SECRET" is deliberately shell-expanded,
+  # by closing and reopening the quoting around it.
+  names="$(oc get deploy -n "$NS" -o go-template='{{range .items}}{{$n := .metadata.name}}{{range .spec.template.spec.imagePullSecrets}}{{if eq .name "'"$PULL_SECRET"'"}}{{$n}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null || true)"
+  # No such Deployment means exercise 4's mechanic B was never done — not a pass. The lab creates one.
+  [[ -n "$names" ]] || return 1
+  while read -r name; do
+    [[ -n "$name" ]] || continue
+    ready="$(oc get deploy "$name" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    [[ -n "$ready" && "$ready" -ge 1 ]] || return 1
+  done <<< "$names"
+  return 0
+}
+
 # Entry clean-slate helpers: return 0 when the lab outcome is ABSENT (attendee has done nothing).
 # Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
 # cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
@@ -109,6 +137,8 @@ else
     || hint "add a namespaced Template to ${NS}: oc apply -f <your-template>.yaml -n ${NS} (see the lab)"
   check "sample pull Secret ${PULL_SECRET} is referenced for pull (private-registry deploy)" secret_referenced \
     || hint "link it: oc secrets link deployer ${PULL_SECRET} --for=pull -n ${NS} (or name it in a pod's imagePullSecrets)"
+  check "the workload naming ${PULL_SECRET} is actually running (mechanic B)" pull_secret_deploy_ready \
+    || hint "exercise 4's Deployment must reach >=1 ready replica. If it is ImagePullBackOff with 'authentication required', the pod template names a pull secret AND pulls from the internal registry — naming one REPLACES the ServiceAccount's default-dockercfg-*, so use a public image or name both secrets."
 fi
 
 verify_summary
