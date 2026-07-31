@@ -190,7 +190,7 @@ curl -ksS "$AGENT/q/health/ready" | jq
 ====
 
 == 2. Ask the agent — and watch grounding depend on how you ask
-⏱ *~9 min* · the deliberate break-and-fix: an ungrounded answer, then a grounded one
+⏱ *~9 min* · terse vs. imperative phrasing — watch what your model does, then make grounding reliable
 
 Ask about a real claim the way a person naturally would — a plain question:
 
@@ -200,7 +200,11 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
   -d '{"question":"What is the status of claim CLM-1001?"}' | jq '{answer, toolCalls}'
 ----
 
-.What you'll see on this cluster's model (the *break* — an ungrounded answer)
+.What you might see — a terse question can go either way
+====
+Grounding is a property of *both* the prompt and the model, so a plain question like this one has two possible, equally valid outcomes at temperature 0:
+
+*Outcome A — ungrounded* (the model prints the tool call as text instead of running it):
 [source,json]
 ----
 {
@@ -208,12 +212,26 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
   "toolCalls": []
 }
 ----
+`toolCalls` is *empty* — the agent never touched your claims data. This is the failure mode the imperative rephrasing below exists to fix.
 
-Look closely: `toolCalls` is *empty*, and the "answer" is the model *printing the tool call as text* instead of *running* it. The agent never touched your claims data — this answer is *ungrounded*. (This is model-dependent and deterministic at temperature 0: some models call the tool even for a terse question; this one does not.)
+*Outcome B — grounded* (the model calls the tool unaided, even on a terse question):
+[source,json]
+----
+{
+  "answer": "The current status of claim CLM-1001 is UnderReview.",
+  "toolCalls": [
+    { "tool": "get_claim", "arguments": "{\"claimNumber\": \"CLM-1001\"}", "result": null }
+  ]
+}
+----
+`toolCalls` shows `get_claim` actually ran, and the answer (`UnderReview`) is the real seeded record — a capable model can ground even a terse question by itself.
+
+Note which one *your* model just did — deterministic at temperature 0, but it varies by model. Either way, keep reading: the imperative phrasing below is the reliable path regardless of what you just saw.
+====
 
 NOTE: If instead you get `{"answer": null, "toolCalls": null}`, the model endpoint *refused the call* (an expired or mis-scoped MaaS key — the agent returns a `502` your `jq` filter renders as nulls). That is a wiring failure, not the grounding lesson — see the troubleshooting page's `502` entry.
 
-Now *fix* it by asking *imperatively* — tell the agent to use its tools:
+Now ask the same question *imperatively* — tell the agent explicitly to use its tools. This is the reliable phrasing whichever outcome you saw above:
 
 [source,sh,role=execute]
 ----
@@ -221,7 +239,7 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
   -d '{"question":"Use your tools to look up claim CLM-1001 and report its status."}' | jq '{answer, toolCalls}'
 ----
 
-.The *fix* — a grounded answer, from a real tool call
+.The imperative phrasing — a grounded answer, from a real tool call
 [source,json]
 ----
 {
@@ -232,7 +250,7 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
 }
 ----
 
-Same claim, same model, *different phrasing* — and now `toolCalls` shows `get_claim` actually *ran*, and the answer (`UnderReview`) is the *real* seeded record. The lesson is the whole point of agentic AI: *the model decides whether to call a tool*, and *grounding is something you engineer* — through the system prompt and clear phrasing here, through model choice and tool-forcing in production. When an agent gives a grounded answer, someone *made* it ground.
+Same claim, same model, imperative phrasing — `toolCalls` shows `get_claim` actually *ran*, and the answer (`UnderReview`) is the *real* seeded record. Whether or not your terse question above grounded on its own, the imperative phrasing grounds it *reliably*, because you told the agent explicitly what to do. The lesson is the whole point of agentic AI: *the model decides whether to call a tool*, and *grounding is something you engineer* — through the system prompt and clear phrasing here, through model choice and tool-forcing in production. Even a model that grounds a terse question unaided is still being *steered* by the prompt underneath it; when an agent gives a grounded answer, someone *made* it ground.
 
 // media-pass: screenshot agentic-ai-02-ask-grounded.png — MARQUEE — the terminal `POST /agent/ask`
 // response for the imperative CLM-1001 question: the `answer` (UnderReview) and the populated
@@ -248,7 +266,7 @@ The *answer* is your proof the tool ran: `UnderReview` is the seeded truth for `
 
 [.checkpoint]
 ====
-✔ *Verify:* With the *imperative* phrasing, `POST /agent/ask` returns a non-empty `toolCalls` containing `get_claim`, and the `answer` reports `CLM-1001` as `UnderReview`. You saw an ungrounded answer (empty `toolCalls`, tool call printed as text) become a grounded one by changing *how you asked* — grounding is engineered, not guaranteed.
+✔ *Verify:* With the *imperative* phrasing, `POST /agent/ask` returns a non-empty `toolCalls` containing `get_claim`, and the `answer` reports `CLM-1001` as `UnderReview`. However your terse question above came out — grounded already, or the tool call printed as text — the imperative phrasing grounds it here: `toolCalls` populated, the tool actually run. That is the lesson either way: grounding is engineered, not guaranteed, and even a model that grounds unaided is still being told what to do by the prompt underneath it.
 ====
 
 == 3. MCP tools are your APIs
