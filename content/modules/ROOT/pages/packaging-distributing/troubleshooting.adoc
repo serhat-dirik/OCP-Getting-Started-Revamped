@@ -2,7 +2,7 @@
 :module-id: packaging-distributing
 include::partial$version-attributes.adoc[]
 
-// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-16 in a
+// Real entries from performing the module on OCP 4.21.22 (Kubernetes 1.34, 2026-07-16 in a
 // {user}-dev namespace) plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use
 // $NS = {user}-dev (set it once). NAMESPACE in output is the sample user user2-dev.
 
@@ -78,6 +78,36 @@ helm rollback parasol-notifications -n $NS      # back to the last good revision
 +
 The old pods keep serving during a failed `--wait` upgrade (the rollout won't retire them for a not-Ready pod), so there's no outage — you have time to read the events and decide.
 
+== `helm test` reports `Phase: Failed` on the read-back step
+
+Symptom:: `helm test parasol-notifications -n $NS --logs` prints `Phase: Failed`. The test Pod's logs show `1) health check`, `2) POST a notification`, `3) read it back` — and then stop, with no `PASS:` line.
+Cause:: *More than one pod is serving the Service.* The notifications app keeps its store *in memory, per pod* (it is a demo notifier, not a durable queue), so the test's POST lands on one pod and the read-back that follows can be answered by another pod that never saw the write. Exercise 4 leaves the release at two replicas; exercise 5's upgrade is the step that scales it back to one, so this is what a skipped or partially-applied exercise 5 looks like.
+Fix:: Put the release back to a single replica, *confirm* it, then re-run the test:
++
+[source,sh,role=execute]
+----
+helm upgrade parasol-notifications ./parasol-notifications -n $NS --set replicaCount=1 --wait --timeout=180s
+oc get deploy parasol-notifications -n $NS -o jsonpath='{.status.readyReplicas}{"/"}{.spec.replicas}{" ready\n"}'
+helm test parasol-notifications -n $NS --logs
+----
++
+Expect `1/1 ready`, then `Phase: Succeeded`. If the count is right and the test still fails, read the app pod's log (`oc logs deploy/parasol-notifications -n $NS`) — a pod that restarted between the POST and the read lost the store, which is the same limitation arriving from a different direction. The lesson is the app's, not the test's: a write-then-read assertion is only meaningful while one pod holds the state.
+
+== The final InstallPlan read lists operators I didn't ask for — or nothing at all
+
+Symptom:: In exercise 7, the last read shows an InstallPlan whose `CSVS` column carries *several* operator names with Pipelines somewhere in the middle — or, with an older `[0]`-indexed command, prints nothing at all.
+Cause:: One InstallPlan approves a whole *resolution* — the operator you asked for plus everything OLM pulled in with it — so `.spec.clusterServiceVersionNames` is an *array*. Reading only `[0]` shows the first name and hides the rest, so a `grep` for your operator silently matches nothing even though the plan exists and is approved. It is the same *bare-index* trap as trusting the ambiguous bare `subscription` name, and it is *not* an RBAC problem: a missing grant announces itself with `Error … is forbidden`, never with silence.
+Fix:: Print every entry (`[*]`; the printer joins them with commas) and keep the header so a no-match is visible:
++
+[source,sh,role=execute]
+----
+oc get installplan -n openshift-operators \
+  -o custom-columns='NAME:.metadata.name,APPROVAL:.spec.approval,APPROVED:.spec.approved,CSVS:.spec.clusterServiceVersionNames[*]' \
+  | grep -E 'NAME|pipelines'
+----
++
+If you get the header and no row, the plan that installed Pipelines lives elsewhere or has been pruned — drop the `grep` to see every plan in the namespace, or read the operator's own namespace. Confirm which CSV is actually live with `oc get subscriptions.operators.coreos.com -n openshift-operators openshift-pipelines-operator-rh -o jsonpath='{.status.installedCSV}{"\n"}'` — that is the authoritative answer, and it does not depend on any InstallPlan still existing.
+
 == The Route shows "Application is not available"
 
 Symptom:: The chart installed, the pod is Ready, but opening the Route in a browser shows the router's "Application is not available" page (or an empty response over HTTP).
@@ -107,4 +137,4 @@ oc whoami -t | helm registry login image-registry.openshift-image-registry.svc:5
 
 '''
 
-_Last verified on OpenShift 4.21.22 (Kubernetes 1.34, 2026-07-16)._
+_Last verified on OpenShift 4.21.22 (Kubernetes 1.34, 2026-07-16). The two entries covering a failed `helm test` and the InstallPlan CSV array were added from a smoke run on 2026-07-31 (OpenShift 4.22.5); the InstallPlan commands in that entry were re-measured read-only on that cluster._

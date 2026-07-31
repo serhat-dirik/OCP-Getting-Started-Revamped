@@ -31,7 +31,7 @@ Total hands-on: *~40 min* (add ~5 min of concept up front — the spectrum + OLM
 | 2 | Template the notifications service | ~5 min | the edits; `helm lint` and `helm template` *<1 s* each; time is understanding *values → manifests*
 | 3 | Install and reach it | ~5 min | `helm install` + rollout *~15 s* (image is pull-through-cached); `curl` instant
 | 4 | Upgrade, break, rollback | ~5 min | `upgrade` *~2 s* + rollout; the break is a *deliberate 90 s `--wait` timeout*; `rollback` *~2 s* + rollout
-| 5 | Test and hooks | ~5 min | the `post-upgrade` seed hook fires on `helm upgrade` (*~5 s*); `helm test` *~5 s* (the test Pod runs the round-trip)
+| 5 | Test and hooks | ~5 min | the upgrade scales back to *one* replica with `--wait` (the test's round-trip needs a single pod), then the `post-upgrade` seed hook fires (*~5 s*); `helm test` *~5 s* (the test Pod runs the round-trip)
 | 6 | Package + OCI push/pull | ~5 min | `package` *<1 s*; `registry login`/`push`/`pull` *~2 s* each; time is reading the digest match
 | 7 | Dissect the operator | ~5 min | all reads *instant*; comprehension-heavy — the CSV/CRDs/CatalogSource chain
 | 8 | OLM v1 + spectrum | ~5 min | reads *instant*; the spectrum decision is discussion, not commands
@@ -40,10 +40,18 @@ Total hands-on: *~40 min* (add ~5 min of concept up front — the spectrum + OLM
 [NOTE]
 .How this timing was measured
 ====
-On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-16, every exercise was performed in a `{user}-dev` namespace and timed.
+On the build cluster (OCP 4.21.22, Kubernetes 1.34) on 2026-07-16, every exercise was performed in a `{user}-dev` namespace and timed.
 The `helm` commands return in about a second — `create`, `lint`, `template`, `package` are all *sub-second*; `install`/`upgrade` return once the rollout settles (*~15 s* for install; the image is pull-through-cached so no long pull); the exercise-5 `post-upgrade` seed hook adds *~5 s* to that upgrade (Helm waits for the hook Job); `helm test` runs its Pod in *~5 s*; the OCI `login`/`push`/`pull` are *~2 s* each.
 The *only* real wait is *engineered*: the break in exercise 4 uses `helm upgrade --wait --timeout=90s`, which blocks for the full 90 s because the bad probe never passes — that pause *is* the lesson (Helm refusing to call a broken release done), so do not let attendees think it hung.
 Everything else is dominated by *reading*: the chart tree, the render, the failed-then-rolled-back history, and the operator bundle.
+
+// Exercise 5's upgrade gained `--set replicaCount=1 --wait --timeout=180s` on 2026-07-31 (see
+// Watchouts). Its wall clock was NOT re-measured on a cluster — the fix was made repo-only under a
+// no-cluster-mutation instruction. Expect it to return once the deployment reports one ready replica
+// and the seed hook Job has finished (image pull included), i.e. tens of seconds rather than
+// instantly; the 180 s is a ceiling, not an expected duration, and the ~5 min chip is unaffected.
+// Re-measure on the next full cluster pass and replace this note with a number.
+The one number here that is *not* a fresh measurement: exercise 5's upgrade now waits for the scale-down and the seed hook, so it returns in tens of seconds rather than instantly. The `--timeout=180s` on it is a ceiling, not an expectation.
 ====
 
 == Pre-flight checklist
@@ -128,6 +136,8 @@ No — this is a *platform* gap, not an attendee mistake. The read-only `platfor
 
 *4. "`oc get subscription` shows a Knative object (or nothing) — where's my operator?"*::
 Several APIs define a `Subscription` kind (Knative messaging, OLM, and others), so a bare `oc get subscription` resolves to whichever the API server picks — usually *not* OLM's. Always *fully-qualify* `subscriptions.operators.coreos.com`. The same trap bites `packagemanifest` — enumerate it with `--field-selector=metadata.name=…`. Exercise 7 opens with the `oc api-resources` proof so attendees see *why*.
++
+The exercise closes on the *index* form of the same trap: an InstallPlan's `.spec.clusterServiceVersionNames` is an *array* (OLM approves a whole resolution in one plan), so a `[0]` read hides every operator but the first. The lab reads `[*]` and keeps the table header, so "no match" looks like an empty table rather than silence.
 
 *5. "Should we write an operator for our service?"*::
 Almost always no — this is the module's thesis. An operator earns its cost only when *continuous reconcile* is the value: it repairs drift instantly, orchestrates stateful upgrades, fails over, or manages many instances from one spec. If your day-2 is "occasionally `helm upgrade` with new values," a chart already does that, and an operator is a reconcile loop with nothing to reconcile plus a controller to build, certify, and maintain forever. Point back to exercise 8: the notifications service wants Helm, and saying so is the senior call.
@@ -142,6 +152,10 @@ The module's one hard platform dependency. The OLM-read rules are in `gitops/wor
 The internal registry (`image-registry.openshift-image-registry.svc:5000`) has no external route; the push in exercise 6 succeeds because the cockpit terminal is *inside* the cluster. If an attendee tries it from a laptop it will not resolve — that's expected, and the in-cluster posture is the point.
 * *A pushed chart is an unreferenced artifact — the pruner can reclaim it.*
 The chart tag (`parasol-notifications:0.1.0`) is not referenced by any running workload, so on a multi-day event the internal registry's nightly pruner can remove it overnight. For a single session it's fine; on a long event, either have attendees push-and-pull in one sitting or note that a re-push is expected.
+* *Exercise 5 scales the release back to one replica — that is deliberate, and it is a teaching moment.*
+Exercise 4 leaves the release at two replicas; the notifications app keeps its store *in memory, per pod*, so a `helm test` that POSTs and reads back can be answered by the pod that never saw the write. Exercise 5's upgrade therefore passes `--set replicaCount=1 --wait`, prints a `1/1 ready` readback, and says why. If an attendee asks "why did we scale down?", the answer is the lesson: *a test can only assert what the app actually guarantees* — fix the app's state model, not the test. An attendee who skips or edits that upgrade will see `helm test` → `Phase: Failed`; the troubleshooting page has the recovery.
+* *One InstallPlan can approve several operators.*
+Exercise 7's last read prints `.spec.clusterServiceVersionNames[*]`, not `[0]`, because a GitOps baseline install commonly batches four or five CSVs into a single InstallPlan with your operator well down the list. If an attendee reports "nothing came back", check *which* command they ran before reaching for RBAC — a missing `platform-observer` grant announces itself as `Forbidden`, never as silence.
 * *Keep Helm scope tight.*
 Subcharts and shipping CRDs inside a chart are real features and real rabbit holes. The lab deliberately stops at values + Route + test + hook. If an attendee asks about subcharts, answer briefly and steer back — the module's depth is *consumer-grade*, not chart-library engineering.
 
@@ -154,3 +168,7 @@ The *Helm half* was performed in a `{user}-dev` namespace on OpenShift 4.21.22 o
 
 The *OLM half* is a real read-only read of the *live Pipelines operator's bundle* on the same cluster: its `subscriptions.operators.coreos.com` (channel `latest`, source `redhat-operators`), the PackageManifest channel list, the installed CSV (14 owned CRDs, a controller Deployment, `AllNamespaces`), the Tekton CRDs it added (30 on the cluster), the `redhat-operators` CatalogSource (a `registry.redhat.io/redhat/redhat-operator-index` image) and its `Automatic`-approval InstallPlan, and *OLM v1* — the default `ClusterCatalog`s `Serving` (clusters provisioned without the Red Hat Marketplace catalog — common on RHDP/bare-metal — show three; clusters with it show a fourth), zero `ClusterExtension`s (present, idle, console-invisible).
 The `platform-observer` OLM-read extension that grants attendees these reads read-only is defined in `gitops/workshop-config/templates/platform-observer-clusterrole.yaml`; verify it is synced to the cluster (pre-flight #3) — at build time the already-synced `packagemanifests`/`catalogsources` reads worked for a `workshop-attendees` member while the CSV/Subscription/CRD reads were pending the sync.
+
+A cold-start smoke run as a real attendee on 2026-07-31 (OpenShift 4.22.5) found two defects on the literal path and both are now fixed in the lab.
+Exercise 5's `helm test` failed deterministically because exercise 4 leaves the release at *two* replicas and the app's store is per-pod — exercise 5's upgrade now scales back to one explicitly, with `--wait` and a visible `1/1 ready` readback, and the page teaches *why* rather than depending on a replica count it never mentioned.
+Exercise 7's final InstallPlan read returned nothing because it printed only `.spec.clusterServiceVersionNames[0]` while that cluster's single InstallPlan carried four CSVs with Pipelines at index `[3]`; the command now reads `[*]` and keeps the table header. Both the broken and the corrected InstallPlan commands were re-measured read-only against that cluster, including a single-CSV plan in `openshift-gitops-operator` to confirm the corrected form is unchanged in the simple case.

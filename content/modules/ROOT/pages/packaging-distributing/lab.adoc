@@ -6,7 +6,7 @@ include::partial$version-attributes.adoc[]
 // presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
 // [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes); later blocks use
 // $NS with NO subs so Helm's {{ }} and jsonpath braces stay literal. All Helm commands, outputs, and
-// timings were performed on OCP {ocp_version} (Kubernetes 1.34) in a {user}-dev namespace on
+// timings were performed on OCP 4.21.22 (Kubernetes 1.34) in a {user}-dev namespace on
 // 2026-07-16: helm create (the cockpit's helm), the values-driven chart, lint/template, install,
 // upgrade, the wrong-probe break-and-fix + rollback, helm test, package, and the OCI push+pull
 // round-trip (matching digest) are real captures. The OLM dissection (exercises 7-8) is a real
@@ -452,8 +452,8 @@ Console::
 // exact revision in this pass (it progressed on to revision 2/3 for the marker below) but
 // confirmed structurally identical via CLI `helm history` at the time and the same table/columns
 // observed later at revision 3. Networking → Routes → `parasol-notifications` confirmed live:
-// Status "Accepted", Location `https://parasol-notifications-user4-dev.apps.cluster-<id>.
-// <domain>`, matching the curl-tested host and the `"site":"user4-dev"` JSON. Marker CLOSED.
+// Status "Accepted", Location `parasol-notifications-user4-dev` on the cluster's apps wildcard
+// domain, matching the curl-tested host and the `"site":"user4-dev"` JSON. Marker CLOSED.
 In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Ecosystem* → *Helm* (lands on the *Helm Releases* tab) → `parasol-notifications`.
 The release header shows revision *1*, status *Deployed*; open the *Resources* tab to see the resources the chart created (ServiceAccount, Deployment, Service, Route).
 Open *Networking* → *Routes* → `parasol-notifications` and click the *Location* URL — the landing page shows the service JSON, including `"site":"{user}-dev"`.
@@ -718,12 +718,29 @@ EOF
 echo "test added"
 ----
 
-Upgrade to apply both — the *post-upgrade hook fires* and seeds the welcome notification into the store that was empty in exercise 3:
+Upgrade to apply both — but *scale the release back to one replica in the same upgrade*, and it is worth knowing exactly why.
+Exercise 4 left this release at *two* replicas, and the notifications service keeps its store *in memory, inside each pod* — it is a demo notifier, not a durable queue, and its README says so.
+With two pods behind one Service, a POST lands on *one* of them and the very next GET can be answered by the *other*, which never saw the write.
+The test you just wrote asserts a *write-then-read-back round-trip* — a property this app only has at *one* replica.
+So the upgrade below passes `--set replicaCount=1` explicitly, and `--wait` holds it open until the scale-down has actually finished, so the hook and the test both see a single pod:
 
+// SEV1 fix (smoke 2026-07-31, user1/cluster2): the smoke measured TWO Ready replicas serving the
+// Service at `helm test` time on the literal path, and `helm test` failed 2/2 (the round-trip read
+// hit the pod that never saw the POST). Documented Helm 3 semantics say a plain `helm upgrade`
+// discards the previous `--set replicaCount=2` and re-reads values.yaml (replicaCount: 1) — but the
+// page must not DEPEND on that implicit reset either way, and the smoke's measurement contradicts
+// it. `--set replicaCount=1` is therefore explicit and mechanism-agnostic; `--wait` closes the
+// scale-down race; the readback line makes the state the test depends on visible on the page. The
+// per-pod store is a real property of apps/parasol-notifications (in-memory list, resets on
+// restart) and is now taught rather than silently relied on.
 [source,sh,role=execute]
 ----
-helm upgrade parasol-notifications ./parasol-notifications -n $NS >/dev/null && echo "upgraded"
-# the post-upgrade hook Job seeds CLM-0000 a moment after the upgrade returns — retry until it lands
+# --set replicaCount=1: exercise 4 left this release at 2 replicas, and this app's store is per-pod.
+# --wait: hold until the scale-down has finished, so the hook and the test see exactly one pod.
+helm upgrade parasol-notifications ./parasol-notifications -n $NS \
+  --set replicaCount=1 --wait --timeout=180s >/dev/null && echo "upgraded"
+oc get deploy parasol-notifications -n $NS -o jsonpath='{.status.readyReplicas}{"/"}{.spec.replicas}{" ready\n"}'
+# the post-upgrade hook Job seeds CLM-0000 around the time the upgrade returns — retry until it lands
 SEEDED=""
 for i in $(seq 1 15); do
   if curl -sk "https://$ROUTE/api/notifications" | grep -o 'CLM-0000'; then SEEDED=yes; break; fi
@@ -734,12 +751,15 @@ if [ -z "$SEEDED" ]; then
 fi
 ----
 
-.Expected output (the hook ran — the store now carries the seeded welcome)
+.Expected output (one replica, and the hook ran — the store now carries the seeded welcome)
 [source,texinfo]
 ----
 upgraded
+1/1 ready
 CLM-0000
 ----
+
+That `1/1 ready` is not decoration — it is the precondition the next command depends on.
 
 Now run the *test* — Helm launches the test Pod and reports pass/fail:
 
@@ -762,12 +782,26 @@ PASS: health + notify round-trip
 
 `Phase: Succeeded` means the release is not just *running* but *working* — health plus a real write-then-read a consumer can run after *their* install, on *their* cluster.
 `helm.sh/hook: test` (the test Pod) and `helm.sh/hook: post-install,post-upgrade` (the seed Job) are the *same mechanism* at different moments.
+
+[NOTE]
+.Why the replica count mattered — and what it tells you about testing a packaged app
+====
+That scale-back was not a workshop quirk; it was the app being honest about itself.
+A `helm test` asserts what the release *guarantees*, and this release guarantees "write it, then read it back" only while a single pod holds the store.
+Two rules fall out of that, and they are worth more than the test:
+
+* *If the app must scale, its state cannot live in the pod.* Move the store to a database or a shared cache and the same test passes at any replica count — the test never needed fixing; the *app* did.
+* *If you cannot move the state, say so in the chart.* A single-replica constraint belongs in `values.yaml` comments and the chart's README, not in the author's head — otherwise the next consumer sets `replicaCount=3` and the limitation surfaces as a support ticket instead of a red test.
+
+Making the test pass by retrying the read until it happens to land on the pod that holds the write would be the *wrong* fix: a flaky test that hides a real property of the workload is worse than no test.
+====
+
 *Stop here* — that is as far into Helm as this module goes.
 Subcharts and shipping CRDs inside a chart are real features, but they are rabbit holes; a single-service chart with values, a Route, a test, and a hook is the shape most applications want.
 
 [.checkpoint]
 ****
-✔ *Verify:* You added a `post-install,post-upgrade` *hook* (it seeded `CLM-0000` on the upgrade — the store was empty in exercise 3) and a `helm test` *round-trip* that reported `Phase: Succeeded`. You can name the two lifecycle hooks by their `helm.sh/hook` annotations — same mechanism, different moments.
+✔ *Verify:* You scaled the release back to *one* replica *on purpose* — because this app's store is per-pod and the test asserts a round-trip — then added a `post-install,post-upgrade` *hook* (it seeded `CLM-0000` on that upgrade; the store was empty in exercise 3) and a `helm test` *round-trip* that reported `Phase: Succeeded`. You can name the two lifecycle hooks by their `helm.sh/hook` annotations — same mechanism, different moments — and say why the test's assertion depends on the app's state model.
 ****
 
 == 6. Package and push the chart as an OCI artifact
@@ -869,11 +903,13 @@ Helm is one end of the packaging spectrum; an *operator* is the other.
 You don't have to imagine one — the *Pipelines operator* that ran your builds all week is installed on this cluster, and you can read its bundle *read-only* (the `platform-observer` role grants cluster-wide *read*; you never mutate it).
 
 [NOTE]
-.If these reads come back empty or `Forbidden`
+.If these reads come back `Forbidden`
 ====
 Exercises 7-8 depend on that `platform-observer` grant.
-If *Installed Operators* looks empty in the console, or `oc get csv` returns `Forbidden`, the grant's OLM-read extension isn't synced to this cluster — nothing is wrong with your commands or your account.
+If `oc get csv` returns `Error … is forbidden`, or *Installed Operators* looks empty in the console, the grant's OLM-read extension isn't synced to this cluster — nothing is wrong with your commands or your account.
 Flag the instructor (it is their pre-flight #3); the self-check is on xref:packaging-distributing/troubleshooting.adoc[the troubleshooting page].
+
+*`Forbidden` is the RBAC signal — a short answer is not.* Several reads below legitimately differ from the samples: the channel list grows with every Pipelines release, and how many InstallPlans exist depends on how long the cluster has lived. Fewer rows than the sample is normal and is called out where it happens; an explicit `forbidden` is the one thing to escalate.
 ====
 
 First, a *trap* worth knowing: several APIs define a `Subscription` kind, so a bare `oc get subscription` resolves to the *wrong* one.
@@ -900,7 +936,7 @@ Read the Pipelines operator's Subscription — the "I want this operator, on thi
 Console::
 +
 --
-// Grounded 2026-07-29 on OCP {ocp_version} (server 4.22.5): `oc get subscriptions.operators.coreos.com
+// Grounded 2026-07-29 on OCP 4.22.5: `oc get subscriptions.operators.coreos.com
 // openshift-pipelines-operator-rh -n openshift-operators` shows channel=latest,
 // installPlanApproval=Automatic, source=redhat-operators (currentCSV
 // openshift-pipelines-operator-rh.v1.23.1, state AtLatestKnown) — matching the Update channel/Update
@@ -992,23 +1028,38 @@ TektonConfig
 Those `Tekton…` kinds are what let you write a `Pipeline` or a `TektonConfig` — *the operator extended the Kubernetes API*.
 Finally, trace *where the bundle came from* and *how it was approved*:
 
+// SEV2 fix (smoke 2026-07-31): the previous command read only
+// `.spec.clusterServiceVersionNames[0]` and piped to a bare `grep pipelines`. On any cluster where OLM
+// approved several operators in ONE InstallPlan — the normal outcome of a GitOps baseline install —
+// the Pipelines CSV sits at a higher index, the column never shows it, grep matches nothing and the
+// block returns SILENTLY EMPTY, right after a NOTE that primes "empty means RBAC". `[*]` prints every
+// entry (kubectl joins them with commas) and `grep -E 'NAME|pipelines'` keeps the header so a no-match
+// is visible instead of silent. Both forms re-measured read-only on cluster2 2026-07-31: the broken
+// one exits 1 with no output against `install-drlpc` (4 CSVs, Pipelines at index [3]); the corrected
+// one prints the header plus that row. Also re-measured against a single-CSV plan
+// (openshift-gitops-operator/install-qq9ml) — one name, unchanged shape.
 [source,sh,role=execute]
 ----
 oc get catalogsource redhat-operators -n openshift-marketplace -o jsonpath='catalog: {.spec.displayName}  image: {.spec.image}{"\n"}'
-oc get installplan -n openshift-operators -o custom-columns='NAME:.metadata.name,APPROVAL:.spec.approval,APPROVED:.spec.approved,CSV:.spec.clusterServiceVersionNames[0]' | grep pipelines
+oc get installplan -n openshift-operators \
+  -o custom-columns='NAME:.metadata.name,APPROVAL:.spec.approval,APPROVED:.spec.approved,CSVS:.spec.clusterServiceVersionNames[*]' \
+  | grep -E 'NAME|pipelines'
 ----
 
-.Expected output (the catalog index image, and the InstallPlan(s) that approved installs)
+.Expected output (the catalog index image, and the InstallPlan that approved the install — here one plan carrying four operators)
 // subs="attributes" is REQUIRED here — [source] blocks do not substitute by default, so without it
 // {pipelines_version} rendered literally on the attendee's page. It was the only unresolved attribute
-// in the whole rendered module (found by the packaging-distributing smoke, 2026-07-31).
+// in the whole rendered module (found by the packaging-distributing smoke, 2026-07-31). The three
+// co-installed CSV names are a frozen capture of what a batched plan looks like; only the Pipelines
+// entry is an attribute, because that one should track the reader's own cluster.
 [source,texinfo,subs="attributes"]
 ----
 catalog: Red Hat Operators  image: registry.redhat.io/redhat/redhat-operator-index:v4.22
-install-qgwxt   Automatic   true   openshift-pipelines-operator-rh.v{pipelines_version}
+NAME            APPROVAL    APPROVED   CSVS
+install-drlpc   Automatic   true       devspacesoperator.v3.29.1,web-terminal.v1.17.0,devworkspace-operator.v0.42.0,openshift-pipelines-operator-rh.v{pipelines_version}
 ----
 
-*Two things here vary by cluster, and both are worth reading rather than matching character by character.*
+*Three things here vary by cluster, and all of them are worth reading rather than matching character by character.*
 
 // version-anchor-ok: the releases ARE the lesson here — the paragraph teaches that the catalog index tag tracks the cluster's OpenShift minor, which cannot be said without naming two of them. They are illustrative examples, not a claim about the reader's cluster.
 The index image tag *tracks your cluster's OpenShift minor* — `v4.22` on a 4.22 cluster, `v4.21` on a
@@ -1017,15 +1068,24 @@ so an operator bundle is one that was tested against *your* OpenShift.
 
 The *number* of InstallPlans depends on how long the cluster has lived. A freshly installed operator
 shows *one*. On a cluster where the `latest` channel with `Automatic` approval has already upgraded
-the operator, you will see *several* — OLM keeps the superseded plans beside the current one. Either
-way, the newest line's CSV matches the `installed CSV` you read a moment ago.
+the operator, you will see *several* — OLM keeps the superseded plans beside the current one.
+
+The *`CSVS` column can name several operators at once* — and this is the third trap of the exercise.
+OLM approves a whole *resolution* in one InstallPlan: the operator you asked for plus everything it
+pulled in with it. So `clusterServiceVersionNames` is an *array*, and yours is not necessarily first —
+above, Pipelines is the *fourth* entry. That is why the command asks for `[*]` (every entry, comma-joined)
+and not `[0]`: reading only the first name is the same *bare-index* mistake as trusting a bare
+`subscription` name, and on a cluster whose baseline operators were approved together it would print
+*nothing at all*. Keeping `NAME` in the `grep` means a no-match shows up as a header with no rows —
+visible, not silent. Either way, the newest plan's CSV list *contains* the `installed CSV` you read a
+moment ago.
 
 That is the whole chain, read backwards from a running operator: a *CatalogSource* (an index image) offered the package; a *Subscription* picked the `latest` channel; an *InstallPlan* approved it *automatically* (again on each upgrade); a *CSV* installed the controller and 14 owned CRDs.
 *That is what happened when someone clicked "Install."*
 
 [.checkpoint]
 ****
-✔ *Verify:* You read the live Pipelines operator's bundle end to end — its `subscriptions.operators.coreos.com` (channel `latest`, source `redhat-operators`), its channel list from the PackageManifest, its CSV (14 owned CRDs, a controller Deployment, `AllNamespaces`), the Tekton CRDs it added, and the CatalogSource + InstallPlan behind it — all read-only. You know the trap that a bare `subscription` resolves to the wrong kind.
+✔ *Verify:* You read the live Pipelines operator's bundle end to end — its `subscriptions.operators.coreos.com` (channel `latest`, source `redhat-operators`), its channel list from the PackageManifest, its CSV (14 owned CRDs, a controller Deployment, `AllNamespaces`), the Tekton CRDs it added, and the CatalogSource + InstallPlan behind it — all read-only. You know *two* traps now: a bare `subscription` resolves to the wrong kind, and a bare `[0]` index into an InstallPlan's CSV list can hide the very operator you are looking for.
 ****
 
 == 8. Where OLM is going, and map your product onto the spectrum
