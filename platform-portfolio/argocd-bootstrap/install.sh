@@ -570,6 +570,22 @@ else
           if oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1; then
             PRIOR_RECORDED="$(oc get configmap "$STATE_CM" -n "$STATE_NS" \
                                 -o jsonpath='{.data.gitops_argocd_controller_resources_b64}' 2>/dev/null || true)"
+            # CARRIED RESIDUE. ogsr-uninstall keeps ${STATE_NS} when it could not put a value back,
+            # pruned to the unrestored priors and stamped with residue_keys. For a key listed there
+            # the org's original is ALREADY known — as the recorded value, or, when the key is
+            # absent, as the fact that the CR carried no explicit .spec.controller.resources at all.
+            # The live CR meanwhile still carries OUR sizing. So a carried key counts as recorded and
+            # must not be re-derived: writing CUR_RES_B64 here would file the workshop's own leftover
+            # as "the org's original", which is the 2026-07-31 state-lifetime defect. Absence stays
+            # absence — the empty-prior encoding this whole restore path rests on.
+            # bootstrap/install.sh's record_once and the FSC state-capture Job hold the same rule.
+            RESIDUE_CARRIED=" $(oc get configmap "$STATE_CM" -n "$STATE_NS" \
+                                  -o jsonpath='{.data.residue_keys}' 2>/dev/null | tr ',' ' ' | xargs || true) "
+            case "$RESIDUE_CARRIED" in
+              *" gitops_argocd_controller_resources_b64 "*)
+                echo "  • prior controller sizing carried forward by a previous ogsr-uninstall — kept verbatim"
+                PRIOR_RECORDED="carried" ;;
+            esac
             RES_OK="true"
             if [[ -z "$PRIOR_RECORDED" && -n "$CUR_RES_B64" ]]; then
               oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \

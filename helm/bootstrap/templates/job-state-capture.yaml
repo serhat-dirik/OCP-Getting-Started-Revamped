@@ -112,14 +112,47 @@ spec:
                 oc create configmap "$CM" -n "$STATE_NS" >/dev/null
               oc label configmap "$CM" -n "$STATE_NS" "workshop.redhat.com/owner=${OWNER}" --overwrite >/dev/null
 
+              # Keys a PREVIOUS ogsr-uninstall could not restore and carried forward in this same
+              # ConfigMap (its residue_keys). Read BEFORE the first record_once, because it decides
+              # what record_once may write. The invariant: a value recorded as "the org's original"
+              # must never be a value we ourselves wrote — and for a carried key the cluster still
+              # carries OUR value, so re-deriving it here is precisely the corruption. Absent-but-
+              # listed is authoritative too (for gitops_argocd_controller_resources_b64 absence
+              # encodes "the CR carried no explicit resources"), so both cases mean: do not touch.
+              # Mirrors bootstrap/install.sh's record_once guard — the two capture paths must not
+              # hold different opinions about who owns a recorded value.
+              RESIDUE_KEYS_CARRIED=" $(oc get configmap "$CM" -n "$STATE_NS" \
+                -o jsonpath='{.data.residue_keys}' 2>/dev/null | tr ',' ' ' | xargs || true) "
+              # `if`, not `cond && cmd`: harmless at this nesting (top level of the container script),
+              # fatal the day it is moved into a function — the shape that silently skipped teardown
+              # steps 4-8 in cleanup_created_operators.
+              if [[ "$RESIDUE_KEYS_CARRIED" == "  " ]]; then RESIDUE_KEYS_CARRIED=""; fi
+              if [[ -n "$RESIDUE_KEYS_CARRIED" ]]; then
+                echo "⚠️  carried residue from a previous ogsr-uninstall:${RESIDUE_KEYS_CARRIED% }"
+                echo "   those prior values are kept verbatim; nothing below re-snapshots them."
+              fi
+
               # record_once KEY VALUE — write only if unset (true first-install snapshot).
               record_once(){
                 local k="$1" v="$2" cur
+                case "$RESIDUE_KEYS_CARRIED" in
+                  *" $k "*) return 0 ;;
+                esac
                 cur="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
                 [[ -n "$cur" ]] && return 0
                 oc patch configmap "$CM" -n "$STATE_NS" --type merge \
                   -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
               }
+
+              # Provenance stamp for everything ELSE this run records: false = a previous workshop
+              # install left something behind when the snapshot was taken, so no key recorded now is
+              # a proven pristine baseline. First-write-wins, so it is the ORIGINAL capture's verdict.
+              if [[ -n "$RESIDUE_KEYS_CARRIED" ]]; then
+                record_once capture_baseline false
+                record_once capture_baseline_evidence "residue carried by a previous ogsr-uninstall:${RESIDUE_KEYS_CARRIED% }"
+              else
+                record_once capture_baseline true
+              fi
 
               # yaml_field FILE JSONPATH — read one field from a local manifest with no yq in this
               # image: `oc create --dry-run=client` parses the file client-side, no server round-trip,

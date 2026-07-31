@@ -288,14 +288,37 @@ fi
 # 37 keys, including the ones teardown actually branches on — gitops_preexisted=true,
 # lightspeed_preinstalled=true, og_cert-manager-operator=preexisting:<name>, oauth_idp_ownedbyus,
 # console_plugins_added, and a per-operator op_<pkg>=created:<ns> provenance row.
+#
+# First-write-wins is only half the story, because the ConfigMap used to die with ${STATE_NS} at
+# teardown: on a re-install every key was a fresh first write of whatever the PREVIOUS install left
+# behind, recorded as if it were the customer's original. ogsr-uninstall now KEEPS the namespace when
+# it could not restore something and prunes the ConfigMap to those prior values (its residue_keys);
+# § carried residue below reads them and record_once refuses to touch them. Invariant, gated by
+# tools/lint/uninstall-state-lifetime-guard.sh: a value recorded as "the org's original" must never
+# be a value we ourselves wrote.
 OWNER_LABEL="workshop.redhat.com/owner=ogsr"
 STATE_NS="ogsr-system"
 STATE_CM="ogsr-uninstall-state"
 
 owner_stamp() { oc label --local --overwrite -f - "$OWNER_LABEL" -o yaml; }  # add the owner label to a piped manifest
 
+# Keys a PREVIOUS ogsr-uninstall run could not restore and therefore carried forward in the state
+# ConfigMap (its residue_keys). Populated below, before the first record_once call. The invariant it
+# enforces: a value recorded as "the org's original" must never be a value we ourselves wrote. For a
+# carried key the org's original is already known — either as the key's recorded value, or, when the
+# key is ABSENT, as the fact that the org had no such value at all (that absence is load-bearing for
+# gitops_argocd_controller_resources_b64, where it encodes "the CR carried no explicit resources").
+# Both cases mean the same thing here: do not touch it. Without this, a re-install on a cluster the
+# previous teardown could not fully clean snapshots OUR leftover as the baseline — measured 2026-07-31.
+RESIDUE_KEYS_CARRIED=""   # " key key " (space-fenced) — filled in at [0/6], § carried residue
+
 record_once() {  # key value — write to the state CM only if the key is unset (true first-install snapshot)
   local k="$1" v="$2" cur
+  case "$RESIDUE_KEYS_CARRIED" in
+    *" $k "*)
+      # Carried from a previous teardown: authoritative, present or absent. Never re-derive it.
+      return 0 ;;
+  esac
   cur="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
   [[ -n "$cur" ]] && return 0
   oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
@@ -642,6 +665,33 @@ metadata:
 EOF
 oc get configmap "$STATE_CM" -n "$STATE_NS" >/dev/null 2>&1 \
   || oc create configmap "$STATE_CM" -n "$STATE_NS" --dry-run=client -o yaml | owner_stamp | oc apply -f - >/dev/null
+
+# ── carried residue + capture provenance ─────────────────────────────────────
+# Read BEFORE the first record_once, because it decides what record_once is allowed to write.
+#
+# ogsr-uninstall deletes ${STATE_NS} — and with it this ConfigMap — only when it restored everything
+# it changed. When it could not, it PRUNES the ConfigMap to the unrestored prior values, lists their
+# keys in residue_keys and keeps the namespace. Those keys are the org's true originals surviving a
+# teardown; the live cluster still carries OUR value for them, so re-deriving them from the cluster
+# here is exactly the corruption this whole mechanism exists to prevent.
+#
+# capture_baseline is the provenance stamp on everything ELSE captured in this run: `false` means a
+# previous workshop install left something on this cluster when the snapshot was taken, so no key
+# recorded now is a proven pristine baseline. It is first-write-wins like every other key, which is
+# what makes it the verdict of the ORIGINAL capture rather than of the latest re-run.
+RESIDUE_KEYS_CARRIED=" $(oc get configmap "$STATE_CM" -n "$STATE_NS" \
+  -o jsonpath='{.data.residue_keys}' 2>/dev/null | tr ',' ' ' | xargs || true) "
+if [[ "$RESIDUE_KEYS_CARRIED" != "  " && "$RESIDUE_KEYS_CARRIED" != " " ]]; then
+  warn "a previous ogsr-uninstall could not restore:${RESIDUE_KEYS_CARRIED% }"
+  warn "   those prior values are CARRIED FORWARD unchanged — this install will not re-snapshot them"
+  warn "   from the cluster, because the cluster still carries the workshop's own value for them."
+  warn "   Details: oc -n ${STATE_NS} get cm ${STATE_CM} -o jsonpath='{.data.residue_notes}'"
+  record_once capture_baseline false
+  record_once capture_baseline_evidence "residue carried by a previous ogsr-uninstall:${RESIDUE_KEYS_CARRIED% }"
+else
+  RESIDUE_KEYS_CARRIED=""
+  record_once capture_baseline true
+fi
 
 # cluster-monitoring-config: the portfolio flips enableUserWorkload=true — remember its prior value.
 if oc get configmap cluster-monitoring-config -n openshift-monitoring >/dev/null 2>&1; then

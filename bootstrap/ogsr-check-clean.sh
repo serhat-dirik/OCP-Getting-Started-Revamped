@@ -260,6 +260,7 @@ fi
 # ── indexes: one cluster read each, reused by every section ───────────────────
 DISCOVERY_NOTE=""
 NS_INDEX=""; SVC_INDEX=""; CSV_INDEX=""; OG_INDEX=""; CRD_INDEX=""; STATE_KV=""; STATE_SRC=""
+STATE_RESIDUE=""   # residue_keys from a KEPT state ConfigMap — see load_state and section [4/9]
 
 # ns|name|installedCSV|currentCSV|<the 8 marker fields> — ONE cluster-wide Subscription read, shared by
 # the four call sites that each used to pay for it: section [3/9]'s orphan test, build_adoption_index's
@@ -417,7 +418,18 @@ load_state() {
   # shellcheck disable=SC2016  # $k/$v are go-template variables; expanding them here would break it
   live="$(oc get configmap "$STATE_CM" -n "$STATE_NS" -o go-template='{{range $k,$v := .data}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null)"
   if [ -n "$live" ]; then
-    STATE_KV="$live"; STATE_SRC="ConfigMap ${STATE_NS}/${STATE_CM} (install still present)"
+    STATE_KV="$live"
+    # Two very different clusters produce a live state ConfigMap, and calling both "install still
+    # present" would tell an operator to finish a teardown that already ran. ogsr-uninstall KEEPS
+    # ${STATE_NS} when it could not restore something, pruned to the unrestored prior values and
+    # stamped with residue_keys. That ConfigMap is the ONLY record of those values — section [4/9]
+    # must not print `oc delete namespace ${STATE_NS}` for it.
+    STATE_RESIDUE="$(printf '%s\n' "$live" | grep -m1 '^residue_keys=' | cut -d= -f2-)"
+    if [ -n "$STATE_RESIDUE" ]; then
+      STATE_SRC="ConfigMap ${STATE_NS}/${STATE_CM} (RESIDUE from a previous uninstall: ${STATE_RESIDUE})"
+    else
+      STATE_SRC="ConfigMap ${STATE_NS}/${STATE_CM} (install still present)"
+    fi
     return 0
   fi
   # The state ConfigMap lives in ogsr-system, which the uninstall deletes LAST — so after a
@@ -1112,6 +1124,15 @@ section_namespaces() {
     marker="$(ns_is_ours "$name" "$owner" "$comp" "$stack" "$user" "$layer" "$track" "$che")" || continue
     hit=1
     OURS_NS_LIST="${OURS_NS_LIST}${name} "
+    # The residue receipt is ours, but it is NOT litter: it holds the org's prior values for changes
+    # the teardown could not undo, and deleting it makes the next install record the workshop's own
+    # leftovers as the org's originals. Reported as "needs a human", which prints no delete command.
+    if [ "$name" = "$STATE_NS" ] && [ -n "$STATE_RESIDUE" ]; then
+      report_decide namespace "$name" "" \
+        "namespace/${name} — ${phase}, KEPT ON PURPOSE by the last uninstall: it holds the org's prior values for ${STATE_RESIDUE}" \
+        "apply the restores in: oc -n ${name} get cm ${STATE_CM} -o jsonpath='{.data.residue_notes}' — and only THEN delete the namespace"
+      continue
+    fi
     cls="$(classify_finding namespace "$name" "")"
     why="${cls#*|}"
     case "${cls%%|*}" in

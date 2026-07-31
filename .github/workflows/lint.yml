@@ -548,3 +548,38 @@ jobs:
           fi
           echo "self-test ok — both canaries are detected and the real tree stays clean (rc=1)."
           bash tools/lint/uninstall-restore-guard.sh
+
+  uninstall-state-lifetime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The uninstall-state record outlives the teardown that would erase it
+        # 2026-07-31: bootstrap/ogsr-uninstall.sh deleted the ogsr-system namespace, which is where
+        # the ogsr-uninstall-state ConfigMap lives — so the record of what to undo lived inside the
+        # thing being undone. Anything the teardown could NOT put back stayed on the cluster as the
+        # workshop's value, and the next install's first-write-wins snapshot recorded it as "the
+        # org's original". Measured live: recorded prior 2Gi, live Argo CD controller at our 6Gi, no
+        # consent key to authorise the restore — one cycle from 6Gi becoming the permanent baseline.
+        #
+        # The guard checks the three mechanics that uphold the invariant "a value recorded as the
+        # org's original must never be a value we ourselves wrote": (1) every restore path that
+        # leaves our value on the org's object records residue, (2) ogsr-system is deleted only when
+        # the residue ledger is empty, and (3) both capture paths refuse to re-derive a carried key.
+        # Invisible to every other gate here — valid shell, lint-clean, and the only symptom is a CR
+        # on a twice-installed cluster nobody inspects.
+        run: |
+          rc=0
+          bash tools/lint/uninstall-state-lifetime-guard.sh --self-test || rc=$?
+          # Exactly 1 = the real tree satisfies the contract AND all three canaries (a restore that
+          # declines silently, a state-namespace delete that ignores the ledger, and a record_once
+          # that re-derives a carried key) were detected. 0 = a detector is blind; 2 = the real tree
+          # is broken, extraction failed, or the fixture harness is. Either way detection is
+          # unproven, so fail rather than trust a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::uninstall-state-lifetime-guard self-test must exit 1 (real tree clean," \
+                 "all three canaries detected); got rc=$rc. The guard's detection is unproven —" \
+                 "refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — all three canaries are detected and the real tree stays clean (rc=1)."
+          bash tools/lint/uninstall-state-lifetime-guard.sh

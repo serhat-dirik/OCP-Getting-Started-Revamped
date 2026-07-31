@@ -105,6 +105,13 @@ spec:
 Uninstall (B2) is the same `./bootstrap/ogsr-uninstall.sh` — it reads the `ogsr-uninstall-state`
 ConfigMap this chart's capture Job wrote.
 
+It normally deletes `ogsr-system` (and that ConfigMap) at the end. It **keeps** both when it could
+not put some prior value back: the ConfigMap is pruned to exactly those values and stamped with
+`residue_keys`, because it is the only record of them — delete it and the next install snapshots the
+workshop's own leftover as the org's original. The capture Job honours that: `record_once` skips
+every key named in `residue_keys`, present or absent. Restore what `residue_notes` lists, then
+`oc delete namespace ogsr-system`. Gated by `tools/lint/uninstall-state-lifetime-guard.sh`.
+
 ---
 
 ## What gets deployed (sync-wave order)

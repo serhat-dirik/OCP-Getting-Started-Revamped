@@ -124,6 +124,11 @@ STEP_FAILED=0
 STEP_SUB_FAILED=0     # non-zero returns from sub-actions inside the step currently running
 STEPS_STARTED="false"
 STATE_DUMP=""         # set in step 9; the EXIT summary references it, so it must always be defined
+# The residue ledger. Declared HERE, with the other EXIT-summary globals rather than beside
+# residue_record() 100 lines down, because print_run_summary() reads them and `set -u` makes an
+# unset variable fatal — the summary must survive an early death at any point after the trap is set.
+RESIDUE_KEYS=""       # "<state-key>\n"… — see § the residue ledger
+RESIDUE_NOTES=""      # "<key>: <reason>\n"…
 
 sub() {  # <fn> [args…] — one action inside a step: report a non-zero return, run the rest anyway
   local rc=0
@@ -177,6 +182,21 @@ print_run_summary() {  # <shell exit status> — the ONE place that says what ha
     ok "ogsr-uninstall dry-run complete — all ${STEP_TOTAL} steps evaluated, nothing changed"
   else
     ok "ogsr-uninstall complete — all ${STEP_TOTAL} steps ran"
+  fi
+  # "All steps ran" is not "no trace left". A step can complete having deliberately declined to write
+  # to a CR it cannot prove it changed, and that decision leaves the workshop's value on the org's
+  # cluster — the verdict has to say so or it is the same false success the state ConfigMap's lifetime
+  # bug produced. Printed for dry-runs too: there the ledger is the PLAN, and a plan that ends in
+  # residue is exactly what an operator wants to see before saying yes.
+  if [[ -n "$RESIDUE_KEYS" ]]; then
+    echo
+    err "NOT trace-free: $(printf '%s' "$RESIDUE_KEYS" | grep -c . || true) prior value(s) were not put back."
+    err "   ${STATE_NS} is KEPT holding them (${STATE_CM}); it is the only record of the org's originals."
+    printf '%s\n' "$RESIDUE_NOTES" | while IFS= read -r _line; do
+      [[ -n "$_line" ]] || continue
+      echo "      ↳ ${_line}"
+    done
+    echo "   Apply those restores, then: oc delete namespace ${STATE_NS}"
   fi
   echo
   echo "   NEXT — check what outlived the teardown (read-only, deletes nothing):"
@@ -236,6 +256,35 @@ state() {  # key [default] — echo a recorded value from the uninstall-state Co
   fi
   v="$(printf '%s\n' "$STATE_SNAPSHOT" | grep -m1 "^${k}=" | cut -d= -f2- || true)"
   if [[ -n "$v" ]]; then echo "$v"; else echo "$def"; fi
+  return 0
+}
+
+# ── the residue ledger ────────────────────────────────────────────────────────
+# THE RECORD OF WHAT TO UNDO USED TO LIVE INSIDE THE THING BEING UNDONE. Step 9 deletes ${STATE_NS},
+# and with it the ConfigMap that is the ONLY record of what the org's cluster looked like before this
+# workshop touched it. That is correct exactly when this teardown put everything back — and a lie
+# every other time: whatever we could NOT restore stays on the cluster as OUR value, and the next
+# install's first-write-wins snapshot records it as "the org's original". Measured 2026-07-31 on a
+# live cluster whose adopted Argo CD controller sits at our 6Gi with the true prior (2Gi) recorded
+# and no consent key to authorise putting it back — one more install/teardown cycle and 6Gi becomes
+# the recorded baseline, permanently, with the teardown reporting "complete".
+#
+# So the state is deleted only when this teardown has nothing left to confess. Every restore path
+# that walks away leaving OUR value on an object we do not own calls residue_record; step 9 then
+# PRUNES the ConfigMap down to exactly those keys and KEEPS ${STATE_NS} as the receipt. What remains
+# is one namespace holding one ConfigMap of true prior values — and it remains only on a cluster that
+# already carries a change of ours, so it documents an existing trace rather than adding a new one.
+# It is self-clearing: restore the values by hand (the commands are printed) and delete the namespace,
+# or let the next install carry them forward — record_once is first-write-wins, so a carried prior is
+# never overwritten by the value we ourselves left behind.
+# RESIDUE_KEYS / RESIDUE_NOTES are declared with the EXIT-summary globals at the top of the file.
+residue_record() {  # <state-key> <reason> — this teardown left OUR value on an object we do not own
+  local k="$1" reason="$2"
+  case $'\n'"${RESIDUE_KEYS}" in
+    *$'\n'"${k}"$'\n'*) ;;
+    *) RESIDUE_KEYS="${RESIDUE_KEYS}${k}"$'\n' ;;
+  esac
+  RESIDUE_NOTES="${RESIDUE_NOTES}${k}: ${reason}"$'\n'
   return 0
 }
 
@@ -1496,7 +1545,13 @@ restore_monitoring() {  # put cluster-monitoring-config back the way we found it
       ok "restored enableUserWorkload=false in cluster-monitoring-config";;  # TODO(verify-on-cluster)
     *)
       err "cluster-monitoring-config pre-existed WITHOUT enableUserWorkload; we added it. Remove it manually:"
-      echo "      oc -n openshift-monitoring edit configmap cluster-monitoring-config   # delete the enableUserWorkload line";;
+      echo "      oc -n openshift-monitoring edit configmap cluster-monitoring-config   # delete the enableUserWorkload line"
+      # RESIDUE, and the second instance of the same defect class as the Argo one: our
+      # enableUserWorkload line stays on the org's ConfigMap. Drop the record here and the next
+      # install snapshots monitoring_uwm_prior=true — after which every future teardown "preserves"
+      # user-workload monitoring as something the org had all along.
+      residue_record monitoring_uwm_prior \
+        "cluster-monitoring-config -n openshift-monitoring still carries the enableUserWorkload key this workshop added; the ConfigMap had no such key before install. Remove it: oc -n openshift-monitoring edit configmap cluster-monitoring-config";;
   esac
   return 0
 }
@@ -2214,6 +2269,11 @@ restore_argocd_controller_resources() {
       err "   not write to an adopted CR on a guess. Prior spec.controller.resources:"
       echo "      ${prior:-<unreadable>}"
       echo "      restore manually if the org relied on it: oc -n ${ARGO_NS} edit argocd openshift-gitops"
+      # RESIDUE. The live limit IS our target and the recorded prior is not, so a workshop install
+      # raised it and this run is walking away without putting it back. Deleting the record now would
+      # make the next install snapshot OUR ${target_mem} as the org's original.
+      residue_record gitops_argocd_controller_resources_b64 \
+        "argocd/openshift-gitops -n ${ARGO_NS} is at the workshop's ${target_mem}; no consent record authorised putting it back. Restore: oc -n ${ARGO_NS} patch argocd openshift-gitops --type json -p '[{\"op\":\"add\",\"path\":\"/spec/controller/resources\",\"value\":${prior}}]'"
     fi
     return 0
   fi
@@ -2235,6 +2295,11 @@ restore_argocd_controller_resources() {
     if [[ "$rc" -ne 0 ]]; then
       err "could not remove spec.controller.resources from argocd/openshift-gitops: ${out}"
       echo "      by hand: oc -n ${ARGO_NS} patch argocd openshift-gitops --type merge -p '{\"spec\":{\"controller\":{\"resources\":null}}}'"
+      # RESIDUE with an EMPTY prior. The key stays UNSET in the carried ConfigMap on purpose — absence
+      # is how "the CR carried no explicit .spec.controller.resources" is encoded, and residue_keys is
+      # what makes that absence authoritative instead of just missing (see install.sh's record_once).
+      residue_record gitops_argocd_controller_resources_b64 \
+        "argocd/openshift-gitops -n ${ARGO_NS} still carries the workshop's spec.controller.resources; the CR had NONE before install and the removal patch failed. Restore: oc -n ${ARGO_NS} patch argocd openshift-gitops --type merge -p '{\"spec\":{\"controller\":{\"resources\":null}}}'"
       return 1
     fi
     ok "removed spec.controller.resources from argocd/openshift-gitops (it carried no explicit sizing before install; the operator restarts the controller)"
@@ -2251,6 +2316,8 @@ restore_argocd_controller_resources() {
       err "recorded prior controller resources are not a JSON object — refusing to patch argocd/openshift-gitops with them."
       echo "      recorded value: ${prior:-<unreadable>}"
       echo "      restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops"
+      residue_record gitops_argocd_controller_resources_b64 \
+        "argocd/openshift-gitops -n ${ARGO_NS} still carries the workshop's sizing; the recorded prior is not a JSON object so it could not be patched back. Restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops"
       return 1 ;;
   esac
 
@@ -2267,6 +2334,8 @@ restore_argocd_controller_resources() {
     err "could not restore argocd/openshift-gitops spec.controller.resources: ${out}"
     echo "      recorded prior value: ${prior}"
     echo "      restore by hand: oc -n ${ARGO_NS} edit argocd openshift-gitops"
+    residue_record gitops_argocd_controller_resources_b64 \
+      "argocd/openshift-gitops -n ${ARGO_NS} still carries the workshop's sizing; the restore patch failed. Restore: oc -n ${ARGO_NS} patch argocd openshift-gitops --type json -p '[{\"op\":\"add\",\"path\":\"/spec/controller/resources\",\"value\":${prior}}]'"
     return 1
   fi
   ok "restored argocd/openshift-gitops spec.controller.resources to ${prior} (the operator restarts the controller)"
@@ -2443,10 +2512,81 @@ step_delete_namespaces() {  # 9 — whatever the cascade did not own, then the s
       err "could not write the install-state dump to ${STATE_DUMP} — ogsr-check-clean.sh will run without it"
     fi
   fi
-  sub del_obj namespace "$STATE_NS"
-  DELETED_WS_NS+=("$STATE_NS")   # always ≥1 element, so the expansion below is safe on bash 3.2
-  sub report_stuck_namespaces "${DELETED_WS_NS[@]}"
+  sub carry_residue_or_delete_state_ns
+  # No longer "always ≥1 element": carry_residue_or_delete_state_ns KEEPS the namespace when this
+  # teardown has residue to confess, so the array can be empty here. Under `set -u`, "${arr[@]}" on an
+  # empty array is an unbound-variable FATAL on bash 3.2 — which is what macOS still ships and what
+  # `env bash` resolves to on a stock admin laptop. Guard on the count, which is safe on every bash.
+  if [[ "${#DELETED_WS_NS[@]}" -gt 0 ]]; then
+    sub report_stuck_namespaces "${DELETED_WS_NS[@]}"
+  fi
   return 0
+}
+
+# ── the residue receipt ───────────────────────────────────────────────────────
+# The one place ${STATE_NS} is removed, and the one place it is kept. See the residue ledger's header
+# for why: the state ConfigMap is the ONLY record of the org's prior values, so deleting it is honest
+# exactly when this run put every one of them back. With residue, the ConfigMap is PRUNED to the
+# unrestored keys and the namespace stays as the receipt for a trace that is already on the cluster.
+#
+# Pruned, not left whole, on purpose: every other key (op_*, og_*, installed_stacks, node lists…)
+# describes objects this teardown DID remove, and carrying them would make the next install believe a
+# previous workshop is still live. What survives is the minimum that is still true.
+#
+# A residue key with NO recorded value is left UNSET here rather than written empty: for
+# gitops_argocd_controller_resources_b64 absence is the encoding for "the CR carried no explicit
+# resources", and residue_keys is what turns that absence from missing into authoritative — see
+# install.sh's record_once, which refuses to fill any key named in residue_keys.
+carry_residue_or_delete_state_ns() {
+  local k v n=0
+  local -a args
+  if [[ -z "$RESIDUE_KEYS" ]]; then
+    sub del_obj namespace "$STATE_NS"
+    DELETED_WS_NS+=("$STATE_NS")
+    return 0
+  fi
+
+  n="$(printf '%s' "$RESIDUE_KEYS" | grep -c . || true)"
+  err "KEEPING ${STATE_NS}: ${n} prior value(s) this teardown could NOT put back"
+  printf '%s\n' "$RESIDUE_NOTES" | while IFS= read -r k; do
+    [[ -n "$k" ]] || continue
+    echo "      ↳ ${k}"
+  done
+  echo "   The workshop's own value is still on the org's cluster, so this teardown did not leave it"
+  echo "   trace-free. ${STATE_NS}/${STATE_CM} is kept holding ONLY those prior values, because it is"
+  echo "   the only record of them: delete it and the next install snapshots OUR value as the org's."
+  echo "   Apply the restores above, then:  oc delete namespace ${STATE_NS}"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "   • WOULD keep ${STATE_NS} and prune ${STATE_CM} to: $(printf '%s' "$RESIDUE_KEYS" | tr '\n' ' ' | xargs || true)"
+    return 0
+  fi
+
+  args=(create configmap "$STATE_CM" -n "$STATE_NS")
+  while IFS= read -r k; do
+    [[ -n "$k" ]] || continue
+    v="$(state "$k")"
+    # Absent stays absent — writing "" would destroy the empty-prior encoding (see the header).
+    [[ -n "$v" ]] || continue
+    args+=("--from-literal=${k}=${v}")
+  done <<< "$RESIDUE_KEYS"
+  args+=("--from-literal=residue_keys=$(printf '%s' "$RESIDUE_KEYS" | tr '\n' ',' | sed 's/,$//')")
+  args+=("--from-literal=residue_notes=${RESIDUE_NOTES}")
+  args+=("--from-literal=residue_recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+  args+=("--from-literal=residue_readme=This ConfigMap is what is LEFT of an ogsr-uninstall run: the prior values of objects the workshop changed and the teardown could not put back. Each key is the ORG'S value, never the workshop's. Do not delete it while residue_notes lists an unapplied restore — a re-install would then record the workshop's own leftovers as the org's originals. Apply every restore in residue_notes, then: oc delete namespace ${STATE_NS}")
+
+  # Delete-then-create, not apply: apply 3-way-merges against the last-applied annotation install.sh
+  # wrote and would KEEP every key we are pruning away.
+  oc delete configmap "$STATE_CM" -n "$STATE_NS" --ignore-not-found >/dev/null 2>&1 || true
+  if oc "${args[@]}" >/dev/null 2>&1; then
+    oc label configmap "$STATE_CM" -n "$STATE_NS" "$OWNER_LABEL" --overwrite >/dev/null 2>&1 || true
+    ok "pruned ${STATE_NS}/${STATE_CM} to the ${n} unrestored prior value(s) and kept the namespace"
+    return 0
+  fi
+  err "could not write the residue ConfigMap ${STATE_NS}/${STATE_CM} — the prior values below are now"
+  err "   recorded NOWHERE. Save them by hand before the next install:"
+  printf '%s\n' "$RESIDUE_NOTES" >&2
+  return 1
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────
