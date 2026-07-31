@@ -10,6 +10,16 @@
 #            in a file called subscription-extra.yaml would pass the filename test and fail here,
 #            which is exactly the drift that would ship a silently incomplete workshop.
 #
+#   NOT CHECKED HERE — and this is the gap that let the 2026-08-01 openshift-pipelines regression
+#            ship. Both properties below are quantified over whatever is CURRENTLY skippable, so a
+#            component that STOPS being skippable simply stops being examined: 49a7e28 added
+#            components/openshift-pipelines/tekton-config.yaml, is_operator_only() (which reads
+#            filenames) demoted the component, and this check stayed green without ever printing the
+#            word "openshift-pipelines". The expected-skippable set lives in
+#            hack/adoption-skippable.snapshot and is gated by tools/lint/adoption-skippable-guard.sh
+#            (CI job `adoption-skippable`); this file answers "is skipping safe?", that one answers
+#            "is the set of things we may skip still what we agreed to?".
+#
 #   MECHANICS A skip is delivered as a kustomize `$patch: delete` on the parent Application, not by
 #            editing the repo. This check renders every stack with each of its skippable components
 #            simulated as skipped and asserts the child Application is GONE and every other child

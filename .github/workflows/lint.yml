@@ -893,3 +893,65 @@ jobs:
             exit 1
           fi
           bash tools/lint/cohort-ops-guard.sh
+
+  adoption-skippable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A component may not lose adoption-skippability in silence
+        # 49a7e28 added ONE ordinary file to a component the installer was allowed to SKIP on
+        # clusters already running Pipelines. Eligibility is decided by FILENAME, so that single
+        # file revoked it -- and nothing said so. On a customer cluster already running Pipelines
+        # we would now install our Subscription over theirs and re-channel an operator we promised
+        # not to touch.
+        #
+        # The pre-existing gate could not have caught it: it proves whatever is CURRENTLY skippable
+        # is safe to skip, so a demoted component simply stops being examined. It passed straight
+        # through the regression without ever printing the component's name.
+        #
+        # The expected set is GENERATED from the installer's own classifier, never typed, so the
+        # snapshot cannot disagree with the real decision. A demotion becomes one changed line in a
+        # reviewable diff.
+        run: |
+          rc=0
+          bash tools/lint/adoption-skippable-guard.sh --self-test || rc=$?
+          # Exactly 1 = the tree matches the snapshot AND every canary was caught -- first among them
+          # the incident itself, replayed: one extra file added to a skippable component must name
+          # that component as demoted. 0 = blind; 2 = the tree drifted, the snapshot is missing, or a
+          # detector is declared but never called.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::adoption-skippable-guard self-test must exit 1; got rc=$rc." \
+                 "Detection is unproven -- refusing to trust a clean result."
+            exit 1
+          fi
+          bash tools/lint/adoption-skippable-guard.sh
+
+  adoption-skip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kustomize (pinned)
+        run: |
+          curl -sfL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.0/kustomize_v5.8.0_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+      - name: Install yq (pinned)
+        run: |
+          sudo curl -sfL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+      - name: Skipping an adopted component is safe, and actually removes it
+        # This gate has existed since automatic adoption shipped and NO workflow ever ran it. It
+        # proves the two properties adoption rests on -- an operator-only component renders nothing
+        # but Namespace/OperatorGroup/Subscription, and the skip really removes that child
+        # Application and nothing else. It only ever ran when a human remembered. An unrun gate is
+        # worse than none: it reads as coverage.
+        run: |
+          rc=0
+          bash platform-portfolio/hack/check-adoption-skip.sh || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::check-adoption-skip.sh failed (rc=$rc). Adoption would drop resources the" \
+                 "workshop needs, or would not drop the component at all."
+            exit 1
+          fi
