@@ -242,10 +242,28 @@ SELF_EXCLUDED = {"credential-redaction-guard.py", "credential-redaction-guard.ca
 
 
 def collect_files(roots, skip_self=True):
+    """Resolve `roots` (files and/or directories) to the concrete files to scan.
+
+    A directory walk and an explicitly-named file are DELIBERATELY not filtered the same way:
+
+    * SELF_EXCLUDED always applies, file or directory. Naming the guard's own source or its canary
+      by hand is still the detector reporting itself to itself — the reason SELF_EXCLUDED exists in
+      the first place — regardless of whether the path arrived via a walk or on the command line.
+
+    * SCANNED_SUFFIXES / the shebang sniff do NOT apply to an explicitly-named file. That allowlist
+      exists to bound an otherwise-unbounded directory walk (`.git`, `node_modules`, a stray binary);
+      it is not a claim that unusual suffixes are safe to skip. A file named directly on the command
+      line was asked for BY NAME — "scan tools/lint/credential-redaction-guard.py" — and silently
+      no-op'ing because its extension isn't in the allowlist (or it has none, and no shebang) would
+      make `guard.py <dir>` and `guard.py <dir>/<file>` disagree about what is scannable, which is
+      the defect this rewrite fixes. This guard is security-relevant; when in doubt, scan more.
+    """
     files = []
     for root in roots:
         p = pathlib.Path(root)
         if p.is_file():
+            if skip_self and p.name in SELF_EXCLUDED:
+                continue
             files.append(p)
         elif p.is_dir():
             for f in sorted(p.rglob("*")):
