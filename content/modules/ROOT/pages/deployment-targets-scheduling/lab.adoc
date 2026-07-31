@@ -60,8 +60,26 @@ ifdef::demo[]
 ====
 Run `ws start deployment-targets-scheduling --user {user}` a few minutes ahead, and set `NS={user}-dev` in your terminal.
 This demo runs from the *entry* state (default scheduling, batch worker unpinned), *not* from `ws solve`.
-The money moment is beat 1 — the batch pod stuck *Pending* on an untolerated taint, then *snapping* onto the batch node the instant you add the toleration.
 Keep the terminal font large and `oc get pods -o wide` handy; node placement is the whole visual.
+
+*Check the taint before you promise beat 1.* Bootstrap only applies the batch-pool *taint* on a worker
+pool of 3 or more nodes (below that floor it labels the node but withholds the taint — tainting one of
+only two workers once starved a platform component of capacity for 4h+, so bootstrap will not repeat
+that). Run this first:
++
+[source,sh,role=execute]
+----
+oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath='{.items[0].spec.taints}{"\n"}'
+----
++
+*If that prints a `NoSchedule` taint*, beat 1 runs exactly as scripted below — the money moment is the
+batch pod stuck *Pending* on the untolerated taint, then *snapping* onto the batch node the instant you
+add the toleration.
+*If it prints nothing*, this cluster is below the floor: the `nodeSelector`-only patch will schedule
+the pod *immediately*, not go `Pending`. Don't stage the refusal — reframe the Say line to "the
+toleration is what you'd need if this node repelled you; on a bigger cluster it does" and skip straight
+to applying both fields together. Never hand-taint the node to force the original beat — that recreates
+the outage.
 ====
 
 [demo-block]
@@ -247,8 +265,8 @@ REASON      MESSAGE
 Scheduled   Successfully assigned user2-dev/parasol-claims-74b5d4fb86-4cl9x to worker-2
 ----
 
-One node in the cluster is deliberately *held back* from ordinary pods — a *taint*.
-This is the dedicated *batch pool* you'll use later; peek at it now so you know it's there:
+One node in the cluster is set aside as a dedicated *batch pool* — always *labeled*, and (on a large-enough cluster) *held back* from ordinary pods with a *taint*.
+Peek at it now so you know it's there:
 
 [source,sh,role=execute]
 ----
@@ -256,19 +274,30 @@ oc get nodes -l workshop.redhat.com/pool=batch -o name
 oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath='{.items[0].spec.taints}{"\n"}'
 ----
 
-.Expected output
+.Expected output — depends on your cluster's worker count (see below)
 [source,texinfo]
 ----
+# on a cluster with a 3-worker-or-larger pool, the taint is applied:
 node/worker-1
 [{"effect":"NoSchedule","key":"workshop.redhat.com/pool","value":"batch"}]
+
+# on a smaller pool, the node is labeled but the taint line is empty:
+node/worker-1
+
 ----
 
-`NoSchedule` means "no pod lands here unless it explicitly tolerates `workshop.redhat.com/pool=batch`."
-That's *why* none of your app's pods are on `worker-1` — none of them tolerate it.
+[NOTE]
+.Why the taint line can be empty — and what that does and doesn't tell you
+====
+The platform only applies the `NoSchedule` taint once the worker pool has *3 or more* nodes; below that floor it deliberately withholds it, because tainting one of only *two* workers once starved a platform component of capacity for 4+ hours on a live cluster.
+If your taint line came back empty, `NoSchedule` isn't in effect here: nothing is stopping an ordinary pod from landing on `worker-1` — if none of your app's pods happen to be there right now, that's *chance placement*, not a taint repelling them.
+If you *did* get a taint, then `NoSchedule` means "no pod lands here unless it explicitly tolerates `workshop.redhat.com/pool=batch`" — and that genuinely is why none of your app's pods are on `worker-1`.
+Exercise 4 checks this again and walks you through exactly what it means for the break-and-fix ahead.
+====
 
 [.checkpoint]
 ****
-✔ *Verify:* You saw the six pods scattered across nodes (`-o wide`), confirmed `parasol-claims` is scheduled against its *requests* (200m/256Mi → `Burstable`), read a `Scheduled` event naming the chosen node, and found the *batch pool* node held back by a `NoSchedule` taint.
+✔ *Verify:* You saw the six pods scattered across nodes (`-o wide`), confirmed `parasol-claims` is scheduled against its *requests* (200m/256Mi → `Burstable`), read a `Scheduled` event naming the chosen node, and found the *batch pool* node — labeled always, and (on a 3-worker-or-larger cluster) held back by a `NoSchedule` taint.
 ****
 
 == 2. Direct the API with pod anti-affinity
@@ -348,21 +377,28 @@ parasol-claims-789ff476b-jkb6t    1/1     Running   worker-3
 ----
 
 Finally, see what happens when the scheduler *can't* satisfy the rule.
-A claims pod can only land on a node *outside* the tainted batch pool — count those eligible nodes, then ask for one *more* replica than that, so the extra pod has nowhere to go:
+A claims pod can only land on a node *outside* the batch pool *if that pool is actually tainted* — count the eligible nodes for *your* cluster, then ask for one *more* replica than that, so the extra pod has nowhere to go.
+The count of "eligible" nodes depends on whether the batch pool's taint is in effect (exercise 4 checks this properly; here's the short version so the count is right):
 
 [source,sh,role=execute]
 ----
-ELIGIBLE=$(oc get nodes -l 'workshop.redhat.com/pool!=batch' --no-headers | wc -l)
-echo "eligible (non-batch) nodes: $ELIGIBLE"
+BTAINT=$(oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath="{.items[0].spec.taints[?(@.key=='workshop.redhat.com/pool')].effect}")
+if [ "$BTAINT" = "NoSchedule" ]; then
+  ELIGIBLE=$(oc get nodes -l 'workshop.redhat.com/pool!=batch' --no-headers | wc -l)
+  echo "eligible nodes: $ELIGIBLE (batch pool is tainted, so it's excluded)"
+else
+  ELIGIBLE=$(oc get nodes --no-headers | wc -l)
+  echo "eligible nodes: $ELIGIBLE (batch pool is NOT tainted on this cluster, so it's schedulable too and counts)"
+fi
 oc scale deploy/parasol-claims -n $NS --replicas=$((ELIGIBLE + 1))
 sleep 12
 oc get pods -n $NS -l app=parasol-claims -o wide | grep -E 'NAME|Pending|Running' | head -12
 ----
 
-.Expected output (one pod stuck `Pending`; the counts track *your* cluster — here `ELIGIBLE` is 5, so 5 replicas run and 1 cannot place)
+.Expected output (one pod stuck `Pending`; the counts track *your* cluster — here `ELIGIBLE` is 5 on a tainted-batch-pool cluster, so 5 replicas run and 1 cannot place)
 [source,texinfo]
 ----
-eligible (non-batch) nodes: 5
+eligible nodes: 5 (batch pool is tainted, so it's excluded)
 NAME                              READY   STATUS    NODE
 parasol-claims-585785cf56-hhcs9   0/1     Pending   <none>
 parasol-claims-585785cf56-prjvp   1/1     Running   control-plane-1
@@ -379,14 +415,19 @@ The scheduler tells you *exactly* why — read its refusal:
 oc get events -n $NS --field-selector reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tail -1
 ----
 
-.Expected output (the totals are *your* cluster's node counts — here 6 nodes: 1 tainted batch node + 5 each already holding a claims pod)
+.Expected output (the totals AND the reasons are *your* cluster's — a tainted batch pool names the taint; an untainted one won't, and may instead cite plain capacity like `Insufficient memory` alongside the anti-affinity clause)
 [source,texinfo]
 ----
+# on a TAINTED batch pool (6 nodes: 1 tainted batch node + 5 each already holding a claims pod):
 0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match pod anti-affinity rules. ...
+
+# on an UNTAINTED batch pool, the taint clause is simply absent -- e.g. on a 5-node cluster where
+# every node is a real candidate and each is already occupied or short on room:
+0/5 nodes are available: 2 Insufficient memory, 3 node(s) didn't match pod anti-affinity rules. ...
 ----
 
-None available: *one* node is the tainted batch pool, and every *other* node already holds a claims pod, so the anti-affinity rule rejects it — the counts add up to your cluster's node total.
-That single line is the answer to almost every "why is my pod Pending?" — always read it first.
+Read whichever line *you* got: it names, node by node, exactly why none was free — no taint clause at all means there was no taint to name, not that the event is broken.
+That single line is the answer to almost every "why is my pod Pending?" — always read it first, and always read what it *actually* says rather than what you expected it to say.
 Scale back to three (a good spread, room for the disruption budget later):
 
 [source,sh,role=execute]
@@ -397,7 +438,7 @@ oc rollout status deploy/parasol-claims -n $NS --timeout=90s
 
 [.checkpoint]
 ****
-✔ *Verify:* Required `podAntiAffinity` put the replicas on *distinct* nodes; deleting one rescheduled it onto another distinct node; scaling past the available-node count left a pod `Pending` with a `FailedScheduling` event reading *"untolerated taint … didn't match pod anti-affinity rules"*; and you scaled back to three.
+✔ *Verify:* Required `podAntiAffinity` put the replicas on *distinct* nodes; deleting one rescheduled it onto another distinct node; scaling past the eligible-node count left a pod `Pending` with a `FailedScheduling` event — naming an *"untolerated taint"* if your batch pool is tainted, or citing plain capacity/anti-affinity if it isn't — and you scaled back to three.
 ****
 
 == 3. Spread evenly with topology spread constraints
@@ -479,7 +520,7 @@ oc patch deploy parasol-claims -n $NS --type=merge -p '{"spec":{"template":{"spe
 ⏱ *~7 min* · the break-and-fix: a selector attracts, but a toleration is what permits
 
 The `statement-batch` worker churns monthly statements and shouldn't compete with the live API for CPU.
-You have a *dedicated pool* — the tainted `worker-1` from exercise 1 — and now you'll pin the batch worker onto it.
+You have a *dedicated pool* — the batch-pool node from exercise 1 — and now you'll pin the batch worker onto it.
 It's on a general node today:
 
 [source,sh,role=execute]
@@ -494,8 +535,33 @@ NAME                              READY   STATUS    NODE
 statement-batch-db8794f7c-88cvm   1/1     Running   worker-2
 ----
 
+[IMPORTANT]
+.Check first — is the batch-pool node actually TAINTED on this cluster?
+====
+This exercise's whole point is that a `nodeSelector` *alone* is not enough — it needs the node's *taint* pushing back to prove it.
+That taint only exists on clusters whose worker pool has *3 or more* nodes; below that floor the platform labels the node (so you can still target it) but *deliberately withholds the taint*, because tainting one of only *two* workers once starved a platform component of capacity for 4+ hours on a live cluster.
+Run this before you touch anything, and read what it tells you:
+
+[source,sh,role=execute]
+----
+BN=$(oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath='{.items[0].metadata.name}')
+TAINT=$(oc get node $BN -o jsonpath="{.spec.taints[?(@.key=='workshop.redhat.com/pool')].effect}")
+if [ "$TAINT" = "NoSchedule" ]; then
+  echo "batch-pool node ($BN) IS tainted -- the rest of this exercise runs exactly as written below."
+else
+  echo "batch-pool node ($BN) is labeled but NOT tainted on this cluster."
+  echo "why: this cluster's worker pool is below the 3-worker floor the platform requires before it"
+  echo "will dedicate a node -- see this module's concept page."
+  echo "what you'll see instead: the nodeSelector-only patch below will schedule CLEANLY and"
+  echo "immediately -- no Pending, no FailedScheduling event. That's not a mistake on your part; it's"
+  echo "this cluster. Keep going anyway -- the toleration you add afterward is still the correct,"
+  echo "production-shaped fix. You just don't get to watch it refused first."
+fi
+----
+====
+
 The instinct is "add a `nodeSelector` for the pool label and I'm done."
-Do exactly that — *only* the selector — and watch it *fail*, on purpose:
+Do exactly that — *only* the selector — and read what actually happens (on a tainted pool it fails on purpose; per the check above, this cluster may not have that taint):
 
 [source,sh,role=execute]
 ----
@@ -504,24 +570,36 @@ sleep 10
 oc get pods -n $NS -l app=statement-batch
 ----
 
-.Expected output (the new pod is stuck `Pending`)
+.Expected output — two honest outcomes; the precondition check above told you which is yours
 [source,texinfo]
 ----
+# on a TAINTED batch pool (3-worker floor met): the new pod is stuck Pending
 deployment.apps/statement-batch patched
 NAME                               READY   STATUS    NODE
 statement-batch-64b4659bdf-2l2tp   0/1     Pending   <none>
 statement-batch-db8794f7c-88cvm    1/1     Running   worker-2
+
+# on an UNTAINTED batch pool (below the floor): the new pod schedules immediately -- expected, not a bug
+deployment.apps/statement-batch patched
+NAME                               READY   STATUS    NODE
+statement-batch-64b4659bdf-2l2tp   1/1     Running   worker-1
 ----
 
-Read the refusal — it names *both* halves of the problem:
+Read the refusal, if you got one — it names *both* halves of the problem. If you didn't, this block says so and explains why:
 
 [source,sh,role=execute]
 ----
-BATCHPOD=$(oc get pods -n $NS -l app=statement-batch --field-selector=status.phase=Pending -o jsonpath='{.items[0].metadata.name}')
-oc get events -n $NS --field-selector involvedObject.name=$BATCHPOD,reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tail -1
+BATCHPOD=$(oc get pods -n $NS -l app=statement-batch --field-selector=status.phase=Pending -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$BATCHPOD" ]; then
+  oc get events -n $NS --field-selector involvedObject.name=$BATCHPOD,reason=FailedScheduling -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | tail -1
+else
+  echo "no Pending statement-batch pod -- this cluster's batch-pool node carries no taint (see the"
+  echo "check above), so there is no refusal event to read. The selector alone was enough to land it"
+  echo "here; it would NOT be enough on a cluster whose batch pool is actually tainted."
+fi
 ----
 
-.Expected output (the totals are *your* cluster's node counts — here 6 nodes: 1 tainted batch node + 5 that don't match the selector)
+.Expected output (the totals are *your* cluster's node counts; shown here for a tainted 6-node cluster — 1 tainted batch node + 5 that don't match the selector. On an untainted cluster you'll see the "no Pending pod" line instead.)
 [source,texinfo]
 ----
 0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match Pod's node affinity/selector. ...
@@ -529,15 +607,16 @@ oc get events -n $NS --field-selector involvedObject.name=$BATCHPOD,reason=Faile
 
 // media-pass: screenshot deployment-targets-scheduling-03-batch-pending.png — Console -> Workloads
 // -> Pods -> the statement-batch pod Pending, its Events showing the untolerated-taint
-// FailedScheduling. Circle: the FailedScheduling event text "untolerated taint". See
-// media-manifest.md.
+// FailedScheduling. Circle: the FailedScheduling event text "untolerated taint". Captured on a
+// tainted (3+ worker) cluster — see media-manifest.md.
 
-Read it carefully — this is the whole lesson.
+Read it carefully, if you have it — this is the whole lesson.
 The *one* node your selector points at (the batch pool) has an *untolerated taint* — the selector *sent* the pod there, but the node *repels* it.
 Every *other* node doesn't match the selector at all.
 So the pod has nowhere to go.
+If instead it scheduled immediately, the reasoning is the same one in reverse: with no taint on that node, *nothing* was repelling the pod, so the selector's "send it there" was the whole story — which is exactly why the taint, not just the label, is what makes a pool truly *dedicated*.
 
-The fix is the *toleration* — the pod's permission slip for the tainted node.
+The fix is the *toleration* — the pod's permission slip for the tainted node, and the field that makes the pin correct no matter which kind of cluster you're on.
 Add it, and the selector and toleration together do the job:
 
 // Verified live OCP 4.22.5, 2026-07-26: statement-batch's detail page carries a YAML tab directly
@@ -580,11 +659,11 @@ landed on: worker-1  pool-label=batch
 ----
 
 There it is: *selector to send it, toleration to permit it — you need both.*
-A toleration without a selector would *allow* the batch node but not *choose* it; a selector without a toleration is exactly the `Pending` you just fixed.
+A toleration without a selector would *allow* the batch node but not *choose* it; a selector without a toleration is exactly the `Pending` you saw above — or would have, on a cluster whose batch pool is tainted.
 
 [.checkpoint]
 ****
-✔ *Verify:* The `nodeSelector` alone left `statement-batch` `Pending` with an *"untolerated taint … didn't match node selector"* event; adding the matching *toleration* let it schedule *onto the dedicated batch pool node* (`worker-1`, `pool=batch`). Selector attracts, toleration permits — both required.
+✔ *Verify:* On a tainted batch pool (3-worker floor met), the `nodeSelector` alone left `statement-batch` `Pending` with an *"untolerated taint … didn't match node selector"* event. On an untainted pool (below the floor), it scheduled immediately instead — and the precondition check told you why before you could mistake that for "nodeSelector alone was enough." Either way, adding the matching *toleration* left it running *onto the dedicated batch pool node* (`worker-1`, `pool=batch`). Selector attracts, toleration permits — both required for a correct pin, even on a cluster that didn't make you prove it.
 ****
 
 == 5. Make the rollout zero-downtime

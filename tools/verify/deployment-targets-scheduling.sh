@@ -36,13 +36,31 @@ deploy_ready() {
   [[ -n "$ready" && "$ready" -ge 1 ]]
 }
 
-# The dedicated batch pool exists: at least one node carries the pool label. Cluster-scoped bootstrap
-# substrate (Rule 13 — never chart-owned); fail closed so a missing/recycled pool is LOUD, not a silent
-# "the toleration exercise schedules anywhere and the lesson is lost" (build note open risk).
-batch_pool_exists() {
+# The dedicated batch pool node LABEL exists: at least one node carries workshop.redhat.com/pool=batch.
+# Cluster-scoped bootstrap substrate (Rule 13 — never chart-owned); fail closed so a missing/recycled
+# label is LOUD. Label-only is NOT the same claim as "the pool is real" — see batch_pool_tainted below.
+batch_pool_labeled() {
   local c
   c="$(oc get nodes -l "${POOL_KEY}=${POOL_VALUE}" -o name 2>/dev/null | grep -c . || true)"
   [[ "${c:-0}" -ge 1 ]]
+}
+
+# The labeled batch pool node ALSO carries the matching NoSchedule taint. This is the 40th instance of
+# the "tick that passes without inspecting the thing that matters" defect class (see the 39 fixed
+# 2026-07-31 across 19 sibling scripts): a check named batch_pool_exists() used to test the label alone,
+# so `ws verify` returned green on a cluster where exercise 4's whole break-and-fix cannot happen — the
+# nodeSelector-only pod schedules cleanly in ~11s instead of going Pending, and the attendee concludes
+# the opposite of the lesson (nodeSelector alone is sufficient). bootstrap/install.sh withholds the
+# taint below its MIN_BATCH_POOL_FOR_TAINT=3 floor (tainting one of two workers starved RHACS
+# central-db for 4h+, 2026-07-30) — that is a REAL, deliberate state on small clusters, not a bootstrap
+# defect, so this must still fail closed: a green check here is a promise that the toleration half of
+# the lesson is actually live on THIS cluster, and that promise must not be made when it's false.
+batch_pool_tainted() {
+  local node effect
+  node="$(oc get nodes -l "${POOL_KEY}=${POOL_VALUE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "$node" ]] || return 1
+  effect="$(oc get node "$node" -o jsonpath="{.spec.taints[?(@.key=='${POOL_KEY}')].effect}" 2>/dev/null || true)"
+  [[ "$effect" == "NoSchedule" ]]
 }
 
 # The node a Running statement-batch pod landed on (empty if none Running).
@@ -140,7 +158,8 @@ check "parasol-claims deployment present"               deploy_present parasol-c
 check "parasol-web deployment present"                  deploy_present parasol-web          || hint "entry app not synced — ws reset deployment-targets-scheduling --user ${USER_NAME}"
 check "statement-batch worker has >=1 ready replica"    deploy_ready statement-batch        || hint "the batch worker isn't up — oc get pods -l app=statement-batch -n ${NS}"
 check "load generator has >=1 ready replica"            deploy_ready claims-load            || hint "the load generator isn't up — oc get pods -l app=claims-load -n ${NS}"
-check "dedicated batch pool exists (a node is labeled ${POOL_KEY}=${POOL_VALUE})" batch_pool_exists || hint "no batch pool — run the bootstrap node-shaping step (bootstrap/install.sh labels+taints one worker ${POOL_KEY}=${POOL_VALUE})"
+check "dedicated batch pool node exists (labeled ${POOL_KEY}=${POOL_VALUE})" batch_pool_labeled || hint "no node carries the label at all — run the bootstrap node-shaping step (bootstrap/install.sh labels+taints one worker ${POOL_KEY}=${POOL_VALUE})"
+check "dedicated batch pool node is TAINTED (a toleration is actually required to land there)" batch_pool_tainted || hint "labeled but NOT tainted — this is a DIFFERENT problem than a missing pool. Expected below bootstrap's 3-worker floor: tainting one of only two workers starved a platform component for 4h+ on 2026-07-30 (see bootstrap/install.sh MIN_BATCH_POOL_FOR_TAINT), so the taint is deliberately withheld. Exercise 4's toleration half cannot be taught on this cluster until a 3rd worker joins the pool; the nodeSelector half still works. Do NOT hand-taint the node to force this green — that recreates the outage."
 
 # INFO: parasol-web/parasol-claims readiness needs the parasol-images imagestreams (workshop image-load
 # step). Presence is asserted above; readiness is a cluster-provisioning concern, not an entry defect.

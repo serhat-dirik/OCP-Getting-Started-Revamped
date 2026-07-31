@@ -77,16 +77,40 @@ oc get pods -n user2-dev -l 'app in (parasol-web,parasol-claims)'
 Expect `parasol-web` `1/1` and both `parasol-claims` `1/1 Running`.
 If they are `ImagePullBackOff`, the `ogsr-parasol-images` imagestreams weren't loaded — the node-spread and rollout beats (exercises 2, 3, 5) need `parasol-claims` running; `statement-batch`, `claims-load`, and `claims-db` run on always-present platform images and work regardless.
 
-. *The dedicated batch pool exists (label + taint on one worker).*
+. *The dedicated batch pool exists — and check whether it's actually TAINTED.*
 +
 [source,sh,role=execute]
 ----
 oc get nodes -l workshop.redhat.com/pool=batch -o name
+oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' -o name | wc -l
 oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath='{.items[0].spec.taints}{"\n"}'
 ----
 +
-Expect one node and a `workshop.redhat.com/pool=batch:NoSchedule` taint.
-This is *cluster-scoped bootstrap substrate* — if it's missing (a node was recycled/relabelled), exercise 4's pin has nowhere to land; re-run the bootstrap node-shaping step. `ws verify … --entry-only` also fails closed on this.
+[IMPORTANT]
+.The taint is conditional — read this before you assume exercise 4 works as written
+====
+`bootstrap/install.sh` only applies the `workshop.redhat.com/pool=batch:NoSchedule` taint when the
+worker pool has *3 or more* nodes (`MIN_BATCH_POOL_FOR_TAINT`). Below that floor it labels the node
+(so the `nodeSelector` half of the beat still works) but *deliberately withholds the taint* — tainting
+one of only *two* workers once starved RHACS `central-db` for 4h+ on a live cluster (2026-07-30), so
+bootstrap will not repeat that. **Never hand-taint the node to "fix" this** — it recreates the outage.
+
+*If the worker count is ≥3 and the taint is present:* exercise 4 runs exactly as written — the
+`nodeSelector`-only patch goes `Pending`, and the toleration fix is the real unblock.
+
+*If the worker count is <3 and the node is labeled but untainted:* exercise 4's `Pending` moment will
+*not* happen — the `nodeSelector`-only patch schedules cleanly and immediately, because nothing is
+repelling it. The lab's own precondition check surfaces this to the attendee truthfully (it reads the
+taint live and explains why), so you don't need to intervene mid-exercise — but say it up front in your
+framing: *"this cluster is below the 3-worker floor, so you'll see the pod land immediately instead of
+going Pending — the toleration is still the right thing to add, you just won't get to watch it get
+refused first."* Cross-check with the pre-flight `ws verify` below, which reports the same distinction.
+====
++
+This pool is *cluster-scoped bootstrap substrate* — if the label itself is missing (a node was
+recycled/relabelled), exercise 4's pin has nowhere to land at all; re-run the bootstrap node-shaping
+step. `ws verify … --entry-only` fails closed on BOTH conditions now — missing label and missing
+taint — with a hint that names which one and why.
 
 . *The synthetic zone labels are present (for the exercise-3 zone knob).*
 +
@@ -215,6 +239,11 @@ The fault is a boot-time reseed of the shared DB (every pod boot runs `drop-and-
 *Do not promise zero.* `maxUnavailable: 0` guarantees capacity, not that every in-flight request lands: endpoint removal propagates asynchronously, so a request can still reach a pod that is already shutting down. If an attendee asks how to reach a true zero, the answer is a `preStop` hook plus graceful shutdown — a different technique, and a good pointer for the wrap-up. The *shape* (before ≫ after, after in single digits) is what's deterministic; the exact digits are not.
 * *The `master` role label shows on screen — say "control plane".*
 `oc get ds … nodeSelector` prints `node-role.kubernetes.io/master` for the control-plane-only agent. It's the legacy role label Kubernetes still sets; refer to those nodes as *control plane* in prose, and don't try to rename the label.
+* *Exercise 4's `Pending` moment needs a TAINTED batch pool — not just a labeled one.*
+Bootstrap only applies the `NoSchedule` taint at a 3-worker floor (see the pre-flight IMPORTANT box
+above). Below the floor the node is labeled but not tainted, and the `nodeSelector`-only patch in
+exercise 4 schedules immediately instead of going `Pending` — the lab's own precondition check tells
+the attendee this live, so don't treat a "no Pending pod" report as something broken.
 * *The batch pool is one node shared by all users.*
 Each `statement-batch` is tiny (50m/64Mi), so ~30 users' batch pods fit comfortably. If a user scales `statement-batch` up hard, it could crowd the node — the `{user}-dev` quota keeps it bounded. Don't add a second dedicated pool per user; it's shared substrate by design.
 * *This module is the catalogue's node-headroom canary.*
