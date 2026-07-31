@@ -2,9 +2,13 @@
 :module-id: ai-assisted-development
 include::partial$version-attributes.adoc[]
 
-// Real entries from performing the module on OCP {ocp_version} (Kubernetes 1.34, 2026-07-15 in a
+// Real entries from performing the module on OpenShift 4.21.22 (Kubernetes 1.34, 2026-07-15 in a
 // user3-dev namespace) plus known failure-mode seeds. Format: Symptom / Cause / Fix. Commands use
 // $NS = {user}-dev (set it once). NAMESPACE in output is the sample user user3-dev.
+// The InvalidImageName entry was added 2026-07-31 from two INDEPENDENT live reproductions (two
+// clusters, two attendees): with the scoped write granted, the agent hand-authored a replacement
+// parasol-claims Deployment carrying a literal `image: <image>` placeholder while its own answer
+// reported success. managedFields showed `kubernetes-mcp-server op=Apply` in both.
 
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 Set the shortcuts first: `export NS={user}-dev` and `export AGENT_CLI_IMAGE=$(oc get cm ws-entry-ai-assisted-development -n $NS -o jsonpath='{.data.agentCliImage}')`.
@@ -21,6 +25,46 @@ ask-agent "Inspect namespace $NS. List the pods in that namespace, get the paras
 ----
 +
 For a *write* the model narrates (it prints a `resources_create_or_update(...)` block and changes nothing), you've *reviewed* the proposed change — apply it with the scoped write you granted: `oc patch deploy parasol-claims -n $NS --type=json -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/q/health/ready"}]'`.
++
+Zero tool calls is the *visible* way an agent comes up short. The invisible way — it acts, gets it wrong, and reports success — is the next entry.
+
+== `parasol-claims` is `InvalidImageName` after the agent's write — and the agent said it succeeded
+
+Symptom:: After exercise 3's `ask-agent --allow-writes`, the agent's `ANSWER` reports the fix applied, the trace shows a real `resources_create_or_update` that the API server accepted — and yet:
++
+[source,texinfo]
+----
+NAME                             READY   STATUS              RESTARTS   AGE
+parasol-claims-b7c9d4f6c-...     0/1     InvalidImageName    0          30s
+----
++
+`oc get deploy parasol-claims -n $NS -o jsonpath='{.spec.template.spec.containers[0].image}'` prints a *placeholder* — something like `<image>` — instead of a registry reference. `parasol-claims` can never reach `1/1`, so checkpoint 3 is unreachable.
+Cause:: The model *acted* rather than narrated, but hand-authored a *replacement* Deployment manifest instead of editing the one field. It reproduced the parts it reasoned about (the readiness probe) and filled the rest with template text — including the image. The write was legitimate, and the audit trail proves it:
++
+[source,sh,role=execute]
+----
+oc get deploy parasol-claims -n $NS -o jsonpath='{range .metadata.managedFields[*]}{.manager}{" — op="}{.operation}{"\n"}{end}'
+----
++
+A `kubernetes-mcp-server — op=Apply` line means the agent's scoped identity really made the write. This is the module's own lesson landing on you: *an agent's report of success is a claim, not a fact* — and the reason the grant is one verb, one resource, one namespace is that a confident mistake stays this small.
++
+Patching the readiness probe alone will *not* fix this — the probe is not what is broken.
+Fix:: Restore the image from the value your entry state recorded (never retype it), then re-apply the probe fix:
++
+[source,sh,role=execute]
+----
+SEED_IMAGE=$(oc get cm ws-entry-ai-assisted-development -n $NS -o jsonpath='{.data.seedImage}')
+if [ -n "$SEED_IMAGE" ]; then
+  oc set image deploy/parasol-claims parasol-claims="$SEED_IMAGE" -n $NS
+else
+  oc rollout undo deploy/parasol-claims -n $NS
+fi
+oc patch deploy parasol-claims -n $NS --type=json \
+  -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/q/health/ready"}]'
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+----
++
+If the agent changed *more* than the image — a dropped environment variable (the pod then crash-loops on a missing database host rather than showing `InvalidImageName`), a renamed container — use `oc rollout undo deploy/parasol-claims -n $NS` on its own to restore the entire previous pod template, then re-apply the probe patch. `ws prep {module-id} --yes` re-materializes the whole world if you would rather start clean; you keep the lesson either way.
 
 == `ask-agent: command not found`, or the pod fails with an empty image
 

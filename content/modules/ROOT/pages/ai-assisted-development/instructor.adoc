@@ -7,9 +7,14 @@ include::partial$version-attributes.adoc[]
 // against this cluster's served model: the read-only diagnosis (3 real tool calls), the scoped-write
 // grant + fix, the client read-only filter hiding 6 mutating tools, and the cross-namespace RBAC
 // denial (2 real tool calls, both `is forbidden`) are real captures. Two realities are flagged in
-// Watchouts and reported to the PM: (a) on the build cluster's model the agent NARRATES the large
-// resources_create_or_update write as text instead of executing it — the lab ships a reviewed-and-apply
-// fallback and frames it as the "review the agent" lesson; (b) the optional in-IDE Dev Spaces beat
+// Watchouts and reported to the PM: (a) how the agent lands exercise 3's write VARIES BY MODEL and is
+// the module's top delivery variable — on the 2026-07-15 build cluster's model it NARRATED the large
+// resources_create_or_update write as text; on a tool-calling model provisioned later it EXECUTED and
+// got it WRONG, hand-authoring a replacement Deployment with a literal `image: <image>` placeholder
+// (reproduced twice independently 2026-07-31, two clusters, two attendees; managedFields recorded
+// `kubernetes-mcp-server op=Apply`) while reporting success. The lab now enumerates all three landings
+// and ships ONE recovery that works from any of them; DO NOT re-pin this page to one model's
+// behaviour — per-user MaaS keys are model-scoped; (b) the optional in-IDE Dev Spaces beat
 // resolves its editor via the in-cluster dashboard editor API — design call #40 (editor resolution) is
 // now CLOSED as the permanent mechanism (see gitops/entry-states/ai-assisted-development/templates/
 // devworkspace.yaml), not an interim fix; it stays an optional preview pending a graded in-IDE checkpoint
@@ -23,7 +28,7 @@ The single most valuable thing you can reinforce is the *boundary claim*: the se
 
 == Timing
 
-Total hands-on: *~30 min* (add ~15 min of concept up front — the MCP+ServiceAccount boundary and the two-phase RBAC diagrams).
+Total hands-on: *~31 min* (add ~15 min of concept up front — the MCP+ServiceAccount boundary and the two-phase RBAC diagrams).
 
 [cols="1,4,1,3",options="header"]
 |===
@@ -31,7 +36,7 @@ Total hands-on: *~30 min* (add ~15 min of concept up front — the MCP+ServiceAc
 
 | 1 | Meet the MCP server + connect the agent | ~5 min | reading the scoped SA/RBAC + building the `ask-agent` helper; all `oc` reads *instant*
 | 2 | Diagnose read-only | ~7 min | one `ask-agent` run — the *model round-trip is the wait* (~20-40 s); reading the trace + `oc` verification is the rest
-| 3 | Scoped write + fix + audit | ~8 min | the RBAC grant + server flip are *instant*/~15 s rollout; the fix `ask-agent` run ~30-60 s; reading the audit trail
+| 3 | Scoped write + fix + *review* + audit | ~9 min | the RBAC grant + server flip are *instant*/~15 s rollout; the fix `ask-agent` run ~30-60 s; +1 min for the review step and, when needed, the recovery (all `oc` reads *instant*, one further ~15 s rollout); reading the audit trail
 | 4 | The forbidden test | ~5 min | one `ask-agent` run (~20-40 s) + the `oc auth can-i --as` matrix (*instant*); the denial is the payoff
 | 5 | In-IDE preview | ~5 min | reading only — optional, no checkpoint
 |===
@@ -39,10 +44,11 @@ Total hands-on: *~30 min* (add ~15 min of concept up front — the MCP+ServiceAc
 [NOTE]
 .How this timing was measured
 ====
-On the build cluster (OCP {ocp_version}, Kubernetes 1.34) on 2026-07-15, every exercise was performed in a `user3-dev` namespace with the neutral `mcp-agent-cli` against the cluster's served model.
+On the build cluster (OpenShift 4.21.22, Kubernetes 1.34) on 2026-07-15, every exercise was performed in a `user3-dev` namespace with the neutral `mcp-agent-cli` against the cluster's served model.
 The mechanics are *instant*: `oc get`/`auth can-i`/`apply` return in well under a second, and the agent's container image is pull-through-cached (pull ~0.2 s), so each `ask-agent` pod starts immediately.
 *The only real wait is the model round-trip.* A read-only diagnosis (three tool calls) took roughly 20-40 s end to end; the fix and the forbidden test are similar. Budget each `ask-agent` call at up to a minute and tell attendees so they don't think it hung.
 The dominant *attendee* time is reading — the tool-call trace, the `managedFields` audit, and the `is forbidden` denial — not waiting on commands.
+Exercise 3 gained a *review* step on 2026-07-31 (read the cluster, not the answer) plus a recovery block. Its commands are `oc` reads (instant) and at most one further rollout, measured at the same ~15 s as the server flip on the same cluster — hence ~8 → ~9 min, not a new measurement of the agent path.
 ====
 
 == Pre-flight checklist
@@ -85,7 +91,15 @@ Expect a `…/ogsr-parasol-images/mcp-agent-cli@sha256:…` digest. If it's miss
 ws smoke ai-assisted-development --user user3     # runs a read-only ask-agent diagnosis in the live cockpit
 ----
 +
-The module is *model-agnostic*, but models differ in how reliably they *execute* tool calls versus *narrating* them (see Watchouts). Do a dry run of exercises 2-4 on *your* cluster's model before the session so you know whether the fix in exercise 3 executes directly or lands on the reviewed-and-apply fallback.
+The module is *model-agnostic*, but models differ both in whether they *execute* a write at all and in whether the manifest they write is *correct* (see Watchouts). Run exercise 3 end to end on *your* cluster's model before the session and check the cluster afterwards, not the agent's answer:
++
+[source,sh,role=execute]
+----
+oc get pods -n user3-dev -l app=parasol-claims
+oc get deploy parasol-claims -n user3-dev -o jsonpath='probe: {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}image: {.spec.template.spec.containers[0].image}{"\n"}'
+----
++
+Expect `1/1 Running`, probe `/q/health/ready`, and an `image-registry.openshift-image-registry.svc:5000/…/parasol-claims:…` reference. A `STATUS` of `InvalidImageName` with a placeholder in the `image` line is the *third landing* — the agent wrote, wrongly, and said it succeeded. Reset with `ws prep ai-assisted-development --user user3 --yes` after the dry run, and know which landing to expect on the day.
 
 . *`mcp-agent` is scoped to ONE namespace — the forbidden test depends on it.*
 +
@@ -104,12 +118,12 @@ Beyond the Say/Show/Do arc in the demo flavor:
 The story is *diagnosing and fixing* a broken app. `ws solve ai-assisted-development` renders the finished end state (`parasol-claims` already `1/1`) — use it to *show the destination* or pre-stage, never as the demo's start.
 * *Pre-warm the model.* The first `ask-agent` call of the day can be slower (cold model, key fetch). Run one throwaway diagnosis a minute before you present so the live one is snappy.
 * *Land the denial beat.* Exercise 4 is the whole demo. Read the `is forbidden` line out loud, then the identity in it — `system:serviceaccount:user3-dev:mcp-agent` — and say "it *tried*; the platform said no." Follow with the `oc auth can-i --as` matrix so they see it's the API server, not the agent's manners.
-* *If the model narrates the fix, use it.* When the agent prints the `resources_create_or_update` call as text instead of running it (common on smaller models), don't treat it as a failure — narrate it: "it proposed the exact right patch; now *I* review and apply it." That *is* the human-in-the-loop lesson.
+* *Whatever the agent does with the write, use it — but read the cluster on screen first.* If it narrates the `resources_create_or_update` call instead of running it, say "it proposed the exact right patch; now *I* review and apply it." If it writes something wrong and reports success, that is the stronger beat — show the `InvalidImageName` pod and the placeholder in the image field next to the answer claiming victory, then the `managedFields` line naming `kubernetes-mcp-server` as the writer, then recover in seconds with the block staged in your buffer. Either way the line is the same: *the answer is a claim; the cluster is the fact.* Keep the recovery block ready before you start so a wrong write costs you fifteen seconds, not the demo.
 
 == Top questions attendees ask
 
-*1. "The agent printed the fix as text and made zero tool calls — is it broken?"*::
-No — this is *model behavior*, not a bug, and it's a teaching moment. Models *decide* whether to emit a tool call through the function-calling channel or just describe it in prose; smaller models, and large structured arguments (like a whole deployment manifest), make some of them narrate. The lab anticipates this: you *reviewed* the agent's proposed change, so you apply it with the scoped write you granted. Imperative, decomposed prompts ("get the deployment, then update the path, then confirm") ground far more reliably than terse ones — that's exercise 2's note, made real.
+*1. "Everyone's exercise 3 came out differently — mine narrated, hers broke the app, his just worked. Which is right?"*::
+All three, and the lab says so. Models *decide* whether to emit a tool call through the function-calling channel or just describe it in prose (smaller models, and large structured arguments like a whole deployment manifest, push some of them to narrate); and a model that *does* write may hand-author a *replacement* manifest and fill fields it did not reason about with template text — which is how a placeholder lands in the image and the app goes `InvalidImageName` while the answer reports success. The lab's recovery block lands the fix from any of the three. Reinforce the framing rather than smoothing the difference away: *the room just proved that "the agent says it worked" is not evidence*, and the reason the damage stopped at one deployment is the grant was one verb, one resource, one namespace. If you have time, put both a narrating and an acting outcome on screen side by side — it is the best version of this module you will ever deliver.
 
 *2. "Why not just give the assistant a kubeconfig or `cluster-admin` so it always works?"*::
 Because then the agent's power is *your* power, and a model that can be wrong or prompt-injected now has it. The entire module is the alternative: a dedicated ServiceAccount, read-only by default, a namespaced write granted per task. The online recipes that grant `cluster-reader` cluster-wide are teaching a *convenience*, not a *posture* — on a shared, multi-team cluster that convenience is an incident waiting to happen.
@@ -125,8 +139,10 @@ The module is *model-agnostic* — it runs against whatever model your cluster s
 
 == Watchouts
 
-* *The fix may narrate instead of execute — plan for it.*
-On the build cluster's model, the agent reliably *diagnoses* (small-argument read calls) but *narrates* the large `resources_create_or_update` write as text — zero executed calls, the correct manifest printed in the answer. The lab ships a reviewed-and-apply fallback and frames it as the review lesson, so the exercise always *completes*; just don't promise attendees the agent will always click "apply" itself. Imperative prompts help; a bigger/better tool-calling model helps more. *This is the module's top delivery variable — dry-run your cluster's model first.*
+* *Exercise 3's write lands three different ways depending on the model — this is the module's top delivery variable.*
+(1) *Correct write*: `resources_create_or_update` executes, `parasol-claims` goes `1/1`. (2) *No write*: the agent narrates the call as text, zero executed calls, the correct manifest printed in the answer — observed on the 2026-07-15 build cluster's model, which diagnoses reliably (small-argument read calls) but narrates the large write. (3) *Wrong write*: it executes, but hand-authors a *replacement* Deployment carrying a placeholder in the image field (`image: <image>`), leaving `InvalidImageName` while the answer reports success — reproduced twice independently on 2026-07-31, on two clusters with two attendees; `managedFields` recorded `kubernetes-mcp-server op=Apply` both times, so the write was genuine and attributable.
++
+Do *not* tell the room which one to expect, and do not present any of them as the failure case: the page is written to hold for all three, and dry-running your own cluster (pre-flight #4) is how *you* know which is likely. Landing 3 is the best teaching moment in the module — an agent that acts wrongly and reports success is exactly why the write grant is one verb on one resource in one namespace, and exactly why the lab makes reading cluster state a required step rather than a suggestion. The recovery block in exercise 3 restores the image from the entry marker's `seedImage` and re-applies the probe fix; it is a no-op on landing 1, so attendees can run it regardless. Note that the *older* fallback — patching the probe alone — repairs landing 3 not at all.
 * *The in-IDE Dev Spaces beat is an optional preview.*
 The `parasol-ai-assist` DevWorkspace resolves its `che-code` editor through the in-cluster Dev Spaces dashboard editor API (the earlier bare-plugin-id `registryUrl` failure is fixed). This is the settled, permanent design (design call #40, closed) — not a stopgap: it is Eclipse Che's own documented way to inject an editor into a DevWorkspace authored via the Kubernetes API, it needs no external registry (in-cluster Service DNS only), and it survives Dev Spaces operator upgrades because it's a maintained product integration surface rather than a guessed-at internal path. A custom controller-namespace "editor definition" ConfigMap was considered and rejected — that mechanism is for non-bundled editors, and `che-code` already ships bundled. Exercise 5 stays an optional in-IDE *preview* — the full security lesson is already exercised from the terminal (exercises 1-4), so a workspace that is slow to open on first launch costs nothing gradeable. A graded in-IDE checkpoint remains a planned enhancement (separate backlog item, not part of #40).
 * *The read-only note changes wording after you flip the server — that's correct.*
@@ -141,4 +157,6 @@ Cosmetic only — `parasol-claims` may show revision 2/3 after a fix or a re-run
 AI-Assisted Development is a net-new module (spec: "fresh; MCP + kubernetes-mcp-server + Lightspeed docs; ties Multi-Tenancy & Workload Security for the RBAC spine").
 It is marked `[ADD-ON]` for one reason: the agent needs a model, reached over Models-as-a-Service — a hosted-model dependency no core `[OCP]` module may require. Everything *else* it teaches (MCP, ServiceAccounts, RBAC, the internal registry, Dev Spaces) is core OpenShift.
 
-The lab was performed in a `user3-dev` namespace on OpenShift 4.21.22 on 2026-07-15 with the neutral `mcp-agent-cli` against the cluster's served model (model-agnostic; live infra scrubbed): the read-only diagnosis is a real three-tool-call trace (`pods_list_in_namespace` → `resources_get` → `events_list`) that named the wrong probe path `/q/health/reddy`, confirmed against the live `Readiness probe failed … statuscode: 404` event; the scoped `deployer` grant made `oc auth can-i patch deployments --as=…:mcp-agent` flip to `yes` while `get secrets` stayed `no`; with the server flipped off `--read-only` the client filter hid *6* mutating tools; the fix was applied through the `mcp-agent` identity's `resources_create_or_update` (server-side Apply, recorded in `managedFields` as `manager: kubernetes-mcp-server`), taking `parasol-claims` to `1/1`; and the forbidden test is a real two-tool-call trace against `user1-dev`, both returning `pods is forbidden` / `events is forbidden` for `system:serviceaccount:user3-dev:mcp-agent`, with the agent reporting the denial. The MCP server image is digest-pinned to `kubernetes-mcp-server` {kubernetes_mcp_server_version} — pre-1.0, daily-churn software per versions.yaml; re-verify every flag/tool name against that release before reusing this trace as ground truth. The `--read-only` bypass cited is CVE-2026-46519 (a different, sibling project — not the server used here).
+The lab was performed in a `user3-dev` namespace on OpenShift 4.21.22 on 2026-07-15 with the neutral `mcp-agent-cli` against the cluster's served model (model-agnostic; live infra scrubbed): the read-only diagnosis is a real three-tool-call trace (`pods_list_in_namespace` → `resources_get` → `events_list`) that named the wrong probe path `/q/health/reddy`, confirmed against the live `Readiness probe failed … statuscode: 404` event; the scoped `deployer` grant made `oc auth can-i patch deployments --as=…:mcp-agent` flip to `yes` while `get secrets` stayed `no`; with the server flipped off `--read-only` the client filter hid *6* mutating tools; the fix was applied through the `mcp-agent` identity's `resources_create_or_update` (server-side Apply, recorded in `managedFields` as `manager: kubernetes-mcp-server`), taking `parasol-claims` to `1/1`; and the forbidden test is a real two-tool-call trace against `user1-dev`, both returning `pods is forbidden` / `events is forbidden` for `system:serviceaccount:user3-dev:mcp-agent`, with the agent reporting the denial. The MCP server image is digest-pinned to `kubernetes-mcp-server` 0.0.65 — pre-1.0, daily-churn software; the running image carries no version label at all (`oc image info` on the pinned digest, 2026-07-31, returns only the UBI base labels plus `org.opencontainers.image.revision`), so the *digest* is the only identity available on-cluster and the lab compares against that rather than a version string. Re-verify every flag and tool name against the release you are actually running before reusing this trace as ground truth. The `--read-only` bypass cited is CVE-2026-46519 (a different, sibling project — not the server used here).
+
+Exercise 3's *outcome* is not part of that provenance and must not be treated as fixed. On 2026-07-31, on two different clusters and two different attendees, the same `--allow-writes` ask produced a *real* `resources_create_or_update` (`managedFields`: `kubernetes-mcp-server` `op=Apply`) that hand-authored a replacement Deployment with a literal `image: <image>` placeholder — `InvalidImageName`, `1/1` unreachable — while the agent's own answer reported success. The page now covers correct-write, no-write and wrong-write without pinning any of them to a model, and the entry marker records `seedImage` (entry chart 0.1.8) so the recovery restores the image from cluster state instead of a retyped literal.

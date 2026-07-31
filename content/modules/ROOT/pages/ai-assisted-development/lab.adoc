@@ -12,6 +12,24 @@ include::partial$version-attributes.adoc[]
 // cluster's served model (model-agnostic — yours may differ). Console click-paths are grounded against
 // the unified console (OCP 4.19+, no perspective switch); labels a build couldn't click carry
 // [CAPTURE-VERIFY] + the authoritative CLI (rule 6/12).
+//
+// 2026-07-31 — exercise 3 REWRITTEN. The page used to teach one failure mode ("the agent narrates
+// instead of acting"). On a tool-calling model it does not narrate: it acts, and can act WRONG.
+// Reproduced twice independently that day on two clusters with two attendees — the agent
+// hand-authored a REPLACEMENT parasol-claims Deployment carrying a literal `image: <image>`
+// placeholder instead of the value it had just read via resources_get, leaving InvalidImageName
+// (managedFields recorded `kubernetes-mcp-server op=Apply`, so the write was real and attributable)
+// while its own ANSWER reported clean success. Checkpoint 3 asks for 1/1, which that state can never
+// reach, and the page's only fallback patched the readiness probe — which does not touch the image
+// field and repaired nothing. Exercise 3 now: (a) treats the ANSWER as a claim and makes reading
+// cluster state a required step; (b) enumerates all three landings (right write / no write / wrong
+// write) without pinning the lesson to any one model, because per-user MaaS keys are model-scoped and
+// which landing an attendee sees depends on what the cluster was provisioned with; (c) ships one
+// recovery that works from all three, restoring the image from the entry marker's new `seedImage`
+// key (entry chart 0.1.8) rather than from a retyped literal. Captured "Expected output" blocks that
+// used to pin a model's exact prose are now labelled "Shape of the output" and carry a placeholder
+// where the prose was — only tool names, mode lines, resource names, RBAC outcomes and cluster state
+// are pinned.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -79,7 +97,7 @@ ask-agent "Inspect namespace $NS to find out why the parasol-claims pod is Runni
 [demo-block]
 [TIME 4m]
 Say:: "Diagnosing is safe. *Fixing* means writing. So I grant the agent's identity a *scoped* write — patch deployments, in *this* namespace, nothing else — and let it fix the one bad field."
-Show:: The `deployer` Role + binding applied; the agent patching the probe; `parasol-claims` going `1/1`; the audit trail naming `kubernetes-mcp-server` as the writer.
+Show:: The `deployer` Role + binding applied; the agent's write attempt; *then the cluster's own answer* — pod state, probe path, image — and the `managedFields` naming who wrote.
 Do:: Grant the narrow write, enable the write path, and let the agent fix it:
 +
 [source,sh,role=execute,subs="attributes"]
@@ -106,9 +124,24 @@ oc patch deploy kubernetes-mcp-server -n $NS --type=json \
 oc rollout status deploy/kubernetes-mcp-server -n $NS --timeout=90s
 ask-agent --allow-writes "The parasol-claims deployment in namespace $NS has a wrong readinessProbe.httpGet.path of /q/health/reddy. Update it to /q/health/ready and roll it out, then confirm."
 oc get pods -n $NS -l app=parasol-claims
+oc get deploy parasol-claims -n $NS -o jsonpath='probe path: {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}image:      {.spec.template.spec.containers[0].image}{"\n"}'
 ----
 +
-"Green. It patched *one field* — and it could only do that because I granted the write. If the model narrates the change instead of running it, that's the review lesson: it proposed the exact right patch, and I approve and apply it."
+"It could only touch that deployment because I granted the write. Now the part people skip: *I do not take its word for it* — I read the cluster. If it's green, great. If it narrated instead of acting, I approve its proposed patch and apply it myself. And if it *acted and got it wrong* — a placeholder in the image field while its answer says 'done' — that is the most useful thing that can happen in this room, because it's exactly why the grant is one verb on one resource in one namespace."
++
+[NOTE]
+.Have the recovery ready before you present
+====
+Keep this in your buffer; it lands the fix from any of the three outcomes and takes seconds:
+[source,sh,role=execute]
+----
+SEED_IMAGE=$(oc get cm ws-entry-ai-assisted-development -n $NS -o jsonpath='{.data.seedImage}')
+[ -n "$SEED_IMAGE" ] && oc set image deploy/parasol-claims parasol-claims="$SEED_IMAGE" -n $NS
+oc patch deploy parasol-claims -n $NS --type=json \
+  -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/q/health/ready"}]'
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
+----
+====
 
 [demo-block]
 [TIME 4m]
@@ -208,14 +241,22 @@ deployments.apps                []     []    [get list watch]
 `mcp-agent` has *one* RoleBinding, to the built-in `view` ClusterRole, *in this namespace only*. That means read (`get list watch`) on pods, events, deployments, logs — and, because `view` excludes them, *no access to Secrets* and *no writes*. This is the agent's entire power. Nothing here can reach another namespace or read a credential.
 
 [NOTE]
-.Pre-1.0 software — check what you're actually running
+.Pre-1.0 software — identify what you're actually running by *digest*
 ====
-This lab was authored and verified against `kubernetes-mcp-server` {kubernetes_mcp_server_version}. It's pre-1.0 with releases (and occasional flag or tool-name changes) landing daily, so if a flag, tool name, or transport path here doesn't match what you see, don't assume the docs are wrong before checking the image your namespace actually runs:
+// The running image is pinned by manifest-list digest and carries NO version label: `oc image info`
+// on that digest (run 2026-07-31) returns only UBI base labels plus
+// org.opencontainers.image.revision — there is no human-readable tag or version anywhere in the
+// image metadata, so the old "compare this against 0.0.65" framing asked for something the command
+// could not produce. Digest equality is the comparison that actually works offline.
+This lab was authored and verified against `kubernetes-mcp-server` 0.0.65. It's pre-1.0, with releases (and occasional flag or tool-name changes) landing daily — so if a flag, tool name, or transport path here doesn't match what you see, check what your namespace is actually running before assuming the page is wrong:
 
 [source,sh,role=execute]
 ----
-oc get deploy kubernetes-mcp-server -n $NS -o jsonpath='running image: {.spec.template.spec.containers[0].image}{"\n"}'
+oc get deploy kubernetes-mcp-server -n $NS -o jsonpath='running:  {.spec.template.spec.containers[0].image}{"\n"}'
+oc get cm ws-entry-ai-assisted-development -n $NS -o jsonpath='pinned:   {.data.mcpServerImage}{"\n"}'
 ----
+
+Both lines end in `@sha256:…`, not a version number — the image is *digest-pinned*, which is the point: a tag can be rebuilt underneath you, a digest cannot. There is no readable version inside the image either, so *the digest is the version*. If the two lines match, you are running exactly what your entry state pinned; if they differ, something re-pointed the deployment and the flags on this page are no longer a safe reference.
 ====
 
 Now build the *neutral agent* — the client that talks to the model and to that MCP server. Create a small `ask-agent` helper once; you'll reuse it for every question:
@@ -287,7 +328,7 @@ Ask the agent why the claims service is broken. Phrase it the way you'd brief a 
 ask-agent "Inspect namespace $NS to find out why the parasol-claims pod is Running but not Ready. List the pods in that namespace, get the parasol-claims deployment, and read the recent events. Then explain the root cause in one or two sentences, quoting the readinessProbe path."
 ----
 
-.Expected output (the tool-call trace — three real calls — then a grounded answer)
+.Shape of the output — the header, mode line and tool names are fixed; the results depend on what your cluster returns, and the answer is the model's own prose
 [source,texinfo]
 ----
 mcp-agent-cli
@@ -305,20 +346,26 @@ TOOL-CALL TRACE (3 calls)
       result: {... "readinessProbe":{"httpGet":{"path":"/q/health/reddy","port":8080} ...}
   [3] events_list
       args:   {"namespace": "user3-dev"}
-      result: ... Readiness probe failed: HTTP probe failed with statuscode: 404 ...
+      result: <recent events — see the note below on what this call does and does not return>
 
 read-only: no mutating tools were offered by the server.
 
 ANSWER
-  The parasol-claims pod is Running but not Ready because its readiness probe is failing
-  with a 404 status code at the path /q/health/reddy. The application is not serving that
-  endpoint; the readinessProbe path /q/health/reddy is wrong.
+  <the model's own words, built from what those three calls returned — on a grounded run it
+   names the readinessProbe path /q/health/reddy and the 404>
 ----
 
 Two things just happened, and both matter:
 
 * *The agent called the cluster, it did not guess.* The `TOOL-CALL TRACE` is the receipt — three read tools, with the exact arguments and the exact results. The answer is built from what those calls returned, not from the model's imagination.
 * *It ran with eyes only.* `mode: READ-ONLY` and `no mutating tools were offered by the server` — the MCP server, started `--read-only`, advertised only read tools, so there was nothing to write with even if the model wanted to.
+
+[NOTE]
+.`events_list` may not hand the agent the 404 — and that changes nothing about the diagnosis
+====
+The probe failure is an event on the *Pod*, not on the Deployment, and it is one line among everything else the namespace has emitted recently. Depending on what the model asks for and how much of the result it keeps, the `404` may or may not appear in that third call's result — and the model may reach the same conclusion from `resources_get` alone, since the wrong path is right there in the deployment spec.
+Do not treat "the 404 was in the agent's trace" as the thing that proves the diagnosis. The thing that proves it is *your own* check, next — which reads the event off the pod where it actually lives.
+====
 
 Now do the thing that separates a useful agent from a trusted one: *verify its claim yourself*.
 
@@ -344,17 +391,19 @@ CLI::
 [source,sh,role=execute]
 ----
 oc get deploy parasol-claims -n $NS -o jsonpath='the real probe path: {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}'
-oc get events -n $NS --field-selector reason=Unhealthy | grep 404 | tail -1
+oc get events -n $NS --field-selector reason=Unhealthy,involvedObject.kind=Pod -o custom-columns='OBJECT:.involvedObject.name,MESSAGE:.message' --no-headers | tail -1
 ----
 --
 ====
 
-.Expected output (the agent told the truth — the probe path really is wrong, and the event really is a 404)
+.Expected output (the agent told the truth — the probe path really is wrong, and the event on the *pod* really is a 404)
 [source,texinfo]
 ----
 the real probe path: /q/health/reddy
-... Readiness probe failed: HTTP probe failed with statuscode: 404
+parasol-claims-665b7fcfc8-...   Readiness probe failed: HTTP probe failed with statuscode: 404
 ----
+
+Note the `involvedObject` filter: the event is attached to the *pod*, not to the Deployment. That is why the second command names a pod, and why the console path sends you to the pod's *Events* tab rather than the deployment's.
 
 The agent's claim checks out: the readiness probe points at `/q/health/reddy` (a typo for `/q/health/ready`), the app returns `404` there, so the pod never passes readiness and the Service has no endpoints. The agent found it read-only, and you confirmed it — that is the trust loop.
 
@@ -367,13 +416,13 @@ That is not the model being broken — it is a reminder that *grounding is somet
 
 [.checkpoint]
 ****
-✔ *Verify:* The agent diagnosed the fault *read-only* — its tool-call trace shows it called `pods_list_in_namespace`, `resources_get`, and `events_list`, and its answer named the wrong probe path `/q/health/reddy`. You confirmed the claim yourself with `oc`: the probe path really is wrong and the event really is a `404`. No writes were possible — the server offered no mutating tools.
+✔ *Verify:* The agent diagnosed the fault *read-only* — its tool-call trace shows real calls to `pods_list_in_namespace`, `resources_get`, and `events_list` (not tool names printed as text), and `mode: READ-ONLY` with no mutating tools offered, so no write was possible. You then confirmed the fault yourself with `oc`, independently of what the agent said: the probe path really is `/q/health/reddy`, and the pod really is emitting a `404` readiness event.
 ****
 
 == 3. Grant a scoped write, and let the agent fix it
-⏱ *~8 min* · give it hands — the smallest hands that do the job
+⏱ *~9 min* · give it hands — the smallest hands that do the job
 
-Diagnosing is safe; *fixing* means *writing*, and writing is a decision *you* make. You'll grant `mcp-agent` a *narrow* write, enable the write path, watch the client's read-only seatbelt, then let the agent patch the one bad field.
+Diagnosing is safe; *fixing* means *writing*, and writing is a decision *you* make. You'll grant `mcp-agent` a *narrow* write, enable the write path, watch the client's read-only seatbelt, then let the agent loose on the one bad field — and *review what it actually did to the cluster*, which is the half of this exercise that matters most.
 
 First, the human grant: a small `deployer` Role that can `patch`/`update` *deployments* — in *this* namespace, and nothing else. Not `edit` (which can touch secrets), not cluster-wide.
 
@@ -460,7 +509,7 @@ Now *allow writes* and let the agent fix the probe:
 ask-agent --allow-writes "The parasol-claims deployment in namespace $NS has a wrong readinessProbe.httpGet.path of /q/health/reddy. Get the deployment, update it so the readinessProbe path is /q/health/ready, apply the change, and confirm."
 ----
 
-.Expected output (writes allowed; on a tool-calling-capable model the agent applies the corrected deployment through its scoped identity — if yours *narrates* the change instead, see the note below)
+.Shape of the output — the header, mode line and tool names are fixed; the *prose* is the model's own and yours will read differently
 [source,texinfo]
 ----
 mcp-agent-cli
@@ -473,33 +522,93 @@ TOOL-CALL TRACE (2 calls)
       args:   {"apiVersion": "apps/v1", "kind": "Deployment", "name": "parasol-claims", ...}
       result: {... "readinessProbe":{"httpGet":{"path":"/q/health/reddy",...
   [2] resources_create_or_update
-      args:   {"resource": "apiVersion: apps/v1\nkind: Deployment\n... path: /q/health/ready ..."}
+      args:   {"resource": "apiVersion: apps/v1\nkind: Deployment\n..."}
       result: # The following resources (YAML) have been created or updated successfully ...
 
 ANSWER
-  Updated the parasol-claims deployment: readinessProbe path is now /q/health/ready. The
-  rollout is progressing and the pod should become Ready.
+  <the model's own words — it will tell you what it believes it did>
+----
+
+[WARNING]
+.Do not read the `ANSWER` and move on
+====
+The `ANSWER` is the agent's *claim about its own work*, and the trace's `successfully` is the API server accepting a write — *not* a statement that the write was correct.
+Both can be present on a deployment the agent has just broken.
+The next step is not optional: *the cluster is the source of truth, and you are the reviewer.*
+====
+
+Read what actually changed — the pod's real state, and the two fields that decide it:
+
+[tabs]
+====
+Console::
++
+--
+// Console labels reused from grounding already recorded on this page: the Pods list's Ready and
+// Status columns carry the literal "N/M" and the pod phase (grounded 2026-07-30 as user1, unified
+// console OCP 4.21), and the Deployment detail page's YAML tab is where container fields including
+// serviceAccountName and image live — the Details tab does not surface them (grounded 2026-07-28,
+// tools/media/CONSOLE-GROUNDING.md). No new label is claimed here.
+In the {ocp_console_url}[web console^] (project `{user}-dev`), open *Workloads* → *Pods* and read the `parasol-claims-…` row's *Ready* and *Status* columns — `1/1` and `Running` is the only pair that means the fix landed. `InvalidImageName` or `ErrImagePull` in *Status* means the write went wrong.
+Then open *Workloads* → *Deployments* → `parasol-claims` → *YAML* and read the container's `image` and `readinessProbe.httpGet.path`. The `image` must be a registry reference; a placeholder such as `<image>` is the agent's own text, not a real image.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l app=parasol-claims
+oc get deploy parasol-claims -n $NS -o jsonpath='probe path: {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}image:      {.spec.template.spec.containers[0].image}{"\n"}'
+----
+--
+====
+
+.Expected output on a clean landing — the probe path is corrected and the image is untouched (a registry reference, not a placeholder)
+[source,texinfo]
+----
+NAME                              READY   STATUS    RESTARTS   AGE
+parasol-claims-7df9f89857-...     1/1     Running   0          40s
+probe path: /q/health/ready
+image:      image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
 ----
 
 [IMPORTANT]
-.When the agent doesn't land the fix — your manual fallback (and today's second lesson)
+.Three ways this lands — and why the third one is the lesson
 ====
-The agent path can come up short in more than one way, and you should be ready for all of them:
+Which of these you get depends on the model your cluster serves, and none of them is a defect in the lab. Read your own output against this list:
 
-* *The agent narrates instead of acting.* On some models (this cluster's included), the agent *prints* the `resources_create_or_update(...)` call as *text* and makes *zero* tool calls — it proposed the exact right patch but didn't execute it. That is the same "grounding is engineered" reality from exercise 2.
-* *The model endpoint is unavailable.* If the MaaS endpoint or key is down, `ask-agent` comes back with an error like `model authentication failed` and no answer at all.
-* *The agent pod can't run.* If its image won't pull, `ask-agent` fails fast (see the note in exercise 1) instead of hanging.
+. *The agent wrote the right thing.* `STATUS Running`, `READY 1/1`, probe path `/q/health/ready`, image unchanged. Nothing to do — carry on below.
+. *The agent wrote nothing.* `TOOL-CALL TRACE (0 calls)` and a `resources_create_or_update(...)` call *printed as text* in the answer. It proposed the correct patch and did not execute it — the "grounding is engineered" reality from exercise 2. The pod is still `0/1` on the old probe path.
+. *The agent wrote something wrong — and told you it succeeded.* The trace shows a real `resources_create_or_update`, the API server accepted it, the answer reports success — and the pod is `ErrImagePull`/`InvalidImageName`, or `STATUS` reads `InvalidImageName` outright, with the `image:` line showing a *placeholder* such as `<image>` instead of a registry reference. This happens when the model hand-authors a *replacement* manifest from scratch rather than editing the one field: it reproduces the parts it reasoned about and fills the rest with template text. The write was *permitted* — you granted it — *auditable*, and *wrong*.
 
-In *every* one of these cases you are not blocked, because you already *diagnosed* the fault yourself in exercise 2. You apply the reviewed change directly — using the very write you granted:
+Landing 3 is the most valuable thing that can happen to you today. An agent that declines to act is *visibly* unfinished; an agent that acts wrongly and reports success is *invisibly* unfinished, and the only thing that catches it is a human reading cluster state instead of model prose. That is the entire reason the scoped write is narrow: the blast radius of a confident mistake is one deployment in one namespace.
+====
+
+*Recover and land the fix yourself.* This block works from *any* of the three landings — it restores the container image from the value your entry state recorded (read, never retyped), then re-applies the one-field probe fix you reviewed in exercise 2. If the image was never touched, restoring it is a no-op:
+
 [source,sh,role=execute]
 ----
+SEED_IMAGE=$(oc get cm ws-entry-ai-assisted-development -n $NS -o jsonpath='{.data.seedImage}')
+if [ -n "$SEED_IMAGE" ]; then
+  oc set image deploy/parasol-claims parasol-claims="$SEED_IMAGE" -n $NS
+else
+  oc rollout undo deploy/parasol-claims -n $NS
+fi
 oc patch deploy parasol-claims -n $NS --type=json \
   -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/q/health/ready"}]'
+oc rollout status deploy/parasol-claims -n $NS --timeout=120s
 ----
-The manual fallback isn't a workaround for a chatty model — it is how you keep making progress *whenever the agent path is unavailable*, whether the agent narrated, the model endpoint is down, or the one-shot pod never ran. The point stands either way: the write is *permitted* because you granted the scoped role, and a human stayed in the loop for the change.
+
+[NOTE]
+.Why a *fallback* is part of the design, not an apology for it
+====
+You were never blocked, because you *diagnosed the fault yourself* in exercise 2 — so you always know what the correct change is, whichever way the agent lands, and whether the model endpoint is reachable at all (a dead MaaS key ends `ask-agent` in `model authentication failed`; an unpullable agent image fails fast per exercise 1's note).
+Both commands above are writes *you* make, with *your* identity — and the deployment they repair is the same one the agent could reach, because you granted `mcp-agent` that scope deliberately. Human-in-the-loop is not a fallback for a weak model; it is the control that makes the strong one safe to use.
+
+If the agent rewrote *more* than the image — a missing environment variable, a renamed container — `oc rollout undo deploy/parasol-claims -n $NS` restores the whole previous pod template in one step; re-apply the probe patch after it. `ws prep {module-id} --yes` re-materializes the entire world if you would rather start clean.
 ====
 
-Watch the fix land, and confirm the service is finally healthy:
+Confirm the service is finally healthy:
 
 [tabs]
 ====
@@ -522,7 +631,6 @@ CLI::
 --
 [source,sh,role=execute]
 ----
-oc rollout status deploy/parasol-claims -n $NS --timeout=90s
 oc get pods -n $NS -l app=parasol-claims
 oc get deploy parasol-claims -n $NS -o jsonpath='fixed probe path: {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}'
 ----
@@ -532,37 +640,37 @@ oc get deploy parasol-claims -n $NS -o jsonpath='fixed probe path: {.spec.templa
 .Expected output (the one-field fix took — the pod is Ready)
 [source,texinfo]
 ----
-deployment "parasol-claims" successfully rolled out
 NAME                              READY   STATUS    RESTARTS   AGE
 parasol-claims-7df9f89857-...     1/1     Running   0          40s
 fixed probe path: /q/health/ready
 ----
 
-Finally, *review the audit trail*. Who changed the deployment, and how? The `managedFields` record every writer by name — and the *last* one names whoever applied your fix:
+Finally, *review the audit trail*. Who changed the deployment, and how? The `managedFields` record every writer by name — and they answer the question the agent's own answer cannot:
 
 [source,sh,role=execute]
 ----
 oc get deploy parasol-claims -n $NS -o jsonpath='{range .metadata.managedFields[*]}{.manager}{" — op="}{.operation}{"\n"}{end}'
 ----
 
-.Expected output (the managedFields name every writer; the last one is whoever applied the fix — here, the `oc` fallback)
+.Expected output — the base managers are always there; the lines *after* them are the writes made during this exercise
 [source,texinfo]
 ----
 argocd-controller — op=Update
 kube-controller-manager — op=Update
+kubernetes-mcp-server — op=Apply
 kubectl-patch — op=Update
 ----
 
-The base managers (`argocd-controller`, which materialized the deployment, and `kube-controller-manager`) are always present; the *last* manager is the one that mattered — it records *who* applied your fix:
+The base managers (`argocd-controller`, which materialized the deployment, and `kube-controller-manager`) are always present. Everything after them is *this exercise*, and each name is a different hand on the object:
 
-* *If the agent applied it* (a tool-calling model, with writes allowed), that line reads `kubernetes-mcp-server — op=Apply` — the agent's write, made through the MCP server's *scoped identity* and recorded by the API server itself.
-* *If you applied it with the `oc patch` fallback above* (as you did here, because this cluster's model narrated the change), the writer is your own client — `kubectl-patch — op=Update`, attributed to *you*.
+* `kubernetes-mcp-server — op=Apply` is *the agent's write*, made through the MCP server's *scoped identity* and recorded by the API server itself. It appears if the agent executed a write — whether that write was correct or not. This entry is why a wrong agent write is *attributable* rather than mysterious.
+* `kubectl-patch — op=Update` (and `kubectl-set` if the recovery restored the image) is *your* client, attributed to *you*.
 
-Either way the point holds: between the *tool-call trace* (what the agent tried) and the *managedFields* (what actually changed the object), *every write is accountable* — the platform records who wrote, whether that was the agent or you.
+Your own output will carry some subset of those, depending on how the agent landed — and that subset *is* the record. Between the *tool-call trace* (what the agent tried) and the `managedFields` (what actually changed the object), *every write is accountable*, including the wrong ones. An agent you cannot attribute a change to is an agent you cannot run in production.
 
 [.checkpoint]
 ****
-✔ *Verify:* You granted `mcp-agent` a *scoped* write (patch deployments in *this* namespace only — `oc auth can-i` confirms `patch deployments: yes` but `read secrets: no`), watched the client's read-only filter *hide 6 mutating tools* as defense in depth, and the probe path is now fixed to `/q/health/ready` — whether the agent applied it or you applied the reviewed `oc` fallback — so `parasol-claims` is `1/1`. The `managedFields` audit trail names whoever applied it: `kubernetes-mcp-server` if the agent did, or your `oc` client (`kubectl-patch`) if you used the fallback.
+✔ *Verify:* You granted `mcp-agent` a *scoped* write (patch deployments in *this* namespace only — `oc auth can-i` confirms `patch deployments: yes` but `read secrets: no`) and watched the client's read-only filter *hide 6 mutating tools* as defense in depth. You then judged the agent's write *against cluster state, not against its answer*, and `parasol-claims` is now `1/1 Running` with `readinessProbe.httpGet.path` = `/q/health/ready` and its image a real registry reference — whether the agent got there itself or you recovered it. The `managedFields` name every writer involved: `kubernetes-mcp-server` for anything the agent applied, your own `oc` client for anything you did.
 ****
 
 == 4. The forbidden test — watch RBAC deny the agent

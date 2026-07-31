@@ -43,6 +43,20 @@ seed_probe_is_bad() {
   [[ -n "$want" && "$got" == "$want" ]]
 }
 
+# The seed still carries the image the entry state gave it. Exercise 3 grants the agent a scoped
+# write, and a tool-calling model can hand-author a REPLACEMENT manifest with a placeholder in the
+# image field (`image: <image>` — seen twice on 2026-07-31) → InvalidImageName, the app can never
+# reach 1/1, and NOTHING else in this script explains why. Compared against the marker, never a
+# literal. Older markers (chart < 0.1.8) carry no seedImage: with nothing to compare against this
+# passes rather than emitting a false ❌ — an unearned red destroys trust in every other ✅.
+seed_image_intact() {
+  local want got
+  want="$(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.seedImage}' 2>/dev/null || true)"
+  [[ -z "$want" ]] && return 0
+  got="$(oc get deploy "$SEED" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  [[ "$got" == "$want" ]]
+}
+
 # Pre-lab RBAC shape: the attendee has NOT yet granted the mcp-agent SA a write role. Ask the API
 # DIRECTLY (SubjectAccessReview) whether the SA can WRITE. The old name-based rolebinding grep only saw
 # the stock edit/admin/cluster-admin ClusterRoles and MISSED custom Roles (e.g. Ex3's mcp-agent-deployer),
@@ -71,6 +85,8 @@ check "DevWorkspace env config carries GENAI_MODEL (configmap maas-config-env)" 
   || hint "the MaaS copy hook did not fill maas-config-env — ws reset ai-assisted-development --user ${USER_NAME}"
 check "Dev Spaces workspace present"                 oc get devworkspaces.workspace.devfile.io "$(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.devWorkspaceName}' 2>/dev/null || echo parasol-ai-assist)" -n "$NS" \
   || hint "the DevWorkspace is missing — ws reset ai-assisted-development --user ${USER_NAME}"
+check "parasol-claims still carries the entry-state container image"   seed_image_intact \
+  || hint "the image field was overwritten (an agent write can put a placeholder there — check 'oc get pods -n ${NS} -l app=${SEED}' for InvalidImageName). Restore it in place: oc set image deploy/${SEED} ${SEED}=\"\$(oc get cm ws-entry-ai-assisted-development -n ${NS} -o jsonpath='{.data.seedImage}')\" -n ${NS}"
 
 # INFO: the pinned MCP image + converged model (proves digest-pin + per-cluster secret-sourcing).
 info "MCP server image: $(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.mcpServerImage}' 2>/dev/null || echo '?')"
