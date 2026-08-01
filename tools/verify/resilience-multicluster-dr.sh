@@ -229,6 +229,9 @@ not_solved() {
 # asked for it by name. Save site-a's replica count ON THE OBJECT, scale it to 0 ("the site fails"),
 # confirm the client is still served — by site-b — through the stable endpoint, then restore and wait.
 # >= semantics: a single site-b response is a pass.
+# ws-mutation-optin: takes the primary site down; only --failover-drill or WS_FAILOVER_DRILL=1 asks
+#   for it, it refuses --entry-only, and ws doctor cannot reach it by any path. Everything else in
+#   tools/verify/ is read-only and tools/lint/verify-mutation-guard.sh enforces that.
 failover_drill() {
   local orig site deadline got_b=0
   orig="$(oc get deploy parasol-claims -n "$SITEA_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 3)"
@@ -259,6 +262,7 @@ failover_drill() {
   trap - EXIT INT TERM HUP
   [[ "$got_b" == "1" ]]
 }
+# ws-mutation-optin-end
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 # First, because it changes how every check below should be read: a site-a sitting at zero because an

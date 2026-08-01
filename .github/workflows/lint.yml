@@ -955,3 +955,40 @@ jobs:
                  "workshop needs, or would not drop the component at all."
             exit 1
           fi
+
+  verify-mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A verify script GRADES the cluster; it must not WRITE to it
+        # 2026-08-01 (fixed in 4445c4c): tools/verify/resilience-multicluster-dr.sh scaled the
+        # attendee's primary-site Deployment to 0 and back while grading. The scale itself was behind
+        # an opt-in flag; its EXIT trap was not — installed unconditionally above the drill's own
+        # prerequisite guard with the restore variable still empty, so `--replicas=${VAR:-3}` became
+        # a literal 3 and EVERY end-mode run wrote 3 onto the Deployment, including runs that never
+        # entered the drill. M21's lab asks the attendee to scale that exact Deployment to zero and
+        # watch the mesh fail over, so running `ws verify` in a second terminal silently ended their
+        # exercise. Found by reading the file. The other 25 verify scripts had never been audited.
+        #
+        # The guard is not a grep: 62 of the 68 mutating-verb occurrences under tools/verify/ sit
+        # inside printed `hint "…"` repair strings or comments, and flagging those would be noise
+        # that gets the gate switched off. A quote/comment/escape-aware scanner separates executed
+        # writes from printed ones, then four detectors run: an executed mutation outside an opt-in
+        # region, a mutating trap outside one (the incident shape — a trap body is a quoted string,
+        # so the executed-mutation detector cannot see it), a covered mutating trap that is never
+        # disarmed, and opt-in marker hygiene.
+        run: |
+          rc=0
+          bash tools/lint/verify-mutation-guard.sh --self-test || rc=$?
+          # Exactly 1 = all four canaries detected (D2's is the incident verbatim: a guarded write
+          # with an unguarded trap), the NEGATIVE canary of printed/commented/escaped/--dry-run
+          # forms stayed silent, and the real tree is clean. 0 = a detector is blind; 2 = a canary
+          # was missed, the scanner's own fixture probe failed, or the tree is broken.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::verify-mutation-guard self-test must exit 1 (four canaries detected," \
+                 "negative canary silent, real tree clean); got rc=$rc. The guard's detection is" \
+                 "unproven — refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — four canaries detected, no false positives, real tree clean (rc=1)."
+          bash tools/lint/verify-mutation-guard.sh
