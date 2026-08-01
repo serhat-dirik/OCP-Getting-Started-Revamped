@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly full run. Added 2026-08-01 with the canary-coverage scoping below: that job now does
+  # its expensive mutation sweep only when a guard actually changed, so the schedule is what keeps
+  # a whole-tree sweep happening on a fixed cadence regardless of what anyone pushed. Cheap — this
+  # repo is public, so Actions minutes are free — and it also re-runs the other 33 jobs against
+  # whatever has drifted underneath them (a pinned action, a new shellcheck release).
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC daily
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -1149,7 +1157,67 @@ jobs:
         # unmutated control exits 2, which the gate reports as could-not-inspect — correct, but a
         # dependency failure dressed up as a finding about the guards.
         run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Does this run need the full mutation sweep?
+        id: scope
+        # WHY. This job was the slowest in the workflow by 3x — 155s against a 170s total, so it
+        # alone set the wall-clock for every push. The other 33 jobs run in parallel and 30 of them
+        # finish inside 15s, which means job COUNT was never the cost; this one job was.
+        #
+        # Mutation coverage regresses when a GUARD changes, not when a lab page or a chart does. So
+        # the sweep runs on a guard edit, a PR, the nightly schedule, or a manual dispatch. A push
+        # that touched no guard still runs the self-test below — the gate is never fully unrun,
+        # because a green check that inspected nothing is the exact defect this workflow exists to
+        # catch.
+        #
+        # Do NOT "simplify" this to `if: github.event_name == 'pull_request'`. Maintainers commit
+        # straight to main, so the PR trigger almost never fires — link-check.yml carries the same
+        # warning after learning it the hard way. Gating on PRs alone silently switches the job off.
+        env:
+          BASE: ${{ github.event_name == 'pull_request'
+                    && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # FAIL SAFE in every branch: anything we cannot determine sweeps. Treating an
+          # unanswerable question as "nothing changed" is how a gate goes quiet.
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "sweep=true"  >>"$GITHUB_OUTPUT"
+            echo "why=event '${{ github.event_name }}' always sweeps" >>"$GITHUB_OUTPUT"
+          elif [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+               || ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+            echo "sweep=true"  >>"$GITHUB_OUTPUT"
+            echo "why=no resolvable base commit — sweeping rather than assuming nothing changed" >>"$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE" "$GITHUB_SHA" | grep -q '^tools/lint/'; then
+            echo "sweep=true"  >>"$GITHUB_OUTPUT"
+            echo "why=this push changed tools/lint/" >>"$GITHUB_OUTPUT"
+          else
+            echo "sweep=false" >>"$GITHUB_OUTPUT"
+            echo "why=no guard changed in this push" >>"$GITHUB_OUTPUT"
+          fi
+      - name: The gate itself must not be blind
+        # ALWAYS runs, sweep or no sweep. Exactly 1 = the gate classified a fixture guard with
+        # witnessed detectors as proven, one with an unwitnessable detector as UNPROVEN, and
+        # rejected both rot directions of both ledgers. 0 = the gate is blind and would pass any
+        # tree. 2 = its own harness is broken. A meta-guard that always passes is the exact defect
+        # it exists to find, so this is asserted on every push even when the sweep is skipped.
+        run: |
+          rc=0
+          python3 tools/lint/_canary-coverage.py --self-test || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::_canary-coverage self-test must exit 1 (it can tell a proven detector" \
+                 "from an unproven one); got rc=$rc. Refusing to trust its verdict on the guards."
+            exit 1
+          fi
+      - name: No guard changed — full sweep deferred to the nightly run
+        if: steps.scope.outputs.sweep != 'true'
+        # Says out loud what was NOT done. A skipped check that renders as a plain green tick with
+        # no explanation is how a gate quietly stops meaning anything.
+        run: |
+          echo "Mutation sweep SKIPPED: ${{ steps.scope.outputs.why }}."
+          echo "The gate's own self-test ran and passed, so this check is not blind — but no"
+          echo "detector was blinded on this run. Coverage can only regress when a guard changes,"
+          echo "and any push touching tools/lint/ sweeps immediately. A whole-tree sweep runs at"
+          echo "03:00 UTC daily, and 'gh workflow run lint' forces one now."
       - name: Every detector in a Python guard must be provable by blinding it
+        if: steps.scope.outputs.sweep == 'true'
         # WHY THIS JOB EXISTS. On 2026-08-01 an audit blinded each Python guard's detectors one at
         # a time and required an exit code to change. In one night it found 15 of 21 detectors
         # blindable in rebuild-scan-guard (its two halves counted a mutant caught if EITHER fired,
@@ -1160,26 +1228,16 @@ jobs:
         # each detector is individually load-bearing. This job asserts the second thing, so the
         # audit does not have to be re-run by hand to stay true.
         #
-        # RUNTIME. The gate sweeps a guard when the diff touched it (always) or when its projected
-        # cost fits --budget (default 240s). On this tree that is nine of ten guards in ~2 minutes;
-        # rebuild-scan-guard costs ~75s per detector across 24 of them and is swept only when it or
-        # its fixtures change, which is when its coverage can actually regress. Nothing hardcodes
-        # which guard is the expensive one — a guard that gets slow drops out on its own.
+        # RUNTIME. Within a sweep, the gate covers a guard when the diff touched it (always) or
+        # when its projected cost fits --budget (default 240s). On this tree that is nine of ten
+        # guards in ~2 minutes; rebuild-scan-guard costs ~75s per detector across 24 of them and is
+        # covered only when it or its fixtures change, which is when its coverage can actually
+        # regress. Nothing hardcodes which guard is the expensive one — a guard that gets slow
+        # drops out on its own. Whether a sweep happens AT ALL is decided by the scope step above.
         env:
           BASE: ${{ github.event_name == 'pull_request'
                     && github.event.pull_request.base.sha || github.event.before }}
         run: |
-          rc=0
-          python3 tools/lint/_canary-coverage.py --self-test || rc=$?
-          # Exactly 1 = the gate classified a fixture guard with witnessed detectors as proven, a
-          # fixture guard with an unwitnessable one as UNPROVEN, and rejected both rot directions
-          # of both ledgers. 0 = the gate is blind and would pass any tree. 2 = its own harness is
-          # broken. A meta-guard that always passes is the exact defect it exists to find.
-          if [ "$rc" -ne 1 ]; then
-            echo "::error::_canary-coverage self-test must exit 1 (it can tell a proven detector" \
-                 "from an unproven one); got rc=$rc. Refusing to trust its verdict on the guards."
-            exit 1
-          fi
           # An all-zero SHA is a first push to a branch with no predecessor to diff against. Pass
           # no --changed-from at all there: the budget still sweeps nine guards, and claiming a
           # base we do not have would be worse than sweeping the cheap set.
