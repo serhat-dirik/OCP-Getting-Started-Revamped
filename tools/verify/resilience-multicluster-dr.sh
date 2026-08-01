@@ -93,53 +93,75 @@ fi
 
 # A namespace carries istio-discovery=enabled (the shared-istiod discoverySelectors label): $1=namespace.
 ns_discovery_labeled() {
-  [[ "$(oc get ns "$1" -o jsonpath='{.metadata.labels.istio-discovery}' 2>/dev/null || true)" == "enabled" ]]
+  oc_read get ns "$1" -o jsonpath='{.metadata.labels.istio-discovery}' || return 1
+  [[ "$OC_OUT" == "enabled" ]]
 }
 
 # A site's claims service is RESILIENT: the Deployment is present with >=2 desired replicas, a PDB, and an
 # HPA (the observability-health-scale/deployment-targets-scheduling primitives the in-site resiliency beat leans on): $1=namespace.
 site_resilient() {
-  local ns="$1" reps
-  oc get deploy parasol-claims -n "$ns" >/dev/null 2>&1 || return 1
-  oc get poddisruptionbudget parasol-claims -n "$ns" >/dev/null 2>&1 || return 1
-  oc get horizontalpodautoscaler parasol-claims -n "$ns" >/dev/null 2>&1 || return 1
-  reps="$(oc get deploy parasol-claims -n "$ns" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
-  [[ -n "$reps" && "$reps" -ge 2 ]]
+  local ns="$1"
+  oc_present get deploy parasol-claims -n "$ns" -o name || return 1
+  oc_present get poddisruptionbudget parasol-claims -n "$ns" -o name || return 1
+  oc_present get horizontalpodautoscaler parasol-claims -n "$ns" -o name || return 1
+  oc_read get deploy parasol-claims -n "$ns" -o jsonpath='{.spec.replicas}' || return 1
+  [[ -n "$OC_OUT" && "$OC_OUT" -ge 2 ]]
 }
 
 # Any ServiceEntry AND any VirtualService exist in the client ns (mechanism-agnostic: don't pin the names).
+# An empty list is a real answer (rc 0, empty) and still a ❌; only an API that could not be asked skips.
 failover_routing_present() {
-  [[ -n "$(oc get serviceentry -n "$CLIENT_NS" -o name 2>/dev/null || true)" ]] &&
-  [[ -n "$(oc get virtualservice -n "$CLIENT_NS" -o name 2>/dev/null || true)" ]]
+  oc_present get serviceentry -n "$CLIENT_NS" -o name || return 1
+  oc_present get virtualservice -n "$CLIENT_NS" -o name
 }
 # Entry clean-slate: NO failover routing yet (attendee builds the ServiceEntry + VirtualService).
 # CLIENT_NS must actually exist first — otherwise an empty result is vacuous (true on a cluster
 # where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+# A NEGATION THAT MUST KEEP PASSING ON GENUINE ABSENCE: oc_absent returns 0 for both NotFound and an
+# empty list, and 1 only when the API could not be asked — so a clean entry state still passes and an
+# unreachable cluster can no longer certify a clean slate it never looked at.
 no_failover_routing() {
-  oc get ns "$CLIENT_NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get serviceentry,virtualservice -n "$CLIENT_NS" -o name 2>/dev/null || true)" ]]
+  oc_present get ns "$CLIENT_NS" -o name || return 1
+  oc_absent get serviceentry,virtualservice -n "$CLIENT_NS" -o name
 }
 
 # When the failover routing first appeared — the anchor for "has a failover happened SINCE?". Oldest
 # ServiceEntry wins, so re-editing a VirtualService mid-lab does not shrink the evidence window. Empty
 # when there is no routing (the check that needs it is skipped in that case, never failed on it).
+#
+# Writes the GLOBAL ROUTING_SINCE and ALWAYS returns 0, rather than echoing for `x="$(routing_since)"`.
+# Two reasons, both of them the traps the previous conversion waves hit: under `set -e` an assignment
+# whose command substitution returns non-zero KILLS the script silently, and a command substitution
+# runs in a SUBSHELL — so VERIFY_INCONCLUSIVE raised inside one never reaches the caller, and the
+# "empty because nothing is wired" / "empty because nobody answered" distinction would be lost again
+# at exactly the point this conversion exists to preserve it.
+ROUTING_SINCE=""
 routing_since() {
-  oc get serviceentry -n "$CLIENT_NS" --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{.items[0].metadata.creationTimestamp}' 2>/dev/null || true
+  ROUTING_SINCE=""
+  oc_read get serviceentry -n "$CLIENT_NS" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[0].metadata.creationTimestamp}' || true
+  ROUTING_SINCE="$OC_OUT"
 }
 
 # The stable endpoint (the ingress gateway) serves HTTP 200 to the client (routing is wired).
+# The in-pod probe converts cleanly, MEASURED not assumed (cluster 2, user8, 2026-08-01): curl runs
+# with -s, so on a refused connection it prints nothing and `oc exec` reports only `command terminated
+# with exit code 7`. That is not in oc_read's could-not-ask allowlist, so "the endpoint did not serve"
+# stays a graded ❌ — unlike networking-dev-devops' `</dev/tcp/…` probes, where BASH prints
+# "Connection refused" and only the allowlist's lowercase spelling keeps that module gradeable.
 stable_serves() {
-  local code
-  code="$(oc exec deploy/claims-client -n "$CLIENT_NS" -- \
-    curl -s -m5 -o /dev/null -w '%{http_code}' http://claims-stable/ 2>/dev/null || echo 000)"
-  [[ "$code" == "200" ]]
+  oc_read exec deploy/claims-client -n "$CLIENT_NS" -- \
+    curl -s -m5 -o /dev/null -w '%{http_code}' http://claims-stable/ || return 1
+  [[ "$OC_OUT" == "200" ]]
 }
 
 # Which SITE (A/B) the stable endpoint currently returns (empty on any failure). Drill-only.
+# Sets the global SERVED_SITE and always returns 0 — same subshell/`set -e` reasoning as routing_since.
+SERVED_SITE=""
 served_site() {
-  oc exec deploy/claims-client -n "$CLIENT_NS" -- curl -s -m3 http://claims-stable/ 2>/dev/null \
-    | sed -n 's/.*"site":"\([AB]\)".*/\1/p' 2>/dev/null || true
+  SERVED_SITE=""
+  oc_read exec deploy/claims-client -n "$CLIENT_NS" -- curl -s -m3 http://claims-stable/ || true
+  SERVED_SITE="$(sed -n 's/.*"site":"\([AB]\)".*/\1/p' <<< "$OC_OUT")"
 }
 
 # ── the lab's aftermath, read back ────────────────────────────────────────────────────────────────
@@ -157,20 +179,54 @@ served_site() {
 #                 world that never failed over. Narrowed user8's log from 1,272 lines to 1,147.
 #   --previous    an in-place container restart (OOM, probe kill) rolls the current log without changing
 #                 the pod's startTime, so the pre-restart log is where the evidence would be. It errors
-#                 outright when there is no previous container, hence the `|| true`.
-client_log_since() {  # $1=RFC3339 anchor → the client's post-anchor log on stdout
-  oc logs -l app=claims-client -n "$CLIENT_NS" --tail=-1 --since-time="$1" 2>/dev/null || true
-  oc logs -l app=claims-client -n "$CLIENT_NS" --tail=-1 --since-time="$1" --previous 2>/dev/null || true
+#                 outright when there is no previous container — which is the NORMAL case, so the
+#                 caller reads its rc rather than swallowing it (the old `|| true`).
+#
+# Through oc_read, so "the log says no failover" and "nobody answered when I asked for the log" stop
+# being the same empty string. Both `oc logs` outcomes that are NOT a log were measured on cluster 2
+# (2026-08-01) and both are the server's real answer, not a transport failure — so neither becomes a
+# skip: no pods match the selector → rc 0, empty stdout, `No resources found in <ns> namespace.`;
+# no previous container → rc 1, `Error from server (BadRequest): previous terminated container … not
+# found`. Only a refused/unauthorized/timed-out API reaches rc 2.
+client_log_read() {  # $1=RFC3339 anchor, rest=extra oc args → rc 0/1/2 per oc_read, log in OC_OUT
+  local anchor="$1" rc=0
+  shift
+  oc_read logs -l app=claims-client -n "$CLIENT_NS" --tail=-1 --since-time="$anchor" "$@" || rc=$?
+  return "$rc"
 }
 
-# Cached: the log read is ~1 MB and the branch below asks the question more than once.
-LOG_HAS_B=""
+# Cached: the log read is ~1 MB (12,712 lines on user8, measured) and the branch below asks the
+# question more than once. Three states, not two: yes · no · unknown (the API could not be asked).
+LOG_STATE=""
 failover_evidenced() {  # $1=RFC3339 anchor
-  if [[ -z "$LOG_HAS_B" ]]; then
-    LOG_HAS_B="no"
-    case "$(client_log_since "$1")" in *"served-by-site=B"*) LOG_HAS_B="yes";; esac
+  local rc
+  if [[ -z "$LOG_STATE" ]]; then
+    rc=0; client_log_read "$1" || rc=$?
+    if (( rc == 2 )); then
+      LOG_STATE="unknown"
+    else
+      case "$OC_OUT" in *"served-by-site=B"*) LOG_STATE="yes";; esac
+    fi
+    # Only when the current log holds no proof: a `B` already found is proof enough, and skipping the
+    # second read keeps a could-not-ask on the (usually absent) previous container from downgrading an
+    # answer we already have.
+    if [[ -z "$LOG_STATE" ]]; then
+      rc=0; client_log_read "$1" --previous || rc=$?
+      if (( rc == 2 )); then
+        LOG_STATE="unknown"
+      else
+        case "$OC_OUT" in
+          *"served-by-site=B"*) LOG_STATE="yes";;
+          *)                    LOG_STATE="no";;
+        esac
+      fi
+    fi
   fi
-  [[ "$LOG_HAS_B" == "yes" ]]
+  # Re-raised on a CACHED unknown, deliberately: check() clears VERIFY_INCONCLUSIVE before every
+  # predicate and normally only oc_read sets it, so the second (cache-hit) call would report a graded
+  # ❌ — "you never failed over" — for a log this run never managed to read at all.
+  if [[ "$LOG_STATE" == "unknown" ]]; then VERIFY_INCONCLUSIVE=1; return 1; fi
+  [[ "$LOG_STATE" == "yes" ]]
 }
 
 # Is the ABSENCE of a `B` line the attendee's real answer, or just lost evidence? It is only gradeable
@@ -182,10 +238,15 @@ failover_evidenced() {  # $1=RFC3339 anchor
 # vs `date -j` (BSD) is not, and these scripts run both in the cockpit and off a maintainer's macOS.
 client_log_is_complete() {  # $1=RFC3339 routing anchor
   local pod_start restarts
-  pod_start="$(oc get pods -l app=claims-client -n "$CLIENT_NS" --sort-by=.status.startTime \
-    -o jsonpath='{.items[-1:].status.startTime}' 2>/dev/null || true)"
-  restarts="$(oc get pods -l app=claims-client -n "$CLIENT_NS" \
-    -o jsonpath='{.items[*].status.containerStatuses[?(@.name=="client")].restartCount}' 2>/dev/null || true)"
+  # Read straight out of OC_OUT rather than through `x="$(oc …)"`: under `set -e` an assignment whose
+  # command substitution fails kills the script outright, which is how the first conversion wave
+  # truncated an absence run silently.
+  oc_read get pods -l app=claims-client -n "$CLIENT_NS" --sort-by=.status.startTime \
+    -o jsonpath='{.items[-1:].status.startTime}' || return 1
+  pod_start="$OC_OUT"
+  oc_read get pods -l app=claims-client -n "$CLIENT_NS" \
+    -o jsonpath='{.items[*].status.containerStatuses[?(@.name=="client")].restartCount}' || return 1
+  restarts="$OC_OUT"
   [[ -n "$pod_start" ]] || return 1
   [[ "$pod_start" < "$1" ]] || return 1
   # Any non-zero count across the (normally single) client pod disqualifies the window. Written as a
@@ -207,21 +268,29 @@ client_log_is_complete() {  # $1=RFC3339 routing anchor
 STRANDED_REPLICAS=""
 stranded_drill() {
   local have
-  STRANDED_REPLICAS="$(oc get deploy parasol-claims -n "$SITEA_NS" \
-    -o jsonpath="{.metadata.annotations.${DRILL_ANN//./\\.}}" 2>/dev/null || true)"
+  # Cleared FIRST: an early `return 1` below must not leave a previous call's number behind for the
+  # hint to interpolate.
+  STRANDED_REPLICAS=""
+  oc_read get deploy parasol-claims -n "$SITEA_NS" \
+    -o jsonpath="{.metadata.annotations.${DRILL_ANN//./\\.}}" || return 1
+  STRANDED_REPLICAS="$OC_OUT"
   [[ -n "$STRANDED_REPLICAS" ]] || return 1
-  have="$(oc get deploy parasol-claims -n "$SITEA_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  oc_read get deploy parasol-claims -n "$SITEA_NS" -o jsonpath='{.spec.replicas}' || return 1
+  have="$OC_OUT"
   [[ -n "$have" && "$have" -lt "$STRANDED_REPLICAS" ]]
 }
 # check() needs a predicate that FAILS when the world is wrong, and "stranded" is the wrong world.
 not_stranded_drill() { ! stranded_drill; }
 
 # Solve marker (end-state only) lives in the client ns.
-solved() { oc get cm ws-solve-resilience-multicluster-dr -n "$CLIENT_NS" >/dev/null 2>&1; }
+solved() { oc_present get cm ws-solve-resilience-multicluster-dr -n "$CLIENT_NS" -o name; }
 # CLIENT_NS must actually exist first — otherwise "absent" is vacuous, not evidence of a clean entry.
+# The same negation-on-genuine-absence care as no_failover_routing: oc_absent passes on a real
+# NotFound (the entry state's whole point) and refuses to pass on an API that never answered. NOT
+# written as `! solved`, which would turn could-not-ask into a certified-clean PASS.
 not_solved() {
-  oc get ns "$CLIENT_NS" >/dev/null 2>&1 || return 1
-  ! solved
+  oc_present get ns "$CLIENT_NS" -o name || return 1
+  oc_absent get cm ws-solve-resilience-multicluster-dr -n "$CLIENT_NS" -o name
 }
 
 # ── the opt-in active drill ───────────────────────────────────────────────────────────────────────
@@ -233,8 +302,12 @@ not_solved() {
 #   for it, it refuses --entry-only, and ws doctor cannot reach it by any path. Everything else in
 #   tools/verify/ is read-only and tools/lint/verify-mutation-guard.sh enforces that.
 failover_drill() {
-  local orig site deadline got_b=0
-  orig="$(oc get deploy parasol-claims -n "$SITEA_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 3)"
+  local orig deadline got_b=0
+  # The one READ in this function, and it goes through oc_read like every other read in the file —
+  # `|| true` because an unanswerable API must not kill the drill before its own restore path exists;
+  # the 3-replica default below already covers an empty answer.
+  oc_read get deploy parasol-claims -n "$SITEA_NS" -o jsonpath='{.spec.replicas}' || true
+  orig="$OC_OUT"
   [[ -n "$orig" && "$orig" -ge 1 ]] || orig=3
   SITEA_RESTORE="$orig"
   # Durable restore intent BEFORE the scale. An in-shell variable dies with the shell; this does not,
@@ -246,8 +319,8 @@ failover_drill() {
   oc scale deploy/parasol-claims -n "$SITEA_NS" --replicas=0 >/dev/null 2>&1 || true
   deadline=$(( $(date +%s) + 45 ))
   while [[ $(date +%s) -lt $deadline ]]; do
-    site="$(served_site)"
-    if [[ "$site" == "B" ]]; then got_b=1; break; fi
+    served_site   # sets SERVED_SITE; never `site="$(served_site)"` — see served_site's own comment
+    if [[ "$SERVED_SITE" == "B" ]]; then got_b=1; break; fi
     sleep 3
   done
   oc scale deploy/parasol-claims -n "$SITEA_NS" --replicas="$orig" >/dev/null 2>&1 || true
@@ -309,8 +382,16 @@ else
   fi
 
   # ── THE GRADED OUTCOME: did a failover actually happen? ────────────────────────────────────────
-  ROUTING_SINCE="$(routing_since)"
-  if [[ -z "$ROUTING_SINCE" ]]; then
+  VERIFY_INCONCLUSIVE=0
+  routing_since                                    # sets ROUTING_SINCE, always rc 0
+  ROUTING_UNKNOWN="$VERIFY_INCONCLUSIVE"           # …and the flag says WHY it came back empty
+  if [[ -z "$ROUTING_SINCE" && "$ROUTING_UNKNOWN" == "1" ]]; then
+    # Empty because nobody answered, not because nothing is wired. Before the oc_read conversion these
+    # two were the same empty string and the attendee was pointed at the ❌ above — which, on an
+    # unreachable API, is now a ⚠ that says nothing about their work.
+    warn "failover evidence — the cluster API could not be asked when the routing was created (see the ⚠ above)"
+    hint "not your lab, and not graded: re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor"
+  elif [[ -z "$ROUTING_SINCE" ]]; then
     warn "failover evidence — there is no failover routing to measure from (see the ❌ above)"
     hint "wire the routing first (lab exercise 2), then fail site-a over; re-run this verify afterwards"
   elif failover_evidenced "$ROUTING_SINCE"; then
@@ -319,6 +400,13 @@ else
     # perform the failover live would be downgraded from ✅ to ⚠.
     check "FAILOVER proven: the client log shows it served by SITE B after the routing went in" \
       failover_evidenced "$ROUTING_SINCE"
+  elif [[ "$LOG_STATE" == "unknown" ]]; then
+    # The routing exists but the log itself could not be read. Placed AHEAD of the solved-world and
+    # log-completeness branches because both of those describe a log we actually got an answer about;
+    # falling through to them would explain an outage as either "you machine-solved this" or "your pod
+    # restarted", and send the attendee chasing a pod that is fine.
+    warn "failover evidence — the client's log could not be read (the cluster API did not answer)"
+    hint "not your lab, and not graded: the evidence is still in the pod, this run just could not fetch it. Re-run the same ws verify in a moment; if it keeps happening, tell your instructor"
   elif solved; then
     # Keyed on the MARKER, not on --solve: the instructor's pre-demo check is a plain `ws verify` after
     # `ws solve` (instructor.adoc), and `ws solve` renders the three routing CRs and stops — it never

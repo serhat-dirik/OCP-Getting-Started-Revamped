@@ -135,6 +135,31 @@ ok()   { echo "✅ $*"; }
 # exists-but-objects-absent, entry-only AND full, plus a 33-case predicate-level differential reaching
 # branches the guarded end-state block hides. The outcomes that SHOULD differ do: on an unreachable API
 # the three scripts previously printed 8, 9 and 11 false ❌ and now print zero red and skip everything.
+#
+# ── 2026-08-01, FOURTH PASS: the largest row converted, 80 → 64 ──────────────────────────────────
+# resilience-multicluster-dr falls 22 → 6 and KEEPS its row. The 16 converted lines are every OBJECT
+# READ in the file, including both `oc exec … -- curl` probes and both `oc logs` reads. On an
+# unreachable API that script previously printed EIGHT false ❌ at entry mode and eight at full mode;
+# it now prints zero red, 15/16 ⚠ and zero passes.
+#
+# THE SIX SURVIVORS ARE NOT READS. They are the five WRITES and one `oc rollout status` wait inside
+# failover_drill — the opt-in active-drill region that tools/lint/verify-mutation-guard.sh reviews
+# (`# ws-mutation-optin:`), all of the shape `oc scale … >/dev/null 2>&1 || true`. This detector is
+# line-shaped: it sees "an `oc` line that silences stderr" and cannot tell a blind READ from a
+# deliberately-quiet WRITE. oc_read exists to classify an ANSWER so a check can be graded; a drill
+# that scales a Deployment and ignores the result has no answer to classify, and rewriting those six
+# lines to satisfy a read-oriented ratchet would be churn inside the one region of this suite where
+# churn is most expensive. Recorded here instead, which is what the row is for.
+#
+# Proven against live cluster 2 (attendee slots user2 = entry world, user8 = solved end world):
+# byte-identical across TWELVE end-to-end runs per tree — healthy entry-only, healthy full, healthy
+# --solve, entry-world-at-full-mode, end-world-at-entry-mode, genuine absence (--user user99, both
+# modes), namespace-exists-but-objects-absent (--user user5, both modes), the --entry-only
+# +--failover-drill refusal, AND a real ACTIVE FAILOVER DRILL (site-a scaled to 0 and restored, 38s,
+# identical to the byte on both trees) — plus a 74-case predicate-level differential. Of the 74, 60
+# are byte-identical, 11 differ only by VERIFY_INCONCLUSIVE flipping 0 → 1 on an unanswerable API
+# (the whole point), and 3 were harness artifacts of the echo→global change, re-measured with both
+# call shapes and confirmed value-identical.
 BASELINE_TABLE="
 app-security-testing.sh 1
 build-deliver.sh 4
@@ -148,7 +173,7 @@ observability-health-scale.sh 2
 packaging-distributing.sh 7
 pipelines-fundamentals.sh 1
 platform-orientation.sh 5
-resilience-multicluster-dr.sh 22
+resilience-multicluster-dr.sh 6
 securing-apps-keycloak.sh 5
 trusted-supply-chain.sh 2
 "
