@@ -71,47 +71,89 @@ anything. This is the number people underestimate.
 **RHACS alone is 26 Gi — 46% of the platform's memory.** If you need to order lean, dropping the
 RHACS-dependent modules via `modules_disabled` is the single biggest lever you have.
 
+### What one attendee costs
+
+Plan for the **peak concurrent module**, not the sum of anyone's quota. Measured per attendee:
+
+| Module class | Per attendee at peak | Examples |
+|---|---|---|
+| Light | ~1 CPU / 1 Gi | networking, config, GitOps, observability |
+| Medium | ~2 CPU / 4 Gi | pipelines, the security-scanning runs |
+| **Heavy** | **~2.5 CPU / 0.5 Gi requested** (~4.25 Gi limit) | Dev Spaces workspace, MTA analysis, the AI modules |
+
+Working through one or two modules, attendees measured **2–6 pods, 0.3–1.1 Gi of requests, and
+28–514 Mi actually in use**. The per-user quota ceiling of 41 CPU / 82 Gi is a guard rail, not a
+forecast — nobody is ever in all thirteen of their namespaces at once.
+
+So the planning allowance is **2.5 CPU and 1.5 Gi of requests per attendee**: the heaviest module's
+CPU, plus enough memory for its workspace and the one or two other modules they have materialized.
+
 ### What to order
 
 ```
-total = 32 CPU / 56 Gi              (the platform, measured above)
-      + attendees × 4 CPU / 10 Gi   (assume everyone is on a heavy module at once)
+total = 32 CPU / 56 Gi                (the platform, measured above)
+      + attendees × 2.5 CPU / 1.5 Gi  (assume everyone is on a heavy module at once)
       + 20% headroom
 ```
 
-Sized against a **32 vCPU / 64 GiB** worker, the common shape — figure on roughly 30 CPU and 58 Gi
-of that being *allocatable* once the kubelet and system reservations are taken out.
+Sized against a **32 vCPU / 64 GiB** worker — figure on roughly 30 CPU and 58 Gi of that being
+*allocatable* once kubelet and system reservations come out.
 
-| Workshop size | Attendees | Minimum allocatable | Order |
-|---|---|---|---|
-| Small | 12 | ~96 CPU / ~211 Gi | **4 workers** × 32 vCPU / 64 GiB |
-| **Normal** | **20** | **~134 CPU / ~307 Gi** | **6 workers** × 32 vCPU / 64 GiB |
-| Large | 30 | ~182 CPU / ~427 Gi | **8 workers** × 32 vCPU / 64 GiB |
+| Workshop size | Attendees | Minimum allocatable | Workers by capacity | **Order** |
+|---|---|---|---|---|
+| Small | 12 | ~74 CPU / ~89 Gi | 3 | **5** |
+| **Normal** | **20** | **~98 CPU / ~103 Gi** | **4** | **5** |
+| Large | 30 | ~128 CPU / ~121 Gi | 5 | **5** |
 
-**Memory is what decides the node count, not CPU.** At 20 and 30 attendees the memory figure needs
-one more node than the CPU figure does. The heavy modules are memory-hungry and CPU-idle — a Dev
-Spaces workspace mostly waits for a human to type.
+**Five 32 vCPU / 64 GiB workers runs any workshop up to 30 people.** Capacity is not what sets the
+floor below 30 — module topology is, and the next section explains why. If you order for capacity
+alone you will land on 3 or 4 workers and one module will not run.
 
-**Order fewer, larger nodes.** A 4 CPU / 16 GiB node cannot host a single Dev Spaces workspace plus
-its share of platform pods, so small nodes strand capacity you have paid for.
+**CPU decides the capacity column, not memory.** Every row needs one to two more nodes for CPU than
+for memory, and the gap widens with the cohort. That is the Dev Spaces workspace: 2.5 CPU requested
+against 0.5 Gi. It is a large CPU reservation for something that mostly waits for a human to type,
+but requests are what the scheduler enforces, so requests are what you buy.
 
-The per-attendee allowance above is deliberately conservative: it assumes every attendee is on the
-heaviest module simultaneously, which a real room never quite reaches. Attendees measured on a live
-cluster with one or two modules materialized used 0.3–1.1 Gi of requests each. Size on the formula
-and the room stays comfortable; size on a `top` reading and you will under-order, because the
-scheduler places pods on *requests*.
+**Order fewer, larger nodes.** A workspace needs its 2.5 CPU on *one* node, so a 4 CPU worker can
+host exactly one and nothing else. Small nodes strand capacity you have paid for.
 
-**One module needs free *nodes*, not just free totals.** *Deployment Targets & Scheduling* asks the
-scheduler for four distinct placements at once, so it needs **four non-batch nodes that can each still
-admit a 200m / 256Mi pod**, judged on requests rather than usage. On a cluster whose nodes are already
-near their request ceiling, its exercises cannot place a replica even though the cluster looks idle.
+**Do not size on a `top` reading.** Actual CPU ran 4–61 m per attendee against requests an order of
+magnitude higher. A cluster that looks 90% idle will still refuse to place a pod.
 
-Every row in the table above already orders four or more workers, so this is satisfied by default —
-it only bites if you cut the node count below the recommendation while keeping the module enabled.
-If you do need to run leaner, drop that module with `modules_disabled` rather than hoping it fits.
+> **The footprint grows with modules *materialized*, not modules *in progress*.** Starting a module
+> only evicts one that declares a conflict in the same namespace, so an attendee working through
+> several non-conflicting modules accumulates all of them until a reset. The figures above are for
+> one or two modules each; a cohort deep into the catalog sits higher. If a long delivery starts
+> crowding the cluster, resetting finished modules reclaims it.
 
-**Running lean:** `modules_disabled` in `vars.yaml` drops heavy modules from the delivery. Their
-operators still install, but no attendee can start them.
+### Why five workers, when capacity says three
+
+**One module needs free *nodes*, not just free totals — and that is what sets the floor.**
+
+*Deployment Targets & Scheduling* spreads three claims replicas across three distinct nodes with
+anti-affinity, then performs a rolling update whose `maxSurge` pod needs a fourth. So it wants **four
+nodes that can each still admit a 200m / 256Mi pod**, judged on requests rather than usage.
+
+Those four must be nodes the workload is allowed to use. The installer dedicates one worker to a
+**batch pool** — labelled and tainted `NoSchedule` — so that *Jobs, Batch & Queued Workloads* can
+teach node pinning. That worker does not count toward the four.
+
+**Four non-batch plus one batch is five**, at every cohort size. Aggregate headroom does not help
+here: a workload that must spread cannot borrow capacity from a node it is forbidden to use.
+
+The installer already refuses the trap in one direction — it **skips the batch taint below three
+workers**, because tainting one of two workers starved the rest of the cluster in practice. It does
+not, however, know whether you enabled the scheduling module, so three workers plus that module is a
+combination it will let you build.
+
+**If you want to run leaner than five workers**, disable that module rather than hoping it fits:
+
+```yaml
+modules_disabled: [deployment-targets-scheduling]
+```
+
+Then the capacity column governs — 3 workers for a small cohort, 4 for normal. `modules_disabled`
+works the same way for any heavy module: the operators still install, but no attendee can start it.
 
 ### Where to get a cluster
 
