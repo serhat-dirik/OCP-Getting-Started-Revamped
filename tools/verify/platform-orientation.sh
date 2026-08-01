@@ -19,22 +19,23 @@ NS="${USER_NAME}-dev"
 # (route "gitea" in namespace "ogsr-gitea" → gitea-ogsr-gitea.<domain>), which every
 # authenticated user can resolve.
 #
-# NOT CONVERTED, and deliberately left blind — see tools/lint/verify-oc-read-guard.sh's baseline row.
-# This is the route-then-domain fallback the guard excludes by name inside gitea_host(), inlined here
-# under a different name, so it is counted. Converting it needs an idiom _lib.sh does not have: the
-# route read is EXPECTED to be refused for an attendee, so its rc 2 must NOT become this check's
-# verdict once the domain fallback yields a host — but check() consults VERIFY_INCONCLUSIVE whenever
-# the predicate fails, so a raised-then-unwanted flag turns a genuinely MISSING Gitea account (a real
-# ❌) into "the cluster could not be asked" (⚠). The only way to express that from here is to assign
-# VERIFY_INCONCLUSIVE inside a module script, which invents a flag-lifecycle rule in the wrong file —
-# and shellcheck says so out loud (SC2034: the module writes the shared flag and never reads it).
-# What is missing is an _lib.sh primitive for "an oc read whose refusal is expected because a fallback
-# answers it" — an oc_read_optional, or a save/restore pair. Reported rather than worked around.
+# CONVERTED via oc_read_optional (_lib.sh) — the route-then-domain fallback the guard excludes by name
+# inside gitea_host(), inlined here under a different name. Mirrors tools/verify/gitops-at-scale.sh's
+# read_gitea_host(). The route read is EXPECTED to be refused for an attendee (rule 10 — routes in
+# ogsr-gitea are not theirs to read), so its rc 2 must NOT become this check's verdict once the domain
+# fallback yields a host — oc_read_optional saves/restores VERIFY_INCONCLUSIVE around that call so a
+# refusal check() would otherwise turn into ⚠ never reaches it. The domain fallback itself goes through
+# plain oc_read: it is the LAST resort, so if it also cannot be asked, "could not determine the host" is
+# genuinely inconclusive and must raise the flag — that is what keeps a real cluster outage a ⚠ instead
+# of a false ❌ on a genuinely missing Gitea account.
 gitea_user_exists() {
-  local user="$1" host domain
-  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  local user="$1" host="" domain
+  if oc_read_optional get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' && [[ -n "$OC_OUT" ]]; then
+    host="$OC_OUT"
+  fi
   if [[ -z "$host" ]]; then
-    domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
+    oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || return 1
+    domain="$OC_OUT"
     [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
   fi
   [[ -n "$host" ]] || return 1

@@ -289,9 +289,7 @@ ok()   { echo "✅ $*"; }
 # (a banned-tech clean bill nobody checked). All three were invisible to a whole-cluster outage — every
 # one has a namespace guard that fails closed — and only appeared under a PARTIAL outage.
 BASELINE_TABLE="
-eventing-deep-dive.sh 9
 networking-dev-devops.sh 3
-platform-orientation.sh 2
 "
 
 baseline_for() {  # <basename> → integer, 0 if not listed

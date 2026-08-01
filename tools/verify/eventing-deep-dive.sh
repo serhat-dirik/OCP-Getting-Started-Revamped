@@ -28,27 +28,32 @@ NS="${USER_NAME}-dev"
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
-# A named Knative Service exists in {user}-dev.
-ksvc_present() { oc get ksvc "$1" -n "$NS" >/dev/null 2>&1; }
+# A named Knative Service exists in {user}-dev. A missing ksvc CRD ("the server doesn't have a
+# resource type") is the server's own answer and still fails loudly — Serverless not installed is a
+# real platform failure, not an inconclusive read.
+ksvc_present() { oc_present get ksvc "$1" -n "$NS" -o name; }
 
 # A named ksvc reports Ready=True (latest revision came up + Route admitted). Stays True scaled to zero.
 ksvc_ready() {
-  [[ "$(oc get ksvc "$1" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)" == "True" ]]
+  oc_read get ksvc "$1" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || return 1
+  [[ "$OC_OUT" == "True" ]]
 }
 
 # A named ksvc has an auto-created external URL (the operator-managed edge Route is admitted) — the
 # attendee-readable proof the consumer is Addressable, unlike the Route object in knative-serving-ingress.
 ksvc_has_url() {
-  [[ -n "$(oc get ksvc "$1" -n "$NS" -o jsonpath='{.status.url}' 2>/dev/null || true)" ]]
+  oc_read get ksvc "$1" -n "$NS" -o jsonpath='{.status.url}' || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 # Eventing objects (namespaced; attendee admin reads them via the aggregated admin role).
-broker_present()     { oc get broker.eventing.knative.dev default -n "$NS" >/dev/null 2>&1; }
+broker_present() { oc_present get broker.eventing.knative.dev default -n "$NS" -o name; }
 broker_ready() {
-  [[ "$(oc get broker.eventing.knative.dev default -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)" == "True" ]]
+  oc_read get broker.eventing.knative.dev default -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || return 1
+  [[ "$OC_OUT" == "True" ]]
 }
-pingsource_present() { oc get pingsource.sources.knative.dev claim-ticker -n "$NS" >/dev/null 2>&1; }
-base_trigger_present() { oc get trigger.eventing.knative.dev claims-events -n "$NS" >/dev/null 2>&1; }
+pingsource_present()   { oc_present get pingsource.sources.knative.dev claim-ticker -n "$NS" -o name; }
+base_trigger_present() { oc_present get trigger.eventing.knative.dev claims-events -n "$NS" -o name; }
 
 # OUTCOME detectors (rule 14 — assert the shape, not the name). A non-empty jsonpath line means at least
 # one Trigger carries that field.
@@ -71,11 +76,11 @@ dlq_trigger_present() {
 # Require the namespace to exist first — otherwise "absent" is vacuous (true on a cluster where
 # nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
 no_filtered_trigger() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  oc_read get ns "$NS" || return 1
   ! filtered_trigger_present
 }
 no_dlq_trigger() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
+  oc_read get ns "$NS" || return 1
   ! dlq_trigger_present
 }
 
