@@ -59,6 +59,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 
 def _crash_exit_2(exc_type, exc, tb):
@@ -136,6 +137,10 @@ except ModuleNotFoundError:
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 ENTRY_STATES = REPO / "gitops/entry-states"
+# The fixture CHART the self-test renders through check_chart(). It is a chart, not a text file,
+# because check_chart() is the thing that needed proving and check_chart() renders with helm — and
+# until 2026-08-01 this constant was read by one `if … : pass` and nothing else, which is to say it
+# was not read at all.
 CANARY = REPO / "tools/lint/hook-env-guard.canary"
 
 # Names the shell itself provides. Referencing these under `set -u` is safe.
@@ -373,8 +378,82 @@ def self_test() -> int:
             failures.append(f"fixture ({why}): expected {expect} undefined reference(s), got "
                             f"{len(found)}: {found}")
 
-    if not CANARY.is_dir() and not CANARY.with_suffix(".txt").is_file():
-        pass  # fixtures are inline above by design — see the note below
+    # THE PRODUCTION PATH, driven end to end. Everything above re-implements check_chart()'s body
+    # inline — it calls scripts_in/env_names/assigned_names/REF itself — so check_chart(), the only
+    # function main() actually runs, was executed by no CI signal at all. Measured 2026-08-01:
+    # neutering its `findings.append` while leaving its counters intact left --self-test at 1 AND
+    # the real run at 0. That is the api-key-shape defect in a different costume: a docstring's
+    # worth of logic that nothing exercises.
+    #
+    # The two `pass`-branch lines that used to sit here claimed the fixtures were "inline by
+    # design" and referenced a CANARY constant that no code read. They are replaced by a real
+    # fixture chart, rendered by helm under both solve worlds exactly as the real charts are.
+    if not (CANARY / "Chart.yaml").is_file():
+        failures.append(f"the canary fixture chart {CANARY.relative_to(REPO)} is missing, so "
+                        "check_chart() — the function the real run is made of — is exercised by "
+                        "nothing.")
+    else:
+        canary_findings, canary_counts = check_chart(CANARY, "canary")
+        by_world = {(m.group(1), m.group(2))
+                    for m in (re.search(r"\(solve=(\w+)\).*?\$\{(\w+)\}", finding)
+                              for finding in canary_findings) if m}
+        expected_world = {
+            ("false", "DST_USER"), ("true", "DST_USER"),
+            ("false", "ONLY_IN_INIT_CONTAINER"), ("true", "ONLY_IN_INIT_CONTAINER"),
+            ("false", "NEVER_SET_IN_TEMPLATE"), ("true", "NEVER_SET_IN_TEMPLATE"),
+            # solve=false only: the Job that carries it is gated on solve=true.
+            ("true", "ONLY_IN_THE_SOLVE_WORLD"),
+        }
+        if by_world != expected_world:
+            failures.append(
+                f"check_chart() over the canary chart found {sorted(by_world)}; expected "
+                f"{sorted(expected_world)}. Missing entries mean a shape stopped being walked or a "
+                f"finding stopped being raised; extra ones mean a defined reference is now being "
+                f"reported. Raw findings: {canary_findings}")
+        if canary_counts["renders"] != 2:
+            failures.append(f"check_chart() reported {canary_counts['renders']} render(s) of the "
+                            "canary chart; both the solve=false and the solve=true world must be "
+                            "rendered, and dropping one is invisible in the finding list of a "
+                            "chart whose worlds are identical.")
+        if canary_counts["solve=true scripts"] <= canary_counts["solve=false scripts"]:
+            failures.append("the canary's solve world did not materialize MORE scripts than its "
+                            "default world, so nothing here distinguishes two renders from one.")
+        # The envFrom skip, pinned from both sides. Exactly one container per render carries
+        # envFrom, so evaluated must be exactly two short of the scripts seen: a skip that widens
+        # makes this larger than the gap, and a skip that disappears makes it equal.
+        seen = canary_counts["solve=false scripts"] + canary_counts["solve=true scripts"]
+        if canary_counts["scripts actually evaluated"] != seen - 2:
+            failures.append(
+                f"check_chart() evaluated {canary_counts['scripts actually evaluated']} of {seen} "
+                f"scripts; the fixture carries exactly one envFrom container per render, so it must "
+                f"evaluate {seen - 2}. More means the envFrom skip stopped working (and its "
+                f"unknowable reference is now a false finding); fewer means the skip widened past "
+                f"envFrom and containers are being ignored.")
+
+    # A chart that will not render must SAY SO by name. The scope floors already fail the run (a
+    # skipped render never raises `renders`), but a scope collapse names a number, not the chart —
+    # and this finding was the only thing that did. Blinding it changed neither exit code, because
+    # nothing here ever handed check_chart() a chart helm refuses. Written to a temp dir rather than
+    # committed: a chart that exists only during the run cannot be installed by accident, and a
+    # deliberately-broken chart in gitops/ would be a trap for the next reader.
+    with tempfile.TemporaryDirectory() as tmp:
+        broken = pathlib.Path(tmp) / "broken-chart"
+        (broken / "templates").mkdir(parents=True)
+        (broken / "Chart.yaml").write_text(
+            "apiVersion: v2\nname: broken\nversion: 0.1.0\n", encoding="utf-8")
+        # `required` with no value set is how a real chart fails: rendered, not a syntax error.
+        (broken / "templates" / "boom.yaml").write_text(
+            '{{ required "canary: this chart is meant to fail rendering" .Values.doesNotExist }}\n',
+            encoding="utf-8")
+        broken_findings, broken_counts = check_chart(broken, "broken-canary")
+        if broken_counts["renders"] != 0:
+            failures.append(f"a chart helm refuses to render still counted "
+                            f"{broken_counts['renders']} render(s) — the counter is raised on a "
+                            "render that did not happen, so the scope floor stops meaning anything.")
+        if len(broken_findings) != 2 or not all("FAILED TO RENDER" in f for f in broken_findings):
+            failures.append(f"a chart helm refuses to render produced {broken_findings!r} instead "
+                            "of one FAILED TO RENDER finding per solve world. Without it the run "
+                            "fails on a scope shortfall that names a number and not the chart.")
 
     # The scope ledger is a library no CI step runs on its own; exercising it from here is what
     # stops it from being an unrun gate.
@@ -391,8 +470,10 @@ def self_test() -> int:
             print(f"::error::hook-env-guard SELF-TEST FAILED — {failure}", file=sys.stderr)
         return 2
     print("self-test ok — the DST_USER shape, a Template-nested script and an initContainer-only "
-          "script are all detected; inline/loop/read assignments plus shell builtins are correctly "
-          "NOT reported; and the scope ledger fails an empty or truncated input set.")
+          "script are all detected THROUGH check_chart() as main() runs it, in both solve worlds; "
+          "inline/loop/read assignments plus shell builtins are correctly NOT reported; the envFrom "
+          "skip covers exactly the envFrom containers; and the scope ledger fails an empty or "
+          "truncated input set.")
     return 1
 
 

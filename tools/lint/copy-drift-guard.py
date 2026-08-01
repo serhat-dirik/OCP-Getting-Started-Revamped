@@ -662,6 +662,30 @@ def _canary_pairs(root: pathlib.Path) -> list[dict]:
             "lua_paths": [[0, "check"]],
             "expect": {"lua-value"},
         },
+        {   # The two SHAPE detectors. Added 2026-08-01: `type` and `length` were the only two of
+            # the eight finding kinds no fixture reached, and both could be blinded with the
+            # self-test still exiting 1 and the tree run still exiting 0. A mapping that collapsed
+            # to a scalar and a list that grew an item are both invisible to the value/added/missing
+            # detectors, which is exactly why they needed their own case.
+            "id": "canary-shape-drift", "mode": "structural",
+            "source": {"file": f"{fixture}/manifest-source.yaml"},
+            "copy": {"chart": chart, "template": "templates/shape-drift.yaml"},
+            "allow_added": [["metadata", "namespace"]],
+            "expect": {"type", "length"},
+        },
+        {   # The Lua branch's own precondition: a declared lua_path whose copy side is not a
+            # string. It is checked INSIDE the lua branch, before the generic type check, so the
+            # pair above cannot reach it — blinding it was green on both signals (2026-08-01).
+            "id": "canary-lua-not-a-string", "mode": "structural",
+            "source": {"file": f"{fixture}/lua-source.yaml",
+                       "subtree": ["spec", "resourceHealthChecks"]},
+            "copy": {"chart": chart, "template": "templates/job-lua-nonstring.yaml",
+                     "heredoc": {"path": ["spec", "template", "spec", "containers", 0, "args", 0],
+                                 "opener": "<<'PATCHEOF'", "terminator": "PATCHEOF"},
+                     "subtree": ["spec", "resourceHealthChecks"]},
+            "lua_paths": [[0, "check"]],
+            "expect": {"type"},
+        },
     ]
 
 
@@ -719,11 +743,47 @@ def self_test(root: pathlib.Path) -> int:
         elif result.nodes < 1:
             failures.append(f"{pair['id']}: behaved as declared but reported inspecting 0 nodes — "
                             "the count the real run's scope floor depends on is not being raised.")
+        elif expected and not result.problems:
+            # kinds and problems come out of the same finding list TODAY, which is precisely why
+            # this needs saying: main() prints result.problems and never looks at result.kinds,
+            # while every assertion above reads kinds and never looks at problems. Nothing else
+            # notices if the two stop agreeing, and a drifted pair whose report is empty is a
+            # DRIFT banner with nothing under it.
+            failures.append(f"{pair['id']}: reported the detector kinds {sorted(got)} but produced "
+                            "no problem text. main() prints the text, not the kinds — a pair that "
+                            "drifts would head its report with nothing to read.")
         else:
             print(f"self-test: {pair['id']} → "
                   f"{sorted(got) if got else 'clean, as declared'} ({result.nodes} nodes) ✅")
 
-    required = {"bytes", "value", "added", "missing", "allowlist-misuse", "lua-value"}
+    # The bytes reporter emits a headline AND a unified diff, from two separate statements. Each
+    # masked the other: blinding either one alone left `problems` non-empty, so the kind stayed
+    # "bytes" and the self-test stayed at 1 (measured 2026-08-01). Pin both halves by name.
+    bytes_drift = next((p for p in canaries if p["id"] == "canary-bytes-drift"), None)
+    if bytes_drift is not None:
+        try:
+            report = check_pair(root, bytes_drift).problems
+        except GuardError as exc:
+            report = []
+            failures.append(f"canary-bytes-drift could not be re-evaluated for its report shape: "
+                            f"{exc}")
+        # The HEADLINE specifically — report[0], and it must name BOTH sides. "somewhere in the
+        # report" is not enough: difflib's own `--- from` / `+++ to` lines carry each filename on
+        # its own, so a report that lost its headline still mentioned every path and passed.
+        if report and not all(side in report[0]
+                              for side in (bytes_drift["source"]["file"],
+                                           bytes_drift["copy"]["file"])):
+            failures.append("the bytes report does not OPEN with a line naming both the copy and "
+                            f"the source it drifted from; it opens with {report[0].strip()!r}. The "
+                            "reader is told a duplicate diverged without being told which file to "
+                            "fix or what to re-copy it from.")
+        if report and not any(line.lstrip().startswith(("+", "-")) for line in report[1:]):
+            failures.append("the bytes report carries no diff body — only the headline. The diff "
+                            "is the whole reason this mode is not just `cmp -s`, and it can be "
+                            "removed without changing any detector kind.")
+
+    required = {"bytes", "value", "added", "missing", "allowlist-misuse", "lua-value",
+                "type", "length"}
     missing_detectors = required - kinds_seen
     if missing_detectors:
         failures.append(f"the canary set never exercised detector(s) {sorted(missing_detectors)} — "

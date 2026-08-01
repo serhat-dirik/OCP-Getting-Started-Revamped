@@ -291,7 +291,11 @@ def contract_findings(source: str) -> tuple[list[str], int]:
                         "empty, `IFS=$'\\t' read` binds nothing to it, and ws doctor prints "
                         "whatever that variable held before.")
     checked += 1
-    if "revisionUID" not in bodies["rebuild_scan"]:
+    # The EXECUTABLE form, not the bare word. `"revisionUID" not in body` was satisfied by the
+    # explanatory COMMENT two lines above the case statement, so deleting the skip itself and
+    # leaving the comment behind passed this check — the exact edit a "simplification" makes.
+    # Measured 2026-08-01 while canarying the contract half.
+    if 'serving.knative.dev/revisionUID*) continue' not in bodies["rebuild_scan"]:
         findings.append("rebuild_scan no longer skips workloads selected by "
                         "serving.knative.dev/revisionUID. Knative runs each Revision as its own "
                         "Deployment, so those double-count the ksvc row and invite an "
@@ -470,10 +474,24 @@ def main(argv=None) -> int:
     return 0
 
 
-# Each mutation is a defect that was MEASURED in this code, expressed as the smallest edit that
-# brings it back. `ws` mutations edit a copy of the script; `fixture` mutations edit the recording,
-# which is how the two cluster-shaped defects (a collapsed selector column, a service-wide ksvc pod
-# match) are expressed — they are properties of what `oc` returns, not of the shell.
+# Each mutation is a defect expressed as the smallest edit that brings it back — MEASURED in this
+# code where the comment says so, and otherwise the minimal edit that reintroduces exactly what one
+# pinned invariant exists to forbid.
+#
+# THE KIND SELECTS WHICH HALF MUST CATCH IT, and that is the whole point of the vocabulary:
+#   "ws"       — edits a copy of the script; proven by the BEHAVIOUR half alone.
+#   "fixture"  — edits the recording; proven by the BEHAVIOUR half alone. This is how the two
+#                cluster-shaped defects (a collapsed selector column, a service-wide ksvc pod match)
+#                are expressed — they are properties of what `oc` returns, not of the shell.
+#   "contract" — edits a copy of the script; proven by the CONTRACT half alone.
+#
+# Until 2026-08-01 every kind ran BOTH halves and a mutant counted as caught if EITHER fired. The
+# two halves then masked each other wholesale: TEN of the fifteen pinned contract invariants could
+# be neutered one at a time with `--self-test` still exiting 1 and the tree run still exiting 0,
+# because a behaviour mutant that happened to trip the contract check (or vice versa) kept the
+# suite green. `kind` read like a distinction the code made; it was documentation. Splitting the
+# halves is what turns each pinned invariant into something a canary can actually fail on — and it
+# is why every contract check below now has a mutant of its own rather than borrowing one.
 MUTANTS = [
     ("digest-compare-disabled", "ws",
      'if [[ -n "$want" && "$d" != "$want" ]]; then stale=$((stale + 1)); fi',
@@ -518,6 +536,111 @@ MUTANTS = [
      '"${module:--}"',
      '"${module}"',
      "an unlabelled ksvc emits an empty middle field"),
+    # ── one mutant per behaviour-half check that nothing isolated ─────────────────────────────
+    # Added 2026-08-01, same audit. The behaviour half asks six separate questions of the recorded
+    # cluster and every mutant above trips several at once, so five of the six could be neutered
+    # one at a time with both CI signals green. Each mutant below changes EXACTLY ONE of them: the
+    # `--check` exit status without the rows, the doctor row's label without its contents, its mark
+    # without its text, one fragment of its text, and the modelled-call ledger without anything
+    # visible at all.
+    ("container-column-misreported", "ws",
+     '"$kind" "$ns" "$name" "$cname" "$wl_owner" "${module:--}"',
+     '"$kind" "$ns" "$name" "$name" "$wl_owner" "${module:--}"',
+     "the CONTAINER column reports the workload's name instead of the container's. Nothing about "
+     "the verdict changes — same states, same counts, same exit status, same doctor row — so this "
+     "is the only shape that reaches the row comparison and nothing else. `oc rollout restart` "
+     "takes a workload, but the SA reading the table to find which container is off-digest is "
+     "given a name that is not in the pod"),
+    ("check-exit-status-lost", "ws",
+     '      echo "   roll them:  ws rebuild-images --no-build ${hint_scope}'
+     '${filter:+ --image ${filter}}"\n      rebuild_end; trap - EXIT\n      return 1',
+     '      echo "   roll them:  ws rebuild-images --no-build ${hint_scope}'
+     '${filter:+ --image ${filter}}"\n      rebuild_end; trap - EXIT\n      return 0',
+     "`--check` prints the drift and exits 0. ws doctor and CI consume that status as a pass/fail, "
+     "so a drifted cluster reports healthy while the table on screen says otherwise"),
+    ("doctor-row-label-renamed", "ws",
+     'printf "  %-28s" "running image drift"',
+     'printf "  %-28s" "image drift"',
+     "the doctor row is still computed and still printed, under a label nothing looks for — which "
+     "is how a row silently stops being the thing anyone greps for"),
+    ("doctor-row-mark-softened", "ws",
+     'err "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
+     'ok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"',
+     "the drift row reports ✅ with the drift spelled out beside it, and ws doctor stops failing"),
+    ("doctor-row-offenders-dropped", "ws",
+     'err "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
+     'err "${d_what} — detail: ws rebuild-images --check${d_fix}"; fail=1',
+     "the row keeps its mark and its counts but stops naming WHICH consumers drifted, so the "
+     "reader is told a number and given nowhere to go"),
+    ("unmodelled-oc-call-introduced", "ws",
+     'IFS=$\'\\t\' read -r src_ns src_name reftype refval <<< "$parts"',
+     'oc get clusterversion version >/dev/null 2>&1 || true\n    '
+     'IFS=$\'\\t\' read -r src_ns src_name reftype refval <<< "$parts"',
+     "the read-only path asks the cluster something the recording does not model. Every read in "
+     "the scan is written `|| true`, so the answer is silently empty and part of the report comes "
+     "from no data at all — the one defect shape that leaves the table and the exit status intact"),
+    # ── one mutant per remaining pinned contract invariant ───────────────────────────────────
+    # Added 2026-08-01. Each of these checks existed and each could be neutered with both CI
+    # signals green, because the behaviour half caught whichever mutant happened to trip it. They
+    # are the smallest edit that breaks exactly one producer/consumer pairing: a width, a reader,
+    # or an emptiness default. None of them is a defect that shipped — they are the shapes these
+    # invariants were written to forbid, which is the only thing a canary for them can be.
+    ("scan-row-width-shrunk", "contract",
+     "printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t0\\t0\\tpinned\\n' \\",
+     "printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t0\\t0\\tpinned\\n' \\",
+     "the digest-pinned early return emits one field fewer than the normal path, so every reader "
+     "binds the tail of that row one column to the left"),
+    ("consumer-row-reader-unwired", "contract",
+     "read -r kind ns name cname owner module src want running stale state; do",
+     "read -r knd ns name cname owner module src want running stale state; do",
+     "a consumer stops reading a rebuild_scan row at all — the pairing goes stale in silence"),
+    ("consumer-row-reader-short", "contract",
+     "read -r kind ns name cname owner module src want running stale state; do",
+     "read -r kind ns name cname owner module src want running stale; do",
+     "a consumer binds one name fewer than the row emits; the surplus field is swallowed"),
+    ("enumerate-reader-unwired", "contract",
+     "while IFS=$'\\t' read -r kind ns name sel cname image; do",
+     "while IFS=$'\\t' read -r kind ns name selector cname image; do",
+     "rebuild_scan stops reading rebuild_enumerate's rows under the pinned names"),
+    ("enumerate-template-width-shrunk", "contract",
+     '{{$k}}{{"\\t"}}{{$ns}}{{"\\t"}}{{$n}}{{"\\t"}}{{$s}}{{"\\t"}}{{.name}}{{"\\t"}}{{.image}}'
+     '{{"\\n"}}',
+     '{{$k}}{{"\\t"}}{{$ns}}{{"\\t"}}{{$n}}{{"\\t"}}{{$s}}{{"\\t"}}{{.image}}{{"\\n"}}',
+     "the workload go-template drops the container-name column while the reader still binds six"),
+    ("row-summary-width-grown", "contract",
+     "printf '%s\\t%s\\t%s\\t%s\\n'",
+     "printf '%s\\t%s\\t%s\\t%s\\t%s\\n'",
+     "rebuild_row_summary emits a fifth field ws doctor never reads"),
+    ("doctor-row-reader-unwired", "contract",
+     "IFS=$'\\t' read -r d_total d_stale d_bad d_names < <(rebuild_row_summary",
+     "IFS=$'\\t' read -r doctor_total d_stale d_bad d_names < <(rebuild_row_summary",
+     "cmd_doctor stops consuming rebuild_row_summary under the pinned names"),
+    ("doctor-row-reader-short", "contract",
+     "IFS=$'\\t' read -r d_total d_stale d_bad d_names < <(rebuild_row_summary",
+     "IFS=$'\\t' read -r d_total d_stale d_bad < <(rebuild_row_summary",
+     "ws doctor binds three of the four summary fields and drops the offender names"),
+    ("image-parts-width-shrunk", "contract",
+     "printf '%s\\t%s\\ttag\\tlatest\\n'",
+     "printf '%s\\t%s\\tlatest\\n'",
+     "the bare-reference branch of rebuild_image_parts emits 3 fields where the other two emit 4"),
+    ("image-parts-reader-short", "contract",
+     "read -r src_ns src_name reftype refval",
+     "read -r src_ns src_name reftype",
+     "rebuild_scan binds three of rebuild_image_parts' four fields, losing the tag"),
+    ("ksvc-selector-init-dropped", "contract",
+     '{{$sel := printf "serving.knative.dev/service=%s" $n}}',
+     '{{$sel := ""}}',
+     "a ksvc with no .status.traffic emits an empty selector column and collapses its row"),
+    ("row-summary-names-default-removed", "contract",
+     '"${names:--}"',
+     '"${names}"',
+     "with no offenders the field is empty and ws doctor prints whatever that variable held before"),
+    ("revisionUID-case-removed-contract", "contract",
+     'case "$sel" in *serving.knative.dev/revisionUID*) continue ;; esac',
+     ':',
+     "the same edit as the behaviour mutant above, pinned HERE because the contract check used to "
+     "be satisfied by the explanatory comment beside the case statement rather than by the case "
+     "statement itself"),
 ]
 
 
@@ -532,12 +655,27 @@ def self_test() -> int:
     raw = CLUSTER.read_text(encoding="utf-8")
     failures: list[str] = []
 
-    def suite(source: str, fixture_text: str) -> list[str]:
-        """The full gate — both halves — against a given script text and recording."""
-        data = yaml.safe_load(fixture_text)
-        calls = {k: v.replace("<TAB>", "\t") for k, v in data["calls"].items()}
-        return (contract_findings(source)[0]
-                + behaviour_findings(calls, data["expect"], data["doctor_row"], source)[0])
+    def suite(source: str, fixture_text: str, half: str = "both") -> list[str]:
+        """The gate against a given script text and recording.
+
+        `half` is what makes each mutant prove something specific. "both" is the control's mode —
+        the unmutated tree has to pass everything. A mutant runs ONE half, so a defect in the
+        contract pairings cannot be signed off by the behaviour reproduction noticing it (or the
+        reverse); that mutual masking is what hid ten neuterable contract checks until 2026-08-01.
+        Running one half is also what makes thirteen extra contract mutants affordable: they never
+        spawn the recorded-cluster subprocesses.
+        """
+        findings = []
+        if half in ("both", "contract"):
+            findings += contract_findings(source)[0]
+        if half in ("both", "behaviour"):
+            data = yaml.safe_load(fixture_text)
+            calls = {k: v.replace("<TAB>", "\t") for k, v in data["calls"].items()}
+            findings += behaviour_findings(calls, data["expect"], data["doctor_row"], source)[0]
+        return findings
+
+    # kind -> the half that must catch it, on its own.
+    HALF_FOR_KIND = {"contract": "contract", "ws": "behaviour", "fixture": "behaviour"}
 
     # Control. A suite that fails on the real thing proves nothing about the mutants.
     control = suite(ws_source, raw)
@@ -546,22 +684,29 @@ def self_test() -> int:
                         "anything:\n      " + "\n      ".join(control))
 
     for name, kind, old, new, why in MUTANTS:
+        half = HALF_FOR_KIND.get(kind)
+        if half is None:
+            failures.append(f"mutant {name} declares kind {kind!r}, which names no half. A mutant "
+                            f"whose kind the runner does not understand proves nothing.")
+            continue
         if kind == "fixture":
             if old not in raw:
                 failures.append(f"mutant {name}: the recording no longer contains {old!r}, so this "
                                 f"mutation is a no-op and proves nothing.")
                 continue
-            found = suite(ws_source, raw.replace(old, new, 1))
+            found = suite(ws_source, raw.replace(old, new, 1), half)
         else:
             if ws_source.count(old) < 1:
                 failures.append(f"mutant {name}: tools/ws/ws no longer contains {old!r}, so this "
                                 f"mutation is a no-op and proves nothing. The code was reworded — "
                                 f"re-express the defect, do not delete the mutant.")
                 continue
-            found = suite(ws_source.replace(old, new), raw)
+            found = suite(ws_source.replace(old, new), raw, half)
         if not found:
-            failures.append(f"mutant {name} was NOT caught ({why}). The suite passes with the "
-                            f"defect present, so a clean result on the real tree means nothing.")
+            failures.append(f"mutant {name} was NOT caught by the {half} half ({why}). That half "
+                            f"passes with the defect present, so a clean result on the real tree "
+                            f"means nothing. Do not widen the mutant to the other half — the point "
+                            f"of the split is that each half proves its own invariants.")
 
     # Both halves must report having done work on the UNMUTATED tree, and their floors must be
     # meetable. A mutation suite proves the halves DETECT; only these counts prove they RAN.

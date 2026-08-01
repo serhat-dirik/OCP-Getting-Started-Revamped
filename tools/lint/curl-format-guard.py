@@ -276,7 +276,13 @@ def collect_files(roots):
 
 def scope_for_tree() -> Scope:
     """Floors for a real-tree run over content/. Measured 2026-08-01: 139 .adoc files, 198
-    subs="attributes" blocks carrying 919 body lines, 118 attribute names collected."""
+    subs="attributes" blocks carrying 919 body lines, 118 attribute names collected.
+
+    The "attribute names collected" floor is also what witnesses INTRINSIC_ATTRIBUTES being
+    emptied on the tree side — but only the canary's counter-case notices it as a DETECTION
+    change, because emptying that set makes the guard noisier, never quieter, and nothing under
+    content/ references an intrinsic from inside a substitution block.
+    """
     scope = Scope("curl-format-guard")
     scope.require("files scanned", 90,
                   "content/ holds ~139 .adoc pages. A handful means the walk stopped recursing — "
@@ -299,10 +305,14 @@ def scope_for_self_test() -> Scope:
     the walk reached inside the blocks."""
     scope = Scope("curl-format-guard --self-test")
     scope.require("files scanned", 1, "the canary fixture.")
-    scope.require("attribute-substitution blocks", 4, "the fixture declares four blocks.")
-    scope.require("block body lines inspected", 6,
+    scope.require("attribute-substitution blocks", 5,
+                  "the fixture declares five blocks (raised from four on 2026-08-01 with the "
+                  "INTRINSIC_ATTRIBUTES counter-case). The fixture is a DECLARED set, so the floor "
+                  "is its exact size: shrinking it is an editorial act that must re-state itself.")
+    scope.require("block body lines inspected", 9,
                   "the fixture's blocks are deliberately multi-line so a first-line-only scan is "
-                  "visible here too, not just on the real tree.")
+                  "visible here too, not just on the real tree. Eleven today; the floor keeps a "
+                  "little slack for an edited comment, none for a lost block.")
     scope.require("attribute names collected", 60, "same collection as the real run.")
     return scope
 

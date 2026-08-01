@@ -1,0 +1,45 @@
+# Canary COPY for the detector that guards the Lua comparison's own precondition: a path declared
+# in the pair's `lua_paths` whose copy side is NOT a string.
+#
+# WHY IT NEEDS ITS OWN FIXTURE. lua_code_only() takes text, so the comparison has to establish that
+# both sides ARE text before it can normalize them. That check sits INSIDE the lua branch and runs
+# BEFORE the generic type check, so the shape-drift fixture next door can never reach it. Blinding
+# it left both CI signals green (measured 2026-08-01) — and a blinded version does not fall through
+# to a safe path, it walks on and hands a mapping to a string function.
+#
+# The shape below is the realistic accident: someone wraps the check script in a `script:` key
+# (which several CRDs do use) and the scalar the pair points at becomes a mapping.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: canary-health-tuning-nonstring
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: tune
+          image: registry.example.com/cli:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              PATCH_FILE="$(mktemp)"; trap 'rm -f "$PATCH_FILE"' EXIT
+              cat > "$PATCH_FILE" <<'PATCHEOF'
+              spec:
+                resourceHealthChecks:
+                  - group: example.com
+                    kind: Widget
+                    check:
+                      script: |
+                        local health_status = {}
+                        if obj.status ~= nil then
+                          health_status.status = "Healthy"
+                          health_status.message = obj.status.state .. " reported by the canary"
+                          return health_status
+                        end
+                        health_status.status = "Progressing"
+                        return health_status
+              PATCHEOF
+              oc patch argocd canary-argocd --type=merge --patch-file="$PATCH_FILE"

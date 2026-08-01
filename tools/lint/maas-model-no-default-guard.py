@@ -248,6 +248,30 @@ def self_test() -> int:
                 print(f"SELF-TEST FAILED: {complaint}", file=sys.stderr)
                 ok = False
 
+        # The two gates that are not about a VALUE at all: a site whose FILE is gone, and a site
+        # whose regex no longer matches exactly one value. Both must be rc 2 — "the guard could not
+        # read what it claims to read" — and until 2026-08-01 nothing exercised either: turning
+        # both into `if False:` left the tree run at 0 and this self-test at 1. A renamed file and
+        # a reworded key are how a site quietly stops being read, and reading zero sites must never
+        # be spelled the same way as reading four clean ones.
+        absent = Path(d) / "no-such-file.yml"
+        if check([(absent, rx, "canary-absent")]) != 2:
+            print("SELF-TEST FAILED: a site whose file does not exist did not exit 2. A moved or "
+                  "renamed file would then read as a site with no default set.", file=sys.stderr)
+            ok = False
+        for name, text, why in (
+                ("no-match.yml", '    some_other_key: "llama-scout-17b"\n',
+                 "a file the value regex matches ZERO times (the key was renamed)"),
+                ("two-matches.yml", '    maas_model: "llama-scout-17b"\n    maas_model: "gpt-oss"\n',
+                 "a file the value regex matches TWICE (a duplicated key)")):
+            probe = Path(d) / name
+            probe.write_text(text)
+            if check([(probe, rx, f"canary-{name}")]) != 2:
+                print(f"SELF-TEST FAILED: {why} did not exit 2 — the guard would report a clean "
+                      f"site it never actually read, or judge only the first of two values.",
+                      file=sys.stderr)
+                ok = False
+
     # The declared floor must still equal the declared site list: MIN_SITES is a literal so that
     # shrinking SITES cannot shrink its own floor, and this is what notices when the two diverge.
     if MIN_SITES != len(SITES):
@@ -262,8 +286,9 @@ def self_test() -> int:
     if not ok:
         return 2
     print("self-test ok — a concrete value fails, an empty value fails, and both placeholder forms "
-          "pass; the site-count floor matches the declared sites; the scope ledger fails an empty "
-          "or truncated input set.")
+          "pass; a missing file and a regex that matches zero or two values are refusals, not "
+          "clean sites; the site-count floor matches the declared sites; the scope ledger fails an "
+          "empty or truncated input set.")
     return 1
 
 

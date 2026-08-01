@@ -579,6 +579,41 @@ def self_test(root: pathlib.Path) -> int:
             failures.append(f"canary (solve={solve}): expected 0 exempt containers, saw "
                             f"{stats['exempt']}. An exemption was re-introduced — justify it here.")
 
+    # (2b) collect_sites() ITSELF — the production glue main() runs and every assertion above walks
+    #      around. The loop above calls render_helm and find_image_sites directly, so anything
+    #      collect_sites does with their output was unproven: blinded to return no sites while still
+    #      raising its counters, both CI signals stayed green (measured 2026-08-01). A filter or a
+    #      slice appended at the end of that function is the realistic shape.
+    #
+    #      Driven over the canary chart with NO kustomize dirs — what is being proven here is the
+    #      helm half's wiring; the kustomize half is pinned by its own scope floor on the real run,
+    #      which fails closed because KUSTOMIZE_DIRS is a declared list.
+    try:
+        collected, collected_counts = collect_sites(root, [canary_chart], ())
+    except GuardError as exc:
+        collected, collected_counts = [], {}
+        failures.append(f"collect_sites() could not run over the canary chart: {exc}")
+    if collected_counts:
+        if collected_counts["helm renders"] != len(HELM_VALUE_SETS):
+            failures.append(f"collect_sites() reported {collected_counts['helm renders']} helm "
+                            f"render(s) for one chart; HELM_VALUE_SETS declares "
+                            f"{len(HELM_VALUE_SETS)}. A dropped value set is a whole world of "
+                            "workloads that stops being rendered.")
+        if collected_counts["solve=true image sites"] <= collected_counts["solve=false image sites"]:
+            failures.append("collect_sites() did not see MORE image sites at solve=true than at "
+                            "solve=false. The canary chart, like every entry state, materializes "
+                            "extra workloads in its solve world; equal counts mean one render's "
+                            "documents never reached the walker.")
+        # The invariant a blinded collect_sites breaks and nothing else notices: the sites it
+        # RETURNS must be exactly the sites it COUNTED. Counters that outlive their own list are
+        # how a scope floor gets satisfied by work whose result was thrown away.
+        counted = sum(collected_counts[d] for d in COLLECT_DIMENSIONS if d.endswith("image sites"))
+        if len(collected) != counted:
+            failures.append(f"collect_sites() returned {len(collected)} site(s) but counted "
+                            f"{counted}. The scope floors are raised from the counters, so a "
+                            "filter that drops sites after they are counted passes every floor "
+                            "while judging nothing.")
+
     # (3a) Every declared container key must actually be honoured by the walker. Asserted in Python
     #      rather than as a chart fixture: the devfile `container` key has no workshop-image instance
     #      in the tree today, and shipping a rendered fixture that carries one would imply a devfile
