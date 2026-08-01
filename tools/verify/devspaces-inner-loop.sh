@@ -39,10 +39,13 @@ fork_exists() {
 # The claims Route answers HTTP 200 on the readiness endpoint. NOTE: parasol-claims is an
 # API-only service — "/" returns 404 by design, so we probe /q/health/ready (and it also
 # proves the app reached its datasource, since readiness gates on the DB connection).
+# The Route read is oc_present in THIS shell (never `$(…)`, which would strand VERIFY_INCONCLUSIVE in a
+# subshell): a Route the API could not be asked about is not a missing Route, and grading it ❌ blames
+# the attendee for a cluster blip.
 route_ready_200() {
   local ns="$1" host code
-  host="$(oc get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  [[ -n "$host" ]] || return 1
+  oc_present get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]
 }

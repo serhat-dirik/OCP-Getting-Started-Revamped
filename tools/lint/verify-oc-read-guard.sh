@@ -255,17 +255,43 @@ ok()   { echo "✅ $*"; }
 # scripted `oc`. Four checks that PASSED on an unreachable API now report ⚠ instead: mtws' sa_cannot and
 # deploy_idle, gitops-at-scale's rollout_absent and packaging-distributing's no_deploy — three of them
 # ENTRY negations, where a wrongly-green check sends `ws prep` down its "already prepared" fast path.
+#
+# ── 2026-08-01, SEVENTH PASS: 33 → 14 ─────────────────────────────────────────────────────────────
+# Seven more rows reach ZERO and are DELETED (an absent file defaults to baseline 0, so deleting the
+# row is what protects it): securing-apps-keycloak (5), build-deliver (4), observability-health-scale
+# (2), trusted-supply-chain (2), developer-hub-golden-paths (1), devspaces-inner-loop (1),
+# pipelines-fundamentals (1). platform-orientation falls 5 → 2 and KEEPS its row. No file's count rose.
+#
+# platform-orientation's REMAINING 2 are gitea_user_exists' route-then-domain fallback — the same
+# shape gitea_host() is excluded by name for, inlined under a different name, which is why they are
+# counted and the identical lines in three sibling files are not. They are NOT converted, on purpose:
+# the route read is EXPECTED to be refused for an attendee, so its rc 2 must not become the check's
+# verdict once the domain fallback yields a host — but check() consults VERIFY_INCONCLUSIVE on every
+# predicate failure, so a raised-then-unwanted flag reports a genuinely MISSING Gitea account as ⚠
+# instead of ❌. Expressing "stand the flag down" from a module script means assigning _lib.sh's shared
+# flag in the wrong file, and shellcheck says so out loud (SC2034). What is missing is an _lib.sh
+# primitive for an oc read whose refusal is EXPECTED because a fallback answers it. Renaming the
+# function to gitea_host to inherit the by-name exclusion was considered and rejected — this header
+# already says a new function inventing its own "fall back regardless of why" is a NEW instance of the
+# pattern, so that would be gaming the ratchet rather than paying it.
+#
+# Proven against live cluster 2 (attendee slots user1, user2, user3, user5, user6, user7, plus scratch
+# user9-dev / user9-cicd, deleted after): the pristine `git archive HEAD` tree and the working tree
+# — pinned to the SAME _lib.sh, so a sibling lane's concurrent _lib.sh work is excluded — run with
+# identical arguments, combined stdout+stderr diffed byte-for-byte, identical across healthy /
+# genuine-absence (--user user99) / namespace-exists-but-objects-absent, entry-only AND full, plus
+# solve→reset round trips. Under a scripted `oc` the equivalence that matters is exact: all 16
+# module×mode pairs are BYTE-IDENTICAL on NotFound, on "the server doesn't have a resource type", and
+# on the partial outage where the namespace reads fine and only the object read fails with NotFound.
+# THREE checks that PASSED on an API that could not be asked now report ⚠: platform-orientation's
+# clean-slate and securing-apps-keycloak's no_fraud_yet (both ENTRY negations, where a wrongly-green
+# check sends `ws prep` down its "already prepared" fast path) and build-deliver's no_deploymentconfig
+# (a banned-tech clean bill nobody checked). All three were invisible to a whole-cluster outage — every
+# one has a namespace guard that fails closed — and only appeared under a PARTIAL outage.
 BASELINE_TABLE="
-build-deliver.sh 4
-developer-hub-golden-paths.sh 1
-devspaces-inner-loop.sh 1
 eventing-deep-dive.sh 9
 networking-dev-devops.sh 3
-observability-health-scale.sh 2
-pipelines-fundamentals.sh 1
-platform-orientation.sh 5
-securing-apps-keycloak.sh 5
-trusted-supply-chain.sh 2
+platform-orientation.sh 2
 "
 
 baseline_for() {  # <basename> → integer, 0 if not listed

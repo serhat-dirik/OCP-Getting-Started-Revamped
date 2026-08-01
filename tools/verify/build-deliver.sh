@@ -34,11 +34,23 @@ gitea_host() {
 # impersonation rights (admin/CI only); when the attendee runs this themselves their own
 # SelfSubjectAccessReview IS the attendee answer. Flags stay LITERAL in both branches — an --as
 # string built from a variable silently reviews the wrong subject.
+# Every read here goes through oc_read, in the CALLER's own shell: `$(oc whoami 2>/dev/null)` and a
+# silenced `can-i impersonate` both answer "" on an unreachable API, which used to drop this into the
+# self branch whose can-i then failed for the SAME transport reason — and printed ❌ at the attendee.
 attendee_reads_catalog_templates() {
-  if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
-    oc auth can-i get templates.template.openshift.io -n openshift --as="$USER_NAME" --as-group=workshop-attendees
+  local who_rc=0 imp_rc=0 impersonate="false"
+  oc_read whoami || who_rc=$?
+  if (( who_rc != 0 )) || [[ "$OC_OUT" != "$USER_NAME" ]]; then
+    oc_read auth can-i impersonate users || imp_rc=$?
+    # 0 OR 2, the same open-on-"could not ask" as multi-tenancy-workload-security's IMPERSONATE_OK: a
+    # transport failure must not quietly re-point the review at the CALLER's own rights. A genuine
+    # "no" from the server is rc 1 and still closes the guard.
+    case "$imp_rc" in 0|2) impersonate="true";; esac
+  fi
+  if [[ "$impersonate" == "true" ]]; then
+    oc_read auth can-i get templates.template.openshift.io -n openshift --as="$USER_NAME" --as-group=workshop-attendees
   else
-    oc auth can-i get templates.template.openshift.io -n openshift
+    oc_read auth can-i get templates.template.openshift.io -n openshift
   fi
 }
 
@@ -53,11 +65,13 @@ gitea_repo_exists() {
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
-# Route resolves and answers HTTP 200 on the claims readiness endpoint.
+# Route resolves and answers HTTP 200 on the claims readiness endpoint. The Route read is oc_present in
+# THIS shell: a Route the API could not be asked about is not an unexposed app, and the hint below tells
+# the attendee to redo exercise 5 they may already have done correctly.
 route_answers_200() {
   local ns="$1" host code
-  host="$(oc get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  [[ -n "$host" ]] || return 1
+  oc_present get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]
 }
@@ -65,11 +79,14 @@ route_answers_200() {
 # No DeploymentConfig objects anywhere in the namespace (every Parasol workload is a
 # Deployment; the custom PostgreSQL Template exists precisely to avoid the stock DC).
 # Namespace must actually exist first — otherwise a zero count is vacuous, not evidence.
+# NEGATION IS THE DANGEROUS DIRECTION: a silenced `oc get deploymentconfig | grep -c .` counts zero
+# just as readily from an API that never answered, certifying a banned-tech clean bill nobody checked.
+# oc_absent returns 0 only when the API ANSWERED — including "the server doesn't have a resource type
+# deploymentconfig", which is a real answer meaning there are none and must stay a pass.
 no_deploymentconfig() {
-  local ns="$1" n
-  oc get ns "$ns" >/dev/null 2>&1 || return 1
-  n="$(oc get deploymentconfig -n "$ns" -o name 2>/dev/null | grep -c . || true)"
-  [[ "$n" == "0" ]]
+  local ns="$1"
+  oc_present get ns "$ns" -o name || return 1
+  oc_absent get deploymentconfig -n "$ns" -o name
 }
 
 # --- entry state (what `ws start build-deliver` materializes) --------------------------

@@ -18,6 +18,18 @@ NS="${USER_NAME}-dev"
 # we fall back to the conventional host derived from the cluster ingress domain
 # (route "gitea" in namespace "ogsr-gitea" → gitea-ogsr-gitea.<domain>), which every
 # authenticated user can resolve.
+#
+# NOT CONVERTED, and deliberately left blind — see tools/lint/verify-oc-read-guard.sh's baseline row.
+# This is the route-then-domain fallback the guard excludes by name inside gitea_host(), inlined here
+# under a different name, so it is counted. Converting it needs an idiom _lib.sh does not have: the
+# route read is EXPECTED to be refused for an attendee, so its rc 2 must NOT become this check's
+# verdict once the domain fallback yields a host — but check() consults VERIFY_INCONCLUSIVE whenever
+# the predicate fails, so a raised-then-unwanted flag turns a genuinely MISSING Gitea account (a real
+# ❌) into "the cluster could not be asked" (⚠). The only way to express that from here is to assign
+# VERIFY_INCONCLUSIVE inside a module script, which invents a flag-lifecycle rule in the wrong file —
+# and shellcheck says so out loud (SC2034: the module writes the shared flag and never reads it).
+# What is missing is an _lib.sh primitive for "an oc read whose refusal is expected because a fallback
+# answers it" — an oc_read_optional, or a save/restore pair. Reported rather than worked around.
 gitea_user_exists() {
   local user="$1" host domain
   host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
@@ -43,14 +55,28 @@ gitea_user_exists() {
 # A plain HTTP Route gets HSTS-upgraded by the browser and the router answers "Application is not
 # available"; edge with Redirect instead of Allow gives an empty 302 on `curl http`. So both the
 # termination AND the https response are asserted here, not one standing in for the other.
+#
+# Both Route reads go through oc_present in THIS shell: a Route the API could not be asked about is
+# not an un-exposed app, and telling an attendee to re-create a Route they already created correctly
+# is exactly the false ❌ this suite exists to avoid.
 route_answers_200() {
-  local ns="$1" host code term
-  host="$(oc get route parasol-web -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  [[ -n "$host" ]] || return 1
-  term="$(oc get route parasol-web -n "$ns" -o jsonpath='{.spec.tls.termination}' 2>/dev/null || true)"
-  [[ "$term" == "edge" ]] || return 1
+  local ns="$1" host code
+  oc_present get route parasol-web -n "$ns" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
+  oc_present get route parasol-web -n "$ns" -o jsonpath='{.spec.tls.termination}' || return 1
+  [[ "$OC_OUT" == "edge" ]] || return 1
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "https://${host}/" || true)"
   [[ "$code" == "200" ]]
+}
+
+# The entry clean slate, asked three-outcome. Was a `bash -c "oc get ns … >/dev/null 2>&1 && ! oc get
+# deploy … >/dev/null 2>&1"` — a SUBPROCESS, so even a converted read's VERIFY_INCONCLUSIVE could
+# never have reached check(). And the negation is the dangerous direction: `! oc get deploy` certifies
+# a clean slate from an API that never answered, which sends `ws prep` down its "already prepared"
+# fast path against a world nobody verified. oc_absent returns 0 only when the API ANSWERED.
+clean_slate_no_parasol_web() {
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get deploy parasol-web -n "$NS" -o name
 }
 
 # --- entry state (what `ws start platform-orientation` materializes) --------------------------
@@ -67,7 +93,7 @@ check "Gitea account ${USER_NAME} answers (API 200)" gitea_user_exists "$USER_NA
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Namespace must exist first — otherwise "not deployed" is vacuous (true on a cluster where
   # nothing materialized at all), not evidence of a clean, correctly-prepared entry state.
-  check "clean slate: parasol-web not yet deployed" bash -c "oc get ns $NS >/dev/null 2>&1 && ! oc get deploy parasol-web -n $NS >/dev/null 2>&1" \
+  check "clean slate: parasol-web not yet deployed" clean_slate_no_parasol_web \
     || hint "leftover from a previous run — reset with: ws prep platform-orientation --yes"
 fi
 

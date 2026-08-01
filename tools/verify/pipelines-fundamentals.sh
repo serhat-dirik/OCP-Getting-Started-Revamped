@@ -23,11 +23,23 @@ NS="${USER_NAME}-cicd"
 # when the attendee runs this in their own cockpit terminal their SelfSubjectAccessReview IS the
 # attendee answer. Flags stay LITERAL in both branches — an --as string built from a variable
 # silently reviews the wrong subject (measured 2026-07-29).
+# Every read goes through oc_read, in the CALLER's own shell: `$(oc whoami 2>/dev/null)` and a silenced
+# `can-i impersonate` both answer "" on an unreachable API, which dropped this into the self branch
+# whose can-i then failed for the SAME transport reason and printed ❌ at the attendee.
 attendee_reads_task_library() {
-  if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
-    oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks --as="$USER_NAME" --as-group=workshop-attendees
+  local who_rc=0 imp_rc=0 impersonate="false"
+  oc_read whoami || who_rc=$?
+  if (( who_rc != 0 )) || [[ "$OC_OUT" != "$USER_NAME" ]]; then
+    oc_read auth can-i impersonate users || imp_rc=$?
+    # 0 OR 2, the same open-on-"could not ask" as multi-tenancy-workload-security's IMPERSONATE_OK: a
+    # transport failure must not quietly re-point the review at the CALLER's own rights. A genuine
+    # "no" from the server is rc 1 and still closes the guard.
+    case "$imp_rc" in 0|2) impersonate="true";; esac
+  fi
+  if [[ "$impersonate" == "true" ]]; then
+    oc_read auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks --as="$USER_NAME" --as-group=workshop-attendees
   else
-    oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks
+    oc_read auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks
   fi
 }
 

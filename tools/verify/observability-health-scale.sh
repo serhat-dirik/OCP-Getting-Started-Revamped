@@ -93,9 +93,19 @@ servicemonitor_scrape_10s() {
 # this in their own cockpit terminal there is nobody to impersonate — their own SelfSubjectAccessReview
 # IS the attendee answer. Flags stay literal in both branches: an --as string built from a variable
 # silently reviews the wrong subject.
+# Both probes go through oc_read: `$(oc whoami 2>/dev/null)` and a silenced `can-i impersonate` both
+# answer "" on an unreachable API, which used to select the self branch whose can-i then failed for the
+# SAME transport reason — a ❌ at the attendee for a cluster blip.
 IMPERSONATE_AS_ATTENDEE="false"
-if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
-  IMPERSONATE_AS_ATTENDEE="true"
+who_rc=0
+oc_read whoami || who_rc=$?
+if (( who_rc != 0 )) || [[ "$OC_OUT" != "$USER_NAME" ]]; then
+  imp_rc=0
+  oc_read auth can-i impersonate users || imp_rc=$?
+  # 0 OR 2, the same open-on-"could not ask" as multi-tenancy-workload-security's IMPERSONATE_OK: a
+  # transport failure must not quietly re-point the review at the CALLER's own rights. A genuine "no"
+  # from the server is rc 1 and still closes the guard.
+  case "$imp_rc" in 0|2) IMPERSONATE_AS_ATTENDEE="true";; esac
 fi
 
 # The exact SubjectAccessReview thanos-querier runs for the tenancy rules port — resource
@@ -122,7 +132,14 @@ TENANCY_BODY=""
 
 tenancy_rules_fetch() {
   local token resp code
-  token="$(oc whoami -t 2>/dev/null || true)"
+  # oc_read, not `$(oc whoami -t 2>/dev/null)`: a session that genuinely carries no token (client-cert
+  # kubeconfig — a real answer, rc 1) and an apiserver that could not be reached at all both used to
+  # come back as the same empty string. Either way TENANCY_STATE stays "unreachable", which is the
+  # right ⚠ — but the read itself must not be blind, and rc 2 raises the flag for whoever reads it.
+  if ! oc_read whoami -t; then
+    return 0
+  fi
+  token="$OC_OUT"
   if [[ -z "$token" ]]; then
     return 0
   fi

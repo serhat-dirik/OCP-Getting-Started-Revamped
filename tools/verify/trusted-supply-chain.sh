@@ -59,8 +59,13 @@ gitea_raw_contains() {
 }
 
 # Tekton Chains signed at least one TaskRun in this namespace (signature attached).
+# oc_read, not `2>/dev/null | grep -q`: a silenced read hands grep an empty stream whether the
+# namespace holds no signed TaskRun (a real ❌) or the API never answered (⚠) — and this check is
+# asserted in BOTH modes, so a blip would tell an attendee their warm prep build was never signed.
+# Read in THIS shell, never `$(…)`: VERIFY_INCONCLUSIVE raised in a subshell never reaches check().
 signed_taskrun_exists() {
-  oc get taskruns.tekton.dev -n "$1" -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' 2>/dev/null | grep -q 'true'
+  oc_read get taskruns.tekton.dev -n "$1" -o jsonpath='{range .items[*]}{.metadata.annotations.chains\.tekton\.dev/signed}{"\n"}{end}' || return 1
+  grep -q 'true' <<<"$OC_OUT"
 }
 # A parasol-claims-supply-chain PipelineRun reached overall Succeeded. Tekton labels every run from a
 # pipelineRef with tekton.dev/pipeline=<name>, so this catches the warm prep run AND the attendee's re-run.
@@ -80,10 +85,11 @@ supply_chain_run_succeeded() {
 # Chains-emitted tags derived from its digest — sha256-<digest>.sig (signature) and .att (SLSA attestation).
 # This is what the trust lab's cosign verify / verify-attestation / admission beats read; the warm hook
 # produces it at prep and a completed lab leaves it intact (the attendee's red beat uses a :candidate tag).
+# Same three-outcome treatment, and for the same reason: `tags="$(oc … 2>/dev/null || true)"` makes an
+# ImageStream that could not be read indistinguishable from one carrying no signed tags.
 signed_latest_image_present() {
-  local tags
-  tags="$(oc get imagestream parasol-claims -n "$1" -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}' 2>/dev/null || true)"
-  grep -qx 'latest' <<<"$tags" && grep -q '\.sig$' <<<"$tags" && grep -q '\.att$' <<<"$tags"
+  oc_read get imagestream parasol-claims -n "$1" -o jsonpath='{range .status.tags[*]}{.tag}{"\n"}{end}' || return 1
+  grep -qx 'latest' <<<"$OC_OUT" && grep -q '\.sig$' <<<"$OC_OUT" && grep -q '\.att$' <<<"$OC_OUT"
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------

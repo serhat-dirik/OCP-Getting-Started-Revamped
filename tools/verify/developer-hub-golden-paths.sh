@@ -22,38 +22,43 @@ SCAFFOLD_ORG="${USER_NAME}-svcs"
 
 # --- helpers (oc + curl only) ------------------------------------------------
 
+# THE ONE oc READ IN THIS FILE, and every consumer of it used to be a command substitution — so a
+# VERIFY_INCONCLUSIVE raised here could never have reached check(). It therefore does NOT echo: it
+# leaves the domain in OC_OUT and returns rc 0/1, and its callers do the same, so the whole chain runs
+# in the CALLER's own shell. rc 1 = the domain is absent OR the API could not be asked; the flag says
+# which, and check() turns the second into ⚠ instead of a ❌ on the attendee's work.
 ingress_domain() {
-  oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true
+  oc_present get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'
 }
 
+# Side effect, not stdout — same reason. RHDH_HOST is only ever read straight after a successful call.
+RHDH_HOST=""
 rhdh_host() {
-  local d; d="$(ingress_domain)"
-  [[ -n "$d" ]] && echo "backstage-developer-hub-rhdh.${d}"
+  ingress_domain || return 1
+  RHDH_HOST="backstage-developer-hub-rhdh.${OC_OUT}"
 }
 
 gitea_host() {
-  local host domain
+  local host=""
   host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]]; then
-    domain="$(ingress_domain)"
-    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
+  if [[ -z "$host" ]] && ingress_domain; then
+    host="gitea-ogsr-gitea.${OC_OUT}"
   fi
   echo "$host"
 }
 
 # The shared RHDH portal answers on its route.
 rhdh_up() {
-  local h code; h="$(rhdh_host)"
-  [[ -n "$h" ]] || return 1
-  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "https://${h}/" || true)"
+  local code
+  rhdh_host || return 1
+  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "https://${RHDH_HOST}/" || true)"
   [[ "$code" == "200" ]]
 }
 
 # A short-lived guest token for the catalog/scaffolder API (guest sign-in is the workshop default).
 rhdh_guest_token() {
-  local h; h="$(rhdh_host)"
-  [[ -n "$h" ]] || return 1
-  curl -ks --max-time 15 "https://${h}/api/auth/guest/refresh" 2>/dev/null \
+  rhdh_host || return 1
+  curl -ks --max-time 15 "https://${RHDH_HOST}/api/auth/guest/refresh" 2>/dev/null \
     | python3 -c 'import sys,json
 try: d=json.load(sys.stdin)
 except Exception: d={}
@@ -62,19 +67,23 @@ print(d.get("backstageIdentity",{}).get("token",""))' 2>/dev/null || true
 
 # The Parasol catalog is populated: the catalog API returns the parasol-claims Component.
 catalog_has_parasol() {
-  local h tok; h="$(rhdh_host)"; tok="$(rhdh_guest_token)"
-  [[ -n "$h" && -n "$tok" ]] || return 1
+  local tok
+  rhdh_host || return 1
+  tok="$(rhdh_guest_token)"
+  [[ -n "$tok" ]] || return 1
   curl -ks --max-time 15 -H "Authorization: Bearer ${tok}" \
-    "https://${h}/api/catalog/entities/by-name/component/default/parasol-claims" 2>/dev/null \
+    "https://${RHDH_HOST}/api/catalog/entities/by-name/component/default/parasol-claims" 2>/dev/null \
     | grep -q '"name":"parasol-claims"'
 }
 
 # The golden-path Software Template is registered (catalog holds the Template entity).
 template_registered() {
-  local h tok; h="$(rhdh_host)"; tok="$(rhdh_guest_token)"
-  [[ -n "$h" && -n "$tok" ]] || return 1
+  local tok
+  rhdh_host || return 1
+  tok="$(rhdh_guest_token)"
+  [[ -n "$tok" ]] || return 1
   curl -ks --max-time 15 -H "Authorization: Bearer ${tok}" \
-    "https://${h}/api/catalog/entities/by-name/template/default/parasol-service-template" 2>/dev/null \
+    "https://${RHDH_HOST}/api/catalog/entities/by-name/template/default/parasol-service-template" 2>/dev/null \
     | grep -q '"name":"parasol-service-template"'
 }
 
@@ -110,12 +119,14 @@ print(len(d) if isinstance(d,list) else 0)' 2>/dev/null || true
 # parasol-policy-{user}, so its Location target is …/{user}-svcs/<svc>/…). RHDH unreachable → 0 (the
 # "portal reachable" check above already fails in that case; don't double-count the outage here).
 user_catalog_location_count() {
-  local h tok; h="$(rhdh_host)"; tok="$(rhdh_guest_token)"
-  [[ -n "$h" && -n "$tok" ]] || { echo 0; return; }
+  local tok
+  rhdh_host || { echo 0; return; }
+  tok="$(rhdh_guest_token)"
+  [[ -n "$tok" ]] || { echo 0; return; }
   # `|| true`, not `|| echo 0` — see the matching comment in scaffold_repo_count(): python3's
   # try/except already guarantees one valid line, and `|| echo 0` on the whole pipe would duplicate
   # it into a corrupt two-line value whenever curl itself is the thing that failed.
-  curl -ks --max-time 15 -H "Authorization: Bearer ${tok}" "https://${h}/api/catalog/locations" 2>/dev/null \
+  curl -ks --max-time 15 -H "Authorization: Bearer ${tok}" "https://${RHDH_HOST}/api/catalog/locations" 2>/dev/null \
     | python3 -c 'import sys,json
 try: d=json.load(sys.stdin)
 except Exception: d=[]
