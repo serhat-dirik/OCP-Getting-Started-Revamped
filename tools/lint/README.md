@@ -194,6 +194,36 @@ Add a job to `.github/workflows/lint.yml` that runs **both** modes, in this orde
   (empty scope, scope floor breached, fixture missing). Treat 2 as worse than 1, not better —
   it means the guard has no evidence at all, not that it looked and found nothing.
 
+#### Python guards: a CRASH must exit 2, and this is not optional
+
+Python exits **1** on any uncaught exception. So without deliberate handling, a guard that fails to
+compile a regex, cannot import `_scope`, or throws inside a detector exits with **the exact code CI
+treats as "detection proven."** A completely broken guard and a working one were indistinguishable.
+Measured on 2026-08-01: **ten of eleven** Python guards here had this, and one had already shipped
+broken in-tree with a green tick beside it.
+
+Every Python guard therefore installs, as its first statement after the imports:
+
+```python
+def _crash_exit_2(exc_type, exc, tb):
+    traceback.print_exception(exc_type, exc, tb)
+    os._exit(2)                      # os._exit, not sys.exit — an excepthook cannot raise
+sys.excepthook = _crash_exit_2
+```
+
+plus a `try/except` around `__main__` and a `_compile(name, pattern)` helper that exits 2 on
+`re.error`. All three are needed and none is redundant: **module-level code runs before `__main__`
+exists**, so the wrapper alone misses a bad regex or a raising import; and the helper produces the
+specific message (`LITERAL_RE is not a valid regex`) that a bare traceback does not. Guard the
+`_scope` import with `except Exception`, **not `except ImportError`** — a `_scope.py` that fails to
+*parse* raises `SyntaxError` and sails straight past an ImportError-only handler.
+
+The shape is identical across all eleven files; copy it from any of them. A new guard written the
+obvious way — `sys.exit(main())` — silently re-opens the hole, which is why `canary-coverage`
+exists as a CI job rather than as advice in this file.
+
+Bash guards are unaffected: a broken one exits 127 or 2, not 1.
+
 ### Run BOTH modes — this is not optional, and it really happened
 
 A guard whose real-run invocation **crashes** (a typo, an unhandled exception, a path that doesn't
