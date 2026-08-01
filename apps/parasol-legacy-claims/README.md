@@ -1,7 +1,7 @@
 # Parasol Legacy Claims
 
 A **deliberately legacy** Parasol Insurance claims REST service — the modernization *target* for
-**M22 — Application Modernization (MTA + AI)**. Attendees run MTA 8 analysis against it, triage the
+the *Application Modernization* module. Attendees run MTA 8 analysis against it, triage the
 report, fix issues (with Developer Lightspeed for MTA where entitled), then containerize and deploy
 the modernized service to OpenShift.
 

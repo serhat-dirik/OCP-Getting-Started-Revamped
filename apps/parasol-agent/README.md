@@ -1,22 +1,23 @@
 # parasol-agent
 
-The Parasol Insurance **agentic AI service**: a Quarkus + LangChain4j app that answers
-claims and policy questions by calling an **OpenAI-compatible model** (MaaS) and using the
-**`claims-db`** and **`policy-docs`** MCP servers as its **tools**. It is the star of
-**M23 — Agentic AI on OpenShift** and the concrete payoff of the module's thesis: *an AI
-app is just an app* — same probes, metrics, tracing, config, and golden path as every other
-Parasol service.
+The Parasol Insurance **agentic AI service**: a Quarkus + LangChain4j application that answers
+claims and policy questions by calling an **OpenAI-compatible model** and using the
+**`claims-db`** and **`policy-docs`** MCP servers as its tools.
 
-Small enough to read in ten minutes: one AI-service interface, one REST resource.
+It is the centrepiece of *Agentic AI on OpenShift*, and the payoff of that module's argument —
+**an AI app is just an app**: same probes, metrics, tracing, configuration and golden path as
+every other Parasol service.
+
+One AI-service interface and one REST resource. Ten minutes to read.
 
 ## Endpoints
 
-| Method + path       | Purpose                                                                           |
-|---------------------|-----------------------------------------------------------------------------------|
-| `POST /agent/ask`   | Ask a question; returns the answer, **which tools the agent called** (name + args + result), and token usage |
-| `GET /agent/info`   | The model + MCP wiring the agent is configured with (no model call)               |
-| `GET /q/health/live` · `/q/health/ready` | Liveness / readiness. **Readiness also pings both MCP servers**, so a Ready agent has proven its tool wiring. |
-| `GET /q/metrics`    | Prometheus metrics (Micrometer) — request latency + LangChain4j model/tool metrics |
+| Method + path | Purpose |
+|---|---|
+| `POST /agent/ask` | Ask a question. Returns the answer, **which tools the agent called** (name, arguments, result), and token usage |
+| `GET /agent/info` | The model and MCP wiring in effect — makes no model call |
+| `GET /q/health/live` · `/q/health/ready` | Liveness / readiness. **Readiness also pings both MCP servers**, so a Ready agent has proven its tool wiring |
+| `GET /q/metrics` | Prometheus metrics, including model and tool metrics |
 
 ### `POST /agent/ask`
 
@@ -38,129 +39,111 @@ curl -sS localhost:8080/agent/ask -H 'content-type: application/json' \
 }
 ```
 
-If the model call fails (for example the short-lived MaaS key has expired → HTTP 401), the
-endpoint returns a clean `502` with `"authFailure": true` instead of a stack trace — the
-agent **degrades gracefully**.
+If the model call fails — an expired API key returning 401, for instance — the endpoint returns a
+clean `502` with `"authFailure": true` rather than a stack trace. The agent degrades gracefully.
 
-## How the agent wires MCP tools + the model
+## How it wires the model and its tools
 
 - **`ClaimsAssistant`** is a `@RegisterAiService` interface. `@McpToolBox({"claims-db",
   "policy-docs"})` hands the model both MCP servers' tools; LangChain4j discovers them over
-  **HTTP-SSE** at startup and lets the model choose which to call. The method returns a
-  LangChain4j `Result<String>`, which is how `/agent/ask` reports the answer **and** the exact
-  `toolExecutions()` + `tokenUsage()`.
+  HTTP-SSE at startup and lets the model choose which to call. The method returns a
+  `Result<String>`, which is how `/agent/ask` can report the answer **and** the exact tool
+  executions and token usage.
 - The service is **stateless per request** and runs at **temperature 0**, so answers are
-  reproducible — the workshop demo lands the same way every time. `ask` takes a `@MemoryId` and
-  `AgentResource` passes a **fresh UUID on every call**, so no two requests share history; the
-  per-request memory window (40 messages) exists only so the tool-calling round-trip — model asks
-  for a tool, tool result is fed back, model answers — has somewhere to hold its intermediate
-  messages.
+  reproducible and a demo lands the same way every time. Each call gets a fresh memory ID, so no
+  two requests share history; the per-request memory window exists only to hold the intermediate
+  messages of a tool-calling round trip — model requests a tool, the result is fed back, the model
+  answers.
 
-## Configuration — model-agnostic, env-driven
+## Configuration
 
-Nothing about a specific model or endpoint is baked in. The workshop injects three values at
-deploy time (committed defaults are harmless local-dev placeholders, **never** workshop infra):
+Nothing about a specific model or endpoint is baked in. The workshop injects these at deploy
+time; the committed defaults are harmless local-development placeholders.
 
-| Env var             | Maps to                                              | Example                                    |
-|---------------------|------------------------------------------------------|--------------------------------------------|
-| `GENAI_ENDPOINT`    | `quarkus.langchain4j.openai.base-url`                | `https://maas-example.apps.<domain>/v1`    |
-| `GENAI_API_KEY`     | `quarkus.langchain4j.openai.api-key`                 | `sk-…` (MaaS virtual key; short-lived)     |
-| `GENAI_MODEL`       | `quarkus.langchain4j.openai.chat-model.model-name`   | `qwen3-14b` (cluster 1) / `llama-scout-17b` (cluster 2) |
-| `CLAIMS_DB_MCP_URL` | `quarkus.langchain4j.mcp.claims-db.url`              | `http://claims-db:8080/mcp/sse`            |
-| `POLICY_DOCS_MCP_URL` | `quarkus.langchain4j.mcp.policy-docs.url`          | `http://policy-docs:8080/mcp/sse`          |
+| Environment variable | Sets | Example |
+|---|---|---|
+| `GENAI_ENDPOINT` | Model base URL | `https://maas-example.apps.<domain>/v1` |
+| `GENAI_API_KEY` | Model API key | a short-lived key |
+| `GENAI_MODEL` | Model name | `llama-scout-17b` |
+| `CLAIMS_DB_MCP_URL` | Claims MCP server | `http://claims-db:8080/mcp/sse` |
+| `POLICY_DOCS_MCP_URL` | Policy MCP server | `http://policy-docs:8080/mcp/sse` |
 
-The same image runs against any OpenAI-compatible model — only these env values change.
-`OTEL_EXPORTER_OTLP_ENDPOINT` + `QUARKUS_OTEL_SDK_DISABLED=false` turn on tracing to Tempo (M12).
+The same image runs against any OpenAI-compatible model — only these values change. Setting
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `QUARKUS_OTEL_SDK_DISABLED=false` turns on tracing, which is
+what *Observability, Health & Scale* reads.
 
-### `GENAI_MODEL` is a curriculum choice, not just a config value
+### Choosing a model is a teaching decision, not just configuration
 
-The **wiring** is model-agnostic; the **teaching** is not. The Agentic AI module's whole point is
-that the agent *calls tools* and grounds its answers in seeded facts, so `GENAI_MODEL` must name a
-model that **elects tool calls on its own** (OpenAI-style `tool_calls` with `tool_choice` absent or
-`auto`). A model that only tool-calls when a specific function is *forced* by name is not enough —
-see the rejected lever below.
+The wiring is model-agnostic. The teaching is not.
 
-Measured 2026-07-29 by replaying this agent's **exact wire payload** (the system prompt and all six
-MCP tool schemas, captured verbatim from the pod log with `log-requests=true`) against the MaaS
-endpoint at temperature 0, three trials per prompt, over the four load-bearing lab prompts:
+The module's whole point is that the agent **calls tools** and grounds its answers in real
+records, so the model must be one that **elects to call a tool on its own**. A model that only
+calls a tool when a specific function is forced by name is not good enough.
 
-| `GENAI_MODEL`                  | Happy-path grounding (imperative "use your tools…" prompts) |
-|--------------------------------|--------------------------------------------------------------|
-| `llama-scout-17b`              | Grounds — the module's captured outputs were performed on it. **Not re-verified on 2026-07-29** (no key on hand is scoped to it). |
-| `deepseek-r1-distill-qwen-14b` | **0/12.** Never emits a `tool_call`; narrates one in prose instead ("*To determine the status of claim CLM-1001, I will use the claims tool…*") and then invents the record. **Do not point the workshop at it.** |
+This has been measured by replaying the agent's exact wire payload — system prompt and all six
+MCP tool schemas — at temperature 0:
 
-Levers tried against `deepseek-r1-distill-qwen-14b` and **rejected because none measurably helped**
-(each still 0/12), recorded so nobody pays for this experiment twice:
+| Model | Result |
+|---|---|
+| `llama-scout-17b` | Grounds correctly. The module's captured outputs were produced on it. |
+| `deepseek-r1-distill-qwen-14b` | **Never emits a tool call.** It narrates one in prose instead — *"To determine the status of claim CLM-1001, I will use the claims tool…"* — and then invents the record. **Do not point the workshop at it.** |
 
-- **Sharpening the system prompt** — an explicit "you MUST call a tool for any claim or policy fact,
-  never answer from memory" mandate plus an anti-transcription rule ("never write a call to a tool
-  as text"). The model kept writing the call as text, in the very sentence the rule forbids.
-- **Shortening or removing the system prompt** (in case the prose was baiting narration): no change.
-- **Sending `tool_choice: "auto"` explicitly** instead of omitting it, in case the serving stack only
-  arms its tool parser when the field is present: no change.
+Sharpening the system prompt, shortening it, and sending `tool_choice: "auto"` explicitly were
+all tried against the second model. None of them helped.
 
-Two request-level findings on that endpoint, for whoever debugs this next:
+Two request-level notes for anyone debugging a model that will not call tools:
 
-- `tool_choice: "required"` **breaks the endpoint** — the connection is closed without a response,
-  not a clean 4xx.
-- `tool_choice: {"type":"function","function":{"name":"get_claim"}}` **works** and returns correct
-  arguments — proof the model *can* emit a call and simply never *chooses* to.
+- `tool_choice: "required"` can break a serving endpoint outright — the connection closes with no
+  response, rather than returning a clean error.
+- Forcing a named function does work, and returns correct arguments. That proves the model *can*
+  emit a call and simply never *chooses* to.
 
-That named-function forcing is the one lever that would make this model ground, and it is
-**deliberately not used**: forcing a named tool on every request would fake the grounding the module
-asks attendees to verify, and it would erase the exercise-2 break-and-fix beat (the terse question
-that returns an empty `toolCalls`). Grounding here is engineered with the system prompt and the tool
-schemas — and, when a model cannot elect a tool at all, by choosing a different model.
+**That named-function forcing is deliberately not used here.** Forcing a tool on every request
+would fake the very grounding the module asks attendees to verify, and it would erase the
+break-and-fix beat where a vaguely-worded question comes back with no tool calls at all.
+Grounding is engineered through the system prompt and the tool schemas — and, when a model cannot
+elect a tool at all, by choosing a different model.
 
 ## Tech
 
-- **Quarkus 3.33 LTS** (`3.33.2.1`), **Java 21**, JVM `fast-jar`.
-- **Quarkiverse LangChain4j 1.10.0** (`quarkus-langchain4j-openai` + `quarkus-langchain4j-mcp`,
-  managed by `quarkus-langchain4j-bom`) — the **LangChain4j-direct-to-MaaS** graded path from
-  the M23 build note (Llama Stack is Tech Preview; the Responses API is Developer Preview).
-- Health, Prometheus metrics, OpenTelemetry (exporter off by default) — **on by default**, curriculum.
+- **Quarkus 3.33 LTS**, **Java 21**, JVM `fast-jar`.
+- **Quarkiverse LangChain4j** (`quarkus-langchain4j-openai` and `quarkus-langchain4j-mcp`),
+  talking directly to an OpenAI-compatible endpoint.
+- Health, Prometheus metrics and OpenTelemetry are on by default — curriculum, not extras.
 
 ## Local development
 
-Needs an OpenAI-compatible endpoint and the two MCP servers. Start the MCP servers first
-(`claims-db` on 8081, `policy-docs` on 8082 in `%dev`), then:
+Needs an OpenAI-compatible endpoint and both MCP servers. Start those first (`claims-db` on 8081,
+`policy-docs` on 8082 in dev mode), then:
 
 ```bash
-export GENAI_ENDPOINT=http://localhost:11434/v1   # e.g. a local Ollama, or a MaaS URL
-export GENAI_API_KEY=sk-...                        # your key
-export GENAI_MODEL=llama3.2                        # any served model
+export GENAI_ENDPOINT=http://localhost:11434/v1   # a local Ollama, or any compatible URL
+export GENAI_API_KEY=...
+export GENAI_MODEL=llama3.2
 ./mvnw quarkus:dev
+
 curl -sS localhost:8080/agent/ask -H 'content-type: application/json' \
   -d '{"question":"List the denied claims and explain what Denied means."}' | jq
 ```
 
-`./mvnw test` runs fast and fully offline — plain JUnit tests over the error-handling logic
-(auth-failure detection, cause unwrapping, response mapping). The end-to-end REST path is
-validated by the on-cluster smoke instead, because it needs a live model and both MCP servers
-running (booting the app without them makes the MCP client block retrying dead endpoints).
+`./mvnw test` runs fast and fully offline — plain JUnit over the error-handling logic. The
+end-to-end REST path is covered by the on-cluster smoke test instead, because it needs a live
+model and both MCP servers; booting the app without them makes the MCP client block retrying
+dead endpoints.
 
-## Building the image in-cluster
+## How the image is built
 
-Built declaratively by GitOps, not a manual step: the `parasol-agent` BuildConfig + ImageStream in
-`gitops/workshop-config/templates/parasol-images-build.yaml` (Argo CD `workshop-config` Application)
-clones this repo (`contextDir: apps/parasol-agent`) and pushes `parasol-agent:latest`; `1.0` is a
-declared ImageStream tag aliasing `latest`, so the `agentic-ai` entry state — which pins it by full
-in-cluster-registry spec — resolves without anyone having run a build by hand. The git source
-follows `vars.yaml`'s `repo_url` (bootstrap/install.sh -> `parasolImages.build.repoUrl`), so a fork
-install builds this image from the fork.
+GitOps builds it — there is no manual step. A BuildConfig and ImageStream in
+`gitops/workshop-config/templates/parasol-images-build.yaml` clone this repository and push
+`parasol-agent:latest`, with `1.0` as an alias. The Git source follows `repo_url` from your
+`vars.yaml`, so **a fork install builds this image from the fork**.
 
 ```bash
-# Manual rebuild (e.g. after editing this app) — moves latest and the 1.0 alias together:
+# Rebuild after editing this app — moves latest and the 1.0 alias together:
 oc start-build parasol-agent -n ogsr-parasol-images --follow
 ```
 
-> Historically this was a hand-run binary build, with a separate Git-strategy
-> `openshift/buildconfig.yaml` twin kept for "later CI rebuilds" that nothing ever wired up — dead
-> code that hardcoded this project's own GitHub URL, so it would have silently ignored a fork's
-> `repo_url` if anyone had applied it by hand. Retired 2026-07-25, matching the parasol-claims/
-> parasol-web/parasol-fraud precedent.
+## Container notes
 
-## Container notes (OpenShift restricted-v2)
-
-- UBI9 multi-stage `Containerfile`: `ubi9/openjdk-21:1.23` → `ubi9/openjdk-21-runtime:1.23`.
-- Runtime runs as numeric non-root **USER 185**, port **8080**.
+- UBI9 multi-stage build: `ubi9/openjdk-21` for the build, `ubi9/openjdk-21-runtime` at runtime.
+- Runs as numeric non-root **USER 185** on port **8080**.

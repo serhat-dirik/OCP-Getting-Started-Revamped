@@ -1,47 +1,40 @@
 # parasol-web
 
-The Parasol Insurance **claims-portal web frontend**. A deliberately small
-Quarkus application that serves a clean landing page with a summary table of
-seeded insurance claims. Module **M01 (Platform Orientation & First App)** deploys
-it as a prebuilt image to teach the deploy → scale → self-heal → expose loop.
+The Parasol Insurance **claims-portal frontend**. A deliberately small Quarkus application
+serving a landing page with a table of seeded claims. *Platform Orientation & First App* deploys
+it from a prebuilt image to teach the deploy → scale → self-heal → expose loop.
 
 ```
-                      ┌──────────────────────────────────────────┐
+                      ┌───────────────────────────────────────────┐
    browser ──HTTP──►  │  parasol-web (Quarkus, JVM fast-jar)      │
-                      │                                          │
-                      │  GET /                → index.html (static)│
+                      │                                           │
+                      │  GET /                → index.html         │
                       │  GET /api/claims      → 5 seeded claims    │
-                      │  GET /q/health/{live,ready}  (SmallRye)    │
-                      │  GET /q/metrics       (Micrometer/Prom)    │
-                      └──────────────────────────────────────────┘
+                      │  GET /q/health/{live,ready}                │
+                      │  GET /q/metrics                            │
+                      └───────────────────────────────────────────┘
       No database, no backend service — the claims are seeded in-process.
 ```
 
-> Architecture SVG and a quickstart screenshot are added with the M01 content
-> wave (media is produced during module build per style-guide §4).
+## What it is, and what it is not
 
-## What it is (and isn't)
-
-- **Is:** a self-contained black box. The landing page (`index.html` + CSS + JS)
-  calls one REST endpoint that returns a fixed set of five claims. That is the
-  whole app. You can read it in ten minutes.
-- **Isn't:** the real claims service. The stateful, database-backed
-  `parasol-claims` service (CLM-1001..CLM-1030) arrives in M02 and later. Keeping
-  `parasol-web` dependency-free is what lets M01 deploy it with nothing else running.
+- **It is** a self-contained black box. The landing page calls one REST endpoint that returns a
+  fixed set of five claims. That is the whole application, and it reads in ten minutes.
+- **It is not** the real claims service. That is `parasol-claims` — database-backed, owning
+  `CLM-1001`–`CLM-1030`. Keeping this one dependency-free is exactly what lets the first module
+  deploy something with nothing else running on the cluster.
 
 ## Endpoints
 
-| Method + path        | Purpose                                                        |
-|----------------------|----------------------------------------------------------------|
-| `GET /`              | Claims-portal landing page (static, from `META-INF/resources`) |
-| `GET /api/claims`    | Seeded claims as JSON — 5 items, `CLM-1001`..`CLM-1005`         |
-| `GET /q/health/live` | Liveness probe (SmallRye Health)                               |
-| `GET /q/health/ready`| Readiness probe (SmallRye Health)                              |
-| `GET /q/health`      | Aggregate health                                               |
-| `GET /q/metrics`     | Prometheus metrics (Micrometer)                                |
+| Method + path | Purpose |
+|---|---|
+| `GET /` | The claims-portal landing page (static) |
+| `GET /api/claims` | Seeded claims as JSON — five items, `CLM-1001`–`CLM-1005` |
+| `GET /q/health/live` · `/q/health/ready` | Liveness / readiness probes |
+| `GET /q/health` | Aggregate health |
+| `GET /q/metrics` | Prometheus metrics |
 
-The seeded `GET /api/claims` payload is deterministic so lab text can reference
-exact values:
+The payload is deterministic, so lab text can quote exact values:
 
 ```json
 [
@@ -55,82 +48,65 @@ exact values:
 
 ## Tech
 
-- **Quarkus 3.33 LTS** (current long-term-support stream; recommended for
-  production, maintained until 2027-03-25). Pinned in `pom.xml` as
-  `quarkus.platform.version = 3.33.2.1`.
-- **Java 21**, JVM mode, `fast-jar` packaging.
-- Minimal extensions — each one earns its place:
-  - `quarkus-rest-jackson` — the REST endpoint + JSON, and hosts static resources.
-  - `quarkus-smallrye-health` — `/q/health/live` and `/q/health/ready`.
-  - `quarkus-micrometer-registry-prometheus` — `/q/metrics`.
-- Health, metrics, and externalized config are **on by default** — they are
-  workshop curriculum (M01, M04, M11), not optional extras.
+- **Quarkus 3.33 LTS**, **Java 21**, JVM mode, `fast-jar` packaging.
+- Three extensions, each earning its place: `quarkus-rest-jackson` (the endpoint, the JSON and
+  the static resources), `quarkus-smallrye-health`, `quarkus-micrometer-registry-prometheus`.
+- Health, metrics and externalized configuration are **on by default** — several modules teach by
+  inspecting them, so they are curriculum rather than optional extras.
 
 ## Local development
 
 ```bash
-# Live-reload dev mode (Dev UI at http://localhost:8080/q/dev/):
-mvn quarkus:dev
-#   ... or with the bundled wrapper:
-./mvnw quarkus:dev
+./mvnw quarkus:dev                       # live reload; Dev UI at /q/dev/
 
-# Package the fast-jar and run it:
-mvn -DskipTests package
+# or package and run:
+./mvnw -DskipTests package
 java -jar target/quarkus-app/quarkus-run.jar
 
-# Then:
 curl -s localhost:8080/api/claims | jq
 curl -s localhost:8080/q/health/ready
 open http://localhost:8080/
 ```
 
-`mvn quarkus:dev` against in-cluster services is the M03 (Dev Spaces) story;
-this app has no external dependencies, so dev mode runs standalone.
+This app has no external dependencies, so dev mode runs standalone. Running dev mode against
+in-cluster services is the *Dev Spaces & the Inner Loop* story instead.
 
-## Building the image in-cluster
+## How the image is built
 
-Built declaratively by GitOps, not a manual step: the `parasol-web` BuildConfig +
-ImageStream in `gitops/workshop-config/templates/parasol-images-build.yaml` (Argo CD
-`workshop-config` Application) clones this repo (Docker strategy, `contextDir
-apps/parasol-web`) and pushes `parasol-web:latest`; `1.0` and `1.1` are declared
-ImageStream tags aliasing `latest`, so M01 (and every later module that pins either
-tag) resolves the image without anyone having run a build by hand.
+GitOps builds it — there is no manual step. A BuildConfig and ImageStream in
+`gitops/workshop-config/templates/parasol-images-build.yaml` clone this repository and push
+`parasol-web:latest`. The `1.0` and `1.1` tags are aliases for `latest`, so every module that
+pins either one resolves the image without a hand-run build.
 
 ```bash
-# Manual rebuild (e.g. after editing this app) — moves latest AND both aliases together:
+# Rebuild after editing this app — moves latest and both aliases together:
 oc start-build parasol-web -n ogsr-parasol-images --follow
 ```
 
-> Historically this was a one-off binary build (`oc new-build --strategy=docker
-> --binary` + `oc start-build --from-dir`, streamed straight from this directory)
-> followed by `oc tag …:latest …:1.0` — necessary only because the code wasn't yet
-> committed to the public repo. See git history before 2026-07-18 for that recipe.
-
-### Image reference M01 deploys
+The image the first module deploys:
 
 ```
 image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-web:1.0
 ```
 
-Workshop attendees pull it via the `workshop-image-pullers` RoleBinding in
-`gitops/workshop-config/templates/parasol-images-pull.yaml` (granted to every
-per-user namespace's ServiceAccount group, plus the human `workshop-attendees`
-group, scoped to the `ogsr-parasol-images` namespace — this is the mechanism that
-is actually live; an earlier `openshift/image-puller-rb.yaml` RoleBinding in this
-directory predated it, was never applied on any cluster, and has been removed).
+Attendees can pull it because of the `workshop-image-pullers` RoleBinding in
+`gitops/workshop-config/templates/parasol-images-pull.yaml`, granted to every per-user
+namespace's ServiceAccount group and to the `workshop-attendees` group, scoped to the
+`ogsr-parasol-images` namespace.
 
-## Container notes (OpenShift restricted-v2)
+## Container notes
 
-- UBI9 multi-stage `Containerfile`: `ubi9/openjdk-21:1.23` (build) →
-  `ubi9/openjdk-21-runtime:1.23` (runtime).
-- Runtime runs as numeric non-root **USER 185**, port **8080**.
-- Files are copied `--chown=185:0` and group-readable, so the container runs
-  unchanged under an arbitrary injected UID (GID 0). Nothing is written outside
-  `/tmp`.
+- UBI9 multi-stage build: `ubi9/openjdk-21` for the build, `ubi9/openjdk-21-runtime` at runtime.
+- Runs as numeric non-root **USER 185** on port **8080**.
+- Files are copied `--chown=185:0` and group-readable, so the container runs unchanged under an
+  arbitrary injected UID — which is what OpenShift's restricted security context does. Nothing is
+  written outside `/tmp`.
 
 ## Intentional flaws — do not fix
 
-None. `parasol-web` is intentionally simple and correct; the deliberate
-teachable flaws in this workshop live in other services (e.g. a seeded CVE
-dependency for M07, an N+1 endpoint for M11, and the legacy anti-patterns in
-`parasol-legacy-claims` for M21).
+None. This service is deliberately simple and correct.
+
+The workshop's deliberate faults live elsewhere: a seeded vulnerable dependency on a
+`parasol-claims` branch (*Trusted Software Supply Chain*), an N+1 query endpoint on
+`parasol-claims` (*Observability, Health & Scale*), and the legacy patterns throughout
+`parasol-legacy-claims` (*Application Modernization*).

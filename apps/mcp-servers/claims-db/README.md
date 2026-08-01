@@ -3,7 +3,7 @@
 An **MCP server** that exposes the Parasol claims dataset as tools, so the
 `parasol-agent` (and any MCP-capable client) can answer claim questions by
 *calling tools* rather than by having the data prompt-stuffed into the model.
-This is the "**MCP tools are your APIs**" beat of **M23 — Agentic AI on OpenShift**.
+This is the "**MCP tools are your APIs**" beat of the *Agentic AI on OpenShift* module.
 
 Small enough to read in ten minutes: two entities, one repository, one tools class.
 
@@ -38,14 +38,14 @@ The agent is wired with `quarkus.langchain4j.mcp.claims-db.url=http://claims-db:
   legacy `/mcp/sse`).
 - `quarkus-hibernate-orm-panache` + `quarkus-jdbc-h2` — an **embedded H2** seeded at boot
   from `import.sql`. The server is self-contained and deterministic (no external DB pod),
-  which keeps M23 module-independent.
+  which keeps that module independent of the others.
 - Health (`/q/health/*`), Prometheus metrics (`/q/metrics`), and OpenTelemetry tracing
-  (exporter off by default) are **on by default** — they are curriculum (M11/M12).
+  (exporter off by default) are **on by default** — they are curriculum for *Observability, Health & Scale*.
 
 ## Data source — self-contained by default, PostgreSQL-overridable
 
 The default is an in-memory H2 seeded from `import.sql`. To back the tools with the shared
-claims **PostgreSQL** instead (an option the M23 entry-state may choose), override at deploy:
+claims **PostgreSQL** instead (an option that module may choose), override at deploy:
 
 ```
 QUARKUS_DATASOURCE_DB_KIND=postgresql
@@ -61,7 +61,7 @@ self-contained image stays lean).
 ## Local development
 
 ```bash
-# Live-reload dev mode; the MCP server listens on 8081 in %dev so all three M23
+# Live-reload dev mode; the MCP server listens on 8081 in %dev so all three of that module's
 # services (claims-db 8081, policy-docs 8082, parasol-agent 8080) coexist locally.
 ./mvnw quarkus:dev
 
@@ -85,11 +85,6 @@ install builds this image from the fork.
 oc start-build claims-db -n ogsr-parasol-images --follow
 ```
 
-> Historically this was a hand-run binary build, with a separate Git-strategy
-> `openshift/buildconfig.yaml` twin kept for "later CI rebuilds" that nothing ever wired up — dead
-> code that hardcoded this project's own GitHub URL, so it would have silently ignored a fork's
-> `repo_url` if anyone had applied it by hand. Retired 2026-07-25, matching the parasol-claims/
-> parasol-web/parasol-fraud precedent.
 
 ## Container notes (OpenShift restricted-v2)
 

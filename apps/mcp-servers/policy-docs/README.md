@@ -4,7 +4,7 @@ An **MCP server** that exposes **RAG-style retrieval** over a small, seeded corp
 Parasol Insurance policy documents as tools. The `parasol-agent` calls `search_policies`
 to *ground* its answers about coverage, deductibles, documentation, claim workflow, SLAs
 and payout timing — the "**ground it with RAG over Parasol policy docs**" beat of
-**M23 — Agentic AI on OpenShift**.
+the *Agentic AI on OpenShift* module.
 
 Small enough to read in ten minutes: one corpus, one retriever, one tools class.
 
@@ -48,12 +48,12 @@ Wired in the agent as `quarkus.langchain4j.mcp.policy-docs.url=http://policy-doc
 - **`io.quarkiverse.mcp:quarkus-mcp-server-http` 1.13.1** (Quarkus 3.33.2).
 - No database, no external dependency — pure in-memory retrieval.
 - Health (`/q/health/*`), Prometheus metrics (`/q/metrics`) and OpenTelemetry tracing
-  (exporter off by default) are **on by default** — curriculum (M11/M12).
+  (exporter off by default) are **on by default** — curriculum for *Observability, Health & Scale*.
 
 ## Local development
 
 ```bash
-# Live-reload dev mode; listens on 8082 in %dev so all three M23 services coexist.
+# Live-reload dev mode; listens on 8082 in %dev so all three of that module's services coexist.
 ./mvnw quarkus:dev
 curl -s localhost:8082/q/health/ready
 ```
@@ -73,11 +73,6 @@ install builds this image from the fork.
 oc start-build policy-docs -n ogsr-parasol-images --follow
 ```
 
-> Historically this was a hand-run binary build, with a separate Git-strategy
-> `openshift/buildconfig.yaml` twin kept for "later CI rebuilds" that nothing ever wired up — dead
-> code that hardcoded this project's own GitHub URL, so it would have silently ignored a fork's
-> `repo_url` if anyone had applied it by hand. Retired 2026-07-25, matching the parasol-claims/
-> parasol-web/parasol-fraud precedent.
 
 ## Container notes (OpenShift restricted-v2)
 

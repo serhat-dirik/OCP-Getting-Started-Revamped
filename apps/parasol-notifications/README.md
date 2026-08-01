@@ -1,6 +1,6 @@
 # parasol-notifications
 
-Parasol Insurance **notifications service** — the M02 *polyglot moment*. Two
+Parasol Insurance **notifications service** — the *polyglot moment* in *Ways to Build & Deliver Apps*. Two
 implementations with an **identical API**, so an attendee picks a runtime and gets
 the same behaviour:
 
@@ -51,5 +51,5 @@ curl -s -XPOST localhost:8080/api/notify -H content-type:application/json \
   -d '{"claimNumber":"CLM-1001","message":"Adjuster assigned"}' | jq
 ```
 
-Both are built on the cluster via the S2I nodejs / python builder images (M02
+Both are built on the cluster via the S2I nodejs / python builder images (*Ways to Build & Deliver Apps*
 import-from-Git). Port **8080**; runs under OpenShift's restricted-v2 SCC.
