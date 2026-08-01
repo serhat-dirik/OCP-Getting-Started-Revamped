@@ -1,17 +1,31 @@
 // Canary fixture for tools/lint/click-to-run-guard.py — NOT content, never built by antora, never
-// linked from any nav. Its only job is to hold one deliberately BROKEN click-to-run block plus one
-// example of every safe form beside it, so `click-to-run-guard.py --self-test` can prove the
-// detector fires on the broken shape and stays silent on every safe one. DO NOT "fix" the broken
-// block below — that is the point of this file. See the postmortem in the script's own docstring
+// linked from any nav. Its only job is to hold deliberately BROKEN click-to-run blocks plus one
+// example of every safe form beside them, so `click-to-run-guard.py --self-test` can prove the
+// detector fires on the broken shapes and stays silent on every safe one. DO NOT "fix" the broken
+// blocks below — that is the point of this file. See the postmortem in the script's own docstring
 // (commit 76ae9d3): content/supplemental-ui/js/click-to-run.js sends an entire block to the
 // terminal in ONE write, so a `read` that is not a block's last line eats the line after it.
+//
+// WHY THERE ARE FIVE BROKEN CASES AND NOT ONE (2026-08-01). The detector is not one regex, it is
+// eight, and for months this fixture exercised three of them. An audit blinded each pattern in turn
+// — replacing it with one that can never match — and found that _NORMALIZE_RE, _SPLIT_RE,
+// _LEADING_LOOP_RE, _LEADING_ASSIGN_RE and HEREDOC_START_RE could ALL be switched off with the
+// self-test still exiting 1 and the real run still exiting 0. Every case below therefore names the
+// ONE pattern it isolates: it must be the only case that stops being reported when that pattern is
+// blinded. Each broken `read` also uses a UNIQUE variable name, which is how the self-test says
+// WHICH case went undetected instead of only that a count moved. Deleting a case, or renaming its
+// variable, is a decision to stop proving that pattern — update EXPECTED_OFFENDERS in the guard in
+// the same edit.
 
-// Case 1 (BROKEN) — an interactive `read` followed by another line in the SAME block. On a real
-// cockpit this line becomes the read's answer and the export below it never runs.
+// Case 1 (BROKEN — the shipped defect) — an interactive `read` followed by another line in the SAME
+// block. On a real cockpit this line becomes the read's answer and the export below it never runs.
+// This is the gitops-at-scale/lab.adoc victim verbatim except for the variable name, which carries
+// a suffix only so the self-test can tell this case apart from case 6's identical prompt.
+// Isolates: _READ_RE (blinding it silences every case here, this one included).
 [source,sh,role=execute]
 ----
-read -rsp "Your workshop password: " PW; echo
-export TOKEN_EXCHANGE="uses $PW"
+read -rsp "Your workshop password: " PW_MERGED; echo
+export TOKEN_EXCHANGE="uses $PW_MERGED"
 ----
 
 // Case 2 (safe — pipe-fed) — `read` here drains the pipe from `head`, not the terminal. Harmless
@@ -73,4 +87,74 @@ oc get pods -n {user}-dev
 ----
 export ARGOCD_SERVER=student-gitops-server-student-gitops.example.com
 read -rsp "Your workshop password: " PW; echo
+----
+
+// Case 7 (BROKEN — `read` behind a `do` keyword) — a retry loop blocks on the terminal exactly as
+// case 1 does, and its own body is what gets eaten.
+// Isolates: _NORMALIZE_RE. Only that pattern rewrites `do` to a separator; without it the read sits
+// in a chunk that begins "do read", which `^read\b` cannot see. Case 9 also uses a loop keyword but
+// survives this blinding, because its `read` precedes the `do` rather than following it.
+[source,sh,role=execute]
+----
+while true; do read -rsp "Retry the failed sync? [y/N] " PW_LOOP; break; done
+echo "the line above is consumed as the answer instead of running"
+----
+
+// Case 8 (BROKEN — `read` behind `&&`) — the guard-then-prompt shape, which is how a lab usually
+// grows a mid-block read: someone appends a confirmation to a command that already worked.
+// Isolates: _SPLIT_RE. Without separator splitting the whole line is one chunk beginning "oc", and
+// `^read\b` never sees the invocation. Case 1 survives this blinding (its line already starts with
+// `read`), which is what made the gap invisible.
+[source,sh,role=execute]
+----
+oc whoami >/dev/null && read -rsp "Press Enter once the sync finishes: " PW_ANDAND
+oc get application/parasol -n {user}-gitops
+----
+
+// Case 9 (BROKEN — `read` as an `until` loop's condition) — the "keep asking until they paste
+// something" shape. The read is the loop's test, so it runs on the terminal before anything else.
+// Isolates: _LEADING_LOOP_RE. Without the leading `until `/`while ` strip the chunk reads
+// "until read …" and is skipped. Case 2 exercises the same strip but is pipe-fed, so blinding it
+// changes nothing there — a positive case is the only thing that proves this pattern.
+[source,sh,role=execute]
+----
+until read -rsp "Paste the Gitea token, then press Enter: " PW_UNTIL; do echo "empty, try again"; done
+oc create secret generic gitea-token --from-literal=token="$PW_UNTIL" -n {user}-dev
+----
+
+// Case 10 (BROKEN — `read` behind an inline `IFS=` assignment) — `IFS= read -r` is the canonical
+// careful form, which is exactly why it turns up in labs; it is no less interactive for it.
+// Isolates: _LEADING_ASSIGN_RE. Without the leading-assignment strip the chunk reads "IFS= read …"
+// and is skipped. Case 2 exercises the same strip pipe-fed, so again only a positive case proves it.
+[source,sh,role=execute]
+----
+IFS= read -rsp "Your MaaS API key: " PW_IFS
+echo "${#PW_IFS} characters captured"
+----
+
+// Case 11 (safe — an interactive-shaped read inside a heredoc body) — this text is written into a
+// script FILE; the read runs later, in a shell of its own, not at click time. Case 4's heredoc read
+// is pipe-fed, so it stays silent even when the heredoc tracker is off and proves nothing about it.
+// Isolates: HEREDOC_START_RE. Blinding it makes this line a sixth offender.
+[source,sh,role=execute]
+----
+cat > /tmp/parasol-prompt.sh <<'EOF'
+read -rsp "This prompt belongs to the generated script: " ANSWER
+echo "$ANSWER" > /tmp/parasol-answer
+EOF
+chmod +x /tmp/parasol-prompt.sh
+----
+
+// Case 12 (safe — tab-indented heredoc terminator, `<<-`) — proves the `-` capture group, not the
+// heredoc match as a whole. The terminator below is indented with a REAL TAB; if the group-1 strip
+// is lost the heredoc never closes, the two commands after it are never examined, and the drop
+// shows up against the self-test's "block command lines examined" floor rather than in the offender
+// count. Do not let an editor convert that tab to spaces — `<<-` strips tabs only.
+[source,sh,role=execute]
+----
+cat <<-'EOF' > /tmp/parasol-claims.txt
+	CLM-1001 approved
+	EOF
+wc -l /tmp/parasol-claims.txt
+oc get pods -n {user}-dev
 ----

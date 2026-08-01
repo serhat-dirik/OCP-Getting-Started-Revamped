@@ -75,6 +75,20 @@ relearned that lesson on tools/lint/route-tls-guard.sh. This script refuses to r
 empty file scope AND over a zero-block scan. --self-test exists so CI (and a human) can prove the
 detector fires on a deliberately broken canary case, does NOT fire on every safe form beside it, and
 exits 2 (not 1) if either check fails — only a clean self-test earns trust in a clean real-tree run.
+
+THE DETECTOR IS EIGHT PATTERNS AND THE CANARY MUST COVER ALL EIGHT (2026-08-01). An audit blinded
+each compiled pattern in turn — swapping it for one that can never match — and re-ran BOTH modes.
+Five of the eight could be switched off with `--self-test` still exiting 1 and the real run still
+exiting 0: _NORMALIZE_RE, _SPLIT_RE, _LEADING_LOOP_RE, _LEADING_ASSIGN_RE and HEREDOC_START_RE. The
+reason each was invisible is the same shape every time: the fixture's only broken case
+(`read …; echo` at the start of its line) is detected by `^read\b` alone, and every case that
+exercised one of the other five was a SAFE case that stays silent whether the pattern works or not.
+A safe case proves a pattern only when blinding the pattern makes it FIRE; proving a pattern that
+enables detection needs a broken case that stops firing. The fixture now carries five broken cases,
+one per enabling pattern, and EXPECTED_OFFENDERS below asserts them by name rather than by count, so
+a blinded pattern reports which case it silenced. Three patterns are proven by other means and say
+so there: OPENER_RE and DELIMITER_RE collapse the block scope (the ledger floors catch them), and
+`<<-`'s indent group is proven through the examined-lines floor, not the offender list.
 """
 from __future__ import annotations
 
@@ -171,6 +185,31 @@ _SPLIT_RE = _compile("_SPLIT_RE", r"(\|\||&&|[;&|(){}])")
 _LEADING_LOOP_RE = _compile("_LEADING_LOOP_RE", r"^(?:while|until)\s+")
 _LEADING_ASSIGN_RE = _compile("_LEADING_ASSIGN_RE", r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
 _READ_RE = _compile("_READ_RE", r"^read\b")
+
+# The canary's broken cases, keyed by the unique variable name each one's `read` assigns to, with
+# the pattern that case exists to prove. --self-test asserts the guard flagged EXACTLY these — by
+# NAME, not by count, so a blinded pattern names the case it silenced instead of just moving a
+# number. Adding a broken case to the fixture means adding its marker here; the two are one edit.
+#
+# The three patterns absent from this table are not unproven, they are proven elsewhere, and each is
+# listed with where — an entry that quietly went missing would otherwise look like coverage:
+#   OPENER_RE      — blinding it yields zero execute blocks, which trips the "execute blocks" floor
+#                    in scope_for_self_test() (rc 2). No offender-level canary can reach it: with no
+#                    opener there is no block to put a canary in.
+#   DELIMITER_RE   — same, for the same reason: iter_execute_blocks() requires a delimiter line
+#                    immediately after the opener, so blinding it also yields zero blocks.
+#   HEREDOC_START_RE group 1 (the `-` of `<<-`) — canary case 12. Losing the indent strip does not
+#                    change any offender; it leaves that block's heredoc open to the end of the
+#                    block, so the two commands after the tab-indented terminator are never
+#                    examined. That is why the self-test's "block command lines examined" floor is
+#                    the fixture's exact measurement rather than a margin below it.
+EXPECTED_OFFENDERS = {
+    "PW_MERGED": "case 1 (the shipped gitops-at-scale defect) — proves _READ_RE",
+    "PW_LOOP": "case 7 (`while …; do read …`) — proves _NORMALIZE_RE rewrites `do` to a separator",
+    "PW_ANDAND": "case 8 (`cmd && read …`) — proves _SPLIT_RE splits on command separators",
+    "PW_UNTIL": "case 9 (`until read …; do`) — proves _LEADING_LOOP_RE strips the loop keyword",
+    "PW_IFS": "case 10 (`IFS= read …`) — proves _LEADING_ASSIGN_RE strips inline assignments",
+}
 
 
 def repo_root() -> pathlib.Path:
@@ -333,14 +372,24 @@ def scope_for_tree() -> Scope:
 
 
 def scope_for_self_test() -> Scope:
-    """The canary is one small fixture; only the floors it can meet are asserted, and they still
-    prove the walk reached inside the blocks rather than merely counting them."""
+    """The canary is one small fixture, and unlike the real tree its size is DECLARED, not observed —
+    so these floors are its exact current measurement rather than a margin below it. _scope.py's own
+    guidance says to pin a floor exactly where the set is declared in-repo, and pinning buys a proof
+    nothing else here can give: canary case 12's tab-indented `<<-` terminator changes no offender,
+    only how many lines get examined, so the only way to notice its indent group breaking is for the
+    examined count to fall. Both numbers can only grow as cases are added; a fixture edit that
+    lowers either is an editorial act and should re-state its own floor."""
     scope = Scope("click-to-run-guard --self-test")
     scope.require("files scanned", 1, "the canary fixture.")
-    scope.require("execute blocks", 6, "the fixture declares six blocks.")
-    scope.require("block command lines examined", 10,
-                  "above the fixture's six blocks on purpose, so a first-line-only scan is visible "
-                  "here too and not only on the real tree.")
+    scope.require("execute blocks", 12,
+                  "the fixture declares twelve blocks. Zero means OPENER_RE or DELIMITER_RE stopped "
+                  "matching — neither can be proven by an offender canary, because with no opener "
+                  "or no delimiter there is no block for a canary to live in.")
+    scope.require("block command lines examined", 27,
+                  "the fixture's exact count of lines reaching the detector. Above the twelve "
+                  "blocks on purpose, so a first-line-only scan is visible here and not only on the "
+                  "real tree — and pinned exactly, so case 12's `<<-` heredoc silently swallowing "
+                  "the two commands after its tab-indented terminator (2 lines) trips it.")
     return scope
 
 
@@ -396,14 +445,34 @@ def main(argv=None):
         return 2
 
     if args.self_test:
-        # The canary carries exactly one broken case. Any other count means the detector missed
-        # it, double-counted it, or wrongly fired on one of the safe forms sitting beside it.
-        expected = 1
-        if len(all_offenders) != expected:
-            print(f"click-to-run-guard: SELF-TEST FAILED — expected exactly {expected} offender "
-                  f"(the broken canary case), got {len(all_offenders)}: "
-                  f"{[(str(f), n) for f, n, _ in all_offenders]}. The guard, not the fixture, is "
-                  "broken.", file=sys.stderr)
+        # The canary carries one broken case per enabling pattern, each assigning to a unique
+        # variable name. Matching offenders BY NAME rather than counting them is what makes a
+        # blinded pattern say which case it silenced: a bare count reports "expected 5, got 4" and
+        # leaves the reader to bisect the fixture. Anything unexpected in the list is the other
+        # failure mode — the detector firing on one of the seven safe forms beside them.
+        failures = []
+        seen = set()
+        for path, line_no, snippet in all_offenders:
+            marks = [marker for marker in EXPECTED_OFFENDERS if marker in snippet]
+            if marks:
+                seen.update(marks)
+            else:
+                failures.append(f"{path}:{line_no} was flagged and no broken canary case lives "
+                                f"there — a SAFE form is being reported as an offender, which is "
+                                f"the false positive that gets a guard switched off ({snippet!r}).")
+        for marker, why in EXPECTED_OFFENDERS.items():
+            if marker not in seen:
+                failures.append(f"{marker} went UNDETECTED — {why}. That pattern is now unproven, "
+                                f"so a clean run over content/ proves nothing about it.")
+        if len(all_offenders) != len(EXPECTED_OFFENDERS):
+            failures.append(f"expected exactly {len(EXPECTED_OFFENDERS)} offenders, got "
+                            f"{len(all_offenders)}: {[(str(f), n) for f, n, _ in all_offenders]}.")
+        # The scope ledger is a library no CI step runs on its own; exercising it here is what
+        # stops it from being an unrun gate.
+        failures += Scope.self_check()
+        if failures:
+            for failure in failures:
+                print(f"::error::click-to-run-guard SELF-TEST FAILED — {failure}", file=sys.stderr)
             return 2
 
     for f, line_no, snippet in all_offenders:

@@ -205,7 +205,22 @@ def is_opaque(run: str) -> bool:
 
 
 def looks_like_key(token: str) -> bool:
-    """All three layers, applied to a token that already starts with `sk-`."""
+    """All three layers, applied to a token that already starts with `sk-`.
+
+    THE ONE PLACE THE VERDICT IS DECIDED. Until 2026-08-01 this function was dead code: scan_text()
+    re-implemented it inline as `CANDIDATE.finditer(...)` plus `is_opaque(...)`, so blinding this
+    body to `return False` changed nothing anywhere — the tree scan still exited 0 and --self-test
+    still exited 1, and the audit could switch off the guard's own named predicate with both CI
+    signals staying green. A predicate nothing calls cannot be blinded because it was never seeing.
+    scan_text() now delegates here, and self_test() asserts this function directly, so the two ways
+    of noticing it broke are independent of each other.
+
+    `fullmatch` rather than `search` is deliberate and stays correct for scan_text's callers: the
+    token it passes is exactly one CANDIDATE match, whose greedy tail already ran to the end of the
+    `[A-Za-z0-9_-]` run, and the leading lookbehind is satisfied trivially at position 0. Callers
+    with an arbitrary line must keep using CANDIDATE.finditer to cut tokens out first — passing a
+    whole line here is a FALSE NEGATIVE, not an error, which is why this is spelled out.
+    """
     match = CANDIDATE.fullmatch(token)
     return bool(match) and is_opaque(token[3:])
 
@@ -239,8 +254,11 @@ def tracked_files(root: pathlib.Path) -> list[str]:
 def scan_text(text: str, origin: str) -> list[tuple[str, int, str]]:
     findings = []
     for lineno, line in enumerate(text.splitlines(), 1):
+        # CANDIDATE cuts the token out of the line (layers 1-2); looks_like_key() then renders the
+        # verdict on that token. The opacity test used to be repeated inline here, which left the
+        # named predicate uncalled and therefore unblindable — see its docstring.
         for match in CANDIDATE.finditer(line):
-            if is_opaque(match.group(0)[3:]):
+            if looks_like_key(match.group(0)):
                 findings.append((origin, lineno, redact(match.group(0))))
     return findings
 
@@ -328,6 +346,29 @@ def self_test(root: pathlib.Path) -> int:
     if not is_opaque("a_A1b2C3d4E5f6G7h8i9"):
         failures.append("the opacity rule rejected a 19-character mixed alnum chunk — layer 3 is "
                         "too strict and would miss real keys.")
+    # The named predicate itself, asserted directly — the ONE call scan_text() routes every verdict
+    # through. Blinding it to `return False` left both CI signals green for as long as it was dead
+    # code (audit, 2026-08-01); the fixture sweep above notices too, and these two lines notice
+    # independently of the fixture.
+    #
+    # BOTH probes are SPLIT ACROSS A `+` rather than written as one token, and neither split is
+    # cosmetic:
+    #   - the positive probe, because this file is deliberately NOT in EXCLUDED_PATHS. A key-shaped
+    #     literal here makes the guard fire on ITSELF the moment the file is committed, which is
+    #     exactly how a literal in the docstring reddened main once already.
+    #   - the negative probe, because sibling guard credential-redaction-guard.py scans tools/ with
+    #     `\bsk-[A-Za-z0-9_-]{16,}` — the naive widening THIS guard exists to replace. Written out,
+    #     the slug trips it (measured 2026-08-01: one finding, this line), so proving our layer 3
+    #     rejects slugs would have reddened a different CI job with the very false positive being
+    #     disproved. Splitting after `sk-` denies both patterns their 16-plus-character run while
+    #     leaving the string looks_like_key() receives byte-identical.
+    if not looks_like_key("sk-" + "Kd7Vb2Nm9Qx4Rt6Ws1Zy3Ec5Uv8"):
+        failures.append("looks_like_key() rejected a 28-character opaque token that passes all "
+                        "three layers. It is the predicate scan_text() delegates every verdict to, "
+                        "so the tree scan cannot report a real key while it says no.")
+    if looks_like_key("sk-" + "parasol-web-v11-rollout-2026"):
+        failures.append("looks_like_key() accepted a hyphenated slug. A guard that fires on the "
+                        "repo's own names gets switched off, and then the real key gets through.")
     # Layer 1, asserted directly: `sk-` mid-token is a slug, never a key prefix.
     if scan_text("name: parasol-task-image-size-report-abc123def456", "unit"):
         failures.append("layer 1 (token start) did not fire: `sk-` inside `task-` was treated as a "
