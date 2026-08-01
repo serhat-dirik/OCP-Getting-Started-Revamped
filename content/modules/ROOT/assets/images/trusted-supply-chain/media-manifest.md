@@ -74,6 +74,20 @@ return to a clean slate, `ws prep trusted-supply-chain --user <user> --yes` (re-
 | 3 | `trusted-supply-chain-03-imagestream-tags.png` | ✅ CAPTURED 2026-07-29 | **Builds → ImageStreams → parasol-claims → Tags** — `latest` + `sha256-….sig` + `sha256-….att` | the signature and SLSA attestation stored **beside** the image, by digest | lab.adoc ex. 3 (the artifacts Chains stored) — **provenance caveat CLOSED 2026-07-31:** verified live as user6 that `user6-cicd`'s PipelineRuns (including the one that built `latest`) all carry `workshop.redhat.com/module=trusted-supply-chain` — the artifacts in this shot genuinely belong to this module, not a neighboring one. Separately, as of 2026-07-31 the live ImageStream actually carries **9** tags / **3** pairs (`candidate` + `cleancheck` + `latest`, each with its own `.att`/`.sig`) — the `cleancheck` pair is an out-of-band verification build (see lab.adoc's grounding note beside the Chains-artifacts step), not something this exercise's own instructions produce, so this screenshot's 1-pair/3-row/Image-count-3 state was deliberately left as-is rather than re-shot. A 9-tag reference capture exists (reviewed, not committed) if a future pass wants to show three pairs on purpose. |
 | 4 | `trusted-supply-chain-04-rekor-entry.png` | ✅ CAPTURED 2026-08-01 (as user4; **anonymous — the Rekor Search UI needs no login at all**) | **Rekor Search UI** (`rekor-search-ui-trusted-artifact-signer.{cluster_domain}`) → search by the SBOM hash → the entry | the keyless signature as a **public, permanent** transparency-log record: Entry UUID, Type `hashedrekord`, Log Index, Integrated time, the searched sha256, the signature, and the decoded Fulcio certificate whose **Validity window is ten minutes wide** — the certificate that signed it has already expired while the log entry stays verifiable forever | lab.adoc ex. 4 (the transparency-log receipt) — **now embedded** |
 
+### Row 1 — re-attempted 2026-08-01, blocked on an RHACS login
+
+The 2026-08-01 media pass could not shoot this one. The blocker is **access, not cluster state**:
+RHACS Central runs its own user database (the module's own lab says so — the RHACS screens are
+instructor-shown precisely because the workshop issues attendees no RHACS account), it has no
+anonymous read surface at all, and this pass was barred from typing a password into any login form.
+Contrast row 4, which fell to this same pass in minutes *because* the Rekor Search UI needs no login.
+
+So the prerequisite for row 1 is not "produce the red state" — that part is deterministic and
+documented above, and takes ~7 min. It is **one headed `login.py` window against
+`{acs_console_url}` with an RHACS credential**, after which the Violations view is a plain
+`capture.py` job. Until someone does that, the row cannot move, and its absence breaks nothing (its
+embed point is a `// media-pass:` comment).
+
 Screenshot **1 (the RHACS violation screen) is the priority capture** — the visual that makes the threat
 concrete. Screenshots 2–4 are **enrichment**; the lab's load-bearing evidence is CLI output (the `acs-scan`
 table, the `jq` SBOM query, `cosign verify` "verified against the specified public key", `verify-blob`

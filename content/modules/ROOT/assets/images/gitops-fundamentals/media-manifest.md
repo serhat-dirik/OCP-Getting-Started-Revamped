@@ -30,6 +30,24 @@ them in the media pass; the New App form and the drift-diff are the two that mos
 | 7 | `gitops-fundamentals-07-gitea-edit-overlay.png` | ❌ RE-CAPTURE| **Gitea editor on `overlays/stage/kustomization.yaml`** | `count: 2` changed to `count: 3`, the Commit Changes panel (RE-CAPTURE: the editor and `count: 3` are correct but the Commit Changes panel is below the fold and absent from the frame.) | lab.adoc ex. 4 (git edit) |
 | 8 | `gitops-fundamentals-08-stage-gitdriven-diff.png` | ✅ CAPTURED 2026-07-26| **claims-stage OutOfSync after the git edit, DIFF open** | desired `replicas: 3` vs live `replicas: 2`, and the new commit as the target revision — "the change came from Git" Audit caveat: the replicas 2→3 diff is correct and load-bearing, but the open Diff modal covers the app header, so the "new commit as target revision" evidence this row also asks for is not visible in the image. | lab.adoc ex. 4 (after Refresh) |
 
+### Rows 2 and 7 — attempted 2026-08-01, blocked on a browser session (not on cluster state)
+
+Both re-shoots were in scope for the 2026-08-01 media pass and both are still open, for the same
+single reason as `gitops-at-scale` rows 1–3: **no authenticated browser session exists for this
+cluster and this pass had no way to create one.** Row 2 is the Argo CD *NEW APP* panel (OpenShift
+OAuth, then the `workshop-users` IdP's username/password form — and a console session does not carry
+to it); row 7 is the Gitea *editor*, which needs a signed-in Gitea session before the pencil icon
+does anything. Checked cookie by cookie: the session files under `tools/media/` that carry this
+cluster's host hold only `login-state` and `csrf-token`, with no `openshift-session-token-*` — a
+visit, not a session. Establishing one means a human at `login.py`'s headed window, which is the
+documented workflow and cannot be automated.
+
+Nothing else stands in the way. Row 2 stays *bespoke* (the NEW APP panel exists only mid-creation and
+has no URL, so it needs an interactive driver, not a jobs-file entry); row 7 is a plain
+`capture.py` job against the Gitea edit URL once a session exists — and note what made it a
+re-capture in the first place: the *Commit Changes* panel is below the fold, so it needs a taller
+`viewport` or a `scroll_to_text`, never a relaxed `require_in_frame`.
+
 Screenshots **2 (New App form)** and **5 (drift diff)** are the two the text most needs a picture
 for; capture those first. All embed points are `// media-pass:` comments, so the page reads
 correctly without them — but this module benefits more from its screenshots than any CLI module,

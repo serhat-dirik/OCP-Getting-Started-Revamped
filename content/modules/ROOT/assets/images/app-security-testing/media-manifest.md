@@ -67,19 +67,26 @@ that matters — worth doing on a re-shoot.
 
 ### Screenshot 3 — how the RED state was produced, and how to reproduce it (measured 2026-08-01)
 
-**The lab's own documented path produces it. No workaround was needed.** Re-measured end to end on
-cluster 2 as `user5`:
+**The lab's own documented path produces it. No workaround was needed** — and it needs no particular
+attendee slot, which is the useful part: the row was first thought to be blocked on `user5`, whose
+project had been driven green, but any user's slot produces its own red project. The two committed
+frames were shot against **`parasol-claims-user4`**, from `user4-cicd`, on cluster 2:
 
 ```sh
-tools/ws/ws start app-security-testing --user user5   # ~30 s; re-seeds the fork AND purges the ns
-# then lab.adoc Exercise 1's own CLI PipelineRun block, verbatim:
-#   git-revision: seed-appsec   sonar-project-key: parasol-claims-user5
+tools/ws/ws start app-security-testing --user user4   # ~30 s; re-seeds the fork AND purges the ns
+# then lab.adoc Exercise 1's own CLI PipelineRun block, verbatim, run AS the attendee
+# (oc exec into the showroom-user4 pod's terminal container — oc whoami there returns user4):
+#   git-revision: seed-appsec   sonar-project-key: parasol-claims-user4
 ```
+
+Substitute your own slot throughout. Nothing in either frame identifies which one was used (see the
+by-eye note below), so a re-shoot from a different user is a drop-in replacement.
 
 The entry-state hook **force-pushes the five seeded flaws back over any fixes a previous run
 committed** to `seed-appsec`, so a namespace that was driven all the way to green comes back fully
 red — that is what makes this row re-shootable at all. The run then stops at `sast-sonar`
-(`StepFailed`) in **~2 min 45 s**, exactly as Exercise 1 promises, and that failing analysis flips
+(`StepFailed`) in **2 min 44 s measured** (`fetch-source` 2 m 45 s, `sast-sonar` 15 s of step time),
+exactly as Exercise 1 promises, and that failing analysis flips
 SonarQube: `alert_status` `OK`→`ERROR`, `vulnerabilities` `0`→`1`, and the S2068 issue
 `CLOSED/FIXED`→`OPEN` with no resolution (SonarQube reopens the *same* issue key rather than
 creating a new one).

@@ -35,6 +35,24 @@ should be short GIFs/MP4s** per the project owner's 2026-07-11 directive.
 | 5 | `observability-health-scale-05-observe-alerting-inactive.png` | ✅ CAPTURED 2026-07-29 | **project-scoped** `/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user` at the healthy baseline | the just-created `ParasolClaimsErrorRateHigh` armed but not active — severity **Warning**, source **User**, and State **`-`** (confirmed on screen: the console does not print the word "Inactive" here). Frame the `Project: <user>-dev` selector and the Alerting rules tab so the reader can tell this view from the cluster-wide one. The "before" to #4's "after" — same view, opposite states, captured as the deliberate pair. | lab.adoc ex. 2 (Console tab) — **`// media-pass:` marker placed** |
 | 6 | `observability-health-scale-06-import-yaml.png` | ⬜ OPTIONAL — **no embed marker** | **+ / Import YAML** dialog with the PrometheusRule (or PDB) pasted | the masthead `+` action and the paste-and-Create flow | **Intentionally not embedded** (2026-07-11): the `+` / Import YAML masthead flow is generic OpenShift UI already spelled out in the ex. 2 / ex. 6 Console-tab prose; a screenshot adds little over the signature alerting/topology beats. Capture only if a deck wants it — no `// media-pass:` marker in `lab.adoc`. |
 
+### Rows 2 and 3 — re-attempted 2026-08-01, blocked on a console session
+
+Both re-shoots were in scope for the 2026-08-01 media pass and both are still open. The blocker is
+**access, not cluster state**: every view this module needs is inside the OpenShift console, the
+console is behind OpenShift OAuth, the `workshop-users` IdP presents a username/password form, and
+this pass was barred from typing a password into any field. Checked cookie by cookie: the session
+files under `tools/media/` that carry this cluster's host hold only `login-state` and `csrf-token`,
+with no `openshift-session-token-*` — a visit, not a session. Establishing one means a human at
+`login.py`'s headed window; that is the documented workflow and cannot be automated or faked.
+
+That makes M12 the most exposed module in this block to the missing session — unlike the CLI-heavy
+modules beside it, it has **no terminal fallback**: the console view *is* the content here, so there
+is no second-best frame to shoot instead. Both rows also need live state under them
+(`stage-m12-hpa.sh` for row 3, traffic through the app for row 2), so plan the login window and the
+staging together rather than in two sittings. Row 3's scope is already narrowed for whoever gets
+there — see the `// media-pass:` note at `lab.adoc` ex. 5, which closes the "pod ring grows 2→4"
+framing (the ring shows no count) and redirects the asset to the *Resources* side panel's Pods list.
+
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 The concept/wrap-up pages `include::` their diagram source — a standalone `.mmd` under
