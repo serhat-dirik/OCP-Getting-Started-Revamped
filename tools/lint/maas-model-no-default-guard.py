@@ -45,8 +45,71 @@ import re
 import sys
 from pathlib import Path
 
+
+def _crash_exit_2(exc_type, exc, tb):
+    """Any uncaught exception → rc 2, INCLUDING one raised at MODULE level.
+
+    WHY THE `__main__` TRY/EXCEPT IS NOT ENOUGH (measured 2026-08-01). Module-level code runs before
+    `__main__` exists, so a bad constant, a failed import, or a _scope.py that does not PARSE crashed
+    with Python's default rc 1 — which is exactly what CI's `--self-test must exit EXACTLY 1` reads as
+    "the canary fired". Measured on a scratch copy of this file: replacing _scope.py with a syntax
+    error gave rc 1 in BOTH modes, and the CI step would have printed "self-test ok".
+
+    Installed as the FIRST statement after the imports, so it is already in place before anything
+    below it can fail. `os._exit` is what makes the code stick: an excepthook cannot change the exit
+    status by returning.
+    """
+    import os
+    import traceback
+    traceback.print_exception(exc_type, exc, tb)
+    print(f"::error::maas-model-no-default-guard: crashed before it could report "
+          f"({exc_type.__name__}: {exc}). "
+          f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and never "
+          f"'canary detected'.", file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(2)
+
+
+sys.excepthook = _crash_exit_2
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _scope import Scope  # noqa: E402  (path must be set first; this file is run as a script)
+try:
+    from _scope import Scope  # noqa: E402  (path must be set first)
+except Exception as exc:  # noqa: BLE001 — deliberately broad; see the note below
+    # NOT `except ImportError`. Measured 2026-08-01: a _scope.py that fails to PARSE raises
+    # SyntaxError, sails past an ImportError-only handler, and exits 1 — CI's 'the canary
+    # fired'. Anything at all going wrong while loading the scope ledger means this guard
+    # cannot start, and that is rc 2 regardless of which exception said so.
+    # An uncaught ImportError exits 1, and CI's contract for this guard is "--self-test must exit
+    # EXACTLY 1 = the canary was detected". A crash would therefore be READ AS PROOF OF DETECTION and
+    # the real run would never even happen. Measured 2026-08-01 by running a copy of this file with
+    # _scope.py absent: traceback, rc=1, and the CI step would have printed "self-test ok".
+    print(f"::error::maas-model-no-default-guard: cannot import _scope ({exc}) — "
+          f"the guard could not start, which is NOT the same as a clean tree.",
+          file=sys.stderr)
+    sys.exit(2)
+
+
+def _compile(name, pattern, flags=0):
+    """re.compile, but a bad pattern exits 2 instead of crashing with 1.
+
+    WHY (measured 2026-08-01). Every pattern compiled at MODULE level raises re.error before main()
+    — and before any try/except inside it — can run. Python exits 1 on an uncaught exception, and 1
+    is exactly what CI's `--self-test must exit EXACTLY 1` assertion accepts as "the canary was
+    detected". A one-character regex typo therefore reported the guard's detection as PROVEN while
+    the guard could not even load. A regex is the likeliest thing to break in a guard, so the
+    compile step is where the exit code has to be fixed.
+    """
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        print(f"::error::maas-model-no-default-guard: {name} is not a valid regex ({exc}) — "
+              f"the guard could not load. Exiting 2: that is 'the guard is broken', not "
+              f"'the canary fired'.", file=sys.stderr)
+        sys.exit(2)
+
 
 # tools/lint/<this file> -> tools/lint -> tools -> repo root. Getting this wrong made the first
 # run look for content/ under tools/; the guard refused to report clean rather than passing on a
@@ -56,13 +119,17 @@ REPO = Path(__file__).resolve().parents[2]
 # Where a MaaS default can hide. Each entry: file, regex capturing the value, human label.
 SITES = [
     (REPO / "content/antora.yml",
-     re.compile(r'^\s*maas_model\s*:\s*"?([^"\n#]+?)"?\s*$', re.M), "antora.yml maas_model"),
+     _compile("SITES[0]", r'^\s*maas_model\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
+     "antora.yml maas_model"),
     (REPO / "content/antora.yml",
-     re.compile(r'^\s*maas_endpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M), "antora.yml maas_endpoint"),
+     _compile("SITES[1]", r'^\s*maas_endpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
+     "antora.yml maas_endpoint"),
     (REPO / "gitops/workshop-config/values.yaml",
-     re.compile(r'^\s*maasModel\s*:\s*"?([^"\n#]+?)"?\s*$', re.M), "values.yaml maasModel"),
+     _compile("SITES[2]", r'^\s*maasModel\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
+     "values.yaml maasModel"),
     (REPO / "gitops/workshop-config/values.yaml",
-     re.compile(r'^\s*maasEndpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M), "values.yaml maasEndpoint"),
+     _compile("SITES[3]", r'^\s*maasEndpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
+     "values.yaml maasEndpoint"),
 ]
 
 # A LITERAL, deliberately not len(SITES): the point is that shrinking SITES must not be able to
@@ -87,7 +154,7 @@ MIN_SITES = 4
 # cannot be mistaken for a real setting, and it survives rendering. Bracketed forms stay accepted
 # so an endpoint written `<set-from-…>` in a YAML comment or a non-rendered file is not a failure —
 # what changed is that the bracket-free form is no longer rejected.
-PLACEHOLDER = re.compile(r"^<[^>]+>$|^set-from-[\w.-]+$|(^|\.)example\.com(/|$)")
+PLACEHOLDER = _compile("PLACEHOLDER", r"^<[^>]+>$|^set-from-[\w.-]+$|(^|\.)example\.com(/|$)")
 
 
 def judge(value: str) -> str | None:
@@ -217,4 +284,18 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Any unhandled exception exits 1, and 1 is this guard's "the canary was detected" / "the tree
+    # has a finding" code. A crash must never be readable as either, so it is remapped to 2 — "the
+    # guard could not run". Without this, a typo in a regex or a missing fixture would make
+    # --self-test exit 1 and CI would report the guard's detection as PROVEN.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:                                  # noqa: BLE001 — deliberate
+        import traceback
+        traceback.print_exc()
+        print(f"::error::maas-model-no-default-guard: crashed ({type(exc).__name__}: {exc}). "
+              f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and "
+              f"never 'canary detected'.", file=sys.stderr)
+        sys.exit(2)

@@ -7,7 +7,9 @@
 # apart and returns three outcomes; `check` routes any `oc` invocation through it. Nothing about that
 # fix stops the NEXT commit from undoing it, one line at a time, in three different ways:
 #
-#   [1] a NEW `oc … 2>/dev/null` in a tools/verify/*.sh predicate, bypassing oc_read entirely.
+#   [1] a NEW stderr-silenced `oc` read in a tools/verify/*.sh predicate, bypassing oc_read entirely
+#       — `oc … 2>/dev/null`, `oc … >/dev/null 2>&1` or `oc … &>/dev/null`; all three are blind in
+#       exactly the same way, and the second is the commonest shape in this tree.
 #   [2] a module script re-defining deploy_ready / deploy_ready_min / cm_key_set locally — a copy
 #       silently SHADOWS the shared _lib.sh definition for that one caller, the exact failure mode
 #       that let six copies of an extraction walker drift apart before tools/lint/_extract-func.sh
@@ -58,6 +60,8 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tools/lint/_parse-guard-args.sh
+source "${LINT_DIR}/_parse-guard-args.sh"
 # shellcheck source=tools/lint/_extract-func.sh
 source "${LINT_DIR}/_extract-func.sh"
 # shellcheck source=tools/lint/_check-coverage.sh
@@ -72,6 +76,7 @@ ok()   { echo "✅ $*"; }
 
 # ── [1] the ratchet table ──────────────────────────────────────────────────────────────────────────
 # One line per file, "<basename> <count>". A file not listed here defaults to baseline 0.
+#
 # Re-measured 2026-08-01 against the committed tree after the second conversion pass. Seven files
 # reached ZERO and their rows are GONE rather than set to 0 — an absent file defaults to baseline 0, so
 # deleting the row is what protects them: a single new silenced read in any of them now fails outright.
@@ -79,22 +84,59 @@ ok()   { echo "✅ $*"; }
 # runs diffed against `git archive HEAD`): agentic-ai (4), ai-assisted-development (8), app-modernization
 # (4), deployment-targets-scheduling (7), gitops-fundamentals (5), jobs-batch-kueue (9),
 # serverless-zero-to-hero (4) — 41 lines, table total 98 → 57. No file's count rose.
+#
+# ── 2026-08-01, SAME DAY: the detector was matching HALF the debt ────────────────────────────────
+# The header above documented `oc … 2>/dev/null` and the detector matched that literal string only.
+# It never saw `>/dev/null 2>&1`, which is the MORE COMMON shape here — it is what an existence
+# probe and a negation are written as:
+#
+#     deploy_present() { oc get deploy "$1" -n "$2" >/dev/null 2>&1; }
+#     ! oc get networkpolicy default-deny-all -n "$NS" >/dev/null 2>&1
+#
+# Both silence stderr exactly as thoroughly as `2>/dev/null` and are blind in exactly the same way: a
+# throttled API, an expired token or a network blip is indistinguishable from "the object is not
+# there", and the attendee gets a false ❌ for correct work. Measured against the committed tree: 58
+# additional LINES across 13 files, every one of them invisible to the old detector and therefore
+# passing at whatever baseline the file happened to carry. tools/verify/networking-dev-devops.sh was
+# the worst case — it carried ZERO of the old shape, so it had no row at all and sat at baseline 0
+# while holding TEN blind reads.
+#
+# NOT ABSORBED SILENTLY. The table below is the honest re-measurement, and the debt it now admits to
+# is 115 lines, not 57. Which files moved (old → new): build-deliver 3→4, eventing-deep-dive 3→9,
+# gitops-at-scale 6→8, multi-tenancy-workload-security 4→9, networking-dev-devops 0→10 (NEW ROW),
+# packaging-distributing 2→7, platform-orientation 4→5, registry-images-catalog-governance 8→15,
+# resilience-multicluster-dr 10→22, securing-apps-keycloak 3→5, service-mesh-advanced-gateways 6→13.
+# Six rows are unchanged. No file's count fell, because nothing was converted in this change — the
+# detector simply stopped being half-blind.
+#
+# STILL A RATCHET, DELIBERATELY. A zero-tolerance gate over 58 newly-visible violations would be
+# switched off inside a week, and these reads are pre-existing debt, not a regression someone just
+# introduced. Recording them makes the size of the debt visible instead of laundering it. The
+# direction of travel is unchanged: a count may only stay put or FALL, and converting a file's reads
+# to oc_read/oc_present/oc_absent should lower its row in the same change.
+#
+# NOT matched, on purpose: `oc … 2>&1 >/dev/null` (one instance, jobs-batch-kueue.sh:198,
+# `cq_err="$(oc get clusterqueue "$CQ" -o name 2>&1 >/dev/null || true)"`). The order is reversed:
+# stderr goes to the ORIGINAL stdout and is captured, stdout is discarded. That is a deliberate
+# capture-the-error idiom — the opposite of silencing one — and folding it in would punish the shape
+# that keeps the diagnosis.
 BASELINE_TABLE="
 app-security-testing.sh 1
-build-deliver.sh 3
+build-deliver.sh 4
 developer-hub-golden-paths.sh 1
 devspaces-inner-loop.sh 1
-eventing-deep-dive.sh 3
-gitops-at-scale.sh 6
-multi-tenancy-workload-security.sh 4
+eventing-deep-dive.sh 9
+gitops-at-scale.sh 8
+multi-tenancy-workload-security.sh 9
+networking-dev-devops.sh 10
 observability-health-scale.sh 2
-packaging-distributing.sh 2
+packaging-distributing.sh 7
 pipelines-fundamentals.sh 1
-platform-orientation.sh 4
-registry-images-catalog-governance.sh 8
-resilience-multicluster-dr.sh 10
-securing-apps-keycloak.sh 3
-service-mesh-advanced-gateways.sh 6
+platform-orientation.sh 5
+registry-images-catalog-governance.sh 15
+resilience-multicluster-dr.sh 22
+securing-apps-keycloak.sh 5
+service-mesh-advanced-gateways.sh 13
 trusted-supply-chain.sh 2
 "
 
@@ -102,11 +144,24 @@ baseline_for() {  # <basename> → integer, 0 if not listed
   awk -v f="$1" '$1==f{print $2; found=1} END{if(!found) print 0}' <<< "$BASELINE_TABLE"
 }
 
-# A line counts iff: not a comment, carries a literal `2>/dev/null`, AND carries a standalone `oc`
-# token (so a pure curl probe — no `oc` token at all — never matches). Read from STDIN so the same
-# matcher applies to a whole file and to an extracted function's body text alike.
+# A line counts iff: not a comment, silences stderr into /dev/null in one of the shapes below, AND
+# carries a standalone `oc` token (so a pure curl probe — no `oc` token at all — never matches). Read
+# from STDIN so the same matcher applies to a whole file and to an extracted function's body text
+# alike, and counted BY LINE, so a line carrying two silenced reads counts once.
+#
+# The three silencing shapes, all equally blind:
+#   2>/dev/null              stderr discarded, stdout kept — the shape 51eb1b6 converted.
+#   >/dev/null 2>&1          both discarded — the existence-probe / negation idiom, and the MORE
+#                            COMMON one here; invisible to this detector until 2026-08-01.
+#   &>/dev/null              bash shorthand for the same thing. Zero instances today; matched so the
+#                            obvious one-character bypass does not exist the day someone reaches for it.
+# The optional [[:space:]]* after `2>` / `&>` and the required whitespace before `2>&1` are what make
+# `2> /dev/null` and `> /dev/null 2>&1` count too. `2>&1 >/dev/null` deliberately does NOT match —
+# see the BASELINE_TABLE header.
+OC_SILENCED_RE='2>[[:space:]]*/dev/null|>[[:space:]]*/dev/null[[:space:]]+2>&1|&>[[:space:]]*/dev/null'
+
 oc_devnull_lines() {
-  grep -vE '^[[:space:]]*#' | grep -E '2>/dev/null' | grep -E '(^|[^A-Za-z0-9_])oc([^A-Za-z0-9_]|$)'
+  grep -vE '^[[:space:]]*#' | grep -E "$OC_SILENCED_RE" | grep -E '(^|[^A-Za-z0-9_])oc([^A-Za-z0-9_]|$)'
 }
 
 count_oc_devnull_violations() {  # <file> → integer, gitea_host()'s body excluded
@@ -129,7 +184,7 @@ check_no_new_raw_oc_devnull() {  # <verify-dir> → 0 within baseline, 1 a file 
     actual="$(count_oc_devnull_violations "$f")"
     base_count="$(baseline_for "$base")"
     if [[ "$actual" -gt "$base_count" ]]; then
-      bad "[1] ${base}: ${actual} raw 'oc … 2>/dev/null' read(s) outside gitea_host(), baseline allows ${base_count} (excess $((actual - base_count)))."
+      bad "[1] ${base}: ${actual} stderr-silenced 'oc' read line(s) outside gitea_host() (2>/dev/null, >/dev/null 2>&1 or &>/dev/null), baseline allows ${base_count} (excess $((actual - base_count)))."
       note "    Each one hides a real API failure (throttling, an expired token, a blip) as a genuine"
       note "    absence — the attendee gets a false ❌ for correct work. Route it through oc_read /"
       note "    oc_present / oc_absent (tools/verify/_lib.sh) instead of adding another one."
@@ -141,7 +196,7 @@ check_no_new_raw_oc_devnull() {  # <verify-dir> → 0 within baseline, 1 a file 
     bad "[1] ${dir}: zero *.sh files found — this detector inspected nothing."
     return 2
   fi
-  [[ "$rc" -eq 0 ]] && ok "[1] no tools/verify/*.sh file exceeds its recorded raw-oc-2>/dev/null baseline"
+  [[ "$rc" -eq 0 ]] && ok "[1] no tools/verify/*.sh file exceeds its recorded stderr-silenced-oc-read baseline"
   return "$rc"
 }
 
@@ -417,6 +472,38 @@ FIXTURE
   rm -rf "$d"
   _expect_rc "canary [1]-D (pure curl probe stays clean)" 0 "$got" || bad_seen=1
 
+  # Canary [1]-E — the `>/dev/null 2>&1` shape, which this detector was blind to until 2026-08-01.
+  # Appended to a file at its recorded baseline, so ONLY the extended matcher can turn it into a
+  # finding: with the old literal-'2>/dev/null' matcher this canary is silently clean.
+  # shellcheck disable=SC2016  # sed PROGRAM text: fixture source for the copy, not an expansion.
+  d="$(_canary_verify_dir platform-orientation.sh '$a\
+oc get ns default >/dev/null 2>&1')"
+  got=0; check_no_new_raw_oc_devnull "$d" >/dev/null 2>&1 || got=$?
+  rm -rf "$d"
+  _expect_rc "canary [1]-E ('>/dev/null 2>&1' existence probe, the shape the detector used to miss)" 1 "$got" || bad_seen=1
+
+  # Canary [1]-F — the `&>/dev/null` shorthand, the one-character bypass of [1]-E. Zero instances in
+  # the tree today, which is exactly why it needs a canary rather than a measurement.
+  d="$(mktemp -d)"
+  cat > "${d}/only-ampersand.sh" <<'FIXTURE'
+route_present() { oc get route parasol-web -n "$1" &>/dev/null; }
+FIXTURE
+  got=0; check_no_new_raw_oc_devnull "$d" >/dev/null 2>&1 || got=$?
+  rm -rf "$d"
+  _expect_rc "canary [1]-F ('&>/dev/null' shorthand, unlisted file at baseline 0)" 1 "$got" || bad_seen=1
+
+  # Canary [1]-G — the NEGATIVE canary for the extension: `2>&1 >/dev/null` REVERSES the order, so
+  # stderr goes to the original stdout and is captured while stdout is discarded. That keeps the
+  # diagnosis rather than silencing it, and jobs-batch-kueue.sh:198 does exactly this on purpose.
+  # Without this canary a lazily-widened regex would quietly start punishing the good shape.
+  d="$(mktemp -d)"
+  cat > "${d}/only-captured-stderr.sh" <<'FIXTURE'
+cq_probe() { cq_err="$(oc get clusterqueue "$1" -o name 2>&1 >/dev/null || true)"; }
+FIXTURE
+  got=0; check_no_new_raw_oc_devnull "$d" >/dev/null 2>&1 || got=$?
+  rm -rf "$d"
+  _expect_rc "canary [1]-G (NEGATIVE: '2>&1 >/dev/null' captures stderr and must stay clean)" 0 "$got" || bad_seen=1
+
   # Canary [2] — a module script shadows a shared predicate with a local copy.
   d="$(_canary_verify_dir platform-orientation.sh '1i\
 deploy_ready() { return 0; }')"
@@ -452,12 +539,16 @@ deploy_ready() { return 0; }')"
   if [[ "$bad_seen" -ne 0 ]]; then
     return 2
   fi
-  ok "self-test ok — ratchet-exceeded, unlisted-file, gitea_host exclusion, curl allowance, predicate shadow, NotFound-folding and an uncalled detector all caught; real tree stays clean."
+  ok "self-test ok — ratchet-exceeded, unlisted-file, '>/dev/null 2>&1', '&>/dev/null', predicate shadow,"
+  ok "   NotFound-folding and an uncalled detector all caught; gitea_host exclusion, pure-curl probe and"
+  ok "   the stderr-CAPTURING '2>&1 >/dev/null' shape all stay clean; real tree within baseline."
   # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
   return 1
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then
+parse_guard_args "$@"
+
+if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
   self_test
   exit $?
 fi
@@ -473,6 +564,6 @@ fi
 RC=0
 run_check "$VERIFY_DIR" "$LIB_SH" || RC=$?
 if [[ "$RC" -eq 0 ]]; then
-  ok "verify-oc-read-guard: no new raw 'oc … 2>/dev/null' reads beyond baseline, no shared-predicate shadowing, oc_read's three-outcome contract intact."
+  ok "verify-oc-read-guard: no new stderr-silenced 'oc' reads beyond baseline, no shared-predicate shadowing, oc_read's three-outcome contract intact."
 fi
 exit "$RC"

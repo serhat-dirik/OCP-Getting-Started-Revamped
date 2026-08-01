@@ -131,10 +131,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # a permanent excuse. Reasons, one per entry, in the same order:
   #   adoption-skippable-guard.sh  own parser: takes --components-dir, and must refuse to combine it
   #                                with --self-test. Already rejects unknown arguments by name.
-  #   route-tls-guard.sh           OWED. Has no --self-test mode at all yet; adopting the parser is
-  #                                part of giving it one. Owned by another lane as of 2026-08-01.
-  #   verify-oc-read-guard.sh      OWED. Owned by another lane as of 2026-08-01; convert on landing.
-  _PGA_EXEMPT="adoption-skippable-guard.sh route-tls-guard.sh verify-oc-read-guard.sh"
+  #
+  # route-tls-guard.sh and verify-oc-read-guard.sh were listed here as OWED on 2026-08-01 and both
+  # landed on the shared parser the same night (route-tls-guard.sh gained its first real --self-test
+  # in that change). Their rows are deleted rather than kept: the STALE EXEMPTION branch below turns
+  # a converted-but-still-listed file into an error precisely so this list cannot outlive its reason.
+  _PGA_EXEMPT="adoption-skippable-guard.sh"
 
   # A file is "runnable" if it has a standalone entry point at all: either a real shebang-driven
   # top-level flow (a guard) or a `BASH_SOURCE == $0` block (a library). Everything under tools/lint

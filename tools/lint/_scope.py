@@ -67,6 +67,34 @@ from __future__ import annotations
 import sys
 
 
+def _crash_exit_2(exc_type, exc, tb):
+    """Any uncaught exception → rc 2, INCLUDING one raised at MODULE level.
+
+    WHY THE `__main__` TRY/EXCEPT IS NOT ENOUGH (measured 2026-08-01). Module-level code runs before
+    `__main__` exists, so a bad constant, a failed import, or a _scope.py that does not PARSE crashed
+    with Python's default rc 1 — which is exactly what CI's `--self-test must exit EXACTLY 1` reads as
+    "the canary fired". Measured on a scratch copy of this file: replacing _scope.py with a syntax
+    error gave rc 1 in BOTH modes, and the CI step would have printed "self-test ok".
+
+    Installed as the FIRST statement after the imports, so it is already in place before anything
+    below it can fail. `os._exit` is what makes the code stick: an excepthook cannot change the exit
+    status by returning.
+    """
+    import os
+    import traceback
+    traceback.print_exception(exc_type, exc, tb)
+    print(f"::error::_scope: crashed before it could report "
+          f"({exc_type.__name__}: {exc}). "
+          f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and never "
+          f"'canary detected'.", file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(2)
+
+
+sys.excepthook = _crash_exit_2
+
+
 class Scope:
     """Per-dimension measurements of what a guard actually inspected, plus the floors they may not
     fall below."""
@@ -265,4 +293,27 @@ def _main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_main() if "--self-test" in sys.argv else _main())
+    # THE TERNARY THAT WAS HERE WAS DEAD (removed 2026-08-01). It read
+    #     sys.exit(_main() if "--self-test" in sys.argv else _main())
+    # — both branches identical, so it was shaped like a mode switch that did not exist. Removed
+    # rather than implemented: this file is a library, and proving its own mechanism is the only
+    # thing it can be RUN to do, so there is no second mode to switch to. What the ternary's shape
+    # promised is now real in the only way that means anything here — an argv this file does not
+    # understand exits 2 instead of silently running the self-test and returning its 1, which is
+    # every other guard's "the canary fired".
+    if sys.argv[1:] != ["--self-test"]:
+        print(f"usage: {sys.argv[0]} --self-test   (this file is a library; its only runnable mode "
+              f"is proving the scope ledger works)", file=sys.stderr)
+        sys.exit(2)
+    # Any unhandled exception exits 1, and 1 is this file's "the mechanism works" code — the same
+    # collision the consuming guards were hardened against. A crash must never be readable as proof.
+    try:
+        sys.exit(_main())
+    except SystemExit:
+        raise
+    except BaseException as exc:                                  # noqa: BLE001 — deliberate
+        import traceback
+        traceback.print_exc()
+        print(f"::error::_scope.py: crashed ({type(exc).__name__}: {exc}). Exiting 2 — a crash is "
+              f"'the harness could not run', never 'the mechanism is proven'.", file=sys.stderr)
+        sys.exit(2)

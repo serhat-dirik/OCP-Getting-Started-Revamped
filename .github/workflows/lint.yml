@@ -185,7 +185,33 @@ jobs:
       # `solve=true`, so `helm template <dir>` never produced them and never checked them. The guard
       # below renders each chart under the value permutations that change what is emitted.
       - name: Browser-facing Routes must be edge-terminated
-        run: ./tools/lint/route-tls-guard.sh
+        # Measured 2026-08-01: this guard had NO --self-test mode. `route-tls-guard.sh --self-test`
+        # — the house flag, spelled correctly — discarded the argument in silence and ran the PLAIN
+        # check, which passes on a healthy tree by definition, then exited 0 with a green result. So
+        # this step ran the gate with nothing whatsoever asserting that its detection still works,
+        # and a maintainer reaching for the documented flag got a tick that proved nothing.
+        #
+        # The self-test now drives the real check with each of its TWO input halves collapsed in
+        # turn — to ZERO and to a genuine TRUNCATION (2 of 56 renders; 2 of 16 gitops manifests;
+        # 1 of 2 platform-portfolio manifests) — with the other half left healthy, and plants a
+        # TLS-less Route in each half to prove the verdict propagates. Truncation passing outright
+        # was a real defect in this file earlier that same night, which is why every half is proven
+        # at a non-empty collapse and not just at zero.
+        run: |
+          rc=0
+          ./tools/lint/route-tls-guard.sh --self-test || rc=$?
+          # Exactly 1 = every canary correctly caught. 0 = a detector is blind (or the flag was
+          # discarded again); 2 = a canary was missed, or the real tree does not pass under the real
+          # defaults, which the plain run below would report anyway.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::route-tls-guard self-test must exit 1 (TLS-less Route rejected and an" \
+                 "edge-terminated one accepted, both input halves caught at zero AND at a" \
+                 "truncation, a real finding surfaced through each half); got rc=$rc. The guard's" \
+                 "detection is unproven — refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — detectors fire, both scope halves floor-checked, real tree clean (rc=1)."
+          ./tools/lint/route-tls-guard.sh
 
   kustomize:
     runs-on: ubuntu-latest
@@ -1023,3 +1049,79 @@ jobs:
           fi
           echo "self-test ok — typo, flag-with-value and bare positional all rejected 2 and named."
           bash tools/lint/_parse-guard-args.sh
+
+  verify-oc-read:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A verify script must not read the cluster BLIND
+        # tools/lint/verify-oc-read-guard.sh landed in a4c632f and was never wired into CI at all —
+        # a gate that exists in the tree, is documented as a gate, and runs nowhere. Worse, its
+        # `--selftest` (one missing hyphen) exited 0 green, so the two ways a maintainer might have
+        # convinced themselves it was live both lied.
+        #
+        # What it pins (commit 51eb1b6): `oc get … 2>/dev/null` cannot tell "the object is not
+        # there" (a real ❌) from "the cluster did not answer" (a ⚠ that is never the attendee's
+        # fault) — both come back as an empty string. oc_read in tools/verify/_lib.sh keeps stdout
+        # and stderr apart and returns three outcomes. Three detectors: [1] a ratchet on new blind
+        # reads per file, [2] a module script shadowing a shared predicate with a local copy, and
+        # [3] oc_read's three-outcome contract, EXECUTED against stubbed NotFound / Forbidden /
+        # connection-refused answers rather than grepped — 51eb1b6's own first draft folded NotFound
+        # into "succeeded" and made a missing-PodDisruptionBudget check PASS.
+        #
+        # 2026-08-01: [1]'s detector matched the literal `2>/dev/null` only and MISSED
+        # `>/dev/null 2>&1`, which is the commoner shape here (existence probes and negations) — 58
+        # further blind lines across 13 files, tools/verify/networking-dev-devops.sh among them with
+        # TEN of them and no table row at all. The detector now matches all three silencing shapes
+        # and the baseline table was re-measured honestly rather than absorbing the difference.
+        run: |
+          rc=0
+          bash tools/lint/verify-oc-read-guard.sh --self-test || rc=$?
+          # Exactly 1 = every canary caught: the per-file ratchet exceeded, an unlisted file at
+          # baseline 0, the two newly-matched silencing shapes, a shadowed predicate, the
+          # NotFound-folding regression and a declared-but-never-called detector — while
+          # gitea_host's named exclusion, a pure curl probe and the stderr-CAPTURING
+          # `2>&1 >/dev/null` form all stayed silent. 0 = a detector is blind (or the flag was
+          # discarded); 2 = a canary was missed or the real tree is already over baseline.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::verify-oc-read-guard self-test must exit 1 (every canary caught, no" \
+                 "false positives, real tree within baseline); got rc=$rc. The guard's detection" \
+                 "is unproven — refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — all canaries caught, negative canaries silent, tree within baseline (rc=1)."
+          bash tools/lint/verify-oc-read-guard.sh
+
+  curl-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Brace expressions must not be eaten as AsciiDoc attribute references
+        # This guard shipped canaries, called Scope.self_check(), and ran NOWHERE — measured
+        # 2026-08-01. An unrun gate is worse than none: it reads as coverage in review and
+        # executes on nothing. Wired here alongside version-anchor, which had the same gap.
+        run: |
+          rc=0
+          python3 tools/lint/curl-format-guard.py --self-test || rc=$?
+          # 1 = every canary fired as declared. 0 = the guard is blind. 2 = it could not run at
+          # all (bad regex, missing _scope, crash) — which Python used to report as 1, i.e. as
+          # proof of detection, until the guards were hardened to exit 2 on any crash.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::curl-format-guard self-test must exit 1; got rc=$rc."
+            exit 1
+          fi
+          python3 tools/lint/curl-format-guard.py
+
+  version-anchor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: OpenShift release numbers must not be hardcoded in attendee prose
+        run: |
+          rc=0
+          python3 tools/lint/version-anchor-guard.py --self-test || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::version-anchor-guard self-test must exit 1; got rc=$rc."
+            exit 1
+          fi
+          python3 tools/lint/version-anchor-guard.py

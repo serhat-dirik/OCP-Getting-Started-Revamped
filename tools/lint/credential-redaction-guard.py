@@ -78,10 +78,43 @@ import re
 import subprocess
 import sys
 
+
+def _crash_exit_2(exc_type, exc, tb):
+    """Any uncaught exception → rc 2, INCLUDING one raised at MODULE level.
+
+    WHY THE `__main__` TRY/EXCEPT IS NOT ENOUGH (measured 2026-08-01). Module-level code runs before
+    `__main__` exists, so a bad constant, a failed import, or a _scope.py that does not PARSE crashed
+    with Python's default rc 1 — which is exactly what CI's `--self-test must exit EXACTLY 1` reads as
+    "the canary fired". Measured on a scratch copy of this file: replacing _scope.py with a syntax
+    error gave rc 1 in BOTH modes, and the CI step would have printed "self-test ok".
+
+    Installed as the FIRST statement after the imports, so it is already in place before anything
+    below it can fail. `os._exit` is what makes the code stick: an excepthook cannot change the exit
+    status by returning.
+    """
+    import os
+    import traceback
+    traceback.print_exception(exc_type, exc, tb)
+    print(f"::error::credential-redaction-guard: crashed before it could report "
+          f"({exc_type.__name__}: {exc}). "
+          f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and never "
+          f"'canary detected'.", file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(2)
+
+
+sys.excepthook = _crash_exit_2
+
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 try:
     from _scope import Scope  # noqa: E402  (path must be set first)
-except ImportError as exc:  # pragma: no cover — see the exit-code note below
+except Exception as exc:  # noqa: BLE001 — deliberately broad; see the note below
+    # NOT `except ImportError`. Measured 2026-08-01: a _scope.py that fails to PARSE raises
+    # SyntaxError, sails past an ImportError-only handler, and exits 1 — CI's 'the canary
+    # fired'. Anything at all going wrong while loading the scope ledger means this guard
+    # cannot start, and that is rc 2 regardless of which exception said so.
     # An uncaught ImportError exits 1, and CI's contract for this guard is "--self-test must exit
     # EXACTLY 1 = the canary was detected". A crash would therefore be READ AS PROOF OF DETECTION and
     # the real run would never even happen. Measured 2026-08-01 by running a copy of this file with
@@ -101,7 +134,7 @@ SKIP_DIR_PARTS = {
 }
 
 
-def _compile(name, pattern):
+def _compile(name, pattern, flags=0):
     """re.compile, but a bad pattern exits 2 instead of crashing with 1.
 
     WHY (measured 2026-08-01). Every pattern below is compiled at MODULE level, so a typo raises
@@ -112,7 +145,7 @@ def _compile(name, pattern):
     in this file, so the compile step is where the exit code has to be fixed.
     """
     try:
-        return re.compile(pattern)
+        return re.compile(pattern, flags)
     except re.error as exc:
         print(f"::error::credential-redaction-guard: {name} is not a valid regex ({exc}) — the guard "
               f"could not load. Exiting 2: that is 'the guard is broken', not 'the canary fired'.",
@@ -438,11 +471,12 @@ CANARY_PATH = pathlib.Path(__file__).resolve().parent / "credential-redaction-gu
 
 # A mutation is how a section proves it is testing what it claims: blind the pattern it names (make
 # it match nothing) or flood it (make it match everything), and the section's outcome must FLIP.
-NEVER_MATCH = re.compile(r"(?!)")
-ALWAYS_MATCH = re.compile(r"")
+NEVER_MATCH = _compile("NEVER_MATCH", r"(?!)")
+ALWAYS_MATCH = _compile("ALWAYS_MATCH", r"")
 
 # // EXPECT: <rule[,rule]|none> | <blind|flood|-> <PATTERN_NAME> — prose
-EXPECT_RE = re.compile(
+EXPECT_RE = _compile(
+    "EXPECT_RE",
     r"^//\s*EXPECT:\s*(?P<rules>[^|]+?)\s*\|\s*(?P<mode>blind|flood|-)\s*(?P<pattern>[A-Z_]*)"
 )
 

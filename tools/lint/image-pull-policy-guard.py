@@ -94,8 +94,51 @@ import subprocess
 import sys
 import tempfile
 
+
+def _crash_exit_2(exc_type, exc, tb):
+    """Any uncaught exception → rc 2, INCLUDING one raised at MODULE level.
+
+    WHY THE `__main__` TRY/EXCEPT IS NOT ENOUGH (measured 2026-08-01). Module-level code runs before
+    `__main__` exists, so a bad constant, a failed import, or a _scope.py that does not PARSE crashed
+    with Python's default rc 1 — which is exactly what CI's `--self-test must exit EXACTLY 1` reads as
+    "the canary fired". Measured on a scratch copy of this file: replacing _scope.py with a syntax
+    error gave rc 1 in BOTH modes, and the CI step would have printed "self-test ok".
+
+    Installed as the FIRST statement after the imports, so it is already in place before anything
+    below it can fail. `os._exit` is what makes the code stick: an excepthook cannot change the exit
+    status by returning.
+    """
+    import os
+    import traceback
+    traceback.print_exception(exc_type, exc, tb)
+    print(f"::error::image-pull-policy-guard: crashed before it could report "
+          f"({exc_type.__name__}: {exc}). "
+          f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and never "
+          f"'canary detected'.", file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(2)
+
+
+sys.excepthook = _crash_exit_2
+
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from _scope import Scope  # noqa: E402  (path must be set first; this file is run as a script)
+try:
+    from _scope import Scope  # noqa: E402  (path must be set first)
+except Exception as exc:  # noqa: BLE001 — deliberately broad; see the note below
+    # NOT `except ImportError`. Measured 2026-08-01: a _scope.py that fails to PARSE raises
+    # SyntaxError, sails past an ImportError-only handler, and exits 1 — CI's 'the canary
+    # fired'. Anything at all going wrong while loading the scope ledger means this guard
+    # cannot start, and that is rc 2 regardless of which exception said so.
+    # An uncaught ImportError exits 1, and CI's contract for this guard is "--self-test must exit
+    # EXACTLY 1 = the canary was detected". A crash would therefore be READ AS PROOF OF DETECTION and
+    # the real run would never even happen. Measured 2026-08-01 by running a copy of this file with
+    # _scope.py absent: traceback, rc=1, and the CI step would have printed "self-test ok".
+    print(f"::error::image-pull-policy-guard: cannot import _scope ({exc}) — "
+          f"the guard could not start, which is NOT the same as a clean tree.",
+          file=sys.stderr)
+    sys.exit(2)
 
 try:
     import yaml
@@ -733,4 +776,18 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Any unhandled exception exits 1, and 1 is this guard's "the canary was detected" / "the tree
+    # has a finding" code. A crash must never be readable as either, so it is remapped to 2 — "the
+    # guard could not run". Without this, a typo in a regex or a missing fixture would make
+    # --self-test exit 1 and CI would report the guard's detection as PROVEN.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:                                  # noqa: BLE001 — deliberate
+        import traceback
+        traceback.print_exc()
+        print(f"::error::image-pull-policy-guard: crashed ({type(exc).__name__}: {exc}). "
+              f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and "
+              f"never 'canary detected'.", file=sys.stderr)
+        sys.exit(2)

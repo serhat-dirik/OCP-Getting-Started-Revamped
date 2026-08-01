@@ -86,8 +86,71 @@ import pathlib
 import re
 import sys
 
+
+def _crash_exit_2(exc_type, exc, tb):
+    """Any uncaught exception → rc 2, INCLUDING one raised at MODULE level.
+
+    WHY THE `__main__` TRY/EXCEPT IS NOT ENOUGH (measured 2026-08-01). Module-level code runs before
+    `__main__` exists, so a bad constant, a failed import, or a _scope.py that does not PARSE crashed
+    with Python's default rc 1 — which is exactly what CI's `--self-test must exit EXACTLY 1` reads as
+    "the canary fired". Measured on a scratch copy of this file: replacing _scope.py with a syntax
+    error gave rc 1 in BOTH modes, and the CI step would have printed "self-test ok".
+
+    Installed as the FIRST statement after the imports, so it is already in place before anything
+    below it can fail. `os._exit` is what makes the code stick: an excepthook cannot change the exit
+    status by returning.
+    """
+    import os
+    import traceback
+    traceback.print_exception(exc_type, exc, tb)
+    print(f"::error::version-anchor-guard: crashed before it could report "
+          f"({exc_type.__name__}: {exc}). "
+          f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and never "
+          f"'canary detected'.", file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(2)
+
+
+sys.excepthook = _crash_exit_2
+
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from _scope import Scope, fixture_line_expectations  # noqa: E402  (path must be set first)
+try:
+    from _scope import Scope, fixture_line_expectations  # noqa: E402  (path must be set first)
+except Exception as exc:  # noqa: BLE001 — deliberately broad; see the note below
+    # NOT `except ImportError`. Measured 2026-08-01: a _scope.py that fails to PARSE raises
+    # SyntaxError, sails past an ImportError-only handler, and exits 1 — CI's 'the canary
+    # fired'. Anything at all going wrong while loading the scope ledger means this guard
+    # cannot start, and that is rc 2 regardless of which exception said so.
+    # An uncaught ImportError exits 1, and CI's contract for this guard is "--self-test must exit
+    # EXACTLY 1 = the canary was detected". A crash would therefore be READ AS PROOF OF DETECTION and
+    # the real run would never even happen. Measured 2026-08-01 by running a copy of this file with
+    # _scope.py absent: traceback, rc=1, and the CI step would have printed "self-test ok".
+    print(f"::error::version-anchor-guard: cannot import _scope ({exc}) — "
+          f"the guard could not start, which is NOT the same as a clean tree.",
+          file=sys.stderr)
+    sys.exit(2)
+
+
+def _compile(name, pattern, flags=0):
+    """re.compile, but a bad pattern exits 2 instead of crashing with 1.
+
+    WHY (measured 2026-08-01). Every pattern compiled at MODULE level raises re.error before main()
+    — and before any try/except inside it — can run. Python exits 1 on an uncaught exception, and 1
+    is exactly what CI's `--self-test must exit EXACTLY 1` assertion accepts as "the canary was
+    detected". A one-character regex typo therefore reported the guard's detection as PROVEN while
+    the guard could not even load. A regex is the likeliest thing to break in a guard, so the
+    compile step is where the exit code has to be fixed.
+    """
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        print(f"::error::version-anchor-guard: {name} is not a valid regex ({exc}) — "
+              f"the guard could not load. Exiting 2: that is 'the guard is broken', not "
+              f"'the canary fired'.", file=sys.stderr)
+        sys.exit(2)
+
 
 # The attendee-facing renderings. Numbers may not appear here; instructor/troubleshooting are
 # provenance surfaces and are deliberately absent.
@@ -96,23 +159,23 @@ ATTENDEE_PAGES = ("concept.adoc", "lab.adoc", "wrapup.adoc")
 # Any version attribute that carries an OpenShift release. Product versions ({pipelines_version},
 # {gitops_version}, …) are NOT matched: naming the product release in "the OpenShift Pipelines guide
 # (Pipelines 1.20)" is useful and does not date the page to a cluster.
-ATTR_RE = re.compile(r"\{(ocp[A-Za-z0-9_]*_version|ocp_version)\}")
+ATTR_RE = _compile("ATTR_RE", r"\{(ocp[A-Za-z0-9_]*_version|ocp_version)\}")
 
 # A hardcoded OpenShift release. Two digits after the dot is what separates a release (4.19 … 4.99)
 # from an ordinary number ("4.5 GB"). The lookbehind rejects a digit or dot before the match, so an
 # IP address like 10.14.221.9 cannot produce a false "4.22", and an optional leading `v` catches the
 # `v4.22` catalog-tag form.
-LITERAL_RE = re.compile(r"(?<![\w.])v?4\.\d{2}(?:\.\d+)?(?!\d)")
+LITERAL_RE = _compile("LITERAL_RE", r"(?<![\w.])v?4\.\d{2}(?:\.\d+)?(?!\d)")
 
 # Verbatim block delimiters — listing and literal. Their contents are captured output.
-VERBATIM_DELIM_RE = re.compile(r"^(-{4,}|\.{4,})\s*$")
+VERBATIM_DELIM_RE = _compile("VERBATIM_DELIM_RE", r"^(-{4,}|\.{4,})\s*$")
 
 # The deliberate-exception marker. A reason is mandatory.
-OPT_OUT_RE = re.compile(r"^\s*//\s*version-anchor-ok\s*:\s*\S")
+OPT_OUT_RE = _compile("OPT_OUT_RE", r"^\s*//\s*version-anchor-ok\s*:\s*\S")
 # Same marker with the reason missing — reported, so it can't be used as a silent blanket.
-OPT_OUT_BARE_RE = re.compile(r"^\s*//\s*version-anchor-ok\s*:?\s*$")
+OPT_OUT_BARE_RE = _compile("OPT_OUT_BARE_RE", r"^\s*//\s*version-anchor-ok\s*:?\s*$")
 
-COMMENT_RE = re.compile(r"^\s*//")
+COMMENT_RE = _compile("COMMENT_RE", r"^\s*//")
 
 
 def find_offenders(path: pathlib.Path):
@@ -295,4 +358,18 @@ def scope_for_self_test() -> Scope:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Any unhandled exception exits 1, and 1 is this guard's "the canary was detected" / "the tree
+    # has a finding" code. A crash must never be readable as either, so it is remapped to 2 — "the
+    # guard could not run". Without this, a typo in a regex or a missing fixture would make
+    # --self-test exit 1 and CI would report the guard's detection as PROVEN.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:                                  # noqa: BLE001 — deliberate
+        import traceback
+        traceback.print_exc()
+        print(f"::error::version-anchor-guard: crashed ({type(exc).__name__}: {exc}). "
+              f"Exiting 2 — a crash is 'the guard could not run', never 'clean' and "
+              f"never 'canary detected'.", file=sys.stderr)
+        sys.exit(2)
