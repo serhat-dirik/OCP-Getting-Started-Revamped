@@ -268,6 +268,35 @@ add_unique() {  # <csv> <item> → csv with item appended at most once
 # throw away. CC_VERB: ok (install it) | present (already on the cluster) | invalid (bug in the
 # component). CC_HARD records whether the evidence was an OperatorGroup collision — the one class of
 # evidence that must still refuse when the component cannot be skipped.
+#
+# KNOWN BLIND SPOT — A COMPONENT THAT SHIPS NO SUBSCRIPTION IS NEVER CLASSIFIED AT ALL.
+# (Measured 2026-08-01 by driving this exact function against fixtures with every adoption signal
+#  forced positive. Recorded, deliberately not fixed here: the fix needs a way for a component to
+#  DECLARE which operator it configures, and that is an owner design decision, not a local patch.)
+#
+# The mechanism, precisely: both loops below are fed by lib-components.sh readers that GLOB the
+# component directory — component_operatorgroup_namespaces() over operatorgroup*.yaml, and
+# component_subscriptions() over subscription*.yaml. A component carrying neither file produces ZERO
+# iterations of both loops, so not one of signals 1-4 is ever consulted. CC_VERB keeps the "ok" this
+# function assigns on entry, and the preflight loop's `[[ "$CC_VERB" == "ok" ]] && continue` (the
+# `for _stack in "${PREFLIGHT_STACKS[@]}"` loop further down) installs the component unconditionally.
+#
+# WHAT THAT LOOKS LIKE ON A CUSTOMER CLUSTER. Split an operator component in two — `foo-operator`
+# (Namespace + OperatorGroup + Subscription, and therefore is_operator_only() = skippable) and
+# `foo-config` (the operand CRs alone, no Subscription). On a cluster that already runs foo:
+#   • foo-operator is correctly detected as present and SKIPPED — the org's operator is left alone;
+#   • foo-config is classified "ok" and applied anyway, so our operand CRs land on THEIR operator
+#     instance, at whatever channel and version they chose to run it at.
+# There is no ❌, no ⚠, no line in --adoption-plan and nothing in the install summary: the adoption
+# preflight prints exactly what it prints for a component that had nothing to adopt. That is QUIETER
+# than the openshift-pipelines case this code path was criticised for, which at least warns.
+#
+# WHY IT MATTERS BEYOND ONE COMPONENT. "Move the extra resource into its own component" is the
+# standard remedy the adoption gate itself recommends for a skippable → installs-more demotion (see
+# tools/lint/adoption-skippable-guard.sh and platform-portfolio/README.md § Adoption). Taking that
+# advice is what CREATES an operand-only component — so today the recommended fix silently converts
+# a visible warning into an invisible overwrite, and the "split operator install from operand
+# config" pattern cannot be used safely anywhere in the portfolio until this is resolved.
 CC_VERB=""; CC_REASON=""; CC_NS=""; CC_SUBS=""; CC_HARD="false"
 classify_component() {  # <component-dir>
   local dir="$1" ns f name subns pkg rec csv sub

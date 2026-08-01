@@ -42,12 +42,30 @@
 # catch what it was written for. Exit 1 = every canary caught AND the real tree clean, matching the
 # house convention where CI asserts the self-test exits exactly 1.
 #
+# ARGUMENTS ARE CHECKED, and that is not pedantry. Until 2026-08-01 this script read only $1, and
+# only to compare it against --self-test; everything else was DISCARDED IN SILENCE. A lane passed
+# `--components-dir <scratch tree>`, got three green ticks and rc=0, and was told nothing — the run
+# had classified the REAL components/ directory the whole time. A gate that confidently answers a
+# question you did not ask emits the exact signal success emits, which is worse than no gate: it
+# retires the reader's suspicion. So unknown arguments now exit 2 naming the offender, and
+# --components-dir — the flag that was silently ignored — is genuinely implemented (the driver
+# always took the directory as a parameter; only the command line could not reach it) and ANNOUNCES
+# the override, so a green run against a scratch tree can never be misread as the shipped tree
+# being clean.
+#
+# Usage:
+#   adoption-skippable-guard.sh                       # classify the shipped components/ tree
+#   adoption-skippable-guard.sh --components-dir DIR  # classify DIR instead, vs the same snapshot
+#   adoption-skippable-guard.sh --self-test           # prove the detectors (and this parser) fire
+#
 # Exit codes:
 #   0  the tree's adoption verdicts match the committed snapshot
 #   1  drift — or, under --self-test, every canary was correctly detected
-#   2  the guard could not inspect what it claims to inspect (missing snapshot, generator, or library)
+#   2  the guard could not inspect what it claims to inspect (missing snapshot, generator or library
+#      — or an argument it does not support, which means it never examined what you asked it to)
 set -uo pipefail
 
+SELF="${BASH_SOURCE[0]}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/lint/_extract-func.sh
@@ -397,15 +415,130 @@ self_test() {
     return 2
   fi
 
+  # ── Canary F — the ARGUMENT PARSER, driven as a real subprocess ────────────────────────────────
+  # Every canary above calls run_check() directly, which is exactly how the silent-argument defect
+  # survived: run_check has always taken the components dir as a parameter, so the detectors were
+  # fine and only the command line was deaf. These four run `bash "$SELF" …` so the thing under test
+  # is the parser an operator and CI actually reach.
+
+  # F1 — an unsupported argument must be REFUSED, not ignored. rc=2, the offender named, and — the
+  # part that mattered on 2026-08-01 — not one ✅ on stdout. The old behaviour's tell was that it
+  # looked identical to a clean run.
+  rc=0
+  out="$(bash "$SELF" --not-a-real-flag 2>&1)" || rc=$?
+  if [[ "$rc" -ne 2 ]]; then
+    bad "SELF-TEST FAILED: an unknown argument returned rc=${rc}, expected 2."
+    note "An ignored argument means the guard examined something other than what it was asked to,"
+    note "then reported success. Got: $(head -3 <<< "$out" | tr '\n' ' ')"
+    return 2
+  fi
+  if ! grep -q 'unknown argument: --not-a-real-flag' <<< "$out"; then
+    bad "SELF-TEST FAILED: the refusal did not name the offending argument."
+    return 2
+  fi
+  if grep -q '✅' <<< "$out"; then
+    bad "SELF-TEST FAILED: a rejected argument still printed a green tick."
+    return 2
+  fi
+
+  # F2 — --components-dir is HONOURED, not merely accepted. A flag that parses and then changes
+  # nothing is the same defect wearing a better error message: point the guard at a scratch tree
+  # carrying the demotion canary and it must go red about THAT tree. Ignoring the flag would
+  # classify the shipped tree and exit 0, which is precisely what this proves cannot happen.
+  scratch="$(scratch_components)"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: canary-operand\n' \
+    > "${scratch}/${victim}/zz-canary-operand.yaml"
+  rc=0
+  out="$(bash "$SELF" --components-dir "$scratch" 2>&1)" || rc=$?
+  rm -rf "$scratch"
+  if [[ "$rc" -ne 1 ]] || ! grep -q "ADOPTION DEMOTION: ${victim} " <<< "$out"; then
+    bad "SELF-TEST FAILED: --components-dir did not redirect the check (rc=${rc}, expected 1)."
+    note "The flag parses but the run still classified the shipped tree — the 2026-08-01 defect with"
+    note "an argument parser bolted on top. Got: $(head -3 <<< "$out" | tr '\n' ' ')"
+    return 2
+  fi
+  if ! grep -q 'components dir OVERRIDDEN' <<< "$out"; then
+    bad "SELF-TEST FAILED: an overridden components dir was not announced in the output."
+    note "Unannounced, a clean run against a scratch tree reads exactly like a clean run against the"
+    note "shipped one — the misreading this flag was implemented to prevent."
+    return 2
+  fi
+
+  # F3 — the normal path is untouched. A parser that rejects everything, including nothing, would
+  # satisfy F1 and break CI.
+  rc=0
+  bash "$SELF" >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    bad "SELF-TEST FAILED: a plain no-argument run returned rc=${rc}, expected 0."
+    return 2
+  fi
+
+  # F4 — an option missing its value is a usage error too, never a silent fallback to the shipped
+  # tree (which would answer a different question and call it clean).
+  rc=0
+  out="$(bash "$SELF" --components-dir 2>&1)" || rc=$?
+  if [[ "$rc" -ne 2 ]] || grep -q '✅' <<< "$out"; then
+    bad "SELF-TEST FAILED: --components-dir with no value returned rc=${rc}, expected 2."
+    return 2
+  fi
+
   ok "self-test ok — untouched copy clean; one added file to ${victim} caught as an ADOPTION DEMOTION;"
   note "    promotion caught; vacuous snapshot caught; missing snapshot is rc=2; a re-implemented"
-  note "    classifier is caught. Real tree matches the committed snapshot (rc=0)."
+  note "    classifier is caught; an unknown argument is refused (rc=2, no ✅) and --components-dir"
+  note "    provably redirects the check. Real tree matches the committed snapshot (rc=0)."
   return 1
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then
+# ── arguments ─────────────────────────────────────────────────────────────────
+usage() {
+  echo "usage: adoption-skippable-guard.sh [--components-dir DIR] [--self-test]"
+  echo "  (no arguments)        classify platform-portfolio/components against the committed snapshot"
+  echo "  --components-dir DIR  classify DIR's components instead, against the same snapshot"
+  echo "  --self-test           prove the detectors and this argument parser fire; exits 1 when they do"
+}
+
+SELF_TEST=0
+COMPONENTS_OVERRIDDEN=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-test) SELF_TEST=1; shift ;;
+    --components-dir)
+      [[ $# -ge 2 ]] || { bad "--components-dir needs a directory."; exit 2; }
+      COMPONENTS="$2"; COMPONENTS_OVERRIDDEN=1; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      bad "unknown argument: $1"
+      # Deliberately free of the success glyph: canary F1 asserts a refusal prints no green tick at
+      # all, and it caught this very line carrying one while explaining why it must not.
+      note "Refusing rather than ignoring it: a run that discards an argument still reports success"
+      note "and rc=0, and that verdict describes a tree you did not ask about."
+      usage >&2
+      exit 2 ;;
+  esac
+done
+
+# --self-test builds and checks its OWN scratch trees, and its first proof is that the SHIPPED tree
+# matches the snapshot. Pointing that at someone else's directory would make every canary derive
+# from a tree the guard does not ship — refused for the same reason the generator refuses
+# `--write --components-dir`.
+if [[ "$SELF_TEST" -eq 1 && "$COMPONENTS_OVERRIDDEN" -eq 1 ]]; then
+  bad "--self-test and --components-dir are mutually exclusive."
+  note "The self-test derives its canaries from the shipped component tree; against another tree its"
+  note "verdicts would describe nothing this repo installs."
+  exit 2
+fi
+
+if [[ "$SELF_TEST" -eq 1 ]]; then
   self_test
   exit $?
+fi
+
+if [[ "$COMPONENTS_OVERRIDDEN" -eq 1 ]]; then
+  [[ -d "$COMPONENTS" ]] || { bad "--components-dir ${COMPONENTS} is not a directory."; exit 2; }
+  # Said BEFORE the verdicts, unconditionally: the whole point of implementing this flag rather than
+  # deleting it is that its result can never be mistaken for a verdict about the shipped tree.
+  note "components dir OVERRIDDEN: ${COMPONENTS}"
+  note "The verdicts below describe THAT tree, not platform-portfolio/components."
 fi
 
 run_check "$COMPONENTS" "$SNAPSHOT"
