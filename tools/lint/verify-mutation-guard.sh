@@ -44,11 +44,17 @@
 # Explicit and greppable, deliberately: inferring "this looked opt-in enough" from control flow is
 # how the trap slipped through in the first place. The marker is a claim its author signs.
 #
-# THE REVIEWED BASELINE. tools/verify/ is owned by other lanes and cannot be edited from here, so the
-# one region that is already opt-in-by-construction — resilience-multicluster-dr.sh's failover_drill,
-# rewritten under review in 4445c4c — is carried as a named baseline entry instead of a marker. It is
-# reported on every run, and it is an ERROR (D4) once it stops matching: the entry must be deleted in
-# the same change that adds the marker comment. The baseline is one entry and never grows.
+# THE REVIEWED BASELINE — now EMPTY, which is the intended end state. It briefly carried one entry
+# (resilience-multicluster-dr.sh's failover_drill) because the lane that wrote this guard did not own
+# tools/verify/ and so could not add the marker comment. The marker landed in the same commit that
+# emptied this array; D4 errors on an entry matching nothing, which is what forced the two halves to
+# be atomic. Leave it empty. An entry here is a debt, not a feature.
+#
+# Emptying it also exposed a bug worth remembering: on bash 3.2 with `set -u`, "${EMPTY[@]}" raises
+# "unbound variable" rather than expanding to nothing — so the SUCCESS state crashed the guard, and
+# the crash exited 1, which is exactly what CI's "self-test must exit 1" reads as proof of detection.
+# Both expansions below are guarded. If you ever add an entry and later remove it, re-run the PLAIN
+# mode: the self-test alone cannot tell you the difference.
 #
 # THE SCANNER. Per file, a character state machine tracks single quotes, double quotes, `$( )`
 # substitutions re-entered from inside a double quote, backslash escapes, and `#` comments, ACROSS
