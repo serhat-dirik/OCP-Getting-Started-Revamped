@@ -53,13 +53,42 @@ independently, then MUTATES that regex and requires the section's outcome to fli
 takes its own section down with it; an exemption that dies shows up as a false positive in its own
 section. The self-test also fails if any rule or any mutable pattern has no section naming it, so a
 new rule cannot ship without a canary for it.
+
+AND THE SCOPE IS MEASURED, NOT JUST NON-EMPTY (2026-08-01). The per-rule self-test above proves the
+detectors work; it says nothing about whether anything was FED to them. This guard's only scope check
+was `if not files: return 2` — the weak form, which catches `collect_files() → []` and misses
+`collect_files() → files[:1]`. Measured: with that one-character truncation the guard printed
+"clean (1 file(s) scanned)" and exited 0 while 901 of 902 files went uninspected, and --self-test
+still exited 1, so BOTH CI signals stayed green. Scope now goes through the shared _scope.py ledger
+with a floor per dimension, each recorded by the code path it proves — "files collected" by the walk,
+"files scanned" by the loop that hands each file to the detectors. Counting only in the walk was not
+enough: `files[:1]` truncates at the RETURN, after every increment, so the ledger read 899 while one
+file was inspected. A counter upstream of the defect measures the intent, not the work.
+
+AND A CRASH IS NOT A DETECTION (2026-08-01). CI's contract here is "--self-test must exit EXACTLY 1".
+Python exits 1 on an uncaught exception, so a broken guard scored as a proven one: measured, a
+missing _scope.py and a one-character regex typo each produced a traceback, rc=1, and a CI step that
+printed "self-test ok". Both crash classes now exit 2, as does any unhandled exception from main().
 """
 from __future__ import annotations
 
 import argparse
 import pathlib
 import re
+import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+try:
+    from _scope import Scope  # noqa: E402  (path must be set first)
+except ImportError as exc:  # pragma: no cover — see the exit-code note below
+    # An uncaught ImportError exits 1, and CI's contract for this guard is "--self-test must exit
+    # EXACTLY 1 = the canary was detected". A crash would therefore be READ AS PROOF OF DETECTION and
+    # the real run would never even happen. Measured 2026-08-01 by running a copy of this file with
+    # _scope.py absent: traceback, rc=1, and the CI step would have printed "self-test ok".
+    print(f"::error::credential-redaction-guard: cannot import _scope ({exc}) — the guard could not "
+          f"start, which is NOT the same as a clean tree.", file=sys.stderr)
+    sys.exit(2)
 
 DEFAULT_ROOTS = ("content", "tools", "bootstrap", "gitops", "platform-portfolio", "helm", ".github", "apps")
 
@@ -71,12 +100,33 @@ SKIP_DIR_PARTS = {
     ".venv", "venv", "dist", "charts",
 }
 
+
+def _compile(name, pattern):
+    """re.compile, but a bad pattern exits 2 instead of crashing with 1.
+
+    WHY (measured 2026-08-01). Every pattern below is compiled at MODULE level, so a typo raises
+    re.error before main() — and before any try/except inside it — can run. Python exits 1 on an
+    uncaught exception, and 1 is exactly what CI's `--self-test must exit EXACTLY 1` assertion
+    accepts as "the canary was detected". A one-character regex typo therefore reported the guard's
+    detection as PROVEN while the guard could not even load. A regex is the likeliest thing to break
+    in this file, so the compile step is where the exit code has to be fixed.
+    """
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        print(f"::error::credential-redaction-guard: {name} is not a valid regex ({exc}) — the guard "
+              f"could not load. Exiting 2: that is 'the guard is broken', not 'the canary fired'.",
+              file=sys.stderr)
+        sys.exit(2)
+
+
 # ---------------------------------------------------------------------------------------------
 # Rule 1 — fixed-width truncation in a credential-bearing context.
 # ---------------------------------------------------------------------------------------------
 
 # Every way this repo has actually written "keep the first N characters".
-TRUNCATION_RE = re.compile(
+TRUNCATION_RE = _compile(
+    "TRUNCATION_RE",
     r"""(?x)
       \bcut\s+(?:-[a-zA-Z]+\s+)*-[cb]\s*\d       # cut -c1-200 / cut -b1-64
     | \bhead\s+(?:-[a-zA-Z]+\s+)*-c\s*\d         # head -c 200
@@ -89,7 +139,8 @@ TRUNCATION_RE = re.compile(
 # Tight on purpose. Words like "secret" are omitted: `oc get secret` appears all over this repo in
 # entirely benign shapes, and a guard that cries wolf gets disabled. These are the tokens that
 # actually co-occur with credential VALUES rather than credential object names.
-CREDENTIAL_CONTEXT_RE = re.compile(
+CREDENTIAL_CONTEXT_RE = _compile(
+    "CREDENTIAL_CONTEXT_RE",
     r"(?i)\b(?:authorization|bearer|api[_-]?key|apikey|genai_api_key|access[_-]?token"
     r"|id[_-]?token|maas-credentials|received=|passwd|htpasswd|password|credential)\b"
     r"|\bsk-[A-Za-z0-9]|\beyJ[A-Za-z0-9]"
@@ -100,11 +151,12 @@ CREDENTIAL_CONTEXT_RE = re.compile(
 # motivating near-miss arose — the block said only `oc logs … | cut -c1-200`, with no credential
 # vocabulary anywhere in it, because the credential was in the DATA, not in the command. Without
 # this signal the guard would miss the very defect it was written for.
-UNAUDITABLE_STREAM_RE = re.compile(r"\b(?:oc|kubectl)\s+logs\b")
+UNAUDITABLE_STREAM_RE = _compile("UNAUDITABLE_STREAM_RE", r"\b(?:oc|kubectl)\s+logs\b")
 
 # An explicit redaction anywhere in the block clears rule 1 — that is the whole point of the rule:
 # we are not banning truncation, we are banning truncation used AS the safety.
-REDACTION_RE = re.compile(
+REDACTION_RE = _compile(
+    "REDACTION_RE",
     r"(?i)redact|<hidden>|\*\*\*\*|/dev/null|\bwc\s+-c\b|-o\s+name\b|(?:^|[^A-Za-z])xxxx"
 )
 
@@ -112,18 +164,21 @@ REDACTION_RE = re.compile(
 # `openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | cut -c1-16` is a generator, and the character
 # count is the point rather than a fig leaf. Measured false positive on bootstrap/install.sh and
 # tools/ws/ws before this exemption existed.
-GENERATION_RE = re.compile(r"\bopenssl\s+rand\b|/dev/urandom|\buuidgen\b|\bpwgen\b")
+GENERATION_RE = _compile("GENERATION_RE",
+                         r"\bopenssl\s+rand\b|/dev/urandom|\buuidgen\b|\bpwgen\b")
 
 # ---------------------------------------------------------------------------------------------
 # Rule 2 — a literal credential in a command line (not a $VARIABLE reference).
 # ---------------------------------------------------------------------------------------------
 
-LITERAL_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")
-LITERAL_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}")
+LITERAL_KEY_RE = _compile("LITERAL_KEY_RE", r"\bsk-[A-Za-z0-9_-]{16,}")
+LITERAL_JWT_RE = _compile("LITERAL_JWT_RE",
+                          r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}")
 
 # Synthetic stand-ins are how you TEST a redaction, so they must not be findings themselves. Every
 # fixture in this repo is deliberately built from these markers.
-SYNTHETIC_MARKERS = re.compile(
+SYNTHETIC_MARKERS = _compile(
+    "SYNTHETIC_MARKERS",
     r"(?i)synthetic|placeholder|redacted|example|fixture|canary|fake|dummy|"
     r"abcdef0123456789|xxxx|<the-?key>|your-?key|test"
 )
@@ -241,7 +296,74 @@ def find_offenders(path: pathlib.Path):
 SELF_EXCLUDED = {"credential-redaction-guard.py", "credential-redaction-guard.canary.adoc"}
 
 
-def collect_files(roots, skip_self=True):
+def require_tree_floors(scope, include_scan: bool = True) -> None:
+    """The floors a WHOLE-TREE run must clear. Declared once and used by both the real run and
+    --self-test, so the two can never disagree about what "enough" means.
+
+    THREE DIMENSIONS, BECAUSE THEY FAIL AT DIFFERENT PLACES. "collected" is recorded by the directory
+    walk and "scanned" by the loop that actually calls the detectors, and the gap between them is
+    load-bearing: a first attempt counted only in the walk, and `collect_files() → files[:1]` still
+    passed, because the truncation happens at the RETURN — after every increment had been recorded.
+    A counter upstream of the defect measures the intent, not the work.
+
+    `include_scan=False` is for --self-test's Proof 0, which exercises the walk but does not scan.
+    """
+    scope.require("roots walked", len(DEFAULT_ROOTS),
+                  f"DEFAULT_ROOTS names {len(DEFAULT_ROOTS)} trees and every one of them exists in "
+                  f"this repo. Fewer means discovery broke, or the run happened somewhere other than "
+                  f"the repo root — not that a tree was deleted.")
+    scope.require("files collected", 400,
+                  "the eight default roots hold ~900 scannable files, and the largest single root "
+                  "holds ~264. A floor of 400 therefore survives ordinary growth and deletion, but "
+                  "cannot be met by any single root — so a walk truncated to one tree, or to one "
+                  "file, fails instead of reporting a confident 'clean'.")
+    if include_scan:
+        scope.require("files scanned", 400,
+                      "recorded by the loop that hands each file to the detectors, NOT by the walk. "
+                      "Collecting 900 files and scanning 1 is a clean-looking run over nothing; only "
+                      "a counter downstream of the truncation can tell the two apart.")
+
+
+def _ignored_untracked() -> set:
+    """Absolute paths of files git BOTH ignores AND does not track.
+
+    WHY (measured 2026-08-01). A plain run on a maintainer's machine reported a finding in
+    `bootstrap/vars.yaml` — a real `sk-` key, sitting in the file the project's own rule 8 says is
+    where credentials belong ("secrets only via gitignored vars files"). So the guard's one finding
+    on a healthy tree was the sanctioned location doing exactly what it is for. That is the shape
+    this guard's own docstring warns about: a guard that cries wolf gets disabled, and the next
+    person to see red here learns to ignore it.
+
+    A file that is ignored AND untracked cannot reach main, so it is not what this guard defends.
+    That is also the line lint.yml's sibling privacy guard already draws — it uses `git grep`, which
+    reads tracked files only.
+
+    BOTH conditions are required, and the untracked half is the load-bearing one: a TRACKED file can
+    still match an ignore rule, and skipping on ignore-status alone would let a key be hidden from
+    this guard by appending a line to .gitignore. `--others` lists untracked files only, so a tracked
+    file is never in this set no matter what .gitignore says.
+
+    Degrades to "skip nothing" when git is absent or this is not a repo — in CI every file is
+    tracked, so the set is empty there and behaviour is unchanged.
+    """
+    def _git(*args):
+        return subprocess.run(["git", *args], capture_output=True, text=True, timeout=30,
+                              check=False)
+
+    try:
+        top = _git("rev-parse", "--show-toplevel")
+        if top.returncode != 0:
+            return set()
+        root = pathlib.Path(top.stdout.strip())
+        out = _git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+        if out.returncode != 0:
+            return set()
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {(root / p).resolve() for p in out.stdout.split("\0") if p}
+
+
+def collect_files(roots, skip_self=True, scope=None):
     """Resolve `roots` (files and/or directories) to the concrete files to scan.
 
     A directory walk and an explicitly-named file are DELIBERATELY not filtered the same way:
@@ -257,15 +379,33 @@ def collect_files(roots, skip_self=True):
       no-op'ing because its extension isn't in the allowlist (or it has none, and no shebang) would
       make `guard.py <dir>` and `guard.py <dir>/<file>` disagree about what is scannable, which is
       the defect this rewrite fixes. This guard is security-relevant; when in doubt, scan more.
+
+    * The gitignored-and-untracked skip is likewise WALK-ONLY, for the same reason: naming such a
+      file by hand is asking for it to be scanned, and answering "no findings" without looking would
+      be a lie. Only the automatic walk treats unreachable-by-git as out of scope.
+
+    `scope` (a _scope.Scope) records what this walk actually did. The counts are incremented HERE,
+    inside the loop that does the work, rather than from `len(...)` at the call site — a length taken
+    beside the walk is satisfied by a walk that never ran, which is precisely the `→ []` / `[:1]`
+    blinding the ledger exists to catch.
     """
     files = []
+    # Resolved on first use, so a single-file (pre-commit) invocation never pays for a `git ls-files`
+    # it would not consult anyway — the skip is walk-only.
+    ignored = None
     for root in roots:
         p = pathlib.Path(root)
         if p.is_file():
             if skip_self and p.name in SELF_EXCLUDED:
                 continue
             files.append(p)
+            if scope is not None:
+                scope.add("files collected")
         elif p.is_dir():
+            if ignored is None:
+                ignored = _ignored_untracked()
+            if scope is not None:
+                scope.add("roots walked")
             for f in sorted(p.rglob("*")):
                 if not f.is_file():
                     continue
@@ -273,8 +413,12 @@ def collect_files(roots, skip_self=True):
                     continue
                 if skip_self and f.name in SELF_EXCLUDED:
                     continue
+                if ignored and f.resolve() in ignored:
+                    continue
                 if f.suffix in SCANNED_SUFFIXES or (f.suffix == "" and _has_shebang(f)):
                     files.append(f)
+                    if scope is not None:
+                        scope.add("files collected")
     return files
 
 
@@ -418,6 +562,33 @@ def self_test():
         problems.append(f"[uncovered] pattern {missing} is never mutated by any canary section — "
                         f"nothing would notice if it stopped working")
 
+    # The canary proves the DETECTORS. These two proofs cover the other half — whether anything is
+    # ever handed to them. Measured 2026-08-01: `collect_files() → files[:1]` left --self-test at 1
+    # AND the real run at 0, so every signal stayed green while one file of 902 was inspected.
+    problems += Scope.self_check()          # the ledger mechanism itself, exercised by this CI job
+
+    # Proof 0 — the real tree still clears this guard's own floors, AND collect_files still records
+    # what it walked. A count recorded nowhere fails the floor exactly like a walk that never ran,
+    # which is what makes a truncated or unwired walk visible from --self-test.
+    tree = Scope("credential-redaction-guard/real-tree")
+    require_tree_floors(tree, include_scan=False)
+    returned = collect_files([r for r in DEFAULT_ROOTS if pathlib.Path(r).exists()],
+                             skip_self=True, scope=tree)
+    for shortfall in tree.shortfalls():
+        problems.append(f"[scope] the real tree no longer clears this guard's own floor — {shortfall} "
+                        f"(run from the repo root; cwd is {pathlib.Path.cwd()})")
+
+    # RECORDED vs RETURNED. The floors above are raised inside the walk, so they cannot see a
+    # truncation applied at the `return` — `return files[:1]` increments 899 times and hands back
+    # one. Comparing the two numbers catches exactly that, and it is the one scope defect the real
+    # run's floors would otherwise be alone in noticing.
+    collected = tree.get("files collected")
+    if len(returned) != collected:
+        problems.append(f"[scope] collect_files RECORDED {collected} file(s) but RETURNED "
+                        f"{len(returned)} — something truncates the list after the walk. Every file "
+                        f"counted must actually be handed back, or the guard reports confidence it "
+                        f"has not earned.")
+
     if problems:
         for p in problems:
             print(f"❌ SELF-TEST FAILED: {p}", file=sys.stderr)
@@ -443,9 +614,18 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    explicit = bool(args.paths)
     roots = args.paths or [r for r in DEFAULT_ROOTS if pathlib.Path(r).exists()]
 
-    files = collect_files(roots, skip_self=True)
+    # Floors apply to the WHOLE-TREE run only. `guard.py one-file.adoc` — the pre-commit shape — is a
+    # legitimately tiny scope, and a floor there would fail every single-file invocation. An explicit
+    # scope is the caller's assertion about what to look at; the default scope is the guard's own,
+    # and only the guard's own claim is something the guard can be held to.
+    scope = Scope("credential-redaction-guard")
+    if not explicit:
+        require_tree_floors(scope)
+
+    files = collect_files(roots, skip_self=True, scope=scope)
     if not files:
         print(f"credential-redaction-guard: no scannable files under {[str(r) for r in roots]!r} — "
               "refusing to report clean over an empty scope.", file=sys.stderr)
@@ -453,18 +633,41 @@ def main(argv=None):
 
     offenders = 0
     for f in files:
+        scope.add("files scanned")          # recorded HERE: downstream of collect_files' return
         for line_no, rule, message in find_offenders(f):
             offenders += 1
             print(f"{f}:{line_no}: [{rule}] {message}")
+
+    # Judged BEFORE the findings are reported: over a collapsed scope neither answer is trustworthy.
+    # "No findings" is meaningless, and "findings" understates. rc=2 says the guard could not inspect
+    # what it claims to — a different thing from rc=1, "the tree has a defect".
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
 
     if offenders:
         print(f"\ncredential-redaction-guard: {offenders} finding(s) across {len(files)} file(s) "
               "scanned.", file=sys.stderr)
         return 1
 
-    print(f"credential-redaction-guard: clean ({len(files)} file(s) scanned).")
+    summary = scope.summary() if not explicit else f"{len(files)} files scanned"
+    print(f"credential-redaction-guard: clean ({summary}).")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Any unhandled exception exits 1, and 1 is this guard's "the canary was detected" / "the tree
+    # has a finding" code. A crash must never be readable as either, so it is remapped to 2 — "the
+    # guard could not run". Without this, a typo in a regex or a missing fixture would make
+    # --self-test exit 1 and CI would report the guard's detection as PROVEN.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:                                  # noqa: BLE001 — deliberate
+        import traceback
+        traceback.print_exc()
+        print(f"::error::credential-redaction-guard: crashed ({type(exc).__name__}: {exc}). Exiting 2 "
+              f"— a crash is 'the guard could not run', never 'clean' and never 'canary detected'.",
+              file=sys.stderr)
+        sys.exit(2)

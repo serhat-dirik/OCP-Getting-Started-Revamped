@@ -54,11 +54,43 @@ PY
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-# Counted per HALF, not in total: the two halves fail independently (a renamed chart directory
-# empties the first; a moved manifest tree or a broken grep empties the second), and a single
-# counter lets a healthy half hide a dead one behind a reassuring "74 inputs inspected".
+
+# ── scope floors ────────────────────────────────────────────────────────────────────────────────
+# The bash counterpart of tools/lint/_scope.py, and it follows that file's contract deliberately:
+# a dimension below its floor is rc=2 ("the guard could not inspect what it claims to"), never a
+# clean 0 and never 1 ("the tree has a defect"). Those are different facts and CI should be able to
+# tell them apart.
+#
+# A FLOOR, NOT A NON-ZERO CHECK. This guard used to assert only `-eq 0` per half. Measured
+# 2026-08-01: narrowing the chart glob to a single entry-state took the Helm half from 56 renders to
+# 2 and the guard still exited 0, and dropping platform-portfolio from the static grep took that half
+# from 18 to 16 — silently un-checking the sonarqube and keycloak Routes — and also exited 0. Zero is
+# the accident that is easy to catch; truncation is the likelier one and was invisible.
+scope_check() {  # <dimension> <actual> <floor> <why> [quiet] → 0 met, 2 collapsed
+  local dim="$1" actual="$2" floor="$3" why="$4" quiet="${5:-}"
+  # Spelled as a full `if`, not `cond && return 0`: the && form inside a function is the shape that
+  # silently skipped teardown steps elsewhere in this repo once `set -e` was in play.
+  if [ "$actual" -ge "$floor" ]; then
+    return 0
+  fi
+  if [ -z "$quiet" ]; then
+    echo "  ❌ SCOPE COLLAPSE: ${dim} — inspected ${actual}, floor is ${floor}."
+    echo "       ${why}"
+    echo "       A guard that reports clean over a collapsed input set reports success over work it"
+    echo "       did not do. If the shrink is deliberate, lower the floor in the same change and say why."
+  fi
+  return 2
+}
+
+# Counted per HALF, not in total: the halves fail independently (a renamed chart directory empties
+# the first; a moved manifest tree or a broken grep empties the second), and a single counter lets a
+# healthy half hide a dead one behind a reassuring "74 inputs inspected". The static half is split
+# again per TREE, because the grep takes two roots and losing one of them is the exact truncation
+# measured above — a combined static count of 16-of-18 looks entirely healthy.
 helm_inspected=0
 static_inspected=0
+static_gitops=0
+static_portfolio=0
 
 echo "== rendered Helm charts =="
 for chart in gitops/entry-states/*/Chart.yaml gitops/workshop-config/Chart.yaml helm/bootstrap/Chart.yaml; do
@@ -106,6 +138,12 @@ while IFS= read -r f; do
   esac
   check_file "$f" "$f" || rc=1
   static_inspected=$((static_inspected + 1))
+  # Bucketed by tree so each root carries its own floor; a root that stops matching cannot hide
+  # behind the other one's count.
+  case "$f" in
+    gitops/*)             static_gitops=$((static_gitops + 1)) ;;
+    platform-portfolio/*) static_portfolio=$((static_portfolio + 1)) ;;
+  esac
 done < <(grep -rl --include='*.yaml' --include='*.yml' '^kind: Route' gitops platform-portfolio 2>/dev/null)
 
 # Self-test. A guard that silently inspects nothing reports a perfect score — this one did
@@ -113,32 +151,60 @@ done < <(grep -rl --include='*.yaml' --include='*.yml' '^kind: Route' gitops pla
 # it is not, so "all ok" can never again mean "I read nothing".
 printf 'apiVersion: route.openshift.io/v1\nkind: Route\nmetadata:\n  name: canary\nspec:\n  to:\n    kind: Service\n    name: x\n' >"$tmp/canary.yaml"
 if check_file "$tmp/canary.yaml" "canary" >/dev/null 2>&1; then
-  echo "  SELF-TEST FAILED: guard accepted a Route with no TLS — it is not actually checking."
-  rc=1
+  echo "  ❌ SELF-TEST FAILED: guard accepted a Route with no TLS — it is not actually checking."
+  # rc=2, not 1: a blind detector is "this guard is broken", the same class as a collapsed scope.
+  # rc=1 is reserved for "the tree has a Route missing TLS", which is a fact about the tree and
+  # sends the reader to a completely different fix.
+  rc=2
 else
   echo "  self-test ok — guard rejects a TLS-less Route"
 fi
 
-# …and the canary only proves check_file works. It says NOTHING about whether either half fed it
-# anything: both loops can drop to zero inputs while the line above still prints "self-test ok".
-# Assert each half separately, naming the half that went dark and what to look at.
-if [ "$helm_inspected" -eq 0 ]; then
-  echo "  ❌ SELF-TEST FAILED: the Helm half rendered ZERO inputs — no chart matched"
-  echo "       gitops/entry-states/*/Chart.yaml, gitops/workshop-config, helm/bootstrap."
-  echo "       A renamed or moved chart directory silently empties this half; fix the glob."
-  rc=1
-fi
-if [ "$static_inspected" -eq 0 ]; then
-  echo "  ❌ SELF-TEST FAILED: the static half inspected ZERO manifests — no file under gitops/ or"
-  echo "       platform-portfolio/ matched '^kind: Route'. Either every Route moved, or the grep"
-  echo "       stopped matching (indented kind:, .yml vs .yaml, a new tree not in the search list)."
-  rc=1
-fi
-if [ "$rc" -eq 0 ]; then
-  echo "  inputs inspected: ${helm_inspected} rendered chart(s) + ${static_inspected} static manifest(s)"
+# The canary above only proves check_file works. The floors below prove something was FED to it —
+# and they need their own canary, or they are exactly the unrun gate this repo keeps rediscovering.
+# Run inline on every invocation, so CI's existing step exercises it with no extra wiring.
+if scope_check "canary" 0 1 "canary" quiet; then
+  echo "  ❌ SELF-TEST FAILED: scope_check accepted 0 inputs against a floor of 1 — every floor"
+  echo "       below is decorative and a half that goes dark would report clean."
+  rc=2
+elif ! scope_check "canary" 5 5 "canary" quiet; then
+  echo "  ❌ SELF-TEST FAILED: scope_check rejected a dimension that exactly MEETS its floor — it"
+  echo "       would redden main on a healthy tree."
+  rc=2
+else
+  echo "  self-test ok — scope floors reject a collapsed dimension and accept one that meets its floor"
 fi
 
-if [ "$rc" -ne 0 ]; then
+# Each half asserted separately, naming what went dark and what to look at. Floors are set below
+# today's measurement and above anything a plausible truncation produces (see _scope.py).
+scope_rc=0
+scope_check "rendered Helm charts" "$helm_inspected" 40 \
+  "28 charts × 2 value permutations = 56 today. One chart's worth is 2, so a floor of 40 cannot be
+       met by a glob that collapsed to a single directory. Look at the chart glob: a renamed or moved
+       entry-state silently empties this half." || scope_rc=2
+scope_check "static manifests under gitops/" "$static_gitops" 10 \
+  "16 today. Either Routes moved out of gitops/, or the grep stopped matching them (an indented
+       'kind:', .yml vs .yaml, a new subtree the search never visits)." || scope_rc=2
+scope_check "static manifests under platform-portfolio/" "$static_portfolio" 2 \
+  "2 today (sonarqube, keycloak) — the floor is the exact count because the set is this small, so
+       removing one is an editorial act that should re-state its own floor rather than pass quietly.
+       Dropping this root from the grep took the combined static count from 18 to 16, which is why
+       this dimension is counted separately at all." || scope_rc=2
+
+# A collapsed scope OUTRANKS a finding: over an input set this guard cannot vouch for, neither
+# "clean" nor "N Routes are broken" is a trustworthy answer.
+if [ "$scope_rc" -ne 0 ]; then
+  rc=2
+fi
+
+if [ "$rc" -eq 0 ]; then
+  echo "  inputs inspected: ${helm_inspected} rendered chart(s) + ${static_inspected} static" \
+       "manifest(s) (${static_gitops} gitops/, ${static_portfolio} platform-portfolio/)"
+fi
+
+# Only the TLS advice, and only when a Route is actually the problem. Printing "add tls.termination"
+# under a scope collapse sends the reader to fix a Route that was never inspected.
+if [ "$rc" -eq 1 ]; then
   echo
   echo "A browser-facing Route is missing TLS. Add to its spec:"
   echo "    tls:"
