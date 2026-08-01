@@ -72,6 +72,48 @@ seed_state() {
   return 0
 }
 
+# WHAT THE SEED ACTUALLY WROTE — not "did the Job that was supposed to write it finish".
+#
+# `Complete=True` above and "the dataset exists" are DIFFERENT CLAIMS, and the check used to make
+# the second one out of the first. A Job can reach Complete having written nothing — a changed base
+# image, an empty source, an error swallowed inside the container — and the attendee then starts the
+# lab against an empty world with a ✅ telling them it is ready. A Bound PVC cannot close the gap
+# either: an empty volume Binds exactly as well as a seeded one.
+#
+# So the seed counts the rows it wrote and patches that count into the entry marker as `seededRows`
+# (gitops/entry-states/jobs-batch-kueue/templates/claims-data.yaml, chart 0.1.8+). The number is
+# DERIVED from the artifact — `wc -l` of the file it just wrote to the PVC — never a constant
+# restated here, so a seed that grows or shrinks the dataset keeps passing without this script
+# having to learn its size. Proven on-cluster 2026-08-01 (user5, cluster-s7hkp): the marker read
+# 200 and an independent pod mounting claims-data counted 200 data rows in /data/claims.csv.
+#
+# The MARKER is the durable record on purpose. This used to be a best-effort `oc logs … | grep
+# '^seeded '`, printed as INFO and asserted on by nothing, because a completed Job keeps its
+# Complete condition long after its pod's logs are garbage-collected — so the log went silent
+# exactly on the namespaces old enough that you most want to know. The marker outlives the pod.
+#
+# Sets SEEDED_ROWS for the caller's message.
+# 0 = a real, non-zero count is recorded · 1 = recorded but zero or non-numeric (the seed ran and
+# produced nothing usable) · 2 = the KEY is absent from a marker that does exist — an entry state
+# materialized by a pre-0.1.8 seed · 3 = the marker ConfigMap itself is not there · 4 = the API
+# could not be asked.
+SEEDED_ROWS=""
+seeded_rows_state() {
+  local rc=0
+  oc_read get cm ws-entry-jobs-batch-kueue -n "$NS" -o jsonpath='{.data.seededRows}' || rc=$?
+  if (( rc == 2 )); then return 4; fi
+  if (( rc != 0 )); then return 3; fi   # NotFound on the ConfigMap; the marker check above owns that ❌
+  SEEDED_ROWS="$OC_OUT"
+  # rc 0 with an empty string is the API's real answer that the KEY is absent — a pre-0.1.8 marker,
+  # not a missing dataset. Kept distinct from state 1 because the two deserve opposite verdicts.
+  [[ -n "$SEEDED_ROWS" ]] || return 2
+  [[ "$SEEDED_ROWS" =~ ^[0-9]+$ ]] || return 1
+  # >= 1, never == 200: "the seed wrote something" is the assertion, and the size of the dataset
+  # belongs to the seed. Pinning the number here would put the checker back in the business of
+  # restating a constant, which is the whole defect this predicate exists to remove.
+  (( SEEDED_ROWS >= 1 ))
+}
+
 # An ATTENDEE-created Job has Completed (end state).
 #
 # This used to scan every Job in the namespace and pass if ANY had Complete=True. It could not fail:
@@ -116,7 +158,10 @@ check "workshop quota present in ${NS}"                 oc get resourcequota wor
 check "namespace opted into Kueue (kueue.openshift.io/managed=true)" ns_kueue_managed                || hint "without this label Kueue ignores labeled Jobs — ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "LocalQueue user-queue is Active (bound to ${CQ})" localqueue_active                            || hint "LocalQueue missing/inactive — check the workshop layer created ${CQ}: ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "claims-data PVC is Bound"                        pvc_bound claims-data                        || hint "dataset PVC not bound — needs an RWX StorageClass; check: oc get pvc claims-data -n ${NS}"
-SEED_DESC="claims-data seed Job Completed (the dataset was actually written)"
+# This check now claims ONLY what a Job condition can support: the seed hook ran to completion. The
+# dataset's own existence is asserted by the seededRows check below, which reads a number the seed
+# derived from the file it wrote. Two claims, two checks — conflating them was the defect.
+SEED_DESC="claims-data seed Job Completed (the seed hook ran)"
 seed_rc=0; seed_state || seed_rc=$?
 case "$seed_rc" in
   0) check "$SEED_DESC" true ;;
@@ -129,17 +174,31 @@ case "$seed_rc" in
   *) check "$SEED_DESC" false \
        || hint "namespace ${NS} does not exist — ws start jobs-batch-kueue --user ${USER_NAME}" ;;
 esac
-# The seed prints its own row count on success. Reported (not asserted) because a completed Job keeps
-# its Complete condition long after the pod's logs can be GC'd — a missing log is not a missing dataset.
-if [[ "$seed_rc" == "0" ]]; then
-  # Informational, never graded: a log that cannot be fetched prints nothing, same as before. Routed
-  # through oc_read only so no raw silenced read survives in this file to be copied by the next module.
-  seed_summary=""
-  if oc_read logs "job/claims-data-seed-jobs-batch-kueue-${USER_NAME}" -n "$NS"; then
-    seed_summary="$(printf '%s\n' "$OC_OUT" | grep '^seeded ' || true)"
-  fi
-  if [[ -n "$seed_summary" ]]; then info "seed job reported: ${seed_summary}"; fi
-fi
+# THE DATASET ITSELF — graded, and on a number the seed derived from the file it wrote (see
+# seeded_rows_state). Runs unconditionally, NOT gated on seed_rc: the marker is durable and the Job
+# is not, so a namespace whose seed Job was somehow removed can still prove its data was seeded.
+ROWS_DESC="claims-data holds a seeded dataset (row count recorded by the seed itself)"
+rows_rc=0; seeded_rows_state || rows_rc=$?
+case "$rows_rc" in
+  0) check "${ROWS_DESC} — marker records ${SEEDED_ROWS} rows" true ;;
+  1) check "$ROWS_DESC" false \
+       || hint "the seed recorded '${SEEDED_ROWS}' rows — it completed WITHOUT writing a usable dataset, so every lab Job that reads /data/claims.csv will find nothing. A green seed Job does not contradict this: reaching Complete and writing data are different things. Re-materialize: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
+  # DELIBERATE ⚠, not ❌. This namespace was materialized by a seed that predates the row-count
+  # record, so there is genuinely nothing here to check — the dataset may be perfectly fine. Failing
+  # it would red-flag healthy pre-existing worlds (measured: user1 and user7 on cluster-s7hkp,
+  # 2026-08-01, both correctly seeded, both on markers without the key) and send an attendee to a
+  # `ws reset` that destroys the lab they are in the middle of. The precedent in this suite is
+  # seed_image_intact, which PASSES on an older marker for the same reason — but a silent pass is
+  # the trust bug this whole change is about, so this says out loud that it checked nothing: warn()
+  # counts a skip, verify_summary then prints "did NOT fully verify", and CI (VERIFY_STRICT=1)
+  # exits 3 rather than a clean 0.
+  2) warn "$ROWS_DESC — this entry state predates the seed's row-count record"
+     hint "not your lab, and not graded: your namespace was materialized before the seed began recording what it wrote, so this check has nothing to read. The seed Job check above still applies. For a real verdict on the data, re-materialize when you are between exercises: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
+  3) check "$ROWS_DESC" false \
+       || hint "the entry marker ConfigMap is missing entirely, so nothing recorded what was seeded — see the marker check above: ws start jobs-batch-kueue --user ${USER_NAME}" ;;
+  *) warn "$ROWS_DESC — the cluster API did not answer"
+     hint "not your lab, and not graded: the cluster could not be asked what the seed recorded. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor" ;;
+esac
 check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset jobs-batch-kueue --user ${USER_NAME} (check maas-copy-jobs-batch-kueue-${USER_NAME})"
 check "MaaS config carries the resolved model (configmap maas-config)" cm_key_set "$NS" maas-config model || hint "the MaaS copy hook did not fill maas-config — ws reset jobs-batch-kueue --user ${USER_NAME}"
 # PRESENCE IS NOT PROOF: the check above says the Secret exists, not that its key works. The entry hook
