@@ -69,11 +69,23 @@
 # next group's instructor rather than assuming this covered it.
 #
 # ── HOW LONG IT TAKES ────────────────────────────────────────────────────────────────────────────
-# The delegated purge is ~450 sequential `oc` calls per attendee (13 label-discovered namespaces
-# x ~34 calls each, plus the Argo work). At the ~0.56 s per call measured against an RHDP cluster on
-# 2026-08-01 that is roughly 4-5 minutes PER USER — about 35-45 minutes for a cohort of 8, longer if
-# an entry app's resources-finalizer has to be waited out. It prints a line per namespace, so it is
-# not silent, but it is slow: do not assume it has hung.
+# The delegated purge is ~34 sequential `oc delete` calls per NAMESPACE (most of them for CRDs that
+# are absent on any given cluster — an absent kind still costs a full API round trip), and every
+# attendee has 13 label-discovered namespaces. So the cost is
+#     (namespaces x ~34  +  users x ~6 for the Argo/entry-app work)  x  one API round trip
+# and that last term is the part nobody can assert from a previous cluster. It was measured at 0.56 s
+# on one RHDP cluster and at 1.08-1.54 s on another the next day — which is the difference between the
+# "4-5 minutes per user" this header used to claim and the 11.3 MINUTES a real single-user run took on
+# 2026-08-01 (677 s, 13 namespaces, exit 0). A hard-coded minute count is the same rot as a hard-coded
+# CI job count, so the banner below TIMES a round trip on the cluster in front of it and extrapolates
+# from the namespaces this cohort actually has, instead of repeating a number from somewhere else.
+#
+# Two operational consequences of the real figure, both learned the hard way:
+#   • a cohort of 8 is one to two HOURS, not the 35-45 minutes the old estimate implied;
+#   • it will outlive a 10-minute command timeout. Run it under nohup/tmux, or background it — a run
+#     killed mid-purge leaves a half-cleared cohort (harmless, every step is idempotent, but it has
+#     not finished and its verify never ran).
+# It prints a line per namespace, so it is not silent, but it is slow: do not assume it has hung.
 #
 # Idempotent: safe to re-run, and safe to run twice in a row. Already-absent objects are skipped with
 # a printed reason.
@@ -154,6 +166,56 @@ if [[ -n "${_RESERVED// /}" ]]; then
   fi
 fi
 
+# ── duration estimate — MEASURED on this cluster, never recalled from another one ─────────────────
+# See the HOW LONG IT TAKES header block. The whole point of computing it is that the dominant term,
+# the API round-trip time, differs by ~3x between two clusters of the same product on consecutive
+# days; a constant printed here is wrong on every cluster except the one it was measured on.
+api_rtt_ms() {  # → mean milliseconds for one trivial authenticated API round trip (3 samples)
+  # python3 for the clock, not `date +%s%N`: bash on a macOS bastion is 3.2 and BSD date has no %N.
+  # python3 is already a hard requirement (need_tools), so this adds no dependency.
+  local start end left=3
+  start="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  while [[ "$left" -gt 0 ]]; do
+    oc get namespace default >/dev/null 2>&1 || true
+    left=$(( left - 1 ))
+  done
+  end="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  printf '%s' "$(( (end - start) / 3 ))"
+}
+
+print_duration_estimate() {
+  local u n total=0 rtt calls secs lo hi
+  for u in "${USERS[@]}"; do
+    n="$(oc get ns -l "workshop.redhat.com/user=${u}" -o name 2>/dev/null | grep -c . || true)"
+    total=$(( total + n ))
+  done
+  rtt="$(api_rtt_ms)"
+  if [[ ! "$rtt" =~ ^[0-9]+$ ]] || [[ "$rtt" -le 0 ]]; then
+    echo "Duration: could not time an API round trip, so no estimate. Budget HOURS for a full cohort,"
+    echo "not minutes, and run it under nohup/tmux. It is slow, not hung: a line prints per namespace."
+    return 0
+  fi
+  # ~34 `oc delete` calls per namespace in ws's purge_ns, plus ~6 per user for the student-Argo sweep
+  # and the entry-app deletions. Both are structural counts from tools/ws/ws, not timings.
+  calls=$(( total * 34 + ${#USERS[@]} * 6 ))
+  # x1.5, because a purge call is NOT the call we just timed. The probe is `oc get namespace` — a hit
+  # on a cached, built-in kind. purge_ns issues `oc delete <kind> --all`, mostly for CRDs that are
+  # absent on this cluster, and resolving a kind that is not there costs a discovery round trip on top
+  # of the request. Measured on 2026-08-01: 1042 ms for the probe, 1536 ms for an absent-CRD delete,
+  # and the run itself came in at 677 s for 448 calls = 1.51 s/call. Without this factor the banner
+  # under-promises by ~a third, which is the wrong direction to be wrong in: too-low is what makes an
+  # operator kill a healthy run.
+  secs=$(( calls * rtt * 3 / 2 / 1000 ))
+  lo=$(( secs * 3 / 4 / 60 ))
+  hi=$(( secs * 5 / 4 / 60 ))
+  if [[ "$lo" -lt 1 ]]; then lo=1; fi
+  if [[ "$hi" -le "$lo" ]]; then hi=$(( lo + 1 )); fi
+  echo "Expect roughly ${lo}-${hi} minutes for this cohort — ${total} namespace(s) x ~34 sequential oc"
+  echo "calls, at the ${rtt} ms API round trip just measured on THIS cluster. That is longer than a"
+  echo "10-minute command timeout for all but the smallest cohort: run it under nohup or tmux."
+  echo "It is slow, not hung: a line prints per namespace."
+}
+
 echo "ogsr-reset — clear what the labs created, keep the cohort (nothing is uninstalled)"
 echo
 echo "Cohort          : ${#USERS[@]} user(s) — from the workshop-attendees group"
@@ -194,8 +256,7 @@ echo "  • per-user Keycloak realm CONTENTS (clients/users the securing-apps-ke
 echo "  • SonarQube projects/analyses, RHDH catalog entities, MTA portfolio apps (product databases)"
 echo "  • Gitea personal access tokens and SSH keys on the kept attendee account"
 echo
-echo "Expect roughly 4-5 minutes PER USER (~450 sequential oc calls each) — about"
-echo "$(( ${#USERS[@]} * 4 ))-$(( ${#USERS[@]} * 5 )) minutes for this cohort. It is slow, not hung: a line prints per namespace."
+print_duration_estimate
 echo
 
 if [[ "$DRY_RUN" == "true" ]]; then
