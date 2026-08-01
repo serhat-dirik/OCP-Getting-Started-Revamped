@@ -67,6 +67,9 @@ Each shorter path is a complete arc rather than a truncated one. The half day is
 | `pipelines/` | Parasol company task library + per-module pipeline definitions |
 | `tools/` | `ws` CLI (`ws start\|verify\|reset\|solve <module>`) + per-module verify scripts |
 | `bootstrap/` | Cluster installer: portfolio stacks + workshop layer in one command |
+| `helm/bootstrap/` | The same install as a Helm chart — how the Red Hat Demo Platform deploys the workshop from its catalog, instead of you running `bootstrap/install.sh` |
+| `showroom/` | Site configs that build the attendee cockpits and the SA demo cockpit |
+| `utilities/` | `lab-serve` — preview the content locally with live reload, no cluster needed |
 
 ## Quick Installation on OpenShift
 
