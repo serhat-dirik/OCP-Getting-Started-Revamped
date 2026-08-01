@@ -212,22 +212,23 @@ both exit codes.
   `podman run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.9.0 /mnt/tools/lint/my-new-guard.sh`.
 - **`yamllint` needs an ignore entry that is NOT in the repo, and nothing else will tell you.**
   `.yamllint.yaml` is gitignored (`.gitignore:56`, removed from the tree deliberately), so it exists
-  only on each maintainer's machine. Three guards here ship **Helm-template** canary fixtures —
-  `copy-drift-guard.canary/`, `hook-env-guard.canary/`, `image-pull-policy-guard.canary/` — whose
-  `templates/` directories are unparseable YAML by design (`{{ … }}` where a value belongs). A local
-  `yamllint .` will fail on them unless your config ignores those paths:
+  only on each maintainer's machine. Several guards here ship **Helm-template** canary fixtures whose
+  `templates/` directories are unparseable YAML by design (`{{ … }}` where a value belongs), and a
+  local `yamllint .` fails on them unless your config ignores those paths.
 
-  ```yaml
-  ignore: |
-    tools/lint/copy-drift-guard.canary/chart/templates/
-    tools/lint/hook-env-guard.canary/templates/
-    tools/lint/image-pull-policy-guard.canary/templates/
+  **Derive the list rather than trusting one written here** — the paths are not all the same shape
+  (two are `<guard>.canary/chart/templates/`, one is `<guard>.canary/templates/`), and I got that
+  wrong the first time I wrote it down:
+
+  ```sh
+  git ls-files 'tools/lint/**/*.yaml' | xargs grep -l '{{' | xargs -n1 dirname | sort -u
   ```
 
-  CI is unaffected — `yamllint` is not a CI job (see the top of this file) — so this bites only the
-  person running the linter locally to convince themselves a change is safe, which is the worst
-  audience to hand a spurious failure. **If you add a guard with a Helm-template fixture, add its
-  path here**, because the config file it belongs in cannot be committed to say it for you.
+  Put each result under `ignore:` in your `.yamllint.yaml`. CI is unaffected — `yamllint` is not a
+  CI job (see the top of this file) — so this bites only the person running the linter locally to
+  convince themselves a change is safe, which is the worst possible audience for a spurious failure.
+  **If you add a guard with a Helm-template fixture, re-run that command**, because the config file
+  it belongs in cannot be committed to say it for you.
 
 ## A guard's docstring/header is not optional reading
 
