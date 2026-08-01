@@ -12,17 +12,26 @@ Diagrams ship as a standalone Mermaid `.mmd` under `examples/diagrams/platform-o
 (never inline in the `.adoc`); the SVG diagram exports are already rendered and committed
 (2026-07-26, label fix 2026-07-28).
 
+**2026-08-01 media pass (attendee slot `user2`, shared build cluster) — what stopped it, measured
+not assumed.** No console session could be established without a human, so no console shot was taken
+anywhere in the m01–m07 block: the cached session in `tools/media/shot-profile.session.json` answers
+**HTTP 401** to the console's own `users/~` proxy, and the attendee cockpit — which *is* password-free
+— does **not** carry one either: its *OCP Console* tab is an external link to a different subdomain,
+whose iframe the console refuses with `X-Frame-Options`. Injecting an API token as a session cookie
+does not work (recorded in `capture.py`'s header). One human OAuth hop unblocks the block:
+`tools/media/jobs-first-block.yaml` then shoots every capturable row unattended.
+
 ## Screenshots (console views — the view IS the content)
 
-Screenshots 1–3 were **captured on the live console (2026-07-10)** during the browser-verification
-pass and are embedded in `lab.adoc`. **Screenshot 4 must be RE-SHOT** (owner review 2026-07-14):
-the committed file was taken as `user5` and predates the Pipelines/GitOps/ACS console plugins and
-the newly-enabled Developer perspective, so the nav it shows is stale.
+Screenshots **1, 3 and 4 are done and embedded**; **2 is the module's only outstanding row.** (This
+paragraph said "screenshot 4 must be RE-SHOT" until 2026-08-01 — that was true when it was written
+and stopped being true when row 4 was re-shot on 2026-07-29; the row itself records the re-shoot.
+Corrected here rather than left to contradict the table two lines below it.)
 
 | # | Filename | Status | Console view | Notice | Embed point |
 |---|----------|--------|--------------|--------|-------------|
 | 1 | `platform-orientation-01-topology-3pods.png` | ✅ DONE 2026-07-10 | Topology, project `user1-dev`, `parasol-web` scaled to 3 | the Pod donut showing 3/3; the node title; the Open-URL arrow | lab.adoc ex. 3 (scale) |
-| 2 | `platform-orientation-02-deploy-image-dialog.png` | ✅ DONE 2026-07-10 | **Quick create (+) → Container images** form, registry reference pasted and **Validated** | the *Image name from external registry* field, the green *Validated*, the auto-filled Name, Resource type = Deployment; Target port and *Create a route* live under *Advanced options* | lab.adoc ex. 2 (Console tab) |
+| 2 | `platform-orientation-02-deploy-image-dialog.png` | ❌ RE-CAPTURE (file on disk, **not embedded**) — this row read "✅ DONE 2026-07-10" until 2026-08-01, which contradicted `lab.adoc:187`'s own note that the committed file cannot be embedded until it is re-shot. Opened and read the PNG on 2026-08-01; the lab note is the correct side. What the frame actually shows: masthead and project selector on **`user5`/`user5-dev`** (a decommissioned slot), the registry path **`…/parasol-images/parasol-web:1.0`** — the pre-`ogsr-` prefix namespace, so it contradicts `lab.adoc:53/177/200`, which say `ogsr-parasol-images` — and the form **cropped just below *Application name***, so *Name*, *Resource type* and *Advanced options* (the fields the surrounding step is about) are off-frame entirely. **Not capturable by the harness:** `capture.py` has no generic form-fill (only `filter_text`, which types into a list's filter box), and this shot must show the *Image name from external registry* field filled and green-**Validated** — i.e. a human typing into `/deploy-image?ns={user}-dev`. Parked with that reason in `tools/media/jobs-first-block.yaml`. | **Quick create (+) → Container images** form, registry reference pasted and **Validated** | the *Image name from external registry* field, the green *Validated*, the auto-filled Name, Resource type = Deployment; Target port and *Create a route* live under *Advanced options* | lab.adoc ex. 2 (Console tab) |
 | 3 | `platform-orientation-03-lightspeed-answer.png` | ✅ DONE 2026-07-10 | OpenShift Lightspeed panel after asking "Why is my pod restarting?" | the Lightspeed **chat bubble at bottom-right**; the bulleted causes; the suggested `oc` commands; the doc citations | lab.adoc ex. 7 |
 | 4 | `platform-orientation-04-unified-console-landmarks.png` | ✅ CAPTURED 2026-07-29 as `user1` on 4.22.5, 1600x1000 — re-shot per the owner review of 2026-07-14. Shows the topology canvas drawn with `parasol-claims` + `claims-db`, all four landmarks present. NOTE the first attempt this session passed every assert and was still unusable: the asserts named only nav text, so it photographed an empty canvas with a loading spinner seconds after `ws start` purged the namespace. The spec now asserts a workload name, which is the only thing that proves the panel actually drew. | Unified console, project `user1-dev` selected, on the CURRENT nav (with the Pipelines/GitOps/ACS plugins present) | (1) project selector on `user1-dev`, (2) masthead **Quick create (+)** menu, (3) Topology under **Workloads**, (4) Lightspeed **chat bubble (bottom-right)**; if the Developer perspective is enabled, include the perspective switcher at the top of the nav. The web-terminal masthead icon is **no longer a landmark** (the lab dropped that step). Historical: the shot this row previously carried was pulled 2026-07-28 for showing stale nav (no Pipelines/GitOps/ACS groups), taken as user5 on a decommissioned cluster; the 2026-07-29 re-shoot above supersedes it. | lab.adoc ex. 1 |
 
