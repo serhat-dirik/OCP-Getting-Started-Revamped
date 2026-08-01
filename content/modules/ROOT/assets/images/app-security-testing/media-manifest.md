@@ -42,13 +42,57 @@ shots (`04-STYLE-GUIDE §4`).
 |----------|----------|------------------------|
 | `app-security-testing-01-pipeline-red-run.png` | Lab 1 | **MARQUEE** — the OpenShift *Pipelines* console graph for `parasol-claims-devsecops` on `seed-appsec`: `fetch-source` green, `sast-sonar` *red*, the run stopped. Notice a green *build* is a red *security* posture. `[CAPTURE-VERIFY]` graph node labels |
 | `app-security-testing-02-pipeline-green-run.png` | Lab 6-7 | **MARQUEE (pair with 01)** — the same graph after the five fixes: every stage green (`sast-sonar` · `sca-trivy` · test · build · `image-scan` · sign · `deployment-check` · deploy · `dast-zap`). Notice green now means *safe* |
-| `app-security-testing-03-sonarqube-quality-gate.png` | Lab 2 | The *SonarQube dashboard* for `parasol-claims-{user}`: quality gate *Failed*, condition *Vulnerabilities is greater than 0*, and the *S2068 — Credentials should not be hard-coded* issue on `PartnerGateway.java`. Notice the exact rule, file and line. **Read the two notes below before shooting this row** — one about the cluster state it needs, one about a string in the frame that must NOT be redacted. `[CAPTURE-VERIFY]` dashboard labels |
+| `app-security-testing-03-sonarqube-quality-gate.png` | Lab 2 | ✅ **CAPTURED 2026-08-01.** The *SonarQube* project *Overview* for `parasol-claims-{user}`: quality gate *Failed*, *Overall Code* badged *1 failed*, the one failing condition *1 Vulnerabilities is greater than 0*, and the measure tiles (*Security* 1 open issue, rated C). Notice the code compiled fine — it is the gate, not the compiler, that stopped this change |
+| `app-security-testing-03b-sonarqube-s2068-issue.png` | Lab 2 | ✅ **CAPTURED 2026-08-01.** The *SonarQube Issues* page with the one *Security*-tagged finding opened: rule *Credentials should not be hard-coded · java:S2068*, *Line affected L18*, status *Open*, and the *Where is the issue?* panel showing `PartnerGateway.java` line 18 with the hard-coded literal underlined. Notice the scanner names the exact rule, file and line. **Read the two notes below before re-shooting this row** — one about the cluster state it needs, one about a string in the frame that must NOT be redacted |
 | `app-security-testing-04-rhacs-log4shell-violation.png` | Lab 4 | The *RHACS console* → *Violations*: the `parasol-claims` image violation for the *Block Log4Shell (CVE-2021-44228)* policy, severity *Critical*, showing the CVE, the `log4j-core` component, and the image digest. Notice the image scan caught what the clean Trivy *source* scan could not — defense in depth. `[CAPTURE-VERIFY]` Violations column labels |
 | `app-security-testing-05-roxctl-deployment-check.png` | Lab 5 | The `deployment-check` *TaskRun log*: the `roxctl deployment check` violations on the insecure manifest (Privileged Container, CAP_SYS_ADMIN added, privilege escalation allowed, no CPU request / memory limit) with the MEDIUM+ total. Notice "you ship your configuration, not just your code" |
 | `app-security-testing-06-zap-baseline-summary.png` | Lab 6 | The `dast-zap` *TaskRun* ZAP baseline WARN/FAIL summary against the running Route: the missing security headers (Content-Security-Policy, X-Content-Type-Options, anti-clickjacking). Notice DAST only sees this once the app is deployed and answering requests |
 | `app-security-testing-07-route-security-headers.png` | Lab 6-7 | The deployed `parasol-claims` *Route* open in the browser with the dev-tools *Network → Headers* panel (or the `curl -sI` output alongside) showing the security headers now present. Notice the same header ZAP flagged is now set — the DAST gate is green |
 
-### Screenshot 3 (SonarQube) — reachable surface, wrong state (assessed 2026-08-01)
+### Screenshot 3 (SonarQube) — CAPTURED 2026-08-01, and why it is now two files
+
+**One frame could not hold this row.** As specified, row 3 asked a single image to show the failed
+quality gate *and* the S2068 issue on `PartnerGateway.java`. SonarQube 26.x renders those on two
+different pages — the gate and its failing condition on the project *Overview*, the rule/file/line
+and the offending source line in the *Issues* detail pane — and no view carries both. Row 3 keeps
+its filename and its subject (the gate); the finding became row 3b. Same split as
+`gitops-at-scale` rows 4/4b.
+
+**Two traps worth keeping.** The *Overview* opens on the **New Code** tab, where every tile reads
+`0` under a big red *Failed* headline — a shot of that is technically the right page and teaches
+nothing. The failing condition lives on **Overall Code**; `?codeScope=overall` selects it from the
+URL, which is cheaper than clicking a tab labelled "Overall Code 1 failed". And on the *Issues*
+page, adding `&types=VULNERABILITY` narrows the left-hand list from all seven issues to the one
+that matters — worth doing on a re-shoot.
+
+### Screenshot 3 — how the RED state was produced, and how to reproduce it (measured 2026-08-01)
+
+**The lab's own documented path produces it. No workaround was needed.** Re-measured end to end on
+cluster 2 as `user5`:
+
+```sh
+tools/ws/ws start app-security-testing --user user5   # ~30 s; re-seeds the fork AND purges the ns
+# then lab.adoc Exercise 1's own CLI PipelineRun block, verbatim:
+#   git-revision: seed-appsec   sonar-project-key: parasol-claims-user5
+```
+
+The entry-state hook **force-pushes the five seeded flaws back over any fixes a previous run
+committed** to `seed-appsec`, so a namespace that was driven all the way to green comes back fully
+red — that is what makes this row re-shootable at all. The run then stops at `sast-sonar`
+(`StepFailed`) in **~2 min 45 s**, exactly as Exercise 1 promises, and that failing analysis flips
+SonarQube: `alert_status` `OK`→`ERROR`, `vulnerabilities` `0`→`1`, and the S2068 issue
+`CLOSED/FIXED`→`OPEN` with no resolution (SonarQube reopens the *same* issue key rather than
+creating a new one).
+
+**Inspected by eye before committing** (the harness cannot do this part — a shot that lands on a
+login page is still a valid PNG). Both frames show the red state, not a passing project: row 3
+reads *Failed* with *1 condition failed* and *1 Vulnerabilities is greater than 0*; row 3b shows
+the finding *Open*, `java:S2068`, *Line affected L18*. Neither frame contains a cluster domain, a
+username, a token or a session — SonarQube renders the project's *display name* ("Parasol Claims"),
+never its per-user key, there is no browser chrome in a Playwright shot, and the header still
+offers *Log in* because both views were read anonymously. Nothing needed scrubbing.
+
+### Screenshot 3 — the anonymous read surface (assessed 2026-08-01)
 
 **SonarQube needs no login for this.** Anonymous read is on: `/api/issues/search`,
 `/api/components/search?qualifiers=TRK`, `/api/measures/component`,
@@ -56,19 +100,29 @@ shots (`04-STYLE-GUIDE §4`).
 credential. (`/api/projects/search` is the exception — it is admin-only and returns "Insufficient
 privileges"; use `components/search` instead. Do not read that one 403 as "SonarQube is locked".)
 
-**What blocks the row is the DATA, not the door.** On the capture cluster the only analysed project had
-already been driven to the module's **green end state**, so:
+**What blocked the row was the DATA, not the door — and it will block it again.** This is the
+failure mode to guard against on every re-shoot, recorded because it nearly shipped: when the row
+was first attempted, the only analysed project on the cluster had already been driven to the
+module's **green end state**, so:
 
 * `alert_status` = `OK`, `vulnerabilities` = `0`, `security_rating` = `1.0`;
-* the S2068 issue exists but is `status: CLOSED, resolution: FIXED` — `resolved=false` returns **0**;
-* the gate-event history shows the red state *did* exist and was overwritten:
-  `Failed` (15:46) → `Passed` (15:51) → `Failed` (20:16) → `Passed` (20:39).
+* the S2068 issue existed but was `status: CLOSED, resolution: FIXED` — `resolved=false` returned **0**;
+* the gate-event history showed the red state *had* existed and been overwritten:
+  `Failed` → `Passed` → `Failed` → `Passed`.
 
-The row needs the **RED** state. Shooting now yields a valid PNG of a passing project — a picture of the
-opposite of the lesson. **Re-run the SAST stage against the seeded branch first**, confirm
+The row needs the **RED** state, and every URL in this section renders happily against a green
+project — a valid PNG of a *passing* build, which teaches the opposite of the lesson. **Re-run the
+SAST stage against the seeded branch first** (the reproduction above), confirm
 `/api/issues/search?rules=java:S2068&resolved=false` returns 1, then shoot
-`/project/issues?id=parasol-claims-<user>&open=<issueKey>&types=VULNERABILITY`. Wait on `S2068` **and**
-`PartnerGateway.java` — never on "SonarQube", which is on every page including an empty one.
+`/dashboard?id=parasol-claims-<user>&codeScope=overall` and
+`/project/issues?id=parasol-claims-<user>&open=<issueKey>&types=VULNERABILITY`. Wait on `S2068`
+**and** `PartnerGateway.java` — never on "SonarQube", which is on every page including an empty
+one. The `open=` issue key is per-project: read it from that same `issues/search` call, never
+reuse a literal from a job file.
+
+**These two shots are one-shot.** The next `sast-sonar` run against fixed code closes the finding
+again, so `reshoot` stays `false` in the job file and the images are committed as soon as they are
+inspected.
 
 Two useful anonymous one-liners for confirming the state before you shoot:
 
