@@ -23,6 +23,11 @@ before touching it — it names the real incident, and the incident is the spec.
   `_check-coverage.sh`, `_extract-func.sh`, `_parse-guard-args.sh`, `_scope.py`. These are libraries
   other guards source or import — running them standalone (see below) proves the library itself
   still works, which is why each one is also runnable directly.
+- **`_canary-coverage.py`** — the one `_`-prefixed file that is not a library but a **guard about
+  the guards**: it blinds each Python guard's detectors one at a time and requires an exit code to
+  change. Its fixtures live in `_canary-coverage.canary/` and are themselves tiny fake guards with
+  known answers. See "Proving a detector is load-bearing" below; it is the thing that stops a
+  guard's own green tick from meaning less than it looks like.
 
 Guards come in two shapes, because the repo has both Python and Bash checks and each language grew
 its own convention independently. Pick whichever matches the guard you're closest to; don't force
@@ -198,6 +203,79 @@ canary, not the real tree) and can still correctly exit 1 while the real run sil
 scan anything. This is not hypothetical caution — it happened for real the night of 2026-08-01, and
 is exactly why every guard's CI job runs `--self-test` **and then** the real invocation, checking
 both exit codes.
+
+## Proving a detector is load-bearing: `_canary-coverage.py`
+
+A guard's own CI job asserts that **something** fired. It cannot assert that **each** detector is
+individually load-bearing, and on 2026-08-01 an audit showed how far apart those two claims are: of
+21 detectors in `rebuild-scan-guard.py`, **15 could be blinded with `--self-test` still exiting 1
+and the real run still exiting 0**. Its two halves counted a mutant caught if *either* fired, so
+each half was signing off the other's regressions. The same night turned up a `self_test()` that
+re-implemented the pipeline and never called the function the real run uses, two finding kinds
+masking each other, and a documented predicate that nothing called at all. Every one of those
+guards was green in `lint.yml` the whole time.
+
+The technique that found them is one sentence: **blind ONE detector, re-run BOTH modes, and require
+an exit code to change.** `_canary-coverage.py` is that sentence as a CI job (`canary-coverage`).
+
+```sh
+python3 tools/lint/_canary-coverage.py --self-test          # must exit 1
+python3 tools/lint/_canary-coverage.py                      # budget mode: what CI runs
+python3 tools/lint/_canary-coverage.py --all                # sweep everything, ignore the budget
+python3 tools/lint/_canary-coverage.py --guard copy-drift-guard.py   # one guard, while you edit it
+```
+
+**What it counts as a detector**, all three restricted to the real-run call graph (reachable from
+`main()` without going through `self_test()`, and never inside an `if args.self_test:` branch —
+blinding a harness assertion cannot move an exit code, so counting one would report every guard as
+holed):
+
+| kind | what it is | how it is blinded |
+| --- | --- | --- |
+| `pattern:NAME` | a module-level `re.Pattern` the real run reads | swapped for one that matches nothing |
+| `predicate:NAME` | a module-level `-> bool` function the real run reads | forced to `False`, then to `True` — a predicate that survives *both* is the dead-code shape |
+| `emit:FUNC:HASH` | a finding-emission site: `.append`/`.extend` onto an outcome-deciding `[]` local, a `yield`, or a call to a class's one-line recorder method (`self._record(…)`) | replaced by a no-op |
+
+`HASH` is a hash of the statement text, not a line number, so a ledger entry naming it survives
+everything moving down a few lines and expires exactly when the statement itself changes.
+
+**If your new detector comes out UNPROVEN, the fix is a witness, not a ledger entry.** Write the
+canary case only that detector can catch — or, for the ones that *enable* detection rather than
+trigger it (blinding them makes the guard quieter, so no safe case can ever witness them), the case
+that must stay silent and only stays silent because of them. That is what the five click-to-run
+patterns and `curl-format`'s `INTRINSIC_ATTRIBUTES` needed.
+
+**Two ledgers, for the two things a witness can't be written for.** Both are still swept, and both
+error in *two* directions — when the key stops enumerating, and when the detector becomes proven —
+which is the `_PGA_EXEMPT` shape and the only reason a list like this doesn't rot:
+
+- `EXEMPT` — "this detector **cannot** be witnessed by either mode, and here is the structural
+  reason." Empty today.
+- `KNOWN_UNPROVEN` — "this detector **can** be witnessed and isn't — yet." Debt, with the witness
+  spelled out in the entry. **It may shrink, never grow**: a new unproven detector fails CI, and an
+  entry that acquires a witness fails CI too, so paying the debt is the only way to stop hearing
+  about it.
+
+**Runtime — why the default is a budget and not `--all`.** Measured on this tree: nine of the ten
+Python guards cost under 5s for both baseline modes, so their full sweep is ~2 minutes wall at
+`-j4`. `rebuild-scan-guard.py` costs ~75s per detector (its `--self-test` runs 21 internal mutants,
+several spawning `bash tools/ws/ws`) across 24 detectors — 360-470s even at `-j8`, half an hour serial. So a guard is
+swept when the diff **touched** it (always, budget ignored) or when its projected cost fits
+`--budget` (default 240s). Nothing hardcodes which guard is the slow one; a guard that gets slow
+drops out on its own and rejoins when it gets fast. The consequence worth knowing: an expensive
+guard's detectors are re-proven **when it or its fixtures change**, not on every push.
+
+**Exit codes.** `--self-test` exits 1 (it correctly classified fixture guards with known answers,
+including a deliberately unwitnessable detector); the real run exits 0 clean, **1** for an unproven
+detector or a rotten ledger entry, **2** for could-not-inspect — a guard that will not import, an
+unmutated control that is not 0/1, a mutation that failed to land, zero guards selected, zero
+detectors enumerated. 1 and 2 are deliberately different codes: the first is a finding about a
+guard, the second is a finding about the sweep, and a guard that fails to import must never read as
+a guard with a hole.
+
+**It does not cover the Bash guards.** They have no module-level attribute to patch;
+`_check-coverage.sh` asserts every `check_*` **ran**, which is strictly weaker than "its finding
+could not be silenced". Read the `canary-coverage` tick as a claim about the Python guards only.
 
 ## Local reproduction
 

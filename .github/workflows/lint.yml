@@ -1131,3 +1131,66 @@ jobs:
             exit 1
           fi
           python3 tools/lint/version-anchor-guard.py
+
+  canary-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0, unlike every other job here: this one has to diff against the base commit
+      # to know which guards were TOUCHED, and a shallow clone cannot resolve one. If the base is
+      # unresolvable the guard exits 2 rather than quietly sweeping a narrower set — see below.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # The gate runs the real guards, and three of them parse YAML. Without the parser their
+        # unmutated control exits 2, which the gate reports as could-not-inspect — correct, but a
+        # dependency failure dressed up as a finding about the guards.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Every detector in a Python guard must be provable by blinding it
+        # WHY THIS JOB EXISTS. On 2026-08-01 an audit blinded each Python guard's detectors one at
+        # a time and required an exit code to change. In one night it found 15 of 21 detectors
+        # blindable in rebuild-scan-guard (its two halves counted a mutant caught if EITHER fired,
+        # so each signed off the other's regressions), a self-test that re-implemented the pipeline
+        # and never called the function the real run uses, two finding kinds masking each other,
+        # and a documented predicate that nothing called. Every one of those guards was GREEN in
+        # this workflow the whole time: a guard's own job asserts that SOMETHING fires, never that
+        # each detector is individually load-bearing. This job asserts the second thing, so the
+        # audit does not have to be re-run by hand to stay true.
+        #
+        # RUNTIME. The gate sweeps a guard when the diff touched it (always) or when its projected
+        # cost fits --budget (default 240s). On this tree that is nine of ten guards in ~2 minutes;
+        # rebuild-scan-guard costs ~75s per detector across 24 of them and is swept only when it or
+        # its fixtures change, which is when its coverage can actually regress. Nothing hardcodes
+        # which guard is the expensive one — a guard that gets slow drops out on its own.
+        env:
+          BASE: ${{ github.event_name == 'pull_request'
+                    && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          rc=0
+          python3 tools/lint/_canary-coverage.py --self-test || rc=$?
+          # Exactly 1 = the gate classified a fixture guard with witnessed detectors as proven, a
+          # fixture guard with an unwitnessable one as UNPROVEN, and rejected both rot directions
+          # of both ledgers. 0 = the gate is blind and would pass any tree. 2 = its own harness is
+          # broken. A meta-guard that always passes is the exact defect it exists to find.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::_canary-coverage self-test must exit 1 (it can tell a proven detector" \
+                 "from an unproven one); got rc=$rc. Refusing to trust its verdict on the guards."
+            exit 1
+          fi
+          # An all-zero SHA is a first push to a branch with no predecessor to diff against. Pass
+          # no --changed-from at all there: the budget still sweeps nine guards, and claiming a
+          # base we do not have would be worse than sweeping the cheap set.
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
+            set -- --changed-from "$BASE"
+          else
+            set --
+            echo "no resolvable base commit; sweeping by budget only (touched-guard rule is off)"
+          fi
+          # rc 1 = a detector can be blinded with no CI signal. rc 2 = the gate could not inspect
+          # a guard at all (it does not import, its unmutated control is not 0/1, a mutation
+          # failed to land). Both fail this job, and they are deliberately different codes: the
+          # first is a finding about a guard, the second is a finding about the sweep.
+          python3 tools/lint/_canary-coverage.py "$@"
