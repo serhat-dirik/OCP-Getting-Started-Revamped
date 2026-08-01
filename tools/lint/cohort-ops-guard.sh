@@ -39,6 +39,8 @@ REPO_ROOT="$(cd "${LINT_DIR}/../.." && pwd)"
 source "${LINT_DIR}/_extract-func.sh"
 # shellcheck source=tools/lint/_check-coverage.sh
 source "${LINT_DIR}/_check-coverage.sh"
+# shellcheck source=tools/lint/_parse-guard-args.sh
+source "${LINT_DIR}/_parse-guard-args.sh"
 
 # Set by run_check so the detectors can be pointed at canary fixtures instead of the real tree.
 WIPE_SH=""
@@ -322,7 +324,10 @@ gitea_connect() {\
   return 1
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then
+# Rejects anything that is not --self-test / -h / --help, naming the offender, exit 2. Before this
+# existed a one-hyphen typo (`--selftest`) silently ran the plain check and printed a green tick.
+parse_guard_args "$@"
+if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
   self_test
   exit $?
 fi

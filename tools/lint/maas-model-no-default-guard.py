@@ -40,6 +40,7 @@ USAGE
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -199,5 +200,21 @@ def self_test() -> int:
     return 1
 
 
+def main(argv=None) -> int:
+    # argparse, not `"--self-test" in sys.argv`. The membership test IGNORED every other argument:
+    # `--selftest`, one hyphen short, ran the plain check and printed a clean result, so a maintainer
+    # proving a detector fires proved nothing. argparse names the offending argument and exits 2 —
+    # the same behaviour the six argparse-based guards beside this one already had, and the same
+    # exit code tools/lint/_parse-guard-args.sh gives the shell guards.
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--self-test", action="store_true",
+                    help="run the canaries instead of the real tree; exits 1 when every canary was "
+                         "correctly caught, which is the PASS for this mode")
+    args = ap.parse_args(argv)
+
+    return self_test() if args.self_test else check(SITES, MIN_SITES)
+
+
 if __name__ == "__main__":
-    raise SystemExit(self_test() if "--self-test" in sys.argv else check(SITES, MIN_SITES))
+    raise SystemExit(main())

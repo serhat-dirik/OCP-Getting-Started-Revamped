@@ -161,6 +161,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   _COV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # shellcheck source=tools/lint/_extract-func.sh
   source "${_COV_DIR}/_extract-func.sh"
+  # shellcheck source=tools/lint/_parse-guard-args.sh
+  source "${_COV_DIR}/_parse-guard-args.sh"
 
   # Runtime probe: run a fake driver that calls SOME of the detectors declared in a subshell, and
   # report what assert_all_checks_ran made of it. `blind` names the detector whose call is dropped.
@@ -177,7 +179,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     )
   }
 
-  if [[ "${1:-}" == "--self-test" ]]; then
+  # Rejects anything that is not --self-test / -h / --help, naming the offender, exit 2.
+  parse_guard_args "$@"
+  if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
     # Proof 0: the real tree is wired. An assertion that fires on everything proves nothing either.
     _real_rc=0
     coverage_wiring_scan "$_COV_DIR" >/dev/null 2>&1 || _real_rc=$?

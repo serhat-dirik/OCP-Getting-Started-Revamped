@@ -20,9 +20,9 @@ before touching it — it names the real incident, and the incident is the spec.
   need multiple files to construct a realistic scenario (`copy-drift-guard.canary/`,
   `image-pull-policy-guard.canary/`, `rebuild-scan-fixtures/`).
 - **Shared infrastructure**, prefixed `_` so they sort together and read as "not a guard":
-  `_check-coverage.sh`, `_extract-func.sh`, `_scope.py`. These are libraries other guards source or
-  import — nothing in CI invokes them as a job by name, but running them standalone (see below)
-  proves the library itself still works, which is why each one is also runnable directly.
+  `_check-coverage.sh`, `_extract-func.sh`, `_parse-guard-args.sh`, `_scope.py`. These are libraries
+  other guards source or import — running them standalone (see below) proves the library itself
+  still works, which is why each one is also runnable directly.
 
 Guards come in two shapes, because the repo has both Python and Bash checks and each language grew
 its own convention independently. Pick whichever matches the guard you're closest to; don't force
@@ -36,6 +36,7 @@ one shape into the other file type.
 #!/usr/bin/env bash
 source "$(dirname "${BASH_SOURCE[0]}")/_extract-func.sh"     # if you need to drive a real function
 source "$(dirname "${BASH_SOURCE[0]}")/_check-coverage.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_parse-guard-args.sh" # ALWAYS — see "arguments" below
 
 check_something() {   # <args> → 0 clean, 1 finding, 2 could not inspect
   ran_check            # FIRST statement — see "why check_* must be named that way" below
@@ -55,6 +56,32 @@ Then wire a `--self-test` path (a fixture the detector must fire on, run through
 `check_*` functions — never a reimplementation) and a real-run path (`run_check` against the real
 tree), and add a CI job (see "Wiring into CI" below). `operatorgroup-uniqueness-guard.sh` is a good
 compact worked example of this whole shape.
+
+### Arguments: never hand-roll the check
+
+Dispatch on `parse_guard_args`, never on a bare comparison:
+
+```bash
+parse_guard_args "$@"
+if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then self_test; exit $?; fi
+run_check "$REPO_ROOT"; exit $?
+```
+
+The shape it replaces — `if [[ "${1:-}" == "--self-test" ]]` — discarded every other argument in
+silence, so `--selftest` (one hyphen short) ran the PLAIN check and printed a green tick. A
+maintainer who typos the flag believes they just proved detection; they proved nothing, because the
+plain check passes on a healthy tree by definition. CI's exit-exactly-1 assertion catches that; a
+laptop does not, and the laptop is where guards get run to justify a change. `parse_guard_args`
+names the offending argument and exits **2** (this tree's "could not inspect what it claims to
+inspect" code — never 1, which would satisfy CI's self-test assertion and re-open the hole).
+
+A guard needing more flags writes its own `while … case` parser that also rejects unknown arguments
+by name (`adoption-skippable-guard.sh` is the worked example) and adds itself to `_PGA_EXEMPT` in
+`_parse-guard-args.sh` with a reason. `bash tools/lint/_parse-guard-args.sh` meta-scans the
+directory and fails on any `.sh` that is neither wired nor exempt, so adoption cannot rot.
+
+Python guards get the same contract from `argparse` (`ap.parse_args()` names the offender and exits
+2 already) — use it, not `"--self-test" in sys.argv`, which has the identical silent-discard bug.
 
 ### Python shape: `find_offenders()` + a canary with per-section assertions
 

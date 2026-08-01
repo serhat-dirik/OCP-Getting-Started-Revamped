@@ -81,6 +81,8 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERIFY_DIR="${REPO_ROOT}/tools/verify"
+# shellcheck source=tools/lint/_parse-guard-args.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_parse-guard-args.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -513,18 +515,20 @@ self_test() {
 
 # ── main ──────────────────────────────────────────────────────────────────────────────────────────
 main() {
+  # Parsed FIRST, before the fixture probe: a mistyped flag should be answered immediately, not
+  # after a probe whose result the caller is about to be told nothing about. This guard already
+  # rejected unknown arguments with exit 2 — the shared parser keeps that code and adds the part
+  # that was missing, NAMING the offending argument, and rejecting past $1 as well.
+  parse_guard_args "$@"
+
   if ! fixture_probe; then
     bad "the scanner cannot separate an executed mutation from a printed one — refusing to report on a tree it is not really reading"
     return 2
   fi
 
-  if [[ "${1:-}" == "--self-test" ]]; then
+  if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
     self_test
     return $?
-  fi
-  if [[ -n "${1:-}" ]]; then
-    bad "usage: $(basename "$0") [--self-test]"
-    return 2
   fi
 
   if [[ ! -d "$VERIFY_DIR" ]]; then

@@ -148,7 +148,12 @@ FIXTURE
 # the fix is load-bearing (rc 1). Sourcing (the normal path, from a guard) runs neither.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   set -uo pipefail
-  if [[ "${1:-}" == "--self-test" ]]; then
+  # shellcheck source=tools/lint/_parse-guard-args.sh
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_parse-guard-args.sh"
+  # Sourced INSIDE the standalone block: a guard that sources this library for extract_func must not
+  # also inherit an argument parser it did not ask for. Rejects a mistyped flag by name, exit 2.
+  parse_guard_args "$@"
+  if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
     _extract_func_self_test
     exit $?
   fi

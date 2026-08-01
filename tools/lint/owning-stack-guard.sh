@@ -54,6 +54,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_extract-func.sh"
 # shellcheck source=tools/lint/_check-coverage.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_check-coverage.sh"
+# shellcheck source=tools/lint/_parse-guard-args.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_parse-guard-args.sh"
 
 ok()   { echo "✅ $*"; }
 bad()  { echo "❌ $*" >&2; }
@@ -273,7 +275,10 @@ self_test() {
   return 1
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then
+# Rejects anything that is not --self-test / -h / --help, naming the offender, exit 2. Before this
+# existed a one-hyphen typo (`--selftest`) silently ran the plain check and printed a green tick.
+parse_guard_args "$@"
+if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
   self_test
   exit $?
 fi
