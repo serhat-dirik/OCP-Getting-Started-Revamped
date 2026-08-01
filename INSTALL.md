@@ -74,25 +74,41 @@ RHACS-dependent modules via `modules_disabled` is the single biggest lever you h
 ### What to order
 
 ```
-total = 20 CPU / 60 Gi              (platform)
-      + attendees × 4 CPU / 10 Gi   (assume everyone on a heavy module at once)
+total = 32 CPU / 56 Gi              (the platform, measured above)
+      + attendees × 4 CPU / 10 Gi   (assume everyone is on a heavy module at once)
       + 20% headroom
 ```
 
-| Cohort | Minimum allocatable | Practical order |
-|---|---|---|
-| 5 attendees | ~48 CPU / 132 Gi | 3 workers × 16 CPU / 64 Gi |
-| **8 attendees** | **~62 CPU / 168 Gi** | **4 workers × 16 CPU / 64 Gi** |
-| 12 attendees | ~82 CPU / 216 Gi | 5–6 workers × 16 CPU / 64 Gi |
+Sized against a **32 vCPU / 64 GiB** worker, the common shape — figure on roughly 30 CPU and 58 Gi
+of that being *allocatable* once the kubelet and system reservations are taken out.
 
-**Order fewer, larger nodes.** Memory is the binding constraint, not CPU. A 4 CPU / 16 Gi node cannot
-host one Dev Spaces workspace plus its share of platform pods, so small nodes strand capacity.
+| Workshop size | Attendees | Minimum allocatable | Order |
+|---|---|---|---|
+| Small | 12 | ~96 CPU / ~211 Gi | **4 workers** × 32 vCPU / 64 GiB |
+| **Normal** | **20** | **~134 CPU / ~307 Gi** | **6 workers** × 32 vCPU / 64 GiB |
+| Large | 30 | ~182 CPU / ~427 Gi | **8 workers** × 32 vCPU / 64 GiB |
+
+**Memory is what decides the node count, not CPU.** At 20 and 30 attendees the memory figure needs
+one more node than the CPU figure does. The heavy modules are memory-hungry and CPU-idle — a Dev
+Spaces workspace mostly waits for a human to type.
+
+**Order fewer, larger nodes.** A 4 CPU / 16 GiB node cannot host a single Dev Spaces workspace plus
+its share of platform pods, so small nodes strand capacity you have paid for.
+
+The per-attendee allowance above is deliberately conservative: it assumes every attendee is on the
+heaviest module simultaneously, which a real room never quite reaches. Attendees measured on a live
+cluster with one or two modules materialized used 0.3–1.1 Gi of requests each. Size on the formula
+and the room stays comfortable; size on a `top` reading and you will under-order, because the
+scheduler places pods on *requests*.
 
 **One module needs free *nodes*, not just free totals.** *Deployment Targets & Scheduling* asks the
 scheduler for four distinct placements at once, so it needs **four non-batch nodes that can each still
 admit a 200m / 256Mi pod**, judged on requests rather than usage. On a cluster whose nodes are already
 near their request ceiling, its exercises cannot place a replica even though the cluster looks idle.
-Order real slack, or drop the module with `modules_disabled`.
+
+Every row in the table above already orders four or more workers, so this is satisfied by default —
+it only bites if you cut the node count below the recommendation while keeping the module enabled.
+If you do need to run leaner, drop that module with `modules_disabled` rather than hoping it fits.
 
 **Running lean:** `modules_disabled` in `vars.yaml` drops heavy modules from the delivery. Their
 operators still install, but no attendee can start them.
