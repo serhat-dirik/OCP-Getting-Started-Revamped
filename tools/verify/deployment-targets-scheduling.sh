@@ -26,8 +26,9 @@ POOL_VALUE="batch"
 
 # --- helpers (oc only) -------------------------------------------------------
 
-# A Deployment exists (materialized) in {user}-dev.
-deploy_present() { oc get deploy "$1" -n "$NS" >/dev/null 2>&1; }
+# A Deployment exists (materialized) in {user}-dev. oc_present, not `oc get … 2>/dev/null`: NotFound is
+# still a ❌ (the entry state really did not materialize it), but a cluster that could not be asked is a ⚠.
+deploy_present() { oc_present get deploy "$1" -n "$NS" -o name; }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
@@ -36,9 +37,9 @@ deploy_present() { oc get deploy "$1" -n "$NS" >/dev/null 2>&1; }
 # Cluster-scoped bootstrap substrate (Rule 13 — never chart-owned); fail closed so a missing/recycled
 # label is LOUD. Label-only is NOT the same claim as "the pool is real" — see batch_pool_tainted below.
 batch_pool_labeled() {
-  local c
-  c="$(oc get nodes -l "${POOL_KEY}=${POOL_VALUE}" -o name 2>/dev/null | grep -c . || true)"
-  [[ "${c:-0}" -ge 1 ]]
+  # An empty label selector result is rc 0 with empty stdout — a REAL "no such node", still a ❌.
+  oc_read get nodes -l "${POOL_KEY}=${POOL_VALUE}" -o name || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 # The labeled batch pool node ALSO carries the matching NoSchedule taint. This is the 40th instance of
@@ -52,80 +53,106 @@ batch_pool_labeled() {
 # defect, so this must still fail closed: a green check here is a promise that the toleration half of
 # the lesson is actually live on THIS cluster, and that promise must not be made when it's false.
 batch_pool_tainted() {
-  local node effect
-  node="$(oc get nodes -l "${POOL_KEY}=${POOL_VALUE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  local node
+  # `{.items[0]…}` on an empty list is an oc ERROR, not empty output (measured on 4.20, 2026-08-01) —
+  # oc_read classifies it as the server's real answer, so "no labeled node" stays a ❌ exactly as before.
+  oc_read get nodes -l "${POOL_KEY}=${POOL_VALUE}" -o jsonpath='{.items[0].metadata.name}' || return 1
+  node="$OC_OUT"
   [[ -n "$node" ]] || return 1
-  effect="$(oc get node "$node" -o jsonpath="{.spec.taints[?(@.key=='${POOL_KEY}')].effect}" 2>/dev/null || true)"
-  [[ "$effect" == "NoSchedule" ]]
-}
-
-# The node a Running statement-batch pod landed on (empty if none Running).
-batch_node() {
-  oc get pods -n "$NS" -l app=statement-batch --field-selector=status.phase=Running \
-    -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true
+  # A node with no matching taint yields rc 0 + empty — the real "labeled but not tainted" ❌ this
+  # cluster is actually in (below bootstrap's MIN_BATCH_POOL_FOR_TAINT floor).
+  oc_read get node "$node" -o jsonpath="{.spec.taints[?(@.key=='${POOL_KEY}')].effect}" || return 1
+  [[ "$OC_OUT" == "NoSchedule" ]]
 }
 
 # Does node $1 carry the batch-pool label? (attendee reads nodes via platform-observer.)
 node_is_batch_pool() {
-  [[ "$(oc get node "$1" -o jsonpath="{.metadata.labels.${POOL_KEY//./\\.}}" 2>/dev/null || true)" == "$POOL_VALUE" ]]
+  oc_read get node "$1" -o jsonpath="{.metadata.labels.${POOL_KEY//./\\.}}" || return 1
+  [[ "$OC_OUT" == "$POOL_VALUE" ]]
 }
 
 # END outcome: a Running statement-batch pod is placed ON the dedicated batch pool node.
+# The node lookup is INLINE and not a value-returning batch_node(): `n="$(batch_node)"` runs the read in
+# a SUBSHELL, so the VERIFY_INCONCLUSIVE the helper raises there dies with it and check() would print a
+# ❌ for an API that never answered. Every predicate below reads OC_OUT in the caller's own shell.
 batch_on_pool() {
-  local n; n="$(batch_node)"
-  [[ -n "$n" ]] && node_is_batch_pool "$n"
+  local n
+  oc_read get pods -n "$NS" -l app=statement-batch --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].spec.nodeName}' || return 1
+  n="$OC_OUT"
+  [[ -n "$n" ]] || return 1
+  node_is_batch_pool "$n"
 }
 
-# Count of DISTINCT nodes hosting Running parasol-claims pods (the anti-affinity/spread outcome).
-claims_distinct_nodes() {
-  oc get pods -n "$NS" -l app=parasol-claims --field-selector=status.phase=Running \
-    -o jsonpath='{.items[*].spec.nodeName}' 2>/dev/null | tr ' ' '\n' | sort -u | grep -c . || true
+# The anti-affinity/spread outcome: Running parasol-claims pods sit on >= $1 DISTINCT nodes.
+# A predicate rather than the old `test "$(claims_distinct_nodes)" -ge 2` call site, for the subshell
+# reason above — and because the old form printed 0 for an unreachable API, i.e. a false ❌ on spread.
+claims_spans_nodes() {
+  local n
+  oc_read get pods -n "$NS" -l app=parasol-claims --field-selector=status.phase=Running \
+    -o jsonpath='{.items[*].spec.nodeName}' || return 1
+  n="$(printf '%s' "$OC_OUT" | tr ' ' '\n' | sort -u | grep -c . || true)"
+  [[ "${n:-0}" -ge "$1" ]]
 }
 
 # A PodDisruptionBudget guards parasol-claims.
-pdb_present() { oc get pdb parasol-claims -n "$NS" >/dev/null 2>&1; }
+pdb_present() { oc_present get pdb parasol-claims -n "$NS" -o name; }
 
 # Entry-clean-slate helpers: return 0 when the solve shaping is ABSENT (nothing built yet).
 # Each requires the underlying Deployment to actually exist first — otherwise "absent" is vacuous
 # (true on a cluster where the entry state never materialized at all), not evidence of a clean entry.
+# These three are the NEGATIONS, the direction where this conversion could invent a pass: the old
+# `! oc get … 2>/dev/null` / `[[ -z "$(oc get …)" ]]` certify a clean slate from an API that never
+# answered, and a wrongly-green ENTRY check sends `ws prep` down its "already prepared" fast path.
+# oc_absent answers only when the API did; a missing FIELD on an existing object is still rc 0 + empty
+# (measured, 2026-08-01), so the genuine "not shaped yet" pass is unchanged.
 no_claims_pdb() {
-  oc get deploy parasol-claims -n "$NS" >/dev/null 2>&1 || return 1
-  ! oc get pdb parasol-claims -n "$NS" >/dev/null 2>&1
+  deploy_present parasol-claims || return 1
+  oc_absent get pdb parasol-claims -n "$NS" -o name
 }
 no_claims_antiaffinity() {
-  oc get deploy parasol-claims -n "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity}' 2>/dev/null || true)" ]]
+  deploy_present parasol-claims || return 1
+  oc_read get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity}' || return 1
+  [[ -z "$OC_OUT" ]]
 }
 batch_unpinned() {
   # No batch-pool nodeSelector on statement-batch yet (the attendee adds it).
-  oc get deploy statement-batch -n "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get deploy statement-batch -n "$NS" -o jsonpath="{.spec.template.spec.nodeSelector.${POOL_KEY//./\\.}}" 2>/dev/null || true)" ]]
+  oc_present get deploy statement-batch -n "$NS" -o name || return 1
+  oc_read get deploy statement-batch -n "$NS" -o jsonpath="{.spec.template.spec.nodeSelector.${POOL_KEY//./\\.}}" || return 1
+  [[ -z "$OC_OUT" ]]
 }
 
 # The parasol-claims Hibernate schema-management strategy from the running container env (empty if unset →
 # the image default, which is drop-and-create). Central to deployment-targets-scheduling's zero-downtime re-diagnosis: at entry the
 # app reseeds the SHARED claims-db on every boot (drop-and-create), so a rolling-update pod wipes the DB
 # out from under the serving pod; the fix flips it OFF drop-and-create so pods stop reseeding on boot.
+# Sets CLAIMS_SCHEMA (a global) rather than printing — a `$(…)` caller would lose VERIFY_INCONCLUSIVE.
 claims_schema_strategy() {
-  oc get deploy parasol-claims -n "$NS" \
-    -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null \
-    | grep '^QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=' | head -1 | cut -d= -f2- || true
+  oc_read get deploy parasol-claims -n "$NS" \
+    -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' || return 1
+  CLAIMS_SCHEMA="$(printf '%s\n' "$OC_OUT" \
+    | grep '^QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=' | head -1 | cut -d= -f2- || true)"
 }
 # ENTRY fault-present: the app reseeds on boot (drop-and-create explicitly, or unset → same image default).
 # Requires the Deployment to exist — an absent Deployment also reads as "unset" and must not pass.
 claims_schema_is_reseed() {
-  oc get deploy parasol-claims -n "$NS" >/dev/null 2>&1 || return 1
-  local v; v="$(claims_schema_strategy)"; [[ -z "$v" || "$v" == "drop-and-create" ]]
+  deploy_present parasol-claims || return 1
+  claims_schema_strategy || return 1
+  [[ -z "$CLAIMS_SCHEMA" || "$CLAIMS_SCHEMA" == "drop-and-create" ]]
 }
 # END fix-applied: the app is OFF drop-and-create (none/validate/…) so a new pod boot no longer reseeds.
-claims_schema_not_reseed() { local v; v="$(claims_schema_strategy)"; [[ -n "$v" && "$v" != "drop-and-create" ]]; }
+claims_schema_not_reseed() {
+  claims_schema_strategy || return 1
+  [[ -n "$CLAIMS_SCHEMA" && "$CLAIMS_SCHEMA" != "drop-and-create" ]]
+}
 # END fix-applied: the parasol-claims CPU limit is raised above the 500m entry floor that throttled the
 # JVM cold-start (measured 27s→14-15s when raised to 1). Any limit >500m passes (accepts 1, 2, 1500m, …)
 # — the check grades the OUTCOME, not the exact value. NOTE the lab teaches 1 and not more: at 2 the
 # 3 replicas + maxSurge pod exceed the namespace limits.cpu quota of 6 and the rollout can never finish.
 claims_cpu_limit_raised() {
   local cpu m
-  cpu="$(oc get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}' 2>/dev/null || true)"
+  oc_read get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}' || return 1
+  cpu="$OC_OUT"
   [[ -n "$cpu" ]] || return 1
   if [[ "$cpu" == *m ]]; then m="${cpu%m}"; else m=$(( ${cpu%.*} * 1000 )); fi
   [[ "${m:-0}" -gt 500 ]]
@@ -138,11 +165,14 @@ claims_cpu_limit_raised() {
 # "rollout is complete" check: updatedReplicas lags transiently during any healthy roll and would fire a
 # false ❌ on an attendee who verifies mid-rollout. ReplicaFailure only appears when creation is actually
 # being refused, so this is stable. Same signature covers a quota breach on pods/memory, not just CPU.
+# NOTE this one reads like a pass by default — "no ReplicaFailure found" — so a silenced read made an
+# unanswerable API certify a healthy rollout. oc_read makes that a ⚠ instead; an EMPTY answer from a
+# reachable API still passes, which is the genuine "no failing ReplicaSet" case.
 claims_no_replica_failure() {
   local n
-  n="$(oc get rs -n "$NS" -l app=parasol-claims \
-        -o jsonpath='{range .items[*]}{range .status.conditions[?(@.type=="ReplicaFailure")]}{.status}{"\n"}{end}{end}' 2>/dev/null \
-        | grep -c '^True$' || true)"
+  oc_read get rs -n "$NS" -l app=parasol-claims \
+    -o jsonpath='{range .items[*]}{range .status.conditions[?(@.type=="ReplicaFailure")]}{.status}{"\n"}{end}{end}' || return 1
+  n="$(printf '%s\n' "$OC_OUT" | grep -c '^True$' || true)"
   [[ "${n:-0}" -eq 0 ]]
 }
 
@@ -184,7 +214,7 @@ else
   # Node-spread outcome needs the parasol-claims image running; guard on Ready (image-gap) and use `>=`
   # (lab-exceedable — more replicas/nodes is fine).
   if deploy_ready parasol-claims; then
-    check "parasol-claims replicas span >=2 distinct nodes (anti-affinity/TSC)" test "$(claims_distinct_nodes)" -ge 2 || hint "spread the replicas: add podAntiAffinity on kubernetes.io/hostname (and/or topologySpreadConstraints) so no two claims pods share a node"
+    check "parasol-claims replicas span >=2 distinct nodes (anti-affinity/TSC)" claims_spans_nodes 2 || hint "spread the replicas: add podAntiAffinity on kubernetes.io/hostname (and/or topologySpreadConstraints) so no two claims pods share a node"
   else
     warn "the claims node-spread outcome — parasol-claims not Ready; needs the parasol-images build"
   fi

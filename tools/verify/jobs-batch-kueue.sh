@@ -20,19 +20,26 @@ CQ="cq-${USER_NAME}"
 # --- helpers (kept dependency-free: oc only) ---------------------------------
 
 # The namespace carries the Kueue opt-in label, without which Kueue ignores labeled Jobs.
+# An ABSENT label is rc 0 + empty output from a reachable API — still a ❌, exactly as before. Only a
+# cluster that could not be asked changes verdict, from ❌ to ⚠.
 ns_kueue_managed() {
-  [[ "$(oc get ns "$NS" -o jsonpath='{.metadata.labels.kueue\.openshift\.io/managed}' 2>/dev/null || true)" == "true" ]]
+  oc_read get ns "$NS" -o jsonpath='{.metadata.labels.kueue\.openshift\.io/managed}' || return 1
+  [[ "$OC_OUT" == "true" ]]
 }
 
 # A PVC exists and is Bound.
 pvc_bound() {
-  [[ "$(oc get pvc "$1" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)" == "Bound" ]]
+  oc_read get pvc "$1" -n "$NS" -o jsonpath='{.status.phase}' || return 1
+  [[ "$OC_OUT" == "Bound" ]]
 }
 
 # The LocalQueue exists and reports Active=True (its ClusterQueue accepts it).
+# A missing kueue CRD ("the server doesn't have a resource type") is the server's own answer, so an
+# uninstalled Kueue still fails loudly rather than skipping.
 localqueue_active() {
-  oc get localqueue user-queue -n "$NS" >/dev/null 2>&1 || return 1
-  [[ "$(oc get localqueue user-queue -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Active")].status}' 2>/dev/null || true)" == "True" ]]
+  oc_present get localqueue user-queue -n "$NS" -o name || return 1
+  oc_read get localqueue user-queue -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Active")].status}' || return 1
+  [[ "$OC_OUT" == "True" ]]
 }
 
 # The dataset seed succeeded. ABSENCE IS NOT SUCCESS. This check used to `return 0` when the Job was
@@ -45,12 +52,23 @@ localqueue_active() {
 # 2026-08-01 — the namespaces whose entry state had synced still carried
 # claims-data-seed-jobs-batch-kueue-<user> with Complete=True; the ones it had never synced into
 # carried no Job at all. So absence means "never seeded", and it must fail.
-# 0 = seeded · 1 = Job present but not Complete · 2 = Job ABSENT · 3 = namespace missing.
+# 0 = seeded · 1 = Job present but not Complete · 2 = Job ABSENT · 3 = namespace missing · 4 = the API
+# could not be asked. State 4 is NEW and it is why this function reads the rc rather than a bare
+# `|| return`: its caller drives a `case`, so `check` never sees an oc invocation here and could not
+# classify anything on its own. Without 4 an unreachable cluster fell through to 3 and told the
+# attendee their namespace does not exist — a false ❌ with a hint that sends them to re-run `ws start`.
 seed_state() {
-  local job="claims-data-seed-jobs-batch-kueue-${USER_NAME}"
-  oc get ns "$NS" >/dev/null 2>&1 || return 3
-  oc get job "$job" -n "$NS" >/dev/null 2>&1 || return 2
-  oc get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null | grep -q True || return 1
+  local job="claims-data-seed-jobs-batch-kueue-${USER_NAME}" rc=0
+  oc_read get ns "$NS" -o name || rc=$?
+  if (( rc == 2 )); then return 4; fi
+  if (( rc != 0 )); then return 3; fi
+  rc=0; oc_read get job "$job" -n "$NS" -o name || rc=$?
+  if (( rc == 2 )); then return 4; fi
+  if (( rc != 0 )); then return 2; fi
+  rc=0; oc_read get job "$job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' || rc=$?
+  if (( rc == 2 )); then return 4; fi
+  if (( rc != 0 )); then return 1; fi
+  [[ "$OC_OUT" == *True* ]] || return 1
   return 0
 }
 
@@ -73,19 +91,22 @@ seed_state() {
 # and letting the API server do it means a Job created by some future entry-state addition is excluded
 # the moment it carries the owner label, without this function needing to learn its name.
 any_attendee_job_complete() {
-  oc get jobs -n "$NS" -l '!workshop.redhat.com/owner' \
-    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Complete")].status}{"\n"}{end}' \
-    2>/dev/null | grep -q True
+  oc_read get jobs -n "$NS" -l '!workshop.redhat.com/owner' \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Complete")].status}{"\n"}{end}' || return 1
+  [[ "$OC_OUT" == *True* ]]
 }
 
 # At least one Kueue Workload carries Admitted=True (admission control was exercised).
 any_workload_admitted() {
-  oc get workloads -n "$NS" -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Admitted")].status}{"\n"}{end}' 2>/dev/null | grep -q True
+  oc_read get workloads -n "$NS" -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Admitted")].status}{"\n"}{end}' || return 1
+  [[ "$OC_OUT" == *True* ]]
 }
 
-# The per-user ClusterQueue is Active (only checkable with cluster read — admin/CI).
+# The per-user ClusterQueue is Active (only checkable with cluster read — admin/CI). The Forbidden
+# case never reaches here: the caller's `cq_err` probe below routes an attendee identity to warn().
 cq_active() {
-  [[ "$(oc get clusterqueue "$CQ" -o jsonpath='{.status.conditions[?(@.type=="Active")].status}' 2>/dev/null || true)" == "True" ]]
+  oc_read get clusterqueue "$CQ" -o jsonpath='{.status.conditions[?(@.type=="Active")].status}' || return 1
+  [[ "$OC_OUT" == "True" ]]
 }
 
 # --- entry state (what `ws start jobs-batch-kueue` materializes) --------------------------
@@ -103,13 +124,20 @@ case "$seed_rc" in
        || hint "the seed Job exists but has not Completed — read it, then re-materialize: oc describe job/claims-data-seed-jobs-batch-kueue-${USER_NAME} -n ${NS}; ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
   2) check "$SEED_DESC" false \
        || hint "there is NO claims-data seed Job in ${NS} — the Sync hook never ran, so claims-data is an empty volume (a Bound PVC says nothing about its contents) and every lab Job that reads /data/claims.csv will fail. A successful seed leaves its Job behind, so this is not cleanup: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
+  4) warn "$SEED_DESC — the cluster API did not answer"
+     hint "not your lab, and not graded: the cluster could not be asked whether the seed Job ran. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor" ;;
   *) check "$SEED_DESC" false \
        || hint "namespace ${NS} does not exist — ws start jobs-batch-kueue --user ${USER_NAME}" ;;
 esac
 # The seed prints its own row count on success. Reported (not asserted) because a completed Job keeps
 # its Complete condition long after the pod's logs can be GC'd — a missing log is not a missing dataset.
 if [[ "$seed_rc" == "0" ]]; then
-  seed_summary="$(oc logs "job/claims-data-seed-jobs-batch-kueue-${USER_NAME}" -n "$NS" 2>/dev/null | grep '^seeded ' || true)"
+  # Informational, never graded: a log that cannot be fetched prints nothing, same as before. Routed
+  # through oc_read only so no raw silenced read survives in this file to be copied by the next module.
+  seed_summary=""
+  if oc_read logs "job/claims-data-seed-jobs-batch-kueue-${USER_NAME}" -n "$NS"; then
+    seed_summary="$(printf '%s\n' "$OC_OUT" | grep '^seeded ' || true)"
+  fi
   if [[ -n "$seed_summary" ]]; then info "seed job reported: ${seed_summary}"; fi
 fi
 check "MaaS credentials present (secret maas-credentials)" oc get secret maas-credentials -n "$NS"    || hint "the copy Job didn't run — ws reset jobs-batch-kueue --user ${USER_NAME} (check maas-copy-jobs-batch-kueue-${USER_NAME})"
@@ -124,8 +152,13 @@ check "MaaS config carries the resolved model (configmap maas-config)" cm_key_se
 # that was FOUND and refused (wrong kind / rejected by the endpoint) is somebody's mistake. Both are
 # INFO here, but they must not read the same. Reason strings are the literal ones written by
 # gitops/entry-states/jobs-batch-kueue/templates/maas-credentials.yaml.
-ai_reason="$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || true)"
-case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/dev/null || true)" in
+# Both reads are informational. An unreadable ConfigMap leaves both empty and falls to the `*)` arm,
+# which is what an unrecorded verdict already meant — no verdict changes, no counter is touched.
+ai_reason=""
+if oc_read get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}'; then ai_reason="$OC_OUT"; fi
+ai_available=""
+if oc_read get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}'; then ai_available="$OC_OUT"; fi
+case "$ai_available" in
   true)       info "MaaS credential accepted by the model endpoint (live probe at materialization)" ;;
   unverified) info "MaaS credential staged but UNPROVEN — the cluster could not reach the endpoint when this namespace materialized; batch inference may 401" ;;
   false)      if [[ "$ai_reason" == "no-maas-credential" ]]; then

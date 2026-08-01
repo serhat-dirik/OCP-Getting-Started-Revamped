@@ -22,8 +22,14 @@ STAGE="${USER_NAME}-stage"
 
 # Cluster ingress domain — attendee-readable; used to derive route hosts without a cross-namespace
 # route read (attendees cannot read routes in gitea/student-gitops).
+# ALWAYS returns 0 and signals failure with an empty string — deliberately, and unchanged from the
+# `|| true` it replaces. Both callers assign it (`domain="$(ingress_domain)"`), and under `set -e` an
+# assignment whose command substitution exits non-zero kills the script. It is also the second half of
+# gitea_host()'s route-then-domain fallback, which the lint guard excludes by name precisely because
+# that fallback does not care WHY a read failed; routed through oc_read for consistency only.
 ingress_domain() {
-  oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true
+  oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || OC_OUT=""
+  printf '%s' "$OC_OUT"
 }
 
 # Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "ogsr-gitea").
@@ -84,13 +90,17 @@ ARGO_NS="ogsr-student-gitops"
 # so a missing ConfigMap falls through and fails loudly where it should.
 argo_access_plane_err() { { oc get cm argocd-rbac-cm -n "$ARGO_NS" -o name >/dev/null; } 2>&1 || true; }
 
+# Both reached only via the Forbidden-vs-anything-else guard above, so "unreadable" is already handled;
+# what oc_read adds here is that a ConfigMap the API could not be asked about no longer reads as a
+# DELETED access plane — which is the very distinction the guard's own comment says must not collapse.
 argo_account_exists() {
-  oc get cm argocd-cm -n "$ARGO_NS" -o jsonpath="{.data.accounts\\.${USER_NAME}}" 2>/dev/null | grep -q .
+  oc_read get cm argocd-cm -n "$ARGO_NS" -o jsonpath="{.data.accounts\\.${USER_NAME}}" || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 argo_rbac_binds_user() {
-  oc get cm argocd-rbac-cm -n "$ARGO_NS" -o jsonpath='{.data.policy\.csv}' 2>/dev/null \
-    | grep -q "proj-${USER_NAME}"
+  oc_read get cm argocd-rbac-cm -n "$ARGO_NS" -o jsonpath='{.data.policy\.csv}' || return 1
+  [[ "$OC_OUT" == *"proj-${USER_NAME}"* ]]
 }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
@@ -101,21 +111,26 @@ argo_rbac_binds_user() {
 # The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student
 # instance (annotation tracking), NOT applied by hand — the point of gitops-fundamentals vs the config-multienv hand-config.
 deploy_gitops_managed() {
-  oc get deploy "$1" -n "$2" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null | grep -q .
+  oc_read get deploy "$1" -n "$2" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 # Deployment does NOT exist (entry-only: dev/stage start empty). Namespace must exist first —
 # otherwise "absent" is vacuous, not evidence of a clean entry state.
+# `! oc get … >/dev/null 2>&1` was the same blind read as `2>/dev/null`, just spelled differently, and
+# in the one direction that matters most: it certified an empty dev/stage from an API that never
+# answered, and a wrongly-green entry check sends `ws prep` down its "already prepared" fast path.
 deploy_absent() {
-  oc get ns "$2" >/dev/null 2>&1 || return 1
-  ! oc get deploy "$1" -n "$2" >/dev/null 2>&1
+  oc_present get ns "$2" -o name || return 1
+  oc_absent get deploy "$1" -n "$2" -o name
 }
 
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves DB connectivity, since
 # readiness gates on the datasource). API-only service: "/" is 404 by design.
 route_ready_200() {
   local ns="$1" host code
-  host="$(oc get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  oc_read get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   [[ -n "$host" ]] || return 1
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]

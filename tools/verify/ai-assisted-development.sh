@@ -21,26 +21,28 @@ SEED="parasol-claims"
 
 # A Deployment exists AND has an available replica (readiness passing). `>=1` is lab-exceedable.
 deploy_available() {
-  local avail
-  avail="$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.availableReplicas}' 2>/dev/null)"
-  [[ "${avail:-0}" -ge 1 ]]
+  oc_read get deploy "$1" -n "$NS" -o jsonpath='{.status.availableReplicas}' || return 1
+  [[ "${OC_OUT:-0}" -ge 1 ]]
 }
 
 # The seeded deployment is BROKEN: it exists but has NO available replica (Running 0/1, readiness 404).
+# ASSERTING A FAULT IS A NEGATION. The old silenced read made an unanswerable API read as availableReplicas=0
+# and therefore certify "yes, the fault is live" — a green ENTRY check on a cluster nobody could talk to,
+# which is exactly the wrongly-green entry that sends `ws prep` down its "already prepared" fast path.
 seed_broken() {
-  oc get deploy "$SEED" -n "$NS" >/dev/null 2>&1 || return 1
-  local avail
-  avail="$(oc get deploy "$SEED" -n "$NS" -o jsonpath='{.status.availableReplicas}' 2>/dev/null)"
-  [[ "${avail:-0}" -lt 1 ]]
+  oc_present get deploy "$SEED" -n "$NS" -o name || return 1
+  oc_read get deploy "$SEED" -n "$NS" -o jsonpath='{.status.availableReplicas}' || return 1
+  [[ "${OC_OUT:-0}" -lt 1 ]]
 }
 
 # The seed carries the SPECIFIC injected fault: readinessProbe path == the marker's badProbePath.
 seed_probe_is_bad() {
-  local want got
-  want="$(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.badProbePath}' 2>/dev/null || true)"
-  got="$(oc get deploy "$SEED" -n "$NS" \
-    -o jsonpath='{.spec.template.spec.containers[0].readinessProbe.httpGet.path}' 2>/dev/null || true)"
-  [[ -n "$want" && "$got" == "$want" ]]
+  local want
+  oc_read get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.badProbePath}' || return 1
+  want="$OC_OUT"
+  oc_read get deploy "$SEED" -n "$NS" \
+    -o jsonpath='{.spec.template.spec.containers[0].readinessProbe.httpGet.path}' || return 1
+  [[ -n "$want" && "$OC_OUT" == "$want" ]]
 }
 
 # The seed still carries the image the entry state gave it. Exercise 3 grants the agent a scoped
@@ -50,11 +52,16 @@ seed_probe_is_bad() {
 # literal. Older markers (chart < 0.1.8) carry no seedImage: with nothing to compare against this
 # passes rather than emitting a false ❌ — an unearned red destroys trust in every other ✅.
 seed_image_intact() {
-  local want got
-  want="$(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.seedImage}' 2>/dev/null || true)"
-  [[ -z "$want" ]] && return 0
-  got="$(oc get deploy "$SEED" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
-  [[ "$got" == "$want" ]]
+  local want rc=0
+  oc_read get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.seedImage}' || rc=$?
+  # rc 2 ONLY. A marker that is genuinely absent (rc 1) must keep passing exactly as it did before —
+  # "nothing to compare against" is the documented behaviour for pre-0.1.8 markers, and the separate
+  # entry-marker check above is what fails when the ConfigMap itself is gone.
+  if (( rc == 2 )); then return 1; fi
+  want="$OC_OUT"
+  if [[ -z "$want" ]]; then return 0; fi
+  oc_read get deploy "$SEED" -n "$NS" -o jsonpath='{.spec.template.spec.containers[0].image}' || return 1
+  [[ "$OC_OUT" == "$want" ]]
 }
 
 # Pre-lab RBAC shape: the attendee has NOT yet granted the mcp-agent SA a write role. Ask the API
@@ -64,9 +71,19 @@ seed_image_intact() {
 # custom Role, ClusterRoleBinding, or aggregation. Runs as the attendee (the namespace admin ClusterRole
 # carries impersonate on serviceaccounts — proven live) and as cluster-admin in CI. `patch deployments`
 # is the write the lab grants (the agent fixes the seed's readinessProbe).
+#
+# THE HIGHEST-RISK NEGATION IN THIS FILE. `! oc auth can-i … 2>/dev/null` returns TRUE — "no write
+# grant exists" — whenever the question could not be put at all: an unreachable apiserver, an expired
+# token, or a caller without the impersonate right the comment above assumes. The entry state's whole
+# security claim ("the sandbox is read-only") was therefore certified by silence. can-i's own plain
+# "no" (rc 1, stderr only a namespace-scope Warning) is NOT in oc_read's could-not-ask allowlist, so
+# the real negative answer still passes this check exactly as before.
 scoped_write_absent() {
-  oc get sa "$SA" -n "$NS" >/dev/null 2>&1 || return 1   # SA absent = nothing materialized to assert about
-  ! oc auth can-i patch deployments --as="system:serviceaccount:${NS}:${SA}" -n "$NS" >/dev/null 2>&1
+  local rc=0
+  oc_present get sa "$SA" -n "$NS" -o name || return 1   # SA absent = nothing materialized to assert about
+  oc_read auth can-i patch deployments --as="system:serviceaccount:${NS}:${SA}" -n "$NS" || rc=$?
+  if (( rc == 2 )); then return 1; fi   # could not ask → ⚠ via the flag, never a certified clean slate
+  (( rc != 0 ))                          # rc 1 = the API answered NO → the grant is genuinely absent
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
@@ -83,14 +100,27 @@ check "MaaS credentials Secret present"              oc get secret maas-credenti
 # error anywhere. That is precisely the failure this check exists to make loud.
 check "DevWorkspace env config carries GENAI_MODEL (configmap maas-config-env)" cm_key_set "$NS" maas-config-env GENAI_MODEL \
   || hint "the MaaS copy hook did not fill maas-config-env — ws reset ai-assisted-development --user ${USER_NAME}"
-check "Dev Spaces workspace present"                 oc get devworkspaces.workspace.devfile.io "$(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.devWorkspaceName}' 2>/dev/null || echo parasol-ai-assist)" -n "$NS" \
+# Resolved BEFORE the check, not nested inside its argument list: a `$(…)` there runs in a subshell, so
+# any verdict oc_read forms about the inner read is discarded. The fallback fires on a FAILED read only
+# — a marker that answers with an empty name still yields an empty name, and the outer `check` (which
+# oc_read classifies for us) is what reports it either way.
+DW_NAME="parasol-ai-assist"
+if oc_read get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.devWorkspaceName}'; then
+  DW_NAME="$OC_OUT"
+fi
+check "Dev Spaces workspace present"                 oc get devworkspaces.workspace.devfile.io "$DW_NAME" -n "$NS" \
   || hint "the DevWorkspace is missing — ws reset ai-assisted-development --user ${USER_NAME}"
 check "parasol-claims still carries the entry-state container image"   seed_image_intact \
   || hint "the image field was overwritten (an agent write can put a placeholder there — check 'oc get pods -n ${NS} -l app=${SEED}' for InvalidImageName). Restore it in place: oc set image deploy/${SEED} ${SEED}=\"\$(oc get cm ws-entry-ai-assisted-development -n ${NS} -o jsonpath='{.data.seedImage}')\" -n ${NS}"
 
 # INFO: the pinned MCP image + converged model (proves digest-pin + per-cluster secret-sourcing).
-info "MCP server image: $(oc get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.mcpServerImage}' 2>/dev/null || echo '?')"
-info "agent model (maas-config): $(oc get cm maas-config -n "$NS" -o jsonpath='{.data.model}' 2>/dev/null || echo '?')"
+# Informational only — an unreadable value still prints '?', exactly as the old `|| echo '?'` did.
+MCP_IMAGE='?'
+if oc_read get cm ws-entry-ai-assisted-development -n "$NS" -o jsonpath='{.data.mcpServerImage}'; then MCP_IMAGE="$OC_OUT"; fi
+AGENT_MODEL='?'
+if oc_read get cm maas-config -n "$NS" -o jsonpath='{.data.model}'; then AGENT_MODEL="$OC_OUT"; fi
+info "MCP server image: ${MCP_IMAGE}"
+info "agent model (maas-config): ${AGENT_MODEL}"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: the fault is LIVE and the sandbox is read-only (no scoped write yet) -------------

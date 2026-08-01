@@ -28,41 +28,54 @@ NS="${USER_NAME}-dev"
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
-# The parasol-claims Knative Service exists in {user}-dev.
-ksvc_present() { oc get ksvc parasol-claims -n "$NS" >/dev/null 2>&1; }
+# The parasol-claims Knative Service exists in {user}-dev. A missing ksvc CRD ("the server doesn't have
+# a resource type") is the server's own answer and still fails loudly — Serverless not installed is a
+# real platform failure, not an inconclusive read.
+ksvc_present() { oc_present get ksvc parasol-claims -n "$NS" -o name; }
 
 # The ksvc reports Ready=True (latest revision came up + Route admitted). Stays True even scaled to zero.
 ksvc_ready() {
-  [[ "$(oc get ksvc parasol-claims -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)" == "True" ]]
+  oc_read get ksvc parasol-claims -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || return 1
+  [[ "$OC_OUT" == "True" ]]
 }
 
 # The ksvc has an auto-created external URL (the operator-managed edge Route is admitted). Proof that
 # Knative published the Route — attendee-readable, unlike the OpenShift Route object in knative-serving-ingress.
 ksvc_has_url() {
-  [[ -n "$(oc get ksvc parasol-claims -n "$NS" -o jsonpath='{.status.url}' 2>/dev/null || true)" ]]
+  oc_read get ksvc parasol-claims -n "$NS" -o jsonpath='{.status.url}' || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 # The ksvc traffic is TAG-split (blue/green). At entry the single default target carries no tag; at solve
 # the two targets carry tags (stable/candidate), so a non-empty tag list means the split is in place.
 ksvc_traffic_split() {
-  [[ -n "$(oc get ksvc parasol-claims -n "$NS" -o jsonpath='{.status.traffic[*].tag}' 2>/dev/null || true)" ]]
+  oc_read get ksvc parasol-claims -n "$NS" -o jsonpath='{.status.traffic[*].tag}' || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 # Eventing objects (namespaced; attendee admin reads them via the aggregated admin role).
-broker_present()     { oc get broker.eventing.knative.dev default -n "$NS" >/dev/null 2>&1; }
-trigger_present()    { oc get trigger.eventing.knative.dev claims-processor -n "$NS" >/dev/null 2>&1; }
-pingsource_present() { oc get pingsource.sources.knative.dev claim-ticker -n "$NS" >/dev/null 2>&1; }
+broker_present()     { oc_present get broker.eventing.knative.dev default -n "$NS" -o name; }
+trigger_present()    { oc_present get trigger.eventing.knative.dev claims-processor -n "$NS" -o name; }
+pingsource_present() { oc_present get pingsource.sources.knative.dev claim-ticker -n "$NS" -o name; }
 
 # Entry clean-slate helpers: return 0 when the solve object is ABSENT (attendee has built nothing yet).
 # Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
 # cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+# THE NEGATIONS. `! ksvc_traffic_split` and `[[ -z "$(oc get … 2>/dev/null)" ]]` both certify a clean
+# slate from an API that never answered, and a wrongly-green entry check is what sends `ws prep` down
+# its "already prepared — nothing to do" fast path WITHOUT purging (the same fast path the orphaned-
+# revision note below is about). ksvc_traffic_split now distinguishes its own three outcomes, so
+# no_traffic_split must not blanket-negate it: only a real "no tags" answer is a clean slate.
 no_traffic_split() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! ksvc_traffic_split
+  local rc=0
+  oc_present get ns "$NS" -o name || return 1
+  ksvc_traffic_split || rc=$?
+  if (( VERIFY_INCONCLUSIVE == 1 )); then return 1; fi   # could not ask → ⚠, never a certified clean slate
+  (( rc != 0 ))
 }
 no_eventing() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get broker.eventing.knative.dev,trigger.eventing.knative.dev,pingsource.sources.knative.dev -n "$NS" -o name 2>/dev/null || true)" ]]
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get broker.eventing.knative.dev,trigger.eventing.knative.dev,pingsource.sources.knative.dev -n "$NS" -o name
 }
 # Entry ships EXACTLY ONE revision (parasol-claims-v1) — this file's header and the entry block below
 # both already claimed "one revision", but nothing tested it, so an ORPHANED revision from an earlier
@@ -76,11 +89,10 @@ no_eventing() {
 # == not >= on purpose: this runs ONLY under --entry-only, where a clean slate is the assertion; the
 # lab legitimately mints v1-warm/v1-cold/v2 later and those are checked in the END branch, not here.
 single_revision() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  local revs
-  revs="$(oc get revision.serving.knative.dev -n "$NS" \
-            -l "serving.knative.dev/service=parasol-claims" -o name 2>/dev/null || true)"
-  [[ "$revs" == "revision.serving.knative.dev/parasol-claims-v1" ]]
+  oc_present get ns "$NS" -o name || return 1
+  oc_read get revision.serving.knative.dev -n "$NS" \
+    -l "serving.knative.dev/service=parasol-claims" -o name || return 1
+  [[ "$OC_OUT" == "revision.serving.knative.dev/parasol-claims-v1" ]]
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------

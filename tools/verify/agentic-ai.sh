@@ -54,16 +54,34 @@ NS="${USER_NAME}-ai"
 
 # A Deployment exists AND has an available replica (readiness passing). `>=1` is lab-exceedable (scale up).
 deploy_available() {
-  [[ "$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo 0)" -ge 1 ]]
+  oc_read get deploy "$1" -n "$NS" -o jsonpath='{.status.availableReplicas}' || return 1
+  [[ "${OC_OUT:-0}" -ge 1 ]]
 }
 
 # The agent's public Route URL, as recorded in the entry marker (attendee-safe: no gitea/route read
 # cross-namespace — the URL was computed from the cluster domain at materialization).
-agent_route() { oc get cm ws-entry-agentic-ai -n "$NS" -o jsonpath='{.data.agentRoute}' 2>/dev/null || true; }
+# Sets AGENT_ROUTE rather than printing: its only caller used `route="$(agent_route)"`, and a command
+# substitution would discard the verdict oc_read forms. An unreadable marker still leaves it empty,
+# which the caller already treats as "cannot ask the agent" → ⚠, never a pass.
+AGENT_ROUTE=""
+agent_route() {
+  AGENT_ROUTE=""
+  oc_read get cm ws-entry-agentic-ai -n "$NS" -o jsonpath='{.data.agentRoute}' || return 1
+  AGENT_ROUTE="$OC_OUT"
+}
 
 # One key of maas-config, or empty. The attendee is admin on their own {user}-ai, so this is a
-# self-namespace read (rule 10) — no cross-namespace reach.
-maas_cfg() { oc get cm maas-config -n "$NS" -o jsonpath="{.data.$1}" 2>/dev/null || true; }
+# self-namespace read (rule 10) — no cross-namespace reach. Still prints (its callers are `$(…)`
+# interpolations into info strings and the ai_state/ai_reason variables); an unreadable ConfigMap
+# yields empty exactly as before, and every consumer's empty branch is already a warn, not a pass.
+# ALWAYS returns 0, like the `|| true` it replaces. Its callers are `ai_state="$(maas_cfg …)"` bare
+# assignments, and under `set -e` an assignment whose command substitution exits non-zero kills the
+# script outright — which it did, silently truncating the run after the Secret check (caught by
+# diffing a full user99 run against HEAD, 2026-08-01). Emptiness is this function's failure signal.
+maas_cfg() {
+  oc_read get cm maas-config -n "$NS" -o jsonpath="{.data.$1}" || OC_OUT=""
+  printf '%s' "$OC_OUT"
+}
 
 # The staged GENAI_API_KEY is NON-EMPTY and is NOT a JSON Web Token. A JWT (3 dot-separated segments,
 # `eyJ` prefix) is a bearer minted for another provider's control plane — an adopted Azure-OpenAI
@@ -76,7 +94,11 @@ maas_cfg() { oc get cm maas-config -n "$NS" -o jsonpath="{.data.$1}" 2>/dev/null
 # credential of the wrong KIND actually sitting in the Secret (only pre-validation entry states).
 staged_key_shape_ok() {
   local raw tok
-  raw="$(oc get secret maas-credentials -n "$NS" -o jsonpath='{.data.GENAI_API_KEY}' 2>/dev/null)" || return 2
+  # Every failure keeps mapping to 2 (warn-and-skip), unchanged: the separate "maas-credentials Secret
+  # staged" check above is what turns a genuinely missing Secret red. OC_OUT is copied into a local and
+  # cleared immediately — the staged key must never linger in a global this script also prints from.
+  oc_read get secret maas-credentials -n "$NS" -o jsonpath='{.data.GENAI_API_KEY}' || { OC_OUT=""; return 2; }
+  raw="$OC_OUT"; OC_OUT=""
   [[ -n "$raw" ]] || return 1                       # Secret exists but the key is blank = degraded
   tok="$(printf %s "$raw" | base64 -d 2>/dev/null)" || return 1
   [[ -n "$tok" ]] || return 1
@@ -102,7 +124,8 @@ staged_key_shape_ok() {
 # never printed: a 502 from the model gateway echoes the whole Bearer token back inside its message.
 tool_grounded_answer() {
   local route body code out="/tmp/.agentic-ask.$$"
-  route="$(agent_route)"
+  agent_route || true
+  route="$AGENT_ROUTE"
   [[ -n "$route" ]] || return 2
   code="$(curl -ksS -o "$out" -w '%{http_code}' --max-time 90 -X POST "${route}/agent/ask" \
     -H 'content-type: application/json' \

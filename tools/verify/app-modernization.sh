@@ -37,7 +37,13 @@ NS="${USER_NAME}-modernize"
 
 # The attendee's legacy-repo fork URL, as recorded in the entry marker (attendee-safe: no gitea route
 # read cross-namespace — the URL was computed from the cluster domain at materialization).
-legacy_repo() { oc get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.legacyRepo}' 2>/dev/null || true; }
+# ALWAYS returns 0 and signals failure with an empty string, exactly like the `|| true` it replaces:
+# its caller assigns it (`u="$(legacy_repo)"`) and under `set -e` an assignment whose command
+# substitution exits non-zero kills the script outright.
+legacy_repo() {
+  oc_read get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.legacyRepo}' || OC_OUT=""
+  printf '%s' "$OC_OUT"
+}
 
 # The legacy fork is reachable (public repo → anonymous HTTPS GET returns 200). Network-tolerant caller.
 repo_reachable() {
@@ -47,14 +53,18 @@ repo_reachable() {
 }
 
 # [ADS] MaaS credential present (Developer Lightspeed wired) — reported as INFO, never failed.
-maas_secret_present() { oc get secret maas-credentials -n "$NS" >/dev/null 2>&1; }
+maas_secret_present() { oc_present get secret maas-credentials -n "$NS" -o name; }
 
 # Entry clean-slate: the modernized service is NOT deployed yet (attendee hasn't finished the lab).
 # Namespace must actually exist first — otherwise this is vacuously true on a cluster where nothing
 # materialized at all, which is not evidence of a clean entry state.
+# `! oc get … >/dev/null 2>&1` is the same blind read as `2>/dev/null`, spelled so the lint ratchet's
+# detector does not match it — and in the one direction that matters most: it certifies a clean slate
+# from an API that never answered, and a wrongly-green entry check sends `ws prep` down its "already
+# prepared" fast path without purging.
 no_modernized() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! oc get deploy parasol-claims-modernized -n "$NS" >/dev/null 2>&1
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get deploy parasol-claims-modernized -n "$NS" -o name
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
@@ -68,7 +78,11 @@ check "legacy fork parasol-legacy-claims reachable in Gitea" repo_reachable     
 # it and records the verdict in maas-config (aiPathAvailable). Report the VERDICT, not the Secret's
 # existence — reporting existence is what let a wrong-provider credential read as "wired" while every
 # model call 401'd (the same defect that broke M23 on cluster ksls5, 2026-07-29).
-case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/dev/null || true)" in
+# Read into a variable first: an unreadable ConfigMap leaves it empty and falls to the `*)` arm, which
+# is what an unrecorded verdict already meant. Every arm here is INFO — no counter is touched either way.
+ads_state=""
+if oc_read get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}'; then ads_state="$OC_OUT"; fi
+case "$ads_state" in
   true)
     info "[ADS] maas-credentials staged AND accepted by the model endpoint — Developer Lightspeed for MTA is wired (the lab exports GENAI_API_KEY/GENAI_MODEL/GENAI_ENDPOINT from ${NS} in the Dev Spaces workspace terminal; workspaces live in {user}-devspaces, so nothing automounts)" ;;
   unverified)
@@ -78,7 +92,8 @@ case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/
     # bootstrap/install.sh's no-credential path); anything else means a credential was FOUND and
     # refused. Both leave [ADS] off, but they must not read the same. Reason strings are the literal
     # ones written by gitops/entry-states/app-modernization/templates/maas-credentials.yaml.
-    ads_reason="$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}' 2>/dev/null || true)"
+    ads_reason=""
+    if oc_read get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathReason}'; then ads_reason="$OC_OUT"; fi
     if [[ "$ads_reason" == "no-maas-credential" ]]; then
       info "[ADS] Developer Lightspeed disabled — no MaaS credential reached this cluster (a supported, degraded install, not a fault of this module); the [OCP] MTA assess/analyze/replatform flow is unaffected"
     else
@@ -92,7 +107,13 @@ case "$(oc get cm maas-config -n "$NS" -o jsonpath='{.data.aiPathAvailable}' 2>/
     fi ;;
 esac
 # INFO: the shared MTA Hub is a platform-stack concern (openshift-mta), not per-user state.
-info "shared MTA Hub namespace: $(oc get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.mtaNamespace}' 2>/dev/null || echo openshift-mta) (installed by the platform-portfolio mta stack; analysis targets $(oc get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.analysisTargets}' 2>/dev/null || echo 'cloud-readiness,openshift,containerization'))"
+# Informational; each value keeps its old default when the marker cannot be read. Resolved into
+# variables rather than nested `$(…)` in the info string, so oc_read runs in this shell, not a subshell.
+MTA_NS="openshift-mta"
+if oc_read get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.mtaNamespace}'; then MTA_NS="$OC_OUT"; fi
+MTA_TARGETS="cloud-readiness,openshift,containerization"
+if oc_read get cm ws-entry-app-modernization -n "$NS" -o jsonpath='{.data.analysisTargets}'; then MTA_TARGETS="$OC_OUT"; fi
+info "shared MTA Hub namespace: ${MTA_NS} (installed by the platform-portfolio mta stack; analysis targets ${MTA_TARGETS})"
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — nothing modernized/deployed yet -------------------------------------
