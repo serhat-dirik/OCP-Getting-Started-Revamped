@@ -56,9 +56,22 @@ route_ready_200() {
 # creates for it: a Deployment, its pod, and the per-user home PVC (persistUserHome is enabled,
 # pvcStrategy per-user). ConfigMaps/Secrets/ServiceAccounts are deliberately NOT in that list — Che
 # provisions several of those at namespace-creation time, so they exist before any workspace runs.
-# Rights in that namespace come from Dev Spaces (devspaces-edit/devspaces-view), not from the
-# workshop's per-user RBAC, which covers only {user}-dev|stage|prod|cicd. The read may therefore be
-# refused — and a refusal has to be an explicit "cannot grade", never a silent pass.
+# Rights in that namespace come from Dev Spaces, not from the workshop's per-user RBAC (which covers
+# only {user}-dev|stage|prod|cicd) — but the attendee DOES hold them, so all four signals below are
+# readable as {user}. Grounded on cluster 2026-08-01: cm/che in openshift-devspaces sets
+# CHE_INFRA_KUBERNETES_USER__CLUSTER__ROLES=openshift-devspaces-cheworkspaces-clusterrole,
+# openshift-devspaces-cheworkspaces-devworkspace-clusterrole, and Che RoleBinds exactly those two into
+# {user}-devspaces when it auto-provisions it. The first carries `list` on pods, apps/deployments and
+# PVCs (plus events, which the troubleshooting page tells attendees to read); the second carries
+# get/list/watch/create/update/patch/delete on devworkspaces AND devworkspacetemplates.
+# NOT devspaces-edit / devspaces-view: those two ship with the operator but have ZERO bindings on the
+# cluster (0 ClusterRoleBindings, 0 RoleBindings) and are named nowhere in the Che config, so they
+# grant nobody anything. An earlier revision of this comment named them as the source of the rights
+# and inferred from that a refusal which cannot happen.
+# So the rc=2 branch below is NOT an expected-refusal path. Reaching it means the API could not be
+# asked, or Dev Spaces never provisioned that namespace's RBAC — both real problems worth surfacing.
+# It stays, because a read that could not be answered has to be an explicit "cannot grade", never a
+# silent pass; it just must not tell the attendee that being refused here is normal.
 
 # Read one resource in the workspace namespace and CLASSIFY the server's answer. Deliberately not
 # `oc auth can-i`: run by an instructor or CI the caller is cluster-admin, so can-i would answer for
@@ -112,7 +125,7 @@ if [[ "$ENTRY_ONLY" != "true" ]]; then
       1) check "$WS_DESC" false \
            || hint "${WS_NS} exists but holds no workspace — signing in to the dashboard creates that namespace on its own, so this is the 'opened it and stopped' state. Start a workspace from ${USER_NAME}/parasol-claims (lab exercise 1)" ;;
       *) warn "the end state is not gradeable from here — none of the workspace signals in ${WS_NS} (DevWorkspaces, Deployments, Pods, PVCs) is readable as this identity"
-         hint "rights in that namespace come from Dev Spaces, not from the workshop RBAC. Confirm in the dashboard that your parasol-claims workspace is running, or re-run this check as the instructor/CI identity" ;;
+         hint "you normally CAN read all four — Dev Spaces grants them to you when it provisions ${WS_NS}. Landing here means the API could not be asked, or that grant is missing: retry, then show your instructor 'oc get rolebinding -n ${WS_NS}'. Meanwhile confirm in the dashboard that your parasol-claims workspace is running" ;;
     esac
   else
     hint "open the Dev Spaces dashboard and start ${USER_NAME}/parasol-claims (lab exercise 1) — the namespace is created on your first sign-in"
