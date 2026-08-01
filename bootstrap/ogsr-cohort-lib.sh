@@ -31,6 +31,12 @@ STUDENT_ARGO_NS="${WS_STUDENT_ARGO_NS:-ogsr-student-gitops}"
 # shellcheck disable=SC2034
 SSO_NS="${WS_SSO_NS:-sso-workshop}"
 # shellcheck disable=SC2034
+SONAR_NS="${WS_SONAR_NS:-sonarqube}"
+# The one account the portfolio's sonar-bootstrap Job secures; attendee logins are seeded beside it by
+# the workshop layer's sonarqube-user-seed hook. A variable only so an adopted instance can be pointed
+# at a differently-named administrator.
+SONAR_ADMIN_LOGIN="${WS_SONAR_ADMIN_LOGIN:-admin}"
+# shellcheck disable=SC2034
 USER_PREFIX="${WS_USER_PREFIX:-user}"
 # developer-hub-golden-paths gives each attendee a dedicated Gitea org to scaffold into ({user}-svcs);
 # the suffix is that chart's scaffoldOrgSuffix. A variable so a chart rename is a one-line change.
@@ -183,11 +189,11 @@ gitea_cleanup() {
   if [[ -n "$GITEA_BODY" ]]; then rm -f "$GITEA_BODY"; fi
 }
 
-gitea_connect() {  # → 0 when the admin API is reachable; sets GITEA_HOST/GITEA_CFG/GITEA_BODY
+gitea_connect() {  # → 0 when the admin API is reachable AND accepts the credential; sets GITEA_HOST/CFG/BODY
   if [[ -n "$GITEA_CFG" ]]; then
     return 0   # already connected — idempotent, so the dry-run enumerator and a step can both call it
   fi
-  local host user pass
+  local host user pass code
   host="$(oc get route gitea -n "$GITEA_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   if [[ -z "$host" ]]; then
     return 1
@@ -205,6 +211,20 @@ gitea_connect() {  # → 0 when the admin API is reachable; sets GITEA_HOST/GITE
   GITEA_CFG="$(mktemp)"; chmod 600 "$GITEA_CFG"
   GITEA_BODY="$(mktemp)"; chmod 600 "$GITEA_BODY"
   printf 'user = "%s:%s"\n' "$user" "$pass" > "$GITEA_CFG"
+  # A route plus a non-empty password STRING proves nothing. Measured live on 2026-08-01: with a WRONG
+  # admin password Gitea answers 401 to /api/v1/user, to /api/v1/users/<u> and to /api/v1/users/<u>/repos
+  # alike — and every caller in this library read a non-200 on those as "the account/repos are not there".
+  # A rotated credential therefore produced a green "nothing to clear" sweep that deleted nothing, which
+  # is exactly the failure mode a teardown script must never have. /api/v1/user is the authenticated-
+  # identity endpoint: it returns 200 ONLY for a credential Gitea accepts (401 unauthenticated, measured).
+  code="$(gitea_api GET /api/v1/user)"
+  if [[ "$code" != "200" ]]; then
+    err "Gitea admin API did not accept the discovered credential (HTTP ${code} from https://${host}/api/v1/user)"
+    err "  fix: oc get gitea gitea -n ${GITEA_NS} -o jsonpath='{.status.adminPassword}' — if empty, check the gitea-admin-credentials secret"
+    gitea_cleanup
+    GITEA_HOST=""; GITEA_CFG=""; GITEA_BODY=""
+    return 1
+  fi
   return 0
 }
 
@@ -235,6 +255,12 @@ for item in data or []:
 }
 
 gitea_owner_repos() {  # <owner> <user|org> → every repo name that owner owns, one per line, paged
+  # EXIT CODES ARE PART OF THE CONTRACT — "not there" and "could not ask" are different answers and this
+  # function must never conflate them (a teardown that reads an unanswerable query as an empty result
+  # reports a clean sweep it never performed):
+  #   0  the API answered — the list on stdout is COMPLETE (an empty list means genuinely no repos)
+  #   0  HTTP 404 — the owner does not exist, which is a real, empty answer
+  #   3  anything else (401/403/5xx/000/truncation) — DO NOT treat stdout as authoritative
   local owner="$1" kind="$2" page=1 code names count
   while [[ "$page" -le 20 ]]; do
     if [[ "$kind" == "org" ]]; then
@@ -242,8 +268,11 @@ gitea_owner_repos() {  # <owner> <user|org> → every repo name that owner owns,
     else
       code="$(gitea_api GET "/api/v1/users/${owner}/repos?limit=50&page=${page}")"
     fi
+    if [[ "$code" == "404" ]] && [[ "$page" -eq 1 ]]; then
+      return 0   # owner genuinely absent — an honest empty answer
+    fi
     if [[ "$code" != "200" ]]; then
-      return 0
+      return 3   # asked and did not get an answer we can act on
     fi
     names="$(gitea_json_names)"
     if [[ -z "$names" ]]; then
@@ -256,16 +285,25 @@ gitea_owner_repos() {  # <owner> <user|org> → every repo name that owner owns,
     fi
     page=$((page + 1))
   done
-  return 0
+  # 20 full pages = 1000 repositories. Nobody's attendee account holds that, so reaching here means the
+  # paging assumption broke rather than that the sweep is finished — report it instead of truncating.
+  return 3
 }
 
 gitea_delete_owner_repos() {  # <owner> <user|org> — delete every repo under that owner (idempotent)
   # Owner-SCOPED by construction: the canonical parasol/* seed repos and the git mirror belong to the
   # `parasol` ORG, so no call keyed on an attendee username or on <user>-svcs can ever reach them.
-  local owner="$1" kind="$2" repo code deleted=0 repos
-  repos="$(gitea_owner_repos "$owner" "$kind")"
+  local owner="$1" kind="$2" repo code deleted=0 repos list_rc=0
+  repos="$(gitea_owner_repos "$owner" "$kind")" || list_rc=$?
+  if [[ "$list_rc" -ne 0 ]]; then
+    # The one outcome this function must never render as success. "I could not list them" and "there are
+    # none" produce the same empty string, so the exit code is the only thing that tells them apart.
+    err "  ${owner}: could NOT list repositories — the Gitea API did not answer. NOTHING was deleted;"
+    err "           this is not 'already clean'. Fix the route/credential and re-run (the sweep is idempotent)."
+    return 1
+  fi
   if [[ -z "$repos" ]]; then
-    skip "  ${owner}: no repositories"
+    skip "  ${owner}: no repositories (API answered — genuinely empty)"
     return 0
   fi
   local rc=0
@@ -275,7 +313,8 @@ gitea_delete_owner_repos() {  # <owner> <user|org> — delete every repo under t
     fi
     code="$(gitea_api DELETE "/api/v1/repos/${owner}/${repo}")"
     case "$code" in
-      204|200|404) deleted=$((deleted + 1)); echo "     ✓ ${owner}/${repo}" ;;
+      204|200) deleted=$((deleted + 1)); echo "     ✓ ${owner}/${repo}" ;;
+      404)     deleted=$((deleted + 1)); echo "     ✓ ${owner}/${repo} (already gone)" ;;
       *) err "  could not delete ${owner}/${repo} (HTTP ${code}) — check the Gitea admin credential and re-run"; rc=1 ;;
     esac
   done <<< "$repos"
@@ -288,13 +327,128 @@ sweep_gitea_hook_leftovers() {  # <user…> — clear per-user entry-hook object
   # carrying workshop.redhat.com/user. They are Helm HOOKS with BeforeHookCreation, so Argo does not
   # track them and deleting the entry Application leaves them behind. Label-scoped, so nothing shared
   # is ever in range.
-  local u kinds="job,serviceaccount,role,rolebinding,configmap"
+  # Grounded live on 2026-08-01 (cluster 2): the objects carrying workshop.redhat.com/user in this
+  # namespace are exactly the entry-state fork/seed hooks (8 Jobs + their SA/Role/RoleBinding + 2 seed
+  # ConfigMaps). None carries argocd.argoproj.io/instance and none carries the workshop-config layer
+  # label, so nothing here is Argo-tracked and nothing is re-created by workshop-config's selfHeal.
+  local u kinds="job,serviceaccount,role,rolebinding,configmap" rc=0
+  if ! oc get namespace "$GITEA_NS" >/dev/null 2>&1; then
+    skip "  ${GITEA_NS} not present — no hook leftovers to sweep"
+    return 0
+  fi
   for u in "$@"; do
-    oc delete "$kinds" -n "$GITEA_NS" -l "workshop.redhat.com/user=${u}" \
-      --ignore-not-found >/dev/null 2>&1 || true
+    # NOT `|| true`: an API that cannot be reached must not render as a successful sweep. --ignore-not-found
+    # already makes "nothing matched" a rc-0 success, so a non-zero here is a real failure to ask.
+    if ! oc delete "$kinds" -n "$GITEA_NS" -l "workshop.redhat.com/user=${u}" \
+        --ignore-not-found >/dev/null 2>&1; then
+      err "  ${GITEA_NS}: could not sweep hook leftovers for ${u} — re-run after checking cluster access"
+      rc=1
+    fi
   done
-  ok "  ${GITEA_NS}: hook leftovers swept for $# user(s)"
+  if [[ "$rc" -eq 0 ]]; then
+    ok "  ${GITEA_NS}: hook leftovers swept for $# user(s)"
+  fi
+  return "$rc"
+}
+
+# ── SonarQube admin API ──────────────────────────────────────────────────────────────────────────
+# SonarQube accounts are rows in SonarQube's own database, not Kubernetes objects — the same shape of
+# residue as Gitea accounts, and reached the same way: discover the Route, read the admin credential
+# the portfolio's sonar-bootstrap Job set, talk HTTPS. The credential goes into a 0600 curl config
+# rather than `-u user:pass`, so it never appears in the process table of a shared bastion.
+#
+# WHY THIS MATTERS MORE THAN IT LOOKS. A SonarQube attendee account is `local: true`: it authenticates
+# against SonarQube's own user table and needs no OpenShift identity, no htpasswd line and no Gitea
+# account behind it. Removing every cluster-side trace of an attendee therefore does NOT disarm their
+# SonarQube login — it is the one working credential a wiped attendee keeps.
+SONAR_HOST=""
+SONAR_CFG=""
+SONAR_BODY=""
+
+sonarqube_cleanup() {
+  if [[ -n "$SONAR_CFG" ]]; then rm -f "$SONAR_CFG"; fi
+  if [[ -n "$SONAR_BODY" ]]; then rm -f "$SONAR_BODY"; fi
+}
+
+sonarqube_connect() {  # → 0 connected · 1 could NOT ask · 2 SonarQube is not installed here at all
+  # The 2 is not decoration. "There is no SonarQube on this cluster" is a real, empty answer; "the API
+  # did not answer" is not, and a teardown that renders the second as the first reports a sweep it
+  # never performed. Callers must branch on the two separately (gitea_owner_repos' rc 3 exists for the
+  # identical reason).
+  if [[ -n "$SONAR_CFG" ]]; then
+    return 0   # already connected — the dry-run enumerator and the removal step can both call it
+  fi
+  local host pass code
+  if ! oc get namespace "$SONAR_NS" >/dev/null 2>&1; then
+    return 2
+  fi
+  host="$(oc get route sonarqube -n "$SONAR_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  if [[ -z "$host" ]]; then
+    return 1
+  fi
+  pass="$(oc get secret sonarqube-admin -n "$SONAR_NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  if [[ -z "$pass" ]]; then
+    return 1
+  fi
+  SONAR_HOST="$host"
+  SONAR_CFG="$(mktemp)"; chmod 600 "$SONAR_CFG"
+  SONAR_BODY="$(mktemp)"; chmod 600 "$SONAR_BODY"
+  printf 'user = "%s:%s"\n' "$SONAR_ADMIN_LOGIN" "$pass" > "$SONAR_CFG"
+  # THE HTTP STATUS IS NOT ENOUGH HERE, and this is nastier than Gitea's 401. Measured live on
+  # 2026-08-01 against SonarQube 26.5: with a WRONG admin password /api/authentication/validate answers
+  # HTTP 200 with body {"valid":false}. A status-only probe — the shape gitea_connect can safely use,
+  # because Gitea answers 401 — would accept a rotated credential here and then read every subsequent
+  # 401 as "the account is not there", producing a green sweep that deleted nothing. Check the body.
+  code="$(sonar_api GET /api/authentication/validate)"
+  if [[ "$code" != "200" ]] || ! grep -q '"valid":true' "$SONAR_BODY"; then
+    err "SonarQube admin API did not accept the discovered credential (HTTP ${code} from https://${host}/api/authentication/validate)"
+    err "  fix: oc get secret sonarqube-admin -n ${SONAR_NS} -o jsonpath='{.data.password}' | base64 -d — the portfolio's sonar-bootstrap Job sets it"
+    sonarqube_cleanup
+    SONAR_HOST=""; SONAR_CFG=""; SONAR_BODY=""
+    return 1
+  fi
   return 0
+}
+
+sonar_api() {  # <METHOD> <path> [name=value…] → HTTP status on stdout; response body left in $SONAR_BODY
+  local method="$1" path="$2" code kv
+  shift 2
+  # Seeded with -X so the array is NEVER empty: "${a[@]}" on an empty array is an unbound-variable
+  # error under `set -u` on bash 3.2, which is what /bin/bash still is on a macOS bastion.
+  local args=(-X "$method")
+  for kv in "$@"; do
+    args+=(--data-urlencode "$kv")
+  done
+  code="$(curl -ks -K "$SONAR_CFG" -o "$SONAR_BODY" -w '%{http_code}' \
+    -H 'Accept: application/json' "${args[@]}" "https://${SONAR_HOST}${path}" 2>/dev/null || true)"
+  if [[ -z "$code" ]]; then code="000"; fi
+  printf '%s' "$code"
+}
+
+sonar_match_active_login() {  # <login> → the matched ACTIVE user's id (v1 shape: its login); "" = no match
+  # EXACT-login matching, done here rather than trusting the query: SonarQube's ?q= is a SUBSTRING
+  # match, so q=user1 also returns user10 on a cohort of ten — the same trap sonarqube-user-seed.yaml
+  # documents for its create-if-absent check. Here the caller's very next call is a DELETE, so a fuzzy
+  # match is not a cosmetic bug.
+  # python3, not grep, for the reason gitea_json_names gives: the response is not promised to be
+  # compact, and a user NAME containing the literal '"login":"user2"' would otherwise hand back a
+  # match — in a function whose caller then deletes what it returns.
+  python3 -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for u in data.get("users") or []:
+    if not isinstance(u, dict) or u.get("login") != sys.argv[2]:
+        continue
+    # v2 users-management always carries "active"; v1 /api/users/search returns ACTIVE users only and
+    # omits the field entirely — hence the default. v2 also carries the uuid the v2 DELETE needs; v1
+    # has no id, so the login stands in as a non-empty "yes, it is there" marker.
+    if u.get("active", True):
+        print(u.get("id") or u["login"])
+    break
+' "$SONAR_BODY" "$1" 2>/dev/null || true
 }
 
 # Executed rather than sourced is always a mistake — say so instead of silently doing nothing.
