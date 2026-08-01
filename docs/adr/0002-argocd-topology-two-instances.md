@@ -98,8 +98,8 @@ a `create` by name.
 
 One residual is accepted and documented rather than closed: all attendees share this single
 AppProject, so an attendee can still target a *peer's* namespace. That is a cooperative-classroom
-risk, not a customer-data risk; see `INSTALL.md` for the threat model and the per-attendee
-AppProject pattern that closes it if the audience is ever strangers.
+risk, not a customer-data risk; the threat model and the per-attendee AppProject pattern that closes
+it are documented in the header of `gitops/workshop-config/templates/attendee-entry-app-guard.yaml`.
 
 ## Amendment 3 (2026-08-01) — two corrections to Amendment 2: the per-attendee AppProject it named now exists (but is inert), and its own "five shared namespaces" was itself one of the bugs this cluster of changes fixed
 

@@ -88,7 +88,8 @@ admission, not by any AppProject repo pin.
 
 One residual is accepted, not closed: all eight attendees share this one AppProject, so an attendee can
 still name a *peer's* namespace pattern. Cooperative-classroom risk, not a customer-data risk — see
-ADR-0002 Amendment 2 and `INSTALL.md` for the full threat model.
+ADR-0002 Amendment 2, and the header of
+`gitops/workshop-config/templates/attendee-entry-app-guard.yaml`, for the full threat model.
 
 ## Amendment — 2026-08-01 (per-user AppProjects exist now; they are not yet load-bearing)
 

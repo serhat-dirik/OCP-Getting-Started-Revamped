@@ -70,15 +70,14 @@ Each shorter path is a complete arc rather than a truncated one. The half day is
 
 ## Quick Installation on OpenShift
 
-The steps below get a cluster running. For sizing the cluster before you order it, verifying the
-install, and the failure modes we have actually hit — including one that can quietly stop an operator
-the cluster's owner cares about from upgrading — see **[INSTALL.md](INSTALL.md)**.
+The steps below get a cluster running. For sizing it before you order, verifying the install, and
+troubleshooting, see **[INSTALL.md](INSTALL.md)**.
 
 **Prerequisites**
 
-* An OpenShift **4.20+** cluster with a default StorageClass and **`linux/amd64` workers** (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket). OpenShift Local on Apple Silicon cannot complete the install — the Gitea catalog image is amd64-only; see [INSTALL.md §2.3](INSTALL.md).
+* An OpenShift **4.20+** cluster with a default StorageClass and **`linux/amd64` workers** (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket).
 * `cluster-admin` access, with the `oc` CLI logged in to that cluster.
-* `git` on the machine you install from.
+* On the machine you install from: `git`, `yq`, `htpasswd`, `openssl`. See [INSTALL.md](INSTALL.md) for why each is needed.
 * The installer is **non-invasive on existing clusters**: operators already present are adopted (never overwritten or upgraded), attendees live in their own identity provider, and nothing about the cluster's default behavior is changed.
 
 **1. Clone this repository**
@@ -109,22 +108,50 @@ The variables that matter:
 ./bootstrap/install.sh
 ```
 
-**4. Hand out the links.** Each attendee gets a personal cockpit (guide + terminal + tool tabs) at `https://showroom-user1.<cluster-domain>` … `showroom-userN`, sharing one memorable password printed at the end of the install. The SA demo cockpit is at `https://showroom-demos.<cluster-domain>`.
+## Starting the Workshop
 
-## Operating the Workshop
+**1. Give each attendee their cockpit link.** One personal URL per attendee — the guide, a terminal, and
+tool tabs in a single browser page:
 
-Attendees drive everything from inside their cockpit: `ws prep <module>` sets the module up, `ws verify <module>` checks their work, `ws reset <module>` returns to a clean start. From your admin machine the same CLI manages the fleet:
+```
+https://showroom-user1.<cluster-domain>      # user1
+https://showroom-user2.<cluster-domain>      # user2, and so on
+```
+
+They log in as `userN` with the shared password the installer prints at the end. The SA demo cockpit is
+`https://showroom-demos.<cluster-domain>`.
+
+**2. Tell them to pick a module and prepare it.** The cockpit lists all modules; any module can be first.
+Inside the cockpit terminal:
 
 ```bash
-tools/ws/ws start m01 --user user3     # materialize a module for one attendee
+ws prep <module>        # build this module's starting environment (takes a few minutes)
+```
+
+**3. They do the lab**, following the guide in the left pane, and check their own work:
+
+```bash
+ws verify <module>      # did I do it right?
+ws reset  <module>      # start this module over
+```
+
+That is the whole attendee loop — prep, do, verify. Nothing else is required of them.
+
+### Managing the session
+
+From your admin machine, the same CLI runs against the whole cohort. It lives in the repo at
+`tools/ws/ws` (attendees get it on their `PATH` inside the cockpit; you call it by path):
+
+```bash
 tools/ws/ws status                     # fleet health at a glance
+tools/ws/ws start m01 --user user3     # prepare a module for someone who is stuck
 tools/ws/ws git-refresh                # publish content updates to a live session
 ```
 
 ## Ending a Delivery
 
-Install once; what you run next depends on what you're doing — see **[INSTALL.md](INSTALL.md)** §7
-for the full picture. In order of how often you'll actually reach for them:
+Install once; what you run next depends on what you're doing — see **[INSTALL.md §6](INSTALL.md)** for
+the full picture. In order of how often you'll actually reach for them:
 
 **a) One attendee, one module** — reset a single exercise so someone can redo it; nothing else changes:
 
@@ -132,47 +159,39 @@ for the full picture. In order of how often you'll actually reach for them:
 tools/ws/ws reset <module> --user userN
 ```
 
-**b) Between cohorts, same cluster** — the normal end-of-delivery step. Wipes all attendee/lab content
-and returns the cluster to its immediately-post-install state; the platform, every attendee account,
-Gitea (with its repos), Keycloak (with its logins) and every cockpit stay exactly as installed:
+**b) Between cohorts, same cluster** — the normal end-of-delivery step. Deletes all attendee lab
+content and returns the cluster to its immediately-post-install state. The platform, every attendee
+account, Gitea (with its repos), Keycloak (with its logins) and every cockpit stay exactly as installed:
 
 ```bash
-tools/ws/ws cohort-reset          # attendee-state clear from inside ws
-./bootstrap/ogsr-reset.sh         # cluster-level equivalent — the normal path between cohorts
+./bootstrap/ogsr-reset.sh --dry-run    # print the plan; change nothing
+./bootstrap/ogsr-reset.sh              # do it
 ```
 
-**c) Handing the cluster to someone else, platform staying installed** — removes `user2`…`userN`
-entirely (namespaces, Keycloak identities, Gitea repos) and leaves **`user1`** behind as a working
-sample, login included, so whoever inherits the cluster sees it running before touching anything:
+This is the one to run. (`ws cohort-reset` is the engine it calls internally — you do not need to run
+it yourself.)
+
+**c) Wipe users** — removes `user2`…`userN` entirely (namespaces, Keycloak identities, Gitea repos)
+and leaves **`user1`** behind as a working sample, login included, so the cluster still demonstrates the
+workshop with only one attendee on it:
 
 ```bash
-./bootstrap/ogsr-wipe-users.sh
+./bootstrap/ogsr-wipe-users.sh --dry-run   # print the plan; change nothing
+./bootstrap/ogsr-wipe-users.sh             # do it
+./bootstrap/ogsr-wipe-users.sh --keep 2    # keep user1 and user2 (default 1)
 ```
 
-One known, deliberate side effect: the Developer Hub catalog is **kept**, so it will list components
-scaffolded by the removed users after their namespaces are gone — the owner chose to keep the catalog
-rather than prune user1's live entries along with everyone else's. Expected, not a bug.
+One deliberate side effect: the Developer Hub catalog is **not pruned**, so components scaffolded by
+removed users stay listed after their namespaces are gone. Expected, not a bug.
 
-**d) Giving the cluster itself back, untouched** — this is now the **rare** case, not the routine one:
-reach for it only when the *cluster*, not just the attendee content, must be returned to its owner (a
-borrowed customer or colleague's cluster). It is still fully non-invasive by design (adopted operators
-and anything the cluster had before the install are preserved) — always preview first:
+**d) Remove the workshop entirely** — reach for this only when the *cluster* has to go back to its
+owner. Adopted operators and anything the cluster had before the install are preserved:
 
 ```bash
 ./bootstrap/ogsr-uninstall.sh --dry-run   # prints the full removal plan; changes nothing
 ./bootstrap/ogsr-uninstall.sh             # removes the workshop entirely
+./bootstrap/ogsr-check-clean.sh           # read-only proof; non-zero while anything remains
 ```
-
-**e) Confirm the cluster is clean** — run this *after* a full uninstall to check for anything left
-behind or damaged:
-
-```bash
-./bootstrap/ogsr-check-clean.sh
-```
-
-This is **read-only**: it never deletes, patches, or labels anything. It scans the cluster for whether every adopted operator (and its OperatorGroup) is still healthy, ClusterServiceVersions that no Subscription installs (an orphan left behind when a Subscription went and its CSV did not — worth acting on, because OLM resolves the *next* install against the leftover and fails), workshop namespaces — and any other namespace — stuck `Terminating`, APIServices whose backing Service is gone, admission webhooks pointing at a Service that no longer exists, objects still carrying a workshop label, and CRDs from operators the install created, each reported with a live instance count (deleting a CRD deletes every instance of it, cluster-wide). For every finding it prints the exact `oc` command that would remove it, and it exits non-zero while anything remains. It does not remove anything itself: that decision belongs to the cluster admin, not the script, because the workshop has no way to know whether a given object is now load-bearing for something else on the cluster.
-
-Its runtime tracks the number of *leftovers*, not the size of the cluster: run where it belongs — after the uninstall — it finishes in well under a minute. Run against a full install, where every object is a finding, it takes a couple of minutes. Each section prints its elapsed time as `(t+NNs)` so a long scan is visibly working rather than hung.
 
 ## Local Content Preview
 
@@ -183,8 +202,6 @@ cd content && npx antora site-workshop.yml    # also: site-demo.yml, site-instru
 # or, with live reload:
 ./utilities/lab-serve
 ```
-
-Before pushing a block with `subs="attributes"`, run `tools/lint/curl-format-guard.py` — it catches brace expressions eaten as AsciiDoc attribute references: `curl -w` format fields like `%{http_code}`, and the bare `{end}` that closes a `{range …}` jsonpath. Both produce "skipping reference to missing attribute", and content-build runs antora at `--log-failure-level=warn`, so that warning fails the build. Escape as `%\{http_code}` / `\{end}`, or drop `subs="attributes"` from the block.
 
 ## Credits
 
