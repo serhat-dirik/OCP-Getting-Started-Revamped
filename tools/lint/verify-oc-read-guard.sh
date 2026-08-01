@@ -25,9 +25,11 @@
 # to diff against rather than converting fifteen scripts blind." Those reads are KNOWN, ACKNOWLEDGED
 # debt, not a clean baseline — a guard that failed on all of them today would be disabled within the
 # week. BASELINE_TABLE below is the exact per-file count this guard's own detector measures against
-# the tree as of 2026-08-01 (by LINE, so a line carrying two `oc … 2>/dev/null` reads — e.g. an outer
-# `oc get devworkspaces … "$(oc get cm … 2>/dev/null)"` — counts once; this is why the total differs
-# from the commit message's own by-READ tally, not a disagreement about which reads are blind). A
+# the tree as of 2026-08-01 (by SOURCE LINE, so a line carrying two `oc … 2>/dev/null` reads — e.g. an
+# outer `oc get devworkspaces … "$(oc get cm … 2>/dev/null)"` — counts once; this is why the total
+# differs from the commit message's own by-READ tally, not a disagreement about which reads are
+# blind. Since the fifth pass the SILENCING is looked for across the whole LOGICAL line while the
+# count still lands on the physical lines that carry the `oc` token — see that pass's note). A
 # file's count may only stay AT or FALL BELOW its baseline; a file absent from the table — including
 # any brand-new module's verify script — gets baseline 0, so a single occurrence anywhere new fails
 # immediately. Converting a listed file's reads to oc_read/oc_present/oc_absent should lower its
@@ -144,12 +146,13 @@ ok()   { echo "✅ $*"; }
 #
 # THE SIX SURVIVORS ARE NOT READS. They are the five WRITES and one `oc rollout status` wait inside
 # failover_drill — the opt-in active-drill region that tools/lint/verify-mutation-guard.sh reviews
-# (`# ws-mutation-optin:`), all of the shape `oc scale … >/dev/null 2>&1 || true`. This detector is
-# line-shaped: it sees "an `oc` line that silences stderr" and cannot tell a blind READ from a
+# (`# ws-mutation-optin:`), all of the shape `oc scale … >/dev/null 2>&1 || true`. This detector WAS
+# line-shaped: it saw "an `oc` line that silences stderr" and could not tell a blind READ from a
 # deliberately-quiet WRITE. oc_read exists to classify an ANSWER so a check can be graded; a drill
 # that scales a Deployment and ignores the result has no answer to classify, and rewriting those six
 # lines to satisfy a read-oriented ratchet would be churn inside the one region of this suite where
-# churn is most expensive. Recorded here instead, which is what the row is for.
+# churn is most expensive. Recorded as a row instead — which left the file at a floor it could never
+# honestly leave, and is what the fifth pass below fixes.
 #
 # Proven against live cluster 2 (attendee slots user2 = entry world, user8 = solved end world):
 # byte-identical across TWELVE end-to-end runs per tree — healthy entry-only, healthy full, healthy
@@ -160,12 +163,87 @@ ok()   { echo "✅ $*"; }
 # are byte-identical, 11 differ only by VERIFY_INCONCLUSIVE flipping 0 → 1 on an unanswerable API
 # (the whole point), and 3 were harness artifacts of the echo→global change, re-measured with both
 # call shapes and confirmed value-identical.
+#
+# ── 2026-08-01, FIFTH PASS: the detector was LINE-shaped, and could not tell a read from a write ──
+# Two corrections in OPPOSITE directions. Reported separately below, because netting them into one
+# number would hide both: 64 → 68 (the detector stopped being blind) → 62 (writes stopped being
+# counted as reads).
+#
+# (a) +4 — A SILENCED READ CAN SPAN TWO PHYSICAL LINES. The detector matched one physical line at a
+# time, so a read whose `oc` token and whose `2>/dev/null` land on DIFFERENT lines was invisible:
+#
+#     oc get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-devsecops \
+#       -o jsonpath='{range .items[*]}{…}{end}' 2>/dev/null | grep -qx True
+#
+# Neither line matches: the first carries no redirect, the second carries no `oc`. 80b4380 found five
+# of these in resilience-multicluster-dr.sh (27 actual against 22 counted) while converting it, and
+# recorded that the blind spot was live repo-wide and under-reporting by an unknown amount. The
+# amount, measured: FOUR more lines in THREE files — app-security-testing 1→2, eventing-deep-dive
+# 9→11, trusted-supply-chain 2→3. Every one is the identical `oc get … \` + `-o jsonpath=… 2>/dev/null`
+# shape above, and every one is real debt that was passing at whatever baseline its file carried.
+#
+# The fix folds physical lines into LOGICAL lines first — a backslash continuation, and a pipeline or
+# `&&`/`||` chain broken across lines in either direction — then asks the old question of the whole
+# logical line while still COUNTING the physical lines that carry the `oc` token. Counting on the
+# `oc` line, not on the logical line, is what keeps `[[ -n "$(oc get se … 2>/dev/null)" ]] &&` /
+# `[[ -n "$(oc get vs … 2>/dev/null)" ]]` at TWO, as it has always been counted, instead of quietly
+# collapsing a chain of blind reads into one. The change can therefore only ever ADD lines, never
+# remove them: a physical line that matched before still matches, because it is contained in its own
+# logical line. Trailing- and leading-operator joins find nothing this tree does not already write
+# with a backslash — matched anyway, for the same reason `&>/dev/null` is matched with zero instances.
+#
+# (b) −6 — A QUIET WRITE IS NOT A BLIND READ. resilience-multicluster-dr sat at a floor of 6 that were
+# ALL writes (`oc scale`, `oc annotate`, the restore trap, and an `oc rollout status` wait, each
+# `>/dev/null 2>&1 || true`), so its row could never honestly reach the zero that deletes it.
+# oc_read exists to classify an ANSWER so a check can be graded; a scale that ignores its result has
+# no answer to classify, and converting it would satisfy the ratchet while meaning nothing.
+#
+# THE BASIS IS A CONJUNCTION, and the choice matters more than the code. A line is excluded only when
+# it is BOTH (i) inside a `# ws-mutation-optin:` … `# ws-mutation-optin-end` region AND (ii) not an
+# object read — a mutating verb, or an `oc rollout status` / `oc wait` whose stdout is progress text
+# rather than an answer. Either half alone has a failure mode this guard cannot afford:
+#   • MARKER ALONE would make an opt-in region a SAFE HARBOUR FOR READS. Nothing stops the next
+#     author writing `oc get … 2>/dev/null` inside failover_drill; verify-mutation-guard's D4 only
+#     requires the region to contain a write, not to contain nothing else. That is the same silent
+#     under-report (a) exists to end. Canary [1]-J pins it: a blind read inside a marked region is
+#     still counted.
+#   • VERB ALONE would excuse a misclassified read anywhere in the tree, with no marker to make the
+#     exclusion visible — and it still could not reach zero, because `oc rollout status` is not a
+#     mutating verb, so the row would floor at 1 instead of 6.
+# The conjunction gives up only "a quiet write OUTSIDE a marked region", which cannot legitimately
+# exist: verify-mutation-guard's D1 already fails the build on exactly that. So nothing real is lost,
+# and every exclusion this guard makes is one an author signed for in a reviewed marker comment.
+# resilience-multicluster-dr.sh therefore reaches ZERO and its row is GONE rather than set to 0, the
+# same way seven files' rows went in the second pass: an absent file defaults to baseline 0, so
+# deleting the row is what protects it — one new blind read there now fails outright.
+#
+# THE CLASSIFIER IS BORROWED, NOT REBUILT. Whether a line writes, where the marker regions are, and
+# where gitea_host() begins and ends all come from verify-mutation-guard.sh's OWN awk scanner,
+# extracted from that file at runtime. A second copy of that logic would drift — printed hints,
+# `--dry-run`, `oc auth can-i <verb>` (a permission QUESTION, and this suite is full of them: reading
+# `can-i patch` as `patch` would excuse real blind reads) and the `rollout` sub-verb split are all
+# nuance that took that guard two commits to get right. If the borrow fails, or the borrowed scanner
+# stops classifying the four-shape fixture the way this guard needs, [1] exits 2 — never 0.
+#
+# KNOWN LIMITS of the logical-line matcher, stated rather than hidden (the sibling guard's convention):
+#   • It asks whether the LOGICAL line silences stderr, not whether the silencing belongs to the `oc`
+#     command in particular. `oc get pods | grep -q x 2>/dev/null` has always counted for the same
+#     reason, so this is the existing rule applied consistently — but joined across lines it can now
+#     also catch `oc get route … \` + `|| hint "…2>/dev/null…"`, where the redirect is inside a printed
+#     string. ZERO instances in this tree (checked: exactly one hint anywhere contains `2>/dev/null`,
+#     and it is a `helm version` substitution with no `oc` token). Quote-blanking the joined line would
+#     fix it and would also REMOVE lines from the count, which is the one direction a ratchet
+#     re-measurement must not move in silently; if it ever fires, blank quotes and re-measure the whole
+#     table in that same change.
+#   • A write is excluded on the physical line the borrowed scanner reports the VERB on. Split the verb
+#     off its `oc` token (`oc \` + `scale …`) and the two line numbers disagree, so the line is COUNTED
+#     rather than excluded. Conservative on purpose, and no such split exists here.
 BASELINE_TABLE="
-app-security-testing.sh 1
+app-security-testing.sh 2
 build-deliver.sh 4
 developer-hub-golden-paths.sh 1
 devspaces-inner-loop.sh 1
-eventing-deep-dive.sh 9
+eventing-deep-dive.sh 11
 gitops-at-scale.sh 8
 multi-tenancy-workload-security.sh 9
 networking-dev-devops.sh 3
@@ -173,19 +251,18 @@ observability-health-scale.sh 2
 packaging-distributing.sh 7
 pipelines-fundamentals.sh 1
 platform-orientation.sh 5
-resilience-multicluster-dr.sh 6
 securing-apps-keycloak.sh 5
-trusted-supply-chain.sh 2
+trusted-supply-chain.sh 3
 "
 
 baseline_for() {  # <basename> → integer, 0 if not listed
   awk -v f="$1" '$1==f{print $2; found=1} END{if(!found) print 0}' <<< "$BASELINE_TABLE"
 }
 
-# A line counts iff: not a comment, silences stderr into /dev/null in one of the shapes below, AND
-# carries a standalone `oc` token (so a pure curl probe — no `oc` token at all — never matches). Read
-# from STDIN so the same matcher applies to a whole file and to an extracted function's body text
-# alike, and counted BY LINE, so a line carrying two silenced reads counts once.
+# A physical line counts iff: it is not a comment, it carries a standalone `oc` token (so a pure curl
+# probe — no `oc` token at all — never matches), its LOGICAL line silences stderr into /dev/null in
+# one of the shapes below, and it is not an excluded WRITE (see the fifth-pass note) or inside
+# gitea_host().
 #
 # The three silencing shapes, all equally blind:
 #   2>/dev/null              stderr discarded, stdout kept — the shape 51eb1b6 converted.
@@ -198,34 +275,160 @@ baseline_for() {  # <basename> → integer, 0 if not listed
 # see the BASELINE_TABLE header.
 OC_SILENCED_RE='2>[[:space:]]*/dev/null|>[[:space:]]*/dev/null[[:space:]]+2>&1|&>[[:space:]]*/dev/null'
 
-oc_devnull_lines() {
-  grep -vE '^[[:space:]]*#' | grep -E "$OC_SILENCED_RE" | grep -E '(^|[^A-Za-z0-9_])oc([^A-Za-z0-9_]|$)'
+# ── the logical-line matcher ──────────────────────────────────────────────────────────────────────
+# Folds physical lines into logical ones, then emits "<line>\t<is-wait>" for every physical line of a
+# SILENCED logical line that carries an `oc` token. Emitting the physical `oc` lines rather than the
+# logical line is what keeps a two-line `&&` chain of blind reads counted as two — see (a) above.
+#
+# A group continues when the current line ENDS with `\`, `|`, `||` or `&&`, or when the next line
+# BEGINS with `|`, `||` or `&&` (this tree writes `check … \` / `  || hint "…"` constantly, so both
+# directions are real). A comment line ends the group: a `#` line is never part of a command here,
+# and letting one join would splice a quoted repair hint onto live code.
+#
+# `is-wait` marks `oc rollout status` / `oc wait` — a blocking WAIT, whose stdout is progress text and
+# not an answer oc_read could classify. It is only ever acted on INSIDE a marker region (the
+# conjunction), so this flag can never excuse anything on its own.
+read -r -d '' AWK_LOGICAL <<'AWK_PROGRAM'
+function isoc(s)   { return (s ~ /(^|[^A-Za-z0-9_])oc([^A-Za-z0-9_]|$)/) }
+function iswait(s) { return (s ~ /rollout[[:space:]]+status/ || s ~ /(^|[^A-Za-z0-9_.\/-])wait([^A-Za-z0-9_.\/-]|$)/) }
+function rstrip(s) { sub(/[[:space:]]+$/, "", s); return s }
+function lstrip(s) { sub(/^[[:space:]]+/, "", s); return s }
+function wants_more(s,  t) { t = rstrip(s); return (t ~ /\\$/ || t ~ /(\|\||&&|\|)$/) }
+function attaches(s,    t) { t = lstrip(s); return (t ~ /^(\|\||&&|\|[^|])/) }
+function flush(   i, w) {
+  if (NG > 0 && JOINED ~ SIL) {
+    for (i = 1; i <= NG; i++) {
+      # `w` is assigned first rather than printed as `… "\t" (cond ? 1 : 0)`: a parenthesised ternary
+      # concatenated inside a print is parsed differently by different awks, and this file runs under
+      # BSD awk on a maintainer's macOS and gawk on CI.
+      if (isoc(GL[i])) { w = iswait(GL[i]) ? 1 : 0; print GN[i] "\t" w }
+    }
+  }
+  NG = 0; JOINED = ""; PEND = 0
+}
+BEGIN { NG = 0; JOINED = ""; PEND = 0 }
+{
+  if ($0 ~ /^[[:space:]]*#/) { flush(); next }
+  if (NG > 0 && PEND == 0 && !attaches($0)) flush()
+  NG++; GL[NG] = $0; GN[NG] = NR
+  JOINED = JOINED " " $0
+  PEND = wants_more($0)
+}
+END { flush() }
+AWK_PROGRAM
+
+# ── the borrowed classifier ───────────────────────────────────────────────────────────────────────
+# verify-mutation-guard.sh's own scanner, lifted from that file at runtime rather than copied. It
+# answers all three questions this detector cannot answer with a regex — which lines WRITE (quote- and
+# comment-aware, so a printed repair hint is not a write), where the opt-in marker regions are, and
+# where gitea_host() starts and ends. See the fifth-pass note for why a second copy is not acceptable.
+MUTATION_GUARD="${LINT_DIR}/verify-mutation-guard.sh"
+
+borrowed_mutation_scanner() {  # → the sibling guard's AWK_SCAN program text, empty if it cannot be lifted
+  [[ -f "$MUTATION_GUARD" ]] || return 0
+  awk 'p==1 && $0=="AWK_PROGRAM"{exit} p==1{print} $0 ~ /AWK_SCAN <</{p=1}' "$MUTATION_GUARD"
+}
+MUT_SCAN="$(borrowed_mutation_scanner)"
+
+# ALWAYS-ON, both modes. Four shapes in nine lines: a function whose range must be found, a marker
+# region whose bounds must be found, a PRINTED mutation that must NOT be classified as a write, a
+# genuine read, and a genuine write. If the borrowed scanner stops answering any of them the way this
+# detector needs, [1] refuses to report rather than silently excluding nothing (counts jump) or
+# everything (counts vanish).
+mutation_scanner_probe() {  # → 0 the borrowed scanner still classifies the way this guard needs
+  local d out muts optin funcs
+  [[ -n "$MUT_SCAN" ]] || return 1
+  d="$(mktemp -d)" || return 1
+  cat >"$d/probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+gitea_host() {
+  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+}
+# ws-mutation-optin: fixture region — the probe asserts this guard can still see marker bounds
+hint "repair it yourself: oc delete pod broken -n ${NS}"
+oc get deploy x -n "$NS" -o name 2>/dev/null || true
+oc scale deploy/y -n "$NS" --replicas=0 >/dev/null 2>&1 || true
+# ws-mutation-optin-end
+PROBE
+  out="$(awk "$MUT_SCAN" "$d/probe.sh")"
+  rm -rf "$d"
+  funcs="$(printf '%s\n' "$out" | awk -F'\t' '$1=="FUNC"{printf "%s:%s-%s ", $2, $3, $4}')"
+  muts="$(printf '%s\n' "$out"  | awk -F'\t' '$1=="MUT"{printf "%s:%s ", $2, $4}')"
+  optin="$(printf '%s\n' "$out" | awk -F'\t' '$1=="OPTIN"{printf "%s-%s ", $2, $3}')"
+  [[ "$funcs" == "gitea_host:2-4 " && "$muts" == "8:scale " && "$optin" == "5-9 " ]]
 }
 
-count_oc_devnull_violations() {  # <file> → integer, gitea_host()'s body excluded
-  local f="$1" total gh gh_count=0
-  total="$(oc_devnull_lines < "$f" | wc -l | tr -d ' ')"
-  gh="$(extract_func "$f" gitea_host)"
-  if [[ -n "$gh" ]]; then
-    gh_count="$(printf '%s\n' "$gh" | oc_devnull_lines | wc -l | tr -d ' ')"
-  fi
-  echo $(( total - gh_count ))
+# Returns 1 — never an empty answer — when the borrowed classifier cannot be run over this file. An
+# awk that fails to compile emits nothing, and "nothing" here would read as "no blind reads in this
+# file": measured, a truncated borrow silently took EVERY file to zero and the whole guard to rc 0.
+# The caller turns this into rc 2. Inspecting nothing is never a pass.
+counted_read_lines() {  # <file> → the line numbers this detector counts, one per line; rc 1 = could not classify
+  local f="$1" cand scan writes gh_s=0 gh_e=0 ln iswait i excluded
+  cand="$(awk -v SIL="$OC_SILENCED_RE" "$AWK_LOGICAL" "$f")" || return 1
+  [[ -n "$cand" ]] || return 0
+  scan="$(awk "$MUT_SCAN" "$f")" || return 1
+
+  # Space-delimited sets and index-addressed arrays, not associative ones: this runs on the bash 3.2
+  # every maintainer's macOS ships. A TRAPBODY with a verb writes exactly as surely as a bare `oc
+  # scale` does; one with an EMPTY verb (a trap naming a mutating function) is deliberately NOT
+  # treated as a write here — the sibling resolves those in bash, and guessing would EXCLUDE lines,
+  # which is the one direction this detector must never err in.
+  writes=" $(printf '%s\n' "$scan" | awk -F'\t' '($1=="MUT")||($1=="TRAPBODY"&&$4!=""){printf "%s ", $2}')"
+  local -a os=() oe=()
+  while IFS=$'\t' read -r rec a b c; do
+    case "$rec" in
+      OPTIN) os+=("$a"); oe+=("$b") ;;
+      FUNC)  [[ "$a" == "gitea_host" ]] && { gh_s="$b"; gh_e="$c"; } ;;
+    esac
+  done <<<"$scan"
+
+  while IFS=$'\t' read -r ln iswait; do
+    [[ -n "$ln" ]] || continue
+    # gitea_host()'s route-then-domain fallback: excluded BY NAME, see the header.
+    if [[ "$gh_s" -gt 0 && "$ln" -ge "$gh_s" && "$ln" -le "$gh_e" ]]; then continue; fi
+    # The conjunction: inside a signed opt-in region AND not an object read.
+    excluded=0
+    if [[ "$writes" == *" ${ln} "* || "$iswait" == "1" ]]; then
+      for (( i = 0; i < ${#os[@]}; i++ )); do
+        if [[ "$ln" -ge "${os[i]}" && "$ln" -le "${oe[i]}" ]]; then excluded=1; break; fi
+      done
+    fi
+    [[ "$excluded" -eq 1 ]] || printf '%s\n' "$ln"
+  done <<<"$cand"
+  return 0
 }
 
 check_no_new_raw_oc_devnull() {  # <verify-dir> → 0 within baseline, 1 a file exceeds it, 2 inspected nothing
   ran_check
-  local dir="$1" f base actual base_count rc=0 n=0
+  local dir="$1" f base lines actual base_count rc=0 n=0
+  if ! mutation_scanner_probe; then
+    bad "[1] could not borrow a working write/marker classifier from ${MUTATION_GUARD}."
+    note "    This detector must tell a blind READ from a deliberately-quiet WRITE, and it does that"
+    note "    with that guard's own awk scanner rather than a second copy of the logic. Without it,"
+    note "    every count here would be wrong in one direction or the other — so it reports nothing."
+    return 2
+  fi
   shopt -s nullglob
   for f in "$dir"/*.sh; do
     n=$((n + 1))
     base="$(basename "$f")"
-    actual="$(count_oc_devnull_violations "$f")"
+    if ! lines="$(counted_read_lines "$f")"; then
+      shopt -u nullglob
+      bad "[1] ${base}: the borrowed write/marker classifier could not be run over this file."
+      note "    A classifier that fails emits nothing, and 'nothing' would read as 'no blind reads'"
+      note "    — every file would silently go to zero. Refusing to report instead."
+      return 2
+    fi
+    lines="$(printf '%s' "$lines" | tr '\n' ' ')"
+    actual="$(printf '%s' "$lines" | wc -w | tr -d ' ')"
     base_count="$(baseline_for "$base")"
     if [[ "$actual" -gt "$base_count" ]]; then
-      bad "[1] ${base}: ${actual} stderr-silenced 'oc' read line(s) outside gitea_host() (2>/dev/null, >/dev/null 2>&1 or &>/dev/null), baseline allows ${base_count} (excess $((actual - base_count)))."
+      bad "[1] ${base}: ${actual} stderr-silenced 'oc' READ line(s) (2>/dev/null, >/dev/null 2>&1 or &>/dev/null), baseline allows ${base_count} (excess $((actual - base_count))). Lines: ${lines% }"
       note "    Each one hides a real API failure (throttling, an expired token, a blip) as a genuine"
       note "    absence — the attendee gets a false ❌ for correct work. Route it through oc_read /"
       note "    oc_present / oc_absent (tools/verify/_lib.sh) instead of adding another one."
+      note "    A line whose redirect sits on a CONTINUATION line counts too, and a quiet WRITE inside"
+      note "    a '# ws-mutation-optin:' region does not — so this list is reads, and only reads."
       rc=1
     fi
   done
@@ -428,6 +631,16 @@ _canary_verify_dir() {  # [target-basename] [sed-expr] → a temp copy of tools/
   printf '%s' "$d"
 }
 
+# A continuation canary is two physical lines by definition, which sed's `$a\` cannot append
+# portably — so those fixtures are `cat >>` heredocs onto a plain `_canary_verify_dir '' ''` copy.
+#
+# THE HEREDOC MUST NOT SIT INSIDE `$( … )`. Written as `d="$(_canary_append f <<'FIX' … FIX)"` the
+# fixture arrives as ONE line: bash's command-substitution reader applies backslash-newline joining to
+# the heredoc body even though the delimiter is QUOTED (measured on bash 3.2, 2026-08-01 — two lines
+# in, one line out). A continuation canary that collapses into a single line is INERT: it still fails
+# the ratchet, so it still looks like a pass, but it is testing the shape the guard already caught.
+# Found by blinding the join and watching the canary keep passing. Keep the append at statement level.
+
 _expect_rc() {  # <label> <want-rc> <got-rc> → 0 match, 1 mismatch (and prints)
   local label="$1" want="$2" got="$3"
   if [[ "$got" -ne "$want" ]]; then
@@ -542,6 +755,101 @@ FIXTURE
   rm -rf "$d"
   _expect_rc "canary [1]-G (NEGATIVE: '2>&1 >/dev/null' captures stderr and must stay clean)" 0 "$got" || bad_seen=1
 
+  # Canary [1]-H — the CONTINUATION shape: the `oc` token and the `2>/dev/null` on different physical
+  # lines. Neither line matches on its own, which is exactly how four of these survived every earlier
+  # pass. Appended to a file already AT its baseline, so only the logical-line matcher can find it.
+  d="$(_canary_verify_dir '' '')"
+  cat >> "${d}/platform-orientation.sh" <<'FIXTURE'
+oc get pipelineruns.tekton.dev -n foo -l tekton.dev/pipeline=continuation-canary \
+  -o jsonpath='{range .items[*]}{.status.conditions[0].status}{"\n"}{end}' 2>/dev/null | grep -qx True
+FIXTURE
+  got=0; check_no_new_raw_oc_devnull "$d" >/dev/null 2>&1 || got=$?
+  rm -rf "$d"
+  _expect_rc "canary [1]-H (silenced read split across a backslash continuation)" 1 "$got" || bad_seen=1
+
+  # Canary [1]-H2 — the OTHER split: no backslash at all, the pipeline broken at the operator. Two
+  # reads, one per direction — the first leaves the operator LEADING the next line, the second leaves
+  # it TRAILING the current one. Zero instances in tools/verify/ today (every continuation there is a
+  # backslash), which is precisely why they need a canary and not a measurement — the same argument
+  # `&>/dev/null` is matched under. Blinding the operator joins while leaving the backslash join in
+  # place is caught by this canary and by nothing else.
+  d="$(_canary_verify_dir '' '')"
+  cat >> "${d}/platform-orientation.sh" <<'FIXTURE'
+oc get pods -n foo -l app=chain-canary -o name
+  | grep -q parasol 2>/dev/null
+oc get cm split-canary -n foo -o name |
+  grep -q data 2>/dev/null
+FIXTURE
+  got=0; check_no_new_raw_oc_devnull "$d" >/dev/null 2>&1 || got=$?
+  rm -rf "$d"
+  _expect_rc "canary [1]-H2 (pipeline split with no backslash — operator trailing, and operator leading)" 1 "$got" || bad_seen=1
+
+  # Canary [1]-I — the NEGATIVE canary for the write exclusion. Every shape of failover_drill's floor
+  # of six: an annotate, the restore trap, two scales and a rollout-status wait, all inside a signed
+  # marker region — plus a continued `oc get` that silences NOTHING, which the logical-line matcher
+  # must not sweep up. An unlisted file, so its baseline is 0: anything counted here fails. Without
+  # this canary a future widening could quietly start punishing writes again, which is the churn the
+  # fourth pass refused to do in the one region of this suite where churn is most expensive.
+  d="$(mktemp -d)"
+  cat > "${d}/only-marked-writes.sh" <<'FIXTURE'
+gitea_route() {
+  oc get route gitea -n ogsr-gitea \
+    -o jsonpath='{.spec.host}' || true
+}
+# ws-mutation-optin: the drill takes the primary site down; only --failover-drill asks for it
+failover_drill() {
+  oc annotate deploy/parasol-claims -n "$SITEA_NS" --overwrite "${DRILL_ANN}=${orig}" >/dev/null 2>&1 || true
+  trap 'oc scale deploy/parasol-claims -n "$SITEA_NS" --replicas="${SITEA_RESTORE:-3}" >/dev/null 2>&1 || true' EXIT INT TERM HUP
+  oc scale deploy/parasol-claims -n "$SITEA_NS" --replicas=0 >/dev/null 2>&1 || true
+  oc scale deploy/parasol-claims -n "$SITEA_NS" --replicas="$orig" >/dev/null 2>&1 || true
+  oc rollout status deploy/parasol-claims -n "$SITEA_NS" --timeout=60s >/dev/null 2>&1 || true
+  oc annotate deploy/parasol-claims -n "$SITEA_NS" "${DRILL_ANN}-" >/dev/null 2>&1 || true
+  trap - EXIT INT TERM HUP
+}
+# ws-mutation-optin-end
+FIXTURE
+  got=0; check_no_new_raw_oc_devnull "$d" >/dev/null 2>&1 || got=$?
+  rm -rf "$d"
+  _expect_rc "canary [1]-I (NEGATIVE: marked WRITES and a silence-free continuation stay clean)" 0 "$got" || bad_seen=1
+
+  # Canary [1]-J — the other half of the conjunction, and the reason the basis is not "marker alone".
+  # The SAME marker region, with one blind READ added inside it. A marker says "a write lives here",
+  # never "stop grading reads here" — nothing in verify-mutation-guard's D4 stops the next author
+  # putting an `oc get … 2>/dev/null` in a region that already contains a write, and that would be the
+  # same silent under-report this whole pass exists to end.
+  d="$(mktemp -d)"
+  cat > "${d}/read-inside-marker.sh" <<'FIXTURE'
+# ws-mutation-optin: the drill takes the primary site down; only --failover-drill asks for it
+failover_drill() {
+  have="$(oc get deploy parasol-claims -n "$SITEA_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  oc scale deploy/parasol-claims -n "$SITEA_NS" --replicas=0 >/dev/null 2>&1 || true
+}
+# ws-mutation-optin-end
+FIXTURE
+  got=0; check_no_new_raw_oc_devnull "$d" >/dev/null 2>&1 || got=$?
+  rm -rf "$d"
+  _expect_rc "canary [1]-J (a blind READ inside a marker region is still counted)" 1 "$got" || bad_seen=1
+
+  # Canary [1]-K — the borrowed classifier is load-bearing, so losing it must be rc=2 (could not
+  # inspect), never rc=0. Blinding the borrow is the one failure that would silently turn every write
+  # in the tree back into a "read" — or, with the exclusion inverted, hide every read.
+  (
+    MUT_SCAN=""
+    got=0; check_no_new_raw_oc_devnull "$VERIFY_DIR" >/dev/null 2>&1 || got=$?
+    [[ "$got" -eq 2 ]]
+  ) || { bad "SELF-TEST FAILED: an unavailable write/marker classifier did not force rc=2."; bad_seen=1; }
+
+  # Canary [1]-L — the same failure one step later, and the one that was NOT loud when this pass was
+  # written: a classifier that is present at probe time but fails while scanning a file emits nothing,
+  # and an empty answer read as "no blind reads here" took every file to zero and the whole guard to
+  # rc 0. Measured by truncating the borrowed program with the probe also blinded. Must be rc 2.
+  (
+    # shellcheck disable=SC2317,SC2329  # called indirectly by the detector under test in this subshell
+    counted_read_lines() { return 1; }
+    got=0; check_no_new_raw_oc_devnull "$VERIFY_DIR" >/dev/null 2>&1 || got=$?
+    [[ "$got" -eq 2 ]]
+  ) || { bad "SELF-TEST FAILED: a classifier that fails mid-scan produced a PASS instead of rc=2."; bad_seen=1; }
+
   # Canary [2] — a module script shadows a shared predicate with a local copy.
   d="$(_canary_verify_dir platform-orientation.sh '1i\
 deploy_ready() { return 0; }')"
@@ -577,9 +885,11 @@ deploy_ready() { return 0; }')"
   if [[ "$bad_seen" -ne 0 ]]; then
     return 2
   fi
-  ok "self-test ok — ratchet-exceeded, unlisted-file, '>/dev/null 2>&1', '&>/dev/null', predicate shadow,"
-  ok "   NotFound-folding and an uncalled detector all caught; gitea_host exclusion, pure-curl probe and"
-  ok "   the stderr-CAPTURING '2>&1 >/dev/null' shape all stay clean; real tree within baseline."
+  ok "self-test ok — ratchet-exceeded, unlisted-file, '>/dev/null 2>&1', '&>/dev/null', a read split"
+  ok "   across a CONTINUATION, a blind read inside a marker region, a lost classifier (rc 2), predicate"
+  ok "   shadow, NotFound-folding and an uncalled detector all caught; gitea_host exclusion, pure-curl"
+  ok "   probe, the stderr-CAPTURING '2>&1 >/dev/null' shape and a marked WRITE all stay clean; real"
+  ok "   tree within baseline."
   # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
   return 1
 }
