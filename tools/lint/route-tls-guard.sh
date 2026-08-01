@@ -46,6 +46,14 @@ set -uo pipefail
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/lint/_parse-guard-args.sh
 source "${LINT_DIR}/_parse-guard-args.sh"
+# Required the moment this file grew a run_check() driver with check_*() detectors (2026-08-01):
+# _check-coverage.sh's meta-scan FAILS a guard of that shape which does not source it. Without the
+# coverage assertion, deleting a check_* CALL from run_check() leaves --self-test at 1 and the real
+# run at 0 — the detector goes silently unwired, which is a different hole from a detector that is
+# merely broken. The restructure into helm_half/static_half triggered this; CI caught it, the
+# guard's own three modes did not, because they prove detection rather than wiring.
+# shellcheck source=tools/lint/_check-coverage.sh
+source "${LINT_DIR}/_check-coverage.sh"
 
 cd "$(dirname "$0")/../.." || exit 1
 
@@ -58,6 +66,7 @@ cd "$(dirname "$0")/../.." || exit 1
 # inspecting none of them. A guard that cannot fail is worse than no guard.
 check_file() {
   local path="$1" label="$2"
+  ran_check
   python3 - "$path" "$label" <<'PY'
 import sys, re
 path, label = sys.argv[1], sys.argv[2]
@@ -212,6 +221,7 @@ static_half() {  # <gitops-root> <portfolio-root> → 0 clean · 1 a Route is mi
 # ── the check ───────────────────────────────────────────────────────────────────────────────────
 run_check() {  # <chart-glob-spec> <gitops-root> <portfolio-root> → 0 clean · 1 finding · 2 could not inspect
   local chart_spec="$1" grt="$2" prt="$3" rc=0 scope_rc=0
+  coverage_reset
 
   helm_half "$chart_spec" || rc=1
   static_half "$grt" "$prt" || rc=1
@@ -234,6 +244,19 @@ run_check() {  # <chart-glob-spec> <gitops-root> <portfolio-root> → 0 clean ·
   # "clean" nor "N Routes are broken" is a trustworthy answer.
   if [ "$scope_rc" -ne 0 ]; then
     rc=2
+  fi
+
+  # Wiring, which is a property distinct from both detection and scope: it fails if a check_*
+  # DETECTOR was never called. Unlike most guards here, check_file is a PER-INPUT detector, so the
+  # default "exactly once" expectation does not apply — the honest expectation is one call per input
+  # this run counted. That is a STRONGER assertion than the default, not a weaker one: it catches a
+  # loop that silently skips inputs while the scope counters still look healthy, which is precisely
+  # the truncation shape this guard was hardened against tonight.
+  # Skipped when rc is already 2 — a collapsed scope legitimately leaves detectors unrun, and
+  # reporting a wiring failure on top of it names a second, misleading cause.
+  if [ "$rc" -ne 2 ]; then
+    CHECK_COVERAGE_EXPECT="check_file=$(( helm_inspected + static_inspected ))" \
+      assert_all_checks_ran || rc=2
   fi
 
   if [ "$rc" -eq 0 ]; then
