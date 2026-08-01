@@ -32,12 +32,31 @@ rather than reading the route cross-namespace, and so on). The two bullets below
   | `oc_read <args…>` | any value read | `0` oc succeeded · `1` real NO (NotFound, or the server's own answer) · `2` **could not ask** — sets `VERIFY_INCONCLUSIVE` |
   | `oc_present <args…>` | "this exists / is non-empty" | `0` only when the API answered AND something is there |
   | `oc_absent <args…>` | "this does NOT exist" | `0` only when the API answered AND nothing is there |
+  | `oc_read_optional <args…>` | a read whose refusal is EXPECTED because a fallback answers the same question (the `gitea` route before deriving the host from the ingress domain) | `0` + `OC_OUT` · `1` on any failure, `VERIFY_INCONCLUSIVE` left untouched |
 
   In a predicate, `oc_read … \|\| return 1` is almost always right: a real NO and an unanswerable read
   both return non-zero, and the flag — not the exit code — tells `check` which one it was. Negation is
   the dangerous direction: `! oc get … 2>/dev/null` and `[[ -z "$(oc get …)" ]]` certify a clean slate
   from an API that never answered, which is why `oc_absent` exists. `check "…" oc get …` is classified
   automatically, so those call sites need no change.
+- **Never write `code="$(curl … || true)"` either.** An HTTP probe has exactly the same three outcomes
+  as a cluster read, and the same trust bug when it only has two: `[[ "$code" == "200" ]]` prints the
+  identical ❌ for "the app returned 503" (the attendee's lab, gradeable, and a thing these labs
+  deliberately teach) and for "there is no route from here to this cluster at all" (not the attendee's
+  lab, not gradeable). Use `http_read`:
+
+  | helper | use it for | rc |
+  |---|---|---|
+  | `http_read <url> [curl args…]` | any HTTP probe | `0` a response ARRIVED — grade `HTTP_CODE` / `HTTP_OUT` yourself · `1` real NO · `2` **could not ask** — sets `VERIFY_INCONCLUSIVE` |
+
+  A status code — any status code, 404 and 503 included — is a real answer and is graded as one; the
+  cluster is never consulted for it. Only a TRANSPORT failure (no HTTP response at all: DNS, refused,
+  timeout, TLS) triggers a **second probe against the cluster API**. If the API answers, the path from
+  here to the cluster works, so this URL specifically is broken → still a hard ❌. If the API is silent
+  too → ⚠. `--max-time 15` is the default; pass your own to override it. The predicate shape is
+  `http_read "$url" … || return 1` then a test on `HTTP_CODE`, exactly like `oc_read`'s.
+  **Derive the host in the predicate's OWN shell** (`read_ingress_domain`-style globals, never
+  `h="$(host_helper)"`): a `$( )` is a subshell, and a flag raised in one never reaches `check`.
 - **Three outcomes, and the third is not optimism.** A check whose answer could not be determined
   prints `⚠ … SKIPPED (not a failure)` and touches neither counter; a genuinely absent thing is a real,
   gradeable answer and stays `❌`. `Forbidden` is a skip (rule 10 — not this identity's check to run)

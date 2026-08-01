@@ -31,50 +31,66 @@ PROD="${USER_NAME}-prod"
 
 # Cluster ingress domain — attendee-readable; used to derive route hosts without a cross-namespace
 # route read (attendees cannot read routes in gitea/student-gitops).
-# Echo-shaped, exactly like gitops-fundamentals' twin: every caller is `d="$(ingress_domain)"`, and
-# under `set -e` an assignment whose command substitution FAILS kills the script outright (measured in
-# a4c632f). So it always returns 0 and hands back the empty string. `$( )` is also a subshell, so the
-# VERIFY_INCONCLUSIVE oc_read raises here cannot reach check() — the callers that must grade an
-# unreachable API do so on their own reads, not on this one.
-ingress_domain() {
-  oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || OC_OUT=""
-  printf '%s' "$OC_OUT"
+#
+# GLOBAL, not echo-shaped, and that is the whole point. The old twin of this was
+# `d="$(ingress_domain)"`, which runs the oc read inside a SUBSHELL: the VERIFY_INCONCLUSIVE oc_read
+# raises in there dies with the subshell, so every caller downstream graded an unreachable cluster as
+# a red ❌ on the attendee's work. Signal raised and dropped — the same trap SC2034 names, one costume
+# over. Setting INGRESS_DOMAIN in the CALLER's shell is what keeps the flag where check() can see it.
+# (It also removes the `set -e` hazard the echo shape was working around: nothing here is assigned
+# from a command substitution any more.)
+INGRESS_DOMAIN=""
+read_ingress_domain() {  # → 0 + INGRESS_DOMAIN set; 1 with the flag raised when the API could not be asked
+  oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || return 1
+  INGRESS_DOMAIN="$OC_OUT"
+  [[ -n "$INGRESS_DOMAIN" ]]
 }
 
 # Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "ogsr-gitea").
-gitea_host() {
-  local host domain
-  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]]; then
-    domain="$(ingress_domain)"
-    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
+# Global for the same reason as above.
+GITEA_HOST=""
+read_gitea_host() {  # → 0 + GITEA_HOST set; 1 when the host could not be determined
+  GITEA_HOST=""
+  # oc_read_OPTIONAL, not oc_read: this route read is a best-effort SHORTCUT, and an attendee is
+  # EXPECTED to be refused it (rule 10 — routes in ogsr-gitea are not theirs to read). Its refusal
+  # must not become this check's verdict, because the ingress-domain fallback below answers the same
+  # question perfectly well. See _lib.sh, oc_read_optional — a module clearing the shared flag itself
+  # would be inventing a flag-lifecycle rule in the wrong file.
+  if oc_read_optional get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' && [[ -n "$OC_OUT" ]]; then
+    GITEA_HOST="$OC_OUT"
+    return 0
   fi
-  echo "$host"
+  read_ingress_domain || return 1
+  GITEA_HOST="gitea-ogsr-gitea.${INGRESS_DOMAIN}"
 }
+
+# Every HTTP probe below goes through _lib.sh's http_read, which gives curl the same three outcomes
+# oc_read gives `oc`: a status code is a graded answer, a transport failure asks the cluster API
+# whether it is only this app that is down (❌) or the whole cluster (⚠, never the attendee's fault).
 
 # The per-user promotion fork exists → the Gitea API answers 2xx for {user}/claims-config.
 fork_exists() {
-  local host; host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf -o /dev/null "https://${host}/api/v1/repos/${USER_NAME}/claims-config"
+  read_gitea_host || return 1
+  http_read "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/claims-config" --max-time 15 || return 1
+  # < 400 mirrors the `curl -f` this check used before, to the status code. A 404 — no fork — is the
+  # graded ❌ this check exists to produce, and it stays one: a 404 IS the server answering.
+  [[ "$HTTP_CODE" -lt 400 ]]
 }
 
 # The fork carries a raw file whose contents match a pattern (proves the gitops-at-scale source + personalization).
 fork_file_matches() {
-  local path="$1" pattern="$2" host; host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf "https://${host}/api/v1/repos/${USER_NAME}/claims-config/raw/${path}?ref=main" 2>/dev/null \
-    | grep -q "$pattern"
+  local path="$1" pattern="$2"
+  read_gitea_host || return 1
+  http_read "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/claims-config/raw/${path}?ref=main" --max-time 15 || return 1
+  [[ "$HTTP_CODE" -lt 400 ]] || return 1
+  grep -q "$pattern" <<<"$HTTP_OUT"
 }
 
 # The student-gitops Argo CD instance is reachable on its route (derived host; /healthz → 200).
 student_argo_up() {
-  local domain code
-  domain="$(ingress_domain)"
-  [[ -n "$domain" ]] || return 1
-  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 \
-    "https://student-gitops-server-student-gitops.${domain}/healthz" || true)"
-  [[ "$code" == "200" ]]
+  read_ingress_domain || return 1
+  http_read "https://student-gitops-server-student-gitops.${INGRESS_DOMAIN}/healthz" --max-time 15 || return 1
+  [[ "$HTTP_CODE" == "200" ]]
 }
 
 # --- the attendee's Argo CD ACCESS PLANE, not just the objects ---------------
@@ -109,12 +125,12 @@ argo_rbac_binds_user() {
 # The student server serves its own argocd CLI (gitops-at-scale beat 1 downloads it — Argo 3.4 has no appset UI,
 # so the attendee creates the ApplicationSet via the CLI). A byte-range probe, not a ~300MB pull.
 cli_download_ready() {
-  local domain code
-  domain="$(ingress_domain)"
-  [[ -n "$domain" ]] || return 1
-  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 -r 0-1 \
-    "https://student-gitops-server-student-gitops.${domain}/download/argocd-linux-amd64" || true)"
-  [[ "$code" == "200" || "$code" == "206" ]]
+  read_ingress_domain || return 1
+  # -r 0-1 is what keeps this a byte-range probe rather than a ~300MB pull — and, with http_read
+  # slurping the body into HTTP_OUT, what keeps that variable two bytes wide.
+  http_read "https://student-gitops-server-student-gitops.${INGRESS_DOMAIN}/download/argocd-linux-amd64" \
+    --max-time 15 -r 0-1 || return 1
+  [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "206" ]]
 }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
@@ -147,12 +163,12 @@ rollout_absent() {
 
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves DB connectivity).
 route_ready_200() {
-  local ns="$1" host code
+  local ns="$1" host
   oc_read get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' || return 1
   host="$OC_OUT"
   [[ -n "$host" ]] || return 1
-  code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
-  [[ "$code" == "200" ]]
+  http_read "http://${host}/q/health/ready" --max-time 15 || return 1
+  [[ "$HTTP_CODE" == "200" ]]
 }
 
 # --- entry state (what `ws start gitops-at-scale` materializes) --------------------------
