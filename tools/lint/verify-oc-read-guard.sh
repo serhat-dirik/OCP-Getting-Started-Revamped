@@ -288,9 +288,11 @@ ok()   { echo "✅ $*"; }
 # check sends `ws prep` down its "already prepared" fast path) and build-deliver's no_deploymentconfig
 # (a banned-tech clean bill nobody checked). All three were invisible to a whole-cluster outage — every
 # one has a namespace guard that fails closed — and only appeared under a PARTIAL outage.
-BASELINE_TABLE="
-networking-dev-devops.sh 3
-"
+# EMPTY, and that is the point: every tools/verify/*.sh is now at zero blind reads, so any file
+# appearing here again is a regression rather than inherited debt. baseline_for() returns 0 for a
+# file absent from the table, so an empty table means "nothing is allowed any" — the strictest
+# possible setting. Do not add a row to make a new finding go away; convert the read instead.
+BASELINE_TABLE=""
 
 baseline_for() {  # <basename> → integer, 0 if not listed
   awk -v f="$1" '$1==f{print $2; found=1} END{if(!found) print 0}' <<< "$BASELINE_TABLE"

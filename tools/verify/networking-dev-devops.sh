@@ -26,8 +26,8 @@ PARTNER="${USER_NAME}-partner"
 
 # Every OBJECT read below goes through _lib.sh's oc_read/oc_present/oc_absent rather than
 # `>/dev/null 2>&1`, which cannot tell "the object is not there" (a gradeable ❌) from "the cluster did
-# not answer" (a ⚠ that is never the attendee's fault). The `oc exec` PROBES further down are a
-# different animal and are deliberately left alone — see the note above them.
+# not answer" (a ⚠ that is never the attendee's fault). The `oc exec` PROBES further down go through
+# oc_read too — see the note above them for what that changed and what it deliberately did not.
 
 # A Deployment exists (materialized) in a namespace.
 deploy_present() { oc_present get deploy "$1" -n "$2" -o name; }
@@ -73,38 +73,45 @@ reencrypt_route() {
 # image (demo-client) carries bash + timeout + getent, and the parasol-claims runtime
 # (ubi9/openjdk-21-runtime) carries bash + timeout.
 #
-# THE THREE `oc exec` PROBES BELOW KEEP `>/dev/null 2>&1`, DELIBERATELY — the ratchet baseline for this
-# file is lowered to 3, not deleted. They are not object reads: the measured outcome is the CONNECTION,
-# and the probe's own failures travel back on the same stderr oc_read classifies. Measured on cluster 2,
-# 2026-08-01, rather than argued:
+# THE THREE `oc exec` PROBES NOW ROUTE THROUGH oc_read — same shape resilience-multicluster-dr.sh uses
+# for its `oc exec … -- curl` probes (stable_serves/served_site). They are not object reads: the
+# measured outcome is the CONNECTION, and the probe's own failures travel back on the same stderr
+# oc_read classifies. Measured on cluster 2, 2026-08-01, rather than argued:
 #   refused in-pod connect  → OC_ERR "bash: connect: Connection refused …", oc_read rc 1 (a real answer)
 #   dropped/blackholed      → OC_ERR "command terminated with exit code 124", oc_read rc 1
 #   apiserver unreachable   → oc_read rc 2, VERIFY_INCONCLUSIVE=1
-# So oc_read would classify these CORRECTLY today — but only by one letter: the allowlist entry is the
-# lowercase "connection refused" and bash prints "Connection refused". Case-fold that classifier and the
-# graded outcome this whole module teaches (the packet was dropped) silently becomes ⚠ and stops being
-# graded at all. That is a contract question for _lib.sh's owner, not a call to make locally, so these
-# three stay as they are and the risk is reported rather than worked around.
+# So the classification callers observe is UNCHANGED by this conversion — every caller here only ever
+# tested a boolean (0 opened / nonzero didn't), and rc 1 and rc 2 both still read as "didn't". What's
+# new is VERIFY_INCONCLUSIVE getting raised on rc 2, which nothing here consults directly today (the
+# ARCHITECTURAL gate below already keeps an unreachable API out of the graded check — see next
+# paragraph) but is now available to a caller that needs it without a second oc_read helper.
+#
+# RESIDUAL RISK, unchanged by this conversion, stated rather than hidden: the could-not-ask allowlist
+# matches lowercase "connection refused"; bash prints "Connection refused". Case-fold that classifier in
+# _lib.sh and the graded outcome this module teaches (the packet was dropped) would silently become ⚠
+# instead of ❌ for the refused-connection case. That is _lib.sh's contract to own — flagged for its
+# owner, not a call to make locally.
 #
 # The ambiguity oc_read exists for is in any case already handled here ARCHITECTURALLY: CONTROL 1 and
 # CONTROL 2 must both succeed before the block is graded, so an unreachable API fails probe_machinery_ok
 # and the outcome comes out as ⚠ via warn() rather than as a false ❌.
 
 # Does a TCP connection OPEN from <deployment>'s pod to host:port? Same shape the lab teaches.
+# → 0 opened; nonzero refused/dropped OR could not ask (VERIFY_INCONCLUSIVE distinguishes the two).
 tcp_open_from() {  # tcp_open_from <deployment> <host> <port>
-  oc exec "deploy/$1" -n "$NS" -- timeout 5 bash -c "</dev/tcp/$2/$3" >/dev/null 2>&1
+  oc_read exec "deploy/$1" -n "$NS" -- timeout 5 bash -c "</dev/tcp/$2/$3" || return 1
 }
 
 # CONTROL 1 — the probe machinery itself: exec works, and bash+timeout exist in the image.
 probe_machinery_ok() {
-  oc exec deploy/demo-client -n "$NS" -- timeout 5 bash -c 'exit 0' >/dev/null 2>&1
+  oc_read exec deploy/demo-client -n "$NS" -- timeout 5 bash -c 'exit 0' || return 1
 }
 
 # CONTROL 2 — the NAME resolves from the probing pod: cluster DNS answers (the lab's allow-dns-egress
 # is doing its job) and a claims-db Service still exists. Without this, "no route to a name that does
 # not resolve" reads identically to "policy dropped the packet".
 db_name_resolves_from_demo_client() {
-  oc exec deploy/demo-client -n "$NS" -- timeout 5 getent hosts claims-db >/dev/null 2>&1
+  oc_read exec deploy/demo-client -n "$NS" -- timeout 5 getent hosts claims-db || return 1
 }
 
 # CONTROL 3 (strongest, needs a Ready parasol-claims) — the POSITIVE control: the same connection
