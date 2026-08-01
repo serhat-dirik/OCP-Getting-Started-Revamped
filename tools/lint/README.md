@@ -210,6 +210,24 @@ both exit codes.
   `# shellcheck disable=SC2329` comment silences nothing on CI (name both codes if you need to
   suppress a real 0.9.x/0.11.x split). Pin the version explicitly to reproduce CI locally:
   `podman run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.9.0 /mnt/tools/lint/my-new-guard.sh`.
+- **`yamllint` needs an ignore entry that is NOT in the repo, and nothing else will tell you.**
+  `.yamllint.yaml` is gitignored (`.gitignore:56`, removed from the tree deliberately), so it exists
+  only on each maintainer's machine. Three guards here ship **Helm-template** canary fixtures —
+  `copy-drift-guard.canary/`, `hook-env-guard.canary/`, `image-pull-policy-guard.canary/` — whose
+  `templates/` directories are unparseable YAML by design (`{{ … }}` where a value belongs). A local
+  `yamllint .` will fail on them unless your config ignores those paths:
+
+  ```yaml
+  ignore: |
+    tools/lint/copy-drift-guard.canary/chart/templates/
+    tools/lint/hook-env-guard.canary/templates/
+    tools/lint/image-pull-policy-guard.canary/templates/
+  ```
+
+  CI is unaffected — `yamllint` is not a CI job (see the top of this file) — so this bites only the
+  person running the linter locally to convince themselves a change is safe, which is the worst
+  audience to hand a spurious failure. **If you add a guard with a Helm-template fixture, add its
+  path here**, because the config file it belongs in cannot be committed to say it for you.
 
 ## A guard's docstring/header is not optional reading
 
