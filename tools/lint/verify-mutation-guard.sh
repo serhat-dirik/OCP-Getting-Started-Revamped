@@ -125,6 +125,12 @@ function mutverb(seg,   i, n) {
   # --dry-run and --list turn every writing verb into a read. Both are real idioms here.
   if (seg ~ /--dry-run/) return ""
   if (seg ~ /(^|[[:space:]])--list([[:space:]]|$)/) return ""
+  # `oc auth can-i <verb>` ASKS whether a verb is permitted — the verb token is the question, not an
+  # action, and this suite's RBAC checks are full of `can-i patch|create|delete`. This MUST precede
+  # the verb table: otherwise `can-i patch` reads as `patch` and every RBAC check is a false
+  # positive. Missed on the first pass, which reddened CI — `oc auth reconcile` is NOT included here,
+  # because that one really does write.
+  if (seg ~ /(^|[^[:alnum:]_.\/-])auth[[:space:]]+can-i([^[:alnum:]_.\/-]|$)/) return ""
   n = split("scale patch delete annotate apply create replace label edit expose taint drain " \
             "cordon uncordon new-app new-project new-build import-image debug set cp", MV, " ")
   for (i = 1; i <= n; i++) if (wordin(seg, MV[i])) return MV[i]
@@ -446,6 +452,10 @@ oc rollout status deploy/parasol-claims -n "$NS" --timeout=60s
 oc create configmap probe --from-literal=a=b --dry-run=client -o yaml >/dev/null
 oc set env deploy/parasol-claims --list -n "$NS"
 oc adm policy who-can create pods -n "$NS"
+# The shape that reddened CI on this guard's first commit: the verb is the QUESTION, not the action.
+! oc auth can-i patch deployments --as="$U" --as-group=workshop-attendees -n "$NS" >/dev/null 2>&1
+oc auth can-i create pods -n "$NS" >/dev/null 2>&1
+oc auth can-i delete secrets --subresource= -n "$NS" >/dev/null 2>&1
 trap - EXIT
 echo "done ${got}"
 EOF
