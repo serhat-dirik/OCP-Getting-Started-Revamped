@@ -131,6 +131,17 @@ Nothing else looks wrong when that happens — the pod is Running and the cockpi
 worth doing rather than diagnosing. It takes seconds, needs no pod restart, and is safe to run again
 at any point during the day. See [INSTALL.md §7.1](INSTALL.md) if you meet it live.
 
+**If you have pushed content or updated the workshop since installing**, use this instead — it covers
+the logins *and* re-clones each cockpit, which the command above deliberately does not do:
+
+```bash
+tools/ws/ws git-refresh --restart-terminals --all
+```
+
+A cockpit clones the workshop when its pod starts and never again, so a cluster that has not been
+restarted since an update runs the old copy. The symptom is `ws prep` being refused —
+[INSTALL.md §7.2](INSTALL.md).
+
 **2. Give each attendee their cockpit link.** One personal URL per attendee — the guide, a terminal, and
 tool tabs in a single browser page:
 

@@ -51,7 +51,7 @@ an on-cluster vLLM runtime, or a public provider. You configure it in `vars.yaml
 provisioned on your cluster. Skip it and the AI modules are simply unavailable.
 
 **MaaS keys are model-scoped.** A key issued for one model returns 401 against another, and the error
-does not say so. This is the most common cause of AI-module failures — see [§7.8](#78-ai-modules-return-authentication-errors).
+does not say so. This is the most common cause of AI-module failures — see [§7.9](#79-ai-modules-return-authentication-errors).
 
 ---
 
@@ -450,7 +450,46 @@ Cockpits provisioned by a current install also **re-sign themselves in** when th
 this should not reach an attendee at all. A cluster built before that change has no such profile —
 refresh it once with the command above, or restart the pods to pick it up permanently.
 
-### 7.2 An Argo Application will not sync
+### 7.2 `ws prep` fails with "attendees may only use their own AppProject"
+
+```
+Error from server (Forbidden): applications.argoproj.io "entry-<module>-user1" is forbidden:
+ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' denied request:
+attendees may only use their own 'entries-<username>' AppProject
+```
+
+The cockpit is running an **old copy of the `ws` CLI**. Fix:
+
+```bash
+tools/ws/ws git-refresh --restart-terminals --all
+```
+
+Each cockpit clones this repository when its pod starts, and never again. Attendee isolation has two
+halves that must travel together — an admission policy, which arrives with a `workshop-config` sync,
+and the `ws` CLI that knows to use the per-user `entries-<user>` AppProject, which arrives only when
+a cockpit re-clones. Sync the first without restarting the pods and every attendee's `ws prep` is
+refused by the policy the cluster just gained.
+
+Confirm which half a cockpit has:
+
+```bash
+oc exec -n ogsr-showroom deploy/showroom-user1 -c terminal -- \
+  bash -lc 'grep -c ARGO_PROJECT_PIN ~/ocp-getting-started/tools/ws/ws'   # 1 = current, 0 = old
+```
+
+Keep the `bash -lc` and the single quotes: without a shell on the far side your *local* shell expands
+`~` to your own home directory, and the check fails on a path that was never there. A `0` also exits
+non-zero — that is `grep -c`, not a broken command. The number is the answer.
+
+`--all` is required. `--restart-terminals` on its own refuses with "restart needs a target" and
+restarts nothing, which leaves you in exactly this half-state. Run it between modules or before a
+cohort starts, never mid-exercise.
+
+A current `ws` never fails this way silently: it resolves the AppProject by probing, and if
+`entries-<user>` is missing it prints a warning naming this exact policy before it applies anything.
+**No warning plus this error means the CLI is old**, not that the projects are missing.
+
+### 7.3 An Argo Application will not sync
 
 **Never start a sync while an operation is already Running** — the request is silently swallowed. The
 reliable sequence is: sync the mirror → hard refresh → wait ~10s → sync.
@@ -468,7 +507,7 @@ Two related traps:
 - Auto-heal will not re-run a Sync-phase hook when nothing else drifted, so a hook-only change silently
   does not propagate. Delete the hook Job first, or force a targeted resource sync.
 
-### 7.3 A namespace is stuck `Terminating`
+### 7.4 A namespace is stuck `Terminating`
 
 Read the conditions — they name the blast radius:
 
@@ -488,7 +527,7 @@ never run and must be removed by hand.
 **Patch the blocking object, never the namespace's own finalizer** — patching the namespace orphans the
 content instead of deleting it.
 
-### 7.4 An operator the cluster owner cares about stops upgrading
+### 7.5 An operator the cluster owner cares about stops upgrading
 
 Cause: **two OperatorGroups in one namespace.** A namespace may hold exactly one. With two, OLM marks
 every CSV there `Failed` / `TooManyOperatorGroups` and stops reconciling — **while the pods keep running
@@ -505,16 +544,16 @@ oc get operatorgroups -A --no-headers | awk '{print $1}' | sort | uniq -c | awk 
 Related: three API groups claim the plural `subscriptions`. Always write
 `subscriptions.operators.coreos.com` in full.
 
-### 7.5 Database pods stuck Terminating, replacements blocked
+### 7.6 Database pods stuck Terminating, replacements blocked
 
 Cluster disruption can leave RWO volumes with wedged `VolumeAttachment` objects. The signature is
 **Multi-Attach errors blocking replacement pods in several namespaces at once**, which presents as
 multiple unrelated outages.
 
 Force-delete the stuck pods, then delete the wedged VolumeAttachments. An orphaned-CSV wedge can
-co-present, so re-check §7.4 afterwards.
+co-present, so re-check §7.5 afterwards.
 
-### 7.6 A cockpit serves old content
+### 7.7 A cockpit serves old content
 
 Almost always the mirror-versus-restart ordering in [§5.1](#51-publishing-content-updates-mid-session).
 Confirm what is actually served rather than trusting the job that pushed it:
@@ -523,7 +562,7 @@ Confirm what is actually served rather than trusting the job that pushed it:
 curl -sk "https://showroom-user1.<apps-domain>/modules/<slug>/lab.html" | grep -o '<expected string>'
 ```
 
-### 7.7 An attendee cannot log into a tool
+### 7.8 An attendee cannot log into a tool
 
 | Tool | Credentials |
 |---|---|
@@ -540,7 +579,7 @@ If SonarQube rejects the login, the seed job did not run. It is an Argo sync hoo
 oc logs job/sonarqube-user-seed -n sonarqube --tail=20
 ```
 
-### 7.8 AI modules return authentication errors
+### 7.9 AI modules return authentication errors
 
 **MaaS keys are model-scoped.** A key issued for one model fails against another, and the error looks
 generic rather than saying so.
@@ -555,7 +594,7 @@ working / degraded / unknown verdict. Two verdicts name this problem directly:
 
 The fix is `ws maas set` ([§5.2](#52-changing-the-ai-model-or-rotating-the-key)), not a reinstall.
 
-### 7.9 MTA: attendees see each other's applications
+### 7.10 MTA: attendees see each other's applications
 
 Expected — brief the room. The Hub is one shared instance with no per-user view, and MTA's roles are
 personas rather than tenants, so enabling authentication would not change what anyone sees.
@@ -564,7 +603,7 @@ This is why the lab has each attendee name their application `parasol-legacy-cla
 state lives in the Hub database, not the attendee's namespace, so `ws reset` does not remove it — delete
 stale applications in the MTA console between cohorts.
 
-### 7.10 A hook Job fails immediately
+### 7.11 A hook Job fails immediately
 
 Two recurring causes:
 
@@ -572,13 +611,13 @@ Two recurring causes:
 - **No runtime `dnf`** under the restricted SCC. Use a purpose-built image rather than installing
   packages at runtime.
 
-### 7.11 `parasol-web` / `parasol-claims` never become Ready
+### 7.12 `parasol-web` / `parasol-claims` never become Ready
 
 They run images built into the cluster by the workshop's image-load step. If those ImageStreams have not
 populated, the Deployments exist but never start — check the `ogsr-parasol-images` namespace. This is a
 provisioning timing issue, not a module defect.
 
-### 7.12 A `LoadBalancer` Service sits `<pending>` forever
+### 7.13 A `LoadBalancer` Service sits `<pending>` forever
 
 Expected. There is no MetalLB on purpose — it is a cluster-wide networking component, and installing it
 would change the character of a cluster we do not own. The workshop exposes everything through Routes,
