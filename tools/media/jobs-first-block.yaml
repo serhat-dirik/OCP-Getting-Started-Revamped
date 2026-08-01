@@ -18,12 +18,15 @@
 #    `ws start storage-stateful` purges {user}-dev and evicts config-multienv (both directions are
 #    declared in gitops/entry-states/*/ws-meta.yaml). Nothing above it survives it.
 #
-# 3. Slots: everything here is user2, which was this capture lane's assigned slot (other lanes held
-#    user4, user7, user8 — do not repoint this file at them without checking). One consequence worth
-#    a decision rather than a surprise: `pipelines-fundamentals`'s four EXISTING screenshots are all
-#    user1, so a user2 re-capture of its fifth will show `user2-cicd` beside four `user1-cicd`
-#    frames. If user1 is free when you run this, repointing that one job keeps the set consistent.
-#    `config-multienv` and `jobs-batch-kueue` have no existing shots, so their slot is free choice.
+# 3. Slots — SETTLED 2026-08-01, the file is no longer single-user. config-multienv,
+#    jobs-batch-kueue and storage-stateful are **user2**; pipelines-fundamentals is **user1**.
+#    The split is deliberate: that module's four existing screenshots are all user1, so shooting its
+#    fifth as user2 would have dropped one `user2-cicd` frame into the middle of four `user1-cicd`
+#    ones, which its media-manifest row specifically asks to avoid. A user1 console session existed
+#    by the time these ran, so the row got the slot it wanted. `config-multienv` and
+#    `jobs-batch-kueue` had no existing shots, so their slot was free choice and stayed user2.
+#    Whatever you repoint, the console session must belong to THAT user or every namespaced URL
+#    renders "Access restricted" — the staging scripts all take the user as their first argument.
 #
 # 4. `pipelines-fundamentals-01` is the only `reshoot: true` in the file. Its manifest row says
 #    ❌ RE-CAPTURE: the committed file was shot before the Tekton console plugin mounted, so the
@@ -51,7 +54,19 @@ jobs:
       echo "https://console-openshift-console.{domain}/k8s/ns/user2-dev/pods/$(oc get pods -n user2-dev
       -l app=parasol-claims --sort-by=.metadata.creationTimestamp
       -o jsonpath='{.items[-1:].metadata.name}')/logs"
-    wait_all_text: ["CrashLoopBackOff", "UnknownHostException"]
+    # "CrashLoopBackOff" was REMOVED from the waits on 2026-08-01, after it failed the job twice on
+    # a namespace that was in exactly the right state. It is not a stable string: the pod cycles
+    # start -> Error -> CrashLoopBackOff -> start, so the console's status badge changes under the
+    # poll, and the backoff window it is actually displayed in is a fraction of each cycle early on
+    # (10s, then 20s, 40s, 80s...). A wait that must be true CONTINUOUSLY cannot be pinned to a
+    # value that is only true intermittently — measured: `oc` reported the waiting reason flipping
+    # between CrashLoopBackOff and <none> on 4s sampling, while the restart count climbed 4 -> 5.
+    #
+    # The log line is the honest anchor and it is also what this exercise is about: it is written
+    # once and stays in the stream. `wrong-db-host` is asserted alongside it so the shot cannot pass
+    # on some other host-resolution failure. The badge is still normally in frame — verify by eye
+    # and describe in the alt text whatever the frame actually shows, never what it ought to show.
+    wait_all_text: ["UnknownHostException", "wrong-db-host"]
     forbid_text: ["Access restricted", "Log in with", "not found"]
     require_in_frame: ["UnknownHostException"]
     settle_ms: 6000
@@ -65,8 +80,16 @@ jobs:
     url: https://console-openshift-console.{domain}/k8s/ns/user2-dev/configmaps/claims-config
     wait_all_text: ["claims-config", "APP_ENV", "POSTGRESQL_HOST", "QUARKUS_LOG_LEVEL"]
     forbid_text: ["Access restricted", "Log in with", "not found"]
-    require_in_frame: ["APP_ENV", "POSTGRESQL_HOST"]
-    settle_ms: 4000
+    # MEASURED 2026-08-01: the Data section runs from y=791 to y=1450 — one key every ~150px, five
+    # of them. The default 1000px frame cut it after the first (POSTGRESQL_HOST alone sits at
+    # y=1131), which is how the first attempt failed. 1650 frames the whole object: breadcrumb,
+    # name, and all five plaintext keys, which is what "the ConfigMap Data view" means and what
+    # makes it the honest contrast partner of the masked Secret in row 6.
+    # All five keys are asserted in-frame, not just the two the row originally named — a viewport
+    # that silently clipped the last key is the exact failure being fixed here.
+    require_in_frame: ["APP_ENV", "POSTGRESQL_HOST", "QUARKUS_LOG_LEVEL"]
+    viewport: { width: 1600, height: 1650 }
+    settle_ms: 6000
 
   # ---- ex.3: the Secret, MASKED. docs/media-capture-conventions.md rule 1: "Reveal values" must
   # stay OFF, so this job clicks nothing. The detail page renders values hidden by default, which is
@@ -79,33 +102,50 @@ jobs:
     url: https://console-openshift-console.{domain}/k8s/ns/user2-dev/secrets/claims-creds
     wait_all_text: ["claims-creds", "POSTGRESQL_PASSWORD", "Reveal values"]
     forbid_text: ["Access restricted", "Log in with", "not found"]
-    require_in_frame: ["POSTGRESQL_PASSWORD", "Reveal values"]
-    settle_ms: 4000
+    # MEASURED 2026-08-01: Data at y=791, POSTGRESQL_PASSWORD at 844, POSTGRESQL_USER at 993. The
+    # default 1000px frame caught only the first key, and the row's Annotate note asks for the
+    # Secret's key nameS — plural — so 1250 is the height that actually delivers the row (1100 got
+    # both key NAMES but clipped the second masked value box). BOTH keys
+    # are asserted in-frame for that reason.
+    # Privacy (docs/media-capture-conventions.md rule 1): nothing here clicks "Reveal values". The
+    # captured frame shows each value as "Value hidden" and five bullet glyphs; the link is in shot
+    # precisely to prove it was left alone.
+    require_in_frame: ["POSTGRESQL_PASSWORD", "POSTGRESQL_USER", "Reveal values"]
+    viewport: { width: 1600, height: 1250 }
+    settle_ms: 6000
 
-  # ---- ex.4: the readiness gate holding traffic. The CLUSTER state is proven — the staging phase
-  # refuses to hand over unless `curl` really returns 503 — but the PAGE is a judgement call I could
-  # not test without a session, and it is the weakest job in this file. Read this before shooting:
+  # ---- ex.4: the readiness gate holding traffic. RESOLVED 2026-08-01 — the warning below was
+  # right, and the Service page was shot, opened, and thrown away before it could be committed.
   #
-  #   · The Service detail page below shows *Pod selector*, and the pods still MATCH the selector
-  #     while unready, so this page may well render as if all is well. If what you see does not show
-  #     the gate, do NOT commit it — that is the "valid PNG of the wrong thing" failure this whole
-  #     harness exists to prevent.
-  #   · Fallbacks, in order, for whoever has the window open:
-  #       /k8s/ns/user2-dev/core~v1~Endpoints/parasol-claims        (the object the lab prints)
-  #       /k8s/ns/user2-dev/discovery.k8s.io~v1~EndpointSlice       (ready=false on the endpoint)
-  #       /k8s/ns/user2-dev/pods  filtered to parasol-claims        (READY 0/1, the honest signal)
-  #     Whichever one actually shows "nothing is serving", repoint this job at it and say so here.
-  #   · A browser shot of the router's generic "Application is not available" page was considered
-  #     and rejected: the lab already prints `Route: 503` from curl, and the error page adds nothing.
+  # What the three candidates actually render, with the state PROVEN broken (Endpoints' ENDPOINTS
+  # column blank, `curl` returning 503):
+  #   · Service detail (the original target) — renders *Pod selector*, *Service routing*, hostname,
+  #     ClusterIP and port mapping, and NOTHING that differs from a perfectly healthy Service. The
+  #     unready pods still match the selector, exactly as the old comment feared. A valid PNG of the
+  #     wrong thing; deleted.
+  #   · Endpoints detail — renders Name/Namespace/Labels/Annotations/Created and then simply STOPS.
+  #     There is no addresses or subsets section on this console build, so an empty Endpoints object
+  #     is indistinguishable from one the console declines to show. Teaches nothing; rejected.
+  #   · Pods LIST — `parasol-claims-… | Running | 0/1` sitting directly above `claims-db-… |
+  #     Running | 1/1`. That is the readiness gate in one frame: the pod is up but NOT ready, which
+  #     is precisely why nothing is behind the Service, and the healthy database row beside it gives
+  #     the reader the contrast for free. Chosen.
+  # The list is deliberately NOT filtered to parasol-claims: the claims-db 1/1 row is half the
+  # lesson, and filtering it out would leave a single ambiguous line.
+  # The Route's 503 cannot share this frame — the lab already prints `Route: 503` from curl, and a
+  # shot of the router's generic error page was considered and rejected as adding nothing.
   - slug: config-multienv
     filename: config-multienv-03-readiness-503.png
     pre_sh: ./tools/media/stage-config-multienv.sh user2 readiness-broken
     pre_wait_s: 10
-    url: https://console-openshift-console.{domain}/k8s/ns/user2-dev/services/parasol-claims
-    wait_all_text: ["parasol-claims", "Pod selector"]
+    url: https://console-openshift-console.{domain}/k8s/ns/user2-dev/pods
+    # "0/1" is the whole assertion — the pod NAME alone passes on a healthy 1/1 pod, which is the
+    # state this exercise contrasts against and the mistake that cost two deleted captures here.
+    # claims-db is asserted too so the frame is proven to carry the healthy comparison row.
+    wait_all_text: ["parasol-claims", "claims-db", "0/1"]
     forbid_text: ["Access restricted", "Log in with", "not found"]
-    require_in_frame: ["Pod selector"]
-    settle_ms: 4000
+    require_in_frame: ["0/1", "parasol-claims"]
+    settle_ms: 5000
 
   # ---- ex.5: the quota refusal. The ReplicaFailure condition sits at the BOTTOM of the Deployment
   # details page, well below a 1000px fold — hence the taller viewport AND the scroll. Do not
@@ -116,11 +156,25 @@ jobs:
     pre_sh: ./tools/media/stage-config-multienv.sh user2 quota
     pre_wait_s: 10
     url: https://console-openshift-console.{domain}/k8s/ns/user2-dev/deployments/claims-hog
-    wait_all_text: ["claims-hog", "ReplicaFailure", "exceeded quota"]
+    # MEASURED 2026-08-01, replacing three guesses that all failed on the real page:
+    #  · `scroll_to_text: "ReplicaFailure"` could never work. The console HUMANISES the condition
+    #    type in its Conditions table — the captured frame reads "Replica Failure", with a space —
+    #    so a search for the API's camel-case spelling matches no text node at all, exactly as a
+    #    TreeWalker over the settled page reported, while `oc` says ReplicaFailure=True
+    #    reason=FailedCreate. It is scrolled to "Conditions", the table's heading, which IS an
+    #    exact node.
+    #  · "ReplicaFailure" is likewise gone from `wait_all_text` for the same reason. The message
+    #    "exceeded quota" is the caption's actual subject and it IS rendered verbatim, so it
+    #    carries the assertion on its own.
+    #  · The 1400px viewport was not tall enough either: unscrolled, "exceeded quota" sits at
+    #    y=1845..1884. Scrolling the Conditions heading to centre brings it to roughly y=760 in a
+    #    1100px frame, which also frames the table properly instead of shooting a screen of
+    #    whitespace with one line at the bottom.
+    wait_all_text: ["claims-hog", "exceeded quota"]
     forbid_text: ["Access restricted", "Log in with"]
-    scroll_to_text: "ReplicaFailure"
+    scroll_to_text: "Conditions"
     require_in_frame: ["exceeded quota"]
-    viewport: { width: 1600, height: 1400 }
+    viewport: { width: 1600, height: 1100 }
     settle_ms: 4000
 
   # ---- ex.6: three environments side by side.
@@ -178,7 +232,14 @@ jobs:
     settle_ms: 5000
 
   # ============================================================================================
-  # M07 pipelines-fundamentals
+  # M07 pipelines-fundamentals — SHOT AS user1, not user2 like the rest of this file.
+  #
+  # The header's point 3 asked for exactly this decision and it was taken on 2026-08-01, once a
+  # user1 console session existed: this module's four EXISTING screenshots are all user1, so a
+  # user2 frame would have put one `user2-cicd` picture in the middle of four `user1-cicd` ones for
+  # no reason a reader could understand. The media-manifest row asks for the same thing. Everything
+  # else in this file stays user2 — only these two jobs move, and the staging script takes the user
+  # as its argument, so nothing else had to change.
   # ============================================================================================
 
   # The staging script REUSES a green run if one is already in the namespace and only rebuilds when
@@ -186,16 +247,31 @@ jobs:
   # scarce resource. A run was pre-built as user2 on 2026-08-01 for exactly that reason.
   # `tekton.dev~v1` is checked, not assumed: v1beta1 and v1 are both served, v1 is the storage
   # version (`oc get crd pipelineruns.tekton.dev`).
+  # ⚠ DO NOT RUN THIS JOB. It is kept only as the record of a decision that was REVERSED.
+  #
+  # This row was CAPTURED on 2026-08-01 as **user2** and committed in 5c85333 — the five-Task DAG
+  # renders, every node green, run Succeeded. The owner took the user2 option explicitly, for a
+  # reason this comment block predates: `user1-cicd` holds trusted-supply-chain, whose own marquee
+  # row is STILL UNCAPTURED, and `stage-pipelines-fundamentals.sh user1` rebuilds that namespace.
+  # Running this job would therefore destroy an uncaptured subject in order to re-photograph a
+  # captured one, AND clobber the committed frame.
+  #
+  # The consistency argument below is real but was outweighed: one `user2-cicd` frame among four
+  # `user1-cicd` ones is a cosmetic inconsistency; losing trusted-supply-chain's staged state is not.
+  #
+  # Also note `stage-pipelines-fundamentals.sh` matches ANY green PipelineRun in `{user}-cicd`, not
+  # the five-Task one — on user1 today that is trusted-supply-chain's, so it would report success
+  # having staged the wrong pipeline entirely.
   - slug: pipelines-fundamentals
     filename: pipelines-fundamentals-01-pipelinerun-graph.png
-    reshoot: true   # manifest row says ❌ RE-CAPTURE — shot predates the Tekton console plugin
-    pre_sh: ./tools/media/stage-pipelines-fundamentals.sh user2
+    skip: true      # CAPTURED as user2 in 5c85333 — see the block above before changing this
+    pre_sh: ./tools/media/stage-pipelines-fundamentals.sh user1
     pre_wait_s: 20
     # Resolve the newest run whose Succeeded condition is TRUE. "Newest run" alone is not the same
     # claim — a failed or still-running one is the wrong picture and url_sh cannot tell them apart.
     url_sh: >-
-      echo "https://console-openshift-console.{domain}/k8s/ns/user2-cicd/tekton.dev~v1~PipelineRun/$(oc
-      -n user2-cicd get pipelinerun
+      echo "https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun/$(oc
+      -n user1-cicd get pipelinerun
       -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}'
       | awk '$2=="True"{print $1}' | tail -1)"
     # Name the five Tasks, not just the run: a PipelineRun page WITHOUT the plugin still renders the

@@ -130,9 +130,10 @@ jobs:
     forbid_text: ["Access restricted"]                 # refuse to shoot a page that errored
     require_in_frame: ["Firing"]                       # …and it must be IN THE PICTURE
     reshoot: false                                     # never overwrite an existing file
+    allow_overlays: false                              # default: kill the tour modal + Lightspeed
 ```
 
-Six rules that matter:
+Seven rules that matter:
 
 1. **Never hardcode a cluster domain in the job file.** Write `{domain}`; it is substituted from
    `--domain` / `$OGSR_DOMAIN` at run time, in `url` and `url_sh` **only** — never in `pre_sh`, so
@@ -160,6 +161,18 @@ Six rules that matter:
    whatever the lab looks like *now*. Set it only where the module's `media-manifest.md` says
    ❌ RE-CAPTURE, say so in a comment beside the flag — and take the flag back off once the good
    shot is on disk.
+
+7. **Console overlays are dismissed for you, and their survival is fatal — do not switch this off.**
+   The console paints two things *over* the page: the guided-tour modal ("Welcome to the new
+   OpenShift experience!", `.co-tour-step-component`) and the OpenShift Lightspeed drawer, which
+   **opens by itself on a profile's first visit** and fills 560×840 at x=1016 — the right third of a
+   1600px frame. Rules 2–4 are all blind to them: `require_in_frame` measures the target's own box
+   and, as its docstring concedes, "does not know whether something is painted on top". Measured
+   2026-08-01 — `config-multienv-06-secret-masked` returned `OK 151 KB` with the modal lying across
+   the Secret's Data section and the drawer over the right third. Every gate passed; the file was
+   junk; only opening it caught that. `capture.py` now dismisses both (twice — they mount late) and
+   **fails the job** if either survives. Set `allow_overlays: true` only when an overlay *is* the
+   subject, as in the Lightspeed answer shot in `platform-orientation`.
 
 A job that cannot be captured at all takes `parked: "<the reason>"` instead of a URL. It is never
 executed and the reason is printed — that is how a decision stays next to the job rather than in a

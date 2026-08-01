@@ -161,6 +161,11 @@ class Job:
     # printed instead. Keeps the reason next to the job rather than in a commit message nobody
     # re-reads (see jobs-rekor.yaml for the pattern this generalises).
     parked: str | None = None
+    # Leave the console's own overlays (guided-tour modal, Lightspeed drawer) ALONE. Default false,
+    # i.e. they are dismissed and their absence is then asserted — see dismiss_overlays(). Set this
+    # true only for a shot whose SUBJECT is one of those overlays, e.g. the Lightspeed answer in
+    # platform-orientation; every other job wants them gone.
+    allow_overlays: bool = False
     # Set by main() from --out-root so a grounding run can write outside the repo.
     out_root: Path = ASSETS
 
@@ -463,11 +468,81 @@ _IN_FRAME = """(args) => {
 }"""
 
 
+# The console paints two overlays OVER the page, and NOTHING else in this file can see them.
+#
+# WHY THIS EXISTS, precisely. `require_in_frame` measures a target element's own box against the
+# viewport, and its docstring already concedes the limit: "it does not know whether something is
+# painted on top". Both overlays below are painted on top. So a job can pass `wait_all_text`,
+# `forbid_text` AND `require_in_frame` — every gate this harness has — and still write a PNG whose
+# subject is hidden behind a modal. Measured 2026-08-01: config-multienv-06-secret-masked came back
+# `OK 151 KB` with the guided-tour modal across the middle of the Secret's Data section and the
+# Lightspeed drawer over the right third of the frame. The run log said captured; the image was junk.
+# Only opening the file caught it, which is exactly the failure the log cannot report.
+#
+#   1. The guided-tour modal — "Welcome to the new OpenShift experience!" — renders as
+#      `.co-tour-step-component` and is dismissed by its own "Skip tour" button.
+#   2. The OpenShift Lightspeed drawer, which OPENS BY ITSELF on a profile's first visit
+#      (platform-orientation/lab.adoc says so in prose) and occupies 560x840 at x=1016 — the right
+#      third of a 1600px frame. Its second `.ols-plugin__popover-control` is the minimise control;
+#      measured on this console build, clicking it removes `.pf-chatbot` from the DOM entirely.
+#
+# Both selectors were enumerated from the live console, not recalled.
+_DISMISS_OVERLAYS = """() => {
+    const gone = [];
+    if (document.querySelector('.co-tour-step-component')) {
+        const skip = [...document.querySelectorAll('button')]
+            .find(b => (b.innerText || '').trim().toLowerCase() === 'skip tour');
+        if (skip) { skip.click(); gone.push('guided-tour modal'); }
+    }
+    if (document.querySelector('.pf-chatbot')) {
+        const ctl = document.querySelectorAll('.ols-plugin__popover-control');
+        // [1] is minimise. [0] expands to full screen — clicking the wrong one makes it worse.
+        if (ctl.length > 1) { ctl[1].click(); gone.push('Lightspeed drawer'); }
+    }
+    return gone;
+}"""
+
+# Deliberately a separate expression from the dismissal: "I clicked something" is not the same
+# claim as "it is gone", and only the second one protects the shot.
+_OVERLAYS_PRESENT = """() => {
+    const out = [];
+    if (document.querySelector('.co-tour-step-component')) out.push('guided-tour modal');
+    const c = document.querySelector('.pf-chatbot');
+    if (c) { const r = c.getBoundingClientRect(); if (r.width > 100 && r.height > 100)
+        out.push('Lightspeed drawer'); }
+    return out;
+}"""
+
+
+def dismiss_overlays(page: Any) -> list[str]:
+    """Close the console's tour modal and Lightspeed drawer. Returns what is STILL showing.
+
+    Idempotent: with neither overlay present it clicks nothing and returns []. Callers treat a
+    non-empty return as fatal, because an overlay that survives dismissal is sitting on top of the
+    very thing the caption promises.
+    """
+    try:
+        for _ in range(3):  # the tour can re-render its next step after a dismissal
+            if not page.evaluate(_OVERLAYS_PRESENT):
+                return []
+            page.evaluate(_DISMISS_OVERLAYS)
+            page.wait_for_timeout(1200)
+        return page.evaluate(_OVERLAYS_PRESENT)
+    except PlaywrightError:
+        return []
+
+
 def capture(page: Any, job: Job) -> tuple[bool, str]:
     """Navigate, wait for REAL content, shoot. Returns (ok, detail)."""
     try:
         page.set_viewport_size(job.viewport)
         page.goto(job.url, wait_until="domcontentloaded", timeout=60_000)
+
+        if not job.allow_overlays:
+            # Early pass: the modal blocks clicks, so this must happen BEFORE click_text/filter_text
+            # or those fail for a reason that has nothing to do with the job.
+            page.wait_for_timeout(1500)
+            dismiss_overlays(page)
 
         for label in job.click_text:
             if not click_label(page, label):
@@ -517,9 +592,33 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
         if not (job.wait_selector or waits or job.wait_all_field_values):
             page.wait_for_load_state("networkidle", timeout=60_000)
 
+        page.wait_for_timeout(job.settle_ms)
+
+        if not job.allow_overlays:
+            # The DECIDING pass, and the reason there are two. Both overlays mount LATE — the
+            # Lightspeed drawer arrives several seconds after the shell, well after the early
+            # dismissal above — so a single early pass leaves the shutter unprotected. This one
+            # runs after every click, scroll and settle, i.e. against the frame as it will be shot,
+            # and it is FATAL: a surviving overlay means the caption's subject is behind it.
+            left = dismiss_overlays(page)
+            if left:
+                return False, ("console overlay still covering the page: " + ", ".join(left)
+                               + " — the shot would hide its own subject "
+                                 "(set `allow_overlays: true` only if the overlay IS the subject)")
+
         if job.scroll_to_text:
-            # Locators are unreliable on some of these UIs (see click_label), so find the node in
-            # the DOM and let the browser scroll its own container.
+            # SCROLLING RUNS LAST — after settle_ms and after the overlays are gone — and the order
+            # is the whole point. It used to run BEFORE the settle, and on any page the console is
+            # live-updating that scroll does not survive: measured 2026-08-01 on the claims-hog
+            # Deployment, whose quota-refusal retry loop re-renders the Conditions table every few
+            # seconds. The scroll succeeded, the 4s settle then let the page re-render, the inner
+            # scroller snapped back to the top, and `require_in_frame` correctly reported the target
+            # at y=1845 in an 1100px frame — a failure whose real cause was in this file, not the job.
+            # Dismissing an overlay also reflows the page, so scrolling has to come after that too.
+            #
+            # NOTE: the console scrolls an INNER container (`section.pf-v6-c-page__main-section`,
+            # scrollHeight 1832 / clientHeight 953), not the document — `document.scrollingElement`
+            # never moves, which is why this asks the element to scroll itself.
             found = page.evaluate(
                 """(t) => {
                     const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -534,10 +633,13 @@ def capture(page: Any, job: Job) -> tuple[bool, str]:
                 job.scroll_to_text,
             )
             if not found:
-                return False, f"scroll target {job.scroll_to_text!r} not present"
-            page.wait_for_timeout(1500)
-
-        page.wait_for_timeout(job.settle_ms)
+                # Exact-match on a trimmed text node, deliberately: a substring match would happily
+                # scroll to a nav item or a tab label that merely contains the word. If this fires
+                # on text you can see, the console is probably not rendering it as its own node —
+                # name the heading above it instead (that is how the m04 quota shot was fixed).
+                return False, (f"scroll target {job.scroll_to_text!r} is not a text node of its own "
+                               f"— name a heading that is")
+            page.wait_for_timeout(1800)
 
         if job.forbid_text:
             # AFTER the settle, so a late-arriving error banner is caught. A positive wait cannot

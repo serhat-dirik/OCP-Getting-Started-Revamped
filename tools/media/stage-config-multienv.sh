@@ -22,6 +22,12 @@
 #
 # Each phase is idempotent enough to re-run, but the sequence is not resumable from the middle: start
 # at `break`, which re-materialises the entry state and purges the namespace.
+#
+# `break` uses `ws reset`, not `ws start`, and it has to — see the long comment on that phase. The
+# underlying platform defect is worth reporting on its own: `ws start config-multienv` cannot
+# re-materialise a namespace in which this module's exercise 2 has already run, because the entry
+# state's plain-`value` env entries collide by name with the lab's `valueFrom` ones and the patch is
+# rejected. That is the same `ws start` an attendee re-prepping the module would run.
 
 set -euo pipefail
 
@@ -41,8 +47,21 @@ route_code() {
 case "$PHASE" in
 
   break)
-    say "materialising the entry state (this purges ${DEV})"
-    "${REPO_ROOT}/tools/ws/ws" start config-multienv --user "$USER_SLOT"
+    # `ws reset`, NOT `ws start` — and the difference is not cosmetic. Measured 2026-08-01 on the
+    # build cluster: `ws start config-multienv` does not purge its OWN namespace (it only
+    # gc_conflicts OTHER modules), so it re-syncs onto whatever the last run left behind. Once the
+    # lab's exercise 2 has run, the live Deployment carries POSTGRESQL_HOST/PORT/DATABASE/USER/
+    # PASSWORD as `valueFrom` (configMapKeyRef/secretKeyRef) while the entry state declares the same
+    # five NAMES with a plain `value`. A strategic-merge patch merges env by name, so the result has
+    # both set and the API rejects the whole Deployment:
+    #   Deployment.apps "parasol-claims" is invalid: spec.template.spec.containers[0].env[0]
+    #   .valueFrom: Invalid value: "": may not be specified when `value` is not empty
+    # The Argo Application then parks at operationState.phase=Failed and NO amount of waiting clears
+    # it — `ws start` reported exactly that and the whole five-shot sequence died at job 1.
+    # `ws reset` purges the namespace and deletes the Application before re-materialising, which is
+    # what this comment always claimed was happening. See the note in this file's header.
+    say "materialising the entry state (purge + delete + re-materialize on ${DEV})"
+    "${REPO_ROOT}/tools/ws/ws" reset config-multienv --user "$USER_SLOT"
     oc -n "$DEV" rollout status deploy/parasol-claims --timeout=300s
 
     # lab.adoc ex.1: the readiness probe is what makes the next failure VISIBLE. Without it the

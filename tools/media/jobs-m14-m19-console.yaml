@@ -61,6 +61,15 @@ jobs:
 
   # The promote. Both tags must be in the SAME frame — the entire teaching point is the two
   # identical digests side by side, so require_in_frame names "prod", the row that arrives second.
+  #
+  # `scroll_to_text: Tags` ADDED 2026-08-01, after the first capture came back wrong in exactly the
+  # way require_in_frame is documented not to catch. The page loaded, every text wait passed, and
+  # the check passed too — the `prod` row's box *begins* inside a 1200px viewport, so it measures as
+  # in-frame — but the row was sliced by the bottom edge: its name read "parasol-" and its digest
+  # was cut mid-line, so the two-identical-digests comparison the caption promises was unreadable.
+  # An in-frame assertion tests the top-left of a box, not that the box is whole. Scrolling the Tags
+  # heading to the centre puts both rows entirely in the picture. Caught by opening the PNG; the run
+  # log said `OK 112 KB`.
   - slug: registry-images-catalog-governance
     filename: registry-images-catalog-governance-02-imagestream-two-tags.png
     pre_sh: ./tools/media/stage-m18-registry.sh user7
@@ -68,6 +77,7 @@ jobs:
     url: https://console-openshift-console.{domain}/k8s/ns/user7-dev/imagestreams/parasol-claims
     wait_all_text: ["parasol-claims", "prod", "sha256:"]
     forbid_text: ["Access restricted", "An error occurred", "not found", "Log in with"]
+    scroll_to_text: "Tags"
     require_in_frame: ["prod", "sha256:"]
     viewport: {width: 1600, height: 1200}
     settle_ms: 4000
@@ -93,19 +103,51 @@ jobs:
   # read: `oc get images.config.openshift.io cluster --as=user7 --as-group=workshop-attendees`
   # returned the object on 2026-08-01. No staging: it is a cluster singleton nothing here mutates.
   #
-  # The YAML tab, not the Details tab, and deliberately. The row's caption points at
-  # allowedRegistriesForImport being EMPTY — "empty = open" — and an unset field cannot be asserted
-  # by its own name anywhere, because it is not rendered. What IS rendered, and what proves the
-  # point, is the literal `spec: {}` this cluster carries (verified 2026-08-01). The Details tab
-  # would need a field label nobody in this pass has seen; `internalRegistryHostname` anchors the
-  # frame to the object and ties the shot to the module's own internal-registry beat.
+  # The YAML tab, not the Details tab, and now GROUNDED rather than reasoned: the Details tab was
+  # opened on 2026-08-01 and carries Name / Labels / Annotations / Created at / Owner and nothing
+  # else — no registry fields at all — so it could never serve this row. The caption points at
+  # allowedRegistriesForImport being EMPTY ("empty = open"), and an unset field is not rendered
+  # anywhere; what IS rendered, and what proves the point, is the literal `spec: {}` this cluster
+  # carries, sitting directly above the `status:` block.
+  #
+  # EVERY ASSERTION BELOW WAS REWRITTEN 2026-08-01 after the first capture passed all of them and
+  # was still the wrong picture — worth reading before touching them. The console renders this
+  # object WITH its `managedFields`, which is ~30 lines of `'f:<fieldname>': {}` noise between the
+  # metadata and the two lines the shot is about. `managedFields` therefore contains a mention of
+  # nearly every real field name, so:
+  #   · `wait_all_text: [internalRegistryHostname]` was satisfied by `'f:internalRegistryHostname'`
+  #     at line 33 of the managedFields block;
+  #   · `require_in_frame` matches with `includes()` on the FIRST text node in document order, so it
+  #     measured that same managedFields line — which really was in frame — and reported success.
+  # The result was a valid 154 KB PNG of lines 1-33: apiVersion, kind, and a screenful of
+  # managedFields, with `spec: {}` and the whole `status:` block below the fold. Only opening it
+  # caught that.
+  #
+  # The fix is to assert on VALUES, which managedFields never carries (it stores field paths, not
+  # contents). `Legacy` and the registry hostname exist exactly once each, in the real `status:`.
+  # `scroll_to_text` is safe here for the opposite reason: it demands an EXACT trimmed text node, so
+  # `internalRegistryHostname` matches the real key token and not the quoted `'f:…'` one.
   - slug: registry-images-catalog-governance
     filename: registry-images-catalog-governance-04-cluster-image-config.png
     url: https://console-openshift-console.{domain}/k8s/cluster/config.openshift.io~v1~Image/cluster/yaml
-    wait_all_text: ["internalRegistryHostname", "config.openshift.io"]
+    wait_all_text: ["internalRegistryHostname", "Legacy", "config.openshift.io"]
     forbid_text: ["Access restricted", "An error occurred", "not found", "Log in with"]
-    require_in_frame: ["internalRegistryHostname"]
-    viewport: {width: 1600, height: 1100}
+    require_in_frame: ["image-registry.openshift-image-registry.svc:5000", "Legacy"]
+    # 1600 tall, and `scroll_to_text` deliberately ABSENT — both measured on 2026-08-01, and the
+    # measurement is the interesting part. The console's YAML editor VIRTUALIZES: it puts only the
+    # lines near its own viewport in the DOM (it is not CodeMirror — the page has no `.cm-scroller`
+    # and no `.cm-line`; do not write selectors against either). At height 1100 the document
+    # simply STOPPED at line ~33,
+    # so `status:` was not in the DOM at all and the wait on `Legacy` timed out for 60s against a
+    # perfectly healthy page. Scrolling could not have rescued it either — `scroll_to_text` searches
+    # the DOM, and the target was not in it. Making the browser window taller makes the editor pane
+    # taller, which makes CodeMirror render more: this object is 50 lines with managedFields
+    # included, and at 1600 all 50 render, so the shot needs no scroll and cannot snap back. Grounded
+    # at 2400 first (whole document, plus ~1000px of empty editor); 1600 is the height that holds
+    # line 50 without the dead space. If a future cluster's object grows past ~50 lines this job will
+    # fail on the `Legacy` wait rather than shoot a truncated page — raise the height, do not delete
+    # the wait.
+    viewport: {width: 1600, height: 1600}
     settle_ms: 4000
 
   # ===== deployment-targets-scheduling — evicts the registry state above ==========================
@@ -117,14 +159,19 @@ jobs:
     filename: deployment-targets-scheduling-01-pods-by-node.png
     pre_sh: ./tools/ws/ws start deployment-targets-scheduling --user user7
     pre_wait_s: 30
-    url: https://console-openshift-console.{domain}/k8s/ns/user7-dev/pods
-    # "Node" is the column header the caption points at; the two workload names prove it is the
-    # project-scoped list and not some other pod table.
-    wait_all_text: ["parasol-claims", "statement-batch", "Node"]
-    forbid_text: ["Access restricted", "An error occurred", "Log in with"]
-    require_in_frame: ["statement-batch"]
-    viewport: {width: 1600, height: 1100}
-    settle_ms: 5000
+    parked: >-
+      MOVED OUT OF THIS FILE 2026-08-01 — captured, but by
+      tools/media/capture_m17_pods_by_node.py, not by a job. This row failed here with "never saw
+      'Node'" against a namespace that was in exactly the right state, because the console's Pods
+      list HAS NO NODE COLUMN by default: grounded the same day as user7, the default columns are
+      Name, Status, Ready, Restarts, Owner, Memory, CPU, Created and nothing else (which also
+      settles the module's own [CAPTURE-VERIFY] markers at lab.adoc:168 and :176). Adding it is
+      three interactions — open the icon-only Column management control, tick Node, Save — and
+      capture.py cannot express any of that sequence: click_text needs a control WITH text,
+      check_text runs before the dialog it would tick exists, and there is no post-tick click.
+      The bespoke script does those three steps and then asserts, from the rendered table rather
+      than from the API, that the Node column holds more than one distinct value. Keep the pre_sh
+      above as the record of what state the shot needs.
 
   # The anti-affinity rule, on the Deployment's own YAML tab. The lab already grounded (2026-07-26)
   # that parasol-claims' detail page carries a YAML tab directly — no Actions menu hop needed — and
@@ -138,11 +185,24 @@ jobs:
     url: https://console-openshift-console.{domain}/k8s/ns/user7-dev/deployments/parasol-claims/yaml
     wait_all_text: ["podAntiAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "kubernetes.io/hostname"]
     forbid_text: ["Access restricted", "An error occurred", "Log in with"]
-    # The YAML editor scrolls INTERNALLY, so the rule can sit outside the frame on a page that
-    # otherwise passes every text wait. Scroll to it, then insist it is actually in the picture.
-    scroll_to_text: "podAntiAffinity"
     require_in_frame: ["podAntiAffinity", "topologyKey"]
-    viewport: {width: 1600, height: 1100}
+    # 2400, raised from 1100, and `scroll_to_text` REMOVED — both forced by a measurement, not a
+    # preference. At 1100 this job failed with "never saw 'podAntiAffinity'" against a Deployment
+    # that demonstrably carried the rule (`oc get deploy parasol-claims -o jsonpath=…affinity`
+    # returned it, and the three replicas were on three distinct nodes). The console's YAML editor
+    # VIRTUALIZES: only the lines near its own viewport are in the DOM. So the affinity block was
+    # not merely below the fold, it did not EXIST to be waited on — and `scroll_to_text` could
+    # never have rescued it, because that searches the DOM too.
+    #
+    # The height was then binary-searched with the page open (2026-08-01), asking after each load
+    # whether `podAntiAffinity` was in innerText: 1100 no, 1800 no, 2000 no, 2200 no, **2400 yes**.
+    # Nothing shorter reaches it, so 2400 is not padding. Two things make that frame readable
+    # rather than a wall: the console FOLDS `managedFields` into one line (the document runs 1-14,
+    # then jumps straight to 170), and the whole remaining spec — resources, both probes, env,
+    # affinity at 235-241, strategy — lands in one picture, which is a better teaching frame than
+    # six lines in isolation. Do not add `scroll_to_text` back: with everything rendered there is
+    # nothing to scroll to, and a scroll would only push the object's header out of shot.
+    viewport: {width: 1600, height: 2400}
     settle_ms: 5000
 
   - slug: deployment-targets-scheduling
@@ -185,9 +245,21 @@ jobs:
     pre_sh: ./tools/ws/ws start networking-dev-devops --user user7
     pre_wait_s: 30
     url: https://console-openshift-console.{domain}/k8s/ns/user7-dev/services
-    wait_all_text: ["parasol-web", "parasol-claims", "claims-db", "ClusterIP"]
+    # `ClusterIP` was REMOVED from this wait on 2026-08-01, after the job failed with "never saw
+    # 'ClusterIP'" against three Services that are all demonstrably ClusterIP. **The Services list
+    # has no Type column**, so that string is never on the page — the columns are Name, Labels, Pod
+    # selector, Location, and there is no column-management control on this toolbar to add one
+    # (unlike the Pods list, which has one but also lacks the column by default). The lab's own
+    # console-path comment at networking-dev-devops/lab.adoc:196 had already grounded this in July
+    # and its prose points at the right thing; only this row and its `// media-pass:` caption were
+    # still repeating the older claim.
+    #
+    # `Location` is the honest anchor and carries the same teaching point: it shows an internal
+    # 172.x address and port for every row and nothing else, which IS "reachable inside the cluster
+    # only". The Type value lives on each Service's detail page, one click further in.
+    wait_all_text: ["parasol-web", "parasol-claims", "claims-db", "Location"]
     forbid_text: ["Access restricted", "An error occurred", "Log in with"]
-    require_in_frame: ["claims-db"]
+    require_in_frame: ["claims-db", "Location"]
     settle_ms: 4000
 
   # RETARGETED, and the manifest row was corrected to match. The row originally asked for the
@@ -202,10 +274,25 @@ jobs:
     pre_sh: ./tools/media/stage-m16-networking.sh user7
     pre_wait_s: 5
     url: https://console-openshift-console.{domain}/k8s/ns/user7-dev/networkpolicies/default-deny-all/yaml
-    wait_all_text: ["default-deny-all", "policyTypes", "Ingress", "Egress"]
+    wait_all_text: ["default-deny-all", "policyTypes", "podSelector", "Ingress", "Egress"]
     forbid_text: ["Access restricted", "An error occurred", "not found", "Log in with"]
-    scroll_to_text: "policyTypes"
-    require_in_frame: ["policyTypes", "podSelector"]
+    # THE NEEDLES MOVED, AND THE PAGE DID NOT — read this before "fixing" them back. The original
+    # `require_in_frame: [policyTypes, podSelector]` failed on 2026-08-01 with "below/outside the
+    # fold: box is 571..589px, the frame is 1600x1100" — a box that is plainly INSIDE a 1100px
+    # frame vertically. The message misleads: the check also fails on `r.right > W`, and prints
+    # only the vertical extent. Both words' FIRST occurrence in document order is inside line 12,
+    # the `kubectl.kubernetes.io/last-applied-configuration` annotation, which is one ~500-character
+    # line whose element runs far past the right edge of any viewport. `require_in_frame` takes the
+    # first matching text node, so it measured the annotation, not the spec.
+    #
+    # Probed each candidate against the live page: `policyTypes` and `podSelector` resolve to that
+    # annotation and can never be in frame; `Ingress`, `Egress` and `default-deny-all` resolve to
+    # narrow nodes that are. The spec lines themselves are still asserted — by `wait_all_text`,
+    # which reads innerText and does not care how wide anything is.
+    #
+    # `scroll_to_text` REMOVED with them: the whole 31-line object fits at 1100 with no scrolling,
+    # and centring `policyTypes` would only push the object's own heading out of the picture.
+    require_in_frame: ["default-deny-all", "Ingress", "Egress"]
     viewport: {width: 1600, height: 1100}
     settle_ms: 5000
 
@@ -257,7 +344,20 @@ jobs:
       echo "https://console-openshift-console.{domain}/k8s/ns/user7-dev/replicasets/$(oc get rs
       -n user7-dev -l app=root-demander -o jsonpath='{range .items[?(@.spec.replicas>0)]}{.metadata.name}{"\n"}{end}'
       | head -1)/events"
-    wait_all_text: ["FailedCreate", "security context constraint", "runAsUser"]
+    # `FailedCreate` was REMOVED from this wait on 2026-08-01, after it failed against a page that
+    # was showing the refusal perfectly. **The console's Events tab does not render an event's
+    # REASON.** Grounded: each entry shows the involved object, the namespace, a "Generated from
+    # <controller>" line, an occurrence count, and the message — and nothing else. `FailedCreate` is
+    # what `oc get events` prints in its REASON column; it is not a string this view has. Asserting
+    # a CLI column against a console page is the same mistake the PDB row's upper-case ALLOWED
+    # DISRUPTIONS made, and it will keep happening until each assertion is grounded in the page it
+    # is meant to describe.
+    #
+    # The message text is asserted instead, and it is the better anchor anyway: it is what the
+    # exercise asks the attendee to read. `restricted-v2` pins it to the SCC that actually did the
+    # refusing rather than to any admission failure.
+    wait_all_text: ["Generated from replicaset-controller", "security context constraint",
+                    "runAsUser", "restricted-v2"]
     forbid_text: ["Access restricted", "An error occurred", "Log in with"]
     require_in_frame: ["security context constraint"]
     viewport: {width: 1600, height: 1100}

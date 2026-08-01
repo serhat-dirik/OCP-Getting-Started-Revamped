@@ -20,28 +20,48 @@
 # clobber guard". Only shot 01 is a genuine re-shoot.
 jobs:
 
-  # --- 01: the RE-SHOOT. The asset on disk predates the Tekton console plugin and has no graph.
-  # `ws solve` runs the real build-test-deploy pipeline and BLOCKS until it succeeds (~9 min, cold
-  # cluster longer; ws-meta waitSeconds is 1200, and capture.py allows pre_sh 1800s). That is the
-  # only way a green 5-Task graph exists — the entry state ships the Pipeline, never a run.
+  # --- 01: the RE-SHOOT, and the ONE job in this file that runs. Shot as **user2**, deliberately.
+  #
+  # THE SLOT IS AN OWNER DECISION (2026-08-01), taken against this module's own manifest note, which
+  # asked for user1 so all five frames would show the same namespace. `user1-cicd` on the capture
+  # cluster is holding **trusted-supply-chain** — its signed `.sig`/`.att` ImageStream tags are in
+  # place and that module's own row 1 is still uncaptured. The two modules declare each other in
+  # `conflictsWith` both ways, so `ws start pipelines-fundamentals --user user1` would purge that
+  # namespace and destroy an unshot state to gain cosmetic consistency. `user2-cicd` already held a
+  # finished green five-Task run, so this frame shows `user2-cicd` beside four neighbours showing
+  # `user1-cicd`. That is the accepted cost; do not "fix" it by rebuilding user1.
+  #
+  # The staging script REUSES a green run when the namespace already has one and only falls back to
+  # `ws start` + `ws solve` (~9 min warm, ~13 cold) when it does not — so on a namespace that is
+  # already correct this job costs seconds and touches nothing.
   - slug: pipelines-fundamentals
     filename: pipelines-fundamentals-01-pipelinerun-graph.png
-    reshoot: true                       # manifest row 1: ❌ RE-CAPTURE (no task graph in the old asset)
-    pre_sh: >-
-      ./tools/ws/ws start pipelines-fundamentals --user user1 &&
-      ./tools/ws/ws solve pipelines-fundamentals --user user1
-    # The newest SUCCEEDED run, whatever it is called. Empty output fails the job loudly rather
-    # than navigating to a truncated URL and shooting whatever answers.
+    # `reshoot: true` was REMOVED on 2026-08-01, the moment the good shot landed. The flag existed
+    # for one specific replacement (the old asset predated the Tekton console plugin and had no
+    # graph); leaving it armed means the next wholesale run of this file overwrites a verified frame
+    # with whatever `user2-cicd` looks like then — the clobber that cost the M10 drift diff. The job
+    # stays here so the shot is reproducible on a fresh cluster; re-arm the flag deliberately, and
+    # only if the manifest row goes back to ❌ RE-CAPTURE.
+    pre_sh: ./tools/media/stage-pipelines-fundamentals.sh user2
+    pre_wait_s: 10
+    # The newest run whose `Succeeded` condition is True — not merely the newest, which could be a
+    # failed or still-running one, and `url_sh` cannot tell those apart from the URL alone. Empty
+    # output fails the job loudly rather than navigating to a truncated URL and shooting whatever
+    # answers. Indexing conditions by TYPE, not by [0]: the array order is not part of the contract.
     url_sh: >-
-      run=$(oc get pipelinerun -n user1-cicd --sort-by=.metadata.creationTimestamp
-      -o jsonpath='{range .items[?(@.status.conditions[0].status=="True")]}{.metadata.name}{"\n"}{end}'
-      | tail -1);
-      test -n "$run" && echo "https://console-openshift-console.{domain}/k8s/ns/user1-cicd/tekton.dev~v1~PipelineRun/$run"
-    # Both: the Conditions table renders well after the graph frame, and the task name proves the
-    # pipelines-console-plugin actually mounted. A page with only Details and YAML tabs is a plugin
-    # that failed to load in this browser session, not a cluster without it (CONSOLE-GROUNDING.md)
-    # — and "Tasks Completed" alone cannot tell those apart.
-    wait_all_text: ["Tasks Completed", "image-report"]
+      run=$(oc -n user2-cicd get pipelinerun
+      -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}'
+      | awk '$2=="True"{print $1}' | tail -1);
+      test -n "$run" && echo "https://console-openshift-console.{domain}/k8s/ns/user2-cicd/tekton.dev~v1~PipelineRun/$run"
+    # All five Task names, not just one: a PipelineRun page WITHOUT the Tekton console plugin still
+    # renders the run name and its Details/YAML tabs, which is exactly how the pulled 2026-07-26
+    # shot passed review the first time. Only the plugin's DAG draws every pipelineTask.
+    wait_all_text: ["fetch-source", "unit-test", "build-image", "image-report", "deploy"]
+    forbid_text: ["Access restricted", "An error occurred", "not found", "Log in with"]
+    # The graph is the subject. innerText carries the TaskRuns section far below the fold, so a text
+    # wait alone cannot tell the DAG from a list of the same names — this measures the boxes.
+    require_in_frame: ["fetch-source", "image-report"]
+    viewport: {width: 1600, height: 1200}
     settle_ms: 8000
 
   # --- 03: the RED break-fix run. NOT materialisable by any entry state or solve hook: the failure
