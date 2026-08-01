@@ -1,9 +1,12 @@
 # tools/lint/
 
-This directory holds the guards CI runs in `.github/workflows/lint.yml` (24 jobs as of
-2026-08-01 — verify with `grep -cE '^  [a-z][a-z-]*:$' .github/workflows/lint.yml` before quoting
-a number, it has grown every week). Two more checks — `vale` and `yamllint` — are **not** CI jobs;
-they run locally on maintainer machines only (see the comment above the `shellcheck:` job).
+This directory holds the guards CI runs in `.github/workflows/lint.yml`. Don't hardcode that job
+count anywhere, including here — it has already gone stale six times elsewhere in this repo and
+will be wrong again by the time you read this. Count it yourself:
+`grep -cE '^  [a-z][a-z-]*:$' .github/workflows/lint.yml` (matches the file's `jobs:` keys — 2-space
+indented, lowercase-with-hyphens, colon at end of line). Two more checks — `vale` and `yamllint` —
+are **not** CI jobs; they run locally on maintainer machines only (see the comment above the
+`shellcheck:` job).
 
 A guard exists because something shipped broken and review didn't catch it. Read a guard's header
 before touching it — it names the real incident, and the incident is the spec.
