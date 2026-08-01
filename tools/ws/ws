@@ -994,15 +994,44 @@ cmd_prep() {  # ATTENDEE self-service (project directive 2026-07-10): attendees 
   local have_app="false"
   oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1 && have_app="true"
   if [[ "$have_app" == "true" && ${#findings[@]} -eq 0 ]]; then
-    local script="${VERIFY_DIR}/${module}.sh"
-    if [[ -x "$script" ]] && "$script" --user "$user" --entry-only >/dev/null 2>&1; then
-      ok "your ${module} environment is already prepared — nothing to do."
-      echo "   (want a factory-fresh copy anyway? re-run with: ws prep ${module} --yes)"
-      [[ "$yes" != "true" ]] && return 0
-      findings+=("re-prep requested with --yes")
+    # CAPTURE the rc, never test it as a boolean. A boolean read cannot tell rc 3 ("every check
+    # SKIPPED — nothing was actually verified") from rc 1 ("a check genuinely failed"), and the two
+    # deserve opposite responses: one is a broken world worth offering to wipe, the other is a world
+    # nobody could look at, where wiping would destroy a healthy lab over a network hiccup.
+    #
+    # Without VERIFY_STRICT=1 the skip-only run exits 0 (tools/verify/_lib.sh verify_summary), so
+    # this branch printed "already prepared — nothing to do" for a world it had not verified at all,
+    # and the banner saying so was thrown away by the >/dev/null on the same line. Reachable under a
+    # PARTIAL outage: the Application read below answers, while the checks inside the script hit
+    # Forbidden / timeouts / an impersonation guard and route to warn().
+    #
+    # Classified by doctor_verify_rc_outcome — the same standalone helper `ws doctor` uses, reused
+    # rather than re-implemented so tools/lint/verify-summary-skip-guard.sh pins ONE mapping.
+    local script="${VERIFY_DIR}/${module}.sh" ev_rc=0
+    if [[ -x "$script" ]]; then
+      VERIFY_STRICT=1 "$script" --user "$user" --entry-only >/dev/null 2>&1 || ev_rc=$?
     else
-      findings+=("${module} is provisioned but its entry checks are not passing")
+      ev_rc=1   # no script = treat as "not passing", i.e. today's behaviour exactly
     fi
+    case "$(doctor_verify_rc_outcome "$ev_rc")" in
+      pass)
+        ok "your ${module} environment is already prepared — nothing to do."
+        echo "   (want a factory-fresh copy anyway? re-run with: ws prep ${module} --yes)"
+        if [[ "$yes" != "true" ]]; then return 0; fi
+        findings+=("re-prep requested with --yes")
+        ;;
+      skip)
+        # NOT a failure, and specifically NOT a reason to offer a wipe. Say plainly that nothing was
+        # verified and stop. `--yes` still rebuilds: it is consent already given, not an offer being
+        # made, and `ws smoke` depends on `ws prep --yes` forcing a real re-materialize.
+        warn_prep_unverified "$module" "$user"
+        if [[ "$yes" != "true" ]]; then return 0; fi
+        findings+=("re-prep requested with --yes (entry checks could not be evaluated)")
+        ;;
+      *)
+        findings+=("${module} is provisioned but its entry checks are not passing")
+        ;;
+    esac
   fi
   [[ "$have_app" == "false" ]] && findings+=("${module} is not provisioned for ${user} yet")
 
@@ -1024,13 +1053,19 @@ cmd_prep() {  # ATTENDEE self-service (project directive 2026-07-10): attendees 
 
   cmd_reset "$user" "$module"
   echo
-  local script="${VERIFY_DIR}/${module}.sh"
+  # Same boolean-rc defect as the pre-flight above, quieter but real: this call's output is NOT
+  # redirected, so the honest "⚠ N SKIPPED — this run did NOT fully verify" banner does reach the
+  # attendee — only the one-line summary printed underneath it contradicted them. Classified now, so
+  # the summary agrees with the banner it sits below. The invariant worth keeping: NO boolean rc read
+  # anywhere in cmd_prep, which a future reader can actually grep for.
+  local script="${VERIFY_DIR}/${module}.sh" pv_rc=0
   if [[ -x "$script" ]]; then
-    if "$script" --user "$user" --entry-only; then
-      ok "${module} is ready — start the lab."
-    else
-      info "setup hooks may still be settling (seeding data takes up to ~1 min) — re-check with: ws verify ${module}"
-    fi
+    VERIFY_STRICT=1 "$script" --user "$user" --entry-only || pv_rc=$?
+    case "$(doctor_verify_rc_outcome "$pv_rc")" in
+      pass) ok "${module} is ready — start the lab." ;;
+      skip) skip "${module} was re-materialized, but its entry checks could not be evaluated just now — re-check with: ws verify ${module}" ;;
+      *)    info "setup hooks may still be settling (seeding data takes up to ~1 min) — re-check with: ws verify ${module}" ;;
+    esac
   fi
 }
 
@@ -1914,6 +1949,17 @@ doctor_verify_rc_outcome() {  # rc → pass|skip|fail on stdout — classifies a
     3) echo skip ;;
     *) echo fail ;;
   esac
+}
+
+warn_prep_unverified() {  # <module> <user> — say "I could not look", and do NOT offer to wipe
+  # The distinction this exists to preserve: "your world is broken" and "I could not read your
+  # world" are different sentences, and only the first justifies destroying it. Before rc 3 was
+  # visible to cmd_prep, the second was silently reported as "already prepared — nothing to do".
+  skip "could not verify your ${1} environment — every entry check was SKIPPED, so nothing was"
+  echo "   actually confirmed. This is NOT a failure and your world has NOT been changed."
+  echo "   Usually the cluster answered some reads and not others (an expired session, a transient"
+  echo "   API error, or rights you do not hold). Re-check with: ws verify ${1} --user ${2}"
+  echo "   If you are sure it needs rebuilding: ws prep ${1} --yes"
 }
 
 _cohort_diff_note() {  # <label> <expected space-list> <actual space-list> → diff note on stdout, or ""
