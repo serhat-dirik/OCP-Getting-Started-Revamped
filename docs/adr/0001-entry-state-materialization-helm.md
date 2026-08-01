@@ -115,9 +115,45 @@ today, not recalled:
   cockpit terminal only picks up a new `ws` at pod start — shipping the guard first would make every
   running attendee's `ws prep` Forbidden. The rollout order is written down in
   `appproject-entries-per-user.yaml`'s own header: sync the Gitea mirror and wait for its HEAD to
-  match origin's, sync `workshop-config`, then `ws git-refresh --restart-terminals`.
+  match origin's, sync `workshop-config`, then `ws git-refresh --restart-terminals --all`. [*Command
+  corrected inline 2026-08-01: transcribed here (and still written in that file's header) without a
+  scope. `ws git-refresh --restart-terminals` alone hits `die "restart needs a target"` in
+  `restart_terminals` and restarts nothing, which produces precisely the half-landed state the rest
+  of this bullet warns about. `--all` is required — and it skips `WS_RESERVED_USERS`. See the
+  amendment below.*]
 
 Net for this ADR: the per-user AppProjects are correctly scoped and materialized, but "per-user
 AppProjects" is not yet true of the *running* system — every attendee is still on `workshop-entries`
 until the guard, `ws`, and a terminal restart land together. Do not cite this ADR as evidence the
-per-user isolation is enforced; it is provisioned, not wired in.
+per-user isolation is enforced; it is provisioned, not wired in. [*Superseded later the same day —
+see the amendment below; `0f25a52` wired it in.*]
+
+## Amendment — 2026-08-01, later the same day (the switch landed; the amendment above is superseded)
+
+The amendment directly above was written hours before `0f25a52` shipped both halves in one commit,
+so its "not yet load-bearing" reading of the engine is stale. What is true of the engine now:
+
+- `tools/ws/ws` no longer defaults to the shared project. `ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"`
+  is gone; `argo_project "$user"` resolves `entries-<user>` first, falls back to `workshop-entries`
+  and then to stock `default`, and **announces every fallback on stderr** with the denial message the
+  attendee would otherwise get with no explanation. `WS_ARGO_PROJECT` became an explicit pin that
+  short-circuits the chain rather than a `:-` default.
+- The resolver has a dependency worth naming here because it fails silently otherwise: the attendee
+  must be able to **read** `entries-<user>`, or the probe misses and the chain falls through. That
+  read is `appprojects get,list` in `gitops/workshop-config/templates/per-user-argo-rbac.yaml`
+  (`<user>-entry-apps` Role) — an attendee on an older Role lands on `workshop-entries` or `default`
+  and is then denied by the admission guard.
+- `render_app` is the only emitter of `spec.project` for entry Applications, so routing its four
+  callers (`cmd_start` single and `--all-users`, both `cmd_solve` paths) through the one resolver is
+  the complete change. The other `.spec.project` selectors in `ws` read `purgeAppsProject` /
+  `proj-${user}` — those belong to the **student** instance (ADR-0002 Amendment 1) and are correctly
+  untouched.
+- Item 3 of the 2026-07-10 amendment is now doubly stale and should be read only through this one:
+  its "guarded by the workshop-entries AppProject repo pin" was already corrected on 2026-07-31 (no
+  such pin ever existed), and the project it names is no longer the one `ws` renders.
+
+**Committing is not deploying.** `workshop-config` sources from the in-cluster Gitea mirror, not from
+GitHub, so nothing about this reaches a cluster until someone syncs that mirror. On cluster 2 at the
+time of writing the live policy still carried the old `== 'workshop-entries'` expression and a cockpit
+still held the old `ws` — verified, not assumed. ADR-0002 Amendment 4 is the canonical account of the
+switch, the rollout command, the confirmation steps and the rollback valve; not repeated here.

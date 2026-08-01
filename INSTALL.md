@@ -65,21 +65,59 @@ engine; `ogsr-reset.sh` is the admin-facing operation around it, with a printed 
 confirmation prompt. See §7.1 for the exact division of labor.
 
 **The attendee-isolation promise — and its limit.** Attendees are walled off from the organisation's own
-namespaces: the `workshop-entries` AppProject enumerates every destination an attendee's Application may
-land in (no wildcard), and an admission policy bounds what an attendee may create — name, project, and
-source path. That gap is closed.
+namespaces: each attendee gets their own `entries-<user>` AppProject that enumerates every destination
+their Applications may land in (no wildcard), and an admission policy bounds what an attendee may
+create — name, project, and source path. That gap is closed.
 
-Attendees are **not** walled off from each other. All eight share one Argo permission profile, so a
-determined attendee could hand-craft an object that targets a peer's namespace instead of their own —
-the lab never leads there, but nothing in RBAC stops it (Kubernetes cannot scope a `create` by name,
-since the name doesn't exist yet when permission is checked). This is a deliberate, accepted residual:
-a cooperative-classroom risk on a disposable cluster where attendees already share infrastructure, not a
-customer-data risk.
+Attendees are also walled off **from each other** — new as of 2026-08-01, and not automatic on a
+cluster that predates it (see the rollout note below). Every
+attendee's entry-state Applications used to share one `workshop-entries` AppProject, so a determined
+attendee could hand-craft an object that targeted a peer's namespace instead of their own. Kubernetes
+still cannot scope a `create` by name — the name doesn't exist yet when permission is checked — so RBAC
+is not what stops it. Two things do, and they only work together:
+`gitops/workshop-config/templates/appproject-entries-per-user.yaml` gives each attendee a project
+listing only their own namespaces, and the admission policy in `attendee-entry-app-guard.yaml` pins
+each attendee to `entries-` plus their own username, so naming a peer's project is rejected at the API
+server.
 
-If you are running this for people who are not colleagues — a public class, strangers on a
-customer-adjacent cluster — mitigate by giving each attendee their own AppProject instead of one shared
-one. `gitops/workshop-config/templates/student-appprojects.yaml` already does this for the GitOps
-modules (the `proj-{user}` pattern); the same shape closes the entry-state gap too.
+What remains, deliberately: every attendee's project also permits seven **shared** workshop namespaces
+(`ogsr-gitea`, `ogsr-student-gitops`, `ogsr-system`, `openshift-lightspeed`, `openshift-pipelines`,
+`sonarqube`, `stackrox`), because the entry-state charts genuinely create Roles, RoleBindings,
+ServiceAccounts and Jobs in them and Argo cannot scope a destination down to a resource name. Those
+namespaces hold no attendee work. The blast radius is "seven workshop-owned namespaces", not "any
+peer's lab". That is a cooperative-classroom residual on a disposable cluster, not a customer-data
+risk.
+
+**If your cluster was installed before this landed, it is not automatic.** The switch has two halves —
+the admission policy (which arrives with a `workshop-config` sync) and the `ws` CLI (which each cockpit
+re-clones only when its pod restarts). Ship them together or every attendee's `ws prep` fails with
+`Forbidden: attendees may only use their own 'entries-<username>' AppProject`. One command does it in
+the required order, and this is not the place to improvise:
+
+```bash
+ws git-refresh --restart-terminals --all
+```
+
+`--all` is **required** — `--restart-terminals` without `--user` or `--all` refuses to run ("restart
+needs a target") and restarts nothing, which leaves you with exactly the broken half-state above. Note
+that `--all` skips any user in `WS_RESERVED_USERS`; restart those by name with `--user <u>` or they
+keep the old `ws`. Do it between modules or before a cohort starts, never mid-exercise. To confirm a
+given cockpit actually picked up the new CLI:
+
+```bash
+oc exec -n ogsr-showroom deploy/showroom-user1 -c terminal -- \
+  bash -lc 'grep -c ARGO_PROJECT_PIN ~/ocp-getting-started/tools/ws/ws'   # 1 = new ws, 0 = old
+```
+
+Keep the `bash -lc` and the single quotes: without a shell on the far side, your *local* shell expands
+`~` to your own home directory and the check fails on a path that was never there. A `0` here also
+exits non-zero (that is `grep -c`, not a broken command) — the number is the answer.
+
+The rollback valve and the full confirmation list are in the header of
+`gitops/workshop-config/templates/attendee-entry-app-guard.yaml` — read it before you roll this onto a
+live delivery. One trap worth carrying here: an admin-run `ws start` proves nothing about this policy,
+because it only evaluates members of the `workshop-attendees` group. The real check is one attendee
+running `ws prep <module>` in their own cockpit.
 
 ### Four things that look odd until you know why
 
@@ -460,7 +498,10 @@ push content:
 3. only then restart the cockpits.
 
 Restarting early serves stale content and looks like your change did not land. `ws git-refresh
---restart-terminals` does the sequencing for you; prefer it over doing the steps by hand.
+--restart-terminals --all` does the sequencing for you; prefer it over doing the steps by hand. The
+scope is not optional: `--restart-terminals` on its own refuses with "restart needs a target" and
+restarts nothing, so you get the mirror sync and none of the cockpits. Use `--user <u>` for one
+session, `--all` for the cohort (which skips any `WS_RESERVED_USERS`).
 
 ---
 

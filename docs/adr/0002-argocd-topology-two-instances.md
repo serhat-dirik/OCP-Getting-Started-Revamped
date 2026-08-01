@@ -49,7 +49,10 @@ The Decision's Platform-instance line above — **"Admin-only writes; attendees 
 visibility"** — was superseded on 2026-07-10 by the attendee-self-service directive (commit
 `e2808e6`, "attendee self-service ws prep") and never amended here. From that commit onward,
 attendees hold per-user, name-scoped Argo RBAC on the platform instance's `workshop-entries`
-AppProject (`gitops/workshop-config/templates/per-user-argo-rbac.yaml`): get/list broadly,
+AppProject [*corrected inline 2026-08-01 — see Amendment 4: this grant is plain **k8s** RBAC keyed on
+Application **names**, not Argo RBAC, and it is scoped to no AppProject at all. Read as written it
+sends the next person hunting for a `policy.csv` rule that does not exist.*]
+(`gitops/workshop-config/templates/per-user-argo-rbac.yaml`): get/list broadly,
 patch/delete pinned to `entry-mNN-{user}` by resourceNames, **and an unscoped `create`** —
 because `ws prep` → `cmd_reset` → `render_app | oc apply` is itself a CREATE whenever an
 attendee's entry Application is absent. Attendees write to the platform instance directly;
@@ -109,10 +112,16 @@ an `entries-{user}` AppProject per attendee, and all eight are live on cluster2 
 ADR's escalation depends on (`ogsr-attendee-entry-app-guard`) still carries the committed
 `workshop-entries` expression on cluster2, and `tools/ws/ws` still renders that project by default.
 A local, uncommitted edit to the guard would switch it, but it is deliberately held until it ships
-in the same commit as the `ws` change plus a `ws git-refresh --restart-terminals`. Full command
-evidence is in ADR-0001's matching 2026-08-01 amendment; not repeated here. Until that lands, this
-ADR's residual paragraph above still holds exactly as written: attendees remain on one shared
-AppProject.
+in the same commit as the `ws` change plus a `ws git-refresh --restart-terminals --all` [*command
+corrected inline 2026-08-01: this was originally written here without a scope. `ws git-refresh
+--restart-terminals` with no `--user`/`--all` hits `die "restart needs a target"` in
+`restart_terminals` (`tools/ws/ws`) and restarts **nothing** — following the sequence literally
+would sync the guard and leave every cockpit on the old `ws`, which is exactly the outage the hold
+existed to prevent. Corrected in place rather than only in an amendment because a reader who copies
+this line causes the failure. See Amendment 4.*]. Full command evidence is in ADR-0001's matching
+2026-08-01 amendment; not repeated here. Until that lands, this ADR's residual paragraph above still
+holds exactly as written: attendees remain on one shared AppProject. [*Superseded 2026-08-01 —
+it landed the same day, in `0f25a52`. See Amendment 4.*]
 
 **2. Amendment 2's own destination count was wrong** — a small, on-topic instance of the standing
 lesson this whole change teaches. Amendment 2 said `workshop-entries` "enumerates the attendee
@@ -131,3 +140,100 @@ is seven, not five: `ogsr-gitea`, `ogsr-student-gitops`, `ogsr-system`, `openshi
 enumeration of a fact that is mechanically derivable from other files (here, every entry chart's
 own rendered manifests) will drift out from under you — the fix is to derive it, not to proofread
 it harder.
+
+## Amendment 4 (2026-08-01) — the per-attendee AppProject switch has LANDED; the shared-project residual is closed in the repo, and Amendment 2's "Argo RBAC" attribution was wrong
+
+Amendment 3 was written hours before the thing it describes as held shipped. Commit `0f25a52`
+(`feat(rbac): box each attendee into their own AppProject — guard and ws in one slice`) landed both
+halves together, which is what Amendment 3 said the hold was waiting for.
+
+**What changed, read out of the two files rather than out of the commit message.**
+
+- `gitops/workshop-config/templates/attendee-entry-app-guard.yaml` validation 1 now reads
+  `has(object.spec.project) && object.spec.project == 'entries-' + request.userInfo.username`
+  (was `== 'workshop-entries'`), with the message *"attendees may only use their own
+  'entries-<username>' AppProject"*.
+- `tools/ws/ws` gained `argo_project "$user"`, called from the one emitter of `spec.project` for
+  entry Applications (`render_app`). It resolves `entries-<user>` → `workshop-entries` → `default`,
+  probing each with `oc get appproject` and printing a loud stderr explanation of every fallback,
+  including the exact denial the attendee would otherwise receive with no context. `WS_ARGO_PROJECT`
+  is now an explicit pin (`ARGO_PROJECT_PIN`) that short-circuits the whole chain, rather than the
+  old `${WS_ARGO_PROJECT:-workshop-entries}` collapse — so "pinned to the shared project" is
+  distinguishable from "unset".
+
+**The residual this ADR has carried since Amendment 2 is closed in the repo.** Peer tenancy — an
+attendee having the cluster-admin application-controller write into another attendee's namespace —
+is what the shared `workshop-entries` project allowed and what pinning each attendee to their own
+`entries-<user>` project removes. Per-user destination lists only become a boundary once something
+stops an attendee naming a *different* project, and k8s RBAC cannot do that (it cannot scope a
+`create` by name); the admission guard is what does.
+
+**What is deliberately NOT closed, and should not be read as closed:** `entries-{user}` still permits
+the seven shared workshop namespaces from `workshop-config.entryDestinationsShared` (`ogsr-gitea`,
+`ogsr-student-gitops`, `ogsr-system`, `openshift-lightspeed`, `openshift-pipelines`, `sonarqube`,
+`stackrox`), because the entry charts genuinely write Roles, RoleBindings, ServiceAccounts and Jobs
+into them and Argo cannot scope a destination by resource name. The blast radius shrinks from "any
+of N attendees' namespaces" to "seven workshop-owned namespaces that hold no attendee work" — it
+does not go to zero.
+
+**Committing this did NOT make it live, and that is the point most likely to be misread.** The
+`workshop-config` Argo Application sources from the **in-cluster Gitea mirror**, not from GitHub —
+`bootstrap/install.sh` renders its `repoURL` as `https://${GITEA_HOST}/${MIRROR_ORG}/${MIRROR_REPO}.git`
+and `helm/bootstrap/templates/applications.yaml` uses the same mirror value. So a push to `main`
+propagates to no cluster until someone deliberately syncs the mirror. `main` carrying the switch and
+a cluster running the switch are two separate facts; check the cluster, never the branch.
+
+**The rollout command, corrected.** Amendment 3 (and every runbook that copied it) wrote
+`ws git-refresh --restart-terminals`. Without a scope that command reaches
+`die "restart needs a target: --user <u> (one session) or --all (whole cohort, minus any
+WS_RESERVED_USERS)"` and restarts zero terminals. The correct command is:
+
+```
+ws git-refresh --restart-terminals --all
+```
+
+One command, in the order the switch requires: force the Gitea pull-mirror to fetch and wait until
+its HEAD equals origin's, run a real sync operation on `pp-git-mirror` and then on `workshop-config`
+(which is what updates the policy and renders `entries-{user}`), and only then roll every cockpit
+terminal Deployment so each re-clones the new `ws`. Two caveats that are not optional reading:
+
+- `--all` **skips `WS_RESERVED_USERS`**. If that variable is set at rollout time, those sessions keep
+  the old `ws`, keep rendering `workshop-entries`, and stay Forbidden until restarted by name with
+  `--user <u>`.
+- Restarting terminals *before* the mirror has the commit re-clones the old content. That ordering is
+  baked into the single command precisely so it cannot be got wrong by hand.
+
+The confirmation steps (including the `ARGO_PROJECT_PIN` grep that tells you whether a given cockpit
+actually holds the new `ws`) and the rollback valve live in the guard file's own header, not here —
+one copy, next to the code, is the whole lesson of Amendment 3 item 2. The one thing worth repeating:
+an admin-run `ws start` proves nothing about this policy, because its `matchConditions` exclude every
+identity outside the `workshop-attendees` group. The end-to-end check is an attendee running
+`ws prep` in their own cockpit.
+
+**Correction to Amendment 2.** Amendment 2 describes the per-user grant as "per-user, name-scoped
+**Argo RBAC** on the platform instance's `workshop-entries` AppProject". Both halves are wrong.
+`gitops/workshop-config/templates/per-user-argo-rbac.yaml` — despite its filename — declares plain
+k8s `rbac.authorization.k8s.io/v1` `Role`/`RoleBinding` objects whose `resourceNames` are Application
+**names** (`entry-<slug>-<user>`); it names no AppProject, and no Argo `policy.csv` rule anywhere in
+`gitops/` or `platform-portfolio/` mentions `workshop-entries` (there is no `policy.csv` in either
+tree). Amendment 2's own conclusion is unaffected — the escalation was real and is closed at
+admission — but its attribution would send the next reader looking for an Argo policy line that does
+not exist. Argo's RBAC layer never sees any of this: the side door was always the k8s API.
+
+**Live state at the time of writing (cluster 2, read-only, 2026-08-01 — grounded, not recalled).**
+The switch is committed but **not yet rolled out** there:
+
+- `oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{.spec.validations[0].expression}'`
+  → `has(object.spec.project) && object.spec.project == 'workshop-entries'` — still the old
+  expression, i.e. the mirror has not been synced.
+- A cockpit still holds the old `ws`: `oc exec -n ogsr-showroom deploy/showroom-user2 -c terminal --
+  bash -lc 'grep -n "ARGO_PROJECT=" ~/ocp-getting-started/tools/ws/ws'` →
+  `44:ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"`, and `grep -c ARGO_PROJECT_PIN` on the same
+  file returns 0.
+- All eight `entries-user1` … `entries-user8` projects exist.
+- Twenty live entry Applications: 13 on `workshop-entries`, 7 already on `entries-userN` (3 user2,
+  2 user7, 1 user4, 1 user5). Those seven were created by an **admin** running the new `ws` from a
+  laptop checkout, which the policy never evaluates. That mixed data state is harmless in both
+  directions — already-materialized Applications keep their project until the attendee's next
+  `ws prep`/`ws start` — but it means "some apps say `entries-userN`" is not evidence the rollout
+  happened. The policy expression and the cockpit's `ws` are the two facts that decide.
