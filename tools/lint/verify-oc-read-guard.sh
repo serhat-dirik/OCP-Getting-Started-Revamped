@@ -238,21 +238,34 @@ ok()   { echo "✅ $*"; }
 #   • A write is excluded on the physical line the borrowed scanner reports the VERB on. Split the verb
 #     off its `oc` token (`oc \` + `scale …`) and the two line numbers disagree, so the line is COUNTED
 #     rather than excluded. Conservative on purpose, and no such split exists here.
+#
+# ── 2026-08-01, SIXTH PASS: 62 → 33 ───────────────────────────────────────────────────────────────
+# Four rows reach ZERO and are DELETED rather than set to 0 — an absent file defaults to baseline 0, so
+# deleting the row is what protects it: multi-tenancy-workload-security (9), gitops-at-scale (8),
+# packaging-distributing (7), app-security-testing (2). eventing-deep-dive falls 11 → 9 and
+# trusted-supply-chain 3 → 2: only the identical `oc get … \` + `-o jsonpath=… 2>/dev/null | grep`
+# continuation reads the fifth pass made visible were converted there, so both KEEP their rows. No
+# file's count rose.
+#
+# Proven against live cluster 2 (attendee slots user1, user4, user5, user6, user7, user8): the pristine
+# `git archive HEAD` tree and the working tree run with identical arguments, combined stdout+stderr
+# diffed byte-for-byte, identical across healthy / genuine-absence (--user user99) / namespace-exists-
+# but-objects-absent, entry-only AND full — plus solve→reset round trips on user7 and user1 that reach
+# the end-state branches an entry-only run hides, and an ~80-case predicate-level differential under a
+# scripted `oc`. Four checks that PASSED on an unreachable API now report ⚠ instead: mtws' sa_cannot and
+# deploy_idle, gitops-at-scale's rollout_absent and packaging-distributing's no_deploy — three of them
+# ENTRY negations, where a wrongly-green check sends `ws prep` down its "already prepared" fast path.
 BASELINE_TABLE="
-app-security-testing.sh 2
 build-deliver.sh 4
 developer-hub-golden-paths.sh 1
 devspaces-inner-loop.sh 1
-eventing-deep-dive.sh 11
-gitops-at-scale.sh 8
-multi-tenancy-workload-security.sh 9
+eventing-deep-dive.sh 9
 networking-dev-devops.sh 3
 observability-health-scale.sh 2
-packaging-distributing.sh 7
 pipelines-fundamentals.sh 1
 platform-orientation.sh 5
 securing-apps-keycloak.sh 5
-trusted-supply-chain.sh 3
+trusted-supply-chain.sh 2
 "
 
 baseline_for() {  # <basename> → integer, 0 if not listed

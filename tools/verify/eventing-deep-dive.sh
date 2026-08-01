@@ -52,15 +52,20 @@ base_trigger_present() { oc get trigger.eventing.knative.dev claims-events -n "$
 
 # OUTCOME detectors (rule 14 — assert the shape, not the name). A non-empty jsonpath line means at least
 # one Trigger carries that field.
+# Both go through _lib.sh's oc_read rather than `2>/dev/null`: a silenced list cannot tell "no Trigger
+# carries that field" (a gradeable ❌ on the end-state outcome) from "the cluster did not answer" (a ⚠
+# that is never the attendee's fault). rc 0 with an empty OC_OUT is still a real, graded absence.
 # A Trigger with a non-empty attribute filter exists (attribute-based routing wired).
 filtered_trigger_present() {
-  oc get trigger.eventing.knative.dev -n "$NS" \
-    -o jsonpath='{range .items[*]}{.spec.filter.attributes}{"\n"}{end}' 2>/dev/null | grep -q '[a-zA-Z]'
+  oc_read get trigger.eventing.knative.dev -n "$NS" \
+    -o jsonpath='{range .items[*]}{.spec.filter.attributes}{"\n"}{end}' || return 1
+  grep -q '[a-zA-Z]' <<<"$OC_OUT"
 }
 # A Trigger with a deadLetterSink configured exists (delivery/DLQ wired).
 dlq_trigger_present() {
-  oc get trigger.eventing.knative.dev -n "$NS" \
-    -o jsonpath='{range .items[*]}{.spec.delivery.deadLetterSink}{"\n"}{end}' 2>/dev/null | grep -q '[a-zA-Z]'
+  oc_read get trigger.eventing.knative.dev -n "$NS" \
+    -o jsonpath='{range .items[*]}{.spec.delivery.deadLetterSink}{"\n"}{end}' || return 1
+  grep -q '[a-zA-Z]' <<<"$OC_OUT"
 }
 # Entry clean-slate helpers: return 0 when the outcome is ABSENT (attendee has built nothing yet).
 # Require the namespace to exist first — otherwise "absent" is vacuous (true on a cluster where

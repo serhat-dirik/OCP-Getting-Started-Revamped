@@ -25,19 +25,38 @@ NS="${USER_NAME}-dev"
 
 # --- helpers (oc + curl only) ------------------------------------------------
 
+# Every oc read below goes through _lib.sh's oc_read/oc_present/oc_absent rather than `2>/dev/null`,
+# which cannot tell "the key/object is not there" (a gradeable ❌) from "the cluster did not answer" (a
+# ⚠ that is never the attendee's fault). Predicates return 1 for both, and oc_read raises
+# VERIFY_INCONCLUSIVE so check() picks the right one.
+
 # A field from the entry marker (single source of truth for repo URL / image / dissection target).
-marker() { oc get cm ws-entry-packaging-distributing -n "$NS" -o jsonpath="{.data.$1}" 2>/dev/null || true; }
+# THREE outcomes, into OC_OUT — deliberately NOT an echoing helper. Every graded caller below reads
+# OC_OUT in ITS OWN shell: `v="$(marker …)"` would be a subshell, and the VERIFY_INCONCLUSIVE oc_read
+# raises inside one dies with it, so an unreachable API would land as a hard ❌ on the attendee's work
+# instead of a ⚠. rc 0 = the API answered (an empty OC_OUT is a real answer: the key is not set) ·
+# 1 = the marker itself is genuinely absent · 2 = could not ask.
+marker() { oc_read get cm ws-entry-packaging-distributing -n "$NS" -o jsonpath="{.data.$1}"; }
+
+# The same field for DISPLAY only — check descriptions and INFO lines, where the value is prose and
+# there is no verdict to grade. Echo-shaped and always rc 0, because every call site is
+# `"$(marker_v …)"` inside a string and, under `set -e`, an assignment or expansion whose command
+# substitution fails kills the script outright (measured in a4c632f).
+marker_v() { marker "$1" || OC_OUT=""; printf '%s' "$OC_OUT"; }
 
 # The prebuilt notifications istag exists in {user}-dev (helm install has something to pull).
 istag_present() {
-  local name tag; name="$(marker imageName)"; tag="$(marker imageTag)"
+  local name tag
+  marker imageName || return 1; name="$OC_OUT"
+  marker imageTag  || return 1; tag="$OC_OUT"
   [[ -n "$name" && -n "$tag" ]] || return 1
-  oc get istag "${name}:${tag}" -n "$NS" >/dev/null 2>&1
+  oc_present get istag "${name}:${tag}" -n "$NS" -o name
 }
 
 # The attendee's notifications fork is reachable (public repo → anonymous HTTPS GET 200). Net-tolerant.
 repo_reachable() {
-  local u; u="$(marker notificationsRepo)"
+  local u
+  marker notificationsRepo || return 1; u="$OC_OUT"
   [[ -n "$u" ]] || return 1
   curl -ksf --max-time 10 "$u" >/dev/null 2>&1
 }
@@ -67,9 +86,16 @@ repo_reachable() {
 # world. When the caller IS the attendee, their own read is already the attendee answer. Both
 # impersonation flags are literal, never an unquoted variable.
 # Returns: 0 = readable · 1 = Forbidden · 2 = could not ask (API error / namespace absent / unreachable).
+#
+# The two probes that PICK the identity go through oc_read too — they are ordinary reads, and the
+# tmpfile classification below is only for the read being GRADED (where Forbidden is the failure this
+# check exists for, the opposite of oc_read's reading of it).
 _attendee_read() {  # _attendee_read <oc get args…>
-  local err rc=0 tmp="/tmp/.pkgdist-read.$$"
-  if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
+  local err rc=0 tmp="/tmp/.pkgdist-read.$$" me imp_rc=0
+  oc_read whoami || OC_OUT=""
+  me="$OC_OUT"
+  oc_read auth can-i impersonate users || imp_rc=$?
+  if [[ "$me" != "$USER_NAME" && "$imp_rc" -eq 0 ]]; then
     oc get "$@" -o name --as="$USER_NAME" --as-group=workshop-attendees >/dev/null 2>"$tmp" || rc=$?
   else
     oc get "$@" -o name >/dev/null 2>"$tmp" || rc=$?
@@ -84,30 +110,45 @@ _attendee_read() {  # _attendee_read <oc get args…>
 # namespace, which for an attendee is one of their own — where stock `admin` grants CSV read outright,
 # so the check would report the observer grant healthy without ever having looked at it.
 observer_reads_csv() {
-  local ns; ns="$(marker dissectionOperatorNamespace)"
+  local ns rc=0
+  # rc 2 (could not ask) is this function's own "could not ask" — the *) warn arm. rc 1 (the marker CM
+  # is genuinely gone) leaves OC_OUT empty and falls through to 3, exactly as the old blind read did:
+  # the marker's absence is already graded by its own check above, so it must not become a second ⚠.
+  marker dissectionOperatorNamespace || rc=$?
+  (( rc != 2 )) || return 2
+  ns="$OC_OUT"
   [[ -n "$ns" ]] || return 3
   _attendee_read clusterserviceversions.operators.coreos.com -n "$ns"
 }
 observer_reads_crd() { _attendee_read customresourcedefinitions.apiextensions.k8s.io; }
 
 # Deployment presence in {user}-dev (the notifications app the finished lab leaves running).
-deploy_present() { oc get deploy "$(marker imageName)" -n "$NS" >/dev/null 2>&1; }
+# The name guard is new and defensive: `oc get deploy ""` is not a name lookup at all, and a shape that
+# can silently widen into "list every Deployment" has no business behind a graded ✅.
+deploy_present() {
+  local name
+  marker imageName || return 1; name="$OC_OUT"
+  [[ -n "$name" ]] || return 1
+  oc_present get deploy "$name" -n "$NS" -o name
+}
 # Namespace and a resolved image name are required first — otherwise an empty name / missing
 # namespace makes `oc get deploy ""` error and the negation is vacuously true, not evidence of a
-# clean, correctly-seeded entry state.
+# clean, correctly-seeded entry state. oc_absent adds the third case the old `!` could not express:
+# an API that never answered no longer certifies the clean slate `ws prep` reads as "already prepared".
 no_deploy() {
-  local name; name="$(marker imageName)"
+  local name
+  marker imageName || return 1; name="$OC_OUT"
   [[ -n "$name" ]] || return 1
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! oc get deploy "$name" -n "$NS" >/dev/null 2>&1
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get deploy "$name" -n "$NS" -o name
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep packaging-distributing (or ws start packaging-distributing --user ${USER_NAME}); ${NS} is workshop-layer (per-user-namespaces)"
 check "entry marker ws-entry-packaging-distributing present"               oc get cm ws-entry-packaging-distributing -n "$NS" || hint "entry app not synced — ws reset packaging-distributing --user ${USER_NAME}"
 check "Helm target fork parasol-notifications reachable in Gitea" repo_reachable        || hint "the fork {user}/parasol-notifications is missing — check the gitea-fork Job (ws reset packaging-distributing --user ${USER_NAME}); needs parasol/parasol-notifications seeded (workshop-config app-repo-seed)"
-check "prebuilt image istag $(marker imageName):$(marker imageTag) present in ${NS}" istag_present \
-  || hint "the notifications image is not built — check the notifications-build Job (ws reset packaging-distributing --user ${USER_NAME}); inspect: oc logs -f bc/$(marker imageName) -n ${NS}"
+check "prebuilt image istag $(marker_v imageName):$(marker_v imageTag) present in ${NS}" istag_present \
+  || hint "the notifications image is not built — check the notifications-build Job (ws reset packaging-distributing --user ${USER_NAME}); inspect: oc logs -f bc/$(marker_v imageName) -n ${NS}"
 CSV_DESC="platform-observer: attendee can read OLM ClusterServiceVersions (bundle dissection)"
 csv_rc=0; observer_reads_csv || csv_rc=$?
 case "$csv_rc" in
@@ -116,8 +157,8 @@ case "$csv_rc" in
        || hint "extend platform-observer with operators.coreos.com {clusterserviceversions,subscriptions,installplans,operatorgroups} — gitops/workshop-config/templates/platform-observer-clusterrole.yaml, then sync workshop-config" ;;
   3) check "$CSV_DESC" false \
        || hint "the entry marker carries no dissectionOperatorNamespace, so this check has no target namespace to read — re-materialize the entry state: ws reset packaging-distributing --user ${USER_NAME}" ;;
-  *) warn "OLM ClusterServiceVersion read could not be evaluated — the API did not answer, or namespace $(marker dissectionOperatorNamespace) does not exist on this cluster"
-     hint "re-run from the cockpit terminal as ${USER_NAME}, or check the dissection target: oc get ns $(marker dissectionOperatorNamespace)" ;;
+  *) warn "OLM ClusterServiceVersion read could not be evaluated — the API did not answer, or namespace $(marker_v dissectionOperatorNamespace) does not exist on this cluster"
+     hint "re-run from the cockpit terminal as ${USER_NAME}, or check the dissection target: oc get ns $(marker_v dissectionOperatorNamespace)" ;;
 esac
 
 CRD_DESC="platform-observer: attendee can read CustomResourceDefinitions"
@@ -138,8 +179,12 @@ else
   info "helm not on THIS PATH — the attendee cockpit image ships it (ws smoke hard-checks 'helm version'); not required for standalone verify"
 fi
 # INFO: the recommended read-only dissection target is a platform install (not per-user entry state).
-DTN="$(marker dissectionSubscriptionName)"; DTNS="$(marker dissectionOperatorNamespace)"
-if [[ -n "$DTN" ]] && oc get subscriptions.operators.coreos.com "$DTN" -n "$DTNS" >/dev/null 2>&1; then
+DTN="$(marker_v dissectionSubscriptionName)"; DTNS="$(marker_v dissectionOperatorNamespace)"
+# oc_present rather than a silenced probe. Both arms are INFO, so no verdict changes either way — but
+# routing the last raw read in this file through the shared primitive is what keeps the file at zero,
+# so the next silenced read added here fails the ratchet outright instead of being absorbed.
+# (VERIFY_INCONCLUSIVE raised here cannot leak into a verdict: check() clears it before every assertion.)
+if [[ -n "$DTN" ]] && oc_present get subscriptions.operators.coreos.com "$DTN" -n "$DTNS" -o name; then
   info "dissection target readable: subscriptions.operators.coreos.com/${DTN} in ${DTNS} (the 'customer clicked your tile' chain)"
 else
   info "dissection target ${DTN:-<unset>} not readable here — content may target another installed operator (GitOps/Serverless/…); dissection is read-only against whatever the cluster runs"

@@ -24,10 +24,21 @@ PROD="${USER_NAME}-prod"
 
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
+# Every oc read below goes through _lib.sh's oc_read/oc_present/oc_absent rather than `2>/dev/null`,
+# which cannot tell "the object is not there" (a gradeable ❌) from "the cluster did not answer" (a ⚠
+# that is never the attendee's fault). Predicates return 1 for both, and oc_read raises
+# VERIFY_INCONCLUSIVE so check() picks the right one.
+
 # Cluster ingress domain — attendee-readable; used to derive route hosts without a cross-namespace
 # route read (attendees cannot read routes in gitea/student-gitops).
+# Echo-shaped, exactly like gitops-fundamentals' twin: every caller is `d="$(ingress_domain)"`, and
+# under `set -e` an assignment whose command substitution FAILS kills the script outright (measured in
+# a4c632f). So it always returns 0 and hands back the empty string. `$( )` is also a subshell, so the
+# VERIFY_INCONCLUSIVE oc_read raises here cannot reach check() — the callers that must grade an
+# unreachable API do so on their own reads, not on this one.
 ingress_domain() {
-  oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true
+  oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || OC_OUT=""
+  printf '%s' "$OC_OUT"
 }
 
 # Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "ogsr-gitea").
@@ -86,12 +97,13 @@ ARGO_NS="ogsr-student-gitops"
 argo_access_plane_err() { { oc get cm argocd-rbac-cm -n "$ARGO_NS" -o name >/dev/null; } 2>&1 || true; }
 
 argo_account_exists() {
-  oc get cm argocd-cm -n "$ARGO_NS" -o jsonpath="{.data.accounts\\.${USER_NAME}}" 2>/dev/null | grep -q .
+  oc_read get cm argocd-cm -n "$ARGO_NS" -o jsonpath="{.data.accounts\\.${USER_NAME}}" || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 argo_rbac_binds_user() {
-  oc get cm argocd-rbac-cm -n "$ARGO_NS" -o jsonpath='{.data.policy\.csv}' 2>/dev/null \
-    | grep -q "proj-${USER_NAME}"
+  oc_read get cm argocd-rbac-cm -n "$ARGO_NS" -o jsonpath='{.data.policy\.csv}' || return 1
+  grep -q "proj-${USER_NAME}" <<<"$OC_OUT"
 }
 
 # The student server serves its own argocd CLI (gitops-at-scale beat 1 downloads it — Argo 3.4 has no appset UI,
@@ -112,27 +124,32 @@ cli_download_ready() {
 
 # The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student instance.
 deploy_gitops_managed() {
-  oc get deploy "$1" -n "$2" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null | grep -q .
+  oc_read get deploy "$1" -n "$2" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' || return 1
+  [[ -n "$OC_OUT" ]]
 }
 
 # A named Rollout is present AND Healthy (also proves the cluster RolloutManager is serving it).
 rollout_healthy() {
-  local name="$1" ns="$2" phase
-  phase="$(oc get rollout "$name" -n "$ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  [[ "$phase" == "Healthy" ]]
+  local name="$1" ns="$2"
+  oc_read get rollout "$name" -n "$ns" -o jsonpath='{.status.phase}' || return 1
+  [[ "$OC_OUT" == "Healthy" ]]
 }
 
 # A named Rollout is ABSENT (entry-only: prod starts without the Rollout — converting it is the lab).
 # Namespace must exist first — otherwise "absent" is vacuous, not evidence of a clean entry state.
+# oc_absent, never `! oc get … 2>/dev/null`: a negation built on a silenced read certifies a clean slate
+# from an API that never answered, and a wrongly-green ENTRY check sends `ws prep` down its
+# "already prepared" fast path (_lib.sh, oc_absent's own header).
 rollout_absent() {
-  oc get ns "$2" >/dev/null 2>&1 || return 1
-  ! oc get rollout "$1" -n "$2" >/dev/null 2>&1
+  oc_present get ns "$2" -o name || return 1
+  oc_absent get rollout "$1" -n "$2" -o name
 }
 
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves DB connectivity).
 route_ready_200() {
   local ns="$1" host code
-  host="$(oc get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  oc_read get route parasol-claims -n "$ns" -o jsonpath='{.spec.host}' || return 1
+  host="$OC_OUT"
   [[ -n "$host" ]] || return 1
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]

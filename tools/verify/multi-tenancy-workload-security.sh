@@ -23,29 +23,45 @@ PROD="${USER_NAME}-prod"
 
 # --- helpers (oc only) -------------------------------------------------------
 
+# Every read below goes through _lib.sh's oc_read/oc_present/oc_absent rather than `2>/dev/null`, which
+# cannot tell "the object is not there" (a gradeable ❌) from "the cluster did not answer" (a ⚠ that is
+# never the attendee's fault). Predicates return 1 for both, and oc_read raises VERIFY_INCONCLUSIVE so
+# check() picks the right one.
+
 # A ServiceAccount exists in the team's home namespace.
-sa_exists() { oc get sa "$1" -n "$NS" >/dev/null 2>&1; }
+sa_exists() { oc_present get sa "$1" -n "$NS" -o name; }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # The Deployment exists but is NOT running yet (entry: scaled to 0, nothing admitted).
 deploy_idle() {
-  oc get deploy "$1" -n "$NS" >/dev/null 2>&1 || return 1
-  local ready
-  ready="$(oc get deploy "$1" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-  [[ -z "$ready" || "$ready" == "0" ]]
+  oc_present get deploy "$1" -n "$NS" -o name || return 1
+  oc_read get deploy "$1" -n "$NS" -o jsonpath='{.status.readyReplicas}' || return 1
+  [[ -z "$OC_OUT" || "$OC_OUT" == "0" ]]
 }
 
 # Can a teammate SA (in {user}-dev) do <verb> <resource> in <check-ns>? (impersonation — admin/CI only.)
+# Returns oc_read's THREE outcomes verbatim: 0 = allowed · 1 = the server said no · 2 = it could not be
+# asked. `oc auth can-i`'s plain "no" is rc 1 with only a namespace-scope Warning on stderr, which
+# oc_read's allowlist deliberately does not recognise as a transport failure — so a denial stays a real
+# answer (_lib.sh header).
 sa_can() {  # sa check-ns verb resource
-  oc auth can-i "$3" "$4" --as="system:serviceaccount:${NS}:$1" -n "$2" >/dev/null 2>&1
+  oc_read auth can-i "$3" "$4" --as="system:serviceaccount:${NS}:$1" -n "$2"
 }
 # A negative RBAC assertion is only meaningful once the SA it's about actually exists — `oc auth
 # can-i --as` evaluates hypothetically even for a nonexistent SA, so on a cluster where nothing
 # materialized this would be vacuously true (denied because there is nothing to grant it, not
 # because the entry state correctly left it ungoverned).
-sa_cannot() { oc get sa "$1" -n "$NS" >/dev/null 2>&1 || return 1; ! sa_can "$@"; }
+# rc 1 AND ONLY rc 1 certifies the denial. A bare `! sa_can` would return 0 — a green ✅ — whenever the
+# API could not be asked at all, which is the exact defect a4c632f measured in another module's
+# negation: a dead apiserver certifying a clean slate.
+sa_cannot() {
+  local rc=0
+  oc_present get sa "$1" -n "$NS" -o name || return 1
+  sa_can "$@" || rc=$?
+  (( rc == 1 ))
+}
 
 # The FIXED workload is actually running as a NON-ROOT uid — asserted on the running Pod, not inferred
 # from the Deployment being Ready. "Ready" alone cannot tell the taught fix from the [INSTRUCTOR-DEMO]
@@ -58,20 +74,32 @@ sa_cannot() { oc get sa "$1" -n "$NS" >/dev/null 2>&1 || return 1; ! sa_can "$@"
 # absent uid on a running pod means a RunAsAny SCC admitted it and it is running as the image's own
 # user — root, for the tools image this workload uses. Either way: no non-zero uid = not the fix.
 # Mechanism-agnostic: any securityContext that yields a non-root uid passes (template rule 14).
+# Reads go through oc_read directly, NOT through `$(oc get … )`: `$( )` is a subshell, so the
+# VERIFY_INCONCLUSIVE flag oc_read raises inside one would die with it and check() would print ❌ for a
+# cluster that simply did not answer. OC_OUT is read in this shell instead.
 root_demander_runs_nonroot() {
   local pod uid
-  pod="$(oc get pods -n "$NS" -l app=root-demander --field-selector=status.phase=Running -o name 2>/dev/null | head -1)"
+  oc_read get pods -n "$NS" -l app=root-demander --field-selector=status.phase=Running -o name || return 1
+  pod="${OC_OUT%%$'\n'*}"
   [[ -n "$pod" ]] || return 1
-  uid="$(oc get "$pod" -n "$NS" -o jsonpath='{.spec.containers[0].securityContext.runAsUser}' 2>/dev/null || true)"
+  oc_read get "$pod" -n "$NS" -o jsonpath='{.spec.containers[0].securityContext.runAsUser}' || return 1
+  uid="$OC_OUT"
   if [[ -z "$uid" ]]; then
-    uid="$(oc get "$pod" -n "$NS" -o jsonpath='{.spec.securityContext.runAsUser}' 2>/dev/null || true)"
+    oc_read get "$pod" -n "$NS" -o jsonpath='{.spec.securityContext.runAsUser}' || return 1
+    uid="$OC_OUT"
   fi
   [[ -n "$uid" && "$uid" != "0" ]]
 }
 
 # Guard for the RBAC-outcome checks: only a caller who can impersonate SAs (admin/CI) can evaluate them.
+# "Could not ask" (rc 2) keeps the guard OPEN on purpose. A closed guard makes the three entry-state RBAC
+# checks vanish from the output with no line at all — and a check that silently disappears on an
+# unreachable API is worse than one that says ⚠ SKIPPED, because the run still ends "all N passed".
+# Only a real "no" from the server (rc 1 — this caller genuinely may not impersonate) closes it.
 IMPERSONATE_OK="false"
-oc auth can-i impersonate serviceaccounts >/dev/null 2>&1 && IMPERSONATE_OK="true"
+imp_rc=0
+oc_read auth can-i impersonate serviceaccounts || imp_rc=$?
+case "$imp_rc" in 0|2) IMPERSONATE_OK="true";; esac
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws prep multi-tenancy-workload-security (or ws start multi-tenancy-workload-security --user ${USER_NAME})"

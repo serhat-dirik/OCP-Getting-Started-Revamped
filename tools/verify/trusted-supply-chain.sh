@@ -68,9 +68,13 @@ signed_taskrun_exists() {
 # fails the WHOLE run on a vulnerable source even though build-image + Chains-signing still complete — so a
 # proxy like "image built" or "a signed TaskRun exists" greenlights a run that never passed the gate. The
 # warm-clean-image hook builds the CLEAN main branch at prep, so this passes from entry state onward.
+# oc_read, not `2>/dev/null`: an empty answer from a silenced read cannot be told apart from an API that
+# never answered, and this check is asserted in BOTH modes — a false ❌ here tells an attendee their warm
+# prep build failed when the cluster merely blipped. rc 0 with an empty OC_OUT is still a real ❌.
 supply_chain_run_succeeded() {
-  oc get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-supply-chain \
-    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' 2>/dev/null | grep -qx True
+  oc_read get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-supply-chain \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' || return 1
+  grep -qx True <<<"$OC_OUT"
 }
 # The pre-scanned trust artifact is present: the ImageStream carries parasol-claims:latest PLUS the two
 # Chains-emitted tags derived from its digest — sha256-<digest>.sig (signature) and .att (SLSA attestation).

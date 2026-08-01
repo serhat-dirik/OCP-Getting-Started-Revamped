@@ -19,9 +19,14 @@ NS="${USER_NAME}-cicd"
 # A parasol-claims-devsecops PipelineRun reached overall Succeeded. Tekton labels every run from a
 # pipelineRef with tekton.dev/pipeline=<name>, so this catches the attendee's run AND `ws solve`'s run.
 # Succeeded ⟺ EVERY gate passed (any red gate fails the whole run) ⟺ a clean, fully-secured build.
+# oc_read, not `2>/dev/null`: an empty answer from a silenced read is indistinguishable from an API
+# that never answered, and this is the module's single capstone verdict — a false ❌ here tells an
+# attendee their fully-green pipeline failed. rc 0 with an empty OC_OUT stays a real ❌ (no run has
+# Succeeded); "could not ask" becomes ⚠ via VERIFY_INCONCLUSIVE.
 devsecops_run_succeeded() {
-  oc get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-devsecops \
-    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' 2>/dev/null | grep -qx True
+  oc_read get pipelineruns.tekton.dev -n "$1" -l tekton.dev/pipeline=parasol-claims-devsecops \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' || return 1
+  grep -qx True <<<"$OC_OUT"
 }
 
 # Attendee-visibility of the curated Task library. The four `oc get tasks -n ogsr-parasol-tasks`
@@ -30,8 +35,15 @@ devsecops_run_succeeded() {
 # earlier signal. `--as` needs impersonation rights (admin/CI); the attendee's own
 # SelfSubjectAccessReview is the attendee answer. Flags stay LITERAL — an --as built from a variable
 # reviews the wrong subject.
+# The two identity PROBES go through oc_read as well — they pick which question to ask, and a silenced
+# probe answers "not the attendee, cannot impersonate" for an unreachable API exactly as it does for a
+# genuine attendee-run, so the graded can-i below would be asked in the wrong identity.
 attendee_reads_task_library() {
-  if [[ "$(oc whoami 2>/dev/null || true)" != "$USER_NAME" ]] && oc auth can-i impersonate users >/dev/null 2>&1; then
+  local me imp_rc=0
+  oc_read whoami || OC_OUT=""
+  me="$OC_OUT"
+  oc_read auth can-i impersonate users || imp_rc=$?
+  if [[ "$me" != "$USER_NAME" && "$imp_rc" -eq 0 ]]; then
     oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks --as="$USER_NAME" --as-group=workshop-attendees
   else
     oc auth can-i get tasks.tekton.dev -n ogsr-parasol-tasks
