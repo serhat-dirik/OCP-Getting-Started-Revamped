@@ -9,6 +9,7 @@
 #   ws reset  <module> [--user U]    return the user's world to the module's entry state
 #   ws solve  <module> [--user U]    materialize the END state (instructor only)
 #   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
+#   ws session-refresh --all|--user U SA/admin: re-mint attendee logins before a session (no restart)
 #   ws doctor [--user U]             environment sanity: login, argo, gitea, operators, image drift
 #                                    (--user narrows the cohort-wide rows to one attendee)
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
@@ -1435,6 +1436,98 @@ cmd_git_refresh() {
   elif [[ "$all" == true || -n "$target" || ${#excludes[@]} -gt 0 ]]; then
     info "note: --user/--all/--exclude take effect only with --restart-terminals (bare git-refresh never restarts pods)."
   fi
+}
+
+# ── ws session-refresh: re-mint every attendee's login before a session ──────────────────────────
+# WHY THIS EXISTS. A cockpit's kubeconfig is written ONCE, by the showroom terminal-prep init
+# container, at pod start. It holds an OAuth access token that expires on the cluster's own schedule
+# (24h unless the cluster overrides oauth/cluster .spec.tokenConfig), and the terminal home is a
+# persistent PVC, so the stale kubeconfig outlives anything short of a pod restart. Nothing renewed
+# it. Measured on a live cockpit 2026-08-02: an attendee opening their terminal the day after
+# provisioning met `error: You must be logged in to the server (Unauthorized)` on their FIRST
+# command, with a Running pod, a green Application, and no other symptom anywhere.
+#
+# Provisioning a cluster the day before a workshop is the normal case, so this sat on the path of
+# every attendee who was not handed a freshly-restarted pod.
+#
+# Run this once before a session starts. It re-mints the token INSIDE each cockpit — no pod restart,
+# no content resync, nothing an attendee would notice — and reports per user. Cockpits provisioned
+# after 2026-08-02 also self-heal on shell start; this command is the pre-session sweep that makes
+# the whole room green at once, and the fix for cockpits built before that change.
+cmd_session_refresh() {
+  # Arg validation BEFORE need_oc: a mistyped flag should say so without first demanding a cluster.
+  local all=false target="" ns="$SHOWROOM_NS"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)  all=true; shift;;
+      --user) target="${2:-}"; require_user_token "$target" "session-refresh --user"; shift 2;;
+      *) die "session-refresh: unknown option '$1' — see: ws help";;
+    esac
+  done
+  [[ "$all" == true || -n "$target" ]] \
+    || die "session-refresh needs a target: --user <u> (one session) or --all (the whole cohort)"
+  need_oc
+
+  local users=() u
+  if [[ -n "$target" ]]; then
+    users=("$target")
+  else
+    for u in $(oc get deploy -n "$ns" -l app.kubernetes.io/name=showroom \
+                 -o jsonpath='{range .items[*]}{.metadata.labels.workshop\.redhat\.com/user}{"\n"}{end}' \
+                 2>/dev/null | sort -u); do
+      [[ -n "$u" ]] && users+=("$u")
+    done
+    [[ ${#users[@]} -gt 0 ]] || die "no showroom cockpits found in ns ${ns}"
+  fi
+
+  local api; api="$(oc whoami --show-server 2>/dev/null)"
+  [[ -n "$api" ]] || die "could not determine the cluster API URL (oc whoami --show-server)"
+
+  # The password is fetched INSIDE the pod through its own ServiceAccount, exactly as terminal-prep
+  # does — it never crosses this shell, never lands in your history, and is never echoed. An admin
+  # reading it here instead would put a credential in the process table of whatever runs this.
+  local script
+  # shellcheck disable=SC2016  # single quotes are the POINT: every $ below must expand inside
+  # the cockpit, not here. Expanding locally would send this admin shell's HOME and an empty
+  # SA path into the pod, and would put the fetched password in THIS process's memory.
+  script='set -uo pipefail
+    export HOME=/home/lab-user
+    SA=/var/run/secrets/kubernetes.io/serviceaccount
+    if oc whoami >/dev/null 2>&1; then echo "ALREADY_VALID:$(oc whoami)"; exit 0; fi
+    PW="$(oc get secret workshop-user-creds -n __GITEA_NS__ -o jsonpath="{.data.password}" \
+          --server=https://kubernetes.default.svc --token="$(cat $SA/token)" \
+          --certificate-authority="$SA/ca.crt" --request-timeout=15s 2>/dev/null | base64 -d)"
+    [ -n "${PW:-}" ] || { echo "NO_PASSWORD"; exit 3; }
+    oc login "__API__" -u "__USER__" -p "$PW" --insecure-skip-tls-verify=true \
+       --request-timeout=20s >/dev/null 2>&1 || { unset PW; echo "LOGIN_FAILED"; exit 4; }
+    unset PW
+    oc project "__USER__-dev" >/dev/null 2>&1 || true
+    who="$(oc whoami 2>/dev/null)"
+    [ "$who" = "__USER__" ] && { echo "REFRESHED:$who"; exit 0; }
+    echo "WRONG_IDENTITY:${who:-none}"; exit 5'
+
+  local valid=0 refreshed=0 failed=0 pod out rc body
+  for u in "${users[@]}"; do
+    pod="$(smoke_pod "$u" "$ns")"
+    if [[ -z "$pod" ]]; then
+      err "❌ ${u}: no Running cockpit pod — provision or restart it first"; failed=$((failed+1)); continue
+    fi
+    body="${script//__GITEA_NS__/$GITEA_NS}"; body="${body//__API__/$api}"; body="${body//__USER__/$u}"
+    rc=0
+    out="$(oc exec -n "$ns" "$pod" -c terminal -- bash -c "$body" 2>/dev/null)" || rc=$?
+    case "$out" in
+      ALREADY_VALID:*) ok "${u}: session already valid (${out#*:})"; valid=$((valid+1));;
+      REFRESHED:*)     ok "${u}: signed back in (${out#*:})"; refreshed=$((refreshed+1));;
+      NO_PASSWORD)     err "❌ ${u}: cockpit could not read workshop-user-creds in ${GITEA_NS}"; failed=$((failed+1));;
+      LOGIN_FAILED)    err "❌ ${u}: oc login refused — is the attendee identity provider up?"; failed=$((failed+1));;
+      WRONG_IDENTITY:*) err "❌ ${u}: logged in as '${out#*:}', expected ${u}"; failed=$((failed+1));;
+      *)               err "❌ ${u}: cockpit exec failed (rc=${rc}) — inspect: oc logs -n ${ns} ${pod} -c terminal"; failed=$((failed+1));;
+    esac
+  done
+
+  echo
+  info "session-refresh: ${valid} already valid, ${refreshed} refreshed, ${failed} failed (of ${#users[@]})"
+  [[ "$failed" -eq 0 ]] || return 1
 }
 
 # ── ws rebuild-images: make a rebuilt image REACH every running consumer ──────────────────────────
@@ -4083,6 +4176,7 @@ main() {
   # --exclude takes a value); route its raw args straight through so the generic module parser
   # below never mis-bins that value as a module. "$@" is set -u-safe when empty (unlike an array).
   [[ "$cmd" == "git-refresh" ]] && { cmd_git_refresh "$@"; return; }
+  [[ "$cmd" == "session-refresh" ]] && { cmd_session_refresh "$@"; return; }
   # passwd/cohort-reset/scale-users self-parse their own flags (passwd's NEWPASS is a free-form string,
   # not a module; cohort-reset takes no module/user; scale-users' N is a bare integer) — route their
   # raw args straight through, like git-refresh.
@@ -4154,7 +4248,7 @@ main() {
     # The range is a LINE COUNT into the header block, so it drifts the moment the block grows — adding
     # doctor's --user line pushed the closing "<module> is a position number…" note out of it. Bumped
     # with that line; anything else added above must bump it again (verify with: ws help | tail -2).
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,24p';;
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,25p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }

@@ -402,7 +402,36 @@ spec:
                 echo '# JVM user.home belt-and-suspenders (QA-gate X2) — see terminal-prep header comment.'
                 echo 'export MAVEN_OPTS="-Duser.home=$HOME ${MAVEN_OPTS:-}"'
                 echo 'export JDK_JAVA_OPTIONS="-Duser.home=$HOME ${JDK_JAVA_OPTIONS:-}"'
+                # AUTH SELF-HEAL. The kubeconfig this init writes carries an OAuth token that expires
+                # on the CLUSTER's schedule (24h unless the cluster overrides tokenConfig), and this
+                # init is one-shot: it runs at pod start and never again. The home is a persistent
+                # PVC, so the stale kubeconfig survives every restart that does not re-run the init.
+                # Net effect, measured on a live cockpit 2026-08-02: an attendee opening the terminal
+                # a day after provisioning meets
+                #   error: You must be logged in to the server (Unauthorized)
+                # on their FIRST command, with a Running pod, a green Application and no other
+                # symptom. Provisioning the cluster the day before a workshop is the normal case, so
+                # this was on the path of every attendee who was not handed a freshly-restarted pod.
+                #
+                # The shell now re-mints the token itself. The password is read through the pod's
+                # ServiceAccount exactly as this init does, is never echoed and never persisted, and
+                # the whole thing is a no-op (one `oc whoami`) when the session is still valid.
+                echo '# --- auth self-heal (see terminal-prep header comment for why) ---'
+                echo 'ws_ensure_login() {'
+                echo '  oc whoami >/dev/null 2>&1 && return 0'
+                echo '  local sa=/var/run/secrets/kubernetes.io/serviceaccount pw rc'
+                echo '  [ -r "$sa/token" ] || return 1'
+                echo "  echo \"↻ your session expired — signing you back in as ${WS_USER}…\" >&2"
+                echo "  pw=\"\$(oc get secret workshop-user-creds -n ${GITEA_NS} -o jsonpath='{.data.password}' --server=https://kubernetes.default.svc --token=\"\$(cat \"\$sa/token\")\" --certificate-authority=\"\$sa/ca.crt\" --request-timeout=15s 2>/dev/null | base64 -d)\" || return 1"
+                echo '  [ -n "$pw" ] || return 1'
+                echo "  oc login \"https://${API_HOST}\" -u \"${WS_USER}\" -p \"\$pw\" --insecure-skip-tls-verify=true --request-timeout=20s >/dev/null 2>&1"
+                echo '  rc=$?'
+                echo '  unset pw'
+                echo "  [ \"\$rc\" -eq 0 ] && oc project \"${WS_USER}-dev\" >/dev/null 2>&1"
+                echo '  return "$rc"'
+                echo '}'
                 echo 'if [[ $- == *i* ]]; then'
+                echo '  ws_ensure_login || true'
                 echo '  echo "You are logged in as $(oc whoami 2>/dev/null || echo attendee) — project: $(oc project -q 2>/dev/null || echo none)"'
                 echo '  echo "Set up a module with: ws prep platform-orientation   (then follow the lab; ws verify platform-orientation checks it)"'
                 echo 'fi'
