@@ -43,10 +43,30 @@ views are the attendee's `{user}-site-a` project (**Workloads → Deployments**)
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `resilience-multicluster-dr-01-failover-log-flip.png` | The Terminal tailing `oc logs -f deploy/claims-client` showing the moment it flips from `HTTP 200 served-by-site=A` to `HTTP 200 served-by-site=B` (with the `oc scale ... --replicas=0` visible above) | Circle: the A→B flip line + a run of `200`s on both sides — "the whole site A is gone; not one request dropped" | lab.adoc ex. 2 (failover) — **the marquee** (gif/mp4 preferred over a still — the flip is motion) |
-| 2 | `resilience-multicluster-dr-02-resilient-site.png` | Console → **Workloads → Deployments** (project `{user}-site-a`) with `parasol-claims` **3/3**, plus its **HorizontalPodAutoscaler** and **PodDisruptionBudget** | Circle: **3 of 3** pods on **different nodes** + the PDB "min available 2" — "what absorbs a pod/node loss" | lab.adoc ex. 1 (inspect) |
-| 3 | `resilience-multicluster-dr-03-service-interconnect-topology.png` | Console → **Networking → Service Interconnect** showing the **two-site** topology (`dc-a` ↔ `dc-b`), the link, and the exposed `claims` service | Circle: the **link between the two sites** + the exposed service — "DC-A reads DC-B's claims over this" | lab.adoc ex. 3 (RHSI) `[ADD-ON]` — **second marquee** |
-| 4 | `resilience-multicluster-dr-04-mesh-failover-crs.png` | Console → masthead **+** (Quick create) → **Import YAML** (project `{user}-client`) with the three failover CRs pasted, or the created **VirtualService**/**DestinationRule**/**ServiceEntry** list | Circle: the three resources — "one ServiceEntry (both sites), a locality/outlier DestinationRule, a retry VirtualService on the gateway" | lab.adoc ex. 2 (wire the routing) |
+| 1 | `resilience-multicluster-dr-01-failover-log-flip.png` | ✅ CAPTURED 2026-08-01 (cluster 2, user8, in the Showroom cockpit's ttyd terminal — the attendee's own shell). **A still, not the preferred gif** — and it holds up, because the whole story fits in one frame: `oc scale deploy/parasol-claims -n $SITEA --replicas=0` and its `scaled` confirmation on top, then `oc logs -f deploy/claims-client`, then **nine** consecutive `HTTP 200 served-by-site=A` lines followed by an unbroken run of `HTTP 200 served-by-site=B`. Measured flip: the last A at `23:19:05`, the first B at `23:19:06`. Site A was scaled back to 3 and traffic confirmed back on A afterwards. **NOTE the trap:** the first take was correct but framed into a mostly-black 875 px terminal; it was re-shot only after site A had been restored and the client log proven to read `A` again, so the flip in the committed image is a real one, not a re-crop of a stale state | Circle: the A→B flip line + a run of `200`s on both sides | lab.adoc ex. 2 (failover) — **the marquee** |
+| 2 | `resilience-multicluster-dr-02-resilient-site.png` | ⬜ NOT CAPTURED 2026-08-01 — **blocked on console authentication** (see the note below). The state itself was live and correct throughout: `parasol-claims` **3/3**, PDB min-available **2** with 1 allowed disruption, HPA `cpu 4%/80%` min 3 / max 6 | Circle: **3 of 3** pods + the PDB "min available 2" | lab.adoc ex. 1 (inspect) |
+| 3 | `resilience-multicluster-dr-03-service-interconnect-topology.png` | ⬜ NOT CAPTURED 2026-08-01 — **the console path does not exist on this cluster**, which this row already anticipated. Red Hat Service Interconnect **is** installed (`skupper-operator.v2.2.1-rh-1`, `*.skupper.io` CRDs present) but it registers **no console plugin**: `oc get consoleplugins` returns ten plugins, none of them Skupper/Service Interconnect, and the console operator's enabled list has no entry for one. So there is no **Networking → Service Interconnect** nav item to photograph here. Per this row's own fallback, the CLI (`oc get site/connector/listener/link`) is authoritative. A console login would not change this | — | lab.adoc ex. 3 (RHSI) `[ADD-ON]` |
+| 4 | `resilience-multicluster-dr-04-mesh-failover-crs.png` | ⬜ NOT CAPTURED 2026-08-01 — **blocked on console authentication** (see the note below). Unlike row 3 this one is plugin-independent (Import YAML + the Networking list pages are stock console), so one human login makes it capturable | Circle: the three resources | lab.adoc ex. 2 (wire the routing) |
+
+### Capture note, 2026-08-01
+
+**Console rows are blocked on an OAuth session, nothing else.** A console session requires a human
+to type a password into the OpenShift login page (`tools/media/login.py` exists for exactly that),
+and the operator of this pass is barred from typing credentials anywhere. The cached
+`tools/media/shot-profile.session.json` holds a valid session for a *different* cluster; for
+cluster 2 it carries only an unfinished `login-state`, and a headless probe of that console
+returned **401**. Rows 2 and 4 are one login away. Row 3 is not — see its cell.
+
+**The terminal shot did not need one.** The Showroom cockpit proxies a `ttyd` terminal at
+`<showroom-userN>/tty-top/` with no login, already running as the attendee (`oc whoami` → `user8`),
+and Playwright can type into it and send Enter. `window.term` exposes the xterm buffer, so the
+frame can be asserted (both `served-by-site=A` and `=B` present, no `HTTP 503`/`HTTP 000`) before
+the shutter, and cropped to the rows the shell actually wrote.
+
+**Domain hygiene:** this module's manifest header asks for the cluster domain to be redacted. No
+redaction was needed — the captured frame references the namespaces only through the `$SITEA` and
+`$CLIENT` shell variables, so no domain is rendered. (Note also that the standing owner decision of
+2026-07-26 accepts ephemeral RHDP cluster domains inside captured images; credentials never.)
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):

@@ -13,6 +13,14 @@ Every screenshot needs alt text (what it shows + what to notice). Embed points a
 `.adoc` files with a commented `// media-pass:` line — replace with the `image::…` when the asset
 lands.
 
+**Media-pass status, 2026-08-01.** Checked against the pages: this manifest still specifies **no
+screenshot rows**, and the module's `.adoc` files carry **no `// media-pass: screenshot` markers**,
+so there was no outstanding screenshot row to resolve in this pass and nothing was captured. The
+three diagrams below are rendered and committed. The scope gap the note above records is unchanged
+and still needs an owner. When rows are written, note for whoever shoots them that the Helm arc
+**ends at 2 replicas after the rollback, not 1** — a replica count of 2 in a post-rollback frame is
+the expected value, not a stale capture.
+
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |

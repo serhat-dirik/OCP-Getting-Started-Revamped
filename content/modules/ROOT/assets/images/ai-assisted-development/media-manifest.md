@@ -13,6 +13,15 @@ Every screenshot needs alt text (what it shows + what to notice). Embed points a
 `.adoc` files with a commented `// media-pass:` line — replace with the `image::…` when the asset
 lands.
 
+**Media-pass status, 2026-08-01.** Checked against the pages: this manifest still specifies **no
+screenshot rows**, and the module's `.adoc` files carry **no `// media-pass: screenshot` markers**,
+so there was no outstanding screenshot row to resolve in this pass and nothing was captured. The
+three diagrams below are rendered and committed. The scope gap the note above records is unchanged
+and still needs an owner: the module's biggest visual beats — the assistant diagnosing the seeded
+fault read-only, and the same assistant blocked by RBAC until the narrow write grant lands — have
+no rows written for them. Specifying them is an authoring decision, not a capture one, so it was
+not invented here.
+
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
 | Filename | Source | Notes |

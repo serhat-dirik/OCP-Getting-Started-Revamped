@@ -36,10 +36,10 @@ consumer's **event-display** web page, signed in as the sample user, project sco
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `eventing-deep-dive-01-event-display-envelope.png` | The `claims-consumer` **event-display** page showing a received `☁️ cloudevents.Event` — `type: com.parasol.claim.submitted`, `source`, `id`, `Validation: valid`, and the claim `Data` | Circle: the **context attributes** + `Validation: valid` — "the consumer genuinely received and displayed this" | lab.adoc ex. 2 (consumer-as-processor beat) — **the marquee** |
-| 2 | `eventing-deep-dive-02-dead-letter-event.png` | The `claims-dlq` **event-display** page showing a dead-lettered event with the **`knativeerrorcode: 404`** and `knativeerrordest` extension attributes | Circle: **`knativeerrorcode: 404`** + `knativeerrordest` — "not dropped; dead-lettered with why" | lab.adoc ex. 5 (retries + dead-letter beat) — **the second marquee** |
-| 3 | `eventing-deep-dive-03-eventing-triggers.png` | Console → **Serverless → Eventing**, the `default` Broker with the three Triggers (`claims-events`, `claims-fraud-review`, `claims-audit`) and their filters, and the `claim-ticker` PingSource | Circle: the two **filtered** Triggers' filter attributes (`type`, `claimpriority`) | lab.adoc ex. 4 (attribute-filtering beat) |
-| 4 | `eventing-deep-dive-04-trigger-filter-edit.png` | Console → **Serverless → Eventing → Trigger** editor (or masthead **+** (Quick create) → **Import YAML**) showing a Trigger's `filter.attributes` and a `delivery` block with `deadLetterSink` | Circle: the **`deadLetterSink`** + `retry` fields | lab.adoc ex. 5 (delivery-spec beat) |
+| 1 | `eventing-deep-dive-01-event-display-envelope.png` | ✅ CAPTURED 2026-08-01 (cluster 2, `user8-dev`; the page is a plain edge Route with no login, so it needed no session). **The spec's description of this page was wrong and is corrected here.** The `showcase` **web page** does *not* render `☁️ cloudevents.Event` or `Validation: valid` — that text exists only in the pod **log**. The page renders a heading **"Collected CloudEvents (N)"** and one **card per event** carrying `id`, `source`, `type`, `time`, the content type and the `Data`. The shot shows a single card: `id: direct-1`, `source: /demo/direct`, `type: com.parasol.claim.submitted`, `{"claimId":"CLM-9001","amount":7300,"fraudScore":0.91}`. Staged by resetting the consumer to zero and sending exactly one event, so the frame is one clean card | Circle: the event card's **context attributes + `Data`** | lab.adoc ex. 2 (consumer-as-processor beat) — **the marquee** |
+| 2 | `eventing-deep-dive-02-dead-letter-event.png` | ✅ CAPTURED 2026-08-01 — **as the terminal, not the event-display page, and deliberately so.** Same finding as row 1: the `claims-dlq` **page** shows the dead event as a card with `id`/`source`/`type`/`Data` and **does not render extension attributes at all**, so `knativeerrorcode` cannot appear on it. The attributes the caption promises live in the pod log, which is also where `lab.adoc`'s embed point sits (immediately after the `oc logs … grep -A16 'dead-99'` expected output). Shot in the cockpit ttyd as user8: the failing POST returning `HTTP 202 in 35.2s` (cold run — retries + both scale-to-zero cold starts), then the dead event with `Extensions, knativeerrorcode: 404 … knativeerrordest: http://claims-consumer.user8-dev.svc.cluster.local/process` and the `CLM-DEAD-99` payload | Circle: **`knativeerrorcode: 404`** + `knativeerrordest` | lab.adoc ex. 5 (retries + dead-letter beat) — **the second marquee** |
+| 3 | `eventing-deep-dive-03-eventing-triggers.png` | ⬜ NOT CAPTURED 2026-08-01 — **two independent blockers.** (a) No console session (see the note below). (b) More importantly, **cluster 2 has no Knative console plugin at all**: `oc get consoleplugins` lists ten plugins and none is Knative/Serverless, and the console operator's enabled list does not carry one — so the `Serverless → Eventing` nav item this row depends on **does not exist on this cluster**, even though Serverless 1.37.1 and Knative Eventing are installed and working. Not a content defect; a cluster-provisioning difference from the cluster this path was confirmed on. Flagged to the PM | Circle: the two **filtered** Triggers' filter attributes | lab.adoc ex. 4 (attribute-filtering beat) |
+| 4 | `eventing-deep-dive-04-trigger-filter-edit.png` | ⬜ NOT CAPTURED 2026-08-01 — same two blockers as row 3 (no console session; no Knative console plugin on cluster 2). The masthead **+ → Import YAML** alternative in the same step is plugin-independent and would still work with a session | Circle: the **`deadLetterSink`** + `retry` fields | lab.adoc ex. 5 (delivery-spec beat) |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console) — these confirm the Console
 click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs are authoritative):
@@ -48,6 +48,22 @@ click-paths written with the `[tabs]` Console tabs in `lab.adoc` (the CLI tabs a
 2. **Console → Serverless → Eventing → Create → Trigger** exposes a **filter attribute** key/value and a **subscriber** picker (ex. 4).
 3. **Console → Serverless → Eventing → Trigger → YAML** (or masthead **+** (Quick create) → **Import YAML**) accepts the `delivery` block (`retry`, `backoffPolicy`, `deadLetterSink`) (ex. 5).
 4. The consumer's **event-display page** (`ksvc.status.url`) renders the received CloudEvent envelope, and the `claims-dlq` page renders the dead event with `knativeerror*` attributes (ex. 2, 5) — the product UI, single-path.
+
+### Capture note, 2026-08-01
+
+**What the event-display page actually shows.** Rows 1 and 2 above were specified against the
+*log's* rendering of a CloudEvent (`☁️ cloudevents.Event` / `Validation: valid` / `Extensions,`).
+The `showcase` app's **web page** is a different rendering of the same events: a
+"Collected CloudEvents (N)" heading over one card per event with `id`, `source`, `type`, `time`,
+content type and `Data` — no `Validation:` line, and **no extension attributes**. `lab.adoc` said
+the page "shows the same thing in the browser"; that sentence and the dead-letter beat have both
+been corrected to say which surface carries what. Verified live on cluster 2, 2026-08-01.
+
+**Console rows are blocked on an OAuth session** — a human must type a password into the OpenShift
+login page (that is what `login.py` is for) and the operator of this pass is barred from typing
+credentials. The cached `tools/media/shot-profile.session.json` is valid for a different cluster;
+a headless probe against cluster 2's console returned **401**. For this module the console rows are
+additionally blocked by the missing Knative console plugin, which a login would not fix.
 
 ## Recordings
 
