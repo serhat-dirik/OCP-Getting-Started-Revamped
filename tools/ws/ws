@@ -204,6 +204,35 @@ heal_if_behind() {  # `ws list` freshness: refresh the clone ONLY when it is beh
   heal_clone || true
 }
 
+# ── apply_app: apply a rendered Application without the finalizer warning in an attendee's face ──
+# Kubernetes >=1.28 warns on any finalizer name that is not domain-qualified WITH a path:
+#   Warning: metadata.finalizers: "resources-finalizer.argocd.argoproj.io": prefer a
+#   domain-qualified finalizer name including a path (/) ...
+# It is the FIRST thing an attendee sees from `ws prep`, and it reads like something went wrong.
+#
+# We cannot rename our way out of it. Argo CD documents exactly two finalizers, and the bare name we
+# use IS the foreground variant; the only path-qualified one is
+# `resources-finalizer.argocd.argoproj.io/background`, which changes deletion from foreground to
+# background (verified against the Argo CD user guide, app_deletion, 2026-08-02). Foreground is
+# load-bearing here — cmd_reset, cohort-reset and ogsr-uninstall all rely on the cascade COMPLETING
+# before they move on (see the comments at the delete sites). Swapping it to keep a cosmetic warning
+# quiet would trade a real ordering guarantee for tidier output.
+#
+# So drop this one known line, and ONLY this line: every other warning, and every error, still
+# reaches the attendee. Errors are untouched because they are matched by content, not suppressed
+# wholesale — and the pipeline's exit status is preserved via PIPESTATUS.
+apply_app() {  # stdin: rendered Application YAML → oc apply, minus the known finalizer warning
+  # STDOUT is passed through untouched, so the attendee still sees
+  # "application.argoproj.io/entry-... created". Only STDERR is filtered, and only for this one
+  # known line — every other warning and every error still reaches them verbatim. rc is oc's own.
+  local tmp rc=0
+  tmp="$(mktemp)" || { oc apply -f -; return $?; }   # no temp file? apply unfiltered rather than not at all
+  oc apply -f - 2>"$tmp" || rc=$?
+  grep -v 'prefer a domain-qualified finalizer name' "$tmp" >&2 || true
+  rm -f "$tmp"
+  return "$rc"
+}
+
 # ── stay-current guard: an attendee command must never run from a stale CLI ───────────────────────
 # heal_clone and the require_* helpers above repair MISSING content. They cannot repair a `ws` that is
 # merely OLD: the entry state resolves, the verify script resolves, and the CLI cheerfully builds an
@@ -983,7 +1012,7 @@ cmd_start() {
   fi
   gc_conflicts "$user" "$module"
   info "materializing ${module} entry state for ${user}…"
-  render_app "$module" "$user" | oc apply -f -
+  render_app "$module" "$user" | apply_app
   # Spec changes on an EXISTING app (e.g. solve->start) can serve Argo's cached manifests;
   # force a re-render + real operation (M11 G1: solve materialized only after refresh+sync).
   sync_app_operation "$(app_name "$module" "$user")"
@@ -1296,7 +1325,7 @@ cmd_solve() {  # instructor: materialize the module END state (entry chart with 
   wait_healthy "$(app_name "$module" "$user")" "$(meta_wait "$module")" "false" || true
 
   info "materializing ${module} END state for ${user} (instructor solve)…"
-  render_app "$module" "$user" "true" | oc apply -f -
+  render_app "$module" "$user" "true" | apply_app
   # solve flips a helm parameter on an EXISTING app — without a hard-refresh + operation Argo
   # can serve the cached solve=false render and "solve" becomes a silent no-op (M11 G1 flag #1).
   sync_app_operation "$(app_name "$module" "$user")"
