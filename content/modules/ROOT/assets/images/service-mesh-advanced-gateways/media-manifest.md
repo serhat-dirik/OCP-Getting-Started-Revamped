@@ -24,6 +24,14 @@ Istio/OSSM version numbers on the diagrams (prose carries them via attributes + 
 print the real cluster domain or node names — use `{user}-mesh` and generic hostnames.
 
 ## Screenshots — Kiali (MARQUEE; product UI, single-path, `[CAPTURE-VERIFY]`)
+> **Media-pass status, 2026-08-01.** The console rows in this module could not be shot: the OpenShift
+> console sits behind OpenShift OAuth, the cached capture session in `shot-profile.session.json` had
+> expired (a probe came back as a 25 KB PNG of the IdP chooser — conventions §4 exactly), and
+> establishing a new one needs a human to type a password, which that lane is barred from doing.
+> What the lane did instead: it **staged and proved every cluster state these shots need** on
+> `user7` and wrote them into `tools/media/jobs-m14-m19-console.yaml` with the staging scripts
+> (`tools/media/stage-m1*.sh`). One login window now runs the whole block. Per-row status below.
+
 
 Kiali has no OpenShift-console equivalent, so these are the module's signature visuals. Capture in Kiali
 2.27.1, signed in as the sample user, namespace scoped to the user's `{user}-mesh`. **The graph needs
@@ -31,9 +39,9 @@ traffic first** — run the exercise-3 traffic-generation before each shot.
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `service-mesh-advanced-gateways-01-kiali-graph-mtls.png` | Kiali → Traffic Graph → `{user}-mesh`, after exercise-3 traffic: nodes `parasol-web`/`parasol-claims`/`parasol-fraud` with traffic-driven edges | Circle: an edge's **mutual-TLS padlock** icon + the request-rate label | lab.adoc ex. 3 (the "graph lights up" beat) — **the marquee** |
-| 2 | `service-mesh-advanced-gateways-02-kiali-versioned-split.png` | Kiali → Traffic Graph with **versioned** app grouping, after exercise-4 traffic: `parasol-fraud` split into `v1` and `v2` workloads | Circle: the **90% vs 10%** edge thickness / percentages to v1 vs v2 | lab.adoc ex. 4 (the weighted-split beat) |
-| 3 | `service-mesh-advanced-gateways-03-kiali-health-red.png` | Kiali → Traffic Graph during the exercise-6 authz deny (or exercise-5 fault): a **red/failing** edge into fraud | Circle: the red edge + the health badge flipping from green | lab.adoc ex. 5–6 (resilience / authz — "you can SEE the failure") |
+| 1 | `service-mesh-advanced-gateways-01-kiali-graph-mtls.png` | ⛔ BLOCKED 2026-08-01 on a **second** login: Kiali here runs `auth.strategy: openshift`, and a console session does **not** carry to it — the capture profile must log in through Kiali separately. The graph also needs exercise-3 traffic, not staged in that pass (enrollment *is* done: `stage-m19-mesh.sh`). Kiali → Traffic Graph → `{user}-mesh`, after exercise-3 traffic: nodes `parasol-web`/`parasol-claims`/`parasol-fraud` with traffic-driven edges | Circle: an edge's **mutual-TLS padlock** icon + the request-rate label | lab.adoc ex. 3 (the "graph lights up" beat) — **the marquee** |
+| 2 | `service-mesh-advanced-gateways-02-kiali-versioned-split.png` | ⛔ BLOCKED 2026-08-01 — same Kiali login, plus exercise 4 complete (v2 + subsets + the 90/10 VirtualService) and traffic flowing. Kiali → Traffic Graph with **versioned** app grouping, after exercise-4 traffic: `parasol-fraud` split into `v1` and `v2` workloads | Circle: the **90% vs 10%** edge thickness / percentages to v1 vs v2 | lab.adoc ex. 4 (the weighted-split beat) |
+| 3 | `service-mesh-advanced-gateways-03-kiali-health-red.png` | ⛔ BLOCKED 2026-08-01 — same Kiali login, plus a *transient* state that must be shot while the failing traffic runs. Kiali → Traffic Graph during the exercise-6 authz deny (or exercise-5 fault): a **red/failing** edge into fraud | Circle: the red edge + the health badge flipping from green | lab.adoc ex. 5–6 (resilience / authz — "you can SEE the failure") |
 
 **Animated gif (PREFERRED for the enroll→graph story):**
 `service-mesh-advanced-gateways-04-graph-lights-up.gif` (<25 s, silent) — quick cuts: app pods `1/1 →
@@ -47,8 +55,8 @@ unified-console click-paths while shooting (no perspective switch).
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 4 | `service-mesh-advanced-gateways-05-deployment-inject-label.png` | Console → Workloads → Deployments → `parasol-web` → YAML, the `sidecar.istio.io/inject: "true"` label under `spec.template.metadata.labels` | Circle: the injection label on the **pod template** | lab.adoc ex. 1 Console tab |
-| 5 | `service-mesh-advanced-gateways-06-import-virtualservice.png` | Console → masthead **+** (Quick create) → **Import YAML** with the `VirtualService` (90/10) pasted | Circle: the `weight: 90` / `weight: 10` route entries | lab.adoc ex. 4 Console tab |
+| 4 | `service-mesh-advanced-gateways-05-deployment-inject-label.png` | 🟡 READY TO SHOOT 2026-08-01 (`stage-m19-mesh.sh` enrolls the three tiers and proves a sidecar actually joined — checking **initContainers** too, because Istio 1.28 injects a *native* sidecar; a containers-only check reports a healthy 2/2 mesh as broken). Console → Workloads → Deployments → `parasol-web` → YAML, the `sidecar.istio.io/inject: "true"` label under `spec.template.metadata.labels` | Circle: the injection label on the **pod template** | lab.adoc ex. 1 Console tab |
+| 5 | `service-mesh-advanced-gateways-06-import-virtualservice.png` | ⛔ PARKED 2026-08-01 — pasted-but-not-created only exists while a human types. The created VirtualService's YAML tab shows the same `weight: 90` / `weight: 10` and *is* capturable, but photographs the outcome rather than the Import YAML flow the tab teaches. Console → masthead **+** (Quick create) → **Import YAML** with the `VirtualService` (90/10) pasted | Circle: the `weight: 90` / `weight: 10` route entries | lab.adoc ex. 4 Console tab |
 
 `[CAPTURE-VERIFY]` labels to confirm while shooting (the unified console; Kiali 2.27.1) — these
 confirm the click-paths written with `[CAPTURE-VERIFY]` in `lab.adoc` (the CLI tabs are authoritative):

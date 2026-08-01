@@ -38,12 +38,20 @@ arc. Warm the `openshift/tools` image first so there's no cold-pull dead air bef
 show a minted token on screen (decode claims only).
 
 ## Screenshots (optional — Console tabs get visual support; CLI is the source of truth)
+> **Media-pass status, 2026-08-01.** The console rows in this module could not be shot: the OpenShift
+> console sits behind OpenShift OAuth, the cached capture session in `shot-profile.session.json` had
+> expired (a probe came back as a 25 KB PNG of the IdP chooser — conventions §4 exactly), and
+> establishing a new one needs a human to type a password, which that lane is barred from doing.
+> What the lane did instead: it **staged and proved every cluster state these shots need** on
+> `user7` and wrote them into `tools/media/jobs-m14-m19-console.yaml` with the staging scripts
+> (`tools/media/stage-m1*.sh`). One login window now runs the whole block. Per-row status below.
+
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `multi-tenancy-workload-security-01-deploy-0of1-event.png` | ⬜ NOT CAPTURED — no `root-demander` Deployment exists on the cluster right now (`oc get deploy --all-namespaces` has none); reaching this state needs creating/scaling it. Console → Workloads → Deployments → `root-demander` → Events tab, showing the SCC `FailedCreate` | Circle: `0 of 1` pods + the `restricted-v2 … runAsUser` event line | lab.adoc ex. 1 Console tab |
-| 2 | `multi-tenancy-workload-security-02-create-rolebinding.png` | ⬜ NOT CAPTURED — modal form that must land already-filled; no deep-link reaches it pre-filled, needs a human to type. Console → User Management → RoleBindings → Create binding form (subject=ServiceAccount payments-ci, role=edit) | Circle: Subject type=ServiceAccount, Role name=edit | lab.adoc ex. 3 Console tab |
-| 3 | `multi-tenancy-workload-security-03-resourcequota-gauges.png` | ✅ CAPTURED 2026-07-30 — Console → Administration → ResourceQuotas → `workshop-quota` donut gauges (`/k8s/ns/user1-dev/resourcequotas/workshop-quota`) | Circle: requests.memory used-vs-hard gauge — captured at 13.5% used (832Mi/6Gi). Six gauges render: limits.cpu 26.7%, limits.memory 13.5%, persistentvolumeclaims 0 of 10, pods 4 of 30, requests.cpu 18.3%, requests.memory 13.5% | lab.adoc ex. 5 Console tab |
+| 1 | `multi-tenancy-workload-security-01-deploy-0of1-event.png` | 🟡 READY TO SHOOT 2026-08-01 — state staged and proved on user7 (`tools/media/stage-m15-multitenancy.sh` scales `root-demander` to 1 and polls until the refusal event exists); job row written. **Correction:** the `FailedCreate` is emitted by the **ReplicaSet**, not the Deployment — the pod is refused at admission and never created, so the Deployment's own Events tab may show nothing. The job shoots the ReplicaSet's Events tab (name resolved at run time). The caption's `0 of 1` lives on the Deployment page; if both must share a frame this row needs splitting. Console → Workloads → Deployments → `root-demander` → Events tab, showing the SCC `FailedCreate` | Circle: `0 of 1` pods + the `restricted-v2 … runAsUser` event line | lab.adoc ex. 1 Console tab |
+| 2 | `multi-tenancy-workload-security-02-create-rolebinding.png` | ⛔ PARKED 2026-08-01 — confirmed unreachable headlessly (modal form, no pre-fillable deep link, harness cannot type). Record the GIF below instead and drop the still. Console → User Management → RoleBindings → Create binding form (subject=ServiceAccount payments-ci, role=edit) | Circle: Subject type=ServiceAccount, Role name=edit | lab.adoc ex. 3 Console tab |
+| 3 | `multi-tenancy-workload-security-03-resourcequota-gauges.png` | ✅ CAPTURED 2026-07-30 · **EMBEDDED 2026-08-01** (it had been on disk but `lab.adoc` still carried the `// media-pass:` placeholder) — Console → Administration → ResourceQuotas → `workshop-quota` donut gauges (`/k8s/ns/user1-dev/resourcequotas/workshop-quota`) | Circle: requests.memory used-vs-hard gauge — captured at 13.5% used (832Mi/6Gi). Six gauges render: limits.cpu 26.7%, limits.memory 13.5%, persistentvolumeclaims 0 of 10, pods 4 of 30, requests.cpu 18.3%, requests.memory 13.5% | lab.adoc ex. 5 Console tab |
 
 **Animated gif (PREFERRED for the multi-click RoleBinding flow):**
 `multi-tenancy-workload-security-04-grant-role.gif` (<30 s, silent) — the Console path of ex. 3:

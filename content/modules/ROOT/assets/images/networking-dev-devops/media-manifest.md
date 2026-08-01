@@ -43,13 +43,21 @@ the whole visual. The `timeout 5`/`timeout 6` waits are intentional (a blocked p
 don't cut them short in the edit.
 
 ## Screenshots (optional — Console tabs get visual support; CLI is the source of truth)
+> **Media-pass status, 2026-08-01.** The console rows in this module could not be shot: the OpenShift
+> console sits behind OpenShift OAuth, the cached capture session in `shot-profile.session.json` had
+> expired (a probe came back as a 25 KB PNG of the IdP chooser — conventions §4 exactly), and
+> establishing a new one needs a human to type a password, which that lane is barred from doing.
+> What the lane did instead: it **staged and proved every cluster state these shots need** on
+> `user7` and wrote them into `tools/media/jobs-m14-m19-console.yaml` with the staging scripts
+> (`tools/media/stage-m1*.sh`). One login window now runs the whole block. Per-row status below.
+
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `networking-dev-devops-01-services-clusterip.png` | Console → Networking → Services (project `{user}-dev`), the three tiers all `ClusterIP` | Circle: the `Type = ClusterIP` column + empty external address | lab.adoc ex. 1 Console tab |
-| 2 | `networking-dev-devops-02-create-edge-route.png` | Console → Networking → Routes → Create Route form (Service `parasol-web`, Secure, Edge, Insecure=Allow) | Circle: TLS termination = Edge, Insecure traffic = Allow | lab.adoc ex. 2 Console tab |
-| 3 | `networking-dev-devops-03-networkpolicy-yaml.png` | Console → Networking → NetworkPolicies → Create → YAML view showing `default-deny-all` | Circle: empty `podSelector: {}` + `policyTypes: [Ingress, Egress]` | lab.adoc ex. 3 Console tab |
-| 4 | `networking-dev-devops-04-pod-terminal-blocked.png` | Console → Workloads → Pods → a `demo-client` pod → Terminal, the `</dev/tcp/claims-db/5432>` probe hanging/timing out | Circle: the command timing out (no `OPEN`) vs a `parasol-claims` pod terminal that prints `OPEN` | lab.adoc ex. 4 Console tab |
+| 1 | `networking-dev-devops-01-services-clusterip.png` | 🟡 READY TO SHOOT 2026-08-01 (entry state alone; proved on user7 — exactly three ClusterIP Services, no external address). Console → Networking → Services (project `{user}-dev`), the three tiers all `ClusterIP` | Circle: the `Type = ClusterIP` column + empty external address | lab.adoc ex. 1 Console tab |
+| 2 | `networking-dev-devops-02-create-edge-route.png` | ⛔ PARKED 2026-08-01 — needs a human: three PatternFly dropdowns plus a checkbox, no pre-fillable deep link. Console → Networking → Routes → Create Route form (Service `parasol-web`, Secure, Edge, Insecure=Allow) | Circle: TLS termination = Edge, Insecure traffic = Allow | lab.adoc ex. 2 Console tab |
+| 3 | `networking-dev-devops-03-networkpolicy-yaml.png` | 🟡 READY TO SHOOT 2026-08-01, **RETARGETED**: the *Create* editor with a manifest pasted-but-not-created only exists while a human types, so the job shoots the created object's own YAML tab, which renders both circled lines. Console → Networking → NetworkPolicies → `default-deny-all` → YAML | Circle: empty `podSelector: {}` + `policyTypes: [Ingress, Egress]` | lab.adoc ex. 3 Console tab |
+| 4 | `networking-dev-devops-04-pod-terminal-blocked.png` | ⛔ PARKED 2026-08-01 — the console Terminal is an xterm.js canvas: the harness can neither type into it nor assert on it (no innerText). Prefer the deny-then-allow GIF below. Console → Workloads → Pods → a `demo-client` pod → Terminal, the `</dev/tcp/claims-db/5432>` probe hanging/timing out | Circle: the command timing out (no `OPEN`) vs a `parasol-claims` pod terminal that prints `OPEN` | lab.adoc ex. 4 Console tab |
 
 **Animated gif (PREFERRED for the multi-step default-deny→allow story):**
 `networking-dev-devops-05-deny-then-allow.gif` (<30 s, silent) — split-screen or quick cuts:

@@ -42,13 +42,21 @@ placement is the whole visual. The `sleep 10` after the `nodeSelector` patch is 
 `Pending` register); don't cut it in the edit.
 
 ## Screenshots (optional — Console tabs get visual support; CLI is the source of truth)
+> **Media-pass status, 2026-08-01.** The console rows in this module could not be shot: the OpenShift
+> console sits behind OpenShift OAuth, the cached capture session in `shot-profile.session.json` had
+> expired (a probe came back as a 25 KB PNG of the IdP chooser — conventions §4 exactly), and
+> establishing a new one needs a human to type a password, which that lane is barred from doing.
+> What the lane did instead: it **staged and proved every cluster state these shots need** on
+> `user7` and wrote them into `tools/media/jobs-m14-m19-console.yaml` with the staging scripts
+> (`tools/media/stage-m1*.sh`). One login window now runs the whole block. Per-row status below.
+
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `deployment-targets-scheduling-01-pods-by-node.png` | Console → Workloads → Pods (project `{user}-dev`), the **Node** column visible | Circle: the scattered Node values — two `parasol-claims` on different nodes, `statement-batch` on a general node | lab.adoc ex. 1 Console tab |
-| 2 | `deployment-targets-scheduling-02-edit-deployment-affinity.png` | Console → Workloads → Deployments → `parasol-claims` → Actions → Edit Deployment (YAML), `affinity.podAntiAffinity` in view | Circle: `requiredDuringSchedulingIgnoredDuringExecution` + `topologyKey: kubernetes.io/hostname` | lab.adoc ex. 2 Console tab |
-| 3 | `deployment-targets-scheduling-03-batch-pending.png` | Console → Workloads → Pods → the `statement-batch` pod `Pending`, its Events showing the untolerated-taint `FailedScheduling` | Circle: the `FailedScheduling` event text "untolerated taint" | lab.adoc ex. 4 Console tab |
-| 4 | `deployment-targets-scheduling-04-pdb-allowed-disruptions.png` | Console → Workloads → PodDisruptionBudgets → `parasol-claims`, the **ALLOWED DISRUPTIONS** column = 2 | Circle: `ALLOWED DISRUPTIONS = 2` (3 healthy − minAvailable 1) | lab.adoc ex. 5 Console tab |
+| 1 | `deployment-targets-scheduling-01-pods-by-node.png` | 🟡 READY TO SHOOT 2026-08-01 (entry state alone; proved on user7 — six pods scattered across nodes). Console → Workloads → Pods (project `{user}-dev`), the **Node** column visible | Circle: the scattered Node values — two `parasol-claims` on different nodes, `statement-batch` on a general node | lab.adoc ex. 1 Console tab |
+| 2 | `deployment-targets-scheduling-02-edit-deployment-affinity.png` | 🟡 READY TO SHOOT 2026-08-01 (`stage-m17-scheduling.sh` applies the rule and proves it by checking the three replicas landed on three *distinct* nodes). Shot via the Deployment's own YAML tab — no Actions hop needed. Console → Workloads → Deployments → `parasol-claims` → YAML, `affinity.podAntiAffinity` in view | Circle: `requiredDuringSchedulingIgnoredDuringExecution` + `topologyKey: kubernetes.io/hostname` | lab.adoc ex. 2 Console tab |
+| 3 | `deployment-targets-scheduling-03-batch-pending.png` | ⛔ NOT CAPTURABLE on a sub-floor cluster (2026-08-01) — needs the batch-pool node to carry the `NoSchedule` taint, which bootstrap applies only at 3+ workers. the capture cluster had 2 real workers, so the pool is labelled and deliberately untainted, the nodeSelector-only patch schedules cleanly, and there is no Pending pod to photograph. Not a content bug — the lab's own IMPORTANT block says so. Shoot on a 3+-worker cluster. Console → Workloads → Pods → the `statement-batch` pod `Pending`, its Events showing the untolerated-taint `FailedScheduling` | Circle: the `FailedScheduling` event text "untolerated taint" | lab.adoc ex. 4 Console tab |
+| 4 | `deployment-targets-scheduling-04-pdb-allowed-disruptions.png` | 🟡 READY TO SHOOT 2026-08-01. Two corrections: the console column is sentence-case **Allowed disruptions** (bundle-grounded; `ALLOWED DISRUPTIONS` is the CLI's), and the shot needs **three** healthy replicas or it renders 1 and contradicts the lab (`stage-m17-scheduling.sh` scales first, then polls `status.disruptionsAllowed` until it reads 2). Console → Workloads → PodDisruptionBudgets → `parasol-claims`, the **Allowed disruptions** column = 2 | Circle: `ALLOWED DISRUPTIONS = 2` (3 healthy − minAvailable 1) | lab.adoc ex. 5 Console tab |
 
 **Animated gif (PREFERRED for the break-and-fix story):**
 `deployment-targets-scheduling-05-pin-to-pool.gif` (<30 s, silent) — quick cuts:

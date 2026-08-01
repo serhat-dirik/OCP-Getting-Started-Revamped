@@ -43,13 +43,21 @@ the denial line are the whole visual. **The allowed-registries beat mutates a cl
 it on a disposable cluster, never a shared workshop cluster mid-session.**
 
 ## Screenshots (optional — Console tabs get visual support; CLI is the source of truth)
+> **Media-pass status, 2026-08-01.** The console rows in this module could not be shot: the OpenShift
+> console sits behind OpenShift OAuth, the cached capture session in `shot-profile.session.json` had
+> expired (a probe came back as a 25 KB PNG of the IdP chooser — conventions §4 exactly), and
+> establishing a new one needs a human to type a password, which that lane is barred from doing.
+> What the lane did instead: it **staged and proved every cluster state these shots need** on
+> `user7` and wrote them into `tools/media/jobs-m14-m19-console.yaml` with the staging scripts
+> (`tools/media/stage-m1*.sh`). One login window now runs the whole block. Per-row status below.
+
 
 | # | Filename | View | Annotate | Embed point |
 |---|----------|------|----------|-------------|
-| 1 | `registry-images-catalog-governance-01-imagestream-detail.png` | Console → Builds → ImageStreams → `parasol-claims` (project `{user}-dev`), the tag + `sha256` visible | Circle: the `1.0` tag and its resolved `sha256` digest | lab.adoc ex. 1 Console tab |
-| 2 | `registry-images-catalog-governance-02-imagestream-two-tags.png` | Console → Builds → ImageStreams → `parasol-claims` after the promote, showing `1.0` **and** `prod` | Circle: both tags pointing at the same `sha256` | lab.adoc ex. 2 Console tab |
-| 3 | `registry-images-catalog-governance-03-developer-catalog-template.png` | Console → **Ecosystem → Software Catalog** filtered to *Template* (sub-filter unverified), the **Parasol Claims Quickstart** tile | Circle: the custom tile (present only in `{user}-dev`) | lab.adoc ex. 5 Console tab |
-| 4 | `registry-images-catalog-governance-04-cluster-image-config.png` | Console → Administration → Cluster Settings → Configuration → **Image**, the allowed-registries fields | Circle: `allowedRegistriesForImport` (empty = open) | lab.adoc ex. 6 (governance read) |
+| 1 | `registry-images-catalog-governance-01-imagestream-detail.png` | 🟡 READY TO SHOOT 2026-08-01 (entry state alone; proved on user7 — `1.0` resolves to an immutable digest). Console → Builds → ImageStreams → `parasol-claims` (project `{user}-dev`), the tag + `sha256` visible | Circle: the `1.0` tag and its resolved `sha256` digest | lab.adoc ex. 1 Console tab |
+| 2 | `registry-images-catalog-governance-02-imagestream-two-tags.png` | 🟡 READY TO SHOOT 2026-08-01 (`stage-m18-registry.sh` runs the promote and *asserts the two digests are identical* before the shot). Console → Builds → ImageStreams → `parasol-claims` after the promote, showing `1.0` **and** `prod` | Circle: both tags pointing at the same `sha256` | lab.adoc ex. 2 Console tab |
+| 3 | `registry-images-catalog-governance-03-developer-catalog-template.png` | 🟡 READY TO SHOOT 2026-08-01 (`stage-m18-registry.sh` applies the namespaced Template and asserts it exists). Still unverified: that `?catalogType=Template` pre-applies the filter — the tile is on the page either way, so check the image. Console → **Ecosystem → Software Catalog** filtered to *Template*, the **Parasol Claims Quickstart** tile | Circle: the custom tile (present only in `{user}-dev`) | lab.adoc ex. 5 Console tab |
+| 4 | `registry-images-catalog-governance-04-cluster-image-config.png` | 🟡 READY TO SHOOT 2026-08-01. Attendee readability proved by the *real read* as `user7`, not by `oc auth can-i` (which lies about cluster-scoped resources). **Retargeted to the YAML tab**: the caption's point is that `allowedRegistriesForImport` is *empty*, and an unset field is not rendered anywhere — this cluster's literal `spec: {}` is what proves it. Console → Administration → Cluster Settings → Configuration → **Image** → YAML | Circle: `allowedRegistriesForImport` (empty = open) | lab.adoc ex. 6 (governance read) |
 
 **Animated gif (PREFERRED for the promote-by-digest story):**
 `registry-images-catalog-governance-05-promote-by-digest.gif` (<20 s, silent) — quick cuts:

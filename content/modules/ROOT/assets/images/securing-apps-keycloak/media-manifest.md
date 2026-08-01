@@ -24,11 +24,18 @@ alternatives to `oc set env` / `oc apply`); each gets a screenshot below.
 
 ## Screenshots / recordings
 
+> **Media-pass status, 2026-08-01.** Row 6 was on disk since 2026-07-26 but had never been *embedded* —
+> `lab.adoc` still carried the `// media-pass:` placeholder at its embed point. It is now embedded
+> (exercise 4, after the proxy-forwarding fix) with full alt text. Row 8 is parked: see its row.
+> The console rows for this whole block could not be shot in that pass — the OpenShift console sits
+> behind OAuth, the cached capture session had expired, and establishing a new one needs a human to
+> type a password. The runnable job file is `tools/media/jobs-m14-m19-console.yaml`.
+
 | # | Filename | Status | View | Notice | Embed point |
 |---|----------|--------|------|--------|-------------|
 | 5 | `securing-apps-keycloak-05-claims-env.png` | ✅ CAPTURED 2026-07-29 | **Workloads → Deployments → parasol-claims → Environment** tab with the `QUARKUS_OIDC_*` vars entered | the Name/Value rows that enable bearer protection — the Console-tab equivalent of `oc set env` (grounds the Console tab of ex. 2; the same UI is reused for ex. 3 and the ex. 4 web env) | lab.adoc ex. 2 (Console tab) |
-| 6 | `securing-apps-keycloak-06-keycloak-login.png` | ✅ CAPTURED 2026-07-26 (still; the redirect GIF is still open)| the **Keycloak login page** for `realm-<user>`, reached by opening the protected `parasol-web` frontend unauthenticated | the realm-branded login form the app never had to build — record the browser redirect (app → Keycloak login → back into the app after signing in as `adjuster`/`parasol`) | lab.adoc ex. 4 (after the proxy-forwarding fix) |
-| 8 | `securing-apps-keycloak-08-import-fraud.png` | ⬜ NOT CAPTURED — optional | **+ / Import YAML** editor with the `parasol-fraud` manifest pasted | the masthead `+` action and the paste-and-Create flow (grounds the Console tab of ex. 7) | lab.adoc ex. 7 (Console tab) |
+| 6 | `securing-apps-keycloak-06-keycloak-login.png` | ✅ CAPTURED 2026-07-26 · **EMBEDDED 2026-08-01** (still; the redirect GIF is still open)| the **Keycloak login page** for `realm-<user>`, reached by opening the protected `parasol-web` frontend unauthenticated | the realm-branded login form the app never had to build — record the browser redirect (app → Keycloak login → back into the app after signing in as `adjuster`/`parasol`) | lab.adoc ex. 4 (after the proxy-forwarding fix) |
+| 8 | `securing-apps-keycloak-08-import-fraud.png` | ⛔ PARKED 2026-08-01 — optional, and not reachable headlessly: the subject is the Import YAML editor with the manifest *pasted but not created*, which exists only while a human types into the console's editor. Job row carries the reason. | **+ / Import YAML** editor with the `parasol-fraud` manifest pasted | the masthead `+` action and the paste-and-Create flow (grounds the Console tab of ex. 7) | lab.adoc ex. 7 (Console tab) |
 
 ## Diagrams (SVG exports; Mermaid source is the standalone `.mmd` linked in the Source column)
 
