@@ -113,7 +113,25 @@ The variables that matter:
 
 ## Starting the Workshop
 
-**1. Give each attendee their cockpit link.** One personal URL per attendee — the guide, a terminal, and
+**1. On the morning of the session, refresh the attendee logins.**
+
+```bash
+tools/ws/ws session-refresh --all
+```
+
+Each cockpit signs its attendee in when its pod starts, and that login expires on the cluster's own
+schedule — 24 hours unless your cluster says otherwise. **Installing the day before a workshop is the
+normal case**, so without this the first thing an attendee types comes back:
+
+```
+error: You must be logged in to the server (Unauthorized)
+```
+
+Nothing else looks wrong when that happens — the pod is Running and the cockpit page loads — so it is
+worth doing rather than diagnosing. It takes seconds, needs no pod restart, and is safe to run again
+at any point during the day. See [INSTALL.md §7.1](INSTALL.md) if you meet it live.
+
+**2. Give each attendee their cockpit link.** One personal URL per attendee — the guide, a terminal, and
 tool tabs in a single browser page:
 
 ```
@@ -124,14 +142,14 @@ https://showroom-user2.<cluster-domain>      # user2, and so on
 They log in as `userN` with the shared password the installer prints at the end. The SA demo cockpit is
 `https://showroom-demos.<cluster-domain>`.
 
-**2. Tell them to pick a module and prepare it.** The cockpit lists all modules; any module can be first.
+**3. Tell them to pick a module and prepare it.** The cockpit lists all modules; any module can be first.
 Inside the cockpit terminal:
 
 ```bash
 ws prep <module>        # build this module's starting environment (takes a few minutes)
 ```
 
-**3. They do the lab**, following the guide in the left pane, and check their own work:
+**4. They do the lab**, following the guide in the left pane, and check their own work:
 
 ```bash
 ws verify <module>      # did I do it right?
