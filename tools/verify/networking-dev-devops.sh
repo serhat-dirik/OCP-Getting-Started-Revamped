@@ -24,35 +24,43 @@ PARTNER="${USER_NAME}-partner"
 
 # --- helpers (oc only) -------------------------------------------------------
 
+# Every OBJECT read below goes through _lib.sh's oc_read/oc_present/oc_absent rather than
+# `>/dev/null 2>&1`, which cannot tell "the object is not there" (a gradeable ❌) from "the cluster did
+# not answer" (a ⚠ that is never the attendee's fault). The `oc exec` PROBES further down are a
+# different animal and are deliberately left alone — see the note above them.
+
 # A Deployment exists (materialized) in a namespace.
-deploy_present() { oc get deploy "$1" -n "$2" >/dev/null 2>&1; }
+deploy_present() { oc_present get deploy "$1" -n "$2" -o name; }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
 # A NetworkPolicy exists in {user}-dev.
-np_present() { oc get networkpolicy "$1" -n "$NS" >/dev/null 2>&1; }
+np_present() { oc_present get networkpolicy "$1" -n "$NS" -o name; }
 
 # The partner UDN exists (proves the labeled namespace + UDN materialized).
-udn_present() { oc get userdefinednetwork partner-udn -n "$PARTNER" >/dev/null 2>&1; }
+udn_present() { oc_present get userdefinednetwork partner-udn -n "$PARTNER" -o name; }
 
 # Entry-clean-slate helpers: return 0 when the solve object is ABSENT (nothing built yet).
 # Namespace must exist first — otherwise "absent" is vacuous, not evidence of a clean entry state.
+# `! oc get … >/dev/null 2>&1` was the blind shape in the one direction that matters most: it certified
+# "no policy, no Route" from an API that never answered, and a wrongly-green entry check sends
+# `ws prep` down its "already prepared" fast path. oc_absent returns 0 ONLY when the API answered.
 no_default_deny() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! oc get networkpolicy default-deny-all -n "$NS" >/dev/null 2>&1
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get networkpolicy default-deny-all -n "$NS" -o name
 }
 no_web_route() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! oc get route parasol-web -n "$NS" >/dev/null 2>&1
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get route parasol-web -n "$NS" -o name
 }
 
 # A Route somewhere in the namespace terminates re-encrypt — the exercise-2 outcome, matched on the
 # termination mode rather than on a Route name, so an attendee who names theirs differently still
 # passes. Completion-mode only: the entry state ships no Routes at all.
 reencrypt_route() {
-  [ -n "$(oc get route -n "$NS" \
-            -o jsonpath='{.items[?(@.spec.tls.termination=="reencrypt")].metadata.name}' 2>/dev/null)" ]
+  oc_present get route -n "$NS" \
+    -o jsonpath='{.items[?(@.spec.tls.termination=="reencrypt")].metadata.name}'
 }
 
 # --- the db-block probe and its CONTROLS -------------------------------------
@@ -64,6 +72,23 @@ reencrypt_route() {
 # and the block is graded ONLY behind them. Images verified on-cluster 2026-08-01: the RHEL tools
 # image (demo-client) carries bash + timeout + getent, and the parasol-claims runtime
 # (ubi9/openjdk-21-runtime) carries bash + timeout.
+#
+# THE THREE `oc exec` PROBES BELOW KEEP `>/dev/null 2>&1`, DELIBERATELY — the ratchet baseline for this
+# file is lowered to 3, not deleted. They are not object reads: the measured outcome is the CONNECTION,
+# and the probe's own failures travel back on the same stderr oc_read classifies. Measured on cluster 2,
+# 2026-08-01, rather than argued:
+#   refused in-pod connect  → OC_ERR "bash: connect: Connection refused …", oc_read rc 1 (a real answer)
+#   dropped/blackholed      → OC_ERR "command terminated with exit code 124", oc_read rc 1
+#   apiserver unreachable   → oc_read rc 2, VERIFY_INCONCLUSIVE=1
+# So oc_read would classify these CORRECTLY today — but only by one letter: the allowlist entry is the
+# lowercase "connection refused" and bash prints "Connection refused". Case-fold that classifier and the
+# graded outcome this whole module teaches (the packet was dropped) silently becomes ⚠ and stops being
+# graded at all. That is a contract question for _lib.sh's owner, not a call to make locally, so these
+# three stay as they are and the risk is reported rather than worked around.
+#
+# The ambiguity oc_read exists for is in any case already handled here ARCHITECTURALLY: CONTROL 1 and
+# CONTROL 2 must both succeed before the block is graded, so an unreachable API fails probe_machinery_ok
+# and the outcome comes out as ⚠ via warn() rather than as a false ❌.
 
 # Does a TCP connection OPEN from <deployment>'s pod to host:port? Same shape the lab teaches.
 tcp_open_from() {  # tcp_open_from <deployment> <host> <port>

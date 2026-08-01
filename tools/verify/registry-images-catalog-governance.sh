@@ -30,38 +30,71 @@ PULL_SECRET="parasol-registry-creds"
 
 # --- helpers (oc only) -------------------------------------------------------
 
-# The seeded ImageStream exists in {user}-dev.
-is_present() { oc get is "$IS_NAME" -n "$NS" >/dev/null 2>&1; }
+# Every read below goes through _lib.sh's oc_read/oc_present/oc_absent rather than `2>/dev/null`, which
+# cannot tell "the object is not there" (a gradeable ❌) from "the cluster did not answer" (a ⚠ that is
+# never the attendee's fault). Predicates return 1 for both, and oc_read raises VERIFY_INCONCLUSIVE so
+# check() picks the right one.
 
-# The DECLARED spec-tag names on the seeded stream (space-separated; import-independent).
-is_spec_tags() { oc get is "$IS_NAME" -n "$NS" -o jsonpath='{.spec.tags[*].name}' 2>/dev/null || true; }
+# The seeded ImageStream exists in {user}-dev.
+is_present() { oc_present get is "$IS_NAME" -n "$NS" -o name; }
+
+# The DECLARED spec-tag names on the seeded stream, into OC_OUT (space-separated; import-independent).
+# rc 0 = the API ANSWERED, and an empty OC_OUT is a real answer: a genuinely missing stream declares no
+# tags, which is what the entry negation below wants (its vacuity guard is the NAMESPACE, and the stream's
+# own absence is graded by is_present). rc 1 = the API could not be asked.
+is_spec_tags() {
+  local rc=0
+  oc_read get is "$IS_NAME" -n "$NS" -o jsonpath='{.spec.tags[*].name}' || rc=$?
+  (( rc != 2 ))
+}
 
 # Does the seeded stream declare tag $1? (seed at entry; promoted tag at end.)
-has_tag() { is_spec_tags | tr ' ' '\n' | grep -qx "$1"; }
+has_tag() {
+  is_spec_tags || return 1
+  printf '%s\n' "$OC_OUT" | tr ' ' '\n' | grep -qx "$1"
+}
 
 # The sample private-registry pull Secret exists and is a dockerconfigjson.
 pull_secret_present() {
-  [[ "$(oc get secret "$PULL_SECRET" -n "$NS" -o jsonpath='{.type}' 2>/dev/null || true)" == "kubernetes.io/dockerconfigjson" ]]
+  oc_read get secret "$PULL_SECRET" -n "$NS" -o jsonpath='{.type}' || return 1
+  [[ "$OC_OUT" == "kubernetes.io/dockerconfigjson" ]]
 }
 
 # The scheduled-import stream exists and declares at least one scheduled tag.
 ext_scheduled() {
-  oc get is "$EXT_STREAM" -n "$NS" >/dev/null 2>&1 || return 1
-  oc get is "$EXT_STREAM" -n "$NS" -o jsonpath='{.spec.tags[*].importPolicy.scheduled}' 2>/dev/null | grep -qw true
+  oc_present get is "$EXT_STREAM" -n "$NS" -o name || return 1
+  oc_read get is "$EXT_STREAM" -n "$NS" -o jsonpath='{.spec.tags[*].importPolicy.scheduled}' || return 1
+  printf '%s' "$OC_OUT" | grep -qw true
 }
 
-# Count of custom Templates in {user}-dev (any namespaced Template is attendee-added — stock samples live
-# in ns openshift). Outcome-focused: any parasol/custom template the content ships passes.
-custom_template_count() { oc get templates -n "$NS" -o name 2>/dev/null | grep -c . || true; }
+# At least $1 custom Templates exist in {user}-dev (any namespaced Template is attendee-added — stock
+# samples live in ns openshift). Outcome-focused: any parasol/custom template the content ships passes.
+# A PREDICATE, not a count-printing helper: the count used to be consumed as `"$(custom_template_count)"`
+# in a command substitution, and under `set -e` an assignment whose substitution exits non-zero kills the
+# script outright — the exact regression the previous conversion pass hit in maas_cfg.
+custom_template_min() {  # <n> → at least n namespaced Templates
+  oc_read get templates -n "$NS" -o name || return 1
+  local n
+  n="$(printf '%s\n' "$OC_OUT" | grep -c . || true)"
+  [[ "$n" -ge "$1" ]]   # >=, never ==: the lab may legitimately leave more than one Template behind
+}
+
+# The pull-secret names referenced by every ServiceAccount in {user}-dev (mechanic A), into OC_OUT…
+sa_pull_refs() {
+  oc_read get sa -n "$NS" -o jsonpath='{range .items[*]}{.imagePullSecrets[*].name}{" "}{end}'
+}
+# …and by every Deployment's pod template (mechanic B), into OC_OUT.
+deploy_pull_refs() {
+  oc_read get deploy -n "$NS" -o jsonpath='{range .items[*]}{.spec.template.spec.imagePullSecrets[*].name}{" "}{end}'
+}
 
 # The sample pull secret is wired for pull — either linked to a ServiceAccount's imagePullSecrets OR named
 # in a Deployment's pod imagePullSecrets (accept BOTH mechanics the lab may use — rule 14 outcomes).
 secret_referenced() {
-  oc get sa -n "$NS" -o jsonpath='{range .items[*]}{.imagePullSecrets[*].name}{" "}{end}' 2>/dev/null \
-    | grep -qw "$PULL_SECRET" && return 0
-  oc get deploy -n "$NS" -o jsonpath='{range .items[*]}{.spec.template.spec.imagePullSecrets[*].name}{" "}{end}' 2>/dev/null \
-    | grep -qw "$PULL_SECRET" && return 0
-  return 1
+  sa_pull_refs || return 1
+  if printf '%s' "$OC_OUT" | grep -qw "$PULL_SECRET"; then return 0; fi
+  deploy_pull_refs || return 1
+  printf '%s' "$OC_OUT" | grep -qw "$PULL_SECRET"
 }
 
 # Any Deployment that NAMES the pull secret must actually be running.
@@ -77,17 +110,19 @@ secret_referenced() {
 # on a pod template REPLACES the ServiceAccount's injected default-dockercfg-*, so getting this wrong
 # is a live failure mode rather than a theoretical one: it is exactly what happened.
 pull_secret_deploy_ready() {
-  local names name ready
+  local names name
   # shellcheck disable=SC2016  # {{$n}} and {{"\n"}} are GO-TEMPLATE syntax evaluated by oc, not shell
   # expansions — single quotes are required here. Only "$PULL_SECRET" is deliberately shell-expanded,
   # by closing and reopening the quoting around it.
-  names="$(oc get deploy -n "$NS" -o go-template='{{range .items}}{{$n := .metadata.name}}{{range .spec.template.spec.imagePullSecrets}}{{if eq .name "'"$PULL_SECRET"'"}}{{$n}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null || true)"
+  oc_read get deploy -n "$NS" -o go-template='{{range .items}}{{$n := .metadata.name}}{{range .spec.template.spec.imagePullSecrets}}{{if eq .name "'"$PULL_SECRET"'"}}{{$n}}{{"\n"}}{{end}}{{end}}{{end}}' || return 1
+  names="$OC_OUT"
   # No such Deployment means exercise 4's mechanic B was never done — not a pass. The lab creates one.
   [[ -n "$names" ]] || return 1
   while read -r name; do
     [[ -n "$name" ]] || continue
-    ready="$(oc get deploy "$name" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-    [[ -n "$ready" && "$ready" -ge 1 ]] || return 1
+    # deploy_ready is the SHARED _lib.sh helper, not a local copy — a re-definition here would shadow it
+    # for this one caller, the drift the read guard's detector [2] exists to catch.
+    deploy_ready "$name" "$NS" || return 1
   done <<< "$names"
   return 0
 }
@@ -95,21 +130,32 @@ pull_secret_deploy_ready() {
 # Entry clean-slate helpers: return 0 when the lab outcome is ABSENT (attendee has done nothing).
 # Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
 # cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
+#
+# NONE of these negates a plain predicate any more. `! has_tag …` and `! secret_referenced` returned 0 —
+# a PASS — when the API could not be asked, because those helpers report "no" and "could not ask" with
+# the same rc. Each negation now reads for itself and bails out on inconclusive, so an unreachable API
+# gives ⚠ instead of certifying a clean slate. That matters more here than anywhere else in the script:
+# a wrongly-green entry check sends `ws prep` down its "already prepared" fast path.
 no_promote_tag() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! has_tag "$PROMOTE_TAG"
+  oc_present get ns "$NS" -o name || return 1
+  is_spec_tags || return 1
+  ! printf '%s\n' "$OC_OUT" | tr ' ' '\n' | grep -qx "$PROMOTE_TAG"
 }
 no_ext_stream() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! oc get is "$EXT_STREAM" -n "$NS" >/dev/null 2>&1
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get is "$EXT_STREAM" -n "$NS" -o name
 }
 no_custom_template() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  [[ "$(custom_template_count)" == "0" ]]
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get templates -n "$NS" -o name
 }
 secret_unreferenced() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! secret_referenced
+  oc_present get ns "$NS" -o name || return 1
+  local sa_refs
+  sa_pull_refs || return 1
+  sa_refs="$OC_OUT"
+  deploy_pull_refs || return 1
+  ! printf '%s %s' "$sa_refs" "$OC_OUT" | grep -qw "$PULL_SECRET"
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
@@ -133,7 +179,7 @@ else
     || hint "promote it: oc tag ${NS}/${IS_NAME}:${SEED_TAG} ${NS}/${IS_NAME}:${PROMOTE_TAG}"
   check "${EXT_STREAM} ImageStream re-imports on a schedule (scheduled import)" ext_scheduled \
     || hint "oc import-image ${NS}/${EXT_STREAM} --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm"
-  check "a custom Template exists in ${NS} (namespaced catalog governance)" test "$(custom_template_count)" -ge 1 \
+  check "a custom Template exists in ${NS} (namespaced catalog governance)" custom_template_min 1 \
     || hint "add a namespaced Template to ${NS}: oc apply -f <your-template>.yaml -n ${NS} (see the lab)"
   check "sample pull Secret ${PULL_SECRET} is referenced for pull (private-registry deploy)" secret_referenced \
     || hint "link it: oc secrets link deployer ${PULL_SECRET} --for=pull -n ${NS} (or name it in a pod's imagePullSecrets)"

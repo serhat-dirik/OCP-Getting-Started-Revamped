@@ -25,8 +25,13 @@ NS="${USER_NAME}-mesh"
 
 # --- helpers (oc only) -------------------------------------------------------
 
+# Every read below goes through _lib.sh's oc_read/oc_present/oc_absent rather than `2>/dev/null` or
+# `>/dev/null 2>&1`, which cannot tell "the object is not there" (a gradeable ❌) from "the cluster did
+# not answer" (a ⚠ that is never the attendee's fault). oc_read raises VERIFY_INCONCLUSIVE so check()
+# picks the right one; the predicates only have to stop turning "could not ask" into an answer.
+
 # A Deployment exists (materialized) in {user}-mesh.
-deploy_present() { oc get deploy "$1" -n "$NS" >/dev/null 2>&1; }
+deploy_present() { oc_present get deploy "$1" -n "$NS" -o name; }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
@@ -34,14 +39,19 @@ deploy_present() { oc get deploy "$1" -n "$NS" >/dev/null 2>&1; }
 # The {user}-mesh namespace carries istio-discovery=enabled (workshop-layer per-user-mesh contract — the
 # label that scopes the shared OSSM3 istiod's discoverySelectors to this tenant). Fail-loud if missing.
 ns_discovery_labeled() {
-  [[ "$(oc get ns "$NS" -o jsonpath='{.metadata.labels.istio-discovery}' 2>/dev/null || true)" == "enabled" ]]
+  oc_read get ns "$NS" -o jsonpath='{.metadata.labels.istio-discovery}' || return 1
+  [[ "$OC_OUT" == "enabled" ]]
 }
 
 # The namespace is NOT injection-labelled (the attendee enrolls it in the first lab beat). Namespace
 # must actually exist first — otherwise an empty label read is vacuous, not evidence of a clean entry.
+# The label read is now graded too: an EMPTY string used to mean both "no such label" and "the API never
+# answered", and this check reads the second as a clean entry state — which sends `ws prep` down its
+# "already prepared" fast path on a world nobody could inspect.
 ns_not_injection_labeled() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get ns "$NS" -o jsonpath='{.metadata.labels.istio-injection}' 2>/dev/null || true)" ]]
+  oc_present get ns "$NS" -o name || return 1
+  oc_read get ns "$NS" -o jsonpath='{.metadata.labels.istio-injection}' || return 1
+  [[ -z "$OC_OUT" ]]
 }
 
 # Is the app=$1 tier MESHED? Returns 0 if ANY pod for app=$1 carries the istio-proxy sidecar. Scans ALL
@@ -49,30 +59,52 @@ ns_not_injection_labeled() {
 # rolling update can briefly leave an old un-injected ReplicaSet pod alongside the new injected one — a
 # head -1 check would flake on either. OSSM3 1.28 native sidecar → istio-proxy is an initContainer; the
 # sidecar.istio.io/status annotation is the most robust signal (present iff injected).
-pod_meshed() {
-  local app="$1" pod
-  for pod in $(oc get pod -n "$NS" -l "app=${app}" -o name 2>/dev/null); do
-    oc get "$pod" -n "$NS" -o jsonpath='{.metadata.annotations.sidecar\.istio\.io/status}' 2>/dev/null | grep -q istio-proxy && return 0
-    oc get "$pod" -n "$NS" -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}' 2>/dev/null | grep -q istio-proxy && return 0
-  done
+#
+# THREE outcomes, not two, and that is what claims_unmeshed() below needs: rc 1 ("the API answered and
+# nothing carries a sidecar") and rc 2 ("the API could not be asked") were the same empty pod list
+# before, so negating this predicate certified an UN-meshed entry state from a cluster that never
+# replied. check() reads the VERIFY_INCONCLUSIVE flag rather than the rc, so rc 2 still renders as ⚠
+# at the positive call sites with no change there.
+pod_meshed() {  # <app> → 0 meshed · 1 the API answered, no sidecar · 2 the API could not be asked
+  local app="$1" pods pod rc
+  rc=0; oc_read get pod -n "$NS" -l "app=${app}" -o name || rc=$?
+  if (( rc == 2 )); then return 2; fi
+  pods="$OC_OUT"
+  # while/here-string, not `for pod in $(…)`: a here-string runs the body in THIS shell, so `return 0`
+  # from inside the loop actually leaves the function (a pipeline would fork a subshell and lose it).
+  while read -r pod; do
+    [[ -n "$pod" ]] || continue
+    rc=0; oc_read get "$pod" -n "$NS" -o jsonpath='{.metadata.annotations.sidecar\.istio\.io/status}' || rc=$?
+    if (( rc == 2 )); then return 2; fi
+    if printf '%s' "$OC_OUT" | grep -q istio-proxy; then return 0; fi
+    rc=0; oc_read get "$pod" -n "$NS" -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}' || rc=$?
+    if (( rc == 2 )); then return 2; fi
+    if printf '%s' "$OC_OUT" | grep -q istio-proxy; then return 0; fi
+  done <<< "$pods"
   return 1
 }
 
 # Mesh config CRs in {user}-mesh (namespaced; attendee admin reads them via the aggregated admin role).
-vs_present() { oc get virtualservice "$1" -n "$NS" >/dev/null 2>&1; }
-dr_present() { oc get destinationrule "$1" -n "$NS" >/dev/null 2>&1; }
-ap_present() { oc get authorizationpolicy "$1" -n "$NS" >/dev/null 2>&1; }
+vs_present() { oc_present get virtualservice "$1" -n "$NS" -o name; }
+dr_present() { oc_present get destinationrule "$1" -n "$NS" -o name; }
+ap_present() { oc_present get authorizationpolicy "$1" -n "$NS" -o name; }
 
 # Entry-clean-slate helpers: return 0 when the solve object is ABSENT (attendee has built nothing).
 # Each requires the namespace to actually exist first — otherwise "absent" is vacuous (true on a
 # cluster where nothing materialized at all), not evidence of a clean, correctly-seeded entry state.
 claims_unmeshed() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  ! pod_meshed parasol-claims
+  local rc=0
+  oc_present get ns "$NS" -o name || return 1
+  # NOT `! pod_meshed …`: that negation turned "could not ask" into "definitely un-meshed". Branch on
+  # pod_meshed's third outcome instead, so an unreachable API leaves VERIFY_INCONCLUSIVE set and check()
+  # reports ⚠ rather than a green entry state nobody was able to observe.
+  pod_meshed parasol-claims || rc=$?
+  if (( rc == 2 )); then return 1; fi
+  (( rc == 1 ))
 }
 no_mesh_config() {
-  oc get ns "$NS" >/dev/null 2>&1 || return 1
-  [[ -z "$(oc get virtualservice,destinationrule,authorizationpolicy -n "$NS" -o name 2>/dev/null || true)" ]]
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent get virtualservice,destinationrule,authorizationpolicy -n "$NS" -o name
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------

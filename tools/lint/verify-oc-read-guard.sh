@@ -120,6 +120,21 @@ ok()   { echo "✅ $*"; }
 # stderr goes to the ORIGINAL stdout and is captured, stdout is discarded. That is a deliberate
 # capture-the-error idiom — the opposite of silencing one — and folding it in would punish the shape
 # that keeps the diagnosis.
+#
+# ── 2026-08-01, THIRD PASS: the three worst rows converted, 115 → 80 ─────────────────────────────
+# registry-images-catalog-governance (15) and service-mesh-advanced-gateways (13) reached ZERO and their
+# rows are GONE rather than set to 0 — an absent file defaults to baseline 0, so deleting the row is what
+# protects them going forward. networking-dev-devops falls 10 → 3 and KEEPS its row: the three survivors
+# are `oc exec` PROBES (tcp_open_from, probe_machinery_ok, db_name_resolves_from_demo_client), not object
+# reads, and that file's own comment records the measurement showing why converting them is a contract
+# question for _lib.sh rather than a mechanical change. No file's count rose.
+#
+# Proven the same way the previous pass was, against live cluster 2 (attendee slots user5 and user7):
+# the pristine `git archive HEAD` tree and the working tree run with identical arguments, combined
+# stdout+stderr diffed, byte-identical across healthy / genuine-absence (--user user99) / namespace-
+# exists-but-objects-absent, entry-only AND full, plus a 33-case predicate-level differential reaching
+# branches the guarded end-state block hides. The outcomes that SHOULD differ do: on an unreachable API
+# the three scripts previously printed 8, 9 and 11 false ❌ and now print zero red and skip everything.
 BASELINE_TABLE="
 app-security-testing.sh 1
 build-deliver.sh 4
@@ -128,15 +143,13 @@ devspaces-inner-loop.sh 1
 eventing-deep-dive.sh 9
 gitops-at-scale.sh 8
 multi-tenancy-workload-security.sh 9
-networking-dev-devops.sh 10
+networking-dev-devops.sh 3
 observability-health-scale.sh 2
 packaging-distributing.sh 7
 pipelines-fundamentals.sh 1
 platform-orientation.sh 5
-registry-images-catalog-governance.sh 15
 resilience-multicluster-dr.sh 22
 securing-apps-keycloak.sh 5
-service-mesh-advanced-gateways.sh 13
 trusted-supply-chain.sh 2
 "
 
