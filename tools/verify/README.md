@@ -5,7 +5,7 @@ Called by `ws verify <slug> [--user U]` — `mNN` also resolves, a module's numb
 `/modules.yaml` — by CI, and standalone by instructors.
 
 **"rule 10"**, cited across these scripts and the entry charts, is
-[`docs/module-template/README.md`](../../docs/module-template/README.md) rule 10: *verify scripts run as
+the module template's rule 10 (maintainer notes, kept outside this repo): *verify scripts run as
 the attendee — no reads outside the user's namespaces* (derive the Gitea host from the ingress domain
 rather than reading the route cross-namespace, and so on). The two bullets below extend it.
 

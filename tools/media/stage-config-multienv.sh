@@ -107,7 +107,7 @@ case "$PHASE" in
       --from-literal=QUARKUS_LOG_LEVEL=INFO \
       --dry-run=client -o yaml | oc -n "$DEV" apply -f -
     # NOTE: these are the lab's fabricated teaching credentials (user/password both `parasol`), not
-    # a real secret — see docs/media-capture-conventions.md rule 1. The Secret is still photographed
+    # a real secret — see the media-capture conventions rule 1. The Secret is still photographed
     # with "Reveal values" OFF; nothing decodes it in frame.
     oc -n "$DEV" create secret generic claims-creds \
       --from-literal=POSTGRESQL_USER=parasol \
