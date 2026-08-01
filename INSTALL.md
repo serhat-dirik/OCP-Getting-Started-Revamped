@@ -50,11 +50,12 @@ The litmus test for any change: **would anything of the customer's differ after 
 Both `ogsr-reset.sh` and `ogsr-wipe-users.sh` deliberately leave the platform, **Gitea with every
 attendee repository**, **Keycloak with every login**, and every cockpit in place — that is the point,
 not an oversight, and it is worth saying plainly to whoever inherits the cluster rather than letting
-them discover it. One known cosmetic side effect of `ogsr-wipe-users.sh`: the **Developer Hub catalog is
-kept** while the namespaces its entries were scaffolded from are removed, so the portal will list
-components that no longer exist for the removed users. That trade was made on purpose — the alternative
-was ripping user1's working catalog entries out along with everyone else's — so a stale-looking RHDH
-catalog row after a wipe-users run is expected, not a bug worth filing.
+them discover it. One known cosmetic side effect of `ogsr-wipe-users.sh`: the **Developer Hub catalog
+is not pruned**, so any software component an attendee scaffolded stays listed after the namespace it
+was scaffolded from is removed. That trade was made on purpose — the alternative was ripping user1's
+working catalog entries out along with everyone else's — so a stale-looking RHDH catalog row after a
+wipe-users run is expected, not a bug worth filing. §7.2 has the full, measured account of what a
+wipe leaves behind, including the one leftover that can actually collide with a future cohort.
 
 `ogsr-reset.sh` does not replace `ws cohort-reset` (§5) — it **wraps** it. The per-module Kubernetes
 purge (entry-state Applications, attendee Argo apps, the contents of every attendee namespace, in
@@ -709,11 +710,62 @@ with every attendee repository**, **Keycloak with every login**, or any cockpit 
 not an oversight, and it is worth saying plainly to whoever inherits the cluster rather than letting
 them find it by accident.
 
-**One known cosmetic consequence of `ogsr-wipe-users.sh`:** the Developer Hub catalog is **kept**, so
-once the removed users' namespaces are gone the portal still lists the software components they
-scaffolded there. The owner decided to keep the catalog rather than prune it alongside the namespaces —
-the alternative was ripping out user1's still-live entries along with everyone else's. Expect a
-stale-looking RHDH catalog row after a wipe-users run; it is expected, not a bug worth filing.
+#### What a wipe actually leaves behind
+
+Measured on a real cluster immediately after a `--keep 1` wipe of an eight-user cohort (2026-08-01).
+Everything below was enumerated from the wiped cluster rather than predicted, so you can answer
+"is this a leftover or is it meant to be there?" without re-deriving it during a handover.
+
+**Clean — nothing belonging to the removed users survives.** Each row was checked and returned
+exactly what is claimed.
+
+| Area | State after the wipe | Confirm with |
+|---|---|---|
+| OpenShift identity | Only the kept user plus your admin: no `User`/`Identity` objects, one htpasswd line, group is `["user1"]` | `oc get users`; `oc get identities` |
+| Namespaces | Only the kept user's (13 for `user1`), none `Terminating` | `oc get ns \| grep -E '^user'` |
+| Gitea | Only `gitea-admin`, the kept user, and the `parasol` org. Removed accounts **and** their `<user>-svcs` scaffold orgs return 404 — no ownerless org is left, so re-adding those users later cannot collide | `GET /api/v1/admin/users`, `GET /api/v1/admin/orgs` |
+| Keycloak | Only `master` and the kept user's realm; `realm-user2`…`realm-userN` return 404, and only the kept user's `KeycloakRealmImport` CR remains | `oc get keycloakrealmimport -n sso-workshop`; `GET /admin/realms` |
+| Student Argo | Zero `Application`s; only `proj-user1` remains, and `argocd-secret` / `argocd-cm` / `argocd-rbac-cm` carry only the kept user's account and policy lines | `oc get applications,appprojects -n ogsr-student-gitops` |
+| Storage | Every PV `Bound`, none `Released`, and no `claimRef` points at a deleted namespace | `oc get pv` |
+| RBAC | No `RoleBinding` anywhere names a removed user as a subject, and nothing cluster-scoped carries their `workshop.redhat.com/user` label | `oc get rolebinding -A -o json` |
+| Kueue and quota | Only the kept user's `ClusterQueue`; per-user quota and limits went with their namespaces | `oc get clusterqueue` |
+| Cockpits | Only the kept user's `Deployment` and `Route`. A removed user's old cockpit URL still resolves through wildcard DNS and returns the router's **HTTP 503** page — that is "gone", not "broken" | `oc get deploy,route -n ogsr-showroom` |
+
+**Residue that really is left.** Two items. Neither is a reason to stop a handover, and only the
+first can bite a future cohort.
+
+1. **SonarQube accounts survive — the one thing that can collide on re-provision.** Removed users
+   keep an *active, local* SonarQube account in the `sonar-users` group (no tokens, no projects).
+   Because the workshop password is a shared, non-secret value, that is a working SonarQube login
+   belonging to someone with no cluster identity left — odd-looking, and worth mentioning to the new
+   owner. The collision: `sonarqube-user-seed` is **create-if-absent**, so re-provisioning a cohort
+   onto this cluster finds `user2` already present and skips it, leaving that account on the *old*
+   password while every other tool moves to the new one. Harmless if the next cohort reuses the same
+   `workshop_user_password`; otherwise it is a single confusing per-user login failure. List them
+   with `GET /api/users/search` as the SonarQube admin and delete the stale ones by hand before
+   re-provisioning with a changed password.
+2. **`openshift-pipelines-clusterinterceptors` accumulates dead subjects.** After the wipe this
+   `ClusterRoleBinding` held 132 subjects, 91 of them the `pipeline` ServiceAccount of a namespace
+   that no longer exists (13 per removed user). It is **not ours**: it is owned by a
+   `TektonInstallerSet`, and the Pipelines operator appends to it per namespace. A subject naming a
+   deleted ServiceAccount grants nothing, so this is inert — it is listed only so nobody mistakes it
+   for workshop residue during a handover review. Do not hand-edit it; the operator owns it.
+
+**Developer Hub — the usual claim is only half true.** On the wiped cluster the software catalog was
+*clean*: 14 entities, all owned by `parasol`, all from the four static `catalog.locations` in
+`app-config-rhdh`, with no dynamically registered locations at all. But that is because **no attendee
+had ever run the golden-path template on that cluster** — the scaffolder's task history was empty —
+not because the wipe cleaned anything up. The mechanism is unchanged and still applies:
+`parasol-service-template` ends in a `catalog:register` step, which writes a catalog row that neither
+Argo's prune nor `ogsr-wipe-users.sh` can reach. On a cluster where attendees *did* scaffold, expect
+leftover `Component` and `API` entries pointing at Gitea repositories the wipe deleted, which will
+then fail to refresh. That is cosmetic, never a collision. Say "the catalog is not pruned" rather
+than "the catalog will be full of dead entries" — which it is depends entirely on whether anyone
+scaffolded.
+
+Expect the catalog to also list roughly 256 `Package` and `Plugin` entities. Those are RHDH's
+built-in Extensions marketplace, present on any RHDH install, unrelated to the workshop and to any
+attendee — and the single most likely thing for a reviewer to misread as residue.
 
 ### 7.3 Giving the cluster itself back, untouched: `ogsr-uninstall.sh` (rare)
 
