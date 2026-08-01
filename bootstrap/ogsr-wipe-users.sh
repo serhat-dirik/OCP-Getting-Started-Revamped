@@ -45,6 +45,10 @@
 #     hook), so the account and every fork under it outlive any userCount change.
 #   • The attendee's {user}-svcs scaffold ORG (developer-hub-golden-paths). A Gitea org is a separate
 #     owner from the user, so deleting the user — even with purge — does not take it.
+#   • SonarQube accounts. sonarqube-user-seed is create-if-absent, exactly like the Gitea one, and a
+#     SonarQube account is `local: true` — it authenticates against SonarQube's own user table and
+#     needs no OpenShift identity, no htpasswd line and no Gitea account behind it. Left in place it
+#     is the ONE working login a wiped attendee keeps.
 #   • Keycloak realms. KeycloakRealmImport is IMPORT-ONCE: the operator imports the realm and then
 #     ignores the CR forever. Pruning the CR does not delete the realm from Keycloak's database.
 #   • The per-user LOCAL Argo account password in the student-gitops argocd-secret
@@ -78,10 +82,10 @@ KEEP=1
 source "${SCRIPT_DIR}/ogsr-cohort-lib.sh"
 
 usage() {
-  # 2,66 = the header comment block minus the shebang (ws's own --help does the same).
-  # Re-count 66 whenever that block grows, or --help
-  # truncates mid-sentence.
-  grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,66p'
+  # 2,70 = the header comment block minus the shebang (ws's own --help does the same).
+  # Re-count 70 whenever that block grows, or --help
+  # truncates mid-sentence. It is the count of leading '#' lines: awk '/^set -euo/{print NR-1; exit}'.
+  grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,70p'
   exit 1
 }
 
@@ -99,7 +103,7 @@ if [[ ! "$KEEP" =~ ^[0-9]+$ ]] || [[ "$KEEP" -lt 1 ]]; then
   die "--keep must be a positive integer (got '${KEEP}') — the whole point is that at least ${USER_PREFIX}1 survives"
 fi
 
-trap 'gitea_cleanup; print_ledger' EXIT
+trap 'gitea_cleanup; sonarqube_cleanup; print_ledger' EXIT
 
 need_tools
 require_ws "$WS_BIN" "the cohort prune is ws scale-users"
@@ -169,11 +173,15 @@ echo "  • their htpasswd login line (openshift-config/htpasswd-workshop-users)
 echo "  • their OpenShift User + Identity objects (workshop-users:<user>)"
 echo "  • their Gitea account, purged — every repository they own goes with it"
 echo "  • their <user>-${SCAFFOLD_ORG_SUFFIX} Gitea scaffold org and its repositories"
+echo "  • their SonarQube account in ${SONAR_NS}, removed AND anonymized so the login is freed —"
+echo "    a SonarQube account is local:true and needs no cluster identity, so it would otherwise be"
+echo "    the one working login a wiped attendee keeps"
 echo "  • their Keycloak realm realm-<user> in ${SSO_NS} (pruning the import CR does NOT remove it)"
 echo "  • their student-Argo local account password key in ${STUDENT_ARGO_NS}/argocd-secret"
 echo
 echo "WILL PRESERVE — untouched:"
-echo "  • ${KEPT[*]} — namespaces, cockpit, Gitea account and repos, Keycloak realm, AND LOGIN."
+echo "  • ${KEPT[*]} — namespaces, cockpit, Gitea account and repos, Keycloak realm, SonarQube"
+echo "    account, AND LOGIN."
 echo "    Whoever inherits this cluster can log in as ${KEPT[0]} and click through a working workshop."
 echo "  • every installed component and operator, the platform-portfolio stacks (pp-*), workshop-config"
 echo "  • the shared ogsr-* layer: Gitea, showroom infra, parasol images/tasks, student-gitops"
@@ -182,9 +190,10 @@ echo "  • EVERY admin-supplied credential — the MaaS key, the shared worksho
 echo "    Gitea and Keycloak admin credentials, and the cluster's own identity providers. Those came"
 echo "    from the admin via install.sh; they are the admin's own and nothing here deletes them."
 echo
-echo "NOT REMOVED TODAY (known residue, harmless — no cluster identity is left to use it):"
-echo "  • the removed users' SonarQube accounts (sonarqube-user-seed only ever adds)"
-echo "  • RHDH catalog Locations left by any golden-path service they scaffolded"
+echo "NOT REMOVED TODAY (known residue — CATALOG POINTERS, not credentials: nothing here authenticates"
+echo "anyone, and every target they name is deleted above):"
+echo "  • RHDH catalog Locations left by any golden-path service they scaffolded — they point at the"
+echo "    Gitea repos purged above, so they resolve to nothing and grant nothing"
 echo
 
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -248,6 +257,31 @@ if [[ "$DRY_RUN" == "true" ]]; then
     warn "could not reach the Gitea admin API — the Gitea half of the plan could not be enumerated"
   fi
   echo
+  echo "SonarQube accounts in ${SONAR_NS}:"
+  _sq_rc=0
+  sonarqube_connect || _sq_rc=$?
+  if [[ "$_sq_rc" -eq 2 ]]; then
+    echo "  (${SONAR_NS} absent — SonarQube not installed)"
+  elif [[ "$_sq_rc" -ne 0 ]]; then
+    warn "could not reach the SonarQube admin API — the SonarQube half of the plan could not be enumerated"
+  else
+    for _u in "${REMOVED[@]}"; do
+      _code="$(sonar_api GET "/api/v2/users-management/users?q=${_u}")"
+      if [[ "$_code" != "200" ]]; then
+        _code="$(sonar_api GET "/api/users/search?q=${_u}")"
+      fi
+      if [[ "$_code" != "200" ]]; then
+        echo "  account ${_u} (could NOT ask, HTTP ${_code} — this is not 'absent')"
+        continue
+      fi
+      if [[ -n "$(sonar_match_active_login "$_u")" ]]; then
+        echo "  account ${_u} — active local login, will be removed and anonymized"
+      else
+        echo "  account ${_u} (absent)"
+      fi
+    done
+  fi
+  echo
   ok "dry run complete — nothing was changed. Re-run without --dry-run to apply."
   exit 0
 fi
@@ -256,7 +290,7 @@ confirm_or_exit "Remove ${#REMOVED[@]} user(s) [${REMOVED[*]}] completely, keepi
 
 # ── 1. the GitOps half: lower userCount and let Argo prune ───────────────────────────────────────
 # Delegated in full. `ws scale-users` owns the ordering, the sync discipline and the htpasswd rewrite.
-step "[1/6] lowering userCount ${LIVE_COUNT} → ${KEEP} via ws scale-users (Argo prunes the per-user world)" \
+step "[1/7] lowering userCount ${LIVE_COUNT} → ${KEEP} via ws scale-users (Argo prunes the per-user world)" \
   "$WS_BIN" scale-users "$KEEP" --yes
 
 # ── 2. OpenShift User + Identity objects ─────────────────────────────────────────────────────────
@@ -288,7 +322,7 @@ delete_identities() {
   done
   return "$rc"
 }
-step "[2/6] deleting OpenShift User + Identity objects" delete_identities
+step "[2/7] deleting OpenShift User + Identity objects" delete_identities
 
 # ── 3. Gitea accounts, their repositories, and their scaffold orgs ───────────────────────────────
 delete_gitea_users() {
@@ -337,9 +371,87 @@ delete_gitea_users() {
   done
   return "$rc"
 }
-step "[3/6] purging Gitea accounts, repositories and scaffold orgs" delete_gitea_users
+step "[3/7] purging Gitea accounts, repositories and scaffold orgs" delete_gitea_users
 
-# ── 4. Keycloak realms ───────────────────────────────────────────────────────────────────────────
+# ── 4. SonarQube accounts ────────────────────────────────────────────────────────────────────────
+# Beside Gitea, and for the same reason: another external tool whose accounts are rows in its own
+# database, seeded create-if-absent, that no Argo prune can reach.
+#
+# WHY ANONYMIZE AND NOT A PLAIN DEACTIVATE — all four behaviours measured live on SonarQube 26.5
+# (Community Build, chart 2026.3.1) on 2026-08-01:
+#   • POST /api/users/deactivate (no anonymize) → the account cannot authenticate, but the LOGIN STAYS
+#     RESERVED: it moves to /api/users/search?deactivated=true and still owns the name "user2".
+#   • …and POST /api/users/create on a reserved login REACTIVATES it. It happens to apply the new
+#     password today, so a plain deactivate would appear to work — but only because two unrelated
+#     behaviours line up (the seed's existence check is active-only, and create-as-reactivate resets
+#     the password). Neither is contractual, and the v2 create verb that eventually replaces the
+#     seed's deprecated one is not obliged to reactivate at all. A wipe that leaves a reserved login
+#     behind is one API change away from re-arming the collision it was written to remove.
+#   • Anonymize renames the row to sq-removed-<random> and FREES the login: the next cohort's seed
+#     then creates a genuinely new account, on the new password, with no inherited state.
+#     Verified end to end — anonymized, re-created, authenticated on the new password, rejected on
+#     the old one.
+# So: anonymize. "Removed" then means the same thing here as `purge=true` does for Gitea.
+#
+# v2 first because /api/users/* is deprecated since 10.4 (the server's own /api/webservices/list says
+# so) and v2 users-management is its replacement. The v1 fallback is not dead code: an ADOPTED
+# SonarQube may predate 10.4, and its deactivate carries the anonymize parameter from 9.7 onward.
+delete_sonarqube_users() {
+  local u id code rc=0 connect_rc=0
+  sonarqube_connect || connect_rc=$?
+  if [[ "$connect_rc" -eq 2 ]]; then
+    skip "  ${SONAR_NS} not present (SonarQube not installed) — no accounts to remove"
+    return 0
+  fi
+  if [[ "$connect_rc" -ne 0 ]]; then
+    err "  could not reach the SonarQube admin API (route/${SONAR_NS} or the sonarqube-admin credential)"
+    err "  — accounts NOT removed. This is NOT 'already clean': a SonarQube account is local:true, so"
+    err "  every removed attendee keeps a WORKING login until this step succeeds. Re-run after fixing."
+    err "  fix: oc get route sonarqube -n ${SONAR_NS} && oc get secret sonarqube-admin -n ${SONAR_NS}"
+    return 1
+  fi
+  for u in "${REMOVED[@]}"; do
+    code="$(sonar_api GET "/api/v2/users-management/users?q=${u}")"
+    if [[ "$code" == "200" ]]; then
+      id="$(sonar_match_active_login "$u")"
+      if [[ -z "$id" ]]; then
+        skip "  SonarQube account ${u} already absent"
+        continue
+      fi
+      code="$(sonar_api DELETE "/api/v2/users-management/users/${id}?anonymize=true")"
+      case "$code" in
+        204|200|404) ok "  SonarQube account ${u} removed and anonymized (login freed)" ;;
+        *) err "  could not remove SonarQube account ${u} (HTTP ${code}) — remove it by hand at https://${SONAR_HOST}/admin/users"; rc=1 ;;
+      esac
+      continue
+    fi
+    if [[ "$code" != "404" ]]; then
+      err "  could not query SonarQube for ${u} (HTTP ${code}) — account NOT removed, and NOT confirmed absent"
+      rc=1
+      continue
+    fi
+    # 404 on the v2 collection = this SonarQube predates v2 users-management. Fall back to v1.
+    code="$(sonar_api GET "/api/users/search?q=${u}")"
+    if [[ "$code" != "200" ]]; then
+      err "  could not query SonarQube for ${u} (HTTP ${code}, v1 API) — account NOT removed, and NOT confirmed absent"
+      rc=1
+      continue
+    fi
+    if [[ -z "$(sonar_match_active_login "$u")" ]]; then
+      skip "  SonarQube account ${u} already absent"
+      continue
+    fi
+    code="$(sonar_api POST /api/users/deactivate "login=${u}" "anonymize=true")"
+    case "$code" in
+      204|200|404) ok "  SonarQube account ${u} removed and anonymized (login freed, v1 API)" ;;
+      *) err "  could not remove SonarQube account ${u} (HTTP ${code}, v1 API) — remove it by hand at https://${SONAR_HOST}/admin/users"; rc=1 ;;
+    esac
+  done
+  return "$rc"
+}
+step "[4/7] removing SonarQube accounts (anonymized, so the login is freed)" delete_sonarqube_users
+
+# ── 5. Keycloak realms ───────────────────────────────────────────────────────────────────────────
 delete_keycloak_realms() {
   local u kc host secret admin pass token cfg form code rc=0
   if ! oc get namespace "$SSO_NS" >/dev/null 2>&1; then
@@ -395,9 +507,9 @@ delete_keycloak_realms() {
   rm -f "$cfg"
   return "$rc"
 }
-step "[4/6] deleting Keycloak realms for the removed users" delete_keycloak_realms
+step "[5/7] deleting Keycloak realms for the removed users" delete_keycloak_realms
 
-# ── 5. student-Argo local account passwords ──────────────────────────────────────────────────────
+# ── 6. student-Argo local account passwords ──────────────────────────────────────────────────────
 delete_student_argo_accounts() {
   local u rc=0 patch=""
   if ! oc get secret argocd-secret -n "$STUDENT_ARGO_NS" >/dev/null 2>&1; then
@@ -419,10 +531,10 @@ delete_student_argo_accounts() {
   fi
   return "$rc"
 }
-step "[5/6] removing student-Argo local account passwords" delete_student_argo_accounts
+step "[6/7] removing student-Argo local account passwords" delete_student_argo_accounts
 
-# ── 6. per-user hook leftovers in the Gitea namespace ────────────────────────────────────────────
-step "[6/6] sweeping per-user entry-hook leftovers in ${GITEA_NS}" \
+# ── 7. per-user hook leftovers in the Gitea namespace ────────────────────────────────────────────
+step "[7/7] sweeping per-user entry-hook leftovers in ${GITEA_NS}" \
   sweep_gitea_hook_leftovers "${REMOVED[@]}"
 
 echo

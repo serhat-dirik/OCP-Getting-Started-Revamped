@@ -401,7 +401,7 @@ sonarqube_connect() {  # → 0 connected · 1 could NOT ask · 2 SonarQube is no
   # 401 as "the account is not there", producing a green sweep that deleted nothing. Check the body.
   code="$(sonar_api GET /api/authentication/validate)"
   if [[ "$code" != "200" ]] || ! grep -q '"valid":true' "$SONAR_BODY"; then
-    err "SonarQube admin API did not accept the discovered credential (HTTP ${code} from https://${host}/api/authentication/validate)"
+    err "SonarQube admin API did not accept the discovered credential — https://${host}/api/authentication/validate answered HTTP ${code} without \"valid\":true (a rejected credential answers 200 here, so the status alone means nothing)"
     err "  fix: oc get secret sonarqube-admin -n ${SONAR_NS} -o jsonpath='{.data.password}' | base64 -d — the portfolio's sonar-bootstrap Job sets it"
     sonarqube_cleanup
     SONAR_HOST=""; SONAR_CFG=""; SONAR_BODY=""
