@@ -15,11 +15,88 @@
 # This policy re-imposes the invariant ADR-0002 merely assumed: an attendee may only ever
 # materialize the exact Application `ws` would have rendered for them.
 #
-# KNOWN RESIDUAL, not closed here: `workshop-entries` is ONE AppProject for eight tenants and its
-# destinations are "*", so an attendee can still have the cluster-admin controller create a
-# RoleBinding in any namespace. Blacklisting RBAC kinds is not available -- entry charts
-# legitimately render 37 RoleBindings, 34 Roles and 26 ServiceAccounts across 16 modules. The real
-# fix is per-user AppProjects for entry states, mirroring proj-{user}.
+# The residual this file used to record -- one `workshop-entries` AppProject for every tenant, so an
+# attendee could have the cluster-admin controller create a RoleBinding in a PEER's namespace -- is
+# closed as of appproject-entries-per-user.yaml. Validation 1 below is what closes it: pinning each
+# attendee to `entries-<their own username>` is the ONLY thing that makes those per-user destination
+# lists binding, because k8s RBAC cannot stop them naming a different project.
+#
+# What remains, deliberately: `entries-{user}` still permits the seven SHARED workshop namespaces
+# (ogsr-gitea, ogsr-student-gitops, ogsr-system, openshift-lightspeed, openshift-pipelines, sonarqube,
+# stackrox) because the entry charts genuinely write Roles/RoleBindings/SAs/Jobs there and Argo cannot
+# scope a destination by resource name. Those namespaces hold no attendee work; peer tenancy is what
+# mattered and it is now enforced. Blacklisting the kinds is not available either -- entry charts
+# legitimately render 37 RoleBindings, 34 Roles and 26 ServiceAccounts across 16 modules.
+#
+# ==============================================================================================
+# LANDING SEQUENCE -- READ THIS BEFORE PUSHING. The switch is NOT atomic on a live cluster.
+# ==============================================================================================
+# Validation 1 below and tools/ws/ws argo_project() are two halves of ONE change. A cockpit
+# terminal refreshes its clone of `ws` only at POD START (showroom.yaml's terminal-prep init does
+# `git fetch` + `reset --hard origin/main`). So between "the guard synced" and "the terminals
+# restarted" a running attendee holds the OLD `ws`, which renders project `workshop-entries`,
+# while the NEW guard demands `entries-<their username>` -- and every `ws prep` they run returns
+#   Error from server (Forbidden): ... attendees may only use their own 'entries-<username>'
+#   AppProject
+# That window is the entire risk. Close it deliberately:
+#
+#   1. COMMIT AND PUSH, in ONE commit:
+#        gitops/workshop-config/templates/attendee-entry-app-guard.yaml   (this file)
+#        tools/ws/ws                                                     (argo_project)
+#      appproject-entries-per-user.yaml is already committed (dac87dc) -- if you are on a cluster
+#      that predates it, it must be in the same push, since the guard demands a project that file
+#      is the only source of.
+#   2. DO NOT push mid-exercise. Attendees actively running a lab are the population this breaks.
+#      Between modules, or before a cohort starts, only.
+#   3. ws git-refresh --restart-terminals --all
+#      One command, and it does all three things in the required order: forces the in-cluster Gitea
+#      pull-mirror to fetch and WAITS until its HEAD equals origin's, runs a real sync operation on
+#      pp-git-mirror and on workshop-config (which is what creates/updates entries-{user} AND this
+#      policy), and only then rolls every cockpit terminal Deployment so each re-clones the new
+#      `ws` -- verifying each restarted pod's HEAD against the mirror as it goes.
+#      `--all` (or `--user userN`) is REQUIRED: --restart-terminals alone dies with "restart needs
+#      a target", by design, so nobody cycles a cohort by accident. Any WS_RESERVED_USERS are
+#      skipped by --all -- if the environment sets it, restart those sessions with --user or they
+#      keep the old `ws` and stay broken.
+#      Restarting terminals BEFORE the mirror has the commit re-clones the OLD content -- that is
+#      why the ordering is baked into the command rather than left to three manual steps.
+#
+# CONFIRM IT LANDED (all read-only; run as cluster-admin):
+#   a. the live policy carries the per-user expression, not the shared one:
+#        oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard \
+#          -o jsonpath='{.spec.validations[0].expression}'
+#      => has(object.spec.project) && object.spec.project == 'entries-' + request.userInfo.username
+#   b. every attendee has a project to be pinned to (expect one line per attendee, none missing):
+#        oc get appproject -n openshift-gitops -o name | grep entries-
+#   c. a cockpit is actually running the new ws -- check the ATTENDEE's terminal, not your laptop.
+#      ARGO_PROJECT_PIN exists only in the new argo_project(), so it is an unambiguous marker:
+#        oc exec -n ogsr-showroom deploy/showroom-user1 -c terminal -- \
+#          grep -c ARGO_PROJECT_PIN ~/ocp-getting-started/tools/ws/ws
+#      1 means that pod has the new `ws`. 0 means it did not restart (or re-cloned a stale mirror);
+#      re-run step 3 with --user user1. Repeat per attendee -- one stale pod is one attendee whose
+#      prep is Forbidden. (`grep -c` exits 1 on a count of 0, so a nonzero exit here is the answer,
+#      not a broken command. Verified against a live cockpit, 2026-08-01: it printed 0 pre-landing.)
+#   d. the real end-to-end check is ONE ATTENDEE running `ws prep <module>` in their own cockpit and
+#      reaching "<module> is ready — start the lab." An admin-run `ws start` proves NOTHING here:
+#      matchConditions excludes every identity outside the workshop-attendees group, so as admin the
+#      policy is not evaluated at all and you will see a pass that attendees do not get.
+#
+# IF IT GOES WRONG, the fast valve is this file, synced alone -- no push to `ws`, no second terminal
+# restart, and it works whichever `ws` a given cockpit happens to be holding. Widen validation 1 to
+# accept both renderings:
+#   object.spec.project == 'workshop-entries' ||
+#     object.spec.project == 'entries-' + request.userInfo.username
+# then sync workshop-config. That re-opens the peer-namespace residual for as long as it is in place,
+# so it is a valve, not a resting state -- but it un-breaks every attendee in one sync.
+# Do NOT "roll back" by reverting validation 1 to plain `== 'workshop-entries'` unless you are also
+# putting the old `ws` back on every cockpit: a terminal that already restarted renders
+# `entries-<user>`, which that expression denies. You would be swapping which half of the cohort is
+# broken. (The new argo_project() prefers entries-<user> whenever the project exists, so on a
+# guard-only revert you would additionally have to delete the entries-* projects or pin
+# WS_ARGO_PROJECT=workshop-entries in the cockpit environment.)
+# Already-materialized entry Applications are untouched by any of this: they keep their old project
+# and are only re-projected on the attendee's next `ws start`/`ws prep`, and an admin apply is never
+# evaluated by the policy.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -49,8 +126,14 @@ spec:
   validations:
     # 1. The AppProject is the whole ballgame — `default` permits `*` repos, `*` destinations and
     #    `*` cluster-scoped kinds, and the controller that would reconcile it is cluster-admin.
-    - expression: "has(object.spec.project) && object.spec.project == 'workshop-entries'"
-      message: "attendees may only use the 'workshop-entries' AppProject"
+    #    Pinned to the requester's OWN per-user project (appproject-entries-per-user.yaml), not the
+    #    shared `workshop-entries`: that is what turns "your project lists only your namespaces" into
+    #    an isolation boundary instead of a suggestion. Naming a peer's project (entries-user7) fails
+    #    here; naming their own means their destinations apply.
+    #    LOCKSTEP: tools/ws/ws render_app must emit `entries-${user}`. A ws that still emits
+    #    `workshop-entries` makes every attendee-run `ws prep` Forbidden — ship the two together.
+    - expression: "has(object.spec.project) && object.spec.project == 'entries-' + request.userInfo.username"
+      message: "attendees may only use their own 'entries-<username>' AppProject"
       reason: Forbidden
     # 2. Single-source only. A `spec.sources` (plural) app would slip past every source check below.
     - expression: "!has(object.spec.sources) && has(object.spec.source)"

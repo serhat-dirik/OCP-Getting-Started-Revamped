@@ -41,7 +41,22 @@ ENTRY_DIR="${REPO_ROOT}/gitops/entry-states"
 VERIFY_DIR="${REPO_ROOT}/tools/verify"
 MODULES_YAML="${WS_MODULES_YAML:-${REPO_ROOT}/modules.yaml}"
 ARGO_NS="${WS_ARGO_NS:-openshift-gitops}"
-ARGO_PROJECT="${WS_ARGO_PROJECT:-workshop-entries}"
+# Entry Applications land in the requester's OWN AppProject, `entries-<user>`
+# (gitops/workshop-config/templates/appproject-entries-per-user.yaml) — see argo_project().
+# This is NOT cosmetic and NOT optional: the ValidatingAdmissionPolicy ogsr-attendee-entry-app-guard
+# requires spec.project == 'entries-' + request.userInfo.username for every member of the
+# workshop-attendees group, so a `ws` that renders any other project makes EVERY attendee-run
+# `ws prep` Forbidden. The two files ship in one commit; see that guard's header for the sequence.
+#
+# WS_ARGO_PROJECT still PINS one project for every user (instructor triage, e.g. collecting a whole
+# cohort under one project). When it is set, the per-user derivation AND the fallback chain are both
+# skipped — a pin is an explicit instruction, not a hint. Note that a pin other than the attendee's
+# own project is admin-only by construction: an attendee using one is denied by the guard.
+ARGO_PROJECT_PIN="${WS_ARGO_PROJECT:-}"
+# Fallback when `entries-<user>` is absent: a cluster whose workshop-config predates the per-user
+# projects, or a --user outside .Values.userCount. Falling back here is vastly better than falling
+# back to stock `default`, which permits "*" repos, "*" destinations and "*" cluster-scoped kinds.
+ARGO_PROJECT_SHARED="workshop-entries"
 GITEA_NS="${WS_GITEA_NS:-ogsr-gitea}"
 STUDENT_ARGO_NS="${WS_STUDENT_ARGO_NS:-ogsr-student-gitops}"
 MIRROR_ORG="${WS_MIRROR_ORG:-parasol}"
@@ -268,20 +283,41 @@ user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee 
 
 app_name() { echo "entry-${1}-${2}"; }
 
-argo_project() {  # workshop-entries once the workshop layer exists; default before that
-  if oc get appproject "${ARGO_PROJECT}" -n "${ARGO_NS}" >/dev/null 2>&1; then
-    echo "${ARGO_PROJECT}"
-  else
-    echo "⚠ AppProject ${ARGO_PROJECT} not found — using 'default' (apply the workshop layer for proper scoping)" >&2
-    echo "default"
+argo_project() {  # user → entries-<user>, else workshop-entries, else default
+  # The whole point of the per-user projects is that they are what the admission guard PINS an
+  # attendee to. Resolving by probing (rather than assuming) keeps ws usable on a half-installed or
+  # older cluster, but every fallback is announced, because a silent fallback here does not degrade
+  # gracefully for an attendee — it turns into a Forbidden from the guard with no explanation.
+  local user="$1"
+  if [[ -n "$ARGO_PROJECT_PIN" ]]; then
+    echo "$ARGO_PROJECT_PIN"
+    return 0
   fi
+  if oc get appproject "entries-${user}" -n "${ARGO_NS}" >/dev/null 2>&1; then
+    echo "entries-${user}"
+    return 0
+  fi
+  if oc get appproject "${ARGO_PROJECT_SHARED}" -n "${ARGO_NS}" >/dev/null 2>&1; then
+    echo "⚠ AppProject entries-${user} not found — falling back to ${ARGO_PROJECT_SHARED}" >&2
+    echo "  If ${user} is an attendee, the apply below will be DENIED by ogsr-attendee-entry-app-guard" >&2
+    echo "  (\"attendees may only use their own 'entries-<username>' AppProject\"). Fix: sync the" >&2
+    echo "  workshop-config Application so appproject-entries-per-user.yaml renders, then retry." >&2
+    echo "${ARGO_PROJECT_SHARED}"
+    return 0
+  fi
+  # Neither exists — or neither is READABLE. An attendee whose Role predates the appprojects
+  # get/list grant (per-user-argo-rbac.yaml) lands here too, and looks identical from this side.
+  echo "⚠ neither AppProject entries-${user} nor ${ARGO_PROJECT_SHARED} is visible — using 'default'" >&2
+  echo "  (apply/sync the workshop layer for proper scoping; if you are an attendee, this is more" >&2
+  echo "  likely a missing appprojects read grant than a missing project — tell your instructor.)" >&2
+  echo "default"
 }
 
 render_app() {  # module user [solve]  → Application manifest on stdout
   local module="$1" user="$2" solve="${3:-false}" url domain project degraded_label
   url="$(repo_url)"
   domain="$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo apps.example.com)"
-  project="$(argo_project)"
+  project="$(argo_project "$user")"
   # Cluster-visible twin of ws-meta expectDegraded. meta_expect_degraded only answers from a repo
   # checkout (gitops/entry-states/<module>/ws-meta.yaml) — fine for ws itself, useless to a consumer
   # that has only API-server access (ws doctor run from a bare install, a CI health probe, an external
