@@ -65,6 +65,36 @@ batch_pool_tainted() {
   [[ "$OC_OUT" == "NoSchedule" ]]
 }
 
+# Is this cluster BELOW the floor at which bootstrap applies the taint at all?
+#
+# The comment above is right that a GREEN tick here must never be handed out when the toleration half
+# of the lesson isn't live — but ❌ is the wrong way to say so, and it broke a promise of its own. An
+# attendee on a sub-floor cluster who read the lab's honest "no taint here, and here's why" note and
+# then did every exercise correctly still ended on `❌ 1 of 15 checks failed` (measured as user4,
+# 2026-08-02). This check also runs in --entry-only mode, where `ws prep` reads the script's rc as a
+# boolean "is this world prepared?" — so the same false ❌ was offering to WIPE a perfectly healthy
+# environment, the exact destructive false alarm _lib.sh's exit-code comment exists to prevent.
+#
+# ⚠ SKIP satisfies both requirements at once: no green tick is issued (the promise is still withheld),
+# the reason is printed where the attendee reads it, and nothing that the attendee actually controls is
+# marked failed. Mirrors bootstrap/install.sh's own count exactly — dedicated workers, falling back to
+# all nodes when no node carries the worker role separately — so the two cannot drift apart in meaning.
+BATCH_TAINT_FLOOR=3   # bootstrap/install.sh MIN_BATCH_POOL_FOR_TAINT
+batch_pool_below_taint_floor() {
+  local raw count
+  oc_read get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' \
+    -o jsonpath='{.items[*].metadata.name}' || return 1
+  raw="$OC_OUT"
+  if [[ -z "${raw// /}" ]]; then
+    oc_read get nodes -o jsonpath='{.items[*].metadata.name}' || return 1
+    raw="$OC_OUT"
+  fi
+  count="$(printf '%s' "$raw" | wc -w | tr -d ' ')"
+  # 0 means we learned nothing about the topology — NOT a licence to skip. Fall through to the hard
+  # check, which fails closed exactly as it always did.
+  [[ "$count" -gt 0 && "$count" -lt "$BATCH_TAINT_FLOOR" ]]
+}
+
 # Does node $1 carry the batch-pool label? (attendee reads nodes via platform-observer.)
 node_is_batch_pool() {
   oc_read get node "$1" -o jsonpath="{.metadata.labels.${POOL_KEY//./\\.}}" || return 1
@@ -185,7 +215,13 @@ check "parasol-web deployment present"                  deploy_present parasol-w
 check "statement-batch worker has >=1 ready replica"    deploy_ready statement-batch        || hint "the batch worker isn't up — oc get pods -l app=statement-batch -n ${NS}"
 check "load generator has >=1 ready replica"            deploy_ready claims-load            || hint "the load generator isn't up — oc get pods -l app=claims-load -n ${NS}"
 check "dedicated batch pool node exists (labeled ${POOL_KEY}=${POOL_VALUE})" batch_pool_labeled || hint "no node carries the label at all — run the bootstrap node-shaping step (bootstrap/install.sh labels+taints one worker ${POOL_KEY}=${POOL_VALUE})"
-check "dedicated batch pool node is TAINTED (a toleration is actually required to land there)" batch_pool_tainted || hint "labeled but NOT tainted — this is a DIFFERENT problem than a missing pool. Expected below bootstrap's 3-worker floor: tainting one of only two workers starved a platform component for 4h+ on 2026-07-30 (see bootstrap/install.sh MIN_BATCH_POOL_FOR_TAINT), so the taint is deliberately withheld. Exercise 4's toleration half cannot be taught on this cluster until a 3rd worker joins the pool; the nodeSelector half still works. Do NOT hand-taint the node to force this green — that recreates the outage."
+if batch_pool_below_taint_floor; then
+  # Designed state, not a defect: below the floor bootstrap labels the node and deliberately withholds
+  # the taint. Nothing the attendee did or can do affects this, so it is not graded either way.
+  warn "batch pool node is labeled but deliberately NOT tainted — this cluster has fewer than ${BATCH_TAINT_FLOOR} dedicated workers, and bootstrap withholds the taint below that floor (tainting one of only two workers starved a platform component for 4h+ on 2026-07-30). Exercise 4's nodeSelector half works and IS graded below; its toleration half cannot be demonstrated here until a 3rd worker joins. Do NOT hand-taint the node to turn this green — that recreates the outage"
+else
+  check "dedicated batch pool node is TAINTED (a toleration is actually required to land there)" batch_pool_tainted || hint "labeled but NOT tainted, on a cluster at or above the ${BATCH_TAINT_FLOOR}-worker floor where bootstrap SHOULD have tainted it — this is a DIFFERENT problem than a missing pool, and a real one (see bootstrap/install.sh MIN_BATCH_POOL_FOR_TAINT). Exercise 4's toleration half cannot be taught until it is fixed; the nodeSelector half still works. Do NOT hand-taint the node to force this green — re-run the bootstrap node-shaping step so the cluster and the installer agree."
+fi
 
 # INFO: parasol-web/parasol-claims readiness needs the parasol-images imagestreams (workshop image-load
 # step). Presence is asserted above; readiness is a cluster-provisioning concern, not an entry defect.
