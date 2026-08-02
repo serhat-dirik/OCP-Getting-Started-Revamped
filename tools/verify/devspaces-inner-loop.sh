@@ -82,12 +82,17 @@ ws_ns_read() {  # ws_ns_read <resource>
   return 0
 }
 
-# 0 = a workspace was started · 1 = the namespace holds no workspace artefact at all (dashboard opened,
-# nothing started) · 2 = none of the signals is readable as this identity, so the end state is not
-# gradeable from here.
+# 0 = a workspace was actually STARTED · 1 = it is declared but has never run · 2 = none of the
+# signals is readable as this identity, so the end state is not gradeable from here.
+#
+# `devworkspaces` is deliberately NOT in this list, and must not be added back. Since 2026-08-02 the
+# entry chart DECLARES the DevWorkspace (spec.started:false), so it exists from `ws prep` onward for
+# every attendee. Including it here would make this return 0 before anyone had done anything — the
+# check would tick without inspecting the thing it names. What starting a workspace actually leaves
+# behind is a Deployment, its Pod, and the PVC backing /projects; those are the evidence.
 workspace_started() {
   local kind names rc readable=0
-  for kind in devworkspaces.workspace.devfile.io deployments pods persistentvolumeclaims; do
+  for kind in deployments pods persistentvolumeclaims; do
     rc=0; names="$(ws_ns_read "$kind")" || rc=$?
     if (( rc == 0 )); then
       readable=1
@@ -107,23 +112,28 @@ check "claims-db deployment has >=1 ready replica"   deploy_ready claims-db "$NS
 check "parasol-claims deployment has >=1 ready replica" deploy_ready parasol-claims "$NS"         || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
 check "route parasol-claims answers 200 (/q/health/ready)" route_ready_200 "$NS"                  || hint "claims app not ready — check: oc get pods -n ${NS}"
 
+# The workspace namespace and the DevWorkspace are ENTRY state now, not evidence of attendee work.
+# They used to be checked only at the end, on the reasoning that the namespace proves the attendee
+# signed in — Dev Spaces creates it on first sign-in. That inference died when the entry chart
+# started creating both (2026-08-02): the factory URL the lab used cannot work against Gitea, which
+# Dev Spaces does not support, so `ws prep` now declares the workspace instead. A check still worded
+# "you signed in to the dashboard" would assert something the cluster cannot show.
+check "Dev Spaces namespace ${WS_NS} exists"          oc get ns "$WS_NS"                          || hint "entry app not synced — ws prep devspaces-inner-loop --user ${USER_NAME}"
+check "workspace parasol-claims is declared in ${WS_NS}" oc get devworkspace parasol-claims -n "$WS_NS" || hint "the entry state defines this workspace; if it is missing the chart did not apply — ws reset devspaces-inner-loop --user ${USER_NAME}"
+
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------
-  # Two separate facts, reported separately: the namespace proves only that you SIGNED IN (it is
-  # auto-provisioned), and the workspace is the lab's actual outcome. See the helpers above.
-  WS_DESC="a Dev Spaces workspace was started in ${WS_NS}"
-  if check "Dev Spaces namespace ${WS_NS} exists (you signed in to the dashboard)" oc get ns "$WS_NS"; then
-    ws_rc=0; workspace_started || ws_rc=$?
-    case "$ws_rc" in
-      0) check "$WS_DESC" true ;;
-      1) check "$WS_DESC" false \
-           || hint "${WS_NS} exists but holds no workspace — signing in to the dashboard creates that namespace on its own, so this is the 'opened it and stopped' state. Start a workspace from ${USER_NAME}/parasol-claims (lab exercise 1)" ;;
-      *) warn "the end state is not gradeable from here — none of the workspace signals in ${WS_NS} (DevWorkspaces, Deployments, Pods, PVCs) is readable as this identity"
-         hint "you normally CAN read all four — Dev Spaces grants them to you when it provisions ${WS_NS}. Landing here means the API could not be asked, or that grant is missing: retry, then show your instructor 'oc get rolebinding -n ${WS_NS}'. Meanwhile confirm in the dashboard that your parasol-claims workspace is running" ;;
-    esac
-  else
-    hint "open the Dev Spaces dashboard and start ${USER_NAME}/parasol-claims (lab exercise 1) — the namespace is created on your first sign-in"
-  fi
+  # The attendee's own act is STARTING the workspace, which is what leaves pods/PVCs behind. The
+  # declaration above proves only that prep ran.
+  WS_DESC="the parasol-claims workspace has been started (pods or storage exist in ${WS_NS})"
+  ws_rc=0; workspace_started || ws_rc=$?
+  case "$ws_rc" in
+    0) check "$WS_DESC" true ;;
+    1) check "$WS_DESC" false \
+         || hint "the workspace is declared but has never run — open the Dev Spaces dashboard and click the parasol-claims workspace to start it (lab exercise 1)" ;;
+    *) warn "the end state is not gradeable from here — none of the workspace signals in ${WS_NS} (DevWorkspaces, Deployments, Pods, PVCs) is readable as this identity"
+       hint "you normally CAN read all four — Dev Spaces grants them to you in ${WS_NS}. Landing here means the API could not be asked, or that grant is missing: retry, then show your instructor 'oc get rolebinding -n ${WS_NS}'. Meanwhile confirm in the dashboard that your parasol-claims workspace is running" ;;
+  esac
 fi
 
 verify_summary
