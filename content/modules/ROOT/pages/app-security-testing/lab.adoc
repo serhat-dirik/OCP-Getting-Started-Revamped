@@ -576,17 +576,18 @@ oc get taskrun -n $NS -l tekton.dev/pipelineTask=dast-zap --sort-by=.metadata.cr
   -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "WARN-NEW|FAIL-NEW|DAST FAILED"
 ----
 
-.Expected output (ZAP flags the missing headers on the RUNNING app — a check only possible post-deploy)
+.Expected output (ZAP flags missing headers on the RUNNING app — a check only possible post-deploy. Unlike the CVEs in the earlier gates, *which rules fire and the exact counts move with ZAP's shipped ruleset* — read the rule names in your own output, not these)
 [source,texinfo]
 ----
 WARN-NEW: Content Security Policy (CSP) Header Not Set [10038] x 3
-WARN-NEW: Storable and Cacheable Content [10049] x 3
 WARN-NEW: Permissions Policy Header Not Set [10063] x 3
-FAIL-NEW: 0   WARN-NEW: 3   INFO: 0   IGNORE: 0   PASS: 64
+WARN-NEW: X-Content-Type-Options Header Missing [10021] x 3
+WARN-NEW: Cross-Origin-Resource-Policy Header Missing or Invalid [90004] x 1
+FAIL-NEW: 0   WARN-NEW: 4   INFO: 0   IGNORE: 0   PASS: 62
 ❌ DAST FAILED — ZAP reported a gating alert on the running app.
 ----
 
-The `dast-zap` stage runs with `FAIL_ON_WARN=true`, so these *warnings* fail the build. ZAP found three missing response headers: no Content-Security-Policy, no Permissions-Policy, and cacheable responses (claim data a browser could store). The fix is to *set the headers* in Quarkus configuration — one line per header, applied to every response. Append them to `application.properties` and commit:
+The `dast-zap` stage runs with `FAIL_ON_WARN=true`, so *warnings* fail the build — and because it is `FAIL_ON_WARN`, **a single remaining warning keeps the gate shut**, no matter how many you have cleared. Every one of these is a missing HTTP response header. The fix is to *set them* in Quarkus configuration — one line per header, applied to every response. Append them to `application.properties` and commit:
 
 // media-pass: screenshot app-security-testing-06-zap-baseline-summary.png — the dast-zap TaskRun
 // ZAP baseline WARN/FAIL summary against the running Route: the missing security headers
@@ -606,10 +607,13 @@ quarkus.http.header."Referrer-Policy".value=no-referrer
 quarkus.http.header."Permissions-Policy".value=geolocation=(), camera=(), microphone=()
 quarkus.http.header."Strict-Transport-Security".value=max-age=31536000; includeSubDomains
 quarkus.http.header."Cache-Control".value=no-store
+quarkus.http.header."Cross-Origin-Resource-Policy".value=same-origin
 EOF
 git commit -am "fix(DAST): add HTTP security response headers"
 git push origin seed-appsec
 ----
+
+TIP: That last push is the one that prompts. Enter your Gitea username (`{user}`) and the workshop password when git asks — `credential.helper store` from exercise 1 means it only asks once.
 
 *Re-run one final time.* The rebuilt app sets its headers, ZAP finds nothing to warn about, and — for the first time — *every gate is green*: SAST, SCA, unit test, build, image scan, sign, config check, deploy, DAST. The scanned, signed image is deployed with its Route.
 
