@@ -141,6 +141,17 @@ teach node pinning. That worker does not count toward the four.
 **Four non-batch plus one batch is five**, at every cohort size. Aggregate headroom does not help
 here: a workload that must spread cannot borrow capacity from a node it is forbidden to use.
 
+What the module actually counts is **schedulable nodes that carry the `worker` role**, which is not
+always the same as nodes you bought as workers. On a compact cluster whose control planes also carry
+the worker role and are not tainted, they count — so five *schedulable* nodes can satisfy this with
+fewer dedicated workers. On a production-shaped cluster with tainted control planes, they do not
+count, and five workers is the number. Plan for five unless you know your control planes are
+schedulable; check with:
+
+```
+oc get nodes -l node-role.kubernetes.io/worker
+```
+
 The installer already refuses the trap in one direction — it **skips the batch taint below three
 workers**, because tainting one of two workers starved the rest of the cluster in practice. It does
 not, however, know whether you enabled the scheduling module, so three workers plus that module is a
