@@ -154,29 +154,7 @@ EXEMPT: dict[str, str] = {}
 # confirmed by hand with a real on-disk edit as well as by this file's in-process mutation, because
 # a harness reporting holes in guards deserves the same "measured two independent ways" bar the
 # audit it automates held itself to.
-KNOWN_UNPROVEN: dict[str, str] = {
-    "credential-redaction-guard.py::emit:_adoc_blocks:550df50c":
-        "the unterminated-`----`-block tail branch. Nothing in the canary and nothing in the "
-        "scanned roots leaves a source block open, so the branch that treats the tail as one block "
-        "is exercised by no corpus. Witness: a canary section ending on an unclosed `----` with a "
-        "credential inside it.",
-    "credential-redaction-guard.py::emit:_logical_commands:959fafad":
-        "the ONLY yield in the non-AsciiDoc block grouper. The canary is .adoc, so it routes "
-        "through _adoc_blocks; the real tree is clean, so dropping the grouping keeps 0 findings "
-        "at 0. The pipeline-marrying false positive its docstring describes is therefore pinned by "
-        "nothing. Witness: a .sh canary whose truncation and stream sit in one pipeline.",
-    "credential-redaction-guard.py::emit:collect_files:6720fbbb":
-        "the explicitly-named-single-file branch. Both modes pass directories, so the "
-        "`guard.py <file>` path the docstring spends fourteen lines justifying is never taken. "
-        "Witness: a self-test assertion that collect_files([<a named file>]) returns it.",
-    "credential-redaction-guard.py::predicate:_has_shebang":
-        "forced True and forced False both leave 0/1. It only decides extensionless files during a "
-        "directory walk, and no extensionless file in the scanned roots carries a finding either "
-        "way. Witness: an extensionless canary sidecar with a shebang and a literal credential.",
-    "version-anchor-guard.py::emit:collect_files:6720fbbb":
-        "same shape as credential-redaction's, same file-vs-directory reason: the real run walks "
-        "ATTENDEE_PAGES under a directory root and never names a file.",
-}
+KNOWN_UNPROVEN: dict[str, str] = {}
 
 
 def _ledgers() -> dict:

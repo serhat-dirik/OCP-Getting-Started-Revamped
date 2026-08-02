@@ -326,7 +326,13 @@ def find_offenders(path: pathlib.Path):
 # This guard and its canary exist to CONTAIN the patterns it hunts — its docstring quotes `cut -c`
 # and `b[:400]`, and the canary is nothing but offenders. Scanning them during a real run reports
 # the detector to itself. lint.yml's privacy guard excludes its own file for exactly this reason.
-SELF_EXCLUDED = {"credential-redaction-guard.py", "credential-redaction-guard.canary.adoc"}
+#
+# "pipeline-sidecar" is the extensionless, genuinely-offending fixture under
+# credential-redaction-guard.canary/ that self_test() walks with skip_self=False to prove the
+# shebang-sniff and the non-AsciiDoc block grouper (see self_test()). It must stay out of the real
+# tree's plain scan for the same reason the .adoc canary does — it is a finding by design.
+SELF_EXCLUDED = {"credential-redaction-guard.py", "credential-redaction-guard.canary.adoc",
+                 "pipeline-sidecar"}
 
 
 def require_tree_floors(scope, include_scan: bool = True) -> None:
@@ -600,6 +606,38 @@ def self_test():
     # ever handed to them. Measured 2026-08-01: `collect_files() → files[:1]` left --self-test at 1
     # AND the real run at 0, so every signal stayed green while one file of 902 was inspected.
     problems += Scope.self_check()          # the ledger mechanism itself, exercised by this CI job
+
+    # Proof for collect_files' file-vs-directory branch. Every call above — and every call in
+    # main()'s plain run — hands collect_files a DIRECTORY; `guard.py <file>`, the shape the
+    # docstring spends fourteen lines justifying, is real-run reachable but exercised by nothing.
+    # skip_self=False because the canary's own name is deliberately in SELF_EXCLUDED, and that
+    # exclusion is a different mechanism from the one this proof is about.
+    named = collect_files([CANARY_PATH], skip_self=False)
+    if named != [CANARY_PATH]:
+        problems.append(f"[scope] collect_files([{CANARY_PATH}]) returned {named!r}, not "
+                        f"[{CANARY_PATH}] — the explicitly-named-file branch is broken")
+
+    # Proof for the shebang-sniff predicate (_has_shebang) and the non-AsciiDoc block grouper
+    # (_logical_commands). Both need a WALKED directory — an explicitly-named file skips the
+    # suffix/shebang check entirely — holding an extensionless script whose credential-bearing
+    # pipeline rule 1 only catches if the grouper keeps its three lines together. SELF_EXCLUDED
+    # keeps the fixture out of the real tree's plain scan (it is a genuine offender by design);
+    # skip_self=False here is what lets THIS walk see it anyway.
+    sidecar_dir = pathlib.Path(__file__).resolve().parent / "credential-redaction-guard.canary"
+    sidecar_expect = sidecar_dir / "pipeline-sidecar"
+    sidecar_files = collect_files([sidecar_dir], skip_self=False)
+    if sidecar_files != [sidecar_expect]:
+        problems.append(f"[scope] collect_files([{sidecar_dir}]) returned {sidecar_files!r}, not "
+                        f"[{sidecar_expect}] — the shebang-sniffed sidecar fixture is missing or "
+                        f"the walk did not find it, so neither _has_shebang nor "
+                        f"_logical_commands can be proven")
+    else:
+        sidecar_rules = {rule for _, rule, _ in find_offenders(sidecar_expect)}
+        if RULE_TRUNCATION not in sidecar_rules:
+            problems.append(f"[blind rule] the pipeline sidecar fixture ({sidecar_expect}) "
+                            f"produced no {RULE_TRUNCATION!r} finding — either the shebang sniff "
+                            f"excluded it from the walk or _logical_commands stopped grouping its "
+                            f"pipeline into one block")
 
     # Proof 0 — the real tree still clears this guard's own floors, AND collect_files still records
     # what it walked. A count recorded nowhere fails the floor exactly like a walk that never ran,

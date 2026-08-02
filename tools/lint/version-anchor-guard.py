@@ -310,6 +310,15 @@ def main(argv=None):
         missing = {"attr", "literal", "marker"} - kinds_seen
         if missing:
             failures.append(f"the canary did not trigger the {sorted(missing)} detector(s).")
+        # Proof for collect_files' file-vs-directory branch. The plain run above (and every other
+        # call to collect_files in this file) always hands it a DIRECTORY
+        # (content/modules/ROOT/pages); the explicitly-named-single-file shape — `guard.py <file>`
+        # — is real-run reachable (it lives in main()'s non-self-test branch) but exercised by no
+        # canary, so assert it directly against the fixture itself.
+        named = collect_files([fixture])
+        if named != [fixture]:
+            failures.append(f"collect_files([{fixture}]) returned {named!r}, not [{fixture}] — "
+                            f"the explicitly-named-file branch is broken.")
         # Per-LINE expectations, not a total. The old check looked for "EXEMPT-MUST-NOT-FIRE" in the
         # offender's TEXT — but text is the matched token ("4.22"), never the line — so it could
         # never fire, and blinding the opt-out left the self-test at 1. The markers in the fixture
