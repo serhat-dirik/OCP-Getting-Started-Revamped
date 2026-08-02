@@ -21,40 +21,32 @@ STAGE="${USER_NAME}-stage"
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
 # Cluster ingress domain — attendee-readable; used to derive route hosts without a cross-namespace
-# route read (attendees cannot read routes in gitea/student-gitops).
+# route read (attendees cannot read routes in gitea/student-gitops). Only student_argo_up below still
+# uses this local helper directly — gitea_host() (shared, tools/verify/_lib.sh) does its own ingress
+# read internally and no longer calls out to it.
 # ALWAYS returns 0 and signals failure with an empty string — deliberately, and unchanged from the
-# `|| true` it replaces. Both callers assign it (`domain="$(ingress_domain)"`), and under `set -e` an
-# assignment whose command substitution exits non-zero kills the script. It is also the second half of
-# gitea_host()'s route-then-domain fallback, which the lint guard excludes by name precisely because
-# that fallback does not care WHY a read failed; routed through oc_read for consistency only.
+# `|| true` it replaces. Its one remaining caller assigns it (`domain="$(ingress_domain)"`), and under
+# `set -e` an assignment whose command substitution exits non-zero kills the script.
 ingress_domain() {
   oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || OC_OUT=""
   printf '%s' "$OC_OUT"
 }
 
-# Gitea host: route if readable, else derived from the ingress domain (route "gitea" in ns "ogsr-gitea").
-gitea_host() {
-  local host domain
-  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]]; then
-    domain="$(ingress_domain)"
-    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
-  fi
-  echo "$host"
-}
+# gitea_host() (route if readable, else derived from the cluster ingress domain — attendees cannot
+# read routes in the gitea namespace) is shared — tools/verify/_lib.sh. GLOBAL, not echo-shaped: call
+# it bare and read $GITEA_HOST, never `$(gitea_host)` (that would strand VERIFY_INCONCLUSIVE in a
+# subshell).
 
 # The per-user promotion fork exists → the Gitea API answers 2xx for {user}/claims-config.
 fork_exists() {
-  local host; host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf -o /dev/null "https://${host}/api/v1/repos/${USER_NAME}/claims-config"
+  gitea_host || return 1
+  curl -ksf -o /dev/null "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/claims-config"
 }
 
 # The dev overlay was personalized by the fork job → its kustomization sets namespace {user}-dev.
 overlay_personalized() {
-  local host; host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf "https://${host}/api/v1/repos/${USER_NAME}/claims-config/raw/overlays/dev/kustomization.yaml?ref=main" 2>/dev/null \
+  gitea_host || return 1
+  curl -ksf "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/claims-config/raw/overlays/dev/kustomization.yaml?ref=main" 2>/dev/null \
     | grep -q "namespace: ${DEV}"
 }
 

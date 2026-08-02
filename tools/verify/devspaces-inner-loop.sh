@@ -13,24 +13,15 @@ WS_NS="${USER_NAME}-devspaces"
 
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
-# Gitea host discovered from the cluster ingress domain so the script stays
-# environment-agnostic and needs no cross-namespace route read (attendees can't
-# read routes in the gitea namespace): route "gitea" in ns "ogsr-gitea" → gitea-ogsr-gitea.<domain>.
-gitea_host() {
-  local host domain
-  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]]; then
-    domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
-  fi
-  echo "$host"
-}
+# gitea_host() (route if readable, else derived from the cluster ingress domain — attendees can't
+# read routes in the gitea namespace) is shared — tools/verify/_lib.sh. GLOBAL, not echo-shaped: call
+# it bare and read $GITEA_HOST, never `$(gitea_host)` (that would strand VERIFY_INCONCLUSIVE in a
+# subshell).
 
 # The per-user fork exists → the Gitea API answers 2xx for {user}/parasol-claims.
 fork_exists() {
-  local host; host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf -o /dev/null "https://${host}/api/v1/repos/${USER_NAME}/parasol-claims"
+  gitea_host || return 1
+  curl -ksf -o /dev/null "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/parasol-claims"
 }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's

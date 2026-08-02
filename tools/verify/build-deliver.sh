@@ -16,19 +16,10 @@ NS="${USER_NAME}-dev"
 
 # --- helpers (kept dependency-free: oc + curl only) --------------------------
 
-# Gitea host, discovered environment-agnostically. Instructors/CI can read the route;
-# an attendee (userN) cannot read routes in the gitea namespace, so fall back to the
-# conventional host derived from the cluster ingress domain (route "gitea" in namespace
-# "gitea" → gitea-ogsr-gitea.<domain>).
-gitea_host() {
-  local host domain
-  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]]; then
-    domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
-  fi
-  echo "$host"
-}
+# gitea_host() (route if readable, else derived from the cluster ingress domain — attendees cannot
+# read routes in the gitea namespace) is shared — tools/verify/_lib.sh. GLOBAL, not echo-shaped: call
+# it bare and read $GITEA_HOST, never `$(gitea_host)` (that would strand VERIFY_INCONCLUSIVE in a
+# subshell).
 
 # Attendee-visibility of the catalog Templates in the shared `openshift` namespace. `--as` needs
 # impersonation rights (admin/CI only); when the attendee runs this themselves their own
@@ -56,10 +47,9 @@ attendee_reads_catalog_templates() {
 
 # A Gitea repo exists → the (public) repo API answers 2xx anonymously.
 gitea_repo_exists() {
-  local owner="$1" repo="$2" host
-  host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf -o /dev/null "https://${host}/api/v1/repos/${owner}/${repo}"
+  local owner="$1" repo="$2"
+  gitea_host || return 1
+  curl -ksf -o /dev/null "https://${GITEA_HOST}/api/v1/repos/${owner}/${repo}"
 }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's

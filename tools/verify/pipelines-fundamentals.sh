@@ -43,40 +43,30 @@ attendee_reads_task_library() {
   fi
 }
 
-# Gitea host, discovered environment-agnostically (route if readable, else derived from the
-# cluster ingress domain — the attendee-safe pattern; attendees can't read the gitea route).
-gitea_host() {
-  local host domain
-  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]]; then
-    domain="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-    [[ -n "$domain" ]] && host="gitea-ogsr-gitea.${domain}"
-  fi
-  echo "$host"
-}
+# gitea_host() (route if readable, else derived from the cluster ingress domain — the attendee-safe
+# pattern; attendees can't read the gitea route) is shared — tools/verify/_lib.sh. GLOBAL, not
+# echo-shaped: call it bare and read $GITEA_HOST, never `$(gitea_host)`.
 
 # A Gitea repo exists → the (public) repo API answers 2xx anonymously.
 gitea_repo_exists() {
-  local owner="$1" repo="$2" host
-  host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf -o /dev/null "https://${host}/api/v1/repos/${owner}/${repo}"
+  local owner="$1" repo="$2"
+  gitea_host || return 1
+  curl -ksf -o /dev/null "https://${GITEA_HOST}/api/v1/repos/${owner}/${repo}"
 }
 
 # A file exists in a (public) Gitea repo → the contents API answers 2xx anonymously.
 gitea_file_exists() {
-  local owner="$1" repo="$2" path="$3" host
-  host="$(gitea_host)"
-  [[ -n "$host" ]] || return 1
-  curl -ksf -o /dev/null "https://${host}/api/v1/repos/${owner}/${repo}/contents/${path}"
+  local owner="$1" repo="$2" path="$3"
+  gitea_host || return 1
+  curl -ksf -o /dev/null "https://${GITEA_HOST}/api/v1/repos/${owner}/${repo}/contents/${path}"
 }
 
 # A raw file on a branch contains a needle — used to assert the Ex3 break-fix TARGET is present
 # (fork liveness alone false-passed a stale fork whose ClaimResourceTest.java lacked the toggle, G4).
 gitea_raw_contains() {
-  local owner="$1" repo="$2" path="$3" ref="$4" needle="$5" host
-  host="$(gitea_host)"; [[ -n "$host" ]] || return 1
-  curl -ksf "https://${host}/api/v1/repos/${owner}/${repo}/raw/${path}?ref=${ref}" 2>/dev/null | grep -q "$needle"
+  local owner="$1" repo="$2" path="$3" ref="$4" needle="$5"
+  gitea_host || return 1
+  curl -ksf "https://${GITEA_HOST}/api/v1/repos/${owner}/${repo}/raw/${path}?ref=${ref}" 2>/dev/null | grep -q "$needle"
 }
 
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's

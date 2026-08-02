@@ -142,6 +142,48 @@ oc_read_optional() {  # <oc args…> → 0 + OC_OUT; 1 on ANY failure, VERIFY_IN
   return 1
 }
 
+# ── the gitea host, once ────────────────────────────────────────────────────────────────────────
+#
+# Route "gitea" in namespace "ogsr-gitea" → gitea-ogsr-gitea.<ingress-domain>. Copy-pasted byte-for-
+# byte (barring drift) into SEVEN tools/verify/*.sh scripts — config-multienv, build-deliver,
+# devspaces-inner-loop, developer-hub-golden-paths, gitops-fundamentals, pipelines-fundamentals,
+# trusted-supply-chain — the same argument as deploy_ready above, once more: seven places to get the
+# same fix wrong. gitops-at-scale.sh's read_gitea_host() and platform-orientation.sh's inlined
+# gitea_user_exists() were already converted to the oc_read/oc_read_optional contract; this canonical
+# version follows that pattern, so collapsing the other seven onto it finishes a conversion already
+# under way rather than starting a new one.
+#
+# GLOBAL, not echo-shaped — deliberately, for the same reason developer-hub-golden-paths'
+# ingress_domain()/rhdh_host() and gitops-at-scale's read_ingress_domain() are global too: a caller
+# assigning via `host="$(gitea_host)"` runs the whole body in a SUBSHELL, and the VERIFY_INCONCLUSIVE
+# the ingress-domain fallback raises on a genuine outage dies with that subshell — the flag never
+# reaches the caller's check(), so a real cluster blip renders as a false ❌ on the attendee's work
+# instead of ⚠. Six of the seven collapsed copies called `gitea_host` exactly that way; it was
+# invisible before because none of them touched oc_read at all (`2>/dev/null || true` never sets the
+# flag either way), so collapsing onto oc_read/oc_read_optional without ALSO dropping the `$(...)`
+# calling convention at every call site would have reintroduced the identical trap on the one read
+# this whole helper battery exists to catch.
+GITEA_HOST=""
+gitea_host() {  # → 0 + GITEA_HOST set; 1 when the host could not be determined (flag says why)
+  GITEA_HOST=""
+  # oc_read_OPTIONAL, not oc_read: this route read is a best-effort SHORTCUT, and an attendee is
+  # EXPECTED to be refused it (rule 10 — routes in ogsr-gitea are not theirs to read). Its refusal
+  # must not become the caller's verdict, because the ingress-domain fallback below answers the same
+  # question perfectly well. tools/lint/verify-oc-read-guard.sh used to exclude this fallback BY NAME
+  # from its blind-read ratchet, back when every copy still used a raw `2>/dev/null`; routing through
+  # oc_read_optional/oc_read here retires that exclusion's reason to exist rather than relying on it.
+  if oc_read_optional get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' && [[ -n "$OC_OUT" ]]; then
+    GITEA_HOST="$OC_OUT"
+    return 0
+  fi
+  # Plain oc_read, not oc_read_optional: this IS the last resort, so if it also cannot be asked,
+  # "could not determine the host" is genuinely inconclusive and must raise VERIFY_INCONCLUSIVE — what
+  # keeps a real cluster outage a ⚠ instead of a false ❌ on a genuinely missing Gitea object.
+  oc_read get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' || return 1
+  [[ -n "$OC_OUT" ]] || return 1
+  GITEA_HOST="gitea-ogsr-gitea.${OC_OUT}"
+}
+
 # ── is the cluster there at all? the fallback probe HTTP checks grade against ─────────────────────
 #
 # One cheap question, asked ONLY after something else already failed: did ANY apiserver answer? kube's

@@ -38,14 +38,8 @@ rhdh_host() {
   RHDH_HOST="backstage-developer-hub-rhdh.${OC_OUT}"
 }
 
-gitea_host() {
-  local host=""
-  host="$(oc get route gitea -n ogsr-gitea -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -z "$host" ]] && ingress_domain; then
-    host="gitea-ogsr-gitea.${OC_OUT}"
-  fi
-  echo "$host"
-}
+# gitea_host() is shared — tools/verify/_lib.sh. GLOBAL, not echo-shaped, same reason as
+# ingress_domain()/rhdh_host() above: call it bare and read $GITEA_HOST, never `$(gitea_host)`.
 
 # The shared RHDH portal answers on its route.
 rhdh_up() {
@@ -89,23 +83,21 @@ template_registered() {
 
 # The attendee's dedicated scaffold org exists (the golden-path publish target).
 scaffold_org_exists() {
-  local h; h="$(gitea_host)"
-  [[ -n "$h" ]] || return 1
-  curl -ksf -o /dev/null --max-time 15 "https://${h}/api/v1/orgs/${SCAFFOLD_ORG}"
+  gitea_host || return 1
+  curl -ksf -o /dev/null --max-time 15 "https://${GITEA_HOST}/api/v1/orgs/${SCAFFOLD_ORG}"
 }
 
 # Count repos in the {user}-svcs scaffold org (dedicated to golden-path scaffolds; public repos list
 # anonymously — attendee-safe).
 scaffold_repo_count() {
-  local h; h="$(gitea_host)"
-  [[ -n "$h" ]] || { echo 0; return; }
+  gitea_host || { echo 0; return; }
   # `|| true`, not `|| echo 0` — the python3 try/except already guarantees exactly one line of
   # output even when curl fails to connect (empty stdin → caught, prints 0). Under pipefail the
   # pipe's exit status is curl's non-zero code (not python3's 0), so a trailing `|| echo 0` fires
   # too, duplicating the line into a corrupt "0\n0" that any exact-match caller compares wrong; and
   # under `set -e` the bare pipe with no `|| true` at all would kill the whole script on that same
   # curl failure since this is the function's last statement.
-  curl -ks --max-time 15 "https://${h}/api/v1/orgs/${SCAFFOLD_ORG}/repos?limit=50" 2>/dev/null \
+  curl -ks --max-time 15 "https://${GITEA_HOST}/api/v1/orgs/${SCAFFOLD_ORG}/repos?limit=50" 2>/dev/null \
     | python3 -c 'import sys,json
 try: d=json.load(sys.stdin)
 except Exception: d=[]
