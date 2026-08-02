@@ -373,20 +373,27 @@ check() {  # check "<description>" <command...>  — pass/fail/SKIP one assertio
     [[ "${#OC_ERR}" -le 160 ]] || why="${why}…"
     # "Refused to answer" and "could not answer" are different problems with different next steps, and
     # telling an attendee to retry an RBAC denial wastes their time. Split the message accordingly.
+    #
+    # Every line below is prefixed "could not check:" for one reason: ${desc} is written as a positive
+    # ASSERTION, because the ✅ path reuses the same string. Emitted bare on this path it states the
+    # thing as fact and then explains it could not be read — e.g. "⚠ Dev Spaces namespace
+    # user2-devspaces exists (you signed in to the dashboard) — not readable as this identity", where
+    # the namespace did NOT exist and the attendee had NOT signed in (measured 2026-08-02). The
+    # verdict was right and the sentence was false. The prefix turns the claim back into a subject.
     case "$OC_ERR" in
       *"(Forbidden)"*|*" is forbidden"*)
-        warn "${desc} — not readable as this identity${why:+ (${why})}"
+        warn "could not check: ${desc} — not readable as this identity${why:+ (${why})}"
         hint "not yours to fix and not graded: this check asks for something your account may not read, so it has no verdict here. Run it where it can be answered — your own cockpit terminal for your own namespaces, or an instructor/CI run for cluster-wide objects"
         ;;
       *"and neither could the cluster API"*)
         # http_read's ⚠: the app URL did not answer AND the fallback probe found no apiserver either.
         # Named separately from the oc branch below so the line says what was actually attempted —
         # the attendee's next step is the same, but "the app did not answer" is the honest wording.
-        warn "${desc} — the app did not answer and neither did the cluster API${why:+ (${why})}"
+        warn "could not check: ${desc} — the app did not answer and neither did the cluster API${why:+ (${why})}"
         hint "not your lab, and not graded: nothing on this cluster could be reached, so this check has no verdict. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor"
         ;;
       *)
-        warn "${desc} — the cluster API did not answer${why:+ (${why})}"
+        warn "could not check: ${desc} — the cluster API did not answer${why:+ (${why})}"
         hint "not your lab, and not graded: the cluster could not be asked, so this check has no verdict. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor"
         ;;
     esac
