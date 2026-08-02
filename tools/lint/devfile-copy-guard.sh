@@ -15,6 +15,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=tools/lint/_parse-guard-args.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_parse-guard-args.sh"
+
 SOURCE="apps/parasol-claims/devfile.yaml"
 COPY="gitops/entry-states/devspaces-inner-loop/files/devfile.yaml"
 
@@ -31,7 +34,8 @@ compare() { # compare <root> — 0 identical, 1 drifted, 2 cannot inspect
   return 1
 }
 
-if [[ "${1:-}" == "--self-test" ]]; then
+parse_guard_args "$@"
+if [[ "$GUARD_SELF_TEST" -eq 1 ]]; then
   # A guard that has never been shown to fire cannot certify a clean tree.
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   mkdir -p "$tmp/$(dirname "$SOURCE")" "$tmp/$(dirname "$COPY")"
@@ -46,10 +50,15 @@ if [[ "${1:-}" == "--self-test" ]]; then
   rm -f "$tmp/$COPY"
   compare "$tmp" >/dev/null; gone_rc=$?
 
+  # if/else, not `A && B || C`: with that shape C also runs when B fails, so a broken success
+  # branch would silently report the canary as uncaught (SC2015).
   fail=0
-  [[ "$clean_rc" -eq 0 ]] && ok "identical copies pass"        || { bad "identical copies did NOT pass (rc=$clean_rc)"; fail=1; }
-  [[ "$drift_rc"  -eq 1 ]] && ok "a drifted copy is caught"     || { bad "drift was NOT caught (rc=$drift_rc)"; fail=1; }
-  [[ "$gone_rc"   -eq 2 ]] && ok "a missing copy is caught"     || { bad "missing copy was NOT caught (rc=$gone_rc)"; fail=1; }
+  if [[ "$clean_rc" -eq 0 ]]; then ok "identical copies pass"
+  else bad "identical copies did NOT pass (rc=$clean_rc)"; fail=1; fi
+  if [[ "$drift_rc" -eq 1 ]]; then ok "a drifted copy is caught"
+  else bad "drift was NOT caught (rc=$drift_rc)"; fail=1; fi
+  if [[ "$gone_rc" -eq 2 ]]; then ok "a missing copy is caught"
+  else bad "missing copy was NOT caught (rc=$gone_rc)"; fail=1; fi
   if [[ "$fail" -ne 0 ]]; then
     bad "self-test FAILED — this guard cannot be trusted on the real tree"
     exit 2
