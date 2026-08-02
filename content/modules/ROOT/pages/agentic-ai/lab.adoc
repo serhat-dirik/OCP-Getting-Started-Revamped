@@ -555,10 +555,30 @@ An image from the shared registry, an edge Route, a readiness probe on `/q/healt
 ----
 oc rollout restart deploy/parasol-agent -n $NS
 oc rollout status deploy/parasol-agent -n $NS --timeout=120s
-curl -ksS "$AGENT/q/health/ready" | jq -r '.status'
+# The Route needs a moment longer to serve the NEW pod than the Deployment needs to call itself
+# rolled out — those are two different things converging at their own pace. Poll rather than ask once.
+for i in $(seq 1 10); do
+  STATUS=$(curl -ksS "$AGENT/q/health/ready" 2>/dev/null | jq -r '.status' 2>/dev/null)
+  [ "$STATUS" = "UP" ] && break
+  sleep 3
+done
+echo "status: ${STATUS:-<no answer yet>}"
 ----
 
-The new pod comes up, its readiness probe pings *both* MCP servers again, and only when both answer `OK` does it report `UP` and start taking traffic. A *Ready* agent is one that has re-proven its tool wiring — no special handling, just probes doing their job.
+The new pod comes up, its readiness probe pings *both* MCP servers again, and only when both answer `OK` does it report `UP` and start taking traffic.
+
+[NOTE]
+.Why that loop, instead of one `curl`
+====
+`oc rollout status` reports on the *Deployment*. The *Route* is a separate piece of machinery, and it
+can still be forwarding to the pod on its way out for a second or two after the Deployment declares
+itself rolled out. Ask once, in that window, and you get an empty or non-JSON body — which makes `jq`
+fail with a parse error rather than tell you anything useful, and looks far more alarming than the
+two-second gap it actually is. Measured live on 2026-08-02: exactly that error on the first attempt,
+then `UP` on the retry a moment later.
+====
+
+A *Ready* agent is one that has re-proven its tool wiring — no special handling, just probes doing their job.
 
 [.checkpoint]
 ====
