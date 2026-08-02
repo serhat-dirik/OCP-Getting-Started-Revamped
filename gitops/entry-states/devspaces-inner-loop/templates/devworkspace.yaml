@@ -1,0 +1,85 @@
+{{/*
+Pre-creates the attendee's Dev Spaces workspace, instead of having them open a "factory URL".
+
+WHY THIS EXISTS — the factory URL cannot work against our Gitea, on any cluster.
+Dev Spaces supports GitHub, GitLab, Bitbucket and Azure DevOps only (CheCluster.spec.gitServices
+accepts exactly those four). It does not recognise Gitea, so it falls back to GitHub's layout and
+tries to fetch the devfile from `raw.<gitea-host>`. That fails twice over, measured 2026-08-02:
+
+  1. TLS — the OpenShift wildcard cert covers `*.apps.<domain>`, which is ONE label. `raw.gitea-
+     ogsr-gitea.apps.<domain>` adds a second, so the name is outside the cert. Nothing can fix this:
+     the cert is a real, publicly-trusted one (Google Trust Services), so this is a hostname
+     mismatch, NOT an untrusted CA — `che-git-self-signed-cert` and `http.sslVerify=false` are
+     both aimed at the wrong problem, and both operate after a workspace exists, which this failure
+     precedes ("Failed to create the workspace").
+  2. PATH — even with TLS solved, Che asks for GitHub's raw path shape. Measured against our Gitea:
+       /user/repo/main/devfile.yaml              -> 404   (what Che requests)
+       /user/repo/raw/branch/main/devfile.yaml   -> 200   (what Gitea serves)
+
+So the workspace is created here, where none of that matters: the DevWorkspace carries the devfile
+inline and clones over plain HTTPS from the route, which IS covered by the cert.
+
+VERIFIED on cluster-s7hkp 2026-08-02, both cases:
+  * in a namespace Che had created  — Ready in 14s, /projects/parasol-claims populated
+  * in a namespace WE created, for an attendee who had NEVER signed in (user3) — same result
+The second is what makes this viable at `ws prep` time: Che adopts a namespace carrying its two
+labels and the username annotation below, and does not require a prior dashboard sign-in.
+
+The module's exercise 4 (extend the devfile, restart the workspace) is unaffected: it uses the IDE's
+"Restart Workspace from Local Devfile", which reads the devfile out of the CLONE, not from wherever
+the workspace was first defined.
+*/}}
+{{- $devfile := .Files.Get "files/devfile.yaml" | fromYaml }}
+{{- if not $devfile.components }}
+{{- fail "files/devfile.yaml did not parse, or has no components — the DevWorkspace would start an empty workspace. It is a copy of apps/parasol-claims/devfile.yaml; tools/lint/devfile-drift-guard.sh keeps the two identical." }}
+{{- end }}
+---
+# Che's own per-user workspace namespace. Normally created by the dashboard on first sign-in; we
+# create it so the workspace can exist before the attendee ever opens Dev Spaces. The two labels and
+# the username annotation are exactly what Che stamps on its own (read off a Che-created namespace,
+# 2026-08-02) — they are what makes Che treat this as the user's workspace namespace rather than an
+# unrelated project.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.user }}-devspaces
+  labels:
+    app.kubernetes.io/component: workspaces-namespace
+    app.kubernetes.io/part-of: che.eclipse.org
+    workshop.redhat.com/module: devspaces-inner-loop
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    che.eclipse.org/username: {{ .Values.user | quote }}
+---
+apiVersion: workspace.devfile.io/v1alpha2
+kind: DevWorkspace
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-devspaces
+  labels:
+    workshop.redhat.com/module: devspaces-inner-loop
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+spec:
+  # started:false — the entry state DEFINES the workspace; the attendee starts it from the dashboard,
+  # which is the moment exercise 1 asks them to feel the cold start. Starting it here would burn a
+  # workspace pod per attendee from prep time and hand them a warm one, deleting the lesson.
+  started: false
+  routingClass: che
+  template:
+    projects:
+      - name: {{ .Values.sourceRepo }}
+        git:
+          remotes:
+            # The ROUTE, not the internal Service: the attendee also pushes to this remote in
+            # exercise 5, and a URL they can open in a browser is worth more than saving a hop.
+            # The route's cert is publicly trusted and covers this name (one label under .apps).
+            origin: https://gitea-{{ .Values.giteaNamespace }}.{{ .Values.clusterDomain }}/{{ .Values.user }}/{{ .Values.sourceRepo }}.git
+          checkoutFrom:
+            revision: main
+    # Lifted verbatim from the attendee's own devfile so the starting workspace is exactly what the
+    # repo describes — same image, same Java 21 pinning, same Quarkus dev-mode command. Read from the
+    # file rather than retyped here, so the two cannot drift apart silently.
+    components: {{ toYaml $devfile.components | nindent 6 }}
+    commands: {{ toYaml $devfile.commands | nindent 6 }}
