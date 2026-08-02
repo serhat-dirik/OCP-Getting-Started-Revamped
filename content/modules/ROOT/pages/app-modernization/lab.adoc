@@ -160,7 +160,7 @@ NOTE: The *application* name carries your username; the *repository* name does n
 // submit button is "Create" (not "Save") — Cancel sits beside it.
 +
 image::app-modernization/app-modernization-01-create-application.png["The MTA \"New application\" drawer filled in: the Name field carries the application name ending in the username, and below the expanded \"Source code\" section the Repository type reads Git, the Source Repository field holds the HTTPS URL of the attendee's Gitea fork of parasol-legacy-claims, and Branch reads main. Notice the Source Repository field — this is what MTA clones and analyses."]
-. *Run the analysis.* Select the application, click *Analyze*. Choose *Source code* mode, then on *Set targets* select the five tiles *Containerization*, *Linux*, *OpenJDK* (pick sub-version *OpenJDK 21* — the default 11 changes one issue and the total-effort number), *Jakarta EE 9*, and *JBoss Web Server 6* (together these resolve to the rule labels `cloud-readiness`, `linux`, `openjdk`, `jakarta-ee`, `jws`). Advance through the wizard and *Run*.
+. *Run the analysis.* Select the application, click *Analyze*. Choose *Source code* mode, then on *Set targets* select the five tiles *Containerization*, *Linux*, *OpenJDK* (pick sub-version *OpenJDK 21* — the default 11 changes one issue and the total-effort number), *Jakarta EE 9*, and *JBoss Web Server 6* (together these resolve to the rule labels `cloud-readiness`, `linux`, `openjdk21`, `jakarta-ee`, `jws6` — the wizard's own *Review* step shows them version-qualified like this). Advance through the wizard and *Run*.
 +
 image::app-modernization/app-modernization-02-set-targets.png["The Application analysis wizard on its \"Set targets\" step, with the wizard steps Analysis mode, Set targets, Scope, Advanced, Custom rules, Options and Review down the left. The target tiles are shown as a grid of cards, each with a checkbox in its top-right corner; the Containerization card is checked and highlighted. Notice that a tile is selected through its checkbox, and that tiles such as OpenJDK carry their own sub-version dropdown."]
 . *Wait for it to finish.* The analysis runs as a task in the Hub; even a small source app like this takes *a few minutes* (measured ~*4–5 minutes* end to end — pod scheduling + the analyzer image pull + the rule run). The *Status* becomes *Completed*.
@@ -227,7 +227,9 @@ image::app-modernization/app-modernization-05-issue-incident.png["The Hardcoded 
 
 [.checkpoint]
 ====
-✔ *Verify:* You can name the *mandatory* blockers, point to the *highest-effort* one (Spring/Jakarta EE 9, effort 3), and group the six mandatory issues into ~three pieces of work — the config externalization, the `javax`→`jakarta` migration, and the runtime move.
+✔ *Verify:* You can name *your report's* mandatory blockers, point to *its* highest-effort one, and group them into ~three pieces of work — the config externalization, the `javax`→`jakarta` migration, and the runtime move.
+*Write down your effort total now* — exercise 5 compares against it.
+(The sample run's heaviest issue was Spring/Jakarta EE 9 at effort 3 across six mandatory issues. Yours may differ, and on a smaller rule set that issue may not fire at all — the NOTE above means it: read your own report.)
 ====
 
 == 4. Fix an issue with Developer Lightspeed for MTA `[ADS]`
@@ -352,15 +354,65 @@ Whichever model your cluster serves, a wired endpoint ends this block with `read
 
 *Manual path (graceful degradation).* No `[ADS]` entitlement? Make the *same* change by hand in `PersistenceConfig.java` — replace the compiled-in `getProperty("jdbc.url")` with `System.getenv("CLAIMS_DB_URL")`. The point of the lesson — *externalize the config* — is identical; only the typing assistant differs.
 
+*The accessor is only half of it — and the other half is the half MTA measures.*
+The `hardcoded-ip-address` rule never fires on `PersistenceConfig.java`. It fires on the *literal*
+`10.14.221.9` sitting at line 7 of `src/main/resources/persistence.properties`. Change the accessor
+alone and the issue comes back in the next report unchanged, because the string the rule matched never
+moved. Externalizing configuration means the value *leaves the build* — not merely that the code stops
+reading it:
+
+[source,sh,role=execute]
+----
+cd /tmp/legacy
+sed -i 's|^jdbc\.url=.*|# jdbc.url now comes from the CLAIMS_DB_URL environment variable|' src/main/resources/persistence.properties
+grep -n '10\.14\.221\.9' src/main/resources/persistence.properties || echo "no hardcoded datasource URL left"
+----
+
+.Expected output
+[source,texinfo]
+----
+no hardcoded datasource URL left
+----
+
+*Now commit and push it.* The next exercise re-runs the analysis, and **MTA clones your fork every
+time it runs** — it reads the repository, never your terminal. A fix you have not pushed is a fix the
+analyzer cannot see, and the report will look as though nothing you did worked. The first push asks
+for your Gitea login once and remembers it:
+
+[source,sh,role=execute,subs="attributes"]
+----
+cd /tmp/legacy
+git config --global credential.helper store
+git config --global user.email "{user}@workshop.local"
+git config --global user.name  "{user}"
+git add -A
+git commit -m "externalize the datasource URL"
+git push origin main
+----
+
+NOTE: If you made the Java edit in the Dev Spaces IDE rather than the terminal, make this same
+properties change there and push from the IDE's terminal — what matters is that *both* edits reach the
+fork on `main` before you re-analyze.
+
 [.checkpoint]
 ====
-✔ *Verify:* The datasource URL is no longer a literal — it reads from the `CLAIMS_DB_URL` environment variable. If you used the AI path, you *read the proposed diff* before accepting it and can say *why* it is correct. (The API block above ends with `reads the URL from the environment: YES`, proving the wiring — whatever model your cluster serves, and whether or not it printed a reasoning trace first.)
+✔ *Verify:* The datasource URL is no longer a literal — the code reads `CLAIMS_DB_URL` from the environment, *and* no `10.14.221.9` remains in `persistence.properties`. Both changes are *committed and pushed* to your fork's `main`. If you used the AI path, you *read the proposed diff* before accepting it and can say *why* it is correct. (The API block above ends with `reads the URL from the environment: YES`, proving the wiring — whatever model your cluster serves, and whether or not it printed a reasoning trace first.)
 ====
 
 == 5. Re-analyze and watch the effort drop
 ⏱ *~5 min* · measure that the fix actually helped
 
-Don't trust the fix — *measure* it. Back in the MTA console, run the analysis on `parasol-legacy-claims-{user}` *again* (same targets). When it completes, open the report: the *Hardcoded IP address* mandatory issue is *gone*, and the *effort total is lower than the 24* you started with.
+Don't trust the fix — *measure* it. Back in the MTA console, run the analysis on `parasol-legacy-claims-{user}` *again*, with *the same settings as the first run*. When it completes, open the report: the *Hardcoded IP address* mandatory issue is *gone*, and the effort total is lower than the one you wrote down in exercise 3.
+
+[IMPORTANT]
+====
+*Re-select the Source code mode — the wizard does not remember it.* It resets to the default
+*Source code + dependencies* every time you reopen it, and that mode analyses the dependency tree as
+well, so it reports a different (larger) set of issues at a much higher effort total. Re-run in the
+wrong mode and you are not comparing two measurements of the same thing; the totals move for a reason
+that has nothing to do with your fix. It is also considerably slower — measured *3 min* in *Source
+code* mode against *8m44s* in *+dependencies*, which is enough to overrun this exercise on its own.
+====
 // Stale marker closed 2026-07-29: not an open verification question — there is no fixed value to
 // confirm, since the reduced effort total is attendee-dependent (whichever issues they actually fixed).
 // The prose already states the only invariant that matters: the total is lower than the starting 24.
@@ -377,6 +429,11 @@ To see the *destination*, compare against Parasol's *fully modernized* Quarkus c
 | `parasol-claims` (Quarkus) — *fully modernized* | ~0 | *1*
 |===
 
+NOTE: Those two rows were captured together, on one MTA build, in one analysis mode — and *not* the
+*Source code* mode this lab has you select, which reports a smaller set at a lower total. Read the row
+pair as a *ratio*, which is the point: a legacy app carries a heavy backlog and a modernized one sits
+near zero. Do not read either number as a target for your own run.
+
 That is the funnel made concrete: each fix removes a blocker and drops the number, and a fully-modernized service sits near *zero*. Your partial fix lands *between* — and now you have a *burn-down*, not a guess.
 
 // media-pass: screenshot app-modernization-07-reanalysis-delta.png — the re-analysis report with
@@ -385,7 +442,8 @@ That is the funnel made concrete: each fix removes a blocker and drops the numbe
 
 [.checkpoint]
 ====
-✔ *Verify:* The re-analysis report shows the *Hardcoded IP* issue resolved and an effort total *below 24* — a measurable improvement from a single fix.
+✔ *Verify:* The re-analysis report shows the *Hardcoded IP* issue resolved, and an effort total *below the number you wrote down in exercise 3* — a measurable improvement from a single fix.
+Compare against *your own* first run, not against the 24 in the table above: that figure came from a different analysis mode, so "below 24" can be true before you have fixed anything at all. The comparison only means something when both runs were measured the same way.
 ====
 
 == 6. Containerize and deploy the modernized service
