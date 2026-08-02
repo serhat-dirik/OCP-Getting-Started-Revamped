@@ -1,0 +1,56 @@
+{{/*
+Faithful re-encoding of gitops/workshop-config/templates/per-user-namespaces.yaml (dev/stage/prod/
+cicd) plus the Namespace block at the top of each per-user-<module>.yaml (ai/batch/mesh/modernize/
+partner/gitops, and the three resilience-multicluster-dr namespaces client/site-a/site-b) — one
+suffix per iteration of .Values.suffixes instead of one suffix per source file.
+*/}}
+{{- include "user-namespace.assertInputs" . -}}
+{{- $user := .Values.user -}}
+{{- range $raw := splitList "," .Values.suffixes }}
+{{- $suffix := trim $raw }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $user }}-{{ $suffix }}
+  annotations:
+    # Namespaces sync first on create / last on delete (platform-portfolio/README.md wave table).
+    argocd.argoproj.io/sync-wave: "-2"
+    # These namespaces are SHARED across modules that can be materialized independently at the same
+    # time (e.g. config-multienv's dev/stage/prod Application and gitops-fundamentals's {user}-gitops
+    # Application coexist). Pruning one module's Application must never delete a namespace another
+    # module still needs, so nothing this chart renders is ever prune-eligible — namespace lifecycle
+    # is owned by `ws` (create-if-missing / never delete-on-Application-removal), not by Argo prune.
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+    {{- if or (eq $suffix "dev") (eq $suffix "stage") (eq $suffix "prod") }}
+    # ADR-0002 amendment 1: the namespace-scoped student-gitops instance may deploy only into
+    # namespaces carrying this label (the operator then creates its controller/server RBAC here).
+    # gitops-fundamentals/gitops-at-scale deploy claims into dev/stage/prod via the student instance; cicd stays pipeline-only (pipelines-fundamentals).
+    # VALUE MUST BE THE INSTANCE'S NAMESPACE, NOT ITS NAME: the operator's managed-by enrollment
+    # keys off the ArgoCD CR's namespace (ogsr-student-gitops, student-argocd.yaml), not .metadata.name
+    # (which stays 'student-gitops' unprefixed for Route-host stability). A bare 'student-gitops'
+    # here matches nothing, so the operator never creates the RoleBindings — SEV1 2026-07-18.
+    argocd.argoproj.io/managed-by: {{ $.Values.studentArgoNamespace }}
+    {{- end }}
+    {{- if eq $suffix "batch" }}
+    # Load-bearing: the per-user ClusterQueue cq-{user} selects namespaces by this label —
+    # a LocalQueue here can only bind cq-{user} because the namespace carries it.
+    # OPT-IN GATE (verified on-cluster, jobs-batch-kueue build): Red Hat build of Kueue's Job admission
+    # webhooks (mjob.kb.io / vjob.kb.io) only intercept Jobs in namespaces carrying this label.
+    # Without it, a Job with a queue-name label runs immediately, unmanaged — no Workload, no quota.
+    kueue.openshift.io/managed: "true"
+    {{- end }}
+    {{- if or (eq $suffix "mesh") (eq $suffix "client") (eq $suffix "site-a") (eq $suffix "site-b") }}
+    # Load-bearing (verified live 2026-07-13): the shared OSSM3 istiod's meshConfig.discoverySelectors
+    # matches istio-discovery=enabled, so this namespace is in-mesh. Stable — never toggled by the lab.
+    istio-discovery: enabled
+    {{- end }}
+    {{- if eq $suffix "partner" }}
+    # Load-bearing (verified on-cluster, networking-dev-devops build): OVN-Kubernetes only lets a namespace host a
+    # Primary UserDefinedNetwork if it carries this opt-in label from creation. Empty value is valid.
+    k8s.ovn.org/primary-user-defined-network: ""
+    {{- end }}
+{{- end }}

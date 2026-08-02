@@ -225,6 +225,29 @@ PAIRS: list[dict] = [
                "fix applied to one and not the other means adopted-operator false Degradeds come "
                "back on whichever path the next cluster uses.",
     },
+    {
+        "id": "entry-namespaces-helpers",
+        "mode": "bytes",
+        # Every gitops/entry-states/*/templates/_ns-helpers.tpl (26 charts) is a byte-identical copy
+        # of this file — Helm cannot `.Files.Get` outside its own chart root, so the per-user
+        # Namespace/ResourceQuota/LimitRange/RoleBinding helpers (ownerLabels, quotaSpec) are
+        # duplicated into every entry-state chart that materializes its own namespaces (an attendee
+        # cannot create a Namespace/ResourceQuota themselves — probed on cluster 2026-08-02).
+        # config-multienv is gated here as the representative copy: tools/gen-entry-namespaces.sh
+        # --check re-derives and byte-diffs ALL 26 copies (plus the sibling ns-user-namespaces.yaml,
+        # which this guard cannot reach — see that generator's header comment for why: it is a
+        # rendered manifest template gated `{{- if .Values.manageNamespaces }}`, so it renders empty
+        # under the chart's own default values, and this guard's chart renderer has no mechanism to
+        # pass the `--set manageNamespaces=true` override that would be needed to compare it here).
+        "source": {"file": "gitops/user-namespace/templates/_helpers.tpl"},
+        "copy": {"file": "gitops/entry-states/config-multienv/templates/_ns-helpers.tpl"},
+        "why": "a hand-edit to either copy (bypassing tools/gen-entry-namespaces.sh) would silently "
+               "change the ResourceQuota/LimitRange numbers or the ownerLabels value used by every "
+               "one of the 26 entry-state charts that materialize their own per-user namespaces. "
+               "Fix: re-copy the file (cp source copy) — never hand-edit the copy — then run "
+               "tools/gen-entry-namespaces.sh so all 26 charts pick up the fix, and bump each "
+               "touched chart's version so Argo's manifest cache picks it up.",
+    },
 ]
 
 # Pair (c) — expanded rather than special-cased, so each Task fails on its own name.
@@ -249,7 +272,7 @@ for _task in PARASOL_TASKS:
 # shrink its own floor. Truncating the list the driver iterates (`PAIRS[:1]`) collapses the "pairs
 # compared" count below this; editing PAIRS itself trips the self-test, which asserts the two agree.
 # Adding a pair means bumping this number in the same change.
-MIN_PAIRS = 12
+MIN_PAIRS = 13
 
 # Structural comparison nodes across all pairs, measured 2026-08-01: 995. The floor is well under
 # that (Task bodies and pipelines grow and shrink) and far over what a fragment comparison yields.

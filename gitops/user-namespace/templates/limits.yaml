@@ -1,0 +1,59 @@
+{{/*
+Faithful re-encoding of gitops/workshop-config/templates/per-user-limits.yaml plus the
+ResourceQuota/LimitRange block in each per-user-<module>.yaml. The per-suffix numbers themselves
+live in templates/_helpers.tpl's user-namespace.quotaSpec — see that file's header comment for why
+they're centralized there instead of duplicated per-suffix in this file.
+*/}}
+{{- include "user-namespace.assertInputs" . -}}
+{{- $user := .Values.user -}}
+{{- range $raw := splitList "," .Values.suffixes }}
+{{- $suffix := trim $raw }}
+{{- $spec := include "user-namespace.quotaSpec" $suffix | fromYaml }}
+---
+# Caps total compute/PVCs/pods a user can request per namespace.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    # See namespace.yaml: nothing in this chart is prune-eligible — these namespaces (and the quota/
+    # limits/RBAC inside them) are SHARED across modules and must outlive any one module's Application.
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ $spec.reqCpu | quote }}
+    requests.memory: {{ $spec.reqMem | quote }}
+    limits.cpu: {{ $spec.limCpu | quote }}
+    limits.memory: {{ $spec.limMem | quote }}
+    {{- if $spec.pvc }}
+    persistentvolumeclaims: {{ $spec.pvc | quote }}
+    {{- end }}
+    pods: {{ $spec.pods | quote }}
+---
+# Default container requests/limits so bare pods don't consume the whole quota unbounded.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: {{ $spec.limDefaultCpu | quote }}
+        memory: {{ $spec.limDefaultMem | quote }}
+      defaultRequest:
+        cpu: {{ $spec.limReqCpu | quote }}
+        memory: {{ $spec.limReqMem | quote }}
+{{- end }}

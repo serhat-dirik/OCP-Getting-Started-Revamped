@@ -1,0 +1,83 @@
+{{/*
+Faithful re-encoding of gitops/workshop-config/templates/per-user-rbac.yaml (admin +
+monitoring-edit on dev/stage/prod/cicd) plus the admin RoleBinding in each per-user-<module>.yaml,
+and the extra kueue-batch-user RoleBinding from per-user-batch.yaml.
+*/}}
+{{- include "user-namespace.assertInputs" . -}}
+{{- $user := .Values.user -}}
+{{- range $raw := splitList "," .Values.suffixes }}
+{{- $suffix := trim $raw }}
+---
+# Each attendee is admin on their own namespace (and nothing else at namespace scope).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-admin
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- if or (eq $suffix "dev") (eq $suffix "stage") (eq $suffix "prod") (eq $suffix "cicd") }}
+---
+# PLUS monitoring-edit: OpenShift's built-in `admin` ClusterRole deliberately OMITS
+# monitoring.coreos.com, so without this an attendee cannot create a PrometheusRule or even read
+# their own ServiceMonitor — which breaks observability-health-scale (Observability) exercises AND attendee-run
+# `ws verify observability-health-scale` (the 15/15 only passed because `ws prep` runs verify as admin). Found at observability-health-scale G1,
+# 2026-07-11. monitoring-edit grants create/edit on servicemonitors/podmonitors/prometheusrules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-monitoring-edit
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: monitoring-edit
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}
+{{- if eq $suffix "batch" }}
+---
+# The default `admin` role does NOT include Kueue's workload API (the kueue.x-k8s.io CRDs carry
+# no aggregate-to-admin label — verified on-cluster, jobs-batch-kueue build). The operator ships
+# kueue-batch-user-role (localqueues/workloads read + pending) — bind it per user.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-kueue-batch-user
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kueue-batch-user-role
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}
+{{- end }}
