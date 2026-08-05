@@ -833,20 +833,37 @@ purge_apps() {  # module user [keep-module] — delete the user's Application/Ap
   done
 }
 
-gc_conflicts() {  # user module — evict conflicting modules' entry apps before materializing
-  # Module independence (rule 2): entry charts that materialize the SAME named workloads
-  # (declared in ws-meta conflictsWith) deadlock when their Argo apps coexist — both go
-  # OutOfSync on SharedResourceWarning and the attendee gets a silently wrong world while
-  # the marker check stays green (G3-M04, m03+m04 on user3). Starting a module therefore
-  # evicts the conflicting app and purges this module's namespaces (= reset semantics).
+# gc_conflicts is SPLIT into two halves (U8-F-05) because each half has to sit on a DIFFERENT
+# side of the namespace purge, and cmd_reset can only collapse its double-purge if it can place
+# them itself. cmd_start/cmd_solve, entered directly, still call the combined gc_conflicts below
+# and behave exactly as before.
+gc_conflicts_apps() {  # user module — purge CONFLICTING modules' attendee-created Argo apps
+  # Runs BEFORE any namespace purge. The conflicting module's attendee-created Argo apps
+  # (ws-meta purgeApps*) live in a control-plane ns and would keep selfHeal-ing its world back
+  # — purge them regardless of whether the entry app itself is still present, or they re-deploy
+  # workloads DURING the purge and orphan them (reproduced live, M09 G1). Keep the TARGET
+  # module's own chart-labeled apps: on a bare re-start nothing recycles the entry app, so
+  # purging its world would wipe it permanently (M10 G1 flag #1).
+  local user="$1" module="$2" c
+  for c in $(meta_conflicts "$module"); do
+    purge_apps "$c" "$user" "$module"
+  done
+}
+
+gc_conflicts_evict() {  # user module → rc 0 if anything was evicted or orphaned leftovers found
+  # Runs AFTER the namespace purge. Module independence (rule 2): entry charts that materialize
+  # the SAME named workloads (declared in ws-meta conflictsWith) deadlock when their Argo apps
+  # coexist — both go OutOfSync on SharedResourceWarning and the attendee gets a silently wrong
+  # world while the marker check stays green (G3-M04, m03+m04 on user3).
   # Disjoint modules (platform-orientation's parasol-web, jobs-batch-kueue's {user}-batch) still coexist untouched.
-  local user="$1" module="$2" evicted=0 c app ns
+  # rc is INVERTED shell-style (0 = something was found) so callers can write `if gc_conflicts_evict`.
+  local user="$1" module="$2" evicted=1 c app ns
   for c in $(meta_conflicts "$module"); do
     app="$(app_name "$c" "$user")"
     if oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
       info "evicting conflicting entry app ${app} (shares workloads with ${module})…"
       oc delete application "$app" -n "$ARGO_NS" --wait=true --timeout=180s || true
-      evicted=1
+      evicted=0
     else
       # The conflicting module's app may be long gone while its ORPHANED leftovers still
       # squat in our namespaces (bare 'oc delete application' skips the purge — G4-F3:
@@ -855,17 +872,20 @@ gc_conflicts() {  # user module — evict conflicting modules' entry apps before
       for ns in $(meta_namespaces "$module" "$user"); do
         if oc get cm "ws-entry-${c}" -n "$ns" >/dev/null 2>&1; then
           info "found orphaned ${c} leftovers in ${ns} (marker, no app) — reclaiming…"
-          evicted=1; break
+          evicted=0; break
         fi
       done
     fi
-    # The conflicting module's attendee-created Argo apps (ws-meta purgeApps*) live in a
-    # control-plane ns and would keep selfHeal-ing its world back — purge them regardless
-    # of whether the entry app itself was still present. Keep the TARGET module's own
-    # chart-labeled apps: on a bare re-start nothing recycles the entry app, so purging
-    # its world would wipe it permanently (M10 G1 flag #1).
-    purge_apps "$c" "$user" "$module"
   done
+  return $evicted
+}
+
+gc_conflicts() {  # user module — full pass: evict conflicting modules, then purge (= reset semantics)
+  # For cmd_start/cmd_solve entered DIRECTLY. cmd_reset deliberately does NOT call this — it
+  # places the two halves around its own single purge instead, so prep purges once (U8-F-05).
+  local user="$1" module="$2" evicted=0 app ns
+  gc_conflicts_apps "$user" "$module"
+  if gc_conflicts_evict "$user" "$module"; then evicted=1; fi
   if [[ "$evicted" == 1 ]]; then
     for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
     purge_meta_rbac "$module" "$user"
@@ -985,6 +1005,12 @@ cmd_list() {
 
 cmd_start() {
   local module user="$1" ; module="$2"
+  # --no-gc is INTERNAL (cmd_reset only) — never a documented user flag. It asserts the caller has
+  # already evicted conflicts and purged, so re-running gc_conflicts here would redo the most
+  # expensive part of prep for nothing (U8-F-05). if/then rather than `[[ ]] && x=y`: the latter
+  # returns non-zero when the test fails, which is fatal under `set -e` if it lands last.
+  local skip_gc="false"
+  if [[ "${3:-}" == "--no-gc" ]]; then skip_gc="true"; fi
   need_oc
   require_entry_dir "$module"
   # --all-users: instructor convenience — bulk-provision every attendee's entry state at once.
@@ -1032,7 +1058,7 @@ cmd_start() {
     ok "entry apps applied and ${started}/${n} sync operations started (watch: oc get applications -n ${ARGO_NS})"
     return 0
   fi
-  gc_conflicts "$user" "$module"
+  if [[ "$skip_gc" != "true" ]]; then gc_conflicts "$user" "$module"; fi
   info "materializing ${module} entry state for ${user}…"
   render_app "$module" "$user" | apply_app
   # Spec changes on an EXISTING app (e.g. solve->start) can serve Argo's cached manifests;
@@ -1278,21 +1304,37 @@ cmd_reset() {
   local app; app="$(app_name "$module" "$user")"
   info "resetting ${module} for ${user} (purge + delete + re-materialize)…"
 
-  # Purge FIRST — this ordering is load-bearing (G3-M06 SEV1). Attendee-created workloads (Jobs/
-  # pods the entry app does NOT own) can pin a chart-owned PVC through kubernetes.io/pvc-protection.
-  # If we delete the Application first, its resources-finalizer blocks indefinitely trying to prune
-  # that PVC while the pods holding it are never removed (they aren't app-owned), and the purge that
-  # WOULD remove them never runs. Purging first deletes those pods (Completed pods drain in ~1s),
-  # releases the PVC, and empties the namespace; with selfHeal:false the still-present app never
-  # re-creates what we delete (it only marks OutOfSync). This also hardens m05's StatefulSet reset,
-  # where volumeClaimTemplate PVCs are pinned the same way.
-  # Attendee-created Argo apps FIRST (ws-meta purgeApps*): they live outside the purge namespaces,
-  # and a selfHeal app re-deploys its workloads DURING the namespace purge and orphans them if the
-  # purge runs first (reproduced live, M09 G1 — gc_conflicts always had this order; reset now matches).
+  # ONE purge pass. Prep used to purge every namespace TWICE, re-purge the RBAC twice and delete
+  # this module's Application twice, because cmd_start -> gc_conflicts repeated everything
+  # cmd_reset had just finished doing. user8 measured `ws prep m18` at 3m31s wall for 56s of CPU
+  # — 26%, i.e. overwhelmingly waiting on work already done once (U8-F-05).
+  #
+  # Both orderings below are load-bearing, in OPPOSITE directions — which is exactly why the two
+  # halves of gc_conflicts are split apart and placed individually rather than called as one:
+  #
+  #  1. Attendee-created Argo apps FIRST — this module's AND every conflicting module's (ws-meta
+  #     purgeApps*). They live outside the purge namespaces, and a selfHeal app re-deploys its
+  #     workloads DURING the namespace purge and orphans them (reproduced live, M09 G1).
+  #  2. Namespace purge SECOND, and strictly BEFORE any Application delete (G3-M06 SEV1).
+  #     Attendee-created workloads (Jobs/pods the entry app does NOT own) can pin a chart-owned
+  #     PVC through kubernetes.io/pvc-protection. Delete the Application first and its
+  #     resources-finalizer blocks indefinitely trying to prune that PVC while the pods holding
+  #     it are never removed (they aren't app-owned), and the purge that WOULD remove them never
+  #     runs. Purging first drains those pods (Completed pods go in ~1s), releases the PVC and
+  #     empties the namespace; with selfHeal:false the still-present app only marks OutOfSync.
+  #     This also hardens m05's StatefulSet reset, where volumeClaimTemplate PVCs pin the same way.
+  #  3. Entry-app deletions LAST — conflicting ones here, ours just below. Both are fast now:
+  #     the namespace is already empty, so their finalizers have nothing left to prune. This is
+  #     strictly SAFER than the old path, where gc_conflicts deleted conflicting apps with the
+  #     namespace still populated.
   purge_apps "$module" "$user"
+  gc_conflicts_apps "$user" "$module"
   local ns
   for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
   purge_meta_rbac "$module" "$user"
+  # rc 1 simply means "nothing conflicting was there" — not an error. Bare, it would kill the
+  # script under `set -e` (a non-zero return from a function called as a bare command IS fatal).
+  gc_conflicts_evict "$user" "$module" || true
 
   # Now remove the GitOps wrapper. With the namespace already emptied the finalizer has little or
   # nothing left to prune and completes fast; if it still lingers, strip the finalizer rather than
@@ -1312,7 +1354,9 @@ cmd_reset() {
   else
     info "no existing entry app — clean start"
   fi
-  cmd_start "$user" "$module"
+  # --no-gc: everything gc_conflicts would do has just been done above, once. Without this the
+  # whole purge/evict/delete sequence runs a second time (U8-F-05).
+  cmd_start "$user" "$module" --no-gc
 }
 
 cmd_solve() {  # instructor: materialize the module END state (entry chart with solve=true)
@@ -1371,7 +1415,20 @@ sync_app_operation() {  # app — start a fresh sync OPERATION (hooks only re-ru
     sleep 5; t=$((t+5))
   done
   oc annotate application "$app" -n "$ARGO_NS" argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
-  sleep 10
+  # Wait for Argo to CONSUME the refresh instead of sleeping a flat 10s. The controller removes
+  # the annotation once it has re-resolved the source, so its disappearance is the actual signal
+  # we were approximating; in practice this returns in ~1-2s. Capped at the old 10s so a
+  # controller that never clears it degrades to exactly the previous behaviour rather than hanging.
+  # The --all-users path already calls this same 10s "dead time" and batches around it — but the
+  # SINGLE-attendee path, which is the one every attendee actually runs, paid it on every prep
+  # and every reset (U8-F-05).
+  local w=0 ann
+  while (( w < 10 )); do
+    ann="$(oc get application "$app" -n "$ARGO_NS" \
+             -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/refresh}' 2>/dev/null || true)"
+    if [[ -z "$ann" ]]; then break; fi
+    sleep 1; w=$((w+1))
+  done
   # prune:true is REQUIRED now that syncPolicy has no automated block — pruning used to come from
   # `automated.prune`, and without it here a reset would leave removed resources behind forever.
   # revision follows SOURCE_REVISION rather than a hardcoded "main": ws already supports WS_REVISION,
@@ -3260,8 +3317,33 @@ cmd_preflight() {  # SA pre-install readiness check — run BEFORE bootstrap/ins
     else
       pf_row FAIL "default StorageClass" "no StorageClass found — dynamic RWO storage is required"
     fi
+
+    # Dedicated-worker count → the M17 batch-pool verdict (U8-F-06). Says BEFORE the install which
+    # half of the scheduling lesson this cluster can teach, instead of leaving an SA to discover it
+    # from a verify line mid-workshop. The selector and the floor are bootstrap/install.sh's own
+    # (MIN_BATCH_POOL_FOR_TAINT=3) — a pure worker, never a schedulable control-plane, because
+    # tainting a control-plane node is not a thing this workshop does.
+    #
+    # Below the floor is a WARN, never a FAIL: the module still runs and its nodeSelector half is
+    # fully teachable. Three workers is the smallest pool that can give one up and still leave TWO
+    # general-purpose workers — at two, tainting one left the survivor at 99% memory requests, RHACS
+    # central-db Pending 3h+ and the trusted-supply-chain scan gate dead (2026-07-30).
+    local pure_workers
+    pure_workers="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' \
+                      --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    [[ -n "$pure_workers" ]] || pure_workers=0
+    if (( pure_workers >= 3 )); then
+      pf_row PASS "M17 dedicated batch pool" \
+        "${pure_workers} dedicated worker(s) — install will label AND taint one; both halves of the scheduling lab (nodeSelector + toleration) are teachable"
+    elif (( pure_workers > 0 )); then
+      pf_row WARN "M17 dedicated batch pool" \
+        "${pure_workers} dedicated worker(s) — below the 3-worker floor, so install labels the node but deliberately WITHHOLDS the NoSchedule taint. M17's nodeSelector half still works and is graded; its toleration half cannot be demonstrated, and 'ws verify deployment-targets-scheduling' reports that as not-applicable rather than a failure. Add a worker to teach both halves"
+    else
+      pf_row WARN "M17 dedicated batch pool" \
+        "no dedicated (non-control-plane) worker found — install falls back to shaping any node; M17's dedicated-pool beat will be weak on this topology"
+    fi
   else
-    pf_row WARN "cluster checks skipped" "log in, then re-run for admin / version / storage / adoption checks"
+    pf_row WARN "cluster checks skipped" "log in, then re-run for admin / version / storage / adoption / batch-pool checks"
   fi
   echo
 
