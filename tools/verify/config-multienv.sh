@@ -139,18 +139,19 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no claims-creds Secret in ${DEV} yet (attendee creates it)"     obj_absent secret claims-creds "$DEV"     || hint "a leftover claims-creds is present; exercise 3's 'oc create secret generic claims-creds …' will fail 'already exists' against it — ws reset config-multienv --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab looks like) ---------------------------
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   # dev: config externalized to a ConfigMap + a Secret, all three probes, explicit resources.
-  check "dev claims-config ConfigMap exists"           oc get configmap claims-config -n "$DEV"    || hint "create it — lab exercise 2 (oc create configmap claims-config ...)"
-  check "dev claims-creds Secret exists"               oc get secret claims-creds -n "$DEV"        || hint "create it — lab exercise 3 (oc create secret generic claims-creds ...)"
-  check "dev app references the ConfigMap"             deploy_references parasol-claims "$DEV" claims-config || hint "wire it — lab exercise 2 (oc set env deploy/parasol-claims --from=configmap/claims-config)"
-  check "dev app references the Secret"                deploy_references parasol-claims "$DEV" claims-creds  || hint "wire it — lab exercise 3 (oc set env deploy/parasol-claims --from=secret/claims-creds)"
-  check "dev app has all three probes"                 deploy_has_all_probes parasol-claims "$DEV" || hint "add them — lab exercise 4 (oc set probe --startup/--readiness/--liveness)"
-  check "dev app sets explicit resource requests"      deploy_has_requests parasol-claims "$DEV"   || hint "set them — lab exercise 5 (oc set resources deploy/parasol-claims --requests=... --limits=...)"
+  check "dev claims-config ConfigMap exists"           oc get configmap claims-config -n "$DEV"    || hint "not done yet — you create this in lab exercise 2 (oc create configmap claims-config ...), so it is expected to be missing before then"
+  check "dev claims-creds Secret exists"               oc get secret claims-creds -n "$DEV"        || hint "not done yet — you create this in lab exercise 3 (oc create secret generic claims-creds ...), so it is expected to be missing before then"
+  check "dev app references the ConfigMap"             deploy_references parasol-claims "$DEV" claims-config || hint "not done yet — you wire this in lab exercise 2 (oc set env deploy/parasol-claims --from=configmap/claims-config); expected red until you do"
+  check "dev app references the Secret"                deploy_references parasol-claims "$DEV" claims-creds  || hint "not done yet — you wire this in lab exercise 3 (oc set env deploy/parasol-claims --from=secret/claims-creds); expected red until you do"
+  check "dev app has all three probes"                 deploy_has_all_probes parasol-claims "$DEV" || hint "not done yet — you add these in lab exercise 4 (oc set probe --startup/--readiness/--liveness); expected red until you do"
+  check "dev app sets explicit resource requests"      deploy_has_requests parasol-claims "$DEV"   || hint "not done yet — you set these in lab exercise 5 (oc set resources deploy/parasol-claims --requests=... --limits=...); expected red until you do"
   # promotion: same image, different config, in stage and prod.
-  check "stage parasol-claims ready (>=2 replicas)"    deploy_ready_min parasol-claims "$STAGE" 2   || hint "promote — lab exercise 6 (oc apply -k overlays/stage from your claims-config fork)"
-  check "stage config is APP_ENV=stage"                cm_app_env "$STAGE" stage                   || hint "the stage overlay sets APP_ENV=stage — re-apply overlays/stage"
-  check "prod parasol-claims ready (>=3 replicas)"     deploy_ready_min parasol-claims "$PROD" 3    || hint "promote — lab exercise 6 (oc apply -k overlays/prod from your claims-config fork)"
-  check "prod config is APP_ENV=prod"                  cm_app_env "$PROD" prod                     || hint "the prod overlay sets APP_ENV=prod — re-apply overlays/prod"
+  check "stage parasol-claims ready (>=2 replicas)"    deploy_ready_min parasol-claims "$STAGE" 2   || hint "not done yet? promotion is lab exercise 6 (oc apply -k overlays/stage from your claims-config fork) and stage starts EMPTY, so this red is expected before then. If you HAVE promoted and it is short of 2 ready replicas, that one is real: oc get pods -n ${STAGE}"
+  check "stage config is APP_ENV=stage"                cm_app_env "$STAGE" stage                   || hint "not done yet? the stage overlay you apply in exercise 6 sets APP_ENV=stage. If you already applied it, re-apply overlays/stage — a wrong value here means the overlay is not the one that landed"
+  check "prod parasol-claims ready (>=3 replicas)"     deploy_ready_min parasol-claims "$PROD" 3    || hint "not done yet? promotion is lab exercise 6 (oc apply -k overlays/prod from your claims-config fork) and prod starts EMPTY, so this red is expected before then. If you HAVE promoted and it is short of 3 ready replicas, that one is real: oc get pods -n ${PROD}"
+  check "prod config is APP_ENV=prod"                  cm_app_env "$PROD" prod                     || hint "not done yet? the prod overlay you apply in exercise 6 sets APP_ENV=prod. If you already applied it, re-apply overlays/prod — a wrong value here means the overlay is not the one that landed"
 fi
 
 verify_summary

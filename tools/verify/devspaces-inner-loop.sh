@@ -123,6 +123,7 @@ check "workspace parasol-claims is declared in ${WS_NS}" oc get devworkspace par
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   # The attendee's own act is STARTING the workspace, which is what leaves pods/PVCs behind. The
   # declaration above proves only that prep ran.
   WS_DESC="the parasol-claims workspace has been started (pods or storage exist in ${WS_NS})"
@@ -130,7 +131,7 @@ if [[ "$ENTRY_ONLY" != "true" ]]; then
   case "$ws_rc" in
     0) check "$WS_DESC" true ;;
     1) check "$WS_DESC" false \
-         || hint "the workspace is declared but has never run — open the Dev Spaces dashboard and click the parasol-claims workspace to start it (lab exercise 1)" ;;
+         || hint "not done yet — the workspace is declared but has never run, which is exactly the state ws prep leaves it in: STARTING it is lab exercise 1. Open the Dev Spaces dashboard and click the parasol-claims workspace. Nothing is broken here" ;;
     *) warn "the end state is not gradeable from here — none of the workspace signals in ${WS_NS} (DevWorkspaces, Deployments, Pods, PVCs) is readable as this identity"
        hint "you normally CAN read all four — Dev Spaces grants them to you in ${WS_NS}. Landing here means the API could not be asked, or that grant is missing: retry, then show your instructor 'oc get rolebinding -n ${WS_NS}'. Meanwhile confirm in the dashboard that your parasol-claims workspace is running" ;;
   esac

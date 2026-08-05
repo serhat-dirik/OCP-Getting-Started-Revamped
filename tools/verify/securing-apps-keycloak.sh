@@ -122,12 +122,18 @@ else
   # --- end state: the lab's OUTCOME — the API is bearer-protected and role-enforced -------------
   # Assert outcomes (HTTP behaviour), never the mechanism (env vars / annotation), so any correct
   # solution stays green (rule 14).
+  # NOTE what these three grade is HTTP BEHAVIOUR, so their red before the lab looks especially like a
+  # fault: "the API answered 200" reads as a working app until you remember the whole point is that an
+  # UNSECURED app answering 200 is what the lab exists to change. The entry checks above assert that
+  # very state deliberately (`claims API is OPEN`), so name it here rather than leaving the reader to
+  # infer it from a bare repair instruction.
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "claims API is PROTECTED — GET /api/claims is 401 with no token" \
-        route_answers parasol-claims /api/claims 401                                            || hint "secure the API: enable the OIDC tenant + require claims-adjuster on /api/claims (see the lab)"
+        route_answers parasol-claims /api/claims 401                                            || hint "not done yet — the entry state ships this API deliberately OPEN (the entry check above asserts exactly that), so an un-401 response before the lab is the expected state, not a broken app. Securing it is the lab: enable the OIDC tenant + require claims-adjuster on /api/claims"
   check "a valid claims-adjuster token is accepted — GET /api/claims is 200" \
-        route_answers_as parasol-claims /api/claims 200 adjuster                                || hint "role wiring: map realm_access/roles and allow claims-adjuster; token from ${USER_NAME}'s realm (adjuster/parasol)"
+        route_answers_as parasol-claims /api/claims 200 adjuster                                || hint "not done yet? until the API is secured at all there is no role wiring to accept a token, so this follows from the check above. If the API IS 401 without a token but rejects a valid one, that one is real: map realm_access/roles and allow claims-adjuster; token from ${USER_NAME}'s realm (adjuster/parasol)"
   check "web frontend redirects an unauthenticated request to login (302)" \
-        route_answers parasol-web /api/claims 302                                               || hint "protect the web app: OIDC web-app (auth-code + PKCE) — see the lab"
+        route_answers parasol-web /api/claims 302                                               || hint "not done yet — the web frontend also starts unprotected on purpose; making it an OIDC web-app (auth-code + PKCE) is a later beat, so this red is expected until you get there"
 
   # --- Ex7 [ADVANCED] token exchange (RFC 8693) — the module's ONLY optional exercise, and what `ws solve`
   # materializes. Never let this beat pass silently: if parasol-fraud is deployed, assert the discriminator
@@ -149,9 +155,9 @@ else
       XCHG="$(exchanged_token "$XURL" "$XADJ" || true)"
     fi
     check "Ex7 token-exchange: fraud REFUSES the user's aud=parasol-claims token — 401" \
-          route_answers parasol-fraud /api/fraud/score/CLM-1001 401 "$XADJ"                     || hint "fraud must enforce aud=parasol-fraud (QUARKUS_OIDC_TOKEN_AUDIENCE) — see Ex7"
+          route_answers parasol-fraud /api/fraud/score/CLM-1001 401 "$XADJ"                     || hint "half done — parasol-fraud IS deployed (that is why this beat is being graded at all), so the remaining step is audience enforcement: fraud must reject a token whose aud is parasol-claims (QUARKUS_OIDC_TOKEN_AUDIENCE=parasol-fraud) — see Ex7"
     check "Ex7 token-exchange: fraud ACCEPTS a token exchanged to aud=parasol-fraud — 200" \
-          route_answers parasol-fraud /api/fraud/score/CLM-1001 200 "$XCHG"                     || hint "wire RFC 8693 exchange: parasol-claims (confidential) exchanges the user token to audience=parasol-fraud — see Ex7"
+          route_answers parasol-fraud /api/fraud/score/CLM-1001 200 "$XCHG"                     || hint "half done — parasol-fraud IS deployed, so what is left is the exchange itself: parasol-claims (confidential) must exchange the user token to audience=parasol-fraud (RFC 8693) — see Ex7"
   elif (( fraud_rc == 2 )); then
     warn "Ex7 [ADVANCED] token-exchange — the cluster API could not be asked whether parasol-fraud is deployed, so this beat has no verdict"
     hint "not your lab, and not graded: re-run 'ws verify securing-apps-keycloak' in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor"

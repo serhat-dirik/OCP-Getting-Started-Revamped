@@ -100,9 +100,10 @@ fi
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------
-  check "parasol-web deployment exists"         oc get deploy parasol-web -n "$NS"   || hint "deploy the image — lab exercise 2 (oc new-app --image=…/parasol-web:1.0 --name=parasol-web)"
-  check "parasol-web has >=1 ready replica"     deploy_ready parasol-web "$NS"       || hint "wait for rollout: oc rollout status deploy/parasol-web -n ${NS}"
-  check "route parasol-web is edge-terminated and answers 200 over https" route_answers_200 "$NS" || hint "publish the app the way exercise 4 teaches — oc create route edge parasol-web --service=parasol-web --port=8080 --insecure-policy=Allow. NOT 'oc expose': a plain HTTP Route gets HSTS-upgraded and the router answers 'Application is not available'. If a plain Route already exists, delete it first."
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "parasol-web deployment exists"         oc get deploy parasol-web -n "$NS"   || hint "not done yet — you deploy the image in lab exercise 2 (oc new-app --image=…/parasol-web:1.0 --name=parasol-web), so a red here before then is the expected state and not a broken environment"
+  check "parasol-web has >=1 ready replica"     deploy_ready parasol-web "$NS"       || hint "not done yet? if the Deployment above is also red, this one follows from it and is equally expected. If it EXISTS but has no ready replica, that one is real: oc rollout status deploy/parasol-web -n ${NS}; oc get pods -n ${NS}"
+  check "route parasol-web is edge-terminated and answers 200 over https" route_answers_200 "$NS" || hint "not done yet? publishing the app is exercise 4, so this is expected red before then. Publish it the way that exercise teaches — oc create route edge parasol-web --service=parasol-web --port=8080 --insecure-policy=Allow. NOT 'oc expose': a plain HTTP Route gets HSTS-upgraded and the router answers 'Application is not available'. If a plain Route already exists, delete it first."
 fi
 
 verify_summary

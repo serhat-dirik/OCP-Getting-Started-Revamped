@@ -198,8 +198,9 @@ else
   # --- end state: the lab's OUTCOME — the notifications app deployed to {user}-dev --------------------
   # Assert the OUTCOME (a notifications Deployment is running), never the mechanism, so any correct
   # solution (helm install OR ws solve) stays green (rule 14).
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "notifications app parasol-notifications deployed" deploy_present \
-    || hint "install the chart (helm install parasol-notifications ./parasol-notifications -n ${NS}), or ws solve packaging-distributing --user ${USER_NAME}"
+    || hint "not done yet — the entry state deliberately deploys nothing here, because running the chart IS the lab: helm install parasol-notifications ./parasol-notifications -n ${NS} (or: ws solve packaging-distributing --user ${USER_NAME}). Red before that is the expected state, not a broken environment"
 fi
 
 verify_summary

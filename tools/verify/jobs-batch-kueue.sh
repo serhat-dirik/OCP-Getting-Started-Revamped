@@ -267,9 +267,10 @@ esac
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab / `ws solve jobs-batch-kueue` looks like) -----------
-  check "an attendee-created Job has Completed"          any_attendee_job_complete                    || hint "run the monthly-statement Job (lab exercise 1) — or ws solve jobs-batch-kueue --user ${USER_NAME}"
-  check "nightly-statement CronJob exists"               oc get cronjob nightly-statement -n "$NS"    || hint "create the CronJob (lab exercise 4) — or ws solve jobs-batch-kueue --user ${USER_NAME}"
-  check "a Kueue Workload shows Admitted=True"           any_workload_admitted                        || hint "submit a Job through the LocalQueue (lab exercise 5/6) — or ws solve jobs-batch-kueue --user ${USER_NAME}"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "an attendee-created Job has Completed"          any_attendee_job_complete                    || hint "not done yet — you run the monthly-statement Job in lab exercise 1, so no completed Job before then is expected, not a fault (or: ws solve jobs-batch-kueue --user ${USER_NAME}). If you DID run it and it never Completed, that one is real: oc get jobs -n ${NS}"
+  check "nightly-statement CronJob exists"               oc get cronjob nightly-statement -n "$NS"    || hint "not done yet — you create this CronJob in lab exercise 4, so it is expected to be missing before then (or: ws solve jobs-batch-kueue --user ${USER_NAME})"
+  check "a Kueue Workload shows Admitted=True"           any_workload_admitted                        || hint "not done yet — you submit a Job through the LocalQueue in lab exercises 5/6, so no admitted Workload before then is expected (or: ws solve jobs-batch-kueue --user ${USER_NAME}). If you DID submit one and it is still not Admitted, that one is real — it is queued behind the ClusterQueue's quota: oc get workloads -n ${NS}"
 fi
 
 verify_summary

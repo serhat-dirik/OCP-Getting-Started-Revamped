@@ -133,15 +133,16 @@ else
   # --- end state: the lab's OUTCOMES — enrolled + traffic-managed + secured ------------------------------
   # Assert OUTCOMES (app meshed; a weighted route, a circuit-breaker DR, an authz policy, a v2 exist),
   # never the exact CR wording, so any correct solution stays green (rule 14).
-  check "parasol-claims is MESHED (istio-proxy sidecar)"        pod_meshed parasol-claims      || hint "enroll per WORKLOAD, not the namespace — namespace-level istio-injection is cluster-admin-only (you'll get Forbidden, see exercise 1): oc patch deploy parasol-claims -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"sidecar.istio.io/inject\":\"true\"}}}}}' && oc rollout status deploy/parasol-claims -n ${NS}"
-  check "parasol-fraud is MESHED (istio-proxy sidecar)"         pod_meshed parasol-fraud       || hint "same per-workload fix as claims (not the namespace): oc patch deploy parasol-fraud -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"sidecar.istio.io/inject\":\"true\"}}}}}' && oc rollout status deploy/parasol-fraud -n ${NS}"
-  check "fraud v2 Deployment present (weighted-shift target)"   deploy_present parasol-fraud-v2 || hint "deploy a distinguishable parasol-fraud v2 (version:v2 label) for the 90/10 shift"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "parasol-claims is MESHED (istio-proxy sidecar)"        pod_meshed parasol-claims      || hint "not done yet — the entry state ships ${NS} deliberately UN-meshed, so this red is expected before exercise 1. Enroll per WORKLOAD, not the namespace — namespace-level istio-injection is cluster-admin-only (you'll get Forbidden, see exercise 1): oc patch deploy parasol-claims -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"sidecar.istio.io/inject\":\"true\"}}}}}' && oc rollout status deploy/parasol-claims -n ${NS}"
+  check "parasol-fraud is MESHED (istio-proxy sidecar)"         pod_meshed parasol-fraud       || hint "not done yet — same expected-before-the-lab state as claims above, and the same per-workload fix (not the namespace): oc patch deploy parasol-fraud -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"sidecar.istio.io/inject\":\"true\"}}}}}' && oc rollout status deploy/parasol-fraud -n ${NS}"
+  check "fraud v2 Deployment present (weighted-shift target)"   deploy_present parasol-fraud-v2 || hint "not done yet — you deploy a distinguishable parasol-fraud v2 (version:v2 label) during the lab as the target of the 90/10 shift; expected red until you do"
   check "DestinationRule parasol-fraud present (subsets + circuit breaker)" dr_present parasol-fraud \
-    || hint "create a DestinationRule on host parasol-fraud with v1/v2 subsets + outlierDetection (see the lab)"
+    || hint "not done yet — the entry state ships no istio CRs at all; creating a DestinationRule on host parasol-fraud with v1/v2 subsets + outlierDetection is the lab (see the lab)"
   check "VirtualService parasol-fraud present (weighted / header route)"    vs_present parasol-fraud \
-    || hint "create a VirtualService on host parasol-fraud with a 90/10 v1/v2 split (see the lab)"
+    || hint "not done yet — the entry state ships no istio CRs at all; creating a VirtualService on host parasol-fraud with a 90/10 v1/v2 split is the lab (see the lab)"
   check "AuthorizationPolicy present (only claims may call fraud)"          ap_present fraud-allow-claims \
-    || hint "create an ALLOW AuthorizationPolicy on app=parasol-fraud scoped to claims' ServiceAccount principal"
+    || hint "not done yet — the entry state ships no istio CRs at all; creating an ALLOW AuthorizationPolicy on app=parasol-fraud scoped to claims' ServiceAccount principal is the lab"
 fi
 
 verify_summary

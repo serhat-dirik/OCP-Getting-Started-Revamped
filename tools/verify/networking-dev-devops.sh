@@ -146,12 +146,15 @@ else
   # --- end state: the lab's OUTCOME — micro-segmentation + exposure in place -----------------------
   # Assert OUTCOMES (a policy exists and blocks; a Route exists), never the exact rule wording, so any
   # correct solution stays green (template rule 14).
-  check "default-deny NetworkPolicy present"              np_present default-deny-all             || hint "create a default-deny (ingress+egress) NetworkPolicy in ${NS} (see the lab)"
-  check "DNS egress allowed (else the fix looks broken)"  np_present allow-dns-egress             || hint "add an egress allow to openshift-dns:53 — default-deny blocks DNS too"
-  check "'api only from web' policy present"              np_present allow-claims-from-web        || hint "allow ingress to parasol-claims:8080 only from parasol-web pods"
-  check "'db only from api' policy present"               np_present allow-db-from-claims         || hint "allow ingress to claims-db:5432 only from parasol-claims pods"
-  check "parasol-web is exposed via a Route"              oc get route parasol-web -n "$NS"       || hint "expose parasol-web: oc create route edge parasol-web --service=parasol-web -n ${NS}"
-  check "a re-encrypt Route exists (last hop encrypted)"  reencrypt_route                         || hint "the edge Route leaves router→pod in plaintext; re-encrypt it: oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n ${NS}"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  # All six below are pure existence checks on objects the ATTENDEE writes, and the entry state asserts
+  # that none of them exists. So there is only one cause for red here, and it is "not done yet".
+  check "default-deny NetworkPolicy present"              np_present default-deny-all             || hint "not done yet — the entry state ships ${NS} with no NetworkPolicies at all; writing the default-deny (ingress+egress) is the lab, so this red is expected before you start"
+  check "DNS egress allowed (else the fix looks broken)"  np_present allow-dns-egress             || hint "not done yet — this is the companion to the default-deny above (an egress allow to openshift-dns:53, because default-deny blocks DNS too); expected red until you write it"
+  check "'api only from web' policy present"              np_present allow-claims-from-web        || hint "not done yet — you write this during the lab: ingress to parasol-claims:8080 allowed only from parasol-web pods"
+  check "'db only from api' policy present"               np_present allow-db-from-claims         || hint "not done yet — you write this during the lab: ingress to claims-db:5432 allowed only from parasol-claims pods"
+  check "parasol-web is exposed via a Route"              oc get route parasol-web -n "$NS"       || hint "not done yet — the entry state ships ClusterIP-only on purpose; exposing it is the lab: oc create route edge parasol-web --service=parasol-web -n ${NS}"
+  check "a re-encrypt Route exists (last hop encrypted)"  reencrypt_route                         || hint "not done yet — the edge Route leaves router→pod in plaintext and re-encrypting is a later beat: oc create route reencrypt parasol-web-secure --service=parasol-web --port=https -n ${NS}"
   # Behavioural proof, gated behind its controls (see the helpers above). demo-client is NOT
   # app=parasol-claims, so default-deny + the 'db only from api' allow must BLOCK it — but a probe
   # that has not been shown to work must never be allowed to certify that.
@@ -171,7 +174,7 @@ else
       info "(the strongest control could not run — parasol-claims is not Ready, so the allowed-path connection was not proven; grading the block on the machinery + name-resolution controls only)"
     fi
     check "unauthorized pod CANNOT reach claims-db:5432 (allowed path proven first)" db_blocked_from_demo_client \
-      || hint "the 'db only from api' policy must drop demo-client→claims-db, and the controls above show the probe works — check default-deny-all + allow-db-from-claims in ${NS}"
+      || hint "not done yet? with no NetworkPolicies in ${NS} nothing is blocking anything, so before the lab demo-client reaches claims-db and this red is the expected state (the policy checks above will be red too — start there). If default-deny-all and allow-db-from-claims DO exist and traffic still gets through, that one is real: the controls above already proved the probe works, so re-read those two policies' selectors"
   fi
 fi
 

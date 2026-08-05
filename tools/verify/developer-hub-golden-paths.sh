@@ -152,7 +152,8 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "clean scaffold slate (${SCAFFOLD_ORG} empty, no orphan catalog entry)"   scaffold_slate_clean   || hint "prior scaffold left over (Gitea repo or catalog Location) — ws reset developer-hub-golden-paths --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
-  check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "run the 'New Parasol microservice' template in RHDH; ws solve developer-hub-golden-paths materializes ${SCAFFOLD_ORG}/parasol-golden"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "not done yet — ${SCAFFOLD_ORG} is empty because running the 'New Parasol microservice' template in RHDH IS the lab, so this red is the expected state before you start, not a broken portal (ws solve developer-hub-golden-paths materializes ${SCAFFOLD_ORG}/parasol-golden)"
 fi
 
 verify_summary

@@ -217,6 +217,12 @@ elif [[ "$ai_by_choice" == "true" ]]; then
   hint "$maasless_fix — then re-run: ws verify agentic-ai --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — the agent answered a TOOL-GROUNDED query ------------------------
+  # NOTE the wording of this module's banner differs from every other script's on purpose. Elsewhere an
+  # end-state ❌ usually means "you have not done the lab yet"; here the check ASKS THE AGENT ITSELF, on
+  # a world the entry state already deployed in full, so it does not depend on the attendee having done
+  # anything. A red here is a real fault, and telling the reader it is "expected before you start" would
+  # be a reassuring message printed over a genuine problem — the opposite defect.
+  info "end state — this check runs the query itself against the already-deployed agent, so a ❌ below means something is genuinely wrong, not that you have yet to do the lab"
   # Assert the OUTCOME (the agent invoked the claims-db get_claim tool), not exact answer wording, so any
   # correct run stays green (rule 14). Needs a live MaaS key (short-lived on RHDP). A route that does not
   # answer at all is ⚠ (the caller may simply be off-cluster); an answering agent that did not ground is ❌.
@@ -225,7 +231,7 @@ else
     0) echo "✅ agent executed a tool-grounded query (get_claim on CLM-1001)"; VERIFY_PASS=$((VERIFY_PASS+1)) ;;
     1) echo "❌ agent answered WITHOUT executing a tool — get_claim was never called for CLM-1001 (ungrounded)"
        VERIFY_FAIL=$((VERIFY_FAIL+1))
-       hint "POST /agent/ask did not EXECUTE get_claim (empty toolCalls) — the MaaS key may be rejected (agent returns 502 authFailure; see the credential checks above), the agent is not Ready, or the model text-echoed the call; ws solve agentic-ai --user ${USER_NAME} then retry" ;;
+       hint "this one is broken, not undone — the query above was sent for you and the agent answered without calling a tool. POST /agent/ask returned empty toolCalls: the MaaS key may be rejected (agent returns 502 authFailure; see the credential checks above), the agent is not Ready, or the model text-echoed the call. Retry once (models are non-deterministic), then: ws solve agentic-ai --user ${USER_NAME}" ;;
     *) warn "the agent Route did not answer — cannot evaluate the tool-grounded query from here"
        hint "the Route is reachable from the cockpit terminal and from the cluster; re-run there, or check: oc get route -n ${NS}" ;;
   esac

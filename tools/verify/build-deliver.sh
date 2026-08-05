@@ -102,10 +102,11 @@ check "attendee can read catalog Templates (Software Catalog tile)" attendee_rea
 
 if [[ "$ENTRY_ONLY" != "true" ]]; then
   # --- end state (what a completed lab looks like) ---------------------------
-  check "claims-db deployment ready"            deploy_ready claims-db "$NS"        || hint "deploy the database — lab: Parasol PostgreSQL (ephemeral) from the catalog"
-  check "parasol-claims deployment ready"       deploy_ready parasol-claims "$NS"   || hint "build & wire claims — lab exercises 1 and 5 (S2I import, then oc set env --from=secret/claims-db)"
-  check "route parasol-claims answers 200"      route_answers_200 "$NS"             || hint "expose claims and wire its DB env — lab exercise 5"
-  check "no DeploymentConfig objects in ${NS}"  no_deploymentconfig "$NS"           || hint "a DeploymentConfig leaked in — Parasol uses Deployments only (redeploy the DB from the Parasol template)"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "claims-db deployment ready"            deploy_ready claims-db "$NS"        || hint "not done yet? deploying the database is lab exercise 1 (Parasol PostgreSQL, ephemeral, from the catalog), so a red here before you start is expected and not a broken environment. If you HAVE deployed it and it is still not ready, that one is real: oc get pods -n ${NS} and oc describe deploy/claims-db -n ${NS}"
+  check "parasol-claims deployment ready"       deploy_ready parasol-claims "$NS"   || hint "not done yet? building and wiring claims is lab exercises 1 and 5 (S2I import, then oc set env --from=secret/claims-db) — expected red until you do them. If it IS deployed and still not ready, that one is real: oc get pods -n ${NS} and oc describe deploy/parasol-claims -n ${NS}"
+  check "route parasol-claims answers 200"      route_answers_200 "$NS"             || hint "not done yet? exposing claims and wiring its DB env is lab exercise 5 — expected red before that. If the Route exists and answers non-200, that one is real: check the pod is Ready and the DB env is set"
+  check "no DeploymentConfig objects in ${NS}"  no_deploymentconfig "$NS"           || hint "this one is broken, not undone — nothing in the lab creates a DeploymentConfig, so one being here means a deprecated object leaked in. Parasol uses Deployments only: redeploy the DB from the Parasol template"
 fi
 
 verify_summary

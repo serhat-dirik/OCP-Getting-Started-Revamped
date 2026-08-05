@@ -95,13 +95,16 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no PVC in ${NS} yet (persistence exercise not started)" no_pvcs_yet                          || hint "entry state has no PVCs — ws reset storage-stateful --user ${USER_NAME}"
 else
   # --- end state: persistent claims DB + the StatefulSet ---------------------
-  check "a default StorageClass exists on this cluster" has_default_sc                               || hint "no default StorageClass — a PVC with no storageClassName cannot bind; set one as default"
-  check "claims-db now backed by PVC claims-db-data"    claims_db_persistent                          || hint "add persistence: oc set volume deploy/claims-db --add --overwrite --name data -t pvc --claim-name=claims-db-data --claim-size=2Gi --mount-path=/var/lib/pgsql/data -n ${NS}"
-  check "PVC claims-db-data is Bound"                   pvc_bound claims-db-data "$NS"                 || hint "PVC pending — WaitForFirstConsumer binds when a pod schedules; check: oc get pvc claims-db-data -n ${NS}"
-  check "StatefulSet pg-sts is 2/2 ready"               sts_ready pg-sts "$NS"                         || hint "deploy the StatefulSet exercise; wait: oc rollout status statefulset/pg-sts -n ${NS}"
-  check "per-pod PVC data-pg-sts-0 is Bound"            pvc_bound data-pg-sts-0 "$NS"                  || hint "StatefulSet volumeClaimTemplate PVC missing — check: oc get pvc -n ${NS}"
-  check "per-pod PVC data-pg-sts-1 is Bound"            pvc_bound data-pg-sts-1 "$NS"                  || hint "StatefulSet volumeClaimTemplate PVC missing — check: oc get pvc -n ${NS}"
-  check "pg-sts Service is headless (clusterIP None)"   headless_svc                                   || hint "headless Service missing — a StatefulSet needs a headless Service for stable DNS"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  # The first one is NOT an attendee outcome — it is a property of the cluster, red whether or not the
+  # lab was done, and the only line in this section where "tell your instructor" is the right advice.
+  check "a default StorageClass exists on this cluster" has_default_sc                               || hint "this one is broken, not undone — nothing you do in the lab creates a StorageClass. Without a default, a PVC that names no storageClassName can never bind, so the exercises below cannot succeed on this cluster: show your instructor 'oc get storageclass'"
+  check "claims-db now backed by PVC claims-db-data"    claims_db_persistent                          || hint "not done yet — the entry state ships claims-db on an emptyDir on purpose, and giving it a PVC IS the lab: oc set volume deploy/claims-db --add --overwrite --name data -t pvc --claim-name=claims-db-data --claim-size=2Gi --mount-path=/var/lib/pgsql/data -n ${NS}"
+  check "PVC claims-db-data is Bound"                   pvc_bound claims-db-data "$NS"                 || hint "not done yet? if the PVC does not exist yet this follows from the check above and is equally expected. If it EXISTS and is Pending, that is usually normal: WaitForFirstConsumer binds only when a pod schedules — oc get pvc claims-db-data -n ${NS} and look at its events before treating it as broken"
+  check "StatefulSet pg-sts is 2/2 ready"               sts_ready pg-sts "$NS"                         || hint "not done yet? deploying pg-sts is the StatefulSet exercise, so this red is expected before you get there. If it EXISTS and is short of 2/2, that one is real: oc rollout status statefulset/pg-sts -n ${NS}"
+  check "per-pod PVC data-pg-sts-0 is Bound"            pvc_bound data-pg-sts-0 "$NS"                  || hint "not done yet — this PVC is created by pg-sts's volumeClaimTemplate, so it is expected to be missing until you deploy the StatefulSet: oc get pvc -n ${NS}"
+  check "per-pod PVC data-pg-sts-1 is Bound"            pvc_bound data-pg-sts-1 "$NS"                  || hint "not done yet — same volumeClaimTemplate as the pod above; it appears with the second replica, so expected red until pg-sts is deployed and scaled: oc get pvc -n ${NS}"
+  check "pg-sts Service is headless (clusterIP None)"   headless_svc                                   || hint "not done yet — you create the headless Service alongside the StatefulSet (it is what gives the pods stable DNS), so it is expected to be missing before that exercise"
 fi
 
 verify_summary

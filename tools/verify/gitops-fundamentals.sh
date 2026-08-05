@@ -153,11 +153,16 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no parasol-claims in ${STAGE} yet (clean)"      deploy_absent parasol-claims "$STAGE"               || hint "stage already has the app — ws reset gitops-fundamentals --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
-  check "claims-db ready in ${DEV}"                      deploy_ready claims-db "$DEV"                       || hint "your Argo Application should deploy claims-db — check it Synced/Healthy in the student UI"
-  check "parasol-claims ready in ${DEV}"                 deploy_ready parasol-claims "$DEV"                  || hint "create your Argo Application (overlays/dev) on student-gitops; ws solve gitops-fundamentals does this — or the platform enrollment (managed-by) is broken, see troubleshooting"
-  check "dev claims is GitOps-managed (Argo tracking)"   deploy_gitops_managed parasol-claims "$DEV"         || hint "deploy it via an Argo Application, not oc apply — that is the gitops-fundamentals lesson"
-  check "route parasol-claims answers 200 in ${DEV}"     route_ready_200 "$DEV"                              || hint "claims app not ready — check pods: oc get pods -n ${DEV}"
-  check "parasol-claims promoted to ${STAGE} (>=2 replicas)" deploy_ready_min parasol-claims "$STAGE" 2     || hint "promote — add a second Application pointed at overlays/stage (ws solve gitops-fundamentals does this)"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  # The old wording here named the platform-enrollment failure ("managed-by is broken, see
+  # troubleshooting") in the same breath as the ordinary not-done-yet case, on checks that are red for
+  # everybody who has not written their Argo Application yet — which is the whole cohort at exercise 1.
+  # Naming the alarming cause first is how a correct ❌ gets escalated to an instructor for nothing.
+  check "claims-db ready in ${DEV}"                      deploy_ready claims-db "$DEV"                       || hint "not done yet? ${DEV} starts EMPTY on purpose — your Argo Application is what deploys claims-db, so this red is the expected state before you create it. If your Application EXISTS, look at it in the student Argo UI: Synced/Healthy means look at pods (oc get pods -n ${DEV}); OutOfSync/Degraded means the Application, not this check"
+  check "parasol-claims ready in ${DEV}"                 deploy_ready parasol-claims "$DEV"                  || hint "not done yet? creating your Argo Application (overlays/dev) on student-gitops IS the lab, so this red is expected before you do it (ws solve gitops-fundamentals --user ${USER_NAME} creates it for you). If the Application exists and is stuck OutOfSync with a permissions error, that one is real — the platform enrollment (managed-by) may be missing; see the module's troubleshooting page"
+  check "dev claims is GitOps-managed (Argo tracking)"   deploy_gitops_managed parasol-claims "$DEV"         || hint "the app is there but Argo is not tracking it — so it was applied by hand (oc apply / oc new-app) rather than deployed by an Application. Not broken, just not the lesson: delete it and let your Argo Application create it, which is the point of gitops-fundamentals"
+  check "route parasol-claims answers 200 in ${DEV}"     route_ready_200 "$DEV"                              || hint "not done yet? until the app above is deployed there is nothing to answer, so this red follows from that one. If parasol-claims IS ready and the Route still does not answer 200, that one is real: oc get pods -n ${DEV}; oc get route parasol-claims -n ${DEV}"
+  check "parasol-claims promoted to ${STAGE} (>=2 replicas)" deploy_ready_min parasol-claims "$STAGE" 2     || hint "not done yet — ${STAGE} starts EMPTY and promoting to it is a later exercise (add a second Application pointed at overlays/stage; ws solve gitops-fundamentals --user ${USER_NAME} does this), so this red is expected until you get there"
 fi
 
 verify_summary

@@ -175,16 +175,17 @@ else
   # --- end state: the lab's OUTCOMES — promote + scheduled import + catalog Template + pull-secret use ---
   # Assert OUTCOMES (a promoted tag exists; a scheduled stream exists; a custom Template exists; the pull
   # secret is referenced), never the exact mechanism, so any correct solution stays green (rule 14).
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "parasol-claims carries the promoted :${PROMOTE_TAG} tag (tag/promote)" has_tag "$PROMOTE_TAG" \
-    || hint "promote it: oc tag ${NS}/${IS_NAME}:${SEED_TAG} ${NS}/${IS_NAME}:${PROMOTE_TAG}"
+    || hint "not done yet — the entry state ships only :${SEED_TAG}, and promoting is the lab: oc tag ${NS}/${IS_NAME}:${SEED_TAG} ${NS}/${IS_NAME}:${PROMOTE_TAG}"
   check "${EXT_STREAM} ImageStream re-imports on a schedule (scheduled import)" ext_scheduled \
-    || hint "oc import-image ${NS}/${EXT_STREAM} --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm"
+    || hint "not done yet — the entry state ships no ${EXT_STREAM}, and importing it is the lab: oc import-image ${NS}/${EXT_STREAM} --from=registry.access.redhat.com/ubi9/ubi:latest --scheduled --confirm"
   check "a custom Template exists in ${NS} (namespaced catalog governance)" custom_template_min 1 \
-    || hint "add a namespaced Template to ${NS}: oc apply -f <your-template>.yaml -n ${NS} (see the lab)"
+    || hint "not done yet — the entry state ships no namespaced Template; adding one is the lab: oc apply -f <your-template>.yaml -n ${NS} (see the lab)"
   check "sample pull Secret ${PULL_SECRET} is referenced for pull (private-registry deploy)" secret_referenced \
-    || hint "link it: oc secrets link deployer ${PULL_SECRET} --for=pull -n ${NS} (or name it in a pod's imagePullSecrets)"
+    || hint "not done yet — the entry state ships ${PULL_SECRET} unreferenced on purpose; using it is the lab: oc secrets link deployer ${PULL_SECRET} --for=pull -n ${NS} (or name it in a pod's imagePullSecrets)"
   check "the workload naming ${PULL_SECRET} is actually running (mechanic B)" pull_secret_deploy_ready \
-    || hint "exercise 4's Deployment must reach >=1 ready replica. If it is ImagePullBackOff with 'authentication required', the pod template names a pull secret AND pulls from the internal registry — naming one REPLACES the ServiceAccount's default-dockercfg-*, so use a public image or name both secrets."
+    || hint "not done yet? exercise 4's Deployment does not exist until you create it, so this red is expected before then. If it EXISTS and is short of >=1 ready replica, that one is real — and if it is ImagePullBackOff with 'authentication required', the pod template names a pull secret AND pulls from the internal registry: naming one REPLACES the ServiceAccount's default-dockercfg-*, so use a public image or name both secrets"
 fi
 
 verify_summary

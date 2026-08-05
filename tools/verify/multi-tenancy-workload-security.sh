@@ -128,14 +128,18 @@ else
   # --- end state: the lab's OUTCOME — workload fixed + the team RBAC in place ----------------------
   # Assert OUTCOMES (the workload runs; effective permissions), never the mechanism (which RoleBinding
   # name / which securityContext field), so any correct solution stays green (template rule 14).
-  check "root-demander is running (>=1 ready replica)"        deploy_ready root-demander             || hint "fix the workload (drop runAsUser:0) and scale up — or ws solve multi-tenancy-workload-security --user ${USER_NAME}"
-  check "root-demander's pod actually runs as a NON-ROOT uid" root_demander_runs_nonroot            || hint "the pod runs, but not as a non-root uid — that is the scoped-SCC route ([INSTRUCTOR-DEMO]), not the fix. Drop runAsUser:0 from the pod spec so restricted-v2 assigns a uid from the namespace range: oc get pod -l app=root-demander -n ${NS} -o jsonpath='{.items[0].spec.containers[0].securityContext}'"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "root-demander is running (>=1 ready replica)"        deploy_ready root-demander             || hint "not done yet — the entry state ships root-demander at 0 replicas on purpose; fixing the workload (drop runAsUser:0) and scaling it up IS the lab, so this red is the expected state before you start (or: ws solve multi-tenancy-workload-security --user ${USER_NAME})"
+  check "root-demander's pod actually runs as a NON-ROOT uid" root_demander_runs_nonroot            || hint "not done yet, or done the wrong way — if root-demander is not running at all this follows from the check above. If it IS running as root, that is the scoped-SCC route ([INSTRUCTOR-DEMO]), not the fix: drop runAsUser:0 from the pod spec so restricted-v2 assigns a uid from the namespace range. Inspect: oc get pod -l app=root-demander -n ${NS} -o jsonpath='{.items[0].spec.containers[0].securityContext}'"
   if [[ "$IMPERSONATE_OK" == "true" ]]; then
-    check "payments-ci can update Deployments in ${NS} (edit)"     sa_can payments-ci "$NS" update deployments      || hint "grant payments-ci edit in ${NS}: oc adm policy add-role-to-user edit -z payments-ci -n ${NS}"
-    check "payments-ci can read pods in ${PROD} (view)"            sa_can payments-ci "$PROD" get pods              || hint "grant payments-ci view in ${PROD}: oc adm policy add-role-to-user view -z payments-ci -n ${PROD}"
-    check "payments-ci CANNOT create Deployments in ${PROD} (view is read-only)" sa_cannot payments-ci "$PROD" create deployments || hint "in ${PROD} payments-ci must be view-only — do not grant it edit there"
-    check "payments-ops can create Deployments in ${NS} (deployer Role)"  sa_can payments-ops "$NS" create deployments   || hint "bind the custom deployer Role to payments-ops in ${NS} (see the lab)"
-    check "payments-ops CANNOT read Secrets in ${NS} (deployer excludes secrets)" sa_cannot payments-ops "$NS" get secrets || hint "the deployer Role must NOT grant secrets read — that's the least-privilege point"
+    # These five grade RBAC the attendee writes during the lab. The entry state deliberately leaves both
+    # ServiceAccounts UNGOVERNED (the entry checks above assert exactly that), so red here before the lab
+    # is not just expected — it is the state ws prep guarantees.
+    check "payments-ci can update Deployments in ${NS} (edit)"     sa_can payments-ci "$NS" update deployments      || hint "not done yet — the entry state leaves payments-ci ungoverned by design; granting it is the lab: oc adm policy add-role-to-user edit -z payments-ci -n ${NS}"
+    check "payments-ci can read pods in ${PROD} (view)"            sa_can payments-ci "$PROD" get pods              || hint "not done yet — you grant this during the lab: oc adm policy add-role-to-user view -z payments-ci -n ${PROD}"
+    check "payments-ci CANNOT create Deployments in ${PROD} (view is read-only)" sa_cannot payments-ci "$PROD" create deployments || hint "this one is broken, not undone — it fails only when payments-ci was granted MORE than view in ${PROD}. In prod it must be read-only: remove the over-broad binding rather than adding another"
+    check "payments-ops can create Deployments in ${NS} (deployer Role)"  sa_can payments-ops "$NS" create deployments   || hint "not done yet — the entry state leaves payments-ops ungoverned by design; binding the custom deployer Role to it in ${NS} is the lab (see the lab)"
+    check "payments-ops CANNOT read Secrets in ${NS} (deployer excludes secrets)" sa_cannot payments-ops "$NS" get secrets || hint "this one is broken, not undone — it fails only when your deployer Role (or another binding) grants secrets read. Least privilege is the point: drop secrets from the Role"
   else
     warn "RBAC-outcome checks — caller cannot impersonate ServiceAccounts; run as admin/CI to grade them"
   fi

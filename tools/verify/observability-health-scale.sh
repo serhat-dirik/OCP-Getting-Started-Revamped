@@ -252,15 +252,16 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no PodDisruptionBudget yet (resilience beat not started)"  no_pdb_yet   || hint "entry state has no PDB — ws reset observability-health-scale --user ${USER_NAME}"
 else
   # --- end state: the lab's outcomes exist (HPA + alert + PDB); >= replicas, never == ----------
-  check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "create the HPA: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"
-  check "parasol-claims has >=2 ready replicas (HPA floor)"        claims_replicas_at_least 2                    || hint "HPA floor is 2 — wait: oc get hpa parasol-claims -n ${NS}"
-  check "a PrometheusRule alert exists in ${NS}"                   prometheusrule_exists                         || hint "create an alerting rule (PrometheusRule) in ${NS} — see the alert beat"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "HorizontalPodAutoscaler parasol-claims targets CPU"       hpa_on_cpu                                    || hint "not done yet — the entry state ships no HPA on purpose; creating it is the scale beat: oc autoscale deploy/parasol-claims --cpu=60% --min=2 --max=4 -n ${NS}"
+  check "parasol-claims has >=2 ready replicas (HPA floor)"        claims_replicas_at_least 2                    || hint "not done yet? with no HPA there is nothing holding the floor at 2, so this red follows from the check above and is equally expected before the scale beat. If the HPA EXISTS and replicas are still below 2, give it a moment and look at why: oc get hpa parasol-claims -n ${NS}; oc get pods -n ${NS}"
+  check "a PrometheusRule alert exists in ${NS}"                   prometheusrule_exists                         || hint "not done yet — the entry state ships no alert rule on purpose; creating a PrometheusRule in ${NS} is the alert beat, so this red is expected before you get there"
   # The object existing is not the outcome — the attendee SEEING it is. Only assert this when the
   # endpoint answered; unreachable already printed its ⚠, and a denied endpoint already failed above.
   if [[ "$TENANCY_STATE" == "ok" ]]; then
-    check "attendee's Alerting rules page lists >=1 rule for ${NS}" tenancy_lists_an_alerting_rule          || hint "the /dev-monitoring/ns/${NS}/alertrules?alert-source=user page is EMPTY for the attendee — if 'oc get prometheusrule -n ${NS}' is empty, create the alert (alert beat); if it lists one, Thanos Ruler did not load it (bad expr, or give UWM ~30s and re-verify)"
+    check "attendee's Alerting rules page lists >=1 rule for ${NS}" tenancy_lists_an_alerting_rule          || hint "not done yet, or not loaded — the /dev-monitoring/ns/${NS}/alertrules?alert-source=user page is EMPTY for the attendee. If 'oc get prometheusrule -n ${NS}' is also empty you simply have not written the alert yet (alert beat) and this red is expected. If it DOES list one, that is the real case: Thanos Ruler has not loaded it — a bad expr, or give UWM ~30s and re-verify"
   fi
-  check "PodDisruptionBudget parasol-claims exists"               oc get pdb parasol-claims -n "$NS"            || hint "create a PDB: oc create pdb parasol-claims --selector app=parasol-claims --min-available=1 -n ${NS}"
+  check "PodDisruptionBudget parasol-claims exists"               oc get pdb parasol-claims -n "$NS"            || hint "not done yet — the entry state ships no PDB on purpose; creating one is the resilience beat: oc create pdb parasol-claims --selector app=parasol-claims --min-available=1 -n ${NS}"
 fi
 
 verify_summary

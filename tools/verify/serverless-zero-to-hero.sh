@@ -113,10 +113,11 @@ else
   # --- end state: the lab's OUTCOMES — tuned + split + eventing wired ---------------------------------
   # Assert OUTCOMES (ksvc tag-split; a Broker, Trigger and PingSource exist), never the exact CR wording,
   # so any correct attendee solution stays green (rule 14).
-  check "parasol-claims ksvc traffic is tag-split (blue/green)"     ksvc_traffic_split || hint "split traffic across two revisions with tags (e.g. kn service update parasol-claims --traffic ...) — see the lab"
-  check "eventing Broker present (in-memory)"                       broker_present     || hint "create a Broker in ${NS} (kn broker create default) — the eventing-taste hub"
-  check "Trigger present (Broker -> parasol-claims ksvc)"           trigger_present    || hint "create a Trigger routing the Broker to the parasol-claims ksvc (see the lab)"
-  check "PingSource present (source -> Broker)"                     pingsource_present || hint "create a PingSource emitting events into the Broker (see the lab)"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "parasol-claims ksvc traffic is tag-split (blue/green)"     ksvc_traffic_split || hint "not done yet — the entry state ships ONE revision with all the traffic on purpose; splitting it across two tagged revisions is the lab (kn service update parasol-claims --traffic ...), so this red is expected before you start"
+  check "eventing Broker present (in-memory)"                       broker_present     || hint "not done yet — the entry state ships no eventing objects; creating the Broker is the eventing-taste hub: kn broker create default -n ${NS}"
+  check "Trigger present (Broker -> parasol-claims ksvc)"           trigger_present    || hint "not done yet — you create this during the lab (a Trigger routing the Broker to the parasol-claims ksvc); expected red until you do"
+  check "PingSource present (source -> Broker)"                     pingsource_present || hint "not done yet — you create this during the lab (a PingSource emitting events into the Broker); expected red until you do"
 fi
 
 verify_summary

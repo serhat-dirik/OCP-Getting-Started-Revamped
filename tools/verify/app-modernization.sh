@@ -120,6 +120,12 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no modernized service deployed yet (attendee builds it)" no_modernized || hint "parasol-claims-modernized exists; the lab already finished — ws reset app-modernization --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — the modernized service deployed to {user}-modernize -------------
+  # The one line every end-state section in tools/verify/ now opens with, worded identically. An
+  # attendee who runs `ws verify <module>` BEFORE doing the lab meets a wall of ❌ that is entirely
+  # correct, and three of these scripts used to phrase that red as if the environment were broken —
+  # which sends people to an instructor for nothing. Say up front what the red means, then let each
+  # hint say which KIND of red it is.
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   # Assert the OUTCOME (a modernized claims service is deployed AND Ready), never exact wording, so any
   # correct solution stays green (rule 14). READY, not just present: a crash-looping modernized deploy
   # (see the READINESS NOTE — it currently does) fails HERE, which deploy_present missed. RED until the

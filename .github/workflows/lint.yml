@@ -897,6 +897,121 @@ jobs:
           fi
           python3 tools/lint/module-prep-pairing-guard.py
 
+  no-cdn-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A page asset fetched from the internet works in CI and fails in the room
+        # 2026-08-05, commit e669f7c. All five playbooks pointed mermaid_library_url at
+        # cdn.jsdelivr.net. On an air-gapped or egress-restricted cluster that ES-module import
+        # fails and EVERY diagram on EVERY page renders as raw mermaid text — and the Showroom
+        # cockpit serves from in-cluster, where egress is not guaranteed. Mermaid is now vendored.
+        #
+        # Nothing else in CI can see it come back. Antora never FETCHES the URL — it substitutes
+        # the string into an emitted <script type="module">import mermaid from '…'</script> — so a
+        # build with a CDN URL is rc=0, every link checker passes and www/ looks perfect. The first
+        # failing observation is in front of a room. Same for a new <script src="https://…"> in the
+        # supplemental UI: writing this guard turned up a SECOND one nobody had noticed (webfonts
+        # from fonts.googleapis.com in head-styles.hbs), since vendored alongside.
+        #
+        # Two regressions carry no "https" in the diff at all, so the guard checks for them by
+        # shape rather than by pattern: DELETING mermaid_library_url falls back to the extension's
+        # own jsdelivr default (verified in node_modules/@sntke/antora-mermaid-extension/lib/
+        # extension.js:11+33, not recalled), and pointing it at upstream's .mjs name instead of the
+        # deliberately-renamed vendored .js yields a 404 with the same raw-text symptom.
+        run: |
+          rc=0
+          python3 tools/lint/no-cdn-assets-guard.py --self-test || rc=$?
+          # Exactly 1 = the clean fixtures stayed silent (a comment recording the OLD CDN URL, an
+          # <a href> to redhat.com, an svg xmlns, data:/relative url(), and the real vendored
+          # README that documents the URL it replaced are all legitimate) AND every canary was
+          # caught by the detector that owns it. 0 = a detector is blind; 2 = a canary was missed,
+          # a clean fixture false-positived, or the playbook/UI scan is broken.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::no-cdn-assets-guard self-test must exit 1 (clean fixtures silent," \
+                 "every canary caught); got rc=$rc. Detection is unproven — refusing to trust a" \
+                 "clean scan of the real tree."
+            exit 1
+          fi
+          python3 tools/lint/no-cdn-assets-guard.py
+
+  backtick-leak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: An AsciiDoc code span that cannot close leaks a backtick into the attendee's prose
+        # 2026-08-05. AsciiDoc single-backtick spans are CONSTRAINED: a closing backtick is refused
+        # when the next character is a word character, a straight quote or an apostrophe. So
+        # `Site`s renders no code span at all — either the backticks stay visible, or the span runs
+        # on to the next backtick that IS allowed to close and drags half a sentence into <code>
+        # with a stray ` inside it. 101 of these were shipping across 21 modules.
+        #
+        # Nothing else in CI catches it, and nothing was ever going to: the source reads correctly,
+        # Antora exits 0, and vale does not run in CI at all. Only the rendered page shows it, and
+        # only if you happen to look at the right one — half the surviving leaks live in
+        # [demo-block] Say/Do lines that the workshop rendering removes entirely, so even an
+        # HTML-scanning gate would have to build all three sites to see them. The guard reads the
+        # source, which is the union of the three renderings by construction, and reports a
+        # file:line:column the author can open. Its re-implementation of Asciidoctor's rule was
+        # checked against @asciidoctor/core over all 4,943 prose lines carrying a backtick: 0 false
+        # positives, 0 false negatives.
+        run: |
+          rc=0
+          python3 tools/lint/backtick-leak-guard.py --self-test || rc=$?
+          # Exactly 1 = the clean fixture stayed silent across all eight legitimate backtick
+          # constructs (listing and literal blocks, line comments, +passthrough+, pass:[], "`curved
+          # quotes`", '`single`', ``unconstrained``) AND the blocked-close and blocked-open canaries
+          # were each caught by the detector that owns them. 0 = a detector is blind; 2 = a canary
+          # was missed, the clean fixture false-positived, or the tracked-file scan is broken.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::backtick-leak-guard self-test must exit 1 (clean fixture silent, both" \
+                 "canaries caught by their own detector); got rc=$rc. Detection is unproven —" \
+                 "refusing to trust a clean scan of the real tree."
+            exit 1
+          fi
+          python3 tools/lint/backtick-leak-guard.py
+
+  completion-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A module that grades nothing at completion prints a green banner over an untouched world
+        # 2026-08-05, the 27-module / 8-attendee verification wave. Its important finding was not the
+        # ❌s — it graded lab COMPLETION on worlds where nobody had done the lab, so those were
+        # expected. It was the ✅. tools/verify/trusted-supply-chain.sh printed "✅ all 11 checks
+        # passed" against a namespace the attendee had never touched, because its FULL mode holds no
+        # end-state check at all: all eleven assert what `ws prep` already materialized, and the one
+        # mode-split branch only ADDS a check under --entry-only. Before, after, or instead of the
+        # lab — same green banner, rc 0.
+        #
+        # Nothing else in CI can see it. The script is valid shell, shellcheck-clean, sources
+        # _lib.sh, calls verify_summary, exits 0. verify-summary-skip-guard asserts the banner tells
+        # the truth about the outcomes that RAN; it cannot know they were all entry-state ones.
+        # verify-oc-read-guard asserts each check can tell "false" from "could not ask". Both are
+        # satisfied by a script that grades the wrong world perfectly. The defect is an ABSENCE.
+        #
+        # And a false ✅ is worse than a false ❌, which this project already treats as trust-
+        # destroying: the false ❌ is contradicted within twenty minutes by an attendee looking at
+        # their own cluster, while nothing ever contradicts the false ✅. They close the module
+        # believing they did it.
+        run: |
+          rc=0
+          python3 tools/lint/completion-coverage-guard.py --self-test || rc=$?
+          # Exactly 1 = three clean fixtures each stayed silent ON THEIR OWN (both live polarities of
+          # the ENTRY_ONLY split, plus agentic-ai's hand-rolled VERIFY_FAIL accounting) AND every
+          # canary was caught by the detector that owns it: no end-state checks, a completion branch
+          # of only warn/na/info, completion checks reachable only under --solve, an inverted gate,
+          # accounting with no arm that can reach ❌, a catalogued module with no script, and a stale
+          # exemption. 0 = a detector is blind; 2 = a canary was missed, a clean fixture
+          # false-positived, or the catalogue/script scan is broken.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::completion-coverage-guard self-test must exit 1 (clean fixtures silent," \
+                 "every canary caught); got rc=$rc. Detection is unproven — refusing to trust a" \
+                 "clean scan of the real tree."
+            exit 1
+          fi
+          python3 tools/lint/completion-coverage-guard.py
+
   attribute-interpolation:
     runs-on: ubuntu-latest
     steps:

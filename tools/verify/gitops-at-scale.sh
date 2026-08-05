@@ -205,8 +205,9 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no parasol-claims Rollout in ${PROD} yet (clean)" rollout_absent parasol-claims "$PROD"             || hint "prod already has the Rollout — ws reset gitops-at-scale --user ${USER_NAME} for a clean entry"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
-  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "convert prod to a Rollout (rollouts/ overlay); ws solve gitops-at-scale does this — needs the cluster RolloutManager"
-  check "route parasol-claims answers 200 in ${PROD}"     route_ready_200 "$PROD"                            || hint "prod claims not ready — check the Rollout: oc argo rollouts get rollout parasol-claims -n ${PROD}"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "not done yet? the entry state deliberately leaves ${PROD} WITHOUT a Rollout — converting it (rollouts/ overlay) IS the lab, so this red is expected before you start. If you HAVE converted it and it is not Healthy, that one is real: the cluster RolloutManager must be present — oc argo rollouts get rollout parasol-claims -n ${PROD} (ws solve gitops-at-scale --user ${USER_NAME} does the conversion)"
+  check "route parasol-claims answers 200 in ${PROD}"     route_ready_200 "$PROD"                            || hint "not done yet? until the Rollout above exists there is nothing in ${PROD} to answer, so this red follows from that one and is equally expected. If the Rollout IS Healthy and the Route still does not answer 200, that one is real: oc get pods -n ${PROD}; oc argo rollouts get rollout parasol-claims -n ${PROD}"
 fi
 
 verify_summary

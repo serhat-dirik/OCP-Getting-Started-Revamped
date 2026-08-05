@@ -68,10 +68,14 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   :  # entry-only stops here — no PipelineRun has run yet on a fresh entry state.
 else
   # --- end state (what a completed lab / solve looks like) -------------------
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   # Every gate must pass for the run to Succeed, so this single check asserts the whole secured chain
   # ran green (a proxy like "an image was built" would false-green a run blocked at a later gate).
-  check "capstone run PASSED all gates (a run Succeeded)"   devsecops_run_succeeded "$NS"                          || hint "a red gate fails the whole run — fix the flagged issue and re-run the pipeline (or ws solve app-security-testing --user ${USER_NAME} runs the clean main). Inspect: tkn pr list -n ${NS}"
-  check "deploy stage created the parasol-claims Route"     oc get route parasol-claims -n "$NS"                   || hint "the deploy stage runs 'oc create route edge parasol-claims' — it appears after a Succeeded run"
+  # The old hint opened with "fix the flagged issue", which presumes a run happened AND went red. On a
+  # fresh entry state no PipelineRun exists at all, and that phrasing read as a broken environment to
+  # somebody who had simply not started yet. Name the no-run case first, since it is the common one.
+  check "capstone run PASSED all gates (a run Succeeded)"   devsecops_run_succeeded "$NS"                          || hint "not done yet? no PipelineRun in ${NS} has Succeeded — before you start, that is the expected state, because RUNNING the secured pipeline IS the lab (or: ws solve app-security-testing --user ${USER_NAME} runs the clean main). If a run DID execute and went red, that is a real gate failure and the flagged issue is worth fixing: tkn pr list -n ${NS}"
+  check "deploy stage created the parasol-claims Route"     oc get route parasol-claims -n "$NS"                   || hint "not done yet — the deploy stage creates this Route ('oc create route edge parasol-claims') and it appears only after a Succeeded run, so it is expected to be missing until you run the pipeline"
 fi
 
 verify_summary

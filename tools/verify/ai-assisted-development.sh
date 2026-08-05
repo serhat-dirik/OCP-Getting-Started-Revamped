@@ -132,8 +132,9 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
     || hint "an edit/admin RoleBinding for mcp-agent already exists — entry state should be read-only; ws reset ai-assisted-development --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — the probe is fixed, so the app is Ready ------------------------
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "seeded parasol-claims FIXED + Ready (probe patched to the correct path)" deploy_available "$SEED" \
-    || hint "parasol-claims is still 0/1 — the readinessProbe path was not fixed; ws solve ai-assisted-development --user ${USER_NAME} (or let the agent patch it), then retry"
+    || hint "not done yet? parasol-claims is still 0/1 because the entry state ships it DELIBERATELY broken and repairing the readinessProbe path IS the lab — so this red is the expected state before you start, not a broken environment. Fix the probe path (or let the agent patch it, or: ws solve ai-assisted-development --user ${USER_NAME}), then re-run this verify. If you HAVE patched it and it is still 0/1, that one is real: oc get pods -n ${NS} and oc describe deploy/${SEED} -n ${NS}"
 fi
 
 verify_summary

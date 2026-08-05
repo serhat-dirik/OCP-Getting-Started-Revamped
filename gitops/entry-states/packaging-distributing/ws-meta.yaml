@@ -53,16 +53,27 @@ conflictsWith:
 # `ws start` blocks until the image is genuinely pullable (no sleep-and-hope) rather than timing out.
 waitSeconds: 360
 
-# This entry seeds an OpenShift BuildConfig, and the build API DEFAULTS spec fields it did not set
-# (runPolicy: Serial, {successful,failed}BuildsHistoryLimit: 5, postCommit: {}, nodeSelector: null).
-# Argo diffs those server-added fields against the desired manifest → the app is PERMANENTLY OutOfSync
-# even though every workload is Healthy and the sync operation Succeeded; with selfHeal off (entry-app
-# policy) it never self-corrects. expectOutOfSync makes `ws start`/`ws prep` gate on Health + a Succeeded
-# op instead of Synced (wait_healthy require_sync=false) — otherwise wait_healthy loops to timeout and
-# prep exits non-zero under `set -e`, false-failing the cockpit smoke though materialization worked
-# (found live via `ws smoke packaging-distributing`, 2026-07-16). This is NOT expectDegraded: the app is genuinely Healthy,
-# only unsynced. `ws verify packaging-distributing` remains the correctness gate. Distinct from ai-assisted-development (Degraded-by-design).
-expectOutOfSync: true
+# NO expectOutOfSync, DELIBERATELY — and it is not an oversight that it is gone. It was declared here
+# on 2026-07-16 because this entry seeds an OpenShift BuildConfig: the build API defaults spec fields
+# the chart did not set (runPolicy: Serial, {successful,failed}BuildsHistoryLimit: 5, postCommit: {},
+# nodeSelector: null) and silently DROPS the `triggers: []` the chart did set, so the live object could
+# never equal the render. Entry apps run selfHeal=false, so the app sat PERMANENTLY OutOfSync while
+# every workload was Healthy and the sync op Succeeded; the waiver kept `ws start`/`prep` from looping
+# to timeout and exiting non-zero under `set -e` on a materialization that had actually worked.
+#
+# The CAUSE is gone at chart 0.1.2: templates/notifications-image.yaml now declares those five defaults
+# explicitly and omits `triggers` entirely, so the rendered BuildConfig round-trips through the API
+# unchanged and there is nothing left to diff. Measured on cluster-65prs 2026-08-05 — (1) the
+# BuildConfig was the ONLY OutOfSync resource in this Application (every other resource read Synced,
+# which also proves Argo's own tracking metadata is not a diff source here); (2) the rendered manifest
+# was applied to user5-dev for real and read back, and the persisted spec was byte-identical to the
+# render, key for key.
+#
+# Keeping the waiver would have been the expensive option, not the safe one: it sets wait_healthy
+# require_sync=false, which disables the Synced gate for this module FOREVER — trading away the sync
+# signal of every other resource in the chart so that one BuildConfig could stay quiet. Any real future
+# drift here would then materialize behind a green banner. Do not re-add it to silence a diff; measure
+# the diff and remove its cause, or accept the red as the signal it is.
 
 # Representative attendee commands packaging-distributing genuinely leans on (the generic battery covers cockpit/identity/
 # isolation). ws smoke runs each as {user} in the live cockpit and asserts exit 0. ${USER} resolves

@@ -4,9 +4,12 @@
 #          ephemeral claims-db), a statement-batch worker with NO toleration/nodeSelector, and a load
 #          generator — all with DEFAULT scheduling (no affinity/TSC/PDB, batch unpinned). The dedicated
 #          batch pool (a bootstrap-labeled+tainted worker) exists cluster-wide. Entry marker set.
-#   End:   the attendee ran the lab — parasol-claims replicas are spread across distinct nodes
-#          (anti-affinity/TSC), a PodDisruptionBudget protects it, and statement-batch now runs ON the
-#          dedicated batch pool node (toleration + nodeSelector).
+#   End:   the attendee ran the lab — parasol-claims DECLARES a spread constraint (podAntiAffinity
+#          and/or topologySpreadConstraints) and its replicas do sit on distinct nodes, a
+#          PodDisruptionBudget protects it, and statement-batch now runs ON the dedicated batch pool
+#          node (toleration + nodeSelector). The declaration is what is graded; the observed layout
+#          corroborates it (see claims_spread_constraint — the layout ALONE was a false ✅, because the
+#          default scheduler already spreads replicas by soft preference on the untouched entry state).
 # Runnable as the ATTENDEE: reads only {user}-dev objects the attendee sees via namespace admin, plus
 # nodes via the platform-observer ClusterRole (get/list/watch nodes). The G1 cockpit smoke runs
 # `--entry-only` as {user}.
@@ -114,16 +117,58 @@ batch_on_pool() {
   node_is_batch_pool "$n"
 }
 
-# The anti-affinity/spread outcome: Running parasol-claims pods sit on >= $1 DISTINCT nodes.
-# A predicate rather than the old `test "$(claims_distinct_nodes)" -ge 2` call site, for the subshell
-# reason above — and because the old form printed 0 for an unreachable API, i.e. a false ❌ on spread.
-claims_spans_nodes() {
-  local n
-  oc_read get pods -n "$NS" -l app=parasol-claims --field-selector=status.phase=Running \
-    -o jsonpath='{.items[*].spec.nodeName}' || return 1
-  n="$(printf '%s' "$OC_OUT" | tr ' ' '\n' | sort -u | grep -c . || true)"
-  [[ "${n:-0}" -ge "$1" ]]
+# THE ATTENDEE'S ARTEFACT: parasol-claims carries an explicit spread constraint on its pod template.
+#
+# This replaces a check that graded observed node spread ALONE ("replicas span >= 2 distinct nodes"),
+# which returned a FALSE ✅ on the untouched entry state — measured on user4, 2026-08-05: `ws prep`
+# then `ws verify` printed `✅ parasol-claims replicas span >=2 distinct nodes (anti-affinity/TSC)`
+# with the two entry replicas sitting on control-plane-…-2 and worker-…-3 and NO affinity or TSC on the
+# Deployment at all. The default scheduler spreads replicas of a ReplicaSet by SOFT preference
+# (SelectorSpread scoring), so on any multi-node cluster the lucky layout is the NORMAL one — the lab's
+# own exercise 2 opens by saying exactly that ("Your two parasol-claims replicas *happen* to be on
+# different nodes — but that's the scheduler's soft preference, not a guarantee"). The check was
+# therefore congratulating an attendee for the one thing the exercise exists to teach them is missing,
+# and nothing later in the run contradicts it. A false ✅ costs the lesson silently.
+#
+# So grade the DECLARATION, which only the attendee can have made, and keep the observed layout as a
+# secondary signal at the call site. Still an outcome check, not a wording check (template rule 14):
+# either mechanism the lab teaches counts — podAntiAffinity (required OR preferred) or
+# topologySpreadConstraints — on any topologyKey, since the lab drives the key from hostname to
+# workshop.redhat.com/zone and back. What is NOT accepted is an empty pod template, which is precisely
+# what the entry state ships and precisely what the old check waved through.
+#
+# Sets CLAIMS_SPREAD_KIND (a global, read by the call site — a `$(…)` caller would run this in a
+# SUBSHELL and lose the VERIFY_INCONCLUSIVE that an unanswerable API raises).
+CLAIMS_SPREAD_KIND=""
+claims_spread_constraint() {
+  CLAIMS_SPREAD_KIND=""
+  # ONE read, three ranges. A `{range}` over a path that does not exist is rc 0 + EMPTY, not an error
+  # (measured on this 4.22 cluster against the untouched entry state, 2026-08-05) — so a Deployment
+  # with no shaping at all is the API's real answer "none", still a ❌, exactly as oc_read intends.
+  oc_read get deploy parasol-claims -n "$NS" -o jsonpath=\
+'{range .spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[*]}podAntiAffinity/required on {.topologyKey}{"\n"}{end}'\
+'{range .spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[*]}podAntiAffinity/preferred on {.podAffinityTerm.topologyKey}{"\n"}{end}'\
+'{range .spec.template.spec.topologySpreadConstraints[*]}topologySpreadConstraints on {.topologyKey}{"\n"}{end}' || return 1
+  # Drop any term whose topologyKey came back empty — an unkeyed term spreads across nothing.
+  CLAIMS_SPREAD_KIND="$(printf '%s\n' "$OC_OUT" | grep -v ' on $' | grep '[^[:space:]]' \
+    | awk 'NR>1{printf "; "}{printf "%s", $0}' || true)"
+  [[ -n "$CLAIMS_SPREAD_KIND" ]]
 }
+
+# The OBSERVED layout of the Running parasol-claims pods → CLAIMS_RUNNING (how many) and CLAIMS_NODES
+# (how many DISTINCT nodes they sit on). Globals, not echoed, for the subshell reason above — and read
+# once so the two questions the call site asks ("is there anything to observe?" and "did it spread?")
+# cannot see two different worlds.
+CLAIMS_RUNNING=0
+CLAIMS_NODES=0
+claims_placement() {
+  oc_read get pods -n "$NS" -l app=parasol-claims --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' || return 1
+  CLAIMS_RUNNING="$(printf '%s\n' "$OC_OUT" | grep -c '[^[:space:]]' || true)"
+  CLAIMS_NODES="$(printf '%s\n' "$OC_OUT" | grep '[^[:space:]]' | sort -u | grep -c . || true)"
+}
+# Grades the ALREADY-READ placement (see above) — touches no API, so its ❌ is never a cluster blip.
+claims_nodes_at_least() { [[ "${CLAIMS_NODES:-0}" -ge "$1" ]]; }
 
 # A PodDisruptionBudget guards parasol-claims.
 pdb_present() { oc_present get pdb parasol-claims -n "$NS" -o name; }
@@ -140,10 +185,20 @@ no_claims_pdb() {
   deploy_present parasol-claims || return 1
   oc_absent get pdb parasol-claims -n "$NS" -o name
 }
-no_claims_antiaffinity() {
+# The MIRROR of the same defect, pointed the other way: this used to read podAntiAffinity ONLY, so an
+# environment where the attendee had added a topologySpreadConstraints (exercise 3) still certified a
+# clean slate — and a wrongly-green ENTRY check sends `ws prep` down its "already prepared" fast path,
+# leaving them a half-shaped world. It now negates exactly the constraint the END check grades, so the
+# two directions cannot disagree about what "shaped" means.
+no_claims_spread_constraint() {
   deploy_present parasol-claims || return 1
-  oc_read get deploy parasol-claims -n "$NS" -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity}' || return 1
-  [[ -z "$OC_OUT" ]]
+  # Shaped already → NOT a clean entry.
+  if claims_spread_constraint; then return 1; fi
+  # claims_spread_constraint also returns 1 for "the API could not be asked", where it raises
+  # VERIFY_INCONCLUSIVE. Return 1 there too so check() prints ⚠ instead of certifying a clean slate
+  # from a read that never happened.
+  if (( VERIFY_INCONCLUSIVE == 1 )); then return 1; fi
+  return 0
 }
 batch_unpinned() {
   # No batch-pool nodeSelector on statement-batch yet (the attendee adds it).
@@ -236,7 +291,7 @@ fi
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has shaped NOTHING yet ------------------------------
   check "statement-batch is NOT pinned to the batch pool yet (attendee pins it)" batch_unpinned      || hint "entry ships it unpinned; if a batch-pool nodeSelector is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
-  check "parasol-claims has NO anti-affinity yet (attendee adds it)"             no_claims_antiaffinity || hint "entry ships default scheduling; if podAntiAffinity is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
+  check "parasol-claims has NO spread constraint yet (attendee adds anti-affinity/TSC)" no_claims_spread_constraint || hint "entry ships default scheduling; if a podAntiAffinity or a topologySpreadConstraints is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
   check "no PodDisruptionBudget on parasol-claims yet (attendee creates it)"     no_claims_pdb        || hint "entry ships no PDB; if one exists the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
   check "parasol-claims ships the reseed fault (schema-management drop-and-create)" claims_schema_is_reseed || hint "the reseed fault should be present at entry; if schema-management is already off drop-and-create the lab started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
 else
@@ -251,12 +306,41 @@ else
   else
     warn "the batch-placement outcome — statement-batch not Ready"
   fi
-  # Node-spread outcome needs the parasol-claims image running; guard on Ready (image-gap) and use `>=`
-  # (lab-exceedable — more replicas/nodes is fine).
+  # THE SPREAD BEAT, graded in two parts — the attendee's DECLARATION first, the observed layout only
+  # as corroboration. Grading the layout alone was a false ✅ on the untouched entry state (see
+  # claims_spread_constraint): the default scheduler spreads ReplicaSet replicas by soft preference, so
+  # "they are on two nodes" is the cluster's normal behaviour, not evidence that anybody constrained
+  # anything. Node spread that happens to be true is not evidence of a constraint that makes it true.
+  # Guarded on Ready (image-gap) as before; `>=`, not `==`, on the node count (lab-exceedable — the lab
+  # scales past the entry replica count and more nodes is fine).
   if deploy_ready parasol-claims; then
-    check "parasol-claims replicas span >=2 distinct nodes (anti-affinity/TSC)" claims_spans_nodes 2 || hint "spread the replicas: add podAntiAffinity on kubernetes.io/hostname (and/or topologySpreadConstraints) so no two claims pods share a node"
+    check "parasol-claims carries the spread constraint you added (podAntiAffinity and/or topologySpreadConstraints)" claims_spread_constraint \
+      || hint "the Deployment's pod template has neither — the replicas may LOOK spread, but that is the scheduler's soft preference, not your rule, and it stops holding the moment the cluster gets busy. Add it: oc patch deploy parasol-claims -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"spec\":{\"affinity\":{\"podAntiAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":[{\"labelSelector\":{\"matchLabels\":{\"app\":\"parasol-claims\"}},\"topologyKey\":\"kubernetes.io/hostname\"}]}}}}}}' (see the lab's exercise 2/3)"
+    # SECOND, and only once the constraint is real: does the running world match it? This is where the
+    # old check's question still earns its place — it catches "declared but not in effect" (a rollout
+    # that never rolled, replicas stuck Pending because no eligible node is left).
+    if claims_placement; then
+      if [[ -n "$CLAIMS_SPREAD_KIND" ]]; then
+        info "(spread constraint in place: ${CLAIMS_SPREAD_KIND})"
+        if [[ "${CLAIMS_RUNNING:-0}" -ge 2 ]]; then
+          check "…and the ${CLAIMS_RUNNING} Running replicas really do sit on >=2 distinct nodes" claims_nodes_at_least 2 \
+            || hint "the constraint is declared but the pods have not moved onto distinct nodes — the rollout may not have rolled (oc rollout status deploy/parasol-claims -n ${NS}) or an old ReplicaSet may still be serving (oc get pods -n ${NS} -l app=parasol-claims -o wide)"
+        else
+          # Genuinely UNKNOWN, so warn() and not na(): one replica cannot span two nodes, and a second
+          # replica that is Pending rather than Running is not a fine state — it just is not this
+          # check's verdict to give. The constraint itself is graded above either way.
+          warn "the observed node spread — only ${CLAIMS_RUNNING} parasol-claims replica(s) are Running, so a distinct-node layout cannot be observed (check for Pending pods: oc get pods -n ${NS} -l app=parasol-claims -o wide)"
+        fi
+      elif [[ "${CLAIMS_NODES:-0}" -ge 2 ]]; then
+        # Deliberately an info and NOT a ✅ — this is the exact sentence the old check turned into a
+        # green tick. Say what is true (they are apart) and what is not (nothing is keeping them apart).
+        info "(the ${CLAIMS_RUNNING} Running replicas do currently sit on ${CLAIMS_NODES} distinct nodes — but with no constraint declared that is the scheduler's soft preference doing it, not your work, so it is not graded)"
+      fi
+    else
+      warn "the observed node spread — the pod list could not be read${OC_ERR:+ (${OC_ERR:0:120})}"
+    fi
   else
-    warn "the claims node-spread outcome — parasol-claims not Ready; needs the parasol-images build"
+    warn "the claims spread outcome — parasol-claims not Ready; needs the parasol-images build"
   fi
   # Zero-downtime is a real, gradeable OUTCOME (deployment-targets-scheduling re-diagnosis 2026-07-16). The fault: the shared
   # claims-db is reseeded on EVERY parasol-claims boot (Hibernate drop-and-create), so a rolling-update

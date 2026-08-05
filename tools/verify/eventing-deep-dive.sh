@@ -105,8 +105,9 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   check "no dead-letter Trigger yet (attendee wires retries + DLQ)"     no_dlq_trigger      || hint "entry ships no deadLetterSink Trigger; if one exists the lab already started — ws reset eventing-deep-dive --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOMES — filtered routing + retry/DLQ wired -----------------------------
-  check "an attribute-filtered Trigger exists (spec.filter.attributes)" filtered_trigger_present || hint "add a Trigger that filters on a CloudEvent attribute (e.g. type) to the consumer — see the lab"
-  check "a Trigger with a deadLetterSink exists (retries + DLQ)"        dlq_trigger_present       || hint "add delivery.retry + delivery.deadLetterSink (-> claims-dlq) on a Trigger — the retry/DLQ beat"
+  info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  check "an attribute-filtered Trigger exists (spec.filter.attributes)" filtered_trigger_present || hint "not done yet — the entry state deliberately ships only an UNFILTERED baseline Trigger; adding one that filters on a CloudEvent attribute (e.g. type) is the lab, so this red is expected before you start"
+  check "a Trigger with a deadLetterSink exists (retries + DLQ)"        dlq_trigger_present       || hint "not done yet — the entry state deliberately ships no deadLetterSink; adding delivery.retry + delivery.deadLetterSink (-> claims-dlq) is the retry/DLQ beat, so this red is expected before you get there"
 fi
 
 verify_summary
