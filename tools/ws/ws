@@ -2747,9 +2747,31 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # row is also where `ws doctor --user user9` on an 8-user cohort tells you user9 was never
   # provisioned — so the fix hint splits: a missing user1-dev is an unsynced platform, a missing
   # userN-dev on a synced platform is a cohort-size problem.
-  local ns_probe="${scope_user:-user1}-dev"
-  if oc get ns "$ns_probe" >/dev/null 2>&1; then
+  #
+  # THREE outcomes, not two. A namespace read is CLUSTER-SCOPED, and an attendee holds no rights over
+  # anyone else's — so `oc get ns user1-dev` as user2 comes back Forbidden, which the old two-branch
+  # shape reported as "missing — workshop-config not synced". Measured live as user2 on cluster-65prs
+  # (2026-08-05): a hard red row whose stated cause CONTRADICTED rows 4 and 9 of the same output
+  # (argo ✅ all Healthy · workshop layer ✅ workshop-config Healthy). Every attendee who ran doctor saw
+  # it, and a false ❌ destroys trust in every other ✅ (this repo's own rule). "I could not look" is not
+  # "it is broken" — so a Forbidden read degrades to ⚠/not-graded exactly like the cluster-scoped rows
+  # above it (workshop IdP, cohort size, running image drift), and does NOT set fail.
+  #
+  # The guard is the REAL READ, not `oc auth can-i`: this repo measured can-i answering a false YES for
+  # a cluster-scoped resource when the identity holds a namespaced RoleBinding to a ClusterRole carrying
+  # that rule — and this is that exact shape: re-measured as user3 on cluster-65prs (2026-08-06),
+  # `oc auth can-i list namespaces` answers YES while `oc get ns` comes back Forbidden, so a can-i gate
+  # here would have kept the row grading on a read it cannot make. Same real-read-then-branch idiom as
+  # doctor_cohort_coherence's group/User-object reads; see its header for the full reasoning.
+  #
+  # NotFound still reads as missing (rc≠0, no "Forbidden" in the message), so the admin path — the only
+  # identity that can actually answer this question — grades ✅/❌ exactly as before.
+  local ns_probe="${scope_user:-user1}-dev" ns_out ns_rc=0
+  ns_out="$(oc get ns "$ns_probe" 2>&1)" || ns_rc=$?
+  if [[ "$ns_rc" -eq 0 ]]; then
     ok "${ns_probe} exists"
+  elif printf '%s' "$ns_out" | grep -qi forbidden; then
+    unknown "not checked (reading ${ns_probe} is Forbidden — needs cluster-admin)"
   elif [[ -n "$scope_user" ]]; then
     nok "${ns_probe} missing — is ${scope_user} provisioned? check the cohort: ws status (grow it: ws scale-users N)"; fail=1
   else
