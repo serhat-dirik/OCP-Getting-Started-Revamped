@@ -8,11 +8,17 @@
 #          claims runs GitOps-managed in {user}-dev + {user}-stage (gitops-at-scale starts where gitops-fundamentals ended, so
 #          gitops-at-scale is independent). Entry leaves {user}-prod WITHOUT the Rollout (converting prod to a
 #          Rollout is the lab).
-#   End:   {user}-prod runs claims as an Argo Rollout (canary), Healthy, route answers 200 (also
-#          proves the cluster RolloutManager is serving — a Rollout only goes Healthy if the
-#          controller processes it).
-# End checks are outcome-based: they pass for BOTH the attendee's own lab result AND `ws solve`'s
-# prod Application. Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
+#   End:   the ApplicationSet the attendee creates in exercise 1 templates into proj-{user} (the
+#          module's headline beat — see appset_for_user below) AND {user}-prod runs claims as an
+#          Argo Rollout (canary), Healthy, DELIVERED FROM GIT BY ARGO (tracking annotation), route
+#          answers 200 (also proves the cluster RolloutManager is serving — a Rollout only goes
+#          Healthy if the controller processes it).
+# End checks grade the DECLARATION the attendee wrote (the ApplicationSet, and the fact that prod's
+# Rollout arrived through Argo) and corroborate it with the OBSERVED outcome (Healthy + 200) —
+# never the other way round. They pass for BOTH the attendee's own lab result AND `ws solve`'s prod
+# Application, which reproduces the same world WITHOUT an ApplicationSet and is detected as such
+# rather than silently accepted (solve_built_this_world).
+# Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
@@ -124,7 +130,7 @@ argo_rbac_binds_user() {
 
 # The student server serves its own argocd CLI (gitops-at-scale beat 1 downloads it — Argo 3.4 has no appset UI,
 # so the attendee creates the ApplicationSet via the CLI). A byte-range probe, not a ~300MB pull.
-cli_download_ready() {
+cli_download_ready() {  # NOTE: this asks whether beat 1 CAN be done; appset_for_user asks whether it WAS
   read_ingress_domain || return 1
   # -r 0-1 is what keeps this a byte-range probe rather than a ~300MB pull — and, with http_read
   # slurping the body into HTTP_OUT, what keeps that variable two bytes wide.
@@ -138,11 +144,92 @@ cli_download_ready() {
 
 # deploy_ready_min (<deployment> <namespace> <n>) is shared — tools/verify/_lib.sh (>=, never ==).
 
-# The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student instance.
-deploy_gitops_managed() {
-  oc_read get deploy "$1" -n "$2" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' || return 1
+# --- beat 1: the ApplicationSet — the artefact this module exists to produce -------------------
+#
+# F-07 (false-pass audit, 2026-08-05). The end state used to grade ONLY "prod runs a Healthy Rollout
+# and the route answers 200". Both are OUTCOMES, and `oc apply -k rollouts/` from the clone the lab
+# already has the attendee make produces both without an ApplicationSet, without the argocd CLI
+# login, without Argo touching prod at all — i.e. the whole "at scale" half of "GitOps at Scale"
+# could be skipped under a green banner. Worse, the entry block goes to the trouble of proving the
+# ApplicationSet SOURCE is in the fork (line ~"fork carries applicationset.yaml") and that the CLI
+# that creates it is downloadable — verifying that beat 1 CAN be done and never that it WAS.
+#
+# The rule: grade the DECLARATION the attendee wrote, corroborate with the OBSERVATION. The two
+# checks below are the declaration; rollout_healthy/route_ready_200 stay as the corroboration.
+#
+# MATCHED BY PROJECT, NOT BY NAME — deliberately, and not a shortcut. `ws` itself selects an
+# attendee's ApplicationSets with exactly `.spec.template.spec.project == proj-{user}` (tools/ws/ws,
+# the privileged purge path), which is also the boundary Argo RBAC enforces on the create
+# (`applicationsets, create, proj-{user}/*` — student-argocd.yaml). The fork ships the object named
+# claims-{user}, but the lab's own Challenge tells the attendee to EDIT that file and nothing stops
+# them renaming it. Pinning the name would trade this false ✅ for a false ❌ on a correct attendee,
+# which is not a win. A filter expression (not a plain field path) is what keeps an ApplicationSet
+# belonging to someone else — or one missing the field — from erroring the read into a false ❌.
+read_user_appsets() {  # → 0 + OC_OUT = one name per line (possibly empty); 1 when the ns could not be read
+  oc_read get applicationsets.argoproj.io -n "$ARGO_NS" \
+    -o jsonpath="{range .items[?(@.spec.template.spec.project==\"proj-${USER_NAME}\")]}{.metadata.name}{\"\n\"}{end}"
+}
+
+# ONE READ, TWO WRAPPERS — and that is the point. The exemplar lane that fixed
+# deployment-targets-scheduling found a second, worse bug beside the first: its end predicate
+# accepted "anti-affinity OR topologySpreadConstraints" while its entry predicate negated
+# anti-affinity only, so a TSC-only world was BOTH "complete" in full mode and "a clean slate" in
+# entry mode — and `ws prep` reads the entry rc as "is this world already prepared?", so it could
+# skip setup or offer to WIPE a finished lab. Two hand-written mirrors drift. These cannot: they are
+# `-n` and `-z` over the same bytes.
+appset_for_user()    { read_user_appsets || return 1; [[ -n "$OC_OUT" ]]; }
+no_appset_for_user() { read_user_appsets || return 1; [[ -z "$OC_OUT" ]]; }
+
+# ASK THE OBJECT, NOT A BARE EXISTENCE PROBE — same classifier as argo_access_plane_err above, and
+# for the same reason. An attendee's only k8s read in ogsr-student-gitops is `get appproject
+# proj-{user}` BY NAME (student-appprojects.yaml grants exactly that and nothing else), so listing
+# ApplicationSets there is Forbidden for them and must be ⚠ "not yours to answer", never ❌ on work
+# they may well have done. Anything that is NOT a refusal means the caller CAN ask — so a genuinely
+# missing ApplicationSet falls through and fails loudly, which is the whole point of this check.
+appset_read_err() { { oc get applicationsets.argoproj.io -n "$ARGO_NS" -o name >/dev/null; } 2>&1 || true; }
+
+# Did `ws solve` build this world? solve-endstate.yaml stamps this ConfigMap in the attendee's OWN
+# {user}-gitops namespace (readable by them) and then creates a SINGLE prod Application —
+# claims-prod-{user} — NOT an ApplicationSet. So on a solved world beat 1's artefact is correctly
+# absent, and asserting it would be a false ❌ on a world that is exactly what solve promises.
+# na(), not warn(): nothing is unknown here and no re-run anywhere answers it differently.
+# Read from the CLUSTER as well as from --solve: `ws solve` then a plain `ws verify` is the ordinary
+# instructor sequence, and the flag is absent on that second command.
+#
+# The OWNER LABEL, not just the name. This predicate is the one place where a ✅ is granted without
+# beat 1's artefact, so it must key off something the CHART stamps rather than off a name an
+# attendee could type: {user}-gitops is the attendee's own namespace and they can create ConfigMaps
+# in it. `workshop.redhat.com/owner: ogsr` is set by solve-endstate.yaml on this object. It is not a
+# security boundary — someone determined can forge a label too — but it means the exemption cannot
+# be tripped by accident or by a same-named leftover, and the ➖ line says out loud which world it
+# thinks it is looking at.
+solve_built_this_world() {
+  oc_read get cm "gitops-at-scale-solve-apps-${USER_NAME}" -n "$GITOPS" \
+    -o jsonpath='{.metadata.labels.workshop\.redhat\.com/owner}' || return 1
+  [[ "$OC_OUT" == "ogsr" ]]
+}
+
+# The object carries Argo CD's tracking annotation → the student instance delivered it FROM GIT.
+# Generic over kinds because prod's workload is a Rollout, not a Deployment, and it is the half of
+# F-07 that survives the ⚠ above: an attendee CAN read this one (it lives in their own namespace),
+# so it grades on an attendee's own run and it is what separates "Argo put this here" from
+# `oc apply -k rollouts/`.
+#
+# NOT a guess about how this Argo CD tracks resources: the student instance sets
+# `resourceTrackingMethod: annotation` explicitly (gitops/workshop-config/templates/student-argocd.yaml),
+# and the dev-side check further down already grades that same annotation in BOTH modes — so an
+# instance that had label tracking instead would be printing a red line there long before it printed
+# one here. No new class of false ❌ is created by asking prod the question dev is already asked.
+argo_tracked() {  # <kind> <name> <namespace>
+  oc_read get "$1" "$2" -n "$3" -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' || return 1
   [[ -n "$OC_OUT" ]]
 }
+
+# The Deployment carries the Argo CD tracking annotation → it is GitOps-managed by the student instance.
+deploy_gitops_managed() { argo_tracked deploy "$1" "$2"; }
+
+# Same question, asked of the prod Rollout.
+rollout_gitops_managed() { argo_tracked rollout "$1" "$2"; }
 
 # A named Rollout is present AND Healthy (also proves the cluster RolloutManager is serving it).
 rollout_healthy() {
@@ -203,10 +290,43 @@ check "parasol-claims ready in ${STAGE} (>=2 replicas)"  deploy_ready_min paraso
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove {user}-prod does NOT yet run the Rollout (converting prod is the lab).
   check "no parasol-claims Rollout in ${PROD} yet (clean)" rollout_absent parasol-claims "$PROD"             || hint "prod already has the Rollout — ws reset gitops-at-scale --user ${USER_NAME} for a clean entry"
+  # …and that beat 1's artefact is not there either — the EXACT negation of the end-state check
+  # below, by construction (both wrap read_user_appsets). Not cosmetic symmetry: a leftover
+  # ApplicationSet REGENERATES the Applications a purge deletes (tools/ws/ws deletes appsets FIRST
+  # for exactly this reason), so a world holding one is not a clean slate however empty prod looks —
+  # and `ws prep` reads this rc as "already prepared?" and would take its no-purge fast path on it.
+  case "$(appset_read_err)" in
+    *orbidden*)
+      warn "attendee ApplicationSets in ${ARGO_NS} not listable as this identity"
+      hint "not yours to fix: an attendee's only k8s read there is their own AppProject by name. Confirm it yourself with the Argo CLI — \`~/argocd appset list -p proj-${USER_NAME}\` should be empty at entry — or re-run this script as the instructor/CI identity"
+      ;;
+    *)
+      check "no ApplicationSet for proj-${USER_NAME} yet (clean)"  no_appset_for_user  || hint "a previous run's ApplicationSet is still in ${ARGO_NS} and will regenerate anything a purge deletes — ws prep gitops-at-scale --user ${USER_NAME} --yes (or \`~/argocd appset delete claims-${USER_NAME}\` as ${USER_NAME})"
+      ;;
+  esac
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
+  # BEAT 1 FIRST — the declaration, before the outcomes it is supposed to have caused.
+  if [[ "$SOLVE_MODE" == "true" ]] || solve_built_this_world; then
+    na "ApplicationSet for proj-${USER_NAME} (exercise 1) — this world was built by \`ws solve\`, which reproduces the same END state from a single prod Application (claims-prod-${USER_NAME}) instead of the attendee's ApplicationSet, so beat 1's artefact is correctly absent here; the checks below still grade the outcome it would have produced"
+  else
+    case "$(appset_read_err)" in
+      *orbidden*)
+        warn "could not check: an ApplicationSet for proj-${USER_NAME} exists (exercise 1) — ${ARGO_NS} is not listable as this identity"
+        hint "not yours to fix and not graded here: an attendee's only k8s read in ${ARGO_NS} is their own AppProject by name. Answer it where it can be answered — \`~/argocd appset list -p proj-${USER_NAME}\` in your own terminal after the beat-1 login, or an instructor/CI run of this script"
+        ;;
+      *)
+        check "an ApplicationSet generates proj-${USER_NAME}'s Applications (exercise 1)" appset_for_user  || hint "not done yet? exercise 1 IS this check: log in with the argocd CLI and run \`~/argocd appset create applicationset.yaml\` from your claims-config clone — the entry state ships the source file in your fork and never creates the object. If you DID create it and this is red, that one is real: \`~/argocd appset list -p proj-${USER_NAME}\` (an appset that generates prod by some other route — oc apply -k rollouts/, or a hand-made Application — is not this exercise)"
+        ;;
+    esac
+  fi
   check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "not done yet? the entry state deliberately leaves ${PROD} WITHOUT a Rollout — converting it (rollouts/ overlay) IS the lab, so this red is expected before you start. If you HAVE converted it and it is not Healthy, that one is real: the cluster RolloutManager must be present — oc argo rollouts get rollout parasol-claims -n ${PROD} (ws solve gitops-at-scale --user ${USER_NAME} does the conversion)"
+  # The outcome above says prod runs a Rollout; this says ARGO put it there. `oc apply -k rollouts/`
+  # from the clone the lab already has you make produces an identically Healthy Rollout with no Argo
+  # anywhere near it, and that is not this module. Attendee-readable (own namespace), so unlike the
+  # ApplicationSet check this one grades on an attendee's own run too.
+  check "prod Rollout was delivered by Argo CD (tracking annotation)" rollout_gitops_managed parasol-claims "$PROD" || hint "not done yet? no Rollout in ${PROD} yet means no annotation either — do the check above first. If the Rollout IS there and this is red, that one is real: it was applied by hand rather than generated from git. Delete it and let the ApplicationSet create it — oc get rollout parasol-claims -n ${PROD} -o jsonpath='{.metadata.annotations}'"
   check "route parasol-claims answers 200 in ${PROD}"     route_ready_200 "$PROD"                            || hint "not done yet? until the Rollout above exists there is nothing in ${PROD} to answer, so this red follows from that one and is equally expected. If the Rollout IS Healthy and the Route still does not answer 200, that one is real: oc get pods -n ${PROD}; oc argo rollouts get rollout parasol-claims -n ${PROD}"
 fi
 

@@ -1340,8 +1340,29 @@ cmd_smoke() {
     || hint "attendee 'ws prep ${module} --yes' did not converge — materialize it first: ws prep ${module} --user ${user} --yes, then re-smoke"
   # --entry-only on purpose: the smoke targets a freshly-materialized ENTRY state; a completed lab's
   # END checks legitimately go red on an entry state (verify scripts are mode-split, template rule 14).
-  check "ws verify ${module} --entry-only passes N/N in the cockpit" pod_i "ws verify ${module} --entry-only" \
-    || hint "entry checks are red in the cockpit — inspect: ws verify ${module} --user ${user}"
+  #
+  # VERIFY_STRICT=1, added 2026-08-05. tools/verify/_lib.sh's verify_summary exits 0 by DEFAULT when
+  # every graded check was SKIPPED — deliberately, because `ws prep` reads that rc and a non-zero
+  # there offers to WIPE a healthy world. Its own header names the escape hatch: "automation that must
+  # fail closed opts in with VERIFY_STRICT=1 and gets rc 3". `ws prep` and `ws doctor` opted in; this
+  # gate, the one place whose whole job is to fail closed, never did — so a cockpit run in which the
+  # attendee identity could read NOTHING (an expired token, an RBAC regression, an apiserver blip)
+  # came back rc 0 and G1 went green over a verify that graded nothing. That is the precise shape of
+  # defect this repo keeps finding: a check that grades an outcome it never actually looked at.
+  #
+  # Classified rather than folded into pass/fail, and the env prefix travels INSIDE the pod command
+  # string because the verify runs in the cockpit, not here. rc 3 still fails the gate — a run that
+  # verified nothing must not pass G1 — but it gets its own hint, so nobody burns an hour hunting a
+  # broken entry state that is not broken.
+  local ev_rc=0
+  pod_i "VERIFY_STRICT=1 ws verify ${module} --entry-only" >/dev/null 2>&1 || ev_rc=$?
+  case "$(doctor_verify_rc_outcome "$ev_rc")" in
+    pass) check "ws verify ${module} --entry-only passes N/N in the cockpit" true ;;
+    skip) check "ws verify ${module} --entry-only passes N/N in the cockpit" false \
+            || hint "the cockpit verify SKIPPED every check — it graded nothing, so this is NOT proof the entry state is broken. Read what it could not answer: ws verify ${module} --user ${user}" ;;
+    *)    check "ws verify ${module} --entry-only passes N/N in the cockpit" false \
+            || hint "entry checks are red in the cockpit — inspect: ws verify ${module} --user ${user}" ;;
+  esac
 
   # ── per-module hook: representative click-to-run blocks (ws-meta smokeCommands, optional) ────────
   local sc had_sc=0
@@ -1355,12 +1376,20 @@ cmd_smoke() {
   [[ "$had_sc" == 1 ]] || info "(no ws-meta smokeCommands for ${module} — generic battery only)"
 
   # ── summary (N/N, non-zero exit on any failure so the gate can fail CI/agent briefs) ────────────
+  # `total` is PASS+FAIL — the GRADED outcomes — and the other two are reported beside it rather than
+  # folded in or dropped. _lib.sh grew a third and fourth outcome (VERIFY_SKIP "could not evaluate",
+  # VERIFY_NA "not applicable"); every check here goes through its `check`, so if a smokeCommand ever
+  # routes to one of them this banner must not silently print a smaller denominator and call it N/N.
+  # That is exactly the false-completeness verify_summary was fixed for on 2026-08-05 — one layer up
+  # it would have gone unnoticed for as long again.
   echo
-  local total=$((VERIFY_PASS + VERIFY_FAIL))
+  local total=$((VERIFY_PASS + VERIFY_FAIL)) ungraded=""
+  if (( ${VERIFY_SKIP:-0} > 0 )); then ungraded="${ungraded} · ⚠ ${VERIFY_SKIP} not graded (could not evaluate)"; fi
+  if (( ${VERIFY_NA:-0}   > 0 )); then ungraded="${ungraded} · ➖ ${VERIFY_NA} not applicable"; fi
   if (( VERIFY_FAIL == 0 )); then
-    ok "smoke ${module} @ ${user}: ${VERIFY_PASS}/${total} attendee-cockpit checks passed"
+    ok "smoke ${module} @ ${user}: ${VERIFY_PASS}/${total} attendee-cockpit checks passed${ungraded}"
   else
-    err "smoke ${module} @ ${user}: ${VERIFY_FAIL} of ${total} attendee-cockpit checks FAILED — do not pass G1 until green"
+    err "smoke ${module} @ ${user}: ${VERIFY_FAIL} of ${total} attendee-cockpit checks FAILED${ungraded} — do not pass G1 until green"
     exit 1
   fi
 }
@@ -2300,17 +2329,19 @@ _cohort_diff_note() {  # <label> <expected space-list> <actual space-list> → d
   printf '%s' "$note"
 }
 
-doctor_cohort_coherence() {  # → verdict message on stdout; rc 0=ok 1=err 2=skip (ws doctor's "cohort
-  # coherence" row). After a wipe or a scale, FOUR independent sources should agree on who the cohort
+doctor_cohort_coherence() {  # → verdict message on stdout for ws doctor's "cohort coherence" row;
+  # rc 0=ok · 1=err · 2=COULD NOT EVALUATE. The caller prints rc 2 with unknown()/⚠, never skip()/➖ —
+  # see the case at that row. After a wipe or a scale, FOUR independent sources should agree on who the cohort
   # is: workshop-config's live userCount helm parameter (the target), the workshop-attendees group, the
   # OpenShift User objects, and the Gitea accounts. A wipe that dies partway (bootstrap/ogsr-wipe-
   # users.sh, which delegates its cohort prune to `ws scale-users`) is exactly the state where these
   # stop agreeing — a User object with a working login and NO namespaces is the worst combination this
   # row exists to catch; today it is only visible by checking all four places by hand.
   #
-  # SKIP, never ok/err, when a source cannot be READ — Gitea unreachable, or a Forbidden on a cluster-
-  # scoped read. A false green here is worse than an honest "could not check" (this repo's own rule).
-  # An EMPTY-but-readable source (the group genuinely has no members) is a real finding, not a skip.
+  # rc 2 ("could not evaluate"), never ok/err, when a source cannot be READ — Gitea unreachable, or a
+  # Forbidden on a cluster-scoped read. A false green here is worse than an honest "could not check"
+  # (this repo's own rule). An EMPTY-but-readable source (the group genuinely has no members) is a
+  # real finding, not an unevaluated one.
   #
   # `oc auth can-i` is not used as the gate for the cluster-scoped reads (User objects, the group): this
   # repo measured it giving a false YES for a cluster-scoped resource under some RBAC shapes. Each read
@@ -2521,8 +2552,18 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # follows it rather than ballooning doctor's ~22s cohort-wide baseline. Flagged as friction in the
   # handoff — cohort-wide strict verify may be worth its own opt-in flag; not decided here.
   if [[ -z "$scope_user" ]]; then
-    skip "not checked cohort-wide (expensive — narrow with: ws doctor --user U)"
+    # ⚠, not ➖. This is the one row in doctor whose two glyphs genuinely argued: the skip is DESIGNED
+    # (cost), which reads like "not applicable", but the outcome it produces is "the entry states were
+    # not graded and might be broken" — and an action IS available, named right here in the message.
+    # ➖'s contract is "nothing is missing, no action available", and both halves are false, so a
+    # cohort-wide `ws doctor` ending "environment looks good" with a ➖ on this row claimed a
+    # completeness it never had. Decided ⚠ (2026-08-05): the day's whole lesson is that a check which
+    # graded nothing must not look complete.
+    unknown "not checked cohort-wide (expensive — narrow with: ws doctor --user U)"
   elif [[ "$csv" != *Succeeded* ]]; then
+    # ➖ is right here and stays: with no gitops operator there are no Applications to grade at all,
+    # nothing is missing that this row could report, and the gitops-operator row above already
+    # carries the actual finding.
     skip "n/a (gitops operator not installed)"
   else
     local ev_total=0 ev_pass=0 ev_skip=0 ev_fail=0 ev_solved=0 ev_fail_names="" ev_skip_names=""
@@ -2733,7 +2774,13 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     coh_msg="$(doctor_cohort_coherence)" || coh_rc=$?
     case "$coh_rc" in
       0) ok "$coh_msg" ;;
-      2) skip "$coh_msg" ;;
+      # rc 2 is COULD-NOT-EVALUATE, never not-applicable: every `return 2` in doctor_cohort_coherence
+      # is a source that could not be READ (userCount unreadable, a Forbidden on the group or the User
+      # objects, Gitea unreachable, no python3), and each message says so in its own words. Printing
+      # it with ➖ told an SA "nothing is missing here" about the one row whose whole purpose is to
+      # catch a half-finished wipe — and the function's own header already calls this "an honest
+      # 'could not check'". ⚠ is that sentence's glyph.
+      2) unknown "$coh_msg" ;;
       *) err "$coh_msg"; fail=1 ;;
     esac
   fi
@@ -3752,9 +3799,19 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
       info "Namespace ${ns}"
       markers="$(oc get cm -n "$ns" -o name 2>/dev/null | sed -n 's|.*/ws-entry-|ws-entry-|p' | paste -sd' ' - || true)"
       echo "  ws-entry markers: ${markers:-none}"
+      # SAME readiness contract as ns_pods_ready (ws status): a Completed/Succeeded pod is a FINISHED
+      # pod, not an unready one. Every entry state materializes seed Jobs, and their pods sit at
+      # "0/1 Completed" forever — the ready-ratio arm below flagged all of them, so this row read
+      # "not-Ready pods: seed-… Completed (0/1 ready)" in EVERY namespace of EVERY attendee, burying
+      # the one real CrashLoopBackOff underneath a wall of healthy Jobs. `ws status` never had the
+      # bug because it excluded terminal phases first; diag's copy of the awk did not. Reproduced by
+      # running cmd_diag against a fixture with one Running, one Completed and one crashing pod,
+      # 2026-08-05. A false ❌ in the SA's troubleshooting bundle is the same trust cost as one in a
+      # verify script, and here it also hides the finding the bundle exists to surface.
       badpods="$(oc get pods -n "$ns" --no-headers 2>/dev/null | awk '
         { split($2, a, "/"); st = $3
-          if (st != "Running" && st != "Completed" && st != "Succeeded") { print "     " $1 "  " st; next }
+          if (st == "Completed" || st == "Succeeded") next
+          if (st != "Running") { print "     " $1 "  " st; next }
           if (a[2] + 0 > 0 && a[1] != a[2]) print "     " $1 "  " st " (" $2 " ready)" }' || true)"
       if [[ -n "$badpods" ]]; then echo "  not-Ready pods:"; echo "$badpods"; else echo "  not-Ready pods: none"; fi
       ev="$(oc get events -n "$ns" --sort-by=.lastTimestamp 2>/dev/null | grep -v '^LAST' | tail -n 6 || true)"
@@ -4007,7 +4064,7 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
   local users u2
   users="$(printf '%s\n' "$rows" | cut -f2 | grep -v '^-$' | sort -u | grep . || true)"
   if [[ -n "$scope_user" ]]; then users="$scope_user"; fi
-  local n_work=0 n_deg=0 n_unk=0
+  local n_work=0 n_deg=0 n_unk=0 n_na=0
   # Degraded and unknown are tracked SEPARATELY, each carrying its own module's reason. Folding them
   # into one reason list reads as "app-modernization is broken because no-verdict-recorded", which
   # names the wrong module for the wrong cause — the kind of near-miss that sends an SA down a blind
@@ -4033,13 +4090,23 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
       esac
     done <<< "$rows"
     if [[ "$n_mod" -eq 0 ]]; then
-      skip "${u2} — unknown: no AI module materialized for this attendee"
-      n_unk=$((n_unk + 1))
+      # The SECOND ambiguous ➖/⚠ call, decided 2026-08-05. The GLYPH was already right and stays: an
+      # attendee with no AI module materialized has no AI path to be broken, nothing is missing, and
+      # `ws maas set` cannot change this line. What was wrong is that it also incremented n_unk. This
+      # branch is reachable only under `ws maas show userN` (unscoped, `users` is derived FROM the rows,
+      # so every name in it has at least one), and there it is the whole report: an SA asking about an
+      # attendee who simply has not started an AI module got "0 working · 0 degraded · 1 unknown" plus
+      # the "fix without a reinstall" prompt, for a cluster with nothing wrong. Same caveat-on-a-healthy-
+      # run defect the na() split fixed one layer down — and the wording said "unknown" while wearing
+      # the ➖ mark on top of it. Counted apart, and named honestly.
+      skip "${u2} — n/a: no AI module materialized for this attendee (nothing to converge)"
+      n_na=$((n_na + 1))
     elif [[ -n "$bad" ]]; then
       err "${u2} — degraded: ${bad}${unk:+ · unknown: ${unk}}"
       n_deg=$((n_deg + 1))
     elif [[ -n "$unk" ]]; then
-      echo "⚠ ${u2} — unknown: ${unk}"
+      # unknown(), not a hand-rolled echo: one glyph, one spacing, one meaning across the whole CLI.
+      unknown "${u2} — unknown: ${unk}"
       n_unk=$((n_unk + 1))
     else
       ok "${u2} — working (${n_mod} AI module(s))"
@@ -4047,7 +4114,14 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
     fi
   done
   echo
-  echo "Summary: ${n_work} working · ${n_deg} degraded · ${n_unk} unknown"
+  # ➖ rides along as a parenthetical rather than being hidden (same shape as verify_summary's
+  # "(N not applicable)"): every line printed above is accounted for, without an attendee who simply
+  # has not reached an AI module being counted as a problem.
+  # Built as a plain variable, not an inline `$( cond && printf … )`: this repo has measured how a
+  # `cond && cmd` shape behaves under `set -e`, and a summary line is not the place to rely on it.
+  local na_note=""
+  if [[ "$n_na" -gt 0 ]]; then na_note=" · ${n_na} n/a (no AI module)"; fi
+  echo "Summary: ${n_work} working · ${n_deg} degraded · ${n_unk} unknown${na_note}"
   if [[ "$n_deg" -gt 0 || "$n_unk" -gt 0 ]]; then
     echo "   fix without a reinstall:  ws maas set [--model <name>] [--key-file <file>]"
   fi

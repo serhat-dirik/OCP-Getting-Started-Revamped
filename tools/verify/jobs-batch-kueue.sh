@@ -2,7 +2,10 @@
 # Verify jobs-batch-kueue — Jobs, Batch & Queued Workloads.
 #   Entry: {user}-batch exists (labeled for Kueue), holds the seeded claims-data PVC, a LocalQueue
 #          (user-queue) bound to the per-user ClusterQueue, and MaaS batch-inference credentials;
-#          entry marker + quota present.
+#          entry marker + quota present — AND, in --entry-only mode only, that the lab has NOT
+#          already been run here: no attendee-created Job, no nightly-statement CronJob, no admitted
+#          Workload. That last group is the exact negation of the End group below, and it is what
+#          lets `ws prep` tell a fresh world from a finished one (audit F-05; see no_attendee_jobs).
 #   End:   the attendee ran the lab — at least one Job has Completed, the nightly-statement CronJob
 #          exists, and a Kueue Workload carries Admitted=True (admission control was exercised).
 # Runnable as the ATTENDEE: every check reads namespace-scoped objects the attendee can see
@@ -144,6 +147,74 @@ any_workload_admitted() {
   [[ "$OC_OUT" == *True* ]]
 }
 
+# --- the entry-mode clean slate (audit F-05) ---------------------------------
+#
+# WHY THESE EXIST. `ws prep` reads `<script> --entry-only`'s rc as the boolean "is this world already
+# prepared?" (tools/ws/ws cmd_prep). Until these three predicates existed there was no entry branch
+# at all — --entry-only ran the shared block above and stopped — so it graded ONLY what a COMPLETED
+# lab still satisfies: the namespace, its Kueue label, the quota, the LocalQueue, the PVC, the seed,
+# the MaaS credentials. A namespace holding a finished lab returned rc 0, prep printed "already
+# prepared — nothing to do", DID NOT PURGE, and the attendee started exercise 1 on top of the
+# previous pass's Jobs and CronJob. Because this lab's objects use FIXED names, that is a COLLISION
+# and not merely residue: `oc apply` onto an existing Job whose pod template differs is rejected
+# outright (pod templates are immutable), so the attendee's very first command hard-fails on a world
+# a green ✅ had just told them was ready.
+#
+# Two fixes for this same defect are already in this tree and both say why it matters:
+# config-multienv.sh's obj_absent and serverless-zero-to-hero.sh's single_revision.
+#
+# THE THREE ASSERTIONS ARE THE EXACT MIRROR OF THE THREE END CHECKS — a Completed attendee Job, the
+# nightly-statement CronJob, an Admitted Workload — negated one for one. Preserve that correspondence
+# if either side changes: an entry check negating a strict SUBSET of what the end check accepts
+# leaves a world that reads COMPLETE in full mode and CLEAN SLATE in entry mode at the same time.
+#
+# no_attendee_jobs is one step stronger than the literal negation of any_attendee_job_complete —
+# "no attendee Job exists" rather than "none Completed" — deliberately: a Job the attendee ran that
+# failed, or one still running, is not a completed lab and is not a clean slate either, and it is the
+# exact object that will collide on the next pass. It cannot false-red a correct entry state: the
+# selector is the SAME `!workshop.redhat.com/owner` discriminator the end check uses, so the entry
+# state's own two hook Jobs (claims-data-seed-…, maas-copy-…) are excluded by the API server, and any
+# future entry-state Job is excluded the moment it carries the owner label — nothing here restates a
+# name.
+#
+# oc_absent, NEVER `! oc get … 2>/dev/null`: a negation is the one direction where a silenced read
+# certifies a clean slate from an API that never answered, and a wrongly-green entry check is what
+# sends prep past the purge. The namespace is proven PRESENT first, or the assertion is vacuously
+# true on a cluster where nothing materialized at all.
+no_attendee_jobs() {
+  oc_present get ns "$NS" -o name || return 1
+  oc_absent  get jobs -n "$NS" -l '!workshop.redhat.com/owner' -o name
+}
+
+# Same name and signature as config-multienv.sh's copy on purpose: when this is hoisted into _lib.sh
+# (three scripts carry it after this change) the collapse should be mechanical.
+obj_absent() {  # <type> <name> <namespace> → 0 only when the API ANSWERED and it is not there
+  oc_present get ns "$3" -o name || return 1
+  oc_absent  get "$1" "$2" -n "$3" -o name
+}
+
+# The EXACT negation of any_workload_admitted — the same predicate, called and inverted, rather than a
+# second reading of the same fact that could drift away from it.
+#
+# "No Workload at all" is the tempting stronger form and it is NOT taken. Kueue mints a Workload for
+# every Job it manages, and what a Workload's mere existence proves depends on operator config this
+# script does not own (whether jobs without a queue-name label are managed). The lab's outcome, and
+# the only thing the end check grades, is an ADMITTED one — so that is what the clean slate denies.
+# Betting the purge on a stricter claim than the end check makes would trade this false ✅ for a
+# false ❌ on a correctly-materialized world, which is not a win.
+#
+# The VERIFY_INCONCLUSIVE re-read is the whole reason it is written this way (the shape
+# serverless-zero-to-hero.sh's no_traffic_split already uses): NEGATING a predicate turns "the cluster
+# could not be asked" into a PASS, and a wrongly-green entry check is precisely what makes prep skip
+# the purge. Fail closed here and let check() render the ⚠ from the flag oc_read already raised.
+no_workload_admitted() {
+  local rc=0
+  oc_present get ns "$NS" -o name || return 1
+  any_workload_admitted || rc=$?
+  if (( VERIFY_INCONCLUSIVE == 1 )); then return 1; fi
+  (( rc != 0 ))
+}
+
 # The per-user ClusterQueue is Active (only checkable with cluster read — admin/CI). The Forbidden
 # case never reaches here: the caller's `cq_err` probe below routes an attendee identity to warn().
 cq_active() {
@@ -265,7 +336,16 @@ case "$cq_err" in
     ;;
 esac
 
-if [[ "$ENTRY_ONLY" != "true" ]]; then
+if [[ "$ENTRY_ONLY" == "true" ]]; then
+  # --- entry state: the clean slate — the lab's own artefacts must NOT exist yet ----------------
+  # Exactly the three objects the end block grades, negated. See no_attendee_jobs above for why an
+  # unchecked clean slate costs `ws prep` its purge — and why, in THIS module, that costs the
+  # attendee their very first `oc apply` to an immutable-name collision.
+  info "entry state — these checks assert a CLEAN SLATE: they fail when the lab has already been run here, which is what tells 'ws prep' to purge and re-materialize"
+  check "no attendee-created Job yet (you create the first in exercise 1)"     no_attendee_jobs                       || hint "this is LEFTOVER from an earlier run, not a broken environment — the entry state's own seed/copy Jobs are excluded by label, so what is here is yours from last time. The lab's Job names are fixed, so re-applying over it fails on an immutable pod template. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
+  check "no nightly-statement CronJob yet (you create it in exercise 4)"       obj_absent cronjob nightly-statement "$NS" || hint "this is LEFTOVER from an earlier run (or from ws solve) — the entry state ships no CronJob. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
+  check "no admitted Kueue Workload yet (exercises 5/6 submit the first)"      no_workload_admitted                   || hint "this is LEFTOVER from an earlier run — a Workload reaches Admitted only after a Job is submitted through LocalQueue user-queue, which the entry state never does. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
+else
   # --- end state (what a completed lab / `ws solve jobs-batch-kueue` looks like) -----------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "an attendee-created Job has Completed"          any_attendee_job_complete                    || hint "not done yet — you run the monthly-statement Job in lab exercise 1, so no completed Job before then is expected, not a fault (or: ws solve jobs-batch-kueue --user ${USER_NAME}). If you DID run it and it never Completed, that one is real: oc get jobs -n ${NS}"

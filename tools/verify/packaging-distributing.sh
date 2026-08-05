@@ -143,6 +143,99 @@ no_deploy() {
   oc_absent get deploy "$name" -n "$NS" -o name
 }
 
+# --- the HELM half of a Helm module (false-pass audit F-10, 2026-08-05) -------------------------
+#
+# The only completion check used to be "a Deployment named parasol-notifications exists in
+# {user}-dev". `oc create deployment parasol-notifications --image=…` satisfies that exactly as well
+# as the six-exercise chart lab does: the whole reason the module exists — scaffold a chart, template
+# it, install it as a RELEASE, upgrade it, break it, roll it back — could be skipped and still print
+# green. That is not a check that passes on an untouched world (the Deployment IS attendee work), it
+# is a check that grades the OUTCOME and never the DECLARATION the attendee wrote.
+#
+# So: keep the Deployment as the outcome, and grade the artefact Helm itself leaves. Helm 3's default
+# storage driver records every REVISION of every release as its own Secret in the release's namespace,
+# named sh.helm.release.v1.<release>.v<N>. The entry state installs no chart at all, so any such
+# Secret in {user}-dev is attendee work, and N is the revision counter exercise 4 walks.
+#
+# READ BY NAME, not by label or field selector, and this is a deliberate narrowing of what has to be
+# TRUE for the check to be right. Helm also labels those Secrets (owner/name/status/version) and types
+# them helm.sh/release.v1, and either would have been a tidier query — but every extra assumption
+# about someone else's storage format is another way to red-line an attendee who did the lab
+# correctly, and this file may not be re-grounded against a live release before the next workshop.
+# The name is the storage KEY: Helm looks releases up by it, so it is the one part that cannot drift
+# without breaking Helm itself. `-o name` also prints names only — no Secret values are ever read.
+#
+# DELIBERATELY NOT PINNED to the release name either. The lab says `helm install
+# parasol-notifications`, but a release the attendee named otherwise is still a correct solution
+# (rule 14), and trading a false ✅ for a false ❌ on someone who did the lab right is not a win.
+
+# WHO BUILT THIS WORLD. `ws solve` renders the finished Deployment/Service/Route straight from this
+# module's chart through Argo (templates/solve-endstate.yaml) — there is no `helm install` anywhere in
+# that path, so a solved world has NO Helm release and correctly never will. Grading the two Helm
+# assertions there would red-line a correct instructor/CI run, which is the same trust bug pointed the
+# other way. Detected from the object's own chart label rather than from --solve, so `ws solve`
+# followed by a plain `ws verify` (no flag) is classified identically — the flag is not the fact.
+solve_rendered_deploy() {
+  oc_present get deploy -n "$NS" \
+    -l workshop.redhat.com/module=packaging-distributing,workshop.redhat.com/owner=ogsr -o name
+}
+
+# The namespace's release Secrets, into a global — the caller reads it in ITS OWN shell, because
+# `$(…)` would be a subshell and the VERIFY_INCONCLUSIVE oc_read raises inside one dies with it,
+# landing an unreachable API as a hard ❌ instead of a ⚠ (same argument as marker() above).
+HELM_RELEASE_SECRETS=""
+helm_release_secrets() {  # 0 = the API answered (0+ lines) · 1 = genuinely absent or could not ask
+  HELM_RELEASE_SECRETS=""
+  oc_read get secret -n "$NS" -o name || return 1
+  HELM_RELEASE_SECRETS="$(grep -E '(^|/)sh\.helm\.release\.v1\..+\.v[0-9]+$' <<<"$OC_OUT" || true)"
+  return 0
+}
+
+# A Helm release — any release, any name — is recorded in {user}-dev.
+helm_release_present() {
+  helm_release_secrets || return 1
+  [[ -n "$HELM_RELEASE_SECRETS" ]]
+}
+
+# Exercise 4 — upgrade, break it on purpose, roll back — left nothing graded at all before this.
+# `helm install` alone records revision 1; the lab's upgrade (2) → broken-probe upgrade (3) →
+# `helm rollback` (4) walks it to 4, and every one of those is its own release Secret.
+# `>=`, never `==`: revisions only accumulate, and an attendee who upgrades more times is not wrong.
+HELM_MAX_REV=0
+helm_max_revision() {  # 0 = the API answered (HELM_MAX_REV set, 0 when there is no release) · 1 = could not ask
+  local n v
+  HELM_MAX_REV=0
+  helm_release_secrets || return 1
+  # `${n##*.v}` takes the text after the LAST ".v", so a release whose own name contains ".v"
+  # (…v1.my.v9.v2) still yields the revision, not the release's own suffix.
+  # if/then inside the loop, never `[[ … ]] && …` — the AND-list form returns 1 from the enclosing
+  # function when the test is false, which under this script's `set -e` kills it outright.
+  while read -r n; do
+    v="${n##*.v}"
+    if [[ "$v" =~ ^[0-9]+$ ]] && (( v > HELM_MAX_REV )); then HELM_MAX_REV="$v"; fi
+  done <<<"$HELM_RELEASE_SECRETS"
+  return 0
+}
+helm_release_upgraded() {
+  helm_max_revision || return 1
+  (( HELM_MAX_REV >= 2 ))
+}
+
+# CLEAN SLATE, the other direction. no_deploy alone already guarantees that a COMPLETE world cannot
+# pass entry mode (the end state is a conjunction — see the entry block). This closes the residue case
+# it does not cover: a release whose Deployment was deleted by hand leaves the release Secret behind,
+# no_deploy calls the namespace clean, `ws prep` takes its "already prepared" fast path WITHOUT
+# purging, and the attendee's first command — `helm install parasol-notifications` — dies with
+# "cannot re-use a name that is still in use". The entry state installs no chart, so any release here
+# is leftover by definition.
+no_helm_release() {
+  oc_present get ns "$NS" -o name || return 1
+  # helm_release_secrets returns 1 when the API could not be asked, and oc_read has already raised
+  # VERIFY_INCONCLUSIVE by then — so silence renders ⚠, never a certified clean slate.
+  helm_release_secrets || return 1
+  [[ -z "$HELM_RELEASE_SECRETS" ]]
+}
+
 # --- shared checks (hold at BOTH entry and end) ------------------------------
 check "namespace ${NS} exists"                          oc get ns "$NS"                 || hint "run: ws prep packaging-distributing (or ws start packaging-distributing --user ${USER_NAME}); ${NS} is workshop-layer (per-user-namespaces)"
 check "entry marker ws-entry-packaging-distributing present"               oc get cm ws-entry-packaging-distributing -n "$NS" || hint "entry app not synced — ws reset packaging-distributing --user ${USER_NAME}"
@@ -192,15 +285,40 @@ fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has not installed the chart yet ------------------------
+  # no_deploy negates deploy_present on the same read (plus a namespace precondition, which only makes
+  # it stricter). `ws prep` reads this mode's rc as "is this world already prepared?", so a gap between
+  # the two modes would let it skip setup — or offer to WIPE a finished lab.
+  # The end state is a CONJUNCTION — Deployment AND release AND revision>1 — so negating any ONE
+  # conjunct already guarantees a completed world can never pass entry mode, and no_deploy negates the
+  # first. (The trap to avoid is the opposite shape: had the end state been a DISJUNCTION — "release
+  # OR Deployment" — negating one side would leave a world that is both "complete" in full mode and "a
+  # clean slate" here, which is how `ws prep` gets talked into skipping setup, or into offering to
+  # WIPE a finished lab.) The second check is not that invariant; it is the residue case no_deploy
+  # cannot see — a release Secret outliving its Deployment, which blocks the attendee's first command.
   check "no notifications app deployed yet (attendee runs helm install)" no_deploy \
     || hint "parasol-notifications is already deployed; the lab already ran — ws reset packaging-distributing --user ${USER_NAME}"
+  check "no Helm release recorded in ${NS} yet" no_helm_release \
+    || hint "a release from an earlier run is still recorded here and 'helm install' will refuse the name — ws reset packaging-distributing --user ${USER_NAME} (or, by hand: helm uninstall <name> -n ${NS}; list them with helm list -n ${NS})"
 else
   # --- end state: the lab's OUTCOME — the notifications app deployed to {user}-dev --------------------
-  # Assert the OUTCOME (a notifications Deployment is running), never the mechanism, so any correct
-  # solution (helm install OR ws solve) stays green (rule 14).
+  # Assert the OUTCOME (a notifications Deployment is running), never the exact mechanism that put it
+  # there, so any correct solution (helm install OR ws solve) stays green (rule 14) …
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "notifications app parasol-notifications deployed" deploy_present \
     || hint "not done yet — the entry state deliberately deploys nothing here, because running the chart IS the lab: helm install parasol-notifications ./parasol-notifications -n ${NS} (or: ws solve packaging-distributing --user ${USER_NAME}). Red before that is the expected state, not a broken environment"
+  # … and then grade the DECLARATION the attendee wrote, because the outcome alone is satisfied by an
+  # `oc create deployment` that skips the entire Helm lesson (F-10). On a world `ws solve` built there
+  # is no release to find and there never should be — that is a known, correct absence (na), not an
+  # unknown (warn) and not a failure.
+  if solve_rendered_deploy; then
+    na "Helm release recorded in ${NS} — this world was materialized by ws solve, which renders the finished Deployment from the chart through Argo; no helm install ran, so no release exists or should"
+    na "Helm release carries more than one revision (exercise 4) — ws solve materializes the finished world in one shot, so there is no release history to read"
+  else
+    check "a Helm release is recorded in ${NS} (the chart was installed, not hand-created)" helm_release_present \
+      || hint "not done yet — a Deployment on its own is not a release: the lesson is the chart. Scaffold and install it (exercises 1-3): helm create parasol-notifications, shape it, then helm install parasol-notifications ./parasol-notifications -n ${NS}. Already installed? Check it landed in the right namespace — helm list -n ${NS}"
+    check "the Helm release carries more than one revision (exercise 4: upgrade -> broken probe -> rollback)" helm_release_upgraded \
+      || hint "not done yet — exercise 4 is the release-lifecycle beat, and revision 1 means only the install ran: helm upgrade parasol-notifications ./parasol-notifications -n ${NS} --set replicaCount=2, then the deliberate broken-probe upgrade, then helm rollback. Verify with: helm history parasol-notifications -n ${NS}"
+  fi
 fi
 
 verify_summary

@@ -6,10 +6,12 @@
 #          batch pool (a bootstrap-labeled+tainted worker) exists cluster-wide. Entry marker set.
 #   End:   the attendee ran the lab — parasol-claims DECLARES a spread constraint (podAntiAffinity
 #          and/or topologySpreadConstraints) and its replicas do sit on distinct nodes, a
-#          PodDisruptionBudget protects it, and statement-batch now runs ON the dedicated batch pool
-#          node (toleration + nodeSelector). The declaration is what is graded; the observed layout
-#          corroborates it (see claims_spread_constraint — the layout ALONE was a false ✅, because the
-#          default scheduler already spreads replicas by soft preference on the untouched entry state).
+#          PodDisruptionBudget protects it, and statement-batch DECLARES a batch-pool pin (nodeSelector
+#          + toleration) and does run ON the dedicated batch pool node. In BOTH beats the declaration is
+#          what is graded and the observed layout corroborates it (see claims_spread_constraint and
+#          batch_pin_declared — the layout ALONE was a false ✅ in both: the default scheduler already
+#          spreads replicas by soft preference, and on a cluster below the taint floor it can drop the
+#          unpinned batch pod onto the labeled pool node by chance).
 # Runnable as the ATTENDEE: reads only {user}-dev objects the attendee sees via namespace admin, plus
 # nodes via the platform-observer ClusterRole (get/list/watch nodes). The G1 cockpit smoke runs
 # `--entry-only` as {user}.
@@ -104,7 +106,66 @@ node_is_batch_pool() {
   [[ "$OC_OUT" == "$POOL_VALUE" ]]
 }
 
-# END outcome: a Running statement-batch pod is placed ON the dedicated batch pool node.
+# THE ATTENDEE'S ARTEFACT, batch half: statement-batch DECLARES a pin at the dedicated batch pool.
+#
+# Same defect as claims_spread_constraint below, same fix, and it has to be the same idiom or the file
+# grows two ways of saying one thing. Grading the placement ALONE (batch_on_pool, kept below as the
+# corroboration it is) is a coin flip on any cluster BELOW bootstrap's MIN_BATCH_POOL_FOR_TAINT floor:
+# there the pool node is labeled and deliberately NOT tainted, statement-batch ships with 1 replica and
+# no pin at all, so ordinary scheduling can drop the untouched entry pod onto the labeled node by
+# chance — 1/N on N schedulable nodes, 50% on a two-worker cluster. The attendee then gets a green tick
+# for exercise 4 without writing a nodeSelector, on exactly the clusters where the na() above has just
+# promised them "the nodeSelector half works and IS graded below".
+#
+# So grade the DECLARATION, which only the attendee can have made. The lab's own beat is the
+# nodeSelector, and that is matched exactly (key AND value). A required nodeAffinity on the same label
+# is accepted too — concept.adoc introduces it as "the same idea with required (hard) and preferred
+# (soft) rules", so an attendee who writes it has pinned correctly and must not be failed for taking a
+# route the module taught them. Deliberately NOT narrowed further than the pool KEY on that branch:
+# what the entry state has is NOTHING, so anything targeting the pool label is attendee work, and
+# whether it points AT the pool rather than away from it is answered by the placement check below,
+# which is the whole reason that check keeps its place.
+#
+# The TOLERATION is reported and NOT graded — see the info at the call site. On a tainted cluster the
+# placement outcome already proves it (a pod cannot Run on a NoSchedule-tainted node without one), and
+# on a sub-floor cluster the na() above has just told the attendee in as many words that the toleration
+# half "cannot be demonstrated here". Grading it after saying that would be a false ❌ on someone who
+# believed us — trading this false ✅ for a false ❌ on a correct attendee is not a win.
+#
+# Sets BATCH_PIN_KIND (a global, read by the call site — a `$(…)` caller would run this in a SUBSHELL
+# and lose the VERIFY_INCONCLUSIVE that an unanswerable API raises).
+BATCH_PIN_KIND=""
+batch_pin_declared() {
+  BATCH_PIN_KIND=""
+  # 1. The nodeSelector the lab teaches, matched on key AND value. A missing field on an existing
+  #    object is rc 0 + empty — the API's real answer "no pin", still a ❌, exactly as oc_read intends.
+  oc_read get deploy statement-batch -n "$NS" -o jsonpath="{.spec.template.spec.nodeSelector.${POOL_KEY//./\\.}}" || return 1
+  if [[ "$OC_OUT" == "$POOL_VALUE" ]]; then
+    BATCH_PIN_KIND="nodeSelector ${POOL_KEY}=${POOL_VALUE}"
+    return 0
+  fi
+  # 2. The equivalent required nodeAffinity. Same filter shape as batch_pool_tainted's taint read, and
+  #    a `[?(@.key==…)]` filter that matches nothing is rc 0 + empty, not an error.
+  oc_read get deploy statement-batch -n "$NS" -o jsonpath=\
+"{range .spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[*].matchExpressions[?(@.key=='${POOL_KEY}')]}{.operator}{\"\\n\"}{end}" || return 1
+  if printf '%s\n' "$OC_OUT" | grep -qx 'In\|Exists'; then
+    BATCH_PIN_KIND="required nodeAffinity on ${POOL_KEY}"
+    return 0
+  fi
+  return 1
+}
+
+# Reported, never graded (see above). Filters on the pool key, so a blanket `operator: Exists` with no
+# key is not seen — that is fine for an info line and would not be for a check, which is the other
+# half of why this one is not one.
+batch_toleration_declared() {
+  oc_read get deploy statement-batch -n "$NS" \
+    -o jsonpath="{range .spec.template.spec.tolerations[?(@.key=='${POOL_KEY}')]}{.key}{\"\\n\"}{end}" || return 1
+  [[ -n "${OC_OUT//[[:space:]]/}" ]]
+}
+
+# END outcome, and CORROBORATION ONLY (see batch_pin_declared): a Running statement-batch pod is placed
+# ON the dedicated batch pool node.
 # The node lookup is INLINE and not a value-returning batch_node(): `n="$(batch_node)"` runs the read in
 # a SUBSHELL, so the VERIFY_INCONCLUSIVE the helper raises there dies with it and check() would print a
 # ❌ for an API that never answered. Every predicate below reads OC_OUT in the caller's own shell.
@@ -200,11 +261,21 @@ no_claims_spread_constraint() {
   if (( VERIFY_INCONCLUSIVE == 1 )); then return 1; fi
   return 0
 }
+# The EXACT negation of the end-state predicate, for the same reason no_claims_spread_constraint is:
+# this used to read the nodeSelector ONLY, so a world pinned with a required nodeAffinity — which the
+# end check accepts — was "complete" in full mode AND "a clean slate" in entry mode at the same time.
+# `ws prep` reads the entry rc as the boolean "is this world prepared?", so a wrongly-green entry check
+# either skips the purge or offers to WIPE a healthy environment. Whatever counts as "pinned" for the
+# end state must count as "not a clean slate" here, in one place, so the two cannot drift.
 batch_unpinned() {
-  # No batch-pool nodeSelector on statement-batch yet (the attendee adds it).
-  oc_present get deploy statement-batch -n "$NS" -o name || return 1
-  oc_read get deploy statement-batch -n "$NS" -o jsonpath="{.spec.template.spec.nodeSelector.${POOL_KEY//./\\.}}" || return 1
-  [[ -z "$OC_OUT" ]]
+  deploy_present statement-batch || return 1
+  # Pinned already → NOT a clean entry.
+  if batch_pin_declared; then return 1; fi
+  # batch_pin_declared also returns 1 for "the API could not be asked", where it raises
+  # VERIFY_INCONCLUSIVE. Return 1 there too so check() prints ⚠ instead of certifying a clean slate
+  # from a read that never happened.
+  if (( VERIFY_INCONCLUSIVE == 1 )); then return 1; fi
+  return 0
 }
 
 # The parasol-claims Hibernate schema-management strategy from the running container env (empty if unset →
@@ -277,7 +348,7 @@ if batch_pool_below_taint_floor; then
   # the condition it grades correctly does not exist on a sub-floor cluster. As a warn() it dragged an
   # otherwise perfectly graded run into "this run did NOT fully verify the lab", which is what user8
   # reported. The nodeSelector half IS still graded below, so the lesson keeps its real check.
-  na "batch pool node is labeled but deliberately NOT tainted — this cluster has fewer than ${BATCH_TAINT_FLOOR} dedicated workers, and bootstrap withholds the taint below that floor (tainting one of only two workers starved a platform component for 4h+ on 2026-07-30). Exercise 4's nodeSelector half works and IS graded below; its toleration half cannot be demonstrated here until a 3rd worker joins. Do NOT hand-taint the node to turn this green — that recreates the outage"
+  na "batch pool node is labeled but deliberately NOT tainted — this cluster has fewer than ${BATCH_TAINT_FLOOR} dedicated workers, and bootstrap withholds the taint below that floor (tainting one of only two workers starved a platform component for 4h+ on 2026-07-30). Exercise 4's nodeSelector half works and IS graded below — as the DECLARATION you write, not inferred from where the pod happened to land, which on a cluster this size can be the pool node by chance; its toleration half cannot be demonstrated here until a 3rd worker joins. Do NOT hand-taint the node to turn this green — that recreates the outage"
 else
   check "dedicated batch pool node is TAINTED (a toleration is actually required to land there)" batch_pool_tainted || hint "labeled but NOT tainted, on a cluster at or above the ${BATCH_TAINT_FLOOR}-worker floor where bootstrap SHOULD have tainted it — this is a DIFFERENT problem than a missing pool, and a real one (see bootstrap/install.sh MIN_BATCH_POOL_FOR_TAINT). Exercise 4's toleration half cannot be taught until it is fixed; the nodeSelector half still works. Do NOT hand-taint the node to force this green — re-run the bootstrap node-shaping step so the cluster and the installer agree."
 fi
@@ -290,19 +361,47 @@ fi
 
 if [[ "$ENTRY_ONLY" == "true" ]]; then
   # --- entry state: clean slate — the attendee has shaped NOTHING yet ------------------------------
-  check "statement-batch is NOT pinned to the batch pool yet (attendee pins it)" batch_unpinned      || hint "entry ships it unpinned; if a batch-pool nodeSelector is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
+  check "statement-batch is NOT pinned to the batch pool yet (attendee pins it)" batch_unpinned      || hint "entry ships it unpinned; if a batch-pool nodeSelector (or an equivalent required nodeAffinity) is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
   check "parasol-claims has NO spread constraint yet (attendee adds anti-affinity/TSC)" no_claims_spread_constraint || hint "entry ships default scheduling; if a podAntiAffinity or a topologySpreadConstraints is set the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
   check "no PodDisruptionBudget on parasol-claims yet (attendee creates it)"     no_claims_pdb        || hint "entry ships no PDB; if one exists the lab already started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
   check "parasol-claims ships the reseed fault (schema-management drop-and-create)" claims_schema_is_reseed || hint "the reseed fault should be present at entry; if schema-management is already off drop-and-create the lab started — ws reset deployment-targets-scheduling --user ${USER_NAME}"
 else
   # --- end state: the lab's OUTCOME — placement + spread + availability in place -------------------
-  # Assert OUTCOMES (a PDB exists; batch runs on the pool; claims span >=2 nodes), never the exact field
-  # wording, so any correct solution stays green (template rule 14).
+  # Assert OUTCOMES (a PDB exists; batch is pinned to the pool AND runs there; claims declare a spread
+  # AND sit on >=2 nodes), never the exact field wording, so any correct solution stays green (template
+  # rule 14). Both scheduling beats grade the attendee's DECLARATION first and use the observed layout
+  # as corroboration — the layout alone was a false ✅ in both, for two different reasons.
   check "PodDisruptionBudget protects parasol-claims"    pdb_present                          || hint "create a PDB (minAvailable 1) selecting app=parasol-claims (see the lab)"
-  # statement-batch runs on always-present images, so this outcome is gradeable on any cluster: with the
-  # toleration + nodeSelector it must land ON the dedicated batch pool node.
+  # THE BATCH-POOL BEAT, graded in the same two parts as the spread beat below — the attendee's
+  # DECLARATION first, the observed placement only as corroboration. Grading the placement alone was a
+  # false ✅ on any cluster below the taint floor (see batch_pin_declared): there the pool node carries
+  # the label and deliberately no taint, so the unpinned entry pod can land on it by chance and the
+  # check congratulates the attendee for the scheduler's arbitrary choice. statement-batch runs on
+  # always-present images, so both halves are gradeable on any cluster.
   if deploy_ready statement-batch; then
-    check "statement-batch runs ON the dedicated batch pool node" batch_on_pool                || hint "pin it: add a toleration for ${POOL_KEY}=${POOL_VALUE}:NoSchedule AND nodeSelector ${POOL_KEY}=${POOL_VALUE} to statement-batch"
+    check "statement-batch declares the batch-pool pin you added (nodeSelector ${POOL_KEY}=${POOL_VALUE}, or the equivalent required nodeAffinity)" batch_pin_declared \
+      || hint "the Deployment has no batch-pool nodeSelector — the pod may LOOK like it is on the pool node, but on this cluster that can just be where the scheduler put it, and the next reschedule can move it anywhere. Pin it: oc patch deploy statement-batch -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"${POOL_KEY}\":\"${POOL_VALUE}\"},\"tolerations\":[{\"key\":\"${POOL_KEY}\",\"operator\":\"Equal\",\"value\":\"${POOL_VALUE}\",\"effect\":\"NoSchedule\"}]}}}}' (see the lab's exercise 4)"
+    if [[ -n "$BATCH_PIN_KIND" ]]; then
+      # The toleration is REPORTED, not graded — see batch_pin_declared for why. On a tainted pool a
+      # missing one is caught by the placement check below anyway (the pod cannot land there without
+      # it), which is the honest way to say it: by the outcome, on the cluster where it is true.
+      if batch_toleration_declared; then
+        info "(pin declared: ${BATCH_PIN_KIND}, with a matching toleration for ${POOL_KEY}=${POOL_VALUE}:NoSchedule)"
+      else
+        info "(pin declared: ${BATCH_PIN_KIND}, but no matching toleration — a selector ATTRACTS, only a toleration PERMITS, so this pin alone would leave the pod Pending on a cluster whose batch pool is tainted)"
+      fi
+      # SECOND, and only once the pin is real: did the pod actually go there? Catches "declared but not
+      # in effect" — a rollout that never rolled, or a pod left Pending on the untolerated taint.
+      check "…and the Running statement-batch pod really is ON the dedicated batch pool node" batch_on_pool \
+        || hint "the pin is declared but the pod is not on the pool node — check for a Pending replacement stuck on the taint (oc get pods -n ${NS} -l app=statement-batch -o wide) and add the toleration: oc patch deploy statement-batch -n ${NS} --type=merge -p '{\"spec\":{\"template\":{\"spec\":{\"tolerations\":[{\"key\":\"${POOL_KEY}\",\"operator\":\"Equal\",\"value\":\"${POOL_VALUE}\",\"effect\":\"NoSchedule\"}]}}}}'"
+    elif (( VERIFY_INCONCLUSIVE == 0 )) && batch_on_pool; then
+      # The flag still carries batch_pin_declared's own verdict here (check() clears it only when the
+      # NEXT check starts), so an API that could not be asked prints nothing rather than narrating a
+      # world it never read. Deliberately an info and NOT a ✅ — this is the exact sentence the old
+      # check turned into a green tick. Say what is true (it is sitting there) and what is not
+      # (nothing is keeping it there).
+      info "(the Running statement-batch pod does currently sit on the batch pool node — but with no pin declared that is just where the scheduler had room, not your work, so it is not graded)"
+    fi
   else
     warn "the batch-placement outcome — statement-batch not Ready"
   fi

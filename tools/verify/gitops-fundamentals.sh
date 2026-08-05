@@ -6,10 +6,32 @@
 #          EMPTY (the attendee's first Application is the lab).
 #   End:   claims runs GitOps-managed in {user}-dev (claims-db + app ready, app route answers 200,
 #          and the Deployment carries the Argo tracking annotation — proving it was deployed by the
-#          student instance, not applied by hand) AND promoted to {user}-stage (>=2 replicas: solve
-#          leaves 2, the completed lab's Exercise D scales to 3 — both pass).
+#          student instance, not applied by hand) AND promoted to {user}-stage the SAME way (>=2
+#          replicas AND the Argo tracking annotation there too) AND — exercise 4's actual point —
+#          the stage overlay in the attendee's OWN FORK carries the replica bump they committed.
 # End checks are outcome-based: they pass for BOTH the attendee's own Application AND `ws solve`'s
 # two Applications. Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
+#
+# F-08 (false-pass audit, 2026-08-05). The stage half used to be graded by ONE outcome — "a
+# Deployment named parasol-claims is ready in {user}-stage with >=2 replicas" — and that outcome is
+# reachable without doing either thing the module teaches:
+#   • MECHANISM. `oc apply -k overlays/stage`, or `oc new-app` + `oc scale --replicas=2`, satisfies
+#     it exactly as well as the second Argo Application the lab asks for. The DEV half of the very
+#     same lesson already refused that shortcut (deploy_gitops_managed, whose hint says "deploy it
+#     via an Argo Application, not oc apply — that is the gitops-fundamentals lesson"); the stage
+#     half simply never asked. Same helper, one line, now asked on both sides.
+#   • THE LESSON ITSELF. The page is explicit that 2 replicas is only the halfway state — "The stage
+#     overlay says 2 replicas … so Argo CD stands up the claims app two-up" and only THEN "Now the
+#     point of the exercise: change stage by changing Git. Bump stage from 2 replicas to 3 — in the
+#     repository, not the cluster." (lab.adoc §4, and its checkpoint requires the 3). A check that
+#     goes green at 2 grades the setup and skips the beat.
+# GRADE THE DECLARATION, CORROBORATE WITH THE OBSERVATION. The declaration is the attendee's COMMIT
+# — read from their fork, not from the cluster — because that is the artefact the exercise produces
+# and it survives a shared Argo controller that has not synced yet (the lab's own "if the count does
+# not move for a few minutes" NOTE). The live replica count stays graded beside it as the outcome.
+# `ws solve` deliberately stops at the promotion and leaves the fork factory-fresh, so the commit
+# check is ➖ not-applicable on a machine-solved world — keyed on the solve MARKER, not on --solve,
+# because the instructor's pre-demo check is a plain `ws verify` (same call the DR module makes).
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
@@ -49,6 +71,52 @@ overlay_personalized() {
   curl -ksf "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/claims-config/raw/overlays/dev/kustomization.yaml?ref=main" 2>/dev/null \
     | grep -q "namespace: ${DEV}"
 }
+
+# Exercise 4's DECLARATION: the replica count the attendee's fork declares for stage.
+# The fork job re-asserts the UPSTREAM template's overlays/stage on EVERY ws start/reset
+# (claims-config-fork.yaml — base + dev/stage/prod overlays back to factory content, so lab edits do
+# not survive a reset), and that template ships `count: 2`
+# (gitops/promotion/claims-config-template/overlays/stage/kustomization.yaml). So any value above 2
+# in {user}/claims-config can only be a commit the attendee made — which is exactly what §4 asks for.
+#
+# http_read, not the bare `curl … || true` its two Gitea neighbours above still use: this one grades
+# the attendee's own git work, so "Gitea did not answer" must land as ⚠ (unknown), never as ❌ on a
+# commit they may well have pushed. The parse takes the FIRST `count:` — the overlay has exactly one,
+# under `replicas: - name: parasol-claims` (the file is 27 lines; see the template above).
+STAGE_OVERLAY_COUNT=""
+stage_overlay_replicas() {  # → 0 + STAGE_OVERLAY_COUNT set to an integer; 1 when it could not be read
+  STAGE_OVERLAY_COUNT=""
+  gitea_host || return 1
+  http_read "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/claims-config/raw/overlays/stage/kustomization.yaml?ref=main" || return 1
+  [[ "$HTTP_CODE" == "200" ]] || return 1
+  STAGE_OVERLAY_COUNT="$(printf '%s\n' "$HTTP_OUT" | awk '$1=="count:"{print $2; exit}')"
+  [[ "$STAGE_OVERLAY_COUNT" =~ ^[0-9]+$ ]]
+}
+
+# >=, never ==: the Challenge invites further edits, and an attendee who went to 4 did MORE of the
+# lesson, not less (same rule deploy_ready_min is built on).
+stage_change_committed() {
+  stage_overlay_replicas || return 1
+  [[ "$STAGE_OVERLAY_COUNT" -ge 3 ]]
+}
+
+# …and its EXACT negation, for entry mode. `ws prep` reads --entry-only's rc as "is this world
+# already prepared?", so every end-state predicate needs a matching entry-side one or a world that is
+# half-finished reads as a clean slate and prep skips its purge. Absence of the Deployment (below)
+# negates the two cluster-side stage checks; it says nothing about the FORK, which lives outside
+# every purge namespace. Written as `< 3` and not `== 2` deliberately: the exact negation of the
+# end-state predicate, nothing wider.
+stage_change_not_committed() {
+  stage_overlay_replicas || return 1
+  [[ "$STAGE_OVERLAY_COUNT" -lt 3 ]]
+}
+
+# A world `ws solve` built, told apart from one an attendee completed by hand. This ConfigMap is
+# rendered ONLY under .Values.solve (entry-states/gitops-fundamentals/templates/solve-endstate.yaml),
+# so its presence is the machine-solved marker. Keyed on the marker rather than on --solve because
+# the instructor's pre-demo check is a plain `ws verify` after `ws solve` (instructor.adoc) — the
+# same call the DR module's solved() makes, for the same reason.
+machine_solved() { oc_present get cm "gitops-fundamentals-solve-apps-${USER_NAME}" -n "$GITOPS" -o name; }
 
 # The student-gitops Argo CD instance is reachable on its route (derived host; /healthz → 200).
 student_argo_up() {
@@ -151,6 +219,10 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # Entry-only: prove dev/stage start EMPTY (the attendee's Application deploys the app in the lab).
   check "no parasol-claims in ${DEV} yet (clean)"        deploy_absent parasol-claims "$DEV"                 || hint "dev already has the app — ws reset gitops-fundamentals --user ${USER_NAME} for a clean entry"
   check "no parasol-claims in ${STAGE} yet (clean)"      deploy_absent parasol-claims "$STAGE"               || hint "stage already has the app — ws reset gitops-fundamentals --user ${USER_NAME} for a clean entry"
+  # The fork is NOT in any purge namespace, so a previous run's exercise-4 commit can outlive a purge
+  # of dev/stage and leave the end-state commit check already satisfied on a "clean" world.
+  check "stage overlay still at the factory replica count (${USER_NAME}/claims-config, count: 2)" stage_change_not_committed \
+                                                                                                             || hint "your fork's overlays/stage already declares 3+ replicas — that is exercise 4's commit from a previous run, not a clean entry; ws reset gitops-fundamentals --user ${USER_NAME} re-asserts the fork's factory content"
 else
   # --- end state (what a completed lab / solve looks like) -------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
@@ -163,6 +235,23 @@ else
   check "dev claims is GitOps-managed (Argo tracking)"   deploy_gitops_managed parasol-claims "$DEV"         || hint "the app is there but Argo is not tracking it — so it was applied by hand (oc apply / oc new-app) rather than deployed by an Application. Not broken, just not the lesson: delete it and let your Argo Application create it, which is the point of gitops-fundamentals"
   check "route parasol-claims answers 200 in ${DEV}"     route_ready_200 "$DEV"                              || hint "not done yet? until the app above is deployed there is nothing to answer, so this red follows from that one. If parasol-claims IS ready and the Route still does not answer 200, that one is real: oc get pods -n ${DEV}; oc get route parasol-claims -n ${DEV}"
   check "parasol-claims promoted to ${STAGE} (>=2 replicas)" deploy_ready_min parasol-claims "$STAGE" 2     || hint "not done yet — ${STAGE} starts EMPTY and promoting to it is a later exercise (add a second Application pointed at overlays/stage; ws solve gitops-fundamentals --user ${USER_NAME} does this), so this red is expected until you get there"
+  # The MECHANISM half of the promotion, asked on stage exactly as it is asked on dev above. Without
+  # it, `oc apply -k overlays/stage` scores the same green as the second Application the lab asks for.
+  check "stage claims is GitOps-managed (Argo tracking)" deploy_gitops_managed parasol-claims "$STAGE"      || hint "not done yet? ${STAGE} starts EMPTY, so until you promote there is nothing to track and this red follows the one above. If parasol-claims IS running in ${STAGE} and this is still red, that one is real and it is the whole lesson: the app was applied by hand (oc apply -k overlays/stage) instead of deployed by a second Argo Application — create claims-stage-${USER_NAME} on the student instance (Project proj-${USER_NAME}, Path overlays/stage, Namespace ${STAGE}), delete the hand-applied objects, and let it sync them back"
+  # …and the LESSON half: exercise 4 is "change stage by changing Git", and the page says so twice —
+  # the promotion lands 2 replicas, then "Now the point of the exercise … Bump stage from 2 replicas
+  # to 3 — in the repository, not the cluster". Graded from the fork (the commit), not from
+  # .spec.replicas, so a shared controller that has not synced yet cannot red-flag work that is done.
+  # A pass is a pass however it arose, so this branch comes FIRST — ahead of the machine-solved one —
+  # exactly as the DR module orders its failover evidence.
+  if stage_change_committed; then
+    check "stage scaled to 3+ replicas IN GIT (your exercise-4 commit on overlays/stage)" stage_change_committed
+  elif machine_solved; then
+    na "the git-driven change (overlays/stage count 2 → 3) — this world was machine-solved: ws solve creates the two Applications and stops at the promotion, leaving the fork at its factory content, so there is no commit of yours to read"
+  else
+    check "stage scaled to 3+ replicas IN GIT (your exercise-4 commit on overlays/stage)" stage_change_committed \
+                                                                                                             || hint "not done yet? promoting to ${STAGE} is only the first half of exercise 4 — its point is changing stage BY CHANGING GIT: edit overlays/stage/kustomization.yaml in your ${USER_NAME}/claims-config fork (count: 2 → 3), commit to main, then Refresh + SYNC claims-stage-${USER_NAME}. This reads your FORK, so it stays red until that commit exists, however many replicas are running — and if the two Gitea checks above are red too, none of the three are yours: Gitea itself did not answer"
+  fi
 fi
 
 verify_summary

@@ -3,7 +3,10 @@
 #   Entry: {user}-cicd exists · entry marker CM · claims-db Deployment ready · the
 #          parasol-claims-build-test-deploy Pipeline present · Gitea fork answers ·
 #          .tekton/pull-request.yaml seeded in the fork · the curated parasol-tasks
-#          library is reachable (image-size-report present).
+#          library is reachable (image-size-report present) — AND, in --entry-only mode only, that
+#          the lab has NOT already been run here: no parasol-claims Deployment/ImageStream/Route.
+#          That last group is the exact negation of the End group below, and it is what lets
+#          `ws prep` tell a fresh world from a finished one (audit F-05; see obj_absent).
 #   End:   parasol-claims Deployment ready (the pipeline built it AND it is wired to
 #          claims-db, so it is up — no CrashLoop) · a parasol-claims image was built
 #          (ImageStream present) · the pipeline created the browser Route itself
@@ -72,6 +75,46 @@ gitea_raw_contains() {
 # deploy_ready (<deployment> [namespace]) is shared — tools/verify/_lib.sh. It classifies the API's
 # answer, so a cluster that could not be asked reports ⚠ SKIP instead of a false ❌ on your work.
 
+# --- the entry-mode clean slate (audit F-05) ---------------------------------
+#
+# WHY THIS EXISTS. `ws prep` reads `<script> --entry-only`'s rc as the boolean "is this world already
+# prepared?" (tools/ws/ws cmd_prep). Until this predicate existed, --entry-only graded ONLY the entry
+# artefacts — the namespace, the marker, claims-db, the Pipeline, the fork — and a COMPLETED lab
+# satisfies every single one of them. So a namespace holding a finished run returned rc 0, prep took
+# its "already prepared — nothing to do" fast path, DID NOT PURGE, and the attendee started the lab
+# on top of the previous pass: parasol-claims already deployed, already imaged, already routed. The
+# module's whole outcome was standing there before they ran anything.
+#
+# This is the third instance of one defect. The two fixes already in this tree say the same thing:
+# config-multienv.sh's obj_absent ("an attendee who did ex 2-3 and stopped passed every entry check,
+# so ws prep's fast path returned 'already prepared' WITHOUT purging") and serverless-zero-to-hero.sh's
+# single_revision (an orphaned revision survived prep and made exercise 3 fail RevisionNameTaken).
+#
+# THE ENTRY ASSERTIONS ARE THE EXACT MIRROR OF THE END ONES — the same three objects the end block
+# grades (parasol-claims Deployment ready · ImageStream present · Route present), negated one for
+# one. That correspondence is the property to preserve when either side changes: if entry negates a
+# strict subset of what end accepts, a world in the gap reads as COMPLETE in full mode and as A CLEAN
+# SLATE in entry mode at the same time, and prep will happily offer to wipe it or skip setting it up.
+#
+# ABSENCE, not "not ready". The entry chart materializes claims-db and nothing else app-side (the
+# only Deployment in gitops/entry-states/pipelines-fundamentals/templates/ is claims-db; all three
+# graded artefacts are produced by the PipelineRun, which is wholly `.Values.solve`-gated in
+# solve-endstate.yaml). So absence cannot false-red a correctly-materialized entry state — and it
+# additionally catches a run that went red half-way, which is dirty rather than clean, exactly as
+# prep should report it.
+#
+# oc_absent, NEVER `! oc get … 2>/dev/null`. A negation is the one direction where a silenced read
+# certifies a clean slate from an API that never answered — and a wrongly-green entry check is what
+# makes prep skip the purge. The namespace is proven PRESENT first, or the assertion is vacuously
+# true on a cluster where nothing materialized at all.
+#
+# Same name and signature as config-multienv.sh's copy on purpose: when this is hoisted into
+# _lib.sh (three scripts carry it after this change) the collapse should be mechanical.
+obj_absent() {  # <type> <name> <namespace> → 0 only when the API ANSWERED and it is not there
+  oc_present get ns "$3" -o name || return 1
+  oc_absent  get "$1" "$2" -n "$3" -o name
+}
+
 # --- entry state (what `ws start pipelines-fundamentals` materializes) --------------------------
 check "namespace ${NS} exists"                            oc get ns "$NS"                                    || hint "run: ws start pipelines-fundamentals --user ${USER_NAME}"
 check "entry marker ws-entry-pipelines-fundamentals present"                 oc get cm ws-entry-pipelines-fundamentals -n "$NS"                    || hint "entry app not synced — ws start pipelines-fundamentals --user ${USER_NAME}"
@@ -87,7 +130,15 @@ check "curated library task image-size-report reachable"  oc get tasks.tekton.de
 # already the attendee answer (same idiom as observability-health-scale).
 check "attendee can read the curated task library (parasol-tasks-readers)" attendee_reads_task_library || hint "the graded cross-namespace read in the lab returns Forbidden — the ${USER_NAME} parasol-tasks-readers RoleBinding in ogsr-parasol-tasks is missing; sync workshop-config"
 
-if [[ "$ENTRY_ONLY" != "true" ]]; then
+if [[ "$ENTRY_ONLY" == "true" ]]; then
+  # --- entry state: the clean slate — the pipeline's own three artefacts must NOT exist yet -----
+  # Exactly the three objects the end block grades, negated. Read the obj_absent comment above for
+  # why this block is load-bearing: without it `ws prep` calls a COMPLETED lab "already prepared".
+  info "entry state — these checks assert a CLEAN SLATE: they fail when the lab has already been run here, which is what tells 'ws prep' to purge and re-materialize"
+  check "no parasol-claims Deployment yet (the pipeline deploys it)"      obj_absent deploy parasol-claims "$NS"      || hint "this is LEFTOVER from an earlier run, not a broken environment — the entry state ships only claims-db, and parasol-claims appears when the build-test-deploy pipeline deploys it. Clear it: ws reset pipelines-fundamentals --user ${USER_NAME}"
+  check "no parasol-claims ImageStream yet (the pipeline builds it)"      obj_absent imagestream parasol-claims "$NS" || hint "this is LEFTOVER from an earlier run — the build-image step pushes this ImageStream, so a fresh entry state has none. Clear it: ws reset pipelines-fundamentals --user ${USER_NAME}"
+  check "no parasol-claims Route yet (the pipeline creates it)"           obj_absent route parasol-claims "$NS"       || hint "this is LEFTOVER from an earlier run — the deploy step creates this edge Route itself, so a fresh entry state has none. Clear it: ws reset pipelines-fundamentals --user ${USER_NAME}"
+else
   # --- end state (what a completed lab / solve looks like) -------------------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "parasol-claims deployment ready in ${NS}"        deploy_ready parasol-claims "$NS"                  || hint "not done yet? the pipeline is what deploys and wires this app to claims-db, so before you run it this red is expected, not a broken environment (or: ws solve pipelines-fundamentals --user ${USER_NAME}). If a run already Succeeded and the app is still not ready, that one is real: oc get pods -n ${NS}; tkn pr list -n ${NS}"
