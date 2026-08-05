@@ -136,7 +136,8 @@ echo "drifted to 3 — now nobody touches Argo CD; watch it snap back on its own
 ====
 Self-heal is watch-triggered — it reverts drift in a few seconds (measured ~4s on this cluster), so this beat lands live with no waiting.
 Both the manual Sync (beat 3) and self-heal (beat 4) are near-instant, so the whole drift-revert arc stays snappy.
-`ws reset gitops-fundamentals --user {user}` returns everything to the entry state between runs.
+One caution if you rehearse: Argo CD backs off exponentially on *repeated* drift of the same resource, so a third scale-to-3 in quick succession can take a couple of minutes to revert instead of seconds.
+Leave a few minutes between your rehearsal and the live run — or `ws reset gitops-fundamentals --user {user}` in between, which returns everything to the entry state.
 ====
 endif::demo[]
 
@@ -201,9 +202,9 @@ cat overlays/dev/kustomization.yaml
 .Expected output (the YAML below the comment header)
 [%collapsible]
 ====
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
-namespace: user1-dev
+namespace: {user}-dev
 
 resources:
   - ../../base
@@ -239,31 +240,31 @@ oc kustomize overlays/dev | grep -E '^kind:|^  name:|^  namespace:|^  replicas:'
 .Expected output
 [%collapsible]
 ====
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
 kind: ConfigMap
   name: claims-config
-  namespace: user1-dev
+  namespace: {user}-dev
 kind: Secret
   name: claims-creds
-  namespace: user1-dev
+  namespace: {user}-dev
 kind: Service
   name: claims-db
-  namespace: user1-dev
+  namespace: {user}-dev
 kind: Service
   name: parasol-claims
-  namespace: user1-dev
+  namespace: {user}-dev
 kind: Deployment
   name: claims-db
-  namespace: user1-dev
+  namespace: {user}-dev
   replicas: 1
 kind: Deployment
   name: parasol-claims
-  namespace: user1-dev
+  namespace: {user}-dev
   replicas: 1
 kind: Route
   name: parasol-claims
-  namespace: user1-dev
+  namespace: {user}-dev
 ----
 ====
 
@@ -299,9 +300,9 @@ oc get deploy -n $DEV
 ----
 
 .Expected output
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
-No resources found in user1-dev namespace.
+No resources found in {user}-dev namespace.
 ----
 --
 ====
@@ -320,16 +321,16 @@ metadata:
   namespace: ogsr-student-gitops
 spec:
   project: proj-{user}
-  source: {repoURL: "x", targetRevision: main, path: overlays/dev}
+  source: {repoURL: "{gitea_url}/{user}/claims-config.git", targetRevision: main, path: overlays/dev}
   destination: {server: "https://kubernetes.default.svc", namespace: {user}-dev}
 EOF
 ----
 
 .Expected output (this is supposed to fail)
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
 Error from server (Forbidden): ... applications.argoproj.io is forbidden:
-User "user1" cannot get resource "applications" in API group "argoproj.io" in the namespace "ogsr-student-gitops"
+User "{user}" cannot get resource "applications" in API group "argoproj.io" in the namespace "ogsr-student-gitops"
 ----
 
 That is by design.
@@ -413,12 +414,12 @@ oc get deploy parasol-claims -n $DEV \
 ----
 
 .Expected output
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
 NAME             READY   UP-TO-DATE   AVAILABLE   AGE
 claims-db        1/1     1            1           64s
 parasol-claims   1/1     1            1           64s
-tracking-id: claims-dev-user1:apps/Deployment:user1-dev/parasol-claims
+tracking-id: claims-dev-{user}:apps/Deployment:{user}-dev/parasol-claims
 ----
 --
 ====
@@ -554,22 +555,26 @@ Console::
 --
 In *Topology* (Project `{user}-dev`), scale `parasol-claims` up to *3* again with the Pod-donut up arrow, then *keep Topology open and do nothing else*.
 Within a few seconds the ring shrinks back to a single Pod on its own — Argo CD caught the drift and reverted it, with no Sync click.
+(If you are repeating this drift a second or third time, give it longer than a few seconds — see the note below on self-heal backoff.)
 --
 CLI::
 +
 --
-This command polls the live replica count once a second and stops the moment Argo CD has put it back to 1:
+This command polls the live replica count once a second and stops the moment Argo CD has put it back to 1.
+It keeps polling for about three minutes — comfortably past the controller's `90s` reconcile ceiling — so it will not run out from under you:
 
 [source,sh,role=execute]
 ----
 oc scale deployment/parasol-claims --replicas=3 -n $DEV >/dev/null
 echo "drifted to 3 — now watch, hands off (Argo CD snaps it back):"
-for i in $(seq 1 30); do
+for i in $(seq 1 90); do
   R=$(oc get deployment/parasol-claims -n $DEV -o jsonpath='{.spec.replicas}')
   echo "  $(date +%T)  replicas=$R"
   [ "$R" = "1" ] && { echo "  ✔ self-heal reverted the drift — no human touched Argo CD"; break; }
   sleep 1
 done
+[ "$(oc get deployment/parasol-claims -n $DEV -o jsonpath='{.spec.replicas}')" = "1" ] || \
+  echo "  ⏳ still 3 after ~3 min — not broken: repeated drift backs off. See the note below."
 ----
 
 .Expected output — the revert lands in a few seconds
@@ -588,16 +593,23 @@ The console edit vanished — in a few seconds, with *nobody* pressing Sync.
 That is self-heal: Argo CD *watches* the resources it manages, so it catches drift the moment it happens and corrects it — not on a slow timer.
 
 [NOTE]
-.How fast, and the one number that bounds it
+.How fast, and what can slow it down
 ====
 Self-heal is *watch-triggered*: Argo CD reacts to the live change almost immediately (measured ~4 seconds here), not on a slow poll.
-The controller's periodic reconcile interval — `90s` on this cluster — is only the *ceiling*, the longest drift could linger if a watch event were ever missed under heavy load.
-Either way you *cannot out-edit Git*: the manual *Sync* button reverts drift instantly, and self-heal reverts it within seconds, unasked.
+The controller's periodic reconcile interval — `90s` on this cluster — bounds a single, fresh drift: it is the longest one could linger if a watch event were ever missed under heavy load.
+
+*If you drift the same resource repeatedly, expect it to get slower.*
+Argo CD applies an exponential *self-heal backoff* per resource, so the first revert lands in seconds but a second or third drift of the same Deployment can take a minute or more (~147 seconds was measured on a third consecutive drift).
+That is the controller refusing to fight a hot loop, not a failure — the loop above waits ~3 minutes for exactly this reason.
+If you want the fast revert back, wait a couple of minutes without drifting, or press *SYNC* once in Argo CD.
+
+Either way you *cannot out-edit Git*: the manual *Sync* button reverts drift instantly, and self-heal reverts it unasked.
 ====
 
 [.checkpoint]
 ****
-✔ *Verify:* after scaling to 3 with *Manual* sync, the Deployment *stayed* at 3 until you pressed *Sync*, which reverted it to 1; after enabling *Self Heal*, a fresh scale-to-3 reverted to 1 *on its own within seconds* — with no Sync click.
+✔ *Verify:* after scaling to 3 with *Manual* sync, the Deployment *stayed* at 3 until you pressed *Sync*, which reverted it to 1; after enabling *Self Heal*, a fresh scale-to-3 reverted to 1 *on its own* — with no Sync click.
+(Seconds on the first drift; up to a couple of minutes if you had already drifted this Deployment more than once — the backoff described above, not a failure.)
 Git won both times.
 ****
 

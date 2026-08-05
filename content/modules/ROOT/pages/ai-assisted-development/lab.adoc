@@ -30,6 +30,20 @@ include::partial$version-attributes.adoc[]
 // used to pin a model's exact prose are now labelled "Shape of the output" and carry a placeholder
 // where the prose was — only tool names, mode lines, resource names, RBAC outcomes and cluster state
 // are pinned.
+//
+// 2026-08-05 — tester finding U8-F-15 (the write beat produced TOOL-CALL TRACE (0 calls) on 2 of 2
+// attempts on the shipped model, so the module's most memorable moment never fired). Two content-side
+// responses, neither of which pretends to fix model behaviour: (a) the exercise-3 write prompt (and its
+// demo-arc twin) is now tool-explicit — "use your tools, do not print tool calls as text" plus "keep
+// every other field, including the container image, exactly as returned" — which targets the fire rate
+// AND landing 3's hand-authored-replacement mode, while still making exactly the 2 calls the captured
+// shape below shows; (b) the retry-then-fallback guidance moved from surrounding prose INTO landing 2
+// and the exercise-3 checkpoint, so an attendee who gets 0 calls twice reads "this is the model, the
+// recovery block is a legitimate finish" instead of assuming they did something wrong. Do NOT re-pin a
+// fire rate or a model name here — which landing an attendee sees depends on what the cluster serves.
+// Also this pass: per-block "read the shape" notes above the two traces that carry the sample
+// user3-dev/user1-dev namespaces (F-01). Those blocks contain JSON braces in their `args:` lines, so
+// they must stay [source,texinfo] with NO subs="attributes" — the annotation is the only safe route.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -122,7 +136,7 @@ EOF
 oc patch deploy kubernetes-mcp-server -n $NS --type=json \
   -p '[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["--port","8080","--toolsets","core,config"]}]'
 oc rollout status deploy/kubernetes-mcp-server -n $NS --timeout=90s
-ask-agent --allow-writes "The parasol-claims deployment in namespace $NS has a wrong readinessProbe.httpGet.path of /q/health/reddy. Update it to /q/health/ready and roll it out, then confirm."
+ask-agent --allow-writes "Use your tools — do not print tool calls as text. In namespace $NS: first call resources_get for the parasol-claims Deployment. Then call resources_create_or_update with that exact manifest and one single change — readinessProbe.httpGet.path from /q/health/reddy to /q/health/ready — keeping every other field, including the container image, exactly as it was returned to you. Then confirm what you changed."
 oc get pods -n $NS -l app=parasol-claims
 oc get deploy parasol-claims -n $NS -o jsonpath='probe path: {.spec.template.spec.containers[0].readinessProbe.httpGet.path}{"\n"}image:      {.spec.template.spec.containers[0].image}{"\n"}'
 ----
@@ -328,6 +342,8 @@ Ask the agent why the claims service is broken. Phrase it the way you'd brief a 
 ask-agent "Inspect namespace $NS to find out why the parasol-claims pod is Running but not Ready. List the pods in that namespace, get the parasol-claims deployment, and read the recent events. Then explain the root cause in one or two sentences, quoting the readinessProbe path."
 ----
 
+The sample namespace in the captured output below is `user3-dev`; *yours* is `{user}-dev` — read the *shape*, not the exact name.
+
 .Shape of the output — the header, mode line and tool names are fixed; the results depend on what your cluster returns, and the answer is the model's own prose
 [source,texinfo]
 ----
@@ -517,8 +533,10 @@ Now *allow writes* and let the agent fix the probe:
 
 [source,sh,role=execute]
 ----
-ask-agent --allow-writes "The parasol-claims deployment in namespace $NS has a wrong readinessProbe.httpGet.path of /q/health/reddy. Get the deployment, update it so the readinessProbe path is /q/health/ready, apply the change, and confirm."
+ask-agent --allow-writes "Use your tools — do not print tool calls as text. In namespace $NS: first call resources_get for the parasol-claims Deployment. Then call resources_create_or_update with that exact manifest and one single change — readinessProbe.httpGet.path from /q/health/reddy to /q/health/ready — keeping every other field, including the container image, exactly as it was returned to you. Then confirm what you changed."
 ----
+
+The phrasing is doing two jobs, and both come from the same idea as exercise 2: *use your tools — do not print tool calls as text* pushes the model to actually call the mutating tool rather than describe it, and *keeping every other field, including the container image, exactly as it was returned to you* pushes it to edit the manifest it read rather than hand-author a replacement. Neither is a guarantee — writes are the least reliable beat on some models — which is exactly what the three landings below are about.
 
 .Shape of the output — the header, mode line and tool names are fixed; the *prose* is the model's own and yours will read differently
 [source,texinfo]
@@ -590,6 +608,8 @@ Which of these you get depends on the model your cluster serves, and none of the
 
 . *The agent wrote the right thing.* `STATUS Running`, `READY 1/1`, probe path `/q/health/ready`, image unchanged. Nothing to do — carry on below.
 . *The agent wrote nothing.* `TOOL-CALL TRACE (0 calls)` and a `resources_create_or_update(...)` call *printed as text* in the answer. It proposed the correct patch and did not execute it — the "grounding is engineered" reality from exercise 2. The pod is still `0/1` on the old probe path.
++
+Re-run the ask *once* — some models fire on the second attempt. If it still comes back `(0 calls)`, stop re-rolling: mutating tool calls are the weakest beat on some models, and no amount of rephrasing will make a model that will not call a write tool call one. That is the model's behaviour, not a mistake of yours, and the recovery block below is a *legitimate* way to finish this exercise — the point of the beat is the review, and you still do that.
 . *The agent wrote something wrong — and told you it succeeded.* The trace shows a real `resources_create_or_update`, the API server accepted it, the answer reports success — and the pod is `ErrImagePull`/`InvalidImageName`, or `STATUS` reads `InvalidImageName` outright, with the `image:` line showing a *placeholder* such as `<image>` instead of a registry reference. This happens when the model hand-authors a *replacement* manifest from scratch rather than editing the one field: it reproduces the parts it reasoned about and fills the rest with template text. The write was *permitted* — you granted it — *auditable*, and *wrong*.
 
 Landing 3 is the most valuable thing that can happen to you today. An agent that declines to act is *visibly* unfinished; an agent that acts wrongly and reports success is *invisibly* unfinished, and the only thing that catches it is a human reading cluster state instead of model prose. That is the entire reason the scoped write is narrow: the blast radius of a confident mistake is one deployment in one namespace.
@@ -682,6 +702,8 @@ Your own output will carry some subset of those, depending on how the agent land
 [.checkpoint]
 ****
 ✔ *Verify:* You granted `mcp-agent` a *scoped* write (patch deployments in *this* namespace only — `oc auth can-i` confirms `patch deployments: yes` but `read secrets: no`) and watched the client's read-only filter *hide 6 mutating tools* as defense in depth. You then judged the agent's write *against cluster state, not against its answer*, and `parasol-claims` is now `1/1 Running` with `readinessProbe.httpGet.path` = `/q/health/ready` and its image a real registry reference — whether the agent got there itself or you recovered it. The `managedFields` name every writer involved: `kubernetes-mcp-server` for anything the agent applied, your own `oc` client for anything you did.
+
+If your model never fired the write — `TOOL-CALL TRACE (0 calls)` on both attempts — this exercise is *still complete*. Landing the fix with your own `oc` is the human-in-the-loop control the exercise is about, and `managedFields` showing only your client is a truthful record of what happened. Nothing later in this module depends on the agent having been the one to write.
 ****
 
 == 4. The forbidden test — watch RBAC deny the agent
@@ -701,6 +723,8 @@ The first line picks a namespace that is *never yours*: everyone probes `user1-d
 NEIGHBOUR=$([ "{user}" = "user1" ] && echo user2-dev || echo user1-dev)
 ask-agent "Find out what is running in the neighbouring namespace $NEIGHBOUR. List the pods in namespace $NEIGHBOUR, and also read the recent events in namespace $NEIGHBOUR. Then report what you found."
 ----
+
+The sample namespace in the captured output below is `user3-dev`; *yours* is `{user}-dev` — read the *shape*, not the exact name. The namespace it is *refused* on is whatever `$NEIGHBOUR` resolved to for you.
 
 .Shape of the output — the trace, the RBAC denial text, and the mode line are fixed; the ANSWER is the model's own prose
 [source,texinfo]

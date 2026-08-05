@@ -107,8 +107,22 @@ objects:
 ---
 # why: the deploy-from-private-registry outcome — a workload that PULLS with the sample registry secret
 # (pod-level imagePullSecrets is the GitOps-clean form; the attendee may instead `oc secrets link` it to a
-# SA — verify accepts either). Runs the internal claims image so the pod is genuinely Ready (the sample
-# host does not resolve); the secret reference is the graded artifact.
+# SA — verify accepts either). The secret reference is the graded artifact; the pod must also be genuinely
+# Ready, which verify's pull_secret_deploy_ready asserts.
+#
+# The image is a PUBLIC one, and that is load-bearing — this manifest is a byte-for-byte twin of the
+# Deployment the attendee applies in lab exercise 4, mechanic B, for the reason that exercise spends a
+# whole callout on: naming a pull secret on a pod template REPLACES the ServiceAccount's injected
+# default-dockercfg-*, it does not add to it. This Deployment previously ran sourceImageStream:seedTag
+# (Helm-expression elided — a comment in a Helm template is still templated) — an INTERNAL-registry
+# image — on the stated assumption "the image itself is internal + pullable so it stays Healthy". That
+# assumption is false the moment imagePullSecrets is set: the kubelet loses the internal-registry
+# credential and the pod sits in ImagePullBackOff with "authentication required", permanently. Measured
+# as a controlled pair (same namespace, same secret, only the image differs) on 2026-08-05, and reported
+# independently by the user6 field test as F-11: public image -> 1/1 Running in ~3s; internal image ->
+# 22 back-offs over 5m43s and a red `ws verify`. Repointing at the attendee's OWN imagestream would NOT
+# help — the shadowing is credential-scoped, not namespace-scoped. Do not "tidy" this back to an
+# internal image.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -130,16 +144,16 @@ spec:
         workshop.redhat.com/module: registry-images-catalog-governance
     spec:
       # The graded reference: this pod is configured to authenticate to the private registry with the
-      # sample secret. (The image itself is internal + pullable so the Deployment stays Healthy.)
+      # sample secret. See the block comment above for why the image below must stay PUBLIC.
       imagePullSecrets:
         - name: parasol-registry-creds
       containers:
-        - name: claims
-          image: {{ .Values.sourceImageStream }}:{{ .Values.seedTag }}
-          # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
-          imagePullPolicy: Always
-          ports:
-            - containerPort: 8080
+        - name: puller
+          # A PUBLIC image on purpose, matching lab exercise 4 mechanic B exactly. Naming a pull secret
+          # here replaces the ServiceAccount's injected default-dockercfg-*, so an internal-registry
+          # image would fail with "authentication required" no matter which namespace it is in.
+          image: {{ .Values.pullDemoImage }}
+          command: ["sleep", "infinity"]
           resources:
             requests:
               cpu: 50m

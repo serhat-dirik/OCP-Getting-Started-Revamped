@@ -43,7 +43,7 @@ In this lab you *prove* the service survives a pod loss (in-site resiliency), th
 ====
 Where you apply a mesh custom resource you get two tabs: the *Console* tab uses the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`) to import YAML, and the *CLI* tab uses `oc` in the *Terminal* beside these instructions. Pick a path once — the tabs stay in sync across the page.
 Two things are terminal-only on purpose: *tailing the client's live log* (`oc logs -f`) and the *`curl`-style reads* from inside a pod — the console can't do those.
-The namespace in the output below is the sample user `user1`; *yours* is `{user}`, and the cluster domain shown is a placeholder — read the *shape*, not the exact values.
+Namespaces in the output below render with *your* user (`{user}`). Everything else — pod names, IP addresses, node names, timestamps — comes from one real capture on a since-deleted cluster and *will* differ on yours: read the *shape*, not the exact values.
 ====
 endif::demo[]
 
@@ -186,9 +186,9 @@ oc get pods -n $SITEA -l app=parasol-claims
 ----
 
 .Expected output (one pod deleted; the other two keep serving at `2/2`, and a replacement is already being created — still initializing its sidecar)
-[source,texinfo]
+[source,texinfo,subs="attributes"]
 ----
-pod "parasol-claims-65d8cc85fd-4wwmk" deleted from user1-site-a namespace
+pod "parasol-claims-65d8cc85fd-4wwmk" deleted from {user}-site-a namespace
 NAME                              READY   STATUS     RESTARTS   AGE
 parasol-claims-65d8cc85fd-2t2hf   0/2     Init:0/2   0          1s
 parasol-claims-65d8cc85fd-v2wth   2/2     Running    0          2m
@@ -234,6 +234,8 @@ The gateway is up, but it has *no route* — it doesn't yet know about your two 
 * a *DestinationRule* that turns on *locality-aware load balancing* (prefer the primary) and *outlier detection* (eject a failing site);
 * a *VirtualService* on the gateway that routes the stable endpoint to that host, with *retries* so failover drops no requests.
 
+All three carry `exportTo: ["."]`, and that one field is load-bearing. It scopes a mesh resource to *its own namespace*; leave it out and Istio defaults to `+exportTo: ["*"]+`, publishing the resource *mesh-wide*. `claims.parasol.internal` is deliberately a single, stable, global service name — that is the lesson — but on this shared control plane *every* attendee declares that same host, so un-scoped definitions get merged and your gateway could resolve to *someone else's* sites. `["."]` keeps your logical claims host yours. The same discipline applies in production: on a shared mesh, export only what other namespaces genuinely need to reach.
+
 // Grounded 2026-07-29 on OCP 4.22.5, signed in as an attendee (user1), viewport 1600x1000:
 //   · the masthead button is labelled "Quick create" (exact aria-label) and renders as a ⊕ icon,
 //     sitting between "Application launcher" and "Command line terminal".
@@ -275,6 +277,7 @@ kind: ServiceEntry
 metadata: {name: claims-global, namespace: $CLIENT}
 spec:
   hosts: [claims.parasol.internal]
+  exportTo: ["."]
   location: MESH_INTERNAL
   ports: [{number: 8080, name: http, protocol: HTTP}]
   resolution: DNS
@@ -287,6 +290,7 @@ kind: DestinationRule
 metadata: {name: claims-global, namespace: $CLIENT}
 spec:
   host: claims.parasol.internal
+  exportTo: ["."]
   trafficPolicy:
     loadBalancer: {localityLbSetting: {enabled: true}}
     outlierDetection:
@@ -301,6 +305,7 @@ kind: VirtualService
 metadata: {name: claims-edge, namespace: $CLIENT}
 spec:
   hosts: ["*"]
+  exportTo: ["."]
   gateways: [claims-gateway]
   http:
     - route: [{destination: {host: claims.parasol.internal, port: {number: 8080}}}]
@@ -355,13 +360,27 @@ GW=$(oc get pod -n $CLIENT -l istio=claims-gateway -o jsonpath='{.items[0].metad
 istioctl proxy-config endpoints $GW.$CLIENT --cluster "outbound|8080||claims.parasol.internal"
 ----
 
-.Expected output (both sites are endpoints of the one logical claims host, both healthy — the pod IPs below are this run's example, yours will differ)
+.Expected output (both sites are endpoints of the one logical claims host, both healthy — the addresses below are from one capture on a since-deleted cluster and will *not* match yours)
 [source,texinfo]
 ----
 ENDPOINT                STATUS      OUTLIER CHECK     CLUSTER
 172.231.18.106:8080     HEALTHY     OK                outbound|8080||claims.parasol.internal
 172.231.92.201:8080     HEALTHY     OK                outbound|8080||claims.parasol.internal
 ----
+
+[IMPORTANT]
+.Don't compare the numbers — compare *whose* they are
+====
+Every cluster (and every namespace on it) allocates its own addresses, so the two IPs above are meaningless to you. What you *should* check is that the two endpoints are *your own* site-a and site-b `claims` Services — because `resolution: DNS` makes Envoy resolve each endpoint to that Service's ClusterIP. Print yours and match them against the table:
+
+[source,sh,role=execute]
+----
+oc get svc claims -n $SITEA -o jsonpath='site-a claims ClusterIP: {.spec.clusterIP}{"\n"}'
+oc get svc claims -n $SITEB -o jsonpath='site-b claims ClusterIP: {.spec.clusterIP}{"\n"}'
+----
+
+Two endpoints, both `HEALTHY`, and both IPs appearing in the two lines you just printed — that is the shape you want. If the gateway lists addresses that are *neither* of yours, your routing is resolving to something outside your own namespaces; check that the `exportTo: ["."]` line survived on all three resources.
+====
 
 Now *the failover*. In a *second terminal*, start tailing the client log live so you can watch it in real time:
 
