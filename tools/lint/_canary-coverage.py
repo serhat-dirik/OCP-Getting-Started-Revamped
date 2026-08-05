@@ -46,11 +46,14 @@ BOTH unchanged: it can stop working and no CI signal will say so.
 
 EXIT CODES (this file follows the same inverted convention as every guard beside it):
   --self-test  MUST exit exactly 1. 0 = this gate is blind. 2 = its own harness is broken.
-  plain        0 = every swept detector proven, 1 = an unproven detector or a stale exemption,
-               2 = COULD NOT INSPECT. 1 and 2 are deliberately different: "this detector is
-               unproven" is a finding about a guard; "I could not run this guard at all" is a
-               finding about the sweep, and collapsing them lets a guard that fails to import read
-               as a guard with a hole (or worse, get fixed as one).
+  plain        0 = no NEW unproven detector (every swept detector proven, except any named in the
+               ledgers, which are printed with their reasons and never counted as clean),
+               1 = an undeclared unproven detector or a stale ledger entry,
+               2 = COULD NOT INSPECT, which now includes a MALFORMED ledger entry. 1 and 2 are
+               deliberately different: "this detector is unproven" is a finding about a guard;
+               "I could not run this guard at all" — or "I could not read my own suppression
+               list" — is a finding about the sweep, and collapsing them lets a guard that fails
+               to import read as a guard with a hole (or worse, get fixed as one).
   unknown arg  2, via argparse — never 1, which CI's self-test assertion accepts as success.
 
 RUNTIME, and why the default mode is not `--all`. Measured 2026-08-01 on this tree: nine of the ten
@@ -76,7 +79,9 @@ import argparse
 import ast
 import collections
 import concurrent.futures
+import contextlib
 import hashlib
+import io
 import os
 import pathlib
 import re
@@ -131,13 +136,21 @@ BASELINE_SELF_TEST = 1
 # where this one does not yet meet them. Adding an entry is an OWNER decision, not an agent's.
 #
 # Two lists, identical mechanics, DIFFERENT claims. Both are swept exactly like everything else —
-# neither is a mute button — and both error in two directions, which is what stops them rotting:
+# neither is a mute button — an entry is NAMED in the output with its reason every run, and both
+# error in three directions, which is what stops them rotting:
 #
-#   * the key no longer enumerates (the guard was reworded, so the entry applies to nothing), or
-#   * the detector turns out to be PROVEN (someone wrote the witness; the entry is now a lie).
+#   * the key no longer enumerates (the guard was reworded, so the entry applies to nothing) → 1,
+#   * the detector turns out to be PROVEN (someone wrote the witness; the entry is now a lie) → 1,
+#   * the entry cannot be parsed, or names a guard that does not exist, or carries no reason → 2,
+#     because a suppression list the gate cannot read declares nothing while looking like it does.
 #
-# That is the shape `_parse-guard-args.sh` uses for `_PGA_EXEMPT`, which errors when an exempt file
-# starts using the parser.
+# The third landed 2026-08-06 with `_ledger_problems()`, after a measurement: the staleness scan
+# only considers keys whose guard part is in the selected set, so `proven-gaurd.py::…` — one letter
+# off — was filtered out before the check that would have caught it, and a key with no `::` at all
+# was inert the same way. Both came back rc 0 while suppressing a real hole.
+#
+# `_parse-guard-args.sh` runs the same two-directional rule over `_PGA_EXEMPT`: an entry whose file
+# adopts the parser fails, and so does one naming a file that is no longer there.
 
 # EXEMPT: "this detector CANNOT be witnessed by either mode, and here is why." Permanent, and the
 # reason must be structural — isolating it would couple the fixture to live content, blinding it
@@ -161,16 +174,62 @@ KNOWN_UNPROVEN: dict[str, str] = {}
 
 
 def _ledgers() -> dict:
-    """Both ledgers as one mapping. Keys are disjoint by construction — an entry cannot be both
-    "impossible to witness" and "not witnessed yet" — and a key in both is a contradiction that
-    would make the two staleness rules fight, so it is rejected up front."""
-    both = set(EXEMPT) & set(KNOWN_UNPROVEN)
-    if both:
-        print(f"::error::_canary-coverage: {sorted(both)} appear in BOTH EXEMPT and "
-              f"KNOWN_UNPROVEN. A detector is either unwitnessABLE or merely unwitnessed; it "
-              f"cannot be both, and the two ledgers enforce opposite things.", file=sys.stderr)
-        sys.exit(2)
+    """Both ledgers as one mapping. Keys are disjoint — `_ledger_problems` rejects a key in both
+    before any caller gets here — so a plain merge cannot lose an entry."""
     return {**EXEMPT, **KNOWN_UNPROVEN}
+
+
+def _key_names_a_real_guard(guard: str) -> bool:
+    """Is `guard` a file this gate could ever sweep? `tools/lint/<guard>` for the real ledgers,
+    `_canary-coverage.canary/<guard>` for the fixtures the self-test drives the same code with."""
+    return (LINT / guard).is_file() or (CANARY / guard).is_file()
+
+
+def _ledger_problems() -> list:
+    """Every way an ENTRY can be malformed, as text. Empty list = both ledgers are parseable.
+
+    This runs BEFORE the sweep and its findings exit 2, not 1, for the reason
+    `check-adoption-skip.sh` states about its own ledger: a ledger the gate cannot parse declares
+    nothing, and a gate that silently declares nothing reports accepted debt as a fresh break — or
+    a fresh break as accepted debt. 1 is "a detector is unproven", a verdict about a guard; this is
+    "I could not read my own suppression list", a verdict about the gate.
+
+    A KEY THAT CAN NEVER MATCH IS MALFORMED, NOT ABSENT — measured 2026-08-06, and the reason this
+    function exists. The staleness scan below only considers keys whose guard part is in the
+    selected set (`k.split("::", 1)[0] in selected`), so `proven-gaurd.py::pattern:FLAW_RE` — one
+    letter off — was filtered out before the check that would have caught it and came back rc 0,
+    indistinguishable from a guard that simply was not swept on this run. Under `--all` there is no
+    innocent reading of it at all. A key with no `::` was inert the same way. Both are shape errors,
+    so they are caught here by shape, in every mode, rather than by a scan that has to guess.
+    """
+    problems = []
+    both = sorted(set(EXEMPT) & set(KNOWN_UNPROVEN))
+    if both:
+        problems.append(f"{both} appear in BOTH EXEMPT and KNOWN_UNPROVEN. A detector is either "
+                        f"unwitnessABLE or merely unwitnessed; it cannot be both, and the two "
+                        f"ledgers enforce opposite things (one says a witness is impossible, the "
+                        f"other says one is owed).")
+    for label, ledger in (("EXEMPT", EXEMPT), ("KNOWN_UNPROVEN", KNOWN_UNPROVEN)):
+        for key, why in sorted(ledger.items()):
+            guard, sep, ident = key.partition("::")
+            if not sep or not guard or not ident:
+                problems.append(f"{label} key {key!r} is malformed: expected "
+                                f"'<guard>.py::<kind>:<name>' (the `Detector.key` shape). A key "
+                                f"with no '::' names no guard, so nothing ever compares it to "
+                                f"anything and it suppresses in silence forever.")
+                continue
+            if not _key_names_a_real_guard(guard):
+                problems.append(f"{label} key {key!r} names {guard!r}, which is not a file under "
+                                f"tools/lint/ or the canary fixtures — this gate can never sweep "
+                                f"it, so the entry can never be matched, reported or retired. "
+                                f"Either the guard was renamed (re-key the entry) or the name is "
+                                f"mistyped; one wrong letter is invisible to the staleness scan.")
+            if not why or not why.strip():
+                problems.append(f"{label} key {key!r} has an empty reason. An entry silences a "
+                                f"detector exactly as effectively with no justification as with "
+                                f"one, so the reason is the entry — write why the witness cannot "
+                                f"(EXEMPT) or does not yet (KNOWN_UNPROVEN) exist.")
+    return problems
 
 
 class Detector:
@@ -776,7 +835,21 @@ def collect(root: pathlib.Path) -> list:
 
 
 def run_gate(guard_paths, changed, budget, jobs, timeout, quiet=False):
-    """(rc, reports). rc 0 all swept detectors proven, 1 a hole or a stale exemption, 2 no evidence."""
+    """(rc, reports). rc 0 no NEW hole (declared entries are named, never counted as clean),
+    1 an undeclared hole or a stale ledger entry, 2 no evidence — including a malformed ledger."""
+    # The ledgers are linted BEFORE anything is swept, and a malformed entry is rc 2. Reading the
+    # suppression list is not part of the check — it is the precondition for the check meaning
+    # anything, so failing it is "could not inspect", never "inspected and found nothing".
+    ledger_problems = _ledger_problems()
+    if ledger_problems:
+        if not quiet:
+            for line in ledger_problems:
+                print(f"::error::_canary-coverage: {line}", file=sys.stderr)
+            print("::error::_canary-coverage: exiting 2 — a ledger this gate cannot parse declares "
+                  "nothing, and 2 (could not inspect) is deliberately not 1 (a detector is "
+                  "unproven) nor 0 (everything is fine).", file=sys.stderr)
+        return 2, []
+
     if not guard_paths:
         print("::error::_canary-coverage: selected ZERO guards. The repo ships Python guards, so "
               "an empty selection is a broken sweep, not a clean one.", file=sys.stderr)
@@ -853,19 +926,27 @@ def run_gate(guard_paths, changed, budget, jobs, timeout, quiet=False):
                   file=sys.stderr)
         return 2, reports
 
-    problems, debt = [], 0
+    problems, declared = [], []
     for rep in reports:
         for det in rep.unproven:
-            if det.key in EXEMPT:
-                continue
-            if det.key in KNOWN_UNPROVEN:
-                debt += 1
-                continue
-            problems.append(
-                f"{det.where}  {det.ident}: blinding it left BOTH modes on their baseline "
-                f"({BASELINE_PLAIN} plain, {BASELINE_SELF_TEST} --self-test). This detector can "
-                f"stop working with no CI signal. Give it a witness: a canary case only it can "
-                f"catch, or a real-tree case only it can keep silent.")
+            # A declared detector is REPORTED, at the point of detection, by name, with its reason.
+            # It used to be `continue` with no counter and no print for EXEMPT and a bare tally for
+            # KNOWN_UNPROVEN: an entry could hide a real hole and the run's only visible output was
+            # a ✅ claiming every blinding moved an exit code. Exit 0 here means "no NEW hole"; it
+            # has never meant "no hole", and it must not read that way.
+            for label, ledger in (("EXEMPT", EXEMPT), ("KNOWN_UNPROVEN", KNOWN_UNPROVEN)):
+                if det.key in ledger:
+                    declared.append((label, det.key, ledger[det.key], det.where))
+                    if not quiet:
+                        print(f"⚠ DECLARED {label}  {det.where}  {det.ident}: still UNPROVEN, "
+                              f"known, accepted — NOT fixed. {ledger[det.key]}")
+                    break
+            else:
+                problems.append(
+                    f"{det.where}  {det.ident}: blinding it left BOTH modes on their baseline "
+                    f"({BASELINE_PLAIN} plain, {BASELINE_SELF_TEST} --self-test). This detector "
+                    f"can stop working with no CI signal. Give it a witness: a canary case only "
+                    f"it can catch, or a real-tree case only it can keep silent.")
         # Stale entries, part 2: an entry that is now provable is a lie about the guard.
         for det in rep.proven:
             for label, ledger in (("EXEMPT", EXEMPT), ("KNOWN_UNPROVEN", KNOWN_UNPROVEN)):
@@ -877,6 +958,25 @@ def run_gate(guard_paths, changed, budget, jobs, timeout, quiet=False):
     for key in stale:
         problems.append(f"the ledger carries {key!r}, which no longer enumerates. Either the "
                         f"detector was reworded (re-key it) or it is gone (delete the entry).")
+
+    # The declared-debt block: every entry in either ledger, reprinted with its full reason, so a
+    # reader scanning for known debt finds it without reading the whole log. Entries whose guard was
+    # not swept are listed too and labelled as such — silence about them would be the same false
+    # all-clear in a quieter font. Printed BEFORE the verdict, so it appears whether this run ends
+    # in ❌ or ✅: declared debt does not stop existing because something else also broke.
+    observed = {key for _label, key, _why, _where in declared}
+    carried = [(label, key, why)
+               for label, ledger in (("EXEMPT", EXEMPT), ("KNOWN_UNPROVEN", KNOWN_UNPROVEN))
+               for key, why in sorted(ledger.items()) if key not in observed]
+    if not quiet and (declared or carried):
+        print(f"\n_canary-coverage: {len(declared) + len(carried)} declared ledger entry(ies) "
+              f"— accepted debt, NOT proof:")
+        for label, key, why, where in declared:
+            print(f"  ⚠ {label}  {key}  ({where})  observed UNPROVEN on this run")
+            print(f"      {why}")
+        for label, key, why in carried:
+            print(f"  ⚠ {label}  {key}  guard not swept on this run — entry not re-checked")
+            print(f"      {why}")
 
     if problems:
         if not quiet:
@@ -891,11 +991,20 @@ def run_gate(guard_paths, changed, budget, jobs, timeout, quiet=False):
 
     swept = [r for r in reports if not r.skipped and not r.error]
     if not quiet:
-        print(f"\n✅ _canary-coverage: {sum(len(r.proven) for r in swept)} detector(s) proven "
-              f"across {len(swept)} swept guard(s); every blinding moved an exit code.")
-        if debt:
-            print(f"   {debt} detector(s) carried as KNOWN_UNPROVEN debt — see the ledger in "
-                  f"tools/lint/_canary-coverage.py. The list may shrink, never grow.")
+        proven_n = sum(len(r.proven) for r in swept)
+        if EXEMPT or KNOWN_UNPROVEN:
+            # NOT "every blinding moved an exit code" — that sentence is false the moment a ledger
+            # has one entry, and it was printed anyway, over an EXEMPT entry that was never even
+            # named. Exit 0 means "no NEW unproven detector"; it must never be printed as "no
+            # unproven detector". Same rule check-adoption-skip.sh applies to its green line.
+            print(f"\n✅ _canary-coverage: no NEW unproven detector — {proven_n} detector(s) "
+                  f"proven across {len(swept)} swept guard(s), and the "
+                  f"{len(declared) + len(carried)} entry(ies) above remain UNPROVEN by "
+                  f"declaration. The ledgers may shrink, never grow.")
+        else:
+            print(f"\n✅ _canary-coverage: {proven_n} detector(s) proven across {len(swept)} swept "
+                  f"guard(s); every blinding moved an exit code. Both ledgers are empty, so that "
+                  f"claim carries no exceptions.")
     return 0, reports
 
 
@@ -985,37 +1094,88 @@ def self_test() -> int:
     # exact defect this whole file exists to find, reproduced inside the file itself. Every case
     # below therefore runs the SAME gate over the SAME fixture with the ledger empty first, and
     # only trusts the mutated result if the control came back where it should.
-    def gate(fixture, expected_control, entries):
+    def gate(fixture, expected_control, entries, capture=False):
+        """(rc, stdout). `capture` runs the mutated pass NOT quiet, so a case can assert on what a
+        reader actually sees — an entry that changes an exit code while staying invisible in the
+        output is half the defect these cases exist to prevent."""
         control, _ = run_gate([fixture], {"*"}, 1e9, 4, timeout, quiet=True)
         if control != expected_control:
             problems.append(f"{fixture.name}: control run gave rc={control}, expected "
                             f"{expected_control} — the case below would prove nothing.")
-            return None
+            return None, ""
         for ledger, key, why in entries:
             ledger[key] = why
+        buf = io.StringIO()
         try:
-            return run_gate([fixture], {"*"}, 1e9, 4, timeout, quiet=True)[0]
+            if capture:
+                with contextlib.redirect_stdout(buf):
+                    rc = run_gate([fixture], {"*"}, 1e9, 4, timeout, quiet=False)[0]
+            else:
+                rc = run_gate([fixture], {"*"}, 1e9, 4, timeout, quiet=True)[0]
+            return rc, buf.getvalue()
         finally:
             for ledger, key, _why in entries:
                 ledger.pop(key, None)
 
+    # (label, fixture, control rc, expected rc, entries, substrings the output MUST contain)
     cases = [
         ("a stale EXEMPT key (names nothing)", proven_fixture, 0, 1,
-         [(EXEMPT, "proven-guard.py::pattern:NO_SUCH_PATTERN", "fixture: stale")]),
+         [(EXEMPT, "proven-guard.py::pattern:NO_SUCH_PATTERN", "fixture: stale")], ()),
         ("a stale KNOWN_UNPROVEN key (names nothing)", proven_fixture, 0, 1,
-         [(KNOWN_UNPROVEN, "proven-guard.py::pattern:NO_SUCH_PATTERN", "fixture: stale")]),
+         [(KNOWN_UNPROVEN, "proven-guard.py::pattern:NO_SUCH_PATTERN", "fixture: stale")], ()),
         ("an EXEMPT key that is now PROVEN", proven_fixture, 0, 1,
-         [(EXEMPT, "proven-guard.py::pattern:FLAW_RE", "fixture: claims the unwitnessable")]),
+         [(EXEMPT, "proven-guard.py::pattern:FLAW_RE", "fixture: claims the unwitnessable")], ()),
         ("a KNOWN_UNPROVEN key that is now PROVEN", proven_fixture, 0, 1,
-         [(KNOWN_UNPROVEN, "proven-guard.py::pattern:FLAW_RE", "fixture: debt already paid")]),
+         [(KNOWN_UNPROVEN, "proven-guard.py::pattern:FLAW_RE", "fixture: debt already paid")], ()),
         ("KNOWN_UNPROVEN carrying a real hole turns rc 1 into rc 0", unproven_fixture, 1, 0,
-         [(KNOWN_UNPROVEN, "unproven-guard.py::pattern:UNUSED_RE", "fixture: the debt itself")]),
+         [(KNOWN_UNPROVEN, "unproven-guard.py::pattern:UNUSED_RE", "fixture: the debt itself")],
+         ()),
+
+        # ── Malformed entries: rc 2, distinct from a defect's rc 1 (LEDGERS.md C4) ──────────────
+        # Each of these returned rc 0 on 2026-08-06 while suppressing a real hole. The misspelling
+        # is the one that matters most: it is a plausible typo, and the staleness scan's `guard in
+        # selected` filter made it indistinguishable from a guard that was simply not swept.
+        ("a key whose guard name is misspelled by one letter", proven_fixture, 0, 2,
+         [(EXEMPT, "proven-gaurd.py::pattern:FLAW_RE", "fixture: one letter off")], ()),
+        ("a key with no '::' at all", proven_fixture, 0, 2,
+         [(KNOWN_UNPROVEN, "proven-guard.py", "fixture: no ident")], ()),
+        ("an entry with an empty reason", proven_fixture, 0, 2,
+         [(EXEMPT, "proven-guard.py::pattern:FLAW_RE", "")], ()),
+        # The contradiction branch: shipped 2026-08-01 with one call site and no canary, because it
+        # exited the process directly. It returns a problem now, so this case can drive it.
+        ("the same key in BOTH ledgers", proven_fixture, 0, 2,
+         [(EXEMPT, "proven-guard.py::pattern:FLAW_RE", "fixture: unwitnessable"),
+          (KNOWN_UNPROVEN, "proven-guard.py::pattern:FLAW_RE", "fixture: owed")], ()),
+
+        # ── The reporting contract (LEDGERS.md C2): rc 0 is not permission to look clean ────────
+        # An EXEMPT entry over a real hole used to print NOTHING about itself and leave the green
+        # line reading "every blinding moved an exit code" — a sentence that was false about the
+        # very detector the entry was hiding.
+        ("an EXEMPT entry over a real hole is named, with its reason, and the green line stops "
+         "claiming every blinding moved an exit code", unproven_fixture, 1, 0,
+         [(EXEMPT, "unproven-guard.py::pattern:UNUSED_RE",
+           "2026-08-06 | fixture: the exemption itself | decision: fixture")],
+         # One needle per required element: named at detection, reprinted in the dedicated summary
+         # block with its reason, and a green line that no longer claims blanket success.
+         ("⚠ DECLARED EXEMPT", "unproven-guard.py::pattern:UNUSED_RE",
+          "declared ledger entry(ies)", "fixture: the exemption itself",
+          "no NEW unproven detector")),
     ]
-    for label, fixture, control_rc, want_rc, entries in cases:
-        got = gate(fixture, control_rc, entries)
+    for label, fixture, control_rc, want_rc, entries, must_contain in cases:
+        got, out = gate(fixture, control_rc, entries, capture=bool(must_contain))
         if got is not None and got != want_rc:
             problems.append(f"{label}: rc={got}, expected {want_rc}. A ledger that can rot "
                             f"silently is the same mute button it replaced.")
+        for needle in must_contain:
+            if needle not in out:
+                problems.append(f"{label}: the output never contained {needle!r}. A declared entry "
+                                f"that changes an exit code without appearing in the log is debt "
+                                f"nobody can review — and a green line that still claims blanket "
+                                f"success over it is the false all-clear itself.")
+        if "every blinding moved an exit code" in out:
+            problems.append(f"{label}: the run printed 'every blinding moved an exit code' while a "
+                            f"ledger entry was in force. That claim is false for the declared "
+                            f"detector, which is exactly the sentence C2c forbids.")
 
     if problems:
         print("❌ SELF-TEST FAILED — the gate cannot tell a proven detector from an unproven one:",
@@ -1026,7 +1186,9 @@ def self_test() -> int:
 
     print("✅ self-test: proven-guard's 3 detectors classified proven, unproven-guard's UNUSED_RE "
           f"classified UNPROVEN, and {len(cases)} ledger cases held (both rot directions of both "
-          "ledgers, each against its own control). Exiting 1 — the gate's detection is proven.")
+          "ledgers, four malformed shapes rejected with rc 2, and a declared entry named in the "
+          "output with the green line refusing to claim blanket success — each against its own "
+          "control). Exiting 1 — the gate's detection is proven.")
     return 1
 
 

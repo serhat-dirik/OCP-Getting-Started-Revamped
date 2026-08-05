@@ -82,8 +82,13 @@ inspect" code — never 1, which would satisfy CI's self-test assertion and re-o
 
 A guard needing more flags writes its own `while … case` parser that also rejects unknown arguments
 by name (`adoption-skippable-guard.sh` is the worked example) and adds itself to `_PGA_EXEMPT` in
-`_parse-guard-args.sh` with a reason. `bash tools/lint/_parse-guard-args.sh` meta-scans the
-directory and fails on any `.sh` that is neither wired nor exempt, so adoption cannot rot.
+`_parse-guard-args.sh` with a reason — an owner decision, never an agent's. `bash
+tools/lint/_parse-guard-args.sh` meta-scans the directory and fails on any `.sh` that is neither
+wired nor exempt, so adoption cannot rot; each declared exemption is **named** on the green line
+rather than hidden in a count, and the list itself fails in both directions — an exempt file that
+adopts the parser (`STALE EXEMPTION`) and an entry naming a file that is no longer there
+(`VANISHED EXEMPTION`). The rules every declared-debt ledger in this repo must meet are in
+`tools/lint/LEDGERS.md`.
 
 Python guards get the same contract from `argparse` (`ap.parse_args()` names the offender and exits
 2 already) — use it, not `"--self-test" in sys.argv`, which has the identical silent-discard bug.
@@ -276,8 +281,8 @@ that must stay silent and only stays silent because of them. That is what the fi
 patterns and `curl-format`'s `INTRINSIC_ATTRIBUTES` needed.
 
 **Two ledgers, for the two things a witness can't be written for.** Both are still swept, and both
-error in *two* directions — when the key stops enumerating, and when the detector becomes proven —
-which is the `_PGA_EXEMPT` shape and the only reason a list like this doesn't rot:
+are declared-debt ledgers under `tools/lint/LEDGERS.md` — writing an entry is an owner decision, not
+something an agent does to get CI green.
 
 - `EXEMPT` — "this detector **cannot** be witnessed by either mode, and here is the structural
   reason." Empty today.
@@ -285,6 +290,28 @@ which is the `_PGA_EXEMPT` shape and the only reason a list like this doesn't ro
   spelled out in the entry. **It may shrink, never grow**: a new unproven detector fails CI, and an
   entry that acquires a witness fails CI too, so paying the debt is the only way to stop hearing
   about it.
+
+An entry never buys silence. Every one is **named** at the point of detection (`⚠ DECLARED EXEMPT
+… still UNPROVEN, known, accepted — NOT fixed`), reprinted with its full reason in a block before
+the summary, and it changes the green line: with either ledger non-empty the run says `no NEW
+unproven detector … the N entry(ies) above remain UNPROVEN by declaration`, never `every blinding
+moved an exit code`. Exit 0 means "no *new* hole" and must not read as "no hole".
+
+And an entry expires by itself, three ways:
+
+| the entry | what happens | rc |
+| --- | --- | --- |
+| its key stops enumerating (the guard was reworded) | reported as stale, re-key it or delete it | 1 |
+| its detector becomes PROVEN (someone wrote the witness) | reported as a lie about the guard | 1 |
+| it is malformed — no `::`, a guard filename that does not exist, or an empty reason | rejected before the sweep runs, because a suppression list the gate cannot read declares nothing | **2** |
+
+The third landed 2026-08-06 and closes a measured blind spot: the staleness scan only considers keys
+whose guard part was selected this run, so `proven-gaurd.py::pattern:FLAW_RE` — one letter off —
+was filtered out *before* the check that would have caught it and came back rc 0, indistinguishable
+from a guard that simply wasn't swept. A key with no `::` was inert the same way, and both silenced
+a real hole. **A key that can never match is malformed, not absent.** `_PGA_EXEMPT` runs the same
+rule in its own shape: an exempt file that adopts the parser fails, and so does an entry naming a
+file that is no longer in the directory.
 
 **Runtime — why the default is a budget and not `--all`.** Measured on this tree: nine of the ten
 Python guards cost under 5s for both baseline modes, so their full sweep is ~2 minutes wall at
@@ -296,12 +323,12 @@ drops out on its own and rejoins when it gets fast. The consequence worth knowin
 guard's detectors are re-proven **when it or its fixtures change**, not on every push.
 
 **Exit codes.** `--self-test` exits 1 (it correctly classified fixture guards with known answers,
-including a deliberately unwitnessable detector); the real run exits 0 clean, **1** for an unproven
-detector or a rotten ledger entry, **2** for could-not-inspect — a guard that will not import, an
-unmutated control that is not 0/1, a mutation that failed to land, zero guards selected, zero
-detectors enumerated. 1 and 2 are deliberately different codes: the first is a finding about a
-guard, the second is a finding about the sweep, and a guard that fails to import must never read as
-a guard with a hole.
+including a deliberately unwitnessable detector); the real run exits 0 for no *new* unproven
+detector, **1** for an undeclared unproven detector or a stale ledger entry, **2** for
+could-not-inspect — a guard that will not import, an unmutated control that is not 0/1, a mutation
+that failed to land, zero guards selected, zero detectors enumerated, or a malformed ledger entry.
+1 and 2 are deliberately different codes: the first is a finding about a guard, the second is a
+finding about the sweep, and a guard that fails to import must never read as a guard with a hole.
 
 **It does not cover the Bash guards.** They have no module-level attribute to patch;
 `_check-coverage.sh` asserts every `check_*` **ran**, which is strictly weaker than "its finding

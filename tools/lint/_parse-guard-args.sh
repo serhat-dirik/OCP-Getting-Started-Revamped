@@ -55,7 +55,8 @@
 # that genuinely needs more flags writes its own `while … case` parser and rejects unknown arguments
 # there — adoption-skippable-guard.sh is the worked example (it takes `--components-dir` and refuses
 # to combine it with --self-test). Such a guard is listed in _PGA_EXEMPT below with its reason, and
-# the meta-scan errors if it ever starts using this helper, so the list cannot rot silently.
+# the meta-scan errors in BOTH directions — if the file ever starts using this helper, and if the
+# file named by an entry is not there at all — so the list cannot rot silently.
 #
 # Runnable standalone, matching _extract-func.sh and _check-coverage.sh:
 #   bash tools/lint/_parse-guard-args.sh              → META-SCAN: every runnable *.sh in tools/lint/
@@ -66,8 +67,10 @@
 #   bash tools/lint/_parse-guard-args.sh --self-test  → the parser rejects the real typo, rejects a
 #                                                       flag-with-value, rejects a bare positional,
 #                                                       names the offender in each case, accepts
-#                                                       --self-test and no-args, and answers --help
-#                                                       with 0 (rc 1 = every canary caught).
+#                                                       --self-test and no-args, answers --help with
+#                                                       0, and the meta-scan's own ledger fails in
+#                                                       both rot directions while leaving a live
+#                                                       entry alone (rc 1 = every canary caught).
 # Sourcing (the normal path, from a guard) runs neither.
 #
 # NO ARRAYS ANYWHERE IN THIS FILE, on purpose. Under bash 3.2 + `set -u` — the macOS default, and
@@ -139,6 +142,17 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # landed on the shared parser the same night (route-tls-guard.sh gained its first real --self-test
   # in that change). Their rows are deleted rather than kept: the STALE EXEMPTION branch below turns
   # a converted-but-still-listed file into an error precisely so this list cannot outlive its reason.
+  #
+  # BOTH ratchet directions, because for its first five days this list only had one. The scan
+  # iterates the DIRECTORY, so an entry naming a file that was renamed or deleted was matched by
+  # nothing, reported by nothing, and could never expire — measured 2026-08-06, rc 0 with the green
+  # line cheerfully reporting "0 declared exemption(s)" while the entry sat right here. LEDGERS.md
+  # states the rule this cost us: if the staleness scan iterates the observed defects, it must also
+  # iterate the ledger, or an entry that matches nothing simply never comes up. So:
+  #   • an entry whose file STARTS using the parser  → STALE EXEMPTION  (the entry is now a lie)
+  #   • an entry whose file IS NOT THERE             → VANISHED EXEMPTION (the entry suppresses
+  #                                                    nothing, and the next file to take that name
+  #                                                    inherits a suppression nobody chose)
   _PGA_EXEMPT="adoption-skippable-guard.sh"
 
   # A file is "runnable" if it has a standalone entry point at all: either a real shebang-driven
@@ -146,8 +160,13 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # with a .sh extension qualifies today; the scan asserts it found some, because scanning zero
   # files is never a pass.
   _pga_meta_scan() {  # <dir> → 0 all accounted for, 1 a gap, 2 nothing inspected
-    local dir="$1" f base rc=0 n=0 wired=0 exempt=0
+    local dir="$1" f base e rc=0 n=0 wired=0 exempt=0
     for f in "$dir"/*.sh; do
+      # An unmatched glob is the literal "<dir>/*.sh" here (no nullglob, and setting it would change
+      # every other expansion in this block). Skipping the non-existent path is what lets the n==0
+      # branch below report "inspected nothing" as rc 2 instead of accusing a file named `*.sh` of
+      # not using the parser — could-not-inspect must never be dressed up as a finding.
+      [[ -e "$f" ]] || continue
       base="$(basename "$f")"
       [[ "$base" == "_parse-guard-args.sh" ]] && continue
       n=$((n + 1))
@@ -191,8 +210,29 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       _pga_err "WIRING: no .sh files found under ${dir} — the scan inspected nothing."
       return 2
     fi
+    # Ratchet direction 2. The loop above visits FILES, so it can only ever notice an entry whose
+    # file is present; this loop visits ENTRIES, so every declaration is accounted for by name.
+    # Without it a deleted or renamed guard's exemption is invisible forever — the list keeps a
+    # green tick over a suppression that suppresses nothing.
+    # shellcheck disable=SC2086  # deliberate word-splitting: _PGA_EXEMPT is the space-separated
+    # ledger format documented above, and this file uses no arrays (see the header note on bash 3.2).
+    for e in ${_PGA_EXEMPT}; do
+      if [[ ! -e "${dir}/${e}" ]]; then
+        _pga_err "VANISHED EXEMPTION: ${e} is in _PGA_EXEMPT but there is no such file under ${dir} — the entry matches nothing and suppresses nothing. Delete it from _PGA_EXEMPT in $(basename "${BASH_SOURCE[0]}") (the guard was renamed, or it is gone)."
+        rc=1
+      fi
+    done
     if [[ "$rc" -eq 0 ]]; then
       echo "✅ argument parsing: ${wired} guard(s)/library(ies) on the shared parser, ${exempt} declared exemption(s), no bare \${1:-} comparisons left"
+      # Named, not counted. A bare "1 declared exemption(s)" on the green line tells a reader that
+      # something is suppressed and refuses to say what, which is the shape LEDGERS.md C2a exists to
+      # stop; the reason for each name is in the _PGA_EXEMPT block above.
+      # shellcheck disable=SC2086  # deliberate word-splitting, as above.
+      for e in ${_PGA_EXEMPT}; do
+        if [[ -e "${dir}/${e}" ]]; then
+          echo "   ⚠ DECLARED EXEMPTION (${e} is not on the shared parser, by decision — its own parser must reject unknown arguments by name)"
+        fi
+      done
     fi
     return "$rc"
   }
@@ -203,6 +243,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     (
       parse_guard_args "$@" || exit $?
       echo "st=${GUARD_SELF_TEST}"
+    )
+  }
+
+  # Drive the REAL _pga_meta_scan against a fixture directory with a fixture-local ledger. The
+  # subshell is the whole trick: the override cannot leak into the real-tree scan, and the canaries
+  # still exercise the shipped function and the shipped variable rather than a re-implementation of
+  # either — which is the bar LEDGERS.md sets, and the reason a canary is worth writing at all.
+  #
+  # It also keeps the meta-scan canaries HONEST. With the real one-entry ledger in force, every
+  # fixture directory below would carry a VANISHED EXEMPTION (none of them contain
+  # adoption-skippable-guard.sh), so canaries F and H would go on returning 1 even if the wiring
+  # checks they exist for were deleted — an assertion that cannot fail, which is the exact defect
+  # this file's neighbours were written to find.
+  _pga_scan_with_exempt() {  # <exempt-string> <dir> → merged stdout+stderr; rc is the scan's
+    (
+      _PGA_EXEMPT="$1"
+      _pga_meta_scan "$2" 2>&1
     )
   }
 
@@ -289,17 +346,24 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "--self-test" ]]; then exit 1; fi\nexit 0\n' \
       > "${_tmp}/pretend-guard.sh"
     _rc=0
-    _pga_meta_scan "$_tmp" >/dev/null 2>&1 || _rc=$?
+    _pga_scan_with_exempt "" "$_tmp" >/dev/null 2>&1 || _rc=$?
     if [[ "$_rc" -ne 1 ]]; then
       _pga_err "SELF-TEST FAILED: an unparsed guard was NOT caught by the meta-scan (rc=${_rc}) — adoption can rot silently."
       exit 2
     fi
 
     # Canary G — and it must STAY SILENT on a correctly wired one, or it cries wolf on every guard.
+    #
+    # This canary used to run with the real ledger in force and assert rc 0 over a directory that
+    # does NOT contain the exempted file. That is the undetected-staleness hole itself, written down
+    # as a requirement: the self-test asserted the scan must stay quiet about an entry naming a file
+    # that is not there. Fixing the scan therefore meant fixing this canary, and the fixture ledger
+    # is empty here so the assertion is about the WIRING check and nothing else. The ledger's own
+    # two directions get their own canaries (I/J/K) with their own controls.
     printf '#!/usr/bin/env bash\nsource "x/_parse-guard-args.sh"\nparse_guard_args "$@"\nexit 0\n' \
       > "${_tmp}/pretend-guard.sh"
     _rc=0
-    _pga_meta_scan "$_tmp" >/dev/null 2>&1 || _rc=$?
+    _pga_scan_with_exempt "" "$_tmp" >/dev/null 2>&1 || _rc=$?
     if [[ "$_rc" -ne 0 ]]; then
       _pga_err "SELF-TEST FAILED: a correctly wired guard was reported unparsed (rc=${_rc}) — the meta-scan cries wolf."
       exit 2
@@ -311,15 +375,74 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     printf '#!/usr/bin/env bash\nsource "x/_parse-guard-args.sh"\nif [[ "${1:-}" == "--self-test" ]]; then exit 1; fi\nparse_guard_args "$@"\nexit 0\n' \
       > "${_tmp}/pretend-guard.sh"
     _rc=0
-    _pga_meta_scan "$_tmp" >/dev/null 2>&1 || _rc=$?
+    _pga_scan_with_exempt "" "$_tmp" >/dev/null 2>&1 || _rc=$?
     if [[ "$_rc" -ne 1 ]]; then
       _pga_err "SELF-TEST FAILED: a half-converted guard (parser present, old comparison still ahead of it) was NOT caught (rc=${_rc})."
       exit 2
     fi
 
+    # ── The ledger's own behaviour (LEDGERS.md C3b, C5) ─────────────────────────────────────────
+    # One fixture directory, three ledgers over it. exempt-guard.sh is present and unparsed, so an
+    # entry naming it is LIVE; wired-guard.sh is on the parser, so an entry naming it is a lie.
+    _lt="${_tmp}/ledger"
+    mkdir -p "$_lt"
+    # shellcheck disable=SC2016  # fixture TEXT for a throwaway script, not an expansion here.
+    printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "--self-test" ]]; then exit 1; fi\nexit 0\n' \
+      > "${_lt}/exempt-guard.sh"
+    printf '#!/usr/bin/env bash\nsource "x/_parse-guard-args.sh"\nparse_guard_args "$@"\nexit 0\n' \
+      > "${_lt}/wired-guard.sh"
+
+    # Canary I — the CONTROL, and it is the one that makes J and K mean anything. A live entry
+    # (file present, still not on the parser) must produce rc 0, and must be NAMED rather than
+    # silently folded into a count: a suppression a reader cannot see is a suppression nobody can
+    # review. A staleness check that simply flagged every entry would pass J and K and fail here.
+    _out=""; _rc=0
+    _out="$(_pga_scan_with_exempt "exempt-guard.sh" "$_lt")" || _rc=$?
+    if [[ "$_rc" -ne 0 ]]; then
+      _pga_err "SELF-TEST FAILED: a LIVE exemption (file present, genuinely not on the parser) was reported as a problem (rc=${_rc}) — the ledger would flag its own valid entries. out='${_out}'"
+      exit 2
+    fi
+    if ! grep -q "DECLARED EXEMPTION" <<< "$_out" || ! grep -q -- "exempt-guard.sh" <<< "$_out"; then
+      _pga_err "SELF-TEST FAILED: the live exemption was accepted but never NAMED in the output — declared debt that reads as a clean run. out='${_out}'"
+      exit 2
+    fi
+
+    # Canary J — VANISHED EXEMPTION, the direction this list did not have until 2026-08-06. An entry
+    # naming a file that is not in the directory matched nothing, so nothing ever reported it; the
+    # scan iterated files only. The live entry beside it must stay quiet (the over-fire control).
+    _out=""; _rc=0
+    _out="$(_pga_scan_with_exempt "exempt-guard.sh gone-guard.sh" "$_lt")" || _rc=$?
+    if [[ "$_rc" -ne 1 ]]; then
+      _pga_err "SELF-TEST FAILED: an exemption naming a file that does not exist was NOT caught (rc=${_rc}) — a ledger entry can outlive the file it was written for and nothing will ever say so."
+      exit 2
+    fi
+    if ! grep -q "VANISHED EXEMPTION" <<< "$_out" || ! grep -q -- "gone-guard.sh" <<< "$_out"; then
+      _pga_err "SELF-TEST FAILED: the stale-entry error did not NAME 'gone-guard.sh' (out='${_out}')."
+      exit 2
+    fi
+    if grep -q "VANISHED EXEMPTION.*exempt-guard.sh" <<< "$_out"; then
+      _pga_err "SELF-TEST FAILED: the LIVE entry 'exempt-guard.sh' was flagged as vanished too — a check that fires on every entry deletes the ledger, not the rot. out='${_out}'"
+      exit 2
+    fi
+
+    # Canary K — STALE EXEMPTION, the branch that has existed since 2026-08-01 with nothing proving
+    # it fires: an exempted file that adopted the shared parser. Both entries are declared here, so
+    # the only thing that can produce rc 1 is the one being tested.
+    _out=""; _rc=0
+    _out="$(_pga_scan_with_exempt "exempt-guard.sh wired-guard.sh" "$_lt")" || _rc=$?
+    if [[ "$_rc" -ne 1 ]]; then
+      _pga_err "SELF-TEST FAILED: an exemption for a file that NOW uses parse_guard_args was not caught (rc=${_rc}) — the list becomes a permanent excuse."
+      exit 2
+    fi
+    if ! grep -q "STALE EXEMPTION: wired-guard.sh" <<< "$_out"; then
+      _pga_err "SELF-TEST FAILED: the STALE EXEMPTION error did not name 'wired-guard.sh' (out='${_out}')."
+      exit 2
+    fi
+
     echo "✅ self-test ok — '--selftest', '--components-dir /etc' and a bare positional all rejected 2 and named;"
     echo "   --self-test and no-args accepted; -h/--help exit 0; meta-scan catches unparsed and half-converted"
-    echo "   guards and stays silent on a wired one; the shipped tree is fully adopted."
+    echo "   guards and stays silent on a wired one; the ledger names a live exemption, fails a VANISHED one and"
+    echo "   a STALE one, and leaves the live entry alone; the shipped tree is fully adopted."
     # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
     exit 1
   fi
