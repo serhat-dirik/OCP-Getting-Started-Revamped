@@ -11,6 +11,17 @@ VERIFY_FAIL=0
 # Third outcome, and it is NOT a pass: a check the caller could not evaluate (see warn()). Counted so
 # verify_summary can say so — for eleven of these scripts the summary used to swallow it entirely.
 VERIFY_SKIP=0
+# FOURTH outcome (U8-F-03). warn() was carrying two different meanings and the banner could only
+# report the pessimistic one:
+#   • "I could not evaluate this"  → genuinely unknown → the run did NOT fully verify. That is warn().
+#   • "this does not apply here"   → a KNOWN, correct, designed outcome → nothing is missing. na().
+# Conflating them told an attendee whose run was completely and correctly graded that it "did NOT
+# fully verify the lab" — the exemplar being deployment-targets-scheduling's batch-pool taint, which
+# bootstrap deliberately withholds below a 3-worker floor and whose own comment already said "not
+# graded either way". A caveat printed on a run with nothing wrong is a caveat attendees learn to
+# ignore, which costs us the warning that matters.
+# NOT a pass either — it is not graded, so it never inflates VERIFY_PASS; it is simply not MISSING.
+VERIFY_NA=0
 
 # ── the API's answer, classified — do not swallow errors with `2>/dev/null` ────────────────────────
 #
@@ -444,6 +455,21 @@ deploy_ready_min() {  # <deployment> <namespace> <n> → at least n ready replic
 # verify_summary. Follow every warn with a hint saying WHERE the check can be answered.
 warn() { echo "⚠ $* — SKIPPED (not a failure)"; VERIFY_SKIP=$((VERIFY_SKIP+1)); }
 
+# NOT APPLICABLE — for a check that is CORRECTLY absent on this cluster/config, where nothing the
+# attendee did or can do affects it and there is no other place it could be answered. Distinct from
+# warn(): warn means "unknown, ask elsewhere", na() means "known, and known to be fine".
+#
+# The test for choosing between them: could this check be answered by re-running somewhere else, or
+# with more rights? Yes → warn(). No, because the condition it grades genuinely does not exist here
+# → na(). Do NOT reach for na() to silence a check that is merely inconvenient to evaluate — that
+# converts an honest "did NOT fully verify" into a false green, which is the exact defect this whole
+# banner design exists to prevent (see verify-summary-skip-guard.sh).
+#
+# `$((x+1))`, never `((x++))`: the arithmetic form returns 1 when the pre-increment value is 0, which
+# under the callers' `set -euo pipefail` kills the sourcing script on the FIRST call — the same trap
+# already documented on warn() and pinned by detector [1] of the guard.
+na() { echo "➖ $* — not applicable on this cluster (not a failure)"; VERIFY_NA=$((VERIFY_NA+1)); }
+
 # Neutral note (skipped/context lines) — matches ws's own info style so smoke output is unchanged
 # when a verify script shadows it. Standalone verify scripts (multi-tenancy-workload-security/networking-dev-devops) rely on this being defined.
 info() { echo "▶ $*"; }
@@ -463,16 +489,23 @@ info() { echo "▶ $*"; }
 verify_summary() {  # call at end of every script
   echo
   local graded=$((VERIFY_PASS+VERIFY_FAIL))
+  # `${VERIFY_NA:-0}`, never a bare read. verify-summary-skip-guard.sh EXECUTES this function inside a
+  # harness that initialises only PASS/FAIL/SKIP under `set -euo pipefail`; a bare $VERIFY_NA is an
+  # unbound-variable abort there, which the guard would report as "produced NO banner at all".
+  local nacount="${VERIFY_NA:-0}" na_note=""
+  # Reported, never hidden: an attendee should be able to see that something was inapplicable and go
+  # read WHY on the ➖ line. It just isn't cause to say the run was incomplete — nothing is missing.
+  if (( nacount > 0 )); then na_note=" · ➖ ${nacount} not applicable"; fi
   if (( VERIFY_FAIL > 0 )); then
     if (( VERIFY_SKIP > 0 )); then
-      echo "❌ ${VERIFY_FAIL} of ${graded} checks failed · ⚠ ${VERIFY_SKIP} SKIPPED (not graded)"
+      echo "❌ ${VERIFY_FAIL} of ${graded} checks failed · ⚠ ${VERIFY_SKIP} SKIPPED (not graded)${na_note}"
     else
-      echo "❌ ${VERIFY_FAIL} of ${graded} checks failed"
+      echo "❌ ${VERIFY_FAIL} of ${graded} checks failed${na_note}"
     fi
     exit 1
   fi
   if (( VERIFY_SKIP > 0 )); then
-    echo "⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded) — this run did NOT fully verify the lab"
+    echo "⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded)${na_note} — this run did NOT fully verify the lab"
     echo "   ↳ each ⚠ line above says where its check can be answered; re-run there for a complete result"
     # `if`, not `[[ … ]] && exit 3`: under the callers' `set -e` a false one-liner would return 1 from
     # this function and kill the script — turning a skip into the exit 1 the whole design avoids.
@@ -481,7 +514,16 @@ verify_summary() {  # call at end of every script
     fi
     exit 0
   fi
-  echo "✅ all ${VERIFY_PASS} checks passed"
+  # A run whose only ungraded outcomes were NOT-APPLICABLE ones is a COMPLETE run: everything that
+  # exists to be graded was graded. It keeps the plain green claim and rc 0 — the not-applicable
+  # count rides along as a parenthetical so the attendee can still account for every line above.
+  # Deliberately keeps the literal "all N checks passed" substring: that exact phrasing is what
+  # verify-summary-skip-guard.sh detector [2b] requires a fully-graded clean run to still print.
+  if (( nacount > 0 )); then
+    echo "✅ all ${VERIFY_PASS} checks passed (${nacount} not applicable to this cluster)"
+  else
+    echo "✅ all ${VERIFY_PASS} checks passed"
+  fi
   exit 0
 }
 

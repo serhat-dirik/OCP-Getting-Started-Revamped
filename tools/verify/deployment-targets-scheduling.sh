@@ -218,7 +218,11 @@ check "dedicated batch pool node exists (labeled ${POOL_KEY}=${POOL_VALUE})" bat
 if batch_pool_below_taint_floor; then
   # Designed state, not a defect: below the floor bootstrap labels the node and deliberately withholds
   # the taint. Nothing the attendee did or can do affects this, so it is not graded either way.
-  warn "batch pool node is labeled but deliberately NOT tainted — this cluster has fewer than ${BATCH_TAINT_FLOOR} dedicated workers, and bootstrap withholds the taint below that floor (tainting one of only two workers starved a platform component for 4h+ on 2026-07-30). Exercise 4's nodeSelector half works and IS graded below; its toleration half cannot be demonstrated here until a 3rd worker joins. Do NOT hand-taint the node to turn this green — that recreates the outage"
+  # na(), not warn() (U8-F-03): there is nowhere else this could be answered and nothing is unknown —
+  # the condition it grades correctly does not exist on a sub-floor cluster. As a warn() it dragged an
+  # otherwise perfectly graded run into "this run did NOT fully verify the lab", which is what user8
+  # reported. The nodeSelector half IS still graded below, so the lesson keeps its real check.
+  na "batch pool node is labeled but deliberately NOT tainted — this cluster has fewer than ${BATCH_TAINT_FLOOR} dedicated workers, and bootstrap withholds the taint below that floor (tainting one of only two workers starved a platform component for 4h+ on 2026-07-30). Exercise 4's nodeSelector half works and IS graded below; its toleration half cannot be demonstrated here until a 3rd worker joins. Do NOT hand-taint the node to turn this green — that recreates the outage"
 else
   check "dedicated batch pool node is TAINTED (a toleration is actually required to land there)" batch_pool_tainted || hint "labeled but NOT tainted, on a cluster at or above the ${BATCH_TAINT_FLOOR}-worker floor where bootstrap SHOULD have tainted it — this is a DIFFERENT problem than a missing pool, and a real one (see bootstrap/install.sh MIN_BATCH_POOL_FOR_TAINT). Exercise 4's toleration half cannot be taught until it is fixed; the nodeSelector half still works. Do NOT hand-taint the node to force this green — re-run the bootstrap node-shaping step so the cluster and the installer agree."
 fi

@@ -76,16 +76,25 @@ WS_CLI="tools/ws/ws"
 # counters, nothing else), but the functions are extracted anyway so a canary copy of one of them can
 # be swapped in for the real one — that is what makes the self-test possible.
 # `set -euo pipefail` in the harness mirrors every real verify script's own header.
-run_case() {  # warn_file summary_file pass fail warns strict → banner on stdout, rc from the summary
+run_case() {  # warn_file summary_file pass fail warns strict [na_file] [nas] → banner on stdout, rc
   local warn_file="$1" summary_file="$2" pass="$3" fail="$4" warns="$5" strict="$6"
+  local na_file="${7:-}" nas="${8:-0}"
   local harness rc=0
   harness="$(mktemp)"
   {
     echo '#!/usr/bin/env bash'
     echo 'set -euo pipefail'
     echo "export VERIFY_STRICT='${strict}'"
+    # VERIFY_NA is deliberately NOT initialised unless the case supplies na(). _lib.sh does set it,
+    # but verify_summary must survive being read with it unset — so cases [1]-[4] run with it UNSET,
+    # and that is precisely what pins the `${VERIFY_NA:-0}` read. A bare $VERIFY_NA there aborts the
+    # harness under `set -u` and detector [1] reports "produced NO banner at all". Case [5] supplies both.
     echo 'VERIFY_PASS=0; VERIFY_FAIL=0; VERIFY_SKIP=0'
     cat "$warn_file"
+    if [[ -n "$na_file" ]]; then
+      echo 'VERIFY_NA=0'
+      cat "$na_file"
+    fi
     cat "$summary_file"
     echo "VERIFY_PASS=${pass}"
     echo "VERIFY_FAIL=${fail}"
@@ -95,6 +104,11 @@ run_case() {  # warn_file summary_file pass fail warns strict → banner on stdo
     # A C-style loop, not `seq 1 N`: BSD seq counts DOWN for `seq 1 0` and emitted two skips where
     # the case wanted none — the harness must be able to express "zero skips" exactly.
     echo "for ((_i=0; _i<${warns}; _i++)); do warn \"harness-skip \${_i}\" >/dev/null; done"
+    # Not-applicables go through the REAL na(), for the same reason skips go through the real warn():
+    # the coupling between "an author called na" and "the banner knows" is half of what [5] tests.
+    if [[ -n "$na_file" ]]; then
+      echo "for ((_j=0; _j<${nas}; _j++)); do na \"harness-na \${_j}\" >/dev/null; done"
+    fi
     echo 'verify_summary'
   } > "$harness"
   bash "$harness" 2>/dev/null || rc=$?
@@ -106,6 +120,7 @@ run_case() {  # warn_file summary_file pass fail warns strict → banner on stdo
 claims_complete_pass() { grep -qE 'all [0-9]+ checks passed' <<< "$1"; }
 mentions_skip()        { grep -qiE 'skip' <<< "$1"; }
 mentions_ungraded()    { grep -qiE 'not graded|did NOT fully verify' <<< "$1"; }
+mentions_na()          { grep -qiE 'not applicable' <<< "$1"; }
 
 # ── [1] a skip is counted ─────────────────────────────────────────────────────
 check_skip_counted() {  # warn_file summary_file → 0 correct, 1 wrong
@@ -235,6 +250,83 @@ check_doctor_rc_mapping() {  # doctor_fn_file → 0 correct, 1 wrong
   return "$rc"
 }
 
+# ── [5] not-applicable is a COMPLETE outcome, not a missing one ──────────────
+# U8-F-03. warn() was carrying two meanings — "I could not evaluate this" and "this does not apply
+# here" — and the banner could only report the pessimistic one, so a run in which everything gradeable
+# WAS graded still told the attendee it "did NOT fully verify the lab". The exemplar is
+# deployment-targets-scheduling's batch-pool taint, deliberately withheld by bootstrap below a
+# 3-worker floor, whose own comment already read "not graded either way".
+#
+# The risk this detector exists to contain is the OPPOSITE one: na() must not become a quiet way to
+# silence warn(). So (c) pins that a real skip still dominates a run that also has not-applicables.
+check_na_semantics() {  # warn_file summary_file na_file → 0 correct, 1 wrong
+  ran_check
+  local wf="$1" sf="$2" nf="$3" out rc=0 got
+
+  # (a) an NA-only run is COMPLETE: it keeps the plain green claim, does not call itself incomplete,
+  #     and still accounts for the line the attendee can see above it.
+  out="$(run_case "$wf" "$sf" 7 0 0 0 "$nf" 1)"
+  if ! claims_complete_pass "$out"; then
+    bad "[5a] 7 passed + 1 not-applicable must still print the plain '✅ all 7 checks passed'. Banner: ${out}"
+    note "    A not-applicable check is not a MISSING one — the condition it grades does not exist here."
+    rc=1
+  fi
+  if mentions_ungraded "$out"; then
+    bad "[5a] an NA-only run must NOT say the run was ungraded/incomplete. Banner: ${out}"
+    note "    This is U8-F-03 verbatim: a fully-graded run telling the attendee it 'did NOT fully verify'."
+    note "    A caveat printed when nothing is wrong is a caveat attendees learn to ignore."
+    rc=1
+  fi
+  if ! mentions_na "$out"; then
+    bad "[5a] the banner must still ACCOUNT for the not-applicable check. Banner: ${out}"; rc=1
+  fi
+
+  # (b) the exit contract is UNCHANGED by not-applicables, including under VERIFY_STRICT=1. rc 3 means
+  #     "something went ungraded" and that is simply false here; ws prep/ws smoke branch on this rc.
+  got=0; run_case "$wf" "$sf" 7 0 0 0 "$nf" 1 >/dev/null || got=$?
+  if [[ "$got" -ne 0 ]]; then bad "[5b] an NA-only run must exit 0; got rc=${got}."; rc=1; fi
+  got=0; run_case "$wf" "$sf" 7 0 0 1 "$nf" 1 >/dev/null || got=$?
+  if [[ "$got" -ne 0 ]]; then
+    bad "[5b] VERIFY_STRICT=1 on an NA-only run must STILL exit 0 — rc 3 claims something went ungraded; got rc=${got}."
+    rc=1
+  fi
+
+  # (c) THE ONE THAT MATTERS: a real skip still dominates. Otherwise na() is a laundering mechanism.
+  out="$(run_case "$wf" "$sf" 7 0 2 0 "$nf" 1)"
+  if claims_complete_pass "$out" || ! mentions_ungraded "$out"; then
+    bad "[5c] 2 SKIPPED alongside 1 not-applicable must still report an INCOMPLETE run. Banner: ${out}"
+    note "    If NA can mask a skip, na() becomes a way to silence warn() — the exact false green this"
+    note "    whole banner design exists to prevent."
+    rc=1
+  fi
+  got=0; run_case "$wf" "$sf" 7 0 2 1 "$nf" 1 >/dev/null || got=$?
+  if [[ "$got" -ne 3 ]]; then
+    bad "[5c] VERIFY_STRICT=1 with a real skip must still exit 3 regardless of not-applicables; got rc=${got}."; rc=1
+  fi
+
+  # (d) NA is counted, and na() is safe under set -e — the ((x++)) trap already pinned for warn().
+  out="$(run_case "$wf" "$sf" 5 0 0 0 "$nf" 3)"
+  if [[ -z "$out" ]]; then
+    bad "[5d] 3 na() calls produced NO banner at all — na() aborted the run."
+    note "    Under the callers' \`set -euo pipefail\` ((VERIFY_NA++)) returns 1 on the first call and"
+    note "    kills the sourcing script. Use VERIFY_NA=\$((VERIFY_NA+1))."
+    rc=1
+  elif ! grep -iE 'not applicable' <<< "$out" | grep -qE "(^|[^0-9])3([^0-9]|\$)"; then
+    bad "[5d] 3 na() calls were not reported as 3 not applicable. Banner: ${out}"; rc=1
+  fi
+
+  # (e) and it never manufactures a ❌ — the doctrine no outcome may trade away.
+  out="$(run_case "$wf" "$sf" 7 0 0 0 "$nf" 3)"
+  if grep -q '❌' <<< "$out"; then
+    bad "[5e] a run with NO failures printed a ❌ banner: ${out}"; rc=1
+  fi
+
+  if [[ "$rc" -eq 0 ]]; then
+    ok "[5] not-applicable: a complete run keeps its plain ✅ and rc 0, a real skip still dominates, NA counted, never ❌"
+  fi
+  return "$rc"
+}
+
 # ── driver ────────────────────────────────────────────────────────────────────
 extract_pair() {  # lib_file warn_out summary_out → 0 ok, 2 extraction failed
   local lib="$1"
@@ -242,6 +334,17 @@ extract_pair() {  # lib_file warn_out summary_out → 0 ok, 2 extraction failed
   extract_func "$lib" verify_summary > "$3"
   if [[ ! -s "$2" || ! -s "$3" ]]; then
     bad "could not extract warn()/verify_summary() from ${lib} — the guard cannot inspect what it claims to."
+    return 2
+  fi
+  return 0
+}
+
+extract_na() {  # lib_file na_out → 0 ok, 2 extraction failed
+  extract_func "$1" na > "$2"
+  if [[ ! -s "$2" ]]; then
+    bad "could not extract na() from ${1} — the guard cannot inspect what it claims to."
+    note "    na() is the fourth outcome (U8-F-03). If it was removed, detector [5] must go with it;"
+    note "    a guard that silently stops inspecting an outcome is worse than no guard at all."
     return 2
   fi
   return 0
@@ -257,13 +360,14 @@ extract_doctor_fn() {  # ws_cli_file fn_out → 0 ok, 2 extraction failed
   return 0
 }
 
-run_check() {  # warn_file summary_file doctor_fn_file → 0 clean, 1 broken
+run_check() {  # warn_file summary_file doctor_fn_file na_file → 0 clean, 1 broken
   coverage_reset
-  local wf="$1" sf="$2" dff="$3" rc=0
+  local wf="$1" sf="$2" dff="$3" nf="$4" rc=0
   check_skip_counted  "$wf" "$sf" || rc=1
   check_banner_honesty "$wf" "$sf" || rc=1
   check_exit_contract  "$wf" "$sf" || rc=1
   check_doctor_rc_mapping "$dff" || rc=1
+  check_na_semantics  "$wf" "$sf" "$nf" || rc=1
   # Nothing above proves run_check still CALLS what this guard declares — a deleted call site
   # leaves every canary passing and the real run reporting clean (see _check-coverage.sh).
   if [[ "$rc" -ne 2 ]]; then assert_all_checks_ran || rc=2; fi
@@ -274,17 +378,18 @@ run_check() {  # warn_file summary_file doctor_fn_file → 0 clean, 1 broken
 # Four canaries, each a real regression shape. All must be CAUGHT, and the real tree must be clean
 # under the same detectors — anything else means the gate is decorative.
 self_test() {
-  local tmp wf sf dff real_rc got
+  local tmp wf sf dff nf real_rc got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
-  wf="$tmp/warn.sh"; sf="$tmp/summary.sh"; dff="$tmp/doctor-rc.sh"
+  wf="$tmp/warn.sh"; sf="$tmp/summary.sh"; dff="$tmp/doctor-rc.sh"; nf="$tmp/na.sh"
   extract_pair "${REPO_ROOT}/${LIB}" "$wf" "$sf" || return 2
+  extract_na "${REPO_ROOT}/${LIB}" "$nf" || return 2
   extract_doctor_fn "${REPO_ROOT}/${WS_CLI}" "$dff" || return 2
 
   # Proof 0: the real tree passes. A detector that fires on everything proves nothing either.
   real_rc=0
-  run_check "$wf" "$sf" "$dff" >/dev/null 2>&1 || real_rc=$?
+  run_check "$wf" "$sf" "$dff" "$nf" >/dev/null 2>&1 || real_rc=$?
   if [[ "$real_rc" -ne 0 ]]; then
     bad "SELF-TEST FAILED: the real ${LIB}/${WS_CLI} do not satisfy the contract (rc=${real_rc}). Run without --self-test."
     return 2
@@ -348,7 +453,65 @@ CANARY
     return 2
   fi
 
-  ok "self-test ok — real ${LIB}/${WS_CLI} clean (rc=0); counter-blind warn, two-outcome banner, strict-by-default and doctor-rc-miscounts-skip canaries all caught."
+  # Canary E — the U8-F-03 defect itself, reintroduced: an na() that increments VERIFY_SKIP, i.e. the
+  # conflation of "does not apply here" with "could not be evaluated". A fully-graded run then tells
+  # the attendee it did NOT fully verify — exactly what user8 reported.
+  cat > "$tmp/na-counts-as-skip.sh" <<'CANARY'
+na() { echo "➖ $* — not applicable on this cluster (not a failure)"; VERIFY_SKIP=$((VERIFY_SKIP+1)); }
+CANARY
+  got=0; check_na_semantics "$wf" "$sf" "$tmp/na-counts-as-skip.sh" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: an na() that counts as a SKIP was NOT detected (rc=${got}) — detector [5] is blind."
+    return 2
+  fi
+
+  # Canary F — the reverse over-correction: na() laundering a genuine skip. If verify_summary let a
+  # not-applicable outweigh a real warn(), an inconclusive run would print green. Built by making the
+  # summary treat any NA as license to claim a complete pass.
+  cat > "$tmp/summary-na-launders-skip.sh" <<'CANARY'
+verify_summary() {
+  echo
+  if (( VERIFY_FAIL > 0 )); then
+    echo "❌ ${VERIFY_FAIL} of $((VERIFY_PASS+VERIFY_FAIL)) checks failed"
+    exit 1
+  fi
+  if (( ${VERIFY_NA:-0} > 0 )); then
+    echo "✅ all ${VERIFY_PASS} checks passed (${VERIFY_NA} not applicable to this cluster)"
+    exit 0
+  fi
+  if (( VERIFY_SKIP > 0 )); then
+    echo "⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded) — this run did NOT fully verify the lab"
+    if [[ "${VERIFY_STRICT:-0}" == "1" ]]; then exit 3; fi
+    exit 0
+  fi
+  echo "✅ all ${VERIFY_PASS} checks passed"
+  exit 0
+}
+CANARY
+  got=0; check_na_semantics "$wf" "$tmp/summary-na-launders-skip.sh" "$nf" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: a summary letting NA mask a real SKIP was NOT detected (rc=${got}) — detector [5c] is blind."
+    note "    That shape turns na() into a way to silence warn(), which is a false green across every"
+    note "    script that adopts it."
+    return 2
+  fi
+
+  # Canary G — a bare \$VERIFY_NA read in verify_summary. Cases [1]-[4] deliberately run with the
+  # counter UNSET, so under the callers' `set -u` this aborts before any banner is printed; detector
+  # [1] is what notices. This is what keeps the `${VERIFY_NA:-0}` form from being "tidied" away.
+  # shellcheck disable=SC2016  # matching the LITERAL ${VERIFY_NA:-0} text in the extracted function
+  sed 's|${VERIFY_NA:-0}|$VERIFY_NA|g' "$sf" > "$tmp/summary-bare-na-read.sh"
+  if ! grep -q 'VERIFY_NA' "$tmp/summary-bare-na-read.sh"; then
+    bad "SELF-TEST FAILED: could not build the bare-VERIFY_NA canary — the guarded read it mutates was not found."
+    return 2
+  fi
+  got=0; check_skip_counted "$wf" "$tmp/summary-bare-na-read.sh" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: a bare \$VERIFY_NA read was NOT detected (rc=${got}) — verify_summary would abort for any caller predating the counter."
+    return 2
+  fi
+
+  ok "self-test ok — real ${LIB}/${WS_CLI} clean (rc=0); counter-blind warn, two-outcome banner, strict-by-default, doctor-rc-miscounts-skip, na-counts-as-skip, na-launders-skip and bare-NA-read canaries all caught."
   return 1
 }
 
@@ -368,12 +531,14 @@ if [[ ! -f "${REPO_ROOT}/${WS_CLI}" ]]; then
   bad "${REPO_ROOT}/${WS_CLI} not found"
   exit 2
 fi
-WARN_FILE="$(mktemp)"; SUMMARY_FILE="$(mktemp)"; DOCTOR_FN_FILE="$(mktemp)"
+WARN_FILE="$(mktemp)"; SUMMARY_FILE="$(mktemp)"; DOCTOR_FN_FILE="$(mktemp)"; NA_FILE="$(mktemp)"
 extract_pair "${REPO_ROOT}/${LIB}" "$WARN_FILE" "$SUMMARY_FILE" \
-  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE"; exit 2; }
+  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"; exit 2; }
+extract_na "${REPO_ROOT}/${LIB}" "$NA_FILE" \
+  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"; exit 2; }
 extract_doctor_fn "${REPO_ROOT}/${WS_CLI}" "$DOCTOR_FN_FILE" \
-  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE"; exit 2; }
+  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"; exit 2; }
 RC=0
-run_check "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" || RC=$?
-rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE"
+run_check "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE" || RC=$?
+rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"
 exit "$RC"
