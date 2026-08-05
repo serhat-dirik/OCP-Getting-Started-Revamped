@@ -168,6 +168,27 @@ prog() {  # one progress line, with a count wherever a count exists
   [ "$QUIET" = "true" ] || printf '      … %s  (%s)\n' "$1" "$(elapsed)"
   return 0
 }
+# step() and tick() are the ONLY progress that the long, silent, cluster-bound phases emit, and they go
+# to STDERR on purpose. stdout is the machine-readable product of this script — the leftover report and
+# the exact `oc` remedy commands a caller may parse — so it must stay byte-for-byte what it was; a scan
+# piped through `2>/dev/null` prints an identical report with or without these lines. Same prefix and
+# `t+NNs` stamp as prog() so the streams read alike, and the same --quiet gate: the phases below can each
+# run for minutes on a big cluster (the upfront index reads, section [8/9]'s sweeps, section [9/9]'s CRD
+# counts), and with no line during one a working scan is indistinguishable from a hung one — which is
+# exactly how `timeout 900` killed a slow-but-fine run twice (ksls5, 2026-07-29).
+step() {  # one phase/progress line → STDERR
+  [ "$QUIET" = "true" ] || printf '      … %s  (%s)\n' "$1" "$(elapsed)" >&2
+  return 0
+}
+HEARTBEAT_EVERY=25
+tick() {  # done total label → a bounded counter to STDERR every HEARTBEAT_EVERY items, so a long serial
+          # classify loop visibly advances instead of sitting silent (section [8/9] blew past a 900s
+          # timeout mid-loop before its reads were cached). Counts only; changes no finding and no exit.
+  [ "$QUIET" = "true" ] && return 0
+  [ "$(( $1 % HEARTBEAT_EVERY ))" -eq 0 ] || return 0
+  printf '      … %s %s/%s  (%s)\n' "$3" "$1" "$2" "$(elapsed)" >&2
+  return 0
+}
 hdr() {  # n/N  title  one-line-explanation
   echo; echo "$RULE"; printf '[%s] %s  (%s)\n' "$1" "$2" "$(elapsed)"
   [ "$QUIET" = "true" ] || echo "      $3"
@@ -309,10 +330,12 @@ load_indexes() {
   # name|phase|<the 7 marker fields>. Namespaces are the most dangerous thing this script can be wrong
   # about, so their markers are read up front and seeded into the marks cache — no later object-by-object
   # round trip is needed to classify one.
+  step "listing namespaces"
   NS_INDEX="$(oc get namespaces -o jsonpath="{range .items[*]}{.metadata.name}|{.status.phase}|${MARKS_JP}{\"\n\"}{end}" 2>/dev/null)"
   [ -n "$NS_INDEX" ] || DISCOVERY_NOTE="${DISCOVERY_NOTE}could not list namespaces; "
 
   # " ns/name ns/name … " — membership test for the APIService and webhook sections
+  step "listing services"
   SVC_INDEX=" $(oc get services -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{" "}{end}' 2>/dev/null) "
 
   # ns|name|phase|reason
@@ -343,6 +366,7 @@ load_indexes() {
   # Pulled out to its own function (rather than inlined here) so --self-test can call the exact same
   # code path against a stubbed `oc` and prove the copiedFrom exclusion actually fires, instead of
   # grepping this file's own source for the flag.
+  step "listing ClusterServiceVersions"
   CSV_INDEX="$(csv_index_read)"
   # status.reason is not in the table and section [2/9] needs it. Only non-Succeeded CSVs can carry an
   # interesting reason, and a healthy cluster has none, so this costs nothing in the normal case.
@@ -352,6 +376,7 @@ load_indexes() {
   # which reads field 3 (our owner label). That is still field 3: MARKS_JP leads with the owner label,
   # so widening the tail from "just sync-options" to the full marker set costs the same call and lets
   # section [8/9] classify an adopted operator's OperatorGroup without re-reading the object.
+  step "listing OperatorGroups"
   OG_INDEX="$(oc get operatorgroups.operators.coreos.com -A -o jsonpath="{range .items[*]}{.metadata.namespace}|{.metadata.name}|${MARKS_JP}{\"\n\"}{end}" 2>/dev/null)"
   seed_index_marks operatorgroups.operators.coreos.com "$OG_INDEX"
 
@@ -359,6 +384,7 @@ load_indexes() {
   # build_adoption_index, which is its first consumer.
   sub_ef=""
   [ -n "$TMPROOT" ] && sub_ef="${TMPROOT}/sub-list.err"
+  step "listing Subscriptions"
   SUB_INDEX="$(oc get subscriptions.operators.coreos.com -A \
     -o jsonpath="{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.installedCSV}|{.status.currentCSV}|${MARKS_JP}{\"\n\"}{end}" 2>"${sub_ef:-/dev/null}")"
   SUB_INDEX_RC=$?
@@ -372,9 +398,11 @@ load_indexes() {
   # name|group — also a table read. A CRD carries its full OpenAPI schema, so the jsonpath form measured
   # 8–31s against 2.2s for the table. The group is not lost: apiextensions REQUIRES a CRD to be named
   # <plural>.<group>, so everything after the first dot IS the group.
+  step "listing CustomResourceDefinitions"
   CRD_INDEX="$(oc get customresourcedefinitions.apiextensions.k8s.io --no-headers 2>/dev/null \
     | awk '{ i=index($1,"."); if (i>0) print $1"|"substr($1,i+1); else print $1"|" }')"
 
+  step "reading install state"
   load_state
   build_adoption_index
   printf '  done — %s namespaces, %s CSVs, %s CRDs.  (%s)\n' \
@@ -387,6 +415,7 @@ csv_fill_reasons() {
   local todo out
   todo="$(printf '%s\n' "$CSV_INDEX" | awk -F'|' '$2!="" && $3!="Succeeded" {print $1"|"$2}')"
   [ -n "$todo" ] || return 0
+  step "reading status for $(printf '%s\n' "$todo" | grep -c .) non-Succeeded CSV(s)"
   out="$(printf '%s\n' "$todo" | run_parallel csv_probe)"
   [ -n "$out" ] || return 0
   # replace the table rows with the exact ones
@@ -408,6 +437,7 @@ CSV_OWNED_INDEX=""; CSV_OWNED_LOADED="false"
 load_csv_owned() {
   [ "$CSV_OWNED_LOADED" = "true" ] && return 0
   CSV_OWNED_LOADED="true"
+  step "loading owned-CRD map for stuck-namespace diagnosis (reading every CSV in full)…"
   CSV_OWNED_INDEX="$(oc get clusterserviceversions.operators.coreos.com -A \
     -o jsonpath='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}|{range .spec.customresourcedefinitions.owned[*]}{.name}{","}{end}{"\n"}{end}' 2>/dev/null)"
   return 0
@@ -471,6 +501,7 @@ build_adoption_index() {
   [ -n "$STATE_KV" ] || return 0
   rows="$(state_ops adopted)"
   [ -n "$rows" ] || return 0
+  step "probing $(printf '%s\n' "$rows" | grep -c .) adopted operator Subscription(s)"
   ADOPTED_SUB_INFO="$(printf '%s\n' "$rows" | run_parallel adopted_probe)"
   while IFS='|' read -r name ns _ csv; do
     [ -n "$name" ] || continue
@@ -949,6 +980,7 @@ section_orphan_csvs() {
   # original elsewhere that has one — so every copy is a false orphan. Measured on ksls5 2026-07-28:
   # 3760 CSVs on the cluster, 3723 of them copies. Unfiltered, this section would print 3723 delete
   # commands for objects OLM re-creates the moment you remove them.
+  step "checking for orphaned ClusterServiceVersions…"
   csv_rows="$(oc get clusterserviceversions.operators.coreos.com -A -l '!olm.copiedFrom' \
     -o jsonpath="$ORPHAN_CSV_JP" 2>"${ef:-/dev/null}")"
   rc=$?
@@ -1184,6 +1216,7 @@ section_apiservices() {
   hdr "6/9" "APIServices whose backing Service no longer exists" \
     "The highest-impact class there is. An aggregated APIService with no backend makes discovery fail, and Kubernetes then refuses to garbage-collect ANY namespace on the cluster — 92 of them wedged in the 2026-07-25 teardown, most not ours."
   local name svc_ns svc_nm avail hit=0
+  step "checking APIServices for a live backing Service…"
   while IFS='|' read -r name svc_ns svc_nm avail; do
     [ -n "$name" ] || continue
     [ -n "$svc_ns" ] || continue
@@ -1203,6 +1236,7 @@ section_webhooks() {
   hdr "7/9" "admission webhooks pointing at a Service that no longer exists" \
     "A webhook whose backend is gone rejects or hangs every create/update it intercepts, which blocks deletion of objects in the namespaces it covers. Only ones with failurePolicy=Fail actually block; Ignore is listed as informational."
   local kind w refs ref rns rnm pol hit=0
+  step "checking admission webhooks for a live backend…"
   for kind in validatingwebhookconfigurations.admissionregistration.k8s.io \
               mutatingwebhookconfigurations.admissionregistration.k8s.io; do
     while IFS='|' read -r w refs pol; do
@@ -1413,7 +1447,7 @@ report_swept() {  # kind/name  ns  scope-suffix
 section_labeled_objects() {
   hdr "8/9" "objects carrying a mark of this workshop" \
     "Our kustomize label transformer stamps these labels on every resource in a component, adopted ones included — so a workshop label on an object is NOT proof the workshop created it. Objects we only marked get an un-mark command; only objects we created get a delete. Argo Applications come first: they actively reconcile, so while one exists it re-creates whatever you delete."
-  local obj kinds hit=0 app apps="" ns name owner comp stack layer og st csv kindres seen=" " swept marks failed
+  local obj kinds hit=0 app apps="" ns name owner comp stack layer og st csv kindres seen=" " swept marks failed total_c ndone
 
   # (a) Argo Applications / AppProjects — matched on ANY of our labels, then deduped. Child
   #     portfolio Applications carry ONLY portfolio.redhat.com/component (31 of 32 of them), so an
@@ -1458,17 +1492,22 @@ section_labeled_objects() {
   prog "$(printf '%s\n' "$swept" | grep -c .) cluster-scoped object(s) to classify"
   # Fetch their markers in one list per kind BEFORE classifying, so the loop below makes no cluster
   # call at all — the same contract the namespaced sweep already gets for free from its own list.
+  step "reading markers for the swept cluster-scoped objects…"
   seed_cluster_marks "$swept"
+  total_c="$(printf '%s\n' "$swept" | grep -c .)"; ndone=0
   while IFS= read -r obj; do
     [ -n "$obj" ] || continue
     hit=1
     report_swept "$obj" "" "cluster-scoped"
+    ndone=$((ndone + 1)); tick "$ndone" "$total_c" "classified cluster-scoped"
   done < <(printf '%s\n' "$swept")
 
   # (c) namespaced sweep over the kinds we actually label, cluster-wide
+  step "sweeping namespaced kinds for our label…"
   # shellcheck disable=SC2086  # $NAMESPACED_KINDS is a deliberately word-split list
   swept="$(sweep_ns_kinds $NAMESPACED_KINDS | sort -u)"
   prog "$(printf '%s\n' "$swept" | grep -c .) namespaced object(s) to classify"
+  total_c="$(printf '%s\n' "$swept" | grep -c .)"; ndone=0
   while IFS='|' read -r ns obj marks; do
     [ -n "$obj" ] || continue
     hit=1
@@ -1477,6 +1516,7 @@ section_labeled_objects() {
     # all answer from memory. Without this the four of them make four identical round trips per object.
     [ -n "$marks" ] && marks_put "${obj%%/*}|${ns}|${obj#*/}|${marks}"
     report_swept "$obj" "$ns" "namespaced, in a namespace we preserved"
+    ndone=$((ndone + 1)); tick "$ndone" "$total_c" "classified namespaced"
   done < <(printf '%s\n' "$swept")
 
   # (d) The OLM objects of every ADOPTED operator, checked by name rather than by label selector.
@@ -1580,6 +1620,7 @@ section_crds() {
   [ -n "$todo" ] || { none "no CRD from an operator we installed is still registered"; return 0; }
   # One `oc get <crd> -A` per candidate was the second-largest serial cost on a cluster with many
   # created operators; the counts are independent reads, so they go out together.
+  step "counting instances for $(printf '%b' "$todo" | grep -v '^ *$' | sort -u | grep -c .) candidate CRD(s) (one list each)…"
   counts="$(printf '%b' "$todo" | grep -v '^ *$' | sort -u | run_parallel crd_count)"
   while IFS='|' read -r crd op n; do
     [ -n "$crd" ] || continue
