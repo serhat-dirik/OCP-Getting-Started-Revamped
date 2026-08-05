@@ -171,6 +171,39 @@ later.
 So: never add an OperatorGroup to `openshift-operators` (OpenShift always provides one there), and
 never resolve a conflict by deleting somebody else's.
 
+### Declared known strands
+
+Skipping an adopted operator-only component must not leave a **sibling** behind in a namespace only
+that component provided. `hack/check-adoption-skip.sh` proves this on every push (CI job
+`adoption-skip`), and the portfolio fails it in one place today:
+
+> `keycloak-operator` is the only component that creates namespace `sso-workshop`, and the only one
+> that scopes an OperatorGroup to it — while sibling `keycloak` ships its operands there and creates
+> neither. Dropping it on adoption would leave `keycloak` syncing into a namespace nothing creates,
+> and operand CRs with no controller, which Argo reports as `Synced` forever.
+
+The installer already **refuses** that install loudly instead of skipping, so no cluster is ever
+installed incomplete. Making RHBK genuinely coexist with an organisation's own Keycloak operator is a
+separate decision that has not been taken, so the strand legitimately stays.
+
+Leaving the gate permanently red is not an option — a gate that is always red is a gate people stop
+reading. So those two strands are declared in the `KNOWN_STRANDS` ledger at the top of
+`hack/check-adoption-skip.sh`. It is a ratchet, not a mute button:
+
+| Situation | Result |
+|---|---|
+| A strand the ledger names | **⚠ DECLARED.** Printed in full in its own summary block; does not fail the run. |
+| Any other strand | **❌ Fails.** The gate stays live for *new* breaks — that is the whole point. |
+| A ledger entry matching no strand | **❌ Fails**, and says to delete the entry. |
+
+That last row is the one that matters: **an entry cannot outlive the defect it describes.** Fix the
+keycloak split and CI goes red until the entry is removed, so the ledger cannot quietly rot into a
+stale doc with a green tick over it.
+
+**Adding an entry is an owner decision**, not a way to get CI green. It converts a real failure into
+accepted debt, so each entry must carry a date, a justification and the decision that keeps it open —
+`ledger_lint()` refuses to run at all against an entry missing any of them.
+
 ### Known gap
 
 A component that ships **neither** an OperatorGroup nor a Subscription is not classified at all, and
