@@ -44,7 +44,7 @@ Wired in the agent as `quarkus.langchain4j.mcp.policy-docs.url=http://policy-doc
 
 ## Tech
 
-- **Quarkus 3.33 LTS** (`3.33.2.1`), **Java 21**, JVM `fast-jar`.
+- **Quarkus 3.33 LTS** (`3.33.3.1`), **Java 21**, JVM `fast-jar`.
 - **`io.quarkiverse.mcp:quarkus-mcp-server-http` 1.13.1** (Quarkus 3.33.2).
 - No database, no external dependency — pure in-memory retrieval.
 - Health (`/q/health/*`), Prometheus metrics (`/q/metrics`) and OpenTelemetry tracing

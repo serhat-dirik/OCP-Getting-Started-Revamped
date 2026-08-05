@@ -32,7 +32,7 @@ The agent is wired with `quarkus.langchain4j.mcp.claims-db.url=http://claims-db:
 
 ## Tech
 
-- **Quarkus 3.33 LTS** (`quarkus.platform.version = 3.33.2.1`), **Java 21**, JVM `fast-jar`.
+- **Quarkus 3.33 LTS** (`quarkus.platform.version = 3.33.3.1`), **Java 21**, JVM `fast-jar`.
 - **`io.quarkiverse.mcp:quarkus-mcp-server-http` 1.13.1** (built against Quarkus 3.33.2;
   the artifact was renamed from `-sse` in 1.8.0, and `-http` serves both `/mcp` and the
   legacy `/mcp/sse`).
