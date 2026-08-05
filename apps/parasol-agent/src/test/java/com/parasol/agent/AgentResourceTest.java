@@ -125,5 +125,59 @@ class AgentResourceTest {
 
         AgentResource.AskError error = new AgentResource.AskError("model authentication failed", "401", true, "qwen3-14b");
         assertTrue(error.authFailure());
+
+        AgentResource.AgentInfo agentInfo = new AgentResource.AgentInfo(
+                "qwen3-14b", "http://claims-db:8080/mcp/sse", "http://policy-docs:8080/mcp/sse",
+                "built-in default", GroundingPrompt.DEFAULT_PROMPT);
+        assertEquals("built-in default", agentInfo.groundingPromptSource());
+        assertTrue(agentInfo.groundingPrompt().contains("get_claim") || agentInfo.groundingPrompt().contains("tools"));
+    }
+
+    // ---- grounding as configuration -------------------------------------------------------------
+    // The system prompt decides whether this agent calls a tool at all, so an unset, blank or
+    // whitespace-only value must NEVER leave the agent with no grounding: it falls back to the
+    // built-in prompt. The workshop deliberately ships a WEAKER prompt in a ConfigMap for the lab
+    // (see the entry state) - that path is exercised here as "a supplied value wins".
+
+    @Test
+    void anAbsentGroundingPromptFallsBackToTheBuiltInDefault() {
+        GroundingPrompt grounding = new GroundingPrompt(java.util.Optional.empty());
+        assertEquals(GroundingPrompt.DEFAULT_PROMPT, grounding.text());
+        assertEquals("built-in default", grounding.source());
+    }
+
+    @Test
+    void aBlankGroundingPromptIsTreatedAsUnsetRatherThanAsAnEmptySystemMessage() {
+        // An env var set to "" or to a stray newline is the realistic accident here, and handing the
+        // model an empty system message is precisely the ungrounded state this whole mechanism exists
+        // to make visible - it must not be reachable by accident.
+        assertEquals(GroundingPrompt.DEFAULT_PROMPT, new GroundingPrompt(java.util.Optional.of("")).text());
+        assertEquals(GroundingPrompt.DEFAULT_PROMPT, new GroundingPrompt(java.util.Optional.of("  \n\t ")).text());
+    }
+
+    @Test
+    void aConfiguredGroundingPromptWinsAndSaysSo() {
+        String weak = "You are the Parasol Insurance claims assistant. Answer staff questions.";
+        GroundingPrompt grounding = new GroundingPrompt(java.util.Optional.of(weak));
+        assertEquals(weak, grounding.text());
+        assertTrue(grounding.source().contains(GroundingPrompt.PROPERTY));
+    }
+
+    @Test
+    void theProviderHandsLangchainExactlyTheResolvedText() {
+        // This is the method the model's system message actually comes from; if it ever returned
+        // Optional.empty() the agent would run with NO system prompt and quietly stop grounding.
+        GroundingPrompt grounding = new GroundingPrompt(java.util.Optional.of("weak"));
+        assertEquals(java.util.Optional.of("weak"), grounding.getSystemMessage("any-memory-id"));
+        assertEquals(java.util.Optional.of(GroundingPrompt.DEFAULT_PROMPT),
+                new GroundingPrompt(java.util.Optional.empty()).getSystemMessage(null));
+    }
+
+    @Test
+    void theBuiltInDefaultActuallyDirectsTheModelAtItsTools() {
+        // The fallback is what a bare `podman run` and `quarkus dev` get. If it ever stopped naming
+        // the tools, the image would ship ungrounded and only an on-cluster run would notice.
+        assertTrue(GroundingPrompt.DEFAULT_PROMPT.contains("You have tools"));
+        assertTrue(GroundingPrompt.DEFAULT_PROMPT.contains("search_policies"));
     }
 }

@@ -10,12 +10,25 @@ include::partial$version-attributes.adoc[]
 // CLM-1001 (UnderReview) and CLM-1004 (Tom Becker / home / Denied / 8400 USD / Angela Davis);
 // list_claims_by_status Denied = CLM-1004/1011/1018/1025; get_claim_history CLM-1001 (5 events);
 // search_policies "auto collision deductible" -> POL-AUTO-01 (500 USD); combined CLM-1004 + POL-CLAIM-01;
-// CLM-9999 -> not found. The terse-vs-imperative grounding difference is REAL and deterministic at
-// temperature 0 on this model (the deliberate break-and-fix). Expected-output blocks show representative
+// CLM-9999 -> not found. Expected-output blocks show representative
 // JSON with the cluster-specific model value genericized to <maas-model> (model-agnostic); the grounded
 // FACTS and toolCalls are what the checkpoints verify. The MCP/model/curl steps are single-path (POSTing
 // JSON is a terminal job); viewing the running workloads, pod logs and metrics is genuine dual-path
 // [tabs] Console::/CLI::. NAMESPACE/domain in output are placeholders (yours are {user}-ai / {cluster_domain}).
+//
+// EX2 IS THE MODULE'S WRITE-BEAT (entry chart 0.1.8, 2026-08-05). The agent's system prompt is
+// externalized to the parasol-agent-grounding ConfigMap; the ENTRY state deliberately ships a weak
+// first draft that never mentions tools, and rewriting it + rolling the agent is what the attendee
+// DOES here. Before this the entry state was already the finished state — all four agent tools are
+// read-only, so nothing durable changed, `ws solve` rendered byte-identically to `ws prep`, and the
+// verify script had to manufacture an outcome by POSTing /agent/ask itself.
+// The Ex2 prose is deliberately written so it is TRUE WHETHER OR NOT the weak prompt happens to
+// ground on a given model: the attendee reads what the agent was told, finds the gap, fixes it, and
+// checks the pod is serving their text. The "two possible outcomes" callout is not hedging — a terse
+// question's outcome genuinely varies by model, and the durable lesson is the prompt, not the phrasing.
+// The weak prompt's live effect on {maas_model} is NOT yet measured; do not add a claim that it
+// deterministically fails until someone has run it. The Ex2 console ConfigMap-edit labels are
+// CAPTURE-VERIFY (not grounded in this pass) with the CLI tab authoritative.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -31,13 +44,14 @@ echo "agent:     $AGENT"
 ----
 
 You are a Parasol platform engineer, and the *claims assistant* is live in your `{user}-ai` namespace: a Quarkus + LangChain4j agent (`parasol-agent`) wired to a `{maas_model}` model over *Models-as-a-Service* (MaaS), with two *Model Context Protocol* (MCP) tool servers — `claims-db` and `policy-docs` — already deployed and Ready.
-In this lab you *drive* the agent, watch it *call tools* to answer real claim questions, *ground* its answers in the policy corpus with citations, see where grounding *breaks* and how to *fix* it, *observe* its tokens and tool calls, and confirm the punchline: *an AI app is just an app*.
+What it does *not* have yet is a working *grounding*: the system prompt it shipped with says nothing about the tools it holds.
+In this lab you *drive* the agent, *engineer* that grounding yourself and roll the agent onto it, watch it *call tools* to answer real claim questions, *ground* its answers in the policy corpus with citations, *observe* its tokens and tool calls, and confirm the punchline: *an AI app is just an app*.
 
 [TIP]
 .Where the paths are single vs dual — and why
 ====
 *Asking the agent* means POSTing JSON to its `/agent/ask` endpoint — a terminal job, so those steps are single-path `curl`.
-*Everything around the agent* — seeing the three pods running, reading the pod log, viewing metrics — is genuine dual-path: a `Console::` tab (the OpenShift web console) and a `CLI::` tab (`oc` / `curl`). Pick either.
+*Everything around the agent* — editing its grounding ConfigMap, seeing the three pods running, reading the pod log, viewing metrics — is genuine dual-path: a `Console::` tab (the OpenShift web console) and a `CLI::` tab (`oc` / `curl`). Pick either.
 The agent has no login; it answers over its public edge Route. You never handle the MaaS key — the *agent* holds it and calls the model for you.
 ====
 endif::demo[]
@@ -46,30 +60,61 @@ endif::demo[]
 // DEMO FLAVOR — ~15-minute presenter arc: grounded tools -> RAG -> honest edges
 // ============================================================================
 ifdef::demo[]
-== Demo arc — A grounded agent with tools, and the honesty that earns trust (15 min)
+== Demo arc — Grounding is engineered, and the honesty that earns trust (15 min)
 
 [NOTE]
 .Before you present
 ====
-Run `ws verify agentic-ai --user {user}` a few minutes ahead to confirm the agent answered a tool-grounded query (7/7), and open two things: a *terminal* in `{user}-ai`, and the OpenShift *Topology* for `{user}-ai` (three pods: `parasol-agent`, `claims-db`, `policy-docs`).
-Set `NS={user}-ai` and `AGENT=https://parasol-agent-{user}-ai.{cluster_domain}` in the terminal.
+`ws prep agentic-ai --yes` gives you the world beat 1 needs: the agent and both MCP servers Ready, and a deliberately *weak* system prompt in `cm/parasol-agent-grounding`. Do not run `ws solve` first — solve strengthens the prompt for you and takes the demo's best beat away.
+Open two things: a *terminal* in `{user}-ai`, and the OpenShift *Topology* for `{user}-ai` (three pods: `parasol-agent`, `claims-db`, `policy-docs`).
+Set `NS={user}-ai` and `AGENT=https://parasol-agent-{user}-ai.{cluster_domain}` in the terminal, then stage the strengthened prompt so beat 1 is not a typing exercise:
+
+[source,sh]
+----
+cat > /tmp/grounding-prompt.yaml <<'EOF'
+data:
+  grounding-prompt: |
+    You are the Parasol Insurance claims assistant. You help staff answer questions about
+    insurance claims and Parasol's policies.
+
+    You have tools. USE THEM instead of guessing:
+    - To answer anything about a specific claim (its status, amount, adjuster, type, or
+      history), call the claims tools. Claim numbers look like CLM-1001.
+    - To answer anything about coverage, deductibles, required documents, claim workflow,
+      service levels, or payout timing, call search_policies and base your answer only on
+      the policy passages it returns. Cite the policy id (e.g. POL-AUTO-01) you relied on.
+
+    Rules:
+    - Never invent claim details or policy terms. If a tool says a claim was not found, or a
+      search returns nothing relevant, say so plainly rather than guessing.
+    - Be concise: a few sentences. Give the specific figures the tools return.
+    - If a question needs both a claim fact and a policy rule, call both kinds of tool.
+EOF
+----
+
 The MaaS key is short-lived — if a call returns `502 authFailure`, the key expired; re-run `ws prep agentic-ai --yes` or ask the platform team to refresh it.
-The money moment is beat 3: the agent that *cites its source* and says _"not found"_ is the one people trust — and it's just a Deployment with a Route.
+Rehearse beat 1 once: on a capable model the weak prompt may ground anyway, in which case the story is _"it worked despite what we told it, not because of it"_ — read the prompt aloud and the point lands either way.
+The money moment is beat 1: one ConfigMap and a rollout turn a plausible answerer into a grounded one.
 ====
 
 [demo-block]
 [TIME 5m]
-Say:: "Parasol's staff ask two things all day: what's the status of this claim, and what does our policy say. A model alone will answer both — and be confidently wrong about *our* claims, because it has never seen them. So we don't ask the model; we ask an *agent* that calls our systems as *tools*. Watch: I'll ask about a real claim, and tell it to use its tools."
-Show:: The terminal, then the `POST /agent/ask` response with a populated `toolCalls` array.
-Do:: Run the imperative claim query and point at `toolCalls`:
+Say:: "Parasol's staff ask two things all day: what's the status of this claim, and what does our policy say. A model alone will answer both — and be confidently wrong about *our* claims, because it has never seen them. So we don't ask the model; we ask an *agent* that calls our systems as *tools*. Here's the thing nobody tells you: giving it tools is not what makes it use them. Watch."
+Show:: The claim question and its `toolCalls`, then the agent's own system prompt, then the same question after the prompt is fixed.
+Do:: Ask, read the grounding aloud, patch it, roll, ask again:
 +
 [source,sh]
 ----
 curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
-  -d '{"question":"Use your tools to look up claim CLM-1004 and give me a full summary."}' | jq
+  -d '{"question":"What is the status of claim CLM-1004?"}' | jq '{answer, toolCalls}'
+curl -ksS "$AGENT/agent/info" | jq -r '.groundingPromptSource, .groundingPrompt'
+oc patch cm parasol-agent-grounding -n $NS --type merge --patch-file /tmp/grounding-prompt.yaml
+oc rollout restart deploy/parasol-agent -n $NS && oc rollout status deploy/parasol-agent -n $NS
+curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
+  -d '{"question":"What is the status of claim CLM-1004?"}' | jq
 ----
 +
-"See the `toolCalls` block — the agent called `get_claim` on `CLM-1004` and answered from the *real* record: Tom Becker, home, *Denied*, 8400 dollars, adjuster Angela Davis. The model wrote the sentence; the *facts* came from our claims service."
+"That's all we'd told it — be helpful, be brief. Not one word about the four tools it's holding. So I rewrote the instruction, restarted the pod, and asked the *same* question: now `toolCalls` shows `get_claim` on `CLM-1004`, answered from the *real* record — Tom Becker, home, *Denied*, 8400 dollars, adjuster Angela Davis. The model wrote the sentence; the *facts* came from our claims service. And what I edited was a ConfigMap."
 
 [demo-block]
 [TIME 5m]
@@ -89,24 +134,23 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
 
 [demo-block]
 [TIME 5m]
-Say:: "Here's what earns trust — the honest edges. Ask about a claim that doesn't exist, and it says *not found* instead of inventing one. And watch this: if I ask *casually*, this model prints the tool call as text and never runs it — an ungrounded answer. Grounding is something we *engineer*. Finally: this whole thing is a Deployment with a Route and health probes. An AI app is just an app."
-Show:: The `not found` answer; the terse question returning `[get_claim(...)]` with an empty `toolCalls`; then the Topology view of the three pods.
-Do:: Run the not-found and the terse queries, then flip to Topology:
+Say:: "Here's what earns trust — the honest edges. Ask about a claim that doesn't exist, and it says *not found* instead of inventing one. That's the prompt we wrote in beat one doing its second job: we told it never to fill a gap it couldn't look up. Finally: this whole thing is a Deployment with a Route and health probes. An AI app is just an app."
+Show:: The `not found` answer, then the Topology view of the three pods.
+Do:: Run the not-found query, then flip to Topology:
 +
 [source,sh]
 ----
 curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
-  -d '{"question":"Use your tools to look up claim CLM-9999 and report its status."}' | jq -r '.answer'
-curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
-  -d '{"question":"What is the status of claim CLM-1001?"}' | jq '{answer, toolCalls}'
+  -d '{"question":"What is the status of claim CLM-9999?"}' | jq -r '.answer'
+oc get deploy,svc,route -n $NS
 ----
 +
-"_Not found_ — honest. And the casual question? It printed `[get_claim(...)]` as *text*, empty `toolCalls` — ungrounded. Same claim, different ask. In production you fix that with the system prompt and tool-forcing. Guardrails for PII and a vector database for real-scale RAG are the next platform layer — but the spine is this: a Quarkus service, three pods, one Route."
+"_Not found_ — honest, because we asked for honest. Everything you've seen came from one text file and three pods: guardrails for PII and a vector database for real-scale RAG are the next platform layer, but the spine is this — a Quarkus service, an edge Route, and a ConfigMap holding the sentence that makes it trustworthy."
 +
 [NOTE]
 .Reset between runs
 ====
-`ws prep agentic-ai --yes` returns the world to the entry state. Nothing to clean in the namespace beyond that — the agent and both MCP servers are stateless.
+`ws prep agentic-ai --yes` returns the world to the entry state — including putting the *weak* grounding back, which is exactly what you want before presenting again. Nothing to clean in the namespace beyond that: the agent and both MCP servers are stateless.
 ====
 endif::demo[]
 
@@ -124,20 +168,22 @@ Ask the agent what it is wired to — `GET /agent/info` makes *no* model call, s
 
 [source,sh,role=execute]
 ----
-curl -ksS "$AGENT/agent/info" | jq
+curl -ksS "$AGENT/agent/info" | jq '{model, claimsDbMcpUrl, policyDocsMcpUrl, groundingPromptSource}'
 ----
 
-.Expected output (the model + both MCP tool servers the agent is configured with)
+.Expected output (the model, both MCP tool servers, and where its system prompt comes from)
 [source,json]
 ----
 {
   "model": "<maas-model>",
   "claimsDbMcpUrl": "http://claims-db:8080/mcp/sse",
-  "policyDocsMcpUrl": "http://policy-docs:8080/mcp/sse"
+  "policyDocsMcpUrl": "http://policy-docs:8080/mcp/sse",
+  "groundingPromptSource": "config (parasol.agent.grounding-prompt)"
 }
 ----
 
 The `model` field echoes this cluster's model (`{maas_model}`); the two URLs are the MCP servers the agent calls as tools.
+`groundingPromptSource` is the one to notice: the agent's *system prompt* — the text that decides whether it calls a tool at all — is not compiled into the image. It is *configuration*, and you will rewrite it in the next exercise.
 Now confirm the agent is *Ready* — and here is the elegant part: its readiness probe *pings both MCP servers*, so a Ready agent has *already proven* it can reach its tools.
 
 [tabs]
@@ -195,8 +241,10 @@ curl -ksS "$AGENT/q/health/ready" | jq
 ✔ *Verify:* All three deployments (`parasol-agent`, `claims-db`, `policy-docs`) are `1/1` in `{user}-ai`, and `GET /q/health/ready` reports `status: UP` with both MCP clients `OK`. The agent has proven its tool wiring before you've spent a single token.
 ====
 
-== 2. Ask the agent — and watch grounding depend on how you ask
-⏱ *~9 min* · terse vs. imperative phrasing — watch what your model does, then make grounding reliable
+== 2. Engineer the grounding
+⏱ *~13 min* · read what your agent was told, find the gap, rewrite it, and roll the agent onto it
+
+This is the exercise the module is really about. An agent that answers from *your records* rather than from the model's memory does not do that by nature — somebody *made* it. Here you are that somebody.
 
 Ask about a real claim the way a person naturally would — a plain question:
 
@@ -206,11 +254,11 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
   -d '{"question":"What is the status of claim CLM-1001?"}' | jq '{answer, toolCalls}'
 ----
 
-.What you might see — a terse question can go either way
+.What you might see — and why either outcome leads to the same place
 ====
-Grounding is a property of *both* the prompt and the model, so a plain question like this one has two possible, equally valid outcomes at temperature 0:
+Grounding is a property of *both* the prompt and the model, so a plain question like this one has two possible outcomes:
 
-*Outcome A — ungrounded* (the model prints the tool call as text instead of running it):
+*Outcome A — ungrounded* (the model prints the tool call as text instead of running it, or answers from nothing at all):
 [source,json]
 ----
 {
@@ -218,9 +266,9 @@ Grounding is a property of *both* the prompt and the model, so a plain question 
   "toolCalls": []
 }
 ----
-`toolCalls` is *empty* — the agent never touched your claims data. This is the failure mode the imperative rephrasing below exists to fix.
+`toolCalls` is *empty* — the agent never touched your claims data.
 
-*Outcome B — grounded* (the model calls the tool unaided, even on a terse question):
+*Outcome B — grounded* (the model calls the tool unaided):
 [source,json]
 ----
 {
@@ -230,22 +278,188 @@ Grounding is a property of *both* the prompt and the model, so a plain question 
   ]
 }
 ----
-`toolCalls` shows `get_claim` actually ran, and the answer (`UnderReview`) is the real seeded record — a capable model can ground even a terse question by itself.
+`toolCalls` shows `get_claim` actually ran, and `UnderReview` is the real seeded record.
 
-Note which one *your* model just did — deterministic at temperature 0, but it varies by model. Either way, keep reading: the imperative phrasing below is the reliable path regardless of what you just saw.
+Note which one *your* model just did — and keep reading either way. If you got Outcome B, you got lucky with a capable model, not with your configuration: what you are about to read is what your agent has been *told*, and it is nowhere near good enough to rely on.
 ====
 
 NOTE: If instead you get `{"answer": null, "toolCalls": null}`, the model endpoint *refused the call* (an expired or mis-scoped MaaS key — the agent returns a `502` your `jq` filter renders as nulls). That is a wiring failure, not the grounding lesson — see the troubleshooting page's `502` entry.
 
-Now ask the same question *imperatively* — tell the agent explicitly to use its tools. This is the reliable phrasing whichever outcome you saw above:
+=== What has anyone actually told this agent?
+
+Before changing anything, read the instruction the agent is running. It reports it itself:
+
+[source,sh,role=execute]
+----
+curl -ksS "$AGENT/agent/info" | jq -r '.groundingPromptSource, "---", .groundingPrompt'
+----
+
+.The grounding your agent shipped with
+[source,texinfo]
+----
+config (parasol.agent.grounding-prompt)
+---
+You are the Parasol Insurance claims assistant.
+Answer questions from Parasol staff about claims and policies as helpfully as you can.
+Keep answers short and professional.
+----
+
+Read it twice. It describes a *tone*. It never says the agent *has* tools, never says when to call one, never tells it to refuse to invent an answer it could not look up. That is not a strawman — it is what a system prompt looks like when it was written by someone thinking about manners rather than about grounding, which is most first drafts.
+
+And that is the whole gap: the agent holds four perfectly good tools and has been given no reason to use them.
+
+=== The prompt is a ConfigMap, so you can fix it
+
+`groundingPromptSource` said `config`, and it meant it. The prompt reaches the agent as an environment variable fed from an ordinary ConfigMap in your namespace — the same way its model name and endpoint do. Look at the object itself:
+
+[tabs]
+====
+Console::
++
+--
+In the {ocp_console_url}/k8s/ns/{user}-ai/configmaps/parasol-agent-grounding[*ConfigMaps* -> `parasol-agent-grounding`^] page, the *YAML* tab shows the whole object and the `data.grounding-prompt` key holding the text you just read. You will edit it here in a moment.
+// CAPTURE-VERIFY — the console labels on this ConfigMap page (YAML tab, Save) were NOT grounded live
+// in this pass. The CLI tab below is authoritative; ground these before the media pass.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc get cm parasol-agent-grounding -n $NS -o jsonpath='{.data.grounding-prompt}'
+echo
+oc get deploy parasol-agent -n $NS \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PARASOL_AGENT_GROUNDING_PROMPT")]}'
+echo
+----
+
+.Expected output (the prompt, then the wiring that carries it into the pod)
+[source,texinfo]
+----
+You are the Parasol Insurance claims assistant.
+Answer questions from Parasol staff about claims and policies as helpfully as you can.
+Keep answers short and professional.
+
+{"name":"PARASOL_AGENT_GROUNDING_PROMPT","valueFrom":{"configMapKeyRef":{"key":"grounding-prompt","name":"parasol-agent-grounding"}}}
+----
+--
+====
+
+There is no AI-specific machinery here. A ConfigMap, an environment variable, a Deployment — the same externalized configuration you would use for a connection string.
+
+=== Write a grounding that works
+
+Now write one that tells the model what it has and when to reach for it. Three things earn their place: *say there are tools*, *say which kind of question needs which*, and *forbid inventing what a tool did not return*.
+
+Write the new prompt to a file:
+
+[source,sh,role=execute]
+----
+cat > /tmp/grounding-prompt.yaml <<'EOF'
+data:
+  grounding-prompt: |
+    You are the Parasol Insurance claims assistant. You help staff answer questions about
+    insurance claims and Parasol's policies.
+
+    You have tools. USE THEM instead of guessing:
+    - To answer anything about a specific claim (its status, amount, adjuster, type, or
+      history), call the claims tools. Claim numbers look like CLM-1001.
+    - To answer anything about coverage, deductibles, required documents, claim workflow,
+      service levels, or payout timing, call search_policies and base your answer only on
+      the policy passages it returns. Cite the policy id (e.g. POL-AUTO-01) you relied on.
+
+    Rules:
+    - Never invent claim details or policy terms. If a tool says a claim was not found, or a
+      search returns nothing relevant, say so plainly rather than guessing.
+    - Be concise: a few sentences. Give the specific figures the tools return.
+    - If a question needs both a claim fact and a policy rule, call both kinds of tool.
+EOF
+echo "written: /tmp/grounding-prompt.yaml"
+----
+
+Then apply it to the ConfigMap:
+
+[tabs]
+====
+Console::
++
+--
+On the same {ocp_console_url}/k8s/ns/{user}-ai/configmaps/parasol-agent-grounding[`parasol-agent-grounding`^] page, open the *YAML* tab, replace the text under `grounding-prompt:` with the prompt above (keep the `|` and the indentation — it is a YAML block), and save.
+// CAPTURE-VERIFY — YAML-tab edit + save labels not grounded live in this pass; CLI tab authoritative.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc patch cm parasol-agent-grounding -n $NS --type merge --patch-file /tmp/grounding-prompt.yaml
+oc get cm parasol-agent-grounding -n $NS -o jsonpath='{.data.grounding-prompt}' | head -4
+----
+
+.Expected output
+[source,texinfo]
+----
+configmap/parasol-agent-grounding patched
+You are the Parasol Insurance claims assistant. You help staff answer questions about
+insurance claims and Parasol's policies.
+
+You have tools. USE THEM instead of guessing:
+----
+--
+====
+
+TIP: The wording above is a worked answer, not a magic string. Write your own if you prefer — what matters is that it tells the model it has tools and when to use them. The checkpoint and `ws verify` grade that property, not your sentences.
+
+=== Roll the agent onto it
+
+The ConfigMap has changed. The *agent* has not — the prompt reaches it as an environment variable, and an environment variable cannot change under a running pod. Confirm that for yourself before fixing it:
+
+[source,sh,role=execute]
+----
+BEFORE=$(curl -ksS "$AGENT/agent/info" | jq -r '.groundingPrompt')
+echo "$BEFORE" | head -3
+----
+
+Still the old text: your edit is in the cluster and nowhere near the process. Restart the Deployment so a new pod picks it up:
+
+[source,sh,role=execute]
+----
+oc rollout restart deploy/parasol-agent -n $NS
+oc rollout status deploy/parasol-agent -n $NS --timeout=180s
+----
+
+Now ask the agent again what it is running. Poll rather than asking once — the Route needs a moment longer to serve the *new* pod than the Deployment needs to call itself rolled out, and the loop compares against what you captured above, so it works whatever wording you chose:
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 10); do
+  LIVE=$(curl -ksS "$AGENT/agent/info" 2>/dev/null | jq -r '.groundingPrompt' 2>/dev/null)
+  if [ -n "$LIVE" ] && [ "$LIVE" != "null" ] && [ "$LIVE" != "$BEFORE" ]; then break; fi
+  sleep 3
+done
+curl -ksS "$AGENT/agent/info" | jq -r '.groundingPrompt' | head -4
+----
+
+.Expected output (the pod is now running the prompt you wrote)
+[source,texinfo]
+----
+You are the Parasol Insurance claims assistant. You help staff answer questions about
+insurance claims and Parasol's policies.
+
+You have tools. USE THEM instead of guessing:
+----
+
+=== Ask the same question again
+
+Nothing changed but the instruction. Ask exactly what you asked at the top of this exercise:
 
 [source,sh,role=execute]
 ----
 curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
-  -d '{"question":"Use your tools to look up claim CLM-1001 and report its status."}' | jq '{answer, toolCalls}'
+  -d '{"question":"What is the status of claim CLM-1001?"}' | jq '{answer, toolCalls}'
 ----
 
-.The imperative phrasing — a grounded answer, from a real tool call
+.A grounded answer, from a real tool call
 [source,json]
 ----
 {
@@ -256,9 +470,9 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
 }
 ----
 
-Same claim, same model, imperative phrasing — `toolCalls` shows `get_claim` actually *ran*, and the answer (`UnderReview`) is the *real* seeded record. Whether or not your terse question above grounded on its own, the imperative phrasing grounds it *reliably*, because you told the agent explicitly what to do. The lesson is the whole point of agentic AI: *the model decides whether to call a tool*, and *grounding is something you engineer* — through the system prompt and clear phrasing here, through model choice and tool-forcing in production. Even a model that grounds a terse question unaided is still being *steered* by the prompt underneath it; when an agent gives a grounded answer, someone *made* it ground.
+`toolCalls` shows `get_claim` actually *ran*, and the answer (`UnderReview`) is the *real* seeded record for that claim — not something the model could have invented. Same model, same question, same tools. What changed is the only thing you changed: what the agent was told.
 
-image::agentic-ai/agentic-ai-02-ask-grounded.png["The terminal response to the imperative CLM-1001 question: the answer reads \"The status of claim CLM-1001 is UnderReview.\" and toolCalls contains one entry naming the tool get_claim with arguments claimNumber CLM-1001. Notice which tool the model chose and the arguments it passed — that is the visibility an agent owes you."]
+image::agentic-ai/agentic-ai-02-ask-grounded.png["The terminal response to the CLM-1001 question after the grounding was strengthened: the answer reads \"The status of claim CLM-1001 is UnderReview.\" and toolCalls contains one entry naming the tool get_claim with arguments claimNumber CLM-1001. Notice which tool the model chose and the arguments it passed — that is the visibility an agent owes you."]
 
 [NOTE]
 .Why `result` is `null` in `toolCalls`
@@ -268,17 +482,27 @@ The tool's return value is folded straight back into the model's context to prod
 The *answer* is your proof the tool ran: `UnderReview` is the seeded truth for `CLM-1001`, not something the model could have invented.
 ====
 
+[NOTE]
+.The other lever — and why it is the weaker one
+====
+Phrasing the *question* imperatively (`"Use your tools to look up claim CLM-1001…"`) also pushes a model toward calling a tool, and on some models it is enough on its own.
+It is the weaker lever because it is per-question: it depends on every user, every caller and every integration remembering to say it, and none of them will.
+The system prompt applies to *every* request whether the asker knows about tools or not. Engineer the durable one; the phrasing is a debugging aid.
+
 image::agentic-ai/agentic-ai-03-terse-vs-imperative.png["The same claim asked twice, back to back in one terminal. The terse question returns the tool call printed as text with an empty toolCalls array; the imperative question returns \"The status of claim CLM-1001 is UnderReview.\" with toolCalls naming get_claim. Notice: same claim, same model — only the phrasing changed."]
+====
 
 [.checkpoint]
 ====
-✔ *Verify:* With the *imperative* phrasing, `POST /agent/ask` returns a non-empty `toolCalls` containing `get_claim`, and the `answer` reports `CLM-1001` as `UnderReview`. However your terse question above came out — grounded already, or the tool call printed as text — the imperative phrasing grounds it here: `toolCalls` populated, the tool actually run. That is the lesson either way: grounding is engineered, not guaranteed, and even a model that grounds unaided is still being told what to do by the prompt underneath it.
+✔ *Verify:* `oc get cm parasol-agent-grounding -n {user}-ai -o jsonpath='{.data.grounding-prompt}'` returns a prompt that tells the model it has tools; `curl -ksS $AGENT/agent/info | jq -r .groundingPrompt` returns that *same* text, proving the running pod picked it up; and `POST /agent/ask` with the plain question now returns a non-empty `toolCalls` containing `get_claim`. Those first two are what `ws verify agentic-ai` grades — the model's tool call corroborates them. You changed one piece of configuration, and the agent started grounding: that is the lesson, and it is why *grounding is engineered, not granted*.
 ====
 
 == 3. MCP tools are your APIs
 ⏱ *~11 min* · watch the agent call your claims service three different ways
 
-The `claims-db` MCP server exposes three tools — `get_claim`, `list_claims_by_status`, and `get_claim_history`. To the model they are just callable functions; to you they are *your claims API* behind a small standard adapter. Ask three questions that each drive a different tool.
+From here on the agent is running *your* grounding, so it reaches for a tool without being nagged into it. That is what the rest of this lab is built on.
+
+The `claims-db` MCP server exposes three tools — `get_claim`, `list_claims_by_status`, and `get_claim_history`. To the model they are just callable functions; to you they are *your claims API* behind a small standard adapter. Ask three questions that each drive a different tool. (The questions below still say "use your tools" — belt and braces while you are learning what each tool does; drop the phrase on any of them and watch it work anyway.)
 
 *A full claim summary* — the model calls `get_claim` and reports every field:
 
@@ -549,7 +773,7 @@ readiness: /q/health/ready
 --
 ====
 
-An image from the shared registry, an edge Route, a readiness probe on `/q/health/ready` — this is the *golden path* from the Ways to Build & Deliver Apps module, Pipelines Fundamentals, and GitOps Fundamentals (separate modules), not a parallel "AI platform." Now prove the wiring is *self-healing* the same way every Deployment is — restart it and watch readiness re-establish the tool connections:
+An image from the shared registry, an edge Route, a readiness probe on `/q/health/ready` — this is the *golden path* from the Ways to Build & Deliver Apps module, Pipelines Fundamentals, and GitOps Fundamentals (separate modules), not a parallel "AI platform." You already restarted this Deployment once, in exercise 2, to pick up your grounding — routine enough that it needed no special handling. Do it again, this time watching what *readiness* does: the wiring is *self-healing* the same way every Deployment is.
 
 [source,sh,role=execute]
 ----
@@ -599,7 +823,8 @@ There is nothing to run in this section — see the *concept* page for the stack
 == Challenge (optional)
 ⏱ *~10 min* · no hand-holding
 
-* *Engineer the grounding.* Take the terse question from exercise 2 (`"What is the status of claim CLM-1001?"`) and find the *minimal* phrasing change that makes this model actually call the tool. What words tip it from printing the call to running it?
+* *Find the minimum viable grounding.* Cut your exercise-2 prompt down line by line, rolling the agent each time, until it stops calling `get_claim`. Which sentence was actually load-bearing on *this* model — naming the tools, or simply saying that tools exist?
+* *Break it on purpose, then read the failure.* Patch the ConfigMap back to the weak draft, roll, and ask a claim question. Where does the wrong answer come from — does the model refuse, invent a claim, or print the tool call as text? Restore your prompt afterwards.
 * *Force a two-tool answer.* Craft a single question that makes the agent call *both* a `claims-db` tool and `search_policies` — for a claim you choose. Confirm both appear in `toolCalls`.
 * *Read the cost.* Ask three questions of increasing tool use and compare `tokenUsage.totalTokens`. Where does the cost come from — the question, the answer, or the tool definitions?
 * *Design the guardrail.* On paper: where in the `POST /agent/ask` path would a PII input-guardrail sit, and what would it do to a question containing a Social Security number *before* the model saw it? (The deployed answer is the `[ADD-ON]` FMS Orchestrator sidecar.)

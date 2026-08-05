@@ -25,7 +25,8 @@ import jakarta.ws.rs.core.Response;
  * <pre>
  *   POST /agent/ask    ask the agent a claims/policy question; returns the answer,
  *                      the tools it called (name + arguments + result), and token usage
- *   GET  /agent/info   the model + MCP wiring the agent is configured with (no model call)
+ *   GET  /agent/info   the model + MCP wiring AND the grounding prompt in force
+ *                      (no model call - costs nothing to ask)
  * </pre>
  *
  * <p>{@code /ask} is {@code @Blocking}: the model + MCP tool round-trips take seconds, so the
@@ -45,6 +46,14 @@ public class AgentResource {
 
     @Inject
     ToolCallCollector toolCallCollector;
+
+    /**
+     * The same grounding the AI service runs on, resolved the same way. Constructed rather than
+     * injected because LangChain4j instantiates {@link GroundingPrompt} reflectively and it is
+     * therefore not a CDI bean - see its own class comment. Both instances read one config property,
+     * so {@code /agent/info} cannot drift from what the model is actually being told.
+     */
+    private final GroundingPrompt grounding = new GroundingPrompt();
 
     @ConfigProperty(name = "quarkus.langchain4j.openai.chat-model.model-name", defaultValue = "unknown")
     String modelName;
@@ -101,11 +110,20 @@ public class AgentResource {
         }
     }
 
-    /** What the agent is wired to talk to. Handy for a smoke check without spending a token. */
+    /**
+     * What the agent is wired to talk to, and - just as load-bearing - the grounding prompt this
+     * pod is actually running. Makes no model call, so it is free to ask and free to poll.
+     *
+     * <p>The prompt is echoed IN FULL on purpose. It is the one piece of an agent's behaviour that
+     * is invisible from the outside and decisive from the inside, and after editing the ConfigMap
+     * the only honest way to know whether the change reached the workload is to have the workload
+     * say so. Nothing secret passes through here: the model key is never part of this response.
+     */
     @GET
     @Path("/info")
     public Response info() {
-        return Response.ok(new AgentInfo(modelName, claimsDbUrl, policyDocsUrl)).build();
+        return Response.ok(new AgentInfo(
+                modelName, claimsDbUrl, policyDocsUrl, grounding.source(), grounding.text())).build();
     }
 
     private static ToolCall toToolCall(ToolExecution execution) {
@@ -221,7 +239,11 @@ public class AgentResource {
     public record AskError(String error, String detail, boolean authFailure, String model) {
     }
 
-    /** Body for {@code GET /agent/info}. */
-    public record AgentInfo(String model, String claimsDbMcpUrl, String policyDocsMcpUrl) {
+    /**
+     * Body for {@code GET /agent/info}: the model, both MCP tool servers, and the grounding prompt
+     * in force plus where it came from ({@code config …} or {@code built-in default}).
+     */
+    public record AgentInfo(String model, String claimsDbMcpUrl, String policyDocsMcpUrl,
+                            String groundingPromptSource, String groundingPrompt) {
     }
 }

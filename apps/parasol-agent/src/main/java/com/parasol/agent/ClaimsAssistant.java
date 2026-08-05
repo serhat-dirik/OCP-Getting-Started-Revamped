@@ -2,7 +2,6 @@ package com.parasol.agent;
 
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.Result;
-import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
 import io.quarkiverse.langchain4j.RegisterAiService;
 import io.quarkiverse.langchain4j.mcp.runtime.McpToolBox;
@@ -23,27 +22,19 @@ import io.quarkiverse.langchain4j.mcp.runtime.McpToolBox;
  * their tools over HTTP-SSE and lets the model decide which to call. The method returns a
  * {@link Result} so the REST layer can report not just the answer but exactly which tools ran and
  * how many tokens were spent (the "observe the agent" beat, M12).
+ *
+ * <p>THERE IS NO {@code @SystemMessage} HERE, DELIBERATELY. The system prompt - the text that decides
+ * whether this agent calls a tool or answers from the model's own weights - is
+ * <strong>configuration</strong>, supplied by {@link GroundingPrompt} from
+ * {@code parasol.agent.grounding-prompt} and, in the workshop, from a ConfigMap an attendee edits.
+ * Baking it into the annotation would make the single most consequential knob in an agent a rebuild
+ * away from being turned. {@code systemMessageProviderSupplier} is the extension's own hook for that:
+ * the named {@link io.quarkiverse.langchain4j.runtime.aiservice.SystemMessageProvider} supplies the
+ * system message on every call.
  */
-@RegisterAiService
+@RegisterAiService(systemMessageProviderSupplier = GroundingPrompt.class)
 public interface ClaimsAssistant {
 
-    @SystemMessage("""
-            You are the Parasol Insurance claims assistant. You help staff answer questions about
-            insurance claims and Parasol's policies.
-
-            You have tools. USE THEM instead of guessing:
-            - To answer anything about a specific claim (its status, amount, adjuster, type, or
-              history), call the claims tools. Claim numbers look like CLM-1001.
-            - To answer anything about coverage, deductibles, required documents, claim workflow,
-              service levels, or payout timing, call search_policies and base your answer only on
-              the policy passages it returns. Cite the policy id (e.g. POL-AUTO-01) you relied on.
-
-            Rules:
-            - Never invent claim details or policy terms. If a tool says a claim was not found, or a
-              search returns nothing relevant, say so plainly rather than guessing.
-            - Be concise: a few sentences. Give the specific figures the tools return.
-            - If a question needs both a claim fact and a policy rule, call both kinds of tool.
-            """)
     @McpToolBox({"claims-db", "policy-docs"})
     Result<String> ask(@MemoryId String conversationId, @UserMessage String question);
 }

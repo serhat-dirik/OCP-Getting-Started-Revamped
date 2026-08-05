@@ -1,0 +1,43 @@
+# The agent's GROUNDING — its system prompt — as an ordinary ConfigMap, because that is the object
+# this module asks the attendee to write. parasol-agent reads it as PARASOL_AGENT_GROUNDING_PROMPT
+# (Quarkus config property parasol.agent.grounding-prompt), the same env-from-ConfigMap idiom that
+# already feeds it GENAI_MODEL and GENAI_ENDPOINT from maas-config.
+#
+# ENTRY ships the WEAK draft; `ws solve` (.Values.solve) ships the strengthened one. Both texts live
+# in _helpers.tpl next to the reasoning for the split. sync-wave "1" places this alongside the MCP
+# servers and BEFORE the agent (wave 2), so the value exists when the agent's pod resolves its env.
+#
+# NOT hook-written and NOT sourced from cluster state, unlike maas-config: this value comes from git,
+# so rendering it here is correct and it stays comparable to the render (chart 0.1.7's note about
+# maas-config does not apply). An attendee edit makes THIS ConfigMap OutOfSync, which is honest —
+# entry Applications run selfHeal=false, so their edit is never reverted under them, and `ws reset`
+# purges the ConfigMap and re-materializes the weak draft.
+---
+# why: the one object the attendee edits in this module; the agent's tool-choice behaviour follows it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: parasol-agent-grounding
+  namespace: {{ include "agentic-ai.namespace" . }}
+  labels:
+    app: parasol-agent
+    app.kubernetes.io/component: agent-grounding
+    workshop.redhat.com/module: agentic-ai
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  # Edited by the attendee in the lab (`oc edit cm parasol-agent-grounding`), then picked up by
+  # `oc rollout restart deploy/parasol-agent` — an env var cannot change under a running pod.
+  # `indent 4` pads BLANK lines to four spaces too, which is valid YAML but leaves trailing
+  # whitespace in the rendered manifest (and a yamllint trailing-spaces finding). Strip it back off:
+  # the block scalar reads those lines as empty either way, so the ConfigMap value is unchanged.
+  # NOT written as a pipeline — sprig's regexReplaceAll takes (regex, input, replacement) and a Go
+  # template pipeline appends the piped value as the LAST argument, i.e. as the REPLACEMENT. Written
+  # that way it substitutes into an empty string and renders an empty prompt, which is silent: the
+  # ConfigMap still applies, the agent still starts, and it quietly falls back to its built-in
+  # prompt — erasing the very weakness this entry state exists to ship. Caught by parsing the render
+  # rather than reading it (helm template … | python -c 'yaml.safe_load_all').
+  grounding-prompt: |
+{{ regexReplaceAll "(?m)[ \t]+$" (include "agentic-ai.groundingPrompt" . | indent 4) "" }}
