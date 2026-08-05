@@ -2544,8 +2544,10 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # fail, exactly like the cluster-scoped rows further down.
   #
   # csv itself stays EMPTY whenever the read fails, whatever the reason: two later rows (argo
-  # applications, entry verify) gate on `[[ "$csv" != *Succeeded* ]]`, and letting the error text land
-  # in it would leave them string-matching against a Forbidden message.
+  # applications, entry verify) test `[[ "$csv" != *Succeeded* ]]`, and letting the error text land
+  # in it would leave them string-matching against a Forbidden message. The cost of that choice is
+  # that "unreadable" and "genuinely absent" reach those rows byte-identical, so each of them must
+  # consult csv_unreadable FIRST — see them below.
   local csv="" csv_out csv_rc=0 csv_unreadable=""
   csv_out="$(oc get csv -n openshift-gitops-operator -o jsonpath='{.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}' 2>&1)" || csv_rc=$?
   if [[ "$csv_rc" -eq 0 ]]; then
@@ -2585,7 +2587,17 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # printed "✅ all Healthy" while `applications.argoproj.io` did not exist on the cluster at all — the
   # same "recorded as absent" / "no record at all" conflation as the ogsr-uninstall.sh adoption bug.
   # Gate on the gitops-operator row already computed above so a genuinely-uninstalled Argo reads n/a.
-  if [[ "$csv" != *Succeeded* ]]; then
+  #
+  # THREE outcomes here too, for the same reason that row has three. `csv` is empty on ANY failed
+  # read, so "the operator is absent" and "I was not allowed to look" arrive here byte-identical, and
+  # a two-way gate printed ➖ "not installed" for both — asserting an operator's absence from a read
+  # nobody could make, on the line directly under a ⚠ that had just admitted it could not look. The
+  # report contradicted itself in adjacent lines. Unreadable is ⚠/not-graded and does NOT set fail
+  # (matching the rows above); only a CSV that was actually read and came back absent says "not
+  # installed". Admin, who can read it, grades exactly as before.
+  if [[ -n "$csv_unreadable" ]]; then
+    unknown "not graded (the gitops operator's state could not be read — needs cluster-admin)"
+  elif [[ "$csv" != *Succeeded* ]]; then
     skip "n/a (gitops operator not installed)"
   else
     local bad="" expect_ok="" name health app_user module degraded exp
@@ -2636,10 +2648,17 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     # completeness it never had. Decided ⚠ (2026-08-05): the day's whole lesson is that a check which
     # graded nothing must not look complete.
     unknown "not checked cohort-wide (expensive — narrow with: ws doctor --user U)"
+  elif [[ -n "$csv_unreadable" ]]; then
+    # Same three-outcome split as the Argo row, and the same glyph argument settled the same way. ➖
+    # claims "nothing is missing, no action available"; here BOTH halves are unknown, because the one
+    # fact the ➖ branch below rests on — that there is no gitops operator — is precisely what could
+    # not be read. Saying "not installed" would be a conclusion borrowed from a failed read. ⚠, no
+    # fail: "I could not look" is not "it is broken", the rule the gitops-operator row above sets.
+    unknown "not graded (the gitops operator's state could not be read — needs cluster-admin)"
   elif [[ "$csv" != *Succeeded* ]]; then
-    # ➖ is right here and stays: with no gitops operator there are no Applications to grade at all,
-    # nothing is missing that this row could report, and the gitops-operator row above already
-    # carries the actual finding.
+    # ➖ is right here and stays: the CSV WAS read and reports no healthy operator, so there are no
+    # Applications to grade at all, nothing is missing that this row could report, and the
+    # gitops-operator row above already carries the actual finding.
     skip "n/a (gitops operator not installed)"
   else
     local ev_total=0 ev_pass=0 ev_skip=0 ev_fail=0 ev_solved=0 ev_fail_names="" ev_skip_names=""
