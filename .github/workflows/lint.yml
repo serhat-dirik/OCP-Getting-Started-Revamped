@@ -1073,13 +1073,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Strict mode must exit 3 on an ungraded run and 0 on a clean one
+      - name: Strict mode must tell a partial run (3) from one that graded nothing (4)
         # The attendee summary gained a third outcome (pass/fail/SKIP) because 11 of 26 verify
         # scripts could report "all N checks passed" having graded nothing. VERIFY_STRICT=1 gives
-        # automation a distinct exit 3 for "did not fully verify", while the attendee-facing DEFAULT
-        # stays 0 -- deliberately, because ws prep reads that rc as a boolean and turns non-zero into
-        # the WIPE prompt. A healthy environment must never offer to destroy itself over an
-        # inconclusive check.
+        # automation a distinct non-zero for "did not fully verify", while the attendee-facing
+        # DEFAULT stays 0 -- deliberately, because a non-zero there says "your environment is broken"
+        # over a check nobody was permitted to answer, and it is what once drove ws prep's WIPE
+        # prompt. A healthy environment must never offer to destroy itself over an inconclusive check.
+        #
+        # THAT NON-ZERO IS TWO CODES, not one (2026-08-05, measured in a live cockpit):
+        #   3  SOME checks skipped and every GRADED one passed -- incomplete, but a legitimate pass.
+        #      jobs-batch-kueue lands here for every attendee: 13 passed - 1 SKIPPED, and that skip is
+        #      a cluster-scoped read no attendee identity can ever answer.
+        #   4  NOTHING was graded (pass+fail == 0) -- the run answered zero checks, so it says nothing
+        #      about the lab at all. This is the no-signal run strict mode exists to catch.
+        # ws smoke passes G1 on 3 and fails it on 4, so both codes are pinned here SEPARATELY: a
+        # regression that merged them back would either make every module carrying a legitimately
+        # unanswerable check permanently unpassable, or green-light a verify that read nothing. The
+        # nothing-graded cases are ordered before the strict ones they mirror so the "default" cases
+        # genuinely run with VERIFY_STRICT never set.
         #
         # This asserts the CONTRACT, not a lab grade: grading a real lab needs a cluster CI does not
         # have, and a job that pretended otherwise would be the false-green this all exists to stop.
@@ -1088,13 +1100,19 @@ jobs:
           run_case() { ( set -euo pipefail; source tools/verify/_lib.sh; eval "$1"; verify_summary ); }
           rc=0; run_case 'check "passes" true; warn "cannot evaluate"' || rc=$?
           [ "$rc" -eq 0 ] || { echo "::error::default, pass+skip: expected 0, got $rc"; exit 1; }
+          rc=0; run_case 'warn "cannot evaluate"' || rc=$?
+          [ "$rc" -eq 0 ] || { echo "::error::default, nothing graded: expected 0, got $rc"; exit 1; }
           rc=0; VERIFY_STRICT=1 run_case 'check "passes" true; warn "cannot evaluate"' || rc=$?
           [ "$rc" -eq 3 ] || { echo "::error::strict, pass+skip: expected 3, got $rc"; exit 1; }
+          rc=0; VERIFY_STRICT=1 run_case 'warn "cannot evaluate"' || rc=$?
+          [ "$rc" -eq 4 ] || { echo "::error::strict, NOTHING graded: expected 4 (not 3 -- rc 3 is a" \
+                                    "partial run that passed everything it graded), got $rc"; exit 1; }
           rc=0; VERIFY_STRICT=1 run_case 'check "passes" true' || rc=$?
           [ "$rc" -eq 0 ] || { echo "::error::strict, clean: expected 0, got $rc"; exit 1; }
           rc=0; VERIFY_STRICT=1 run_case 'check "fails" false; warn "cannot evaluate"' || rc=$?
           [ "$rc" -eq 1 ] || { echo "::error::strict, real failure: expected 1, got $rc"; exit 1; }
-          echo "contract holds: default 0 - strict 3 on skip - strict 0 clean - strict 1 on failure."
+          echo "contract holds: default 0 (partial and nothing-graded alike) - strict 3 on a partial" \
+               "run - strict 4 when nothing was graded - strict 0 clean - strict 1 on failure."
 
   cohort-ops:
     runs-on: ubuntu-latest

@@ -27,24 +27,41 @@
 #       count and mark it ungraded. A clean run (no skips) MUST still print the plain green claim —
 #       a gate that demanded a caveat on every run would just be trained away. Failures + skips
 #       report both.
-#   [3] EXIT CONTRACT. Skipped-but-nothing-failed exits 0 BY DEFAULT and that is load-bearing:
-#       tools/ws/ws cmd_prep reads `<script> --entry-only`'s rc as a boolean "is this world already
-#       prepared?", and a non-zero rc tells the attendee their healthy environment is broken and
-#       offers to WIPE it; ws smoke reads the same rc as a G1 ❌. Automation that must fail closed
-#       opts in with VERIFY_STRICT=1 → rc 3, distinct from 1 (a check FAILED) and 2 (usage error).
-#   [4] WS DOCTOR'S RC MAPPING. `ws doctor` (tools/ws/ws) is the first opted-in caller: its "entry
-#       verify (strict)" row runs a module's verify script under VERIFY_STRICT=1 and classifies the rc
-#       through doctor_verify_rc_outcome(). Executed the real function, extracted like [1]-[3] extract
-#       the real _lib.sh: rc 3 must map to skip (never fail) — a doctor that turned VERIFY_STRICT's
-#       information back into a false failure would defeat the reason it opted in.
+#   [3] EXIT CONTRACT. Skipped-but-nothing-failed exits 0 BY DEFAULT and that is load-bearing: the
+#       unstrict rc is what an attendee's own `ws verify` returns, and a non-zero there tells someone
+#       with a healthy world that it is broken over a check nobody was permitted to answer. Automation
+#       that must fail closed opts in with VERIFY_STRICT=1 — and gets TWO codes, because "something
+#       was skipped" was two different runs wearing one (measured in user5's cockpit, 2026-08-05):
+#         rc 3  SOME checks were skipped and every GRADED one passed — incomplete, but a legitimate
+#               pass. jobs-batch-kueue lands here for every attendee: 13 passed · 1 SKIPPED, and that
+#               skip is a cluster-scoped read no attendee identity can ever answer.
+#         rc 4  NOTHING was graded, pass+fail == 0 — the run answered zero checks, so it says nothing
+#               about the lab at all. THIS is the no-signal run strict mode exists to catch.
+#       Both distinct from 1 (a check FAILED) and 2 (usage error). Pinning 3 and 4 SEPARATELY is the
+#       whole point: `ws smoke` passes G1 on 3 and fails it on 4, so a regression that merged them
+#       back would either make every module with an unanswerable check permanently unpassable, or
+#       green-light a verify that read nothing.
+#   [4] WS DOCTOR'S RC MAPPING. `ws doctor` (tools/ws/ws) was the first opted-in caller — `ws prep`
+#       and `ws smoke` followed — and each runs a module's verify script under VERIFY_STRICT=1 and
+#       classifies the rc through the one shared doctor_verify_rc_outcome(). Executed the real
+#       function, extracted like [1]-[3] extract the real _lib.sh: rc 3 AND rc 4 must both map to
+#       skip (never fail). A doctor that turned VERIFY_STRICT's information back into a false failure
+#       would defeat the reason it opted in; and cmd_prep's fail arm is the one that offers to WIPE
+#       the attendee's namespaces, so losing the rc-4 arm proposes a destructive rebuild over a run
+#       that merely could not read anything. (`ws smoke`, the one caller that must tell 3 from 4,
+#       reads the raw rc alongside this word — which is why the word itself can stay coarse.)
 #
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + grep + sed + awk.
 #
-# --self-test plants four canaries, each a real regression shape: the pre-fix counter-blind warn()
-# for [1], the pre-fix two-outcome verify_summary() for [2], a strict-by-default flip for [3], and
-# ws doctor's classifier miscounting rc 3 as fail for [4]. Exit 1 = every canary was caught AND the
-# real tree is clean under the same detectors; that is a PASS, matching the house convention where CI
-# asserts the self-test step exits exactly 1. Exit 2 = a detector is blind, or the harness is broken.
+# --self-test plants a canary for EVERY assertion here, each a real regression shape: the pre-fix
+# counter-blind warn() for [1], the pre-fix two-outcome verify_summary() for [2], a strict-by-default
+# flip plus the nothing-graded run collapsed back into the partial one and a nothing-graded run made
+# non-zero for everyone for [3], ws doctor's classifier miscounting rc 3 as fail and its rc-4 arm
+# deleted for [4], and na()-as-skip / NA-laundering-a-skip for [5]. Their number is deliberately not
+# written down — a count here goes stale the moment an assertion is added, which is exactly how a
+# guard ends up with an assertion nothing proves. Exit 1 = every canary was caught AND the real tree
+# is clean under the same detectors; that is a PASS, matching the house convention where CI asserts
+# the self-test step exits exactly 1. Exit 2 = a detector is blind, or the harness is broken.
 #
 # Exit codes:
 #   0  contract holds
@@ -196,21 +213,24 @@ check_exit_contract() {  # warn_file summary_file → 0 correct, 1 wrong
   ran_check
   local wf="$1" sf="$2" rc=0 got
 
-  # (a) DEFAULT: skips but no failures → rc 0. tools/ws/ws cmd_prep branches on this rc and offers a
-  # destructive wipe when it is non-zero; ws smoke turns it into a G1 ❌. Neither file is editable
-  # from a verify-script change, so the default must stay 0 and the BANNER carries the signal.
+  # (a) DEFAULT: skips but no failures → rc 0. This is the rc an attendee's own `ws verify` returns,
+  # and it is why a skip never reads as a broken world. ws prep's non-zero branch offers a destructive
+  # WIPE and ws smoke turns it into a G1 ❌ — both now CLASSIFY the rc under VERIFY_STRICT=1 rather
+  # than reading it as a boolean, which is precisely why the unstrict default must stay 0 for every
+  # caller that did NOT opt in, with the BANNER carrying the signal.
   got=0; run_case "$wf" "$sf" 7 0 6 0 >/dev/null || got=$?
   if [[ "$got" -ne 0 ]]; then
     bad "[3a] skips with no failures must exit 0 by default; got rc=${got}."
-    note "    ws prep reads '<script> --entry-only' as a boolean and a non-zero rc tells an attendee"
-    note "    with a healthy world that it is broken, then offers to WIPE it."
+    note "    A non-zero default tells an attendee with a healthy world that it is broken, over checks"
+    note "    their own identity was never permitted to answer."
     rc=1
   fi
 
-  # (b) STRICT: the machine-readable signal, opt-in so no existing caller changes behaviour.
+  # (b) STRICT: the machine-readable signal, opt-in so no existing caller changes behaviour. This is
+  # the PARTIAL run — some skipped, everything graded passed — and it is a legitimate pass; see (e).
   got=0; run_case "$wf" "$sf" 7 0 6 1 >/dev/null || got=$?
   if [[ "$got" -ne 3 ]]; then
-    bad "[3b] VERIFY_STRICT=1 with skips must exit 3 (not 1 = a check FAILED, not 2 = usage); got rc=${got}."
+    bad "[3b] VERIFY_STRICT=1 with skips alongside graded passes must exit 3 (not 1 = a check FAILED, not 2 = usage, not 4 = nothing graded); got rc=${got}."
     rc=1
   fi
 
@@ -220,33 +240,64 @@ check_exit_contract() {  # warn_file summary_file → 0 correct, 1 wrong
   got=0; run_case "$wf" "$sf" 3 2 1 1 >/dev/null || got=$?
   [[ "$got" -ne 1 ]] && { bad "[3d] a failed check must exit 1 whether or not anything was skipped; got rc=${got}."; rc=1; }
 
-  [[ "$rc" -eq 0 ]] && ok "[3] exit contract: default 0 (callers unbroken), VERIFY_STRICT=1 → 3 on skips, 1 on failure"
+  # (e) STRICT + NOTHING GRADED → 4, and it must be DISTINCT from (b)'s 3. pass+fail == 0 means the
+  # run answered zero checks: no signal at all, and a ✅ over it is the false completeness this whole
+  # banner design was built for. rc 3 says the opposite — the suite DID run and DID pass what it could
+  # — so a caller that must fail closed fails on 4 and not on 3. Collapsing them back into one code is
+  # not a cosmetic regression: `ws smoke` read "a skip happened" as "graded nothing" and printed "the
+  # cockpit verify SKIPPED every check" over a run that graded 13 of 14, which made every module
+  # carrying a legitimately-unanswerable check permanently unable to pass G1 (user5, 2026-08-05).
+  got=0; run_case "$wf" "$sf" 0 0 3 1 >/dev/null || got=$?
+  if [[ "$got" -ne 4 ]]; then
+    bad "[3e] VERIFY_STRICT=1 with NOTHING graded (0 passed, 0 failed, 3 skipped) must exit 4; got rc=${got}."
+    note "    rc 3 and rc 4 are two different runs: 13-of-14 graded is an incomplete PASS, 0-of-14 is"
+    note "    no signal at all. A gate that cannot tell them apart either rejects honest partial runs"
+    note "    or greenlights a verify that read nothing — this repo has now shipped both."
+    rc=1
+  fi
+
+  # (f) …and the DEFAULT stays 0 even there, for the same reason as (a): the attendee-facing rc is not
+  # where this signal belongs. The nothing-graded BANNER is what says so ("⚠ NOTHING was graded"), and
+  # a non-zero default would re-arm ws prep's wipe offer for every caller that never opted in.
+  got=0; run_case "$wf" "$sf" 0 0 3 0 >/dev/null || got=$?
+  [[ "$got" -ne 0 ]] && { bad "[3f] a nothing-graded run must still exit 0 by DEFAULT (the banner carries the signal, not the rc); got rc=${got}."; rc=1; }
+
+  [[ "$rc" -eq 0 ]] && ok "[3] exit contract: default 0 (callers unbroken), VERIFY_STRICT=1 → 3 on a partial run, 4 when nothing was graded, 1 on failure"
   return "$rc"
 }
 
 # ── [4] ws doctor's strict-mode rc → outcome mapping ─────────────────────────
 # `ws doctor` opts into VERIFY_STRICT=1 on its "entry verify (strict)" row and reads the rc back
-# through doctor_verify_rc_outcome() (tools/ws/ws). The whole point of that opt-in collapses if the
-# mapping quietly turns rc 3 (skip-only) back into a doctor FAILURE — this executes the REAL function,
-# extracted the same way [1]-[3] execute the real _lib.sh, so a regression there is caught here rather
-# than only in a human reading doctor's output.
+# through doctor_verify_rc_outcome() (tools/ws/ws); `ws prep` and `ws smoke` now share that one
+# helper rather than re-implementing it. The whole point of the opt-in collapses if the mapping
+# quietly turns an ungraded run — rc 3 (partial) or rc 4 (nothing graded) — back into a FAILURE, and
+# in cmd_prep the fail arm is the one that offers to WIPE the attendee's namespaces. This executes
+# the REAL function, extracted the same way [1]-[3] execute the real _lib.sh, so a regression there
+# is caught here rather than only in a human reading doctor's output.
 check_doctor_rc_mapping() {  # doctor_fn_file → 0 correct, 1 wrong
   ran_check
   local fn_file="$1" rc=0 pair code expect actual
-  for pair in "0=pass" "3=skip" "1=fail" "2=fail"; do
+  for pair in "0=pass" "3=skip" "4=skip" "1=fail" "2=fail"; do
     code="${pair%%=*}"; expect="${pair##*=}"
     actual="$(bash -c "$(cat "$fn_file"); doctor_verify_rc_outcome ${code}" 2>/dev/null)" || actual=""
     if [[ "$actual" != "$expect" ]]; then
       bad "[4] doctor_verify_rc_outcome ${code} => '${actual:-<empty>}', want '${expect}'."
       if [[ "$code" == "3" ]]; then
-        note "    rc 3 is VERIFY_STRICT's skip-only signal — mapping it to fail would make ws doctor"
-        note "    manufacture a failure out of information an operator asked for (owner decision: doctor"
-        note "    and CI opt in, ws prep/ws smoke stay untouched)."
+        note "    rc 3 is VERIFY_STRICT's partial-run signal — some checks skipped, every graded one"
+        note "    passed. Mapping it to fail would make ws doctor manufacture a failure out of"
+        note "    information an operator asked for (owner decision: doctor/prep/CI opt in)."
+      fi
+      if [[ "$code" == "4" ]]; then
+        note "    rc 4 (NOTHING graded) must classify as skip too, and the arm looks redundant next to"
+        note "    rc 3 right up until it is deleted: 4 then falls through to \`*) echo fail\`, and"
+        note "    cmd_prep's fail arm offers to WIPE the attendee's namespaces — a destructive rebuild"
+        note "    proposed over a run that could not READ anything, not one that found anything wrong."
+        note "    The 3-vs-4 split lives where it is needed: ws smoke reads the raw rc next to this word."
       fi
       rc=1
     fi
   done
-  [[ "$rc" -eq 0 ]] && ok "[4] ws doctor's rc classifier: 0→pass, 3→skip (never fail), 1/2→fail"
+  [[ "$rc" -eq 0 ]] && ok "[4] ws doctor's rc classifier: 0→pass, 3/4→skip (never fail), 1/2→fail"
   return "$rc"
 }
 
@@ -375,8 +426,10 @@ run_check() {  # warn_file summary_file doctor_fn_file na_file → 0 clean, 1 br
 }
 
 # ── self-test ─────────────────────────────────────────────────────────────────
-# Four canaries, each a real regression shape. All must be CAUGHT, and the real tree must be clean
-# under the same detectors — anything else means the gate is decorative.
+# One canary per assertion, each a real regression shape. All must be CAUGHT, and the real tree must
+# be clean under the same detectors — anything else means the gate is decorative. Adding an assertion
+# above without adding its canary here is the defect, not the paperwork: exit 1 proves SOMETHING was
+# detected, never that the new thing was.
 self_test() {
   local tmp wf sf dff nf real_rc got
   tmp="$(mktemp -d)"
@@ -511,7 +564,61 @@ CANARY
     return 2
   fi
 
-  ok "self-test ok — real ${LIB}/${WS_CLI} clean (rc=0); counter-blind warn, two-outcome banner, strict-by-default, doctor-rc-miscounts-skip, na-counts-as-skip, na-launders-skip and bare-NA-read canaries all caught."
+  # ── the rc 3 / rc 4 split (2026-08-05) ────────────────────────────────────────────────────────
+  # Shipped WITH the assertions they prove. An assertion with no canary is this file's own subject
+  # matter one level up: a gate that reports a pass over something it never looked at. Before these,
+  # [3] pinned 0/3/1/2 and [4] pinned 0/3/1/2 — a nothing-graded run sent back to rc 3, or a deleted
+  # `4) echo skip ;;` arm, walked straight through a full green board (verified against a scratch
+  # tree carrying each mutation).
+
+  # Canary H — the nothing-graded run collapsed back into the partial one: the `graded == 0` branch
+  # never taken, so a run that answered ZERO checks exits 3 and describes itself as "0 passed ·
+  # 3 SKIPPED". Byte-for-byte the real function with that one branch forced closed — i.e. the
+  # pre-split behaviour verbatim, in which "read nothing" and "read all but one" were one outcome.
+  sed 's|if (( graded == 0 )); then|if false; then|' "$sf" > "$tmp/summary-nothing-graded-as-partial.sh"
+  if ! grep -q 'if false; then' "$tmp/summary-nothing-graded-as-partial.sh"; then
+    bad "SELF-TEST FAILED: could not build the nothing-graded-as-partial canary — the \`graded == 0\` branch it mutates was not found."
+    return 2
+  fi
+  got=0; check_exit_contract "$wf" "$tmp/summary-nothing-graded-as-partial.sh" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: a nothing-graded run exiting 3 instead of 4 was NOT detected (rc=${got}) — assertion [3e] is blind."
+    return 2
+  fi
+
+  # Canary I — the opposite over-correction, and the one a well-meaning fix reaches for: make the
+  # no-signal run non-zero for EVERYONE by hoisting it out of the VERIFY_STRICT gate. Every attendee
+  # holding an identity that cannot answer a check then gets a non-zero `ws verify` — [3a]'s defect,
+  # re-armed on the new branch. Built by rewriting that branch's DEFAULT exit, the only `exit 0` at
+  # its indent, so the strict arm and every other path stay byte-for-byte real.
+  sed 's|^      exit 0$|      exit 4|' "$sf" > "$tmp/summary-nothing-graded-nonzero-default.sh"
+  if ! grep -qx '      exit 4' "$tmp/summary-nothing-graded-nonzero-default.sh"; then
+    bad "SELF-TEST FAILED: could not build the nothing-graded-nonzero-default canary — the branch's default \`exit 0\` was not found at its expected indent."
+    return 2
+  fi
+  got=0; check_exit_contract "$wf" "$tmp/summary-nothing-graded-nonzero-default.sh" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: a nothing-graded run made non-zero for callers that never opted in was NOT detected (rc=${got}) — assertion [3f] is blind."
+    return 2
+  fi
+
+  # Canary J — ws doctor's rc-4 arm DELETED, which is how that line would really go: sitting next to
+  # `3) echo skip ;;` it reads as a duplicate, and removing it drops rc 4 through to `*) echo fail`
+  # — cmd_prep's offer-to-WIPE branch, now proposing a destructive rebuild over a run that could not
+  # read anything rather than one that found anything wrong.
+  sed '/4) echo skip ;;/d' "$dff" > "$tmp/doctor-rc-drops-nothing-graded.sh"
+  if grep -q '4) echo skip' "$tmp/doctor-rc-drops-nothing-graded.sh" \
+     || ! grep -q '3) echo skip' "$tmp/doctor-rc-drops-nothing-graded.sh"; then
+    bad "SELF-TEST FAILED: could not build the doctor-rc-drops-nothing-graded canary — the rc-4 arm it deletes was not found, or the deletion took the rc-3 arm with it."
+    return 2
+  fi
+  got=0; check_doctor_rc_mapping "$tmp/doctor-rc-drops-nothing-graded.sh" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: a doctor classifier that lost its rc-4 arm was NOT detected (rc=${got}) — the 4=skip assertion in [4] is blind."
+    return 2
+  fi
+
+  ok "self-test ok — real ${LIB}/${WS_CLI} clean (rc=0); counter-blind warn, two-outcome banner, strict-by-default, doctor-rc-miscounts-skip, na-counts-as-skip, na-launders-skip, bare-NA-read, nothing-graded-as-partial, nothing-graded-nonzero-default and doctor-rc-drops-nothing-graded canaries all caught."
   return 1
 }
 
