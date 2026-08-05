@@ -165,8 +165,15 @@ spec:
               if oc get configmap cluster-monitoring-config -n openshift-monitoring >/dev/null 2>&1; then
                 record_once monitoring_cm_existed true
                 UWM="$(oc get configmap cluster-monitoring-config -n openshift-monitoring -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
-                if   echo "$UWM" | grep -qE 'enableUserWorkload:[[:space:]]*true';  then record_once monitoring_uwm_prior true
-                elif echo "$UWM" | grep -qE 'enableUserWorkload:[[:space:]]*false'; then record_once monitoring_uwm_prior false
+                # HERE-STRINGS, not `echo | grep -q`. Under `set -o pipefail` a `grep -q` that
+                # matches EARLY exits before the producer finishes writing; the producer dies of
+                # SIGPIPE and the pipeline's status becomes 141 instead of grep's success — a
+                # genuine match reads as a non-match. This ConfigMap's config.yaml is routinely
+                # multi-line and enableUserWorkload is rarely its last line, so this is exactly the
+                # shape. Misreading it misrecords the prior monitoring state ogsr-uninstall.sh
+                # restores from. Same class fixed across bootstrap/install.sh in c500a84.
+                if   grep -qE 'enableUserWorkload:[[:space:]]*true'  <<< "$UWM"; then record_once monitoring_uwm_prior true
+                elif grep -qE 'enableUserWorkload:[[:space:]]*false' <<< "$UWM"; then record_once monitoring_uwm_prior false
                 else record_once monitoring_uwm_prior absent; fi
               else
                 record_once monitoring_cm_existed false
@@ -174,7 +181,7 @@ spec:
               fi
 
               info "OpenShift GitOps operator (adopted vs created)"
-              if oc get subscription openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
+              if oc get subscriptions.operators.coreos.com openshift-gitops-operator -n openshift-gitops-operator >/dev/null 2>&1; then
                 record_once gitops_preexisted true
                 RES="$(oc get argocd openshift-gitops -n openshift-gitops -o jsonpath='{.spec.controller.resources}' 2>/dev/null | base64 | tr -d '\n' || true)"
                 # Empty is NOT recorded, deliberately: absence of this key is how ogsr-uninstall.sh's
@@ -206,10 +213,38 @@ spec:
               # The stack list ogsr-uninstall.sh re-derives the operator set from.
               record_once installed_stacks "$STACKS"
 
+              # snapshot_operatorgroups NS — record the OperatorGroup(s) an ADOPTED operator's
+              # namespace ALREADY had, captured before any child Application exists. Twin of
+              # bootstrap/install.sh's snapshot_operatorgroups(). Two things depend on it: the
+              # adopted-protection Job (wave -9) annotates them Prune=false,Delete=false so a
+              # cascade delete can never take the org's OperatorGroup down with our app, and the
+              # PostSync uniqueness gate can tell a namespace WE broke apart from one that arrived
+              # with two. A healthy OLM namespace has exactly one; with two, OLM fails every CSV in
+              # it (TooManyOperatorGroups) while the pods keep running.
+              snapshot_operatorgroups() {
+                local ns="$1" ogs
+                ogs="$(oc get operatorgroups.operators.coreos.com -n "$ns" \
+                        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null || true)"
+                ogs="$(echo "$ogs" | xargs || true)"
+                [[ -n "$ogs" ]] || return 0
+                record_once "og_${ns}" "preexisting:${ogs// /,}"
+              }
+
+              # Baseline of OperatorGroups-per-namespace across the WHOLE cluster, taken while it is
+              # still exactly as we found it. The PostSync gate reads it to report what a namespace
+              # held before this install, so "it already had two" is a fact and not a guess.
+              info "OperatorGroup baseline (per namespace, cluster-wide)"
+              OG_BASELINE="$(oc get operatorgroups.operators.coreos.com -A --no-headers 2>/dev/null \
+                              | awk '{print $1}' | sort | uniq -c | awk '{print $2"="$1}' | paste -sd, - || true)"
+              if [[ -n "$OG_BASELINE" ]]; then
+                record_once operatorgroups_baseline "$OG_BASELINE"
+              fi
+
               # gitea-operator: see the file header — external OLMDeploy base, not locally globbable.
               info "gitea-operator (external OLMDeploy base — explicit check, not part of the walk below)"
-              if oc get subscription gitea-operator -n gitea-operator >/dev/null 2>&1; then
+              if oc get subscriptions.operators.coreos.com gitea-operator -n gitea-operator >/dev/null 2>&1; then
                 record_once op_gitea-operator "adopted:gitea-operator"
+                snapshot_operatorgroups gitea-operator
               else
                 record_once op_gitea-operator "created:gitea-operator"
               fi
@@ -235,8 +270,12 @@ spec:
                       name="$(yaml_field "$sub" '{.metadata.name}')"
                       ns="$(yaml_field "$sub" '{.metadata.namespace}')"
                       [[ -n "$name" ]] || continue
-                      if oc get subscription "$name" -n "$ns" >/dev/null 2>&1; then
+                      # ALWAYS fully qualified. The bare plural `subscriptions` is claimed by THREE
+                      # API groups and messaging.knative.dev shadows OLM's — that ambiguity left
+                      # every operator behind at teardown once already (64eb8da).
+                      if oc get subscriptions.operators.coreos.com "$name" -n "$ns" >/dev/null 2>&1; then
                         record_once "op_${name}" "adopted:${ns}"
+                        snapshot_operatorgroups "$ns"
                       else
                         record_once "op_${name}" "created:${ns}"
                       fi

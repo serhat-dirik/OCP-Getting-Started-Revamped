@@ -1,5 +1,17 @@
 # =============================================================================
-# Argo CD resource-health-check tuning (Sync hook, wave -9) — narrowly overrides the
+# Argo CD instance tuning (Sync hook, wave -9). TWO changes to the one ArgoCD CR this whole
+# install reconciles through, applied by a single Job so the controller restarts once, not twice.
+#
+# (1) application-controller SIZING — raise the operator-default 2Gi. Details in the inline block
+#     below: 2Gi is OOMKilled before the workshop layer materializes, the script path has raised
+#     it since 2026-07-12 (platform-portfolio/argocd-bootstrap/operator/argocd-controller-
+#     resources.yaml), and NOTHING on the FSC path did until now — the same source produced two
+#     differently-sized clusters. Gated on argocd.manageControllerResources (values-level consent,
+#     because a Job has no terminal to ask on) and recorded into ogsr-uninstall-state before
+#     patching, so teardown can put it back. Only the health check below is shared with the
+#     portfolio file and gated by copy-drift; the sizing is expressed from .Values here.
+#
+# (2) resourceHealthChecks — narrowly overrides the
 # built-in operators.coreos.com/Subscription health check for ONE specific, provable-benign
 # case: an ADOPTED operator whose OLM Subscription already reports `.status.state:
 # AtLatestKnown` with `installedCSV == currentCSV` (i.e. OLM itself considers it fully
@@ -67,15 +79,110 @@ spec:
           env:
             - name: ARGOCD_NS
               value: {{ .Values.argocd.namespace | quote }}
+            - name: STATE_NS
+              value: {{ .Values.namespaces.system | quote }}
+            - name: MANAGE_CONTROLLER_RESOURCES
+              value: {{ .Values.argocd.manageControllerResources | quote }}
+            - name: CONTROLLER_RESOURCES_JSON
+              value: {{ .Values.argocd.controllerResources | toJson | quote }}
+            - name: TARGET_MEM
+              value: {{ .Values.argocd.controllerResources.limits.memory | quote }}
           args:
             - |
               set -euo pipefail
               ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
+              warn(){ echo "⚠️  $*" >&2; }; err(){ echo "❌ $*" >&2; }
               ARGOCD_NAME=openshift-gitops
+              CM="ogsr-uninstall-state"
 
               if ! oc get argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" >/dev/null 2>&1; then
                 info "no ${ARGOCD_NS}/${ARGOCD_NAME} ArgoCD CR yet — nothing to tune, skipping"
                 exit 0
+              fi
+
+              # ── application-controller sizing ─────────────────────────────────────────────────
+              # The operator default is 2Gi and 2Gi does not survive this workshop: workshop-config
+              # alone carries 636 resources and the controller is OOMKilled (exit 137) before
+              # anything materializes — measured on a clean cluster, where the whole workshop layer
+              # came up as 3 namespaces instead of ~70 with no sync operation ever recorded. The
+              # script path raises it in platform-portfolio/argocd-bootstrap/install.sh; until now
+              # NOTHING on the FSC path did, so the same source produced two differently-sized
+              # clusters. Values-level consent (argocd.manageControllerResources) stands in for the
+              # script's interactive prompt — a Job has no terminal, exactly the case the script
+              # answers with OGSR_ADOPTED_ARGOCD_MEMORY=apply.
+              if [[ "$MANAGE_CONTROLLER_RESOURCES" != "true" ]]; then
+                warn "argocd.manageControllerResources=false — NOT resizing the application-controller."
+                warn "  The operator default is 2Gi. Below ~6Gi the controller is OOMKilled while"
+                warn "  materializing entry states and NOTHING the workshop installs will ever sync."
+                warn "  Raise it yourself before handing this cluster to attendees:"
+                warn "    oc -n ${ARGOCD_NS} patch argocd ${ARGOCD_NAME} --type merge \\"
+                warn "      -p '{\"spec\":{\"controller\":{\"resources\":${CONTROLLER_RESOURCES_JSON}}}}'"
+              else
+                CUR_MEM="$(oc get argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" \
+                            -o jsonpath='{.spec.controller.resources.limits.memory}' 2>/dev/null || true)"
+                if [[ "$CUR_MEM" == "$TARGET_MEM" ]]; then
+                  ok "application-controller already at ${CUR_MEM} — nothing to change"
+                else
+                  # RECORD BEFORE MUTATING, and refuse if the record fails. We may be about to change
+                  # a CR the organisation owns; the consent given at order time was consent to a
+                  # REVERSIBLE change, and without the record it is not reversible. Nothing has been
+                  # touched at this point, so refusing costs the operator nothing.
+                  #
+                  # ONE FACT, ONE KEY. The prior value goes into the SAME key
+                  # gitops_argocd_controller_resources_b64 that bootstrap/install.sh, the portfolio
+                  # bootstrap and this chart's state-capture Job already write and
+                  # ogsr-uninstall.sh's restore_argocd_controller_resources() already reads — one
+                  # restore path fed by every install entry point. An EMPTY prior is meaningful and
+                  # is encoded by the ABSENCE of that key ("the CR carried no explicit
+                  # .spec.controller.resources"), which teardown restores by REMOVING the field — so
+                  # an empty value is never written. argocd_controller_resources_changed_by_us is a
+                  # genuinely different fact (the b64 key is also written by passes that mutate
+                  # nothing) and earns its own key: teardown restores only what we changed.
+                  CUR_RES="$(oc get argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" \
+                              -o jsonpath='{.spec.controller.resources}' 2>/dev/null || true)"
+                  CUR_RES_B64="$(printf '%s' "$CUR_RES" | base64 | tr -d '\n' || true)"
+                  [[ -n "$CUR_RES" ]] || CUR_RES_B64=""
+                  RECORDED=false
+                  oc create configmap "$CM" -n "$STATE_NS" >/dev/null 2>&1 || true
+                  if oc get configmap "$CM" -n "$STATE_NS" >/dev/null 2>&1; then
+                    PRIOR="$(oc get configmap "$CM" -n "$STATE_NS" \
+                              -o jsonpath='{.data.gitops_argocd_controller_resources_b64}' 2>/dev/null || true)"
+                    # Carried residue: a key a previous ogsr-uninstall could not restore is the org's
+                    # ALREADY-KNOWN original (as its value, or — when absent — as the fact that the CR
+                    # carried no explicit resources), while the live CR still carries OUR sizing.
+                    # Re-deriving it here would file the workshop's own leftover as the org's
+                    # baseline: the 2026-07-31 state-lifetime defect. Counts as recorded; do not write.
+                    RESIDUE=" $(oc get configmap "$CM" -n "$STATE_NS" \
+                                 -o jsonpath='{.data.residue_keys}' 2>/dev/null | tr ',' ' ' | xargs || true) "
+                    case "$RESIDUE" in
+                      *" gitops_argocd_controller_resources_b64 "*)
+                        info "prior controller sizing carried forward by a previous ogsr-uninstall — kept verbatim"
+                        PRIOR="carried" ;;
+                    esac
+                    RES_OK=true
+                    if [[ -z "$PRIOR" && -n "$CUR_RES_B64" ]]; then
+                      oc patch configmap "$CM" -n "$STATE_NS" --type merge \
+                        -p "{\"data\":{\"gitops_argocd_controller_resources_b64\":\"${CUR_RES_B64}\"}}" \
+                        >/dev/null 2>&1 || RES_OK=false
+                    fi
+                    if [[ "$RES_OK" == "true" ]] \
+                       && oc patch configmap "$CM" -n "$STATE_NS" --type merge \
+                            -p '{"data":{"argocd_controller_resources_changed_by_us":"true"}}' >/dev/null 2>&1; then
+                      RECORDED=true
+                    fi
+                  fi
+                  if [[ "$RECORDED" != "true" ]]; then
+                    err "could NOT record the prior controller sizing in ${STATE_NS}/${CM} — NOT patching."
+                    err "  Nothing on this cluster has been changed. Without that record teardown cannot"
+                    err "  put the controller back, so the change would not be reversible."
+                    err "  Current value, for your records:"
+                    err "    spec.controller.resources: ${CUR_RES:-<none — the CR carries no explicit resources>}"
+                    exit 1
+                  fi
+                  oc patch argocd "$ARGOCD_NAME" -n "$ARGOCD_NS" --type merge \
+                    -p "{\"spec\":{\"controller\":{\"resources\":${CONTROLLER_RESOURCES_JSON}}}}" >/dev/null
+                  ok "application-controller raised from ${CUR_MEM:-the operator default 2Gi} to ${TARGET_MEM} (prior sizing recorded — ogsr-uninstall.sh restores it)"
+                fi
               fi
 
               info "tuning ${ARGOCD_NS}/${ARGOCD_NAME}: operators.coreos.com/Subscription health check"

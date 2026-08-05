@@ -58,15 +58,44 @@
      it. If Etherpad ever CrashLoopBackOffs with EACCES on a path under /opt/etherpad-lite, that is
      this constraint reasserting itself — mount the path, do not chmod the image.
 
+  8. THE PLUGIN MIGRATION MUST BE PRE-EMPTED, and that is what the init container does. This is the
+     prediction at the end of design note 7 coming true on first contact with a cluster, in a form
+     that does NOT say EACCES. At boot Etherpad calls `checkForMigration()`, which runs a one-time
+     upgrade path for people who once installed plugins into `node_modules`:
+
+         installer.ts:  installedPluginsPath = path.join(settings.root, 'var/installed_plugins.json')
+                        try { await fs.access(installedPluginsPath, F_OK) }
+                        catch (err) { await migratePluginsFromNodeModules() }   // <- pnpm runs here
+
+     The migration shells out to `pnpm ls --long --json --depth=0 --no-production`. Under the
+     restricted SCC that command CANNOT succeed, for two independent reasons, both measured:
+       - pnpm probes its store location by creating a temp file in the PROJECT directory, and
+         /opt/etherpad-lite is mode 755 owned by uid 5001 — `[EACCES] permission denied, open
+         '/opt/etherpad-lite/_tmp_5_<hex>'`;
+       - it then falls back to the store index baked into the image at
+         /home/etherpad/.local/share/pnpm/store/v11/index.db, which is mode 644 owned by uid 5001 —
+         `ERR_SQLITE_ERROR: attempt to write a readonly database`.
+     Etherpad's logger swallows both and reports only `Command exited with code 1`, then exits 1 —
+     CrashLoopBackOff, and workshop-config Degraded.
+
+     The gate is the FILE'S EXISTENCE, nothing else: there is NO env var and NO settings.json option
+     that skips the migration (checked in the image's own installer.ts and against the upstream
+     v3.3.3 tag — do not go looking for one). And the path it tests sits under `var/`, which is
+     already our PVC. So the init container writes `{"plugins":[]}` there when it is absent, and the
+     migration is correctly skipped: we ship no plugins, so there has never been anything to migrate.
+     Normal plugin discovery (`plugins.update()`) is a different call and still runs.
+
+     Do NOT "fix" this by making pnpm work. /opt/etherpad-lite cannot be made writable for an
+     arbitrary UID without masking the application directory itself, and a different image tag does
+     not help — this is structural to running 3.x as an arbitrary UID, not a broken build.
+     To deliberately re-run the migration: delete the file from the PVC and restart the Deployment.
+
   Grounded 2026-08-05 against the etherpad/etherpad image (Docker Hub tag list) and the v3.3.3
   sources: Dockerfile (UID/GID/EP_DIR/CMD/HEALTHCHECK), doc/docker.md (env vars),
   src/node/handler/APIKeyHandler.ts (APIKEY.txt), src/node/utils/Settings.ts (SESSIONKEY.txt is
   skipped under key rotation; empty env values are honoured over defaults),
-  src/node/hooks/express/importexport.ts (/p/<pad>/export/txt).
-
-  NOT YET ASSERTED ON A LIVE CLUSTER (this lane may not apply to one): that no path under
-  /opt/etherpad-lite outside `var/` is written at runtime. First install should check
-  `oc logs deploy/etherpad -n <showroom ns>` for EACCES before the room arrives.
+  src/node/hooks/express/importexport.ts (/p/<pad>/export/txt),
+  src/static/js/pluginfw/installer.ts (the migration gate of design note 8).
 
   RENDERED INTO .Values.showroom.namespace, beside the cockpits — templates/showroom-namespace.yaml
   is the SOLE owner of that Namespace object (a repeated resource parks the whole Argo Application),
@@ -391,6 +420,42 @@ spec:
         app.kubernetes.io/name: etherpad
         app.kubernetes.io/instance: etherpad
     spec:
+      initContainers:
+        # Pre-empt the node_modules plugin migration — design note 8. Without this the pod
+        # CrashLoopBackOffs on every boot under the restricted SCC and takes workshop-config
+        # Degraded with it.
+        #
+        # Runs the SAME image as the main container on purpose: it is already on the node by the
+        # time this runs, so the init step adds no pull, no second tag to bump, and no registry
+        # this cluster might not reach. It needs only a shell — no oc, so none of the ose-cli
+        # memory floor applies.
+        - name: skip-plugin-migration
+          image: {{ $ep.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              f=/opt/etherpad-lite/var/installed_plugins.json
+              # -s not -f: a previous run interrupted mid-write would leave an empty file, which
+              # still satisfies Etherpad's existence check and then fails its JSON.parse.
+              if [ -s "$f" ]; then
+                echo "✅ ${f} already present — left untouched"
+              else
+                # Written via a temp file in the same directory so the rename is atomic: Etherpad
+                # can never observe a half-written file, however this container dies.
+                printf '%s' '{"plugins":[]}' > "${f}.tmp"
+                mv "${f}.tmp" "$f"
+                echo "✅ seeded ${f} — node_modules plugin migration will be skipped"
+              fi
+          volumeMounts:
+            # The PVC, at the same path as the main container: this file must persist, because the
+            # migration is re-attempted on any boot that does not find it.
+            - name: data
+              mountPath: /opt/etherpad-lite/var
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}
       containers:
         - name: etherpad
           image: {{ $ep.image | quote }}

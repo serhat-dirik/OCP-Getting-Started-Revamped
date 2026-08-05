@@ -101,12 +101,18 @@ governed separately (see lightspeedEnabled).
 on only when litemaas.enabled AND both litemaas.apiUrl and litemaas.apiKey are set (no LLM
 endpoint/key ⇒ skipped, no deployer action needed). The stacks.lightspeed expert override forces
 it on. NOT tied to module selection.
+
+The `lightspeed: false` top-level key is the HARD OFF and wins over both — the twin of
+bootstrap/install.sh's `LIGHTSPEED_REQ == "false"` branch, which is evaluated before anything else
+for the same reason. Tested for an explicit boolean false (`kindIs "bool"`), never for
+truthiness: unset is null, and null must mean "auto", not "off".
 */}}
 {{- define "ogsr-bootstrap.lightspeedEnabled" -}}
 {{- $lm := .Values.litemaas | default dict -}}
 {{- $on := false -}}
 {{- if and $lm.enabled (ne (trim (toString ($lm.apiKey | default ""))) "") (ne (trim (toString ($lm.apiUrl | default ""))) "") -}}{{- $on = true -}}{{- end -}}
 {{- if (.Values.stacks | default dict).lightspeed -}}{{- $on = true -}}{{- end -}}
+{{- if and (kindIs "bool" .Values.lightspeed) (not .Values.lightspeed) -}}{{- $on = false -}}{{- end -}}
 {{- ternary "true" "false" $on -}}
 {{- end -}}
 

@@ -41,7 +41,11 @@ spec:
               CM="ogsr-uninstall-state"
               POOL="workshop.redhat.com/pool=batch"
               ZONE_KEY="workshop.redhat.com/zone"
-              ok(){ echo "✅ $*"; }; err(){ echo "❌ $*" >&2; }; info(){ echo "▶ $*"; }
+              # warn() is defined, not assumed: a called-but-undefined helper is a 127 exit under
+              # `set -e`, which is how the RHDH branch of bootstrap/install.sh once aborted an
+              # install instead of warning. Every helper used below is defined here.
+              ok(){ echo "✅ $*"; }; err(){ echo "❌ $*" >&2; }
+              warn(){ echo "⚠️  $*" >&2; }; info(){ echo "▶ $*"; }
               record_once(){
                 local k="$1" v="$2" cur
                 cur="$(oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data['$k']}" 2>/dev/null || true)"
@@ -49,14 +53,52 @@ spec:
                 oc patch configmap "$CM" -n "$STATE_NS" --type merge -p "{\"data\":{\"$k\":\"$v\"}}" >/dev/null 2>&1 || true
               }
 
+              # TAINT FLOOR. Diagnosed live on a 2-worker cluster (2026-07-30): tainting one of two
+              # workers left the survivor at 99% memory requests, RHACS central-db (8Gi + 4 CPU)
+              # Pending for 3h+, Central crashlooping on a DB that never came up, and the
+              # trusted-supply-chain module's scan gate dead — with every Argo app reporting Healthy
+              # throughout. 3 is the smallest pool that can give up a worker and still leave TWO
+              # general-purpose schedulable workers standing. Below the floor we still LABEL the node
+              # (a label alone removes no scheduling capacity, so the nodeSelector half of M16's
+              # lesson is free) but withhold the taint. Same constant, same rule, same messages as
+              # bootstrap/install.sh's MIN_BATCH_POOL_FOR_TAINT — the FSC path must not hand out a
+              # differently-shaped cluster from the script path.
+              MIN_BATCH_POOL_FOR_TAINT=3
+
               info "selecting a batch-pool node (pure worker preferred, deterministic by name)"
-              BATCH="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' \
-                        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
-              [[ -n "$BATCH" ]] || BATCH="$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort | head -1)"
+              # The pool is exactly the set of nodes that would lose one member to the taint, so its
+              # SIZE is what decides whether tainting is affordable — hence counted, not just picked.
+              POOL_RAW="$(oc get nodes -l 'node-role.kubernetes.io/worker,!node-role.kubernetes.io/control-plane' \
+                            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+              [[ -n "$(echo "$POOL_RAW" | xargs || true)" ]] || \
+                POOL_RAW="$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+              read -ra POOL_NODES <<<"$POOL_RAW"
+              POOL_COUNT=${#POOL_NODES[@]}
+              BATCH=""
+              # Guard the expansion on the count: under `set -u`, "${arr[@]}" on an EMPTY array is an
+              # unbound-variable fatal on bash < 4.4, and an unreachable API server (both queries
+              # empty) must reach the explanatory error branch below, not die cryptically here.
+              if [[ "$POOL_COUNT" -gt 0 ]]; then
+                BATCH="$(printf '%s\n' "${POOL_NODES[@]}" | sort | head -1)"
+              fi
+
+              BATCH_TAINTED=false
               if [[ -n "$BATCH" ]]; then
                 oc label node "$BATCH" "$POOL" --overwrite >/dev/null
-                oc adm taint nodes "$BATCH" "${POOL}:NoSchedule" --overwrite >/dev/null
-                ok "batch pool: ${BATCH} labeled+tainted ${POOL}:NoSchedule"
+                if [[ "$POOL_COUNT" -ge "$MIN_BATCH_POOL_FOR_TAINT" ]]; then
+                  oc adm taint nodes "$BATCH" "${POOL}:NoSchedule" --overwrite >/dev/null
+                  BATCH_TAINTED=true
+                  ok "batch pool: ${BATCH} labeled+tainted ${POOL}:NoSchedule (${POOL_COUNT} workers in pool, floor is ${MIN_BATCH_POOL_FOR_TAINT})"
+                else
+                  # Idempotent re-run safety: if an EARLIER sync tainted this node while the pool was
+                  # still at/above the floor and the cluster has since shrunk, clear the stale taint
+                  # rather than leave a silent landmine — the whole point of the floor is that a
+                  # too-small pool must never carry this taint.
+                  oc adm taint nodes "$BATCH" "${POOL}:NoSchedule-" >/dev/null 2>&1 || true
+                  warn "batch pool taint SKIPPED: only ${POOL_COUNT} worker(s) available (need ${MIN_BATCH_POOL_FOR_TAINT}+ to spare one without starving the rest of the cluster — 2026-07-30 incident: 2 workers, 1 tainted, RHACS central-db Pending 3h+, trusted-supply-chain's scan gate dead)"
+                  warn "  worker ${BATCH} is labeled ${POOL} but left fully schedulable — no taint was applied"
+                  warn "  consequence for M16: the nodeSelector half of the batch-pool beat still works (pods requesting the label land on ${BATCH}); the TOLERATION half degrades to label-only — there is no tainted node left on this cluster to demonstrate 'an untolerated pod is refused, a tolerating pod is admitted' against"
+                fi
               else
                 err "no nodes found to shape a batch pool — M16's dedicated-pool beat will have no target"
               fi
@@ -64,13 +106,17 @@ spec:
               info "synthesizing ${ZONE_KEY}={a,b,c} round-robin across all nodes (idempotent)"
               read -ra NODES <<<"$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
               ZONES=(a b c); zi=0
-              for n in "${NODES[@]}"; do
+              # Same empty-array/`set -u` guard as POOL_NODES above.
+              for n in ${NODES[@]+"${NODES[@]}"}; do
                 oc label node "$n" "${ZONE_KEY}=${ZONES[zi % 3]}" --overwrite >/dev/null
                 zi=$((zi + 1))
               done
               ok "synthetic zones applied across ${#NODES[@]} node(s)"
 
               record_once nodes_batch "${BATCH:-}"
+              # Read by the uninstall report AND by anything asking "did this install add the
+              # taint?" — a question `nodes_batch` alone cannot answer once the floor exists.
+              record_once nodes_batch_tainted "${BATCH_TAINTED}"
               record_once nodes_zoned "${NODES[*]:-}"
           resources:
             requests:

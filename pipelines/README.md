@@ -31,7 +31,7 @@ pipelines/
 │   └── parasol-claims-devsecops.yaml  12-stage DevSecOps capstone: SAST/SCA/build/image-scan/sign/config-check/deploy/DAST/perf (app-security-testing)
 ├── pipelinerun/
 │   ├── parasol-claims-run.yaml            ad-hoc run for the pipelines-fundamentals pipeline + workspace/memory shape
-│   └── parasol-claims-devsecops-run.yaml  ad-hoc run for the DevSecOps capstone (shared-workspace + zap-work + k6-work + taskRunSpecs)
+│   └── parasol-claims-devsecops-run.yaml  ad-hoc run for the DevSecOps capstone (shared-workspace + zap-work + k6-work)
 ├── .tekton/
 │   └── parasol-claims-pull-request.yaml   Pipelines-as-Code entrypoint (the git-push beat)
 └── rbac/
@@ -80,7 +80,10 @@ tkn pipelinerun logs -Lf -n <user>-cicd
 - **Memory:** the `-cicd` namespace default container limit is sized (2Gi) for the Maven-heavy steps
   (`unit-test`, `build-image`) in `gitops/workshop-config/templates/per-user-limits.yaml`, so a plain
   run — the console *Actions → Start* form, `tkn pipeline start`, or a PaC push — needs no per-task
-  `taskRunSpecs` and does not OOMKill. (Historically these steps carried per-run `taskRunSpecs`.)
+  `taskRunSpecs` and does not OOMKill. **No PipelineRun in this directory carries `taskRunSpecs`** —
+  historically they did, and a stale override is worse than none: the capstone run kept a 1536Mi cap
+  written against the old 1Gi default, which after the raise silently gave `oc create -f` builds
+  *less* memory than the console *Actions → Start* form. Size the namespace, not the run.
 - **JDK:** the bundled `maven` task is pinned to a JDK 17 image with no image param, so it cannot
   build this JDK 21 app; the curated `maven-jdk21` library Task is why.
 - **Deploy target + Route:** the pipeline deploys into its own `-cicd` namespace to stay self-contained,

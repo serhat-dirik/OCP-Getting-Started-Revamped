@@ -587,6 +587,27 @@ spec:
 
         # roxctl prints a summary line: "(TOTAL: 6, LOW: 1, MEDIUM: 5, HIGH: 0, CRITICAL: 0)".
         SUMMARY="$(grep -oE '\(TOTAL: [0-9]+, LOW: [0-9]+, MEDIUM: [0-9]+, HIGH: [0-9]+, CRITICAL: [0-9]+\)' /tmp/deployment-check.txt | tail -1)"
+
+        # DO NOT infer "no violations" from an unparseable report. When roxctl produces no policy
+        # ASSESSMENT — Central unreachable, an expired/rotated rox-api-token, a scanner still
+        # loading, or an output format that moved — SUMMARY is empty, every severity below parses
+        # as 0, GATING computes to 0, and the gate prints "✅ deployment check passed" and writes
+        # check-passed=true. A security gate that reports GREEN because it could not run is worse
+        # than no gate at all: the attendee is told their configuration was checked when nothing
+        # checked it, and the pipeline deploys on that assurance.
+        #
+        # Same root cause as the acs-image-check fix in this library — a gate must never claim a
+        # result it did not measure — but in the opposite direction: that one inferred a VIOLATION
+        # from an exit code with no taxonomy, this one inferred a PASS from a missing assessment.
+        # The discriminator is the same and is the presence of the assessment, not the exit code.
+        if [ -z "${SUMMARY}" ]; then
+          echo "⏳ deployment check COULD NOT RUN — roxctl produced no policy assessment for ${MANIFEST}."
+          echo "   This is NOT a verdict on your configuration: nothing was checked."
+          echo "   Your manifest is not implicated. Read roxctl's output above, then re-run."
+          echo "   check: oc get pods -n stackrox   (is Central up? is the rox-api-token still valid?)"
+          exit 1
+        fi
+
         sev() { echo "${SUMMARY}" | grep -oE "$1: [0-9]+" | grep -oE '[0-9]+' || echo 0; }
         LOW="$(sev LOW)"; MED="$(sev MEDIUM)"; HIGH="$(sev HIGH)"; CRIT="$(sev CRITICAL)"
         case "${FAIL_SEVERITY}" in

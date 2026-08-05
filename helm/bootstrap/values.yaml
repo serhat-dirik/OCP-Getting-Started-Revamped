@@ -31,7 +31,16 @@ litemaas:
   enabled: false
   apiUrl: ""              # OpenAI/vLLM-compatible base, ends in /v1
   apiKey: ""              # sk-…  (injected; never committed — lives only in the rendered Secret)
-  model: "llama-scout-17b"
+  # EMPTY MEANS DISCOVER, and empty is the right default (owner decision 2026-07-25: "we may not
+  # know what AI model the installer will bring"). MaaS keys are MODEL-SCOPED, so a guessed default
+  # that does not match the key is not a cosmetic mismatch — it is an HTTP 401
+  # key_model_access_denied the attendee meets inside the AI modules, long after the order said
+  # Ready. The two clusters this workshop has run on had keys scoped to OPPOSITE models
+  # (inverted-scope incident 2026-07-19), which is exactly what a hardcoded default cannot survive.
+  # The maas-secret Job asks the endpoint what it serves (GET {apiUrl}/models) and stages the
+  # answer; set a value here only to PIN one, and it is still checked against what the endpoint
+  # offers. Twin of bootstrap/install.sh's discover_maas_model().
+  model: ""
 
 # --- RHDP-injected (only when multi-user was requested): attendee roster ------------
 # num_users drives the htpasswd roster + workshop-config userCount. `users` is the
@@ -67,6 +76,7 @@ modulesDisabled: []
 # disable the module(s) that need it (modulesDisabled), don't flip these to false.
 stacks:
   lightspeed: false   # ai-assist stack (OpenShift Lightspeed). Normally auto-driven by litemaas.* (below).
+                      # This is the ADDITIVE half only (force on). To force it OFF, see `lightspeed:` below.
   auth: false         # auth stack (Red Hat build of Keycloak)
   resilience: false   # resilience stack (OADP + RHSI). PREREQ: ODF/MCG for the S3 target.
   mesh: false         # OSSM 3 + Kiali
@@ -77,6 +87,18 @@ stacks:
   portal: false       # Red Hat Developer Hub (RHDH)
   trust: false        # RHACS + RHTAS
   trustDemo: false    # RHTPA (stack dir: trust-demo) — M09 demo-flavor add-on (no module requires it)
+
+# --- Lightspeed hard-off (twin of bootstrap/vars.yaml `lightspeed: false`) ---------------------
+# Leave UNSET (null) for the normal auto contract: Lightspeed is on iff litemaas.* carries an
+# endpoint + key, off otherwise. Set to false to keep the ai-assist stack off even on a cluster
+# where a MaaS credential IS provisioned — the deployer's explicit "no assistant on this cluster".
+#
+# This is NOT the same as litemaas.enabled=false, and that difference is the reason the key exists.
+# litemaas.enabled=false also withholds ogsr-system/ogsr-maas-credentials — the workshop's OWN MaaS
+# credential, which the AI entry states (agentic-ai, ai-assisted-development, app-modernization,
+# jobs-batch-kueue) PREFER over any adopted Lightspeed secret. Turning off the assistant that way
+# silently takes the AI beats of four modules with it. `lightspeed: false` drops only the stack.
+lightspeed: null
 
 # --- Console plugins (mirrors bootstrap/vars.yaml console_plugins) --------------------
 # ON by default (owner 2026-07-19: the Pipelines/GitOps/ACS plugins are mostly console links —
@@ -115,6 +137,28 @@ gitea:
 argocd:
   namespace: "openshift-gitops"
   project: "ogsr-platform"
+  # --- application-controller sizing -----------------------------------------------------------
+  # The operator default is 2Gi, and 2Gi does not survive this workshop: the workshop-config
+  # Application alone carries 636 resources and the controller is OOMKilled (exit 137) before
+  # anything materializes — measured on a clean cluster, where the whole workshop layer came up as
+  # 3 namespaces instead of ~70 with no sync operation ever recorded. On the script path
+  # platform-portfolio/argocd-bootstrap/install.sh raises it (operator/argocd-controller-
+  # resources.yaml). Nothing on the FSC path did, so the two paths produced different clusters from
+  # the same source — which is exactly the drift helm/bootstrap exists to not have.
+  #
+  # CONSENT. On an ADOPTED Argo CD the script ASKS before touching the org's CR (and refuses
+  # without a TTY unless OGSR_ADOPTED_ARGOCD_MEMORY=apply). A Job has no terminal, so this value IS
+  # that consent, given up front at order time: under FSC the cluster is provisioned for the
+  # workshop, so the order is the consent. On a BYO cluster whose Argo CD belongs to your
+  # organisation and is shared with your own Applications, set manageControllerResources=false and
+  # raise it yourself — the install will then say plainly that it did not, and why.
+  # REVERSIBILITY. The Job records the CR's prior spec.controller.resources (and the fact that WE
+  # changed it) into ogsr-uninstall-state BEFORE patching, and REFUSES to patch if it cannot record
+  # them — same rule the script follows, so ogsr-uninstall.sh can put the controller back.
+  manageControllerResources: true
+  controllerResources:
+    limits: {cpu: "2", memory: 6Gi}
+    requests: {cpu: 250m, memory: 2Gi}
 
 # --- RHDP integration + non-invasive delivery labels --------------------------------
 owner: "ogsr"                        # workshop.redhat.com/owner — enumeration + safe uninstall
