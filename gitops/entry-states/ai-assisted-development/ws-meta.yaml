@@ -31,9 +31,19 @@ namespaces:
 #      wait_materialized branch and never consult meta_require_sync at all (ws:803, ws:1056), and
 #      entry_app_ok short-circuits on expectDegraded before it looks at Synced (ws:2519).
 #
-# So this module's app may still legitimately read OutOfSync — it seeds an intentional fault and ships
-# an operator-managed DevWorkspace, both already covered by expectDegraded below. What is no longer
-# claimed is that maas-config is the reason, because it is not.
+# What is no longer claimed is that maas-config is the reason, because it is not.
+#
+# NOR is the DevWorkspace, and that claim used to live right here. Until chart 0.1.9 this file said the
+# app "may still legitimately read OutOfSync … ships an operator-managed DevWorkspace" — measured on
+# cluster-65prs 2026-08-05, that was WRONG, and it was the sentence that made a permanent red look
+# expected. The DevWorkspace was the only OutOfSync resource in the whole Application, and the entire
+# diff was two devfile DOCUMENT keys (template.schemaVersion, template.metadata) that the chart sent and
+# the API server PRUNES — spec.template is a DevWorkspaceTemplateSpec and has neither field. Not operator
+# defaulting: our manifest asking for fields that cannot exist. The operator's own addition
+# (container.sourceMapping, a CRD default) is invisible to Argo — devspaces-inner-loop ships the same
+# operator-managed DevWorkspace, gets the same added field, and reads Synced. Chart 0.1.9 stops sending
+# the two pruned keys, so this Application's expected reading is now Synced/Degraded — Degraded from the
+# seeded fault below, and nothing else. An OutOfSync here is a REAL signal again: investigate it.
 
 purgeNamespaces:
   - "${USER}-dev"
@@ -66,9 +76,13 @@ conflictsWith:
   - packaging-distributing
 
 # This module SEEDS AN INTENTIONAL FAULT (parasol-claims 0/1 via a wrong readiness probe — the diagnosis
-# target) and ships an operator-managed DevWorkspace, so its Argo app is Degraded/OutOfSync BY DESIGN.
-# expectDegraded makes `ws start`/`ws solve` wait for the sync OPERATION to land, not for Healthy/Synced
-# (which never holds) — otherwise ws's `set -e` fails every start. `ws verify ai-assisted-development` is the correctness gate.
+# target), so its Argo app is DEGRADED by design and Healthy never holds. expectDegraded makes
+# `ws start`/`ws solve` wait for the sync OPERATION to land rather than for Healthy — otherwise ws's
+# `set -e` fails every start. `ws verify ai-assisted-development` is the correctness gate.
+# SCOPE, deliberately narrowed at chart 0.1.9: this covers HEALTH ONLY. It is not a licence for the app
+# to read OutOfSync — a Degraded Deployment still reads Synced (measured: parasol-claims sync=Synced
+# health=Degraded), and the one resource that did diff no longer does. Do not widen this back into a sync
+# waiver to quiet a red; find what actually drifted.
 expectDegraded: true
 
 # The MaaS copy hook (up to ~60s of source-secret retries) plus a cold-node pull of the ghcr MCP server
