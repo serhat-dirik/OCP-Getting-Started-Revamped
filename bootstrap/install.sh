@@ -1184,7 +1184,10 @@ elif ! ensure_argo_trusts_mirror "$GITEA_HOST"; then
   warn "Argo CD cannot verify the mirror's TLS — stacks stay on the external repo (verification is never disabled)"
 else
   ok "mirror HEAD == origin HEAD (${ORIGIN_HEAD:0:8}) and Argo trusts it — flipping stack sources"
-  apply_stacks_from "$MIRROR_REPO_URL" "$REPO_URL"
+  # `|| true` is load-bearing: this is a BARE call under `set -e`, so a nonzero return (the
+  # portfolio-install exit) would abort the whole installer here. A failed flip must instead fall
+  # through to the comparison below — which then fails and reverts — never die mid-flip.
+  apply_stacks_from "$MIRROR_REPO_URL" "$REPO_URL" || true
   # Force a fresh comparison rather than waiting out the 3-minute reconcile before judging the flip.
   for _s in "${STACK_LIST[@]}"; do
     oc annotate application "pp-$(echo "$_s" | xargs)" -n "$ARGO_NS" \
@@ -1195,7 +1198,10 @@ else
     ok "platform stacks now reconcile from the in-cluster mirror (${MIRROR_REPO_URL})"
   else
     err "the mirror source did not comparison-check clean — reverting the stacks to ${REPO_URL}"
-    apply_stacks_from "$REPO_URL" "$REPO_URL"
+    # `|| true` is load-bearing: this is a BARE call under `set -e`, so a nonzero return would abort
+    # BEFORE the diagnostic below and the stack_source state patch after the `fi`. A failed revert
+    # must still log where to look and record state, not die silently mid-recovery.
+    apply_stacks_from "$REPO_URL" "$REPO_URL" || true
     stacks_compare_against "$REPO_URL" >/dev/null 2>&1 || true
     err "   reverted. Inspect: oc get application -n ${ARGO_NS} -o wide, then oc describe application pp-core-devtools -n ${ARGO_NS}"
   fi
