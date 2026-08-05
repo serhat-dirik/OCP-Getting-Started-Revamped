@@ -41,7 +41,7 @@ The label must be present *at pod creation* (the injector reads it then); editin
 
 == The failover happens, but there's a brief `503` during a long outage
 
-Symptom:: After scaling site A to 0, the client flips to B and serves `200`s, but *once* — around 15–20 s into the outage — a single `HTTP 503 served-by-site=none` appears, then it's back to B.
+Symptom:: After scaling site A to 0, the client flips to B and serves ``200``s, but *once* — around 15–20 s into the outage — a single `HTTP 503 served-by-site=none` appears, then it's back to B.
 Cause:: `outlierDetection.baseEjectionTime` expired and the mesh *re-probed* the dead primary (site A is priority 0, so Envoy periodically re-checks it). That one probe hit the still-down site and returned `503` before being re-ejected.
 Fix:: Lengthen `baseEjectionTime` so the failed primary stays ejected through a typical outage (the entry chart uses `30s`, which covers a ~25 s failover drill with no re-probe). It's a trade-off — a longer ejection keeps the service available during the outage but slower to fail *back* after recovery:
 +
@@ -79,6 +79,37 @@ oc get deploy parasol-claims -n $SITEB
 ----
 +
 Site B's namespace must be `istio-discovery=enabled` (the workshop layer sets it), the `ServiceEntry` endpoint address must be `claims.{user}-site-b.svc.cluster.local`, and site B's Deployment must have ready replicas.
+If all three read correctly and the failover still doesn't happen, check the resources' *scope* next (below) — a mesh-wide resource can be answered by a site that isn't yours.
+
+== The routing "works", but the endpoints aren't your sites
+
+Symptom:: Nothing errors, yet the routing doesn't add up. Any of: `istioctl proxy-config endpoints` lists ClusterIPs that are *neither* of your `claims` Services; you scale *your* site A to zero and the marker keeps reading `A`; or the client flips to `B` at a moment you didn't cause.
+Cause:: One of the three failover resources lost its `exportTo: ["."]`. Istio's default is `+exportTo: ["*"]+` — published to the *entire* mesh — and `claims.parasol.internal` is deliberately the same stable host for *every* attendee on one shared control plane. An un-scoped `ServiceEntry`, `DestinationRule`, or `VirtualService` is merged with everyone else's, so your gateway can be programmed with *another attendee's* site endpoints. There is no error and no failed request: you simply get someone else's sites, at `HTTP 200`.
+Fix:: Read the scope off all three — each must be namespace-local:
++
+[source,sh,role=execute]
+----
+oc get serviceentry   claims-global -n $CLIENT -o jsonpath='ServiceEntry    exportTo={.spec.exportTo}{"\n"}'
+oc get destinationrule claims-global -n $CLIENT -o jsonpath='DestinationRule exportTo={.spec.exportTo}{"\n"}'
+oc get virtualservice  claims-edge   -n $CLIENT -o jsonpath='VirtualService  exportTo={.spec.exportTo}{"\n"}'
+----
++
+.Expected output (all three scoped to their own namespace)
+[source,texinfo]
+----
+ServiceEntry    exportTo=["."]
+DestinationRule exportTo=["."]
+VirtualService  exportTo=["."]
+----
++
+An *empty* value on any line means the field is absent and that resource is publishing mesh-wide. Re-apply the three resources exactly as exercise 2 writes them (they carry the field), or add it to the offender in place:
++
+[source,sh,role=execute]
+----
+oc patch serviceentry claims-global -n $CLIENT --type=merge -p '{"spec":{"exportTo":["."]}}'
+----
++
+Then re-read the gateway's endpoints and confirm they match your own site-a/site-b `claims` ClusterIPs (exercise 2 prints both). The same discipline applies outside the workshop: on a shared mesh, export a resource only as far as it genuinely needs to reach.
 
 == `[ADD-ON]` The Skupper `Site` router won't start — `exceeded quota`
 

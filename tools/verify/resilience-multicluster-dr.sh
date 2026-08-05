@@ -125,6 +125,127 @@ no_failover_routing() {
   oc_absent get serviceentry,virtualservice -n "$CLIENT_NS" -o name
 }
 
+# ── the routing is MINE, not the whole mesh's: exportTo ["."] (END STATE) ─────────────────────────
+# Istio defaults exportTo to ["*"] — MESH-WIDE. Every attendee on this shared control plane declares
+# the SAME logical host (claims.parasol.internal is deliberately one stable global service name —
+# that is the lesson), so an un-scoped ServiceEntry/DestinationRule/VirtualService is merged into
+# every other tenant's config and one attendee's gateway can end up resolving to ANOTHER attendee's
+# sites. `["."]` scopes the resource to its own namespace. The lab's three CRs carry it and the solve
+# end state renders it — and until this check existed nothing asserted it, so dropping the field
+# again would have gone green while every attendee published mesh-wide.
+#
+# NAME-AGNOSTIC, like failover_routing_present above (rule 14): EVERY resource of that kind in the
+# attendee's OWN client namespace must be scoped, not one named claims-global. Nothing else can be
+# there by accident — the entry state ships none of these three kinds in {user}-client (it ships the
+# Gateway and nothing else), which is also why no_failover_routing can assert their absence at entry.
+#
+# FULLY-QUALIFIED resource names, unlike the bare `serviceentry`/`virtualservice` above. Measured on
+# a live 4.x cluster 2026-08-05: serviceentries/destinationrules/virtualservices are each claimed by
+# exactly one API group, but `gateways` on that same cluster is claimed by TWO (networking.istio.io
+# and gateway.networking.k8s.io) — the bare-plural ambiguity trap is live in this exact API
+# neighbourhood, so new reads here spell the group out.
+#
+# jsonpath over a LIST: a missing .spec.exportTo comes back as an EMPTY field, not an error
+# (--allow-missing-template-keys defaults true — measured against the live cluster with a
+# deliberately absent field inside a `{range .items[*]}`, 2026-08-05). So "the attendee left exportTo
+# out" arrives as `name=` and is graded ❌, which is the whole point, instead of blowing the read up.
+UNSCOPED_CRS=""
+export_scoped() {  # $1=resource type → 0 when >=1 exists and EVERY one is exportTo ["."]
+  local line name scope
+  UNSCOPED_CRS=""
+  oc_read get "$1" -n "$CLIENT_NS" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.spec.exportTo[*]}{"\n"}{end}' || return 1
+  # An empty list is the API's REAL answer (rc 0, empty output) and still a ❌ — nothing is wired.
+  [[ -n "$OC_OUT" ]] || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    name="${line%%=*}"
+    scope="${line#*=}"
+    # A multi-element exportTo prints space-separated (measured, same run), so anything other than a
+    # lone "." — ["*"], ["." "istio-system"], or nothing at all — is not namespace-local.
+    # Written as a full `if`, never `[[ … ]] && …` as a loop body's last statement inside a function:
+    # that is the shape CLAUDE.md records as fatal under `set -e`.
+    if [[ "$scope" != "." ]]; then
+      UNSCOPED_CRS="${UNSCOPED_CRS}${UNSCOPED_CRS:+, }${name} (exportTo: ${scope:-unset, i.e. the mesh-wide default})"
+    fi
+  done <<< "$OC_OUT"
+  [[ -z "$UNSCOPED_CRS" ]]
+}
+
+# The hint has TWO causes to explain — nothing of that kind exists at all, and something exists but
+# is published mesh-wide — and only the predicate knows which. Built here so each call site stays
+# one line. Echo-shaped on purpose: it reads state and writes none, so the subshell that
+# `hint "$(scope_hint …)"` runs it in costs nothing (contrast routing_since/served_site, which must
+# stay global because they raise VERIFY_INCONCLUSIVE).
+scope_hint() {  # $1=human kind, $2=resource type for the repair command
+  if [[ -n "$UNSCOPED_CRS" ]]; then
+    echo "published MESH-WIDE on a shared control plane: ${UNSCOPED_CRS}. Every attendee declares the same host (claims.parasol.internal), so an un-scoped ${1} merges into other tenants' config and your gateway can resolve to someone else's sites. Re-apply the lab's ${1} with the exportTo: [\".\"] line, or scope it in place: oc patch ${2} <name> -n ${CLIENT_NS} --type=merge -p '{\"spec\":{\"exportTo\":[\".\"]}}'"
+  else
+    echo "there is no ${1} in ${CLIENT_NS} to scope — build the failover routing first (lab exercise 2), and keep the exportTo: [\".\"] line on all three resources"
+  fi
+}
+
+# ── whose sites is the routing pointing at? (user8, suggestion 4) ─────────────────────────────────
+# exportTo stops YOUR routing leaking to other tenants; this is the same question from the other end
+# — do your ServiceEntry's endpoints resolve to YOUR OWN two site Services? The lab has the attendee
+# compare the GATEWAY'S PROGRAMMED endpoints against their own ClusterIPs, but reading those needs
+# `istioctl proxy-config endpoints`: the cockpit does not ship istioctl (the lab downloads it), and
+# this suite will not take a dependency on a binary an attendee may not have fetched. The DECLARED
+# endpoints are the same fact one layer earlier and are a plain `oc` read — with resolution: DNS,
+# these names are exactly what Envoy resolves — so that is what is graded, and the check's wording
+# says "declared" rather than claiming to have read Envoy.
+#
+# HOSTNAMES ONLY. An endpoint written as a bare IP literal cannot be attributed to a namespace
+# without resolving it. That is a legitimate (if un-lab-like) way to write the resource, so it is ➖
+# not applicable rather than ❌ — failing it would be a false ❌ on work that may be perfectly correct.
+SE_ADDRS=""
+SE_ADDRS_LITERAL=0
+#
+# RETURNS oc_read's OWN rc, all three of it — 1 (the API answered no: no such namespace, no Istio CRD)
+# and 2 (the API could not be asked) mean different things to the caller and collapsing them into a
+# bare 1 would print "the cluster did not answer" over a cluster that answered perfectly clearly.
+# rc 1 leaves SE_ADDRS empty, which the caller already handles as "nothing to attribute" — the
+# ❌ for a missing namespace or a missing mesh CRD is the routing check's, not this one's.
+se_endpoint_addrs() {  # → 0 answered (SE_ADDRS set, one address per line) · 1 answered no · 2 could not ask
+  local a
+  SE_ADDRS=""
+  SE_ADDRS_LITERAL=0
+  oc_read get serviceentries.networking.istio.io -n "$CLIENT_NS" \
+    -o jsonpath='{range .items[*].spec.endpoints[*]}{.address}{"\n"}{end}' || return $?
+  SE_ADDRS="$OC_OUT"
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    case "$a" in
+      *:*)       SE_ADDRS_LITERAL=1 ;;   # IPv6 literal (hex letters, so the digit test below can't see it)
+      *[!0-9.]*) : ;;                    # anything other than digits and dots → a hostname
+      *)         SE_ADDRS_LITERAL=1 ;;   # digits and dots only → an IPv4 literal
+    esac
+  done <<< "$SE_ADDRS"
+  return 0
+}
+
+# Evaluates the ALREADY-READ addresses and asks the cluster nothing: the caller below reads them
+# once, up front, precisely so it can tell "could not ask" (⚠) from "nothing to attribute" (➖) from
+# "these are not your sites" (❌) — three outcomes check() alone cannot separate. Same reasoning as
+# failover_evidenced's cache, minus the re-raise: this predicate is only ever reached after a read
+# that succeeded, so there is no unknown left for it to carry.
+#
+# Suffix match on ".${ns}" as well as ".${ns}." so the short forms are accepted too: the lab writes
+# claims.{user}-site-a.svc.cluster.local, but claims.{user}-site-a.svc and claims.{user}-site-a are
+# equally valid in-cluster names and must not be graded ❌. The leading dot is what keeps
+# user1-site-a from matching a user10-site-a address.
+se_targets_own_sites() {
+  local a hit_a=0 hit_b=0
+  [[ -n "$SE_ADDRS" ]] || return 1
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    case "$a" in *".${SITEA_NS}."*|*".${SITEA_NS}") hit_a=1 ;; esac
+    case "$a" in *".${SITEB_NS}."*|*".${SITEB_NS}") hit_b=1 ;; esac
+  done <<< "$SE_ADDRS"
+  if (( hit_a == 1 && hit_b == 1 )); then return 0; fi
+  return 1
+}
+
 # When the failover routing first appeared — the anchor for "has a failover happened SINCE?". Oldest
 # ServiceEntry wins, so re-editing a VirtualService mid-lab does not shrink the evidence window. Empty
 # when there is no routing (the check that needs it is skipped in that case, never failed on it).
@@ -370,6 +491,42 @@ else
     || hint "build the failover routing: a ServiceEntry spanning both sites, a DestinationRule (locality LB + outlier detection), and a VirtualService with retries on claims-gateway (see the lab)"
   check "the stable endpoint serves HTTP 200"          stable_serves \
     || hint "the ingress gateway isn't routing — check the VirtualService is bound to gateway claims-gateway and the ServiceEntry host matches"
+
+  # ── the routing is scoped to THIS attendee, not the whole mesh ──────────────────────────────────
+  # END STATE ONLY, and it has to be: the attendee creates these three CRs during the lab, and the
+  # entry branch above already asserts the opposite (no_failover_routing — none of them exist yet).
+  # Asserting exportTo at entry would grade a world nobody has started.
+  check "ServiceEntry is namespace-scoped (exportTo: [\".\"], not published mesh-wide)" \
+    export_scoped serviceentries.networking.istio.io \
+    || hint "$(scope_hint ServiceEntry serviceentry)"
+  check "DestinationRule is namespace-scoped (exportTo: [\".\"], not published mesh-wide)" \
+    export_scoped destinationrules.networking.istio.io \
+    || hint "$(scope_hint DestinationRule destinationrule)"
+  check "VirtualService is namespace-scoped (exportTo: [\".\"], not published mesh-wide)" \
+    export_scoped virtualservices.networking.istio.io \
+    || hint "$(scope_hint VirtualService virtualservice)"
+
+  # ── and it points at YOUR sites ─────────────────────────────────────────────────────────────────
+  # Read up front, outside check(), because the branch needs three outcomes check() cannot separate
+  # on its own: could-not-ask (⚠), nothing-to-attribute (➖), and endpoints that are not yours (❌).
+  # VERIFY_INCONCLUSIVE is cleared first for the same reason the failover block below clears it —
+  # check() normally does it per-assertion and this read happens outside one.
+  VERIFY_INCONCLUSIVE=0
+  SE_READ_RC=0
+  se_endpoint_addrs || SE_READ_RC=$?
+  if (( SE_READ_RC == 2 )); then
+    warn "could not check: the ServiceEntry's endpoints are your own sites — the cluster API did not answer${OC_ERR:+ (${OC_ERR:0:120})}"
+    hint "not your lab, and not graded: the cluster could not be asked, so this check has no verdict. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor"
+  elif [[ -z "$SE_ADDRS" ]]; then
+    # No ServiceEntry, or one that declares no endpoints: there is nothing whose ownership could be
+    # wrong. NOT a second ❌ for a cause the checks above already reported with the right fix.
+    na "ServiceEntry endpoint ownership — there are no ServiceEntry endpoints in ${CLIENT_NS} to attribute (see the ServiceEntry checks above)"
+  elif (( SE_ADDRS_LITERAL == 1 )); then
+    na "ServiceEntry endpoint ownership — an endpoint is written as an IP literal, which no oc read can attribute to a namespace (the lab's istioctl proxy-config endpoints step is where that is read)"
+  else
+    check "the ServiceEntry's declared endpoints are YOUR OWN sites (${SITEA_NS} + ${SITEB_NS})" se_targets_own_sites \
+      || hint "your ServiceEntry's endpoints do not name both of your own site Services. On a shared mesh that means your stable endpoint can be served by someone else's claims service — check the two endpoint addresses are claims.${SITEA_NS}.svc.cluster.local and claims.${SITEB_NS}.svc.cluster.local: oc get serviceentry -n ${CLIENT_NS} -o jsonpath='{range .items[*].spec.endpoints[*]}{.address}{\"\\n\"}{end}'"
+  fi
   # The ws-solve marker is stamped ONLY by `ws solve`, so assert it ONLY in solve mode (ws verify --solve
   # / CI). A plain `ws verify` is the attendee's own closing verify after doing the failover BY HAND — no
   # solve marker exists, and the OUTCOME checks above + the failover evidence below carry the proof.

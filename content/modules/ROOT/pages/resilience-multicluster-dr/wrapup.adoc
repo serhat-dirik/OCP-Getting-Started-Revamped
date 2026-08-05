@@ -6,7 +6,7 @@ include::partial$version-attributes.adoc[]
 
 You took Parasol's claims service from *resilient in one site* to *surviving the loss of a whole site* — and proved it by scaling an entire site to zero and watching the client never notice.
 You *inspected* the resilient primary — three replicas, a `PodDisruptionBudget`, spread across nodes, a `HorizontalPodAutoscaler` — and *killed a pod* to watch in-site resiliency absorb it.
-You *wired cross-site failover* on OpenShift Service Mesh: a `ServiceEntry` declaring both sites with localities, a `DestinationRule` (locality-aware load balancing + outlier detection), and a `VirtualService` with retries on the ingress gateway — then *failed the entire primary site* and watched the external client *flip from `SITE=A` to `SITE=B` with every request still `200`*, and *return* to A on recovery.
+You *wired cross-site failover* on OpenShift Service Mesh: a `ServiceEntry` declaring both sites with localities, a `DestinationRule` (locality-aware load balancing + outlier detection), and a `VirtualService` with retries on the ingress gateway — all three *scoped to your own namespace* with `exportTo`, so one stable global hostname stays yours on a mesh many tenants share — then *failed the entire primary site* and watched the external client *flip from `SITE=A` to `SITE=B` with every request still `200`*, and *return* to A on recovery.
 As a flagged `[ADD-ON]`, you linked two simulated *data centers* into a Skupper *Virtual Application Network* and read a remote site's service through a *local* address, with no VPN.
 And you placed all of it on the *resilience ladder*: your job is in-site resilience and failover; the platform's job is the DR safety net (OADP + GitOps).
 
@@ -40,6 +40,8 @@ A rebuildable cache or a stateless internal tool does not need a hot second site
 A VAN is for linking services *across sites/clusters/organizations without a flat network*. For two services *in the same cluster*, a `Service` (and the mesh for policy) is simpler and faster — reaching for an interconnect there adds moving parts for nothing.
 * *Don't confuse "we have failover" with "we have DR".*
 Failover keeps the service up when a site goes down; it does *not* bring back *corrupted or deleted data* — for that you need OADP (or replication) and a *tested restore*. Failover + a DR net together are a strategy; failover alone leaves your data unprotected.
+* *Don't publish a mesh resource wider than it needs to reach.*
+A `ServiceEntry`, `DestinationRule`, or `VirtualService` goes *mesh-wide* unless you scope it, so on a mesh shared by more than one team an un-scoped resource quietly becomes everyone's definition of that hostname — exactly the collision `+exportTo: ["."]+` prevented in the lab. Widen the export deliberately, to the namespaces that genuinely consume the service, and never as the default.
 * *Don't let the failover primary flap.*
 Tuning `outlierDetection` too aggressively (a tiny `baseEjectionTime`) makes the mesh re-probe a dead primary constantly, producing brief blips; too conservative and failback is slow. Size it to your outage profile, and *test it* — a failover you've never triggered is untuned.
 
@@ -59,7 +61,8 @@ Tuning `outlierDetection` too aggressively (a tiny `baseEjectionTime`) makes the
 == Go deeper
 
 * *Service Mesh failover* — `localityLbSetting` `distribute`/`failover`/`failoverPriority` for explicit region→region rules, active-active `distribute` weights, and the `outlierDetection` knobs (`splitExternalLocalOriginErrors`, ejection back-off) that shape how fast a site is ejected and re-admitted.
-* *Red Hat Service Interconnect* `[ADD-ON]` — Skupper `Site` high-availability (`ha: true`), multi-key `Listener`s, `Connector` load-balancing across a routing key, and *cross-cluster* links (the same CRs you used, pointed at a real second cluster instead of a second namespace).
+* *Mesh scoping on a shared control plane* — `exportTo` on `ServiceEntry`/`DestinationRule`/`VirtualService` (namespace-local `.`, mesh-wide `+*+`, or a named list), and the `Sidecar` resource, which limits what config a workload receives at all — the pair of knobs that keep a multi-tenant mesh's config from leaking between teams (and keep istiod's push size sane).
+* *Red Hat Service Interconnect* `[ADD-ON]` — Skupper `Site` high-availability (`ha: true`), multi-key ``Listener``s, `Connector` load-balancing across a routing key, and *cross-cluster* links (the same CRs you used, pointed at a real second cluster instead of a second namespace).
 * *OADP / Velero* (the DR net) — `Backup`/`Restore` of an app's objects and persistent-volume data to an object store, `Schedule` for periodic backups, and the discipline of *drilling the restore* so a green backup is a tested capability, not a hope.
 * *GitOps as DR* — Argo CD app-of-apps re-materialization (GitOps at Scale): a Git-declared platform stands the DR site up as a convergence, not a runbook.
 * *Advanced Cluster Management (ACM)* — fleet-scale resilience + DR: cluster backup/restore built on OADP, cross-cluster networking (Submariner / RHSI), and GitOps-everywhere policy — the platform-team's next step beyond this module.

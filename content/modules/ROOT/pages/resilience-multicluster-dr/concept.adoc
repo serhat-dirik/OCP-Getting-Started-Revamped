@@ -74,6 +74,8 @@ That is exactly what a service mesh gives you. OpenShift Service Mesh puts an *i
 * A *DestinationRule* turns on *locality-aware load balancing* (prefer the local/primary site) and *outlier detection* (eject a site whose requests start failing).
 * A *VirtualService* on the gateway routes the stable endpoint to that host, with *retries* so a request that hits the just-failed site is transparently retried onto the healthy one.
 
+Those three say *what* the routing does. One more field decides *who can see it*. By default Istio publishes a `ServiceEntry`, `DestinationRule`, or `VirtualService` to the *whole mesh* (`+exportTo: ["*"]+`), so every other namespace inherits your definition of that host; `+exportTo: ["."]+` scopes a resource to *its own namespace* instead. That is not a detail here: a stable *global* service name like `claims.parasol.internal` is exactly the point of the pattern — and on a shared control plane, several teams (in the lab, every attendee) declare that same name. Un-scoped, those definitions merge, and a gateway can resolve the logical host to *someone else's* endpoints — with no error to tell you. You'll set the scope explicitly on all three resources in the lab, and the production habit is the same: export a mesh resource only as far as it genuinely needs to reach.
+
 [mermaid]
 ....
 include::example$diagrams/resilience-multicluster-dr/02-mesh-failover.mmd[]
@@ -82,7 +84,7 @@ include::example$diagrams/resilience-multicluster-dr/02-mesh-failover.mmd[]
 The magic is that *nothing about the client changes*. It calls the same stable endpoint before, during, and after the failover. In the lab you watch a client hit that endpoint once a second and log which site served it: it reads `SITE=A` steadily, you *scale site A to zero* (the whole site "fails"), and within a few seconds the log flips to `SITE=B` — *every response still `200 OK`, not a single dropped request*. Restore site A and traffic returns to it. The mesh did the failover; you wrote three small resources and zero application code.
 
 [NOTE]
-.Why the client keeps getting `200`s during failover
+.Why the client keeps getting ``200``s during failover
 ====
 Two mesh features cooperate. *Outlier detection* notices site A's requests failing and *ejects* it from the pool, so new requests go to site B. And *retries* catch the handful of in-flight requests that raced the ejection — a request that lands on the just-failed site is retried, lands on site B, and returns `200`. The client sees a clean flip from A to B, not an outage. That is the difference between "we have a second site" and "we fail over to it automatically."
 ====
@@ -134,6 +136,7 @@ This module's lab is the part that is *yours*: making the claims service survive
 * *"We have a second data center."* — Do you *fail over to it automatically*, or is it a manual, 3-a.m. runbook? A warm site nobody has ever cut over to is a *hope*, not a capability. The lab's "scale the site to zero and watch the client keep working" drill is exactly the game-day every team should run.
 * *"We have three replicas, so we're covered."* — Covered for a pod or node loss (rungs 1–3). *Not* covered for a whole-site outage. Name which rung each of your resilience measures actually absorbs, and the gap is almost always at the *site* level.
 * *"Connecting the two sites means a VPN ticket and a three-week wait."* — Network-level coupling is where multi-site projects die. A service-level VAN (RHSI) links *just the services that need it*, over one outbound connection, crossing cluster and organizational boundaries a flat network never could.
+* *"Who else can see our mesh config?"* — On a mesh shared by several teams, a route or destination rule is published *mesh-wide* unless you scope it, so two teams that happen to pick the same hostname silently become each other's problem. Scoping — `exportTo` on the traffic resources, and a `Sidecar` resource for what a workload is allowed to reach — is namespace hygiene that costs one line on day one and an outage to untangle later.
 * *"Our DR plan is a 40-page Word document."* — If recovery depends on humans executing a long runbook under pressure, your recovery time is whatever the most stressed engineer can manage. GitOps turns most of that document into "Argo CD converges the platform; OADP restores the data" — a plan you can *test* instead of *read*.
 * *"Who owns resilience — the platform or the app team?"* — Both, at different layers. The platform owns the DR net (OADP, GitOps, ACM); the app team owns in-site resilience and failover design. Teams that blur the two either over-rely on a backup they never test, or build heroic app-level DR the platform already provides.
 
