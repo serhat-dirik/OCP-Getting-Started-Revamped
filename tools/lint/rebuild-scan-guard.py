@@ -563,13 +563,16 @@ MUTANTS = [
      'printf "  %-28s" "image drift"',
      "the doctor row is still computed and still printed, under a label nothing looks for — which "
      "is how a row silently stops being the thing anyone greps for"),
+    # `nok`, not `err`: the doctor report's failing rows moved to stdout so a row's label and its
+    # status can no longer be split across fds (SEV3-I). These mutants must track that wording — a
+    # mutant that no longer matches the source is a no-op, and a no-op mutant proves nothing.
     ("doctor-row-mark-softened", "ws",
-     'err "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
+     'nok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
      'ok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"',
      "the drift row reports ✅ with the drift spelled out beside it, and ws doctor stops failing"),
     ("doctor-row-offenders-dropped", "ws",
-     'err "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
-     'err "${d_what} — detail: ws rebuild-images --check${d_fix}"; fail=1',
+     'nok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
+     'nok "${d_what} — detail: ws rebuild-images --check${d_fix}"; fail=1',
      "the row keeps its mark and its counts but stops naming WHICH consumers drifted, so the "
      "reader is told a number and given nowhere to go"),
     ("unmodelled-oc-call-introduced", "ws",
