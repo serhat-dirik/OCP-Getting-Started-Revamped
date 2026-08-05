@@ -83,7 +83,16 @@ err()  { echo "❌ $*" >&2; }
 # attendee cannot read cluster-scoped objects like oauths or groups. Reporting ❌ there told
 # people their IdP was missing seconds after they had logged in THROUGH it — and a false ❌
 # costs trust in every ✅ beside it.
+# ➖ = NOT APPLICABLE: correctly does not apply here, nothing is missing, no action available.
 skip() { echo "➖ $*"; }
+# ⚠ = COULD NOT BE EVALUATED: the answer is unknown and MIGHT be bad. Distinct from skip() on
+# purpose — tools/verify/_lib.sh drew exactly this line today (na() vs warn()) after a banner that
+# conflated them told attendees a fully-graded run "did NOT fully verify". ws printed both meanings
+# with the SAME ➖ glyph, so `ws prep` announced "its entry checks could not be evaluated" wearing
+# the not-applicable mark — reintroducing the confusion one layer up. Caught by the verification
+# wave, 2026-08-05. Goes to stdout, not stderr like warn(): this is attendee-facing narration of
+# their own environment, not an operator-facing problem.
+unknown() { echo "⚠  $*"; }
 info() { echo "▶ $*"; }
 # Called at the --all-users sync-failure branch and, until 2026-08-01, never defined. Under
 # `set -e`, an undefined command inside a function exits 127 and KILLS the script — so the one
@@ -1234,7 +1243,7 @@ cmd_prep() {  # ATTENDEE self-service (project directive 2026-07-10): attendees 
     VERIFY_STRICT=1 "$script" --user "$user" --entry-only || pv_rc=$?
     case "$(doctor_verify_rc_outcome "$pv_rc")" in
       pass) ok "${module} is ready — start the lab." ;;
-      skip) skip "${module} was re-materialized, but its entry checks could not be evaluated just now — re-check with: ws verify ${module}" ;;
+      skip) unknown "${module} was re-materialized, but its entry checks could not be evaluated just now — re-check with: ws verify ${module}" ;;
       *)    info "setup hooks may still be settling (seeding data takes up to ~1 min) — re-check with: ws verify ${module}" ;;
     esac
   fi
@@ -2254,7 +2263,7 @@ warn_prep_unverified() {  # <module> <user> — say "I could not look", and do N
   # The distinction this exists to preserve: "your world is broken" and "I could not read your
   # world" are different sentences, and only the first justifies destroying it. Before rc 3 was
   # visible to cmd_prep, the second was silently reported as "already prepared — nothing to do".
-  skip "could not verify your ${1} environment — every entry check was SKIPPED, so nothing was"
+  unknown "could not verify your ${1} environment — every entry check was SKIPPED, so nothing was"
   echo "   actually confirmed. This is NOT a failure and your world has NOT been changed."
   echo "   Usually the cluster answered some reads and not others (an expired session, a transient"
   echo "   API error, or rights you do not hold). Re-check with: ws verify ${1} --user ${2}"
@@ -2556,7 +2565,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     elif [[ "$ev_fail" -gt 0 ]]; then
       err "${ev_fail} of ${ev_total} FAILED:${ev_fail_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"; fail=1
     elif [[ "$ev_skip" -gt 0 ]]; then
-      skip "${ev_pass} fully passed · ${ev_skip} did NOT fully verify (not a failure):${ev_skip_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"
+      unknown "${ev_pass} fully passed · ${ev_skip} did NOT fully verify (not a failure):${ev_skip_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"
     else
       ok "${ev_pass}/${ev_total} verify(ies) fully passed${ev_note}"
     fi
@@ -2581,7 +2590,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
       err "antora-ext:latest not built in ${SHOWROOM_NS} — cockpits Init:ImagePullBackOff until it is; watch: oc logs -f bc/antora-ext -n ${SHOWROOM_NS} · kick idle cockpits: oc rollout restart deploy -n ${SHOWROOM_NS}"; fail=1
     fi
   elif ! oc auth can-i get buildconfigs -n "$SHOWROOM_NS" >/dev/null 2>&1; then
-    skip "not checked (needs access to ${SHOWROOM_NS})"
+    unknown "not checked (needs access to ${SHOWROOM_NS})"
   else
     ok "n/a (showroom build not deployed)"
   fi
@@ -2612,7 +2621,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
       err "missing:${missing_tags} in ${PARASOL_IMAGES_NS} — watch: oc logs -f bc/parasol-claims -n ${PARASOL_IMAGES_NS} (or bc/<app> for the named app)"; fail=1
     fi
   elif ! oc auth can-i get buildconfigs -n "$PARASOL_IMAGES_NS" >/dev/null 2>&1; then
-    skip "not checked (needs access to ${PARASOL_IMAGES_NS})"
+    unknown "not checked (needs access to ${PARASOL_IMAGES_NS})"
   else
     ok "n/a (parasol-images build not deployed)"
   fi
@@ -2636,7 +2645,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # the scan is swallowed by `2>/dev/null || true`, so an attendee running it ungated gets zero rows
   # and a clean-looking "no consumers" produced by having looked at nothing.
   if ! oc auth can-i list deployments --all-namespaces >/dev/null 2>&1; then
-    skip "not checked (needs cluster-wide read — ask your instructor for: ws rebuild-images --check)"
+    unknown "not checked (needs cluster-wide read — ask your instructor for: ws rebuild-images --check)"
   else
     local drift_rows d_total d_stale d_bad d_names d_what d_fix
     rebuild_begin
@@ -2675,7 +2684,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   fi
   printf "  %-28s" "workshop IdP"
   if ! oc auth can-i get oauths.config.openshift.io >/dev/null 2>&1; then
-    skip "not checked (needs cluster-admin; you logged in, so it works)"
+    unknown "not checked (needs cluster-admin; you logged in, so it works)"
   elif oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
     ok "workshop-users present"
   else
@@ -2699,7 +2708,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # Honest after a `ws scale-users`: cross-check the LIVE helm parameter against the group it should
   # have converged to. A mismatch usually means a scale is still mid-sync — re-run shortly.
   if ! oc auth can-i get groups.user.openshift.io >/dev/null 2>&1; then
-    skip "not checked (needs cluster-admin to read the attendee group)"
+    unknown "not checked (needs cluster-admin to read the attendee group)"
   elif ! oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1; then
     ok "n/a (workshop layer not installed)"
   else
@@ -3931,7 +3940,7 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
       printf "     %-10s %s\n" "apitoken" "$(maas_redact "$s_token")"
     fi
   elif ! oc auth can-i get secrets -n "$MAAS_NS" >/dev/null 2>&1; then
-    skip "not checked (reading ${MAAS_NS} secrets needs cluster-admin — run this from the SA kubeconfig)"
+    unknown "not checked (reading ${MAAS_NS} secrets needs cluster-admin — run this from the SA kubeconfig)"
   else
     err "absent — nothing staged"
     if oc get secret "$MAAS_LIGHTSPEED_SECRET" -n "$MAAS_LIGHTSPEED_NS" >/dev/null 2>&1; then
