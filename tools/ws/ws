@@ -2494,9 +2494,33 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   printf "  %-28s" "cluster login"
   if oc whoami >/dev/null 2>&1; then ok "$(oc whoami) @ $(oc whoami --show-server)"; else nok "not logged in"; fail=1; fi
   printf "  %-28s" "gitops operator"
-  local csv
-  csv="$(oc get csv -n openshift-gitops-operator -o jsonpath='{.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}' 2>/dev/null || true)"
-  if [[ "$csv" == *Succeeded* ]]; then ok "installed"; else nok "not ready (${csv:-missing})"; fail=1; fi
+  # THREE outcomes, not two. `2>/dev/null || true` collapsed "the CSV reports a phase other than
+  # Succeeded", "there is no such CSV" and "I am not allowed to look" into the same empty string, and
+  # the row printed all three as ❌ "not ready (missing)" — a hard red about an operator that is
+  # installed and healthy, shown to an attendee whose only fault is not being cluster-admin. "I could
+  # not look" is not "it is broken", so an unreadable CSV degrades to ⚠/not-graded and does NOT set
+  # fail, exactly like the cluster-scoped rows further down.
+  #
+  # csv itself stays EMPTY whenever the read fails, whatever the reason: two later rows (argo
+  # applications, entry verify) gate on `[[ "$csv" != *Succeeded* ]]`, and letting the error text land
+  # in it would leave them string-matching against a Forbidden message.
+  local csv="" csv_out csv_rc=0 csv_unreadable=""
+  csv_out="$(oc get csv -n openshift-gitops-operator -o jsonpath='{.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}' 2>&1)" || csv_rc=$?
+  if [[ "$csv_rc" -eq 0 ]]; then
+    csv="$csv_out"
+  elif printf '%s' "$csv_out" | grep -qi forbidden; then
+    csv_unreadable=1
+  fi
+  # A missing namespace or CRD fails with rc≠0 and NO "Forbidden", so it keeps its old ❌ (missing) —
+  # that is a real finding, and cluster-admin, the identity that can actually answer this question,
+  # grades ✅/❌ exactly as before.
+  if [[ -n "$csv_unreadable" ]]; then
+    unknown "not checked (reading the CSV in openshift-gitops-operator is Forbidden — needs cluster-admin)"
+  elif [[ "$csv" == *Succeeded* ]]; then
+    ok "installed"
+  else
+    nok "not ready (${csv:-missing})"; fail=1
+  fi
   printf "  %-28s" "argo applications"
   # An entry-*-<user> app for a module whose ws-meta.yaml declares expectDegraded (an intentional-fault
   # seed, e.g. ai-assisted-development's broken 0/1 Deployment) is Degraded/OutOfSync BY DESIGN — ws
@@ -2688,15 +2712,36 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   # ALWAYS ON, not behind a flag, for two reasons that pull the same way. A gate nobody runs is worse
   # than no gate (this repo's own rule) — and the live proof is that user1-cicd/parasol-claims sat
   # stale on ksls5 until someone ran --check by hand. And the cost lands on the identity that can act
-  # on it: the scan needs a CLUSTER-WIDE workload list, so an attendee pays one `oc auth can-i` and
+  # on it: the scan needs a CLUSTER-WIDE workload list, so an attendee pays one empty list read and
   # skips, while an SA pays ~1s per materialized consumer (24s / 11 consumers, ksls5 2026-07-29 —
   # doctor's own fixed ~25 reads already cost 22s, and `ws status` costs 40s, so it stays in band).
   #
-  # The can-i is not politeness, it is the difference between a verdict and a guess: every read in
+  # The gate is not politeness, it is the difference between a verdict and a guess: every read in
   # the scan is swallowed by `2>/dev/null || true`, so an attendee running it ungated gets zero rows
   # and a clean-looking "no consumers" produced by having looked at nothing.
-  if ! oc auth can-i list deployments --all-namespaces >/dev/null 2>&1; then
+  #
+  # It is a REAL READ, never `oc auth can-i`: this repo measured can-i answering a false YES for a
+  # cluster-scoped read when the identity holds a namespaced RoleBinding to a ClusterRole carrying the
+  # rule — re-measured as user3 on cluster-65prs (2026-08-06), `oc auth can-i list namespaces` says yes
+  # while `oc get ns` comes back Forbidden. A false YES here is a false ✅, not a false ❌: the gate
+  # would open, the swallowed scan would return zero rows, and the row would grade "n/a (nothing running
+  # consumes a workshop-built image yet)" on a cluster full of consumers — the exact "clean-looking
+  # verdict produced by having looked at nothing" the paragraph above exists to prevent.
+  #
+  # The probe is the same verb/resource/scope as the scan's first call (`oc get deployments -A`), so the
+  # authorization answer is identical, but a field selector that cannot match narrows the RESULT to
+  # nothing: authorization is decided before field selection, so this costs one empty list rather than a
+  # second cluster-wide dump. Measured on cluster-65prs 2026-08-06 — rc 0 with empty output as admin
+  # (~1s, replacing the can-i round trip it drops), rc 1 with "…is forbidden: User \"user4\" cannot list
+  # resource \"deployments\"…at the cluster scope" as an attendee.
+  local drift_probe drift_prc=0
+  drift_probe="$(oc get deployments -A --field-selector=metadata.name=ws-doctor-drift-probe -o name 2>&1)" || drift_prc=$?
+  if [[ "$drift_prc" -ne 0 ]] && printf '%s' "$drift_probe" | grep -qi forbidden; then
     unknown "not checked (needs cluster-wide read — ask your instructor for: ws rebuild-images --check)"
+  elif [[ "$drift_prc" -ne 0 ]]; then
+    # Not Forbidden and still failed — the API server said something else (timeout, connection refused).
+    # ⚠, not ❌: the scan cannot run, so there is no verdict to give either way.
+    unknown "not checked (cluster-wide workload read failed — retry, or: ws rebuild-images --check)"
   else
     local drift_rows d_total d_stale d_bad d_names d_what d_fix
     rebuild_begin
@@ -2734,9 +2779,19 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     fi
   fi
   printf "  %-28s" "workshop IdP"
-  if ! oc auth can-i get oauths.config.openshift.io >/dev/null 2>&1; then
+  # Real-read-then-branch, not `oc auth can-i` — see the "user namespaces" row below for the measurement
+  # and the full reasoning. oauths.config.openshift.io is cluster-scoped, which is precisely the shape
+  # can-i answers a false YES for, and here that YES falls straight through to the ❌ branch: the read it
+  # was gating is the one that then comes back Forbidden, printing "IdP missing — bootstrap adds it" at
+  # an attendee who logged in THROUGH that very IdP to get to this prompt.
+  #
+  # rc≠0 without "Forbidden" (no OAuth CR at all) still reads as missing, so cluster-admin — the identity
+  # that can actually answer this — grades ✅/❌ exactly as before.
+  local idp_out idp_rc=0
+  idp_out="$(oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>&1)" || idp_rc=$?
+  if [[ "$idp_rc" -ne 0 ]] && printf '%s' "$idp_out" | grep -qi forbidden; then
     unknown "not checked (needs cluster-admin; you logged in, so it works)"
-  elif oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
+  elif [[ "$idp_rc" -eq 0 ]] && printf '%s' "$idp_out" | grep -qw workshop-users; then
     ok "workshop-users present"
   else
     nok "IdP missing — bootstrap adds it"; fail=1
@@ -2780,14 +2835,31 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   printf "  %-28s" "workshop cohort size"
   # Honest after a `ws scale-users`: cross-check the LIVE helm parameter against the group it should
   # have converged to. A mismatch usually means a scale is still mid-sync — re-run shortly.
-  if ! oc auth can-i get groups.user.openshift.io >/dev/null 2>&1; then
+  #
+  # The group read is ATTEMPTED and branched on "Forbidden", not gated on `oc auth can-i` — same idiom,
+  # same measurement, as the "user namespaces" row below and as doctor_cohort_coherence, which makes
+  # this exact call. groups.user.openshift.io is cluster-scoped, so it is in scope for can-i's false
+  # YES, and that YES lands on the ❌ branch: the gated read comes back Forbidden, the count falls to
+  # zero, and the row tells an attendee "live userCount=8 but workshop-attendees group has 0" about the
+  # group they are a member of.
+  #
+  # ORDER is deliberately unchanged: not-checked still outranks "workshop layer not installed", so an
+  # attendee's report does not turn on whether they can also read the Application. That costs one group
+  # read in the uninstalled case, which is the call doctor_cohort_coherence makes two rows later anyway.
+  local n_group_out n_group_rc=0
+  n_group_out="$(oc get group workshop-attendees -o jsonpath='{.users[*]}' 2>&1)" || n_group_rc=$?
+  if [[ "$n_group_rc" -ne 0 ]] && printf '%s' "$n_group_out" | grep -qi forbidden; then
     unknown "not checked (needs cluster-admin to read the attendee group)"
   elif ! oc get application workshop-config -n "$ARGO_NS" >/dev/null 2>&1; then
     ok "n/a (workshop layer not installed)"
   else
     local n_live n_group
+    # NotFound — the group was never created — counts as a genuinely EMPTY group, not an unreadable one.
+    # That is a real finding and exactly what this row exists to print (doctor_cohort_coherence draws
+    # the same line on the same call).
+    if [[ "$n_group_rc" -ne 0 ]]; then n_group_out=""; fi
     n_live="$(live_user_count || true)"
-    n_group="$(oc get group workshop-attendees -o jsonpath='{.users[*]}' 2>/dev/null | wc -w | xargs || true)"
+    n_group="$(printf '%s' "$n_group_out" | wc -w | xargs || true)"
     if [[ -n "$n_live" && "$n_live" == "$n_group" ]]; then
       ok "${n_live} user(s) (live userCount + group agree)"
     else
