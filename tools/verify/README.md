@@ -18,7 +18,11 @@ rather than reading the route cross-namespace, and so on). The two bullets below
   A run that SKIPPED checks (see the inconclusive bullet below) still exits 0 — `ws prep` reads
   `--entry-only`'s rc as "is this world already prepared?" and would otherwise offer to wipe a
   healthy environment — but its banner says so: `⚠ 7 passed · 6 SKIPPED (not graded)`. Automation
-  that must fail closed sets `VERIFY_STRICT=1` and gets rc **3** (1 = a check failed, 2 = usage).
+  that must fail closed sets `VERIFY_STRICT=1` and then gets rc **3** when some checks were skipped
+  and every graded one passed, or rc **4** when NOTHING was graded (1 = a check failed, 2 = usage).
+  Fail on 4, not on 3: several modules carry a check an attendee legitimately cannot answer (a
+  cluster-scoped read), so a gate that rejects rc 3 makes those modules permanently unpassable —
+  measured on `jobs-batch-kueue` in user5's cockpit, 2026-08-05, at 13 passed · 1 skipped.
 - Source `_lib.sh` for `check`, `hint`, `warn`, `parse_verify_args`, `verify_summary`, and the
   cluster-read helpers below.
 - Scripts must be runnable with only `oc` + `curl` available (Showroom terminal reality).

@@ -1361,17 +1361,43 @@ cmd_smoke() {
   # defect this repo keeps finding: a check that grades an outcome it never actually looked at.
   #
   # Classified rather than folded into pass/fail, and the env prefix travels INSIDE the pod command
-  # string because the verify runs in the cockpit, not here. rc 3 still fails the gate — a run that
-  # verified nothing must not pass G1 — but it gets its own hint, so nobody burns an hour hunting a
-  # broken entry state that is not broken.
-  local ev_rc=0
-  pod_i "VERIFY_STRICT=1 ws verify ${module} --entry-only" >/dev/null 2>&1 || ev_rc=$?
+  # string because the verify runs in the cockpit, not here.
+  #
+  # WHICH SKIP FAILS THE GATE — the correction, measured in user5's cockpit 2026-08-05. This arm read
+  # rc 3 as "graded nothing" and said so out loud. rc 3 never meant that: _lib.sh raised it whenever
+  # ANY check was skipped, so `VERIFY_STRICT=1 ws verify jobs-batch-kueue --entry-only` came back
+  # "⚠ 13 passed · 1 SKIPPED", rc 3, and G1 printed "the cockpit verify SKIPPED every check — it
+  # graded nothing". Thirteen of fourteen were graded and passed. Worse than the wrong sentence: the
+  # one skip is a CLUSTER-SCOPED ClusterQueue read the verify script itself labels "not yours to fix",
+  # which no attendee identity can ever answer — so the module could not pass G1 by any amount of
+  # correct work, and neither can any other module carrying a legitimately-unanswerable check.
+  #
+  # _lib.sh now splits the two runs (rc 3 = some skipped, the rest graded and passing · rc 4 = NOTHING
+  # graded), and this gate branches on that rather than on "a skip happened":
+  #   rc 4 → ❌. A verify that answered zero checks is no signal at all, and a G1 ✅ over it is the
+  #          false-completeness this gate exists to stop. Unchanged in force, only in aim.
+  #   rc 3 → ✅, with the banner quoted. The gate grades what was actually graded; the ungraded
+  #          checks are printed rather than swallowed, so a NEW skip is still visible to a reader.
+  # The banner is captured (not >/dev/null'd) precisely so these lines can state counts instead of
+  # asserting something about a run nobody looked at — the same defect one layer up.
+  local ev_rc=0 ev_out="" ev_banner=""
+  ev_out="$(pod_i "VERIFY_STRICT=1 ws verify ${module} --entry-only" 2>&1)" || ev_rc=$?
+  # `|| true`: grep exits 1 when the run died before printing a banner (and pipefail would propagate
+  # that), which is a normal outcome here — the rc already carries the verdict.
+  ev_banner="$(printf '%s\n' "$ev_out" | grep -E '^(✅ all [0-9]|❌ [0-9]+ of |⚠ [0-9]+ passed|⚠ NOTHING)' | tail -1 || true)"
   case "$(doctor_verify_rc_outcome "$ev_rc")" in
     pass) check "ws verify ${module} --entry-only passes N/N in the cockpit" true ;;
-    skip) check "ws verify ${module} --entry-only passes N/N in the cockpit" false \
-            || hint "the cockpit verify SKIPPED every check — it graded nothing, so this is NOT proof the entry state is broken. Read what it could not answer: ws verify ${module} --user ${user}" ;;
+    skip)
+      if (( ev_rc == 4 )); then
+        check "ws verify ${module} --entry-only passes N/N in the cockpit" false \
+          || hint "the cockpit verify graded NOTHING — every check was skipped (${ev_banner:-no banner captured}), so this is NOT proof the entry state is broken. Read what it could not answer: ws verify ${module} --user ${user}"
+      else
+        check "ws verify ${module} --entry-only passes in the cockpit — ${ev_banner:-some checks were not graded}" true
+        info "(the ⚠ check(s) above were not graded as ${user} — usually cluster-scoped reads no attendee holds; read them with: ws verify ${module} --user ${user})"
+      fi
+      ;;
     *)    check "ws verify ${module} --entry-only passes N/N in the cockpit" false \
-            || hint "entry checks are red in the cockpit — inspect: ws verify ${module} --user ${user}" ;;
+            || hint "entry checks are red in the cockpit${ev_banner:+ (${ev_banner})} — inspect: ws verify ${module} --user ${user}" ;;
   esac
 
   # ── per-module hook: representative click-to-run blocks (ws-meta smokeCommands, optional) ────────
@@ -2286,14 +2312,24 @@ cmd_rebuild_images() {
 
 doctor_verify_rc_outcome() {  # rc → pass|skip|fail on stdout — classifies a VERIFY_STRICT=1 verify
   # script's exit code for `ws doctor`'s entry-verify row (tools/verify/_lib.sh's verify_summary
-  # contract: 0 clean, 1 a check genuinely failed, 2 usage error, 3 skip-only under VERIFY_STRICT).
+  # contract: 0 clean, 1 a check genuinely failed, 2 usage error, 3 SOME checks skipped and every
+  # graded one passed, 4 NOTHING was graded — every outcome was a skip).
   # rc 3 MUST read as skip, never fail — the whole point of opting doctor into strict mode is to see
   # "this run did not fully verify" as information, not to manufacture a doctor failure out of it.
   # A standalone function (not inlined in cmd_doctor) so tools/lint/verify-summary-skip-guard.sh can
   # extract and pin this mapping the same way it pins _lib.sh's own verify_summary.
+  #
+  # rc 4 JOINS rc 3 IN `skip` HERE, deliberately, and the callers that need the finer split make it
+  # themselves. This word is read by `ws prep` and `ws doctor`, and for BOTH of them 3 and 4 call for
+  # the same response: say the world could not be fully read, do NOT offer the destructive wipe, do
+  # NOT count a doctor failure. Only `ws smoke` — the one gate whose job is to fail closed — has to
+  # tell them apart, so it reads the raw rc alongside this word rather than every other caller
+  # growing an arm for an outcome it would treat identically. Anything landing in `fail` (1, 2, and
+  # any future code) is unchanged.
   case "$1" in
     0) echo pass ;;
     3) echo skip ;;
+    4) echo skip ;;
     *) echo fail ;;
   esac
 }
@@ -2302,8 +2338,14 @@ warn_prep_unverified() {  # <module> <user> — say "I could not look", and do N
   # The distinction this exists to preserve: "your world is broken" and "I could not read your
   # world" are different sentences, and only the first justifies destroying it. Before rc 3 was
   # visible to cmd_prep, the second was silently reported as "already prepared — nothing to do".
-  unknown "could not verify your ${1} environment — every entry check was SKIPPED, so nothing was"
-  echo "   actually confirmed. This is NOT a failure and your world has NOT been changed."
+  #
+  # "one or more", not "every": this fires on rc 3 (some checks skipped, the rest passed) as well as
+  # rc 4 (nothing graded at all), and on rc 3 the old wording was simply false — `ws prep
+  # jobs-batch-kueue` as an attendee lands here with THIRTEEN checks graded and one skipped, and told
+  # them none of it had been looked at. Same false accusation `ws smoke` was printing from the same
+  # rc; a message that overstates what went unread teaches attendees to distrust the ones that don't.
+  unknown "could not fully verify your ${1} environment — one or more entry checks were SKIPPED, so"
+  echo "   what they grade is unconfirmed. This is NOT a failure and your world has NOT been changed."
   echo "   Usually the cluster answered some reads and not others (an expired session, a transient"
   echo "   API error, or rights you do not hold). Re-check with: ws verify ${1} --user ${2}"
   echo "   If you are sure it needs rebuilding: ws prep ${1} --yes"

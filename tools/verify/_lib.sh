@@ -517,6 +517,27 @@ info() { echo "▶ $*"; }
 # destructive false alarm on a healthy world. `ws smoke` reads the same rc as a G1 ❌. So the BANNER
 # carries the signal for humans, and automation that must fail closed opts in with VERIFY_STRICT=1
 # and gets rc 3 — distinct from 1 (a check actually FAILED) and 2 (usage error, parse_verify_args).
+#
+# AND rc 4, because "something was skipped" was TWO DIFFERENT RUNS wearing one exit code — measured
+# live in user5's cockpit, 2026-08-05:
+#
+#   rc 3  SOME checks were skipped and every GRADED one passed — "this run did not fully verify".
+#         Incomplete, but a legitimate pass. `VERIFY_STRICT=1 ws verify jobs-batch-kueue --entry-only`
+#         as an attendee lands exactly here: 13 passed · 1 SKIPPED, and that one skip is the
+#         cluster-scoped ClusterQueue read the script itself labels "not yours to fix" — an attendee
+#         CANNOT answer it from their own identity, and no re-run of theirs ever will. A gate that
+#         rejects rc 3 therefore makes that module permanently unpassable, which is what `ws smoke`
+#         was doing while telling the operator the verify "SKIPPED every check — it graded nothing".
+#         Thirteen of fourteen checks were graded. The accusation was false in both halves.
+#   rc 4  NOTHING was graded: every outcome was a skip, pass+fail == 0. THIS is the no-signal run
+#         strict mode exists to catch — a ✅ over it is the false-completeness this whole banner
+#         design was built for. Callers that must fail closed fail on 4 (and on 1), never on 3.
+#
+# SPLIT rather than redefine rc 3, deliberately. Four call sites and two CI gates already read rc 3
+# as "did not fully verify", and every one of them is CORRECT for a partial run: `ws prep` says so
+# without offering its destructive wipe, `ws doctor` prints it as information rather than a failure.
+# Redefining 3 would silently change all of them to catch one that was wrong; adding 4 changes only
+# the reader that was wrong. Anything treating non-zero as fatal still fails closed on 4.
 verify_summary() {  # call at end of every script
   echo
   local graded=$((VERIFY_PASS+VERIFY_FAIL))
@@ -536,6 +557,21 @@ verify_summary() {  # call at end of every script
     exit 1
   fi
   if (( VERIFY_SKIP > 0 )); then
+    # GRADE WHAT WAS ACTUALLY GRADED. `graded` is PASS+FAIL and FAIL is 0 on this path, so graded == 0
+    # means literally nothing was answered — the run produced no signal at all and must not be read as
+    # a pass by anything. graded > 0 means the rest of the suite DID run and DID pass; saying that run
+    # "graded nothing" is a false accusation, and rejecting it punishes attendees for checks their own
+    # identity is not permitted to answer (see the rc 3 / rc 4 split above).
+    if (( graded == 0 )); then
+      echo "⚠ NOTHING was graded · ${VERIFY_SKIP} SKIPPED (not graded)${na_note} — 0 checks were answered, so this run says nothing about the lab"
+      echo "   ↳ each ⚠ line above says where its check can be answered; re-run there for any result at all"
+      # `if`, not `[[ … ]] && exit 4`: under the callers' `set -e` a false one-liner would return 1
+      # from this function and kill the script — turning a skip into the exit 1 the design avoids.
+      if [[ "${VERIFY_STRICT:-0}" == "1" ]]; then
+        exit 4
+      fi
+      exit 0
+    fi
     echo "⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded)${na_note} — this run did NOT fully verify the lab"
     echo "   ↳ each ⚠ line above says where its check can be answered; re-run there for a complete result"
     # `if`, not `[[ … ]] && exit 3`: under the callers' `set -e` a false one-liner would return 1 from
