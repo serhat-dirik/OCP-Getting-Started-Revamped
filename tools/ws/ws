@@ -65,6 +65,9 @@ MIRROR_ORG="${WS_MIRROR_ORG:-parasol}"
 MIRROR_REPO="${WS_MIRROR_REPO:-ocp-getting-started}"
 SOURCE_REVISION="${WS_REVISION:-main}"
 SHOWROOM_NS="${WS_SHOWROOM_NS:-ogsr-showroom}"
+# Shared MTA Hub (platform stack). Its portfolio lives in the Hub's own DB rather than in an
+# attendee namespace, which is why prep has to reach it explicitly — see purge_mta_apps (U8-F-01b).
+MTA_NS="${WS_MTA_NS:-openshift-mta}"
 PARASOL_IMAGES_NS="${WS_PARASOL_IMAGES_NS:-ogsr-parasol-images}"
 
 # `ws smoke` targets the LIVE cockpit pod (showroom-<user>) and its ttyd shell container. SMOKE_POD/
@@ -504,6 +507,18 @@ meta_rbac() {  # module user → ws-meta purgeRbac entries (ns/kind/name) with $
   meta_list "$meta" purgeRbac | while read -r item; do echo "${item//\$\{USER\}/${2}}"; done
 }
 
+meta_mta_apps() {  # module user → ws-meta purgeMtaApps entries with ${USER} resolved
+  # U8-F-01b. MTA's portfolio lives in the Hub's OWN database, not in the attendee's namespace, so
+  # purge_ns cannot see it and a reset leaves the previous run's application behind. The lab papered
+  # over this by telling the attendee to go delete it by hand in a web UI before re-running
+  # (app-modernization lab.adoc: "delete the parasol-legacy-claims-{user} Application to re-run the
+  # 'add app' beat cleanly"). Self-service prep is supposed to mean the attendee never has to do
+  # that, so ws does it.
+  local meta="${ENTRY_DIR}/${1}/ws-meta.yaml" item
+  [[ -f "$meta" ]] || return 0
+  meta_list "$meta" purgeMtaApps | while read -r item; do echo "${item//\$\{USER\}/${2}}"; done
+}
+
 meta_wait() {  # module → per-module sync-wait seconds (ws-meta waitSeconds); empty = engine default.
   # Modules whose hooks do real work (m07 solve runs a ~9-min pipeline) declare a longer window.
   local meta="${ENTRY_DIR}/${1}/ws-meta.yaml"
@@ -837,6 +852,49 @@ purge_apps() {  # module user [keep-module] — delete the user's Application/Ap
 # side of the namespace purge, and cmd_reset can only collapse its double-purge if it can place
 # them itself. cmd_start/cmd_solve, entered directly, still call the combined gc_conflicts below
 # and behave exactly as before.
+purge_mta_apps() {  # module user — delete the attendee's OWN applications from the shared MTA Hub
+  # U8-F-01b. Only ever deletes names the module DECLARES (ws-meta purgeMtaApps, ${USER}-resolved),
+  # never a wildcard sweep: the Hub is shared with the whole cohort and is unauthenticated, so a
+  # loose match here would delete a colleague's work — the exact failure mode user8 flagged as HIGH.
+  # No-op for every module that declares nothing, which is all of them but one.
+  local module="$1" user="$2" wanted host id name
+  wanted="$(meta_mta_apps "$module" "$user")"
+  [[ -n "${wanted// }" ]] || return 0
+  host="$(oc get route -n "$MTA_NS" -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true)"
+  if [[ -z "$host" ]]; then
+    info "MTA Hub route not found in ${MTA_NS} — skipping portfolio cleanup (nothing else is affected)"
+    return 0
+  fi
+  # The Hub answers anonymously (verified live 2026-08-05: GET /hub/applications → 200). If that ever
+  # changes, this degrades to a message rather than failing the reset — prep must stay usable.
+  local list
+  list="$(curl -ksf --max-time 20 "https://${host}/hub/applications" 2>/dev/null || true)"
+  if [[ -z "$list" ]]; then
+    info "MTA Hub did not answer — skipping portfolio cleanup (re-run prep, or delete the app in the MTA console)"
+    return 0
+  fi
+  while read -r name; do
+    [[ -n "$name" ]] || continue
+    # Exact-name match, resolved to an id by the Hub's own listing — never a substring.
+    id="$(printf '%s' "$list" | python3 -c "
+import json,sys
+want=sys.argv[1]
+try:
+    for a in json.load(sys.stdin):
+        if a.get('name')==want:
+            print(a.get('id')); break
+except Exception:
+    pass
+" "$name" 2>/dev/null || true)"
+    [[ -n "$id" ]] || continue
+    if curl -ksf --max-time 20 -X DELETE "https://${host}/hub/applications/${id}" >/dev/null 2>&1; then
+      ok "removed MTA application ${name} (id ${id}) — the 'add app' beat starts clean"
+    else
+      info "could not remove MTA application ${name} — delete it in the MTA console if the lab asks you to re-add it"
+    fi
+  done <<< "$wanted"
+}
+
 gc_conflicts_apps() {  # user module — purge CONFLICTING modules' attendee-created Argo apps
   # Runs BEFORE any namespace purge. The conflicting module's attendee-created Argo apps
   # (ws-meta purgeApps*) live in a control-plane ns and would keep selfHeal-ing its world back
@@ -1329,6 +1387,9 @@ cmd_reset() {
   #     namespace still populated.
   purge_apps "$module" "$user"
   gc_conflicts_apps "$user" "$module"
+  # Off-cluster state the namespace purge below cannot see (U8-F-01b). No-op unless the module
+  # declares purgeMtaApps.
+  purge_mta_apps "$module" "$user"
   local ns
   for ns in $(meta_namespaces "$module" "$user"); do purge_ns "$ns" "$module"; done
   purge_meta_rbac "$module" "$user"
