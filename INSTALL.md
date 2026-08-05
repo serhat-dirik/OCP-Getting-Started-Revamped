@@ -26,7 +26,7 @@ All `ws` commands below are run from a clone of this repo as `tools/ws/ws`. Atte
 | OpenShift **4.20+** | Verified on 4.22. The preflight check fails below 4.20. |
 | **cluster-admin** | The install creates operators, CRDs and cluster-scoped RBAC. |
 | A **default StorageClass** | The workshop provisions PVCs dynamically; several labs need RWX. |
-| **`linux/amd64` worker nodes** | |
+| **`linux/amd64` worker nodes** | **At least 3 dedicated workers** (worker role, not also control-plane) if you want the scheduling module taught in full — see [§2](#the-three-worker-taint-floor). |
 | Outbound registry access | Operators pull from Red Hat and Quay registries. |
 | Enough capacity | See [§2](#2-sizing-the-cluster). Get this right before you order — it is not adjustable later without disruption. |
 
@@ -135,8 +135,9 @@ anti-affinity, then performs a rolling update whose `maxSurge` pod needs a fourt
 nodes that can each still admit a 200m / 256Mi pod**, judged on requests rather than usage.
 
 Those four must be nodes the workload is allowed to use. The installer dedicates one worker to a
-**batch pool** — labelled and tainted `NoSchedule` — so that *Jobs, Batch & Queued Workloads* can
-teach node pinning. That worker does not count toward the four.
+**batch pool** — labelled `workshop.redhat.com/pool=batch` and tainted `NoSchedule` — so that the same
+module can teach node pinning against a node that genuinely repels pods. That worker does not count
+toward the four.
 
 **Four non-batch plus one batch is five**, at every cohort size. Aggregate headroom does not help
 here: a workload that must spread cannot borrow capacity from a node it is forbidden to use.
@@ -152,11 +153,6 @@ schedulable; check with:
 oc get nodes -l node-role.kubernetes.io/worker
 ```
 
-The installer already refuses the trap in one direction — it **skips the batch taint below three
-workers**, because tainting one of two workers starved the rest of the cluster in practice. It does
-not, however, know whether you enabled the scheduling module, so three workers plus that module is a
-combination it will let you build.
-
 **If you want to run leaner than five workers**, disable that module rather than hoping it fits:
 
 ```yaml
@@ -165,6 +161,62 @@ modules_disabled: [deployment-targets-scheduling]
 
 Then the capacity column governs — 3 workers for a small cohort, 4 for normal. `modules_disabled`
 works the same way for any heavy module: the operators still install, but no attendee can start it.
+
+**Two different floors, same module.** Five schedulable nodes is what the *anti-affinity spread*
+above wants; three dedicated workers is what the *batch-pool taint* wants, and that one
+`bootstrap/install.sh` enforces on your behalf — read the next section before you settle the node
+count.
+
+### The three-worker taint floor
+
+**Decide this before you order, not after you install.** The batch pool above is only half a lesson
+without its `NoSchedule` taint, and **`bootstrap/install.sh` withholds that taint on any cluster with
+fewer than three dedicated workers.**
+
+The rule, in `bootstrap/install.sh` (`MIN_BATCH_POOL_FOR_TAINT=3`): it counts nodes carrying the
+`worker` role that are **not** also control-plane, picks the first by name as the batch node, and
+labels it either way. It applies the taint only when that count is **3 or more**. Three is the
+smallest pool that can give up a worker and still leave two general-purpose workers standing. The
+floor exists because of a live failure on a two-worker cluster: one of the two was tainted, the
+survivor sat at 99% of memory requests, RHACS `central-db` stayed `Pending` for over three hours,
+Central crashlooped on a database that never came up, and the supply-chain module's scan gate was
+dead — while every Argo application reported `Healthy` throughout. Below the floor the installer
+therefore prints a `warn`, leaves the node labelled and fully schedulable, and (on a re-install of a
+cluster that has since shrunk) removes a taint an earlier run applied.
+
+**What you lose below three dedicated workers.** In *Deployment Targets & Scheduling*, the pinning
+exercise has two halves:
+
+| Half | Below the floor |
+|---|---|
+| **`nodeSelector` attracts** — a pod asking for the pool label lands on the pool node | Works. A label never removes scheduling capacity. |
+| **A taint repels, and a toleration only permits** — patch the `nodeSelector` alone and the pod goes `Pending` with a `FailedScheduling` "untolerated taint", then *snaps* onto the pool node the moment the toleration is added | **Not demonstrable.** With no taint to refuse it, the selector-only patch schedules immediately. There is no `Pending` pod and no refusal event to read. |
+
+That break-and-fix moment — *refused, then admitted* — is the module's signature beat, and it is the
+only thing on the whole cluster the taint exists to make possible.
+
+**The workshop still runs.** This costs one beat in one module — nothing else on the cluster reads
+the taint, and no other module references the pool at all. The lab detects the situation itself: it
+has attendees check the node for the taint first, prints the "no `Pending` pod, and here is why"
+branch when there is none, and reframes the narration instead of pretending. Its expected-output
+blocks show both the tainted and the untainted cluster.
+
+**Never hand-taint a node to force the beat back.** That is exactly the two-worker configuration the
+floor was added to prevent, and it recreates the outage above. If you need the full lesson, order the
+third worker.
+
+> **The floor is enforced by `bootstrap/install.sh` only.** The `helm/bootstrap/` node-shaping Job —
+> the chart route described under [Where to get a cluster](#where-to-get-a-cluster) — currently taints
+> the batch node **unconditionally**, with no worker count check. On a cluster with fewer than three
+> dedicated workers, drive the install from `bootstrap/install.sh`, or check the node afterwards
+> (`oc get nodes -l workshop.redhat.com/pool=batch`) and remove the taint if it landed on a two-worker
+> cluster. Tracked as a divergence between the script and its declarative twin.
+
+If you are on a **compact** cluster — every node carrying both the control-plane and worker roles —
+the "dedicated worker" count comes back empty and the installer falls back to counting *all* nodes,
+so a standard three-node compact cluster is at the floor and does get the taint, on a node that is
+also a control plane. That is supported, but it is a tighter cluster than the sizing table above
+assumes; read [what one attendee costs](#what-one-attendee-costs) before committing to it.
 
 ### Where to get a cluster
 
