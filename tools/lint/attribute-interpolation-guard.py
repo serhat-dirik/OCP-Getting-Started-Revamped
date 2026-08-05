@@ -17,9 +17,18 @@ only 4 already carried `subs=`. So a well-meant sweep across the remaining ~124 
 replaced a wrong-but-plausible namespace name with visible template syntax — strictly worse, because
 `user2-dev` at least looks like a namespace while `{user}-dev` looks like the workshop is broken.
 
-WHAT IT CHECKS, over every tracked .adoc page:
-  [1] LITERAL LEAK. A block WITHOUT `subs=` whose body contains a DECLARED attribute reference. The
-      attendee would see the braces. This is the failure a naive F-01 sweep introduces.
+WHAT IT CHECKS:
+  [1] LITERAL LEAK, over every tracked .adoc page. A block WITHOUT `subs=` whose body contains a
+      DECLARED attribute reference. The attendee would see the braces. This is the failure a naive
+      F-01 sweep introduces.
+  [2] DIAGRAM LEAK, over every tracked .mmd file. Mermaid diagrams are pulled in through
+      `[mermaid]` + a `....` LITERAL block, which applies no substitution and accepts no `subs=`
+      option — so an attribute reference in a .mmd can NEVER resolve, on any page, by construction.
+      Found on the shipped tree 2026-08-05: five diagrams had been rendering the literal text
+      "{user}-dev" to attendees since 2026-07-18, in 30 built files across the three renderings.
+      Detector [1] could not see them because the .adoc block body is an `include::` line, not the
+      diagram text. Fix by wording the label as an obvious placeholder ("your -dev namespace"),
+      never by adding subs= — there is no header on that path to add it to.
 
 A SECOND DETECTOR WAS BUILT AND DELIBERATELY REMOVED — do not re-add it without new evidence.
 The idea was to flag the reverse mistake: `subs="attributes"` on a block containing braces that are
@@ -168,6 +177,42 @@ def scan(paths, known=None):
     return leaks
 
 
+def tracked_mmds():
+    """Diagram SOURCES and their exported renderings.
+
+    Both are checked because they must agree: the project rule is that an exported SVG/PNG sits next
+    to its editable .mmd, so a fix applied to only one of them is silently reverted by the next
+    re-export. The 2026-08-05 incident needed both — five .mmd sources AND their five committed SVGs
+    carried the same unresolvable {user}.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "--", "*.mmd", "*.svg"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+    except Exception:
+        return []
+    return [REPO / f for f in out if ".canary." not in f]
+
+
+def scan_diagrams(paths, known=None):
+    """Any declared-attribute reference in a .mmd is unresolvable — no header exists to opt in."""
+    if known is None:
+        known = declared_attributes()
+    hits = []
+    for p in paths:
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        rel = p.relative_to(REPO) if str(p).startswith(str(REPO)) else p
+        for i, line in enumerate(text.splitlines(), 1):
+            refs = attr_refs(line, known)
+            if refs:
+                hits.append((str(rel), i, sorted(refs), line.strip()[:70]))
+    return hits
+
+
 def tracked_adocs():
     try:
         out = subprocess.run(
@@ -181,8 +226,15 @@ def tracked_adocs():
     return [REPO / f for f in out if ".canary." not in f]
 
 
-def report(leaks) -> int:
+def report(leaks, diagrams=()) -> int:
     rc = 0
+    if diagrams:
+        rc = 1
+        print(f"❌ [2] {len(diagrams)} diagram line(s) reference an attribute that can NEVER resolve.")
+        print("       Mermaid arrives through a `....` literal block, which applies no substitution")
+        print("       and has no header to add subs= to. Reword the label as a plain placeholder.")
+        for f, ln, refs, txt in diagrams[:20]:
+            print(f"   {f}:{ln}  refs={refs}  {txt}")
     if leaks:
         rc = 1
         print(f"❌ [1] {len(leaks)} block(s) reference an attribute but cannot interpolate it —")
@@ -252,14 +304,26 @@ def self_test(tmpdir: Path) -> int:
         return 2
 
 
+    # Canary B — an attribute in a mermaid source, which no header can ever rescue.
+    d = tmpdir / "diagram.mmd"
+    d.write_text('flowchart LR\n  subgraph ns["{user}-dev — after the lab"]\n  end\n')
+    if not scan_diagrams([d]):
+        print("❌ SELF-TEST FAILED: an attribute reference in a .mmd was NOT detected — detector [2]")
+        print("   is blind, and diagrams would keep rendering literal braces to attendees.")
+        return 2
+    d.write_text('flowchart LR\n  subgraph ns["your -dev namespace"]\n  end\n')
+    if scan_diagrams([d]):
+        print("❌ SELF-TEST FAILED: a correctly-worded .mmd was flagged — detector [2] cries wolf.")
+        return 2
+
     # Proof 1: the guard must be able to SEE the real tree, or its clean verdict means nothing.
     real = tracked_adocs()
     if not real:
         print("❌ SELF-TEST FAILED: no tracked .adoc files found — the guard would pass by scanning nothing.")
         return 2
 
-    print("✅ self-test ok — clean fixture silent (including jsonpath beside subs=); the literal-leak")
-    print(f"   canary was caught; {len(real)} tracked .adoc file(s) visible to the real scan.")
+    print("✅ self-test ok — clean fixture silent (including jsonpath beside subs=); literal-leak and")
+    print(f"   diagram-leak canaries caught; {len(real)} tracked .adoc file(s) visible to the real scan.")
     return 1  # house convention: every canary caught == exit exactly 1
 
 
@@ -279,8 +343,10 @@ def main() -> int:
         print("❌ no tracked .adoc files found — refusing to report a clean scan of nothing.")
         return 2
     leaks = scan(paths)
-    print(f"   scanned {len(paths)} tracked .adoc file(s)")
-    return report(leaks)
+    mmds = tracked_mmds()
+    diagrams = scan_diagrams(mmds)
+    print(f"   scanned {len(paths)} tracked .adoc and {len(mmds)} diagram file(s)")
+    return report(leaks, diagrams)
 
 
 if __name__ == "__main__":
