@@ -88,7 +88,12 @@ ANY_BRACE = re.compile(r"\{[^}\n]{0,200}\}")
 #   content/modules/ROOT/partials/version-attributes.adoc (:name: value, generated from versions.yaml)
 #   the scanned page's own `:name:` lines                (e.g. :module-id:)
 _ANTORA_ATTR = re.compile(r"^\s{2,}([a-z][a-z0-9_-]*):\s")
-_PAGE_ATTR = re.compile(r"^:([a-z][a-z0-9_-]*):")
+# re.MULTILINE is load-bearing: scan() calls _PAGE_ATTR.finditer(raw) over a whole page to promote
+# the page's own `:name:` declarations into its known set. Without it `^` matches only at offset 0,
+# so a `:name:` line BELOW the `= Title` — i.e. on every real page — is never seen and the promotion
+# is dead. It does not change the `.match(line)` use in declared_attributes(), which is already
+# anchored at the start of each single line.
+_PAGE_ATTR = re.compile(r"^:([a-z][a-z0-9_-]*):", re.MULTILINE)
 
 
 def declared_attributes() -> set[str]:
@@ -262,6 +267,22 @@ Namespace:  {user}-dev
 """
 
 
+# A PAGE-LOCAL attribute: declared with `:name:` BELOW the `= Title` (as on every real page) and
+# absent from the global set. It reaches page_known ONLY through _PAGE_ATTR promotion in scan(),
+# which needs re.MULTILINE to see a `:name:` line that is not at offset 0. Referenced in a block
+# with no subs=, it is a real leak. The self-test scans it with known=set() so the ONLY thing that
+# can catch it is that promotion — which is exactly what makes it a witness for _PAGE_ATTR.
+FIXTURE_PAGE_LOCAL_LEAK = """= Getting Started
+:region: emea-1
+
+.Expected output
+[source,texinfo]
+----
+Region:  {region}
+----
+"""
+
+
 FIXTURE_CLEAN = """= Page
 
 .Expected output
@@ -303,6 +324,22 @@ def self_test(tmpdir: Path) -> int:
         print("   detector [1] is blind, and a sweep would ship visible {user} to attendees.")
         return 2
 
+    # Canary C — witnesses _PAGE_ATTR. A page-local attribute declared with `:name:` BELOW the title
+    # (so only re.MULTILINE promotion in scan() can see it), referenced in a block with no subs=.
+    # Scanned with known=set() so the ONLY path to a hit is that promotion: blind _PAGE_ATTR and the
+    # detection drops to zero, which is what proves the detector. It is deliberately a LEAK fixture,
+    # not a clean one — the promotion is purely additive to the known set, so blinding it can only
+    # make a leak DISAPPEAR, never appear; a clean fixture could not witness it. Before re.MULTILINE
+    # this canary failed in the baseline, which is the point: it fixes and proves the page-local
+    # promotion in one move.
+    f = tmpdir / "page-local-leak.adoc"
+    f.write_text(FIXTURE_PAGE_LOCAL_LEAK)
+    if not scan([f], known=set()):
+        print("❌ SELF-TEST FAILED: a page-local attribute ({region}, declared via :region: below the")
+        print("   title) referenced in a non-subs block was NOT detected — _PAGE_ATTR promotion is")
+        print("   blind, and a page interpolating its own attribute would ship literal {braces}.")
+        return 2
+
 
     # Canary B — an attribute in a mermaid source, which no header can ever rescue.
     d = tmpdir / "diagram.mmd"
@@ -322,16 +359,21 @@ def self_test(tmpdir: Path) -> int:
         print("❌ SELF-TEST FAILED: no tracked .adoc files found — the guard would pass by scanning nothing.")
         return 2
 
-    print("✅ self-test ok — clean fixture silent (including jsonpath beside subs=); literal-leak and")
-    print(f"   diagram-leak canaries caught; {len(real)} tracked .adoc file(s) visible to the real scan.")
+    print("✅ self-test ok — clean fixture silent (including jsonpath beside subs=); literal-leak,")
+    print("   page-local-leak and diagram-leak canaries caught;")
+    print(f"   {len(real)} tracked .adoc file(s) visible to the real scan.")
     return 1  # house convention: every canary caught == exit exactly 1
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    # argv is a PARAMETER, not read from sys.argv, because tools/lint/_canary-coverage.py drives
+    # every guard by calling `mod.main(argv)` in-process to blind one detector at a time. A
+    # zero-argument main() raises TypeError there, the sweep records "unmutated control ran 2/2",
+    # and this guard's detectors go UNPROVEN while every job still looks green.
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--self-test", action="store_true",
                     help="prove the detectors fire against planted canaries (exit 1 = PASS)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.self_test:
         import tempfile
