@@ -15,9 +15,19 @@
 # (SC2329 on shellcheck >= 0.10, SC2317 on 0.9.x — CI pins 0.9.0, so both names are needed.)
 
 kustomize_resources() {  # <kustomization.yaml> → each entry under `resources:`
-  # Reads the resources list rather than globbing the directory: several stacks ship an app file that
-  # is deliberately COMMENTED OUT (loki-logging, service-interconnect), and preflighting a component
-  # we will never apply would refuse — or worse, silently skip — an install for no reason.
+  # Reads the resources list rather than globbing the directory: a stack may ship an app file that is
+  # deliberately COMMENTED OUT (today: observability/apps/loki-logging.yaml — capacity-gated), and
+  # preflighting a component we will never apply would refuse — or worse, silently skip — an install
+  # for no reason.
+  #
+  # Globbing apps/*.yaml instead is NOT equivalent, and the difference is a safety property, not a
+  # tidiness one: bootstrap/install.sh's snapshot_operators() and bootstrap/ogsr-uninstall.sh's
+  # enumerate_operators() DO glob, so they attribute a commented-out component's operators to us and
+  # record op_<sub>=created:<ns> for operators that were never installed (verified on a live cluster
+  # 2026-08-05: op_loki-operator/op_cluster-logging recorded created while neither namespace existed).
+  # `created:` is the sole authorization csv_delete_authorized_by_state() consults before deleting a
+  # CSV, so a false one licenses deleting an operator the ORG later installs under the same standard
+  # name. Any new consumer must use active_app_files(), never a glob.
   awk '
     /^resources:[[:space:]]*$/           { inres = 1; next }
     /^[A-Za-z0-9_.-]+:/                  { inres = 0 }
@@ -122,4 +132,135 @@ skip_patch_block() {  # <child-app> <component> <reason> <argo-namespace> → on
   # `$patch` is a kustomize strategic-merge DIRECTIVE, not a shell variable — it must stay literal.
   # shellcheck disable=SC2016
   printf '            $patch: delete\n'
+}
+
+# ── namespace-strand detection (SHARED by install.sh §0 and hack/check-adoption-skip.sh) ──────────
+# Skipping an operator-only component on an adopted cluster drops its child Application from the
+# render. That is safe for the operator install itself — but NOT when the component is the ONLY thing
+# that creates a namespace (or scopes an OperatorGroup to one) that a component we do NOT skip deploys
+# into. The sibling then syncs resources into a namespace nothing creates, or operand CRs into a
+# namespace nothing gives a controller: Argo reports Synced/Healthy and nothing ever reconciles. The
+# live case is keycloak — components/keycloak-operator/namespace.yaml is the sole creator of
+# `sso-workshop`, and sibling `keycloak` ships six resources into it while creating none of its own.
+#
+# component_strands() is the SINGLE source of truth for that verdict, so the installer and the CI gate
+# can never hold two opinions. It reads a flat fact table — the "component snapshot" — that each caller
+# builds its own way: the installer with the grep/sed/awk readers below (nothing but oc + this file),
+# the CI gate from RENDERED manifests with yq (so drift a filename cannot show is still caught). Both
+# then feed the SAME detector. One line per fact, "<verb> <component> <value>":
+#   creates <comp> <ns>   the component creates a Namespace of that name
+#   ogns    <comp> <ns>   it scopes an OperatorGroup to that namespace
+#   uses    <comp> <ns>   it places a resource there (child App destination, or a manifest namespace)
+#   opts    <comp> <csv>  the child App's syncOptions, "-" when none (CreateNamespace=true self-heals)
+# Pure awk over text — no yq — so the verdict runs anywhere `oc` does.
+
+_fact_has() {  # <facts-file> <verb> <component> <value> → true when that exact fact was recorded
+  awk -v v="$2" -v c="$3" -v n="$4" '$1 == v && $2 == c && $3 == n { found = 1 } END { exit !found }' "$1"
+}
+
+component_strands() {  # <facts-file> <component> → one strand per line, empty when skipping is safe
+  # "NS <ns> <sibling>"  a sibling deploys into a namespace only this component creates
+  # "OG <ns> <sibling>"  a sibling's operand CRs sit in a namespace only this component scopes a group to
+  # The OG rule is asserted separately, not folded into the NS one: an operand CR left in an existing
+  # namespace with no controller fails MORE quietly than a resource in a namespace that never appears.
+  local facts="$1" s="$2" ns sib opts
+  while IFS= read -r ns; do
+    [[ -n "$ns" ]] || continue
+    while IFS= read -r sib; do
+      [[ -n "$sib" && "$sib" != "$s" ]] || continue
+      # `if`, not `cond && continue`: as the last statement of a bare-called function the short-circuit
+      # form makes the function's status the test's, and under `set -e` that silently skipped
+      # cleanup_created_operators' steps 4-8 on 2026-07-25 (CLAUDE.md). Spelled out to stay immune.
+      if _fact_has "$facts" creates "$sib" "$ns"; then continue; fi   # sibling creates the namespace itself
+      opts="$(awk -v c="$sib" '$1 == "opts" && $2 == c { print $3; exit }' "$facts")"
+      case ",${opts}," in *",CreateNamespace=true,"*) continue ;; esac   # child App self-provisions it
+      echo "NS ${ns} ${sib}"
+    done < <(awk -v n="$ns" '$1 == "uses" && $3 == n { print $2 }' "$facts" | sort -u)
+  done < <(awk -v c="$s" '$1 == "creates" && $2 == c { print $3 }' "$facts" | sort -u)
+  while IFS= read -r ns; do
+    [[ -n "$ns" ]] || continue
+    while IFS= read -r sib; do
+      [[ -n "$sib" && "$sib" != "$s" ]] || continue
+      if _fact_has "$facts" ogns "$sib" "$ns"; then continue; fi   # sibling ships its own OperatorGroup
+      echo "OG ${ns} ${sib}"
+    done < <(awk -v n="$ns" '$1 == "uses" && $3 == n { print $2 }' "$facts" | sort -u)
+  done < <(awk -v c="$s" '$1 == "ogns" && $2 == c { print $3 }' "$facts" | sort -u)
+}
+
+# ── offline fact builders (the installer's yq-free path into component_strands) ────────────────────
+# hack/check-adoption-skip.sh builds the same fact table from RENDERED manifests; these read the
+# FILENAMES, exactly as is_operator_only() does, so the installer needs nothing but oc + this file.
+
+component_created_namespaces() {  # <component-dir> → each namespace a `kind: Namespace` manifest creates
+  local dir="$1" f
+  for f in "${dir}"/*.yaml; do
+    [[ -e "$f" ]] || continue
+    # Document-aware: reset on `---`, capture metadata.name only INSIDE the metadata block, and print
+    # it for any document whose kind is Namespace. A bare grep would miss multi-document files and
+    # could pick up a container's `name:`.
+    awk '
+      function flush() { if (kind == "Namespace" && nm != "") print nm; kind=""; nm=""; inmeta=0 }
+      /^---[[:space:]]*$/             { flush(); next }
+      /^kind:[[:space:]]/             { kind=$2 }
+      /^metadata:[[:space:]]*$/       { inmeta=1; next }
+      /^[A-Za-z0-9_.-]+:/             { inmeta=0 }
+      inmeta && /^  name:[[:space:]]/ { nm=$2; gsub(/"/, "", nm) }
+      END { flush() }
+    ' "$f" 2>/dev/null
+  done
+}
+
+component_used_namespaces() {  # <component-dir> [dest-ns…] → namespaces the component deploys into
+  # The child App destination(s) passed in, plus every metadata.namespace the manifests name. `^  ` is
+  # deliberate: it matches metadata.namespace at indent 2 and never spec.sourceNamespace (a different
+  # key) or a targetNamespaces list item (a `-` entry, not `namespace:`).
+  local dir="$1" ns
+  shift
+  {
+    for ns in "$@"; do [[ -n "$ns" ]] && printf '%s\n' "$ns"; done
+    grep -hE '^  namespace:[[:space:]]' "${dir}"/*.yaml 2>/dev/null \
+      | sed -E 's/^  namespace:[[:space:]]*//; s/[[:space:]]*$//'
+  } | awk 'NF' | sort -u || true
+}
+
+app_destination_namespace() {  # <app-file> → spec.destination.namespace ("" when unset)
+  # destination.namespace sits at indent 4 under `  destination:`; yaml_scalar reads indent-2 keys, so
+  # it cannot see this one. Block-scoped so a `namespace:` under `  source:` can never be mistaken for it.
+  awk '
+    /^  destination:[[:space:]]*$/      { ind=1; next }
+    /^  [A-Za-z0-9_.-]+:/               { ind=0 }
+    ind && /^    namespace:[[:space:]]/ { sub(/^    namespace:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print; exit }
+  ' "$1" 2>/dev/null
+}
+
+app_creates_namespace() {  # <app-file> → true when the child App's syncOptions set CreateNamespace=true
+  grep -qE 'CreateNamespace=true' "$1" 2>/dev/null
+}
+
+build_stack_facts_offline() {  # <stack> <out-file> — write component_strands facts for a whole stack
+  # The installer's offline twin of hack/check-adoption-skip.sh collect_facts(): same verbs, read from
+  # FILENAMES not rendered manifests. Needs STACKS_DIR and REPO_ROOT set by the caller.
+  local stack="$1" out="$2" app cpath cdir comp dest n
+  : > "$out"
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    cpath="$(component_path_of "$stack" "$app" || true)"
+    [[ -n "$cpath" ]] || continue
+    cdir="${REPO_ROOT}/${cpath}"
+    comp="$(basename "$cpath")"
+    dest="$(app_destination_namespace "${STACKS_DIR}/${stack}/${app}")"
+    printf 'stack %s %s\n' "$comp" "$stack" >> "$out"
+    if app_creates_namespace "${STACKS_DIR}/${stack}/${app}"; then
+      printf 'opts %s CreateNamespace=true\n' "$comp" >> "$out"
+    else
+      printf 'opts %s -\n' "$comp" >> "$out"
+    fi
+    while IFS= read -r n; do printf 'creates %s %s\n' "$comp" "$n" >> "$out"; done \
+      < <(component_created_namespaces "$cdir")
+    while IFS= read -r n; do printf 'ogns %s %s\n' "$comp" "$n" >> "$out"; done \
+      < <(component_operatorgroup_namespaces "$cdir")
+    while IFS= read -r n; do printf 'uses %s %s\n' "$comp" "$n" >> "$out"; done \
+      < <(component_used_namespaces "$cdir" "$dest")
+  done < <(active_app_files "$stack")
+  return 0   # the while-loop's EOF status is 0, but a bare-called function must never RELY on that
 }

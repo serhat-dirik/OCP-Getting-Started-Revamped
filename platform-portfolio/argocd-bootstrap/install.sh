@@ -396,6 +396,11 @@ fi
 for _stack in "${PREFLIGHT_STACKS[@]}"; do
   _stack="$(echo "$_stack" | xargs)"
   [[ -d "${STACKS_DIR}/${_stack}" ]] || continue
+  # The whole stack's fact table, built once (offline, from filenames) so the skip decision below can
+  # ask whether dropping any one component would strand a sibling. Same table shape the CI gate builds
+  # from rendered manifests; both feed lib-components.sh component_strands().
+  _facts="$(mktemp)"
+  build_stack_facts_offline "$_stack" "$_facts"
   while IFS= read -r _app; do
     [[ -n "$_app" ]] || continue
     _cpath="$(component_path_of "$_stack" "$_app")"
@@ -418,9 +423,30 @@ for _stack in "${PREFLIGHT_STACKS[@]}"; do
       continue
     fi
 
-    # CC_VERB == present. Operator-only → adopt theirs and skip ours, unattended. Anything else →
-    # refuse (OperatorGroup collision) or warn (adoption without a collision).
+    # CC_VERB == present. Operator-only → adopt theirs and skip ours, unattended — UNLESS dropping it
+    # would strand a sibling we are NOT skipping (a namespace or OperatorGroup only this component
+    # provides), in which case refuse loudly. Anything else → refuse (OperatorGroup collision) or warn.
     if is_operator_only "$_cdir"; then
+      # Same detector the CI gate runs (lib-components.sh), on the offline fact table built above —
+      # one verdict, two fact builders. Non-empty ⇒ skipping this component breaks a sibling.
+      _strands="$(component_strands "$_facts" "$_comp" || true)"
+      if [[ -n "$_strands" ]]; then
+        OG_CONFLICTS=$((OG_CONFLICTS + 1))
+        _sib="$(printf '%s\n' "$_strands" | awk '{ print $3 }' | sort -u | tr '\n' ' ' | xargs || true)"
+        _sns="$(printf '%s\n' "$_strands" | awk '{ print $2 }' | sort -u | tr '\n' ' ' | xargs || true)"
+        plan_add refuse "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" \
+          "skipping the adopted ${_comp} would strand sibling(s) ${_sib} in namespace(s) ${_sns} that only ${_comp} provides"
+        say "❌ ${_comp} is already installed by this cluster's owner, so the normal path is to skip ours —"
+        say "   but ${_comp} is the ONLY component that provides namespace(s) ${_sns}, and sibling(s) ${_sib}"
+        say "   deploy there without creating it. Skipping ${_comp} would leave ${_sib} syncing into a"
+        say "   namespace nothing creates (or operand CRs with no controller): Argo reports Synced while"
+        say "   nothing reconciles. Refusing — a loud stop beats a silently incomplete workshop."
+        say "   Choose one, then re-run:"
+        say "     • install without the stack that ships it — drop '${_stack}' from --stacks"
+        say "     • or move the Namespace/OperatorGroup out of ${_comp} into ${_sib} (or a shared base) so"
+        say "       adopting the operator no longer takes ${_sns} with it"
+        continue
+      fi
       SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
       plan_add skip "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" "$CC_REASON"
       say "  • ${_comp}: already installed by this cluster's owner — using theirs, our component skipped"
@@ -446,6 +472,7 @@ for _stack in "${PREFLIGHT_STACKS[@]}"; do
       say "        oc get subscriptions.operators.coreos.com -n ${CC_NS%%,*}"
     fi
   done < <(active_app_files "$_stack")
+  rm -f "$_facts"   # per-stack; the loop completes before either exit below, so nothing leaks
 done
 
 if [[ "$ADOPTION_PLAN_ONLY" == "true" ]]; then
@@ -454,7 +481,7 @@ if [[ "$ADOPTION_PLAN_ONLY" == "true" ]]; then
 fi
 
 if [[ "$OG_CONFLICTS" -gt 0 ]]; then
-  echo "❌ ${OG_CONFLICTS} unskippable collision(s) — nothing was applied, the cluster is untouched."
+  echo "❌ ${OG_CONFLICTS} unskippable adoption conflict(s) — nothing was applied, the cluster is untouched."
   exit 1
 fi
 echo "  ✓ ${OG_CHECKED} OperatorGroup namespace(s) checked · ${SKIPPED_COUNT} component(s) adopted-and-skipped"

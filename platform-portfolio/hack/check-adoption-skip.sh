@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-adoption-skip — prove the two properties automatic component adoption rests on.
+# check-adoption-skip — prove the three properties automatic component adoption rests on.
 # READ-ONLY: renders manifests with kustomize, never touches a cluster.
 #
 #   SAFETY   argocd-bootstrap/install.sh §0 SKIPS a component when this cluster already runs that
@@ -27,8 +27,34 @@
 #            form cannot delete a resource, and a silent no-op patch would install the operator we
 #            just promised the cluster's owner we would not touch.
 #
-# Usage: ./hack/check-adoption-skip.sh
-# Exit 0 = both properties hold. Exit 1 = violations listed above. Exit 2 = missing tooling.
+#   VIABILITY (property 3, added 2026-08-05 after this file printed
+#            "✅ automatic component adoption is safe across the portfolio" over a live break).
+#            Properties 1 and 2 together say: the child Application disappears and every OTHER child
+#            is byte-identical. Both were true of `keycloak-operator`, and the green line even
+#            counted the survivor — "leaves 1 sibling(s) untouched". Untouched is not the same as
+#            still able to work. components/keycloak-operator/namespace.yaml was the ONLY thing in
+#            the portfolio that created namespace `sso-workshop`; its sibling `keycloak` ships six
+#            resources INTO that namespace, creates none of its own, and its child Application
+#            carries no CreateNamespace=true. Skip the operator component and the survivor is intact
+#            and non-viable. Counting siblings is not checking them.
+#            The same reasoning applies one level up: an OperatorGroup is what scopes an operator to
+#            a namespace, so removing the only OperatorGroup covering a namespace where a sibling
+#            places operand CRs leaves those CRs with no controller — the CR applies, Argo goes
+#            green, and nothing ever reconciles it. That failure is quieter than a missing namespace,
+#            which is why it is asserted separately rather than folded into the namespace rule.
+#
+#            Quantified over the CURRENTLY skippable set, deliberately, and unlike the
+#            openshift-pipelines gap that is sound here: a component that stops being skippable is a
+#            component the installer will never drop, so its viability stops mattering. The set is
+#            printed either way (examined AND not-examined, by name) so a silently shrinking
+#            candidate list cannot masquerade as a clean run, and hack/adoption-skippable.snapshot
+#            plus tools/lint/adoption-skippable-guard.sh make the shrinking itself reviewable.
+#
+# Usage: ./hack/check-adoption-skip.sh [--self-test]
+#   --self-test  drive the property-3 detector against hand-built fixtures and prove it fires; exits
+#                1 when every canary is caught, matching the house convention CI asserts on.
+# Exit 0 = all three properties hold. Exit 1 = violations listed above. Exit 2 = missing tooling, or
+# an argument this script does not support (which would mean it never checked what you asked it to).
 set -euo pipefail
 
 PORTFOLIO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,20 +71,164 @@ ok()   { echo "  ✅ $*"; }
 bad()  { echo "  ❌ $*"; FAILURES=$((FAILURES + 1)); }
 hint() { echo "     ↳ $*"; }
 
-for tool in kustomize yq; do
-  command -v "$tool" >/dev/null 2>&1 || {
-    echo "❌ ${tool} not found in PATH — install it, then re-run"; exit 2; }
+# Arguments are refused rather than ignored. A script that discards an argument still prints the
+# ticks and exits 0, and that verdict describes a run nobody asked for — the exact misreading
+# tools/lint/adoption-skippable-guard.sh was rewritten for on 2026-08-01.
+SELF_TEST=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-test) SELF_TEST=1; shift ;;
+    -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "❌ unknown argument: $1 — see --help" >&2; exit 2 ;;
+  esac
 done
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+self_test() {  # drive the SHARED strand detector against planted fixtures; prove it fires and does not over-fire
+  # An unrun gate is worse than none, so CI runs this first and asserts it exits EXACTLY 1: the
+  # detector must catch a planted strand (canary A) and stay silent on two look-alikes that are not
+  # strands (B, C). Fact tables are hand-built here — no kustomize/yq — so the gate can be proven live
+  # on any box. Exit 1 = every canary behaved (healthy); exit 2 = one did not (do not trust a green run).
+  local ft="${WORK}/self-test.facts" good=0 total=0 out
+  echo "▶ self-test: the shared strand detector fires on a planted strand and stays quiet otherwise"
+
+  # A — the keycloak topology, replayed: an operator-only component ALONE creates + scopes a namespace
+  # a non-skipped sibling deploys into. The detector MUST fire.
+  cat > "$ft" <<'EOF'
+stack fx-operator fx
+opts fx-operator -
+creates fx-operator fx-ns
+ogns fx-operator fx-ns
+uses fx-operator fx-ns
+stack fx-instance fx
+opts fx-instance -
+uses fx-instance fx-ns
+EOF
+  total=$((total + 1))
+  out="$(component_strands "$ft" fx-operator || true)"
+  if [[ -n "$out" ]]; then
+    good=$((good + 1)); ok "A keycloak topology: strand CAUGHT ($(printf '%s' "$out" | tr '\n' ';'))"
+  else
+    bad "A keycloak topology: the planted strand was NOT caught — the detector is dead"
+  fi
+
+  # B — the sibling's child App carries CreateNamespace=true, so it self-provisions. NOT a strand.
+  cat > "$ft" <<'EOF'
+stack fx-operator fx
+opts fx-operator -
+creates fx-operator fx-ns
+uses fx-operator fx-ns
+stack fx-instance fx
+opts fx-instance CreateNamespace=true
+uses fx-instance fx-ns
+EOF
+  total=$((total + 1))
+  if [[ -z "$(component_strands "$ft" fx-operator || true)" ]]; then
+    good=$((good + 1)); ok "B sibling sets CreateNamespace=true: correctly NOT flagged"
+  else
+    bad "B sibling sets CreateNamespace=true: wrongly flagged — a false positive would block a valid install"
+  fi
+
+  # C — the sibling creates the namespace itself. NOT a strand.
+  cat > "$ft" <<'EOF'
+stack fx-operator fx
+opts fx-operator -
+creates fx-operator fx-ns
+uses fx-operator fx-ns
+stack fx-instance fx
+opts fx-instance -
+creates fx-instance fx-ns
+uses fx-instance fx-ns
+EOF
+  total=$((total + 1))
+  if [[ -z "$(component_strands "$ft" fx-operator || true)" ]]; then
+    good=$((good + 1)); ok "C sibling creates the namespace itself: correctly NOT flagged"
+  else
+    bad "C sibling creates the namespace itself: wrongly flagged (false positive)"
+  fi
+
+  echo
+  if [[ "$good" -eq "$total" ]]; then
+    echo "✅ self-test: ${good}/${total} detector canaries behaved — the strand gate is live."
+    echo "   Exiting 1 BY DESIGN (the planted strand was caught); the CI step asserts this exact code."
+    exit 1
+  fi
+  echo "❌ self-test: only ${good}/${total} canaries behaved — the strand detector is unreliable."
+  echo "   Refusing to let a green real run be trusted while the gate cannot catch a planted break."
+  exit 2
+}
+
+# --self-test needs neither kustomize nor yq (it builds fact tables by hand, not from rendered
+# manifests), so it runs BEFORE the render-tool check — a maintainer can prove the gate live anywhere.
+if [[ "$SELF_TEST" == "1" ]]; then
+  self_test   # exits 1 when every canary behaves (the code CI asserts on), 2 when one does not
+fi
+
+for tool in kustomize yq; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "❌ ${tool} not found in PATH — install it, then re-run"; exit 2; }
+done
+
+# ── property-3 machinery ──────────────────────────────────────────────────────
+# A flat fact table, because bash 3.2 (the shell on every macOS maintainer box) has no associative
+# arrays. One "<verb> <component> <value>" per line:
+#   creates <comp> <ns>   the component RENDERS a Namespace object of that name
+#   ogns    <comp> <ns>   it renders an OperatorGroup in that namespace
+#   uses    <comp> <ns>   it places at least one resource there (or the child App targets it)
+#   opts    <comp> <csv>  the child Application's syncOptions, "-" when it has none
+#   stack   <comp> <name> the stack whose apps/ file syncs it
+yq_names() {  # stdin: a rendered manifest stream, $1: a yq expression → one clean name per line
+  # yq prints a `---` between documents and `null` for an absent field; awk, not grep -vE, because
+  # BSD grep rejects the empty alternative that filtering both with one pattern would need.
+  yq -r "$1" - | awk '$0 != "" && $0 != "---" && $0 != "null"' | sort -u
+}
+
+collect_facts() {  # <facts-file> — render every ACTIVE component of every stack, once
+  local out="$1" stack_dir stack app cpath cdir comp rendered dest opts n
+  : > "$out"
+  for stack_dir in "${STACKS_DIR}"/*/; do
+    stack="$(basename "$stack_dir")"
+    while IFS= read -r app; do
+      [[ -n "$app" ]] || continue
+      cpath="$(component_path_of "$stack" "$app" || true)"
+      [[ -n "$cpath" ]] || continue
+      cdir="${REPO_ROOT}/${cpath}"
+      comp="$(basename "$cpath")"
+      if ! rendered="$(kustomize build --enable-helm "$cdir" 2>/dev/null)"; then
+        # Property 1 already reports a build failure for a skippable component; for a non-skippable
+        # one we record nothing rather than inventing facts, and say so.
+        echo "unrendered ${comp} -" >> "$out"
+        continue
+      fi
+      dest="$(yq -r '.spec.destination.namespace // ""' "${STACKS_DIR}/${stack}/${app}")"
+      opts="$(yq -r '(.spec.syncPolicy.syncOptions // []) | join(",")' "${STACKS_DIR}/${stack}/${app}")"
+      echo "stack ${comp} ${stack}" >> "$out"
+      echo "opts ${comp} ${opts:--}" >> "$out"
+      while IFS= read -r n; do echo "creates ${comp} ${n}" >> "$out"; done \
+        < <(printf '%s\n' "$rendered" | yq_names 'select(.kind == "Namespace") | .metadata.name')
+      while IFS= read -r n; do echo "ogns ${comp} ${n}" >> "$out"; done \
+        < <(printf '%s\n' "$rendered" | yq_names 'select(.kind == "OperatorGroup") | .metadata.namespace')
+      while IFS= read -r n; do echo "uses ${comp} ${n}" >> "$out"; done \
+        < <({ echo "$dest"; printf '%s\n' "$rendered" | yq -r '.metadata.namespace // ""' -; } \
+              | awk '$0 != "" && $0 != "---" && $0 != "null"' | sort -u)
+    done < <(active_app_files "$stack")
+  done
+}
+
+# The strand detector (component_strands) and its _fact_has helper live in lib-components.sh, sourced
+# above. The installer and this gate MUST reach the same verdict, so that logic is defined ONCE and
+# shared; this file only BUILDS the fact table (collect_facts, from rendered manifests) and CONSUMES
+# the verdict. An earlier draft re-implemented the detector here with yq — retired for that reason.
+
 # Kinds an operator-only component is allowed to render. Anything else is an operand, config or
 # workload the workshop would silently lose if the component were skipped.
 OPERATOR_ONLY_KINDS='^(Namespace|OperatorGroup|Subscription)/'
 
-echo "▶ [1/2] operator-only components render nothing but namespace + OperatorGroup + Subscription"
+echo "▶ [1/3] operator-only components render nothing but namespace + OperatorGroup + Subscription"
 SKIPPABLE=""   # "<stack> <apps-file> <component> <child-app>" per skippable component
+NOT_SKIPPABLE=""   # names only — printed by property 3 so a shrinking candidate set stays visible
 for stack_dir in "${STACKS_DIR}"/*/; do
   stack="$(basename "$stack_dir")"
   while IFS= read -r app; do
@@ -73,7 +243,10 @@ for stack_dir in "${STACKS_DIR}"/*/; do
     comp="$(basename "$cpath")"
     child="$(yaml_scalar "${STACKS_DIR}/${stack}/${app}" metadata name)"
     [[ -n "$child" ]] || child="pp-${comp}"
-    is_operator_only "$cdir" || continue
+    if ! is_operator_only "$cdir"; then
+      NOT_SKIPPABLE="${NOT_SKIPPABLE}${NOT_SKIPPABLE:+ }${comp}"
+      continue
+    fi
     SKIPPABLE="${SKIPPABLE}${SKIPPABLE:+$'\n'}${stack} ${app} ${comp} ${child}"
 
     if ! rendered="$(kustomize build --enable-helm "$cdir" 2>/dev/null)"; then
@@ -104,7 +277,7 @@ app_names() {  # <kustomize dir> → one child Application name per line
     | awk '$0 != "" && $0 != "---" && $0 != "null"'
 }
 
-echo "▶ [2/2] a simulated skip removes exactly one child Application from the rendered stack"
+echo "▶ [2/3] a simulated skip removes exactly one child Application from the rendered stack"
 while read -r stack app comp child; do
   [[ -n "$stack" ]] || continue
   : "$app"
@@ -139,6 +312,43 @@ while read -r stack app comp child; do
     ok "${stack}: skipping ${comp} removes ${child} and leaves $(printf '%s\n' "$after" | grep -c . ) sibling(s) untouched"
   fi
 done <<< "$SKIPPABLE"
+
+echo "▶ [3/3] skipping an operator-only component strands no sibling in a namespace only it provides"
+# Properties 1-2 say the child Application disappears and every OTHER child renders byte-identically.
+# Both were TRUE of keycloak-operator, and [2/2] even counted the survivor — but "untouched" is not
+# "still able to work". collect_facts() renders every active component once; the SHARED detector
+# (lib-components.sh component_strands) then reads that fact table and reports any sibling left
+# deploying into a namespace, or placing operand CRs under an OperatorGroup, that ONLY the skipped
+# component provides. The installer runs the same detector over its own (grep-built) table.
+FACTS="${WORK}/facts.txt"
+collect_facts "$FACTS"
+EXAMINED=""
+while read -r stack app comp child; do
+  [[ -n "$comp" ]] || continue
+  : "$app" "$child"
+  EXAMINED="${EXAMINED}${EXAMINED:+ }${comp}"
+  strands="$(component_strands "$FACTS" "$comp" || true)"
+  if [[ -z "$strands" ]]; then
+    ok "${comp} (stack ${stack}) — safe to skip: no sibling depends on a namespace only it provides"
+    continue
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    read -r kind ns sib <<< "$line"
+    case "$kind" in
+      NS) bad "${comp} (stack ${stack}) alone creates namespace ${ns}, but sibling ${sib} deploys into it and creates none of its own" ;;
+      OG) bad "${comp} (stack ${stack}) alone scopes an OperatorGroup to ${ns}, but sibling ${sib} places operand CRs there — skipping it leaves them with no controller" ;;
+      *)  bad "${comp} (stack ${stack}) strands ${sib} in ${ns} (${kind})" ;;
+    esac
+  done <<< "$strands"
+  hint "install.sh §0 would DROP ${comp} on a cluster already running its operator, taking the namespace(s) above with it."
+  hint "Fix: move the Namespace/OperatorGroup into the sibling (or a shared base), or drop the stack on adoption."
+done <<< "$SKIPPABLE"
+
+# The doc comment promises the candidate set is printed either way, so a silently shrinking set of
+# things we examine cannot masquerade as a clean run (the openshift-pipelines gap, in prose form).
+echo "   examined (skippable, so droppable on adoption): ${EXAMINED:-none}"
+echo "   not examined (not skippable, so never dropped): ${NOT_SKIPPABLE:-none}"
 
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
