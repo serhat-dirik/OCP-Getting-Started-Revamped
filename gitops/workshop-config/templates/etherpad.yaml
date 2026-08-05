@@ -1,0 +1,663 @@
+{{- /*
+  Etherpad cohort board — the workshop's ENTRY POINT.
+
+  ONE pad, one URL, shared by the instructor with the whole room. It explains what the workshop is
+  and how to start, lists the attendee slots (user1…userN) so people claim one by typing their name
+  next to it, and carries a questions-and-problems section at the bottom that the instructor watches
+  during delivery. Attendees register themselves here and leave from here for their cockpit.
+
+  WHY A PAD AND NOT A PAGE. The claim list has to be WRITEABLE by the room and visible to everyone at
+  once — that is the whole mechanism by which a slot stops being free. A rendered Antora page cannot
+  do that; a pad can, with no accounts, no login and no client to install.
+
+  DESIGN NOTES, in the order they will bite whoever edits this next:
+
+  1. THE PAD LINKS CANNOT DRIFT FROM THE REAL COCKPITS. The claim list is generated from the SAME
+     `.Values.userCount` / `.Values.userPrefix` / `showroom.pilotUser` logic and the SAME
+     `showroom-{user}.{domain}` host pattern that templates/showroom.yaml uses to render the Routes.
+     Copy that block, never a second hand-maintained list.
+
+  2. THE CONTENT CANNOT COME FROM A CONFIGMAP ALONE. Etherpad stores pads in its database, not on
+     disk, so a ConfigMap can only hold the SOURCE text — something has to push it in over the HTTP
+     API. That is the seed Job at the bottom. The ConfigMap is the text; the Job is the delivery.
+
+  3. THE SEED JOB IS RE-RUNNABLE AND CONSERVATIVE. Anyone in the room can select-all-delete the pad,
+     so re-running has to RESTORE it — but it must never overwrite a board people have already
+     written their names on, and it runs on EVERY workshop-config sync (Argo Sync hook). So:
+         pad absent          -> create it with the seeded text
+         pad present, empty  -> restore the seeded text   (someone wiped it)
+         pad present, in use -> leave it completely alone
+     "Empty" is measured through the pad's own plain-text export, not guessed. To reset the board on
+     purpose: wipe the pad in the browser, then re-sync workshop-config (or delete the seed Job and
+     sync). That is the documented reset path.
+
+  4. `DEFAULT_PAD_TEXT` IS DELIBERATELY EMPTY, and `SUPPRESS_ERRORS_IN_PAD_TEXT` deliberately true.
+     If an attendee opens the pad URL before the Job has run, Etherpad creates the pad from
+     defaultPadText — and rule 3 would then read that stock "Welcome to Etherpad!" text as "in use"
+     and refuse to seed the real board. Etherpad also APPENDS its DirtyDB warning to defaultPadText,
+     which would land in the attendee's pad and defeat the same check. Both env vars exist to make
+     an early-visited pad come out genuinely empty so the seed still lands. Do not "tidy" them away.
+
+  5. WEBSOCKETS. Etherpad syncs over a websocket; without `timeout-tunnel` on the Route the pad stops
+     syncing after the default HAProxy tunnel timeout with no error shown to the typist — they keep
+     typing into a page nobody else can see. Both timeout annotations are load-bearing (same reason
+     the cockpit Route carries them).
+
+  6. THE API KEY IS GENERATED ON THE CLUSTER, NEVER COMMITTED. Etherpad's legacy API auth reads
+     `APIKEY.txt` from its install directory and WRITES a random one if the file is missing — which
+     fails on OpenShift, because the image's install directory is mode 755 and the restricted SCC
+     runs the container as an arbitrary UID (the image is built for exactly that: EP_UID=5001,
+     EP_GID=0, so group-readable but not group-writable). So the key must be supplied read-only.
+     A wave-2 hook Job get-or-creates Secret `etherpad-api`; the Deployment mounts it at
+     `/opt/etherpad-lite/APIKEY.txt`. Nothing secret enters git, and re-syncs reuse the existing key.
+
+  7. WHAT IS WRITEABLE. The same arbitrary-UID story means the ONLY writeable path is a mounted
+     volume, so the pad database lives on a PVC mounted at `/opt/etherpad-lite/var` (upstream's
+     `var/` holds nothing but a .gitignore, so mounting over it masks nothing). `SESSIONKEY.txt` is
+     not written because cookie key rotation is enabled by default, which is the branch that skips
+     it. If Etherpad ever CrashLoopBackOffs with EACCES on a path under /opt/etherpad-lite, that is
+     this constraint reasserting itself — mount the path, do not chmod the image.
+
+  Grounded 2026-08-05 against the etherpad/etherpad image (Docker Hub tag list) and the v3.3.3
+  sources: Dockerfile (UID/GID/EP_DIR/CMD/HEALTHCHECK), doc/docker.md (env vars),
+  src/node/handler/APIKeyHandler.ts (APIKEY.txt), src/node/utils/Settings.ts (SESSIONKEY.txt is
+  skipped under key rotation; empty env values are honoured over defaults),
+  src/node/hooks/express/importexport.ts (/p/<pad>/export/txt).
+
+  NOT YET ASSERTED ON A LIVE CLUSTER (this lane may not apply to one): that no path under
+  /opt/etherpad-lite outside `var/` is written at runtime. First install should check
+  `oc logs deploy/etherpad -n <showroom ns>` for EACCES before the room arrives.
+
+  RENDERED INTO .Values.showroom.namespace, beside the cockpits — templates/showroom-namespace.yaml
+  is the SOLE owner of that Namespace object (a repeated resource parks the whole Argo Application),
+  and it only declares it when showroom.enabled, which is why this file requires that flag too.
+*/ -}}
+{{- if and .Values.etherpad.enabled .Values.showroom.enabled }}
+{{- $ns := .Values.showroom.namespace }}
+{{- $domain := .Values.clusterDomain }}
+{{- $ep := .Values.etherpad }}
+{{- $host := printf "%s.%s" $ep.hostPrefix $domain }}
+{{- $padUrl := printf "https://%s/p/%s" $host $ep.padId }}
+{{- /* Same user-list derivation as templates/showroom.yaml — pilot user only, or 1..userCount.
+       This is what keeps the claim list below in lockstep with the cockpits that actually exist. */ -}}
+{{- $users := list }}
+{{- if .Values.showroom.pilotUser }}
+{{- $users = list .Values.showroom.pilotUser }}
+{{- else }}
+{{- range $i := until (int .Values.userCount) }}{{- $users = append $users (printf "%s%d" $.Values.userPrefix (add $i 1)) }}{{- end }}
+{{- end }}
+---
+# One ServiceAccount backs both Jobs below. It carries no attendee identity; its only privileges are
+# get-or-create on ONE Secret in this namespace (the API key) and get on ONE Secret in the Gitea
+# namespace (the shared workshop password the board prints).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etherpad-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+---
+# why (two rules, not one): `create` cannot be resourceName-scoped by Kubernetes RBAC, so it is
+# granted on secrets generally — but every verb that can READ or CHANGE an existing Secret is pinned
+# to `etherpad-api`. The SA therefore cannot read anything else that lands in this namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: etherpad-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+    resourceNames: ["etherpad-api"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etherpad-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: etherpad-seed
+subjects:
+  - kind: ServiceAccount
+    name: etherpad-seed
+    namespace: {{ $ns }}
+---
+# why (cross-namespace read): the shared workshop password is written by bootstrap/install.sh into
+# secret workshop-user-creds in the Gitea namespace — the same single source of truth showroom.yaml
+# and the Gitea/SonarQube seeds read. The board prints the REAL password rather than a value copied
+# into git, so the pad cannot tell the room something the cluster disagrees with.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: etherpad-seed-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["workshop-user-creds"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etherpad-seed-creds
+  namespace: {{ .Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: etherpad-seed-creds
+subjects:
+  - kind: ServiceAccount
+    name: etherpad-seed
+    namespace: {{ $ns }}
+---
+# Wave-2 Sync hook: get-or-create the Etherpad API key Secret (design note 6). Idempotent by
+# construction — an existing key is REUSED, never rotated, so re-syncing does not invalidate the key
+# the running pod already mounted. Runs before the Deployment's wave so the mount is satisfiable.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: etherpad-apikey
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: etherpad-apikey
+    spec:
+      serviceAccountName: etherpad-seed
+      restartPolicy: Never
+      containers:
+        - name: apikey
+          # why ose-cli: ships oc on every connected cluster; no custom image to maintain.
+          # >=512Mi because oc OOMs at 256Mi under the restricted SCC.
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          resources:
+            requests: {cpu: 50m, memory: 512Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          env:
+            - name: NS
+              value: {{ $ns | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              if oc get secret etherpad-api -n "$NS" >/dev/null 2>&1; then
+                echo "✅ API key secret already present in ${NS} — reusing it (never rotated on re-sync)"
+              else
+                echo "▶ generating an Etherpad API key…"
+                # Written to a file rather than passed as --from-literal so the key never appears in
+                # this pod's argv. mktemp creates it 0600; the trap removes it on every exit path.
+                KEYFILE="$(mktemp)"
+                trap 'rm -f "$KEYFILE"' EXIT
+                # `head` reads a fixed number of bytes and exits normally, so nothing upstream of the
+                # pipe is killed by SIGPIPE — which under `set -o pipefail` would fail the script.
+                head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' > "$KEYFILE"
+                [[ -s "$KEYFILE" ]] || { echo "❌ could not generate an API key from /dev/urandom"; exit 1; }
+                oc create secret generic etherpad-api -n "$NS" --from-file=apikey="$KEYFILE" >/dev/null
+                echo "✅ API key secret created in ${NS}"
+              fi
+
+              # Owner/layer stamp so `oc get secret -A -l workshop.redhat.com/owner=ogsr` enumerates
+              # it with the rest of our footprint. Applied on every run: a Secret created by an older
+              # revision of this Job still ends up labelled.
+              oc label secret etherpad-api -n "$NS" \
+                workshop.redhat.com/layer=workshop-config \
+                workshop.redhat.com/owner=ogsr --overwrite >/dev/null
+---
+# The pad's SOURCE text. Rendered here (so the claim list is generated from the same values as the
+# cockpit Routes) and pushed into Etherpad's database by the seed Job below — a ConfigMap alone
+# cannot be pad content, see design note 2.
+#
+# `__WORKSHOP_PASSWORD__` is a placeholder the Job substitutes at runtime from the cluster's own
+# workshop-user-creds Secret. It is deliberately NOT the literal password: this file is public.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etherpad-board
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+data:
+  board.txt: |
+    {{ $ep.title }}
+    Parasol Insurance — cohort board
+
+    ============================================================
+    WHAT THIS PAGE IS
+    ============================================================
+
+    This is the starting point for today's workshop, and it is shared.
+    Everyone in the room is editing this same page, live: what you type
+    appears on everyone else's screen within a second. So please only
+    edit your own line, and leave the rest alone.
+
+    You are here to run real workloads on OpenShift, using Parasol
+    Insurance — a fictional insurer — as the story the exercises hang
+    off. You will work through self-contained modules: each one sets
+    itself up, so you can start at the first and work down, or jump
+    straight to whichever one you came for.
+
+    ============================================================
+    HOW TO START — three steps
+    ============================================================
+
+    1. CLAIM A SLOT. Find the first line in the list below with nothing
+       after the arrow, and type your name there. That slot is yours for
+       the rest of the day and nobody else will take it.
+
+    2. OPEN YOUR COCKPIT. Click the link on your line (middle-click or
+       ctrl-click to open it in a new tab, so this page stays put). The
+       cockpit is where you work: instructions on one side, a terminal
+       and links to the OpenShift console on the other.
+
+    3. SIGN IN when you are asked for credentials:
+
+           username    the user name of your slot, e.g. user1
+           password    __WORKSHOP_PASSWORD__
+
+       Everyone signs in with the same password. It is a workshop
+       password, not a personal one — nothing of yours is behind it.
+
+    Once you are in the cockpit, run `ws list` in the terminal to see the
+    module catalogue, and `ws prep <module>` to set one up for yourself.
+    `ws verify <module>` checks your work when you are done.
+
+    ============================================================
+    CLAIM YOUR SLOT — type your name after the arrow
+    ============================================================
+    {{- /* `{{-` on the range would swallow the blank line above it as well as its own newline, so
+           the separating line is emitted explicitly rather than written as source whitespace. */}}
+    {{ "" }}
+    {{- range $i, $user := $users }}
+    {{ printf "%2d" (add $i 1) }}. {{ printf "%-7s" $user }}  https://showroom-{{ $user }}.{{ $domain }}   ->
+    {{- end }}
+
+    Taken a slot by mistake? Delete your name and take another one — an
+    unclaimed slot is any line with nothing after its arrow.
+
+    ============================================================
+    QUESTIONS AND PROBLEMS
+    ============================================================
+
+    Type your question here instead of holding a hand up. The instructor
+    watches this section: you will either get an answer written under
+    your question or someone coming over to your seat. Nobody has to
+    stop the room to ask.
+
+    Start your line with your user name so we know which environment to
+    look at, and if something failed, the two most useful things to
+    paste are the command you ran and the message you got back.
+
+    - user_ :
+
+    - user_ :
+
+    - user_ :
+
+---
+# Pad database. DirtyDB (Etherpad's built-in file store) on a PVC — see design note 7 for why a
+# mounted volume is the only writeable path, and why the mount point is `var/`.
+#
+# SAME sync-wave as the Deployment (3), NOT earlier: the default StorageClass is
+# WaitForFirstConsumer, so this PVC only binds once its consuming pod schedules. In an earlier wave
+# Argo blocks forever waiting for a Pending PVC to become Healthy (same reason showroom.yaml's home
+# PVC sits in wave 3 — proven on-cluster there).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: etherpad-data
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ $ep.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etherpad
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    app.kubernetes.io/name: etherpad
+    app.kubernetes.io/instance: etherpad
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: etherpad
+  # Recreate, not RollingUpdate: one ReadWriteOnce PVC, and two Etherpad processes on one DirtyDB
+  # file would corrupt it. A restart costs the room a few seconds of pad downtime, nothing more —
+  # the pad content is in the database on the PVC.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: etherpad
+        app.kubernetes.io/instance: etherpad
+    spec:
+      containers:
+        - name: etherpad
+          image: {{ $ep.image | quote }}
+          # Version-pinned upstream tag, immutable by construction — nothing here is workshop-built.
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TITLE
+              value: {{ $ep.title | quote }}
+            - name: PORT
+              value: "9001"
+            # Behind the OpenShift router with edge TLS, so Etherpad must trust the forwarded
+            # protocol/address headers — without this its logs record the router's IP for everyone
+            # and its cookies are computed for the wrong scheme.
+            - name: TRUST_PROXY
+              value: "true"
+            - name: PUBLIC_URL
+              value: {{ printf "https://%s" $host | quote }}
+            # Empty on purpose, and suppressing the DirtyDB banner with it — see design note 4.
+            # A pad opened before the seed Job runs must come out genuinely EMPTY, or the Job's
+            # "already in use, leave it alone" branch fires on text nobody wrote.
+            - name: DEFAULT_PAD_TEXT
+              value: ""
+            - name: SUPPRESS_ERRORS_IN_PAD_TEXT
+              value: "true"
+            # Etherpad 3 defaults its API to the built-in OIDC provider; the seed Job uses the
+            # legacy API-key path, which this switches on. Without it every /api/1/ call is rejected.
+            - name: AUTHENTICATION_METHOD
+              value: "apikey"
+            # No authentication in front of the pad: the pad URL is the access control (owner
+            # decision). Stated explicitly rather than left to the default so the choice is visible.
+            - name: REQUIRE_AUTHENTICATION
+              value: "false"
+            - name: DB_TYPE
+              value: "dirty"
+            - name: DB_FILENAME
+              value: "/opt/etherpad-lite/var/dirty.db"
+            # No outbound calls from a workshop cluster: version check, plugin catalogue and the
+            # self-updater all off. They fail closed anyway; this removes the attempts and the noise.
+            - name: PRIVACY_UPDATE_CHECK
+              value: "false"
+            - name: PRIVACY_PLUGIN_CATALOG
+              value: "false"
+            - name: UPDATES_TIER
+              value: "off"
+          ports:
+            - name: web
+              containerPort: 9001
+              protocol: TCP
+          volumeMounts:
+            # Read-only single file. Etherpad reads the key here and, because the file exists, never
+            # tries to write one — which it could not do anyway (design note 6).
+            - name: apikey
+              mountPath: /opt/etherpad-lite/APIKEY.txt
+              subPath: APIKEY.txt
+              readOnly: true
+            - name: data
+              mountPath: /opt/etherpad-lite/var
+          # /health is the image's own healthcheck endpoint. The startup probe carries the slow first
+          # boot (Node + settings + database open) so the liveness probe can stay tight afterwards
+          # without ever racing it.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9001
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9001
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9001
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: {{ $ep.resources.requests.cpu | quote }}
+              memory: {{ $ep.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ $ep.resources.limits.cpu | quote }}
+              memory: {{ $ep.resources.limits.memory | quote }}
+      volumes:
+        - name: apikey
+          secret:
+            secretName: etherpad-api
+            defaultMode: 420
+            items:
+              - key: apikey
+                path: APIKEY.txt
+        - name: data
+          persistentVolumeClaim:
+            claimName: etherpad-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etherpad
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: etherpad
+  ports:
+    - port: 9001
+      targetPort: 9001
+      protocol: TCP
+---
+# The one URL the instructor shares with the room. Long HAProxy timeouts keep the pad's sync
+# websocket alive for the whole session — see design note 5; edge TLS with redirect so http → https.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: etherpad
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    haproxy.router.openshift.io/timeout: 1h
+    haproxy.router.openshift.io/timeout-tunnel: 1h
+spec:
+  host: {{ $host }}
+  to:
+    kind: Service
+    name: etherpad
+  port:
+    targetPort: 9001
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+---
+# Wave-4 Sync hook: push the board into the pad. Runs after the Deployment's wave and self-waits for
+# the HTTP API regardless, so ordering is belt-and-braces. Re-runnable and conservative — see design
+# note 3 for the three-way create / restore / leave-alone decision this implements.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: etherpad-seed
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: etherpad-seed
+    spec:
+      serviceAccountName: etherpad-seed
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          resources:
+            requests: {cpu: 50m, memory: 512Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          env:
+            - name: NS
+              value: {{ $ns | quote }}
+            - name: GITEA_NS
+              value: {{ .Values.giteaNamespace | quote }}
+            - name: EP
+              value: {{ printf "http://etherpad.%s.svc:9001" $ns | quote }}
+            - name: PAD_ID
+              value: {{ $ep.padId | quote }}
+            - name: PAD_URL
+              value: {{ $padUrl | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              echo "▶ reading the Etherpad API key (secret etherpad-api)…"
+              APIKEY="$(oc get secret etherpad-api -n "$NS" -o jsonpath='{.data.apikey}' 2>/dev/null | base64 -d || true)"
+              [[ -n "$APIKEY" ]] || { echo "❌ secret etherpad-api (key 'apikey') missing in ${NS} — the etherpad-apikey Job creates it"; exit 1; }
+
+              echo "▶ reading the shared workshop password (secret workshop-user-creds)…"
+              WS_PASS="$(oc get secret workshop-user-creds -n "$GITEA_NS" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
+              [[ -n "$WS_PASS" ]] || { echo "❌ secret workshop-user-creds (key 'password') missing in ${GITEA_NS} — bootstrap/install.sh creates it"; exit 1; }
+
+              echo "▶ waiting for the Etherpad HTTP API…"
+              READY=no
+              for i in $(seq 1 60); do
+                if curl -sf -o /dev/null "${EP}/health"; then READY=yes; break; fi
+                sleep 5
+              done
+              [[ "$READY" == "yes" ]] || { echo "❌ Etherpad did not answer /health within 5 minutes"; exit 1; }
+
+              # The board text, with the placeholder replaced by the cluster's real password. Built
+              # in a file rather than on the curl command line so the password never enters argv;
+              # bash pattern substitution rather than sed so no character in the password is special.
+              BOARD="$(cat /board/board.txt)"
+              TEXTFILE="$(mktemp)"
+              RESP="$(mktemp)"
+              trap 'rm -f "$TEXTFILE" "$RESP"' EXIT
+              printf '%s\n' "${BOARD//__WORKSHOP_PASSWORD__/$WS_PASS}" > "$TEXTFILE"
+              unset WS_PASS BOARD
+
+              # Never `cat` a response: the request body carries the password, and an unexpected
+              # error page could echo it back. Report the API's own message field instead — a field
+              # extraction, not a fixed-width truncation that only looks like redaction.
+              # Same whitespace tolerance as the code check below, for the same measured reason: a
+              # reformatted body turned every diagnostic into "(none returned)" — an error path that
+              # cannot deliver its error, which is the failure class this repo keeps paying for.
+              api_message() { grep -oE '"message"[[:space:]]*:[[:space:]]*"[^"]*"' "$RESP" || echo '"message":"(none returned)"'; }
+
+              echo "▶ creating pad '${PAD_ID}'…"
+              HTTP="$(curl -s -o "$RESP" -w '%{http_code}' -X POST "${EP}/api/1/createPad" \
+                        --data-urlencode "apikey=${APIKEY}" \
+                        --data-urlencode "padID=${PAD_ID}" \
+                        --data-urlencode "text@${TEXTFILE}")"
+              [[ "$HTTP" == "200" ]] || { echo "❌ createPad returned HTTP ${HTTP} — $(api_message)"; exit 1; }
+
+              # Whitespace-tolerant on purpose. Etherpad answers through express `res.json`, which
+              # emits `{"code":0,…}` with no spaces — but a literal '"code":0' match silently reads a
+              # SUCCESS as a failure the moment anything reformats that body (a proxy, a future
+              # release, a mock). Measured against a mock that pretty-printed: every branch inverted.
+              if grep -qE '"code"[[:space:]]*:[[:space:]]*0' "$RESP"; then
+                echo "✅ pad created and seeded"
+              elif grep -q 'does already exist' "$RESP"; then
+                # The pad is there. Restore it ONLY if the room wiped it — never overwrite names
+                # people have already typed. Emptiness is measured through the pad's own plain-text
+                # export rather than inferred.
+                CURRENT="$(curl -sf "${EP}/p/${PAD_ID}/export/txt" || true)"
+                if [[ -z "$(printf '%s' "$CURRENT" | tr -d '[:space:]')" ]]; then
+                  echo "▶ pad exists but is empty — restoring the board…"
+                  HTTP="$(curl -s -o "$RESP" -w '%{http_code}' -X POST "${EP}/api/1/setText" \
+                            --data-urlencode "apikey=${APIKEY}" \
+                            --data-urlencode "padID=${PAD_ID}" \
+                            --data-urlencode "text@${TEXTFILE}")"
+                  [[ "$HTTP" == "200" ]] || { echo "❌ setText returned HTTP ${HTTP} — $(api_message)"; exit 1; }
+                  grep -qE '"code"[[:space:]]*:[[:space:]]*0' "$RESP" || { echo "❌ setText refused — $(api_message)"; exit 1; }
+                  echo "✅ board restored"
+                else
+                  LINES="$(printf '%s\n' "$CURRENT" | wc -l | tr -d ' ')"
+                  echo "✅ pad already in use (${LINES} lines) — left untouched"
+                  echo "   to reset it: wipe the pad in the browser, then re-sync workshop-config"
+                fi
+              else
+                echo "❌ createPad refused — $(api_message)"; exit 1
+              fi
+
+              echo
+              echo "   Share this one URL with the room:"
+              echo "   ${PAD_URL}"
+          volumeMounts:
+            - name: board
+              mountPath: /board
+      volumes:
+        - name: board
+          configMap:
+            name: etherpad-board
+            defaultMode: 420
+{{- end }}
