@@ -27,6 +27,11 @@ HOW A PAIR IS COMPARED
   mode "bytes"       — the two files must be byte-identical. For non-YAML content (SQL seeds).
   mode "structural"  — both sides are parsed as YAML and compared as data, so COMMENTS DO NOT
                        MATTER (that is the point) and neither does key order or quoting style.
+  mode "text"        — the two sides are the SAME PROSE embedded in two different host languages
+                       (today: an LLM grounding prompt that lives once as a Java text block and
+                       once as a Helm `define`). Neither side is YAML and neither is a whole file,
+                       so each is EXTRACTED by the host language's own rules and the two extracted
+                       texts are compared. See EXTRACTING TEXT FROM A HOST LANGUAGE below.
 
 For a structural pair the copy may differ from its source ONLY in ways the pair DECLARES, and the
 vocabulary is deliberately small and dumb:
@@ -56,6 +61,63 @@ vocabulary is deliberately small and dumb:
                 comments, and what must not diverge is the code. The stripper refuses to guess: if a
                 `--` survives outside a full-line comment (i.e. it might be inside a string literal)
                 the guard exits 2 rather than normalize something it cannot lex.
+
+EXTRACTING TEXT FROM A HOST LANGUAGE (mode "text")
+
+  java_text_block   The name of a `static final String NAME = <text block>;` constant (a Java text
+                    block: triple-quote, newline, content, triple-quote on its own line). What is
+                    extracted is the RUNTIME VALUE, by JLS §3.10.6: the common leading indentation
+                    ("incidental white space", measured over the non-blank content lines AND the
+                    line carrying the closing delimiter) is removed, trailing white space is
+                    removed from every line, and — because the closing delimiter is on its own
+                    line — the value ends in a line terminator. This is not a normalization we
+                    invented; it is what `javac` puts in the constant pool. Any backslash in the
+                    block is an exit 2: escape sequences would have to be interpreted, and a
+                    comparator that guesses at an escape is one that can call two different
+                    strings equal.
+
+  helm_define       The name of a `{{- define "NAME" -}} … {{- end -}}` body. What is extracted is
+                    the RENDERED VALUE, by Go's own chomping rule: `-}}` on the opener trims all
+                    white space (space, tab, CR, LF) that immediately follows it, and `{{-` on the
+                    terminator trims all white space that immediately precedes it. So the body
+                    normally arrives with no leading and NO TRAILING newline. A body containing
+                    any `{{` action is an exit 2: it is not literal text, it cannot be compared
+                    against a string constant, and refusing also removes every question about
+                    which `end` closes which action.
+
+  WHAT NORMALIZATION IS APPLIED ON TOP, AND WHY EACH IS SEMANTICALLY EMPTY. Exactly two rules,
+  both applied to both sides:
+
+    N1  trailing spaces/tabs are stripped from every line. Java already did this (JLS, above). On
+        the Helm side the value reaches the cluster through a `regexReplaceAll` over
+        `include … | indent 4` in the ConfigMap that carries it, whose regex is exactly
+        "trailing spaces and tabs" — the `indent` pads BLANK lines too and that template strips the
+        padding straight back off — so per-line trailing white space provably cannot survive to
+        the shipped prompt.
+    N2  at most ONE final newline is removed. The Java value ends in one (closing delimiter on its
+        own line); the Helm body ends in none (`{{- end -}}` chomped it) and the ConfigMap's `|`
+        block scalar puts exactly one back. So this single terminator is a host-language artifact
+        on both sides. At MOST one: a copy that grew a second trailing blank line still fails,
+        because that one WOULD reach the ConfigMap.
+
+  NEITHER RULE CAN HIDE A WORDING CHANGE, and that is the property to check when touching them.
+  N1 only deletes white space at end-of-line; N2 only deletes one end-of-text newline. Neither
+  touches a non-whitespace character, LEADING indentation, or a blank line in the middle — so
+  relative indentation (the two-space continuations inside the prompt, which the model does see)
+  is compared verbatim. There is deliberately NO dedent here: on the Java side the language
+  already removed the incidental indent during extraction, and on the Helm side a uniform re-indent
+  of the define body WOULD change the shipped ConfigMap value, so it must fail rather than be
+  normalized away. `_assert_prompt_normalizer_cannot_hide_wording()` in the self-test pins all of
+  this: it asserts one changed word, one changed leading indent, and one extra trailing newline
+  each survive normalization, and that trailing spaces and the single terminator do not.
+
+  WHY NOT COMPARE THE RENDERED ConfigMap INSTEAD. It would need `helm template --set solve=true`,
+  which this guard's chart renderer has no mechanism for (see the entry-namespaces-helpers pair),
+  and it would gate the YAML wrapper as well as the prompt. Comparing the define body is the
+  narrower claim and the one the pair is about. Checked by hand 2026-08-06 that the wrapper is
+  faithful: `helm template gitops/entry-states/agentic-ai --show-only templates/agent-grounding.yaml
+  --set solve=true …` yields a ConfigMap whose `grounding-prompt` value is byte-identical to
+  GroundingPrompt.DEFAULT_PROMPT, trailing newline included.
 
 READING THE HELM SIDE. Helm templates are not valid YAML ({{ }} actions are not YAML syntax), so the
 copy side is RENDERED with `helm template <chart> --show-only <template>` and the rendered output is
@@ -248,6 +310,31 @@ PAIRS: list[dict] = [
                "tools/gen-entry-namespaces.sh so all 26 charts pick up the fix, and bump each "
                "touched chart's version so Argo's manifest cache picks it up.",
     },
+    {
+        "id": "agentic-ai-grounding-prompt",
+        "mode": "text",
+        # agentic-ai's write-beat is the GROUNDING PROMPT: the entry state ships a weak draft, the
+        # attendee strengthens it, and `ws solve` ships the strengthened one. The strengthened text
+        # is byte-identical to the image's own built-in fallback ON PURPOSE — that identity is what
+        # makes a hand-completed attendee world and a machine-solved `ws solve` world converge on
+        # the same good prompt, so a screenshot, a demo and a lab all show the same behaviour.
+        #
+        # NOTHING ELSE CAN CATCH THIS. tools/verify/agentic-ai.sh grades a PROPERTY of the live
+        # prompt (does it direct the model at its tools) and never the exact wording — deliberately,
+        # so any correct attendee edit stays green (rule 14). That is the right predicate for an
+        # attendee's text and the wrong one for this pair: a reworded solve prompt, or a reworded
+        # image default, keeps every ✅ while quietly ending the convergence. Hence a copy pair.
+        "source": {"file": "apps/parasol-agent/src/main/java/com/parasol/agent/GroundingPrompt.java",
+                   "java_text_block": "DEFAULT_PROMPT"},
+        "copy": {"file": "gitops/entry-states/agentic-ai/templates/_helpers.tpl",
+                 "helm_define": "agentic-ai.groundingPromptStrong"},
+        "why": "the agent image's built-in default grounding and the `ws solve` grounding must be "
+               "the SAME prompt, or a solved world behaves differently from a correctly-completed "
+               "one and the module's own screenshots stop matching either. Decide which text is "
+               "right, copy it into the other side verbatim (Java text block ↔ define body), and "
+               "bump the agentic-ai chart version so Argo's manifest cache picks the new prompt up "
+               "— then re-run `ws solve` for one user and re-read GET /agent/info.",
+    },
 ]
 
 # Pair (c) — expanded rather than special-cased, so each Task fails on its own name.
@@ -272,11 +359,17 @@ for _task in PARASOL_TASKS:
 # shrink its own floor. Truncating the list the driver iterates (`PAIRS[:1]`) collapses the "pairs
 # compared" count below this; editing PAIRS itself trips the self-test, which asserts the two agree.
 # Adding a pair means bumping this number in the same change.
-MIN_PAIRS = 13
+MIN_PAIRS = 14
 
 # Structural comparison nodes across all pairs, measured 2026-08-01: 995. The floor is well under
 # that (Task bodies and pipelines grow and shrink) and far over what a fragment comparison yields.
 MIN_STRUCTURAL_NODES = 600
+
+# Normalized prompt lines actually compared, summed over both sides of every mode="text" pair.
+# Measured 2026-08-06: 30 (15 lines each side). The floor is a truncation detector, not an
+# assertion of the prompt's length — an extractor that returned only its first line, or only its
+# first paragraph, would land under it, and prompts are edited far more often than they are halved.
+MIN_TEXT_LINES = 20
 
 
 class GuardError(Exception):
@@ -404,6 +497,174 @@ def load_side(root: pathlib.Path, spec: dict, label: str):
     if "subtree" in spec:
         document = _walk_path(document, spec["subtree"], origin)
     return document, origin
+
+
+# ------------------------------------------------------- extracting embedded text (mode "text")
+
+
+def java_text_block(text: str, name: str, origin: str) -> str:
+    """The RUNTIME VALUE of `static final String <name> = \"\"\" … \"\"\";`, per JLS §3.10.6.
+
+    Not a normalization — this is the string `javac` puts in the constant pool. Incidental white
+    space (the common leading indent, measured over the non-blank content lines and over the line
+    the closing delimiter sits on) is removed, trailing white space is removed from every line, and
+    the closing delimiter being on its own line means the value ends in one line terminator.
+
+    Everything it cannot lex exactly is an exit 2 rather than a guess, for the reason
+    lua_code_only() gives: a comparator that guesses is one that can call two different strings
+    equal, which is the failure this whole file exists to prevent.
+    """
+    lines = text.splitlines()
+    opener = f'{name} = """'
+    openers = [i for i, line in enumerate(lines) if line.rstrip().endswith(opener)]
+    if len(openers) != 1:
+        raise GuardError(
+            f"{origin}: found {len(openers)} declaration(s) matching `{opener}`, expected exactly "
+            f"1. The constant was renamed, removed, duplicated, or reformatted so the opening "
+            f"delimiter no longer ends its line — update the pair rather than comparing something "
+            f"else. (Only a text block is supported: a concatenated \"…\" + \"…\" constant would "
+            f"have to be evaluated, and this guard does not evaluate Java.)")
+    start = openers[0]
+
+    close = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].lstrip().startswith('"""'):
+            close = i
+            break
+    if close is None:
+        raise GuardError(f"{origin}: the {name} text block is never closed by a line beginning "
+                         f'with """.')
+
+    content = lines[start + 1:close]
+    prefix = lines[close][:lines[close].index('"""')]
+    if prefix.strip():
+        raise GuardError(
+            f"{origin}: the {name} text block's closing delimiter shares its line with content "
+            f"({lines[close].strip()!r}). That is legal Java and it changes whether the value ends "
+            "in a newline — put the delimiter on its own line rather than have this guard guess.")
+    for lineno, line in enumerate(content, start + 2):
+        if "\\" in line:
+            raise GuardError(
+                f"{origin}: line {lineno} of the {name} text block contains a backslash:\n"
+                f"    {line.strip()}\n"
+                "Comparing it would mean interpreting Java escape sequences, and a comparator that "
+                "guesses at an escape can call two different strings equal. Keep the shared prompt "
+                "escape-free, or stop gating it as a text pair.")
+
+    indents = [len(line) - len(line.lstrip()) for line in content if line.strip()]
+    if not indents:
+        raise GuardError(f"{origin}: the {name} text block is entirely blank lines.")
+    indent = min(indents + [len(prefix)])
+    return "".join(line[indent:].rstrip() + "\n" for line in content)
+
+
+# The four spellings of a Go/Helm action this extractor accepts, keyed by whether each delimiter
+# chomps. Written out rather than pattern-matched: an action is only three tokens, and a regex
+# loose enough to accept `{{-  define   "x"  -}}` is loose enough to accept things that mean
+# something else. An unrecognized spelling is an exit 2 with the canonical form in the message.
+_ACTION_FORMS = (("{{- ", " -}}"), ("{{- ", " }}"), ("{{ ", " -}}"), ("{{ ", " }}"))
+
+
+def _action_spellings(body: str) -> dict:
+    """{rendered action text: (chomps_before, chomps_after)} for one action body ('define "x"')."""
+    return {f"{lead}{body}{tail}": (lead.startswith("{{-"), tail.endswith("-}}"))
+            for lead, tail in _ACTION_FORMS}
+
+
+def helm_define_body(text: str, name: str, origin: str) -> str:
+    """The RENDERED VALUE of `{{- define "<name>" -}} … {{- end -}}`.
+
+    Go's own chomping rule, not an approximation of it: `-}}` trims every white-space character
+    (space, tab, CR, LF) immediately following the action, `{{-` trims every one immediately
+    preceding it. So the canonical spelling yields the body with no leading and no trailing
+    newline, which is exactly what `include` hands the ConfigMap that ships it.
+
+    A body containing any `{{` is an exit 2. It is then not literal text — it cannot be compared
+    against a string constant at all — and refusing also settles, without a nesting analysis, which
+    `end` belongs to this `define`.
+    """
+    lines = text.splitlines()
+    define_forms = _action_spellings(f'define "{name}"')
+    marker = f'define "{name}"'
+    hits = [i for i, line in enumerate(lines) if marker in line]
+    if len(hits) != 1:
+        raise GuardError(
+            f"{origin}: found {len(hits)} line(s) mentioning `{marker}`, expected exactly 1. The "
+            "define was renamed, removed, duplicated, or quoted verbatim in a nearby comment — "
+            "update the pair (or the comment) rather than comparing something else.")
+    start = hits[0]
+    opener = lines[start].strip()
+    if opener not in define_forms:
+        raise GuardError(
+            f"{origin}: the define opener is spelled {opener!r}, which this guard does not read. "
+            f"Write it as one of {sorted(define_forms)} — the dashes decide whether the value "
+            "starts with a newline, so an unrecognized spelling is not a formatting nit.")
+    _, opener_chomps_after = define_forms[opener]
+
+    end_forms = _action_spellings("end")
+    close = None
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip() in end_forms:
+            close = i
+            break
+        if "{{" in lines[i]:
+            raise GuardError(
+                f"{origin}: the {name} define's body contains a template action on line {i + 1}:\n"
+                f"    {lines[i].strip()}\n"
+                "mode \"text\" compares LITERAL text against a string constant in another "
+                "language; a body that renders differently per values has no single text to "
+                "compare. Gate the rendered object instead.")
+    if close is None:
+        raise GuardError(f"{origin}: the {name} define is never closed by an `end` action.")
+    end_chomps_before, _ = end_forms[lines[close].strip()]
+
+    # Reconstruct the template text BETWEEN the two actions exactly as Go sees it, then chomp:
+    # whatever trailed the opener on its own line, every body line with its terminator, and
+    # whatever leads the `end` action on its line.
+    opener_tail = lines[start][lines[start].rindex("}}") + 2:]
+    end_head = lines[close][:lines[close].index("{{")]
+    body = opener_tail + "\n" + "".join(line + "\n" for line in lines[start + 1:close]) + end_head
+    if opener_chomps_after:
+        body = body.lstrip(" \t\r\n")
+    if end_chomps_before:
+        body = body.rstrip(" \t\r\n")
+    if not body.strip():
+        raise GuardError(f"{origin}: the {name} define renders to nothing but white space.")
+    return body
+
+
+def normalize_prompt_text(text: str) -> str:
+    """The two host-language artifacts that are NOT part of the prompt. See the module docstring.
+
+    N1 trailing spaces/tabs per line — Java strips them, and the ConfigMap template strips them
+       back off the Helm side after `indent` puts them on.
+    N2 at most ONE final newline — Java's closing delimiter adds one, `{{- end -}}` chomps one, and
+       the ConfigMap's `|` block scalar puts exactly one back.
+
+    Nothing here touches a non-whitespace character, leading indentation, or an interior blank
+    line, so no wording or relative-indentation change can survive it. That claim is asserted, not
+    just asserted-in-a-comment: see _assert_prompt_normalizer_cannot_hide_wording().
+    """
+    out = "\n".join(line.rstrip(" \t") for line in text.split("\n"))
+    if out.endswith("\n"):
+        out = out[:-1]
+    return out
+
+
+def load_text_side(root: pathlib.Path, spec: dict, label: str) -> tuple[str, str]:
+    """Read one side of a text pair and extract the declared embedded string from it."""
+    extractors = {"java_text_block": java_text_block, "helm_define": helm_define_body}
+    declared = [key for key in extractors if key in spec]
+    if len(declared) != 1:
+        raise GuardError(f"{label}: a mode=\"text\" side must declare exactly one of "
+                         f"{sorted(extractors)}; this one declares {declared or 'none'}.")
+    path = root / spec["file"]
+    if not path.is_file():
+        raise GuardError(f"{label} {spec['file']} does not exist. It was moved or renamed; "
+                         "update PAIRS rather than leaving the gate pointing at nothing.")
+    key = declared[0]
+    origin = f"{label} {spec['file']} ({key} {spec[key]})"
+    return extractors[key](path.read_text(encoding="utf-8"), spec[key], origin), origin
 
 
 # ---------------------------------------------------------------------------- normalizing Lua
@@ -603,10 +864,48 @@ def check_structural_pair(root: pathlib.Path, pair: dict) -> PairResult:
         nodes=comparison.nodes)
 
 
+def check_text_pair(root: pathlib.Path, pair: dict) -> PairResult:
+    """Compare one prose string embedded in two different host languages. See the module docstring.
+
+    Reported like the bytes pair — a headline naming BOTH files, then a unified diff — because the
+    reader's next move is the same: decide which copy is right and re-copy it. The two halves are
+    separate statements and each is pinned by name in self_test(), for the reason the bytes
+    reporter records: either one alone can be removed with `problems` still non-empty, the kind
+    still "text-value", and the self-test still exiting 1.
+    """
+    source, source_origin = load_text_side(root, pair["source"], "source")
+    copy, copy_origin = load_text_side(root, pair["copy"], "copy")
+    source_norm = normalize_prompt_text(source)
+    copy_norm = normalize_prompt_text(copy)
+
+    problems = []
+    if source_norm != copy_norm:
+        problems.append(f"  text: {copy_origin} no longer matches {source_origin}")
+        import difflib
+        diff = difflib.unified_diff(source_norm.splitlines(), copy_norm.splitlines(),
+                                    fromfile=pair["source"]["file"], tofile=pair["copy"]["file"],
+                                    lineterm="")
+        for line in list(diff)[:40]:
+            problems.append(f"      {line}")
+    # Lines actually compared, raised HERE — past both extractors — so an extractor that silently
+    # returned a fragment (or a driver that stopped calling this function) lands under the floor
+    # instead of reporting a clean, identical, one-line prompt.
+    lines_compared = len(source_norm.splitlines()) + len(copy_norm.splitlines())
+    return PairResult(problems, {"text-value"} if problems else set(), nodes=lines_compared)
+
+
 def check_pair(root: pathlib.Path, pair: dict) -> PairResult:
     """THE production entry point. main() and self_test() both go through here — see PairResult."""
     if pair["mode"] == "bytes":
         return check_bytes_pair(root, pair)
+    if pair["mode"] == "text":
+        return check_text_pair(root, pair)
+    if pair["mode"] != "structural":
+        # Not an else-if for tidiness: an unknown mode used to fall through to the structural
+        # reader, which would try to parse a Java file as YAML and report whatever came back.
+        # An undeclared mode is a pair nobody has written a comparator for — exit 2, never a pass.
+        raise GuardError(f"unknown mode {pair['mode']!r}. Declared modes are bytes, structural and "
+                         "text; a pair whose mode has no reader cannot be compared at all.")
     return check_structural_pair(root, pair)
 
 
@@ -709,6 +1008,28 @@ def _canary_pairs(root: pathlib.Path) -> list[dict]:
             "lua_paths": [[0, "check"]],
             "expect": {"type"},
         },
+        {   # The same prose in two host languages, differing ONLY in what the normalizer is
+            # allowed to erase: the Helm side carries trailing spaces and a trailing tab, and its
+            # `{{- end -}}` chomped the final newline the Java text block's closing delimiter adds.
+            # If either normalization rule stops working this canary reports drift and the
+            # self-test fails — which is the point of making the fixtures non-identical.
+            "id": "canary-text-clean", "mode": "text",
+            "source": {"file": f"{fixture}/prompt/GroundingFixture.java",
+                       "java_text_block": "FIXTURE_PROMPT"},
+            "copy": {"file": f"{fixture}/prompt/helpers-clean.tpl",
+                     "helm_define": "canary.fixturePrompt"},
+            "expect": set(),
+        },
+        {   # …and ONE WORD changed (drift -> wobble) in an otherwise identical copy. One word is
+            # the smallest real defect this pair can suffer and the one a property-grading verify
+            # script cannot see, so it is what the canary reproduces.
+            "id": "canary-text-drift", "mode": "text",
+            "source": {"file": f"{fixture}/prompt/GroundingFixture.java",
+                       "java_text_block": "FIXTURE_PROMPT"},
+            "copy": {"file": f"{fixture}/prompt/helpers-drifted.tpl",
+                     "helm_define": "canary.fixturePrompt"},
+            "expect": {"text-value"},
+        },
     ]
 
 
@@ -723,6 +1044,147 @@ def _assert_lua_stripper_refuses_to_guess() -> None:
                          "It would strip real code and call the pair clean.")
     # Lua's `..` concatenation is everywhere in the real snippet and must NOT trip the refusal.
     lua_code_only('msg = msg .. condition.type .. "\\n"\n', "unit")
+
+
+def _refuses(fn, *args) -> bool:
+    """Did this extractor raise rather than return something it had to guess at?"""
+    try:
+        fn(*args)
+    except GuardError:
+        return True
+    return False
+
+
+def _assert_text_extractors_refuse_to_guess() -> None:
+    """Both host-language readers must fail loudly on input whose value they cannot know exactly.
+
+    Every case below is a shape that would otherwise be extracted as SOMETHING — a wrong string
+    that compares equal or unequal for reasons nobody could see in the report. The pattern is
+    lua_code_only()'s and the reasoning is the same: an extractor that guesses can call two
+    different strings equal, which is the failure this file exists to prevent.
+    """
+    q = '"""'
+    # Three properties of JLS §3.10.6, each of which a plausible textwrap.dedent() implementation
+    # gets wrong: the common indent goes, RELATIVE indent stays, per-line trailing white space
+    # goes, and the closing delimiter's own line participates in the minimum (so a delimiter
+    # outdented past its content leaves that content indented, and Java really does ship it).
+    if java_text_block(f"  static final String P = {q}\n    a  \n      b\n    {q};\n",
+                       "P", "unit") != "a\n  b\n":
+        raise GuardError("SELF-TEST FAILED — java_text_block does not implement JLS §3.10.6 "
+                         "incidental-white-space removal: the common indent and per-line trailing "
+                         "white space must go, the relative indent must stay.")
+    if java_text_block(f"  static final String P = {q}\n    a\n  {q};\n",
+                       "P", "unit") != "  a\n":
+        raise GuardError("SELF-TEST FAILED — java_text_block ignores the indentation of the "
+                         "CLOSING delimiter's line, which JLS §3.10.6 counts toward the minimum. "
+                         "It is how a Java author deliberately keeps leading indentation in a "
+                         "text block, and dropping it silently changes the value.")
+    for label, bad in (
+            ("a constant that is not there", (f"static final String Q = {q}\n x\n {q};\n", "P")),
+            ("two declarations of one name", (f"String P = {q}\n a\n {q};\nString P = {q}\n b\n {q};\n", "P")),
+            ("an unterminated block", (f"static final String P = {q}\n hello\n", "P")),
+            ("content beside the closing delimiter",
+             (f"static final String P = {q}\n hello{q};\n", "P")),
+            ("a backslash escape", (f"static final String P = {q}\n a\\nb\n {q};\n", "P")),
+            ("an all-blank block", (f"static final String P = {q}\n\n\n{q};\n", "P")),
+    ):
+        if not _refuses(java_text_block, bad[0], bad[1], "unit"):
+            raise GuardError(f"SELF-TEST FAILED — java_text_block accepted {label} and returned a "
+                             "value it could only have guessed at.")
+
+    tpl = '{{- define "p" -}}\nhello\n{{- end -}}\n'
+    if helm_define_body(tpl, "p", "unit") != "hello":
+        raise GuardError("SELF-TEST FAILED — helm_define_body does not apply Go's `-}}` / `{{-` "
+                         "white-space chomping, so the value it returns is not the rendered one.")
+    # The non-chomping spelling means something DIFFERENT, and must be read as such rather than
+    # normalized into the chomping one: `{{ define }}`/`{{ end }}` keeps both newlines.
+    if helm_define_body('{{ define "p" }}\nhello\n{{ end }}\n', "p", "unit") != "\nhello\n":
+        raise GuardError("SELF-TEST FAILED — helm_define_body treats a non-chomping define as if "
+                         "it chomped; the two spellings ship different strings.")
+    for label, bad in (
+            ("a define that is not there", ('{{- define "q" -}}\nx\n{{- end -}}\n', "p")),
+            ("two defines of one name",
+             ('{{- define "p" -}}\na\n{{- end -}}\n{{- define "p" -}}\nb\n{{- end -}}\n', "p")),
+            ("an unrecognized opener spelling", ('{{-define "p"-}}\nhello\n{{- end -}}\n', "p")),
+            ("an unclosed define", ('{{- define "p" -}}\nhello\n', "p")),
+            ("a body carrying a template action",
+             ('{{- define "p" -}}\nhello {{ .Values.user }}\n{{- end -}}\n', "p")),
+            ("a white-space-only body", ('{{- define "p" -}}\n   \n{{- end -}}\n', "p")),
+    ):
+        if not _refuses(helm_define_body, bad[0], bad[1], "unit"):
+            raise GuardError(f"SELF-TEST FAILED — helm_define_body accepted {label} and returned a "
+                             "value it could only have guessed at.")
+
+
+def _assert_prompt_normalizer_cannot_hide_wording() -> None:
+    """The normalizer may erase host-language artifacts and NOTHING else.
+
+    This is the assertion the module docstring's claim rests on, and it is the reason to write it
+    as code: "N1 and N2 cannot hide a wording change" is exactly the kind of sentence that stays in
+    a comment while the function underneath it grows a dedent or an rstrip("\\n") and starts
+    passing over real drift. Each pair below states one thing normalization must, or must not, do.
+    """
+    n = normalize_prompt_text
+    base = "You are a canary prompt.\n\nRules:\n- Keep this line indented\n  two extra spaces.\n"
+    erasable = (
+        ("per-line trailing spaces and tabs",
+         base.replace("Rules:", "Rules:  \t").replace("\n\n", "\n   \n")),
+        ("the single final newline the host language adds or chomps", base[:-1]),
+    )
+    for label, variant in erasable:
+        if n(base) != n(variant):
+            raise GuardError(f"SELF-TEST FAILED — normalize_prompt_text no longer erases {label}. "
+                             "The real pair would report drift on two copies that ship the same "
+                             "prompt, and a gate that cries wolf gets deleted.")
+    significant = (
+        ("one changed word", base.replace("canary", "decoy")),
+        ("one changed character", base.replace("Rules:", "Rules;")),
+        ("the leading indentation of one line", base.replace("  two extra", "    two extra")),
+        ("an interior blank line", base.replace("prompt.\n\nRules", "prompt.\nRules")),
+        ("a SECOND trailing newline, which does reach the ConfigMap", base + "\n"),
+    )
+    for label, variant in significant:
+        if n(base) == n(variant):
+            raise GuardError(
+                f"SELF-TEST FAILED — normalize_prompt_text erases {label}. A normalization that "
+                "can hide a real change is worse than no gate at all: it reports two prompts as "
+                "the same prompt, which is the exact defect class mode \"text\" was added for.")
+
+
+def _report_shape_failures(root: pathlib.Path, canary: dict, mode: str) -> list[str]:
+    """Pin BOTH halves of a headline-then-diff report, by name.
+
+    WHY EACH HALF NEEDS ITS OWN ASSERTION (measured 2026-08-01 on the bytes reporter, and true of
+    the text one for the same reason). The headline and the unified diff are two separate
+    statements appending to the same list, so each MASKS the other: blinding either one alone
+    leaves `problems` non-empty, the reported kind unchanged, the self-test at 1 and the real run
+    at 0. Nothing but an assertion on the report's SHAPE can tell them apart.
+
+    Both modes are checked through the same function so a third one cannot be added with only half
+    the pinning — and so the two can never drift into asserting different things.
+    """
+    failures: list[str] = []
+    try:
+        report = check_pair(root, canary).problems
+    except GuardError as exc:
+        return [f"{canary['id']} could not be re-evaluated for its report shape: {exc}"]
+    if not report:
+        return [f"{canary['id']} produced no report at all, so neither half of the {mode} "
+                "reporter is pinned by anything below."]
+    # The HEADLINE specifically — report[0], and it must name BOTH sides. "somewhere in the
+    # report" is not enough: difflib's own `--- from` / `+++ to` lines carry each filename on
+    # its own, so a report that lost its headline still mentioned every path and passed.
+    if not all(side in report[0]
+               for side in (canary["source"]["file"], canary["copy"]["file"])):
+        failures.append(f"the {mode} report does not OPEN with a line naming both the copy and "
+                        f"the source it drifted from; it opens with {report[0].strip()!r}. The "
+                        "reader is told a duplicate diverged without being told which file to "
+                        "fix or what to re-copy it from.")
+    if not any(line.lstrip().startswith(("+", "-")) for line in report[1:]):
+        failures.append(f"the {mode} report carries no diff body — only the headline. The diff is "
+                        "the whole reason this mode is not a bare equality test, and it can be "
+                        "removed without changing any detector kind.")
+    return failures
 
 
 def self_test(root: pathlib.Path) -> int:
@@ -740,6 +1202,8 @@ def self_test(root: pathlib.Path) -> int:
 
     try:
         _assert_lua_stripper_refuses_to_guess()
+        _assert_text_extractors_refuse_to_guess()
+        _assert_prompt_normalizer_cannot_hide_wording()
     except GuardError as exc:
         print(f"::error::copy-drift-guard {exc}", file=sys.stderr)
         return 2
@@ -779,34 +1243,14 @@ def self_test(root: pathlib.Path) -> int:
             print(f"self-test: {pair['id']} → "
                   f"{sorted(got) if got else 'clean, as declared'} ({result.nodes} nodes) ✅")
 
-    # The bytes reporter emits a headline AND a unified diff, from two separate statements. Each
-    # masked the other: blinding either one alone left `problems` non-empty, so the kind stayed
-    # "bytes" and the self-test stayed at 1 (measured 2026-08-01). Pin both halves by name.
-    bytes_drift = next((p for p in canaries if p["id"] == "canary-bytes-drift"), None)
-    if bytes_drift is not None:
-        try:
-            report = check_pair(root, bytes_drift).problems
-        except GuardError as exc:
-            report = []
-            failures.append(f"canary-bytes-drift could not be re-evaluated for its report shape: "
-                            f"{exc}")
-        # The HEADLINE specifically — report[0], and it must name BOTH sides. "somewhere in the
-        # report" is not enough: difflib's own `--- from` / `+++ to` lines carry each filename on
-        # its own, so a report that lost its headline still mentioned every path and passed.
-        if report and not all(side in report[0]
-                              for side in (bytes_drift["source"]["file"],
-                                           bytes_drift["copy"]["file"])):
-            failures.append("the bytes report does not OPEN with a line naming both the copy and "
-                            f"the source it drifted from; it opens with {report[0].strip()!r}. The "
-                            "reader is told a duplicate diverged without being told which file to "
-                            "fix or what to re-copy it from.")
-        if report and not any(line.lstrip().startswith(("+", "-")) for line in report[1:]):
-            failures.append("the bytes report carries no diff body — only the headline. The diff "
-                            "is the whole reason this mode is not just `cmp -s`, and it can be "
-                            "removed without changing any detector kind.")
+    # Every mode that reports headline-then-diff, pinned by name. See _report_shape_failures.
+    for mode, canary_id in (("bytes", "canary-bytes-drift"), ("text", "canary-text-drift")):
+        canary = next((p for p in canaries if p["id"] == canary_id), None)
+        if canary is not None:
+            failures += _report_shape_failures(root, canary, mode)
 
     required = {"bytes", "value", "added", "missing", "allowlist-misuse", "lua-value",
-                "type", "length"}
+                "type", "length", "text-value"}
     missing_detectors = required - kinds_seen
     if missing_detectors:
         failures.append(f"the canary set never exercised detector(s) {sorted(missing_detectors)} — "
@@ -850,6 +1294,11 @@ def scope_for_tree() -> Scope:
     scope.require("byte-identical pairs compared", 1,
                   "the claims-seed pair is the one non-YAML duplicate; its mode has its own reader "
                   "and would otherwise be provable only by the canary.")
+    scope.require("prompt text lines compared", MIN_TEXT_LINES,
+                  "normalized lines returned by check_text_pair(), summed over both sides. This is "
+                  "the count that collapses if a host-language extractor starts returning a "
+                  "fragment — two one-line strings compare equal just as happily as two correct "
+                  "prompts do.")
     return scope
 
 
@@ -902,8 +1351,13 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 2
         scope.add("pairs compared")
+        # One branch PER MODE, never an `else` catch-all: with `text` folded into the structural
+        # branch its ~32 lines would have counted toward the 600-node structural floor, and a
+        # collapsed structural comparison could be masked by an unrelated dimension's volume.
         if pair["mode"] == "bytes":
             scope.add("byte-identical pairs compared")
+        elif pair["mode"] == "text":
+            scope.add("prompt text lines compared", result.nodes)
         else:
             scope.add("structural nodes compared", result.nodes)
         if result.problems:
