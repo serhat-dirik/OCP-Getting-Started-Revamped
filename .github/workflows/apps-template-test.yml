@@ -1,0 +1,129 @@
+---
+name: apps-template-test
+
+# Builds and tests apps/parasol-service-template/skeleton — the RHDH golden-path template — by
+# rendering it the way the scaffolder renders it.
+#
+# Why this is a separate gate from apps-test.yml (2026-08-05): that workflow's discovery walk
+# deliberately skips this directory, and it is right to. The raw skeleton is not a buildable Maven
+# project — its pom's artifactId is a scaffolder placeholder (dollar-brace-brace values.name), which
+# Maven rejects with "does not match a valid id pattern". So the walk excluded it for a true reason
+# and then nothing else picked it up: the skeleton's src/test/java/com/parasol/service/
+# InfoResourceTest.java, two real @QuarkusTest cases over /api/info and the readiness probe, had
+# never been executed by anything. It was the last test suite in apps/ with no runner.
+#
+# The consequence of leaving it ungated is not a red build — it is a live failure. template.yaml's
+# fetch:template step renders this skeleton and publish:gitea pushes the result into the attendee's
+# own Gitea org, so a skeleton whose test stops compiling, or whose Quarkus BOM stops resolving,
+# surfaces for the first time when a room full of attendees runs the build command their generated
+# README just told them to run.
+#
+# Rendering is not an approximation here. The skeleton uses exactly two placeholders (name, owner);
+# render-skeleton.sh substitutes both and then refuses to proceed if the tree contains any
+# placeholder it did not handle, so the thing tested cannot silently drift from the thing shipped.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/parasol-service-template/**'
+      - '.github/workflows/apps-template-test.yml'
+  pull_request:
+    paths:
+      - 'apps/parasol-service-template/**'
+      - '.github/workflows/apps-template-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  template-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # The skeleton pom sets maven.compiler.release 21, same as every other app with a suite.
+          java-version: '21'
+
+      # Restore-only, deliberately. apps-test.yml's matrix already saves a ~1 GB ~/.m2 under this
+      # key and its own comment flags the seven legs racing to write it; the skeleton resolves the
+      # same Quarkus BOM (3.33.2.1), so it can read that cache but has no business becoming an
+      # eighth racer to save a copy of it. A miss here costs a cold dependency download, not a
+      # wrong result.
+      - name: Restore ~/.m2 (shared with apps-test)
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.m2
+          key: >-
+            m2-${{ runner.os }}-${{ hashFiles('apps/**/pom.xml',
+            'apps/**/maven-wrapper.properties') }}
+          restore-keys: |
+            m2-${{ runner.os }}-
+
+      - name: Self-test the renderer before trusting it
+        # This gate's value rests entirely on render-skeleton.sh noticing when the skeleton, the
+        # renderer and template.yaml drift apart. A renderer that has gone blind still produces a
+        # tree that builds and a green check that means nothing, so prove detection first.
+        run: |
+          rc=0
+          ./apps/parasol-service-template/render-skeleton.sh --self-test || rc=$?
+          # Exactly 1 = all four planted defects detected by name (unsubstitutable placeholder,
+          # template.yaml no longer supplying a key the skeleton uses, the test suite deleted, a
+          # placeholder surviving the render) AND the unmutated skeleton still renders clean.
+          # 0 = renderer blind; 2 = a case went undetected or the benign case wrongly fired.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::render-skeleton self-test must exit 1 (every planted defect detected);" \
+                 "got rc=$rc. The renderer's drift detection is unproven — refusing to trust a" \
+                 "green result from a render it may no longer be checking."
+            exit 1
+          fi
+
+      - name: Render the skeleton as the scaffolder would
+        run: |
+          ./apps/parasol-service-template/render-skeleton.sh \
+            "${RUNNER_TEMP}/skeleton-render" parasol-ci-probe parasol
+
+      - name: mvn test
+        working-directory: ${{ runner.temp }}/skeleton-render
+        # ./mvnw, matching apps-test.yml and the build command the generated README hands the
+        # attendee. `test` not `verify`: this gate is about the suite, not about packaging.
+        run: ./mvnw -B -ntp test
+
+      - name: Assert the suite actually executed
+        working-directory: ${{ runner.temp }}/skeleton-render
+        # `mvn test` exits 0 on a module whose tests were all skipped or never discovered, which
+        # would report this gate green having run nothing — the exact failure mode that made the
+        # skeleton's suite invisible for as long as it was. Read the surefire reports and insist a
+        # positive number of tests ran.
+        run: |
+          shopt -s nullglob
+          reports=(target/surefire-reports/*.txt)
+          if [ ${#reports[@]} -eq 0 ]; then
+            echo "::error::mvn test succeeded but wrote no surefire report. No test ran —" \
+                 "refusing to report a green gate that executed nothing."
+            exit 1
+          fi
+          total=0
+          for r in "${reports[@]}"; do
+            n="$(sed -nE 's/^Tests run: ([0-9]+).*/\1/p' "$r" | head -1)"
+            total=$((total + ${n:-0}))
+          done
+          echo "skeleton suite executed $total test(s)"
+          if [ "$total" -lt 1 ]; then
+            echo "::error::surefire reported $total tests. The skeleton ships a suite, so zero" \
+                 "executed tests means discovery broke, not that there is nothing to run."
+            exit 1
+          fi
+          echo "Rendered skeleton: **$total test(s) passed**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload surefire reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-parasol-service-template
+          path: ${{ runner.temp }}/skeleton-render/target/surefire-reports/
+          retention-days: 7
