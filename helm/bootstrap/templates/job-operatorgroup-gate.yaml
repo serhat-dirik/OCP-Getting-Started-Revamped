@@ -1,0 +1,111 @@
+# =============================================================================
+# OperatorGroup uniqueness gate (PostSync hook) — the declarative twin of
+# bootstrap/install.sh's assert_single_operatorgroup(), which is a HARD gate there and is one
+# here too: a failing PostSync hook marks `field-content` Degraded, which is the FSC-visible
+# equivalent of the script's non-zero exit.
+#
+# OLM fails EVERY CSV in a namespace holding more than one OperatorGroup (phase Failed, reason
+# TooManyOperatorGroups) and it does so SILENTLY: the operator's Deployments keep running, so
+# nothing looks broken while reconciliation — upgrades, self-healing — has stopped. Found live
+# 2026-07-25 on a cluster with an org-owned cert-manager: our component applied its own
+# OperatorGroup into the ADOPTED cert-manager-operator namespace and OLM failed the org's CSV one
+# second later. That is a silent, unreversible degradation of somebody else's operator.
+#
+# THE RULE IS NARROW AND CANNOT FALSE-POSITIVE ON TRANSIENT STATE. A namespace with >1
+# OperatorGroup fails ONLY when at least one of them carries our owner label — i.e. WE put ours
+# next to theirs. A namespace that arrived with two of the org's own is reported and left alone.
+# OperatorGroups do not appear and disappear during a sync the way Pending pods do, so unlike the
+# script's batch-taint gate this one is safe to evaluate the moment the sync completes.
+#
+# The portfolio stacks stamp workshop.redhat.com/owner=ogsr on everything they render (each
+# stack's kustomization `labels:` block, includeSelectors:false), which is what makes "ours" a
+# fact rather than an inference.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogsr-operatorgroup-gate
+  namespace: {{ .Values.namespaces.system }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  labels:
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+spec:
+  # No retry: the finding is a cluster fact, not a flake — re-running cannot change it, and three
+  # identical failures in the log only obscure the one explanation.
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "ogsr-bootstrap.ownerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: ogsr-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: gate
+          image: {{ .Values.images.cli }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: STATE_NS
+              value: {{ .Values.namespaces.system | quote }}
+            - name: OWNER_LABEL
+              value: "workshop.redhat.com/owner={{ .Values.owner }}"
+          args:
+            - |
+              set -euo pipefail
+              CM="ogsr-uninstall-state"
+              ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
+              warn(){ echo "⚠️  $*" >&2; }; err(){ echo "❌ $*" >&2; }
+              BAD=0
+
+              # What each namespace held BEFORE this install, recorded cluster-wide by the
+              # state-capture Job (wave -10) as "ns=count,ns=count". Turns "it already had two" from
+              # a guess into a fact.
+              BASELINE="$(oc get configmap "$CM" -n "$STATE_NS" \
+                           -o jsonpath='{.data.operatorgroups_baseline}' 2>/dev/null | tr ',' '\n' || true)"
+              baseline_of(){ sed -nE "s/^$1=([0-9]+)$/\1/p" <<< "$BASELINE" | head -1; }
+
+              info "checking every namespace holds at most one OperatorGroup"
+              while read -r ns count; do
+                [[ -n "$ns" ]] || continue
+                [[ "$count" -gt 1 ]] || continue
+                before="$(baseline_of "$ns")"
+                ours="$(oc get operatorgroups.operators.coreos.com -n "$ns" -l "$OWNER_LABEL" \
+                         -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null | xargs || true)"
+                if [[ -z "$ours" ]]; then
+                  warn "namespace ${ns} holds ${count} OperatorGroups and none of them is ours (it had ${before:-?} before this install) — pre-existing, left alone"
+                  continue
+                fi
+                BAD=1
+                theirs=""
+                while IFS= read -r og; do
+                  [[ -n "$og" ]] || continue
+                  case " $ours " in *" $og "*) continue ;; esac
+                  theirs="${theirs:+$theirs }$og"
+                done < <(oc get operatorgroups.operators.coreos.com -n "$ns" -o name 2>/dev/null | sed 's|.*/||')
+                err "namespace ${ns}: ${count} OperatorGroups — ours (${ours}) was added next to the org's (${theirs:-?})"
+                oc get csv -n "$ns" \
+                  -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{.status.reason}{"\n"}{end}' 2>/dev/null \
+                  | grep -i 'TooManyOperatorGroups' | while IFS= read -r line; do echo "      OLM: csv ${line}" >&2; done
+                echo "      undo (stop the app re-creating it, then remove OURS — never theirs):" >&2
+                echo "        oc -n {{ .Values.argocd.namespace }} patch application <owning-pp-app> --type merge -p '{\"spec\":{\"syncPolicy\":null}}'" >&2
+                echo "        oc -n ${ns} delete operatorgroup ${ours}" >&2
+              done < <(oc get operatorgroups.operators.coreos.com -A --no-headers 2>/dev/null \
+                        | awk '{print $1}' | sort | uniq -c | awk '{print $2" "$1}')
+
+              if [[ "$BAD" -eq 0 ]]; then
+                ok "OperatorGroup uniqueness: every namespace holds at most one"
+                exit 0
+              fi
+              err "An adopted operator has been degraded: OLM stops reconciling every CSV in a namespace"
+              err "with two OperatorGroups, while its pods keep running — so this never surfaces until the"
+              err "org upgrades. This install did NOT complete cleanly."
+              exit 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi

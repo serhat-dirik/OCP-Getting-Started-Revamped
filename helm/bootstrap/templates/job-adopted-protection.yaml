@@ -1,0 +1,182 @@
+# =============================================================================
+# Adopted-resource protection (Sync hook, wave -9) — the declarative twin of
+# bootstrap/install.sh's protect_adopted_resources(). Runs AFTER the state-capture Job
+# (wave -10) has recorded who owns what, and BEFORE a single child Application exists
+# (wave 0+), so an adopted resource is never managed-but-unprotected, not even for one
+# sync cycle. Exactly the position the script runs it in.
+#
+# WHY IT MATTERS ON THIS PATH SPECIFICALLY. Every Application this chart renders carries
+# `finalizers: [resources-finalizer.argocd.argoproj.io]`, so deleting one CASCADES: Argo
+# prunes what it installed, in dependency order. That design is only safe if every ADOPTED
+# resource is INDIVIDUALLY exempt — protection has to be a property of the resource, not a
+# blanket amnesty over the teardown (blanket --cascade=orphan also discards Argo's ordering,
+# which is what wedged 8 namespaces on 2026-07-25). Argo honours both keys in one annotation:
+#     argocd.argoproj.io/sync-options: Prune=false,Delete=false
+# Without this Job an FSC install on a cluster with ANY pre-existing operator produced a
+# footprint ogsr-uninstall.sh then REFUSES to cascade (its check_adopted/PROT_BAD guard) —
+# the script path protected them, the FSC path did not, and the chart's own README promised
+# the uninstall "never touches an operator or namespace the cluster already had".
+#
+# The namespace of an adopted operator is the single largest residual risk in the cascade
+# design and is protected here too: our components DECLARE those namespaces, so Argo adopts a
+# pre-existing one, and deleting a namespace destroys everything inside it regardless of what
+# the contents are annotated with. Prune=false on the Subscription alone does not save it.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogsr-adopted-protection
+  namespace: {{ .Values.namespaces.system }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-9"
+  labels:
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "ogsr-bootstrap.ownerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: ogsr-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: protect
+          image: {{ .Values.images.cli }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: STATE_NS
+              value: {{ .Values.namespaces.system | quote }}
+          args:
+            - |
+              set -euo pipefail
+              CM="ogsr-uninstall-state"
+              ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
+              warn(){ echo "⚠️  $*" >&2; }
+              PROTECTED=0; MISSING=0
+
+              state_get(){ oc get configmap "$CM" -n "$STATE_NS" -o jsonpath="{.data.$1}" 2>/dev/null || true; }
+
+              # oc_scoped NS ARGS… — append -n <ns> only when ns is non-empty. An EMPTY ns means
+              # cluster-scoped (Namespace, GatewayClass), and `oc get namespace foo -n ""` is not
+              # the same call as `oc get namespace foo`, so the scope must branch.
+              oc_scoped(){ local ns="$1"; shift; if [[ -n "$ns" ]]; then oc "$@" -n "$ns"; else oc "$@"; fi; }
+
+              # merge_sync_options CURRENT → merged value (order-preserving, no duplicates).
+              # Preserves any sync options the org already set — clobbering their annotation would
+              # itself be a mutation of a resource we do not own — and re-asserts our two keys
+              # authoritatively, because protection must win over a stale Prune=true.
+              merge_sync_options(){
+                local cur="${1:-}" out="" opt
+                local IFS=','
+                for opt in $cur; do
+                  opt="$(echo "$opt" | xargs)"
+                  [[ -n "$opt" ]] || continue
+                  case "$opt" in Prune=*|Delete=*) continue ;; esac
+                  out="${out:+$out,}$opt"
+                done
+                printf '%s' "${out:+$out,}Prune=false,Delete=false"
+              }
+
+              protect_one(){  # kind name [ns]
+                local kind="$1" name="$2" ns="${3:-}" cur merged where
+                where="${ns:+ in $ns}"; where="${where:- (cluster-scoped)}"
+                if ! oc_scoped "$ns" get "$kind" "$name" >/dev/null 2>&1; then
+                  # A recorded resource that no longer exists is a stale snapshot, not an install
+                  # failure: warn and keep going, so a re-install on a cluster the admin has since
+                  # tidied up is not blocked.
+                  MISSING=$((MISSING + 1))
+                  warn "adopted ${kind}/${name} recorded in ${CM} no longer exists${where} — skipped"
+                  return 0
+                fi
+                cur="$(oc_scoped "$ns" get "$kind" "$name" \
+                        -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/sync-options}' 2>/dev/null || true)"
+                merged="$(merge_sync_options "$cur")"
+                PROTECTED=$((PROTECTED + 1))
+                if [[ "$cur" == "$merged" ]]; then   # idempotent: a re-sync is a no-op
+                  echo "   • ${kind%%.*}/${name}${where} (already ${merged})"
+                  return 0
+                fi
+                if ! oc_scoped "$ns" annotate "$kind" "$name" \
+                      "argocd.argoproj.io/sync-options=${merged}" --overwrite >/dev/null 2>&1; then
+                  PROTECTED=$((PROTECTED - 1))
+                  warn "could NOT annotate ${kind}/${name}${where} — a cascade delete could remove an adopted resource. Check RBAC, then re-sync."
+                  return 0
+                fi
+                echo "   • ${kind%%.*}/${name}${where} → ${merged}"
+              }
+
+              if ! oc get configmap "$CM" -n "$STATE_NS" >/dev/null 2>&1; then
+                warn "no ${STATE_NS}/${CM} — the state-capture Job (wave -10) has not run; nothing to protect yet"
+                exit 0
+              fi
+
+              # Every op_<name>=adopted:<ns> row the capture Job wrote, as "<name> <ns>" lines.
+              # Read from `-o json` (one key per line) with sed — deliberately NOT
+              # `-o jsonpath='{range .data}'`: .data is a MAP, range matches nothing in a map and
+              # jsonpath then dumps the whole object instead, which is the habit that printed a
+              # Secret's base64 VALUES into a transcript on 2026-07-31. No yq/jq in this image.
+              LINES="$(oc get configmap "$CM" -n "$STATE_NS" -o json 2>/dev/null \
+                        | sed -nE 's/.*"op_([^"]+)"[[:space:]]*:[[:space:]]*"adopted:([^"]+)".*/\1 \2/p' || true)"
+
+              if [[ -z "$LINES" ]]; then
+                ok "adopted-resource protection: no pre-existing operators on this cluster — nothing to protect"
+              else
+                info "annotating adopted resources Prune=false,Delete=false"
+                while read -r name ns; do
+                  [[ -n "$name" && -n "$ns" ]] || continue
+                  # ALWAYS fully qualified — messaging.knative.dev shadows OLM's `subscriptions`,
+                  # and that ambiguity was a SEV1 here (64eb8da).
+                  protect_one subscriptions.operators.coreos.com "$name" "$ns"
+                  csv="$(oc get subscriptions.operators.coreos.com "$name" -n "$ns" \
+                          -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)"
+                  if [[ -n "$csv" ]]; then
+                    protect_one clusterserviceversions.operators.coreos.com "$csv" "$ns"
+                  fi
+                  # The OperatorGroup in an adopted operator's namespace is the org's too. Pruning
+                  # it strands their CSV with no group to scope it — the same silent breakage class
+                  # as adding a second one.
+                  while IFS= read -r og; do
+                    [[ -n "$og" ]] || continue
+                    protect_one operatorgroups.operators.coreos.com "$og" "$ns"
+                  done < <(oc get operatorgroups.operators.coreos.com -n "$ns" \
+                            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+                  protect_one namespace "$ns" ""
+                done <<< "$LINES"
+              fi
+
+              # Two cluster-scoped objects a cascade would prune that no op_* row covers — neither
+              # is an operator, so the adoption snapshot never sees them, but both may be the org's.
+              #   • GatewayClass/openshift-default — our gateway-api component declares it, so Argo
+              #     adopts an existing one; pruning it tears down the org's Gateway API data plane.
+              #   • cluster-monitoring-config — synced ServerSideApply precisely BECAUSE it may
+              #     pre-exist. A cascade deletes the whole ConfigMap (retention, alertmanager,
+              #     remote-write and all), making the uninstall's key-level restore of
+              #     enableUserWorkload moot.
+              if [[ "$(state_get gatewayclass_preexisted)" == "true" ]]; then
+                protect_one gatewayclasses.gateway.networking.k8s.io openshift-default ""
+              fi
+              if [[ "$(state_get monitoring_cm_existed)" == "true" ]]; then
+                protect_one configmap cluster-monitoring-config openshift-monitoring
+              fi
+
+              if [[ "$PROTECTED" -eq 0 ]]; then
+                if [[ "$MISSING" -gt 0 ]]; then
+                  warn "adopted-resource protection: ${MISSING} recorded resource(s) missing, 0 protected — a cascade uninstall has nothing to skip"
+                fi
+              else
+                ok "adopted-resource protection: ${PROTECTED} resource(s) carry Prune=false,Delete=false"
+                if [[ "$MISSING" -gt 0 ]]; then
+                  info "   (${MISSING} recorded resource(s) no longer exist — skipped, install continues)"
+                fi
+              fi
+              info "re-check any time: ./bootstrap/ogsr-uninstall.sh --dry-run"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi
