@@ -435,17 +435,48 @@ cm_key_set() {  # namespace configmap key → 0 when that key exists and is non-
 # same way. Nineteen places to get the same fix wrong is the argument for it living here once.
 # Both historical call styles are supported so no call site had to change: scripts that set a single
 # NS pass just the name, the rest pass name + namespace explicitly.
+# U8-F-04 + user6 F-07. Readiness was answered ONCE, on the first look. `ws prep` materializes a
+# module and then immediately verifies it, so the entry checks routinely met a Deployment that was
+# seconds old and still pulling — user8 caught a red ❌ against a 36-second-old pod, on a world that
+# was healthy moments later. Worse, ws prep reads that same rc as "is this environment broken?" and
+# offers to WIPE it, so a converging namespace could be destroyed for being slow.
+#
+# So a readiness assertion now POLLS to a small budget instead of answering on the first look.
+#
+# Why no "is the workload young?" test guarding the retry: it costs nothing to be wrong here. A
+# healthy workload returns on the FIRST poll and pays zero. The budget is only ever spent when the
+# answer would have been ❌ anyway — and spending 45s to avoid a false ❌ is the trade this suite
+# already makes everywhere else (a false ❌ destroys attendee trust in every other ✅). An age check
+# would also need creationTimestamp parsed portably across BSD and GNU `date`, which is a second
+# failure mode bought for nothing.
+VERIFY_SETTLE_BUDGET_S="${VERIFY_SETTLE_BUDGET_S:-45}"
+VERIFY_SETTLE_POLL_S="${VERIFY_SETTLE_POLL_S:-3}"
+
+_ready_poll() {  # <deployment> <namespace> <min-ready> → 0 ready, 1 not within budget, 2 unreadable
+  local d="$1" ns="$2" want="$3" deadline=$(( SECONDS + VERIFY_SETTLE_BUDGET_S ))
+  while :; do
+    # rc 2 (could not ask) propagates UNCHANGED and immediately: oc_read has already raised
+    # VERIFY_INCONCLUSIVE, check() turns that into ⚠ rather than ❌, and retrying an RBAC denial or a
+    # dead apiserver just burns the budget to reach the same answer.
+    oc_read get deploy "$d" -n "$ns" -o jsonpath='{.status.readyReplicas}' || return $?
+    # if/then, not `[[ … ]] && return 0`: the && form returns 1 from this function when the test is
+    # false, which under a caller's `set -e` can take the whole script down. Same convention the rest
+    # of this library already documents.
+    if [[ -n "$OC_OUT" && "$OC_OUT" -ge "$want" ]]; then return 0; fi
+    if (( SECONDS >= deadline )); then return 1; fi
+    sleep "$VERIFY_SETTLE_POLL_S"
+  done
+}
+
 deploy_ready() {  # <deployment> [namespace] → at least one ready replica
-  oc_read get deploy "$1" -n "${2:-${NS:-}}" -o jsonpath='{.status.readyReplicas}' || return 1
-  [[ -n "$OC_OUT" && "$OC_OUT" -ge 1 ]]
+  _ready_poll "$1" "${2:-${NS:-}}" 1
 }
 
 # >=, never ==: several labs have the attendee deliberately exceed the overlay's canonical replica
 # count (config-multienv's prod Challenge, gitops-fundamentals Exercise D), and an exact match would
 # false-fail a correctly-completed lab.
 deploy_ready_min() {  # <deployment> <namespace> <n> → at least n ready replicas
-  oc_read get deploy "$1" -n "$2" -o jsonpath='{.status.readyReplicas}' || return 1
-  [[ -n "$OC_OUT" && "$OC_OUT" -ge "$3" ]]
+  _ready_poll "$1" "$2" "$3"
 }
 
 # INCONCLUSIVE, never a failure — for a check the CALLER cannot evaluate (no impersonation rights, an
