@@ -542,7 +542,35 @@ else
   VERIFY_INCONCLUSIVE=0
   routing_since                                    # sets ROUTING_SINCE, always rc 0
   ROUTING_UNKNOWN="$VERIFY_INCONCLUSIVE"           # …and the flag says WHY it came back empty
-  if [[ -z "$ROUTING_SINCE" && "$ROUTING_UNKNOWN" == "1" ]]; then
+
+  # Will the opt-in active drill below run AND be able to run? Answered ONCE, here, for two reasons.
+  #
+  # CORRECTNESS. The passive chain below reports what the client's LOG already shows. On a
+  # machine-solved world it has nothing to show, so it warns — and its own hint tells you to re-run
+  # with --failover-drill. But the drill then runs anyway, twelve lines later, and PASSES. Measured
+  # on cluster 65prs, a single `ws verify … --failover-drill` printed BOTH
+  #   ⚠ live failover evidence — … SKIPPED (not a failure)
+  #   ✅ FAILOVER proven ACTIVELY: site-a down -> the client is served by site-b
+  # and closed "⚠ 20 passed · 1 SKIPPED — this run did NOT fully verify the lab". The run DID fully
+  # verify it, by the exact command the ⚠ recommended. Not a false pass — a FALSE INCOMPLETENESS,
+  # which is the same class of defect as the banner rewrite that introduced na(): a caveat printed
+  # when nothing is missing teaches people to ignore caveats.
+  #
+  # COST. deploy_ready polls to a 45s budget now, so evaluating these four readiness probes in both
+  # places would double the wait on exactly the runs that are already the slowest.
+  DRILL_SUPERSEDES="false"
+  if [[ "$FAILOVER_DRILL" == "true" ]] \
+     && deploy_ready parasol-claims "$SITEA_NS" && deploy_ready parasol-claims "$SITEB_NS" \
+     && deploy_ready claims-client "$CLIENT_NS" && deploy_ready claims-gateway "$CLIENT_NS" \
+     && failover_routing_present; then
+    DRILL_SUPERSEDES="true"
+  fi
+
+  if [[ "$DRILL_SUPERSEDES" == "true" ]]; then
+    # The drill is a strictly STRONGER assertion than anything the log could show passively: it causes
+    # the outage itself and observes the flip. Grading the passive evidence too can only subtract.
+    info "passive failover evidence not graded — the opt-in drill below proves it ACTIVELY in this same run"
+  elif [[ -z "$ROUTING_SINCE" && "$ROUTING_UNKNOWN" == "1" ]]; then
     # Empty because nobody answered, not because nothing is wired. Before the oc_read conversion these
     # two were the same empty string and the attendee was pointed at the ❌ above — which, on an
     # unreachable API, is now a ⚠ that says nothing about their work.
@@ -592,9 +620,10 @@ else
     # the sites/client/gateway down or the routing unwired there is ZERO chance of a site-b response, so
     # the poll would burn its full 45s window before giving up — measured on an empty cluster (CRC,
     # 2026-07-31), the same "written against a populated cluster" shape as the install.sh incident.
-    if deploy_ready parasol-claims "$SITEA_NS" && deploy_ready parasol-claims "$SITEB_NS" \
-       && deploy_ready claims-client "$CLIENT_NS" && deploy_ready claims-gateway "$CLIENT_NS" \
-       && failover_routing_present; then
+    # Reuses the single evaluation above rather than re-probing: same condition by construction, so
+    # the guard and the passive-chain suppression can never drift apart, and the four readiness polls
+    # are paid once.
+    if [[ "$DRILL_SUPERSEDES" == "true" ]]; then
       echo
       echo "⚠  ACTIVE FAILOVER DRILL — THIS CHANGES THE CLUSTER, and you asked for it (--failover-drill)."
       echo "   About to scale deploy/parasol-claims in ${SITEA_NS} to 0 — the PRIMARY SITE GOES DOWN —"
