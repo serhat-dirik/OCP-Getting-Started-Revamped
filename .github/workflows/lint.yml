@@ -854,6 +854,49 @@ jobs:
           echo "self-test ok -- all three canaries are detected and the real tree stays clean (rc=1)."
           bash tools/lint/verify-summary-skip-guard.sh
 
+  module-prep-pairing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # Hard dependency: the module catalog is the single source of truth for this check and the
+        # guard parses it properly rather than pattern-matching it. A missing parser exits 2, which
+        # the self-test assertion turns into a failure — it can never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Every module must OFFER prep on its concept page and CONFIRM it on its lab page
+        # 2026-08-05, F-13. `ws prep` takes minutes, so the offer moved to the concept page (it
+        # builds while the attendee reads) and the lab page was reduced to confirming it. The pair
+        # landed on 26 concept pages and 26 lab pages, and nothing structural holds the halves
+        # together.
+        #
+        # Drop either half and the failure is SILENT — which is why this is a gate and not a review
+        # item. Antora still builds, the page still renders, there is no broken link and no missing
+        # image; the attendee is simply never told to prepare, and finds out when the first lab
+        # command fails for a reason the page never mentioned. The same is true of the attribute the
+        # partials interpolate: both open with `ifndef::module-id[:module-id: unset-module-id]`, so a
+        # page that forgets `:module-id:` (or sets it BELOW the include, where the ifndef has already
+        # won) renders a clean, confident instruction to run `ws prep unset-module-id`.
+        #
+        # The module list comes from modules.yaml, never from a count written here: the catalog is
+        # elastic by design and a hardcoded 26 rots the first time a module is split or combined.
+        run: |
+          rc=0
+          python3 tools/lint/module-prep-pairing-guard.py --self-test || rc=$?
+          # Exactly 1 = the clean fixture stayed silent (a comment that MENTIONS an include, and a
+          # page carrying no partial at all, are both legitimate) AND all seven canaries were caught
+          # by the detector that owns them. 0 = a detector is blind; 2 = a canary was missed, the
+          # clean fixture false-positived, or the catalog/page scan is broken.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::module-prep-pairing-guard self-test must exit 1 (clean fixture silent," \
+                 "every canary caught by its own detector); got rc=$rc. Detection is unproven —" \
+                 "refusing to trust a clean scan of the real tree."
+            exit 1
+          fi
+          python3 tools/lint/module-prep-pairing-guard.py
+
   attribute-interpolation:
     runs-on: ubuntu-latest
     steps:
