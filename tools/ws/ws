@@ -2455,30 +2455,49 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   elif [[ "$csv" != *Succeeded* ]]; then
     skip "n/a (gitops operator not installed)"
   else
-    local ev_total=0 ev_pass=0 ev_skip=0 ev_fail=0 ev_fail_names="" ev_skip_names=""
-    local ev_name ev_user ev_module ev_script ev_rc
-    while IFS=$'\t' read -r ev_name ev_user ev_module; do
+    local ev_total=0 ev_pass=0 ev_skip=0 ev_fail=0 ev_solved=0 ev_fail_names="" ev_skip_names=""
+    local ev_name ev_user ev_module ev_solve ev_script ev_rc ev_mode
+    while IFS=$'\t' read -r ev_name ev_user ev_module ev_solve; do
       [[ -n "$ev_name" && "$ev_name" == entry-* && -n "$ev_module" ]] || continue
       [[ "$ev_user" == "$scope_user" ]] || continue
       ev_script="${VERIFY_DIR}/${ev_module}.sh"
       [[ -x "$ev_script" ]] || continue
       ev_total=$((ev_total+1))
+      # user6 F-12. This row used to run --entry-only against EVERY materialized app, including one
+      # an instructor had just `ws solve`d. A solved world is in the END state by definition, so its
+      # ENTRY checks fail — and doctor reported a healthy, deliberately-solved demo environment as
+      # broken. The verify scripts are mode-split for exactly this; doctor simply was not asking for
+      # the right mode.
+      #
+      # The solve flag is read off the LIVE Application's helm parameter rather than a local lookup,
+      # for the same reason the Argo row above prefers the degraded-by-design label: a tool holding
+      # only API access must reach the same verdict ws does. It is also the one source that is
+      # correct for apps materialized before any labelling existed.
+      ev_mode="--entry-only"
+      if [[ "$ev_solve" == "true" ]]; then
+        ev_mode="--solve"
+        ev_solved=$((ev_solved+1))
+      fi
       ev_rc=0
-      VERIFY_STRICT=1 "$ev_script" --user "$scope_user" --entry-only >/dev/null 2>&1 || ev_rc=$?
+      VERIFY_STRICT=1 "$ev_script" --user "$scope_user" "$ev_mode" >/dev/null 2>&1 || ev_rc=$?
       case "$(doctor_verify_rc_outcome "$ev_rc")" in
         pass) ev_pass=$((ev_pass+1));;
         skip) ev_skip=$((ev_skip+1)); ev_skip_names="${ev_skip_names} ${ev_module}";;
         *)    ev_fail=$((ev_fail+1)); ev_fail_names="${ev_fail_names} ${ev_module}(rc=${ev_rc})";;
       esac
-    done < <(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${scope_user}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\n"}{end}' 2>/dev/null)
+    done < <(oc get applications -n "$ARGO_NS" -l "workshop.redhat.com/user=${scope_user}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.spec.source.helm.parameters[?(@.name=="solve")].value}{"\n"}{end}' 2>/dev/null)
+    # Say when a module was graded against its END state, so "passed" is not silently ambiguous
+    # about WHICH state was checked.
+    local ev_note=""
+    if [[ "$ev_solved" -gt 0 ]]; then ev_note=" (${ev_solved} solved — graded against the end state)"; fi
     if [[ "$ev_total" -eq 0 ]]; then
       ok "n/a (no entry states materialized for ${scope_user})"
     elif [[ "$ev_fail" -gt 0 ]]; then
-      err "${ev_fail} of ${ev_total} FAILED:${ev_fail_names} — detail: ws verify <module> --user ${scope_user} --entry-only"; fail=1
+      err "${ev_fail} of ${ev_total} FAILED:${ev_fail_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"; fail=1
     elif [[ "$ev_skip" -gt 0 ]]; then
-      skip "${ev_pass} fully passed · ${ev_skip} did NOT fully verify (not a failure):${ev_skip_names} — detail: ws verify <module> --user ${scope_user} --entry-only"
+      skip "${ev_pass} fully passed · ${ev_skip} did NOT fully verify (not a failure):${ev_skip_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"
     else
-      ok "${ev_pass}/${ev_total} entry verify(ies) fully passed"
+      ok "${ev_pass}/${ev_total} verify(ies) fully passed${ev_note}"
     fi
   fi
   printf "  %-28s" "gitea"
