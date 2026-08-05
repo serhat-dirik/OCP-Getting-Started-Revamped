@@ -79,6 +79,16 @@ SMOKE_CONTAINER="terminal"
 
 ok()   { echo "✅ $*"; }
 err()  { echo "❌ $*" >&2; }
+# ❌ report ROW → STDOUT. A doctor/report failure row must ride the SAME stream as the printf label it
+# completes and as its ok()/skip()/unknown() siblings. err() writes to fd2, so a failing row split the
+# label (fd1) from its ❌ result (fd2): `ws doctor > log` captured the label with a BLANK result, and
+# with the streams merged the ❌ reordered onto the WRONG row — e.g. a healthy gitea wearing the
+# previous check's failure (both reproduced — triage-3 §2.1). This ❌ is attendee-facing narration of
+# their own environment — the same rule the unknown() note below states — NOT the out-of-band
+# operator/fatal channel err()/warn()/die() own (cmd_status embeds its ❌ inline on stdout for the
+# same reason). A report's machine signal is its EXIT CODE (doctor still exit 1s), never the stream a
+# line lands on. Mirror of err() minus the >&2.
+nok()  { echo "❌ $*"; }
 # "I could not look", which is NOT "it is broken". `ws doctor` is attendee-runnable, and an
 # attendee cannot read cluster-scoped objects like oauths or groups. Reporting ❌ there told
 # people their IdP was missing seconds after they had logged in THROUGH it — and a false ❌
@@ -2482,11 +2492,11 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   fi
   local fail=0
   printf "  %-28s" "cluster login"
-  if oc whoami >/dev/null 2>&1; then ok "$(oc whoami) @ $(oc whoami --show-server)"; else err "not logged in"; fail=1; fi
+  if oc whoami >/dev/null 2>&1; then ok "$(oc whoami) @ $(oc whoami --show-server)"; else nok "not logged in"; fail=1; fi
   printf "  %-28s" "gitops operator"
   local csv
   csv="$(oc get csv -n openshift-gitops-operator -o jsonpath='{.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}' 2>/dev/null || true)"
-  if [[ "$csv" == *Succeeded* ]]; then ok "installed"; else err "not ready (${csv:-missing})"; fail=1; fi
+  if [[ "$csv" == *Succeeded* ]]; then ok "installed"; else nok "not ready (${csv:-missing})"; fail=1; fi
   printf "  %-28s" "argo applications"
   # An entry-*-<user> app for a module whose ws-meta.yaml declares expectDegraded (an intentional-fault
   # seed, e.g. ai-assisted-development's broken 0/1 Deployment) is Degraded/OutOfSync BY DESIGN — ws
@@ -2531,7 +2541,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
         bad="${bad} ${name}=${health}"
       fi
     done < <(oc get applications -n "$ARGO_NS" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.metadata.labels.workshop\.redhat\.com/degraded-by-design}{"\n"}{end}' 2>/dev/null)
-    if [[ -z "${bad// }" ]]; then ok "all Healthy${scope_user:+ (platform + ${scope_user})}"; else err "unhealthy:${bad}"; fail=1; fi
+    if [[ -z "${bad// }" ]]; then ok "all Healthy${scope_user:+ (platform + ${scope_user})}"; else nok "unhealthy:${bad}"; fail=1; fi
     if [[ -n "${expect_ok// }" ]]; then
       printf "  %-28s" ""
       ok "(Degraded by design):${expect_ok}"
@@ -2604,7 +2614,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     if [[ "$ev_total" -eq 0 ]]; then
       ok "n/a (no entry states materialized for ${scope_user})"
     elif [[ "$ev_fail" -gt 0 ]]; then
-      err "${ev_fail} of ${ev_total} FAILED:${ev_fail_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"; fail=1
+      nok "${ev_fail} of ${ev_total} FAILED:${ev_fail_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"; fail=1
     elif [[ "$ev_skip" -gt 0 ]]; then
       unknown "${ev_pass} fully passed · ${ev_skip} did NOT fully verify (not a failure):${ev_skip_names}${ev_note} — detail: ws verify <module> --user ${scope_user}"
     else
@@ -2614,13 +2624,13 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   printf "  %-28s" "gitea"
   local host
   host="$(oc get route gitea -n "$GITEA_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  if [[ -n "$host" ]] && curl -ksf "https://${host}/api/v1/version" >/dev/null 2>&1; then ok "https://${host}"; else err "unreachable"; fail=1; fi
+  if [[ -n "$host" ]] && curl -ksf "https://${host}/api/v1/version" >/dev/null 2>&1; then ok "https://${host}"; else nok "unreachable"; fail=1; fi
   printf "  %-28s" "mirror (${MIRROR_ORG}/${MIRROR_REPO})"
-  if [[ -n "$host" ]] && curl -ksf "https://${host}/api/v1/repos/${MIRROR_ORG}/${MIRROR_REPO}" >/dev/null 2>&1; then ok "mirrored"; else err "missing — run: ws git-refresh"; fail=1; fi
+  if [[ -n "$host" ]] && curl -ksf "https://${host}/api/v1/repos/${MIRROR_ORG}/${MIRROR_REPO}" >/dev/null 2>&1; then ok "mirrored"; else nok "missing — run: ws git-refresh"; fail=1; fi
   printf "  %-28s" "workshop layer"
   local wsh
   wsh="$(oc get application workshop-config -n "$ARGO_NS" -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
-  if [[ "$wsh" == "Healthy" ]]; then ok "workshop-config Healthy"; else err "workshop-config ${wsh:-absent} — run bootstrap/install.sh"; fail=1; fi
+  if [[ "$wsh" == "Healthy" ]]; then ok "workshop-config Healthy"; else nok "workshop-config ${wsh:-absent} — run bootstrap/install.sh"; fail=1; fi
   printf "  %-28s" "showroom antora image"
   # The cockpit antora-build initContainers pull antora-ext:latest from the in-cluster registry; the
   # antora-ext BuildConfig (workshop-config) builds it. A missing tag = every cockpit ImagePullBackOff.
@@ -2628,7 +2638,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     if oc get istag antora-ext:latest -n "$SHOWROOM_NS" >/dev/null 2>&1; then
       ok "antora-ext:latest built"
     else
-      err "antora-ext:latest not built in ${SHOWROOM_NS} — cockpits Init:ImagePullBackOff until it is; watch: oc logs -f bc/antora-ext -n ${SHOWROOM_NS} · kick idle cockpits: oc rollout restart deploy -n ${SHOWROOM_NS}"; fail=1
+      nok "antora-ext:latest not built in ${SHOWROOM_NS} — cockpits Init:ImagePullBackOff until it is; watch: oc logs -f bc/antora-ext -n ${SHOWROOM_NS} · kick idle cockpits: oc rollout restart deploy -n ${SHOWROOM_NS}"; fail=1
     fi
   elif ! oc auth can-i get buildconfigs -n "$SHOWROOM_NS" >/dev/null 2>&1; then
     unknown "not checked (needs access to ${SHOWROOM_NS})"
@@ -2659,7 +2669,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     if [[ -z "$missing_tags" ]]; then
       ok "parasol-claims/parasol-web 1.0+1.1 + fraud/notifications/agent/mcp-agent-cli/claims-db/policy-docs 1.0 built"
     else
-      err "missing:${missing_tags} in ${PARASOL_IMAGES_NS} — watch: oc logs -f bc/parasol-claims -n ${PARASOL_IMAGES_NS} (or bc/<app> for the named app)"; fail=1
+      nok "missing:${missing_tags} in ${PARASOL_IMAGES_NS} — watch: oc logs -f bc/parasol-claims -n ${PARASOL_IMAGES_NS} (or bc/<app> for the named app)"; fail=1
     fi
   elif ! oc auth can-i get buildconfigs -n "$PARASOL_IMAGES_NS" >/dev/null 2>&1; then
     unknown "not checked (needs access to ${PARASOL_IMAGES_NS})"
@@ -2720,7 +2730,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
         d_what="${d_what}${d_what:+; }${d_bad} reference a tag that does not exist"
         d_fix="${d_fix} · build the missing tag(s) first — rolling them only trades a working pod for an ImagePullBackOff"
       fi
-      err "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1
+      nok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1
     fi
   fi
   printf "  %-28s" "workshop IdP"
@@ -2729,7 +2739,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   elif oc get oauth cluster -o jsonpath='{.spec.identityProviders[*].name}' 2>/dev/null | grep -qw workshop-users; then
     ok "workshop-users present"
   else
-    err "IdP missing — bootstrap adds it"; fail=1
+    nok "IdP missing — bootstrap adds it"; fail=1
   fi
   printf "  %-28s" "user namespaces"
   # Whole-cohort scope keeps probing user1-dev: it is the canary for "workshop-config rendered the
@@ -2741,9 +2751,9 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   if oc get ns "$ns_probe" >/dev/null 2>&1; then
     ok "${ns_probe} exists"
   elif [[ -n "$scope_user" ]]; then
-    err "${ns_probe} missing — is ${scope_user} provisioned? check the cohort: ws status (grow it: ws scale-users N)"; fail=1
+    nok "${ns_probe} missing — is ${scope_user} provisioned? check the cohort: ws status (grow it: ws scale-users N)"; fail=1
   else
-    err "missing — workshop-config not synced"; fail=1
+    nok "missing — workshop-config not synced"; fail=1
   fi
   printf "  %-28s" "workshop cohort size"
   # Honest after a `ws scale-users`: cross-check the LIVE helm parameter against the group it should
@@ -2759,7 +2769,7 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     if [[ -n "$n_live" && "$n_live" == "$n_group" ]]; then
       ok "${n_live} user(s) (live userCount + group agree)"
     else
-      err "live userCount=${n_live:-?} but workshop-attendees group has ${n_group:-?} — scale still converging? re-run shortly, or: ws status"; fail=1
+      nok "live userCount=${n_live:-?} but workshop-attendees group has ${n_group:-?} — scale still converging? re-run shortly, or: ws status"; fail=1
     fi
   fi
   printf "  %-28s" "cohort coherence"
@@ -2781,11 +2791,11 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
       # catch a half-finished wipe — and the function's own header already calls this "an honest
       # 'could not check'". ⚠ is that sentence's glyph.
       2) unknown "$coh_msg" ;;
-      *) err "$coh_msg"; fail=1 ;;
+      *) nok "$coh_msg"; fail=1 ;;
     esac
   fi
   echo
-  if (( fail == 0 )); then ok "environment looks good"; else err "issues found — fix hints above"; exit 1; fi
+  if (( fail == 0 )); then ok "environment looks good"; else nok "issues found — fix hints above"; exit 1; fi
 }
 
 # ── SA/admin cohort operations (ws passwd, ws cohort-reset) ────────────────────────────────────────
