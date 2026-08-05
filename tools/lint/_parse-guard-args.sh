@@ -126,6 +126,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   set -uo pipefail
   _PGA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+  # CONVENTION: tools/lint/LEDGERS.md — the repo-wide rules every declared-debt ledger must meet, and
+  # where this one does not yet meet them. Adding an entry is an OWNER decision, not an agent's.
+  #
   # Files that legitimately do NOT call parse_guard_args, each with the reason. Anything here that
   # STARTS using the helper is an error, not a pass — that is what keeps this list from rotting into
   # a permanent excuse. Reasons, one per entry, in the same order:

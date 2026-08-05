@@ -127,6 +127,9 @@ BASELINE_SELF_TEST = 1
 
 # ── Reasoned exemptions, and dated debt ────────────────────────────────────────────────────────
 #
+# CONVENTION: tools/lint/LEDGERS.md — the repo-wide rules every declared-debt ledger must meet, and
+# where this one does not yet meet them. Adding an entry is an OWNER decision, not an agent's.
+#
 # Two lists, identical mechanics, DIFFERENT claims. Both are swept exactly like everything else —
 # neither is a mute button — and both error in two directions, which is what stops them rotting:
 #
