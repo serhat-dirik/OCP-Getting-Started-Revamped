@@ -165,13 +165,21 @@ fi
 #      pp-cert-manager applied our OperatorGroup into an ADOPTED cert-manager-operator namespace and
 #      the org's CSV failed one second later.
 #
-#   2. If it is already there, can we simply not install ours? A component whose directory holds
-#      nothing but a namespace, an OperatorGroup and a Subscription contributes NOTHING but the
-#      operator install, so dropping it loses nothing — we use theirs and carry on. That component is
-#      SKIPPED automatically (§2 renders a kustomize patch that removes its child Application) and
-#      the install continues unattended. A component that ALSO ships operand CRs cannot be dropped
-#      without silently shipping an incomplete workshop, so that one still REFUSES, loudly. No
-#      partial-component surgery: a loud refusal beats a quietly incomplete install.
+#   2. If it is already there, can we simply not install ours? Two things must hold, and they are the
+#      two halves of lib-components.sh's skippability rule (hack/check-adoption-skip.sh proves the
+#      same rule from rendered manifests, so there is exactly one of it):
+#        • the component contributes NOTHING but the operator install (is_operator_only), and
+#        • every namespace our operands occupy still has something to create it and something to
+#          reconcile in it once the component is gone (component_skip_blockers).
+#      Both hold → SKIPPED automatically (§2 renders a kustomize patch that removes its child
+#      Application) and the install continues unattended. Either fails → we install ours, exactly as
+#      on a cluster with nothing to adopt, and say why. Asking only the first question is what let
+#      adoption drop keycloak-operator whenever ANY rhbk-operator existed anywhere on the cluster,
+#      even though ours is OwnNamespace-scoped to a namespace only we create.
+#      A REFUSAL is now reserved for the one case installing ours would actively damage: a foreign
+#      OperatorGroup in a namespace we ship one into (TooManyOperatorGroups, silent, cluster-owner's
+#      operator). Everything else keeps the component, because a wrongly-kept install costs an
+#      operator nobody needed while a wrongly-skipped one ships a workshop that is green and broken.
 #
 # Argo CD has no "create only if absent" primitive, so none of this can live in the manifests: the
 # decision is made once, here, in the portfolio's single sanctioned imperative step. Read-only
@@ -199,8 +207,12 @@ STATE_CM="ogsr-uninstall-state"
 # skip — never the other way round.
 OG_SNAPSHOT=""      # <ns>|<name>|<our-owner-label>
 SUB_SNAPSHOT=""     # <ns>|<name>|<package>|<our-owner-label>
-CSV_SNAPSHOT=""     # <ns>|<name>|<comma-terminated list of label KEYS>
+CSV_SNAPSHOT=""     # <ns>|<name>|<olm.targetNamespaces>|<comma-terminated list of label KEYS>
 STATE_SNAPSHOT=""   # <key>=<value> from the workshop layer's uninstall-state ConfigMap
+# CSV_SNAPSHOT as a FILE, because lib-components.sh's watch-scope readers are awk over a table and
+# awk reads files. Same four reads, no fifth: field 3 was added to the existing CSV query rather than
+# taking a second one, which is what the format doc in lib-components.sh anticipated.
+CSV_WATCH_TABLE=""
 
 load_cluster_snapshot() {
   OG_SNAPSHOT="$(oc get operatorgroups.operators.coreos.com -A \
@@ -211,11 +223,18 @@ load_cluster_snapshot() {
     2>/dev/null || true)"
   # go-template, not jsonpath: only a template can enumerate label KEYS, and the package marker OLM
   # writes is a key (operators.coreos.com/<package>.<namespace>) with an empty value.
+  # Field 3 is olm.targetNamespaces — the scope OLM RESOLVED for the install, never
+  # spec.targetNamespaces, which is empty both for AllNamespaces and for a label-selector group and
+  # so cannot tell them apart. See the format doc in lib-components.sh for the four shapes it takes.
   # $k/$v are go-template variables, not shell variables — the single quotes are intentional.
   # shellcheck disable=SC2016
   CSV_SNAPSHOT="$(oc get clusterserviceversions.operators.coreos.com -A \
-    -o go-template='{{range .items}}{{.metadata.namespace}}|{{.metadata.name}}|{{range $k, $v := .metadata.labels}}{{$k}},{{end}}{{"\n"}}{{end}}' \
+    -o go-template='{{range .items}}{{.metadata.namespace}}|{{.metadata.name}}|{{index .metadata.annotations "olm.targetNamespaces"}}|{{range $k, $v := .metadata.labels}}{{$k}},{{end}}{{"\n"}}{{end}}' \
     2>/dev/null || true)"
+  # Materialised once. An unreadable CSV list leaves an EMPTY table, and an empty table proves no
+  # coverage — so the failure mode is "keep the component", never "drop it on a guess".
+  CSV_WATCH_TABLE="$(mktemp)"
+  printf '%s\n' "$CSV_SNAPSHOT" > "$CSV_WATCH_TABLE"
   # shellcheck disable=SC2016
   STATE_SNAPSHOT="$(oc get configmap "$STATE_CM" -n "$STATE_NS" \
     -o go-template='{{range $k, $v := .data}}{{$k}}={{$v}}{{"\n"}}{{end}}' 2>/dev/null || true)"
@@ -247,9 +266,11 @@ csvs_for_package_in() {  # <package> <namespace> → CSVs OLM has labelled for t
   # it carries olm.copiedFrom instead), so this never fires outside the operator's own namespace.
   # Only consulted when we hold no Subscription of our own for the package there — otherwise it
   # would match the CSV our own Subscription installed and a re-install would adopt itself.
+  # $4, not $3: the label-key list moved one field right when olm.targetNamespaces was added to the
+  # query so lib-components.sh's watch-scope readers could share the same snapshot.
   printf '%s\n' "$CSV_SNAPSHOT" \
     | awk -F'|' -v ns="$2" -v key="operators.coreos.com/${1}.${2}," \
-        '$1 == ns && index("," $3, "," key) > 0 { print $2 }'
+        '$1 == ns && index("," $4, "," key) > 0 { print $2 }'
 }
 
 state_operator_record() {  # <sub-name> → op_<name> from the workshop layer's adoption snapshot
@@ -282,11 +303,15 @@ add_unique() {  # <csv> <item> → csv with item appended at most once
 # `for _stack in "${PREFLIGHT_STACKS[@]}"` loop further down) installs the component unconditionally.
 #
 # WHAT THAT LOOKS LIKE ON A CUSTOMER CLUSTER. Split an operator component in two — `foo-operator`
-# (Namespace + OperatorGroup + Subscription, and therefore is_operator_only() = skippable) and
-# `foo-config` (the operand CRs alone, no Subscription). On a cluster that already runs foo:
-#   • foo-operator is correctly detected as present and SKIPPED — the org's operator is left alone;
+# (Namespace + OperatorGroup + Subscription, so is_operator_only() = half 1 of the skippability rule)
+# and `foo-config` (the operand CRs alone, no Subscription). On a cluster that already runs foo:
+#   • foo-operator is correctly detected as present and, if half 2 also passes, SKIPPED — the org's
+#     operator is left alone;
 #   • foo-config is classified "ok" and applied anyway, so our operand CRs land on THEIR operator
 #     instance, at whatever channel and version they chose to run it at.
+# Half 2 narrows this but does not close it: component_skip_blockers() reads namespaces a sibling
+# would be stranded in, and a split like this leaves foo-config using a namespace foo-operator does
+# not create or scope a group to, so there is nothing for it to report.
 # There is no ❌, no ⚠, no line in --adoption-plan and nothing in the install summary: the adoption
 # preflight prints exactly what it prints for a component that had nothing to adopt. That is QUIETER
 # than the openshift-pipelines case this code path was criticised for, which at least warns.
@@ -423,30 +448,38 @@ for _stack in "${PREFLIGHT_STACKS[@]}"; do
       continue
     fi
 
-    # CC_VERB == present. Operator-only → adopt theirs and skip ours, unattended — UNLESS dropping it
-    # would strand a sibling we are NOT skipping (a namespace or OperatorGroup only this component
-    # provides), in which case refuse loudly. Anything else → refuse (OperatorGroup collision) or warn.
+    # CC_VERB == present. Both halves of lib-components.sh's skippability rule decide what happens
+    # next — the SAME rule hack/check-adoption-skip.sh runs, from the same library, so the installer's
+    # decision and the CI proof that it is safe can never be two opinions:
+    #   half 1  is_operator_only()          — the component contributes nothing but the operator
+    #   half 2  component_skip_blockers()   — every namespace our operands occupy survives the drop
+    # Half 2 gets the LIVE watch table here, which is the one thing the CI gate cannot have: an OG
+    # blocker clears when an operator already on this cluster is measured to watch the namespace at
+    # issue. An NS blocker never clears — no operator creates the namespace it watches.
+    #
+    # A blocked component is NOT a refusal. It is simply not skipped: it falls through to the same
+    # two branches a component that ships operands takes, and the workshop installs its own operator
+    # exactly as it would on a cluster with nothing to adopt. That is the safe direction and the
+    # cheap one — a component wrongly KEPT costs an operator install nobody needed, a component
+    # wrongly SKIPPED ships a half-built workshop whose every Argo status is green. Until 2026-08-06
+    # this branch REFUSED the whole install instead, on a path that could not fire for the case it
+    # was written for (every adoption signal for keycloak-operator is scoped to a namespace only we
+    # create), while the real defect — dropping it whenever ANY rhbk-operator existed anywhere — went
+    # unnoticed because half 2 did not exist.
+    _keep_why=""   # non-empty ⇒ operator-only but blocked; names the reason for the messages below
+    _skippable="false"
     if is_operator_only "$_cdir"; then
-      # Same detector the CI gate runs (lib-components.sh), on the offline fact table built above —
-      # one verdict, two fact builders. Non-empty ⇒ skipping this component breaks a sibling.
-      _strands="$(component_strands "$_facts" "$_comp" || true)"
-      if [[ -n "$_strands" ]]; then
-        OG_CONFLICTS=$((OG_CONFLICTS + 1))
-        _sib="$(printf '%s\n' "$_strands" | awk '{ print $3 }' | sort -u | tr '\n' ' ' | xargs || true)"
-        _sns="$(printf '%s\n' "$_strands" | awk '{ print $2 }' | sort -u | tr '\n' ' ' | xargs || true)"
-        plan_add refuse "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" \
-          "skipping the adopted ${_comp} would strand sibling(s) ${_sib} in namespace(s) ${_sns} that only ${_comp} provides"
-        say "❌ ${_comp} is already installed by this cluster's owner, so the normal path is to skip ours —"
-        say "   but ${_comp} is the ONLY component that provides namespace(s) ${_sns}, and sibling(s) ${_sib}"
-        say "   deploy there without creating it. Skipping ${_comp} would leave ${_sib} syncing into a"
-        say "   namespace nothing creates (or operand CRs with no controller): Argo reports Synced while"
-        say "   nothing reconciles. Refusing — a loud stop beats a silently incomplete workshop."
-        say "   Choose one, then re-run:"
-        say "     • install without the stack that ships it — drop '${_stack}' from --stacks"
-        say "     • or move the Namespace/OperatorGroup out of ${_comp} into ${_sib} (or a shared base) so"
-        say "       adopting the operator no longer takes ${_sns} with it"
-        continue
+      _blockers="$(component_skip_blockers "$_facts" "$_comp" "$CSV_WATCH_TABLE" || true)"
+      if [[ -z "$_blockers" ]]; then
+        _skippable="true"
+      else
+        _sib="$(printf '%s\n' "$_blockers" | awk '{ print $3 }' | sort -u | tr '\n' ' ' | xargs || true)"
+        _sns="$(printf '%s\n' "$_blockers" | awk '{ print $2 }' | sort -u | tr '\n' ' ' | xargs || true)"
+        _keep_why="dropping it would leave sibling(s) ${_sib} without namespace(s)/operator coverage in ${_sns}, which only ${_comp} provides"
       fi
+    fi
+
+    if [[ "$_skippable" == "true" ]]; then
       SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
       plan_add skip "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" "$CC_REASON"
       say "  • ${_comp}: already installed by this cluster's owner — using theirs, our component skipped"
@@ -459,21 +492,35 @@ for _stack in "${PREFLIGHT_STACKS[@]}"; do
       say "   Component '${_comp}' would add a second one. OLM would then fail EVERY CSV in"
       say "   ${CC_NS%%,*} (TooManyOperatorGroups) while its pods keep running — a silent, invisible"
       say "   break of an operator this cluster's owner installed. Refusing to continue."
-      say "   '${_comp}' ships operand CRs as well as the operator, so it cannot be skipped the way an"
-      say "   operator-only component is: dropping it would leave the workshop quietly incomplete."
+      if [[ -n "$_keep_why" ]]; then
+        say "   '${_comp}' cannot be skipped the way an adoptable operator-only component is: ${_keep_why}."
+      else
+        say "   '${_comp}' ships operand CRs as well as the operator, so it cannot be skipped the way an"
+        say "   operator-only component is: dropping it would leave the workshop quietly incomplete."
+      fi
       say "   Choose one, then re-run:"
       say "     • install without the stack that ships it — drop '${_stack}' from --stacks"
       say "     • or remove the org's operator from ${CC_NS%%,*} first (their call, not ours)"
     else
       plan_add warn "$_stack" "$_comp" "$_child" "$CC_NS" "$CC_SUBS" "$CC_REASON"
       say "  ⚠ ${_comp}: ${CC_REASON}"
-      say "      '${_comp}' ships operand CRs as well as the operator, so it is NOT skipped — Argo will"
-      say "      manage the existing Subscription. Check its channel is one the org expects:"
+      if [[ -n "$_keep_why" ]]; then
+        say "      '${_comp}' installs only an operator, but ${_keep_why} — so it is NOT skipped."
+        say "      Ours installs ALONGSIDE theirs, in the same namespace. Nothing of theirs is deleted"
+        say "      now — but the workshop's uninstall snapshot keys on OUR Subscription name, so an"
+        say "      operator the org named differently is not recorded as adopted. Check both before"
+        say "      you tear down:"
+      else
+        say "      '${_comp}' ships operand CRs as well as the operator, so it is NOT skipped — Argo will"
+        say "      manage the existing Subscription. Check its channel is one the org expects:"
+      fi
       say "        oc get subscriptions.operators.coreos.com -n ${CC_NS%%,*}"
     fi
   done < <(active_app_files "$_stack")
   rm -f "$_facts"   # per-stack; the loop completes before either exit below, so nothing leaks
 done
+# Same reasoning one level up: preflight is finished, and --adoption-plan exits three lines below.
+[[ -z "$CSV_WATCH_TABLE" ]] || rm -f "$CSV_WATCH_TABLE"
 
 if [[ "$ADOPTION_PLAN_ONLY" == "true" ]]; then
   [[ -n "$ADOPTION_PLAN" ]] && printf '%s\n' "$ADOPTION_PLAN"

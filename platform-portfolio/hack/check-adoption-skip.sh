@@ -2,33 +2,65 @@
 # check-adoption-skip — prove the three properties automatic component adoption rests on.
 # READ-ONLY: renders manifests with kustomize, never touches a cluster.
 #
-#   SAFETY   argocd-bootstrap/install.sh §0 SKIPS a component when this cluster already runs that
-#            operator, but only if the component is "operator-only" — it contributes nothing but the
-#            operator install. That verdict comes from is_operator_only(), which reads FILENAMES.
+#   THE RULE argocd-bootstrap/install.sh §0 SKIPS a component when this cluster already runs that
+#            operator AND BOTH halves of lib-components.sh's skippability rule hold:
+#              1. the component renders only operator-install resources  (is_operator_only)
+#              2. every namespace our operands occupy is still covered   (component_skip_blockers)
+#            Half 1 alone is what shipped until 2026-08-06, and it is purely syntactic — it asks what
+#            files a directory contains, never whether anything will still reconcile our operands once
+#            the component is gone. Half 2 asks that. Both callers run the SAME rule from the same
+#            library; they differ only in the evidence they can bring to it (below).
+#
+#   SAFETY   Half 1's verdict comes from is_operator_only(), which reads FILENAMES.
 #            This check re-derives it from the RENDERED manifests: every resource an operator-only
 #            component emits must be a Namespace, an OperatorGroup or a Subscription. A stray operand
 #            in a file called subscription-extra.yaml would pass the filename test and fail here,
 #            which is exactly the drift that would ship a silently incomplete workshop.
 #
+#   COVERAGE Half 2 has two blocker classes and they behave differently on purpose. An NS blocker (a
+#            sibling deploys into a namespace only this component creates) is UNCONDITIONAL: no
+#            operator's watch scope makes a Namespace object exist. An OG blocker (a sibling's
+#            resources sit in a namespace only this component scopes an OperatorGroup to) is cleared
+#            ONLY by proof that an operator already on the cluster watches that namespace —
+#            lib-components.sh operator_installs_watching(), reading the RESOLVED scope.
+#            That proof is a cluster fact and this script has no cluster, so it passes no watch table
+#            and clears nothing. Unprovable therefore falls to NOT skippable here, which is the safe
+#            direction: a component wrongly KEPT installs an operator the cluster did not need, a
+#            component wrongly SKIPPED ships a half-installed workshop with every Argo status green.
+#
+#            THE CONSEQUENCE THAT DECIDES HOW PROPERTIES 1-2 ARE QUANTIFIED. Because a live cluster
+#            can clear an OG blocker that this script cannot, the installer's skippable set is a
+#            SUPERSET of the one printed below, not a subset. Quantifying properties 1 and 2 over
+#            "what this script calls skippable" would therefore leave a component the installer CAN
+#            drop with its render and its `$patch: delete` mechanics never proven — the same shape of
+#            hole as the openshift-pipelines gap. So 1 and 2 are quantified over every OPERATOR-ONLY
+#            component (the widest set the installer could ever drop) and only property 3 partitions
+#            that set into skippable and blocked.
+#
 #   NOT CHECKED HERE — and this is the gap that let the 2026-08-01 openshift-pipelines regression
-#            ship. Both properties below are quantified over whatever is CURRENTLY skippable, so a
-#            component that STOPS being skippable simply stops being examined: 49a7e28 added
+#            ship. Everything below is quantified over whatever is CURRENTLY operator-only, so a
+#            component that stops being operator-only simply stops being examined: 49a7e28 added
 #            components/openshift-pipelines/tekton-config.yaml, is_operator_only() (which reads
 #            filenames) demoted the component, and this check stayed green without ever printing the
 #            word "openshift-pipelines". The expected-skippable set lives in
 #            hack/adoption-skippable.snapshot and is gated by tools/lint/adoption-skippable-guard.sh
 #            (CI job `adoption-skippable`); this file answers "is skipping safe?", that one answers
 #            "is the set of things we may skip still what we agreed to?".
+#            NOTE (2026-08-06) that snapshot records HALF 1 ONLY — is_operator_only() — because the
+#            generator classifies component directories with no stack context, and half 2 needs the
+#            stack's fact table. So `skippable` there now means "operator-only", and this file's own
+#            printed set is the authority on what the installer may drop.
 #
 #   MECHANICS A skip is delivered as a kustomize `$patch: delete` on the parent Application, not by
-#            editing the repo. This check renders every stack with each of its skippable components
-#            simulated as skipped and asserts the child Application is GONE and every other child
-#            survives byte-identically. `$patch: delete` is a strategic-merge directive; the JSON6902
-#            form cannot delete a resource, and a silent no-op patch would install the operator we
-#            just promised the cluster's owner we would not touch.
+#            editing the repo. This check renders every stack with each of its operator-only
+#            components simulated as skipped and asserts the child Application is GONE and every other
+#            child survives byte-identically. `$patch: delete` is a strategic-merge directive; the
+#            JSON6902 form cannot delete a resource, and a silent no-op patch would install the
+#            operator we just promised the cluster's owner we would not touch.
 #
 #   VIABILITY (property 3, added 2026-08-05 after this file printed
-#            "✅ automatic component adoption is safe across the portfolio" over a live break).
+#            "✅ automatic component adoption is safe across the portfolio" over a live break;
+#            promoted on 2026-08-06 from a FAILURE to the second half of the skippability rule).
 #            Properties 1 and 2 together say: the child Application disappears and every OTHER child
 #            is byte-identical. Both were true of `keycloak-operator`, and the green line even
 #            counted the survivor — "leaves 1 sibling(s) untouched". Untouched is not the same as
@@ -43,46 +75,53 @@
 #            green, and nothing ever reconciles it. That failure is quieter than a missing namespace,
 #            which is why it is asserted separately rather than folded into the namespace rule.
 #
-#            Quantified over the CURRENTLY skippable set, deliberately, and unlike the
-#            openshift-pipelines gap that is sound here: a component that stops being skippable is a
-#            component the installer will never drop, so its viability stops mattering. The set is
-#            printed either way (examined AND not-examined, by name) so a silently shrinking
-#            candidate list cannot masquerade as a clean run, and hack/adoption-skippable.snapshot
-#            plus tools/lint/adoption-skippable-guard.sh make the shrinking itself reviewable.
+#            WHAT CHANGED ON 2026-08-06, and it is the point of this whole file. A strand used to be
+#            reported as a DEFECT in an otherwise-skippable component, which forced a choice between a
+#            permanently red gate and a ledger entry. It is not a defect — it is the answer to half 2
+#            of the skippability rule, and the answer is "do not skip this one". So a strand now
+#            DEMOTES the component out of the skippable set (the installer keeps it and installs it
+#            normally) instead of reddening a gate over a component that will be installed anyway.
+#            Both keycloak-operator ledger entries retired as a direct consequence: the strand they
+#            declared is unchanged and still printed, but it no longer describes a break.
 #
-#   LEDGER   Property 3 found a real strand the hour it landed: components/keycloak-operator is the
-#            SOLE creator of namespace `sso-workshop` and the SOLE component scoping an OperatorGroup
-#            to it, while sibling `keycloak` ships operand CRs there and creates neither. The owner's
-#            call was that install.sh REFUSES loudly rather than skipping (§0's strand branch, which
-#            runs this same detector), and that making RHBK genuinely coexist with an org's own
-#            Keycloak operator is a SEPARATE, DEFERRED decision. So the defect legitimately outlives
-#            this gate — and a gate that is permanently red is a gate people stop reading.
-#            KNOWN_STRANDS below declares that exact strand by component + kind + namespace + sibling.
-#            A strand it names reports ⚠ DECLARED and does NOT fail the run; any other strand is still
-#            ❌ and still exits 1, which is the whole point — the gate stays live for NEW breaks.
+#            Every operator-only component is printed with its verdict (skippable, or blocked and
+#            why), so a silently shrinking candidate list cannot masquerade as a clean run, and
+#            hack/adoption-skippable.snapshot plus tools/lint/adoption-skippable-guard.sh make a
+#            change to the operator-only set itself reviewable.
+#
+#   LEDGER   KNOWN_STRANDS declares, by component + kind + namespace + sibling, a strand this
+#            portfolio KNOWS about and has DECIDED to accept rather than fix. Such a strand reports
+#            ⚠ DECLARED and does NOT fail the run; an undeclared one is ❌ and still exits 1.
 #            The ledger cannot rot silently either: an entry matching no strand in this run FAILS and
-#            says to delete it, so the day somebody fixes keycloak the ledger cannot go on asserting a
-#            defect that is gone. That is the stale-doc failure this project keeps paying for, and the
-#            same two-directional ratchet as tools/lint/_canary-coverage.py's EXEMPT/KNOWN_UNPROVEN.
-#            Adding an entry is an OWNER decision, not a way to get CI green — see README § Adoption.
+#            says to delete it, so a declaration can never outlive the defect it describes. That is
+#            the stale-doc failure this project keeps paying for, and the same two-directional ratchet
+#            as tools/lint/_canary-coverage.py's EXEMPT/KNOWN_UNPROVEN. Adding an entry is an OWNER
+#            decision, not a way to get CI green — see README § Adoption.
 #
-#            2026-08-06 — both keycloak entries were RE-MEASURED and UPDATED rather than retired, which
-#            is the ratchet working in its less obvious direction: the strand is unchanged, but what was
-#            written about the planned fix turned out to be wrong. rhbk-operator publishes
-#            AllNamespaces=false and MultiNamespace=false on every channel, so its OperatorGroup can
-#            resolve to exactly one namespace and an organisation's RHBK can never watch ours as well as
-#            their own. "Adopt their operator, own our namespace" is therefore unreachable for this
-#            package — not hard, unreachable — and the loud refusal it was weighed against never fires
-#            anyway, because every adoption signal for this component is scoped to sso-workshop itself.
-#            The watch-scope detector those measurements produced (lib-components.sh
-#            operator_installs_watching, canaries G-K below) is the part that generalises: any future
-#            adoption that leaves our operands in an ADOPTED operator's care must first prove that
-#            operator watches the namespace they land in.
+#            IT IS EMPTY, AND THAT IS THE 2026-08-06 FIX WORKING. It carried two entries, both for
+#            keycloak-operator's sso-workshop strand. They existed only because a strand on a
+#            SKIPPABLE component was a failure — and keycloak-operator was only skippable because the
+#            rule was half of itself. Once a strand demotes the component instead, keycloak-operator
+#            is no longer skippable, its strand is no longer a failure, and the two declarations were
+#            reported STALE by report_stale_declarations() and removed. The ratchet found them; they
+#            were not deleted on a hunch.
+#            What remains reachable, and why the machinery stays: a strand on a component that IS
+#            still skippable. That means component_skip_blockers() and component_strands() disagree —
+#            a bug in the rule, not accepted debt — and the ledger is the owner's release valve if one
+#            ever has to be lived with.
+#
+#            The watch-scope detector (lib-components.sh operator_installs_watching, canaries G-K
+#            below) is what clears an OG blocker on a real cluster: any adoption that leaves our
+#            operands in an ADOPTED operator's care must first prove that operator watches the
+#            namespace they land in. Measured 2026-08-06: rhbk-operator publishes AllNamespaces=false
+#            and MultiNamespace=false on every channel, so an organisation's RHBK OperatorGroup
+#            resolves to exactly one namespace and can never be ours as well as theirs — which is why
+#            keycloak-operator's OG blocker is unclearable on every cluster, not just off-cluster.
 #
 # Usage: ./hack/check-adoption-skip.sh [--self-test]
-#   --self-test  drive the property-3 detector, the ledger AND the watch-scope detector against
-#                hand-built fixtures and prove each fires; exits 1 when every canary behaves, matching
-#                the convention CI asserts on.
+#   --self-test  drive the skippability rule, the strand detector, the ledger AND the watch-scope
+#                detector against hand-built fixtures and prove each fires; exits 1 when every canary
+#                behaves, matching the convention CI asserts on.
 # Exit 0 = all three properties hold, modulo strands the ledger declares. Exit 1 = violations listed
 # above, or a ledger entry that has gone stale. Exit 2 = missing tooling, an argument this script does
 # not support, or a malformed ledger (all three mean it never checked what you asked it to).
@@ -122,9 +161,20 @@ warn() { echo "  ⚠ DECLARED $*"; }   # accepted debt: named in KNOWN_STRANDS, 
 # identical heredoc in a function body parses clean. A ledger is prose humans will edit; it must not
 # detonate on the first possessive somebody types.
 known_strands() {  # → the declared ledger, one entry per line
+  # EMPTY, and it got that way by being told to be. Two entries lived here, both declaring
+  # keycloak-operator's sso-workshop strand as accepted debt. They were not deleted on the theory that
+  # the fix would work: the skippability rule grew its second half FIRST, keycloak-operator stopped
+  # being skippable, its strand stopped being a failure — and report_stale_declarations() then failed
+  # the run on both entries with "declares '…' but this run observed no such strand", which is the
+  # ratchet's whole purpose. Only then were they removed.
+  #
+  # A strand is no longer, by itself, a reason to add an entry here: a strand DEMOTES its component
+  # out of the skippable set, and a component that is never dropped strands nobody. What still lands
+  # in property 3's ❌ path, and is therefore all this ledger can ever declare, is a component
+  # component_skip_blockers() calls skippable while component_strands() still reports a strand on it.
+  # That is the two halves of the rule contradicting each other — a bug in lib-components.sh. Fix it;
+  # do not declare it. The entry exists only for an owner who has measured one and chosen to ship it.
   cat <<'EOF'
-keycloak-operator NS sso-workshop keycloak :: 2026-08-06 | keycloak-operator solely creates namespace sso-workshop; sibling keycloak deploys six resources there and creates none of its own. install.sh §0 REFUSES adoption on this strand rather than silently skipping, so no cluster installs incomplete. STILL PRESENT after the 2026-08-06 coexistence pass, and the fix that was planned for it is now known not to apply: measured live, rhbk-operator declares AllNamespaces=false and MultiNamespace=false on EVERY channel it publishes (v22 through v26.6), so an RHBK OperatorGroup can only ever resolve to exactly ONE namespace and an organisation cannot watch sso-workshop without giving up watching their own. Adopting their operator therefore cannot be made correct for this package, whoever owns the namespace. | decision: owner call pending on the measured finding — moving the Namespace out of this component needs a third component at an app-wave below the operator Subscription (stacks/auth is outside the lane that measured this), and the evidence says the right move may instead be to stop treating keycloak-operator as adoptable at all
-keycloak-operator OG sso-workshop keycloak :: 2026-08-06 | keycloak-operator solely scopes an OperatorGroup to sso-workshop; sibling keycloak places operand CRs there, which without that group would apply, report Synced in Argo, and never reconcile. The same install.sh §0 refusal covers it. Re-measured 2026-08-06 and unchanged, with one correction to the record: that refusal is UNREACHABLE in the case it was written for. Every adoption signal for this component is scoped to sso-workshop itself, so an organisation running RHBK in their own namespace triggers none of them. Observed on a live cluster whose RHBK in namespace keycloak predated our install by 52 minutes: no refusal, no skip, no warning, and our own operator installed alongside theirs. | decision: owner call pending; kept apart from the NS entry because an uncontrolled operand fails more quietly than a missing namespace, so fixing one does not retire the other
 EOF
 }
 
@@ -236,6 +286,13 @@ self_test() {  # drive the SHARED strand detector AND the ledger against planted
   #        fixture replays a shape measured on a live cluster, and the two that must fail closed —
   #        an unresolvable scope (J) and a propagated CSV copy (K) — are asserted separately from the
   #        two that must succeed (H, I), so a detector stuck at "yes" and one stuck at "no" both fail.
+  #   L-O  the SKIPPABILITY RULE itself (component_skip_blockers), which is G-K joined to A-C: it is
+  #        what makes keycloak-operator non-skippable, and it must do so BY RULE. Both directions are
+  #        asserted, because a rule that blocks everything is as broken as one that blocks nothing:
+  #        off-cluster the keycloak topology blocks (L); a namespace-scoped existing operator blocks
+  #        (M); a genuinely AllNamespaces one CLEARS (N — this is the cert-manager/rhacs case the
+  #        owner ships and it must keep working); and the widest possible watch scope still does NOT
+  #        clear a missing Namespace (O), because no operator creates the namespace it watches.
   # D-F call the very functions the real run calls and measure their effect on the real FAILURES
   # counter, then restore it — a re-implementation of the accounting could pass while the gate is
   # broken. Fact tables and ledgers are hand-built here (no kustomize/yq), so this proves live on any
@@ -417,6 +474,76 @@ EOF
     bad "K a copied CSV was read as an install — coverage would be claimed from a propagated shadow"
   fi
 
+  # ── L-O the SKIPPABILITY RULE (lib-components.sh component_skip_blockers) ──────────────────────
+  # The join of A-C and G-K, and the function both callers actually ask "may this be dropped?".
+  # L replays keycloak-operator EXACTLY: operator-only, sole creator and sole OperatorGroup scoper of
+  # a namespace its sibling deploys into. It must block with no cluster in sight — that is the whole
+  # 2026-08-06 fix, and it must come out of the rule rather than out of the component's name.
+  local ogonly="${WORK}/self-test.ogonly"
+  cat > "$ft" <<'EOF'
+stack fx-operator fx
+opts fx-operator -
+creates fx-operator fx-ns
+ogns fx-operator fx-ns
+uses fx-operator fx-ns
+pkg fx-operator fx-operator
+stack fx-instance fx
+opts fx-instance -
+uses fx-instance fx-ns
+EOF
+  # An OG-ONLY topology: the sibling creates the namespace itself, so nothing is missing except the
+  # OperatorGroup. This is the shape a live watch scope is ALLOWED to clear, and L's is not.
+  cat > "$ogonly" <<'EOF'
+stack fx-operator fx
+opts fx-operator -
+ogns fx-operator fx-ns
+uses fx-operator fx-ns
+pkg fx-operator fx-operator
+stack fx-instance fx
+opts fx-instance -
+creates fx-instance fx-ns
+uses fx-instance fx-ns
+EOF
+  total=$((total + 1))
+  out="$(component_skip_blockers "$ft" fx-operator || true)"
+  if [[ -n "$out" ]] && grep -q '^NS ' <<< "$out" && grep -q '^OG ' <<< "$out"; then
+    good=$((good + 1)); ok "L keycloak topology, no cluster evidence: BLOCKED on both NS and OG — not skippable by rule"
+  else
+    bad "L keycloak topology was not blocked off-cluster ($(printf '%s' "$out" | tr '\n' ';')) — adoption would drop it again"
+  fi
+
+  # M — the org runs the package, scoped to THEIR namespace (the live RHBK shape from G). An OG
+  # blocker it cannot clear, so the component stays non-skippable on that cluster too.
+  printf 'other-ns|fx-operator.v1|other-ns|olm.managed,%s,\n' "$pkg_label" > "$wt"
+  total=$((total + 1))
+  if [[ -n "$(component_skip_blockers "$ogonly" fx-operator "$wt" || true)" ]]; then
+    good=$((good + 1)); ok "M existing operator scoped to its OWN namespace: OG blocker stands — component kept"
+  else
+    bad "M a namespace-scoped existing operator CLEARED the blocker — our operands would go unreconciled"
+  fi
+
+  # N — the direction that must NOT over-block. A genuinely AllNamespaces install watches ours, so the
+  # OG blocker clears and the component is skippable. This is cert-manager/rhacs/web-terminal adoption:
+  # a rule that blocked here would silently kill the shipped "drop onto an existing cluster" feature.
+  printf 'other-ns|fx-operator.v1||olm.managed,%s,\n' "$pkg_label" > "$wt"
+  total=$((total + 1))
+  if [[ -z "$(component_skip_blockers "$ogonly" fx-operator "$wt" || true)" ]]; then
+    good=$((good + 1)); ok "N existing AllNamespaces operator: OG blocker CLEARED — genuinely cluster-wide operators stay adoptable"
+  else
+    bad "N an AllNamespaces operator failed to clear the blocker — every adoptable component would be kept"
+  fi
+
+  # O — the same AllNamespaces operator against the keycloak topology. The OG half clears; the NS half
+  # must NOT, because an operator does not create the namespace it watches. Asserted on the surviving
+  # blocker kind, not just on non-emptiness, so "still blocked for the wrong reason" fails too.
+  total=$((total + 1))
+  out="$(component_skip_blockers "$ft" fx-operator "$wt" || true)"
+  if [[ "$out" == "NS fx-ns fx-instance" ]]; then
+    good=$((good + 1)); ok "O widest watch scope vs a missing Namespace: NS blocker survives alone — watch scope creates no namespaces"
+  else
+    bad "O expected exactly 'NS fx-ns fx-instance', got '$(printf '%s' "$out" | tr '\n' ';')' — the unconditional blocker is not unconditional"
+  fi
+
   echo
   if [[ "$good" -eq "$total" ]]; then
     echo "✅ self-test: ${good}/${total} detector + ledger canaries behaved — the strand gate is live."
@@ -481,6 +608,10 @@ collect_facts() {  # <facts-file> — render every ACTIVE component of every sta
       while IFS= read -r n; do echo "uses ${comp} ${n}" >> "$out"; done \
         < <({ echo "$dest"; printf '%s\n' "$rendered" | yq -r '.metadata.namespace // ""' -; } \
               | awk '$0 != "" && $0 != "---" && $0 != "null"' | sort -u)
+      # spec.name (the PACKAGE), never metadata.name: component_skip_blockers() matches it against the
+      # marker OLM stamps on a CSV, and the org may have named their Subscription anything.
+      while IFS= read -r n; do echo "pkg ${comp} ${n}" >> "$out"; done \
+        < <(printf '%s\n' "$rendered" | yq_names 'select(.kind == "Subscription") | .spec.name')
     done < <(active_app_files "$stack")
   done
 }
@@ -494,9 +625,14 @@ collect_facts() {  # <facts-file> — render every ACTIVE component of every sta
 # workload the workshop would silently lose if the component were skipped.
 OPERATOR_ONLY_KINDS='^(Namespace|OperatorGroup|Subscription)/'
 
+# The whole portfolio's fact table, built ONCE and before anything is classified: half 2 of the
+# skippability rule reads it, so it can no longer be a property-3 afterthought.
+FACTS="${WORK}/facts.txt"
+collect_facts "$FACTS"
+
 echo "▶ [1/3] operator-only components render nothing but namespace + OperatorGroup + Subscription"
-SKIPPABLE=""   # "<stack> <apps-file> <component> <child-app>" per skippable component
-NOT_SKIPPABLE=""   # names only — printed by property 3 so a shrinking candidate set stays visible
+OPERATOR_ONLY=""       # "<stack> <apps-file> <component> <child-app>" per operator-only component
+NOT_OPERATOR_ONLY=""   # names only — printed at the end so a shrinking candidate set stays visible
 for stack_dir in "${STACKS_DIR}"/*/; do
   stack="$(basename "$stack_dir")"
   while IFS= read -r app; do
@@ -512,10 +648,10 @@ for stack_dir in "${STACKS_DIR}"/*/; do
     child="$(yaml_scalar "${STACKS_DIR}/${stack}/${app}" metadata name)"
     [[ -n "$child" ]] || child="pp-${comp}"
     if ! is_operator_only "$cdir"; then
-      NOT_SKIPPABLE="${NOT_SKIPPABLE}${NOT_SKIPPABLE:+ }${comp}"
+      NOT_OPERATOR_ONLY="${NOT_OPERATOR_ONLY}${NOT_OPERATOR_ONLY:+ }${comp}"
       continue
     fi
-    SKIPPABLE="${SKIPPABLE}${SKIPPABLE:+$'\n'}${stack} ${app} ${comp} ${child}"
+    OPERATOR_ONLY="${OPERATOR_ONLY}${OPERATOR_ONLY:+$'\n'}${stack} ${app} ${comp} ${child}"
 
     if ! rendered="$(kustomize build --enable-helm "$cdir" 2>/dev/null)"; then
       bad "${comp}: classified operator-only but kustomize build fails"
@@ -526,15 +662,16 @@ for stack_dir in "${STACKS_DIR}"/*/; do
     offenders="$(grep -vE "$OPERATOR_ONLY_KINDS" "${WORK}/kinds.txt" || true)"
     if [[ -n "$offenders" ]]; then
       bad "${comp}: classified operator-only, but renders $(printf '%s' "$offenders" | tr '\n' ' ')"
-      hint "install.sh §0 would DROP this component on a cluster that already runs the operator,"
-      hint "taking those resources with it. Either move them to their own component, or rename the"
-      hint "file so is_operator_only() stops matching (lib-components.sh)."
+      hint "half 1 of the rule passes, so install.sh §0 may DROP this component on a cluster that"
+      hint "already runs the operator — taking those resources with it, unless half 2 happens to"
+      hint "block it, which is luck and not a design. Either move them to their own component, or"
+      hint "rename the file so is_operator_only() stops matching (lib-components.sh)."
     else
-      ok "${comp} (stack ${stack}) — skippable, renders only operator install resources"
+      ok "${comp} (stack ${stack}) — operator-only, renders only operator install resources"
     fi
   done < <(active_app_files "$stack")
 done
-[[ -n "$SKIPPABLE" ]] || bad "no skippable component found at all — is_operator_only() matches nothing"
+[[ -n "$OPERATOR_ONLY" ]] || bad "no operator-only component found at all — is_operator_only() matches nothing"
 
 # yq emits a `---` separator between documents and prints `null` for an empty stream, so the raw
 # name list needs normalising before two renders can be compared.
@@ -546,6 +683,9 @@ app_names() {  # <kustomize dir> → one child Application name per line
 }
 
 echo "▶ [2/3] a simulated skip removes exactly one child Application from the rendered stack"
+# Over every OPERATOR-ONLY component, not just the ones property 3 will call skippable: a live cluster
+# can clear an OG blocker this script cannot, so the installer's skippable set is the wider one and
+# the patch mechanics have to be proven across all of it (see § COVERAGE at the top).
 while read -r stack app comp child; do
   [[ -n "$stack" ]] || continue
   : "$app"
@@ -579,24 +719,44 @@ while read -r stack app comp child; do
   else
     ok "${stack}: skipping ${comp} removes ${child} and leaves $(printf '%s\n' "$after" | grep -c . ) sibling(s) untouched"
   fi
-done <<< "$SKIPPABLE"
+done <<< "$OPERATOR_ONLY"
 
-echo "▶ [3/3] skipping an operator-only component strands no sibling in a namespace only it provides"
+echo "▶ [3/3] half 2 of the rule: every namespace our operands occupy survives the skip"
 # Properties 1-2 say the child Application disappears and every OTHER child renders byte-identically.
-# Both were TRUE of keycloak-operator, and [2/2] even counted the survivor — but "untouched" is not
-# "still able to work". collect_facts() renders every active component once; the SHARED detector
-# (lib-components.sh component_strands) then reads that fact table and reports any sibling left
-# deploying into a namespace, or placing operand CRs under an OperatorGroup, that ONLY the skipped
-# component provides. The installer runs the same detector over its own (grep-built) table.
-FACTS="${WORK}/facts.txt"
-collect_facts "$FACTS"
+# Both were TRUE of keycloak-operator, and [2/3] even counted the survivor — but "untouched" is not
+# "still able to work". component_skip_blockers() (lib-components.sh — the SAME function install.sh §0
+# calls) reads the fact table and reports every namespace that would be left with nothing to create it
+# or nothing to reconcile in it. A blocker DEMOTES the component out of the skippable set; it is not a
+# failure, because a component that is never dropped can never strand anyone.
+#
+# No watch table is passed. Off-cluster there is no way to prove an adopted operator watches a
+# namespace, and an unprovable clearance must never be assumed — see § COVERAGE at the top.
 OBSERVED="${WORK}/observed-strands.txt"
 : > "$OBSERVED"   # must exist even when the portfolio has no strands at all — the staleness check reads it
-EXAMINED=""
+SKIPPABLE=""      # operator-only AND unblocked: the set install.sh §0 may drop off this cluster
+BLOCKED=""        # operator-only but blocked: kept and installed normally, on every cluster
 while read -r stack app comp child; do
   [[ -n "$comp" ]] || continue
   : "$app" "$child"
-  EXAMINED="${EXAMINED}${EXAMINED:+ }${comp}"
+  blockers="$(component_skip_blockers "$FACTS" "$comp" || true)"
+  if [[ -n "$blockers" ]]; then
+    BLOCKED="${BLOCKED}${BLOCKED:+ }${comp}"
+    ok "${comp} (stack ${stack}) — correctly NOT skippable: adoption keeps it, so nothing is stranded"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      read -r kind ns sib <<< "$line"
+      case "$kind" in
+        NS) hint "blocker NS ${ns}: only ${comp} creates it, and sibling ${sib} deploys there without creating it — no operator's watch scope can conjure a Namespace, so this one is unclearable on every cluster" ;;
+        OG) hint "blocker OG ${ns}: only ${comp} scopes an OperatorGroup to it, and sibling ${sib} places resources there — clearable only by proof that an operator already on the cluster watches ${ns}, which off-cluster is unprovable" ;;
+        *)  hint "blocker ${kind} ${ns} → sibling ${sib}" ;;
+      esac
+    done <<< "$blockers"
+    continue
+  fi
+  SKIPPABLE="${SKIPPABLE}${SKIPPABLE:+ }${comp}"
+  # Unblocked, so component_strands() must agree there is nothing to strand. If it does not, the two
+  # halves of the rule contradict each other — a bug in lib-components.sh, not accepted debt — and
+  # THAT is what the ledger and the ❌ below are still here for.
   strands="$(component_strands "$FACTS" "$comp" || true)"
   if [[ -z "$strands" ]]; then
     ok "${comp} (stack ${stack}) — safe to skip: no sibling depends on a namespace only it provides"
@@ -613,21 +773,22 @@ while read -r stack app comp child; do
     report_strand "$LEDGER" "$stack" "$comp" "$kind" "$ns" "$sib"
   done <<< "$strands"
   if [[ "$undeclared" -eq 1 ]]; then
-    hint "install.sh §0 would DROP ${comp} on a cluster already running its operator, taking the namespace(s) above with it."
-    hint "Fix: move the Namespace/OperatorGroup into the sibling (or a shared base), or drop the stack on adoption."
+    hint "component_skip_blockers() cleared ${comp} while component_strands() still reports a strand —"
+    hint "the two halves of the skippability rule disagree. Fix lib-components.sh; do NOT declare it."
   else
-    hint "install.sh §0 REFUSES adoption of ${comp} rather than skipping it, so no cluster installs incomplete."
-    hint "Accepted debt, not a clean bill: fixing it is an owner decision — see README § Adoption."
+    hint "Declared in KNOWN_STRANDS, so this run does not fail on it — but a skippable component with a"
+    hint "live strand means install.sh §0 can still drop it. Accepted debt, not a clean bill."
   fi
-done <<< "$SKIPPABLE"
+done <<< "$OPERATOR_ONLY"
 
 # The ledger's second direction: an entry that names no strand this run observed is now a lie.
 report_stale_declarations "$LEDGER" "$OBSERVED"
 
 # The doc comment promises the candidate set is printed either way, so a silently shrinking set of
 # things we examine cannot masquerade as a clean run (the openshift-pipelines gap, in prose form).
-echo "   examined (skippable, so droppable on adoption): ${EXAMINED:-none}"
-echo "   not examined (not skippable, so never dropped): ${NOT_SKIPPABLE:-none}"
+echo "   skippable (operator-only, unblocked — droppable on adoption): ${SKIPPABLE:-none}"
+echo "   operator-only but BLOCKED (installed on every cluster):       ${BLOCKED:-none}"
+echo "   not operator-only (never dropped):                            ${NOT_OPERATOR_ONLY:-none}"
 
 if [[ "$DECLARED" -gt 0 ]]; then
   echo
@@ -652,6 +813,10 @@ if [[ "$FAILURES" -eq 0 ]]; then
     echo "   which remain BROKEN by owner decision and are re-checked on every run."
   else
     echo "✅ automatic component adoption is safe across the portfolio"
+    # Said out loud rather than left to be inferred from a green tick: the blocked components are safe
+    # BECAUSE they are kept, not because nothing is wrong with skipping them.
+    [[ -z "$BLOCKED" ]] \
+      || echo "   (safe including ${BLOCKED} — blocked by half 2 of the rule, so never dropped)"
   fi
   exit 0
 fi

@@ -152,6 +152,7 @@ skip_patch_block() {  # <child-app> <component> <reason> <argo-namespace> → on
 #   ogns    <comp> <ns>   it scopes an OperatorGroup to that namespace
 #   uses    <comp> <ns>   it places a resource there (child App destination, or a manifest namespace)
 #   opts    <comp> <csv>  the child App's syncOptions, "-" when none (CreateNamespace=true self-heals)
+#   pkg     <comp> <name> an OLM package the component subscribes to (spec.name, not the Subscription's)
 # Pure awk over text — no yq — so the verdict runs anywhere `oc` does.
 
 _fact_has() {  # <facts-file> <verb> <component> <value> → true when that exact fact was recorded
@@ -265,6 +266,80 @@ operator_installs_watching() {  # <csv-watch-table> <package> <target-ns> → "<
     }' "$1" | sort -u
 }
 
+# ── THE skippability rule (SHARED by install.sh §0 and hack/check-adoption-skip.sh) ───────────────
+# A component may be dropped on an adopting cluster when BOTH hold:
+#
+#   1. it renders only operator-install resources           → is_operator_only(), above
+#   2. every namespace our operands occupy is still covered → component_skip_blockers(), here
+#
+# Rule 1 alone is what shipped until 2026-08-06, and it is purely SYNTACTIC: it asks "does this
+# directory contain anything but Namespace/OperatorGroup/Subscription?". Nothing in it asks the
+# question that actually decides whether dropping the component leaves a working cluster —
+#
+#     after we drop it, is anything still going to reconcile the operands we DO install?
+#
+# keycloak-operator is the measured counter-example. It is operator-only, so rule 1 called it
+# skippable and adoption dropped it whenever ANY rhbk-operator existed anywhere on the cluster. But it
+# installs rhbk-operator into sso-workshop with spec.targetNamespaces: [sso-workshop] — an
+# OwnNamespace-scoped operator whose entire job is to reconcile OUR Keycloak CR — and it is the sole
+# creator of that namespace. An organisation's rhbk-operator scoped to THEIR namespace can never
+# reconcile ours: rhbk-operator publishes AllNamespaces=false and MultiNamespace=false on every
+# channel it ships, so their OperatorGroup resolves to exactly one namespace and it is not ours.
+#
+# THE TWO BLOCKER CLASSES, and why they are not the same kind of thing:
+#   NS  a sibling deploys into a namespace only this component creates. UNCONDITIONAL. No operator's
+#       watch scope, however wide, causes a Namespace object to exist — an adopted operator cannot
+#       create the namespace it would watch.
+#   OG  a sibling places resources in a namespace only this component scopes an OperatorGroup to.
+#       CONDITIONAL: it is cleared, and only cleared, by proof that an operator already on the cluster
+#       watches that namespace — which is exactly what operator_installs_watching() measures.
+#
+# The proof is a CLUSTER fact, so the two callers reach different (and correctly different) verdicts
+# from the SAME rule: the installer passes the live CSV watch table and can clear an OG blocker;
+# hack/check-adoption-skip.sh has no cluster, passes none, and therefore clears nothing. Unprovable
+# falls to NOT skippable in both, which is the safe direction — a component wrongly KEPT installs an
+# operator the cluster did not need, a component wrongly SKIPPED ships a half-installed workshop whose
+# every Argo status is green.
+
+component_packages() {  # <facts-file> <component> → each OLM package the component subscribes to
+  awk -v c="$2" '$1 == "pkg" && $2 == c { print $3 }' "$1" | sort -u
+}
+
+component_skip_blockers() {  # <facts> <comp> [<csv-watch-table>] → one blocker per line; EMPTY = skippable
+  # Same "<kind> <ns> <sibling>" lines component_strands() emits, minus any OG strand the watch table
+  # proves is covered. Callers test for emptiness, never a status.
+  #
+  # Coverage requires EVERY package the component subscribes to have a covering install, not any one
+  # of them: with two Subscriptions in the stranded namespace we cannot know which one owns the CRDs
+  # the sibling's operands belong to, and half a controller is the silent failure this exists to stop.
+  # A component with no recorded package proves nothing and is never cleared.
+  local facts="$1" comp="$2" watch="${3:-}" pkgs line kind ns sib pkg covered
+  pkgs="$(component_packages "$facts" "$comp")"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    read -r kind ns sib <<< "$line"
+    if [[ "$kind" != "OG" ]]; then
+      printf '%s %s %s\n' "$kind" "$ns" "$sib"
+      continue
+    fi
+    covered=1
+    # `-s`, not just `-n`: an empty table is a table that proves nothing, and mktemp hands the
+    # installer a real path before a single CSV has been written into it.
+    if [[ -z "$watch" || ! -s "$watch" || -z "$pkgs" ]]; then
+      covered=0
+    else
+      while IFS= read -r pkg; do
+        [[ -n "$pkg" ]] || continue
+        if [[ -z "$(operator_installs_watching "$watch" "$pkg" "$ns")" ]]; then covered=0; fi
+      done <<< "$pkgs"
+    fi
+    if [[ "$covered" -eq 0 ]]; then printf 'OG %s %s\n' "$ns" "$sib"; fi
+  done < <(component_strands "$facts" "$comp")
+  # Explicit: the while-loop's EOF status is 0, but a bare-called function must never RELY on that —
+  # and this one IS called bare from hack/check-adoption-skip.sh's classification loop.
+  return 0
+}
+
 # ── offline fact builders (the installer's yq-free path into component_strands) ────────────────────
 # hack/check-adoption-skip.sh builds the same fact table from RENDERED manifests; these read the
 # FILENAMES, exactly as is_operator_only() does, so the installer needs nothing but oc + this file.
@@ -318,7 +393,7 @@ app_creates_namespace() {  # <app-file> → true when the child App's syncOption
 build_stack_facts_offline() {  # <stack> <out-file> — write component_strands facts for a whole stack
   # The installer's offline twin of hack/check-adoption-skip.sh collect_facts(): same verbs, read from
   # FILENAMES not rendered manifests. Needs STACKS_DIR and REPO_ROOT set by the caller.
-  local stack="$1" out="$2" app cpath cdir comp dest n
+  local stack="$1" out="$2" app cpath cdir comp dest n sub_name sub_ns sub_pkg
   : > "$out"
   while IFS= read -r app; do
     [[ -n "$app" ]] || continue
@@ -339,6 +414,14 @@ build_stack_facts_offline() {  # <stack> <out-file> — write component_strands 
       < <(component_operatorgroup_namespaces "$cdir")
     while IFS= read -r n; do printf 'uses %s %s\n' "$comp" "$n" >> "$out"; done \
       < <(component_used_namespaces "$cdir" "$dest")
+    # The PACKAGE (spec.name), never the Subscription's metadata.name: component_skip_blockers() looks
+    # the package up in the OLM marker OLM stamps on a CSV, and the org is free to have named their
+    # Subscription anything at all.
+    while read -r sub_name sub_ns sub_pkg; do
+      [[ -n "$sub_pkg" ]] || continue
+      : "$sub_name" "$sub_ns"
+      printf 'pkg %s %s\n' "$comp" "$sub_pkg" >> "$out"
+    done < <(component_subscriptions "$cdir")
   done < <(active_app_files "$stack")
   return 0   # the while-loop's EOF status is 0, but a bare-called function must never RELY on that
 }
