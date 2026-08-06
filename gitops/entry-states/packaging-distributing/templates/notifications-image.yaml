@@ -26,13 +26,44 @@ metadata:
 # and sending `triggers: []` both persist identically — no key, no auto-firing — so omitting it is
 # behaviour-identical and is the only one of the two that can ever read Synced. Do NOT re-add it.
 #
-# The five fields below (runPolicy, {successful,failed}BuildsHistoryLimit, postCommit, nodeSelector)
-# are the build API's own DEFAULTS, declared explicitly for the same reason: the server adds them to
-# every BuildConfig, entry apps run selfHeal=false, and Argo diffed each one forever. Declaring the
-# defaults we already get makes the rendered manifest round-trip byte-identically (verified below),
-# which is what lets this module keep a REAL Synced gate instead of an expectOutOfSync waiver.
-# If a future OpenShift release changes one of these defaults, this app goes OutOfSync and that is
-# CORRECT — it is a signal to re-measure, not to re-declare the waiver.
+# Five of the build API's own DEFAULTS used to be declared below on the grounds that "Argo diffed
+# each one forever". That rationale was NEVER TRUE and is retired — a server-ADDED field cannot
+# produce OutOfSync under EITHER diff strategy. Re-measured on cluster-65prs 2026-08-06:
+#   * Argo CD is v3.4.4 (GitOps operator 1.21.1) and runs SERVER-SIDE DIFF, which predicts the live
+#     state with an SSA dry-run — so the prediction receives exactly the same server defaulting the
+#     live object did, and defaults appear identically on both sides. It is on by BUILT-IN DEFAULT
+#     here: `controller.diff.server.side` is absent from argocd-cm, from argocd-cmd-params-cm, from
+#     the ArgoCD CR's extraConfig, and no Application on the cluster carries a compare-options
+#     annotation — yet all 1606 logged applies report "serverSideDiff":true and none report false.
+#     Do NOT infer "legacy three-way diff" from the missing config key on 3.x; the default flipped.
+#   * Direct proof on this very resource kind: the nine BuildConfigs owned by the workshop-config
+#     Application (gitops/workshop-config/templates/parasol-images-build.yaml, incl. a same-named
+#     parasol-notifications in ogsr-parasol-images) send NEITHER postCommit NOR nodeSelector; the API
+#     stores postCommit:{}, nodeSelector:null and resources:{} on all nine; the Application reads
+#     Synced with selfHeal=true, reconciled 101s before the reading. Undeclared defaults are invisible.
+# The `triggers: []` attribution above is a SEPARATE, older claim (2026-07-16) that this pass did not
+# re-verify against the strategy actually in force — its removal stands on its own measured
+# behaviour-identity, not on that attribution.
+#
+# So postCommit:{} and nodeSelector:null were REMOVED at chart 0.1.3. Neither carried behaviour (an
+# empty postCommit is "no hook"; a nil nodeSelector is "cluster default build nodeselector applies" —
+# `oc explain buildconfig.spec.nodeSelector`, read live), and both are the SAME SHAPE as the
+# `triggers: []` trap: empty/null desired values whose round-trip depends on the API's serialization
+# choices rather than on any value we chose. Declaring that shape is how this file got burned once
+# already. Do NOT restore them.
+#
+# The three that remain are kept on their OWN merits, never to appease the differ:
+#   runPolicy: Serial — equals the API default ("if not specified we default to Serial", `oc explain`
+#     read live), kept as declared INTENT: the wave-2 hook runs `oc start-build --wait` and expects
+#     one build at a time, and the sibling BuildConfigs in gitops/workshop-config declare it too.
+#     Dropping it would also be Sync-safe; there is simply nothing to gain by dropping it.
+#   {successful,failed}BuildsHistoryLimit: 5 — LOAD-BEARING, and this is the measured reason, not the
+#     diff: `oc explain buildconfig.spec.successfulBuildsHistoryLimit` (live) says the 5 is applied
+#     "when a BuildConfig is created ... If removed after the BuildConfig has been created, all
+#     successful builds are retained." A chart bump re-applies over an EXISTING BuildConfig (no
+#     `ws reset` needed), so dropping these would patch the field OFF a live object and leave Build
+#     retention UNBOUNDED in {user}-dev. That asymmetry does not apply to the two removed above,
+#     which are nil/empty already and re-defaulted on every write.
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
@@ -62,12 +93,12 @@ spec:
     to:
       kind: ImageStreamTag
       name: {{ .Values.imageName }}:{{ .Values.imageTag }}
-  # The build API's own defaults, declared so the render round-trips — see the header comment.
+  # Declared for BEHAVIOUR, not to satisfy the differ — see the header comment. runPolicy is intent;
+  # the two history limits are load-bearing (removing them from a LIVE BuildConfig makes Build
+  # retention unbounded). postCommit/nodeSelector were removed at 0.1.3 and must not come back.
   runPolicy: Serial
   successfulBuildsHistoryLimit: 5
   failedBuildsHistoryLimit: 5
-  postCommit: {}
-  nodeSelector: null
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: "1", memory: 768Mi}
