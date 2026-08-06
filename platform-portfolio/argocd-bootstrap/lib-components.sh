@@ -187,6 +187,84 @@ component_strands() {  # <facts-file> <component> → one strand per line, empty
   done < <(awk -v c="$s" '$1 == "ogns" && $2 == c { print $3 }' "$facts" | sort -u)
 }
 
+# ── operator watch-scope detection (for adoption that hands our operands to the ORG's operator) ───
+# component_strands() above answers "would skipping this component leave a sibling with no namespace
+# or no OperatorGroup?". These answer the question that comes NEXT, and only matters once a component
+# is skipped in favour of an operator the organisation already installed:
+#
+#     does the org's operator actually WATCH the namespace our operand CRs land in?
+#
+# It is not rhetorical. An operator reconciles only the namespaces its OperatorGroup resolves to. Point
+# our CRs at a namespace outside that set and they apply cleanly, Argo reports Synced/Healthy, and
+# nothing ever reconciles them — quieter than a missing namespace and quieter than a missing group,
+# because every object exists and every status is green. Adoption is correct ONLY when the answer is
+# yes; anything else must refuse loudly, exactly as install.sh §0 already refuses a strand.
+#
+# THE SNAPSHOT. Pure text, one line per ClusterServiceVersion, built by the caller with one `oc` read
+# (the installer's fifth; nothing here touches a cluster). Four `|`-separated fields:
+#
+#     <csv-namespace>|<csv-name>|<olm.targetNamespaces>|<label keys, each comma-TERMINATED>
+#
+# Built with the go-template below — a strict superset of install.sh's CSV_SNAPSHOT, which is the same
+# line with field 3 removed. (Merging the two costs one character: csvs_for_package_in() would read $4
+# where it reads $3.)
+#
+#   oc get clusterserviceversions.operators.coreos.com -A -o go-template='{{range .items}}{{.metadata.namespace}}|{{.metadata.name}}|{{index .metadata.annotations "olm.targetNamespaces"}}|{{range $k, $v := .metadata.labels}}{{$k}},{{end}}{{"\n"}}{{end}}'
+#
+# WHY THE CSV AND NOT THE OperatorGroup. The OperatorGroup carries the scope but not the identity —
+# answering "does the org's rhbk-operator watch us?" from OperatorGroups needs a join, and the join is
+# where a wrong answer hides. The CSV carries BOTH: which operator, and the scope OLM actually resolved
+# for it. Measured 2026-08-06 on a live 4.22 cluster running three separate rhbk-operator installs.
+#
+# THE FOUR SHAPES OF FIELD 3, ALL MEASURED ON THAT CLUSTER — the parse is not inferred, it is observed:
+#   "keycloak"        an explicit scope; comma-separated when there is more than one namespace.
+#                     (org's RHBK: `keycloak|rhbk-operator.v26.4.14-opr.1|keycloak|…`)
+#   ""                EMPTY STRING = AllNamespaces. The annotation is PRESENT and empty.
+#                     (`gitea-operator|gitea-operator.v2.1.0||…`, likewise rhacs, web-terminal.)
+#   "<no value>"      go-template's rendering of an ABSENT key. Scope unknown → treated as NOT covering
+#                     anything. Fail closed: guessing "probably all namespaces" here would hand our
+#                     operands to an operator that cannot see them, which is the exact silent failure.
+#   any of the above, with `olm.copiedFrom` among the label keys — a COPY of someone else's CSV, which
+#                     OLM propagates into every watched namespace. Never classify from a copy: it is
+#                     evidence that an operator watches THIS namespace, but it is not the install, and
+#                     its annotation is absent anyway. Discarded before the scope is ever read.
+#
+# WHY NOT `spec.targetNamespaces` — the trap this parse exists to avoid. It is EMPTY for AllNamespaces
+# *and* empty for a label-selector OperatorGroup, and those mean opposite things. Measured on the same
+# cluster: `openshift-monitoring/openshift-cluster-monitoring` has an empty spec.targetNamespaces, a
+# `spec.selector.matchLabels`, and a resolved `status.namespaces` of 58 explicit namespaces. Reading
+# spec would call it cluster-wide. Only the RESOLVED scope (status.namespaces, or equivalently the
+# CSV's olm.targetNamespaces annotation) is the truth.
+
+CSV_SCOPE_UNKNOWN='<no value>'   # go-template's output for an absent annotation — never a valid namespace name
+
+operator_install_scopes() {  # <csv-watch-table> <package> → "<ns>/<csv> <scope>" per install ("*" = all)
+  # Diagnostics for the refusal message, so it can say WHICH namespaces theirs actually watches instead
+  # of only that it does not watch ours. Prefix-matched on the package marker OLM stamps on every CSV it
+  # manages (operators.coreos.com/<package>.<namespace>), so it finds the org's install whatever they
+  # named their Subscription — and cannot collide with a longer package name, because the search string
+  # ends at the '.' that separates package from namespace.
+  awk -F'|' -v key=",operators.coreos.com/${2}." -v unknown="$CSV_SCOPE_UNKNOWN" '
+    index("," $4, key)             == 0 { next }   # not an install of this package
+    index("," $4, ",olm.copiedFrom,") > 0 { next }   # a propagated copy, not the install
+    { print $1 "/" $2, ($3 == "" ? "*" : ($3 == unknown ? "?" : $3)) }' "$1" | sort -u
+}
+
+operator_installs_watching() {  # <csv-watch-table> <package> <target-ns> → "<ns>/<csv>" per COVERING install
+  # Empty output is the load-bearing answer: nothing on this cluster runs that package with a scope
+  # that reaches <target-ns>, so adopting it would strand our operands with no controller. Callers test
+  # for emptiness rather than a status, matching component_strands() above.
+  awk -F'|' -v key=",operators.coreos.com/${2}." -v want="$3" -v unknown="$CSV_SCOPE_UNKNOWN" '
+    index("," $4, key)             == 0 { next }
+    index("," $4, ",olm.copiedFrom,") > 0 { next }
+    $3 == unknown                        { next }   # scope not resolvable → not covering (fail closed)
+    $3 == ""                             { print $1 "/" $2; next }   # AllNamespaces covers everything
+    {
+      n = split($3, t, ",")
+      for (i = 1; i <= n; i++) if (t[i] == want) { print $1 "/" $2; break }
+    }' "$1" | sort -u
+}
+
 # ── offline fact builders (the installer's yq-free path into component_strands) ────────────────────
 # hack/check-adoption-skip.sh builds the same fact table from RENDERED manifests; these read the
 # FILENAMES, exactly as is_operator_only() does, so the installer needs nothing but oc + this file.

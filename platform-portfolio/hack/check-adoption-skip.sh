@@ -66,9 +66,23 @@
 #            same two-directional ratchet as tools/lint/_canary-coverage.py's EXEMPT/KNOWN_UNPROVEN.
 #            Adding an entry is an OWNER decision, not a way to get CI green — see README § Adoption.
 #
+#            2026-08-06 — both keycloak entries were RE-MEASURED and UPDATED rather than retired, which
+#            is the ratchet working in its less obvious direction: the strand is unchanged, but what was
+#            written about the planned fix turned out to be wrong. rhbk-operator publishes
+#            AllNamespaces=false and MultiNamespace=false on every channel, so its OperatorGroup can
+#            resolve to exactly one namespace and an organisation's RHBK can never watch ours as well as
+#            their own. "Adopt their operator, own our namespace" is therefore unreachable for this
+#            package — not hard, unreachable — and the loud refusal it was weighed against never fires
+#            anyway, because every adoption signal for this component is scoped to sso-workshop itself.
+#            The watch-scope detector those measurements produced (lib-components.sh
+#            operator_installs_watching, canaries G-K below) is the part that generalises: any future
+#            adoption that leaves our operands in an ADOPTED operator's care must first prove that
+#            operator watches the namespace they land in.
+#
 # Usage: ./hack/check-adoption-skip.sh [--self-test]
-#   --self-test  drive the property-3 detector AND the ledger against hand-built fixtures and prove
-#                each fires; exits 1 when every canary behaves, matching the convention CI asserts on.
+#   --self-test  drive the property-3 detector, the ledger AND the watch-scope detector against
+#                hand-built fixtures and prove each fires; exits 1 when every canary behaves, matching
+#                the convention CI asserts on.
 # Exit 0 = all three properties hold, modulo strands the ledger declares. Exit 1 = violations listed
 # above, or a ledger entry that has gone stale. Exit 2 = missing tooling, an argument this script does
 # not support, or a malformed ledger (all three mean it never checked what you asked it to).
@@ -109,8 +123,8 @@ warn() { echo "  ⚠ DECLARED $*"; }   # accepted debt: named in KNOWN_STRANDS, 
 # detonate on the first possessive somebody types.
 known_strands() {  # → the declared ledger, one entry per line
   cat <<'EOF'
-keycloak-operator NS sso-workshop keycloak :: 2026-08-05 | keycloak-operator solely creates namespace sso-workshop; sibling keycloak deploys six resources there and creates none of its own. install.sh §0 REFUSES adoption on this strand rather than silently skipping, so no cluster installs incomplete. | decision: owner deferred functional RHBK coexistence (letting an organisation's own Keycloak operator manage our operands) to a separate decision; until it is taken the loud refusal is the intended behaviour, not a bug to route around
-keycloak-operator OG sso-workshop keycloak :: 2026-08-05 | keycloak-operator solely scopes an OperatorGroup to sso-workshop; sibling keycloak places operand CRs there, which without that group would apply, report Synced in Argo, and never reconcile. The same install.sh §0 refusal covers it. | decision: owner deferred functional RHBK coexistence to a separate decision; kept apart from the NS entry because an uncontrolled operand fails more quietly than a missing namespace, so fixing one does not retire the other
+keycloak-operator NS sso-workshop keycloak :: 2026-08-06 | keycloak-operator solely creates namespace sso-workshop; sibling keycloak deploys six resources there and creates none of its own. install.sh §0 REFUSES adoption on this strand rather than silently skipping, so no cluster installs incomplete. STILL PRESENT after the 2026-08-06 coexistence pass, and the fix that was planned for it is now known not to apply: measured live, rhbk-operator declares AllNamespaces=false and MultiNamespace=false on EVERY channel it publishes (v22 through v26.6), so an RHBK OperatorGroup can only ever resolve to exactly ONE namespace and an organisation cannot watch sso-workshop without giving up watching their own. Adopting their operator therefore cannot be made correct for this package, whoever owns the namespace. | decision: owner call pending on the measured finding — moving the Namespace out of this component needs a third component at an app-wave below the operator Subscription (stacks/auth is outside the lane that measured this), and the evidence says the right move may instead be to stop treating keycloak-operator as adoptable at all
+keycloak-operator OG sso-workshop keycloak :: 2026-08-06 | keycloak-operator solely scopes an OperatorGroup to sso-workshop; sibling keycloak places operand CRs there, which without that group would apply, report Synced in Argo, and never reconcile. The same install.sh §0 refusal covers it. Re-measured 2026-08-06 and unchanged, with one correction to the record: that refusal is UNREACHABLE in the case it was written for. Every adoption signal for this component is scoped to sso-workshop itself, so an organisation running RHBK in their own namespace triggers none of them. Observed on a live cluster whose RHBK in namespace keycloak predated our install by 52 minutes: no refusal, no skip, no warning, and our own operator installed alongside theirs. | decision: owner call pending; kept apart from the NS entry because an uncontrolled operand fails more quietly than a missing namespace, so fixing one does not retire the other
 EOF
 }
 
@@ -217,6 +231,11 @@ self_test() {  # drive the SHARED strand detector AND the ledger against planted
   #   D-F  the KNOWN_STRANDS ratchet, which is what lets the real run exit 0 over accepted debt:
   #        an UNDECLARED strand still counts toward the exit code (D), a DECLARED one counts zero (E),
   #        and an entry that no longer matches any strand FAILS while a live one does not (F).
+  #   G-K  the WATCH-SCOPE detector (lib-components.sh operator_installs_watching), which decides
+  #        whether an ADOPTED operator can actually see the operands we would leave in its care. Every
+  #        fixture replays a shape measured on a live cluster, and the two that must fail closed —
+  #        an unresolvable scope (J) and a propagated CSV copy (K) — are asserted separately from the
+  #        two that must succeed (H, I), so a detector stuck at "yes" and one stuck at "no" both fail.
   # D-F call the very functions the real run calls and measure their effect on the real FAILURES
   # counter, then restore it — a re-implementation of the accounting could pass while the gate is
   # broken. Fact tables and ledgers are hand-built here (no kustomize/yq), so this proves live on any
@@ -332,6 +351,70 @@ EOF
     good=$((good + 1)); ok "F stale entry: the declaration that outlived its defect FAILED, the live one stayed quiet"
   else
     bad "F stale entry: ${delta} failure(s) — a ledger entry could outlive the defect it describes"
+  fi
+
+  # ── G-K the WATCH-SCOPE detector (lib-components.sh operator_installs_watching) ────────────────
+  # A different question from A-F, asked only once a component IS skipped: the org's operator exists,
+  # but does it WATCH the namespace our operands land in? If not, the CRs apply, Argo reports
+  # Synced/Healthy, and nothing reconciles them — every object present, every status green.
+  # Each fixture below replays a shape MEASURED on a live 4.22 cluster on 2026-08-06 (see the format
+  # doc in lib-components.sh); none is invented, because a parse invented from memory is exactly how a
+  # detector ends up confidently wrong about somebody else's Keycloak.
+  local wt="${WORK}/self-test.csvwatch"
+  local pkg_label="operators.coreos.com/fx-operator.other-ns"
+
+  # G — the live RHBK shape: the org runs the package, OwnNamespace-scoped to THEIR namespace. It does
+  # not watch ours, so adoption must refuse. (Measured: keycloak/rhbk-operator.v26.4.14-opr.1 → "keycloak".)
+  printf 'other-ns|fx-operator.v1|other-ns|olm.managed,%s,\n' "$pkg_label" > "$wt"
+  total=$((total + 1))
+  if [[ -z "$(operator_installs_watching "$wt" fx-operator fx-ns || true)" ]]; then
+    good=$((good + 1)); ok "G org operator scoped to its OWN namespace: correctly NOT watching ours — adoption refuses"
+  else
+    bad "G org operator scoped elsewhere was reported as watching ours — adoption would hand operands to an operator that cannot see them"
+  fi
+
+  # H — AllNamespaces: the annotation is PRESENT and EMPTY. Must cover our namespace.
+  # (Measured: gitea-operator/gitea-operator.v2.1.0 → "", likewise rhacs-operator and web-terminal.)
+  printf 'other-ns|fx-operator.v1||olm.managed,%s,\n' "$pkg_label" > "$wt"
+  total=$((total + 1))
+  if [[ -n "$(operator_installs_watching "$wt" fx-operator fx-ns || true)" ]]; then
+    good=$((good + 1)); ok "H AllNamespaces (empty annotation): correctly watching ours — adoption is safe"
+  else
+    bad "H AllNamespaces was NOT reported as watching ours — every adoptable operator would be refused"
+  fi
+
+  # I — an explicit MULTI-namespace scope that includes ours. This is what a label-selector
+  # OperatorGroup resolves to, and it is why the parse reads the RESOLVED scope and never
+  # spec.targetNamespaces (which is empty for AllNamespaces AND for a selector — opposite meanings).
+  # (Measured: openshift-monitoring/openshift-cluster-monitoring, empty spec, 58 resolved namespaces.)
+  printf 'other-ns|fx-operator.v1|a-ns,fx-ns,z-ns|olm.managed,%s,\n' "$pkg_label" > "$wt"
+  total=$((total + 1))
+  if [[ -n "$(operator_installs_watching "$wt" fx-operator fx-ns || true)" ]]; then
+    good=$((good + 1)); ok "I explicit multi-namespace scope containing ours: correctly watching ours"
+  else
+    bad "I a resolved scope listing our namespace was missed — selector-scoped operators would be refused wrongly"
+  fi
+
+  # J — scope UNRESOLVABLE (annotation absent; go-template prints `<no value>`). Must fail CLOSED.
+  # Guessing "probably cluster-wide" here is the one wrong answer that ships silently broken operands.
+  printf 'other-ns|fx-operator.v1|<no value>|olm.managed,%s,\n' "$pkg_label" > "$wt"
+  total=$((total + 1))
+  if [[ -z "$(operator_installs_watching "$wt" fx-operator fx-ns || true)" ]]; then
+    good=$((good + 1)); ok "J unresolvable scope: correctly NOT counted as coverage — the detector fails closed"
+  else
+    bad "J an unresolvable scope was read as coverage — a guess in the unsafe direction"
+  fi
+
+  # K — a COPIED CSV sitting in OUR namespace. OLM propagates copies of an AllNamespaces operator's CSV
+  # into every watched namespace, so a copy in fx-ns looks exactly like an install in fx-ns. It must not
+  # be classified: its annotation is absent, and the install it was copied from may watch something else
+  # entirely. (Measured: sso-workshop carried 19 copies, each labelled olm.copiedFrom with no annotation.)
+  printf 'fx-ns|fx-operator.v1|<no value>|olm.copiedFrom,olm.managed,%s,\n' "$pkg_label" > "$wt"
+  total=$((total + 1))
+  if [[ -z "$(operator_installs_watching "$wt" fx-operator fx-ns || true)" ]]; then
+    good=$((good + 1)); ok "K copied CSV in our own namespace: correctly ignored — a copy is not an install"
+  else
+    bad "K a copied CSV was read as an install — coverage would be claimed from a propagated shadow"
   fi
 
   echo
