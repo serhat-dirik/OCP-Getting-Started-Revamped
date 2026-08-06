@@ -10,8 +10,8 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Pins the exact shape of the printed output - the tool-call trace is the auditable artifact M24 has
- * attendees read, so its formatting is worth a test.
+ * Pins the exact shape of the printed output - the tool-call trace is the auditable artifact
+ * ai-assisted-development has attendees read, so its formatting is worth a test.
  */
 class TraceFormatterTest {
 

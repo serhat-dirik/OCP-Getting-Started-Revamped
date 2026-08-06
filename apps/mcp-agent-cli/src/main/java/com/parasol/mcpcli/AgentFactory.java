@@ -17,8 +17,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 /**
- * Assembles the {@link Assistant} from the same env-driven pieces {@code parasol-agent} uses in M23,
- * only re-pointed from the claims MCP servers to the platform MCP server:
+ * Assembles the {@link Assistant} from the same env-driven pieces {@code parasol-agent} uses in
+ * agentic-ai, only re-pointed from the claims MCP servers to the platform MCP server:
  *
  * <ul>
  *   <li>the injected {@link ChatModel} - the quarkus-langchain4j OpenAI bean configured by
@@ -40,8 +40,8 @@ public class AgentFactory {
 
     /**
      * Imperative, tool-forcing, server-neutral instructions. Imperative phrasing + temperature 0
-     * (see application.properties) keep tool-calling deterministic across models - M23 showed the
-     * same model calls a tool or not depending on terse-vs-imperative wording.
+     * (see application.properties) keep tool-calling deterministic across models - agentic-ai showed
+     * the same model calls a tool or not depending on terse-vs-imperative wording.
      */
     static final String SYSTEM_MESSAGE = """
             You are a careful platform operations assistant. You help an engineer inspect and operate

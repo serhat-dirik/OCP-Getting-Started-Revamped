@@ -21,7 +21,7 @@ import io.quarkiverse.langchain4j.mcp.runtime.McpToolBox;
  * {@code quarkus.langchain4j.mcp.claims-db.*} and {@code ...policy-docs.*}); LangChain4j discovers
  * their tools over HTTP-SSE and lets the model decide which to call. The method returns a
  * {@link Result} so the REST layer can report not just the answer but exactly which tools ran and
- * how many tokens were spent (the "observe the agent" beat, M12).
+ * how many tokens were spent (the "observe the agent" beat, observability-health-scale).
  *
  * <p>THERE IS NO {@code @SystemMessage} HERE, DELIBERATELY. The system prompt - the text that decides
  * whether this agent calls a tool or answers from the model's own weights - is

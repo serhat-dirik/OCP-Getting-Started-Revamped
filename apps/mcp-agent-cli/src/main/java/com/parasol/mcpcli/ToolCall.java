@@ -5,10 +5,10 @@ package com.parasol.mcpcli;
  * the model passed, and (when available) the tool {@code result}.
  *
  * <p>This is the unit of the <strong>tool-call trace</strong> the CLI prints - the auditability
- * that is the core M24 teaching point ("watch the tool calls; verify its claims yourself"). The
- * {@code result} is {@code null} while a call is still in flight (the model has asked for the tool
- * but its result has not come back yet); {@link ToolCallTracer} fills it in when the result message
- * arrives on the next model round-trip.
+ * that is the core ai-assisted-development teaching point ("watch the tool calls; verify its
+ * claims yourself"). The {@code result} is {@code null} while a call is still in flight (the model
+ * has asked for the tool but its result has not come back yet); {@link ToolCallTracer} fills it in
+ * when the result message arrives on the next model round-trip.
  */
 public record ToolCall(String name, String arguments, String result) {
 

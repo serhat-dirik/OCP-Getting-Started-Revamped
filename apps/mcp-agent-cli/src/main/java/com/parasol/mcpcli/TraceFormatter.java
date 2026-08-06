@@ -5,8 +5,8 @@ import java.util.Map;
 
 /**
  * Renders the tool-call trace, the wiring header, and the final answer as plain text for the
- * terminal. Pure functions (no I/O) so the exact formatting - the auditable artifact M24 asks
- * attendees to read - is unit-tested directly.
+ * terminal. Pure functions (no I/O) so the exact formatting - the auditable artifact
+ * ai-assisted-development asks attendees to read - is unit-tested directly.
  */
 public final class TraceFormatter {
 

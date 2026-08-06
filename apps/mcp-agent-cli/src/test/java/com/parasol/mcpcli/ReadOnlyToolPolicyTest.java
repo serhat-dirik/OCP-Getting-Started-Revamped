@@ -10,8 +10,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The read-only-first classifier: which tool names are safe to expose in read-only mode. Exhaustive
- * and fast - no model, no MCP. This encodes the safety posture M24 teaches (and is honest that it is
- * a heuristic, not the RBAC boundary).
+ * and fast - no model, no MCP. This encodes the safety posture ai-assisted-development teaches (and
+ * is honest that it is a heuristic, not the RBAC boundary).
  */
 class ReadOnlyToolPolicyTest {
 

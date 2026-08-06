@@ -9,7 +9,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 /**
- * The policy-docs MCP tools — RAG-style retrieval over the Parasol policy corpus (M23).
+ * The policy-docs MCP tools — RAG-style retrieval over the Parasol policy corpus (agentic-ai).
  *
  * <p>{@code search_policies} is the tool the agent calls to ground answers about coverage,
  * deductibles, documentation, SLAs and payout timing; it returns the matched passages so the

@@ -10,7 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 /**
- * The claims-db MCP tools - "your APIs, as tools" (M23).
+ * The claims-db MCP tools - "your APIs, as tools" (agentic-ai).
  *
  * <p>Three read-only tools over the seeded CLM-1001..CLM-1030 dataset. Descriptions are
  * written FOR THE MODEL: they name the exact claim-number format and the valid statuses so a

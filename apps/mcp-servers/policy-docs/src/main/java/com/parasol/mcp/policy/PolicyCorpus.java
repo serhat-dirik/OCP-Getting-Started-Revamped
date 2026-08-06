@@ -5,7 +5,7 @@ import java.util.List;
 /**
  * The seeded Parasol policy corpus — eight short, fixed documents.
  *
- * <p>Embedded in code (not a vector store) on purpose: the app layer for M23 uses simple,
+ * <p>Embedded in code (not a vector store) on purpose: the app layer for agentic-ai uses simple,
  * deterministic keyword retrieval so the "grounded vs ungrounded" and "RAG honestly" beats
  * land without a GPU or an embeddings model. The production pgvector/Milvus path is a later
  * platform phase. Several documents deliberately describe the claims workflow, statuses, SLAs

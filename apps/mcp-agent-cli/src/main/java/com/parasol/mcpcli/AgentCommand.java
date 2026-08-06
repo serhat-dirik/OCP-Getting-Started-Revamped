@@ -19,10 +19,10 @@ import picocli.CommandLine.Parameters;
  *   mcp-agent-cli --allow-writes "fix the readiness probe on parasol-claims and roll it out"
  * </pre>
  *
- * <p>It is assistant-neutral by design: it is the provided client M24 hands every attendee, so the
- * module never depends on anyone licensing a specific IDE assistant. Read-only-first is the default;
- * writes must be asked for explicitly ({@code --allow-writes}), and even then RBAC on the agent's
- * ServiceAccount - not this flag - is the real boundary.
+ * <p>It is assistant-neutral by design: it is the provided client ai-assisted-development hands
+ * every attendee, so the module never depends on anyone licensing a specific IDE assistant.
+ * Read-only-first is the default; writes must be asked for explicitly ({@code --allow-writes}), and
+ * even then RBAC on the agent's ServiceAccount - not this flag - is the real boundary.
  *
  * <p>A model failure (for example an expired MaaS key -&gt; HTTP 401) is caught and reported as a
  * clean one-line message with exit code 1, printing whatever tool calls were already traced, rather
@@ -110,8 +110,8 @@ public class AgentCommand implements Callable<Integer> {
      * Blank credential material out of an upstream message before it is printed.
      *
      * <p>WHY THIS EXISTS. This CLI runs as a one-shot pod with the MaaS key in its environment, and
-     * M24 reads its output with {@code oc logs "$POD"} straight into the attendee's terminal. The
-     * model gateway echoes a rejected key back in full inside its 401 body
+     * ai-assisted-development reads its output with {@code oc logs "$POD"} straight into the
+     * attendee's terminal. The model gateway echoes a rejected key back in full inside its 401 body
      * ({@code Virtual Key expected. Received=<the key>, ...}), and {@link #rootMessage} deliberately
      * unwraps to exactly that deepest message. So the key was one unrecognised status code away from
      * being printed.

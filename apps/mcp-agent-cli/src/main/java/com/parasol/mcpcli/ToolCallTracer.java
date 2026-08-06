@@ -20,13 +20,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 /**
  * Records every MCP tool the model calls during one run, so the CLI can print the full
  * <strong>tool-call trace</strong> (name + arguments + result). That auditable trace is the point
- * of M24: "watch the tool calls; verify its claims yourself."
+ * of ai-assisted-development: "watch the tool calls; verify its claims yourself."
  *
  * <p>It is a {@link ChatModelListener}. quarkus-langchain4j auto-registers every
  * {@code ChatModelListener} CDI bean around the model, so the injected {@code ChatModel} fires this
- * on each model round-trip - exactly how {@code parasol-agent}'s recorder is wired in M23. We use a
- * listener (not LangChain4j's {@code Result.toolExecutions()}) because that API only reports local
- * {@code @Tool} beans, never MCP tools.
+ * on each model round-trip - exactly how {@code parasol-agent}'s recorder is wired in agentic-ai.
+ * We use a listener (not LangChain4j's {@code Result.toolExecutions()}) because that API only
+ * reports local {@code @Tool} beans, never MCP tools.
  *
  * <p>Capturing the <em>result</em> as well as the request takes two callbacks, because LangChain4j
  * runs a loop - the model asks for a tool, the tool executes, then the result is fed back on the

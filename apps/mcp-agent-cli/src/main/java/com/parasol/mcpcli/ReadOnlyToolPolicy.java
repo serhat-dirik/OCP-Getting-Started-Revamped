@@ -19,14 +19,14 @@ import java.util.Set;
  * names, so the client stays assistant- and server-neutral (kubernetes-mcp-server, openshift-mcp-server,
  * or any other).
  *
- * <p><strong>This heuristic is defense-in-depth, not the security boundary.</strong> M24's lesson
- * (reinforced by CVE-2026-46519, where a sibling server's read-only flag filtered tool discovery but
- * not execution) is that <em>RBAC - the ServiceAccount's grants - is the boundary; a read-only flag
- * is a seatbelt.</em> {@link ReadOnlyToolFilter} applies this policy by removing a mutating tool's
- * <em>executor</em> as well as its spec, so the model can neither see nor invoke it through this
- * client - but a differently-configured client, or the server with the flag off, could still attempt
- * a write, and only RBAC will stop it. The imperfection of a name-based denylist is itself part of
- * the teaching point.
+ * <p><strong>This heuristic is defense-in-depth, not the security boundary.</strong> The
+ * ai-assisted-development lesson (reinforced by CVE-2026-46519, where a sibling server's read-only
+ * flag filtered tool discovery but not execution) is that <em>RBAC - the ServiceAccount's grants -
+ * is the boundary; a read-only flag is a seatbelt.</em> {@link ReadOnlyToolFilter} applies this
+ * policy by removing a mutating tool's <em>executor</em> as well as its spec, so the model can
+ * neither see nor invoke it through this client - but a differently-configured client, or the
+ * server with the flag off, could still attempt a write, and only RBAC will stop it. The
+ * imperfection of a name-based denylist is itself part of the teaching point.
  */
 public final class ReadOnlyToolPolicy {
 

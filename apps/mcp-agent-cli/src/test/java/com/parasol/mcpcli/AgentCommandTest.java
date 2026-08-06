@@ -15,9 +15,10 @@ import org.junit.jupiter.api.Test;
 class AgentCommandTest {
 
     // ---- credential redaction -------------------------------------------------------------------
-    // This CLI runs as a one-shot pod holding the MaaS key, and M24 pipes its output to the attendee
-    // with `oc logs "$POD"`. rootMessage() unwraps to the gateway's own message, which echoes a
-    // rejected key back in full. Synthetic stand-ins only below - never a real credential.
+    // This CLI runs as a one-shot pod holding the MaaS key, and ai-assisted-development pipes its
+    // output to the attendee with `oc logs "$POD"`. rootMessage() unwraps to the gateway's own
+    // message, which echoes a rejected key back in full. Synthetic stand-ins only below - never a
+    // real credential.
 
     private static final String FAKE_KEY = "sk-SYNTHETIC-not-a-real-key-0123456789";
     private static final String FAKE_JWT =
