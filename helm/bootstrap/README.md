@@ -122,7 +122,7 @@ every key named in `residue_keys`, present or absent. Restore what `residue_note
 | -10  | Job (hook)   | `ogsr-state-capture`                     | records prior state → `ogsr-uninstall-state` |
 | -9   | Job (hook)   | `ogsr-adopted-protection`                 | annotates every adopted resource `Prune=false,Delete=false` |
 | -9   | Job (hook)   | `ogsr-argocd-health-tuning`               | application-controller sizing + Subscription health check |
-| -9   | Job (hook)   | `ogsr-node-shaping`                       | batch pool + synthetic zones (M16/M21) |
+| -9   | Job (hook)   | `ogsr-node-shaping`                       | batch pool + synthetic zones (deployment-targets-scheduling / resilience-multicluster-dr) |
 | -8   | Job (hook)   | `ogsr-workshop-users` / `ogsr-maas-secret` | htpasswd + OAuth IdP / MaaS secret |
 | -1   | ConfigMap    | `ogsr-userinfo`                           | `demo.redhat.com/userinfo` (URLs, roster, password) |
 | 0    | Application  | `pp-core-devtools`                        | **mirror anchor**: gitea + git-mirror + dev tooling (from GitHub) |

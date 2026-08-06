@@ -748,20 +748,22 @@ else
   record_once gatewayclass_preexisted false
 fi
 
-# ── workshop node substrate (M16 scheduling / M21 resilience) ─────────────────
+# ── workshop node substrate (scheduling + resilience modules) ─────────────────
 # Cluster-scoped, one-time, idempotent node shaping the per-user entry charts must NOT own (ADR-0001
 # Rule 13 — entry charts never own cluster policy). Two pieces, both workshop-specific substrate:
-#   • a dedicated BATCH POOL: one worker labeled+tainted workshop.redhat.com/pool=batch so M16's
-#     toleration+nodeSelector beat is real (a toleration only PERMITS the tainted node; the nodeSelector
-#     ATTRACTS the pod — you need both). NoSchedule evicts nothing; it only blocks NEW untolerated pods.
-#   • synthetic FAILURE-DOMAIN labels workshop.redhat.com/zone={a,b,c} for M16's optional zone-spread
-#     narrative and M21's chaos drill. Deliberately workshop-namespaced — NOT the well-known
+#   • a dedicated BATCH POOL: one worker labeled+tainted workshop.redhat.com/pool=batch so the
+#     deployment-targets-scheduling toleration+nodeSelector beat is real (a toleration only PERMITS
+#     the tainted node; the nodeSelector ATTRACTS the pod — you need both). NoSchedule evicts
+#     nothing; it only blocks NEW untolerated pods.
+#   • synthetic FAILURE-DOMAIN labels workshop.redhat.com/zone={a,b,c} for the optional zone-spread
+#     narrative in deployment-targets-scheduling and the chaos drill in resilience-multicluster-dr.
+#     Deliberately workshop-namespaced — NOT the well-known
 #     topology.kubernetes.io/zone, which volume/scheduler controllers would treat as a real cloud AZ on
 #     this single-AZ bare-metal cluster. Inert metadata: nothing keys on it unless a workload's
 #     topologySpreadConstraints opts in.
 # Idempotent: --overwrite makes a re-run a no-op. This is bootstrap (not the portfolio) because node
 # objects can't be cleanly GitOps-reconciled and this is workshop substrate, not an operator install.
-info "shaping workshop node substrate (M16 batch pool + M16/M21 synthetic zones)"
+info "shaping workshop node substrate (batch pool + synthetic zones for deployment-targets-scheduling / resilience-multicluster-dr)"
 POOL_LABEL="workshop.redhat.com/pool=batch"
 POOL_LABEL_KEY="${POOL_LABEL%%=*}"
 ZONE_KEY="workshop.redhat.com/zone"
@@ -805,10 +807,10 @@ if [[ -n "$BATCH_NODE" ]]; then
     oc adm taint nodes "$BATCH_NODE" "${POOL_LABEL}:NoSchedule-" >/dev/null 2>&1 || true
     warn "batch pool taint SKIPPED: only ${BATCH_POOL_COUNT} worker(s) available (need ${MIN_BATCH_POOL_FOR_TAINT}+ to spare one without starving the rest of the cluster — see 2026-07-30 incident: 2 workers, 1 tainted, RHACS central-db Pending 3h+, trusted-supply-chain's scan gate dead)"
     warn "  worker ${BATCH_NODE} is labeled ${POOL_LABEL} but left fully schedulable — no taint was applied"
-    warn "  consequence for M16: the nodeSelector half of the batch-pool beat still works (pods requesting the label land on ${BATCH_NODE}); the TOLERATION half degrades to label-only — there is no tainted node left on this cluster to demonstrate 'an untolerated pod is refused, a tolerating pod is admitted' against"
+    warn "  consequence for deployment-targets-scheduling: the nodeSelector half of the batch-pool beat still works (pods requesting the label land on ${BATCH_NODE}); the TOLERATION half degrades to label-only — there is no tainted node left on this cluster to demonstrate 'an untolerated pod is refused, a tolerating pod is admitted' against"
   fi
 else
-  err "no nodes found to shape a batch pool — M16's dedicated-pool beat will have no target"
+  err "no nodes found to shape a batch pool — the deployment-targets-scheduling dedicated-pool beat will have no target"
 fi
 # Synthesize zones a/b/c round-robin across all nodes (idempotent --overwrite).
 read -ra SHAPE_NODES <<<"$(oc get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)"
@@ -842,10 +844,10 @@ record_once nodes_zoned "${SHAPE_NODES[*]:-}"
 # shipped a dead M11 on both install paths).
 STACKS="core-devtools,batch,progressive-delivery"
 [[ "$LIGHTSPEED" == "true" && "$LIGHTSPEED_PREINSTALLED" == "false" ]] && STACKS="${STACKS},ai-assist"
-# auth stack (Red Hat build of Keycloak) for M13. Workshop-agnostic; per-user realms are seeded by the
+# auth stack (Red Hat build of Keycloak) for securing-apps-keycloak. Workshop-agnostic; per-user realms are seeded by the
 # workshop layer below (sso.enabled). Its own OwnNamespace operator never touches a cluster login IdP.
 [[ "$AUTH" == "true" ]] && STACKS="${STACKS},auth"
-# resilience stack (OADP/Velero + in-cluster NooBaa S3) for M21. Opt-in; PREREQ ODF/MCG for the S3 target.
+# resilience stack (OADP/Velero + in-cluster NooBaa S3) for resilience-multicluster-dr. Opt-in; PREREQ ODF/MCG for the S3 target.
 # The RHSI (Skupper v2) add-on stays commented out in the stack unless the catalog offers channel stable-2.
 [[ "$RESILIENCE" == "true" ]] && STACKS="${STACKS},resilience"
 # Elective stacks for the D-block / DevSecOps modules. Each is a plain portfolio stack; prereqs
@@ -1276,7 +1278,7 @@ spec:
           value: "${USERS}"
         - name: clusterDomain
           value: "${DOMAIN}"
-        # Seed per-user realm-{user} imports only when the auth stack is installed (M13).
+        # Seed per-user realm-{user} imports only when the auth stack is installed (securing-apps-keycloak).
         - name: sso.enabled
           value: "${AUTH}"
         # Console plugins (backlog #24) — ON by default; vars.yaml console_plugins: false opts out.
