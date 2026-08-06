@@ -77,7 +77,7 @@ check "legacy fork parasol-legacy-claims reachable in Gitea" repo_reachable     
 # PRESENCE IS NOT PROOF: the entry hook validates the credential against the endpoint before staging
 # it and records the verdict in maas-config (aiPathAvailable). Report the VERDICT, not the Secret's
 # existence — reporting existence is what let a wrong-provider credential read as "wired" while every
-# model call 401'd (the same defect that broke M23 on cluster ksls5, 2026-07-29).
+# model call 401'd (the same defect that broke M23 on a live cluster, 2026-07-29).
 # Read into a variable first: an unreadable ConfigMap leaves it empty and falls to the `*)` arm, which
 # is what an unrecorded verdict already meant. Every arm here is INFO — no counter is touched either way.
 ads_state=""

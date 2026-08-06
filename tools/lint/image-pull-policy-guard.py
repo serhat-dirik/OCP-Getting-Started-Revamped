@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS. Every image this workshop builds is tagged `1.0`/`1.1` and rebuilt IN PLACE, so the
 tag is MUTABLE. Kubernetes defaults any tag other than `:latest` to `imagePullPolicy: IfNotPresent`,
-and a node that already has that tag cached serves the OLD layers forever. Measured on cluster ksls5
+and a node that already has that tag cached serves the OLD layers forever. Measured on a live cluster
 (2026-07-29): all three `parasol-claims` tags had moved to a new digest, and `oc rollout restart`
 brought the old digest back up. Commit 4efc931 fixed all 29 sites; this guard is what stops the 30th.
 

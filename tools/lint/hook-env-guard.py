@@ -9,7 +9,7 @@ referencing a variable that is neither a declared container env var nor assigned
 and it is fatal at the exact moment the line executes, not at parse time. So the failure hides on
 whichever branch is least exercised, which is almost always the error branch.
 
-That is not hypothetical. Measured on cluster ksls5, 2026-07-29:
+That is not hypothetical. Measured on a live cluster, 2026-07-29:
 
     ❌ the MaaS credential in adopted-lightspeed(Bearer) CANNOT work against …
        why: it is a 3-segment JSON Web Token …

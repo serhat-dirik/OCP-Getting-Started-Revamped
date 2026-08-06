@@ -44,7 +44,7 @@
 # credential checks below, which is where that fault belongs. The entry checks never call the model.
 #
 # CREDENTIAL CHECKS (added 2026-07-29). This script used to assert that maas-credentials EXISTED and
-# stop there — which is exactly why M23 shipped green on cluster ksls5 while every attendee's agent
+# stop there — which is exactly why M23 shipped green on a live cluster while every attendee's agent
 # 401'd: the entry hook had copied an adopted Lightspeed install's Azure AD JWT into it. Presence is
 # not proof. Two independent assertions now stand in its place, and BOTH must hold:
 #   1. SHAPE, checked here from the staged Secret: a 3-segment JWT is a control-plane bearer for some

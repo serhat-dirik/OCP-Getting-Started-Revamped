@@ -368,7 +368,7 @@ module_arg() {  # mNN (position, zero-padded) OR a slug → the canonical SLUG (
 # is derived from them — an identity outside this shape cannot correspond to anything provisioned.
 #
 # Task #12 hardened the POSITIONAL userN token but left the --user FLAG VALUE unchecked, and the two
-# are equivalent everywhere else. Live cost on ksls5 (2026-07-29): `--user 1` templated user=1, derived
+# are equivalent everywhere else. Live cost on-cluster (2026-07-29): `--user 1` templated user=1, derived
 # namespace `1-ai`, and created a permanently-OutOfSync entry-agentic-ai-1 Application whose 17
 # resources target a namespace that does not exist. That is worse than an error — a rejected command
 # then looks like a broken module, and it drags down the very health signal `ws doctor`/CI read (the
@@ -1932,7 +1932,7 @@ rebuild_enumerate() {  # → TSV "kind ns workload selector container image" for
   # is IFS *whitespace*, so `IFS=$'\t' read` COLLAPSES a run of tabs and an empty field silently shifts
   # every later field left. A CronJob has no .spec.selector, so emitting "" for it made the reader bind
   # the container name to the image column and drop the row entirely — every CronJob vanished from the
-  # scan without a word (caught on ksls5 2026-07-29 with a probe CronJob that never appeared).
+  # scan without a word (caught on a live cluster 2026-07-29 with a probe CronJob that never appeared).
   # shellcheck disable=SC2016  # $k/$ns/$n/$s are go-template variables; shell expansion would break it
   local tmpl='{{range .items}}{{$k := .kind}}{{$ns := .metadata.namespace}}{{$n := .metadata.name}}{{$s := ""}}{{range $kk, $vv := .spec.selector.matchLabels}}{{$s = printf "%s%s=%s," $s $kk $vv}}{{end}}{{if not $s}}{{$s = "-"}}{{end}}{{range .spec.template.spec.containers}}{{$k}}{{"\t"}}{{$ns}}{{"\t"}}{{$n}}{{"\t"}}{{$s}}{{"\t"}}{{.name}}{{"\t"}}{{.image}}{{"\n"}}{{end}}{{range .spec.jobTemplate.spec.template.spec.containers}}{{$k}}{{"\t"}}{{$ns}}{{"\t"}}{{$n}}{{"\t"}}{{$s}}{{"\t"}}{{.name}}{{"\t"}}{{.image}}{{"\n"}}{{end}}{{end}}'
   oc get deployments,statefulsets,daemonsets,cronjobs -A -o go-template="$tmpl" 2>/dev/null || true
@@ -1941,7 +1941,7 @@ rebuild_enumerate() {  # → TSV "kind ns workload selector container image" for
   # then Knative's own `user-container`.
   #
   # Their pods are matched by the revisions currently RECEIVING TRAFFIC, not by the service label. Two
-  # reasons, both measured on ksls5 2026-07-29: a ksvc that was just given a new Revision keeps the old
+  # reasons, both measured on a live cluster 2026-07-29: a ksvc that was just given a new Revision keeps the old
   # Revision's pods Running (not Terminating) until they scale down, so a service-wide match reports the
   # freshly-rolled service as still stale; and a solve-state traffic split serves TWO revisions on
   # purpose, so "the latest one" would under-report. .status.traffic is exactly "what a request can hit".
@@ -2170,7 +2170,7 @@ rebuild_roll_one() {  # kind ns name owner module → 0 rolled+ready · 1 could 
       if ! oc rollout status "${lk}/${name}" -n "$ns" --timeout="${REBUILD_TIMEOUT}s" >/dev/null 2>&1; then
         # Say this out loud: a stalled rollout is NOT an outage. The previous ReplicaSet keeps serving
         # until the new one is ready, so the attendee sees the old image, not a broken app. Measured on
-        # ksls5 2026-07-29 — a namespace whose ResourceQuota was exhausted by concurrent PipelineRuns
+        # a live cluster 2026-07-29 — a namespace whose ResourceQuota was exhausted by concurrent PipelineRuns
         # could not create the new pod, and the 85-minute-old pod carried on untouched.
         err "  ${ns}/${name}: new pods not ready in ${REBUILD_TIMEOUT}s — the PREVIOUS pods are still serving (old image), nothing is down."
         err "     why:  oc describe ${lk}/${name} -n ${ns}   ·   oc get events -n ${ns} --sort-by=.lastTimestamp | tail"
@@ -2189,7 +2189,7 @@ rebuild_roll_one() {  # kind ns name owner module → 0 rolled+ready · 1 could 
       # Revision. Bumping a template annotation makes one — BUT ONLY when the Revision name is not pinned.
       # Both of this repo's ksvc entry states pin spec.template.metadata.name (parasol-claims-v1/-v2, so
       # the solve traffic split can address revisions by name), and Knative's validating webhook rejects
-      # ANY template change that keeps the same revision name. Measured on ksls5 2026-07-29:
+      # ANY template change that keeps the same revision name. Measured on a live cluster 2026-07-29:
       #   admission webhook "validation.webhook.serving.knative.dev" denied the request: validation
       #   failed: Saw the following changes without a name change (-old +new): spec.template.metadata.name
       # So do not attempt the patch there — re-materializing the entry state is the only honest route.
@@ -2799,9 +2799,9 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
   #
   # ALWAYS ON, not behind a flag, for two reasons that pull the same way. A gate nobody runs is worse
   # than no gate (this repo's own rule) — and the live proof is that user1-cicd/parasol-claims sat
-  # stale on ksls5 until someone ran --check by hand. And the cost lands on the identity that can act
+  # stale on a live cluster until someone ran --check by hand. And the cost lands on the identity that can act
   # on it: the scan needs a CLUSTER-WIDE workload list, so an attendee pays one empty list read and
-  # skips, while an SA pays ~1s per materialized consumer (24s / 11 consumers, ksls5 2026-07-29 —
+  # skips, while an SA pays ~1s per materialized consumer (24s / 11 consumers, a live cluster, 2026-07-29 —
   # doctor's own fixed ~25 reads already cost 22s, and `ws status` costs 40s, so it stays in band).
   #
   # The gate is not politeness, it is the difference between a verdict and a guess: every read in
@@ -4130,7 +4130,7 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
 # strings. An installer is a bootstrap tool; this is the admin entry point it was missing.
 #
 # `ws maas set` writes apitoken + model + endpoint TOGETHER, always. A credential from one source paired
-# with an endpoint from another is an unvalidated pairing — exactly how cluster ksls5 broke on
+# with an endpoint from another is an unvalidated pairing — exactly how a live cluster broke on
 # 2026-07-29 — so the three travel as one unit and the whole TRIPLE is proven against the live endpoint
 # before anything is staged.
 MAAS_NS="${WS_MAAS_NS:-ogsr-system}"
@@ -4275,7 +4275,7 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
   done <<< "$rows"
   echo
   # Endpoint agreement: every namespace disagreeing with the staged credential's endpoint is a module
-  # talking to a host the credential was never proven against — the ksls5 failure shape.
+  # talking to a host the credential was never proven against — that failure shape.
   local n_ep; n_ep="$(printf '%s' "$endpoints" | tr '|' '\n' | grep -c . || true)"
   if [[ "$n_ep" == "1" ]]; then
     local only_ep="${endpoints//|/}"
@@ -4382,7 +4382,7 @@ maas_converge_targets() {  # [user] → TSV "module<TAB>user<TAB>app" for every 
       [[ -n "$name" && -n "$u" ]] || continue
       [[ "$name" == entry-* ]] || continue
       # Skip an app whose user label is not a real attendee identity. require_user_token now stops
-      # `--user 1` at the gate, but apps created BEFORE that fix still sit on live clusters (ksls5 has
+      # `--user 1` at the gate, but apps created BEFORE that fix still sit on live clusters (one such cluster had
       # entry-agentic-ai-1, targeting a namespace `1-ai` that does not exist). Enumerating by label
       # would pick it up, and the converge wait would then block its full 4m timeout on a namespace
       # that can never report a verdict — measured, it did exactly that. Litter must not cost time.
@@ -4551,7 +4551,7 @@ cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge t
     err "shape — this is a 3-segment JSON Web Token, not an OpenAI-compatible API key."
     err "   A JWT is a control-plane bearer for another provider; an adopted Azure-OpenAI OpenShift"
     err "   Lightspeed writes exactly one into its secret. Staging it would 401 every attendee."
-    die "refusing to stage it (cluster ksls5 lost a session to this exact value on 2026-07-29)"
+    die "refusing to stage it (a live cluster lost a session to this exact value on 2026-07-29)"
   fi
   ok "shape — not a JWT ($(maas_redact "$key"))"
 

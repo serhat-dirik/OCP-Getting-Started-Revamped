@@ -107,7 +107,7 @@ TRACK_ANN="argocd.argoproj.io/tracking-id"
 # an attendee who opened Dev Spaces left `userN-devspaces` behind and the report said the cluster was
 # clean. A false clean is worse than a named leftover — it is the one thing this script exists to
 # prevent. Namespaces are cluster-scoped so nothing garbage-collects them either (no ownerReferences,
-# and a namespaced controller could not own one anyway). Measured on ksls5 2026-07-29.
+# and a namespaced controller could not own one anyway). Measured on a live cluster 2026-07-29.
 CHE_USER_ANN="che.eclipse.org/username"
 PORTFOLIO_APP_PREFIX="pp-"
 
@@ -161,7 +161,7 @@ done
 RULE="──────────────────────────────────────────────────────────────────────────"
 # Elapsed seconds, stamped on every section header and progress line. An admin deciding whether to run
 # destructive commands is watching this output; "no output for fifteen minutes" reads as a hang, which
-# is exactly how a slow-but-working scan got killed twice by `timeout 900` (ksls5, 2026-07-29). SECONDS
+# is exactly how a slow-but-working scan got killed twice by `timeout 900` (a live cluster, 2026-07-29). SECONDS
 # is a bash builtin, so this costs no process and cannot itself fail.
 elapsed() { printf 't+%ss' "$SECONDS"; }
 prog() {  # one progress line, with a count wherever a count exists
@@ -175,7 +175,7 @@ prog() {  # one progress line, with a count wherever a count exists
 # `t+NNs` stamp as prog() so the streams read alike, and the same --quiet gate: the phases below can each
 # run for minutes on a big cluster (the upfront index reads, section [8/9]'s sweeps, section [9/9]'s CRD
 # counts), and with no line during one a working scan is indistinguishable from a hung one — which is
-# exactly how `timeout 900` killed a slow-but-fine run twice (ksls5, 2026-07-29).
+# exactly how `timeout 900` killed a slow-but-fine run twice (a live cluster, 2026-07-29).
 step() {  # one phase/progress line → STDERR
   [ "$QUIET" = "true" ] || printf '      … %s  (%s)\n' "$1" "$(elapsed)" >&2
   return 0
@@ -286,11 +286,11 @@ STATE_RESIDUE=""   # residue_keys from a KEPT state ConfigMap — see load_state
 # ns|name|installedCSV|currentCSV|<the 8 marker fields> — ONE cluster-wide Subscription read, shared by
 # the four call sites that each used to pay for it: section [3/9]'s orphan test, build_adoption_index's
 # per-adopted-operator probe, ns_has_foreign_csv's per-namespace label query, and section [8/9]'s marks
-# lookup (seeded into the cache from these very rows). Measured on ksls5 2026-07-29.
+# lookup (seeded into the cache from these very rows). Measured on a live cluster 2026-07-29.
 #
 # THE DANGEROUS READ, and the reason its exit status is kept in a variable of its own. If this list
 # fails and the failure is swallowed, every CSV on the cluster looks unowned and section [3/9] hands an
-# admin `oc delete` for the org's entire operator estate. Verified on ksls5 2026-07-28 with
+# admin `oc delete` for the org's entire operator estate. Verified on a live cluster 2026-07-28 with
 # `--as=system:serviceaccount:default:default`: a forbidden list exits 1 with EMPTY stdout — identical
 # output to a cluster with no Subscriptions, distinguishable only by status. Every consumer below
 # therefore branches on SUB_INDEX_RC and degrades to what it did before this index existed, never to
@@ -475,7 +475,7 @@ load_state() {
 
 # Here-string, NOT `printf … | grep -m1`: grep exits on its first match while printf is still
 # writing, printf takes SIGPIPE, and bash prints `printf: write error: Broken pipe` to stderr —
-# straight into an admin-facing report that is supposed to be trustworthy. Measured on ksls5
+# straight into an admin-facing report that is supposed to be trustworthy. Measured on a live cluster
 # 2026-07-29. A here-string has no upstream process to kill.
 state_get() { grep -m1 "^${1}=" <<< "$STATE_KV" | cut -d= -f2- ; }
 state_ops() {  # created|adopted → "name namespace" lines
@@ -556,7 +556,7 @@ adopted_probe() {  # "name ns" → "name|ns|ok|<csv>" or "name|ns|missing|"
 # `c="$(strip_label_cmd …)"`, `"$(marks_summary …)"` — and an assignment made inside a subshell dies
 # with it. A variable therefore memoised NOTHING across call sites: a single object reported as a trace
 # cost four identical `oc get`s (classify, strip labels, strip annotations, summarise), one ~0.7s round
-# trip each. Measured on ksls5 2026-07-29: 601 swept objects cost 604 per-object reads and ~1.15s per
+# trip each. Measured on a live cluster 2026-07-29: 601 swept objects cost 604 per-object reads and ~1.15s per
 # object, which is what pushed section [8/9] past a 900s timeout twice without ever reaching a verdict.
 # A file is visible to every subshell in both directions, so a marker is read once or not at all.
 MARKS_CACHE=""   # in-process fallback for a run with no writable tmpdir (inherited downward, never up)
@@ -633,7 +633,7 @@ ns_has_foreign_csv() {  # ns → 0 = holds a CSV we cannot account for
     # writing 3760 CSV rows; printf takes SIGPIPE and, under the `set -o pipefail` at the top of this
     # file, the PIPELINE's status becomes 141 — so a match reports as a NON-match. Whether printf has
     # finished is a scheduling race, which made this whole branch a coin flip: two runs of the
-    # unmodified script against one idle cluster (ksls5, 2026-07-29) returned 609 vs 602 "ours: delete"
+    # unmodified script against one idle cluster (2026-07-29) returned 609 vs 602 "ours: delete"
     # and 28 vs 35 "needs a human decision", 130 differing lines. The false side is the dangerous one —
     # "no CSV here" means "ours", so the report printed `oc delete namespace` for namespaces holding an
     # operator CSV it could not attribute. state_get() documents the same trap for a different reason
@@ -957,9 +957,9 @@ section_operatorgroups() {
 # Subscription against the CSV that is already there and gives up —
 #   constraints not satisfiable: @existing/openshift-operators//devspacesoperator.v3.29.0,
 #                                redhat-operators/openshift-marketplace/stable/devspacesoperator
-# (measured on ksls5 2026-07-25; see ogsr-uninstall.sh § operator CSV identity for the full incident).
+# (measured on a live cluster 2026-07-25; see ogsr-uninstall.sh § operator CSV identity for the full incident).
 #
-# Note what this section does NOT use: labels. Measured on ksls5 2026-07-28, not one CSV on the cluster
+# Note what this section does NOT use: labels. Measured on a live cluster 2026-07-28, not one CSV on the cluster
 # carries a workshop label, a portfolio label or a pp-* tracking-id — Argo manages Subscriptions, not
 # CSVs. The only mark we ever leave on a CSV is install.sh's `Delete=false`, and that is stamped on
 # ADOPTED resources alone. On a CSV, therefore, a mark of ours is evidence the object is the ORG'S; it
@@ -977,7 +977,7 @@ section_orphan_csvs() {
 
   # `-l '!olm.copiedFrom'` drops OLM's per-namespace COPIES server-side, and that is load-bearing rather
   # than an optimisation. A copy legitimately lives in a namespace with no Subscription — it is the
-  # original elsewhere that has one — so every copy is a false orphan. Measured on ksls5 2026-07-28:
+  # original elsewhere that has one — so every copy is a false orphan. Measured on a live cluster 2026-07-28:
   # 3760 CSVs on the cluster, 3723 of them copies. Unfiltered, this section would print 3723 delete
   # commands for objects OLM re-creates the moment you remove them.
   step "checking for orphaned ClusterServiceVersions…"
@@ -1023,7 +1023,7 @@ section_orphan_csvs() {
 
     # A CSV carrying olm.clusteroperator.name is installed by the cluster-version-operator, not by a
     # Subscription — it backs a ClusterOperator. `packageserver` in openshift-operator-lifecycle-manager
-    # is that case on EVERY OpenShift cluster (ksls5 2026-07-28: the only original CSV of 37 with no
+    # is that case on EVERY OpenShift cluster (measured 2026-07-28: the only original CSV of 37 with no
     # Subscription), so without this it is a guaranteed false positive on every run, on every cluster.
     # The namespace test is belt-and-braces for a future core CSV that carries no such label: OLM's own
     # namespace is never one we install into.
@@ -1103,7 +1103,7 @@ section_orphan_csvs() {
         ;;
     esac
     # A Subscription elsewhere installing the same CSV NAME does not own this object — two namespaces
-    # can run the same operator (ksls5 2026-07-28: rhbk-operator.v26.6.4-opr.1 in both openshift-mta and
+    # can run the same operator (a live cluster 2026-07-28: rhbk-operator.v26.6.4-opr.1 in both openshift-mta and
     # sso-workshop, each with its own Subscription). Said as context, never as a reason to spare it.
     if [ -n "$elsewhere" ]; then
       sub "note: ${elsewhere} installs the same CSV name in its own namespace — a different object, and"
@@ -1284,7 +1284,7 @@ localqueues.kueue.x-k8s.io"
 # `authorization.openshift.io` kinds are the RBAC objects. Sweeping a mirror does not find anything new
 # — it finds the SAME object again — so every finding is printed twice, once per group, with two
 # different `oc delete` commands for one object, and the VERDICT counts stop being a count of things.
-# It also costs a classification round trip per duplicate. Measured on ksls5 2026-07-29: 150 of the 182
+# It also costs a classification round trip per duplicate. Measured on a live cluster 2026-07-29: 150 of the 182
 # cluster-scoped hits were mirrors — 136 Projects, which section [4/9] already reports WITH the stuck-
 # namespace diagnosis a bare `oc delete project` line cannot give, plus 14 duplicate ClusterRole and
 # ClusterRoleBinding lines. Verified as mirrors, not coincidence: both groups returned identical name
@@ -1363,7 +1363,7 @@ sweep_ns_kind() {  # kind → "ns|kind/name|<the 8 marker fields>"
 }
 
 # The cluster-scoped sweep above lists with `-o name`, which carries NO markers — so every object it
-# found was then read back one at a time by obj_marks, in the main shell, serially. Measured on ksls5
+# found was then read back one at a time by obj_marks, in the main shell, serially. Measured on a live cluster
 # 2026-07-29: 35 such reads, 39.5s of `oc` wall clock inside a 128s scan, ~31% of the run, for objects
 # the API server had already served once.
 #
@@ -1521,7 +1521,7 @@ section_labeled_objects() {
 
   # (d) The OLM objects of every ADOPTED operator, checked by name rather than by label selector.
   #     A label selector cannot find a trace once the label is gone, and the Argo tracking-id outlives
-  #     the labels: on cluster ksls5 the org's cert-manager Subscription had been de-labelled but still
+  #     the labels: on a live cluster the org's cert-manager Subscription had been de-labelled but still
   #     carried `argocd.argoproj.io/tracking-id: pp-cert-manager`. That is still our fingerprint on
   #     their object, and the "no trace" bar says it goes — by un-marking it, never by deleting it.
   while IFS='|' read -r name ns st csv; do

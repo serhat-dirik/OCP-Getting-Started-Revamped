@@ -272,7 +272,7 @@ def contract_findings(source: str) -> tuple[list[str], int]:
         findings.append('rebuild_enumerate no longer emits the literal "-" for a workload with no '
                         '.spec.selector. A CronJob has none, so the column goes empty, `IFS=$\'\\t\' '
                         'read` collapses it, and every CronJob leaves the scan silently — measured '
-                        'on ksls5 2026-07-29 with a probe CronJob that never appeared.')
+                        'on a live cluster 2026-07-29 with a probe CronJob that never appeared.')
     ksvc_tmpl = re.search(r"local\s+ktmpl='([^']*)'", bodies["rebuild_enumerate"])
     checked += 1
     if ksvc_tmpl and '{{$sel := printf' not in ksvc_tmpl.group(1):

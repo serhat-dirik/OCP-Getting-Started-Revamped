@@ -264,7 +264,7 @@ if oc get olsconfig cluster >/dev/null 2>&1; then
   ok "OpenShift Lightspeed pre-installed (provider: ${PROVIDER}) — reusing it; ai-assist stack skipped"
 fi
 # Discovery runs whenever a MaaS key is CONFIGURED — not only when we install Lightspeed ourselves.
-# An adopted Lightspeed says nothing about OUR key: on cluster ksls5 (adopted, Azure-OpenAI-wired) the
+# An adopted Lightspeed says nothing about OUR key: on a live cluster (adopted, Azure-OpenAI-wired) the
 # old condition skipped discovery entirely, nothing validated maas.api_key, and the AI modules sourced
 # Lightspeed's Azure AD JWT instead — green install, 401 for every attendee (2026-07-29). If the
 # operator put a key in vars.yaml they mean the AI modules to work; prove it here, at the gate.
@@ -996,7 +996,7 @@ fi
 # PREFER, and it exists precisely because the block above does not run on an adopted-Lightspeed cluster:
 # there the modules had only Lightspeed's provider secret to read, and on an Azure-OpenAI wiring that
 # is an Azure AD JWT for a different provider — it staged green and returned 401 for every attendee
-# (cluster ksls5, 2026-07-29). endpoint travels WITH key+model so the entry states never pair a
+# (a live cluster, 2026-07-29). endpoint travels WITH key+model so the entry states never pair a
 # credential from one source with an endpoint from another. Torn down with ogsr-system by the uninstall.
 # MAAS_KEY is blanked by discover_maas_model when the endpoint refused it on an adopted-Lightspeed
 # cluster, so a key that failed its gate is NEVER staged — that is the whole point of this change.

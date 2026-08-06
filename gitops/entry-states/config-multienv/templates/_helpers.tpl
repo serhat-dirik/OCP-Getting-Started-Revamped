@@ -193,7 +193,7 @@ spec:
   # `Allow` (not `Redirect`) keeps plain-http curl working, which several labs rely on.
   # This helper renders the Route for EVERY environment namespace (dev/stage/prod), which is
   # why it was missed when the standalone entry-state templates were fixed on 2026-07-27 —
-  # the stage Route stayed plain and was caught live on cluster-ksls5 (http 200 / https 503).
+  # the stage Route stayed plain and was caught live on-cluster (http 200 / https 503).
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Allow

@@ -122,7 +122,7 @@ seeded_rows_state() {
 # This used to scan every Job in the namespace and pass if ANY had Complete=True. It could not fail:
 # `ws start` itself materializes two Jobs that complete — claims-data-seed-… and maas-copy-… — so the
 # check went green on a namespace where the attendee had done nothing, while the very Job its own hint
-# names ("run the monthly-statement Job") did not exist. Measured on ksls5 2026-07-29:
+# names ("run the monthly-statement Job") did not exist. Measured on a live cluster 2026-07-29:
 #
 #   claims-data-seed-jobs-batch-kueue-user1 -> Complete=True     <- ws start artifact
 #   maas-copy-jobs-batch-kueue-user1        -> Complete=True     <- ws start artifact
