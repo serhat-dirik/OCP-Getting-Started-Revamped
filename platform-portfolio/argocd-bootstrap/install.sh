@@ -180,6 +180,10 @@ fi
 #      OperatorGroup in a namespace we ship one into (TooManyOperatorGroups, silent, cluster-owner's
 #      operator). Everything else keeps the component, because a wrongly-kept install costs an
 #      operator nobody needed while a wrongly-skipped one ships a workshop that is green and broken.
+#      OWNER DECISION 2026-08-06, asked and answered explicitly: this narrowing REVERSES the earlier
+#      "refuse loudly rather than mutate someone's cluster on an assumption" posture for the
+#      blocked-but-operator-only case, and was signed off on that asymmetry. It is not a silent
+#      relaxation — do not "restore" the hard refuse here without taking the reversal back to them.
 #
 # Argo CD has no "create only if absent" primitive, so none of this can live in the manifests: the
 # decision is made once, here, in the portfolio's single sanctioned imperative step. Read-only
@@ -465,7 +469,8 @@ for _stack in "${PREFLIGHT_STACKS[@]}"; do
     # this branch REFUSED the whole install instead, on a path that could not fire for the case it
     # was written for (every adoption signal for keycloak-operator is scoped to a namespace only we
     # create), while the real defect — dropping it whenever ANY rhbk-operator existed anywhere — went
-    # unnoticed because half 2 did not exist.
+    # unnoticed because half 2 did not exist. The reversal was put to the owner as its own decision
+    # and approved 2026-08-06; see the asymmetry argument in the § header above.
     _keep_why=""   # non-empty ⇒ operator-only but blocked; names the reason for the messages below
     _skippable="false"
     if is_operator_only "$_cdir"; then
