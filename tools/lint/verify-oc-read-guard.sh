@@ -553,6 +553,27 @@ oc() {
   return 137
 }
 STUB
+  # `oc auth can-i` ANSWERS ON STDOUT. A denial on a NAMESPACED resource is stdout `no`, exit 1,
+  # stderr EMPTY — measured live 2026-08-06. This is the one subcommand whose real NO carries no
+  # stderr, and case (e) above shipped without it, which inverted five live checks from ✅ to ⚠ on a
+  # healthy cluster. The stub reproduces the namespaced form deliberately: the CLUSTER-SCOPED form
+  # (`impersonate users`) does print a namespace-scope Warning, which is exactly the one case the old
+  # comments in this tree had measured and then generalised from.
+  cat > "${d}/stub-canideny.sh" <<'STUB'
+oc() {
+  printf 'no'
+  return 1
+}
+STUB
+  # A can-i that was KILLED writes nothing to EITHER stream. This is the discriminator between "the
+  # server said no" and "we never got an answer", and without it a fix for (f) could be written that
+  # simply exempts all of can-i — reopening (e) for every can-i call in the suite.
+  cat > "${d}/stub-canikilled.sh" <<'STUB'
+oc() {
+  printf ''
+  return 137
+}
+STUB
 }
 
 # run_oc_read_case <lib-file> <stub-file> <oc-args…> → stdout "RC=<n> INCONCLUSIVE=<0|1> OUT=<text>"
@@ -662,8 +683,37 @@ check_oc_read_notfound_not_folded() {  # <lib-file-or-snippet> → 0 all three o
     rc=1
   fi
 
+  # (f) `oc auth can-i` DENIED on a namespaced resource — stdout `no`, exit 1, stderr EMPTY. This is a
+  # real answer from the server and must stay rc=1, even though (e) above says empty stderr means
+  # "could not ask". can-i is the exception because it answers on STDOUT. Added 2026-08-06 after (e)
+  # shipped without it and silently turned five live checks from ✅ to ⚠ on a healthy cluster
+  # (multi-tenancy-workload-security's sa_cannot/sa_can, ai-assisted-development's
+  # scoped_write_absent, build-deliver's and pipelines-fundamentals' catalog/task-library reads).
+  out="$(run_oc_read_case "$lib" "${stubdir}/stub-canideny.sh" auth can-i update deployments -n ns)"
+  got_rc="$(_oc_read_field "$out" RC)"; got_inc="$(_oc_read_field "$out" INCONCLUSIVE)"
+  if [[ "$got_rc" != "1" || "$got_inc" != "0" ]]; then
+    bad "[3f] an 'oc auth can-i' DENIAL (stdout 'no', empty stderr) must stay a real NO (rc=1, not inconclusive); got rc=${got_rc:-<none>} inconclusive=${got_inc:-<none>}. Output: ${out}"
+    note "    can-i reports its verdict on STDOUT, so a denial writes nothing to stderr. Grading that"
+    note "    'could not ask' reports a WORKING cluster as unreachable on every RBAC negation in the"
+    note "    suite — and check() suppresses the call site's own hint on the ⚠ path, so the attendee"
+    note "    also loses the instruction telling them what to do."
+    rc=1
+  fi
+
+  # (g) a can-i that was KILLED writes nothing to EITHER stream — still "could not ask". Without this,
+  # (f) could be "fixed" by exempting can-i wholesale, which would reopen (e) for every can-i in the
+  # suite. The pair is the assertion: stdout present = an answer, stdout absent = no answer.
+  out="$(run_oc_read_case "$lib" "${stubdir}/stub-canikilled.sh" auth can-i update deployments -n ns)"
+  got_rc="$(_oc_read_field "$out" RC)"; got_inc="$(_oc_read_field "$out" INCONCLUSIVE)"
+  if [[ "$got_rc" != "2" || "$got_inc" != "1" ]]; then
+    bad "[3g] a KILLED 'oc auth can-i' (no stdout, no stderr) must be 'could not ask' (rc=2, VERIFY_INCONCLUSIVE=1); got rc=${got_rc:-<none>} inconclusive=${got_inc:-<none>}. Output: ${out}"
+    note "    If this fires while [3f] passes, can-i has been exempted WHOLESALE rather than by"
+    note "    whether it actually answered — which reopens the false-❌ hole [3e] exists to close."
+    rc=1
+  fi
+
   rm -rf "$stubdir"
-  [[ "$rc" -eq 0 ]] && ok "[3] oc_read: NotFound stays a real NO; Forbidden, connection-refused and a silent failure all stay 'could not ask'; success stays a pass"
+  [[ "$rc" -eq 0 ]] && ok "[3] oc_read: NotFound and a can-i denial stay real NOs; Forbidden, connection-refused, a silent failure and a killed can-i all stay 'could not ask'; success stays a pass"
   return "$rc"
 }
 

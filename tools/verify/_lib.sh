@@ -64,6 +64,11 @@ OC_OUT=""
 OC_ERR=""
 oc_read() {  # oc_read <oc args…> → OC_OUT/OC_ERR; rc 0 = oc succeeded, 1 = real NO, 2 = could not ask
   local errfile rc=0
+  # `oc auth can-i` ANSWERS ON STDOUT, which makes it the one subcommand whose real NO carries no
+  # stderr at all. Captured here, at the only point the argv is visible, for the empty-stderr branch
+  # far below — see the measurement there.
+  local is_can_i=0
+  [[ "${1:-}" == "auth" && "${2:-}" == "can-i" ]] && is_can_i=1
   # One short-lived file per call rather than a process-wide one plus a trap: verify scripts exit
   # through verify_summary's `exit`, and an EXIT trap installed here would fight any the script sets.
   errfile="$(mktemp "${TMPDIR:-/tmp}/ogsr-verify.XXXXXX")" || {
@@ -109,6 +114,27 @@ oc_read() {  # oc_read <oc args…> → OC_OUT/OC_ERR; rc 0 = oc succeeded, 1 = 
   # answer being upgraded to success. This downgrades a NO-TEXT non-answer to inconclusive. The two
   # move in opposite directions and the case below still decides everything that has text.
   if [[ -z "${OC_ERR// /}" ]]; then
+    # ONE SUBCOMMAND BREAKS THE "every real NO carries text" PREMISE, and it is a load-bearing one.
+    # `oc auth can-i` reports its verdict on STDOUT — a denial is stdout `no`, exit 1, stderr EMPTY.
+    # MEASURED on a live cluster 2026-08-06, admin impersonating a nonexistent SA:
+    #   can-i update deployments -n user1-dev  (NAMESPACED)      -> rc 1, stdout "no", stderr 0 bytes
+    #   can-i get secrets        -n user1-dev  (NAMESPACED)      -> rc 1, stdout "no", stderr 0 bytes
+    #   can-i impersonate users                (CLUSTER-SCOPED)  -> rc 1, stdout "no", stderr 80 bytes
+    #   can-i get pods           (allowed)                       -> rc 0, stdout "yes"
+    # Only the CLUSTER-SCOPED form writes anything, and only because oc emits
+    # `Warning: resource 'users' is not namespace scoped in group 'user.openshift.io'`. Three comments
+    # in this tree generalised from exactly that one case to all of can-i, which is how the empty-
+    # stderr rule shipped without anyone noticing it inverted five live checks in
+    # multi-tenancy-workload-security, ai-assisted-development, build-deliver and
+    # pipelines-fundamentals — every one of them from ✅ to ⚠ on a HEALTHY cluster.
+    #
+    # Keyed on the ARGV, not on the output text. `[[ $OC_OUT == no* ]]` would also match a `get` whose
+    # object is literally named "no...", and matching the verb states the actual reason. A denial must
+    # still produce OUTPUT: a signal-killed `oc` writes nothing to either stream, so it stays rc 2 and
+    # the case this whole branch exists for is untouched.
+    if (( is_can_i )) && [[ -n "$OC_OUT" ]]; then
+      return 1
+    fi
     OC_OUT=""
     VERIFY_INCONCLUSIVE=1
     return 2
