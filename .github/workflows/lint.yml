@@ -1572,3 +1572,43 @@ jobs:
           # failed to land). Both fail this job, and they are deliberately different codes: the
           # first is a finding about a guard, the second is a finding about the sweep.
           python3 tools/lint/_canary-coverage.py "$@"
+
+  doctor-degraded:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: ws doctor must stay honest in the states nobody is there to see
+        # Half of `ws doctor`'s rows have a third outcome — ⚠ "I could not look", which is not "it is
+        # broken" and deliberately does not fail the run. Those branches fire only for an identity
+        # that cannot read cluster-scoped objects, so on the clusters this project develops on they
+        # are never exercised: the degraded report is first rendered on a customer's cluster, in
+        # front of an attendee, with nobody watching. It has been wrong there twice — first the rows
+        # printed ❌ at attendees whose environment was fine, then the rows were fixed and the
+        # SUMMARY still ended "✅ environment looks good" over six ⚠ rows (measured live 2026-08-06).
+        #
+        # Both failures look like a normal report, so neither is visible by reading the diff. This
+        # job runs the real tools/ws/ws against three recorded clusters — an attendee with six
+        # Forbidden reads, an admin with nothing wrong, and an attendee on a broken platform — and
+        # pins the rows, the closing line and the exit status of each. No cluster and no network:
+        # `oc` and `curl` are a recording, and a call the recording does not model is a finding.
+        #
+        # It is NOT a substitute for `ws doctor` on a live cluster: the recording is of what oc
+        # PRINTED, so the jsonpaths inside ws are data here. It says the reporter is honest, never
+        # that a cluster is healthy.
+        run: |
+          rc=0
+          bash tools/lint/doctor-degraded-guard.sh --self-test || rc=$?
+          # Exactly 1 = the real tree reproduces all three recordings AND all eight reintroduced
+          # defects were each caught by the one detector meant to prove them. 0 = the guard is
+          # blind; 2 = a canary slipped through, a mutation became a no-op because ws was reworded,
+          # or a recording is missing. Detection is unproven either way, so fail rather than trust
+          # a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::doctor-degraded-guard self-test must exit 1 (every reintroduced defect" \
+                 "caught by its own detector); got rc=$rc. Refusing to trust a clean result."
+            exit 1
+          fi
+          bash tools/lint/doctor-degraded-guard.sh

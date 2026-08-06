@@ -1,0 +1,98 @@
+# A recorded cluster for `ws doctor` — THE CASE NOBODY EVER SEES.
+#
+# TRANSCRIBED, not authored: every `oc` line below is a real call `ws doctor --user user3` made on
+# cluster-65prs on 2026-08-06, logged through a shim that recorded argv, rc, stdout and stderr and
+# then handed the call to the real oc. The cluster's DNS name is scrubbed to example.com; nothing
+# else is edited except the two departures documented at the bottom.
+#
+# WHY THIS RECORDING EXISTS. Half of doctor's rows have a third outcome — ⚠ "I could not look",
+# which is not "it is broken" — and that outcome fires only for an identity that cannot read
+# cluster-scoped objects. On the clusters this project develops on, attendees CAN read most of them,
+# so the ⚠ family is exercised for the first time on a customer's cluster, in front of an attendee,
+# with nobody watching. Every one of those rows was once a hard red ❌ telling a healthy attendee
+# their IdP was missing seconds after they logged in through it. There is no way to keep them honest
+# by reading the code: the wrong answer and the right one are both a plausible-looking report.
+#
+# WHAT THIS CASE PINS, and it is the whole three-part contract in one run:
+#   · six rows the attendee cannot answer are ⚠ and NOT ❌ (no false red on a healthy attendee);
+#   · the closing verdict says so — "did NOT fully check" with the count — instead of the plain
+#     "✅ environment looks good" it printed over these same six rows until 2026-08-06;
+#   · the exit code stays 0. An attendee whose world is fine but partly unreadable must not be told
+#     their environment is broken, and no CI or cockpit caller may start failing on them.
+#
+# Record types: `argv` (what ws is run with) · `exit` · `row <label> <mark>` (one per printed row,
+# in order) · `verdict` / `after` (the closing lines, matched EXACTLY) · `oc` / `curl` (the
+# recording: key, rc, stdout, stderr). `<TAB>` and `<NL>` are written out — a field that collapses
+# to nothing is exactly the kind of defect a recording exists to make visible.
+
+argv	doctor --user user3
+exit	0
+
+# ── the report, row by row (the ⚠ six are the reason this file exists) ─────────────────────────
+row	cluster login	✅
+row	gitops operator	✅
+row	argo applications	✅
+row	entry verify (strict)	✅
+row	gitea	✅
+row	mirror (parasol/ocp-getting-started)	✅
+row	workshop layer	✅
+row	showroom antora image	⚠
+row	parasol images	⚠
+row	running image drift	⚠
+row	workshop IdP	⚠
+row	user namespaces	✅
+row	workshop cohort size	⚠
+row	cohort coherence	⚠
+
+# 8 + 6 = 14, and 14 is the number of `row` lines above: the verdict is checked against the report it
+# is summarizing, so a row that silently stops printing cannot leave the counts looking right.
+verdict	⚠  8 of 14 checks passed · 6 NOT GRADED — this run did NOT fully check the environment
+after	   ↳ each ⚠ line above says what could not be read and who can read it; re-run there for a complete picture
+
+# ── the recording ──────────────────────────────────────────────────────────────────────────────
+oc	whoami	0	user3<NL>
+oc	whoami --show-server	0	https://api.cluster-fixture.example.com:6443<NL>
+oc	get csv -n openshift-gitops-operator -o jsonpath={.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}	0	Succeeded<NL>
+
+# DEPARTURE 1 (from 58 Applications to four). The live list is the whole cohort; four rows carry
+# everything this row's logic branches on — another attendee's healthy entry app and their
+# degraded-BY-DESIGN one (both dropped by --user scope, which is what proves the scope filter runs),
+# and two platform apps, which are never scoped away.
+oc	get applications -n openshift-gitops -o jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.metadata.labels.workshop\.redhat\.com/degraded-by-design}{"\n"}{end}	0	entry-agentic-ai-user1<TAB>Healthy<TAB>user1<TAB>agentic-ai<TAB><NL>entry-ai-assisted-development-user8<TAB>Degraded<TAB>user8<TAB>ai-assisted-development<TAB>true<NL>pp-gitea<TAB>Healthy<TAB><TAB><TAB><NL>workshop-config<TAB>Healthy<TAB><TAB><TAB><NL>
+
+# DEPARTURE 2 (this attendee has no entry state materialized; live, user3 had one). The row then
+# grades "n/a", which is what keeps the recording SELF-CONTAINED: with an entry app present, doctor
+# shells out to tools/verify/<module>.sh, a second process making its own ~19 cluster reads, and a
+# recording of the report would quietly become a recording of a verify script. A fresh cohort is
+# exactly this shape. Stated because it means this case says nothing about the entry-verify row's
+# graded branches — those are pinned by tools/lint/verify-summary-skip-guard.sh instead.
+oc	get applications -n openshift-gitops -l workshop.redhat.com/user=user3 -o jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.spec.source.helm.parameters[?(@.name=="solve")].value}{"\n"}{end}	0
+
+oc	get route gitea -n ogsr-gitea -o jsonpath={.spec.host}	0	gitea-ogsr-gitea.apps.cluster-fixture.example.com<NL>
+oc	get application workshop-config -n openshift-gitops -o jsonpath={.status.health.status}	0	Healthy<NL>
+
+# ── the six reads an attendee is not allowed to make ───────────────────────────────────────────
+# Each is rc 1 with "Forbidden" in stderr, verbatim from the cluster. The word in that message is
+# what every degraded row branches on, so these strings are the fixture's load-bearing content.
+oc	get bc antora-ext -n ogsr-showroom	1		Error from server (Forbidden): buildconfigs.build.openshift.io "antora-ext" is forbidden: User "user3" cannot get resource "buildconfigs" in API group "build.openshift.io" in the namespace "ogsr-showroom"<NL>
+oc	auth can-i get buildconfigs -n ogsr-showroom	1	no<NL>
+oc	get bc parasol-claims -n ogsr-parasol-images	1		Error from server (Forbidden): buildconfigs.build.openshift.io "parasol-claims" is forbidden: User "user3" cannot get resource "buildconfigs" in API group "build.openshift.io" in the namespace "ogsr-parasol-images"<NL>
+oc	auth can-i get buildconfigs -n ogsr-parasol-images	1	no<NL>
+# The drift row's gate is a REAL bounded read, never `oc auth can-i` — measured on this same cluster,
+# can-i answers "yes" for a cluster-scoped resource this identity cannot read, and that false YES
+# would open the gate onto a scan whose every read is swallowed, grading "nothing consumes a
+# workshop-built image" from having looked at nothing.
+oc	get deployments -A --field-selector=metadata.name=ws-doctor-drift-probe -o name	1		Error from server (Forbidden): deployments.apps "ws-doctor-drift-probe" is forbidden: User "user3" cannot list resource "deployments" in API group "apps" at the cluster scope<NL>
+oc	get oauth cluster -o jsonpath={.spec.identityProviders[*].name}	1		Error from server (Forbidden): oauths.config.openshift.io "cluster" is forbidden: User "user3" cannot get resource "oauths" in API group "config.openshift.io" at the cluster scope<NL>
+oc	get group workshop-attendees -o jsonpath={.users[*]}	1		Error from server (Forbidden): groups.user.openshift.io "workshop-attendees" is forbidden: User "user3" cannot get resource "groups" in API group "user.openshift.io" at the cluster scope<NL>
+
+# Their OWN namespace they can read — which is the point of the "user namespaces" row's split: the
+# same read is ✅ for the attendee it belongs to and Forbidden for anyone else's.
+oc	get ns user3-dev	0	NAME        STATUS   AGE<NL>user3-dev   Active   10h<NL>
+oc	get application workshop-config -n openshift-gitops	0	NAME              SYNC STATUS   HEALTH STATUS<NL>workshop-config   Synced        Healthy<NL>
+oc	get application workshop-config -n openshift-gitops -o jsonpath={.spec.source.helm.parameters[?(@.name=="userCount")].value}	0	8<NL>
+
+# Gitea and the mirror are plain HTTPS probes an attendee is entitled to make, and they succeed —
+# which is why this run has no ❌ at all. The rc is the whole answer; both call sites discard output.
+curl	https://gitea-ogsr-gitea.apps.cluster-fixture.example.com/api/v1/version	0
+curl	https://gitea-ogsr-gitea.apps.cluster-fixture.example.com/api/v1/repos/parasol/ocp-getting-started	0

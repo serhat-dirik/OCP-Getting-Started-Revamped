@@ -77,7 +77,27 @@ SMOKE_NS=""
 SMOKE_POD=""
 SMOKE_CONTAINER="terminal"
 
-ok()   { echo "✅ $*"; }
+# ── report tallies: what a report's LAST LINE is allowed to claim ─────────────────────────────────
+# A closing verdict must not out-claim the rows above it. `ws doctor` printed "✅ environment looks
+# good" under SIX ⚠ rows on a live attendee run (user3, cluster-65prs, 2026-08-06), because the
+# summary read one boolean — `fail` — and the ⚠ rows deliberately do not set it. That last part is
+# correct and stays: a false ❌ on a healthy attendee is the worse defect, and this repo says so. The
+# missing half was never the rows, it was the COUNT of them.
+#
+# Kept HERE, in the printers, rather than at each call site: a row added next year is counted by the
+# act of printing its glyph, with nothing for its author to remember — and forgetting is exactly how
+# a caveat gets silently dropped. Same reason tools/verify/_lib.sh keeps VERIFY_PASS/FAIL/SKIP/NA
+# inside check() rather than in each of the ~30 verify scripts.
+#
+# Every command increments these; only cmd_doctor reads them (and resets them first, so a verdict can
+# never inherit a count from something that ran earlier in the same process). Assignment form, never
+# `((n++))`: that arithmetic command returns 1 when the result is 0, which under `set -e` kills the
+# script at the first increment of the run.
+REPORT_PASS=0       # ✅ graded and good
+REPORT_FAIL=0       # ❌ graded and bad
+REPORT_NA=0         # ➖ correctly does not apply here — nothing is missing, no action available
+REPORT_UNGRADED=0   # ⚠  could not be evaluated — the answer is unknown and MIGHT be bad
+ok()   { REPORT_PASS=$((REPORT_PASS + 1)); echo "✅ $*"; }
 err()  { echo "❌ $*" >&2; }
 # ❌ report ROW → STDOUT. A doctor/report failure row must ride the SAME stream as the printf label it
 # completes and as its ok()/skip()/unknown() siblings. err() writes to fd2, so a failing row split the
@@ -88,13 +108,13 @@ err()  { echo "❌ $*" >&2; }
 # operator/fatal channel err()/warn()/die() own (cmd_status embeds its ❌ inline on stdout for the
 # same reason). A report's machine signal is its EXIT CODE (doctor still exit 1s), never the stream a
 # line lands on. Mirror of err() minus the >&2.
-nok()  { echo "❌ $*"; }
+nok()  { REPORT_FAIL=$((REPORT_FAIL + 1)); echo "❌ $*"; }
 # "I could not look", which is NOT "it is broken". `ws doctor` is attendee-runnable, and an
 # attendee cannot read cluster-scoped objects like oauths or groups. Reporting ❌ there told
 # people their IdP was missing seconds after they had logged in THROUGH it — and a false ❌
 # costs trust in every ✅ beside it.
 # ➖ = NOT APPLICABLE: correctly does not apply here, nothing is missing, no action available.
-skip() { echo "➖ $*"; }
+skip() { REPORT_NA=$((REPORT_NA + 1)); echo "➖ $*"; }
 # ⚠ = COULD NOT BE EVALUATED: the answer is unknown and MIGHT be bad. Distinct from skip() on
 # purpose — tools/verify/_lib.sh drew exactly this line today (na() vs warn()) after a banner that
 # conflated them told attendees a fully-graded run "did NOT fully verify". ws printed both meanings
@@ -102,7 +122,7 @@ skip() { echo "➖ $*"; }
 # the not-applicable mark — reintroducing the confusion one layer up. Caught by the verification
 # wave, 2026-08-05. Goes to stdout, not stderr like warn(): this is attendee-facing narration of
 # their own environment, not an operator-facing problem.
-unknown() { echo "⚠  $*"; }
+unknown() { REPORT_UNGRADED=$((REPORT_UNGRADED + 1)); echo "⚠  $*"; }
 info() { echo "▶ $*"; }
 # Called at the --all-users sync-failure branch and, until 2026-08-01, never defined. Under
 # `set -e`, an undefined command inside a function exits 127 and KILLS the script — so the one
@@ -2533,6 +2553,9 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     echo "ws doctor — environment sanity"
   fi
   local fail=0
+  # This report counts its OWN rows. The tallies are process-global (the printers keep them), so the
+  # closing verdict resets them here rather than inheriting whatever ran before it.
+  REPORT_PASS=0; REPORT_FAIL=0; REPORT_NA=0; REPORT_UNGRADED=0
   printf "  %-28s" "cluster login"
   if oc whoami >/dev/null 2>&1; then ok "$(oc whoami) @ $(oc whoami --show-server)"; else nok "not logged in"; fail=1; fi
   printf "  %-28s" "gitops operator"
@@ -2622,7 +2645,11 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     if [[ -z "${bad// }" ]]; then ok "all Healthy${scope_user:+ (platform + ${scope_user})}"; else nok "unhealthy:${bad}"; fail=1; fi
     if [[ -n "${expect_ok// }" ]]; then
       printf "  %-28s" ""
-      ok "(Degraded by design):${expect_ok}"
+      # `echo`, not ok(): a CONTINUATION of the row above (blank label, same finding), not a row of
+      # its own. ok() now tallies the ✅ rows the closing verdict counts, and counting this line
+      # would make "N of M checks passed" report one more check than the report has rows. Prints
+      # byte-identically to what ok() printed here before.
+      echo "✅ (Degraded by design):${expect_ok}"
     fi
   fi
   printf "  %-28s" "entry verify (strict)"
@@ -2950,7 +2977,57 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     esac
   fi
   echo
-  if (( fail == 0 )); then ok "environment looks good"; else nok "issues found — fix hints above"; exit 1; fi
+  # THE CLOSING VERDICT MUST NOT OUT-CLAIM THE ROWS ABOVE IT. `fail` alone cannot express this
+  # report any more: TEN of the fourteen rows below can now answer ⚠ "I could not look", which
+  # deliberately does NOT set fail — and the one-line verdict went on printing "✅ environment looks
+  # good" over them. Measured on a live attendee, user3 on cluster-65prs, 2026-08-06: six ⚠ rows,
+  # then ✅.
+  # Per-row honesty a summary throws away is not honesty; an SA pasting `ws doctor` output into a
+  # chat, and an attendee skimming it, both read the last line first.
+  #
+  # THE VOCABULARY IS tools/verify/_lib.sh's verify_summary, deliberately — same repo, same reader:
+  #   ⚠ 13 passed · 1 SKIPPED (not graded) — this run did NOT fully verify the lab
+  # Same three-way split (all graded and good · graded but incomplete · a real failure), the same
+  # "this run did NOT fully …" sentence, the same rule that ➖ not-applicable rides along as a
+  # parenthetical and never makes a run incomplete, and the same follow-up line pointing at the ⚠
+  # rows. Somebody who has read one banner should not have to learn the other.
+  #
+  # THE EXIT CODE IS UNCHANGED AND THAT IS THE POINT: ⚠ stays rc 0. `ws doctor` is attendee-runnable
+  # and an attendee cannot read cluster-scoped objects (oauths, groups, namespaces, cluster-wide
+  # workloads), so making "not graded" non-zero would fail every healthy attendee's report — trading
+  # an overclaiming ✅ for a false ❌, which this project treats as the worse defect. Only a graded ❌
+  # exits 1, exactly as before. (verify_summary offers rc 3/4 under VERIFY_STRICT for machine
+  # readers; doctor has no such caller, and an opt-in nobody sets is an untested branch.)
+  #
+  # NOT MIRRORED, on purpose: verify_summary's fourth state, "NOTHING was graded". Doctor's first row
+  # is `oc whoami` and it always grades — ✅ or ❌, never ⚠ — so any run reaching here with fail==0
+  # has at least one pass, and a nothing-graded branch would be unreachable. Add it when a row can
+  # make it reachable, not before: an unreachable branch is a claim nobody can check.
+  #
+  # Snapshot first: this verdict is itself printed through ok()/nok()/unknown(), so reading the live
+  # tallies inside the branches would count the verdict as one of the rows it is summarizing.
+  local pass="$REPORT_PASS" failed="$REPORT_FAIL" na="$REPORT_NA" ungraded="$REPORT_UNGRADED"
+  local rows=$(( pass + failed + na + ungraded ))
+  local na_note="" ungraded_note=""
+  if (( na > 0 )); then na_note=" · ➖ ${na} not applicable"; fi
+  if (( ungraded > 0 )); then ungraded_note=" · ⚠ ${ungraded} NOT GRADED"; fi
+  # `|| failed > 0` is belt-and-braces, not a change of contract: every ❌ row in this function also
+  # sets fail=1 today (checked, all fifteen), and a future row that prints ❌ without setting it would
+  # otherwise reproduce the very defect above with the other glyph.
+  if (( fail != 0 || failed > 0 )); then
+    nok "${failed} of ${rows} checks failed — fix hints above${ungraded_note}${na_note}"
+    exit 1
+  fi
+  if (( ungraded > 0 )); then
+    unknown "${pass} of ${rows} checks passed · ${ungraded} NOT GRADED${na_note} — this run did NOT fully check the environment"
+    echo "   ↳ each ⚠ line above says what could not be read and who can read it; re-run there for a complete picture"
+    return 0
+  fi
+  if (( na > 0 )); then
+    ok "environment looks good — all ${pass} checks passed (${na} not applicable to this cluster)"
+  else
+    ok "environment looks good — all ${pass} checks passed"
+  fi
 }
 
 # ── SA/admin cohort operations (ws passwd, ws cohort-reset) ────────────────────────────────────────

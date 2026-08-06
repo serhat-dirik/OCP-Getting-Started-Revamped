@@ -1,0 +1,60 @@
+# A recorded cluster for `ws doctor` — SOMETHING IS ACTUALLY BROKEN, seen by an attendee.
+#
+# The third state, and the one the other two cases exist to stay distinguishable from: a run that
+# both FAILED some checks and could not grade others. It is attendee-forbidden.case with a single
+# answer changed — the Gitea Route is gone — which is how a real session breaks (the platform goes
+# down under attendees who cannot see most of the platform).
+#
+# WHAT IT PINS. That "some rows were not graded" never softens a genuine failure: the verdict leads
+# with the failures, still carries the not-graded count beside them, and the exit code is 1. The
+# opposite mistake is just as easy to make — an ungraded run that swallows a real ❌ would let a
+# broken cluster look merely under-inspected — so the ordering and the rc are both asserted.
+#
+# Measured, not imagined: this exact shape was reproduced against the live cluster on 2026-08-06 with
+# a read-only PATH shim that failed only `oc get route gitea` and passed everything else through to
+# the real oc. The rows and the verdict below are what that run printed.
+
+argv	doctor --user user3
+exit	1
+
+row	cluster login	✅
+row	gitops operator	✅
+row	argo applications	✅
+row	entry verify (strict)	✅
+row	gitea	❌
+row	mirror (parasol/ocp-getting-started)	❌
+row	workshop layer	✅
+row	showroom antora image	⚠
+row	parasol images	⚠
+row	running image drift	⚠
+row	workshop IdP	⚠
+row	user namespaces	✅
+row	workshop cohort size	⚠
+row	cohort coherence	⚠
+
+verdict	❌ 2 of 14 checks failed — fix hints above · ⚠ 6 NOT GRADED
+
+# ── the recording (attendee-forbidden.case, with the Route gone) ───────────────────────────────
+oc	whoami	0	user3<NL>
+oc	whoami --show-server	0	https://api.cluster-fixture.example.com:6443<NL>
+oc	get csv -n openshift-gitops-operator -o jsonpath={.items[?(@.spec.displayName=="Red Hat OpenShift GitOps")].status.phase}	0	Succeeded<NL>
+oc	get applications -n openshift-gitops -o jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.health.status}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.metadata.labels.workshop\.redhat\.com/degraded-by-design}{"\n"}{end}	0	entry-agentic-ai-user1<TAB>Healthy<TAB>user1<TAB>agentic-ai<TAB><NL>entry-ai-assisted-development-user8<TAB>Degraded<TAB>user8<TAB>ai-assisted-development<TAB>true<NL>pp-gitea<TAB>Healthy<TAB><TAB><TAB><NL>workshop-config<TAB>Healthy<TAB><TAB><TAB><NL>
+oc	get applications -n openshift-gitops -l workshop.redhat.com/user=user3 -o jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.spec.source.helm.parameters[?(@.name=="solve")].value}{"\n"}{end}	0
+
+# THE BREAK. NotFound, not Forbidden — a read that ANSWERED, and the answer is that the Route is not
+# there. That distinction is the whole of this case: the same row would be ⚠ if the word in this
+# message were "Forbidden". With no host, neither the gitea nor the mirror row makes an HTTPS probe
+# at all, which is why this recording carries no `curl` lines.
+oc	get route gitea -n ogsr-gitea -o jsonpath={.spec.host}	1		Error from server (NotFound): routes.route.openshift.io "gitea" not found<NL>
+
+oc	get application workshop-config -n openshift-gitops -o jsonpath={.status.health.status}	0	Healthy<NL>
+oc	get bc antora-ext -n ogsr-showroom	1		Error from server (Forbidden): buildconfigs.build.openshift.io "antora-ext" is forbidden: User "user3" cannot get resource "buildconfigs" in API group "build.openshift.io" in the namespace "ogsr-showroom"<NL>
+oc	auth can-i get buildconfigs -n ogsr-showroom	1	no<NL>
+oc	get bc parasol-claims -n ogsr-parasol-images	1		Error from server (Forbidden): buildconfigs.build.openshift.io "parasol-claims" is forbidden: User "user3" cannot get resource "buildconfigs" in API group "build.openshift.io" in the namespace "ogsr-parasol-images"<NL>
+oc	auth can-i get buildconfigs -n ogsr-parasol-images	1	no<NL>
+oc	get deployments -A --field-selector=metadata.name=ws-doctor-drift-probe -o name	1		Error from server (Forbidden): deployments.apps "ws-doctor-drift-probe" is forbidden: User "user3" cannot list resource "deployments" in API group "apps" at the cluster scope<NL>
+oc	get oauth cluster -o jsonpath={.spec.identityProviders[*].name}	1		Error from server (Forbidden): oauths.config.openshift.io "cluster" is forbidden: User "user3" cannot get resource "oauths" in API group "config.openshift.io" at the cluster scope<NL>
+oc	get ns user3-dev	0	NAME        STATUS   AGE<NL>user3-dev   Active   10h<NL>
+oc	get group workshop-attendees -o jsonpath={.users[*]}	1		Error from server (Forbidden): groups.user.openshift.io "workshop-attendees" is forbidden: User "user3" cannot get resource "groups" in API group "user.openshift.io" at the cluster scope<NL>
+oc	get application workshop-config -n openshift-gitops	0	NAME              SYNC STATUS   HEALTH STATUS<NL>workshop-config   Synced        Healthy<NL>
+oc	get application workshop-config -n openshift-gitops -o jsonpath={.spec.source.helm.parameters[?(@.name=="userCount")].value}	0	8<NL>
