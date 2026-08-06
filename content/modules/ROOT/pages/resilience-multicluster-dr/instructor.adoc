@@ -42,12 +42,18 @@ Total core (exercises 1–3): *~30 min*, plus ~12–15 min of concept up front; 
 ====
 On the build cluster (OCP {ocp_version}) on 2026-07-13, every exercise was performed in `user1-client` / `user1-site-a` / `user1-site-b` and timed.
 The `oc` commands are fast. The genuine waits are three: *~8 s* for the mesh to program the gateway after the CRs apply; the *~4 s* failover (measured against a client hitting the stable endpoint once a second — the marker flipped `SITE=A`→`SITE=B` with *every one of ~90 continuous requests returning `200`*); and *~30–90 s* failback after site A recovers (the three fresh site-A pods must reschedule, pull their image, and pass readiness before the locality-aware load balancer returns traffic to the primary — image-cache warmth and cluster load drive the spread). The RHSI waits are the two Skupper Sites reaching Ready (tens of seconds) and the Link forming after the AccessToken redemption (seconds). Budget for the *reading and deciding* too — the resilience-ladder framing and the mesh-vs-RHSI distinction are the real time, not command latency.
-Note: `ws reset resilience-multicluster-dr` re-materializes via Argo and can take up to the CLI's sync-wait — run it *before* the session, not during.
+Note: `ws reset resilience-multicluster-dr` re-materializes all three namespaces via Argo and waits up to *5 minutes* for the sync to converge (no module-specific `waitSeconds` is declared, so this is the engine default) — a ceiling, not an expected duration, but budget it and run it *before* the session, not during.
 ====
+
+== How to know the room can move on
+
+Two instruments tell you this without guessing, and neither is the clock. Each exercise ends on a `[.checkpoint]` block with a *✔ Verify:* line in the lab — that is the move-on signal, written for attendees to confirm before continuing. For the whole module, `ws verify resilience-multicluster-dr --user <u>` is the same self-check the attendee can run any time; a room reporting all checks green is actually done, not just out of time.
 
 == Pre-flight checklist
 
 Run these *before the session* (as cluster-admin, `KUBECONFIG` on the workshop cluster). The sample user below is `user1` (use any real attendee user).
+
+`ws prep resilience-multicluster-dr` waits up to *5 minutes* for the entry state to converge across all three namespaces (no module-specific `waitSeconds` is declared, so this is the engine default). It normally returns well inside that — the ceiling is a timeout, not a duration. Attendees start it themselves from the top of the *concept* page, so deliver the concept at its normal pace and it converges under you.
 
 . *A sample user's entry state materializes and verifies.*
 +
@@ -86,8 +92,8 @@ Every row for a `claims-global` / `claims-edge` resource must show `[.]` in the 
 +
 [source,sh,role=execute]
 ----
-ws solve resilience-multicluster-dr --user user1
-ws verify resilience-multicluster-dr --user user1 --failover-drill
+ws solve resilience-multicluster-dr --user user1     # ceiling 5 min (no module waitSeconds override; engine default)
+ws verify resilience-multicluster-dr --user user1 --failover-drill     # the drill itself: up to 45s watching for the B flip, then up to 60s confirming the restore rollout
 ----
 +
 `ws solve` renders the failover routing but never fails a site over, so a plain `ws verify` on a freshly-solved world reports the live-failover check as *skipped* (`⚠ … not graded`) — there is nothing yet to observe. `--failover-drill` is the opt-in that actively proves it: it announces itself, briefly scales site A to zero, confirms the client is served by site B, then restores site A. Expect all checks green, ending with `FAILOVER proven ACTIVELY: site-a down -> the client is served by site-b`. *This is the check that matters* — a "Ready" mesh with a mis-wired `DestinationRule` passes every object check but fails the actual failover. When done, `ws reset resilience-multicluster-dr --user user1` returns the user to the entry state for the attendee to build the routing themselves.
@@ -106,6 +112,15 @@ oc get crd sites.skupper.io -o jsonpath='RHSI CRDs present: {.spec.versions[0].n
 ----
 +
 Expect the `skupper-controller` *Running* and `v2alpha1`. If absent, the `service-interconnect` stack isn't synced — the RHSI section can't run (skip it; it's an `[ADD-ON]`). Also confirm the *site namespaces have quota headroom for the Skupper router* (~1 CPU on top of the meshed claims pods) — see Watchouts.
+
+. *A representative attendee command actually works — from the cockpit, as the attendee.*
++
+[source,sh,role=execute]
+----
+ws smoke resilience-multicluster-dr user1     # execs the external client and proves it reaches the primary site's claims responder over the mesh (HTTP 200), as the attendee, in the live cockpit
+----
++
+This is the only pre-flight instrument that runs *as the attendee*, in the real cockpit terminal — everything above runs as cluster-admin. Expect all checks to pass.
 
 == Instructor demo — the 11-minute arc (demo flavor)
 
@@ -158,8 +173,8 @@ Each Skupper `Site` adds a router pod (~1 CPU) to a site namespace that already 
 The claims responder handles `SIGTERM` and its pod has a short `terminationGracePeriodSeconds`, so `--replicas=0` removes the site *promptly* and the failover is crisp. A workload that ignores `SIGTERM` would linger through its grace period and the failover would look delayed — worth knowing if you swap the responder image.
 * *`baseEjectionTime` tuning is a trade-off.*
 The `DestinationRule` uses `baseEjectionTime: 30s` — a middle ground. Shorter (e.g. `5s`) fails *back* to the primary faster but re-probes the dead site during a longer outage (a brief blip); longer (e.g. `120s`) keeps the service available during the outage but slow to fail back. The challenge section has attendees feel both.
-* *`ws reset resilience-multicluster-dr` is slow — run it before the session.*
-Reset re-materializes all three namespaces via Argo; the CLI waits for the sync. It always completes, but don't run it live mid-session — prep worlds ahead of time.
+* *`ws reset resilience-multicluster-dr` waits up to 5 minutes — run it before the session.*
+Reset re-materializes all three namespaces via Argo; the CLI waits up to the module's *5-minute* sync-wait ceiling (no module-specific `waitSeconds` is declared, so this is the engine default) — a timeout, not an expected duration. It always completes, but don't run it live mid-session — prep worlds ahead of time.
 
 == Provenance
 
