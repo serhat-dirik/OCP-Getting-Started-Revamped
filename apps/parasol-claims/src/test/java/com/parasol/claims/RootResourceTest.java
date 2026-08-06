@@ -30,7 +30,7 @@ class RootResourceTest {
                 .body("links.metrics", is("/q/metrics"));
     }
 
-    /** With SITE unset (the single-site default for M02–M20) the marker is absent. */
+    /** With SITE unset (the single-site default for every other module) the marker is absent. */
     @Test
     void rootOmitsSiteMarkerWhenSiteUnset() {
         given()

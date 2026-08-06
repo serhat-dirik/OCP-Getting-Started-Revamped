@@ -74,7 +74,7 @@ public class ClaimResource {
     private static final int DEFAULT_PAGE_SIZE = 20;
     private static final int MAX_PAGE_SIZE = 100;
 
-    /** Micrometer registry for the custom business metric (curriculum: M11). */
+    /** Micrometer registry for the custom business metric (curriculum: observability-health-scale). */
     @Inject
     MeterRegistry registry;
 
@@ -117,11 +117,11 @@ public class ClaimResource {
     /**
      * A claim's audit timeline.
      *
-     * <p><strong>Deliberate N+1 query pattern (curriculum: M11).</strong> This method
-     * first runs ONE query to fetch the ids of the claim's events, then loads each
+     * <p><strong>Deliberate N+1 query pattern (curriculum: observability-health-scale).</strong>
+     * This method first runs ONE query to fetch the ids of the claim's events, then loads each
      * event individually by primary key in a loop — so a claim with N events costs
      * {@code 1 + N} SELECTs. Every {@code findById} shows as its own JDBC span in the
-     * M11 trace, which is how attendees spot the anti-pattern. The one-line fix (a
+     * observability trace, which is how attendees spot the anti-pattern. The one-line fix (a
      * single {@code ClaimEvent.list("claimNumber", Sort.by("createdAt"), claimNumber)})
      * is left for the lab — do NOT "optimize" it here, the slowness is the lesson.
      */
@@ -194,8 +194,8 @@ public class ClaimResource {
         claim.adjuster = isBlank(input.adjuster()) ? "Unassigned" : input.adjuster();
         claim.status = "Submitted";
         claim.persist();
-        // Custom business metric (curriculum: M11). Micrometer appends _total to
-        // counters, so this is scraped at /q/metrics as claims_created_total.
+        // Custom business metric (curriculum: observability-health-scale). Micrometer
+        // appends _total to counters, so this is scraped at /q/metrics as claims_created_total.
         registry.counter("claims_created").increment();
         return Response.status(Response.Status.CREATED).entity(claim).build();
     }

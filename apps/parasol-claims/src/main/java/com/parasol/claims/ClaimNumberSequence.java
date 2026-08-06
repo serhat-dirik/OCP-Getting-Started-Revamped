@@ -18,9 +18,9 @@ import jakarta.enterprise.event.Observes;
  *
  * <p><strong>Why a sequence at all.</strong> {@code nextval} is atomic, so concurrent requests —
  * and, crucially, concurrent <em>replicas</em> — can never be handed the same number. Several
- * modules run this service at more than one replica (the M11 HPA scales it to {@code min=2},
- * others run it at 3), which makes any "read the highest number, add one" scheme wrong by
- * construction: both pods read the same maximum and both try to insert it.
+ * modules run this service at more than one replica (the observability module's HPA scales it
+ * to {@code min=2}, others run it at 3), which makes any "read the highest number, add one"
+ * scheme wrong by construction: both pods read the same maximum and both try to insert it.
  *
  * <p><strong>Why the sequence is created here and not only in {@code import.sql}.</strong>
  * Quarkus runs {@code sql-load-script} only under the {@code drop-and-create} and {@code create}
@@ -68,8 +68,8 @@ public class ClaimNumberSequence {
     static final long FIRST_NUMBER = 1001L;
 
     /**
-     * False in the DB-free mode M21's cross-site responder and the modernization modules run the
-     * same image in ({@code QUARKUS_HIBERNATE_ORM_ACTIVE=false} /
+     * False in the DB-free mode the resilience module's cross-site responder and the
+     * modernization modules run the same image in ({@code QUARKUS_HIBERNATE_ORM_ACTIVE=false} /
      * {@code QUARKUS_DATASOURCE_ACTIVE=false}). Touching the database at startup there would
      * crash-loop a pod whose whole point is serving {@code GET /} without one.
      */

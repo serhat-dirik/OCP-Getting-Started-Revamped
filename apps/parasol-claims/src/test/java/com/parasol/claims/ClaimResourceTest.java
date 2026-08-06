@@ -78,10 +78,11 @@ class ClaimResourceTest {
 
     /**
      * CLM-0000 is the canonical "never exists" probe — it is below the seed range and the
-     * sequence only counts up, so no created claim can ever take it. (The M11 load generator
-     * uses the same number for its steady 404 beat.) Do NOT use a high number like CLM-9999
-     * here: creates really do reach five digits under sustained load, and the numbering
-     * regression test below deliberately walks the sequence across that boundary.
+     * sequence only counts up, so no created claim can ever take it. (The observability
+     * module's load generator uses the same number for its steady 404 beat.) Do NOT use a
+     * high number like CLM-9999 here: creates really do reach five digits under sustained
+     * load, and the numbering regression test below deliberately walks the sequence across
+     * that boundary.
      */
     @Test
     void getUnknownClaimReturns404() {
@@ -245,8 +246,8 @@ class ClaimResourceTest {
     }
 
     /**
-     * M29 regression guard: quarkus-oidc is on the classpath but the tenant is
-     * DISABLED by default, so the API must stay anonymous - no token, still 200.
+     * securing-apps-keycloak regression guard: quarkus-oidc is on the classpath but the
+     * tenant is DISABLED by default, so the API must stay anonymous - no token, still 200.
      * If someone flips tenant-enabled=true in the shipped config, this fails.
      */
     @Test
@@ -262,7 +263,7 @@ class ClaimResourceTest {
                 .body("claimNumber", is("CLM-1001"));
     }
 
-    /** The M11 N+1 endpoint returns the seeded timeline, oldest event first. */
+    /** The observability-health-scale N+1 endpoint returns the seeded timeline, oldest event first. */
     @Test
     void historyReturnsSeededTimeline() {
         given()
@@ -336,10 +337,11 @@ class ClaimResourceTest {
      *
      * <p>Any "read the current max, add one" scheme loses this race — two callers read the same
      * max and both insert it. That is what makes the bug unfixable at the application level once
-     * the service runs at more than one replica, which several modules do (the M11 HPA scales
-     * parasol-claims to min=2, and other modules run it at 3). This test drives the race in one
-     * JVM; it cannot reproduce the cross-pod case, but the sequence is what makes both safe,
-     * because {@code nextval} is atomic in the database rather than in any one process.
+     * the service runs at more than one replica, which several modules do (the observability
+     * module's HPA scales parasol-claims to min=2, and other modules run it at 3). This test
+     * drives the race in one JVM; it cannot reproduce the cross-pod case, but the sequence is
+     * what makes both safe, because {@code nextval} is atomic in the database rather than in
+     * any one process.
      */
     @Test
     void concurrentCreatesGetDistinctNumbers() throws Exception {
@@ -367,7 +369,7 @@ class ClaimResourceTest {
         }
     }
 
-    /** POST the exact payload the M11 load generator sends, and return the assigned number. */
+    /** POST the exact payload the observability load generator sends, and return the assigned number. */
     private static String createLoadShapedClaim() {
         return given()
                 .contentType("application/json")

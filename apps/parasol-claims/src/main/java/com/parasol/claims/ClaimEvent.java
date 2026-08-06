@@ -16,8 +16,8 @@ import jakarta.persistence.Table;
  * seed-controlled {@code Long} (no sequence) so the deterministic rows in
  * {@code import.sql} own their ids and the history endpoint can load each event by
  * primary key — which is exactly how it produces its <em>deliberate</em> N+1 query
- * pattern for the M11 tracing exercise. There is intentionally no JPA relationship to
- * {@link Claim}; the link is the plain {@code claim_number} column.
+ * pattern for the observability-health-scale tracing exercise. There is intentionally
+ * no JPA relationship to {@link Claim}; the link is the plain {@code claim_number} column.
  */
 @Entity
 @Table(name = "claim_event")

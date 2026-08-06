@@ -13,9 +13,9 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 
 /**
- * M21 contract guard. When {@code SITE} is set, the {@code GET /} body must carry a
- * <em>compact</em> {@code "site":"<SITE>"} marker (no spaces around the colon),
- * because M21's cross-site failover client extracts the site letter from the body
+ * resilience-multicluster-dr contract guard. When {@code SITE} is set, the {@code GET /} body
+ * must carry a <em>compact</em> {@code "site":"<SITE>"} marker (no spaces around the colon),
+ * because that module's cross-site failover client extracts the site letter from the body
  * with a {@code sed} regex over {@code "site":"A"} / {@code "site":"B"}. If anyone
  * turned on JSON pretty-printing, that grep would silently stop matching and the
  * failover demo would read {@code served-by-site=none}; this test fails first instead.
@@ -24,7 +24,7 @@ import io.quarkus.test.junit.TestProfile;
 @TestProfile(RootResourceSiteTest.SiteAProfile.class)
 class RootResourceSiteTest {
 
-    /** Sets SITE=A the way the M21 site-a Deployment does, via config. */
+    /** Sets SITE=A the way the resilience module's site-a Deployment does, via config. */
     public static class SiteAProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
@@ -40,7 +40,7 @@ class RootResourceSiteTest {
                 .statusCode(200)
                 .body("service", is("parasol-claims"))
                 .body("site", is("A"))
-                // The exact compact substring M21's sed greps for (no spaces).
+                // The exact compact substring the resilience module's sed greps for (no spaces).
                 .body(containsString("\"site\":\"A\""));
     }
 }

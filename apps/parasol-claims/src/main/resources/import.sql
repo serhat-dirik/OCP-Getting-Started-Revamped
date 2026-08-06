@@ -62,7 +62,7 @@ INSERT INTO claim (claim_number, claimant, claim_type, status, amount, incident_
 INSERT INTO claim (claim_number, claimant, claim_type, status, amount, incident_date, adjuster) VALUES ('CLM-1030', 'Frank Miller', 'life', 'Submitted', 30000.00, '2026-06-27', 'Unassigned');
 
 -- Claim audit timeline (claim_event). Backs GET /api/claims/{claimNumber}/history,
--- which loads each event by id in a loop (a DELIBERATE N+1 for the M11 tracing lab -
+-- which loads each event by id in a loop (a DELIBERATE N+1 for observability-health-scale's tracing lab -
 -- see ClaimResource.history). Ids are FIXED and seed-controlled. CLM-1001 has the
 -- richest history (5 events) so its history call issues a visible 1+5 = 6 queries.
 -- Columns: id, claim_number, event_type, note, created_at
