@@ -16,6 +16,15 @@ include::partial$version-attributes.adoc[]
 // guardrails, a production vector database) are marked [ADD-ON] and taught as CONCEPT — they are the next
 // platform layer, not deployed on this cluster. Prose expands workshop-concept acronyms (MCP, RAG, LLM,
 // MaaS, PII, OTel) on first use; ubiquitous acronyms (AI, API, HTTP, JSON, URL, GPU) are never expanded.
+//
+// REALIGNED to the rewritten lab (commit 4044d1f): "Grounding is engineered, not guaranteed" is no
+// longer a terse-vs-imperative phrasing contrast — the agent's system prompt is a ConfigMap
+// (parasol-agent-grounding in {user}-ai), the entry state ships it deliberately WEAK, and the
+// attendee rewrites it and rolls the pods. The section's table now contrasts the two PROMPTS, and
+// phrasing is demoted to a named "weaker lever" paragraph. Per lab.adoc's own authoring note, the
+// weak prompt's live effect on {maas_model} is NOT measured — nothing here may claim it
+// deterministically fails; both outcomes are stated as the model's coin-toss, which is the point.
+// The two quoted prompts are verbatim excerpts of lab.adoc's shipped draft and worked answer.
 
 [.lead]
 Parasol's support staff keep asking the same two questions all day: _"what's the status of this claim?"_ and _"what does our policy say about this?"_
@@ -29,7 +38,7 @@ include::partial$prep-while-you-read.adoc[]
 * The *anatomy of an agent* — model plus instructions plus *tools* plus memory — and why the tools, not the model, are where the real answers come from.
 * Why *MCP tools are your APIs*: the *Model Context Protocol* (MCP) lets a model call your claims database and your policy search as ordinary services, so the agent reads *live* data instead of hallucinating it.
 * *Retrieval-Augmented Generation* (RAG) *honestly* — how grounding an answer in retrieved policy passages works, when it helps, and how it fails.
-* That *grounding is engineered, not guaranteed* — the model *decides* whether to call a tool, and how you *ask* changes whether it does.
+* That *grounding is engineered, not guaranteed* — the model *decides* whether to call a tool, and the instruction that sways that decision is a *system prompt you write*, shipped as ordinary configuration. In the lab you write it.
 * Where *guardrails*, a *Llama Stack* agent runtime, and a production *vector database* fit — the `[ADD-ON]` platform layer above the graded path — and *when* to reach for each.
 * The thesis that ties the whole week together: *the same platform disciplines apply* — health, config, metrics, tracing, and the golden path are identical for an AI app.
 
@@ -54,7 +63,7 @@ include::example$diagrams/agentic-ai/01-agent-anatomy.mmd[]
 ....
 
 * *Model* — the reasoning engine. On this workshop it is `{maas_model}`, served over an OpenAI-compatible *Models-as-a-Service* (MaaS) endpoint. The agent is *model-agnostic*: the same code runs against any served model; only an environment value changes.
-* *Instructions* — the *system prompt* that sets the agent's job and its rules: _use your tools instead of guessing, never invent claim details, cite the policy id you relied on._ This is where you encode *behaviour*, and it is ordinary text you can read and change.
+* *Instructions* — the *system prompt* that sets the agent's job and its rules: _use your tools instead of guessing, never invent claim details, cite the policy id you relied on._ This is where you encode *behaviour*, and it is ordinary text you can read and change — on Parasol's agent it lives in a ConfigMap rather than in the image, which is what makes it yours to engineer.
 * *Tools* — the functions the model may call. For Parasol these are the two *MCP servers*: `claims-db` (look up a claim, list by status, fetch history) and `policy-docs` (search the policy corpus). The tools are the whole point: they are how the agent touches *your* world.
 * *Memory* — where the multi-step tool conversation is held. Parasol's agent uses a *fresh, per-request* memory: it remembers within a single answer (question → tool call → tool result → answer) but shares nothing between requests, which — with *temperature 0* — keeps answers reproducible.
 
@@ -96,19 +105,21 @@ Production RAG replaces that retriever with a *vector database* (Milvus or Postg
 
 == Grounding is engineered, not guaranteed
 
-Here is the part most demos hide: *the model decides whether to call a tool*, and that decision is not always the one you want.
+Here is the part most demos hide: *the model decides whether to call a tool*, and that decision is not always the one you want. Handing an agent four perfectly good tools does not make it use them. What sways it is the *instruction it is carrying* — its *system prompt* — and that is not a property of the model. It is a piece of text somebody wrote.
 
-Performed live against `{maas_model}`, the *same* claim can get two very different outcomes depending on *how you ask* — and, for the terse phrasing, on *which model* you ask:
+On Parasol's agent that text is not compiled into the image. It arrives as *configuration*: a ConfigMap (`parasol-agent-grounding`) in your `{user}-ai` namespace, fed to the container as an environment variable, exactly like a connection string. Which means you can read what your agent was told, decide it is not good enough, and *change it* — and the difference is the difference between these two:
 
 [cols="1,3",options="header"]
 |===
-| You ask | What the model may do
+| What the agent has been told | What that produces
 
-| _"What is the status of claim CLM-1001?"_ (terse) | Model-dependent: some models print the tool call as *text* instead of running it — `[get_claim(claimNumber=CLM-1001)]`, `toolCalls` empty — an *ungrounded* answer that never touched your data. A capable model may instead call the tool unaided and ground the same terse question.
-| _"Use your tools to look up claim CLM-1001 and report its status."_ (imperative) | Reliable across models: it *executes* `get_claim`, gets the real record, and answers _"...is UnderReview"_ — *grounded*.
+| _"You are the Parasol Insurance claims assistant. Answer questions from Parasol staff about claims and policies as helpfully as you can. Keep answers short and professional."_ — a first draft about *manners* | Nothing here says the agent *has* tools, when to reach for one, or that it must not invent an answer it could not look up. Whether a model grounds anyway is a coin-toss it owns, not a property you engineered: some print the tool call as *text* — `[get_claim(claimNumber=CLM-1001)]`, `toolCalls` empty, your data never touched — while a capable one may call the tool unaided.
+| _"You have tools. USE THEM instead of guessing… call the claims tools… call `search_policies` and cite the policy id… Never invent claim details or policy terms."_ — an instruction about *grounding* | The tool *executes*. `toolCalls` names `get_claim`, the answer carries the real seeded record (_"...is UnderReview"_), coverage answers arrive with a policy citation, and an unknown claim comes back _"not found"_ instead of invented — because the prompt asked for that too.
 |===
 
-Each is reproducible at temperature 0 for a given model. The lesson is not "the model is broken" — it is that *grounding is something you engineer*: through the *system prompt*, through *clear phrasing*, and (in production) through model choice and tool-forcing settings. Different models behave differently on the terse phrasing — this is exactly why the module keeps the code *model-agnostic*, pins *temperature 0* and *seeded data* for reproducibility, and teaches the *imperative* phrasing as the technique that grounds reliably regardless of model. When you see an agent give a grounded answer, someone *made* it ground — the system prompt and phrasing, even when the model does the rest unaided.
+The lesson is not "the model is broken." It is that *grounding is something you engineer*, and the thing you engineer is an *artifact you can point at*: a ConfigMap, an environment variable, a rollout. In the lab you read the first draft above out of your own namespace, replace it, restart the Deployment so the new pod picks it up — an environment variable cannot change under a running process — and ask the same question again.
+
+There is a second lever, and it is the weaker one. Phrasing the *question* imperatively (_"use your tools to look up claim CLM-1001…"_) also pushes a model toward calling a tool. It is weaker because it is *per-question*: it depends on every user, every caller and every integration remembering to say it, and none of them will. The system prompt applies to *every* request whether the asker knows about tools or not. Engineer the durable one; keep phrasing as a debugging aid. And pin what you can — *temperature 0*, *seeded data*, *deterministic tools* — so the only variable left is the one you meant to change.
 
 == Guardrails are a platform concern `[ADD-ON]`
 
@@ -142,7 +153,7 @@ The whole right-hand column is *additive*: each piece slots in behind an interfa
 
 Step back and notice what the agent *is*: a Quarkus Deployment with a Service, an edge Route, a readiness probe (which pings both MCP servers, so a *Ready* agent has *proven* its tool wiring), a liveness probe, Prometheus metrics, and a container image pulled from the shared registry — *identical in shape to every other Parasol service you have deployed this week*.
 
-That is the thesis. An AI app is *not* a special snowflake that needs a parallel platform. It needs config in a ConfigMap and a key in a Secret (Config & Multi-Environment), health probes (Developer Hub), metrics and traces (Developer Hub and Observability), and delivery through Source-to-Image, pipelines, and GitOps (Ways to Build & Deliver Apps, Pipelines Fundamentals, and GitOps Fundamentals) — *the golden path you already know*. The model is new; the *disciplines* are not.
+That is the thesis. An AI app is *not* a special snowflake that needs a parallel platform. It needs config in a ConfigMap, a key in a Secret, and health probes that gate traffic (Config, Secrets & Multi-Environment), metrics and traces (Observability, Health & Scale), and delivery through Source-to-Image, pipelines, and GitOps (Ways to Build & Deliver Apps, Pipelines Fundamentals, and GitOps Fundamentals) — *the golden path you already know*. The model is new; the *disciplines* are not.
 
 == The agentic-AI layer over the Parasol platform
 
@@ -156,7 +167,7 @@ include::example$diagrams/agentic-ai/04-platform-accretion.mmd[]
 
 == How this shows up in real orgs
 
-* *"Our chatbot confidently gave a customer the wrong claim status."* A model without tools *hallucinates* live data. The fix is not a better prompt alone — it is *grounding*: make the agent call the system of record, and make it *cite* what it used. If it can't point at a source, don't trust it.
+* *"Our chatbot confidently gave a customer the wrong claim status."* A model without tools *hallucinates* live data. The fix is *grounding*, and it has two halves that are both engineering: give the agent a tool onto the system of record, and *tell it, in its system prompt, to use that tool and to cite what it used*. Giving it the tool and hoping is the half that fails quietly. If it can't point at a source, don't trust it.
 * *"Every team is building its own AI integration to the same backend."* MCP is the antidote: wrap the backend as *one* MCP server and every agent — and every coding assistant — calls the *same* tool. Tools are shared platform capability, not per-app glue.
 * *"How do we stop an agent leaking PII?"* Not in each agent's code. A *guardrail* layer the platform enforces (regex detectors today, richer models later) blocks it once, for everyone. Security that depends on every developer remembering is security you don't have.
 * *"Is this a whole new platform to run?"* No — and be suspicious of anyone who says it is. The agent is a Deployment with a Route and probes; it rides your existing pipelines and GitOps. *AI apps are apps.* The new part is the model endpoint and the tools, and both are just services.
@@ -167,8 +178,8 @@ ifdef::demo[]
 .Presenter framing
 ====
 Spend no more than five minutes here before the live demo.
-Three ideas must land: (1) *tools are the point* — the model does language, but the *facts* come from MCP tools that are just your services (`get_claim`, `search_policies`); (2) *grounding is engineered* — the agent *cites* its source, and how you ask changes whether it grounds at all (the terse-vs-imperative beat is the honest money moment); (3) *AI apps are apps* — this is a Quarkus Deployment with a Route and probes, shipped the same way as everything else.
-The demo is the ~15-minute arc: ask a claim question imperatively and watch `get_claim` execute and the answer land grounded; ask a policy question and watch `search_policies` cite `POL-AUTO-01`; combine both on a denied claim; then show the honest edges — an unknown claim answered _"not found,"_ the terse phrasing that *doesn't* ground, and the token/tool-call report — and close on _"it's a Deployment with a Route; guardrails and a vector database are the next layer."_
+Three ideas must land: (1) *tools are the point* — the model does language, but the *facts* come from MCP tools that are just your services (`get_claim`, `search_policies`); (2) *grounding is engineered* — the agent *cites* its source, and it reaches for a tool only because somebody *told* it to, in a ConfigMap you can open and rewrite (that edit-and-roll is the honest money moment); (3) *AI apps are apps* — this is a Quarkus Deployment with a Route and probes, shipped the same way as everything else.
+The demo is the ~15-minute arc: ask a claim question, then read the agent's own system prompt aloud — not one word about the four tools it is holding — patch the ConfigMap, roll the pod, and ask the *same* question again, now answered from the real record; ask a policy question and watch `search_policies` cite `POL-AUTO-01`; combine both on a denied claim; then the honest edges — an unknown claim answered _"not found"_ and the token/tool-call report — and close on _"it's a Deployment with a Route; guardrails and a vector database are the next layer."_
 Close on the honest frame: "the model is impressive, but the trust comes from the tools and the grounding — and it ships like any other app."
 ====
 endif::demo[]
