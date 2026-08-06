@@ -499,29 +499,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: ogsr-check-clean.sh excludes OLM's copied CSVs (offline self-test, no cluster)
-        # ogsr-check-clean.sh's CSV_INDEX used to be read with no `-l '!olm.copiedFrom'` filter,
-        # unlike ogsr-uninstall.sh's csv_index() and this same file's own section [3/9] orphan-CSV
-        # read, both of which already filter OLM's per-namespace copies and document why. OLM
-        # copies a CSV into every namespace its OperatorGroup targets — for an AllNamespaces-mode
-        # operator that is every namespace on the cluster — so the unfiltered read inflated
-        # ns_has_foreign_csv() to answer "yes" for nearly the whole cluster, drowning the one
-        # namespace that genuinely hosts an unaccounted operator under false positives. --self-test
-        # proves the exclusion fires against a stubbed `oc` (never a real cluster) and that a
-        # namespace holding a genuine, unaccounted ORIGINAL CSV is still caught after the fix.
+      - name: ogsr-check-clean.sh's whole proof suite holds (offline self-test, no cluster)
+        # THE JOB KEY IS HISTORICAL. `check-clean-copiedfrom` is named for the FIRST thing this
+        # self-test proved; it now runs the script's entire proof suite and the suite keeps growing.
+        # The key is kept because it is a stable CI identifier, but do not read it as the scope —
+        # a red run here is far more likely to be about something other than copiedFrom.
+        #
+        # ORIGIN (still proven, now one proof among many). CSV_INDEX used to be read with no
+        # `-l '!olm.copiedFrom'` filter, unlike ogsr-uninstall.sh's csv_index() and this same file's
+        # section [3/9] orphan-CSV read. OLM copies a CSV into every namespace its OperatorGroup
+        # targets — for an AllNamespaces operator, every namespace on the cluster — so the unfiltered
+        # read inflated ns_has_foreign_csv() to "yes" for nearly the whole cluster, burying the one
+        # namespace genuinely hosting an unaccounted operator.
+        #
+        # SCOPE TODAY covers at least: that exclusion, the declared-residue ledger in both
+        # directions (undeclared leftover fails AND stale declaration fails), residue_lint's
+        # malformed shapes, shared-CRD withholding (a foreign CSV co-owns it, or a live instance
+        # sits outside our namespaces), the control that a CRD which IS ours alone is still offered
+        # for deletion, and fail-closed canaries for every read the decision depends on.
+        #
+        # NO PROOF COUNT HERE, deliberately — same reason the canary-coverage job carries no guard
+        # count. The script prints its own numbered proofs; read them. What this job asserts is the
+        # CONTRACT (`--self-test` exits exactly 1 = every canary was correctly detected), and that
+        # contract does not change when a proof is added.
         run: |
           rc=0
           bash bootstrap/ogsr-check-clean.sh --self-test || rc=$?
-          # Exactly 1 = both proofs held (copy excluded from CSV_INDEX; a real foreign CSV still
-          # caught). 0/2 = the exclusion is missing/broken or the fixture harness itself is broken.
-          # Either way detection is unproven, so fail rather than trust the fix on a live cluster.
+          # Exactly 1 = every proof in the suite held. 0 = at least one canary went UNDETECTED, so
+          # some detection is silently broken. 2 = the fixture harness itself could not run, so
+          # nothing was proven. All three non-1 outcomes mean detection is unproven — fail rather
+          # than trust this script against a live cluster, where its job is to decide what an
+          # admin is told to delete.
           if [ "$rc" -ne 1 ]; then
-            echo "::error::ogsr-check-clean.sh self-test must exit 1 (copiedFrom exclusion proven," \
-                 "real foreign CSV still caught); got rc=$rc. The fix is unproven — refusing to" \
-                 "trust it against a live cluster."
+            echo "::error::ogsr-check-clean.sh --self-test must exit exactly 1; got rc=$rc." \
+                 "Run it locally and read the numbered proof lines — the FAILING one names what" \
+                 "broke. Do not assume this is the copiedFrom check; the suite covers the residue" \
+                 "ledger, shared-CRD withholding and the fail-closed canaries too."
             exit 1
           fi
-          echo "self-test ok — copied CSVs are excluded and a genuine foreign CSV is still caught (rc=1)."
+          echo "self-test ok — every proof in the suite held (rc=1)."
 
   maas-model-no-default:
     runs-on: ubuntu-latest

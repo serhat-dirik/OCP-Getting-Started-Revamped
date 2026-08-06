@@ -11,10 +11,12 @@
 # admin who knows what the org runs — not to a script running unattended. This tells you what there
 # is to decide about; you decide.
 #
-# Every finding is then sorted into one of three REMEDIES, because "carries a workshop label" and
+# Every finding is then sorted into ONE of the REMEDIES below, because "carries a workshop label" and
 # "the workshop created it" are NOT the same statement. Our kustomize label transformer stamps our
 # labels onto resources Argo ADOPTED — the org's operator namespace and the org's Subscription end up
-# labelled `workshop.redhat.com/owner=ogsr` without us ever having created them:
+# labelled `workshop.redhat.com/owner=ogsr` without us ever having created them.
+# (No count is written in that sentence: the one that used to be there said "three" while four were
+# already listed, and it would be wrong again the next time a class is added.)
 #
 #   DELETE  — we created it. The removal command is printed.
 #   STRIP   — we only marked it. Our label/annotation is a trace that should go (the "no trace" bar),
@@ -22,16 +24,25 @@
 #   DECIDE  — we cannot tell. NO destructive command is printed; the line says what is ambiguous.
 #   RESIDUE — it is EXPECTED to survive a teardown, by owner decision, and is named in KNOWN_RESIDUE
 #             (below) with the reason and the exact command that removes it for anyone who does want
-#             it gone. Reported in full on every run; the ONE class that does not affect the exit code.
-#             It is not an escape hatch: an undeclared leftover still fails, and a declaration whose
-#             object is still here while the scan no longer reports it as residue fails too.
+#             it gone. Reported in full on every run; one of the two classes that do not affect the
+#             exit code. It is not an escape hatch: an undeclared leftover still fails, and a
+#             declaration whose object is still here while the scan no longer reports it as residue
+#             fails too.
+#   SHARED  — a cluster-scoped CRD the ORGANISATION still depends on: an operator outside this install
+#             declares it owned, or it still has an instance outside any namespace this workshop can be
+#             shown to own. Named on every run with the evidence and a read-only `oc get <crd> -A`, and
+#             NEVER with a delete command — `oc delete crd keycloaks.k8s.keycloak.org` would take the
+#             organisation's Keycloak with ours. Like RESIDUE it does not affect the exit code; unlike
+#             RESIDUE it is discovered live from the cluster (plus the teardown's own `crds_shared`
+#             record), not declared in a ledger. See section [9/9].
 #
 # An unattended admin must never be handed `oc delete <the org's thing>` on a guess. That is a worse
 # failure than the leftover this script exists to report.
 #
 # Exit codes
-#   0  nothing UNEXPECTED remains and the cluster is healthy (declared residue may still be present,
-#      in which case it is listed above and the green line says so rather than claiming "clean")
+#   0  nothing UNEXPECTED remains and the cluster is healthy (declared residue and shared CRDs may
+#      still be present, in which case they are listed above and the green line says so rather than
+#      claiming "clean")
 #   1  findings are listed above (works as a CI gate and as a yes/no for an SA), or a KNOWN_RESIDUE
 #      entry has gone stale
 #   2  the scan could not run at all (no oc, not logged in, or KNOWN_RESIDUE is malformed — all three
@@ -63,10 +74,13 @@
 #   ./ogsr-check-clean.sh --quiet             findings and verdict only, no explanations
 #   ./ogsr-check-clean.sh --self-test         offline proof that the olm.copiedFrom exclusion works,
 #                                             that a copy-only namespace is never misread as foreign,
-#                                             and that the KNOWN_RESIDUE ratchet holds both ways
+#                                             that the KNOWN_RESIDUE ratchet holds both ways
 #                                             (undeclared still fails, stale declaration fails,
-#                                             malformed refused). Touches no cluster. Exit 1 = every
-#                                             proof held (house convention — .github/workflows/lint.yml).
+#                                             malformed refused), and that section [9/9] withholds a
+#                                             CRD the organisation still depends on while STILL
+#                                             offering one that is genuinely ours alone. Touches no
+#                                             cluster. Exit 1 = every proof held (house convention —
+#                                             .github/workflows/lint.yml).
 #
 # `set -e` is deliberately NOT used. This script runs on a cluster whose state it cannot predict —
 # including one whose API discovery is already broken, which is one of the things it reports. A
@@ -142,6 +156,7 @@ N_WS=0        # workshop litter we created — safe to delete
 N_TRACE=0     # our marks left on resources that are NOT ours to delete — strip the marks, keep the object
 N_DECIDE=0    # unclassifiable — a human has to look; no destructive command is printed for these
 N_RESIDUE=0   # KNOWN_RESIDUE matches — expected leftovers, reported in full and deliberately NOT failing
+N_SHARED=0    # CRDs the org still depends on — named in full, never offered for deletion, NOT failing
 N_LEDGER=0    # ledger faults (a declaration that outlived its residue) — these DO fail the run
 
 TMPROOT=""
@@ -217,26 +232,30 @@ found() {  # bucket  what  [command]
   # that something was left on purpose, and a reader scanning a long report must be able to tell the
   # two apart at a glance rather than by reading the sentence.
   case "$1" in
-    residue) printf '   ⚠ %s\n' "$2";;
-    *)       printf '   • %s\n' "$2";;
+    residue|shared) printf '   ⚠ %s\n' "$2";;
+    *)              printf '   • %s\n' "$2";;
   esac
   # The verb differs by bucket ON PURPOSE. "remove" next to an object we do not own is the defect this
-  # classification exists to prevent, so the trace bucket says "strip" and never prints a delete.
+  # classification exists to prevent, so the trace bucket says "strip" and never prints a delete — and
+  # the shared bucket says "inspect", because the only safe thing to do with a CRD the org depends on
+  # is look at it.
   if [ -n "${3:-}" ]; then
     case "$1" in
       trace)   printf '     strip:  %s\n' "$3";;
       residue) printf '     if you want it gone: %s\n' "$3";;
+      shared)  printf '     inspect (read-only): %s\n' "$3";;
       *)       printf '     remove: %s\n' "$3";;
     esac
   fi
-  # ONE accounting site for every bucket, residue included, so a sixth counter cannot be added later
-  # without passing through here — and through the verdict block that reads these five names.
+  # ONE accounting site for every bucket, residue and shared included, so a further counter cannot be
+  # added later without passing through here — and through the verdict block that reads these names.
   case "$1" in
     adopted) N_ADOPTED=$((N_ADOPTED + 1));;
     health)  N_HEALTH=$((N_HEALTH + 1));;
     trace)   N_TRACE=$((N_TRACE + 1));;
     decide)  N_DECIDE=$((N_DECIDE + 1));;
     residue) N_RESIDUE=$((N_RESIDUE + 1));;
+    shared)  N_SHARED=$((N_SHARED + 1));;
     *)       N_WS=$((N_WS + 1));;
   esac
   return 0
@@ -1727,6 +1746,161 @@ adopted_obj_trace() {  # kind name ns already-seen → 0 when it reported a trac
 }
 
 # ── [9/9] CRDs from operators we installed ────────────────────────────────────
+# THE MOST DESTRUCTIVE LINE THIS SCRIPT CAN PRINT. A CRD is a CLUSTER-SCOPED registration shared by
+# every namespace on the cluster, so `oc delete crd X` deletes every instance of X everywhere — ours
+# and the organisation's alike — and nothing puts them back. OLM's "owned" means "this operator
+# reconciles this kind", NOT "this operator brought this kind onto the cluster", so OUR OPERATOR OWNING
+# A CRD IS NOT EVIDENCE THE CRD IS OURS TO REMOVE.
+#
+# MEASURED on a live cluster 2026-08-06, read-only: keycloaks.k8s.keycloak.org is declared owned by
+# FOUR original CSVs — sso-workshop/rhbk-operator.v26.6.5-opr.1 (ours), openshift-mta/rhbk-operator
+# .v26.6.5-opr.1 (OLM resolved it as a dependency of MTA) and keycloak/rhbk-operator.v26.4.13-opr.1 and
+# .v26.4.14-opr.1 (the organisation's own Keycloak) — with live instances in BOTH sso-workshop and
+# keycloak. The CRD's own labels agree: operators.coreos.com/rhbk-operator.{keycloak,openshift-mta,
+# sso-workshop}, three OLM owners on one cluster-scoped object.
+#
+# Until this guard existed section [9/9] printed `oc delete crd keycloaks.k8s.keycloak.org` for exactly
+# that CRD, in its highest-confidence "exact" mode. The record said the adopted-operator guard failed to
+# match; the truth was worse — `crd_matches_adopted` sat behind `[ -n "$op" ]` while the exact branch
+# builds every row with an EMPTY operator field, so `&&` short-circuited and the guard was NEVER CALLED.
+# Not a guard that missed: no guard. Proven against a stubbed `oc` in self_test below, which now drives
+# the real section_crds through both dangerous worlds and a control on every CI run.
+#
+# THE RULE — two independent tests joined by OR, because they fail differently:
+#   [A] a FOREIGN OWNING CSV — an ORIGINAL CSV outside this install declares the same CRD owned. Proves
+#       the CRD belongs to somebody else's operator EVEN WHEN IT HAS ZERO INSTANCES right now: their
+#       operator is still running and will create instances the moment they use it.
+#   [B] a LIVE INSTANCE OUTSIDE any namespace this workshop can be SHOWN to own — proves dependence
+#       right now, even where we are the only operator that ever owned the kind (the org can create a
+#       Gitea or a Certificate in their own namespace using an operator we installed). A cluster-scoped
+#       instance is outside by definition: it sits in no namespace at all.
+# Either one withholds the CRD, and a withheld CRD is NAMED, with its reason and with the read-only
+# command to inspect it — absent from the delete list is not the same as reported, and a CRD silently
+# missing from this output looks exactly like a CRD nobody checked.
+#
+# Both tests FAIL CLOSED. Each of the three inputs they rest on comes back EMPTY when its read fails,
+# byte-identical to the answer that would clear the CRD for deletion, so each carries its read status
+# out with it and a CRD whose tests could not run is reported as needing a human — never offered.
+
+# ONE cluster-wide read of every ORIGINAL CSV's owned-CRD declarations, in the same shape and for the
+# same reason as ogsr-uninstall.sh's crd_owned_index(). Deliberately NOT load_csv_owned() above: that
+# one serves stuck-namespace diagnosis and reads OLM's per-namespace COPIES too, and a copy of OUR OWN
+# CSV in another namespace would read here as an owner outside this install — which would withhold
+# every CRD of every AllNamespaces-mode operator and turn this guard from discrimination into
+# blindness. Deferred, and skipped entirely when every candidate is already known shared.
+CRD_OWNERS_INDEX=""       # "<ns>|<csv>|<crd> <crd> …" per ORIGINAL CSV
+CRD_OWNERS_RC=1           # 0 = the read succeeded and may be reasoned from; anything else = blind
+CRD_OWNERS_LOADED="false"
+load_crd_owners() {
+  [ "$CRD_OWNERS_LOADED" = "true" ] && return 0
+  CRD_OWNERS_LOADED="true"
+  step "reading owned-CRD declarations from every original CSV (the shared-CRD guard)…"
+  CRD_OWNERS_INDEX="$(oc get clusterserviceversions.operators.coreos.com -A -l '!olm.copiedFrom' \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}{range .spec.customresourcedefinitions.owned[*]}{.name}{" "}{end}{"\n"}{end}' 2>/dev/null)"
+  # The status, not the emptiness. A forbidden or broken list exits non-zero with EMPTY stdout, which
+  # is identical to a cluster on which no CSV owns anything — and unlike ogsr-uninstall.sh, this script
+  # legitimately runs AFTER the cascade, where our own CSVs are already gone, so "empty" cannot be
+  # argued to be impossible here. Only the status can tell the two apart.
+  CRD_OWNERS_RC=$?
+  return 0
+}
+
+# " <ns>/<csv> … " — the CSVs THIS install put on the cluster, resolved through the Subscriptions the
+# state records as ours. NEVER by name shape: measured against the live state ConfigMap 2026-08-06, the
+# recorded operator name and its CSV name disagree for a third of the portfolio (op_kiali-ossm →
+# kiali-operator.v2.27.2, op_redhat-oadp-operator → oadp-operator.v1.6.1, op_opentelemetry-product →
+# opentelemetry-operator.v0.152.0-2, op_devspaces → devspacesoperator.v3.29.1), so a prefix test would
+# file our own CSVs as foreign and withhold everything — blindness again, wearing a safe-looking hat.
+#
+# A Subscription of ours that is already GONE while its CSV lingers leaves that CSV unattributed, so it
+# reads foreign and withholds one CRD we could have offered. That is the safe direction, and section
+# [3/9] reports that orphaned CSV separately anyway.
+INSTALL_CSVS=" "
+INSTALL_CSVS_OK="false"   # false ⇒ no CSV can be attributed, so "foreign" cannot be claimed about any
+INSTALL_CSVS_LOADED="false"
+load_install_csvs() {
+  local sub ns row csv
+  [ "$INSTALL_CSVS_LOADED" = "true" ] && return 0
+  INSTALL_CSVS_LOADED="true"
+  # A Subscription list that FAILED is empty exactly like a cluster with no Subscriptions (verified
+  # live 2026-07-28 — see SUB_INDEX). Reading the first as the second would make every CSV on the
+  # cluster look foreign: safe, but blind. Named as a failure instead. An EMPTY list with rc 0 is a
+  # different thing entirely and is completely normal here — after a teardown our Subscriptions are
+  # gone, and then no surviving CSV is ours, which is exactly the right answer.
+  [ "$SUB_INDEX_RC" -eq 0 ] || return 0
+  while read -r sub ns; do
+    [ -n "$sub" ] || continue
+    [ -n "$ns" ] || continue
+    # Field-exact on the first two columns, never a substring grep: one Subscription name can be a
+    # suffix of another in the same namespace, and a substring hit would claim the wrong CSV as ours.
+    row="$(awk -F'|' -v n="$ns" -v s="$sub" '$1==n && $2==s {print; exit}' <<< "$SUB_INDEX")"
+    [ -n "$row" ] || continue
+    # installedCSV AND currentCSV: mid-upgrade they differ, and both are ours.
+    for csv in "$(cut -d'|' -f3 <<< "$row")" "$(cut -d'|' -f4 <<< "$row")"; do
+      [ -n "$csv" ] || continue
+      case "$INSTALL_CSVS" in *" ${ns}/${csv} "*) continue;; esac
+      INSTALL_CSVS="${INSTALL_CSVS}${ns}/${csv} "
+    done
+  done < <(state_ops created)
+  INSTALL_CSVS_OK="true"
+  return 0
+}
+
+# PREDICATE — its non-zero IS the answer, so no trailing `return 0`. Test [A].
+crd_foreign_owners() {  # <crd> → "<ns>/<csv>" per owner outside this install; rc 0 when one exists
+  local crd="$1" ns csv owned hit=1
+  while IFS='|' read -r ns csv owned; do
+    [ -n "$ns" ] || continue
+    [ -n "$csv" ] || continue
+    # Space-padded containment, not a bare substring match: CRD names in one group share a suffix, so
+    # `case "$owned" in *"$crd"*` would let a longer sibling answer for a shorter one. The field is
+    # space-separated and a CRD name is DNS-subdomain-shaped, so the padding makes the match exact.
+    case " $owned " in *" ${crd} "*) ;; *) continue;; esac
+    case "$INSTALL_CSVS" in *" ${ns}/${csv} "*) continue;; esac
+    printf '%s/%s\n' "$ns" "$csv"
+    hit=0
+  done <<< "$CRD_OWNERS_INDEX"
+  return "$hit"
+}
+
+crd_ns_is_ours() {  # <ns> → 0 ONLY when this namespace can be shown to be the workshop's. Fails CLOSED.
+  # The crd_ prefix is not decoration: section [4/9] already has an ns_is_ours(), which takes eight
+  # pre-parsed marker fields and ECHOES the marker that identified the namespace. Defining a second
+  # one-argument function of that name here silently redefined it — bash keeps the last definition —
+  # so section [4/9] would have started calling this instead, with seven arguments it ignores and a
+  # different contract. shellcheck 0.9.0 caught it as SC2317 on the now-unreachable original.
+  #
+  # Every "no" here counts an instance as the organisation's, which withholds a CRD. That asymmetry is
+  # deliberate: the cost of a wrong "no" is one delete command not printed, the cost of a wrong "yes" is
+  # the org's data. openshift-operators is the case that decides the shape — three of our operators live
+  # in it, it carries none of our marks (measured live 2026-08-06), and it is a namespace no teardown of
+  # ours removes, so an instance sitting there is NOT covered by anything we delete.
+  local ns="$1" row i
+  [ -n "$ns" ] || return 1                                   # cluster-scoped: no namespace covers it
+  case "$ADOPTED_NS" in *" ${ns} "*) return 1;; esac          # the org's operator namespace
+  row="$(awk -F'|' -v n="$ns" '$1==n {print; exit}' <<< "$NS_INDEX")"
+  if [ -z "$row" ]; then
+    # Not in the namespace index — either the namespace is gone (its instances went with it) or the
+    # index read failed. Only the ogsr- prefix, which we own by construction, can answer without it.
+    case "$ns" in "${NS_PREFIX}"*) return 0;; esac
+    return 1
+  fi
+  # Field 9 is sync-options. install.sh stamps Delete=false ONLY on what it ADOPTED — the one adoption
+  # signal that needs no state file, and the same one classify_finding trusts ahead of everything else.
+  case "$(cut -d'|' -f9 <<< "$row")" in *Delete=false*) return 1;; esac
+  case "$ns" in "${NS_PREFIX}"*) return 0;; esac
+  i=3
+  while [ "$i" -le 7 ]; do                                   # 3-7: owner, component, stack, user, layer
+    if [ -n "$(cut -d'|' -f"$i" <<< "$row")" ]; then return 0; fi
+    i=$((i + 1))
+  done
+  case "$(cut -d'|' -f8 <<< "$row")" in "${PORTFOLIO_APP_PREFIX}"*) return 0;; esac
+  # Field 10 is Dev Spaces' username annotation: a namespace it auto-provisioned for an attendee. We
+  # did not create it, but the workshop caused it and section [4/9] already reports it as our leftover.
+  if [ -n "$(cut -d'|' -f10 <<< "$row")" ]; then return 0; fi
+  return 1
+}
+
 crd_candidates_for() {  # operator-name → CRD names that plausibly belong to it (heuristic)
   local op="$1" tok toks=""
   for tok in $(printf '%s\n' "$op" | tr '-' ' '); do
@@ -1742,14 +1916,15 @@ crd_candidates_for() {  # operator-name → CRD names that plausibly belong to i
 
 section_crds() {
   hdr "9/9" "CRDs installed by operators this install created" \
-    "Never removed automatically, and never by us: deleting a CRD deletes every instance of it cluster-wide, in every namespace. The instance count tells you whether anything is using it before you decide."
+    "Never removed automatically, and never by us: deleting a CRD deletes every instance of it cluster-wide, in every namespace. One that another operator ALSO owns, or that still has an instance outside our namespaces, is named as SHARED and never carries a delete command."
   if [ -z "$STATE_KV" ]; then
     note "no install state (source: none) — cannot tell which operators were ours."
     note "re-run with --state-file PATH, using the file ogsr-uninstall.sh wrote before it removed"
     note "the ${STATE_NS} namespace. Without it this section cannot be checked."
     return 0
   fi
-  local exact op crd n hit=0 mode counts todo="" phase
+  local exact op crd n hit=0 mode counts todo="" todo_set=" " phase rc nss
+  local shared_rec=" " need_tests=0 owners outside x why detail blocked
   exact="$(state_get crds_created | tr ',' ' ')"
   # WHEN the list was taken decides whether it may be called exact. ogsr-uninstall.sh used to capture
   # crds_created from each CSV in its CSV-cleanup step, which runs AFTER the cascade has already taken
@@ -1778,6 +1953,8 @@ section_crds() {
       # then DROPS a CRD that is registered — silently shrinking the only list section [9/9] can offer.
       grep -q "^${crd}|" <<< "$CRD_INDEX" || continue
       todo="${todo}${crd}|\n"
+      todo_set="${todo_set}${crd} "
+      need_tests=1
     done
   else
     mode="heuristic name match — VERIFY before deleting"
@@ -1785,21 +1962,110 @@ section_crds() {
       [ -n "$op" ] || continue
       while IFS= read -r crd; do
         [ -n "$crd" ] || continue
+        case "$todo_set" in *" ${crd} "*) ;; *) todo_set="${todo_set}${crd} ";; esac
         todo="${todo}${crd}|${op}\n"
+        need_tests=1
       done < <(crd_candidates_for "$op")
     done < <(state_ops created)
   fi
+  # `crds_shared` — the CRDs the teardown DELIBERATELY left registered because the organisation still
+  # depends on them (ogsr-uninstall.sh § the shared-CRD guard). It withholds them from crds_created, so
+  # without this loop nothing here would ever mention them again — and a CRD silently missing from this
+  # report is indistinguishable from a CRD nobody checked. They join the candidate list in their own
+  # right so they are NAMED on every run, with their live instance count and a read-only way to look.
+  # Read whatever the capture-phase gate above decided about crds_created: this key is a statement about
+  # what was withheld, not a delete authorisation derived from a list that may be a fragment.
+  for crd in $(state_get crds_shared | tr ',' ' '); do
+    [ -n "$crd" ] || continue
+    grep -q "^${crd}|" <<< "$CRD_INDEX" || continue        # already gone: nothing to report about it
+    shared_rec="${shared_rec}${crd} "
+    case "$todo_set" in *" ${crd} "*) continue;; esac
+    todo="${todo}${crd}|\n"
+    todo_set="${todo_set}${crd} "
+  done
   [ -n "$todo" ] || { none "no CRD from an operator we installed is still registered"; return 0; }
   # One `oc get <crd> -A` per candidate was the second-largest serial cost on a cluster with many
   # created operators; the counts are independent reads, so they go out together.
   step "counting instances for $(printf '%b' "$todo" | grep -v '^ *$' | sort -u | grep -c .) candidate CRD(s) (one list each)…"
   counts="$(printf '%b' "$todo" | grep -v '^ *$' | sort -u | run_parallel crd_count)"
-  while IFS='|' read -r crd op n; do
+  # Loaded HERE, in this shell, before the loop — and skipped entirely when every candidate is already
+  # known shared from the record, which is the normal post-teardown case and the one that must stay
+  # cheap. `$(load_crd_owners)` would run it in a subshell and throw the index away, leaving
+  # CRD_OWNERS_RC at its blind default; the loop below runs in THIS shell (`done < <(…)` redirects the
+  # loop's input, it does not fork the body), so what is loaded here is what the tests actually see.
+  if [ "$need_tests" -eq 1 ]; then
+    load_crd_owners
+    load_install_csvs
+  fi
+  while IFS='|' read -r crd op rc n nss; do
     [ -n "$crd" ] || continue
     hit=1
+    why=""; detail=""; owners=""; outside=""; blocked=""
+    # A row this loop cannot parse must read as a FAILED read, not as rc 0. `[ "$rc" -eq 0 ]` on a
+    # non-numeric value is a bash error on stderr and a false branch, which happens to fail closed —
+    # but "happens to" is not a property to rest a delete authorisation on. Made explicit instead.
+    case "$rc" in ''|*[!0-9]*) rc=1;; esac
+    case "$n"  in ''|*[!0-9]*) n="?";; esac
+    # The teardown's own record. Authoritative on its own: it was taken at the only honest moment, when
+    # our operators' CSVs were still on the cluster and could still be told apart from everyone else's.
+    case "$shared_rec" in
+      *" ${crd} "*) why="the teardown recorded it as shared and withheld it from crds_created";;
+    esac
+    # ── test [A]: an ORIGINAL CSV outside this install declares it owned ──────
+    if [ "$CRD_OWNERS_RC" -eq 0 ] && [ "$INSTALL_CSVS_OK" = "true" ]; then
+      owners="$(crd_foreign_owners "$crd" | tr '\n' ' ')"
+    fi
+    if [ -n "$owners" ]; then
+      [ -n "$why" ] && why="${why}; "
+      why="${why}$(printf '%s' "$owners" | wc -w | tr -d ' ') CSV(s) outside this install declare it owned"
+      detail="${detail}${detail:+ + }${owners% }"
+    fi
+    # ── test [B]: a live instance outside any namespace we can be shown to own ─
+    if [ "$rc" -eq 0 ]; then
+      # Word splitting is the point: these are namespace names, which carry no glob character. "-" is
+      # crd_count's marker for a CLUSTER-SCOPED instance, which is outside every namespace by defn.
+      for x in $(printf '%s' "$nss" | tr ',' ' '); do
+        [ -n "$x" ] || continue
+        if [ "$x" = "-" ]; then outside="${outside}<cluster-scoped> "; continue; fi
+        crd_ns_is_ours "$x" || outside="${outside}${x} "
+      done
+    fi
+    if [ -n "$outside" ]; then
+      [ -n "$why" ] && why="${why}; "
+      why="${why}it still has instances outside every namespace this workshop owns"
+      detail="${detail}${detail:+ + }in ${outside% }"
+    fi
+    # ── proven shared: NAMED, with the evidence, and never a delete command ───
+    if [ -n "$why" ]; then
+      found shared "crd/${crd} — ${n} instance(s) cluster-wide; SHARED with the organisation, left registered on purpose: ${why}" \
+        "oc get ${crd} -A"
+      # No apostrophe in the ${:-} default: the WORD of a ${var:-word} is quote-processed even inside a
+      # double-quoted string, so a lone ' opens a single quote and the file stops parsing (bash -n).
+      sub "evidence: ${detail:-the crds_shared record written by the teardown}"
+      sub "deleting this CRD would delete every instance of it in EVERY namespace, the org's included."
+      continue
+    fi
+    # ── could not run a test: say which one, and offer nothing ────────────────
+    # An unanswerable read looks exactly like a clean answer, and treating it as one is the fail-open
+    # that hands back the delete command this section exists to withhold.
+    if [ "$rc" -ne 0 ]; then
+      blocked="its instances could not be listed (rc ${rc} — a dead APIService does this), so it cannot be shown to have none outside our namespaces"
+    fi
+    if [ "$CRD_OWNERS_RC" -ne 0 ]; then
+      blocked="${blocked}${blocked:+; }the owned-CRD declarations could not be read, so no operator outside this install can be found owning it"
+    elif [ "$INSTALL_CSVS_OK" != "true" ]; then
+      blocked="${blocked}${blocked:+; }the Subscription list failed, so our own CSVs cannot be told from the organisation's"
+    fi
+    if [ -n "$blocked" ]; then
+      report_decide customresourcedefinitions.apiextensions.k8s.io "$crd" "" \
+        "crd/${crd} — ${n} instance(s) cluster-wide; cannot be shown to be ours alone" "$blocked"
+      continue
+    fi
     # A heuristic token match can land on a CRD belonging to an ADOPTED operator (cert-manager's own
     # CRDs match the token "cert"). Deleting one of those takes every certificate on the cluster with
-    # it, so an ambiguous name match must never carry a delete command.
+    # it, so an ambiguous name match must never carry a delete command. Kept as a belt behind the two
+    # owner/instance tests above — this one answers "the NAME also fits somebody else's operator",
+    # which is a reason to hesitate, not proof of sharing, so it stays a DECIDE and not a SHARED.
     if [ -n "$op" ] && crd_matches_adopted "$crd"; then
       report_decide customresourcedefinitions.apiextensions.k8s.io "$crd" "" \
         "crd/${crd} — ${n} instance(s) cluster-wide; name-matched to ${op}, but it ALSO matches an operator the org already had" \
@@ -1814,8 +2080,25 @@ section_crds() {
 }
 # shellcheck disable=SC2317,SC2329  # dispatched indirectly by run_parallel, not called by name
 # (SC2329 is shellcheck >=0.10, SC2317 the same finding on 0.9.x which CI installs — name both)
-crd_count() {  # "crd|op" → "crd|op|<instance count>"
-  printf '%s|%s\n' "$1" "$(oc get "${1%%|*}" -A --no-headers 2>/dev/null | grep -c .)"
+crd_count() {  # "crd|op" → "crd|op|<read rc>|<instances>|<distinct namespaces, '-' = cluster-scoped>"
+  # jsonpath, not the `--no-headers` TABLE this used to read. A table's first column is NAMESPACE for a
+  # namespaced kind and NAME for a cluster-scoped one, so a bare count was all it could honestly yield —
+  # and WHERE the instances live is the whole of test [B]. An empty {.metadata.namespace} identifies a
+  # cluster-scoped instance: it sits in no namespace at all, so no namespace of ours can account for it.
+  # Verified live 2026-08-06: this exact read returns "|version" for clusterversions (cluster-scoped)
+  # and "keycloak|keycloak" / "sso-workshop|sso-workshop" for keycloaks (namespaced).
+  #
+  # The READ STATUS is carried out of here on purpose. `oc get <a-type-the-server-does-not-serve>` exits
+  # 1 with EMPTY stdout (verified live, same session), byte-identical to "this CRD has no instances
+  # anywhere" — and reading the first as the second is the fail-OPEN that hands back the one delete
+  # command this section exists to withhold.
+  local crd="${1%%|*}" op="${1#*|}" out rc n nss
+  out="$(oc get "$crd" -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then printf '%s|%s|%s|0|?\n' "$crd" "$op" "$rc"; return 0; fi
+  n="$(printf '%s\n' "$out" | grep -c .)"
+  nss="$(printf '%s\n' "$out" | awk -F'|' '$0 != "" { print ($1 == "" ? "-" : $1) }' | sort -u | tr '\n' ',' | sed 's/,$//')"
+  printf '%s|%s|0|%s|%s\n' "$crd" "$op" "$n" "$nss"
 }
 crd_matches_adopted() {  # crd-name → 0 when an ADOPTED operator's name tokens also claim this CRD
   local crd="$1" op cands
@@ -1876,7 +2159,7 @@ self_test() {
     echo "❌ SELF-TEST: csv_index_read() let a copy's namespace through — the -l '!olm.copiedFrom' selector is missing or broken"
     rc=1
   else
-    echo "✅ self-test 1/2: csv_index_read() excludes a namespace whose only CSV is OLM's copy"
+    echo "✅ self-test 1/13: csv_index_read() excludes a namespace whose only CSV is OLM's copy"
   fi
 
   # ── proof 2: the downstream bias is actually fixed, not just the read ──────
@@ -1905,13 +2188,13 @@ self_test() {
     echo "❌ SELF-TEST: a namespace holding only a copied CSV was reported as foreign — the exact bias this fix removes"
     rc=1
   else
-    echo "✅ self-test 2/2a: a copy-only namespace is no longer misreported as foreign"
+    echo "✅ self-test 2/13a: a copy-only namespace is no longer misreported as foreign"
   fi
   if [ "$orig_rc" -ne 0 ]; then
     echo "❌ SELF-TEST: a namespace holding a genuine, unaccounted ORIGINAL CSV was NOT flagged — this is a regression in detection, not just a fix"
     rc=1
   else
-    echo "✅ self-test 2/2b: a namespace holding a genuine unaccounted CSV is still flagged"
+    echo "✅ self-test 2/13b: a namespace holding a genuine unaccounted CSV is still flagged"
   fi
 
   # ── proofs 3-7: the KNOWN_RESIDUE ledger ──────────────────────────────────
@@ -1921,7 +2204,7 @@ self_test() {
   # lesson canary G in tools/lint/_parse-guard-args.sh was rewritten for).
   local lf="${TMPDIR:-/tmp}/ogsr-selftest.$$.ledger" pr="${TMPDIR:-/tmp}/ogsr-selftest.$$.probe"
   local keep_res keep_trace keep_ws keep_dec keep_led keep_obs keep_lines keep_na keep_ledger_file
-  local d_res d_other d_led lint_bad=0 lint_ok=0 bad_line
+  local keep_shared d_res d_other d_led lint_bad=0 lint_ok=0 bad_line
   keep_ledger_file="$LEDGER_FILE"
 
   # The object under test wears TektonConfig's real marks, measured on a live cluster 2026-08-06:
@@ -1931,10 +2214,10 @@ self_test() {
 
   save_counters() { keep_res="$N_RESIDUE"; keep_trace="$N_TRACE"; keep_ws="$N_WS"; keep_dec="$N_DECIDE"
                     keep_led="$N_LEDGER"; keep_obs="$RESIDUE_OBSERVED"; keep_lines="$RESIDUE_LINES"
-                    keep_na="$RESIDUE_NA"; return 0; }
+                    keep_na="$RESIDUE_NA"; keep_shared="$N_SHARED"; return 0; }
   restore_counters() { N_RESIDUE="$keep_res"; N_TRACE="$keep_trace"; N_WS="$keep_ws"; N_DECIDE="$keep_dec"
                        N_LEDGER="$keep_led"; RESIDUE_OBSERVED="$keep_obs"; RESIDUE_LINES="$keep_lines"
-                       RESIDUE_NA="$keep_na"; return 0; }
+                       RESIDUE_NA="$keep_na"; N_SHARED="$keep_shared"; return 0; }
 
   # ── proof 3 (ratchet direction 1): a leftover the ledger does NOT name still counts ──
   # The fixture ledger is deliberately non-empty but names a DIFFERENT object: an empty one would let a
@@ -1951,7 +2234,7 @@ EOF
   d_other=$(( (N_TRACE - keep_trace) + (N_WS - keep_ws) + (N_DECIDE - keep_dec) ))
   restore_counters
   if [ "$d_res" -eq 0 ] && [ "$d_other" -eq 1 ]; then
-    echo "✅ self-test 3/7: an UNDECLARED leftover is still a finding and still counts toward the exit code"
+    echo "✅ self-test 3/13: an UNDECLARED leftover is still a finding and still counts toward the exit code"
   else
     echo "❌ SELF-TEST: an undeclared leftover contributed ${d_other} finding(s) and ${d_res} residue —"
     echo "   the ledger is swallowing objects it never declared, which is a false clean"
@@ -1975,7 +2258,7 @@ EOF
      && grep -q 'DECLARED RESIDUE' "$pr" \
      && grep -q 'if you want it gone: oc delete tektonconfig config' "$pr" \
      && ! grep -q 'remove: \|strip:  ' "$pr"; then
-    echo "✅ self-test 4/7: a DECLARED leftover is named with its remedy and adds 0 findings"
+    echo "✅ self-test 4/13: a DECLARED leftover is named with its remedy and adds 0 findings"
   else
     echo "❌ SELF-TEST: a declared leftover added ${d_other} finding(s)/${d_res} residue, or was not"
     echo "   reported with its remedy. got: $(tr '\n' ' ' < "$pr")"
@@ -1999,7 +2282,7 @@ EOF
   restore_counters
   unset -f oc
   if [ "$d_led" -eq 1 ] && grep -q 'gone.example.com' "$pr" && ! grep -q 'tektonconfig' "$pr"; then
-    echo "✅ self-test 5/7: a STALE declaration FAILED while the live one stayed quiet"
+    echo "✅ self-test 5/13: a STALE declaration FAILED while the live one stayed quiet"
   else
     echo "❌ SELF-TEST: the stale declaration contributed ${d_led} failure(s) — a KNOWN_RESIDUE entry"
     echo "   could outlive the object it describes, or a live entry is being flagged. got: $(tr '\n' ' ' < "$pr")"
@@ -2024,7 +2307,7 @@ EOF
     *) lint_ok=0;;
   esac
   if [ "$d_led" -eq 0 ] && [ "$lint_ok" -eq 1 ]; then
-    echo "✅ self-test 6/7: an entry whose object is absent is NAMED as not-applicable and fails nothing"
+    echo "✅ self-test 6/13: an entry whose object is absent is NAMED as not-applicable and fails nothing"
   else
     echo "❌ SELF-TEST: an absent object contributed ${d_led} failure(s), or was dropped silently."
     echo "   A silent drop is how a ledger rots unseen; a failure is a false alarm on a clean cluster."
@@ -2054,7 +2337,7 @@ EOF
   # 7 malformed shapes: no " :: ", a 2-field key, an upper-case kind, a namespace that is not a
   # namespace, no date, no remedy, an empty decision pointer.
   if [ "$lint_bad" -eq 7 ] && [ "$lint_ok" -eq 1 ]; then
-    echo "✅ self-test 7/7: residue_lint rejects all 7 malformed shapes and accepts a well-formed entry"
+    echo "✅ self-test 7/13: residue_lint rejects all 7 malformed shapes and accepts a well-formed entry"
   else
     echo "❌ SELF-TEST: residue_lint rejected ${lint_bad}/7 malformed entries (well-formed accepted: ${lint_ok})."
     echo "   A ledger this script cannot parse declares nothing while looking like it declares something."
@@ -2068,12 +2351,254 @@ EOF
     rc=1
   fi
 
+  # ── proofs 8-13: section [9/9] never offers a CRD the organisation depends on ──
+  # These drive the REAL section_crds — the same function the real run calls, through run_parallel and
+  # all — against a stubbed `oc` whose fixtures are copied from cluster-65prs, measured read-only
+  # 2026-08-06. TWO DANGEROUS WORLDS AND A CONTROL, because a guard that withholds everything is not
+  # discrimination, it is blindness: a one-sided "the dangerous CRD was withheld" assertion passes just
+  # as well for a guard that has suppressed the entire section, which is why proof 10 exists and why
+  # proofs 8 and 9 each assert WHICH test fired.
+  local co="${TMPDIR:-/tmp}/ogsr-selftest.$$.crds"
+  local d_ws d_shr d_dec ST_OWNERS ST_OWNERS_RC ST_INST_RC
+  # Ordered longest-name-first: `giteabackups.pfe.redhat.com` must not be answered by the pattern for
+  # `gitea.pfe.redhat.com`. keycloakrealmimports deliberately has NO branch — it falls through to the
+  # empty answer, which is the whole point of proof 8 (a shared CRD with ZERO instances anywhere).
+  # ST_INST_RC models the OTHER unanswerable read: a type the server no longer serves, which exits
+  # non-zero with EMPTY stdout — the same shape as "no instances anywhere" (proof 13).
+  crd_stub_oc() {
+    oc() {
+      case "$*" in
+        *"customresourcedefinitions.owned"*)
+          [ -n "$ST_OWNERS" ] && printf '%s\n' "$ST_OWNERS"
+          return "$ST_OWNERS_RC";;
+        *"giteabackups.pfe.redhat.com -A -o jsonpath"*)
+          [ "$ST_INST_RC" -eq 0 ] && printf 'ogsr-gitea|nightly\n'
+          return "$ST_INST_RC";;
+        *"gitea.pfe.redhat.com -A -o jsonpath"*)
+          [ "$ST_INST_RC" -eq 0 ] && printf 'team-infra|org-gitea\n'
+          return "$ST_INST_RC";;
+        *"keycloaks.k8s.keycloak.org -A -o jsonpath"*)
+          [ "$ST_INST_RC" -eq 0 ] && printf 'keycloak|keycloak\nsso-workshop|sso-workshop\n'
+          return "$ST_INST_RC";;
+      esac
+      return 0
+    }
+    return 0
+  }
+  # crds_created, crds_shared → every global section_crds reads. NS_INDEX and the CSV/Subscription rows
+  # are verbatim shapes from the live cluster: sso-workshop and ogsr-gitea carry our marks, `keycloak`
+  # and `team-infra` carry none, and rhbk-operator is recorded created in sso-workshop while the org's
+  # rhbk-operator Subscription in `keycloak` is not in our state at all.
+  crd_fixture() {
+    STATE_KV="crds_created=${1}
+crds_shared=${2}
+crds_created_capture=pre-cascade
+op_rhbk-operator=created:sso-workshop
+op_gitea-operator=created:gitea-operator"
+    CRD_INDEX="keycloaks.k8s.keycloak.org|k8s.keycloak.org
+keycloakrealmimports.k8s.keycloak.org|k8s.keycloak.org
+gitea.pfe.redhat.com|pfe.redhat.com
+giteabackups.pfe.redhat.com|pfe.redhat.com"
+    NS_INDEX="sso-workshop|Active|ogsr|keycloak-operator||||pp-keycloak-operator:/Namespace:sso-workshop/sso-workshop||
+keycloak|Active||||||||
+team-infra|Active||||||||
+ogsr-gitea|Active|ogsr|gitea||||pp-gitea:/Namespace:ogsr-gitea/ogsr-gitea||
+gitea-operator|Active|ogsr|||||pp-gitea:/Namespace:ogsr-gitea/gitea-operator||"
+    SUB_INDEX="sso-workshop|rhbk-operator|rhbk-operator.v26.6.5-opr.1|rhbk-operator.v26.6.5-opr.1|ogsr|||||||
+gitea-operator|gitea-operator|gitea-operator.v2.1.0|gitea-operator.v2.1.0|ogsr|||||||
+keycloak|rhbk-operator|rhbk-operator.v26.4.14-opr.1|rhbk-operator.v26.4.14-opr.1||||||||"
+    SUB_INDEX_RC=0
+    ADOPTED_NS=" "
+    # Every cache reset: a proof that inherited the previous proof's loaded index would be measuring
+    # the wrong run, and the fail-closed proof would silently reuse a healthy index.
+    CRD_OWNERS_INDEX=""; CRD_OWNERS_RC=1; CRD_OWNERS_LOADED="false"
+    INSTALL_CSVS=" "; INSTALL_CSVS_OK="false"; INSTALL_CSVS_LOADED="false"
+    # The STUB's answers are reset here too, not only the script's caches. Leaving them out let proof
+    # 12b inherit 12a's deliberately-broken owned-CRD read and fail for the wrong reason — the test
+    # was measuring the previous test. A fixture that resets half the world is not a fixture.
+    #
+    # Four ORIGINAL CSVs own the keycloak pair: ours in sso-workshop, OLM's dependency-resolved copy in
+    # openshift-mta, and the organisation's two in `keycloak`. Measured on the cluster, not invented.
+    ST_OWNERS="keycloak|rhbk-operator.v26.4.13-opr.1|keycloaks.k8s.keycloak.org keycloakrealmimports.k8s.keycloak.org
+keycloak|rhbk-operator.v26.4.14-opr.1|keycloaks.k8s.keycloak.org keycloakrealmimports.k8s.keycloak.org
+openshift-mta|rhbk-operator.v26.6.5-opr.1|keycloaks.k8s.keycloak.org keycloakrealmimports.k8s.keycloak.org
+sso-workshop|rhbk-operator.v26.6.5-opr.1|keycloaks.k8s.keycloak.org keycloakrealmimports.k8s.keycloak.org
+gitea-operator|gitea-operator.v2.1.0|gitea.pfe.redhat.com giteabackups.pfe.redhat.com"
+    ST_OWNERS_RC=0
+    ST_INST_RC=0
+    return 0
+  }
+
+  # ── proof 8 (dangerous world A): a FOREIGN owning CSV, and ZERO instances ──
+  # Only test [A] can catch this one — there is nothing anywhere to count — and it is the case that
+  # matters most: the org's rhbk-operator is running and will create Keycloaks the moment they use it.
+  crd_fixture "keycloakrealmimports.k8s.keycloak.org" ""
+  crd_stub_oc
+  save_counters
+  section_crds > "$co" 2>&1
+  d_ws=$((N_WS - keep_ws)); d_shr=$((N_SHARED - keep_shared))
+  restore_counters
+  unset -f oc
+  if [ "$d_ws" -eq 0 ] && [ "$d_shr" -eq 1 ] \
+     && ! grep -q 'oc delete crd' "$co" \
+     && grep -q 'CSV(s) outside this install declare it owned' "$co" \
+     && grep -q 'inspect (read-only): oc get keycloakrealmimports.k8s.keycloak.org -A' "$co"; then
+    echo "✅ self-test 8/13: a CRD a FOREIGN CSV also owns is withheld and named, even with 0 instances"
+  else
+    echo "❌ SELF-TEST: a CRD owned by an operator outside this install was offered for deletion, or was"
+    echo "   withheld without saying why. ws=${d_ws} shared=${d_shr}. got: $(tr '\n' ' ' < "$co")"
+    rc=1
+  fi
+
+  # ── proof 9 (dangerous world B): OUR operator owns it, the org has an instance ──
+  # No foreign owner exists here, so test [A] answers "no" and only test [B] can save the org's Gitea.
+  # The negative assertion is what makes this proof about [B] and not a lucky [A] hit.
+  crd_fixture "gitea.pfe.redhat.com" ""
+  crd_stub_oc
+  save_counters
+  section_crds > "$co" 2>&1
+  d_ws=$((N_WS - keep_ws)); d_shr=$((N_SHARED - keep_shared))
+  restore_counters
+  unset -f oc
+  if [ "$d_ws" -eq 0 ] && [ "$d_shr" -eq 1 ] \
+     && ! grep -q 'oc delete crd' "$co" \
+     && ! grep -q 'CSV(s) outside this install declare it owned' "$co" \
+     && grep -q 'instances outside every namespace this workshop owns' "$co" \
+     && grep -q 'team-infra' "$co"; then
+    echo "✅ self-test 9/13: a CRD with a live instance outside our namespaces is withheld and named"
+  else
+    echo "❌ SELF-TEST: a CRD the org still has an instance of was offered for deletion, or the reason"
+    echo "   given was the owner test rather than the instance test. ws=${d_ws} shared=${d_shr}."
+    echo "   got: $(tr '\n' ' ' < "$co")"
+    rc=1
+  fi
+
+  # ── proof 10 (THE CONTROL): genuinely ours alone — it MUST still be offered ──
+  # Owned by our CSV and no other, its only instance in ogsr-gitea. If this one stops being offered the
+  # guard has stopped discriminating, and every proof above would still pass.
+  crd_fixture "giteabackups.pfe.redhat.com" ""
+  crd_stub_oc
+  save_counters
+  section_crds > "$co" 2>&1
+  d_ws=$((N_WS - keep_ws)); d_shr=$((N_SHARED - keep_shared))
+  restore_counters
+  unset -f oc
+  if [ "$d_ws" -eq 1 ] && [ "$d_shr" -eq 0 ] \
+     && grep -q 'oc delete crd giteabackups.pfe.redhat.com' "$co"; then
+    echo "✅ self-test 10/13: a CRD that IS ours alone is still offered for deletion (the control)"
+  else
+    echo "❌ SELF-TEST: a CRD owned only by us, with no instance outside our namespaces, was NOT offered."
+    echo "   The guard is suppressing everything, which is blindness, not discrimination."
+    echo "   ws=${d_ws} shared=${d_shr}. got: $(tr '\n' ' ' < "$co")"
+    rc=1
+  fi
+
+  # ── proof 11: crds_shared is READ, and reported rather than merely absent ──
+  # The teardown withholds these from crds_created, so nothing else in this section would ever mention
+  # them again. A CRD missing from the output looks exactly like a CRD nobody checked. The control CRD
+  # rides along in the same run so this cannot pass by suppressing the whole section.
+  crd_fixture "giteabackups.pfe.redhat.com" "keycloaks.k8s.keycloak.org"
+  crd_stub_oc
+  save_counters
+  section_crds > "$co" 2>&1
+  d_ws=$((N_WS - keep_ws)); d_shr=$((N_SHARED - keep_shared))
+  restore_counters
+  unset -f oc
+  if [ "$d_ws" -eq 1 ] && [ "$d_shr" -eq 1 ] \
+     && grep -q 'the teardown recorded it as shared' "$co" \
+     && grep -q 'inspect (read-only): oc get keycloaks.k8s.keycloak.org -A' "$co" \
+     && ! grep -q 'oc delete crd keycloaks.k8s.keycloak.org' "$co" \
+     && grep -q 'oc delete crd giteabackups.pfe.redhat.com' "$co"; then
+    echo "✅ self-test 11/13: a CRD recorded in crds_shared is NAMED with its reason and inspect command"
+  else
+    echo "❌ SELF-TEST: the crds_shared state key was not reported as its own category (or the control"
+    echo "   stopped being offered alongside it). ws=${d_ws} shared=${d_shr}. got: $(tr '\n' ' ' < "$co")"
+    rc=1
+  fi
+
+  # ── proof 12 (FAIL CLOSED): test [A] rests on TWO reads — break each in turn ──
+  # Every one of them comes back EMPTY when it fails, byte-identical to the answer that CLEARS a CRD
+  # for deletion, so each needs its own canary. Both sub-proofs run against the CONTROL — the one CRD
+  # that IS offered when every read works — so they measure the read status and nothing else.
+  #
+  # 12a: the owned-CRD declarations. rc 1 with empty stdout reads as "no CSV owns anything".
+  crd_fixture "giteabackups.pfe.redhat.com" ""
+  ST_OWNERS=""; ST_OWNERS_RC=1
+  crd_stub_oc
+  save_counters
+  section_crds > "$co" 2>&1
+  d_ws=$((N_WS - keep_ws)); d_dec=$((N_DECIDE - keep_dec))
+  restore_counters
+  unset -f oc
+  if [ "$d_ws" -eq 0 ] && [ "$d_dec" -eq 1 ] \
+     && ! grep -q 'oc delete crd' "$co" \
+     && grep -q 'owned-CRD declarations could not be read' "$co"; then
+    echo "✅ self-test 12/13a: a failed owned-CRD read offers NOTHING and says which test could not run"
+  else
+    echo "❌ SELF-TEST: with the owned-CRD read failing, section [9/9] still offered a delete command."
+    echo "   An unanswerable read was treated as an all-clear. ws=${d_ws} decide=${d_dec}."
+    echo "   got: $(tr '\n' ' ' < "$co")"
+    rc=1
+  fi
+
+  # 12b: the Subscription list. Without it no CSV can be attributed to this install, so OUR OWN CSV
+  # reads as foreign — which withholds everything for a reason that is not true. The honest answer is
+  # to say the attribution failed, and that is what this asserts: no delete, and the reason names the
+  # Subscription list rather than inventing a foreign owner.
+  crd_fixture "giteabackups.pfe.redhat.com" ""
+  SUB_INDEX_RC=1
+  crd_stub_oc
+  save_counters
+  section_crds > "$co" 2>&1
+  d_ws=$((N_WS - keep_ws)); d_dec=$((N_DECIDE - keep_dec))
+  restore_counters
+  unset -f oc
+  SUB_INDEX_RC=0
+  if [ "$d_ws" -eq 0 ] && [ "$d_dec" -eq 1 ] \
+     && ! grep -q 'oc delete crd' "$co" \
+     && grep -q 'Subscription list failed' "$co" \
+     && ! grep -q 'CSV(s) outside this install declare it owned' "$co"; then
+    echo "✅ self-test 12/13b: an untrustworthy Subscription list offers NOTHING and blames the right read"
+  else
+    echo "❌ SELF-TEST: with the Subscription list failing, section [9/9] offered a delete command, or"
+    echo "   claimed a foreign owner it could not actually have identified. ws=${d_ws} decide=${d_dec}."
+    echo "   got: $(tr '\n' ' ' < "$co")"
+    rc=1
+  fi
+
+  # ── proof 13 (FAIL CLOSED, the OTHER read): the instance list fails ───────
+  # A dead APIService makes `oc get <crd> -A` exit non-zero with empty stdout, which reads as "no
+  # instances anywhere" — and that is the answer that CLEARS a CRD for deletion under test [B]. Added
+  # after a mutation run showed proofs 8-12 all still green with crd_count's `rc=$?` hard-coded to 0:
+  # the owned-CRD read had a canary and this one did not, so the fail-open it guards was untested.
+  crd_fixture "giteabackups.pfe.redhat.com" ""
+  ST_INST_RC=1
+  crd_stub_oc
+  save_counters
+  section_crds > "$co" 2>&1
+  d_ws=$((N_WS - keep_ws)); d_dec=$((N_DECIDE - keep_dec))
+  restore_counters
+  unset -f oc
+  ST_INST_RC=0
+  if [ "$d_ws" -eq 0 ] && [ "$d_dec" -eq 1 ] \
+     && ! grep -q 'oc delete crd' "$co" \
+     && grep -q 'instances could not be listed' "$co"; then
+    echo "✅ self-test 13/13: a failed instance list offers NOTHING and names that read as the reason"
+  else
+    echo "❌ SELF-TEST: with the instance list failing, section [9/9] still offered a delete command."
+    echo "   'the read failed' was read as 'nothing is using it'. ws=${d_ws} decide=${d_dec}."
+    echo "   got: $(tr '\n' ' ' < "$co")"
+    rc=1
+  fi
+  rm -f "$co"
+
   LEDGER_FILE="$keep_ledger_file"
   rm -f "$lf" "$pr"
 
   if [ "$rc" -eq 0 ]; then
-    echo "self-test ok — copy excluded from CSV_INDEX, a real foreign CSV still caught, and the"
-    echo "KNOWN_RESIDUE ratchet holds in both directions with malformed entries refused"
+    echo "self-test ok — copy excluded from CSV_INDEX, a real foreign CSV still caught, the"
+    echo "KNOWN_RESIDUE ratchet holds in both directions with malformed entries refused, and section"
+    echo "[9/9] withheld both shared CRDs while still offering the one that is genuinely ours alone"
     return 1
   fi
   return 2
@@ -2163,18 +2688,25 @@ printf '   %-42s %s\n' "workshop leftovers (ours: delete)"   "$N_WS"
 printf '   %-42s %s\n' "our marks on the org's resources"    "$N_TRACE"
 printf '   %-42s %s\n' "needs a human decision"              "$N_DECIDE"
 printf '   %-42s %s\n' "declared residue (expected, kept)"   "$N_RESIDUE"
+printf '   %-42s %s\n' "shared CRDs (the org's too, kept)"   "$N_SHARED"
 printf '   %-42s %s\n' "stale ledger declarations"           "$N_LEDGER"
 [ -n "$DISCOVERY_NOTE" ] && echo "   (partial scan: ${DISCOVERY_NOTE%; })"
 echo
-# Declared residue is the ONE row above that does not enter this sum — that is the whole point of the
-# ledger. A stale declaration does, because a ledger that cannot rot is the price of that exemption.
+# Declared residue and shared CRDs are the TWO rows above that do not enter this sum — that is the whole
+# point of both. A stale declaration does, because a ledger that cannot rot is the price of the first
+# exemption; a shared CRD needs no such ratchet because it is re-derived from the cluster every run.
 if [ "$((N_ADOPTED + N_HEALTH + N_WS + N_TRACE + N_DECIDE + N_LEDGER))" -eq 0 ]; then
-  if [ "$N_RESIDUE" -gt 0 ]; then
-    # Deliberately NOT "nothing from this workshop remains": ${N_RESIDUE} object(s) listed above are
-    # still on the cluster. A green line that claims otherwise is the false all-clear this whole script
-    # exists to prevent, and it would be a lie told by the very mechanism that suppressed the finding.
-    echo "✅ no UNEXPECTED leftover — no namespace is wedged, and the only thing this workshop left is"
-    echo "   the ${N_RESIDUE} declared residue item(s) listed above, which remain ON THE CLUSTER by owner decision."
+  if [ "$N_RESIDUE" -gt 0 ] || [ "$N_SHARED" -gt 0 ]; then
+    # Deliberately NOT "nothing from this workshop remains": the object(s) listed above are still on the
+    # cluster. A green line that claims otherwise is the false all-clear this whole script exists to
+    # prevent, and it would be a lie told by the very mechanism that suppressed the finding.
+    echo "✅ no UNEXPECTED leftover — no namespace is wedged, and everything still here was left on purpose:"
+    if [ "$N_RESIDUE" -gt 0 ]; then
+      echo "   ${N_RESIDUE} declared residue item(s), which remain ON THE CLUSTER by owner decision."
+    fi
+    if [ "$N_SHARED" -gt 0 ]; then
+      echo "   ${N_SHARED} CRD(s) still REGISTERED because the organisation depends on them — see section [9/9]."
+    fi
   else
     echo "✅ clean — nothing from this workshop remains and no namespace is wedged."
   fi
@@ -2190,6 +2722,12 @@ if [ "$N_TRACE" -gt 0 ]; then
   echo "⚠️  ${N_TRACE} finding(s) are OUR MARK on a resource the org owns. Each is printed with a"
   echo "   'strip:' command that removes the label or annotation and leaves the object alone."
   echo "   Do NOT delete these objects — they were here before the workshop and must outlive it."
+fi
+if [ "$N_SHARED" -gt 0 ]; then
+  echo "ℹ️  ${N_SHARED} CRD(s) are SHARED with the organisation and were left registered on purpose. They"
+  echo "   are named in section [9/9] with the evidence and a read-only 'oc get <crd> -A'. No delete"
+  echo "   command is printed for them on any cluster: a CRD is cluster-scoped, so removing one deletes"
+  echo "   every instance of it in every namespace — including the org's, in namespaces we never touched."
 fi
 if [ "$N_LEDGER" -gt 0 ]; then
   echo "❌ ${N_LEDGER} KNOWN_RESIDUE entry(ies) no longer describe anything this scan reports, while the"
