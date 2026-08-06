@@ -163,6 +163,10 @@ STATE_DUMP=""         # set in step 10; the EXIT summary references it, so it mu
 # unset variable fatal — the summary must survive an early death at any point after the trap is set.
 RESIDUE_KEYS=""       # "<state-key>\n"… — see § the residue ledger
 RESIDUE_NOTES=""      # "<key>: <reason>\n"…
+# The other thing this teardown deliberately declines to do, declared here for the same reason: built in
+# step 10 by classify_shared_crds(), read by print_run_summary() from the EXIT trap, and `set -u` makes
+# an unset variable fatal there. "<crd>|<why>|<detail>" per line — see § the shared-CRD guard.
+CRDS_SHARED=""
 
 sub() {  # <fn> [args…] — one action inside a step: report a non-zero return, run the rest anyway
   local rc=0
@@ -242,6 +246,15 @@ print_run_summary() {  # <shell exit status> — the ONE place that says what ha
       echo "      ↳ ${_line}"
     done
     echo "   Apply those restores, then: oc delete namespace ${STATE_NS}"
+  fi
+  # Same honesty rule, for the other thing this teardown deliberately does not do. A CRD left registered
+  # on purpose has to appear in the verdict an SA actually reads, not only in the step output 200 lines
+  # up — otherwise "complete" reads as "the CRD registry is back the way it was", which it is not.
+  if [[ -n "$CRDS_SHARED" ]]; then
+    echo
+    warn "$(printf '%s' "$CRDS_SHARED" | grep -c . || true) CRD(s) are SHARED with the organisation and were left registered on purpose."
+    warn "   They are named above with their reason. They are withheld from crds_created, so"
+    warn "   ogsr-check-clean.sh will not offer to delete them — deleting one takes the org's instances too."
   fi
   echo
   echo "   NEXT — check what outlived the teardown (read-only, deletes nothing):"
@@ -769,6 +782,299 @@ record_created_crds() {  # csv ns — remember every CRD that CSV's spec says it
     case "$CRDS_CREATED_SET" in *" ${crd} "*) continue;; esac
     CRDS_CREATED_SET="${CRDS_CREATED_SET}${crd} "
   done
+  return 0
+}
+
+# ── the shared-CRD guard: OUR OPERATOR OWNING A CRD DOES NOT MAKE THE CRD OURS ─
+# `crds_created` is not a passive record. ogsr-check-clean.sh section [9/9] prints
+#   oc delete crd <name>   # this deletes all N instance(s) of it, everywhere
+# beside every entry of it, in its highest-confidence "exact" mode — and in that mode it prints the line
+# WITHOUT consulting crd_matches_adopted(), because that guard is behind `[ -n "$op" ]` and the exact
+# branch never sets an operator name. So this list is a delete authorisation, and it is the most
+# destructive one in this toolchain: a CRD is a CLUSTER-SCOPED registration shared by every namespace on
+# the cluster, so deleting it deletes every instance of that kind, in every namespace, ours and the
+# org's alike, and nothing puts them back.
+#
+# OLM's "owned" means "this operator reconciles this kind", NOT "this operator brought this kind onto
+# the cluster". MEASURED on cluster-65prs 2026-08-06, read-only:
+#   keycloaks.k8s.keycloak.org is declared in .spec.customresourcedefinitions.owned by FOUR original
+#   CSVs — sso-workshop/rhbk-operator.v26.6.5-opr.1 (ours), openshift-mta/rhbk-operator.v26.6.5-opr.1
+#   (OLM resolved it as an MTA dependency), keycloak/rhbk-operator.v26.4.13-opr.1 and .v26.4.14-opr.1
+#   (the organisation's own Keycloak). Its live instances are sso-workshop/sso-workshop (ours) and
+#   keycloak/keycloak (theirs). The CRD's own labels agree: operators.coreos.com/rhbk-operator.keycloak,
+#   .openshift-mta and .sso-workshop, three OLM owners on one cluster-scoped object.
+# Our capture files that CRD as ours — correctly, by its own rule: our operator does own it. Handing the
+# name to `oc delete crd` would take the org's Keycloak with ours.
+#
+# THE RULE, and it is deliberately two independent tests joined by OR, because they fail differently:
+#   [A] a FOREIGN OWNING CSV — any original CSV outside this install declares the same CRD owned. Proves
+#       the CRD belongs to somebody else's operator EVEN WHEN IT CURRENTLY HAS ZERO INSTANCES: their
+#       operator is still running and will create instances the moment they use it.
+#   [B] a LIVE INSTANCE OUTSIDE THE NAMESPACES THIS TEARDOWN REMOVES — proves live dependence right now,
+#       even when we are the only operator that has ever owned the kind (the org can create a Pipeline
+#       or a Certificate in their own namespace using an operator we installed).
+# Either one withholds the CRD. Nothing here deletes anything, and nothing here suppresses a report:
+# a withheld CRD is NAMED, with its reason and with the read-only command to inspect it, and its name is
+# written to the state dump under `crds_shared` so it cannot vanish between this run and the checker.
+#
+# WHY NOT JUST DROP THEM QUIETLY — because a teardown that silently narrows its own report is the
+# 2026-07-31 defect wearing a different hat (17 CRDs of 165, presented as the complete answer). The
+# withheld set is a category with a name, printed on every run, counted, and repeated in the closing
+# summary beside the residue ledger.
+#
+# WHAT THIS DOES NOT TOUCH: CRDS_CREATED_SET itself, and therefore step 2. That set drives
+# cluster_scoped_created_crds(), whose deletes are per-INSTANCE and already guarded object-by-object
+# (Prune=false/Delete=false, then Argo tracking). Narrowing it here would silently stop step 2 removing
+# our own orphan-prone operands; the authorisation this section filters is the CRD-level one, which is
+# the only place a single command can reach the org's data.
+CRDS_SHARED_BUILT="false"
+CRDS_CLASSIFIED="false"  # completion proof — a HALF-finished classification must never be written out
+CRDS_MINE=" "            # space-padded " crd … " that passed BOTH tests: what `crds_created` may carry
+CRD_META_INDEX=""
+CRD_META_INDEX_LOADED="false"
+# 25 CRDs per read, not one read per CRD: 218 candidates on a full install (measured, same cluster) at
+# ~1.9s each is seven minutes bolted onto the end of every teardown; at 25 per read it is nine calls.
+CRD_SCAN_CHUNK=25
+CRD_SCAN_JP='{range .items[*]}{.apiVersion}{"|"}{.kind}{"|"}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}'
+
+crd_meta_index() {  # → "<group>|<kind>|<crd>" for every registered CRD (cached, one call)
+  # Exists to attribute an item in a merged multi-type list back to the CRD it came from: `oc get a,b,c`
+  # returns ONE list whose items each carry their own apiVersion+kind (verified live 2026-08-06), and
+  # group+kind is unique across CRDs — the API server refuses to register two with the same pair.
+  if [[ "$CRD_META_INDEX_LOADED" != "true" ]]; then
+    CRD_META_INDEX="$(oc get customresourcedefinitions.apiextensions.k8s.io \
+      -o jsonpath='{range .items[*]}{.spec.group}{"|"}{.spec.names.kind}{"|"}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+    CRD_META_INDEX_LOADED="true"
+  fi
+  printf '%s\n' "$CRD_META_INDEX"
+  return 0
+}
+
+# PREDICATE — its non-zero IS the answer, so no trailing `return 0`. Test [A].
+crd_foreign_owners() {  # <crd> → "<ns>/<csv>" per foreign owner; rc 0 when at least one exists
+  # ZERO cluster reads: crd_owned_index() is already cached from the pre-cascade moment, which is also
+  # the only honest instant to ask this — after the cascade OUR CSV is gone and every surviving owner
+  # would look foreign. CRDS_CAPTURED_CSVS is the exact set of CSVs this run read owned-CRDs from, and
+  # every call site of record_created_crds sits behind csv_delete_authorized_by_state, so "not in that
+  # set" is precisely "not an operator the state records as created by us, in that namespace".
+  # An orphaned OLDER CSV of our own operator, left in our own namespace by an upgrade, reads as foreign
+  # here. That withholds one CRD we could have offered — the safe direction, and section [3/9] of the
+  # checker reports that orphan separately anyway.
+  local crd="$1" ns csv owned hit=1
+  while IFS='|' read -r ns csv owned; do
+    [[ -n "$ns" && -n "$csv" ]] || continue
+    case " $owned " in *" ${crd} "*) ;; *) continue;; esac
+    case "$CRDS_CAPTURED_CSVS" in *" ${ns}/${csv} "*) continue;; esac
+    printf '%s/%s\n' "$ns" "$csv"
+    hit=0
+  done < <(crd_owned_index)
+  return "$hit"
+}
+
+removed_namespace_set() {  # → " ns … " — exactly the namespaces THIS run deleted, or would in --dry-run
+  # DELETED_WS_NS is the record of issued deletes (delete_workshop_namespaces appends before del_ns_fast
+  # decides whether to act, so a --dry-run preview is faithful), plus STATE_NS, which goes at the very
+  # end of step 10. Deliberately NOT widened with created_operator_namespaces: that set contains
+  # openshift-operators, a namespace three of our operators live in and this teardown never removes —
+  # treating it as "ours" would mask exactly the org instance test [B] exists to find.
+  local ns out=" "
+  if [[ "${#DELETED_WS_NS[@]}" -gt 0 ]]; then
+    for ns in "${DELETED_WS_NS[@]}"; do
+      case "$out" in *" ${ns} "*) continue;; esac
+      out="${out}${ns} "
+    done
+  fi
+  case "$out" in *" ${STATE_NS} "*) ;; *) out="${out}${STATE_NS} ";; esac
+  printf '%s' "$out"
+  return 0
+}
+
+crd_scan_emit() {  # <jsonpath output> → "<crd>|<ns>|<name>" per instance (ns empty ⇒ cluster-scoped)
+  # NR==FNR two-stream awk rather than `-v meta=…`: awk processes escapes in a -v value, and the map is
+  # multi-line. crd_meta_index runs in a process substitution, i.e. a SUBSHELL, so its cache assignment
+  # would be discarded — classify_shared_crds primes it in the parent first and the subshell inherits
+  # the loaded value, the same reason capture_installed_csvs primes csv_index before the cascade.
+  awk -F'|' '
+    NR==FNR { if ($3 != "") M[$1 "|" $2] = $3; next }
+    { sub(/\/.*/, "", $1); k = $1 "|" $2; if ($4 != "" && (k in M)) print M[k] "|" $3 "|" $4 }
+  ' <(crd_meta_index) <(printf '%s\n' "$1")
+  return 0
+}
+
+crd_scan_chunk() {  # <crd…> → crd_scan_emit's shape, plus "<crd>|?|-" for a CRD that could not be read
+  # A chunk read is ALL-OR-NOTHING: `oc get a,b,c` fails the WHOLE command when any one type is not
+  # served — "error: the server doesn't have a resource type", rc 1, no output on stdout (verified live
+  # 2026-08-06). Silence from a failed read is indistinguishable from "no instances anywhere", and
+  # reading it as the latter is the fail-OPEN that hands back the delete command this guard exists to
+  # withhold. So a failed chunk is retried CRD by CRD — one dead APIService must not taint 24 healthy
+  # types — and a CRD whose own read fails is marked unreadable and withheld on that basis.
+  local joined out rc=0 crd
+  joined="$(printf '%s,' "$@")"
+  joined="${joined%,}"
+  out="$(oc get "$joined" -A -o jsonpath="$CRD_SCAN_JP" 2>/dev/null)" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    crd_scan_emit "$out"
+    return 0
+  fi
+  if [[ "$#" -eq 1 ]]; then
+    printf '%s|?|-\n' "$1"
+    return 0
+  fi
+  for crd in "$@"; do
+    crd_scan_chunk "$crd"
+  done
+  return 0
+}
+
+crd_instance_scan() {  # <crd…> → every instance of every candidate, chunked
+  local -a chunk=()
+  local crd
+  for crd in "$@"; do
+    chunk+=("$crd")
+    if [[ "${#chunk[@]}" -ge "$CRD_SCAN_CHUNK" ]]; then
+      crd_scan_chunk "${chunk[@]}"
+      chunk=()
+    fi
+  done
+  if [[ "${#chunk[@]}" -gt 0 ]]; then crd_scan_chunk "${chunk[@]}"; fi
+  return 0
+}
+
+classify_shared_crds() {  # split CRDS_CREATED_SET into CRDS_MINE (deletable) and CRDS_SHARED (withheld)
+  local -a cand=()
+  local crd removed scan outside owners n_out n_unread why detail meta
+  if [[ "$CRDS_SHARED_BUILT" == "true" ]]; then return 0; fi
+  CRDS_SHARED_BUILT="true"
+  if [[ "$CRDS_CREATED_SET" == " " ]]; then
+    # Nothing was captured, so there is nothing to authorise and nothing to withhold. Classified is
+    # still TRUE: an empty split of an empty set is complete, and the snapshot below must not treat it
+    # as a half-run.
+    CRDS_CLASSIFIED="true"
+    return 0
+  fi
+  # Word splitting is the point — CRDS_CREATED_SET is a space-separated set and a CRD name is
+  # DNS-subdomain-shaped, so it carries no glob character.
+  for crd in $CRDS_CREATED_SET; do cand+=("$crd"); done
+  removed="$(removed_namespace_set)"
+
+  # ── the three inputs, each checked, because EVERY one of them fails OPEN if it comes back empty ────
+  # This function runs with `set -e` suppressed for its whole dynamic extent — its only call site is
+  # `sub classify_shared_crds`, and sub() runs it as `"$@" || rc=$?`, i.e. a TESTED command. So a failed
+  # read does NOT abort anything here; it just yields an empty string and execution walks on. MEASURED
+  # against this file's own code 2026-08-06: with the instance scan stubbed to fail, the loop below
+  # found no outside instances, withheld nothing, set CRDS_CLASSIFIED=true and printed "no CRD of ours
+  # is shared with the organisation — all 4 are safe to offer". A confident all-clear derived from a
+  # read that never happened is precisely the failure this section exists to make impossible, so each
+  # input is proven non-empty and an unprovable one ends the classification INCOMPLETE instead.
+  #
+  # crd_owned_index empty ⇒ test [A] is blind: no CSV can be found owning anything, so no CRD ever has a
+  # foreign owner. It cannot legitimately be empty here — CRDS_CREATED_SET is non-empty, which means at
+  # least one CSV was read — so empty means the read failed.
+  # `fn >/dev/null`, never `$(fn)`: a command substitution runs in a SUBSHELL, so the cache these two
+  # fill would be discarded and every later caller — crd_foreign_owners once per candidate,
+  # crd_scan_emit once per chunk, both from subshells of their own — would re-read the cluster. The
+  # redirection form runs in THIS shell, so the globals below are the ones the whole pass then reuses.
+  crd_owned_index >/dev/null
+  if [[ -z "$CRD_OWNED_INDEX" ]]; then
+    err "the CSV owned-CRD index is empty while ${#cand[@]} CRD(s) are recorded as ours — that read failed."
+    err "   Without it no CRD can be shown to have an owner outside this install, so every one of them"
+    err "   would look exclusively ours. Refusing to classify."
+    return 1
+  fi
+  # crd_meta_index empty ⇒ test [B] is blind: crd_scan_emit maps an instance back to its CRD through
+  # this index, so an empty map discards every instance and each CRD reads as instance-free.
+  crd_meta_index >/dev/null
+  meta="$CRD_META_INDEX"
+  if [[ -z "$meta" ]]; then
+    err "could not read the CRD registry, so no instance can be attributed back to the CRD it came from."
+    err "   Every candidate would read as having no instances anywhere. Refusing to classify."
+    return 1
+  fi
+  scan="$(crd_instance_scan "${cand[@]}")" || {
+    err "the instance scan failed outright — nothing can be said about which CRDs still have instances"
+    err "   outside the namespaces this teardown removed. Refusing to classify."
+    return 1
+  }
+  # Reduce once, in awk, to "<crd>|<where>". An empty namespace is a CLUSTER-SCOPED instance: it sits in
+  # no namespace at all, so no namespace deletion can take it, which makes it outside every namespace
+  # this teardown removes by definition. UNREADABLE is kept as its own marker rather than folded in with
+  # the instances — "1 live instance(s) outside" printed about a CRD nobody could list is a sentence
+  # that is simply not true, and a reason an admin cannot trust is worse than no reason.
+  outside="$(printf '%s\n' "$scan" | awk -F'|' -v rm="$removed" '
+    $1 == "" { next }
+    $2 == "?" { print $1 "|!unreadable"; next }
+    $2 == ""  { print $1 "|cluster-scoped/" $3; next }
+    index(rm, " " $2 " ") == 0 { print $1 "|" $2 "/" $3 }
+  ' || true)"
+  for crd in "${cand[@]}"; do
+    owners="$(crd_foreign_owners "$crd" | tr '\n' ' ' || true)"
+    n_out="$(printf '%s\n' "$outside" | awk -F'|' -v c="$crd" '$1 == c && $2 != "!unreadable"' | grep -c . || true)"
+    n_unread="$(printf '%s\n' "$outside" | awk -F'|' -v c="$crd" '$1 == c && $2 == "!unreadable"' | grep -c . || true)"
+    why=""
+    detail=""
+    if [[ -n "$owners" ]]; then
+      why="owned by $(printf '%s' "$owners" | wc -w | tr -d ' ') CSV(s) outside this install"
+      detail="${owners% }"
+    fi
+    if [[ "$n_out" -gt 0 ]]; then
+      # awk 'NR<=4', never `head -4`: head exits early, awk takes SIGPIPE, and under `pipefail` the
+      # substitution returns 141 — the same trap ogsr-check-clean.sh documents twice.
+      if [[ -n "$why" ]]; then why="${why}; "; fi
+      why="${why}${n_out} live instance(s) outside the namespaces this teardown removes"
+      if [[ -n "$detail" ]]; then detail="${detail} + "; fi
+      detail="${detail}$(printf '%s\n' "$outside" | awk -F'|' -v c="$crd" '$1 == c && $2 != "!unreadable" {print $2}' | awk 'NR<=4' | tr '\n' ' ' || true)"
+    fi
+    if [[ "$n_unread" -gt 0 ]]; then
+      # Withheld for NOT KNOWING, and it says so. The alternative is to treat an unanswerable read as
+      # "no instances anywhere" and hand back the delete command, which is the one outcome this whole
+      # section exists to make impossible.
+      if [[ -n "$why" ]]; then why="${why}; "; fi
+      why="${why}its instances could not be listed, so it cannot be shown to be ours alone"
+      if [[ -n "$detail" ]]; then detail="${detail} + "; fi
+      detail="${detail}read failed (a dead APIService does this) — check by hand"
+    fi
+    if [[ -n "$why" ]]; then
+      CRDS_SHARED="${CRDS_SHARED}${crd}|${why}|${detail% }"$'\n'
+      continue
+    fi
+    CRDS_MINE="${CRDS_MINE}${crd} "
+  done
+  # Set LAST and only here: a classification that died partway would otherwise write a silently
+  # shortened crds_created, which is the 2026-07-31 defect exactly (a fragment presented as the whole).
+  CRDS_CLASSIFIED="true"
+  return 0
+}
+
+report_shared_crds() {  # the named category — printed every run, in --dry-run too
+  local crd why detail n
+  if [[ "$CRDS_CLASSIFIED" != "true" ]]; then
+    err "the shared-CRD classification did not finish, so this run cannot say which CRDs are safe to offer."
+    err "   crds_created is NOT being written: ogsr-check-clean.sh section [9/9] will fall back to its"
+    err "   heuristic name-match mode and tell you to verify each CRD by hand. That is the honest answer;"
+    err "   a partial list written as if it were complete is not."
+    return 0
+  fi
+  if [[ -z "$CRDS_SHARED" ]]; then
+    ok "no CRD of ours is shared with the organisation — all $(printf '%s' "$CRDS_MINE" | wc -w | tr -d ' ') are safe to offer for removal"
+    return 0
+  fi
+  n="$(printf '%s' "$CRDS_SHARED" | grep -c . || true)"
+  echo
+  echo "   SHARED CRDs — LEFT REGISTERED ON PURPOSE, and NOT offered for deletion (${n}):"
+  echo "   A CRD is cluster-scoped. Deleting one of these would delete the organisation's instances of it"
+  echo "   too, in namespaces this workshop never touched. They are withheld from crds_created, so"
+  echo "   ./bootstrap/ogsr-check-clean.sh will not print an 'oc delete crd' line for them."
+  while IFS='|' read -r crd why detail; do
+    [[ -n "$crd" ]] || continue
+    echo "      ⚠ ${crd} — ${why}"
+    if [[ -n "$detail" ]]; then echo "        namely: ${detail}"; fi
+    echo "        inspect (read-only): oc get ${crd} -A"
+  done <<< "$CRDS_SHARED"
+  if [[ "$CRDS_MINE" == " " ]]; then
+    err "   EVERY captured CRD was withheld, so crds_created will not be written at all. Section [9/9] of"
+    err "   the checker therefore falls back to its heuristic name-match mode — treat any 'oc delete crd'"
+    err "   it prints as a suggestion to verify, never as an instruction."
+  fi
   return 0
 }
 
@@ -2773,6 +3079,12 @@ step_delete_namespaces() {  # 9 — whatever the cascade did not own, then the s
   # it early is what stranded 7 Applications and wedged a namespace on 2026-07-25.
   sub del_appprojects
   sub delete_workshop_namespaces
+  # AFTER delete_workshop_namespaces, because test [B] asks which instances survive OUTSIDE the
+  # namespaces this run removes, and DELETED_WS_NS is not populated until that call has classified them.
+  # BEFORE the dump below, which is the one thing the classification exists to filter. Read-only, so it
+  # runs in --dry-run too — which is what lets the plan show the CRDs a real run would decline to offer.
+  sub classify_shared_crds
+  sub report_shared_crds
   # The state ConfigMap is about to go with its namespace, so dump it first: ogsr-check-clean.sh needs
   # it to tell an adopted operator from one we created, and a second run has no other source.
   # Only set in a REAL run: the closing guidance prints `--state-file $STATE_DUMP` when the file is
@@ -2782,8 +3094,19 @@ step_delete_namespaces() {  # 9 — whatever the cascade did not own, then the s
     # crds_created exists ONLY in this in-memory snapshot, never in the live ConfigMap install.sh wrote
     # (it is populated during THIS run — see record_created_crds) — so it has to be folded in here, the
     # one place that snapshot gets persisted, or it is lost the moment the ogsr-system namespace goes.
-    if [[ "$CRDS_CREATED_SET" != " " ]]; then
-      STATE_SNAPSHOT="${STATE_SNAPSHOT}"$'\n'"crds_created=$(printf '%s' "$CRDS_CREATED_SET" | sed -e 's/^ //' -e 's/ $//' -e 's/ /,/g')"
+    #
+    # CRDS_MINE, never CRDS_CREATED_SET: this key is a DELETE AUTHORISATION (§ the shared-CRD guard) and
+    # only the CRDs that passed both the foreign-owner and the outside-instance test may appear in it.
+    # Written ONLY on a complete classification — a half-finished split would shorten the list silently,
+    # which is the one failure mode this whole area was rebuilt to stop. Its absence is not a loss: the
+    # checker's heuristic mode says out loud that every CRD needs verifying by hand.
+    if [[ "$CRDS_CLASSIFIED" == "true" && "$CRDS_MINE" != " " ]]; then
+      STATE_SNAPSHOT="${STATE_SNAPSHOT}"$'\n'"crds_created=$(printf '%s' "$CRDS_MINE" | sed -e 's/^ //' -e 's/ $//' -e 's/ /,/g')"
+    fi
+    # The withheld half, carried so it cannot vanish between this run and whoever reads the dump. It is
+    # a statement, not an authorisation: nothing may turn this key into a delete command.
+    if [[ -n "$CRDS_SHARED" ]]; then
+      STATE_SNAPSHOT="${STATE_SNAPSHOT}"$'\n'"crds_shared=$(printf '%s\n' "$CRDS_SHARED" | awk -F'|' '$1 != "" {print $1}' | tr '\n' ',' | sed 's/,$//')"
     fi
     # WHEN the list was taken, written alongside it and never inferred from it. A list captured after
     # the cascade is a fragment (measured: 17 of 165), and a fragment presented as complete is worse
@@ -2969,6 +3292,10 @@ echo "   Operators create CRDs, APIServices and admission webhooks at runtime, s
 echo "   can own them. The checker reports those with the exact removal command for each, and exits 0"
 echo "   once nothing remains. Deciding what to remove is yours — deleting a CRD deletes every instance"
 echo "   of it cluster-wide, including any the org created."
+echo "   Which is why a CRD another operator ALSO owns, or that still has an instance outside the"
+echo "   namespaces this teardown removed, is never offered: it is listed under SHARED CRDs above and"
+echo "   carried in the state dump as crds_shared. Inspect those with 'oc get <crd> -A' and decide by"
+echo "   hand; there is no cluster on which this script will hand you a delete command for one."
 cat <<'VERIFY'
 
    Spot-check by hand if you prefer:
