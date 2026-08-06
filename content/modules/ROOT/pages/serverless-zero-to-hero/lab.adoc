@@ -80,20 +80,22 @@ oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "warm:       HTT
 [demo-block]
 [TIME 3m]
 Say:: "Now a sudden burst. Knative scales on *concurrency* — in-flight requests — and I've capped this service at three pods. Watch it climb from zero to the ceiling, then melt back down when the load stops."
-Show:: `oc get pods -w` going `0 → 2 → 3`, holding at 3, then dropping back to `0` after the load ends.
-Do:: Drive a burst from the in-cluster client and watch the autoscaler:
+Show:: `oc get pods -w` going `0 → 1 → 2 → 3`, holding at 3, then dropping back to `0` after the load ends.
+Do:: *Confirm you are at zero first* (`oc get pods -n $NS -l serving.knative.dev/service=parasol-claims` — nothing running), then drive the burst and watch the autoscaler:
 +
 [source,sh,role=execute]
 ----
 oc exec deploy/demo-client -n $NS -- sh -c '
-  end=$(( $(date +%s) + 35 ))
+  end=$(( $(date +%s) + 90 ))
   for i in $(seq 1 12); do
     ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'$URL'/api/claims"; done ) &
   done; wait' &
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
 ----
 +
-"Zero to three in about ten seconds, held at the ceiling I set, and — once the burst is over — back to zero. Pay for the burst, nothing for the quiet."
+NOTE: *Two things here will embarrass you in front of a room if you skip them.* The burst must be *90s*, not 35 — measured on this cluster, the third pod lands at *t+49s*, so a 35-second burst ends before the ceiling is ever reached and the demo simply does not happen. And you must start from *zero*: from zero the activator sees the whole burst and adds capacity at once, but a service left warm by an earlier step scales on measured average concurrency and will sit at *one pod indefinitely*. Rehearse it cold, and give it the full minute — the pause between the first pod and the next two is the demo, not dead air.
++
+"First pod almost immediately — that's the activator holding your requests until there's somewhere to put them. Then a pause, and around forty-five seconds the autoscaler has seen enough sustained concurrency to decide one isn't enough, and takes it to the ceiling I set. Once the burst is over, back to zero. Pay for the burst, nothing for the quiet."
 
 [demo-block]
 [TIME 4m]
@@ -507,13 +509,17 @@ already waiting that out, so by the time the block finishes you will have the se
 Re-run `kn revision list -n $NS` if you want to watch it flip.
 ====
 
-Now the payoff. With a hard limit of *2 requests per pod*, a burst of concurrent traffic *forces* Knative to add pods to keep up — up to your ceiling of 3. Drive a burst from the `demo-client` in the background and *watch the pods climb from zero*:
+Now the payoff. With a hard limit of *2 requests per pod*, a burst of concurrent traffic *forces* Knative to add pods to keep up — up to your ceiling of 3.
+
+IMPORTANT: *Start from zero.* Check `oc get pods -n $NS -l serving.knative.dev/service=parasol-claims` first — if any pod is still running from an earlier step, wait for it to disappear (about a minute of no traffic) before you start. This is not fussiness: scaling *from zero* routes through Knative's activator, which sees the whole burst at once and adds capacity immediately. A service that is already warm scales on *measured average concurrency* instead, and a shell loop that spawns a fresh `curl` per request spends most of its time starting processes rather than holding connections open — so a warm service can sit at *one pod for as long as you care to wait*. Measured on this cluster: from zero, 3 pods; from warm, never.
+
+Drive a burst from the `demo-client` in the background and *watch the pods climb from zero*:
 
 [source,sh,role=execute]
 ----
-# 12 parallel request loops for ~35s, in the background:
+# 12 parallel request loops for ~90s, in the background:
 oc exec deploy/demo-client -n $NS -- sh -c '
-  end=$(( $(date +%s) + 35 ))
+  end=$(( $(date +%s) + 90 ))
   for i in $(seq 1 12); do
     ( while [ $(date +%s) -lt $end ]; do curl -s -k -o /dev/null "'$URL'/api/claims"; done ) &
   done; wait' &
@@ -521,17 +527,19 @@ oc exec deploy/demo-client -n $NS -- sh -c '
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
 ----
 
-.Expected output (zero → the max-scale ceiling in about ten seconds)
+.Expected output (zero → the max-scale ceiling in about a minute)
 [source,texinfo]
 ----
 NAME                                            READY   STATUS              AGE
-parasol-claims-v2-deployment-...                0/2     Pending             1s
-parasol-claims-v2-deployment-...                2/2     Running             6s
-parasol-claims-v2-deployment-xxxxx-...          2/2     Running             8s
-parasol-claims-v2-deployment-yyyyy-...          2/2     Running             10s
+parasol-claims-v2-deployment-...                0/2     Pending             2s
+parasol-claims-v2-deployment-...                2/2     Running             10s
+parasol-claims-v2-deployment-xxxxx-...          2/2     Running             45s
+parasol-claims-v2-deployment-yyyyy-...          2/2     Running             49s
 ----
 
-You saw the replica count go *0 → 2 → 3* within about ten seconds, then hold at *3* — the `max-scale` ceiling you set, so a single bursting service can't exhaust the cluster.
+You saw the replica count go *0 → 1 → 2 → 3*, then hold at *3* — the `max-scale` ceiling you set, so a single bursting service can't exhaust the cluster.
+
+Watch the *shape*, not the stopwatch: the first pod arrives in seconds because the activator is holding your requests and needs somewhere to put them, and the next two follow around the 45-second mark once the autoscaler has measured sustained concurrency and decided one pod is not enough. Those are two different mechanisms, and the gap between them is the interesting part.
 
 // media-pass: screenshot serverless-zero-to-hero-02-topology-scaled-up.png — Topology during this
 // burst: the parasol-claims ksvc showing 3/3 pods (filled ring). Circle: the pod ring filled to the
