@@ -27,6 +27,10 @@ FAILURES=0
 ok()   { echo "  ✅ $*"; }
 bad()  { echo "  ❌ $*"; FAILURES=$((FAILURES + 1)); }
 hint() { echo "     ↳ $*"; }
+# An exemption that is REPORTED, never silent. A rule that does not apply to a resource is a fact
+# worth printing: the alternative is a quiet `continue`, and a check whose exemptions are invisible
+# cannot be reviewed. Deliberately does NOT touch FAILURES.
+note() { echo "  ➖ $*"; }
 
 for tool in kustomize yq; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -70,19 +74,32 @@ $1
   return 1
 }
 
-# Emit "<group>|<kind>|<name>|<wave>" for every rendered resource. A resource with no sync-wave
-# annotation is reported as wave 0, which is exactly how Argo CD treats it. The group is the
-# apiVersion up to the slash ("" for core/v1), split here rather than in yq so the expression stays
-# readable.
+# Emit "<group>|<kind>|<name>|<wave>|<sync-options>" for every rendered resource. A resource with no
+# sync-wave annotation is reported as wave 0, which is exactly how Argo CD treats it. The group is
+# the apiVersion up to the slash ("" for core/v1), split here rather than in yq so the expression
+# stays readable. sync-options rides along because the operand rule below is about DELETION ORDER,
+# and a resource Argo never deletes has no deletion order to get wrong.
 render() {
   kustomize build --enable-helm "$1" 2>/dev/null \
     | yq -r '[(.apiVersion // ""), (.kind // "?"), (.metadata.name // "?"),
-              (.metadata.annotations["argocd.argoproj.io/sync-wave"] // "0")] | join("|")' - \
-    | while IFS='|' read -r api kind name wave; do
+              (.metadata.annotations["argocd.argoproj.io/sync-wave"] // "0"),
+              (.metadata.annotations["argocd.argoproj.io/sync-options"] // "")] | join("|")' - \
+    | while IFS='|' read -r api kind name wave opts; do
         [[ -n "$kind" ]] || continue
         case "$api" in */*) group="${api%%/*}" ;; *) group="" ;; esac
-        echo "${group}|${kind}|${name}|${wave}"
+        echo "${group}|${kind}|${name}|${wave}|${opts}"
       done
+}
+
+# Does this resource opt OUT of Argo-driven deletion entirely? Parsed as Argo parses sync-options —
+# a comma-separated list, compared whole, so a hypothetical `Delete=falsely` cannot match.
+never_deleted_by_argo() {  # <sync-options> → 0 if Delete=false is present
+  local opt
+  IFS=',' read -ra _o <<<"$1"
+  for opt in "${_o[@]}"; do
+    [[ "${opt// /}" == "Delete=false" ]] && return 0
+  done
+  return 1
 }
 
 echo "▶ teardown invariants (namespace ${WAVE_NAMESPACE} · controller ${WAVE_CONTROLLER} · operand >= ${WAVE_OPERAND_MIN})"
@@ -113,7 +130,7 @@ for dir in "${PORTFOLIO_DIR}"/components/*/; do
   has_sub="no"
   grep -q '^operators.coreos.com|Subscription|' <<<"$rendered" && has_sub="yes"
   problems=0
-  while IFS='|' read -r group kind name wave; do
+  while IFS='|' read -r group kind name wave opts; do
     [[ -n "$kind" ]] || continue
     case "$kind" in
       Namespace)
@@ -128,6 +145,23 @@ for dir in "${PORTFOLIO_DIR}"/components/*/; do
     esac
     [[ "$has_sub" == "yes" ]] || continue
     is_infra_group "$group" && continue
+    # A resource Argo NEVER deletes has no deletion order to get wrong. This rule exists to stop an
+    # operand being pruned no later than the operator that must run its finalizer — see the hint
+    # below — and `Delete=false` removes the operand from the prune entirely, so the hazard cannot
+    # arise. Exempting it is not a loophole; applying the rule to it would be asserting an ordering
+    # for an event that never happens.
+    #
+    # The live instance is openshift-pipelines' TektonConfig/config, which the Pipelines operator
+    # creates ITSELF and our chart only patches. It carries Prune=false,Delete=false precisely
+    # because a cascade taking it would destroy the entire Tekton install on a cluster where
+    # Pipelines belongs to the organisation. Owner decision 2026-08-06: it is declared, permanent
+    # residue and ogsr-check-clean reports it as such rather than counting it a defect.
+    #
+    # This check had been RED on main for some time and no CI job ran it, so nobody knew.
+    if never_deleted_by_argo "$opts"; then
+      note "${comp}: ${kind}/${name} is wave ${wave} but carries Delete=false — Argo never prunes it, so the operand-wave rule does not apply"
+      continue
+    fi
     if [[ "$wave" -lt "$WAVE_OPERAND_MIN" ]]; then
       bad "${comp}: ${kind}/${name} (${group}) is wave ${wave}, operands must be >= ${WAVE_OPERAND_MIN}"
       hint "at wave ${wave} it is deleted no later than its operator, stranding its finalizer"
