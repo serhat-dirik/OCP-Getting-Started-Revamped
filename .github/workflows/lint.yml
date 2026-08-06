@@ -1422,6 +1422,17 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.3
+      - name: Install kustomize (pinned)
+        # Same pin as the `kustomize` job, and the same `--enable-helm` at call time: the portfolio
+        # half of this guard renders `platform-portfolio/**` with kustomize, not Helm, and one
+        # component (sonarqube) inflates an upstream chart. A missing kustomize exits 2 — the guard
+        # refuses to report clean over a render path it could not run — so this step can never
+        # degrade into a silent half-check.
+        run: |
+          curl -sfL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.0/kustomize_v5.8.0_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -1442,16 +1453,28 @@ jobs:
         # rather than passing, so a new custom-resource kind reddens this job until someone runs
         # `--capture` on a cluster. That cost is the point: a gate that goes green over something it
         # never inspected is the defect this workflow exists to catch.
+        #
+        # Scope covers BOTH render paths as of 2026-08-06: the Helm charts (entry states,
+        # workshop-config, helm/bootstrap, user-namespace) and the `platform-portfolio/**` kustomize
+        # overlays, which ship the largest hand-written operand CRs in the repo — Central,
+        # SecuredCluster, Securesign, Backstage, TempoMonolithic, CheCluster, OLSConfig, Tackle.
+        # Which overlays get rendered is DERIVED from the app-of-apps wiring (a component is
+        # rendered when a rendered stack Application points at it), and whatever that leaves out is
+        # named on stdout on every run — see the guard's docstring.
         run: |
           rc=0
           python3 tools/lint/crd-unknown-field-guard.py --self-test || rc=$?
-          # Exactly 1 = all eight planted defects caught against the REAL CRD snapshots (both
+          # Exactly 1 = all ten planted defects caught against the REAL CRD snapshots (both
           # DevWorkspace fields of 9c97d80, an unknown field inside an array item, a misspelt root
           # field, a typo inside a map VALUE, a CR nested in an OpenShift Template, a closed-object
-          # subtree, and a solve=true-only resource) AND all six legal fields beside them left
-          # unflagged — a false positive here would block authoring, so it is asserted in both
-          # directions. 0 = a detector is blind; 2 = a canary was missed, a false-positive control
-          # fired or vanished from the fixture, or the harness itself is broken.
+          # subtree, a solve=true-only resource, a CR in an always-rendered portfolio overlay, and a
+          # CR in a component reachable ONLY by following a stack Application) AND all seven legal
+          # fields beside them left unflagged — a false positive here would block authoring, so it
+          # is asserted in both directions. It also asserts the wiring rule's own cost: the overlay
+          # no stack wires up is REPORTED as outside the render set and still carries its planted
+          # defect, so the exclusion cannot rot into a green tick over an empty file. 0 = a detector
+          # is blind; 2 = a canary was missed, a false-positive control fired or vanished from the
+          # fixture, or the harness itself is broken.
           if [ "$rc" -ne 1 ]; then
             echo "::error::crd-unknown-field-guard self-test must exit 1 (every planted pruned" \
                  "field detected and every legal field left alone); got rc=$rc. Detection is" \
