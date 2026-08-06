@@ -3,7 +3,10 @@
 #   Entry: {user}-dev has the claims app + PostgreSQL (build-deliver end state, composed directly);
 #          a per-user Gitea fork of parasol-claims exists; entry marker + quota present.
 #   End:   the attendee started THE parasol-claims workspace — it lives in {user}-devspaces, which is
-#          Dev Spaces' per-user project and therefore shared with every other module's workspace.
+#          Dev Spaces' per-user project and therefore shared with every other module's workspace —
+#          AND they closed the loop: the /ping endpoint they wrote in exercise 3 is on their fork's
+#          main, pushed in exercise 5. Starting a workspace is the first six minutes; the push is the
+#          lab (audit F-06, 2026-08-06 — see the block above ping_endpoint_pushed).
 # Runnable with only oc + curl (Showroom terminal reality). See tools/verify/README.md.
 set -euo pipefail
 # shellcheck disable=SC1091  # _lib.sh is linted standalone; its path is runtime-derived
@@ -40,6 +43,68 @@ route_ready_200() {
   host="$OC_OUT"
   code="$(curl -ks -o /dev/null -w '%{http_code}' --max-time 15 "http://${host}/q/health/ready" || true)"
   [[ "$code" == "200" ]]
+}
+
+# --- did the attendee CLOSE the inner loop — i.e. PUSH the change? -----------
+# STARTING A WORKSPACE IS NOT THE LAB. This is the second half of audit F-06, and it is the half
+# `75c92ad` did not close: that commit scoped the workspace signals to parasol-claims (correctly), but
+# left the module with exactly ONE completion assertion, and that one grades exercise 1 — clicking the
+# workspace tile, ~6 minutes of a ~60-minute lab. Measured on a live dev cluster 2026-08-06, as user5 and
+# user6, both carrying a materialized ws-entry-devspaces-inner-loop and neither having run a single
+# step of the lab: `ws verify devspaces-inner-loop` printed SEVEN ✅ and exited 0. All seven are
+# `ws prep` artefacts (namespace, entry marker, quota, fork, claims-db, claims app, route); the one
+# end-state check landed on its ⚠ branch, because {user}-devspaces is Forbidden to an attendee until
+# Che adopts it at first dashboard sign-in. So completion mode graded ZERO attendee work and said
+# "7 passed". Nor does the rc-4 tripwire catch it: the seven entry passes keep PASS+FAIL above zero,
+# so VERIFY_STRICT=1 returns 3 ("a partial but legitimate pass"), never 4 ("nothing was graded").
+# That padding is why this was invisible — the module can grade none of the lab and still look busy.
+#
+# WHAT THE LAB IS ACTUALLY ABOUT is the loop closing: edit ClaimResource.java in the IDE (exercise 3),
+# watch it hot-reload, then COMMIT AND PUSH it to your own fork (exercise 5 — "the moment the inner
+# loop hands off to the outer loop that the rest of the workshop builds"). That push is the only
+# durable, attendee-authored artefact the whole module leaves behind, and it is readable with curl
+# alone, from the Showroom terminal, by every attendee — no Dev Spaces RBAC, so it grades even in the
+# ⚠ world above. Exercise 5 is also where attendees genuinely stall: the lab itself predicts the first
+# push fails on the credential wall ("fatal: could not read Username"), and an attendee stuck there
+# has done the inner loop and never handed it off.
+#
+# GRADE THE ENDPOINT DECLARATION, NOT THE STRING IT RETURNS. The suite's rule (audit F-04): assert
+# what the attendee wrote, not one specific value of it. The lab's own Challenge invites them to
+# change the body to JSON with a claim count, and the wrap-up expects that to still be the same
+# endpoint — matching the "hot reload works" literal would fail exactly the attendees who went
+# furthest. The regex therefore reads the @Path annotation and tolerates whitespace and the leading
+# slash (@Path("/ping"), @Path( "ping" )), and nothing else.
+#
+# IT CANNOT BE SATISFIED BY ANYTHING BUT THE LAB, all three checked rather than assumed:
+#   • not by the entry state — the fork is SEEDED from apps/parasol-claims, whose ClaimResource.java
+#     contains no /ping and, case-insensitively, not the substring "ping" at all (measured on the tree
+#     and against the live upstream repo, 2026-08-06: zero hits in both);
+#   • not by another module — {user}/parasol-claims IS shared (build-deliver, pipelines-fundamentals
+#     and trusted-supply-chain fork the same repo, and user5's fork carries pipelines-fundamentals'
+#     .tekton/pull-request.yaml today), but no other lab in the catalogue edits ClaimResource.java or
+#     mentions /ping (grepped across content/modules/ROOT/pages, 2026-08-06);
+#   • not by a failed read — a 404 (no fork, wrong branch) is a status code, not a body, and the
+#     HTTP_CODE gate returns before the grep ever sees Gitea's error page.
+#
+# NO ENTRY-MODE NEGATION, deliberately, and for a sharper reason than the workspace block's: the fork
+# job is skip-if-exists (templates/gitea-fork.yaml — "already exists — nothing to do"), so a pushed
+# commit SURVIVES `ws prep` and `ws reset`, which is what the lab promises attendees in as many words
+# ("your fork keeps its pushed commits"). "The fork has no /ping" is therefore NOT the negation of
+# this end state at all; asserting it in entry mode would red `ws doctor` permanently for everyone who
+# ever finished this module, and `ws prep` reads that rc as "offer to wipe their world".
+PING_SOURCE_PATH="src/main/java/com/parasol/claims/ClaimResource.java"
+
+# The attendee's own /ping endpoint is on their fork's main branch.
+# http_read, not `curl -ksf`: it gives curl oc_read's three outcomes, so a Gitea that could not be
+# reached at all is ⚠ "could not check", never a ❌ on work they may well have pushed correctly.
+ping_endpoint_pushed() {
+  gitea_host || return 1
+  http_read "https://${GITEA_HOST}/api/v1/repos/${USER_NAME}/parasol-claims/raw/${PING_SOURCE_PATH}?ref=main" \
+    --max-time 15 || return 1
+  # A 404 IS the server answering — the graded ❌ this check exists to produce — so it stays a ❌ and
+  # is not laundered into a skip. It must still never reach the grep: see the failed-read note above.
+  [[ "$HTTP_CODE" -lt 400 ]] || return 1
+  grep -Eq '@Path[[:space:]]*\([[:space:]]*"/?ping"[[:space:]]*\)' <<<"$HTTP_OUT"
 }
 
 # --- did the attendee actually START THE parasol-claims WORKSPACE? -----------
@@ -220,6 +285,13 @@ if [[ "$ENTRY_ONLY" != "true" ]]; then
     *) warn "the end state is not gradeable from here — none of the parasol-claims workspace's signals in ${WS_NS} (its DevWorkspace, and the Deployments/Pods/PVCs the controller labels with its name) is readable as this identity"
        hint "usually this just means you have not opened Dev Spaces yet: it grants you these reads in ${WS_NS} when it adopts the project at your first dashboard sign-in, which is lab exercise 1 — so nothing is wrong, this check simply has no verdict yet. If you HAVE signed in and still land here, the API could not be asked or that grant is missing: retry, then show your instructor 'oc get rolebinding -n ${WS_NS}'. Either way, the dashboard tells you directly whether your parasol-claims workspace is running" ;;
   esac
+
+  # The lab itself, as opposed to its first six minutes. This is the check that makes completion mode
+  # mean something for this module: it is answerable by EVERY attendee from the Showroom terminal,
+  # including in the ⚠ world above, so a run can no longer report seven green `ws prep` artefacts over
+  # a lab nobody touched. See the ping_endpoint_pushed block for why it grades the annotation.
+  check "your /ping endpoint is pushed to ${USER_NAME}/parasol-claims (exercises 3 + 5)" ping_endpoint_pushed \
+    || hint "not done yet if you have not reached exercise 5 — nothing is broken. Add the /ping endpoint to ${PING_SOURCE_PATH} in the IDE (exercise 3), then commit and push it to your fork's main (exercise 5): that push is the hand-off from the inner loop to the outer loop, and it is what this checks. If you DID push, confirm the commit is on main in your fork's web UI — and note the first push is expected to fail on credentials until you set them, which the lab walks you through"
 fi
 
 verify_summary
