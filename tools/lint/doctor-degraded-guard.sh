@@ -12,7 +12,7 @@
 #     had logged in THROUGH that IdP seconds earlier, and "user1-dev missing — workshop-config not
 #     synced" on the line under a green workshop-config;
 #   • then the rows were fixed and the SUMMARY was not, so the same run ended "✅ environment looks
-#     good" with six ⚠ rows above it (measured live, user3 on cluster-65prs, 2026-08-06).
+#     good" with six ⚠ rows above it (measured live, user3, 2026-08-06).
 #
 # Both are invisible to review: each produces a plausible, quiet, complete-looking report. Neither is
 # reachable from a maintainer's admin shell. So this gate records the cluster instead.
