@@ -5,7 +5,9 @@ _ws_complete() {
   local cur prev subcmds mods repo
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
-  subcmds="list prep verify smoke reset start solve git-refresh doctor passwd cohort-reset preflight status diag scale-users maas rebuild-images"
+  # Keep this list equal to main()'s dispatch in tools/ws/ws (its `ws help` header is the same set).
+  # session-refresh was dispatched and documented but absent here, so it never tab-completed.
+  subcmds="help list prep verify smoke reset start solve git-refresh session-refresh doctor passwd cohort-reset preflight status diag scale-users maas rebuild-images"
 
   # First word after `ws` → a subcommand.
   if [ "$COMP_CWORD" -eq 1 ]; then
@@ -34,6 +36,12 @@ _ws_complete() {
       ;;
     maas)
       mapfile -t COMPREPLY < <(compgen -W "show set" -- "$cur")
+      return
+      ;;
+    # session-refresh takes ONLY these two and dies on anything else, so offer just them
+    # rather than falling through to the generic flag list below.
+    session-refresh)
+      mapfile -t COMPREPLY < <(compgen -W "--all --user" -- "$cur")
       return
       ;;
   esac
