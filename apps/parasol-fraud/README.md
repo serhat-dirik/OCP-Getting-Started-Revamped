@@ -2,12 +2,12 @@
 
 A tiny Quarkus **fraud-scoring service**. It exists to be the *audience* of a token exchange in
 the **Securing Apps with Keycloak** module: `parasol-claims` exchanges the caller's user token
-for one scoped to `aud=fraud`, and this **bearer-only** service enforces that audience — so a
+for one scoped to `aud=parasol-fraud`, and this **bearer-only** service enforces that audience — so a
 correctly down-scoped token is accepted and an attempt to escalate is refused.
 
 ```
-   parasol-web ──(user token)──► parasol-claims ──(exchanged aud=fraud token)──► parasol-fraud
-                                                                                  enforces aud=fraud
+   parasol-web ──(user token)──► parasol-claims ──(exchanged aud=parasol-fraud token)──► parasol-fraud
+                                                                                          enforces aud=parasol-fraud
 ```
 
 You can read it in ten minutes: one resource class, a deterministic score, no database.
@@ -47,7 +47,7 @@ attendee, through environment variables:
 ```properties
 QUARKUS_OIDC_TENANT_ENABLED=true
 QUARKUS_OIDC_AUTH_SERVER_URL=https://sso-workshop.<domain>/realms/realm-<user>
-QUARKUS_OIDC_TOKEN_AUDIENCE=fraud        # accept ONLY tokens carrying aud=fraud
+QUARKUS_OIDC_TOKEN_AUDIENCE=parasol-fraud   # accept ONLY tokens carrying aud=parasol-fraud
 ```
 
 Two settings are already in `application.properties` so the module does not have to teach them:

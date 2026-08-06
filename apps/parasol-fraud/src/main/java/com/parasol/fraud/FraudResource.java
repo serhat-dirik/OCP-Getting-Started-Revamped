@@ -20,7 +20,8 @@ import jakarta.ws.rs.core.Response;
  * values (e.g. {@code CLM-1001} always scores 37 / low). There is no model and no
  * database — this service exists to be the <em>audience</em> of a token exchange in the
  * securing-apps-keycloak module: parasol-claims exchanges the caller's user token for a
- * token scoped to {@code aud=fraud}, and this bearer-only service enforces that audience.
+ * token scoped to {@code aud=parasol-fraud} (this service's Keycloak client id), and
+ * this bearer-only service enforces that audience.
  *
  * <p>Security: the OIDC tenant is DISABLED by default (see application.properties), so
  * every endpoint is anonymous in every other module and this class carries no security
