@@ -37,11 +37,20 @@
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + grep + awk + base64.
 #
 # --self-test proves both detectors FIRE before a clean run on the real tree is worth anything:
-# it plants a write-only `argocd_controller_memory_prior` fixture for [1], and a mutated copy of
-# the restore function whose empty-prior branch writes 2Gi back instead of removing the field for
-# [2] — the precise defect shape in each case. Exit 1 = every canary was caught AND the real tree
-# is clean under the same detectors; that is a PASS, matching the house convention where CI asserts
-# the self-test step exits exactly 1. Exit 2 = a detector is blind, or the harness itself is broken.
+# SEVEN canaries, one per declared property — both directions of [1], and all five cases of [2].
+# Exit 1 = every canary was caught AND the real tree is clean under the same detectors; that is a
+# PASS, matching the house convention where CI asserts the self-test step exits exactly 1.
+# Exit 2 = a detector is blind, or the harness itself is broken.
+#
+# EVERY CANARY IS ASSERTED ON THE SPECIFIC MESSAGE for the property it breaks, and DENIES the
+# messages it must not trip — never on the exit code alone (2026-08-06). [1]'s canary was measured
+# INERT before this: it built its tree by copying ogsr-uninstall.sh and ONE synthetic installer,
+# omitting the two real writers, so the two genuine keys the teardown reads looked unwritten and the
+# detector fired THREE errors — one for the planted write-only key and two spurious "READ but never
+# written" ones. Deleting the write-only assertion, the only one that names the 2026-07-31 defect,
+# left --self-test still reporting 1: the guard was certified by the collateral damage of a mutant
+# broken more widely than intended (a missing file), which is failure mode 1 exactly. The canary
+# tree is now the REAL tree plus one appended defect, so exactly one message can fire.
 #
 # Exit codes:
 #   0  contract holds
@@ -302,10 +311,76 @@ run_check() {  # root → 0 clean, 1 broken, 2 uninspectable
 }
 
 # ── self-test ─────────────────────────────────────────────────────────────────
-# Two canaries, each the real defect shape. Both must be CAUGHT, and the real tree must be clean
-# under the same detectors — anything else means the gate is decorative.
+# Seven canaries, each the real defect shape for one declared property. All must be CAUGHT — by the
+# assertion that NAMES that property, proven from the message — and the real tree must be clean under
+# the same detectors. Anything else means the gate is decorative.
+
+# Copies the whole inspected surface (the teardown + every writer) into <dir>, unmutated. Canaries
+# then APPEND their one defect to one file, so the detector has nothing else to complain about.
+# Building the tree from a subset instead is what made [1]'s canary inert — see the header.
+materialize_tree() {  # <dir> → 0 built, 2 a source file was missing
+  local dir="$1" f
+  for f in "$UNINSTALL" "${WRITERS[@]}"; do
+    if [[ ! -f "${REPO_ROOT}/${f}" ]]; then
+      bad "SELF-TEST FAILED: cannot build a canary tree — ${REPO_ROOT}/${f} does not exist."
+      return 2
+    fi
+    mkdir -p "${dir}/$(dirname "$f")"
+    cp "${REPO_ROOT}/${f}" "${dir}/${f}"
+  done
+  return 0
+}
+
+# Materializes $FUNC with one sed applied, and proves the sed actually changed something — a sed that
+# silently matches nothing yields the REAL function, which passes, which reads as "detector blind".
+build_canary_func() {  # <out-file> <sed-expr> → 0 built, 2 the mutation never applied
+  local out="$1" expr="$2" pristine
+  pristine="${out}.pristine"
+  extract_func "${REPO_ROOT}/${UNINSTALL}" "$FUNC" > "$pristine"
+  sed "$expr" "$pristine" > "$out"
+  if [[ ! -s "$out" ]]; then
+    bad "SELF-TEST FAILED: canary not built — ${FUNC}() extracted as empty, so there was nothing to mutate."
+    return 2
+  fi
+  if cmp -s "$pristine" "$out"; then
+    bad "SELF-TEST FAILED: canary not built — sed '${expr}' changed no line of ${FUNC}(), so the mutant IS the real function."
+    return 2
+  fi
+  return 0
+}
+
+# Proves a canary was caught BY THE NAMED ASSERTION: rc exactly 1, every <want> message present,
+# every <deny> message absent. Both lists are newline-separated fragments.
+expect_canary() {  # <label> <detector-fn> <arg> <wants> <denies> → 0 proven, 2 not
+  local label="$1" detector="$2" arg="$3" wants="$4" denies="$5" out rc=0 m
+  out="$("$detector" "$arg" 2>&1)" || rc=$?
+  if [[ "$rc" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: ${label}: ${detector} returned ${rc}; a caught canary returns exactly 1."
+    return 2
+  fi
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    if ! printf '%s\n' "$out" | grep -qF -- "$m"; then
+      bad "SELF-TEST FAILED: ${label}: ${detector} failed, but never printed '${m}'."
+      note "    It caught this canary on a DIFFERENT assertion, so the one that names this property is"
+      note "    unproven — it could be deleted and --self-test would still report 1."
+      return 2
+    fi
+  done <<< "$wants"
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    if printf '%s\n' "$out" | grep -qF -- "$m"; then
+      bad "SELF-TEST FAILED: ${label}: ${detector} also printed '${m}', a property this canary does not break."
+      note "    The mutant is broken more widely than the one mechanism it names, so it would certify"
+      note "    that neighbouring assertion without ever testing it."
+      return 2
+    fi
+  done <<< "$denies"
+  return 0
+}
+
 self_test() {
-  local tmp canary_func real_rc bad_key_rc bad_func_rc
+  local tmp real_rc f
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
@@ -318,40 +393,140 @@ self_test() {
     return 2
   fi
 
-  # Canary A — the 2026-07-31 defect: an installer records a restore key nobody reads.
-  mkdir -p "$tmp/bootstrap" "$tmp/platform-portfolio/argocd-bootstrap" "$tmp/helm/bootstrap/templates"
-  cp "${REPO_ROOT}/${UNINSTALL}" "$tmp/${UNINSTALL}"
-  cat > "$tmp/platform-portfolio/argocd-bootstrap/install.sh" <<'CANARY'
-#!/usr/bin/env bash
-# CANARY: writes a controller-memory restore key that no teardown reads.
+  # ── [1] canary A — the 2026-07-31 defect: an installer records a restore key nobody reads.
+  materialize_tree "$tmp/write-only" || return 2
+  cat >> "$tmp/write-only/platform-portfolio/argocd-bootstrap/install.sh" <<'CANARY'
+
+# CANARY: files a controller-memory prior into the state ConfigMap that no teardown ever reads.
 oc patch configmap "$STATE_CM" -n "$STATE_NS" --type merge \
   -p "{\"data\":{\"argocd_controller_memory_prior\":\"${CUR_MEM}\"}}"
 CANARY
-  bad_key_rc=0
-  check_key_symmetry "$tmp" >/dev/null 2>&1 || bad_key_rc=$?
-  if [[ "$bad_key_rc" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the write-only 'argocd_controller_memory_prior' canary was NOT detected (rc=${bad_key_rc}) — detector [1] is blind."
-    return 2
-  fi
+  expect_canary "write-only restore key" check_key_symmetry "$tmp/write-only" \
+    "state key 'argocd_controller_memory_prior' is WRITTEN by an installer but never read by" \
+    'is READ by' || return 2
 
-  # Canary B — the empty-prior defect: restoring "no explicit resources" by writing a number back
-  # instead of removing the field. Byte-for-byte the real function, with one branch broken.
-  canary_func="$tmp/canary-func.sh"
-  extract_func "${REPO_ROOT}/${UNINSTALL}" "$FUNC" \
-    | sed 's|{"spec":{"controller":{"resources":null}}}|{"spec":{"controller":{"resources":{"limits":{"memory":"2Gi"}}}}}|' \
-    > "$canary_func"
-  if ! grep -q '"memory":"2Gi"' "$canary_func"; then
-    bad "SELF-TEST FAILED: could not build the empty-prior canary — the merge-patch null it mutates was not found."
-    return 2
-  fi
-  bad_func_rc=0
-  check_restore_behaviour "$canary_func" >/dev/null 2>&1 || bad_func_rc=$?
-  if [[ "$bad_func_rc" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the write-a-number-back canary was NOT detected (rc=${bad_func_rc}) — detector [2] is blind."
-    return 2
-  fi
+  # ── [1] canary B — the mirror-image defect, which had no canary at all before 2026-08-06: teardown
+  # branches on a key no installer writes, so the restore it guards can never fire.
+  materialize_tree "$tmp/read-only" || return 2
+  cat >> "$tmp/read-only/${UNINSTALL}" <<'CANARY'
 
-  ok "self-test ok — real tree clean (rc=0), write-only-key canary caught, empty-prior canary caught."
+# CANARY: a restore branch keyed on a value no installer records — permanently dead code.
+restore_orphan_canary() {
+  local prior
+  prior="$(state argocd_controller_orphan_prior)"
+  [[ -n "$prior" ]] || return 0
+  oc -n "$ARGO_NS" patch argocd openshift-gitops --type merge -p "$prior"
+}
+CANARY
+  expect_canary "read-only restore key (dead branch)" check_key_symmetry "$tmp/read-only" \
+    "state key 'argocd_controller_orphan_prior' is READ by" \
+    'is WRITTEN by an installer' || return 2
+
+  # ── [2a] the empty-prior defect: restoring "no explicit resources" by writing a number back
+  # instead of removing the field.
+  f="$tmp/c-writes-a-number-back.sh"
+  build_canary_func "$f" 's|{"spec":{"controller":{"resources":null}}}|{"spec":{"controller":{"resources":{"limits":{"memory":"2Gi"}}}}}|' || return 2
+  expect_canary "empty prior writes 2Gi back instead of removing the field" check_restore_behaviour "$f" \
+    '[2a] empty prior must REMOVE .spec.controller.resources (merge-patch null), not write a value back.' \
+    "$(printf '%s\n' '[2a] empty prior: expected exactly ONE patch' \
+        '[2a] empty prior: expected a MERGE patch' '[2b] ' '[2c] ' '[2d] ' '[2e] ')" || return 2
+
+  # ── [2a]/[2b] the ORIGINAL 2026-07-31 shape, once per branch: the restore path reports success
+  # having written nothing at all (the defect as found printed a manual `oc edit` hint and moved on).
+  # Both branches get their own canary because they are separate code paths — proving one says
+  # nothing about the other, and each is the sole restore for its half of the contract.
+  f="$tmp/c-empty-prior-never-patches.sh"
+  # `$(oc patch` is TEXT in ogsr-uninstall.sh; single quotes keep sed matching that literal instead
+  # of this script running a command substitution.
+  # shellcheck disable=SC2016
+  build_canary_func "$f" 's|^    out="\$(oc patch argocd|    out="$(: oc patch argocd|' || return 2
+  expect_canary "empty prior: reports success without removing the field" check_restore_behaviour "$f" \
+    '[2a] empty prior: expected exactly ONE patch, got: <none>' \
+    "$(printf '%s\n' '[2b] ' '[2c] ' '[2d] ' '[2e] ')" || return 2
+
+  f="$tmp/c-recorded-prior-never-patches.sh"
+  # Same literal `$(oc patch`, at the two-column indent of the recorded-prior branch.
+  # shellcheck disable=SC2016
+  build_canary_func "$f" 's|^  out="\$(oc patch argocd|  out="$(: oc patch argocd|' || return 2
+  expect_canary "recorded prior: reports success without patching it back" check_restore_behaviour "$f" \
+    '[2b] recorded prior: expected exactly ONE patch, got: <none>' \
+    "$(printf '%s\n' '[2a] ' '[2c] ' '[2d] ' '[2e] ')" || return 2
+
+  # ── [2b] union is not restoration: a merge patch keeps every key the prior block did not set, so
+  # requests.memory=2Gi survives a "restore" of a prior that only carried limits.memory.
+  f="$tmp/c-merge-instead-of-json.sh"
+  build_canary_func "$f" 's/--type json \\$/--type merge \\/' || return 2
+  expect_canary "recorded prior replayed as a merge patch (unions instead of replacing)" check_restore_behaviour "$f" \
+    '[2b] recorded prior: expected a JSON patch' \
+    "$(printf '%s\n' '[2a] ' '[2c] ' '[2d] ' '[2e] ')" || return 2
+
+  # ── [2a] a JSON patch cannot express "remove this field" the way a merge-patch null does, so the
+  # removal branch silently stops removing anything.
+  f="$tmp/c-removal-as-json-patch.sh"
+  build_canary_func "$f" 's/--type merge \\$/--type json \\/' || return 2
+  expect_canary "empty prior removed with a json patch instead of a merge-patch null" check_restore_behaviour "$f" \
+    '[2a] empty prior: expected a MERGE patch' \
+    "$(printf '%s\n' '[2a] empty prior: expected exactly ONE patch' \
+        '[2a] empty prior must REMOVE' '[2b] ' '[2c] ' '[2d] ' '[2e] ')" || return 2
+
+  # ── [2b] `replace` requires the path to already exist; `add` creates or replaces it. On a CR whose
+  # controller block was removed in between, a replace-based restore fails and restores nothing.
+  f="$tmp/c-op-replace.sh"
+  build_canary_func "$f" 's/\\"op\\":\\"add\\"/\\"op\\":\\"replace\\"/g' || return 2
+  expect_canary "recorded prior patched with op=replace instead of op=add" check_restore_behaviour "$f" \
+    '[2b] recorded prior: expected op=add on /spec/controller/resources' \
+    "$(printf '%s\n' '[2b] recorded prior: expected exactly ONE patch' \
+        '[2b] recorded prior: expected a JSON patch' \
+        '[2b] recorded prior: the recorded block was not patched back verbatim' \
+        '[2a] ' '[2c] ' '[2d] ' '[2e] ')" || return 2
+
+  # ── [2b] the right patch verb at the right path carrying the WRONG value: an empty object wipes
+  # the org's sizing while every structural check above still passes.
+  f="$tmp/c-value-not-verbatim.sh"
+  # `${prior}` is the text ogsr-uninstall.sh interpolates into its patch body — matching it literally
+  # is the point; expanding it here would match nothing.
+  # shellcheck disable=SC2016
+  build_canary_func "$f" 's|\\"value\\":${prior}}\]|\\"value\\":{}}]|g' || return 2
+  expect_canary "recorded prior replaced by an empty object" check_restore_behaviour "$f" \
+    '[2b] recorded prior: the recorded block was not patched back verbatim' \
+    "$(printf '%s\n' '[2b] recorded prior: expected exactly ONE patch' \
+        '[2b] recorded prior: expected a JSON patch' \
+        '[2b] recorded prior: expected op=add' \
+        '[2a] ' '[2c] ' '[2d] ' '[2e] ')" || return 2
+
+  # ── [2c] the trace-leaving defect: patch an adopted CR without a consent record, i.e. without any
+  # proof the workshop is the thing that changed it.
+  f="$tmp/c-patches-without-consent.sh"
+  # `$changed` is ogsr-uninstall.sh's local variable, matched as text.
+  # shellcheck disable=SC2016
+  build_canary_func "$f" 's/^  if \[\[ "\$changed" != "true" \]\]; then$/  if false; then # CANARY: consent no longer required/' || return 2
+  expect_canary "patches an adopted CR with no consent recorded" check_restore_behaviour "$f" \
+    '[2c] no consent recorded' \
+    "$(printf '%s\n' '[2a] ' '[2b] ' '[2d] ' '[2e] ')" || return 2
+
+  # ── [2d] the org may have removed the CR between install and teardown; patching it back is both an
+  # error we would report as ours and a resurrection of an object its owner deleted.
+  f="$tmp/c-patches-absent-cr.sh"
+  # `$ARGO_NS` is text in the line being replaced, not a value to substitute.
+  # shellcheck disable=SC2016
+  build_canary_func "$f" 's|^  if ! oc get argocd openshift-gitops -n "\$ARGO_NS" >/dev/null 2>&1; then$|  if false; then # CANARY: absent CR no longer tolerated|' || return 2
+  expect_canary "patches a CR the org already removed" check_restore_behaviour "$f" \
+    '[2d] CR absent, yet a patch was issued' \
+    "$(printf '%s\n' '[2a] ' '[2b] ' '[2c] ' '[2e] ')" || return 2
+
+  # ── [2e] --dry-run must be readable by anyone deciding whether to run the real teardown.
+  f="$tmp/c-dry-run-writes.sh"
+  # `$DRY_RUN` is text in both of ogsr-uninstall.sh's dry-run guards; the sed is unanchored so it
+  # disables both, which is what makes the two dry-run shapes in [2e] testable at once.
+  # shellcheck disable=SC2016
+  build_canary_func "$f" 's/if \[\[ "\$DRY_RUN" == "true" \]\]; then/if false; then # CANARY: dry-run now writes/' || return 2
+  expect_canary "--dry-run writes to the cluster" check_restore_behaviour "$f" \
+    '[2e] --dry-run issued a patch' \
+    "$(printf '%s\n' '[2a] ' '[2b] ' '[2c] ' '[2d] ')" || return 2
+
+  ok "self-test ok — real tree clean (rc=0); write-only and read-only key canaries caught, and every"
+  note "   assertion of [2] proven by its own canary: no patch, wrong patch type, wrong op, wrong value,"
+  note "   value written back instead of removed, no consent, absent CR, dry-run."
   return 1
 }
 

@@ -40,12 +40,21 @@
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + awk + sed.
 #
 # --self-test proves the detector actually fires before a clean run on the real tree is worth
-# anything: it plants a canary that drops the `bad=1` assignment — the one line that turns "we found
-# OUR OperatorGroup colliding with the org's" into a failure — reproducing the exact shape of a
-# detector blind to the incident it exists to catch (case (b) would then wrongly return 0 with the
-# pass banner intact). Exit 1 = the canary was caught AND the real tree is clean under the same
-# detector; that is a PASS, matching the house convention where CI asserts the self-test step exits
-# exactly 1. Exit 2 = the detector is blind, or the harness itself is broken.
+# anything: FOUR canaries, one per property above plus the undo hint, each byte-for-byte the real
+# function with ONE mechanism broken. Exit 1 = every canary was caught AND the real tree is clean
+# under the same detectors; that is a PASS, matching the house convention where CI asserts the
+# self-test step exits exactly 1. Exit 2 = a detector is blind, or the harness itself is broken.
+#
+# EVERY CANARY IS ASSERTED ON THE SPECIFIC [a]/[b]/[c] MESSAGE for the property it breaks, never on
+# the exit code alone (2026-08-06). A canary checked only for "the detector returned non-zero" is
+# satisfied by ANY failure — including one from a mutant broken more broadly than intended — so the
+# assertion that names the property stays unproven. Measured before this was fixed: this guard had
+# ONE canary, it tripped three of case (b)'s four assertions at once, and every one of the ten
+# assertions in check_operatorgroup_gate could be deleted individually with --self-test still
+# reporting 1. Cases (a) and (c) and the undo hint had no canary at all — including the positive
+# control in (c), which the WHAT IT CHECKS note above calls out as mattering as much as (b).
+# Each canary also DENIES the messages it must not trip, so a mutation that breaks more than the one
+# mechanism it names is caught here rather than silently certifying a neighbouring assertion.
 #
 # Exit codes:
 #   0  contract holds
@@ -236,10 +245,59 @@ run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
 }
 
 # ── self-test ─────────────────────────────────────────────────────────────────
-# One canary, the real defect shape. It must be CAUGHT, and the real tree must be clean under the
-# same detector — anything else means the gate is decorative.
+# Four canaries, each a real defect shape. All must be CAUGHT — by the assertion that NAMES the
+# property, proven from the message, not from the exit code — and the real tree must be clean under
+# the same detectors. Anything else means the gate is decorative.
+
+# Materializes the real operatorgroup_counts() + assert_single_operatorgroup() with one sed applied.
+build_canary() {  # <out-file> <sed-expr> <proof-string> → 0 built, 2 the mutation never applied
+  local out="$1" expr="$2" proof="$3"
+  {
+    extract_func "${REPO_ROOT}/${INSTALL}" "$FN_COUNTS"
+    extract_func "${REPO_ROOT}/${INSTALL}" "$FN_ASSERT" | sed "$expr"
+  } > "$out"
+  if ! grep -qF -- "$proof" "$out"; then
+    bad "SELF-TEST FAILED: canary not built — sed '${expr}' changed nothing in ${FN_ASSERT}(), so '${proof}' is absent from the mutant."
+    return 2
+  fi
+  return 0
+}
+
+# Proves a canary was caught BY THE NAMED ASSERTION: rc must be exactly 1, every <want> message must
+# appear, and every <deny> message must not. Both lists are newline-separated fragments.
+expect_canary() {  # <label> <func-file> <wants> <denies> → 0 proven, 2 not
+  local label="$1" f="$2" wants="$3" denies="$4" out rc=0 m
+  out="$(check_operatorgroup_gate "$f" 2>&1)" || rc=$?
+  if [[ "$rc" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: ${label}: check_operatorgroup_gate returned ${rc}; a caught canary returns exactly 1."
+    return 2
+  fi
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    if ! printf '%s\n' "$out" | grep -qF -- "$m"; then
+      bad "SELF-TEST FAILED: ${label}: the detector failed, but never printed '${m}'."
+      note "    It caught this canary on a DIFFERENT assertion, so the one that names this property is"
+      note "    unproven — it could be deleted and --self-test would still report 1."
+      return 2
+    fi
+  done <<< "$wants"
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    if printf '%s\n' "$out" | grep -qF -- "$m"; then
+      bad "SELF-TEST FAILED: ${label}: the detector also printed '${m}', a property this canary does not break."
+      note "    The mutant is broken more widely than the one mechanism it names, so it would certify"
+      note "    that neighbouring assertion without ever testing it."
+      return 2
+    fi
+  done <<< "$denies"
+  return 0
+}
+
 self_test() {
-  local real_rc canary_rc f
+  local real_rc f tmp
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
 
   # Proof 0: the real tree passes. A detector that fires on everything proves nothing either.
   real_rc=0
@@ -249,30 +307,71 @@ self_test() {
     return 2
   fi
 
-  # Canary — drop the ONE line that turns "our OperatorGroup collided with the org's" into a failure.
-  # Byte-for-byte the real function with that assignment removed: case (b) would then leave bad=0,
-  # take the early "$bad -eq 0" success branch, and return 0 with the pass banner intact — a detector
-  # blind to the exact incident this gate exists to catch.
-  f="$(mktemp)"
-  {
-    extract_func "${REPO_ROOT}/${INSTALL}" "$FN_COUNTS"
-    extract_func "${REPO_ROOT}/${INSTALL}" "$FN_ASSERT" \
-      | sed 's/^    bad=1$/    : # CANARY: dropped — collisions we cause are no longer flagged/'
-  } > "$f"
-  if grep -q '^    bad=1$' "$f"; then
-    bad "SELF-TEST FAILED: could not build the dropped-bad canary — the assignment it mutates was not found."
-    rm -f "$f"
-    return 2
-  fi
-  canary_rc=0
-  check_operatorgroup_gate "$f" >/dev/null 2>&1 || canary_rc=$?
-  rm -f "$f"
-  if [[ "$canary_rc" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the dropped-bad=1 canary was NOT detected (rc=${canary_rc}) — the detector is blind."
-    return 2
-  fi
+  # Canary (b) — drop the ONE line that turns "our OperatorGroup collided with the org's" into a
+  # failure. Case (b) then leaves bad=0, takes the early "$bad -eq 0" success branch, and returns 0
+  # with the pass banner intact: a detector blind to the exact incident this gate exists to catch.
+  # It cannot break (b)'s undo hint — that text is printed before the return, so it still names ours.
+  f="$tmp/c-dropped-bad.sh"
+  build_canary "$f" 's/^    bad=1$/    : # CANARY: dropped — collisions we cause are no longer flagged/' \
+    ': # CANARY: dropped' || return 2
+  expect_canary "dropped bad=1 (our own collision goes unflagged)" "$f" \
+    "$(printf '%s\n' \
+        "[b] our OperatorGroup collided with the org's: expected ${FN_ASSERT} to return 1." \
+        "[b] the pass banner printed even though OUR OperatorGroup collided with the org's" \
+        "[b] expected the degradation warning")" \
+    "$(printf '%s\n' '[a] ' '[c] ')" || return 2
 
-  ok "self-test ok — real tree clean (rc=0), dropped-bad=1 canary (our own collision going unflagged) caught."
+  # Canary (c) — the POSITIVE CONTROL, and the one shape no canary covered before 2026-08-06: strip
+  # the ownership test, so a namespace that already held two OperatorGroups before this install (a
+  # collision we did not cause and cannot fix) is reported as ours. That detector would fail installs
+  # on clusters we have not touched — the header calls this case as important as (b), and until now
+  # all three of its assertions could be deleted without --self-test noticing.
+  f="$tmp/c-blind-to-ownership.sh"
+  # `$ours` is TEXT to match in bootstrap/install.sh, not a variable of this script — double quotes
+  # here would expand to the empty string and the sed would silently match nothing.
+  # shellcheck disable=SC2016
+  build_canary "$f" 's/^    if \[\[ -z "\$ours" \]\]; then$/    if false; then # CANARY: ownership no longer checked/' \
+    'if false; then # CANARY: ownership' || return 2
+  expect_canary "ownership test stripped (pre-existing collisions blamed on us)" "$f" \
+    "$(printf '%s\n' \
+        "[c] pre-existing collision we did not cause: expected ${FN_ASSERT} to return 0." \
+        "[c] the degradation warning fired for a collision this install never caused." \
+        "[c] expected the pre-existing-collision note")" \
+    "$(printf '%s\n' '[a] ' '[b] ')" || return 2
+
+  # Canary (b)/undo-hint — point the removal hint at the ORG'S OperatorGroup instead of ours. The
+  # gate still fails, still suppresses the banner, still warns about degradation; only the one line
+  # an operator copy-pastes now deletes the wrong object, which is a second act of the same defect.
+  # Nothing but the undo-hint assertion can see this, which is why it is asserted by message.
+  f="$tmp/c-undo-names-theirs.sh"
+  # `${ours}` / `${theirs}` are TEXT inside install.sh's undo-hint line, not variables of this
+  # script — the whole mutation is "swap which of the two names install.sh interpolates".
+  # shellcheck disable=SC2016
+  build_canary "$f" 's/delete operatorgroup ${ours}/delete operatorgroup ${theirs}/' \
+    'delete operatorgroup ${theirs}' || return 2
+  expect_canary "undo hint names the org's OperatorGroup instead of ours" "$f" \
+    "[b] expected the undo hint to name OUR OperatorGroup (og-ours) for removal, never the org's." \
+    "$(printf '%s\n' '[a] ' '[c] ' \
+        "[b] our OperatorGroup collided with the org's: expected" \
+        "[b] the pass banner printed even though OUR OperatorGroup collided with the org's" \
+        "[b] expected the degradation warning")" || return 2
+
+  # Canary (a) — fail closed: initialise bad=1, so a clean cluster is reported as degraded. An
+  # install gate that refuses every cluster is as useless as one that passes every cluster, and it is
+  # the shape a one-character typo produces. Case (b) is unaffected (bad was already 1 there), so
+  # this proves the three case-(a) assertions specifically.
+  f="$tmp/c-fail-closed.sh"
+  build_canary "$f" 's/^  local ns count before ours theirs og app stack bad=0$/  local ns count before ours theirs og app stack bad=1 # CANARY: fails closed/' \
+    'bad=1 # CANARY: fails closed' || return 2
+  expect_canary "gate initialised fail-closed (a clean cluster is called degraded)" "$f" \
+    "$(printf '%s\n' \
+        "[a] clean cluster: expected ${FN_ASSERT} to return 0." \
+        "[a] clean cluster: expected the pass banner" \
+        "[a] clean cluster: the degradation warning fired with nothing to flag.")" \
+    '[b] ' || return 2
+
+  ok "self-test ok — real tree clean (rc=0); dropped-bad=1, ownership-blind, undo-names-theirs and"
+  note "   fail-closed canaries each caught by the assertion that names its property."
   return 1
 }
 

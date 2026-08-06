@@ -30,12 +30,23 @@
 #
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + grep + awk + sed + base64.
 #
-# --self-test proves all three detectors FIRE before a clean run on the real tree means anything: it
-# plants a restore branch with its residue_record removed, a state-namespace delete that ignores the
-# ledger, and a record_once with the carried-key guard removed — the precise defect shape in each
-# case. Exit 1 = every canary was caught AND the real tree is clean under the same detectors; that is
-# a PASS, matching the house convention where CI asserts the self-test step exits exactly 1.
-# Exit 2 = a detector is blind, or the harness itself is broken.
+# --self-test proves all four detectors FIRE before a clean run on the real tree means anything, with
+# twelve canaries: restore branches with their residue_record removed (both objects, and both indents
+# of the argo one, because those are separate branches), one that records residue it never earned, a
+# dry-run that writes, a state-namespace delete that ignores the ledger plus one that never deletes, a
+# carried ConfigMap missing the ledger key, a dry-run carry that writes, a record_once with the
+# carried-key guard removed, one that overwrites, one that never writes, and a writer that ignores
+# the carried ledger. Exit 1 = every canary was caught AND the real
+# tree is clean under the same detectors; that is a PASS, matching the house convention where CI
+# asserts the self-test step exits exactly 1. Exit 2 = a detector is blind, or the harness is broken.
+#
+# EVERY CANARY IS ASSERTED ON THE SPECIFIC MESSAGE for the property it breaks, and DENIES the
+# messages it must not trip — never on the exit code alone (2026-08-06). Before that, three canaries
+# each tripped SEVERAL assertions at once and no single assertion in [2] was load-bearing: the
+# unconditional-delete canary fired both "the namespace was DELETED" and "no ConfigMap was written",
+# so either could be deleted with --self-test still reporting 1, and the three remaining [2]
+# assertions (a clean ledger DOES delete, the carried ConfigMap carries its keys, --dry-run writes
+# nothing) had no canary at all. An assertion no canary can fail is an assertion CI is not running.
 #
 # Exit codes:
 #   0  contract holds
@@ -476,10 +487,68 @@ run_check() {  # <root> → 0 clean, 1 broken, 2 uninspectable
 }
 
 # ── self-test ─────────────────────────────────────────────────────────────────
-# Three canaries, each the real defect shape. All must be CAUGHT, and the real tree must be clean
-# under the same detectors — anything else means the gate is decorative.
+# Eleven canaries, each the real defect shape for one declared property. All must be CAUGHT — by the
+# assertion that NAMES that property, proven from the message — and the real tree must be clean under
+# the same detectors. Anything else means the gate is decorative.
+
+# Materializes <pristine> with one sed applied, and proves the sed actually changed something: a sed
+# that silently matches nothing yields the REAL function, which passes, which reads as "blind
+# detector" and sends the next reader hunting in the wrong file.
+#
+# Every input here is a REAL file, never <(extract_func …). check_residue_accounting guards its
+# inputs with `[[ ! -s "$mf" ]]`, and `-s` on a process-substitution pipe is platform-dependent:
+# BSD/macOS reports the bytes currently buffered in the pipe as st_size, so the test passes, while
+# Linux reports 0, so it fails. That is why this self-test once returned 1 locally and 2 on CI
+# ubuntu — the guard decided it "could not extract the restore functions" and declared its own
+# detector blind. A guard whose result depends on the OS is not a guard.
+build_mutant() {  # <out-file> <pristine-file> <sed-expr> → 0 built, 2 the mutation never applied
+  local out="$1" pristine="$2" expr="$3"
+  if [[ ! -s "$pristine" ]]; then
+    bad "SELF-TEST FAILED: canary not built — ${pristine##*/} is empty, so extraction failed before any mutation ran."
+    return 2
+  fi
+  sed "$expr" "$pristine" > "$out"
+  if cmp -s "$pristine" "$out"; then
+    bad "SELF-TEST FAILED: canary not built — sed '${expr}' changed no line of ${pristine##*/}, so the mutant IS the real function."
+    return 2
+  fi
+  return 0
+}
+
+# Proves a canary was caught BY THE NAMED ASSERTION: rc exactly 1, every <want> message present,
+# every <deny> message absent. Both lists are newline-separated fragments.
+expect_canary() {  # <label> <wants> <denies> <detector> [args…] → 0 proven, 2 not
+  local label="$1" wants="$2" denies="$3"; shift 3
+  local out rc=0 m
+  out="$("$@" 2>&1)" || rc=$?
+  if [[ "$rc" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: ${label}: ${1} returned ${rc}; a caught canary returns exactly 1."
+    return 2
+  fi
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    if ! printf '%s\n' "$out" | grep -qF -- "$m"; then
+      bad "SELF-TEST FAILED: ${label}: ${1} failed, but never printed '${m}'."
+      note "    It caught this canary on a DIFFERENT assertion, so the one that names this property is"
+      note "    unproven — it could be deleted and --self-test would still report 1."
+      return 2
+    fi
+  done <<< "$wants"
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    if printf '%s\n' "$out" | grep -qF -- "$m"; then
+      bad "SELF-TEST FAILED: ${label}: ${1} also printed '${m}', a property this canary does not break."
+      note "    The mutant is broken more widely than the one mechanism it names, so it would certify"
+      note "    that neighbouring assertion without ever testing it."
+      return 2
+    fi
+  done <<< "$denies"
+  return 0
+}
+
 self_test() {
-  local tmp real_rc canary_rc f
+  local tmp real_rc f g
+  local p_argo p_mon p_carry p_ro
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
@@ -492,84 +561,185 @@ self_test() {
     return 2
   fi
 
-  # Canary A — a restore path that declines to restore and says nothing about it. Byte-for-byte the
-  # real function with the no-consent branch's residue_record turned into a comment.
-  f="$tmp/canary-argo.sh"
-  extract_func "${REPO_ROOT}/${UNINSTALL}" restore_argocd_controller_resources \
-    | sed 's/^      residue_record gitops_argocd_controller_resources_b64 \\$/      : \\/' > "$f"
-  if grep -q '^      residue_record gitops_argocd_controller_resources_b64' "$f"; then
-    bad "SELF-TEST FAILED: could not build the silent-no-restore canary — the residue_record call it mutates was not found."
-    return 2
-  fi
-  canary_rc=0
-  # Materialize to a REAL file rather than passing <(extract_func …). check_residue_accounting
-  # guards its inputs with `[[ ! -s "$mf" ]]`, and `-s` on a process-substitution pipe is
-  # platform-dependent: BSD/macOS reports the bytes currently buffered in the pipe as st_size, so
-  # the test passes, while Linux reports 0, so it fails. That is why this self-test returned 1
-  # locally and 2 on CI ubuntu — the guard decided it "could not extract the restore functions" and
-  # declared its own detector blind. A guard whose result depends on the OS is not a guard.
-  extract_func "${REPO_ROOT}/${UNINSTALL}" restore_monitoring > "$tmp/canary-mon.sh"
-  check_residue_accounting "$f" "$tmp/canary-mon.sh" >/dev/null 2>&1 || canary_rc=$?
-  if [[ "$canary_rc" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the silent-no-restore canary was NOT detected (rc=${canary_rc}) — detector [1] is blind."
-    return 2
-  fi
+  # The unmutated originals every canary is built from, and the healthy partner each detector needs.
+  p_argo="$tmp/p-argo.sh"; p_mon="$tmp/p-mon.sh"; p_carry="$tmp/p-carry.sh"; p_ro="$tmp/p-record-once.sh"
+  extract_func "${REPO_ROOT}/${UNINSTALL}" restore_argocd_controller_resources > "$p_argo"
+  extract_func "${REPO_ROOT}/${UNINSTALL}" restore_monitoring                  > "$p_mon"
+  extract_func "${REPO_ROOT}/${UNINSTALL}" carry_residue_or_delete_state_ns    > "$p_carry"
+  extract_func "${REPO_ROOT}/${INSTALL}"   record_once                         > "$p_ro"
 
-  # Canary B — the original bug: delete the state namespace whatever the ledger says.
-  f="$tmp/canary-carry.sh"
+  # ── [1] canary A — a restore path that declines to restore and says nothing about it. Three of the
+  # four argo residue_record calls sit at six-column indent; the fourth (the failed json-patch path)
+  # does not, and the deny below proves this sed left it alone rather than blanking the function.
+  f="$tmp/c-argo-silent.sh"
+  build_mutant "$f" "$p_argo" 's/^      residue_record gitops_argocd_controller_resources_b64 \\$/      : \\/' || return 2
+  expect_canary "restore declines silently (no residue recorded)" \
+    "$(printf '%s\n' \
+        "[1] no consent, live at our target: expected residue '${ARGO_KEY}', got '<none>'" \
+        "[1] consent, empty-prior removal fails: expected residue '${ARGO_KEY}', got '<none>'" \
+        "[1] consent, prior is not JSON: expected residue '${ARGO_KEY}', got '<none>'")" \
+    "$(printf '%s\n' '[1] consent, restore patch fails' 'cluster write(s), got' '[1] monitoring')" \
+    check_residue_accounting "$f" "$p_mon" || return 2
+
+  # ── [1] canary A2 — the FOURTH residue_record, the one the sed above deliberately leaves alone
+  # because it sits at four columns rather than six: the failed json-patch path. Same defect, its own
+  # branch, and nothing about canary A says this branch is watched.
+  f="$tmp/c-argo-silent-failed-patch.sh"
+  build_mutant "$f" "$p_argo" 's/^    residue_record gitops_argocd_controller_resources_b64 \\$/    : \\/' || return 2
+  expect_canary "failed restore patch leaves our sizing on the CR unrecorded" \
+    "[1] consent, restore patch fails: expected residue '${ARGO_KEY}', got '<none>'" \
+    "$(printf '%s\n' '[1] no consent, live at our target' '[1] consent, empty-prior removal fails' \
+        '[1] consent, prior is not JSON' 'cluster write(s), got' '[1] monitoring')" \
+    check_residue_accounting "$f" "$p_mon" || return 2
+
+  # ── [1] canary B — the OPPOSITE error, which had no canary before 2026-08-06: residue recorded for
+  # a change no install ever made. Over-recording is not harmless — it keeps ogsr-system forever, so
+  # a teardown that genuinely left no trace still reports one and never removes its own namespace.
+  f="$tmp/c-argo-over-records.sh"
+  # `$live_mem` / `$target_mem` are ogsr-uninstall.sh's locals, matched as TEXT — double quotes here
+  # would expand to empty strings and the sed would match nothing.
+  # shellcheck disable=SC2016
+  build_mutant "$f" "$p_argo" 's/^    elif \[\[ "\$live_mem" != "\$target_mem" \]\]; then$/    elif false; then # CANARY: never recognises the org'"'"'s own value/' || return 2
+  expect_canary "residue recorded for a value the org set itself" \
+    "[1] no consent, live is the org's own: expected residue '<none>', got '${ARGO_KEY}'" \
+    "$(printf '%s\n' '[1] no consent, live at our target' '[1] no consent, org already at target' \
+        'cluster write(s), got' '[1] monitoring')" \
+    check_residue_accounting "$f" "$p_mon" || return 2
+
+  # ── [1] canary C — --dry-run writes to the org's CR. This is the one canary that proves
+  # expect_restore's CLUSTER-WRITE assertion rather than its residue assertion; without it the write
+  # count could be dropped entirely and every other canary here would still pass.
+  f="$tmp/c-argo-dry-run-writes.sh"
+  # `$DRY_RUN` is text in the guard being disabled; unanchored on purpose so both of the function's
+  # dry-run early-returns go, which is what lets the recorded-prior dry-run case reach a patch.
+  # shellcheck disable=SC2016
+  build_mutant "$f" "$p_argo" 's/if \[\[ "\$DRY_RUN" == "true" \]\]; then/if false; then # CANARY: dry-run now writes/' || return 2
+  expect_canary "--dry-run patches the adopted CR" \
+    '[1] dry-run, recorded prior: expected 0 cluster write(s), got 1' \
+    "$(printf '%s\n' 'expected residue' '[1] monitoring')" \
+    check_residue_accounting "$f" "$p_mon" || return 2
+
+  # ── [1] canary D — the SECOND object under the same contract. restore_monitoring is a separate
+  # function on a separate ConfigMap, so nothing about the argo canaries above says its residue path
+  # is checked; before this it had no canary of its own.
+  g="$tmp/c-mon-silent.sh"
+  build_mutant "$g" "$p_mon" 's/^      residue_record monitoring_uwm_prior \\$/      : \\/' || return 2
+  expect_canary "monitoring key we added is left behind unrecorded" \
+    "[1] monitoring: we added the key, cannot remove it: expected residue '${MON_KEY}', got '<none>'" \
+    "$(printf '%s\n' 'cluster write(s), got' '[1] no consent' '[1] consent')" \
+    check_residue_accounting "$p_argo" "$g" || return 2
+
+  # ── [2] canary A — the original bug: delete the state namespace whatever the ledger says.
+  f="$tmp/c-carry-always-deletes.sh"
   # $RESIDUE_KEYS is part of the PATTERN being matched in the extracted source, not a variable to
   # expand here — the single quotes are intentional.
   # shellcheck disable=SC2016
-  extract_func "${REPO_ROOT}/${UNINSTALL}" carry_residue_or_delete_state_ns \
-    | sed 's/^  if \[\[ -z "\$RESIDUE_KEYS" \]\]; then$/  if true; then/' > "$f"
-  if ! grep -q '^  if true; then' "$f"; then
-    bad "SELF-TEST FAILED: could not build the unconditional-delete canary — the ledger check it mutates was not found."
-    return 2
-  fi
-  canary_rc=0
-  check_state_deletion "$f" >/dev/null 2>&1 || canary_rc=$?
-  if [[ "$canary_rc" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the unconditional-delete canary was NOT detected (rc=${canary_rc}) — detector [2] is blind."
-    return 2
-  fi
+  build_mutant "$f" "$p_carry" 's/^  if \[\[ -z "\$RESIDUE_KEYS" \]\]; then$/  if true; then/' || return 2
+  expect_canary "state namespace deleted despite recorded residue" \
+    "$(printf '%s\n' '[2] residue recorded, yet the state namespace was DELETED' \
+        '[2] residue recorded, but no ConfigMap was written')" \
+    "$(printf '%s\n' '[2] empty residue ledger' '[2] the carried ConfigMap does not contain' \
+        '[2] --dry-run wrote to the cluster')" \
+    check_state_deletion "$f" || return 2
 
-  # Canary C — a capture that re-derives a carried key from the live cluster.
-  f="$tmp/canary-record-once.sh"
+  # ── [2] canary B — the mirror image, previously untested: a CLEAN teardown that keeps ogsr-system.
+  # "Leave no trace" fails in both directions, and a namespace nobody expected is what an org sees.
+  f="$tmp/c-carry-never-deletes.sh"
+  # `$STATE_NS` is text in the del_obj call being removed, not a variable of this script.
+  # shellcheck disable=SC2016
+  build_mutant "$f" "$p_carry" 's/^    sub del_obj namespace "\$STATE_NS"$/    : # CANARY: a clean teardown no longer removes its own namespace/' || return 2
+  expect_canary "clean ledger leaves the state namespace behind" \
+    '[2] empty residue ledger: the state namespace was NOT deleted' \
+    "$(printf '%s\n' '[2] residue recorded, yet the state namespace was DELETED' \
+        '[2] residue recorded, but no ConfigMap was written' \
+        '[2] the carried ConfigMap does not contain' '[2] --dry-run wrote to the cluster')" \
+    check_state_deletion "$f" || return 2
+
+  # ── [2] canary C — the carried ConfigMap written WITHOUT residue_keys. Everything looks right (the
+  # namespace survives, the ConfigMap exists, the prior values are in it) and detector [4]'s whole
+  # mechanism is dead: every writer consults .data.residue_keys, and there is now nothing to consult.
+  f="$tmp/c-carry-drops-ledger-key.sh"
+  build_mutant "$f" "$p_carry" 's|^  args+=("--from-literal=residue_keys=|  #CANARY args+=("--from-literal=residue_keys=|' || return 2
+  expect_canary "carried ConfigMap omits the residue_keys ledger" \
+    "[2] the carried ConfigMap does not contain 'residue_keys'." \
+    "$(printf '%s\n' '[2] empty residue ledger' '[2] residue recorded, yet the state namespace was DELETED' \
+        '[2] residue recorded, but no ConfigMap was written' '[2] --dry-run wrote to the cluster')" \
+    check_state_deletion "$f" || return 2
+
+  # ── [2] canary D — --dry-run rewrites the state ConfigMap. Previously untested, and the reason
+  # anyone trusts `ogsr-uninstall.sh --dry-run` on a cluster they do not own.
+  f="$tmp/c-carry-dry-run-writes.sh"
+  # `$DRY_RUN` is text in carry_residue_or_delete_state_ns's own guard; anchored to two columns so it
+  # hits only that function's copy.
+  # shellcheck disable=SC2016
+  build_mutant "$f" "$p_carry" 's/^  if \[\[ "\$DRY_RUN" == "true" \]\]; then$/  if false; then # CANARY: dry-run now writes/' || return 2
+  expect_canary "--dry-run rewrites the state ConfigMap" \
+    '[2] --dry-run wrote to the cluster' \
+    "$(printf '%s\n' '[2] empty residue ledger' '[2] residue recorded, yet the state namespace was DELETED' \
+        '[2] residue recorded, but no ConfigMap was written' '[2] the carried ConfigMap does not contain')" \
+    check_state_deletion "$f" || return 2
+
+  # ── [3] canary A — a capture that re-derives a carried key from the live cluster.
+  f="$tmp/c-record-once-rederives.sh"
   # $k is part of the PATTERN being matched in the extracted source, not a variable to expand here.
   # shellcheck disable=SC2016
-  extract_func "${REPO_ROOT}/${INSTALL}" record_once \
-    | sed 's/^    \*" \$k "\*)$/    NEVER-MATCHES)/' > "$f"
-  if ! grep -q 'NEVER-MATCHES' "$f"; then
-    bad "SELF-TEST FAILED: could not build the re-derive canary — record_once's carried-key case was not found."
-    return 2
-  fi
-  canary_rc=0
-  check_carried_keys "canary" "$f" >/dev/null 2>&1 || canary_rc=$?
-  if [[ "$canary_rc" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the re-derive canary was NOT detected (rc=${canary_rc}) — detector [3] is blind."
-    return 2
-  fi
+  build_mutant "$f" "$p_ro" 's/^    \*" \$k "\*)$/    NEVER-MATCHES)/' || return 2
+  expect_canary "carried key re-derived from the live cluster" \
+    '[3] re-derive: record_once WROTE a carried key that the teardown deliberately left unset.' \
+    "$(printf '%s\n' 'record_once overwrote a carried key' 'record_once wrote NOTHING')" \
+    check_carried_keys "re-derive" "$f" || return 2
 
-  # Canary D — the portfolio consent gate with its carried-ledger read stripped out: it would file
-  # the live (already-ours) sizing as the org's original the moment the workshop's target moves.
-  mkdir -p "$tmp/bootstrap" "$tmp/platform-portfolio/argocd-bootstrap" "$tmp/helm/bootstrap/templates"
+  # ── [3] canary B — BOTH skip conditions gone. The overwrite assertion is unreachable while
+  # first-write-wins stands (a carried key that already holds the org's value is skipped twice over),
+  # so the only honest canary for it breaks both — which is exactly what a refactor of this
+  # five-line function would do.
+  # Each step writes a NEW file: `sed expr f > f` truncates f before sed opens it, and the mutant
+  # would come out empty — which build_mutant reports as "the sed matched nothing".
+  g="$tmp/c-record-once-overwrites-step1.sh"
+  f="$tmp/c-record-once-overwrites.sh"
+  # shellcheck disable=SC2016
+  build_mutant "$g" "$p_ro" 's/^    \*" \$k "\*)$/    NEVER-MATCHES)/' || return 2
+  # shellcheck disable=SC2016
+  build_mutant "$f" "$g" 's/^  \[\[ -n "\$cur" \]\] && return 0$/  : # CANARY: first-write-wins gone/' || return 2
+  expect_canary "carried key with the org's value overwritten" \
+    "$(printf '%s\n' "[3] overwrite: record_once overwrote a carried key that already had the org's value" \
+        '[3] overwrite: record_once WROTE a carried key that the teardown deliberately left unset.')" \
+    'record_once wrote NOTHING' \
+    check_carried_keys "overwrite" "$f" || return 2
+
+  # ── [3] canary C — record_once that never records. Without this the detector would be satisfied by
+  # a capture that writes nothing at all, and "never re-derives a carried key" is trivially true of a
+  # function that never writes.
+  f="$tmp/c-record-once-never-writes.sh"
+  # `$STATE_CM` is text in record_once's patch line. The replacement deliberately keeps it spelled the
+  # same, so the only difference is the leading `:` that turns the write into a no-op.
+  # shellcheck disable=SC2016
+  build_mutant "$f" "$p_ro" 's/^  oc patch configmap "\$STATE_CM"/  : oc patch configmap "$STATE_CM"/' || return 2
+  expect_canary "ordinary first capture records nothing" \
+    '[3] dead-snapshot: record_once wrote NOTHING on an ordinary first capture — the snapshot is dead.' \
+    "$(printf '%s\n' 'record_once WROTE a carried key' 'record_once overwrote a carried key')" \
+    check_carried_keys "dead-snapshot" "$f" || return 2
+
+  # ── [4] canary — the portfolio consent gate with its carried-ledger read stripped out: it would
+  # file the live (already-ours) sizing as the org's original the moment the workshop's target moves.
+  mkdir -p "$tmp/writers"
   for f in "${WRITERS[@]}"; do
-    mkdir -p "$tmp/$(dirname "$f")"
-    grep -v 'data\.residue_keys' "${REPO_ROOT}/${f}" > "$tmp/${f}"
+    mkdir -p "$tmp/writers/$(dirname "$f")"
+    grep -v 'data\.residue_keys' "${REPO_ROOT}/${f}" > "$tmp/writers/${f}"
   done
-  if grep -rq 'data\.residue_keys' "$tmp"; then
-    bad "SELF-TEST FAILED: could not build the ignores-carried-ledger canary — the read it strips was not found."
+  if grep -rq 'data\.residue_keys' "$tmp/writers"; then
+    bad "SELF-TEST FAILED: could not build the ignores-carried-ledger canary — every writer still contains a .data.residue_keys read after stripping it."
     return 2
   fi
-  canary_rc=0
-  check_writers_read_residue "$tmp" >/dev/null 2>&1 || canary_rc=$?
-  if [[ "$canary_rc" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the ignores-carried-ledger canary was NOT detected (rc=${canary_rc}) — detector [4] is blind."
-    return 2
-  fi
+  expect_canary "writer ignores the carried residue ledger" \
+    "writes ${RESTORE_SOURCE_KEY} but never reads .data.residue_keys" \
+    'no writer of' \
+    check_writers_read_residue "$tmp/writers" || return 2
 
-  ok "self-test ok — real tree clean (rc=0); silent-no-restore, unconditional-delete, re-derive and"
-  note "   ignores-carried-ledger canaries all caught."
+  ok "self-test ok — real tree clean (rc=0); twelve canaries, each caught by the assertion that names"
+  note "   its property: residue under- and over-recorded, dry-run writes on both objects, the state"
+  note "   namespace deleted and not deleted, a ledger-less carried ConfigMap, record_once re-deriving,"
+  note "   overwriting and never writing, and a writer ignoring the carried ledger."
   return 1
 }
 
