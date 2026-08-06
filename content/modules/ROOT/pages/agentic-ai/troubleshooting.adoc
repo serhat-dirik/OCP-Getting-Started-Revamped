@@ -6,6 +6,16 @@ include::partial$version-attributes.adoc[]
 // performing the module live on the workshop cluster (2026-07-13/14). symptom -> cause -> fix. Product
 // NAMES appear plain, with NO version numbers in prose (course standard). Environment values via
 // attributes only.
+//
+// REALIGNED to the rewritten lab (commit 4044d1f): the first entry's remedy is now the GROUNDING
+// ConfigMap, not question phrasing. It deliberately encodes the gap the lab builds on — a ConfigMap
+// edit does NOT reach a running pod, because the prompt arrives as PARASOL_AGENT_GROUNDING_PROMPT and
+// an env var cannot change under a live process — so the diagnosis compares /agent/info's
+// groundingPrompt (what the POD serves) against cm/parasol-agent-grounding (what the CLUSTER holds).
+// Field names confirmed in apps/parasol-agent AgentResource.AgentInfo (model, claimsDbMcpUrl,
+// policyDocsMcpUrl, groundingPromptSource, groundingPrompt) and GroundingPrompt.source(), which
+// returns "config (parasol.agent.grounding-prompt)" or "built-in default". Phrasing is demoted to a
+// NOTE. Per lab.adoc's authoring note, no claim here says the weak prompt deterministically fails.
 
 Each entry is symptom → cause → fix. All were seen (or deliberately induced) while performing this module live against the running `parasol-agent` on the workshop cluster.
 
@@ -13,9 +23,44 @@ Each entry is symptom → cause → fix. All were seen (or deliberately induced)
 
 *Symptom:* You ask a claim question and the `answer` is literally `[get_claim(claimNumber=CLM-1001)]` (or similar), and `toolCalls` is `[]`.
 
-*Cause:* The model *described* the tool call as text instead of *executing* it — an ungrounded answer. Whether this happens depends on the model and on how you phrase the question; it is deterministic at temperature 0 for a given model and prompt.
+*Cause:* The model *described* the tool call as text instead of *executing* it — an ungrounded answer. The reason is almost always the *instruction the agent is carrying*: either its system prompt never told it that it has tools, or you have already fixed that and the running pod is not serving your fix yet.
 
-*Fix:* Ask *imperatively* — tell the agent to use its tools: _"Use your tools to look up claim CLM-1001 and report its status."_ The tool then executes and `toolCalls` is populated. This is the module's core lesson (exercise 2): *grounding is engineered*, through the system prompt and clear phrasing, not guaranteed.
+*Fix:* Start from what the agent is actually running. `GET /agent/info` reports its own grounding and spends no token:
+
+[source,sh,role=execute,subs="attributes"]
+----
+curl -ksS "https://parasol-agent-{user}-ai.{cluster_domain}/agent/info" \
+  | jq -r '.groundingPromptSource, "---", .groundingPrompt'
+----
+
+Then read the ConfigMap it is fed from:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get cm parasol-agent-grounding -n {user}-ai -o jsonpath='{.data.grounding-prompt}'
+echo
+----
+
+Those two outputs separate the two failures:
+
+* *Both show a prompt that never mentions tools.* You are still at the entry state. That prompt is deliberately weak — it describes a *tone* and says nothing about the four tools the agent holds — and rewriting it *is* exercise 2. Write one that says there are tools, says which kind of question needs which, and forbids inventing what a tool did not return; then patch it into `cm/parasol-agent-grounding`.
+* *The ConfigMap shows your new prompt but `/agent/info` still shows the old one.* Your edit reached the *cluster* and never reached the *process*. The prompt arrives as the `PARASOL_AGENT_GROUNDING_PROMPT` environment variable, and an environment variable cannot change under a running pod. Roll the Deployment:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc rollout restart deploy/parasol-agent -n {user}-ai
+oc rollout status deploy/parasol-agent -n {user}-ai --timeout=180s
+----
++
+Then re-read `/agent/info`, polling for a few seconds rather than asking once: the Route needs a moment longer to serve the *new* pod than the Deployment needs to call itself rolled out. `ws verify agentic-ai` grades this outcome separately and names it — _"the running agent is still serving the OLD grounding — your ConfigMap edit has not reached the pod."_
+
+[NOTE]
+.Phrasing the question is the other lever — useful, but not the fix
+====
+Asking *imperatively* (_"Use your tools to look up claim CLM-1001 and report its status."_) also pushes a model toward calling a tool, and it is a good way to prove the wiring works while you debug. It is not the remedy, because it is *per-question*: it depends on every user, every caller and every integration remembering to say it, and none of them will. The system prompt applies to *every* request. Fix the prompt; keep the phrasing as a probe.
+
+The honest edge: whether the *plain* question grounds at all varies by model. If yours grounds it unaided, that is the model being generous, not your configuration doing its job — read the shipped prompt and judge it on its own terms.
+====
 
 == `POST /agent/ask` returns `502` with `"authFailure": true`
 
