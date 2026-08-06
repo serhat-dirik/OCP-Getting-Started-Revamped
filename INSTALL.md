@@ -241,8 +241,10 @@ Never plan to install in front of the room.
 tools/ws/ws preflight
 ```
 
-Checks local tooling, cluster access, version and StorageClass, then prints an **adoption forecast** —
-for every shared component, whether the install will reuse what is already there or create its own:
+Checks local tooling, cluster access, version, StorageClass and the worker count, then prints an
+**adoption forecast** for the *cluster-scoped* things an install would otherwise change — the GitOps
+operator, Lightspeed, user-workload monitoring, the default GatewayClass and the OAuth identity
+provider:
 
 ```
 ▶ Adoption forecast (preview only — nothing is changed)
@@ -254,9 +256,71 @@ for every shared component, whether the install will reuse what is already there
 **On a customer cluster, show this to the customer before installing.** It is the moment to catch a
 component you did not expect them to have.
 
+**Those rows are not the whole picture.** Every *operator* is decided separately, per portfolio
+component, by a rule `ws preflight` does not run — cert-manager, Pipelines, RHACS and the rest never
+appear in the forecast above. Preview that decision with the command in the next section before you
+install on a cluster you do not own.
+
 A `⚠ prior install detected` row means the cluster already ran the installer. Re-running is idempotent;
 for a fresh cohort run `bootstrap/ogsr-reset.sh` ([§6](#6-ending-a-delivery)) rather than a full
 uninstall — reinstalling the platform costs far more time than resetting it.
+
+#### What the install does with an operator the cluster already has
+
+The per-component plan comes from the portfolio installer itself. `--adoption-plan` prints the verdict
+and exits, applying nothing:
+
+```bash
+platform-portfolio/argocd-bootstrap/install.sh \
+  --stacks "$(ls platform-portfolio/stacks | tr '\n' ',' | sed 's/,$//')" \
+  --adoption-plan
+```
+
+One tab-separated line per component that is *not* simply installed — verdict, stack, component, child
+Application, namespaces, the org's Subscriptions, and the evidence. Components with nothing to adopt
+print nothing at all, so silence is the good answer.
+
+That `--stacks` list is every stack in the repo, which is the widest form of the question. Your install
+requests only the stacks your `modules_disabled` leaves enabled, and prints them at phase 1 — so a
+verdict for a stack yours will not request is informational. `ai-assist` is the one to know about: on a
+cluster that already runs Lightspeed the workshop drops that stack before the preflight ever sees it.
+
+| Verdict | What the install does |
+|---|---|
+| `skip` | The org's operator is used and **ours is never installed** — the component's Argo Application is dropped from the rendered stack. Recorded as adopted, so the uninstall preserves their namespace, Subscription, CSV and OperatorGroup. |
+| `warn` | **Ours is installed alongside theirs**, in the same namespace, exactly as on a cluster with nothing to adopt. Nothing of theirs is deleted, and the install prints a ⚠ naming the namespace to check. |
+| `refuse` | Nothing is applied and the cluster is untouched. |
+
+A component is skipped only when **both** halves hold: it installs nothing but the operator (namespace
++ OperatorGroup + Subscription, no other manifest), **and** dropping it would strand no sibling
+component that has no other source for that namespace or that operator's coverage. Either half failing
+means `warn`, not a refusal — a component wrongly kept costs an operator install nobody needed, while
+one wrongly skipped ships a workshop that is green and broken.
+
+**A refusal is reserved for exactly one case:** a namespace we ship an OperatorGroup into already
+carries one that is not ours. Two OperatorGroups in a namespace make OLM fail *every* CSV there while
+the pods keep running — a silent break of an operator the cluster's owner installed
+([§7.5](#75-an-operator-the-cluster-owner-cares-about-stops-upgrading)). The install stops before
+applying anything and names the two ways forward: drop the stack that ships that component, or have the
+owner remove theirs first. **A blocked component no longer aborts the install** — it warns and installs
+alongside.
+
+What this means on the clusters you will actually meet:
+
+| The cluster already runs | What happens |
+|---|---|
+| **cert-manager** (every RHDP cluster) | `skip`. Operator-only, and nothing depends on it for a namespace, so the workshop uses theirs and installs no cert-manager of its own. |
+| **OpenShift GitOps** | Reused — the existing Subscription is detected and no OperatorGroup of ours is applied. But see the prompt below: an adopted Argo CD is also the one place the install can stop and ask you a question. |
+| **OpenShift Lightspeed** | Reused. An `OLSConfig` on the cluster means the `ai-assist` stack is never requested at all and their provider stays. (Run the portfolio directly and *ask* for `ai-assist` on such a cluster and you get a `refuse` — the workshop installer never does.) |
+| **Red Hat build of Keycloak / RHBK** | **Both run.** The workshop's Keycloak lives in `sso-workshop`, a namespace only it creates, and RHBK can watch exactly one namespace — so an RHBK elsewhere is not an adoption signal, and there is no warning either. Theirs is untouched; ours is extra. This is also why teardown will not offer to delete the Keycloak CRDs ([§6.3](#63-removing-the-workshop-ogsr-uninstallsh)). |
+
+> **An adopted Argo CD makes the install interactive.** The workshop needs the application-controller
+> at 6Gi — the operator default of 2Gi is OOMKilled part-way through materializing entry states, and
+> nothing ever syncs. On an Argo CD *we* install that is applied unconditionally; on an **adopted** one
+> it is a change to a resource the org owns that restarts their controller, so the installer prints the
+> prior value, asks `[y/N]`, and records what to restore before patching. **Answering no — or running
+> with no TTY — stops the install.** For an unattended run consent up front:
+> `OGSR_ADOPTED_ARGOCD_MEMORY=apply ./bootstrap/install.sh`.
 
 ### 3.2 Configure
 
@@ -283,7 +347,20 @@ cp bootstrap/vars.example.yaml bootstrap/vars.yaml
 ```
 
 Six phases, idempotent — re-run it freely. Budget **15–20 minutes** to the completion banner, plus more
-for operators to finish reconciling behind it. It ends with a summary of what it adopted.
+for operators to finish reconciling behind it.
+
+Phase 0 runs the component adoption plan from [§3.1](#what-the-install-does-with-an-operator-the-cluster-already-has)
+against the live cluster, before anything is applied. **Read its output rather than scrolling past it:**
+
+- `✅ adopting this cluster's <component>` — theirs is used, ours is never installed.
+- `⚠ <component>: …` — **ours is being installed alongside theirs.** The line names the namespace and
+  the `oc get subscriptions.operators.coreos.com -n <ns>` to run. Worth a look now, and worth noting
+  before you tear the cluster down: the uninstall snapshot keys on *our* Subscription name, so an
+  operator the org named something else is not recorded as adopted.
+- A refusal stops the run there, with nothing applied.
+
+It ends with a summary of what it adopted, and of which adopted resources are annotated
+`Prune=false,Delete=false` so a cascade uninstall cannot reach them.
 
 **Do not judge success by the banner.** Confirm with §4.
 
@@ -452,19 +529,76 @@ nothing belonging to a removed user survives in any of those.
 ```bash
 ./bootstrap/ogsr-uninstall.sh --dry-run    # prints the WIPE / PRESERVE plan
 ./bootstrap/ogsr-uninstall.sh              # performs it
-./bootstrap/ogsr-check-clean.sh            # read-only proof; non-zero while anything remains
+./bootstrap/ogsr-check-clean.sh            # read-only report; the admin decides what else to remove
 ```
 
 **Never skip the dry run on a customer cluster.**
 
-**What is preserved:** anything the adoption forecast marked ADOPT — operators the cluster already had,
-their namespaces, Subscriptions, CSVs and OperatorGroups. Adopted namespaces are de-labelled rather
-than deleted.
+**What is preserved:** every component the adoption plan marked `skip` — operators the cluster already
+had, their namespaces, Subscriptions, CSVs and OperatorGroups, all annotated `Prune=false,Delete=false`
+at install time so the cascade cannot reach them. Adopted namespaces are de-labelled rather than
+deleted.
+
+A component the install **`warn`ed** about is the case to look at before you run this. That operator is
+ours, recorded as *created*, sitting in a namespace the org also has one in — so teardown removes our
+Subscription and the CSV it resolves, while the org's Subscription is preserved and de-labelled. The
+snapshot keys on *our* Subscription name, and one namespace can hold two Subscriptions resolving to a
+single CSV object, so read what is actually there first:
+
+```bash
+oc get subscriptions.operators.coreos.com,csv -n <the namespace the ⚠ named>
+```
 
 `ogsr-check-clean.sh` **never deletes anything.** It reports leftover namespaces, stale APIServices,
-dead webhooks, orphaned CSVs and workshop-created CRDs with live instance counts, and prints the exact
-`oc` command to remove each — the cluster's admin decides. Against a full install it takes a couple of
-minutes and every section prints elapsed time, so it is visibly working rather than hung.
+dead webhooks, orphaned CSVs and workshop-created CRDs with live instance counts. Where it can say
+safely what a finding is, it prints the exact `oc` command — a delete for something we created, a
+`strip` that removes our label and leaves the object, and deliberately *nothing* for a finding it
+cannot attribute. The cluster's admin decides. Against a full install it takes a couple of minutes and
+every section prints elapsed time, so it is visibly working rather than hung.
+
+#### Some CRDs are deliberately never offered for deletion
+
+A CRD is cluster-scoped: `oc delete crd` removes every instance of that kind in *every* namespace, the
+organisation's included, and nothing puts them back. So a CRD our operator owns is not automatically
+ours to offer.
+
+The teardown withholds one when either test fires — **another operator outside this install also
+declares it owned**, or **it still has an instance outside every namespace this teardown removes**. The
+first fires even at zero instances: their operator is still running and will create some. Withheld CRDs
+are named on every run, in `--dry-run` too, with the evidence and a read-only `oc get <crd> -A`, and
+their names are carried in the state dump under `crds_shared`.
+
+`ogsr-check-clean.sh` reads that key, re-derives the same tests live, and reports them as a category of
+its own — **`SHARED`, with an `inspect (read-only):` command and never a delete, on any cluster.**
+
+The real example, measured on a live cluster: `keycloaks.k8s.keycloak.org` is declared owned by four
+CSVs — the workshop's RHBK in `sso-workshop`, one OLM resolved as an MTA dependency, and two belonging
+to the organisation's own Keycloak. Deleting that CRD to tidy up after the workshop would take the
+organisation's Keycloak with it. It is named, and it is never offered.
+
+**The checker still exits 0 with those CRDs registered** — that is the point of the category, and it is
+the one thing to know before you wire it into anything:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Nothing *unexpected* remains. Declared residue and shared CRDs may still be on the cluster — the green line then says `no UNEXPECTED leftover` and lists them, rather than claiming `clean`. |
+| `1` | Findings are listed above (works as a CI gate), or a declared-residue entry has gone stale. |
+| `2` | The scan could not run at all — no `oc`, not logged in, or a malformed residue ledger. |
+
+So **do not read a green tick as "the CRD registry is back the way it was."** When anything was kept on
+purpose the verdict says so on the same screen, counting the shared CRDs and the declared residue
+separately from the findings — read those lines, they name what is still there and why.
+
+**Keep the state dump.** The teardown deletes the namespace holding its own install state, so it writes
+a copy to `${TMPDIR:-/tmp}/ogsr-uninstall-state.txt` first and prints the exact next command. The
+checker picks that path up automatically on the same machine; from anywhere else, pass it:
+
+```bash
+./bootstrap/ogsr-check-clean.sh --state-file /path/to/ogsr-uninstall-state.txt
+```
+
+Without it the checker cannot tell an adopted operator from one of ours, falls back to heuristic
+name-matching, and says so — treat anything it prints in that mode as a suggestion to verify.
 
 ---
 
@@ -598,6 +732,11 @@ every CSV there `Failed` / `TooManyOperatorGroups` and stops reconciling — **w
 
 `openshift-operators` always ships one, so nothing may ever add another there.
 
+This is the **one** condition the install refuses on: a namespace we ship an OperatorGroup into that
+already carries someone else's stops the run before anything is applied
+([§3.1](#what-the-install-does-with-an-operator-the-cluster-already-has)). Every other
+already-installed operator is either adopted or installed alongside.
+
 Assert after any install that this returns nothing:
 
 ```bash
@@ -705,14 +844,21 @@ status and a logs pointer. It always exits 0 — it is a report, not a gate.
 
 The workshop must drop onto an existing cluster without changing its character:
 
-- **Operators already present are adopted**, never reinstalled or upgraded. The install prints what it
-  adopted, and uninstall refuses to touch those.
+- **An operator already present is adopted wherever adopting it is safe** — never reinstalled or
+  upgraded, and never touched by the uninstall. Where the workshop's component ships more than the
+  operator, or where dropping it would strand a sibling, ours is installed *alongside* theirs instead
+  and the install says so; the only thing that stops an install outright is a namespace where a second
+  OperatorGroup of ours would silently break OLM ([§3.1](#what-the-install-does-with-an-operator-the-cluster-already-has)).
 - **Cluster-wide default behaviour is never altered.** (This is why the OpenShift console opens in a new
   tab instead of being embedded in the cockpit — embedding would require a global IngressController
   header rewrite, which changes behaviour for every workload on the cluster.)
 - **Attendees are walled off** from the organisation's namespaces and from each other: each gets their
   own Argo `AppProject` listing only their own namespaces, and an admission policy pins them to it.
-- **Full removal reverses what we created and leaves the rest**, and a read-only checker proves it.
+- **Full removal reverses what we created and leaves the rest**, and a read-only checker reports what
+  is left. Where reversing something would reach the organisation's data — a cluster-scoped CRD their
+  operator also owns, or that still has their instances in it — it is deliberately left registered,
+  named with its evidence, and never handed to anyone as a delete command
+  ([§6.3](#some-crds-are-deliberately-never-offered-for-deletion)).
 
 The litmus test for any change: *would anything of the cluster owner's differ after a full removal?*
 

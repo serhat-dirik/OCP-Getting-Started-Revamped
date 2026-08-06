@@ -83,7 +83,7 @@ troubleshooting, see **[INSTALL.md](INSTALL.md)**.
 * An OpenShift **4.20+** cluster with a default StorageClass and **`linux/amd64` workers** (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket).
 * `cluster-admin` access, with the `oc` CLI logged in to that cluster.
 * On the machine you install from: `git`, `yq`, `htpasswd`, `openssl`. See [INSTALL.md](INSTALL.md) for why each is needed.
-* The installer is **non-invasive on existing clusters**: operators already present are adopted (never overwritten or upgraded), attendees live in their own identity provider, and nothing about the cluster's default behavior is changed.
+* The installer is **non-invasive on existing clusters**: an operator already present is adopted wherever adopting it is safe (never overwritten or upgraded) and otherwise the workshop's own is installed *alongside* it rather than over it, attendees live in their own identity provider, and nothing about the cluster's default behavior is changed. Preview the exact per-component decision before you install — read-only, applies nothing: `platform-portfolio/argocd-bootstrap/install.sh --stacks "$(ls platform-portfolio/stacks | tr '\n' ',' | sed 's/,$//')" --adoption-plan`. See [INSTALL.md §3.1](INSTALL.md).
 
 **1. Clone this repository**
 
@@ -229,8 +229,15 @@ owner. Adopted operators and anything the cluster had before the install are pre
 ```bash
 ./bootstrap/ogsr-uninstall.sh --dry-run   # prints the full removal plan; changes nothing
 ./bootstrap/ogsr-uninstall.sh             # removes the workshop entirely
-./bootstrap/ogsr-check-clean.sh           # read-only proof; non-zero while anything remains
+./bootstrap/ogsr-check-clean.sh           # read-only report; the admin decides what else to remove
 ```
+
+Two things the teardown deliberately leaves behind, and says so on every run: declared residue, and
+**cluster-scoped CRDs the organisation still depends on** — one another operator also owns, or that
+still has their instances in it. Deleting such a CRD would delete every instance of it in every
+namespace, so it is named with its evidence and a read-only `oc get <crd> -A`, never a delete command.
+The checker exits **0** with those still registered, saying `no UNEXPECTED leftover` rather than
+`clean` — see [INSTALL.md §6.3](INSTALL.md).
 
 ## Local Content Preview
 
