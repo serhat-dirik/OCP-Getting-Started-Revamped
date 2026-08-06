@@ -218,7 +218,9 @@ live_grounding_directs_tools() {
 # AND IT IS DELIBERATELY KEPT IMPERATIVE NOW THAT THIS IS CORROBORATION. A terse question would be the
 # tempting change — it would exercise the attendee's own prompt rather than the wording of the query —
 # but that is exactly what makes it a bad probe here: the terse question's outcome is model-dependent
-# (the lab page documents both outcomes as valid), so it would warn on correct work as often as not.
+# (2026-08-06: the lab NO LONGER documents both outcomes — it was re-measured 3/3 per cell and the
+# terse question does not ground in EITHER prompt state on {maas_model}), so it would warn on correct
+# work as often as not.
 # The imperative query corroborates the END-TO-END TOOL PATH (model reachable, MCP servers answering,
 # tool actually executed). The attendee's grounding is graded from the ConfigMap and from what the pod
 # is serving — both of which are decided without asking a model anything.
@@ -344,7 +346,9 @@ else
        hint "the Route is reachable from the cockpit terminal and from the cluster; re-run there, or check: oc get route parasol-agent -n ${NS}" ;;
   esac
   # 3. CORROBORATION, NOT A GRADE. Whether the model then ELECTS get_claim depends on the model as much
-  #    as on the prompt (the lab page documents both outcomes on the same terse question), so it is
+  #    as on the prompt (2026-08-06: on {maas_model} it is deterministic, not a toss-up — the terse
+  #    question typed the call out as text 0/10 times across both prompt states and three pods, which
+  #    is why the lab and this probe both use the imperative phrasing), so it is
   #    reported and never counted: a ❌ here would fail correct work on a model that simply chooses
   #    differently. What it genuinely proves when it passes is the whole path end to end — model
   #    reachable, MCP servers answering, a tool actually executed.
