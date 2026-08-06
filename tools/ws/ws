@@ -596,7 +596,7 @@ meta_smoke_cmds() {  # module → ws-meta smokeCommands list (OPTIONAL, default 
 }
 
 meta_apps() {  # module user → "namespace project" if the module declares attendee-created Argo
-  # Application CRs living OUTSIDE its purge namespaces (m09+: the student-gitops control plane —
+  # Application CRs living OUTSIDE its purge namespaces (m10+: the student-gitops control plane —
   # ADR-0002 amendment 5: GitOps 1.21 refuses per-user source namespaces on a namespace-scoped
   # instance, so attendee apps live in the instance ns, isolated by Argo RBAC + AppProjects).
   # ws-meta keys: purgeAppsNamespace + purgeAppsProject (${USER} resolves).
@@ -615,64 +615,70 @@ purge_ns() {  # ns [keep-module] — delete user workloads/leftovers; preserve s
   oc get ns "$ns" >/dev/null 2>&1 || return 0
   info "purging user workloads in ${ns}…"
   oc delete all,pvc --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # CRs 'oc delete all' misses: workspaces (M03+), Tekton runs (M07+), ImagePolicies (M08+) — extend
+  # CRs 'oc delete all' misses: workspaces (M03+), Tekton runs (M07+), ImagePolicies (M09+) — extend
   # as modules add types. PipelineRuns cascade to their TaskRuns; deleting them also releases per-run
-  # workspace PVCs. A leftover M08 ImagePolicy (block-unsigned) would otherwise block the next module's
-  # image pulls in this namespace, so purge it too.
+  # workspace PVCs. A leftover trusted-supply-chain ImagePolicy (block-unsigned) would otherwise block
+  # the next module's image pulls in this namespace, so purge it too.
   oc delete devworkspaces.workspace.devfile.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete pipelineruns.tekton.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete imagepolicies.config.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # PodDisruptionBudgets aren't in `oc delete all`; an attendee's leftover M12 PDB survives reset and
-  # then trips the next start's entry verify (found at M12 G1, 2026-07-11).
+  # PodDisruptionBudgets aren't in `oc delete all`; an attendee's leftover observability-health-scale PDB
+  # survives reset and then trips the next start's entry verify (found at M12 G1, 2026-07-11).
   oc delete poddisruptionbudgets.policy --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # Same for the M12 attendee-created PrometheusRule — not in `oc delete all`, survives reset and red-
-  # fails the next entry verify ("no PrometheusRule yet") (M12 G3, 2026-07-11 — sibling of the PDB gap).
+  # Same for the observability-health-scale attendee-created PrometheusRule — not in `oc delete all`,
+  # survives reset and red-fails the next entry verify ("no PrometheusRule yet") (M12 G3, 2026-07-11 —
+  # sibling of the PDB gap).
   oc delete prometheusrules.monitoring.coreos.com --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # NetworkPolicies aren't in `oc delete all` either; M15's whole lab is attendee-authored netpols
-  # (default-deny + precise allows), which survive reset and red-fail the next entry verify ("no
-  # default-deny yet") — the exact sibling of the PDB/PrometheusRule gaps above (found at M15 G1,
-  # 2026-07-13). Any chart-owned entry netpol is re-created by re-materialize, so this is safe.
+  # NetworkPolicies aren't in `oc delete all` either; networking-dev-devops's whole lab is attendee-
+  # authored netpols (default-deny + precise allows), which survive reset and red-fail the next entry
+  # verify ("no default-deny yet") — the exact sibling of the PDB/PrometheusRule gaps above (found at
+  # M15 G1, 2026-07-13). Any chart-owned entry netpol is re-created by re-materialize, so this is safe.
   oc delete networkpolicy --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # Namespaced Templates aren't in `oc delete all` either; M17's catalog-governance beat adds a Template
-  # to the attendee's own namespace (and `ws solve m17` renders one), which survives reset and red-fails
-  # the next entry verify ("no custom Template yet") — the exact sibling of the PDB/NetworkPolicy gaps
-  # above (found at M17 build, 2026-07-13). Any chart-owned entry Template is re-created by re-materialize.
+  # Namespaced Templates aren't in `oc delete all` either; registry-images-catalog-governance's catalog-
+  # governance beat adds a Template to the attendee's own namespace (and `ws solve
+  # registry-images-catalog-governance` renders one), which survives reset and red-fails the next entry
+  # verify ("no custom Template yet") — the exact sibling of the PDB/NetworkPolicy gaps above (found at
+  # M17 build, 2026-07-13). Any chart-owned entry Template is re-created by re-materialize.
   oc delete templates.template.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # Istio config CRs the M18 attendee creates in a mesh namespace aren't in `oc delete all`; a leftover
-  # VirtualService/DestinationRule/AuthorizationPolicy/PeerAuthentication/Gateway/EnvoyFilter survives reset
-  # and red-fails the next entry verify ("no mesh config yet") — the exact sibling of the PDB/NetworkPolicy/
-  # Template gaps above (M18 build, 2026-07-13). No-op on non-mesh clusters (the istio CRDs are absent).
+  # Istio config CRs the service-mesh-advanced-gateways attendee creates in a mesh namespace aren't in
+  # `oc delete all`; a leftover VirtualService/DestinationRule/AuthorizationPolicy/PeerAuthentication/
+  # Gateway/EnvoyFilter survives reset and red-fails the next entry verify ("no mesh config yet") — the
+  # exact sibling of the PDB/NetworkPolicy/Template gaps above (M18 build, 2026-07-13). No-op on
+  # non-mesh clusters (the istio CRDs are absent).
   oc delete virtualservices.networking.istio.io,destinationrules.networking.istio.io,gateways.networking.istio.io,serviceentries.networking.istio.io,sidecars.networking.istio.io,envoyfilters.networking.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete authorizationpolicies.security.istio.io,peerauthentications.security.istio.io,requestauthentications.security.istio.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # Knative Serving/Eventing CRs the M19 attendee creates in {user}-dev aren't in `oc delete all`; a
-  # leftover ksvc (Service→Configuration/Revision/Route cascade), Broker, Trigger or PingSource survives
-  # reset and red-fails the next entry verify ("a ksvc already exists / eventing already wired") — the
-  # exact sibling of the PDB/NetworkPolicy/Template/istio purge gaps above (M19 build, 2026-07-13). Deleting
-  # the ksvc Service cascades to its Configuration/Revision/Route via owner refs. No-op on clusters without
-  # Serverless installed (the serving/eventing CRDs are absent).
+  # Knative Serving/Eventing CRs the serverless-zero-to-hero attendee creates in {user}-dev aren't in
+  # `oc delete all`; a leftover ksvc (Service→Configuration/Revision/Route cascade), Broker, Trigger or
+  # PingSource survives reset and red-fails the next entry verify ("a ksvc already exists / eventing
+  # already wired") — the exact sibling of the PDB/NetworkPolicy/Template/istio purge gaps above (M19
+  # build, 2026-07-13). Deleting the ksvc Service cascades to its Configuration/Revision/Route via owner
+  # refs. No-op on clusters without Serverless installed (the serving/eventing CRDs are absent).
   oc delete services.serving.knative.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete triggers.eventing.knative.dev,brokers.eventing.knative.dev,pingsources.sources.knative.dev --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # Velero (OADP) Backup/Restore CRs the M21 lab creates in a resilience namespace aren't in `oc delete all`;
-  # a leftover backup/restore/schedule.velero.io — plus the Tech-Preview NonAdmin* self-service CRs
-  # (nonadmin{backups,restores,backupstoragelocations}.oadp.openshift.io) — survives reset and red-fails the
-  # next entry verify ("a backup already exists"). No-op on clusters without OADP (the CRDs are absent).
+  # Velero (OADP) Backup/Restore CRs the resilience-multicluster-dr lab creates in a resilience namespace
+  # aren't in `oc delete all`; a leftover backup/restore/schedule.velero.io — plus the Tech-Preview
+  # NonAdmin* self-service CRs (nonadmin{backups,restores,backupstoragelocations}.oadp.openshift.io) —
+  # survives reset and red-fails the next entry verify ("a backup already exists"). No-op on clusters
+  # without OADP (the CRDs are absent).
   oc delete backups.velero.io,restores.velero.io,schedules.velero.io,podvolumebackups.velero.io,podvolumerestores.velero.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
   oc delete nonadminbackups.oadp.openshift.io,nonadminrestores.oadp.openshift.io,nonadminbackupstoragelocations.oadp.openshift.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # Skupper v2 (RHSI) CRs the M21 attendee creates to link sites aren't in `oc delete all`; a leftover Site/
-  # Link/Listener/Connector/AccessGrant/AccessToken survives reset and red-fails the next entry verify — the
-  # sibling of the istio/knative purge gaps above. No-op on clusters without RHSI (the skupper.io CRDs absent).
+  # Skupper v2 (RHSI) CRs the resilience-multicluster-dr attendee creates to link sites aren't in
+  # `oc delete all`; a leftover Site/Link/Listener/Connector/AccessGrant/AccessToken survives reset and
+  # red-fails the next entry verify — the sibling of the istio/knative purge gaps above. No-op on
+  # clusters without RHSI (the skupper.io CRDs absent).
   oc delete sites.skupper.io,links.skupper.io,listeners.skupper.io,connectors.skupper.io,accessgrants.skupper.io,accesstokens.skupper.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # MTA/Tackle namespaced CRs the M22 attendee could drop in {user}-modernize aren't in `oc delete all`.
-  # MTA's portfolio state (Applications, assessments, analyses) lives in the shared Tackle Hub DB — NOT
-  # as per-user k8s CRs — so today this is defensive: it purges any namespaced tackle.konveyor.io Task/
-  # Addon/Extension a future lab beat might create in the user namespace, matching the istio/knative
-  # idiom above. No-op on clusters without MTA installed (the tackle CRDs are absent) or on non-M22
-  # namespaces (nothing of these kinds is present).
+  # MTA/Tackle namespaced CRs the app-modernization attendee could drop in {user}-modernize aren't in
+  # `oc delete all`. MTA's portfolio state (Applications, assessments, analyses) lives in the shared
+  # Tackle Hub DB — NOT as per-user k8s CRs — so today this is defensive: it purges any namespaced
+  # tackle.konveyor.io Task/Addon/Extension a future lab beat might create in the user namespace,
+  # matching the istio/knative idiom above. No-op on clusters without MTA installed (the tackle CRDs
+  # are absent) or on non-app-modernization namespaces (nothing of these kinds is present).
   oc delete tasks.tackle.konveyor.io,addons.tackle.konveyor.io,extensions.tackle.konveyor.io --all -n "$ns" --wait=false >/dev/null 2>&1 || true
-  # And STRIP the sidecar-injection labels the M18 attendee added when enrolling. The {user}-mesh namespace
-  # is workshop-layer (survives reset) and keeps its STABLE istio-discovery label, but a leftover
-  # istio-injection / istio.io/rev would inject sidecars into the re-materialized "un-meshed" app and
-  # red-fail the next entry verify. Harmless no-op on namespaces that never carried them.
+  # And STRIP the sidecar-injection labels the service-mesh-advanced-gateways attendee added when
+  # enrolling. The {user}-mesh namespace is workshop-layer (survives reset) and keeps its STABLE
+  # istio-discovery label, but a leftover istio-injection / istio.io/rev would inject sidecars into the
+  # re-materialized "un-meshed" app and red-fail the next entry verify. Harmless no-op on namespaces
+  # that never carried them.
   oc label ns "$ns" istio-injection- istio.io/rev- >/dev/null 2>&1 || true
   # Secrets/ConfigMaps the user created (e.g. template-instantiated DB creds) leak past
   # 'oc delete all' — purge them EXCEPT system objects and the current module's marker.
@@ -763,8 +769,8 @@ purge_meta_rbac() {  # module user — delete the RBAC a module's lab teaches at
 # survivor (m09/m10 claims-*) then re-deployed into the just-purged namespace and prep/reset never
 # converged (SEV1-A). We instead delete through the STUDENT ARGO API as the attendee: the per-user
 # local account's token maps to role:{user} → proj-{user}, so Argo RBAC bounds every delete to the
-# user's OWN apps (a cross-project delete returns permission denied — the SAME boundary M10's negative
-# test proves). A namespace-wide k8s `delete applications` grant would be a cross-tenant hole and is
+# user's OWN apps (a cross-project delete returns permission denied — the SAME boundary gitops-at-scale's
+# negative test proves). A namespace-wide k8s `delete applications` grant would be a cross-tenant hole and is
 # deliberately NOT used. Admin/instructor keep the direct k8s path (they can delete cross-namespace).
 _student_argo_host() {  # → student Argo server route host, derived from the ingress domain (attendee-
   # safe: attendees cannot read the student-gitops route cross-namespace — the verify scripts' idiom).
@@ -865,8 +871,8 @@ purge_apps() {  # module user [keep-module] — delete the user's Application/Ap
     argo_purge_apps "$user" "$proj" "$keep"
     return 0
   fi
-  # Privileged (admin/instructor) k8s path. ApplicationSets FIRST: an attendee's appset (M10 beat 1)
-  # re-generates any Application we delete, so purging apps before their generator is self-defeating.
+  # Privileged (admin/instructor) k8s path. ApplicationSets FIRST: an attendee's appset (gitops-at-scale
+  # beat 1) re-generates any Application we delete, so purging apps before their generator is self-defeating.
   for name in $(oc get applicationsets.argoproj.io -n "$ns" \
       -o jsonpath="{range .items[?(@.spec.template.spec.project==\"${proj}\")]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null); do
     if [[ -n "$keep" ]]; then
@@ -999,9 +1005,9 @@ wait_healthy() {  # appname [timeout_s] [require_sync]
   # require_sync (default true): also require the app to read Synced. Pass "false" for a module whose app
   # is genuinely Healthy but never reaches Synced — an entry state that seeds an OpenShift BuildConfig
   # drifts forever because the build API defaults spec fields (runPolicy, {successful,failed}Builds-
-  # HistoryLimit, postCommit, nodeSelector:null) that Argo diffs, and selfHeal is off (m25, ws-meta
-  # expectOutOfSync). Health + a Succeeded op still gate readiness, so a genuine failure is still caught;
-  # `ws verify` is the correctness gate regardless.
+  # HistoryLimit, postCommit, nodeSelector:null) that Argo diffs, and selfHeal is off (packaging-
+  # distributing, ws-meta expectOutOfSync). Health + a Succeeded op still gate readiness, so a genuine
+  # failure is still caught; `ws verify` is the correctness gate regardless.
   # TIMEOUT IS WALL-CLOCK, not a loop counter. It used to add 5 per iteration and assume an
   # iteration costs only its sleep — but each pass makes THREE `oc get` calls, and against a slow or
   # remote API server those dominate. Measured on a real cluster: a declared 1500s budget ran 2980s,
@@ -3218,8 +3224,8 @@ delete_app_with_finalizer() {  # app — delete an entry Argo app in ARGO_NS, st
 cohort_purge_student_apps() {  # user — delete ALL the user's apps/appsets in the student-gitops control
   # plane (project proj-<user>), ApplicationSets FIRST (they regenerate deleted apps). cohort-reset is a
   # cluster-admin op, so this uses the direct k8s path (no student-Argo token needed). No-op when
-  # student-gitops is absent (pre-M09 clusters) or the user owns nothing there. Mirrors purge_apps' admin
-  # path but sweeps the WHOLE per-user project rather than one module's apps.
+  # student-gitops is absent (clusters predating gitops-fundamentals) or the user owns nothing there.
+  # Mirrors purge_apps' admin path but sweeps the WHOLE per-user project rather than one module's apps.
   local user="$1" name
   local proj="proj-${user}"
   oc get ns "$STUDENT_ARGO_NS" >/dev/null 2>&1 || return 0
@@ -4090,7 +4096,7 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
   # ── 4. student-gitops apps in the user's project (proj-<user>) ──
   info "Student GitOps (project proj-${user})"
   if ! oc get ns "$STUDENT_ARGO_NS" >/dev/null 2>&1; then
-    echo "  (${STUDENT_ARGO_NS} namespace absent — pre-M09 cluster or student-gitops not installed)"
+    echo "  (${STUDENT_ARGO_NS} namespace absent — cluster predates gitops-fundamentals, or student-gitops not installed)"
   else
     local sapps n s h
     sapps="$(oc get applications -n "$STUDENT_ARGO_NS" \
