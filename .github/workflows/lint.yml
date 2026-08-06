@@ -1415,6 +1415,51 @@ jobs:
           fi
           python3 tools/lint/version-anchor-guard.py
 
+  crd-unknown-field:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Rendered custom resources must not carry fields their CRDs do not define
+        # Kubernetes PRUNES unknown fields at admission: the field lands in last-applied, never in
+        # the stored object, and Argo CD's three-way diff then compares a manifest against an object
+        # that can never match it. Measured on 65prs 2026-08-05: ai-assisted-development shipped
+        # `spec.template.schemaVersion` and `spec.template.metadata` on a DevWorkspace — neither is
+        # in that CRD's structural schema — and `entry-ai-assisted-development-*` read OutOfSync
+        # FOREVER on an otherwise-healthy world. Nobody could explain the red, and the accepted
+        # story became "operator defaulting", which was wrong. 9c97d80 fixed it; this stops the
+        # whole class returning, because permanent red teaches attendees and SAs to ignore red.
+        #
+        # Schemas come from checked-in snapshots (tools/lint/crd-unknown-field-guard.fixtures),
+        # never a live cluster — CI has none. A CR whose CRD has no snapshot exits 2 as UN-CHECKABLE
+        # rather than passing, so a new custom-resource kind reddens this job until someone runs
+        # `--capture` on a cluster. That cost is the point: a gate that goes green over something it
+        # never inspected is the defect this workflow exists to catch.
+        run: |
+          rc=0
+          python3 tools/lint/crd-unknown-field-guard.py --self-test || rc=$?
+          # Exactly 1 = all eight planted defects caught against the REAL CRD snapshots (both
+          # DevWorkspace fields of 9c97d80, an unknown field inside an array item, a misspelt root
+          # field, a typo inside a map VALUE, a CR nested in an OpenShift Template, a closed-object
+          # subtree, and a solve=true-only resource) AND all six legal fields beside them left
+          # unflagged — a false positive here would block authoring, so it is asserted in both
+          # directions. 0 = a detector is blind; 2 = a canary was missed, a false-positive control
+          # fired or vanished from the fixture, or the harness itself is broken.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::crd-unknown-field-guard self-test must exit 1 (every planted pruned" \
+                 "field detected and every legal field left alone); got rc=$rc. Detection is" \
+                 "unproven — refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/crd-unknown-field-guard.py
+
   canary-coverage:
     runs-on: ubuntu-latest
     steps:

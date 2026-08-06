@@ -1,0 +1,83 @@
+---
+# FALSE-POSITIVE CONTROL 1: knative's Trigger sets x-kubernetes-preserve-unknown-fields on the WHOLE
+# of spec, so CRD pruning cannot touch a field nothing names — and this guard, which models pruning,
+# must not flag it.
+#
+# MEASURED CAVEAT, 2026-08-06, and recorded because a control whose story is wrong is worse than no
+# control: a server-side dry-run of this exact object is REJECTED, by knative's own webhook rather
+# than by pruning — `admission webhook "webhook.eventing.knative.dev" denied the request: mutation
+# failed: cannot decode incoming new object: json: unknown field "wildButLegal"`. Preserve-unknown-
+# fields is therefore necessary but not sufficient for a field to be ACCEPTED, and admission
+# webhooks are outside this guard's model (see its docstring). The control still does its job here:
+# the guard must stay silent about a field the CRD schema legalises. The one that also survives a
+# real cluster end to end is DevWorkspace's `spec.template.attributes.wildButLegal`, which the same
+# dry-run kept.
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: canary-trigger
+  namespace: {{ .Values.user }}-canary
+spec:
+  broker: default
+  wildButLegal: "preserve-unknown-fields makes this legal"
+  subscriber:
+    ref:
+      apiVersion: v1
+      kind: Service
+      name: canary
+---
+# FALSE-POSITIVE CONTROL 2 (free-form map) plus a planted ROOT-level unknown. `spec.nodeLabels` is
+# additionalProperties — arbitrary KEYS are the whole point of it — while `speec` is a misspelling
+# of the one field this kind has, and misspelling the root is how a whole spec silently vanishes.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: canary-flavor
+spec:
+  nodeLabels:
+    anyKeyAtAll: "arbitrary map keys are legal here"
+speec: {}                           # planted: a root-level field the schema does not define
+---
+# FALSE-POSITIVE CONTROL 3, and the case that proves a map's VALUES are still walked: Tekton's
+# `spec.params[].properties` is a map, so `shape` is a legal key — but the map's values have a
+# schema of their own, and `typo` inside one prunes exactly like any other unknown field.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: canary-pipeline
+  namespace: {{ .Values.user }}-canary
+spec:
+  params:
+    - name: claim
+      type: object
+      properties:
+        shape:
+          type: string             # legal: a real field of the map's value schema
+          typo: string             # planted: not a field of that value schema
+  tasks:
+    - name: only-task
+      taskRef:
+        name: canary-task
+---
+# FALSE-POSITIVE CONTROL 4: a BUILT-IN kind. Deployments are not backed by a CRD, so there is no
+# openAPIV3Schema to walk and this guard's mechanism does not apply to them — it must skip the whole
+# object rather than invent a verdict about it. (The API server rejects this outright; that is the
+# API server's job, not this guard's.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-builtin
+  namespace: {{ .Values.user }}-canary
+spec:
+  notADeploymentField: true
+  selector:
+    matchLabels:
+      app: canary
+  template:
+    metadata:
+      labels:
+        app: canary
+    spec:
+      containers:
+        - name: c
+          image: registry.example.com/canary/app:1
