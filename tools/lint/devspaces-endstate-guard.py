@@ -57,7 +57,7 @@ selector is invisible to this gate, and a live `ws verify` stays the acceptance 
 Dev Spaces halves of the end state (Che's namespace adoption, what the DevWorkspace controller labels)
 are equally recordings and are asserted on cluster, not here.
 
-Detectors, each with a canary of its own in --self-test:
+Detectors:
   [1] marks        every recorded line appears with the mark the world requires
   [2] verdict      the closing banner is exactly what the world requires
   [3] exit code    the process status matches, plain and under VERIFY_STRICT=1
@@ -65,6 +65,29 @@ Detectors, each with a canary of its own in --self-test:
   [5] lab anchor   the lab still teaches the endpoint the script grades
   [6] seed anchor  the seeded app source must NOT satisfy the predicate
   [7] modelled     no `oc`/`curl` call escaped the recording
+  [8] harness      the inputs a verdict needs — script, lib, app source, lab, stub, fixtures, bash
+
+THOSE EIGHT NUMBERS ARE CONCEPTS; THE CODE HAS ONE EMISSION SITE PER SENTENCE IT CAN PRINT, and each
+one is a separate way this gate can go blind. `_canary-coverage.py` enumerates them mechanically and
+blinds them one at a time — a site is PROVEN only when blinding it moves an exit code. Do not write
+the current total here; count it with the tool, which is the only thing that cannot rot:
+
+    python3 tools/lint/_canary-coverage.py --guard devspaces-endstate-guard.py --budget 99999 -j 8
+
+Measured that way on 2026-08-06, before the canaries below existed: 1 of 20 proven. Six mutants and
+two anchors were all being asserted as "findings() came back non-empty", and non-empty is satisfied
+by whichever site fires FIRST. Renaming the endpoint in the lab, for instance, trips [5]'s two sites
+at once, so blinding either one left the self-test green and neither was ever witnessed.
+
+SO EVERY CANARY HERE NAMES THE SENTENCE IT EXPECTS, not merely that something was found. That exact
+string is what attributes a canary to one emission site: blinding that site deletes that sentence and
+the self-test fails, and blinding any OTHER site leaves the assertion untouched. Several canaries do
+trip more than one site — a script that returns the wrong exit code usually prints the wrong banner
+too, and forcing artificial isolation would mean inventing defects nobody could ship. The assertion,
+not the input, is what distinguishes. A canary asserting a sentence a DIFFERENT site produces would
+prove nothing about its own, which is why every `wants` string below carries the site's own literal
+prefix (`[X] no line carries`, `[X/entry] exit status`, `[X/strict] unmodelled call`, …), and why
+those prefixes must stay pairwise distinct.
 
 Exit codes:
   0  every world reproduces
@@ -96,19 +119,43 @@ CASES = ("untouched", "completed", "pushed-variant", "cluster-unreachable")
 # script's regex.
 LAB_PATH_ANNOTATION = '@Path("/ping")'
 
+# The three edits that turn the lab's own snippet into the "went further" world, each paired with what
+# the pushed-variant fixture would lose if it stopped landing. Applied and checked one at a time in
+# build_worlds() — see the block there for why the chained-replace version could not report anything.
+VARIANT_EDITS = (
+    (LAB_PATH_ANNOTATION, '@Path( "ping" )',
+     "the annotation spelled the other legal JAX-RS way, which regex-no-whitespace-tolerance needs"),
+    ("@Produces(MediaType.TEXT_PLAIN)", "@Produces(MediaType.APPLICATION_JSON)",
+     "the Challenge's JSON media type"),
+    ('return "parasol-claims dev mode: hot reload works";', 'return Map.of("claims", Claim.count());',
+     "a body other than the sample string, which regex-pinned-to-the-sample-string needs"),
+)
+
+
+# What must exist before any verdict is possible, named as a constant so it can be a DEFAULT rather
+# than a literal inside the loop. That is the whole reason for the parameters below: --self-test hands
+# Harness a world in which exactly one of the three things it checks is broken, and requires the
+# matching sentence back. Nothing on disk is touched to arrange it.
+REQUIRED_FILES = (SCRIPT, LIB, APP_SOURCE, LAB, STUB)
+
 
 class Harness:
     """Everything that can go wrong before a verdict exists. Missing input is rc 2, never a pass."""
 
-    def __init__(self) -> None:
+    def __init__(self, required=REQUIRED_FILES, cases=CASES, have_bash=None) -> None:
         self.problems: list[str] = []
-        for path in (SCRIPT, LIB, APP_SOURCE, LAB, STUB):
+        for path in required:
             if not path.is_file():
                 self.problems.append(f"{path.relative_to(REPO)} is missing")
-        for name in CASES:
+        for name in cases:
             if not (FIXTURES / f"{name}.case").is_file():
                 self.problems.append(f"fixture {name}.case is missing")
-        if shutil.which("bash") is None:
+        # Resolved into a plain bool first, so the canary can supply one. `if shutil.which(...) is
+        # None` inline would have left this branch witnessable only by editing PATH out from under a
+        # running process, which is a mutation of the world every other lane shares.
+        if have_bash is None:
+            have_bash = shutil.which("bash") is not None
+        if not have_bash:
             self.problems.append("bash is not on PATH")
 
 
@@ -173,16 +220,26 @@ def build_worlds(directory: Path, app_source: str, lab_text: str) -> list[str]:
 
     # The attendee who went further: annotation written the other legal way, and the Challenge's JSON
     # body instead of the sample string. Derived from the same snippet so it cannot drift from it.
-    variant = (snippet
-               .replace('@Path("/ping")', '@Path( "ping" )')
-               .replace('@Produces(MediaType.TEXT_PLAIN)', '@Produces(MediaType.APPLICATION_JSON)')
-               .replace('return "parasol-claims dev mode: hot reload works";',
-                        'return Map.of("claims", Claim.count());'))
-    if variant == snippet:
-        problems.append(
-            "the variant world is byte-identical to the pushed one, so the false-❌ canary would "
-            "prove nothing — the lab's snippet no longer contains what it is derived from"
-        )
+    #
+    # EACH EDIT IS CHECKED ON ITS OWN, and that is a fix, not a flourish. This used to apply all three
+    # with a chained .replace() and then ask `if variant == snippet`. That comparison was DEAD CODE:
+    # extract_lab_snippet only ever returns a block that contains LAB_PATH_ANNOTATION, so the first
+    # replacement always lands and the whole-string comparison could never be false — the branch was
+    # unreachable by construction and reported nothing while looking like it did. Meanwhile the two
+    # edits that CAN quietly stop landing (someone rewords the sample's body, or switches the media
+    # type) are exactly the ones the false-❌ canaries rest on: if the return literal stops matching,
+    # variant.java keeps the sample string and `regex-pinned-to-the-sample-string` passes for the
+    # wrong reason. Per-edit is what the comparison was reaching for and could not express.
+    variant = snippet
+    for old, new, carries in VARIANT_EDITS:
+        if old not in variant:
+            problems.append(
+                f"the lab's snippet no longer contains {old!r}, so the 'pushed-variant' world cannot "
+                f"carry {carries} — the false-❌ canary that rests on that difference would pass for "
+                f"the wrong reason instead of proving anything")
+            continue
+        variant = variant.replace(old, new)
+    if problems:
         return problems
     (directory / "variant.java").write_text(head + variant + "\n" + tail, encoding="utf-8")
     return problems
@@ -346,35 +403,48 @@ def findings(script_text: str, cases: dict[str, dict], worlds: Path, only: str |
     return out
 
 
-# name -> (old, new, which case must catch it on its own, why it matters)
+# name -> (old, new, which case must catch it on its own, the sentences that must come back, why)
 # Each mutant reintroduces a false-pass (or false-fail) shape the audit names, expressed against the
 # script's real text. A mutation whose `old` has been reworded out of the file is reported as a NO-OP
 # rather than silently skipped: a canary that cannot fire proves nothing.
+#
+# `wants` IS THE POINT, not decoration. Each string is the literal prefix of ONE emission site in
+# findings(); requiring it by name is what makes this canary evidence about that site rather than
+# about whichever site happened to fire first. See the module docstring for the 1-of-20 measurement
+# that produced the rule. Keep the prefixes pairwise distinct — `[X] exit status` and `[X/entry] exit
+# status` are different detectors and the `/entry` is the only thing separating them.
 MUTANTS = (
     ("degenerate-true",
      "ping_endpoint_pushed() {\n  gitea_host || return 1",
      "ping_endpoint_pushed() {\n  return 0  # MUTANT\n  gitea_host || return 1",
      "untouched",
+     ("[untouched] 'your /ping endpoint is pushed' is ✅ and must be ❌",
+      "[untouched] the closing banner must be",
+      "[untouched] exit status 0, must be 1"),
      "the canonical false pass — a predicate that cannot distinguish anything (audit F-05's bare ':')"),
     ("existence-not-content",
      '''grep -Eq '@Path[[:space:]]*\\([[:space:]]*"/?ping"[[:space:]]*\\)' <<<"$HTTP_OUT"''',
      '''[[ -n "$HTTP_OUT" ]]''',
      "untouched",
+     ("[untouched] 'your /ping endpoint is pushed' is ✅ and must be ❌",),
      "F-06 itself (audit shape 3): grading that the artefact EXISTS where the lab is about its CONTENT"),
     ("loose-regex",
      '''grep -Eq '@Path[[:space:]]*\\([[:space:]]*"/?ping"[[:space:]]*\\)' <<<"$HTTP_OUT"''',
      '''grep -Eq '@Path' <<<"$HTTP_OUT"''',
      "untouched",
+     ("[untouched] 'your /ping endpoint is pushed' is ✅ and must be ❌",),
      "audit shape 4: a predicate so loose the untouched seed satisfies it too"),
     ("regex-pinned-to-the-sample-string",
      '''grep -Eq '@Path[[:space:]]*\\([[:space:]]*"/?ping"[[:space:]]*\\)' <<<"$HTTP_OUT"''',
      '''grep -Fq 'parasol-claims dev mode: hot reload works' <<<"$HTTP_OUT"''',
      "pushed-variant",
+     ("[pushed-variant] 'your /ping endpoint is pushed' is ❌ and must be ✅",),
      "the false-❌ direction: grading the sample's return VALUE fails the attendees who did the Challenge"),
     ("regex-no-whitespace-tolerance",
      '''grep -Eq '@Path[[:space:]]*\\([[:space:]]*"/?ping"[[:space:]]*\\)' <<<"$HTTP_OUT"''',
      '''grep -Fq '@Path("/ping")' <<<"$HTTP_OUT"''',
      "pushed-variant",
+     ("[pushed-variant] 'your /ping endpoint is pushed' is ❌ and must be ✅",),
      "the false-❌ direction again: JAX-RS accepts @Path( \"ping\" ) and so must the check"),
     ("graded-in-entry-mode",
      '''  check "your /ping endpoint is pushed to ${USER_NAME}/parasol-claims (exercises 3 + 5)" ping_endpoint_pushed \\''',
@@ -383,7 +453,37 @@ fi
 if true; then
   check "your /ping endpoint is pushed to ${USER_NAME}/parasol-claims (exercises 3 + 5)" ping_endpoint_pushed \\''',
      "untouched",
+     ("[untouched/entry] --entry-only printed",
+      "[untouched/entry] the closing banner must be",
+      "[untouched/entry] exit status 1, must be 0"),
      "the mode split: an entry run that grades completion offers to wipe a finished attendee's world"),
+
+    # The three below witness detectors nothing above could reach. They are not extra false-pass
+    # shapes — they are the ways this GATE goes deaf while the script it grades looks untouched.
+    ("renamed-completion-check",
+     '''"your /ping endpoint is pushed to ${USER_NAME}/parasol-claims (exercises 3 + 5)"''',
+     '''"the fork carries the endpoint the lab teaches"''',
+     "untouched",
+     ("[untouched] no line carries",),
+     "the check is still there and still graded, but under a description no recorded mark matches — "
+     "the world silently stops being graded and every remaining assertion still passes"),
+    ("unrecorded-source-path",
+     'PING_SOURCE_PATH="src/main/java/com/parasol/claims/ClaimResource.java"',
+     'PING_SOURCE_PATH="src/main/java/com/parasol/claims/PingResource.java"',
+     "untouched",
+     ("[untouched] the run made a call the recording does not model",),
+     "the script asks Gitea for a file the recording never answered for. The ❌ that comes back is "
+     "RIGHT for this world and wrong for the reason — graded off an answer nobody recorded"),
+    ("unrecorded-read",
+     'oc get ns "$NS"',
+     'oc get namespace "$NS"',
+     "cluster-unreachable",
+     ("[cluster-unreachable/strict] unmodelled call:",
+      "[cluster-unreachable/strict] VERIFY_STRICT=1 exit status 1, must be 4",
+      "[cluster-unreachable/entry] unmodelled call:"),
+     "the same escape, in the two modes that have their own runs: an unrecorded read answers rc 1 "
+     "with EMPTY stderr, which oc_read classifies as the server's real NO — so a cluster that could "
+     "not be asked at all manufactures a ❌ and takes strict mode off its rc-4 tripwire"),
 )
 
 
@@ -401,6 +501,26 @@ def self_test() -> int:
     cases = {name: parse_case((FIXTURES / f"{name}.case").read_text(encoding="utf-8"))
              for name in CASES}
     failures: list[str] = []
+    witnessed = 0
+
+    def expect(label: str, reported: list[str], wants, why: str) -> None:
+        """Require each named sentence back. THE assertion of this whole file — see the docstring.
+
+        `reported` non-empty is NOT the test. A canary signed off by "something came back" is signed
+        off by whichever emission site fires first, and the sites that never fire first are exactly
+        the ones that can rot unnoticed. Naming the sentence pins the canary to one site.
+        """
+        nonlocal witnessed
+        for want in wants:
+            witnessed += 1
+            if any(want in item for item in reported):
+                continue
+            detail = ("\n        " + "\n        ".join(reported)) if reported else \
+                     " — the run reported NOTHING at all, so the defect went completely unnoticed"
+            failures.append(
+                f"{label}: nothing reported {want!r}. That sentence is the only evidence this canary "
+                f"offers about its detector, so the detector is unwitnessed and may already be dead "
+                f"({why}). What came back instead:{detail}")
 
     with tempfile.TemporaryDirectory() as tmp:
         worlds = Path(tmp) / "worlds"
@@ -416,7 +536,7 @@ def self_test() -> int:
             failures.append("the UNMUTATED script does not pass its own suite, so nothing below "
                             "means anything:\n      " + "\n      ".join(control))
 
-        for name, old, new, case_name, why in MUTANTS:
+        for name, old, new, case_name, wants, why in MUTANTS:
             if script_text.count(old) != 1:
                 failures.append(
                     f"mutant {name}: tools/verify/devspaces-inner-loop.sh contains "
@@ -428,34 +548,100 @@ def self_test() -> int:
             # a defect that only one world can see could be masked by an unrelated world failing for
             # an unrelated reason. Naming the world is what makes each canary say something.
             caught = findings(script_text.replace(old, new), cases, worlds, only=case_name)
-            if not caught:
-                failures.append(f"mutant {name} was NOT caught by the {case_name} world ({why}). "
-                                f"That world passes with the defect present, so a clean result on "
-                                f"the real script is not evidence of anything.")
+            expect(f"mutant {name} ({case_name} world)", caught, wants, why)
 
-        # The two anchors are CROSS-FILE: they describe states that would silently destroy this check
-        # without touching the verify script at all. Their canaries mutate the other file's TEXT in
-        # memory and hand it to findings() — nothing is written to the repository, see findings().
+        # ── cross-file anchors ────────────────────────────────────────────────────────────────────
+        # These describe states that would silently destroy this check without touching the verify
+        # script at all. Their canaries mutate the other file's TEXT in memory and hand it to
+        # findings() — nothing is written to the repository, see findings().
+        #
+        # THE TWO [lab] SITES USED TO MASK EACH OTHER. One canary renamed the endpoint, which trips
+        # BOTH of them, and asked only for "a finding starting with [lab]" — so either site could be
+        # deleted and the suite stayed green. They now have one canary each, and the second one is
+        # built so that only IT can fire: the annotation stays in the lab (so the rename detector is
+        # silent) while the block it lives in stops being java (so the derivation detector is not).
 
         # [5] canary: the lab stops printing the annotation the script grades.
         if LAB_PATH_ANNOTATION not in lab_text:
             failures.append("[5] canary is a no-op: the lab does not contain the annotation to "
                             "rename, which detector [5] should already have reported.")
-        elif not any(f.startswith("[lab]") for f in findings(
+        else:
+            expect("[5] lab renames the endpoint", findings(
                 script_text, cases, worlds, run_cases=False,
-                lab_text=lab_text.replace(LAB_PATH_ANNOTATION, '@Path("/pong")'))):
-            failures.append("[5] did not fire when the lab renamed the endpoint the script grades, "
-                            "so the two files can drift apart unnoticed.")
+                lab_text=lab_text.replace(LAB_PATH_ANNOTATION, '@Path("/pong")')),
+                ("[lab] devspaces-inner-loop/lab.adoc no longer prints",),
+                "the lab and the verify script can drift apart unnoticed, which turns a real check "
+                "into a permanent ❌ — or a permanent ✅ if the regex is the half that moved")
+
+        # [5b] canary: the annotation is STILL printed, but no longer inside a [source,java] block,
+        # so the 'pushed' world can no longer be derived from what attendees are shown.
+        if "[source,java]" not in lab_text:
+            failures.append("[5b] canary is a no-op: the lab has no [source,java] block to retype, "
+                            "which detector [5]'s second half should already have reported.")
+        else:
+            expect("[5b] the snippet stops being a java block", findings(
+                script_text, cases, worlds, run_cases=False,
+                lab_text=lab_text.replace("[source,java]", "[source,text]")),
+                ("[lab] the lab's [source,java] block",),
+                "the fixture's pushed worlds would have to be hand-written, which is the drift the "
+                "whole derivation exists to prevent")
 
         # [6] canary: the app itself grows the endpoint, which would green every attendee at prep.
         injected = app_source.replace('@Path("/{claimNumber}")', '@Path("/ping")', 1)
         if injected == app_source:
             failures.append("[6] canary is a no-op: apps/parasol-claims' ClaimResource.java no "
                             "longer contains the annotation the canary rewrites.")
-        elif not any(f.startswith("[seed]") for f in findings(
-                script_text, cases, worlds, run_cases=False, app_source=injected)):
-            failures.append("[6] did not fire when the seeded app source itself declared /ping — "
-                            "the state in which every attendee passes from the moment prep runs.")
+        else:
+            expect("[6] the seeded app grows the endpoint", findings(
+                script_text, cases, worlds, run_cases=False, app_source=injected),
+                ("[seed] apps/parasol-claims'",),
+                "every attendee would pass this check from the moment ws prep runs — F-06, "
+                "reintroduced from the other side")
+
+        # ── the derivation itself ─────────────────────────────────────────────────────────────────
+        # build_worlds() is upstream of every world above: when it cannot derive a fixture it must
+        # SAY SO and abort the run (rc 2), never fall back to something hand-written. Each canary
+        # below breaks exactly one of its three preconditions, in memory, and requires the sentence.
+        derived = Path(tmp) / "canary-worlds"
+        expect("[D1] the lab's snippet is not in a java block",
+               build_worlds(derived / "d1", app_source,
+                            lab_text.replace("[source,java]", "[source,text]")),
+               ("could not find the lab's /ping snippet",),
+               "the 'pushed' world would silently be something no attendee is ever shown")
+        expect("[D2] the app source has no closing brace",
+               build_worlds(derived / "d2", "// a ClaimResource with nothing to insert before\n",
+                            lab_text),
+               ("has no closing brace to insert before",),
+               "the endpoint would be appended outside the class and every pushed world would be "
+               "a file that does not compile")
+        stale_body = lab_text.replace(VARIANT_EDITS[2][0], 'return "hello";')
+        if stale_body == lab_text:
+            failures.append("[D3] canary is a no-op: the lab's snippet no longer returns the sample "
+                            "string the canary rewrites, which build_worlds should already report.")
+        else:
+            expect("[D3] a variant edit stops landing",
+                   build_worlds(derived / "d3", app_source, stale_body),
+                   ("the lab's snippet no longer contains",),
+                   "pushed-variant would stop differing from pushed in the way the false-❌ canaries "
+                   "depend on, and both would pass for the wrong reason")
+
+    # ── the inputs a verdict needs ────────────────────────────────────────────────────────────────
+    # Harness is what stands between "the gate ran" and "the gate could not run", and its three
+    # reports are the difference between rc 2 and a green tick over nothing. Each canary hands it a
+    # world with exactly ONE thing broken; nothing on disk is touched to arrange it.
+    expect("[8a] a required file is missing",
+           Harness(required=(REPO / "tools/verify/devspaces-inner-loop.sh.deleted",),
+                   cases=(), have_bash=True).problems,
+           ("tools/verify/devspaces-inner-loop.sh.deleted is missing",),
+           "the guard would run against a script that is not there and report whatever that produced")
+    expect("[8b] a fixture is missing",
+           Harness(required=(), cases=("no-such-world",), have_bash=True).problems,
+           ("fixture no-such-world.case is missing",),
+           "a world could be deleted and the run would simply grade one fewer, silently")
+    expect("[8c] bash is not on PATH",
+           Harness(required=(), cases=(), have_bash=False).problems,
+           ("bash is not on PATH",),
+           "every world would fail to execute and the failure would read as the script being wrong")
 
     if failures:
         print("::error::devspaces-endstate-guard self-test FAILED — detection is unproven:",
@@ -463,8 +649,9 @@ def self_test() -> int:
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 2
-    print(f"self-test ok — {len(MUTANTS)} false-pass/false-fail canaries and 2 cross-file anchors "
-          f"were all detected, and the real script passes all {len(CASES)} worlds (rc=1).")
+    print(f"self-test ok — {witnessed} named findings from {len(MUTANTS)} script mutants, 3 "
+          f"cross-file anchors, 3 derivation canaries and 3 harness canaries were all produced, and "
+          f"the real script passes all {len(CASES)} worlds (rc=1).")
     return 1
 
 
