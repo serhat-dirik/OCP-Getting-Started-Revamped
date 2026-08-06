@@ -53,15 +53,20 @@
 #
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + grep + sed + awk.
 #
-# --self-test plants a canary for EVERY assertion here, each a real regression shape: the pre-fix
-# counter-blind warn() for [1], the pre-fix two-outcome verify_summary() for [2], a strict-by-default
-# flip plus the nothing-graded run collapsed back into the partial one and a nothing-graded run made
-# non-zero for everyone for [3], ws doctor's classifier miscounting rc 3 as fail and its rc-4 arm
-# deleted for [4], and na()-as-skip / NA-laundering-a-skip for [5]. Their number is deliberately not
-# written down — a count here goes stale the moment an assertion is added, which is exactly how a
-# guard ends up with an assertion nothing proves. Exit 1 = every canary was caught AND the real tree
-# is clean under the same detectors; that is a PASS, matching the house convention where CI asserts
-# the self-test step exits exactly 1. Exit 2 = a detector is blind, or the harness is broken.
+# --self-test plants a canary for EVERY assertion here, each a real regression shape, and PINS each
+# canary to the finding it was planted for. The pinning is the load-bearing half (2026-08-06):
+# canaries used to be judged on "did the detector return 1", but every detector here carries several
+# assertions and answers with the same 1, so a canary was satisfied by whichever assertion happened
+# to fire. Measured by deleting each assertion in turn: 25 of the 30 could be removed with --self-test
+# still exiting 1 — 14 had no canary firing them anywhere, and 11 more were shadowed by a sibling
+# assertion catching the same mutant.
+# The sub-tags ([1.1], [2a.3], [5c.2] …) exist so there is something unambiguous to pin to; an
+# assertion without its own tag and its own canary is this file's own subject matter one level up.
+# Their number is deliberately not written down — a count here goes stale the moment an assertion is
+# added, which is exactly how a guard ends up with an assertion nothing proves. Exit 1 = every canary
+# was caught AND the real tree is clean under the same detectors; that is a PASS, matching the house
+# convention where CI asserts the self-test step exits exactly 1. Exit 2 = a detector is blind, an
+# assertion is unproven, or the harness is broken.
 #
 # Exit codes:
 #   0  contract holds
@@ -146,7 +151,7 @@ check_skip_counted() {  # warn_file summary_file → 0 correct, 1 wrong
   for n in 1 3; do
     out="$(run_case "$wf" "$sf" 5 0 "$n" 0)"
     if [[ -z "$out" ]]; then
-      bad "[1] ${n} warn call(s) produced NO banner at all — warn() aborted the run."
+      bad "[1.1] ${n} warn call(s) produced NO banner at all — verify_summary printed nothing, so the run aborted before reaching it."
       note "    Under the callers' \`set -euo pipefail\` an arithmetic form such as ((VERIFY_SKIP++))"
       note "    returns 1 on the first call and kills the sourcing script. Use VERIFY_SKIP=\$((VERIFY_SKIP+1))."
       rc=1
@@ -155,7 +160,7 @@ check_skip_counted() {  # warn_file summary_file → 0 correct, 1 wrong
     # The count must land on a line that ALSO mentions the skip: "⚠ 5 passed" carries digits of its
     # own, so a bare "does the banner contain N" would go green on a banner that never mentions skips.
     if ! grep -iE 'skip' <<< "$out" | grep -qE "(^|[^0-9])${n}([^0-9]|\$)"; then
-      bad "[1] ${n} warn call(s) were not reported as ${n} skipped. Banner: ${out}"
+      bad "[1.2] ${n} warn call(s) were not reported as ${n} skipped — no line of the banner mentions a skip AND carries the number ${n}. Banner: ${out}"
       note "    warn() must increment VERIFY_SKIP — a skip the summary cannot see is a skip the attendee never hears about."
       rc=1
     fi
@@ -172,14 +177,22 @@ check_banner_honesty() {  # warn_file summary_file → 0 correct, 1 wrong
   # (a) the 2026-07-31 defect verbatim: 7 graded passes, 6 ungraded outcome checks.
   out="$(run_case "$wf" "$sf" 7 0 6 0)"
   if claims_complete_pass "$out"; then
-    bad "[2a] 6 checks were SKIPPED and the banner still claimed a complete pass: ${out}"
+    bad "[2a.1] 6 checks were SKIPPED and the banner still matched 'all N checks passed': ${out}"
     note "    This is multi-tenancy-workload-security's whole lesson going ungraded behind one"
     note "    IMPERSONATE_OK guard while the attendee reads ✅ all 7 checks passed."
     rc=1
   elif ! mentions_skip "$out" || ! grep -q '6' <<< "$out"; then
-    bad "[2a] the banner must name the 6 skipped checks. Banner: ${out}"; rc=1
+    # Which half failed is measured and REPORTED, never left as "one of these two things". A
+    # disjunctive finding ("wrong state, or it was not reached") has cost this project four
+    # debugging runs; the reader must be told what was actually observed.
+    if mentions_skip "$out"; then
+      bad "[2a.2] the banner mentions a skip but nowhere carries the number 6, so the 6 skipped checks go uncounted. Banner: ${out}"
+    else
+      bad "[2a.2] the banner never mentions a skip at all, though 6 checks were skipped. Banner: ${out}"
+    fi
+    rc=1
   elif ! mentions_ungraded "$out"; then
-    bad "[2a] the banner must say the skipped checks were NOT GRADED — 'skipped' alone reads as 'fine'. Banner: ${out}"; rc=1
+    bad "[2a.3] the banner never says 'not graded' or 'did NOT fully verify' — 'skipped' alone reads as 'fine'. Banner: ${out}"; rc=1
   fi
 
   # (b) a genuinely complete run must still get the plain green claim. A gate that forced a caveat
@@ -192,7 +205,12 @@ check_banner_honesty() {  # warn_file summary_file → 0 correct, 1 wrong
   # (c) failures and skips together: neither may hide the other.
   out="$(run_case "$wf" "$sf" 3 2 1 0)"
   if ! grep -q '2' <<< "$out" || ! mentions_skip "$out"; then
-    bad "[2c] with 2 failures AND 1 skip the banner must report both. Banner: ${out}"; rc=1
+    if grep -q '2' <<< "$out"; then
+      bad "[2c] with 2 failures AND 1 skip the banner reports the failures but never mentions a skip. Banner: ${out}"
+    else
+      bad "[2c] with 2 failures AND 1 skip the banner nowhere carries the number 2. Banner: ${out}"
+    fi
+    rc=1
   fi
 
   # (d) a skip must never be printed as a failure — the doctrine the fix must not trade away.
@@ -318,52 +336,56 @@ check_na_semantics() {  # warn_file summary_file na_file → 0 correct, 1 wrong
   #     and still accounts for the line the attendee can see above it.
   out="$(run_case "$wf" "$sf" 7 0 0 0 "$nf" 1)"
   if ! claims_complete_pass "$out"; then
-    bad "[5a] 7 passed + 1 not-applicable must still print the plain '✅ all 7 checks passed'. Banner: ${out}"
+    bad "[5a.1] 7 passed + 1 not-applicable did not print 'all N checks passed'. Banner: ${out}"
     note "    A not-applicable check is not a MISSING one — the condition it grades does not exist here."
     rc=1
   fi
   if mentions_ungraded "$out"; then
-    bad "[5a] an NA-only run must NOT say the run was ungraded/incomplete. Banner: ${out}"
+    bad "[5a.2] an NA-only run said 'not graded' / 'did NOT fully verify' — it was fully graded. Banner: ${out}"
     note "    This is U8-F-03 verbatim: a fully-graded run telling the attendee it 'did NOT fully verify'."
     note "    A caveat printed when nothing is wrong is a caveat attendees learn to ignore."
     rc=1
   fi
   if ! mentions_na "$out"; then
-    bad "[5a] the banner must still ACCOUNT for the not-applicable check. Banner: ${out}"; rc=1
+    bad "[5a.3] the banner nowhere says 'not applicable', so the ➖ line above it is unaccounted for. Banner: ${out}"; rc=1
   fi
 
   # (b) the exit contract is UNCHANGED by not-applicables, including under VERIFY_STRICT=1. rc 3 means
   #     "something went ungraded" and that is simply false here; ws prep/ws smoke branch on this rc.
   got=0; run_case "$wf" "$sf" 7 0 0 0 "$nf" 1 >/dev/null || got=$?
-  if [[ "$got" -ne 0 ]]; then bad "[5b] an NA-only run must exit 0; got rc=${got}."; rc=1; fi
+  if [[ "$got" -ne 0 ]]; then bad "[5b.1] an NA-only run must exit 0 by default; got rc=${got}."; rc=1; fi
   got=0; run_case "$wf" "$sf" 7 0 0 1 "$nf" 1 >/dev/null || got=$?
   if [[ "$got" -ne 0 ]]; then
-    bad "[5b] VERIFY_STRICT=1 on an NA-only run must STILL exit 0 — rc 3 claims something went ungraded; got rc=${got}."
+    bad "[5b.2] VERIFY_STRICT=1 on an NA-only run must STILL exit 0 — rc 3 claims something went ungraded; got rc=${got}."
     rc=1
   fi
 
   # (c) THE ONE THAT MATTERS: a real skip still dominates. Otherwise na() is a laundering mechanism.
   out="$(run_case "$wf" "$sf" 7 0 2 0 "$nf" 1)"
   if claims_complete_pass "$out" || ! mentions_ungraded "$out"; then
-    bad "[5c] 2 SKIPPED alongside 1 not-applicable must still report an INCOMPLETE run. Banner: ${out}"
+    if claims_complete_pass "$out"; then
+      bad "[5c.1] 2 SKIPPED alongside 1 not-applicable still printed 'all N checks passed'. Banner: ${out}"
+    else
+      bad "[5c.1] 2 SKIPPED alongside 1 not-applicable never said 'not graded' / 'did NOT fully verify'. Banner: ${out}"
+    fi
     note "    If NA can mask a skip, na() becomes a way to silence warn() — the exact false green this"
     note "    whole banner design exists to prevent."
     rc=1
   fi
   got=0; run_case "$wf" "$sf" 7 0 2 1 "$nf" 1 >/dev/null || got=$?
   if [[ "$got" -ne 3 ]]; then
-    bad "[5c] VERIFY_STRICT=1 with a real skip must still exit 3 regardless of not-applicables; got rc=${got}."; rc=1
+    bad "[5c.2] VERIFY_STRICT=1 with a real skip must still exit 3 regardless of not-applicables; got rc=${got}."; rc=1
   fi
 
   # (d) NA is counted, and na() is safe under set -e — the ((x++)) trap already pinned for warn().
   out="$(run_case "$wf" "$sf" 5 0 0 0 "$nf" 3)"
   if [[ -z "$out" ]]; then
-    bad "[5d] 3 na() calls produced NO banner at all — na() aborted the run."
+    bad "[5d.1] 3 na() calls produced NO banner at all — verify_summary printed nothing, so the run aborted before reaching it."
     note "    Under the callers' \`set -euo pipefail\` ((VERIFY_NA++)) returns 1 on the first call and"
     note "    kills the sourcing script. Use VERIFY_NA=\$((VERIFY_NA+1))."
     rc=1
   elif ! grep -iE 'not applicable' <<< "$out" | grep -qE "(^|[^0-9])3([^0-9]|\$)"; then
-    bad "[5d] 3 na() calls were not reported as 3 not applicable. Banner: ${out}"; rc=1
+    bad "[5d.2] 3 na() calls were not reported as 3 not applicable — no line saying 'not applicable' carries the number 3. Banner: ${out}"; rc=1
   fi
 
   # (e) and it never manufactures a ❌ — the doctrine no outcome may trade away.
@@ -426,12 +448,62 @@ run_check() {  # warn_file summary_file doctor_fn_file na_file → 0 clean, 1 br
 }
 
 # ── self-test ─────────────────────────────────────────────────────────────────
-# One canary per assertion, each a real regression shape. All must be CAUGHT, and the real tree must
-# be clean under the same detectors — anything else means the gate is decorative. Adding an assertion
-# above without adding its canary here is the defect, not the paperwork: exit 1 proves SOMETHING was
-# detected, never that the new thing was.
+# One canary per assertion, each a real regression shape, and each PINNED to the assertion it was
+# planted for. All must be CAUGHT, and the real tree must be clean under the same detectors —
+# anything else means the gate is decorative. Adding an assertion above without adding its canary
+# here is the defect, not the paperwork: exit 1 proves SOMETHING was detected, never that the new
+# thing was.
+#
+# WHY THE PINNING (2026-08-06). Each canary used to be judged on "did the detector return 1". Every
+# detector here carries several assertions and answers with the same 1, so a canary was satisfied by
+# whichever assertion happened to fire — including one it never exercised. Measured by deleting each
+# assertion in turn and re-running --self-test: 25 of this file's 30 assertions could be removed with
+# --self-test still exiting 1 (14 with no canary firing them anywhere, 11 shadowed by a sibling
+# assertion catching the same mutant). _expect_detect now requires the detector to name the finding, and
+# the tags ([1.1], [2a.3], [5c.2] …) exist so there is something unambiguous to name.
+
+# _expect_detect <label> <tag> <detector-fn> <args…> → 0 when the detector returned EXACTLY 1 AND
+# printed <tag>. rc alone is not evidence: see the note above.
+_expect_detect() {
+  local label="$1" tag="$2"; shift 2
+  local out rc=0
+  out="$("$@" 2>&1)" || rc=$?
+  if [[ "$rc" -ne 1 ]]; then
+    bad "SELF-TEST FAILED: ${label} — the detector returned rc=${rc}, expected exactly 1."
+    note "    Detector output: ${out}"
+    return 1
+  fi
+  if ! grep -qF -- "$tag" <<< "$out"; then
+    bad "SELF-TEST FAILED: ${label} — the detector fired but never printed ${tag}, so a DIFFERENT assertion caught this canary and ${tag} is still unproven."
+    note "    Detector output: ${out}"
+    return 1
+  fi
+  return 0
+}
+
+# _build <label> <src> <dst> <sed-expr> [expected-line] → 0 when the mutation actually applied.
+# A canary built by a sed that matched nothing is byte-identical to the real function: it would be
+# "caught" by nothing and reported as caught by whatever else fires. The cmp is the load-bearing
+# check; the optional exact-line grep is for anchors whose replacement text also occurs elsewhere.
+_build() {
+  local label="$1" src="$2" dst="$3" expr="$4" line="${5:-}"
+  sed "$expr" "$src" > "$dst"
+  if cmp -s "$src" "$dst"; then
+    bad "SELF-TEST FAILED: could not build the ${label} canary — the sed matched nothing, so the mutant is byte-identical to the real function and proves nothing."
+    return 1
+  fi
+  if [[ -n "$line" ]] && ! grep -qxF -- "$line" "$dst"; then
+    bad "SELF-TEST FAILED: could not build the ${label} canary — the mutant has no line reading exactly '${line}'."
+    return 1
+  fi
+  return 0
+}
+
 self_test() {
-  local tmp wf sf dff nf real_rc got
+  # No `got` here any more: every canary is judged by _expect_detect, which reads the rc AND the
+  # finding. A leftover rc variable would be the same class of defect as an unreachable assertion —
+  # it looks like coverage and is not.
+  local tmp wf sf dff nf real_rc blind=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
@@ -452,11 +524,8 @@ self_test() {
   cat > "$tmp/warn-blind.sh" <<'CANARY'
 warn() { echo "⚠ $* — SKIPPED (not a failure)"; }
 CANARY
-  got=0; check_skip_counted "$tmp/warn-blind.sh" "$sf" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the counter-blind warn() canary was NOT detected (rc=${got}) — detector [1] is blind."
-    return 2
-  fi
+  _expect_detect "counter-blind warn()" "[1.2]" \
+    check_skip_counted "$tmp/warn-blind.sh" "$sf" || blind=1
 
   # Canary B — the pre-fix verify_summary(), verbatim: two outcomes, so six skipped checks vanish and
   # the run ends "✅ all 7 checks passed".
@@ -472,39 +541,119 @@ verify_summary() {
   fi
 }
 CANARY
-  got=0; check_banner_honesty "$wf" "$tmp/summary-two-outcome.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the two-outcome verify_summary() canary was NOT detected (rc=${got}) — detector [2] is blind."
-    return 2
-  fi
+  _expect_detect "two-outcome verify_summary()" "[2a.1]" \
+    check_banner_honesty "$wf" "$tmp/summary-two-outcome.sh" || blind=1
+
+  # Canary B2 — the banner stops NAMING the skip: it drops the count and the word, keeping only the
+  # caveat. [2a.1] is silent (no complete-pass claim) and [2a.3] is never reached, so before the
+  # pinning this assertion had nothing proving it.
+  # The sed PROGRAMS below are the LITERAL text of the extracted verify_summary(), so
+  # ${VERIFY_PASS}, ${VERIFY_SKIP}, ${na_note}, ${nacount}, ${VERIFY_STRICT:-0} and
+  # ${VERIFY_NA:-0} must stay unexpanded — they are characters being MATCHED in another
+  # file, not variables of this guard. Double-quoting any of them would expand to this
+  # guard's own (unset) variables, the anchor would match nothing, and the canary would
+  # silently become a no-op: an assertion certified by a mutant identical to the real
+  # function. _build's cmp catches that at runtime; this directive stops the edit.
+  # shellcheck disable=SC2016
+  _build "banner-omits-skip-count" "$sf" "$tmp/summary-omits-skip-count.sh" \
+    's|⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded)${na_note} — this run did NOT fully verify the lab|⚠ this run did NOT fully verify the lab|' \
+    '    echo "⚠ this run did NOT fully verify the lab"' || return 2
+  _expect_detect "banner that omits the skip count" "[2a.2]" \
+    check_banner_honesty "$wf" "$tmp/summary-omits-skip-count.sh" || blind=1
+
+  # Canary B3 — the banner names the skips but drops the "not graded" / "did NOT fully verify"
+  # language, so "6 SKIPPED" reads to an attendee as six things that were fine.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "banner-omits-ungraded" "$sf" "$tmp/summary-omits-ungraded.sh" \
+    's|⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded)${na_note} — this run did NOT fully verify the lab|⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED${na_note}|' \
+    '    echo "⚠ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED${na_note}"' || return 2
+  _expect_detect "banner that never says the skips went ungraded" "[2a.3]" \
+    check_banner_honesty "$wf" "$tmp/summary-omits-ungraded.sh" || blind=1
+
+  # Canary B4 — the over-correction [2b] exists to stop: the plain green claim removed, so even a
+  # fully-graded clean run wears a caveat. A caveat on every run is a caveat attendees stop reading.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "clean-run-loses-plain-claim" "$sf" "$tmp/summary-no-plain-claim.sh" \
+    's|✅ all ${VERIFY_PASS} checks passed"$|✅ ${VERIFY_PASS} checks OK"|' \
+    '    echo "✅ ${VERIFY_PASS} checks OK"' || return 2
+  _expect_detect "clean run that lost its plain green claim" "[2b]" \
+    check_banner_honesty "$wf" "$tmp/summary-no-plain-claim.sh" || blind=1
+
+  # Canary B5 — failures HIDE the skips: the fail-with-skips banner collapses into the fail-only one,
+  # so a run that both failed and skipped reports only the failures.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "failure-hides-skip" "$sf" "$tmp/summary-failure-hides-skip.sh" \
+    's| · ⚠ ${VERIFY_SKIP} SKIPPED (not graded)||' \
+    '      echo "❌ ${VERIFY_FAIL} of ${graded} checks failed${na_note}"' || return 2
+  _expect_detect "failure banner that hides the skips" "[2c]" \
+    check_banner_honesty "$wf" "$tmp/summary-failure-hides-skip.sh" || blind=1
+
+  # Canary B6 — the doctrine-breaking direction: skips rendered as a ❌. Eleven modules would show a
+  # red board over checks nobody was permitted to answer, and a false ❌ destroys trust in every ✅.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "skip-printed-as-failure" "$sf" "$tmp/summary-skip-as-failure.sh" \
+    's|echo "⚠ ${VERIFY_PASS} passed · |echo "❌ ${VERIFY_PASS} passed · |' \
+    '    echo "❌ ${VERIFY_PASS} passed · ${VERIFY_SKIP} SKIPPED (not graded)${na_note} — this run did NOT fully verify the lab"' || return 2
+  _expect_detect "skip rendered as a ❌" "[2d]" \
+    check_banner_honesty "$wf" "$tmp/summary-skip-as-failure.sh" || blind=1
 
   # Canary C — the opposite over-correction: strict behaviour ON by default, so a skip exits non-zero
   # for every caller. Byte-for-byte the real function with the strict gate forced open.
-  # shellcheck disable=SC2016  # ${VERIFY_STRICT:-0} is the LITERAL text being matched in the
-  # extracted function — expanding it here would search for the guard's own environment instead.
-  sed 's|if \[\[ "${VERIFY_STRICT:-0}" == "1" \]\]; then|if true; then|' "$sf" > "$tmp/summary-strict-default.sh"
-  if ! grep -q 'if true; then' "$tmp/summary-strict-default.sh"; then
-    bad "SELF-TEST FAILED: could not build the strict-by-default canary — the VERIFY_STRICT gate it mutates was not found."
-    return 2
-  fi
-  got=0; check_exit_contract "$wf" "$tmp/summary-strict-default.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the strict-by-default canary was NOT detected (rc=${got}) — detector [3] is blind."
-    return 2
-  fi
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "strict-by-default" "$sf" "$tmp/summary-strict-default.sh" \
+    's|if \[\[ "${VERIFY_STRICT:-0}" == "1" \]\]; then|if true; then|' || return 2
+  _expect_detect "strict-by-default" "[3a]" \
+    check_exit_contract "$wf" "$tmp/summary-strict-default.sh" || blind=1
+
+  # Canary C2 — the partial-run signal itself removed: VERIFY_STRICT=1 with skips returns 0 instead
+  # of 3, so a caller that opted in to fail closed learns nothing. Also the [5c.2] canary: that
+  # assertion pins the same rc through the not-applicable path.
+  _build "partial-run-rc-lost" "$sf" "$tmp/summary-partial-rc-lost.sh" \
+    's|^      exit 3$|      exit 0|' || return 2
+  _expect_detect "VERIFY_STRICT partial run no longer exits 3" "[3b]" \
+    check_exit_contract "$wf" "$tmp/summary-partial-rc-lost.sh" || blind=1
+
+  # Canary C3 — a fully-graded CLEAN run made non-zero under strict mode. Nothing was skipped and
+  # nothing failed, so this is a pure false alarm for every automated caller.
+  _build "strict-clean-nonzero" "$sf" "$tmp/summary-strict-clean-nonzero.sh" \
+    's|^  exit 0$|  exit 3|' '  exit 3' || return 2
+  _expect_detect "strict mode reddening a fully-graded clean run" "[3c]" \
+    check_exit_contract "$wf" "$tmp/summary-strict-clean-nonzero.sh" || blind=1
+
+  # Canary C4 — a genuine FAILURE stops exiting 1. Everything downstream branches on that code, and
+  # nothing else in the contract would notice it moving.
+  _build "failure-rc-moved" "$sf" "$tmp/summary-failure-rc-moved.sh" \
+    's|^    exit 1$|    exit 2|' '    exit 2' || return 2
+  _expect_detect "a failed check no longer exiting 1" "[3d]" \
+    check_exit_contract "$wf" "$tmp/summary-failure-rc-moved.sh" || blind=1
 
   # Canary D — ws doctor's classifier miscounting rc 3 (skip-only) as fail instead of skip. Byte-for-
   # byte the real doctor_verify_rc_outcome() with its rc-3 arm changed from `skip` to `fail`.
-  sed 's/3) echo skip ;;/3) echo fail ;;/' "$dff" > "$tmp/doctor-rc-miscounts-skip.sh"
-  if ! grep -q '3) echo fail ;;' "$tmp/doctor-rc-miscounts-skip.sh"; then
-    bad "SELF-TEST FAILED: could not build the doctor-rc-miscounts-skip canary — the rc-3 arm it mutates was not found."
-    return 2
-  fi
-  got=0; check_doctor_rc_mapping "$tmp/doctor-rc-miscounts-skip.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: the doctor-rc-miscounts-skip canary was NOT detected (rc=${got}) — detector [4] is blind."
-    return 2
-  fi
+  _build "doctor-rc-miscounts-skip" "$dff" "$tmp/doctor-rc-miscounts-skip.sh" \
+    's/3) echo skip ;;/3) echo fail ;;/' '    3) echo fail ;;' || return 2
+  _expect_detect "doctor classifying a partial run as fail" "doctor_verify_rc_outcome 3 =>" \
+    check_doctor_rc_mapping "$tmp/doctor-rc-miscounts-skip.sh" || blind=1
+
+  # Canary D2 — a clean run classified as anything but pass. The 0 arm looks unmissable and had no
+  # canary: deleting `0=pass` from the mapping left --self-test at 1.
+  _build "doctor-rc-loses-pass" "$dff" "$tmp/doctor-rc-loses-pass.sh" \
+    's/0) echo pass ;;/0) echo skip ;;/' '    0) echo skip ;;' || return 2
+  _expect_detect "doctor no longer classifying rc 0 as pass" "doctor_verify_rc_outcome 0 =>" \
+    check_doctor_rc_mapping "$tmp/doctor-rc-loses-pass.sh" || blind=1
+
+  # Canary D3 / D4 — the other direction, and the dangerous one: a REAL failure laundered into skip.
+  # `ws smoke` fails closed on the word `fail`; an arm that swallows rc 1 (a check genuinely failed)
+  # or rc 2 (usage error — the script did not run at all) turns both into "could not read the world".
+  _build "doctor-launders-rc1" "$dff" "$tmp/doctor-launders-rc1.sh" \
+    's|^    0) echo pass ;;$|    0) echo pass ;;\
+    1) echo skip ;;|' '    1) echo skip ;;' || return 2
+  _expect_detect "doctor laundering a genuine failure (rc 1) into skip" "doctor_verify_rc_outcome 1 =>" \
+    check_doctor_rc_mapping "$tmp/doctor-launders-rc1.sh" || blind=1
+  _build "doctor-launders-rc2" "$dff" "$tmp/doctor-launders-rc2.sh" \
+    's|^    0) echo pass ;;$|    0) echo pass ;;\
+    2) echo skip ;;|' '    2) echo skip ;;' || return 2
+  _expect_detect "doctor laundering a usage error (rc 2) into skip" "doctor_verify_rc_outcome 2 =>" \
+    check_doctor_rc_mapping "$tmp/doctor-launders-rc2.sh" || blind=1
 
   # Canary E — the U8-F-03 defect itself, reintroduced: an na() that increments VERIFY_SKIP, i.e. the
   # conflation of "does not apply here" with "could not be evaluated". A fully-graded run then tells
@@ -512,11 +661,39 @@ CANARY
   cat > "$tmp/na-counts-as-skip.sh" <<'CANARY'
 na() { echo "➖ $* — not applicable on this cluster (not a failure)"; VERIFY_SKIP=$((VERIFY_SKIP+1)); }
 CANARY
-  got=0; check_na_semantics "$wf" "$sf" "$tmp/na-counts-as-skip.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: an na() that counts as a SKIP was NOT detected (rc=${got}) — detector [5] is blind."
-    return 2
-  fi
+  _expect_detect "na() that counts as a SKIP" "[5a.2]" \
+    check_na_semantics "$wf" "$sf" "$tmp/na-counts-as-skip.sh" || blind=1
+
+  # Canary E2 — an NA-only run losing the plain green claim. It was fully graded; anything short of
+  # "all N checks passed" understates a complete run.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "na-run-loses-plain-claim" "$sf" "$tmp/summary-na-no-plain-claim.sh" \
+    's|✅ all ${VERIFY_PASS} checks passed (${nacount} not applicable to this cluster)|✅ ${VERIFY_PASS} checks OK (${nacount} not applicable to this cluster)|' \
+    '    echo "✅ ${VERIFY_PASS} checks OK (${nacount} not applicable to this cluster)"' || return 2
+  _expect_detect "NA-only run that lost the plain green claim" "[5a.1]" \
+    check_na_semantics "$wf" "$tmp/summary-na-no-plain-claim.sh" "$nf" || blind=1
+
+  # Canary E3 — the ➖ line goes unaccounted for: the banner drops the parenthetical entirely, so an
+  # attendee reading "➖ … not applicable" above sees nothing about it in the summary.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "na-run-unaccounted" "$sf" "$tmp/summary-na-unaccounted.sh" \
+    's| (${nacount} not applicable to this cluster)||' || return 2
+  _expect_detect "NA-only run that never accounts for the ➖ line" "[5a.3]" \
+    check_na_semantics "$wf" "$tmp/summary-na-unaccounted.sh" "$nf" || blind=1
+
+  # Canary E4 / E5 — a not-applicable made the run non-zero. Split by mode, because the two arms are
+  # separate promises: the DEFAULT rc is what an attendee's own `ws verify` returns (ws prep's
+  # non-zero branch offers to WIPE their namespaces), and the STRICT rc is what CI reads.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "na-nonzero-default" "$sf" "$tmp/summary-na-nonzero-default.sh" \
+    's|^    echo "✅ all ${VERIFY_PASS} checks passed (${nacount} not applicable to this cluster)"$|    echo "✅ all ${VERIFY_PASS} checks passed (${nacount} not applicable to this cluster)"; if [[ "${VERIFY_STRICT:-0}" != "1" ]]; then exit 3; fi|' || return 2
+  _expect_detect "not-applicable making the DEFAULT rc non-zero" "[5b.1]" \
+    check_na_semantics "$wf" "$tmp/summary-na-nonzero-default.sh" "$nf" || blind=1
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "na-nonzero-strict" "$sf" "$tmp/summary-na-nonzero-strict.sh" \
+    's|^    echo "✅ all ${VERIFY_PASS} checks passed (${nacount} not applicable to this cluster)"$|    echo "✅ all ${VERIFY_PASS} checks passed (${nacount} not applicable to this cluster)"; if [[ "${VERIFY_STRICT:-0}" == "1" ]]; then exit 3; fi|' || return 2
+  _expect_detect "not-applicable making the STRICT rc non-zero" "[5b.2]" \
+    check_na_semantics "$wf" "$tmp/summary-na-nonzero-strict.sh" "$nf" || blind=1
 
   # Canary F — the reverse over-correction: na() laundering a genuine skip. If verify_summary let a
   # not-applicable outweigh a real warn(), an inconclusive run would print green. Built by making the
@@ -541,28 +718,47 @@ verify_summary() {
   exit 0
 }
 CANARY
-  got=0; check_na_semantics "$wf" "$tmp/summary-na-launders-skip.sh" "$nf" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: a summary letting NA mask a real SKIP was NOT detected (rc=${got}) — detector [5c] is blind."
-    note "    That shape turns na() into a way to silence warn(), which is a false green across every"
-    note "    script that adopts it."
-    return 2
-  fi
+  _expect_detect "summary letting NA mask a real SKIP" "[5c.1]" \
+    check_na_semantics "$wf" "$tmp/summary-na-launders-skip.sh" "$nf" || blind=1
+  # The rc half of [5c] is a separate promise from the banner half — `ws prep` and `ws smoke` branch
+  # on the code, not the text — so it gets its own canary: the same summary whose strict partial-run
+  # exit was removed for [3b], driven through the not-applicable path.
+  _expect_detect "strict skip alongside a not-applicable no longer exiting 3" "[5c.2]" \
+    check_na_semantics "$wf" "$tmp/summary-partial-rc-lost.sh" "$nf" || blind=1
+
+  # Canary F2 — an na() that is unsafe under `set -e`, the same ((x++)) trap already pinned for
+  # warn(): the first call returns 1, the sourcing script dies, and no banner is printed at all.
+  cat > "$tmp/na-aborts-run.sh" <<'CANARY'
+na() { echo "➖ $* — not applicable on this cluster (not a failure)"; ((VERIFY_NA++)); }
+CANARY
+  _expect_detect "na() that aborts the run under set -e" "[5d.1]" \
+    check_na_semantics "$wf" "$sf" "$tmp/na-aborts-run.sh" || blind=1
+
+  # Canary F3 — the not-applicable count stops tracking na(): the phrase is there, the number is not.
+  # A hardcoded 1 is what a "simplification" of that parenthetical actually looks like.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "na-count-not-tracked" "$sf" "$tmp/summary-na-count-frozen.sh" \
+    's|(${nacount} not applicable to this cluster)|(1 not applicable to this cluster)|' \
+    '    echo "✅ all ${VERIFY_PASS} checks passed (1 not applicable to this cluster)"' || return 2
+  _expect_detect "not-applicable count that stopped tracking na()" "[5d.2]" \
+    check_na_semantics "$wf" "$tmp/summary-na-count-frozen.sh" "$nf" || blind=1
+
+  # Canary F4 — a ❌ manufactured out of not-applicables, the [2d] doctrine on the NA path.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "na-printed-as-failure" "$sf" "$tmp/summary-na-as-failure.sh" \
+    's|echo "✅ all ${VERIFY_PASS} checks passed (${nacount}|echo "❌ all ${VERIFY_PASS} checks passed (${nacount}|' \
+    '    echo "❌ all ${VERIFY_PASS} checks passed (${nacount} not applicable to this cluster)"' || return 2
+  _expect_detect "not-applicable rendered as a ❌" "[5e]" \
+    check_na_semantics "$wf" "$tmp/summary-na-as-failure.sh" "$nf" || blind=1
 
   # Canary G — a bare \$VERIFY_NA read in verify_summary. Cases [1]-[4] deliberately run with the
   # counter UNSET, so under the callers' `set -u` this aborts before any banner is printed; detector
-  # [1] is what notices. This is what keeps the `${VERIFY_NA:-0}` form from being "tidied" away.
-  # shellcheck disable=SC2016  # matching the LITERAL ${VERIFY_NA:-0} text in the extracted function
-  sed 's|${VERIFY_NA:-0}|$VERIFY_NA|g' "$sf" > "$tmp/summary-bare-na-read.sh"
-  if ! grep -q 'VERIFY_NA' "$tmp/summary-bare-na-read.sh"; then
-    bad "SELF-TEST FAILED: could not build the bare-VERIFY_NA canary — the guarded read it mutates was not found."
-    return 2
-  fi
-  got=0; check_skip_counted "$wf" "$tmp/summary-bare-na-read.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: a bare \$VERIFY_NA read was NOT detected (rc=${got}) — verify_summary would abort for any caller predating the counter."
-    return 2
-  fi
+  # [1.1] is what notices. This is what keeps the `${VERIFY_NA:-0}` form from being "tidied" away.
+  # shellcheck disable=SC2016  # literal ${…} matched in the extracted function; see the note at the first _build.
+  _build "bare-VERIFY_NA-read" "$sf" "$tmp/summary-bare-na-read.sh" \
+    's|${VERIFY_NA:-0}|$VERIFY_NA|g' || return 2
+  _expect_detect "bare \$VERIFY_NA read aborting the run" "[1.1]" \
+    check_skip_counted "$wf" "$tmp/summary-bare-na-read.sh" || blind=1
 
   # ── the rc 3 / rc 4 split (2026-08-05) ────────────────────────────────────────────────────────
   # Shipped WITH the assertions they prove. An assertion with no canary is this file's own subject
@@ -575,50 +771,60 @@ CANARY
   # never taken, so a run that answered ZERO checks exits 3 and describes itself as "0 passed ·
   # 3 SKIPPED". Byte-for-byte the real function with that one branch forced closed — i.e. the
   # pre-split behaviour verbatim, in which "read nothing" and "read all but one" were one outcome.
-  sed 's|if (( graded == 0 )); then|if false; then|' "$sf" > "$tmp/summary-nothing-graded-as-partial.sh"
-  if ! grep -q 'if false; then' "$tmp/summary-nothing-graded-as-partial.sh"; then
-    bad "SELF-TEST FAILED: could not build the nothing-graded-as-partial canary — the \`graded == 0\` branch it mutates was not found."
-    return 2
-  fi
-  got=0; check_exit_contract "$wf" "$tmp/summary-nothing-graded-as-partial.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: a nothing-graded run exiting 3 instead of 4 was NOT detected (rc=${got}) — assertion [3e] is blind."
-    return 2
-  fi
+  _build "nothing-graded-as-partial" "$sf" "$tmp/summary-nothing-graded-as-partial.sh" \
+    's|if (( graded == 0 )); then|if false; then|' '    if false; then' || return 2
+  _expect_detect "nothing-graded run exiting 3 instead of 4" "[3e]" \
+    check_exit_contract "$wf" "$tmp/summary-nothing-graded-as-partial.sh" || blind=1
 
   # Canary I — the opposite over-correction, and the one a well-meaning fix reaches for: make the
   # no-signal run non-zero for EVERYONE by hoisting it out of the VERIFY_STRICT gate. Every attendee
   # holding an identity that cannot answer a check then gets a non-zero `ws verify` — [3a]'s defect,
   # re-armed on the new branch. Built by rewriting that branch's DEFAULT exit, the only `exit 0` at
   # its indent, so the strict arm and every other path stay byte-for-byte real.
-  sed 's|^      exit 0$|      exit 4|' "$sf" > "$tmp/summary-nothing-graded-nonzero-default.sh"
-  if ! grep -qx '      exit 4' "$tmp/summary-nothing-graded-nonzero-default.sh"; then
-    bad "SELF-TEST FAILED: could not build the nothing-graded-nonzero-default canary — the branch's default \`exit 0\` was not found at its expected indent."
-    return 2
-  fi
-  got=0; check_exit_contract "$wf" "$tmp/summary-nothing-graded-nonzero-default.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: a nothing-graded run made non-zero for callers that never opted in was NOT detected (rc=${got}) — assertion [3f] is blind."
-    return 2
-  fi
+  _build "nothing-graded-nonzero-default" "$sf" "$tmp/summary-nothing-graded-nonzero-default.sh" \
+    's|^      exit 0$|      exit 4|' '      exit 4' || return 2
+  _expect_detect "nothing-graded run made non-zero for callers that never opted in" "[3f]" \
+    check_exit_contract "$wf" "$tmp/summary-nothing-graded-nonzero-default.sh" || blind=1
 
   # Canary J — ws doctor's rc-4 arm DELETED, which is how that line would really go: sitting next to
   # `3) echo skip ;;` it reads as a duplicate, and removing it drops rc 4 through to `*) echo fail`
   # — cmd_prep's offer-to-WIPE branch, now proposing a destructive rebuild over a run that could not
   # read anything rather than one that found anything wrong.
-  sed '/4) echo skip ;;/d' "$dff" > "$tmp/doctor-rc-drops-nothing-graded.sh"
-  if grep -q '4) echo skip' "$tmp/doctor-rc-drops-nothing-graded.sh" \
-     || ! grep -q '3) echo skip' "$tmp/doctor-rc-drops-nothing-graded.sh"; then
-    bad "SELF-TEST FAILED: could not build the doctor-rc-drops-nothing-graded canary — the rc-4 arm it deletes was not found, or the deletion took the rc-3 arm with it."
+  _build "doctor-rc-drops-nothing-graded" "$dff" "$tmp/doctor-rc-drops-nothing-graded.sh" \
+    '/4) echo skip ;;/d' || return 2
+  if grep -q '4) echo skip' "$tmp/doctor-rc-drops-nothing-graded.sh"; then
+    bad "SELF-TEST FAILED: could not build the doctor-rc-drops-nothing-graded canary — an rc-4 skip arm survived the deletion."
     return 2
   fi
-  got=0; check_doctor_rc_mapping "$tmp/doctor-rc-drops-nothing-graded.sh" >/dev/null 2>&1 || got=$?
-  if [[ "$got" -ne 1 ]]; then
-    bad "SELF-TEST FAILED: a doctor classifier that lost its rc-4 arm was NOT detected (rc=${got}) — the 4=skip assertion in [4] is blind."
+  if ! grep -q '3) echo skip' "$tmp/doctor-rc-drops-nothing-graded.sh"; then
+    bad "SELF-TEST FAILED: could not build the doctor-rc-drops-nothing-graded canary — the deletion took the rc-3 arm with it, so the mutant is not the shape it claims to be."
     return 2
+  fi
+  _expect_detect "doctor classifier that lost its rc-4 arm" "doctor_verify_rc_outcome 4 =>" \
+    check_doctor_rc_mapping "$tmp/doctor-rc-drops-nothing-graded.sh" || blind=1
+
+  # ── the coverage assertion itself ─────────────────────────────────────────────────────────────
+  # Every canary above calls its detector DIRECTLY, so none of them can notice run_check() no longer
+  # calling one. Deleting the assert_all_checks_ran line left --self-test at 1 and the real run at 0
+  # (measured 2026-08-06) — this guard was the one file in tools/lint wired to _check-coverage.sh
+  # without a canary proving the wiring still fires.
+  local cov=0
+  (
+    # Declared to be seen by `declare -F` and DELIBERATELY never called — that is the whole canary.
+    # SC2317 on 0.9.x, SC2329 on >=0.10: both are named so the directive works on CI and locally.
+    # shellcheck disable=SC2317,SC2329
+    check_never_called() { ran_check; return 0; }
+    run_check "$wf" "$sf" "$dff" "$nf" >/dev/null 2>&1
+  ) || cov=$?
+  if [[ "$cov" -ne 2 ]]; then
+    bad "SELF-TEST FAILED: a declared-but-never-called detector was not caught (rc=${cov}) — the coverage assertion is inert."
+    blind=1
   fi
 
-  ok "self-test ok — real ${LIB}/${WS_CLI} clean (rc=0); counter-blind warn, two-outcome banner, strict-by-default, doctor-rc-miscounts-skip, na-counts-as-skip, na-launders-skip, bare-NA-read, nothing-graded-as-partial, nothing-graded-nonzero-default and doctor-rc-drops-nothing-graded canaries all caught."
+  if [[ "$blind" -ne 0 ]]; then
+    return 2
+  fi
+  ok "self-test ok — real ${LIB}/${WS_CLI} clean (rc=0); every assertion has a canary and every canary is pinned to the finding it was planted for."
   return 1
 }
 

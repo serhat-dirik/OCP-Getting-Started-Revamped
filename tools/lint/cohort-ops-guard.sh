@@ -29,7 +29,12 @@
 #      library for that caller only, which is the six-copied-walkers bug in miniature.
 #
 #   bash tools/lint/cohort-ops-guard.sh              → the real tree (rc 0 clean · 1 finding · 2 could not inspect)
-#   bash tools/lint/cohort-ops-guard.sh --self-test  → every detector catches its own canary (rc 1)
+#   bash tools/lint/cohort-ops-guard.sh --self-test  → every ASSERTION catches its own canary (rc 1)
+#
+# "every assertion", not "every detector", since 2026-08-06: a detector answers 1 no matter which of
+# its branches fired, so a canary judged on the rc alone certified branches it never exercised. Six
+# of the fourteen assertions below could be deleted with --self-test still exiting 1. Each now has a
+# canary AND a pinned message; see _expect_rc.
 set -uo pipefail
 
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,13 +94,13 @@ check_ws_delegation() {  # → 1 when a script stopped delegating its engine hal
   # shellcheck disable=SC2016  # a grep PATTERN: $WS_BIN must stay literal, not expand to this
   # guard's own (empty) variable.
   if ! grep -qE '\$WS_BIN"?[[:space:]]+scale-users[[:space:]]' "$WIPE_SH"; then
-    fail "$(basename "$WIPE_SH"): never invokes 'ws scale-users' — the cohort prune has been re-implemented or dropped."
+    fail "$(basename "$WIPE_SH"): no 'ws scale-users <n>' invocation — grepped the file for the WS_BIN variable followed by 'scale-users' and an argument, zero matches."
     note "Lowering userCount, the SEV1-safe purge ordering and the htpasswd rewrite all live in cmd_scale_users."
     rc=1
   fi
   # shellcheck disable=SC2016  # grep PATTERN, see above.
   if ! grep -qE '\$WS_BIN"?[[:space:]]+cohort-reset[[:space:]]' "$RESET_SH"; then
-    fail "$(basename "$RESET_SH"): never invokes 'ws cohort-reset' — the per-module purge has been re-implemented or dropped."
+    fail "$(basename "$RESET_SH"): no 'ws cohort-reset' invocation — grepped the file for the WS_BIN variable followed by 'cohort-reset' and an argument, zero matches."
     note "purgeNamespaces / purgeAppsNamespace / purgeAppsProject are declared per module in gitops/entry-states/*/ws-meta.yaml and driven by ws."
     rc=1
   fi
@@ -137,7 +142,7 @@ check_destructive_gate() {  # → 1 when --dry-run or the confirmation gate is m
     rc=1
   fi
   if ! grep -q 'die' <<< "$body"; then
-    fail "$(basename "$LIB_SH"): confirm_or_exit() no longer refuses the non-TTY, no --yes case."
+    fail "$(basename "$LIB_SH"): confirm_or_exit() no longer calls die() — its non-TTY, no --yes branch now falls through instead of refusing."
     rc=1
   fi
   return "$rc"
@@ -241,12 +246,28 @@ _canary_dir() {  # <sed-target-file> <sed-expr> → a temp bootstrap dir with th
   printf '%s' "$d"
 }
 
-_expect_rc() {  # <label> <want-rc> <dir> → 0 when run_check returned exactly want-rc
-  local label="$1" want="$2" dir="$3" got=0
-  run_check "$dir" >/dev/null 2>&1 || got=$?
+# A canary is judged on the FINDING it produced, never on the exit code alone. Pinning the rc by
+# itself is how a canary certifies an assertion it never exercised: every detector answers with the
+# same 1, so a mutant that trips a DIFFERENT detector satisfies the check and the assertion the
+# canary was planted for stays unproven. Measured 2026-08-06 by deleting each assertion in turn and
+# re-running --self-test: six of this guard's fourteen could be removed with --self-test still
+# exiting 1 (scale-users delegation, --dry-run present, confirm_or_exit called, the two
+# could-not-inspect rc-2 arms, and the gate's die()). Each now has both a canary and a pinned
+# message.
+_expect_rc() {  # <label> <want-rc> <dir> [want-msg] → 0 when run_check returned exactly want-rc and,
+                # when want-msg is given, reported that specific finding
+  local label="$1" want="$2" dir="$3" want_msg="${4:-}" got=0 out
+  out="$(run_check "$dir" 2>&1)" || got=$?
   rm -rf "$dir"
   if [[ "$got" -ne "$want" ]]; then
-    fail "SELF-TEST FAILED: ${label} → rc=${got}, expected ${want}."
+    fail "SELF-TEST FAILED: ${label} → run_check returned rc=${got}, expected ${want}."
+    note "$out"
+    return 1
+  fi
+  if [[ -n "$want_msg" ]] && ! grep -qF -- "$want_msg" <<< "$out"; then
+    fail "SELF-TEST FAILED: ${label} → rc=${want} as expected, but no finding contained \"${want_msg}\"."
+    note "A different detector caught this canary, so the assertion it was planted for is still unproven."
+    note "$out"
     return 1
   fi
   return 0
@@ -255,7 +276,8 @@ _expect_rc() {  # <label> <want-rc> <dir> → 0 when run_check returned exactly 
 self_test() {
   local bad=0 d
 
-  # Proof 0: the REAL tree passes. A guard that fires on everything proves nothing.
+  # Proof 0: the REAL tree passes. A guard that fires on everything proves nothing. No pinned
+  # message here — a clean run has no finding to pin.
   if ! _expect_rc "the real bootstrap/ tree is clean" 0 "$(_canary_dir '' '')"; then
     fail "run 'bash tools/lint/cohort-ops-guard.sh' without --self-test to see the finding."
     return 2
@@ -264,34 +286,82 @@ self_test() {
   # Canary A — hand-deleting a namespace instead of lowering userCount (the self-heal trap).
   d="$(_canary_dir ogsr-reset.sh '1a\
 oc delete ns user3-dev')"
-  if ! _expect_rc "canary A (hand namespace delete)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary A (hand namespace delete)" 1 "$d" \
+     "deletes a Namespace/Project by hand"; then bad=1; fi
 
   # Canary A' — patching the workshop-config Application directly instead of delegating.
   d="$(_canary_dir ogsr-wipe-users.sh '1a\
 oc patch application workshop-config -n openshift-gitops --type=json -p "[]"')"
-  if ! _expect_rc "canary A2 (direct workshop-config patch)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary A2 (direct workshop-config patch)" 1 "$d" \
+     "patches the workshop-config Application"; then bad=1; fi
 
   # Canary B — the ws delegation removed (a re-implemented engine that will drift).
   d="$(_canary_dir ogsr-reset.sh 's/cohort-reset --yes/cohort-resetX --yes/g')"
-  if ! _expect_rc "canary B (ws cohort-reset delegation dropped)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary B (ws cohort-reset delegation dropped)" 1 "$d" \
+     "no 'ws cohort-reset' invocation"; then bad=1; fi
+
+  # Canary B' — the OTHER half of the same detector. ogsr-wipe-users.sh's cohort prune has its own
+  # branch and, until 2026-08-06, no canary: deleting that branch left --self-test at 1, because
+  # canary B was catching the cohort-reset branch and the rc could not tell them apart.
+  d="$(_canary_dir ogsr-wipe-users.sh 's/scale-users/scale-usersX/g')"
+  if ! _expect_rc "canary B2 (ws scale-users delegation dropped)" 1 "$d" \
+     "no 'ws scale-users <n>' invocation"; then bad=1; fi
 
   # Canary C — the dry-run branch no longer exits, so a dry run falls through into the mutations.
   d="$(_canary_dir ogsr-wipe-users.sh 's/^  exit 0$/  : /')"
-  if ! _expect_rc "canary C (dry-run falls through)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary C (dry-run falls through)" 1 "$d" \
+     "the --dry-run branch never reaches an 'exit 0'"; then bad=1; fi
+
+  # Canary C0 — the option itself removed. Distinct from canary C: there the plan prints and then
+  # keeps going, here there is no way to ask for a plan at all, and only this branch reports it.
+  d="$(_canary_dir ogsr-reset.sh 's/--dry-run)/--dry-runX)/')"
+  if ! _expect_rc "canary C0 (--dry-run option removed)" 1 "$d" \
+     "no --dry-run option"; then bad=1; fi
 
   # Canary C' — the confirmation gate stops refusing a non-TTY run.
   d="$(_canary_dir ogsr-cohort-lib.sh 's/if \[\[ ! -t 0 \]\]; then/if false; then/')"
-  if ! _expect_rc "canary C2 (non-TTY confirmation gate defanged)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary C2 (non-TTY confirmation gate defanged)" 1 "$d" \
+     "no longer checks for a TTY"; then bad=1; fi
+
+  # Canary C3 — the gate still EXISTS in the library but is never CALLED, so the operation runs
+  # unconfirmed. A script-side deletion the library-side canaries (C2/C6) cannot see.
+  d="$(_canary_dir ogsr-reset.sh '/^confirm_or_exit /d')"
+  if ! _expect_rc "canary C3 (confirm_or_exit call site deleted)" 1 "$d" \
+     "no confirm_or_exit call"; then bad=1; fi
+
+  # Canary C4 — the gate can no longer be INSPECTED (renamed out from under the extractor). rc 2,
+  # not 1: "could not inspect" is a different answer from "inspected and found broken", and a guard
+  # that reports the second when it means the first is the failure this whole file exists to prevent.
+  d="$(_canary_dir ogsr-cohort-lib.sh 's/^confirm_or_exit() {/confirm_or_exit_renamed() {/')"
+  if ! _expect_rc "canary C4 (confirmation gate not extractable)" 2 "$d" \
+     "could not be extracted"; then bad=1; fi
+
+  # Canary C6 — the gate still tests for a TTY and still prints, but no longer DIES, so the non-TTY
+  # no---yes path falls through into the mutations. C2 cannot see this: the -t 0 test is intact.
+  d="$(_canary_dir ogsr-cohort-lib.sh 's/^    die "not a terminal/    echo "not a terminal/')"
+  if ! _expect_rc "canary C6 (non-TTY path no longer refuses)" 1 "$d" \
+     "no longer calls die()"; then bad=1; fi
 
   # Canary D — the set -e AND-list shape reintroduced.
   # shellcheck disable=SC2016  # sed PROGRAM text: $x is fixture source, not an expansion.
   d="$(_canary_dir ogsr-cohort-lib.sh '1a\
 [[ -n "$x" ]] && echo hi')"
-  if ! _expect_rc "canary D (set -e '&&' statement shape)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary D (set -e '&&' statement shape)" 1 "$d" \
+     "uses the '[[ cond ]] && cmd' statement shape"; then bad=1; fi
 
   # Canary E — a caller stops sourcing the library.
   d="$(_canary_dir ogsr-reset.sh 's|^source .*ogsr-cohort-lib.sh|: |')"
-  if ! _expect_rc "canary E (library no longer sourced)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary E (library no longer sourced)" 1 "$d" \
+     "does not source bootstrap/ogsr-cohort-lib.sh"; then bad=1; fi
+
+  # Canary E0 — the library exposes no inspectable functions (every definition gains a space before
+  # its parens), so the shadow scan has an EMPTY expectation and would otherwise pass vacuously
+  # against any caller at all. rc 2. This mutation necessarily also defeats the confirm_or_exit
+  # extraction in check_destructive_gate — the two share one measurement, "can a function be found
+  # at column 0" — which is exactly why the pinned message, not the rc, is what proves this branch.
+  d="$(_canary_dir ogsr-cohort-lib.sh 's/^\([a-z_][a-z0-9_]*\)()/\1 ()/')"
+  if ! _expect_rc "canary E0 (library exposes no functions)" 2 "$d" \
+     "no functions found"; then bad=1; fi
 
   # Canary E' — a caller shadows a library function with its own copy. This is the exact shape the
   # byte-identical-block design would have re-introduced, and no other detector sees it.
@@ -299,7 +369,8 @@ oc patch application workshop-config -n openshift-gitops --type=json -p "[]"')"
 gitea_connect() {\
   return 1\
 }')"
-  if ! _expect_rc "canary E2 (library function shadowed by a local copy)" 1 "$d"; then bad=1; fi
+  if ! _expect_rc "canary E2 (library function shadowed by a local copy)" 1 "$d" \
+     "re-defines gitea_connect()"; then bad=1; fi
 
   # Canary F — the coverage assertion itself: a detector that is declared but never called must be
   # caught as rc=2, not silently tolerated.
@@ -319,7 +390,7 @@ gitea_connect() {\
   if [[ "$bad" -ne 0 ]]; then
     return 2
   fi
-  pass "self-test ok — self-heal fight, dropped delegation, fall-through dry run, defanged gate, '&&' shape, unsourced library, shadowed helper and an uncalled detector all caught."
+  pass "self-test ok — every assertion has a canary, and every canary is pinned to the finding it was planted for: self-heal fight, direct workshop-config patch, both dropped ws delegations, fall-through dry run, missing --dry-run, defanged TTY test, uncalled gate, unextractable gate, gate that no longer dies, '&&' shape, unsourced library, uninspectable library, shadowed helper and an uncalled detector."
   # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
   return 1
 }
