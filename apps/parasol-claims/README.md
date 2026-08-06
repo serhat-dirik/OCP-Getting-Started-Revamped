@@ -115,11 +115,17 @@ down — and the whole app can serve `/` with **no PostgreSQL at all** when both
 `QUARKUS_DATASOURCE_ACTIVE=false` and `QUARKUS_HIBERNATE_ORM_ACTIVE=false` are set (the
 `/api/claims` endpoints are inactive in that mode).
 
-That combination — a self-identifying site marker plus a database-free boot — is what lets
-*Resilience, Multi-Cluster & DR* run the real image as its per-site failover responder. Its
-client polls this root once a second for `"site":"A"` versus `"site":"B"`, and a two-second
-shutdown timeout keeps a scaled-to-zero pod dying crisply so failover stays quick. The default
-configuration, with a datasource URL set, is unaffected.
+The database-free boot is what lets two modules ship the real image with no PostgreSQL beside
+it: *AI-Assisted Development* seeds it as its diagnosis target (so the only fault in that lab is
+a wrong readiness path, not a missing `parasol-db`), and *Application Modernization* deploys the
+modernized service DB-inactive — both in the attendee's own lab step and in the `ws solve` end
+state. The default configuration, with a datasource URL set, is unaffected.
+
+The `SITE` marker, by contrast, has **no consumer at present**. It was written for *Resilience,
+Multi-Cluster & DR*, which now runs a small inline Node responder as its per-site service rather
+than this image; the only deployment in the workshop that sets `SITE` today sets it on
+`parasol-notifications`, which implements the same wire contract independently. The marker and
+its compact, un-prettified format stay covered by `RootResourceSiteTest`.
 
 ## Tech
 

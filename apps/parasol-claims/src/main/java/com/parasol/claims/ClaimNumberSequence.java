@@ -68,10 +68,11 @@ public class ClaimNumberSequence {
     static final long FIRST_NUMBER = 1001L;
 
     /**
-     * False in the DB-free mode the resilience module's cross-site responder and the
-     * modernization modules run the same image in ({@code QUARKUS_HIBERNATE_ORM_ACTIVE=false} /
-     * {@code QUARKUS_DATASOURCE_ACTIVE=false}). Touching the database at startup there would
-     * crash-loop a pod whose whole point is serving {@code GET /} without one.
+     * False in the DB-free mode that ai-assisted-development's seeded diagnosis target and
+     * app-modernization's deployed service run this same image in
+     * ({@code QUARKUS_HIBERNATE_ORM_ACTIVE=false} / {@code QUARKUS_DATASOURCE_ACTIVE=false}).
+     * Touching the database at startup there would crash-loop a pod whose whole point is serving
+     * {@code GET /} without one. See {@code DatabaseFreeBootTest} for the full consumer list.
      */
     @ConfigProperty(name = "quarkus.hibernate-orm.active", defaultValue = "true")
     boolean hibernateActive;
