@@ -542,6 +542,17 @@ oc() {
   return 0
 }
 STUB
+  # A failure that says NOTHING. This is the shape of `oc` killed before it could be told anything —
+  # the OOM-killer, a timeout wrapper, SIGPIPE — and the one shape this detector did not have until
+  # 2026-08-06, which is exactly why _lib.sh graded it as the server's real NO for as long as it did.
+  # The detector was GREEN the whole time. rc 137 rather than 1 so the stub cannot be mistaken for a
+  # NotFound whose message went missing.
+  cat > "${d}/stub-silent.sh" <<'STUB'
+oc() {
+  printf ''
+  return 137
+}
+STUB
 }
 
 # run_oc_read_case <lib-file> <stub-file> <oc-args…> → stdout "RC=<n> INCONCLUSIVE=<0|1> OUT=<text>"
@@ -631,8 +642,28 @@ check_oc_read_notfound_not_folded() {  # <lib-file-or-snippet> → 0 all three o
     rc=1
   fi
 
+  # (e) a failure with NOTHING on stderr — "could not ask", never the server's real NO. Added
+  # 2026-08-06 after measuring that _lib.sh graded it rc=1, i.e. IDENTICALLY to a genuine NotFound:
+  # an OOM-killed read and a genuinely absent object produced the same ❌ against the attendee. Note
+  # what this says about (a)-(d): they were all GREEN while that hole was open, because none of them
+  # supplied an empty stderr. A contract test proves the cases it enumerates and nothing else, so the
+  # honest reading of a green [3] is "these four shapes classify correctly", never "the contract holds".
+  #
+  # This cannot re-open (a): that regression upgraded a real, TEXT-carrying answer to success. This
+  # downgrades a NO-TEXT non-answer to inconclusive. Opposite directions, and (a) still runs.
+  out="$(run_oc_read_case "$lib" "${stubdir}/stub-silent.sh" get deploy widget -n ns)"
+  got_rc="$(_oc_read_field "$out" RC)"; got_inc="$(_oc_read_field "$out" INCONCLUSIVE)"
+  if [[ "$got_rc" != "2" || "$got_inc" != "1" ]]; then
+    bad "[3e] a failure with EMPTY stderr must be 'could not ask' (rc=2, VERIFY_INCONCLUSIVE=1); got rc=${got_rc:-<none>} inconclusive=${got_inc:-<none>}. Output: ${out}"
+    note "    Every genuine NO the server sends carries text (NotFound prints a message). Silence"
+    note "    means oc never got far enough to be told anything — signal-killed, OOM, dead early."
+    note "    Grading that a real NO manufactures a ❌ against an attendee whose cluster simply could"
+    note "    not be reached, and CLAUDE.md is explicit that one false ❌ destroys every other ✅."
+    rc=1
+  fi
+
   rm -rf "$stubdir"
-  [[ "$rc" -eq 0 ]] && ok "[3] oc_read: NotFound stays a real NO, Forbidden/connection-refused stay 'could not ask', success stays a pass"
+  [[ "$rc" -eq 0 ]] && ok "[3] oc_read: NotFound stays a real NO; Forbidden, connection-refused and a silent failure all stay 'could not ask'; success stays a pass"
   return "$rc"
 }
 
@@ -701,6 +732,54 @@ _build_notfound_folding_canary() {  # → path to a temp file containing the mut
   mutated="${body/return 1/return 0}"
   if [[ "$mutated" == "$body" ]]; then
     bad "could not build the NotFound-folding canary — no 'return 1' found in the extracted oc_read() to mutate."
+    return 2
+  fi
+  tmp="$(mktemp)"
+  printf '%s\n' "$mutated" > "$tmp"
+  printf '%s' "$tmp"
+}
+
+# The mutation for canary [3e]: remove oc_read's empty-stderr guard so a silent failure falls through
+# to the `case`'s `*)` arm again — i.e. reintroduce the exact 2026-08-06 defect, where an OOM-killed
+# read and a genuinely absent object both became a ❌ against the attendee.
+#
+# THE ANCHOR MUST CONTAIN NO GLOB METACHARACTERS, and the first draft of this function is why that
+# sentence is here. `${var/pattern/repl}` matches `pattern` as a GLOB, not as a literal, so an anchor
+# written as `if [[ -z "${OC_ERR// /}" ]]; then` has its `[[ … ]` read as a bracket expression — a
+# one-character class. It matched SOMETHING, somewhere else in the body, so the "did the mutation
+# land?" check below was satisfied while the guard clause was never touched. The canary then passed
+# because a DIFFERENT case failed on a differently-broken mutant. Caught 2026-08-06 by blinding [3e]
+# and watching --self-test stay green; `mutated != body` distinguishes "changed something" from
+# "changed nothing", which is not the same as "changed the right thing".
+#
+# So: anchor on `-z "${OC_ERR// /}"`, which is glob-safe (`{`, `}`, `$`, `/`, `"` are all literal in a
+# bash pattern) and unique inside oc_read — the only other OC_ERR emptiness test is `-n`, the klog
+# fallback. Flipping it to a non-empty literal makes the condition false and disables the clause
+# without changing its shape, so the mutant differs from the real body in exactly one predicate.
+_build_silent_failure_canary() {  # → path to a temp file containing oc_read() with the guard disabled
+  local body mutated tmp
+  body="$(extract_func "$LIB_SH" oc_read)"
+  if [[ -z "$body" ]]; then
+    bad "could not extract oc_read() from ${LIB_SH} to build the silent-failure canary."
+    return 2
+  fi
+  # sed with a `|` delimiter, NOT bash's ${var/pat/rep}. Two separate reasons, both measured here on
+  # 2026-08-06: (i) ${var/…} matches its pattern as a GLOB, so `[[` becomes a bracket expression;
+  # (ii) escaping `$`, `/` and `"` through ${var/…} to dodge that produced a mutant that did not
+  # PARSE — every case then came back `rc=<none>`, which still made [3e] "fire" and the canary still
+  # "pass". A broken mutant is the most dangerous kind: it fails everything, so it satisfies any
+  # assertion phrased as "something failed". In BRE with `|` as the delimiter, `$` mid-pattern, `{`,
+  # `}` and `"` are all literal and no escaping is needed at all.
+  # shellcheck disable=SC2016  # the single quotes are the POINT: this is a literal source-text
+  # pattern matched against oc_read's body, not an expression to expand. Expanding ${OC_ERR// /}
+  # here would substitute this process's own (empty) OC_ERR and the anchor would match nothing —
+  # turning the canary inert in precisely the way the header above documents.
+  mutated="$(printf '%s\n' "$body" | sed 's|-z "${OC_ERR// /}"|-z "canary-guard-disabled"|')"
+  if [[ "$mutated" == "$body" ]]; then
+    bad "could not build the silent-failure canary — oc_read()'s empty-stderr guard was not found by" \
+        "its condition text. It was either renamed or REMOVED; if removed, that is the 2026-08-06" \
+        "regression itself and [3e] is what should be telling you. Do not 'fix' this by loosening" \
+        "the anchor: a canary that mutates the wrong thing passes for the wrong reason."
     return 2
   fi
   tmp="$(mktemp)"
@@ -907,6 +986,46 @@ deploy_ready() { return 0; }')"
   got=0; check_oc_read_notfound_not_folded "$mutated_file" >/dev/null 2>&1 || got=$?
   rm -f "$mutated_file"
   _expect_rc "canary [3] (NotFound folded into rc 0, oc_read's first-draft regression)" 1 "$got" || bad_seen=1
+
+  # Canary [3e] — REVERTING the 2026-08-06 silent-failure fix must be caught. This one exists because
+  # its absence was itself the bug: for as long as _lib.sh graded an empty stderr as the server's real
+  # NO, this detector was GREEN, because none of cases (a)-(d) ever supplied an empty stderr. A
+  # contract test proves the cases it enumerates and nothing else.
+  #
+  # The mutation deletes the guard clause by name rather than by line, so it cannot silently become a
+  # no-op if the file moves — and if the clause is ever renamed, the builder below fails loudly
+  # instead of leaving a canary that proves nothing. That distinction is the whole lesson of this
+  # file: an inert canary and a passing one are indistinguishable from the exit code alone.
+  mutated_file="$(_build_silent_failure_canary)"
+  if [[ -z "$mutated_file" ]]; then
+    bad "SELF-TEST FAILED: could not build the silent-failure canary."
+    return 2
+  fi
+  # RC IS NOT THE ASSERTION HERE — the reported SENTENCE is. `check_oc_read_notfound_not_folded`
+  # returns 1 if ANY of its five cases fails, so "rc 1" is satisfied by a mutant that broke something
+  # else entirely. That is not a hypothetical: the first draft of this canary mutated the wrong text
+  # (see _build_silent_failure_canary's header) and passed on rc alone while [3e] never fired. Blind
+  # [3e] and this must go red; blind any other case and it must not. Requiring the "[3e]" prefix back
+  # is what makes that true, and it is the same fix the Dev Spaces guard needed for the same reason.
+  # ONLY [3e] MAY FIRE. Requiring the [3e] sentence is necessary but NOT sufficient: a mutant that
+  # fails to parse reports every case as `rc=<none>`, which fires [3e] too and would sign this canary
+  # off on a mutant that proves nothing. Measured, not imagined — the second draft of this canary did
+  # exactly that. So the assertion is two-sided: [3e] must be reported AND no sibling case may be,
+  # which is only true when the mutant still runs and differs in precisely the one predicate.
+  got=0; mutant_out="$(check_oc_read_notfound_not_folded "$mutated_file" 2>&1)" || got=$?
+  rm -f "$mutated_file"
+  siblings=""
+  for _c in 3a 3b 3c 3d; do
+    [[ "$mutant_out" == *"[${_c}]"* ]] && siblings="${siblings}${_c} "
+  done
+  if [[ "$got" -ne 1 || "$mutant_out" != *"[3e]"* || -n "$siblings" ]]; then
+    bad "SELF-TEST FAILED: canary [3e] (empty-stderr failure graded as the server's real NO — a" \
+        "false ❌ for an unreachable cluster) → rc=${got}, wanted rc 1 with a [3e] finding and NO" \
+        "sibling findings.${siblings:+ Siblings also fired: ${siblings}— the mutant is broken rather}" \
+        "${siblings:+than narrowly disabled, so this canary would prove nothing.}" \
+        "Reported: ${mutant_out:-<nothing>}"
+    bad_seen=1
+  fi
 
   # Canary — coverage wiring: a detector declared but never called by run_check must be rc=2, never
   # silently tolerated. Mirrors cohort-ops-guard.sh's own canary F.

@@ -478,12 +478,38 @@ if true; then
      'oc get ns "$NS"',
      'oc get namespace "$NS"',
      "cluster-unreachable",
-     ("[cluster-unreachable/strict] unmodelled call:",
-      "[cluster-unreachable/strict] VERIFY_STRICT=1 exit status 1, must be 4",
+     ("[cluster-unreachable] the run made a call the recording does not model",
+      "[cluster-unreachable/strict] unmodelled call:",
       "[cluster-unreachable/entry] unmodelled call:"),
-     "the same escape, in the two modes that have their own runs: an unrecorded read answers rc 1 "
-     "with EMPTY stderr, which oc_read classifies as the server's real NO — so a cluster that could "
-     "not be asked at all manufactures a ❌ and takes strict mode off its rc-4 tripwire"),
+     "the same escape, in all three modes that have their own runs: a read the recording never "
+     "answered for is graded off nobody's answer. Detector [7] is the only thing standing between "
+     "that and a fabricated verdict"),
+
+    # This canary used to be carried by `unrecorded-read` above, and the story of why it moved is
+    # worth keeping. An unrecorded read comes back rc 1 with EMPTY stderr, and until 2026-08-06
+    # oc_read classified that as the server's real NO — so a cluster that could not be asked at all
+    # manufactured a ❌ and strict mode lost its rc-4 tripwire. That was a REAL DEFECT in _lib.sh,
+    # not a property to build a canary on: it sat under every verify script in the suite, and
+    # CLAUDE.md is explicit that a false ❌ destroys attendee trust in every other ✅. Measured and
+    # fixed the same day — an empty stderr is now "could not ask", because every genuine NO the
+    # server sends carries text. Strict correctly returns 4 there now, so that sentence stopped
+    # firing and this detector needed an honest witness instead of a bug-shaped one.
+    #
+    # This is it, and it is a one-WORD regression: check() routes on `[[ "${1:-}" == "oc" ]]`, so
+    # prefixing the predicate with anything at all — `command`, `env`, a wrapper function — drops it
+    # into the `"$@" >/dev/null 2>&1` branch, throws away the stderr oc_read classifies on, and turns
+    # a three-outcome check into a blind one. In the cluster-unreachable world that is a graded ❌
+    # against an attendee whose cluster simply could not be reached, and VERIFY_STRICT=1 returns 1
+    # instead of 4. Exactly the class tools/lint/verify-oc-read-guard.sh exists to stop, which is why
+    # a plausible maintainer could write it.
+    ("blind-read-bypasses-oc-read",
+     'oc get ns "$NS"',
+     'command oc get ns "$NS"',
+     "cluster-unreachable",
+     ("[cluster-unreachable/strict] VERIFY_STRICT=1 exit status 1, must be 4",),
+     "a check that reads the cluster BLIND: one word in front of `oc` bypasses check()'s routing, "
+     "the stderr oc_read classifies on is discarded, and a cluster that could not be asked "
+     "manufactures a ❌ while strict mode loses its rc-4 tripwire"),
 )
 
 

@@ -90,6 +90,29 @@ oc_read() {  # oc_read <oc args…> → OC_OUT/OC_ERR; rc 0 = oc succeeded, 1 = 
   # made `check "PodDisruptionBudget parasol-claims exists" oc get pdb …` PASS on a namespace that had
   # no PDB at all (caught by diffing a full run against HEAD on user7, 2026-08-01). A genuine absence
   # is a real answer and must stay a ❌ — only "could not ask" may become ⚠.
+  #
+  # A FAILURE WITH NOTHING ON STDERR IS "COULD NOT ASK", AND MUST BE, because it is not an answer at
+  # all. Every real NO the server sends carries text — NotFound prints "Error from server (NotFound):
+  # …", a bad resource type prints "doesn't have a resource type". Silence means `oc` never got far
+  # enough to be told anything: killed by a signal (OOM-killer, a timeout wrapper, SIGPIPE), or dead
+  # before it wrote a word. Falling through to `*)` graded that as the server's real NO.
+  #
+  # MEASURED 2026-08-06, three arms, single variable = what the stub writes to stderr:
+  #   exit 137, stderr empty                     -> rc 1, VERIFY_INCONCLUSIVE=0   ← indistinguishable
+  #   exit 1, "Error from server (NotFound): …"  -> rc 1, VERIFY_INCONCLUSIVE=0   ← from this
+  #   exit 1, "Unable to connect to the server"  -> rc 2, VERIFY_INCONCLUSIVE=1
+  # An OOM-killed read and a genuinely absent object produced the SAME ❌ against the attendee. This
+  # sits under 27 verify scripts, 736 `check` call sites and 256 direct oc_read calls, and CLAUDE.md
+  # is explicit that a false ❌ destroys attendee trust in every other ✅.
+  #
+  # Note this cannot re-open the NotFound hole above: that regression was about a real, TEXT-carrying
+  # answer being upgraded to success. This downgrades a NO-TEXT non-answer to inconclusive. The two
+  # move in opposite directions and the case below still decides everything that has text.
+  if [[ -z "${OC_ERR// /}" ]]; then
+    OC_OUT=""
+    VERIFY_INCONCLUSIVE=1
+    return 2
+  fi
   case "$OC_ERR" in
     *"(Forbidden)"*|*" is forbidden"*|\
     *"(Unauthorized)"*|*"must be logged in to the server"*|*"asked for the client to provide credentials"*|\
