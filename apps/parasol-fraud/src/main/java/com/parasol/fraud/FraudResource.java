@@ -18,14 +18,14 @@ import jakarta.ws.rs.core.Response;
  *
  * <p>The score is a pure function of the claim id, so lab text can reference exact
  * values (e.g. {@code CLM-1001} always scores 37 / low). There is no model and no
- * database — this service exists to be the <em>audience</em> of a token exchange in
- * module M29: parasol-claims exchanges the caller's user token for a token scoped to
- * {@code aud=fraud}, and this bearer-only service enforces that audience.
+ * database — this service exists to be the <em>audience</em> of a token exchange in the
+ * securing-apps-keycloak module: parasol-claims exchanges the caller's user token for a
+ * token scoped to {@code aud=fraud}, and this bearer-only service enforces that audience.
  *
  * <p>Security: the OIDC tenant is DISABLED by default (see application.properties), so
- * every endpoint is anonymous for M01-M28 and this class carries no security
- * annotation. M29 turns the tenant on and adds {@code aud} enforcement + a role check
- * (the in-lab edit) — see the README "Enabling protection (M29)".
+ * every endpoint is anonymous in every other module and this class carries no security
+ * annotation. securing-apps-keycloak turns the tenant on and adds {@code aud} enforcement
+ * + a role check (the in-lab edit) — see the README "Turning protection on".
  */
 @Path("/api/fraud")
 @Produces(MediaType.APPLICATION_JSON)
@@ -35,9 +35,10 @@ public class FraudResource {
      * Score a claim. Returns a deterministic pseudo-score in [0,99] and a risk band,
      * derived only from the claim id so results are stable and reproducible.
      *
-     * <p>M29 note: when the tenant is enabled this is the audience-guarded call. To
-     * require a caller role as well, add {@code @RolesAllowed("claims-adjuster")} here
-     * (works once {@code quarkus.oidc.roles.role-claim-path=realm_access/roles} is set).
+     * <p>Note for securing-apps-keycloak: when the tenant is enabled this is the
+     * audience-guarded call. To require a caller role as well, add
+     * {@code @RolesAllowed("claims-adjuster")} here (works once
+     * {@code quarkus.oidc.roles.role-claim-path=realm_access/roles} is set).
      */
     @GET
     @Path("/score/{claimId}")

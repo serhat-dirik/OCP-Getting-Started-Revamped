@@ -11,8 +11,8 @@ import io.quarkus.test.junit.QuarkusTest;
  * Build-time smoke over the scoring endpoint and the readiness probe.
  *
  * <p>Runs with the OIDC tenant DISABLED (the default), so these calls are anonymous:
- * that is the module-independence guarantee (M01-M28 see an unprotected service). The
- * scores asserted here are the deterministic values lab text references.
+ * that is the module-independence guarantee (every other module sees an unprotected
+ * service). The scores asserted here are the deterministic values lab text references.
  */
 @QuarkusTest
 class FraudResourceTest {
