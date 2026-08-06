@@ -393,7 +393,7 @@ enumerate_operators() {
 # there and gives up:
 #     constraints not satisfiable: @existing/openshift-operators//devspacesoperator.v3.29.0,
 #                                  redhat-operators/openshift-marketplace/stable/devspacesoperator
-# Measured on ksls5 2026-07-25: that exact orphan drove pp-devspaces Degraded with `CheCluster/devspaces
+# Measured on a live cluster 2026-07-25: that exact orphan drove pp-devspaces Degraded with `CheCluster/devspaces
 # Missing` and took M03 out of the workshop; deleting the CSV by hand let OLM resolve immediately.
 #
 # Step 5 used to name the CSV by reading `.status.installedCSV` off the Subscription. That was correct
@@ -412,7 +412,7 @@ enumerate_operators() {
 #      has no snapshot to take, but every orphaned CSV is still there carrying its own package name.
 #
 # Deliberately NOT the primary mechanism: OLM's `operators.coreos.com/<package>.<namespace>` label. A
-# label KEY is capped at 63 characters and OLM silently TRUNCATES rather than skipping — live on ksls5,
+# label KEY is capped at 63 characters and OLM silently TRUNCATES rather than skipping — live on a cluster,
 # cluster-observability-operator in openshift-cluster-observability-operator (71 chars) is stamped
 # `operators.coreos.com/cluster-observability-operator.openshift-cluster-observability` (exactly 63),
 # so a selector built from the real names matches nothing at all. It survives only as a last-resort
@@ -422,7 +422,7 @@ CSV_INDEX_LOADED="false"
 csv_index() {  # → "<ns>|<csv>|<copiedFrom>|<properties-json>" for every ORIGINAL CSV (cached, one call)
   if [[ "$CSV_INDEX_LOADED" != "true" ]]; then
     # `!olm.copiedFrom` drops OLM's per-namespace COPIES server-side. Not a micro-optimisation:
-    # measured on ksls5, unfiltered is 3743 objects / 3.8 MB / 92s, filtered is 37 objects / 36 KB / 4s.
+    # measured live, unfiltered is 3743 objects / 3.8 MB / 92s, filtered is 37 objects / 36 KB / 4s.
     # Copies have to be excluded anyway (deleting one is pointless — OLM garbage-collects them when the
     # original goes, and re-creates any you delete), so filtering at the API server costs nothing.
     # properties LAST in the line: it is JSON, and putting it last means a stray delimiter inside it
@@ -468,7 +468,7 @@ csv_index_props() {  # <ns> <csv> → "hit|<properties-json>" when the index kno
 
 csv_by_olm_label() {  # <package> <ns> → CSV found via OLM's component label (truncation-aware)
   # Truncation is NOT a plain cut to 63. A label key's name part must also END alphanumeric, so OLM
-  # trims whatever the cut left dangling. Live on ksls5: cut(63) of
+  # trims whatever the cut left dangling. Live on a cluster: cut(63) of
   # cluster-observability-operator.openshift-cluster-observability-operator ends in '-', and the label
   # OLM actually stamped is the 62-char version with that '-' removed. A cut-only candidate misses it,
   # and asking the API server for the untruncated key is not even a miss — it is a 400:
@@ -495,7 +495,7 @@ capture_installed_csvs() {  # main calls this ONCE, before step 1 — see mechan
   if [[ "$CSV_SNAPSHOT_TAKEN" == "true" ]]; then return 0; fi
   CSV_SNAPSHOT_TAKEN="true"
   # ONE cluster-wide read, not one per operator: an `oc get` against a remote cluster costs ~3s
-  # (measured on ksls5), so 22 operators would be a minute of wall clock for data a single list
+  # (measured live), so 22 operators would be a minute of wall clock for data a single list
   # already contains. The extra rows for Subscriptions that are not ours are inert — every lookup is
   # keyed on the exact (name, namespace) pair the state ConfigMap recorded.
   CSV_SNAPSHOT="$(oc get subscriptions.operators.coreos.com -A \
@@ -557,7 +557,7 @@ capture_attendee_users() {  # main calls this ONCE, before step 1 — same reaso
   if [[ "$ATTENDEE_USERS_CAPTURED" == "true" ]]; then return 0; fi
   ATTENDEE_USERS_CAPTURED="true"
   local from_group from_htpasswd="" b64
-  # NOT `{range .users[*]}{.}{end}` — verified live (ksls5, 2026-07-31): oc's jsonpath does not resolve
+  # NOT `{range .users[*]}{.}{end}` — verified live (2026-07-31): oc's jsonpath does not resolve
   # a bare `{.}` as the current item over a plain string array, so that form silently prints NOTHING,
   # which would have made ATTENDEE_USERS always empty and disabled this whole guard without an error.
   # `{.users[*]}` prints the array space-separated directly; verified to actually return the 8 usernames.
@@ -734,7 +734,7 @@ CRDS_CAPTURED_CSVS=" "   # " ns/csv … " already read, so two callers cost one 
 CRDS_CAPTURE_PHASE=""    # "pre-cascade" once capture_installed_csvs() has run its authorized pass
 
 # ONE cluster-wide read for every CSV's owned-CRD list, in the same shape and for the same reason as
-# csv_index(): 19 operators would otherwise be 19 serial `oc get`s (~3s each, measured on ksls5) added
+# csv_index(): 19 operators would otherwise be 19 serial `oc get`s (~3s each, measured live) added
 # to the pre-cascade moment, which --dry-run pays for too. Nested `range` is a documented jsonpath form
 # (the same one kubectl's own docs use for containers within pods), and if it ever fails the index
 # simply comes back empty and record_created_crds falls through to the per-CSV read it has always used
@@ -1095,7 +1095,7 @@ assert_adopted_protection() {
     # name reported every operator as absent (SEV1, fixed in 437bbf4). Do not regress it here.
     check_adopted subscriptions.operators.coreos.com "$name" "$ns" "adopted operator (the org installed it)"
     # Resolve the CSV the way step 5 does, NOT from the Subscription — this guard had the SAME defect.
-    # Live on ksls5 2026-07-25: the org's adopted openshift-pipelines-operator-rh and web-terminal have
+    # Live on a cluster 2026-07-25: the org's adopted openshift-pipelines-operator-rh and web-terminal have
     # Succeeded CSVs and NO Subscription at all, so the old installedCSV read returned "" and the guard
     # printed no line for them — it silently verified nothing about the two objects it exists to
     # protect, and a genuinely unprotected adopted CSV would have sailed through as "clean".
@@ -1647,7 +1647,9 @@ restore_monitoring() {  # put cluster-monitoring-config back the way we found it
       ok "restored enableUserWorkload=false in cluster-monitoring-config";;  # TODO(verify-on-cluster)
     *)
       err "cluster-monitoring-config pre-existed WITHOUT enableUserWorkload; we added it. Remove it manually:"
-      echo "      oc -n openshift-monitoring edit configmap cluster-monitoring-config   # delete the enableUserWorkload line"
+      # >&2 like the err() above it: a message whose sentence ends on stderr and whose command lands on
+      # stdout is readable on NEITHER stream alone. Same convention as diagnose_stuck_app's hand-clear hint.
+      echo "      oc -n openshift-monitoring edit configmap cluster-monitoring-config   # delete the enableUserWorkload line" >&2
       # RESIDUE, and the second instance of the same defect class as the Argo one: our
       # enableUserWorkload line stays on the org's ConfigMap. Drop the record here and the next
       # install snapshots monitoring_uwm_prior=true — after which every future teardown "preserves"
@@ -1925,7 +1927,7 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
         err "   could not name the CSV for ${name} in ${ns}: its Subscription reports no installedCSV and"
         err "      no CSV in that namespace carries package '${pkg}'. If one appears later it will block"
         err "      the next install — check and remove by hand:"
-        echo "      oc get csv -n ${ns}   # then: oc delete csv <name> -n ${ns}"
+        echo "      oc get csv -n ${ns}   # then: oc delete csv <name> -n ${ns}" >&2
       fi
     else
       echo "   • preserve operator ${name} in ${ns} (${st} — not created by us)"
@@ -1955,7 +1957,7 @@ cleanup_created_operators() {  # remove Subscription+CSV for operators WE create
       # namespace it adopts, and preserve_and_strip never reaches this one — an adopted operator's
       # namespace is not in the "preserved" list, it is simply never a deletion candidate. Leaving
       # the mark means ogsr-check-clean.sh correctly reports the org's namespace as marked by us
-      # after a teardown that was otherwise complete. Measured on ksls5, 2026-07-25.
+      # after a teardown that was otherwise complete. Measured on a live cluster, 2026-07-25.
       strip_our_marks namespace "$ns" ""
     fi
   done < <(enumerate_operators)
@@ -2006,19 +2008,38 @@ classify_workshop_namespaces() {
     printf 'preserve-strip\t%s\tnot part of installed_stacks (%s) — left intact, review manually\n' "$n" "$(state installed_stacks)"
   done < <(oc get namespaces -l "$OWNER_LABEL" \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/user}{"\t"}{.metadata.labels.workshop\.redhat\.com/layer}{"\t"}{.metadata.labels.workshop\.redhat\.com/shared}{"\n"}{end}' 2>/dev/null || true)
+  # END SENTINEL — the last thing this function emits, so its ABSENCE proves the loop above died early.
+  # This function is consumed as `< <(classify_workshop_namespaces)`, i.e. in a subshell, and every emit
+  # above is a bare `printf` under `set -e`: one failed write kills the subshell mid-loop and the reader
+  # sees nothing but EOF. Measured on cluster-65prs 2026-08-06 — `printf: write error: Interrupted system
+  # call` at namespace 85 of 137, after which the remaining 52 (all of user5-user8) were never classified,
+  # delete_workshop_namespaces still returned 0, and the step ledger printed ✅ for a teardown that had
+  # silently done a third less than it said. A count comparison would race with the cascade still
+  # finishing its own namespace deletions; a sentinel cannot.
+  printf 'end-of-classification\t-\t-\n'
   return 0
 }
 
 delete_workshop_namespaces() {  # act on the classification: delete ours, preserve+strip the rest (F7)
-  local verb n reason
+  local verb n reason seen=0 complete="false"
   while IFS=$'\t' read -r verb n reason; do
     [[ -n "$n" ]] || continue
     case "$verb" in
-      delete)         del_ns_fast "$n"; DELETED_WS_NS+=("$n");;
-      preserve-strip) preserve_and_strip "$n" "$reason";;
-      defer)          : ;;  # STATE_NS removed right after this fn; Lightspeed handled by handle_lightspeed
+      end-of-classification) complete="true";;   # see classify_workshop_namespaces' END SENTINEL
+      delete)         del_ns_fast "$n"; DELETED_WS_NS+=("$n"); seen=$((seen + 1));;
+      preserve-strip) preserve_and_strip "$n" "$reason"; seen=$((seen + 1));;
+      defer)          seen=$((seen + 1));;  # STATE_NS removed right after this fn; Lightspeed handled by handle_lightspeed
     esac
   done < <(classify_workshop_namespaces)
+  # No sentinel = the classifier died partway and every namespace after that point was never looked at.
+  # Reported, never swallowed: run_step marks the step failed and the EXIT ledger carries it, which is
+  # the difference between "re-run this" and a teardown that silently left a third of itself behind.
+  if [[ "$complete" != "true" ]]; then
+    err "namespace classification STOPPED EARLY — only ${seen} owner-labeled namespace(s) were classified."
+    err "   Every namespace it never reached was NOT acted on, and this step's ✅ would have been a lie."
+    err "   Re-run this script: it is idempotent and skips whatever is already gone."
+    return 1
+  fi
   return 0
 }
 
@@ -2206,7 +2227,7 @@ del_appprojects() {  # the AppProject(s) argocd-bootstrap applies imperatively
   # Application whose project is missing — including its DELETION — so every straggler freezes in
   # Unknown with `InvalidSpecError: Application referencing project ogsr-platform which does not
   # exist` and `DeletionError: error getting app project`. Their hook finalizers then never clear and
-  # their namespaces never finish. Measured on ksls5 2026-07-25: deleting it in step 6 stranded 7
+  # their namespaces never finish. Measured on a live cluster 2026-07-25: deleting it in step 6 stranded 7
   # Applications and wedged the stackrox namespace on four finalizers at once. An AppProject left
   # behind is a reported leftover; an AppProject deleted too early is an unrecoverable teardown.
   local name remaining
@@ -2500,8 +2521,11 @@ restore_argocd_controller_resources() {
       err "a prior openshift-gitops controller spec was recorded, but NO consent to change it was —"
       err "   this install predates the consent gate, so we cannot prove the change was ours and will"
       err "   not write to an adopted CR on a guess. Prior spec.controller.resources:"
-      echo "      ${prior:-<unreadable>}"
-      echo "      restore manually if the org relied on it: oc -n ${ARGO_NS} edit argocd openshift-gitops"
+      # The VALUE this sentence promises, on the SAME stream as the sentence. Measured on a live cluster
+      # 2026-08-06: with these two on stdout, `2>/dev/null` printed a bare JSON blob with no line saying
+      # what it was, and `1>/dev/null` printed "Prior spec.controller.resources:" with nothing after it.
+      echo "      ${prior:-<unreadable>}" >&2
+      echo "      restore manually if the org relied on it: oc -n ${ARGO_NS} edit argocd openshift-gitops" >&2
       # RESIDUE. The live limit IS our target and the recorded prior is not, so a workshop install
       # raised it and this run is walking away without putting it back. Deleting the record now would
       # make the next install snapshot OUR ${target_mem} as the org's original.
@@ -2655,7 +2679,7 @@ del_labeled_rbac_in_preserved_ns() {
 sweep_dead_webhooks() {  # admission webhooks whose backing Service died with a namespace we removed
   # Some operators register their webhooks at RUNTIME rather than through the CSV's webhookdefinitions,
   # so OLM does not own them and removing the operator leaves them behind. Sync waves cannot help: the
-  # operator's finalizer only cleans up what the operator itself tracks. Measured on ksls5 2026-07-25 —
+  # operator's finalizer only cleans up what the operator itself tracks. Measured on a live cluster 2026-07-25 —
   # keda-admission and stackrox both survived a complete teardown pointing at deleted Services.
   #
   # These are not inert. failurePolicy=Fail means every create/update the webhook intercepts is REJECTED
