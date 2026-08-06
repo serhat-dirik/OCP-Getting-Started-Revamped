@@ -3105,6 +3105,18 @@ step_delete_namespaces() {  # 9 — whatever the cascade did not own, then the s
     fi
     # The withheld half, carried so it cannot vanish between this run and whoever reads the dump. It is
     # a statement, not an authorisation: nothing may turn this key into a delete command.
+    #
+    # NAMES ONLY, AND THAT IS SETTLED — owner decision 2026-08-06, asked and answered. `$CRDS_SHARED`
+    # holds `<name>|<reason>` pairs and the awk above deliberately keeps only field 1. A proposal to
+    # add a `crds_shared_why` key was raised and DECLINED, so do not "improve" this into one.
+    #
+    # The argument for it, recorded so the decision is not re-litigated from scratch: the reason is
+    # computed here at the honest moment — pre-cascade, while our own CSVs still exist — and the
+    # checker re-derives its own reason later from a cluster where they are gone, so a CRD withheld
+    # for a pre-cascade-only reason reads as "recorded by the teardown" with nothing behind it.
+    # The argument against, which won: the CRD is withheld either way, so nothing unsafe turns on it.
+    # This buys reporting quality at the price of widening a state contract that two scripts read, and
+    # a narrow contract is worth more than a richer sentence.
     if [[ -n "$CRDS_SHARED" ]]; then
       STATE_SNAPSHOT="${STATE_SNAPSHOT}"$'\n'"crds_shared=$(printf '%s\n' "$CRDS_SHARED" | awk -F'|' '$1 != "" {print $1}' | tr '\n' ',' | sed 's/,$//')"
     fi
