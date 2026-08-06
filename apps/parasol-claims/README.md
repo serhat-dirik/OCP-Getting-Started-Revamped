@@ -151,7 +151,7 @@ environment variables (`QUARKUS_OIDC_TENANT_ENABLED`, `QUARKUS_OIDC_AUTH_SERVER_
 and secret) plus a `@RolesAllowed("claims-adjuster")` annotation on the guarded method.
 `quarkus.oidc.roles.role-claim-path=realm_access/roles` is pre-set so the role check matches
 Keycloak realm roles, and `quarkus-oidc-client` is present for that module's token exchange —
-re-audiencing the user's token to `aud=fraud` before calling `parasol-fraud`.
+re-audiencing the user's token to `aud=parasol-fraud` before calling `parasol-fraud`.
 
 ## Supply chain
 
