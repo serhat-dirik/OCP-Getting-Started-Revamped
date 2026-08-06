@@ -1,8 +1,8 @@
 # The canary portfolio
 
 A miniature app-of-apps, shaped exactly like `platform-portfolio/`, that
-`crd-unknown-field-guard.py --self-test` drives through the **real** `portfolio_jobs()` and
-`check_overlay()` — never through a re-implementation of the wiring rule, because a
+`crd-unknown-field-guard.py --self-test` drives through the **real** `portfolio_jobs()`,
+`render_job()` and `judge_job()` — never through a re-implementation of the wiring rule, because a
 re-implementation can pass while the thing that ships is broken.
 
 It proves four things the Helm canary next door cannot:
@@ -17,3 +17,10 @@ It proves four things the Helm canary next door cannot:
 Every planted field is judged against the same checked-in CRD snapshots the real run uses.
 `expectations.yaml` declares all of it; the self-test asserts set equality, so a finding nobody
 declared fails just as loudly as a declared one that stopped firing.
+
+The **ownership split** — what a missing snapshot costs, and for whom — lives in the Helm canary next
+door (`../chart/templates/ownership.yaml`), not here: it is a property of a single custom resource,
+so it needs no portfolio around it. What this directory contributes to it is the real tree's
+counterpart, `platform-portfolio/components/loki-logging`, whose `LokiStack` and
+`ClusterLogForwarder` cannot be snapshotted on any cluster this project has. The self-test asserts
+they are **named** in the unwired note with the verdict each would get.

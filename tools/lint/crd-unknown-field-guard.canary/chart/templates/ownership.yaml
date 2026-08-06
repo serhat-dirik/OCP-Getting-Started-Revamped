@@ -1,0 +1,70 @@
+---
+# THE OWNERSHIP SPLIT, both sides of it, on kinds that can never collide with a real CRD.
+#
+# A missing schema snapshot costs different things depending on who owns the kind (owner decision,
+# 2026-08-06). These three documents are the whole of that rule, and they are written as a canary
+# rather than a comment because a rule nobody can watch fail is worth nothing.
+#
+# SIDE ONE — a third-party operator's kind. It carries Argo CD's SkipDryRunOnMissingResource, which
+# is the manifest author's own load-bearing statement that this object's CRD is not on a bare
+# cluster: an operator in an earlier sync wave brings it. The guard has no snapshot for it, says so
+# by name on stdout, and does NOT redden CI — pinning a vendor's schema asserts more than we can
+# know, because a customer runs whatever operator version they run. The live instances of this case
+# are loki-logging's LokiStack and ClusterLogForwarder, which no cluster this project has can
+# snapshot at all.
+apiVersion: vendor.crd-unknown-field-guard.invalid/v1
+kind: ThirdPartyNoSnapshot
+metadata:
+  name: canary-third-party
+  namespace: {{ .Values.user }}-canary
+  annotations:
+    # Two options, comma-separated, deliberately: Argo parses this as a LIST, and a guard that
+    # substring-matched would also accept `SkipDryRunOnMissingResource=truely`.
+    argocd.argoproj.io/sync-options: Validate=false,SkipDryRunOnMissingResource=true
+spec:
+  unverifiedField: true
+---
+# SIDE TWO — THE VETO. This CR carries the very same annotation, so the ownership signal alone would
+# call it third-party and let it through unchecked. It must NOT be let through, because the canary
+# chart below SHIPS THE CRD for this kind: a kind we define is a kind we can keep correct, so a
+# missing snapshot for it stays rc 2 however it is annotated. Delete the CustomResourceDefinition
+# under this and the guard starts treating it as somebody else's — which is exactly the mis-filing
+# the veto exists to make impossible, and the self-test's `mustBeUncheckable` entry is what notices.
+apiVersion: ours.crd-unknown-field-guard.invalid/v1
+kind: OurOwnNoSnapshot
+metadata:
+  name: canary-our-own
+  namespace: {{ .Values.user }}-canary
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  unverifiedField: true
+---
+# The CRD that makes the document above OURS. CustomResourceDefinition is itself a built-in kind, so
+# the walk skips it and it produces no findings of its own; it exists purely so shipped_crd_kinds()
+# has something real to find. The repo's own renders emit ZERO CRDs today (measured 2026-08-06),
+# which is why the veto has no live instance and needs one here.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ourownnosnapshots.ours.crd-unknown-field-guard.invalid
+spec:
+  group: ours.crd-unknown-field-guard.invalid
+  scope: Namespaced
+  names:
+    plural: ourownnosnapshots
+    singular: ourownnosnapshot
+    kind: OurOwnNoSnapshot
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                unverifiedField:
+                  type: boolean

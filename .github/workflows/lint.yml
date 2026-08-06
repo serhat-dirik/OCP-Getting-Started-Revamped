@@ -1459,10 +1459,21 @@ jobs:
         # whole class returning, because permanent red teaches attendees and SAs to ignore red.
         #
         # Schemas come from checked-in snapshots (tools/lint/crd-unknown-field-guard.fixtures),
-        # never a live cluster — CI has none. A CR whose CRD has no snapshot exits 2 as UN-CHECKABLE
-        # rather than passing, so a new custom-resource kind reddens this job until someone runs
-        # `--capture` on a cluster. That cost is the point: a gate that goes green over something it
-        # never inspected is the defect this workflow exists to catch.
+        # never a live cluster — CI has none. What a MISSING snapshot costs splits by who owns the
+        # kind (owner decision, 2026-08-06): a kind this repo defines and controls still exits 2 as
+        # UN-CHECKABLE, because we can keep those correct without asking anyone; a kind an adopted or
+        # third-party operator brings is NAMED on stdout every run and does not redden this job,
+        # because a customer runs whatever operator version they run and pinning a vendor's schema
+        # asserts more than we can know. Anything the classifier cannot place falls to the STRICT
+        # side. A gate that goes green over something it never inspected is the defect this workflow
+        # exists to catch, so the rule is not "skip what we have no schema for" — it is "say, every
+        # single run, exactly which objects went unchecked and why".
+        #
+        # The classifier reads Argo CD's own `SkipDryRunOnMissingResource=true` sync option off the
+        # rendered CR — the manifest author's load-bearing statement that this object's CRD arrives
+        # with an operator — vetoed by any CustomResourceDefinition the repo's own renders emit. The
+        # standing instances are loki-logging's LokiStack and ClusterLogForwarder, which no cluster
+        # this project has can snapshot at all; they are named on stdout on every run.
         #
         # Scope covers BOTH render paths as of 2026-08-06: the Helm charts (entry states,
         # workshop-config, helm/bootstrap, user-namespace) and the `platform-portfolio/**` kustomize
@@ -1474,17 +1485,27 @@ jobs:
         run: |
           rc=0
           python3 tools/lint/crd-unknown-field-guard.py --self-test || rc=$?
-          # Exactly 1 = all ten planted defects caught against the REAL CRD snapshots (both
+          # Exactly 1 = every planted defect caught against the REAL CRD snapshots (both
           # DevWorkspace fields of 9c97d80, an unknown field inside an array item, a misspelt root
           # field, a typo inside a map VALUE, a CR nested in an OpenShift Template, a closed-object
           # subtree, a solve=true-only resource, a CR in an always-rendered portfolio overlay, and a
-          # CR in a component reachable ONLY by following a stack Application) AND all seven legal
-          # fields beside them left unflagged — a false positive here would block authoring, so it
-          # is asserted in both directions. It also asserts the wiring rule's own cost: the overlay
-          # no stack wires up is REPORTED as outside the render set and still carries its planted
-          # defect, so the exclusion cannot rot into a green tick over an empty file. 0 = a detector
-          # is blind; 2 = a canary was missed, a false-positive control fired or vanished from the
-          # fixture, or the harness itself is broken.
+          # CR in a component reachable ONLY by following a stack Application) AND every legal field
+          # beside them left unflagged — a false positive here would block authoring, so it is
+          # asserted in both directions. The canary declares its own cases in
+          # crd-unknown-field-guard.canary/expectations.yaml and the self-test asserts SET EQUALITY
+          # against them, so no count belongs in this file: one written here goes stale the day a
+          # case is added, and a stale count is how a gate stops asserting what it claims to.
+          #
+          # It also asserts the wiring rule's own cost — the overlay no stack wires up is REPORTED as
+          # outside the render set, naming the kinds in it that have no snapshot, and still carries
+          # its planted defect, so the exclusion cannot rot into a green tick over an empty file —
+          # and the OWNERSHIP SPLIT in every direction: an un-snapshotted third-party kind is
+          # reported and not fatal, an un-snapshotted kind with no ownership evidence is still rc 2,
+          # a kind carrying the third-party signal whose CRD the canary SHIPS is vetoed back to
+          # strict, a lenient row alone exits 0 while a strict row beside it still exits 2, and an
+          # EMPTY schema store collapses a scope floor instead of reporting green over an unchecked
+          # tree. 0 = a detector is blind; 2 = a canary was missed, a false-positive control fired or
+          # vanished from the fixture, or the harness itself is broken.
           if [ "$rc" -ne 1 ]; then
             echo "::error::crd-unknown-field-guard self-test must exit 1 (every planted pruned" \
                  "field detected and every legal field left alone); got rc=$rc. Detection is" \

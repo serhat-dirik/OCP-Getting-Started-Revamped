@@ -29,14 +29,91 @@ THE THREE OUTCOMES ARE DELIBERATELY DISTINCT, and the third is the point. This p
 defect is a gate that goes green over something it never inspected, so "I had no schema for this
 kind" must not be spelled the same way as "I checked it and it was clean":
 
-    rc 0   every custom resource was CHECKED against a real schema and every field is defined
+    rc 0   every custom resource this guard CLAIMS to check was checked against a real schema and
+           every field is defined — and whatever it stopped claiming is NAMED on stdout
     rc 1   a rendered CR carries a field its CRD does not define — it will be pruned at admission
-    rc 2   the guard COULD NOT INSPECT what it claims to: a CR whose CRD has no snapshot, a chart
-           helm refuses to render, a collapsed scope, or a crash
+    rc 2   the guard COULD NOT INSPECT what it claims to: a CR with no snapshot that it cannot show
+           is an operator's, a chart helm refuses to render, a collapsed scope, or a crash
 
-A new custom-resource kind therefore REDDENS CI until someone captures its schema. That is the
-intended cost. The alternative — skipping what we have no schema for — is the exact shape of every
-false-pass in this repo's history.
+WHAT A MISSING SNAPSHOT COSTS DEPENDS ON WHO OWNS THE KIND (owner decision, 2026-08-06). The rule
+above used to be flat: any CR whose CRD had no snapshot was rc 2, full stop. That was right for the
+kinds this repo defines, and false precision for everybody else's — a customer running a different
+operator version has a different schema than whatever cluster we happened to capture on, so pinning
+a vendor's schema asserts more than we can know. So the outcome now splits by ownership:
+
+  * a kind THIS REPO defines and controls  → a missing snapshot is still rc 2. We can keep these
+    correct without asking anyone, so nothing about them may go unchecked.
+  * a kind an ADOPTED or THIRD-PARTY OPERATOR brings → a missing snapshot is reported by name on
+    stdout, every run, and does not redden CI.
+  * ANYTHING THE CLASSIFIER CANNOT PLACE → rc 2, with the first group. Ambiguity falls strict, and
+    "ours" and "unclassifiable" are deliberately the SAME outcome: the guard has no positive
+    evidence either way, and guessing lenient is how a gate turns itself off.
+
+HOW OWNERSHIP IS DECIDED, and the honest limits of it. There is no `owner:` field on a custom
+resource, so the classifier needs a signal that is already load-bearing for something else — a
+marker that exists only to answer this guard would rot into decoration the week after it landed.
+The signal is Argo CD's own sync option, read off the rendered CR:
+
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+
+It means "do not server-side dry-run this manifest, because its CRD may not be on the cluster yet",
+and it is only ever true of a kind whose CRD arrives with an OPERATOR installed in an earlier sync
+wave. It is load-bearing in both directions: delete it and a fresh install fails its first sync; add
+it and Argo really does stop dry-running that object. So it cannot be quietly added to silence this
+guard without changing how the portfolio installs.
+
+Vetoed by ownership of the CRD itself: if any render in this guard's own scope emits a
+CustomResourceDefinition for that group/kind, the kind is OURS whatever annotation the CR carries.
+Measured 2026-08-06: this repo's renders emit ZERO CustomResourceDefinitions — every kind it ships a
+CR for belongs to somebody else's operator — so the veto fires on nothing today. It is written
+anyway, because the day a chart here does define a CRD, that kind must be strict by construction
+rather than by somebody remembering.
+
+WHAT THAT ACTUALLY CLASSIFIES, measured on the real tree 2026-08-06 rather than asserted: of 191
+rendered custom resources, 31 (24 kinds) carry the option and 160 (27 kinds) do not. The strict side
+keeps every DevWorkspace — the kind of the 9c97d80 defect this file exists for — plus every Tekton
+Task and Pipeline, every Knative Service, Broker and Trigger, every Argo CD Application and
+AppProject, the Keycloak CR, the Backstage CR and the istio networking CRs. The lenient side is the
+portfolio's operand CRs, which is precisely the population whose schema moves with an operator
+version we do not choose.
+
+AND CHECKED AGAINST A LIVE CLUSTER, because a classification nobody corroborated is a guess with a
+docstring. On cluster-65prs (423 CRDs) the same day: all 24 lenient kinds have a CRD installed and 20
+of them carry an `operators.coreos.com/<csv>` label, so not one of them is a kind this repo defines —
+the four without a label (kueue.x-k8s.io/*) arrive with the Kueue operand rather than straight from
+OLM. Nothing is mis-filed lenient. The strict side is the over-inclusive one: 8 of its 27 kinds carry
+that label too and would be lenient if their manifests declared the option. They stay strict, which
+is the safe direction and costs nothing while their snapshots exist.
+
+THE FAILURE MODE, stated plainly because the owner was warned of it and accepted it. A kind
+mis-filed as third-party is a kind this guard stops checking, and it stops checking it for exactly
+the CRs where field pruning hurts most. The classifier errs strict — a genuinely third-party operand
+whose author forgot the annotation reads rc 2, and the fix is to capture the schema or to write the
+annotation, which was correct for Argo anyway — but the reverse mistake is possible: a CR carrying
+the option for a kind we do define, on the day this repo starts defining kinds, with the CRD applied
+somewhere outside the render set (the four imperative files listed under WHAT THIS DOES NOT COVER
+below are exactly that gap). Nothing here detects that; the veto only sees rendered CRDs.
+
+The verdict is per CUSTOM RESOURCE, not per kind, because the evidence is written on the object. Two
+CRs of one kind can therefore land on opposite sides — and when they do, the strict one still exits
+2, so the run's outcome is the strict one. That asymmetry is deliberate: it is the difference
+between one manifest being under-annotated and a whole kind going unchecked.
+
+ONLY THE CR'S OWN ANNOTATION IS READ, and there is a second place the same option legitimately
+lives: a child Application's `spec.syncPolicy.syncOptions`, which applies it to everything that
+Application syncs. `stacks/portal/apps/rhdh.yaml` does exactly that for the Backstage CR. That form
+is NOT consulted here, deliberately — it would move every CR in the component to the lenient side on
+the strength of one flag on the parent, which is a blunter instrument than a per-object declaration
+— so such a CR reads strict. Strict is the safe side and it costs nothing while the kind has a
+snapshot; if it ever costs something, the fix is the per-CR annotation, not a wider signal.
+
+WHAT STOPS THE LENIENT PATH SWALLOWING EVERYTHING. Not a count in this file — a count would go stale.
+Two floors that already exist: `CRD schemas loaded` (45) and `custom resources checked` (140). Every
+resource that lands on the lenient path is a resource that did NOT raise `custom resources checked`,
+so a snapshot store that vanishes, or a classifier that starts saying "third-party" to everything,
+collapses a scope dimension and exits 2 instead of printing a green tick over 191 unchecked objects.
+--self-test proves that directly: it judges the canary against an EMPTY store and asserts the tree's
+own floors reject the result.
 
 WHY A SNAPSHOT AND NOT A LIVE CLUSTER. CI has no cluster, and a guard that only runs on a laptop is
 a guard that does not run. `--capture` re-takes the snapshots from a live cluster (see below); the
@@ -78,8 +155,13 @@ ships.
 The wiring is read from the RENDERED stacks, never from a second parse of the YAML, so there is no
 discovery mechanism that can drift from the thing being checked. Every component the render set
 leaves out is NAMED on every run, green or red — the count is not left to be inferred — and the day
-someone uncomments an app file that component enters the render set automatically. If its CRDs have
-no snapshot it will then read rc 2 UN-CHECKABLE, which is the correct and intended cost.
+someone uncomments an app file that component enters the render set automatically. So that the day
+does not arrive as a surprise, the note also RENDERS each unwired overlay and names the kinds in it
+that have no snapshot, with the verdict each would get. Today that is the whole of the answer to
+"what happens if I uncomment loki-logging": its LokiStack and its ClusterLogForwarder have no
+snapshot and cannot get one — logging is not installed on any cluster this project has, verified on
+cluster-65prs 2026-08-06 (`oc get crd | grep -ciE 'lokistack|clusterlogforwarder'` → 0) — and both
+carry SkipDryRunOnMissingResource, so both would be REPORTED and neither would redden CI.
 
 WHAT IS SKIPPED, and why that is not a hole. Built-in and aggregated kinds (core/v1, apps, batch,
 rbac, route.openshift.io, build.openshift.io, image.openshift.io, template.openshift.io,
@@ -234,6 +316,13 @@ SOLVE_WORLDS = ("false", "true")
 # and is walked like any other.
 ROOT_ALWAYS_ALLOWED = ("apiVersion", "kind", "metadata")
 
+# THE OWNERSHIP SIGNAL. Argo CD's sync-options annotation, and the one option in it that means "this
+# object's CRD is not on a bare cluster — an operator in an earlier sync wave brings it". See the
+# ownership section of the module docstring for why a signal that is already load-bearing for the
+# install is the only kind worth using here.
+SYNC_OPTIONS_ANNOTATION = "argocd.argoproj.io/sync-options"
+OPERATOR_DELIVERED_OPTION = "SkipDryRunOnMissingResource=true"
+
 # The dimensions the working functions raise. Named once so the counters and their floors cannot
 # drift apart; self_test asserts every one of them has a floor, because a measurement nobody judges
 # is not a measurement.
@@ -247,6 +336,16 @@ WALK_DIMENSIONS = (
 )
 RENDER_DIMENSIONS = (("helm renders", "kustomize renders", "portfolio custom resources")
                      + tuple(f"solve={w} custom resources" for w in SOLVE_WORLDS))
+
+# Measured, but deliberately NOT a floored Scope dimension — and the reason is the whole point of
+# the ownership split. On a healthy tree this is legitimately ZERO, and Scope.require() rejects a
+# floor below 1 precisely because a floor of 0 asserts nothing. Flooring it at 1 would be worse than
+# not measuring it: it would oblige the repo to keep an un-snapshotted kind around forever to feed
+# the counter. What judges this number instead is the floor on `custom resources checked` — every
+# resource counted here is one that did NOT get counted there — plus the run naming every single one
+# of them on stdout, so the number can never grow quietly.
+UNFLOORED_DIMENSIONS = ("third-party resources not checked",)
+ALL_DIMENSIONS = WALK_DIMENSIONS + RENDER_DIMENSIONS + UNFLOORED_DIMENSIONS
 
 
 class GuardError(Exception):
@@ -299,6 +398,44 @@ def is_closed_object(schema: dict) -> bool:
             and not is_embedded_resource(schema))
 
 
+def operator_delivered(doc: dict) -> bool:
+    """True when the CR itself declares that its CRD arrives with an operator.
+
+    Read off `argocd.argoproj.io/sync-options`, which Argo CD parses as a COMMA-SEPARATED list —
+    `Validate=false,SkipDryRunOnMissingResource=true` is a legal value and a substring test would
+    also match `SkipDryRunOnMissingResource=truely`, so the value is split and compared whole.
+
+    This is the only positive evidence of third-party ownership this guard accepts. Absence of it is
+    not evidence of the opposite: it means the guard has nothing to go on, which is why absence is
+    treated exactly like "ours" and lands on the strict side.
+    """
+    annotations = (doc.get("metadata") or {}).get("annotations") or {}
+    value = annotations.get(SYNC_OPTIONS_ANNOTATION)
+    if not isinstance(value, str):
+        return False
+    return OPERATOR_DELIVERED_OPTION in [option.strip() for option in value.split(",")]
+
+
+def shipped_crd_kinds(renders: list) -> set:
+    """(group, kind) for every CustomResourceDefinition THIS REPO's own renders emit — the veto set.
+
+    A kind whose CRD we ship is a kind we define, and it stays strict however it is annotated. The
+    set is built from the SAME rendered documents the walk judges, and it is complete before any
+    document is classified — an ordering bug here would be silent leniency, so the two-pass shape in
+    run() is not a stylistic choice.
+    """
+    owned = set()
+    for label, documents in renders:
+        for doc, _nested in documents:
+            if doc.get("kind") != "CustomResourceDefinition":
+                continue
+            spec = doc.get("spec") or {}
+            group, kind = spec.get("group"), (spec.get("names") or {}).get("kind")
+            if group and kind:
+                owned.add((group, kind))
+    return owned
+
+
 def is_builtin(group: str, kind: str, builtin_kinds: set) -> bool:
     """True when the cluster serves this kind WITHOUT a CustomResourceDefinition behind it.
 
@@ -333,6 +470,16 @@ class Report:
 
     def uncheckable(self, source: str, subject: str, why: str) -> None:
         self._record("uncheckable", source, subject, why)
+
+    def third_party_uncheckable(self, source: str, subject: str, why: str) -> None:
+        """A CR the guard has stopped claiming to check. Reported by name, never rc 2.
+
+        Its own recorder rather than a flag on `uncheckable`, for the reason the class docstring
+        gives: blinding this one line must silence exactly this outcome and nothing else, so that
+        the canary can prove the lenient path independently of the strict one. Blinded, every
+        third-party row falls back to rc 2 — the safe direction, and a direction --self-test sees.
+        """
+        self._record("third-party-uncheckable", source, subject, why)
 
     def render_failed(self, source: str, subject: str, why: str) -> None:
         self._record("render-failed", source, subject, why)
@@ -415,9 +562,12 @@ def walk(value, schema: dict, path: list, source: str, subject: str,
             walk(element, item_schema, path + [f"[{index}]"], source, subject, report, counts)
 
 
-def check_document(doc: dict, source: str, store: dict, builtin_kinds: set,
+def check_document(doc: dict, source: str, store: dict, builtin_kinds: set, owned_kinds: set,
                    report: Report, counts: dict) -> str:
-    """Judge one rendered document. Returns its verdict: checked / builtin / uncheckable."""
+    """Judge one rendered document.
+
+    Returns its verdict: checked / builtin / uncheckable / third-party-uncheckable.
+    """
     api_version = doc.get("apiVersion") or ""
     kind = doc.get("kind") or ""
     group, _, version = api_version.rpartition("/")
@@ -429,11 +579,32 @@ def check_document(doc: dict, source: str, store: dict, builtin_kinds: set,
 
     schema = store.get((group, version, kind))
     if schema is None:
+        # THE OWNERSHIP FORK. Both branches say "this object was not checked"; they differ only in
+        # whether that is a defect in this repo or a limit of what a checked-in snapshot can honestly
+        # assert about somebody else's operator. Ordered so the STRICT branch is the fall-through:
+        # every way of failing to prove third-party ownership — no annotation, a non-string
+        # annotation, a kind whose CRD we ship — arrives at rc 2 without needing its own test.
+        if operator_delivered(doc) and (group, kind) not in owned_kinds:
+            counts["third-party resources not checked"] += 1
+            report.third_party_uncheckable(
+                source, subject,
+                f"no CRD schema snapshot for {api_version} {kind}, and this CR declares "
+                f"{SYNC_OPTIONS_ANNOTATION}: {OPERATOR_DELIVERED_OPTION} — its CRD is installed by "
+                f"an operator, not by us, so its schema is whatever version that cluster runs. NOT "
+                f"CHECKED, and deliberately not a CI failure. Every field on it is unverified; if "
+                f"you want it verified, capture on a cluster carrying that operator:\n"
+                f"      tools/lint/crd-unknown-field-guard.py --capture")
+            return "third-party-uncheckable"
         report.uncheckable(
             source, subject,
-            f"no CRD schema snapshot for {api_version} {kind}. This is NOT a pass — the guard could "
-            f"not inspect it. Capture it on a cluster where that CRD is installed:\n"
-            f"      tools/lint/crd-unknown-field-guard.py --capture")
+            f"no CRD schema snapshot for {api_version} {kind}, and nothing shows it belongs to a "
+            f"third-party operator (it does not declare {SYNC_OPTIONS_ANNOTATION}: "
+            f"{OPERATOR_DELIVERED_OPTION}). This is NOT a pass — the guard could not inspect it. "
+            f"Capture it on a cluster where that CRD is installed:\n"
+            f"      tools/lint/crd-unknown-field-guard.py --capture\n"
+            f"      …or, if the kind really is an operator's and the CR is missing the sync option, "
+            f"add the option — a manifest whose CRD arrives with an operator needs it anyway, or "
+            f"the first sync on a fresh cluster fails its dry run.")
         return "uncheckable"
 
     counts["custom resources checked"] += 1
@@ -502,17 +673,48 @@ def render_overlay(overlay: pathlib.Path) -> str:
     return proc.stdout
 
 
-def judge(rendered: str, label: str, store: dict, builtin_kinds: set, report: Report,
-          counts: dict, solve: str | None = None, portfolio: bool = False) -> None:
+def render_job(job: tuple, report: Report, counts: dict) -> list | None:
+    """Render one job and return its documents, or None when the render REFUSED.
+
+    Both render paths land here, because what a refusal means is identical on either side: a chart
+    helm will not render, or an overlay kustomize will not build, is a chart or overlay this guard
+    did NOT check, and skipping it would turn a broken input into a passing gate. The two `renders`
+    counters stay separate — folded together, the whole kustomize half could stop running and hide
+    behind 55 healthy Helm renders while the total still cleared its floor.
+    """
+    kind, target, values, label = job
+    if kind not in ("helm", "kustomize"):
+        # An unreachable branch that is written anyway, and one that RAISES rather than recording a
+        # row: a job shape nobody handles is not a broken input, it is a guard that does not know
+        # what it was asked to do, and it must stop the run instead of contributing nothing while
+        # the totals still clear their floors.
+        raise GuardError(f"unknown job kind {kind!r} for {label} — the guard does not know how to "
+                         f"render it, which is not the same as there being nothing to check.")
+    try:
+        rendered = render(target, values) if kind == "helm" else render_overlay(target)
+    except GuardError as exc:
+        report.render_failed(label, target.name,
+                             f"{exc} An input that will not render is an input this guard did not "
+                             f"check; skipping it would turn a broken one into a passing gate.")
+        return None
+    counts["helm renders" if kind == "helm" else "kustomize renders"] += 1
+    # Parsed ONCE, here, and the documents handed back: run() walks them twice (the veto set, then
+    # the judging) and re-parsing between the two passes would be a second chance to disagree.
+    # A render that is not parseable YAML raises straight out to main() — rc 2, same as before.
+    return list(documents_in(rendered, label))
+
+
+def judge(documents: list, label: str, store: dict, builtin_kinds: set, owned_kinds: set,
+          report: Report, counts: dict, solve: str | None = None, portfolio: bool = False) -> None:
     """Judge every document one render produced. The shared half of both render paths.
 
     Helm and kustomize differ only in how the YAML is produced; what happens to it afterwards must
     be identical, so it is written once. The counters are raised HERE, by the loop doing the work.
     """
-    for doc, nested in documents_in(rendered, label):
+    for doc, nested in documents:
         if nested:
             counts["template objects walked"] += 1
-        verdict = check_document(doc, label, store, builtin_kinds, report, counts)
+        verdict = check_document(doc, label, store, builtin_kinds, owned_kinds, report, counts)
         if verdict != "checked":
             continue
         if solve in SOLVE_WORLDS:
@@ -521,47 +723,12 @@ def judge(rendered: str, label: str, store: dict, builtin_kinds: set, report: Re
             counts["portfolio custom resources"] += 1
 
 
-def check_chart(chart: pathlib.Path, values: dict, label: str, store: dict, builtin_kinds: set,
-                report: Report) -> dict:
-    """Render one chart under one value set and judge every document it produced.
-
-    Returns the scope counters this call raised. They are produced by the loops that did the work —
-    never re-derived by the caller — so a blinded check_chart collapses a floor rather than
-    reporting a clean scan of nothing.
-    """
-    counts = {d: 0 for d in WALK_DIMENSIONS + RENDER_DIMENSIONS}
-    try:
-        rendered = render(chart, values)
-    except GuardError as exc:
-        report.render_failed(label, chart.name,
-                             f"{exc} A chart that will not render is a chart this guard did not "
-                             f"check; skipping it would turn a broken chart into a passing gate.")
-        return counts
-    counts["helm renders"] += 1
-    judge(rendered, label, store, builtin_kinds, report, counts, solve=values.get("solve"))
-    return counts
-
-
-def check_overlay(overlay: pathlib.Path, label: str, store: dict, builtin_kinds: set,
-                  report: Report) -> dict:
-    """`kustomize build` one portfolio overlay and judge every document it produced.
-
-    Counted on its own dimensions rather than folded into the Helm ones: the two halves must be able
-    to collapse independently, or a kustomize path that stops rendering hides behind 55 healthy Helm
-    renders and the total still clears its floor.
-    """
-    counts = {d: 0 for d in WALK_DIMENSIONS + RENDER_DIMENSIONS}
-    try:
-        rendered = render_overlay(overlay)
-    except GuardError as exc:
-        report.render_failed(label, overlay.name,
-                             f"{exc} An overlay that will not render is an overlay this guard did "
-                             f"not check; skipping it would turn a broken overlay into a passing "
-                             f"gate.")
-        return counts
-    counts["kustomize renders"] += 1
-    judge(rendered, label, store, builtin_kinds, report, counts, portfolio=True)
-    return counts
+def judge_job(job: tuple, documents: list, store: dict, builtin_kinds: set, owned_kinds: set,
+              report: Report, counts: dict) -> None:
+    """Judge one already-rendered job on the dimensions its render path owns."""
+    kind, _target, values, label = job
+    judge(documents, label, store, builtin_kinds, owned_kinds, report, counts,
+          solve=(values or {}).get("solve"), portfolio=(kind == "kustomize"))
 
 
 # ────────────────────────────────────────────────────────────────────── the checked-in snapshots
@@ -660,7 +827,7 @@ def portfolio_jobs(root: pathlib.Path = PORTFOLIO) -> tuple[list, list]:
     return jobs, unwired
 
 
-def unwired_note(unwired: list) -> str:
+def unwired_note(unwired: list, store: dict, builtin_kinds: set) -> str:
     """What the render set leaves out, printed on EVERY run — green or red.
 
     A scope that narrows itself must announce the narrowing at the point of detection, or the day
@@ -669,6 +836,15 @@ def unwired_note(unwired: list) -> str:
     rather than to a declared-debt entry: this is not a waiver of a detected defect — nothing was
     detected and then forgiven — but it IS a decision about what gets looked at, so it is said out
     loud with its own reason every time.
+
+    Each unwired overlay is RENDERED to say what it carries that has no snapshot, and which verdict
+    each of those kinds would get. Naming the directory alone answers "what is outside the scope"
+    and leaves "what would happen if I wired it back in" to be discovered by reddening CI; today
+    that question has a real answer worth printing, because loki-logging's LokiStack and
+    ClusterLogForwarder cannot be snapshotted on any cluster this project has and would be REPORTED
+    rather than fatal. A render that fails here is stated in the note and is NOT rc 2: this overlay
+    is outside the scope by definition, and quietly widening the scope to it would be the same
+    unasked-for change in the other direction.
     """
     if not unwired:
         return ("ℹ️  every component overlay in the portfolio is wired into a stack and was "
@@ -677,10 +853,28 @@ def unwired_note(unwired: list) -> str:
              f"at them, so no portfolio install deploys them:"]
     for overlay in unwired:
         lines.append(f"     · {overlay.relative_to(REPO).as_posix()}")
+        try:
+            documents = list(documents_in(render_overlay(overlay), str(overlay)))
+        except GuardError as exc:
+            lines.append(f"         ‼️  and it does not even render ({exc}), so not even this note "
+                         f"can say what it carries.")
+            continue
+        for doc, _nested in documents:
+            api_version = doc.get("apiVersion") or ""
+            kind = doc.get("kind") or ""
+            group, _, version = api_version.rpartition("/")
+            if not group or is_builtin(group, kind, builtin_kinds):
+                continue
+            if (group, version, kind) in store:
+                continue
+            verdict = ("REPORTED, not fatal (third-party operator kind)" if operator_delivered(doc)
+                       else "rc 2 UN-CHECKABLE (nothing shows whose kind it is)")
+            lines.append(f"         · {api_version} {kind} has no schema snapshot → would be "
+                         f"{verdict}")
     lines.append("   They enter this guard's scope automatically the moment a stack's "
-                 "kustomization.yaml lists their app file. If their CRDs have no snapshot then, "
-                 "the run turns rc 2 UN-CHECKABLE — capture first, on a cluster carrying those "
-                 "operators: tools/lint/crd-unknown-field-guard.py --capture")
+                 "kustomization.yaml lists their app file — no code change and no re-capture. "
+                 "Anything listed above as rc 2 must be captured first, on a cluster carrying that "
+                 "operator: tools/lint/crd-unknown-field-guard.py --capture")
     return "\n".join(lines)
 
 
@@ -754,28 +948,42 @@ def scope_for_tree() -> Scope:
 # ──────────────────────────────────────────────────────────────────────────────────── the run
 
 
-def run(fixtures: pathlib.Path, jobs: list, scope: Scope | None) -> tuple[Report, dict]:
-    """Render and judge everything. Returns (report, counters). Raises GuardError for rc 2."""
-    store, builtin_kinds, index = load_snapshots(fixtures)
+def run(fixtures: pathlib.Path, jobs: list, scope: Scope | None,
+        snapshots: tuple | None = None) -> tuple[Report, dict]:
+    """Render and judge everything. Returns (report, counters). Raises GuardError for rc 2.
+
+    TWO PASSES OVER ONE SET OF RENDERS, and the order is a correctness property rather than a style
+    preference. The ownership veto asks "does any render in this scope define this CRD?", and a
+    single interleaved pass would answer it with whatever had been rendered SO FAR — so a CRD
+    shipped by a chart later in the list would fail to veto, and the kind would be classified
+    third-party and go unchecked. Silent leniency, decided by list order. Rendering everything first
+    makes the veto set complete before a single document is classified; each render is parsed once
+    and its documents kept, so nothing is rendered or parsed twice to buy that.
+    """
+    store, builtin_kinds, index = snapshots or load_snapshots(fixtures)
     report = Report()
-    totals: dict = {d: 0 for d in WALK_DIMENSIONS + RENDER_DIMENSIONS}
+    totals: dict = {d: 0 for d in ALL_DIMENSIONS}
     if scope is not None:
         scope.add("charts", len({job[1] for job in jobs if job[0] == "helm"}))
         scope.add("portfolio overlays", len({job[1] for job in jobs if job[0] == "kustomize"}))
         scope.add("CRD schemas loaded", len(index.get("crds") or []))
-    for kind, target, values, label in jobs:
-        if kind == "helm":
-            counts = check_chart(target, values, label, store, builtin_kinds, report)
-        elif kind == "kustomize":
-            counts = check_overlay(target, label, store, builtin_kinds, report)
-        else:
-            # An unreachable branch that is written anyway: a job shape nobody handles would
-            # otherwise be a job that silently contributes nothing while the totals still clear
-            # their floors.
-            raise GuardError(f"unknown job kind {kind!r} for {label} — the guard does not know how "
-                             f"to render it, which is not the same as there being nothing to check.")
+
+    rendered: list = []
+    for job in jobs:
+        counts = {d: 0 for d in ALL_DIMENSIONS}
+        documents = render_job(job, report, counts)
+        if documents is not None:
+            rendered.append((job, documents))
         for dimension, value in counts.items():
             totals[dimension] += value
+
+    owned_kinds = shipped_crd_kinds([(job[3], documents) for job, documents in rendered])
+    for job, documents in rendered:
+        counts = {d: 0 for d in ALL_DIMENSIONS}
+        judge_job(job, documents, store, builtin_kinds, owned_kinds, report, counts)
+        for dimension, value in counts.items():
+            totals[dimension] += value
+
     if scope is not None:
         scope.merge(totals)
     return report, totals
@@ -791,6 +999,19 @@ def report_and_exit(report: Report, scope: Scope | None, headline: str, quiet: b
     def shout(text):
         if not quiet:
             print(text, file=sys.stderr)
+
+    # THE DISCLOSURE, before the verdict and whatever the verdict is. These rows move no exit code
+    # by design, which is exactly why they need their own unconditional print: an outcome that
+    # changes nothing and is not said out loud is a scope that shrank in silence. Stdout, like the
+    # unwired note, because it is a statement about what this run covered rather than a fault.
+    third_party = report.of("third-party-uncheckable")
+    if third_party and not quiet:
+        print(f"ℹ️  {len(third_party)} custom resource(s) NOT CHECKED — third-party operator kinds "
+              f"with no schema snapshot. Their fields are unverified; a customer's cluster runs "
+              f"whatever operator version it runs, so a pinned schema would assert more than we "
+              f"know:")
+        for row in third_party:
+            print(f"     · {row['source']}: {row['subject']}\n       {row['detail']}")
 
     blocked = report.of("render-failed") + report.of("uncheckable")
     if blocked:
@@ -899,12 +1120,15 @@ def capture(fixtures: pathlib.Path) -> int:
         raise GuardError("oc is not on PATH; --capture needs a live cluster.")
     print("rendering the charts and overlays to find out which CRDs are actually needed…")
     wanted = set()
+    operator_delivered_kinds = set()   # so the NOT-INSTALLED line below can tell the truth
     for kind, target, values, label in capture_jobs():
         rendered = render(target, values) if kind == "helm" else render_overlay(target)
         for doc, _ in documents_in(rendered, label):
             group, _, _version = (doc.get("apiVersion") or "").rpartition("/")
             if group:
                 wanted.add((group, doc.get("kind")))
+                if operator_delivered(doc):
+                    operator_delivered_kinds.add((group, doc.get("kind")))
 
     crds = json.loads(_oc("get", "crd", "-o", "json"))["items"]
     by_kind = {(c["spec"]["group"], c["spec"]["names"]["kind"]): c for c in crds}
@@ -943,6 +1167,15 @@ def capture(fixtures: pathlib.Path) -> int:
             # is a genuine hole that will read UN-CHECKABLE on the next plain run.
             if f"{group}/{kind}" in builtin:
                 print(f"  ·  {group}/{kind}: built-in (no CRD behind it) — nothing to snapshot.")
+            elif (group, kind) in operator_delivered_kinds:
+                # A third-party operator's kind, missing because this cluster does not run that
+                # operator. It will be REPORTED and not fatal, so the line stays a warning rather
+                # than an alarm — but it is still printed, because "not checked" has to be visible
+                # wherever it is decided. loki-logging's two kinds are the standing instance.
+                print(f"  ⚠️  {group}/{kind}: NOT INSTALLED on this cluster, and its CRs declare "
+                      f"{OPERATOR_DELIVERED_OPTION} — a plain run will REPORT it as an unchecked "
+                      f"third-party kind rather than fail. Re-capture where that operator runs to "
+                      f"start checking it.")
             else:
                 print(f"  ‼️  {group}/{kind}: NOT INSTALLED on this cluster. It will read "
                       f"UN-CHECKABLE (rc 2) until you re-capture somewhere that operator is.")
@@ -1024,14 +1257,21 @@ def main(argv=None) -> int:
             return capture(FIXTURES)
         scope = scope_for_tree()
         overlay_jobs, unwired = portfolio_jobs()
+        # Loaded once and handed to both: the note classifies un-snapshotted kinds against the same
+        # store the run judges against, so the two cannot report different verdicts for one kind.
+        snapshots = load_snapshots(FIXTURES)
         # Before the verdict, not after and not only when green: the narrowing has to be visible in
         # the log a reader is scanning because something FAILED, not just in the happy path.
-        print(unwired_note(unwired))
-        report, totals = run(FIXTURES, chart_jobs() + overlay_jobs, scope)
+        print(unwired_note(unwired, snapshots[0], snapshots[1]))
+        report, totals = run(FIXTURES, chart_jobs() + overlay_jobs, scope, snapshots)
     except GuardError as exc:
         print(f"::error::crd-unknown-field-guard: {exc}", file=sys.stderr)
         return 2
     headline = scope.summary()
+    # Appended to the headline rather than left to the disclosure block alone, so the number rides
+    # along with every other measured dimension on the one line a reader actually skims. It is not a
+    # Scope dimension because it may legitimately be 0 — see UNFLOORED_DIMENSIONS.
+    headline += f", {totals['third-party resources not checked']} third-party resources not checked"
     headline += (f"; {len(unwired)} component overlay(s) outside the render set, named above"
                  if unwired else "; every component overlay was wired and rendered")
     return report_and_exit(report, scope, headline)
@@ -1108,6 +1348,66 @@ def self_test() -> int:
         failures.append("a canary carrying an un-checkable custom resource did not exit 2. "
                         "'I had no schema for this' would then be indistinguishable from 'clean'.")
 
+    # ── 3b. THE OWNERSHIP SPLIT (owner decision, 2026-08-06), asserted on BOTH sides and on the
+    # veto between them. This is the half of the guard that decides what NOT to check, so it is
+    # asserted exactly as carefully as the half that decides what to flag: a classifier that
+    # silently mis-files a kind as third-party turns the guard off for that kind, and turns it off
+    # in the direction where field pruning hurts most.
+    third_party = {row["subject"].split("/")[0] for row in report.of("third-party-uncheckable")}
+    if third_party != set(expectations["mustBeThirdPartyUncheckable"]):
+        failures.append(f"the third-party un-checkable set was {sorted(third_party)}, expected "
+                        f"{sorted(expectations['mustBeThirdPartyUncheckable'])}. A kind that "
+                        f"leaves this set has started reddening CI for somebody else's schema; a "
+                        f"kind that JOINS it has stopped being checked, and nobody asked for that.")
+    for kind in expectations["mustBeUncheckable"]:
+        if kind in third_party:
+            failures.append(f"{kind} was classified THIRD-PARTY and it is ours or unclassifiable. "
+                            f"The lenient path has swallowed a kind that must stay strict — this is "
+                            f"the exact failure the ownership veto exists to prevent.")
+    if totals["third-party resources not checked"] < 1:
+        failures.append("the canary produced no third-party un-checkable resource at all, so "
+                        "nothing here proves the lenient path is still reachable — the split could "
+                        "have collapsed back to 'everything is rc 2' and this would pass.")
+
+    # The exit codes the split turns on, proven directly rather than inferred from the run above
+    # (which mixes both severities and would exit 2 whatever the lenient rows did).
+    lenient_only = Report()
+    lenient_only.third_party_uncheckable("canary", "ThirdPartyNoSnapshot/x", "canary")
+    if report_and_exit(lenient_only, None, "canary", quiet=True) != 0:
+        failures.append("a report carrying ONLY third-party un-checkable rows did not exit 0. The "
+                        "owner's decision is that somebody else's un-snapshotted schema is reported "
+                        "and not fatal; if it still fails, nothing about this change landed.")
+    mixed = Report()
+    mixed.third_party_uncheckable("canary", "ThirdPartyNoSnapshot/x", "canary")
+    mixed.uncheckable("canary", "NoSnapshotHere/x", "canary")
+    if report_and_exit(mixed, None, "canary", quiet=True) != 2:
+        failures.append("a report carrying one strict un-checkable row BESIDE a third-party one did "
+                        "not exit 2. The lenient half must not be able to mask the strict half.")
+
+    # ── 3c. THE BACKSTOP against the lenient path swallowing the tree. There is deliberately no
+    # cap on how many resources may go unchecked — a number here would go stale — so what has to
+    # hold instead is that resources landing on the lenient path stop raising `custom resources
+    # checked`, and the real tree's own floors then refuse the result. Proven by judging the canary
+    # against an EMPTY snapshot store, which is what a fixtures directory that moved looks like.
+    starved = Report()
+    starved_counts = {d: 0 for d in ALL_DIMENSIONS}
+    judge(list(documents_in(render(CANARY / "chart", dict(chart_half[0][2])), "canary-starved")),
+          "canary-starved", {}, set(), set(), starved, starved_counts)
+    if starved_counts["custom resources checked"] != 0:
+        failures.append("judging against an EMPTY schema store still counted custom resources as "
+                        "checked, so the floor that is supposed to catch a vanished fixtures "
+                        "directory would never fire.")
+    starved_scope = scope_for_tree()
+    starved_scope.merge(starved_counts)
+    # Named dimension, not just `enforce() != 0`: a starved run misses several floors at once, so a
+    # bare enforce() would pass this assertion even if `custom resources checked` were the one
+    # dimension that had stopped judging anything.
+    if not any(short.startswith("custom resources checked")
+               for short in starved_scope.shortfalls()):
+        failures.append("a run whose every custom resource went unchecked did NOT collapse the "
+                        "'custom resources checked' floor. That floor is the only thing standing "
+                        "between the lenient path and a green tick over the whole repo.")
+
     # ── 4. THE WIRING RULE, in all three directions. The render set narrows itself, so what it
     # leaves out has to be asserted as carefully as what it catches — an exclusion nobody checks is
     # how a scope quietly shrinks while the ✅ line stays the same length.
@@ -1146,7 +1446,8 @@ def self_test() -> int:
     import contextlib
     import io
     _, real_unwired = portfolio_jobs()
-    note = unwired_note(real_unwired)
+    real_store, real_builtin, _real_index = load_snapshots(FIXTURES)
+    note = unwired_note(real_unwired, real_store, real_builtin)
     if not note.strip():
         failures.append("unwired_note() produced nothing. A render scope that narrows itself in "
                         "silence is how the ✅ line survives while the world behind it shrinks.")
@@ -1154,6 +1455,27 @@ def self_test() -> int:
         if overlay.relative_to(REPO).as_posix() not in note:
             failures.append(f"{overlay.relative_to(REPO).as_posix()} is outside the render set and "
                             f"is NOT named in the note. A count without names cannot be acted on.")
+        # AND the kinds inside it that have no snapshot, by NAME. The overlay path alone tells a
+        # reader that something is outside the scope; it does not tell them that wiring it back in
+        # would leave two kinds permanently unchecked. loki-logging's LokiStack and
+        # ClusterLogForwarder are the standing instance — no cluster this project has carries the
+        # logging operators (verified on cluster-65prs 2026-08-06), so they can never be captured
+        # and this note is the ONLY place they are ever mentioned.
+        try:
+            outside = list(documents_in(render_overlay(overlay), str(overlay)))
+        except GuardError:
+            outside = []
+        for doc, _nested in outside:
+            api_version = doc.get("apiVersion") or ""
+            group, _, version = api_version.rpartition("/")
+            kind = doc.get("kind") or ""
+            if (not group or is_builtin(group, kind, real_builtin)
+                    or (group, version, kind) in real_store):
+                continue
+            if kind not in note:
+                failures.append(f"{api_version} {kind} sits in the un-rendered overlay "
+                                f"{overlay.name}, has no schema snapshot, and is NOT named in the "
+                                f"note. It would then be a kind nobody checks and nobody mentions.")
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         main([])  # the plain path — never --self-test, so this cannot recurse
@@ -1179,34 +1501,48 @@ def self_test() -> int:
 
     # ── 6. a render either side refuses must be a REFUSAL, not a skip. Written to a temp dir rather
     # than committed, because a broken chart in the tree would trip `helm lint` and the kustomize
-    # job.
+    # job. Driven through render_job(), which is the function run() itself calls — a private twin
+    # here could pass while the shipped path silently swallowed a failed render.
     with tempfile.TemporaryDirectory() as tmp:
         broken = pathlib.Path(tmp) / "broken"
         (broken / "templates").mkdir(parents=True)
         (broken / "Chart.yaml").write_text("apiVersion: v2\nname: broken\nversion: 0.0.0\n")
         (broken / "templates" / "boom.yaml").write_text("{{ .Values.nope | required \"boom\" }}\n")
-        broken_report = Report()
-        check_chart(broken, {"solve": "false"}, "canary-broken", {}, set(), broken_report)
-        if len(broken_report.of("render-failed")) != 1:
-            failures.append("a chart helm refuses to render did not produce exactly one "
-                            "render-failed row. Without it, a chart that stops rendering becomes a "
-                            "chart that stops being checked, silently.")
-        if report_and_exit(broken_report, None, "canary", quiet=True) != 2:
-            failures.append("a chart that failed to render did not exit 2.")
-
-        # The kustomize half of the same property. A directory with no kustomization.yaml is what
-        # `kustomize build` refuses, and it must land as render-failed → rc 2, never as an overlay
-        # that quietly contributed nothing.
+        # The kustomize half of the same property: a directory with no kustomization.yaml is what
+        # `kustomize build` refuses. And a job kind nobody handles, which must also refuse rather
+        # than contribute nothing — the branch is unreachable from the shipped job builders, which
+        # is exactly why it is proven here instead of trusted.
         empty = pathlib.Path(tmp) / "not-an-overlay"
         empty.mkdir()
-        overlay_report = Report()
-        check_overlay(empty, "canary-broken-overlay", {}, set(), overlay_report)
-        if len(overlay_report.of("render-failed")) != 1:
-            failures.append("an overlay kustomize refuses to build did not produce exactly one "
-                            "render-failed row. Without it, an overlay that stops rendering becomes "
-                            "an overlay that stops being checked, silently.")
-        if report_and_exit(overlay_report, None, "canary", quiet=True) != 2:
-            failures.append("an overlay that failed to build did not exit 2.")
+        refusals = (
+            (("helm", broken, {"solve": "false"}, "canary-broken"), False,
+             "a chart helm refuses to render"),
+            (("kustomize", empty, None, "canary-broken-overlay"), False,
+             "an overlay kustomize refuses to build"),
+            (("teleport", empty, None, "canary-unknown-job-kind"), True,
+             "a job kind the guard cannot render"),
+        )
+        for job, raises, what in refusals:
+            refused = Report()
+            try:
+                documents = render_job(job, refused, {d: 0 for d in ALL_DIMENSIONS})
+            except GuardError:
+                if not raises:
+                    failures.append(f"{what} raised instead of recording a render-failed row.")
+                continue
+            if raises:
+                failures.append(f"{what} did NOT raise. An unhandled job shape must stop the run, "
+                                f"not contribute zero documents while the totals still clear their "
+                                f"floors.")
+                continue
+            if documents is not None:
+                failures.append(f"{what} returned documents instead of refusing.")
+            if len(refused.of("render-failed")) != 1:
+                failures.append(f"{what} did not produce exactly one render-failed row. Without it, "
+                                f"an input that stops rendering becomes an input that stops being "
+                                f"checked, silently.")
+            if report_and_exit(refused, None, "canary", quiet=True) != 2:
+                failures.append(f"{what} did not exit 2.")
 
     # ── 7. the declared floors must still describe the declared work.
     if MIN_EXTRA_CHARTS != len(EXTRA_CHARTS):
@@ -1223,6 +1559,15 @@ def self_test() -> int:
         if tree_scope.floor_for(dimension) is None:
             failures.append(f"the counter '{dimension}' is raised but has no floor — a measurement "
                             f"nobody judges cannot notice a collapse.")
+    # And the one exemption, asserted rather than assumed. `third-party resources not checked` is
+    # legitimately 0 on a healthy tree, so it cannot carry a floor (Scope.require rejects one below
+    # 1); what must hold is that it is exempt DELIBERATELY and stays that way — a floor appearing
+    # here later would oblige the repo to keep an un-snapshotted kind alive to feed it.
+    for dimension in UNFLOORED_DIMENSIONS:
+        if tree_scope.floor_for(dimension) is not None:
+            failures.append(f"the counter '{dimension}' has grown a floor. It is legitimately zero "
+                            f"on a clean tree, so a floor turns 'nothing went unchecked' into a "
+                            f"scope collapse and CI reddens for the healthy outcome.")
     failures += Scope.self_check()
 
     if failures:
@@ -1237,10 +1582,17 @@ def self_test() -> int:
           f"Application) are present in the render and are NOT flagged; a component reached only by "
           f"following a stack Application IS rendered, and the "
           f"{len(expectations['mustNotBeRendered'])} overlay(s) no stack wires up are reported as "
-          f"outside the scope with their planted defect still in place; a CR with no snapshot exits "
-          f"2 rather than passing; a chart helm refuses and an overlay kustomize refuses both exit "
-          f"2; the solve world renders more than the default; every counter has a floor and the "
-          f"scope ledger fails an empty or truncated input set.")
+          f"outside the scope with their planted defect still in place, naming every kind in them "
+          f"that has no snapshot; the OWNERSHIP SPLIT holds in all three directions — "
+          f"{len(expectations['mustBeThirdPartyUncheckable'])} un-snapshotted third-party kind(s) "
+          f"reported and NOT fatal, {len(expectations['mustBeUncheckable'])} un-snapshotted kind(s) "
+          f"still rc 2 (one of them carrying the third-party signal but vetoed by the CRD the canary "
+          f"ships for it), a lenient row alone exits 0 while a strict row beside it still exits 2, "
+          f"and an EMPTY schema store collapses the 'custom resources checked' floor rather than "
+          f"reporting green; a chart helm refuses, an overlay kustomize refuses and a job kind "
+          f"nobody handles all exit 2; the solve world renders more than the default; every counter "
+          f"has a floor except the one that is legitimately zero, and the scope ledger fails an "
+          f"empty or truncated input set.")
     return 1
 
 
