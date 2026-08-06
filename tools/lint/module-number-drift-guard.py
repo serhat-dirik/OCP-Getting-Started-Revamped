@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """Fail CI when a module-number token (MNN) contradicts /modules.yaml.
 
-WHY THIS EXISTS. The Gen-4 renumber moved AppSec M27 -> M08 and shifted every module that had
-been M08-M25 up by one. Its sweeps covered `content/` pages and `platform-portfolio/` and stopped
-there. Nobody noticed that `apps/`, `bootstrap/`, `helm/`, `tools/` and `content/antora.yml` were
-never swept, so 189 lines kept pointing at the pre-renumber catalogue for three weeks — including
-strings `bootstrap/install.sh` PRINTS TO AN OPERATOR while an install is failing, and all five
-module references in `content/antora.yml`. The drift is invisible: nothing builds differently, no
-test fails, and a reader who follows a wrong number simply lands on the wrong module and believes
-it.
+NOTE ON THIS FILE'S OWN PROSE. Every dead module number below is spelled out in words rather than
+written as a token. This guard cannot tell a number being QUOTED from one being USED, and it caught
+itself the first time it was committed — correctly. Exempting the guard from its own rule would
+blind it on the one file most likely to accumulate examples, so the prose works around the guard
+instead. If you add an example here, write it in words too.
+
+WHY THIS EXISTS. The Gen-4 renumber moved AppSec down from the twenty-seventh slot to M08 and
+shifted every module above it up by one. Its sweeps covered `content/` pages and
+`platform-portfolio/` and stopped there. Nobody noticed that `apps/`, `bootstrap/`, `helm/`,
+`tools/` and `content/antora.yml` were never swept, so 189 lines kept pointing at the pre-renumber
+catalogue for three weeks — including strings `bootstrap/install.sh` PRINTS TO AN OPERATOR while an
+install is failing, and all five module references in `content/antora.yml`. The drift is invisible:
+nothing builds differently, no test fails, and a reader who follows a wrong number simply lands on
+the wrong module and believes it.
 
 WHAT THIS ASSERTS — deliberately only two things, both exact.
 
   P1  RANGE.  Every MNN token names a module that exists: 1 <= NN <= len(modules.yaml).
       Catches the whole class of numbers left over from a catalogue that was longer or
       differently-shaped. Real instances this would have caught on the day it was written:
-      `M27` (AppSec's pre-renumber number) in content/antora.yml and a parasol-claims deployment;
-      `M29` in parasol-fraud's devfile and pom; `M28` in a FraudResourceTest span.
+      AppSec's pre-renumber number in content/antora.yml and a parasol-claims deployment, and two
+      higher numbers still in parasol-fraud's devfile, its pom, and a FraudResourceTest span —
+      left from a catalogue that had at least thirty-two modules.
 
   P2  WITNESS AGREEMENT.  When a line carries BOTH an MNN and a module SLUG, the number must be
       that slug's position. A slug is an exact, unambiguous witness.
@@ -65,8 +72,8 @@ PATHSPEC = [
 # INLINE SVG is the exclusion the *.svg pathspec cannot make. parasol-web's index.html embeds a
 # logo as a literal <path d="M32 6C46 6 …"/>, and `M32` there is a moveto command, not a module.
 # Excluding by FILE would blind the guard to the rest of that HTML; excluding by LINE is exact.
-# Found by this guard's own first real run reporting M30/M32 that do not exist — a guard that
-# cries wolf gets switched off, so this is load-bearing, not cosmetic.
+# Found by this guard's own first real run reporting two module numbers in the thirties that do not
+# exist — a guard that cries wolf gets switched off, so this is load-bearing, not cosmetic.
 SVG_PATH_LINE = re.compile(r"<path\b|\bd=[\"']\s*[Mm][\d.\-]")
 
 
@@ -106,9 +113,9 @@ def scan(root: Path, slugs: dict[str, int], pathspec: list[str]) -> tuple[list, 
         if not nums:
             continue
 
-        # Report a LINE once per distinct bad value, not once per occurrence: a line reading
-        # "M27 gate ... the M27 capstone" is one defect to fix, and printing it twice makes the
-        # count overstate the work.
+        # Report a LINE once per distinct bad value, not once per occurrence: a line naming the same
+        # dead number twice ("... gate ... the ... capstone") is one defect to fix, and printing it
+        # twice makes the count overstate the work.
         for n in sorted({n for n in nums if n < 1 or n > count}):
             bad_range.append((path, lineno, n, count, body.strip()[:120]))
 
