@@ -20,14 +20,22 @@
 #   STRIP   — we only marked it. Our label/annotation is a trace that should go (the "no trace" bar),
 #             but the OBJECT is the org's. The printed command removes our marks, never the object.
 #   DECIDE  — we cannot tell. NO destructive command is printed; the line says what is ambiguous.
+#   RESIDUE — it is EXPECTED to survive a teardown, by owner decision, and is named in KNOWN_RESIDUE
+#             (below) with the reason and the exact command that removes it for anyone who does want
+#             it gone. Reported in full on every run; the ONE class that does not affect the exit code.
+#             It is not an escape hatch: an undeclared leftover still fails, and a declaration whose
+#             object is still here while the scan no longer reports it as residue fails too.
 #
 # An unattended admin must never be handed `oc delete <the org's thing>` on a guess. That is a worse
 # failure than the leftover this script exists to report.
 #
 # Exit codes
-#   0  nothing of the workshop remains and the cluster is healthy
-#   1  findings are listed above (works as a CI gate and as a yes/no for an SA)
-#   2  the scan could not run at all (no oc, not logged in)
+#   0  nothing UNEXPECTED remains and the cluster is healthy (declared residue may still be present,
+#      in which case it is listed above and the green line says so rather than claiming "clean")
+#   1  findings are listed above (works as a CI gate and as a yes/no for an SA), or a KNOWN_RESIDUE
+#      entry has gone stale
+#   2  the scan could not run at all (no oc, not logged in, or KNOWN_RESIDUE is malformed — all three
+#      mean it never checked what you asked it to)
 #
 # HOW LONG IT TAKES. The scan is latency-bound — it makes one list call per resource class and then
 # classifies each marked object it found — so its runtime tracks the number of LEFTOVERS, not the size
@@ -53,10 +61,12 @@
 #                                             writes one before it deletes the state namespace,
 #                                             and prints the path in its closing summary.
 #   ./ogsr-check-clean.sh --quiet             findings and verdict only, no explanations
-#   ./ogsr-check-clean.sh --self-test         offline proof that the olm.copiedFrom exclusion works
-#                                             and that a copy-only namespace is never misread as
-#                                             foreign. Touches no cluster. Exit 1 = both proofs held
-#                                             (house convention — see .github/workflows/lint.yml).
+#   ./ogsr-check-clean.sh --self-test         offline proof that the olm.copiedFrom exclusion works,
+#                                             that a copy-only namespace is never misread as foreign,
+#                                             and that the KNOWN_RESIDUE ratchet holds both ways
+#                                             (undeclared still fails, stale declaration fails,
+#                                             malformed refused). Touches no cluster. Exit 1 = every
+#                                             proof held (house convention — .github/workflows/lint.yml).
 #
 # `set -e` is deliberately NOT used. This script runs on a cluster whose state it cannot predict —
 # including one whose API discovery is already broken, which is one of the things it reports. A
@@ -131,11 +141,20 @@ N_HEALTH=0    # cluster-wide health damage (wedged namespaces, broken discovery)
 N_WS=0        # workshop litter we created — safe to delete
 N_TRACE=0     # our marks left on resources that are NOT ours to delete — strip the marks, keep the object
 N_DECIDE=0    # unclassifiable — a human has to look; no destructive command is printed for these
+N_RESIDUE=0   # KNOWN_RESIDUE matches — expected leftovers, reported in full and deliberately NOT failing
+N_LEDGER=0    # ledger faults (a declaration that outlived its residue) — these DO fail the run
 
 TMPROOT=""
+LEDGER_FILE=""   # set once KNOWN_RESIDUE is materialised; declared here so the EXIT trap is safe under
+                 # `set -u` on every path that exits before that (a rejected flag, a missing oc).
 # shellcheck disable=SC2329  # invoked by the EXIT trap below, not called by name
 # shellcheck disable=SC2317  # body runs from the EXIT trap, not from a call site
-cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
+cleanup() {
+  [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"
+  # The ledger lands OUTSIDE TMPROOT whenever mktemp -d failed, so it needs removing on its own.
+  [ -n "$LEDGER_FILE" ] && rm -f "$LEDGER_FILE"
+  return 0
+}
 trap cleanup EXIT
 
 # Print the header block and stop at the first line that is not a comment — a line COUNT drifts out of
@@ -194,20 +213,30 @@ hdr() {  # n/N  title  one-line-explanation
   [ "$QUIET" = "true" ] || echo "      $3"
 }
 found() {  # bucket  what  [command]
-  printf '   • %s\n' "$2"
+  # The bullet differs for declared residue: it is not a finding to act on, it is a standing statement
+  # that something was left on purpose, and a reader scanning a long report must be able to tell the
+  # two apart at a glance rather than by reading the sentence.
+  case "$1" in
+    residue) printf '   ⚠ %s\n' "$2";;
+    *)       printf '   • %s\n' "$2";;
+  esac
   # The verb differs by bucket ON PURPOSE. "remove" next to an object we do not own is the defect this
   # classification exists to prevent, so the trace bucket says "strip" and never prints a delete.
   if [ -n "${3:-}" ]; then
     case "$1" in
-      trace) printf '     strip:  %s\n' "$3";;
-      *)     printf '     remove: %s\n' "$3";;
+      trace)   printf '     strip:  %s\n' "$3";;
+      residue) printf '     if you want it gone: %s\n' "$3";;
+      *)       printf '     remove: %s\n' "$3";;
     esac
   fi
+  # ONE accounting site for every bucket, residue included, so a sixth counter cannot be added later
+  # without passing through here — and through the verdict block that reads these five names.
   case "$1" in
     adopted) N_ADOPTED=$((N_ADOPTED + 1));;
     health)  N_HEALTH=$((N_HEALTH + 1));;
     trace)   N_TRACE=$((N_TRACE + 1));;
     decide)  N_DECIDE=$((N_DECIDE + 1));;
+    residue) N_RESIDUE=$((N_RESIDUE + 1));;
     *)       N_WS=$((N_WS + 1));;
   esac
   return 0
@@ -217,6 +246,144 @@ subcmd()  { printf '       remove: %s\n' "$*"; }
 stripcmd(){ printf '       strip:  %s\n' "$*"; }
 none()    { printf '   ✅ %s\n' "${1:-none}"; }
 note()    { printf '   ℹ  %s\n' "$*"; }
+
+# ── KNOWN_RESIDUE — declared, accepted, dated leftovers that are EXPECTED to survive a teardown ─────
+# Some objects are left on the cluster ON PURPOSE, and a report that files them as defects trains an
+# admin to ignore the report. The ledger below names each one, says why it stays, prints the exact
+# command that removes it for anyone who does want it gone — and stops it counting toward the exit
+# code, so a clean teardown can end in exit 0 on a cluster that carries it.
+#
+# It is NOT a way to make a red run green. A leftover this ledger does not name is still a finding and
+# still fails, and the ledger cannot rot either: an entry naming an object that is STILL ON THE CLUSTER
+# while this scan no longer reports it as residue FAILS and says to delete the entry. Same
+# two-directional ratchet, same convention, as platform-portfolio/hack/check-adoption-skip.sh's
+# KNOWN_STRANDS and tools/lint/_canary-coverage.py's EXEMPT — see tools/lint/LEDGERS.md.
+# Adding an entry is an OWNER decision, not an agent's, and not a way to get a gate green.
+#
+# Format, one entry per line:
+#
+#   <kind> <name> <namespace|-> :: <YYYY-MM-DD> | <why it stays> | remedy: <oc …> | decision: <who>
+#
+# <kind> is the kind string `oc get -o name` PRINTS, which is the singular, group-qualified form
+# (measured 2026-08-06: `oc get tektonconfigs.operator.tekton.dev -o name` →
+# `tektonconfig.operator.tekton.dev/config`, singular) — not the plural name `oc api-resources` lists.
+# That is what report_swept() splits out of the swept object, so a plural key would match nothing.
+# <namespace> is `-` for a cluster-scoped object. Every field of the reason is mandatory and enforced
+# by residue_lint() before the scan starts.
+#
+# EMITTED by a function, not `VAR=$(cat <<'EOF' … )`: bash 3.2 (every macOS maintainer box) mis-parses
+# an apostrophe inside a quoted heredoc nested in a command substitution, and a ledger is prose humans
+# will edit. Same reason check-adoption-skip.sh's known_strands() is a function.
+known_residue() {  # → the declared ledger, one entry per line
+  cat <<'EOF'
+tektonconfig.operator.tekton.dev config - :: 2026-08-06 | The OpenShift Pipelines operator creates TektonConfig/config itself; the portfolio only patches two fields on it. It is CLUSTER-SCOPED and carries the operator own finalizer tektonconfigs.operator.tekton.dev, so letting an Argo cascade delete it would tear down the ENTIRE Tekton install on a cluster where Pipelines belongs to the org, and once the CSV is gone that finalizer can never run and the object hangs Terminating forever. The chart therefore marks it Prune=false,Delete=false (platform-portfolio/components/openshift-pipelines/tekton-config.yaml) and the teardown skips every protected operand for the same reason. namespace/openshift-pipelines hangs off it by ownerReference and stays with it. | remedy: oc delete tektonconfig config | decision: owner 2026-08-06 — TektonConfig/config and namespace openshift-pipelines are expected, permanent residue after an uninstall; they stay protected and must not be counted as a defect. Run the remedy ONLY on a cluster where Pipelines is not the organisation own — it takes namespace/openshift-pipelines and the whole Tekton install with it
+EOF
+}
+
+residue_lint() {  # <ledger-file> → prints every problem, non-zero when there is one
+  # A ledger this script cannot parse declares nothing, and a script that silently declares nothing
+  # reports expected residue as a fresh break (or, worse, a fresh break as expected residue). So the
+  # caller turns any output here into exit 2 — "I could not check what I claim to check" — never 1.
+  # Character classes, not `{4}`: BSD/macOS awk has not always supported interval expressions.
+  awk -v D='^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] ' '
+    !NF || $1 ~ /^#/ { next }
+    {
+      i = index($0, " :: ")
+      if (!i) { print "line " NR ": no \" :: \" separating the key from the reason"; bad = 1; next }
+      key = substr($0, 1, i - 1); why = substr($0, i + 4)
+      if (split(key, f, /[ \t]+/) != 3)
+        { print "line " NR ": key must be exactly <kind> <name> <namespace|->"; bad = 1 }
+      else {
+        # A key that can never match is malformed, not absent — validate the shape statically, because
+        # a typo here would silently move a real leftover from "declared" to "not applicable".
+        if (f[1] !~ /^[a-z][a-z0-9.-]*$/)
+          { print "line " NR ": kind \"" f[1] "\" is not a lowercase resource name as `oc get -o name` prints it"; bad = 1 }
+        if (f[3] != "-" && f[3] !~ /^[a-z0-9][a-z0-9-]*$/)
+          { print "line " NR ": namespace \"" f[3] "\" must be a namespace name, or \"-\" for a cluster-scoped object"; bad = 1 }
+        k = f[1] " " f[2] " " f[3]
+        if (k in seen) { print "line " NR ": duplicate key \"" k "\" (already declared on line " seen[k] ")"; bad = 1 }
+        seen[k] = NR
+      }
+      if (why !~ D) { print "line " NR ": reason must start with a YYYY-MM-DD date"; bad = 1 }
+      # The remedy is the whole point of reporting residue instead of hiding it: an admin who does want
+      # the object gone must not have to work the command out for themselves.
+      if (why !~ /\| remedy: oc [^ ]/) { print "line " NR ": reason must carry \"| remedy: oc <...>\""; bad = 1 }
+      if (why !~ /\| decision: [^ ]/)  { print "line " NR ": reason must end with \"| decision: <...>\""; bad = 1 }
+    }
+    END { exit bad }' "$1"
+}
+
+residue_reason() {  # <ledger> <kind> <name> <ns|-> → the declared reason; rc 1 when undeclared
+  awk -v k="$2" -v n="$3" -v s="$4" '
+    !NF || $1 ~ /^#/ { next }
+    $1 == k && $2 == n && $3 == s {
+      i = index($0, " :: "); print substr($0, i + 4); found = 1; exit }
+    END { exit !found }' "$1"
+}
+
+RESIDUE_OBSERVED=" "   # " <kind> <name> <ns|-> " keys this run actually reported — the staleness input
+RESIDUE_LINES=""       # "<kind>|<name>|<ns>|<reason>" per declared match, reprinted in the summary block
+RESIDUE_NA=""          # entries whose object is not on this cluster at all — named, never silently dropped
+
+report_residue() {  # kind name [ns] → 0 when this object is declared residue and has been reported
+  # Returns non-zero on the undeclared path so the caller falls through to normal classification. That
+  # is a PREDICATE result, not an error: callers use it as `report_residue … && return 0`.
+  local kind="$1" name="$2" ns="${3:--}" why remedy nsarg
+  [ -n "$ns" ] || ns="-"
+  why="$(residue_reason "$LEDGER_FILE" "$kind" "$name" "$ns")" || return 1
+  RESIDUE_OBSERVED="${RESIDUE_OBSERVED}${kind} ${name} ${ns} "
+  RESIDUE_LINES="${RESIDUE_LINES}${kind}|${name}|${ns}|${why}
+"
+  remedy="${why#*| remedy: }"; remedy="${remedy%%| decision:*}"
+  nsarg=""; [ "$ns" = "-" ] || nsarg=" -n ${ns}"
+  # Named at the point of detection, on EVERY run — an entry visible only in the success branch
+  # disappears exactly when the log is longest. The full reason is printed once, by the summary block.
+  found residue "DECLARED RESIDUE  ${kind}/${name}${nsarg} — left on purpose, NOT counted as a defect" \
+    "${remedy% }"
+  return 0
+}
+
+residue_object_exists() {  # kind name <ns|-> → 0 when the object is on the cluster right now
+  local kind="$1" name="$2" ns="${3:--}" out
+  if [ -n "$ns" ] && [ "$ns" != "-" ]; then
+    out="$(oc get "$kind" "$name" -n "$ns" -o name --ignore-not-found 2>/dev/null)"
+  else
+    out="$(oc get "$kind" "$name" -o name --ignore-not-found 2>/dev/null)"
+  fi
+  [ -n "$out" ]
+}
+
+report_stale_residue() {  # <ledger> — the anti-rot half: a declaration outliving its residue is a FAILURE
+  # Iterates the LEDGER, not the observations. An entry that matches nothing would otherwise simply
+  # never come up, which is exactly how both tools/lint ledgers lost this direction for five days.
+  #
+  # Three outcomes, and only one of them fails, because this gate reads a CLUSTER rather than a repo
+  # render and its input legitimately differs between clusters:
+  #   observed                      → the live declaration; reported by report_residue, nothing to do here
+  #   object present, NOT reported  → STALE. The object is right there and the scan no longer files it as
+  #                                   residue: the marks changed, the classification moved, or the entry
+  #                                   describes something that is no longer true. Fails.
+  #   object absent from the cluster→ not applicable HERE (this cluster never carried it, or it has since
+  #                                   been removed). Named in the summary, never counted, never silent.
+  local ledger="$1" kind name ns key
+  while read -r kind name ns; do
+    [ -n "$kind" ] || continue
+    key="${kind} ${name} ${ns}"
+    case "$RESIDUE_OBSERVED" in *" ${key} "*) continue;; esac
+    if residue_object_exists "$kind" "$name" "$ns"; then
+      N_LEDGER=$((N_LEDGER + 1))
+      printf '   ❌ %s\n' "STALE DECLARATION: KNOWN_RESIDUE declares ${kind}/${name}, the object IS on this"
+      sub "cluster, and this scan did not report it as residue. The entry now asserts something untrue."
+      sub "Either it stopped carrying our marks (nothing here can see it any more — investigate before"
+      sub "deleting the entry), or its classification moved and the entry belongs in the bin. A ledger"
+      sub "must not outlive the thing it describes: fix one or the other, do not leave both."
+    else
+      RESIDUE_NA="${RESIDUE_NA}${kind}/${name}$([ "$ns" = "-" ] || printf ' -n %s' "$ns")
+"
+    fi
+  done < <(awk 'NF && $1 !~ /^#/ { print $1, $2, $3 }' "$ledger")
+  return 0
+}
 
 # ── parallel helper ───────────────────────────────────────────────────────────
 # Every `oc` invocation on a remote cluster costs ~0.7s of round-trip before it reads anything, so the
@@ -1424,6 +1591,11 @@ sweep_chunk() {  # comma-list — echo "kind/name" (or "ns kind/name" when SWEEP
 report_swept() {  # kind/name  ns  scope-suffix
   local obj="$1" ns="${2:-}" where="$3" kind name cls why nsarg
   kind="${obj%%/*}"; name="${obj#*/}"
+  # Declared residue is answered BEFORE classification. It is not a competing verdict — classification
+  # would call TektonConfig/config "adopted, marked by us but NOT ours to delete" on the strength of its
+  # Delete=false annotation, which is the right rule for an adopted resource and the wrong sentence for
+  # an operand our own chart marks. The ledger entry says what is actually true and why it stays.
+  report_residue "$kind" "$name" "$ns" && return 0
   nsarg=""; [ -n "$ns" ] && nsarg=" -n ${ns}"
   cls="$(classify_finding "$kind" "$name" "$ns")"
   why="${cls#*|}"
@@ -1742,12 +1914,188 @@ self_test() {
     echo "✅ self-test 2/2b: a namespace holding a genuine unaccounted CSV is still flagged"
   fi
 
+  # ── proofs 3-7: the KNOWN_RESIDUE ledger ──────────────────────────────────
+  # Every case drives the REAL functions the real run calls, and measures their effect on the REAL
+  # counters before restoring them — a re-implementation of the accounting could pass while the gate is
+  # broken. Each has its own control, because an assertion that would hold anyway proves nothing (the
+  # lesson canary G in tools/lint/_parse-guard-args.sh was rewritten for).
+  local lf="${TMPDIR:-/tmp}/ogsr-selftest.$$.ledger" pr="${TMPDIR:-/tmp}/ogsr-selftest.$$.probe"
+  local keep_res keep_trace keep_ws keep_dec keep_led keep_obs keep_lines keep_na keep_ledger_file
+  local d_res d_other d_led lint_bad=0 lint_ok=0 bad_line
+  keep_ledger_file="$LEDGER_FILE"
+
+  # The object under test wears TektonConfig's real marks, measured on a live cluster 2026-08-06:
+  # owner label + a pp-* tracking-id + sync-options carrying Delete=false. Seeded into the marks cache
+  # so classify_finding/report_trace answer from memory and this test touches no cluster.
+  marks_put "tektonconfig.operator.tekton.dev||config|ogsr|||||pp-openshift-pipelines:operator.tekton.dev/TektonConfig:openshift-operators/config|SkipDryRunOnMissingResource=true,Prune=false,Delete=false|"
+
+  save_counters() { keep_res="$N_RESIDUE"; keep_trace="$N_TRACE"; keep_ws="$N_WS"; keep_dec="$N_DECIDE"
+                    keep_led="$N_LEDGER"; keep_obs="$RESIDUE_OBSERVED"; keep_lines="$RESIDUE_LINES"
+                    keep_na="$RESIDUE_NA"; return 0; }
+  restore_counters() { N_RESIDUE="$keep_res"; N_TRACE="$keep_trace"; N_WS="$keep_ws"; N_DECIDE="$keep_dec"
+                       N_LEDGER="$keep_led"; RESIDUE_OBSERVED="$keep_obs"; RESIDUE_LINES="$keep_lines"
+                       RESIDUE_NA="$keep_na"; return 0; }
+
+  # ── proof 3 (ratchet direction 1): a leftover the ledger does NOT name still counts ──
+  # The fixture ledger is deliberately non-empty but names a DIFFERENT object: an empty one would let a
+  # lookup that never matches anything pass this, and a lookup that matches everything fail loudly.
+  cat > "$lf" <<'EOF'
+other.example.com other-object - :: 2026-08-06 | fixture: declares an unrelated object | remedy: oc delete other.example.com other-object | decision: fixture
+EOF
+  LEDGER_FILE="$lf"
+  save_counters
+  # Redirected to a FILE, never captured with $(…): command substitution runs a subshell and the very
+  # counter increments these canaries exist to measure would be discarded with it.
+  report_swept "tektonconfig.operator.tekton.dev/config" "" "cluster-scoped" > "$pr" 2>&1
+  d_res=$((N_RESIDUE - keep_res))
+  d_other=$(( (N_TRACE - keep_trace) + (N_WS - keep_ws) + (N_DECIDE - keep_dec) ))
+  restore_counters
+  if [ "$d_res" -eq 0 ] && [ "$d_other" -eq 1 ]; then
+    echo "✅ self-test 3/7: an UNDECLARED leftover is still a finding and still counts toward the exit code"
+  else
+    echo "❌ SELF-TEST: an undeclared leftover contributed ${d_other} finding(s) and ${d_res} residue —"
+    echo "   the ledger is swallowing objects it never declared, which is a false clean"
+    rc=1
+  fi
+
+  # ── proof 4 (C2): the SAME object, now declared — reported in full, worth ZERO findings ──
+  # This is the property that lets a teardown on a cluster carrying TektonConfig end in exit 0.
+  cat > "$lf" <<'EOF'
+tektonconfig.operator.tekton.dev config - :: 2026-08-06 | fixture: declares exactly this object | remedy: oc delete tektonconfig config | decision: fixture
+EOF
+  save_counters
+  report_swept "tektonconfig.operator.tekton.dev/config" "" "cluster-scoped" > "$pr" 2>&1
+  d_res=$((N_RESIDUE - keep_res))
+  d_other=$(( (N_TRACE - keep_trace) + (N_WS - keep_ws) + (N_DECIDE - keep_dec) ))
+  restore_counters
+  # Asserting on the OUTPUT as well as the exit accounting: an entry that moves a counter while staying
+  # invisible in the log is half the defect this ledger convention exists to prevent. And a declared
+  # object must never be printed with `remove:`/`strip:` — those verbs mean "act on this".
+  if [ "$d_res" -eq 1 ] && [ "$d_other" -eq 0 ] \
+     && grep -q 'DECLARED RESIDUE' "$pr" \
+     && grep -q 'if you want it gone: oc delete tektonconfig config' "$pr" \
+     && ! grep -q 'remove: \|strip:  ' "$pr"; then
+    echo "✅ self-test 4/7: a DECLARED leftover is named with its remedy and adds 0 findings"
+  else
+    echo "❌ SELF-TEST: a declared leftover added ${d_other} finding(s)/${d_res} residue, or was not"
+    echo "   reported with its remedy. got: $(tr '\n' ' ' < "$pr")"
+    rc=1
+  fi
+
+  # ── proof 5 (ratchet direction 2): a STALE entry fails, and the live one stays quiet ──
+  # The over-fire control is not optional: a staleness check that flags everything would pass a
+  # one-sided "the stale entry failed" assertion.
+  cat > "$lf" <<'EOF'
+tektonconfig.operator.tekton.dev config - :: 2026-08-06 | fixture: still matches an object this run reported | remedy: oc delete tektonconfig config | decision: fixture
+gone.example.com left-behind - :: 2026-08-06 | fixture: the scan no longer reports this, but it is still on the cluster | remedy: oc delete gone.example.com left-behind | decision: fixture
+EOF
+  # The stubbed `oc` answers as a cluster on which gone.example.com/left-behind IS still present —
+  # which is what makes the entry STALE rather than merely not applicable.
+  oc() { printf 'gone.example.com/left-behind\n'; return 0; }
+  save_counters
+  RESIDUE_OBSERVED=" tektonconfig.operator.tekton.dev config - "
+  report_stale_residue "$lf" > "$pr" 2>&1
+  d_led=$((N_LEDGER - keep_led))
+  restore_counters
+  unset -f oc
+  if [ "$d_led" -eq 1 ] && grep -q 'gone.example.com' "$pr" && ! grep -q 'tektonconfig' "$pr"; then
+    echo "✅ self-test 5/7: a STALE declaration FAILED while the live one stayed quiet"
+  else
+    echo "❌ SELF-TEST: the stale declaration contributed ${d_led} failure(s) — a KNOWN_RESIDUE entry"
+    echo "   could outlive the object it describes, or a live entry is being flagged. got: $(tr '\n' ' ' < "$pr")"
+    rc=1
+  fi
+
+  # ── proof 6: an entry whose object is NOT on this cluster is named, and costs nothing ──
+  # check-clean reads a CLUSTER, not a repo render, so its input legitimately differs between clusters:
+  # a cluster that never installed Pipelines must not go red over an entry about TektonConfig. It must
+  # not go SILENT either — the entry is named so nobody mistakes "not here" for "verified gone".
+  oc() { return 0; }   # nothing on this cluster: --ignore-not-found prints nothing
+  save_counters
+  RESIDUE_OBSERVED=" "
+  RESIDUE_NA=""
+  report_stale_residue "$lf" > "$pr" 2>&1
+  d_led=$((N_LEDGER - keep_led))
+  bad_line="$RESIDUE_NA"
+  restore_counters
+  unset -f oc
+  case "$bad_line" in
+    *"gone.example.com/left-behind"*) lint_ok=1;;
+    *) lint_ok=0;;
+  esac
+  if [ "$d_led" -eq 0 ] && [ "$lint_ok" -eq 1 ]; then
+    echo "✅ self-test 6/7: an entry whose object is absent is NAMED as not-applicable and fails nothing"
+  else
+    echo "❌ SELF-TEST: an absent object contributed ${d_led} failure(s), or was dropped silently."
+    echo "   A silent drop is how a ledger rots unseen; a failure is a false alarm on a clean cluster."
+    rc=1
+  fi
+
+  # ── proof 7 (C4): residue_lint rejects every malformed shape, and accepts the shipped ledger ──
+  # The reference implementation of this convention (check-adoption-skip.sh) ships a ledger linter with
+  # NO canary — the one requirement it is otherwise the model for is the one it cannot prove about
+  # itself (tools/lint/LEDGERS.md §7). This closes that gap here rather than inheriting it.
+  lint_bad=0; lint_ok=0
+  printf 'k.example.com n - :: 2026-08-06 | why | remedy: oc delete k.example.com n | decision: fixture\n' > "$lf"
+  residue_lint "$lf" >/dev/null 2>&1 && lint_ok=1
+  while IFS= read -r bad_line; do
+    [ -n "$bad_line" ] || continue
+    printf '%s\n' "$bad_line" > "$lf"
+    residue_lint "$lf" >/dev/null 2>&1 || lint_bad=$((lint_bad + 1))
+  done <<'EOF'
+k.example.com n - 2026-08-06 | why | remedy: oc delete x | decision: fixture
+k.example.com n :: 2026-08-06 | why | remedy: oc delete x | decision: fixture
+K.Example.COM n - :: 2026-08-06 | why | remedy: oc delete x | decision: fixture
+k.example.com n Not_A_Namespace :: 2026-08-06 | why | remedy: oc delete x | decision: fixture
+k.example.com n - :: no-date | why | remedy: oc delete x | decision: fixture
+k.example.com n - :: 2026-08-06 | why | decision: fixture
+k.example.com n - :: 2026-08-06 | why | remedy: oc delete x | decision:
+EOF
+  # 7 malformed shapes: no " :: ", a 2-field key, an upper-case kind, a namespace that is not a
+  # namespace, no date, no remedy, an empty decision pointer.
+  if [ "$lint_bad" -eq 7 ] && [ "$lint_ok" -eq 1 ]; then
+    echo "✅ self-test 7/7: residue_lint rejects all 7 malformed shapes and accepts a well-formed entry"
+  else
+    echo "❌ SELF-TEST: residue_lint rejected ${lint_bad}/7 malformed entries (well-formed accepted: ${lint_ok})."
+    echo "   A ledger this script cannot parse declares nothing while looking like it declares something."
+    rc=1
+  fi
+  # The SHIPPED ledger through the SHIPPED linter — the real run does this too, but proving it here
+  # means a malformed entry cannot reach a cluster behind a green self-test.
+  known_residue > "$lf"
+  if ! residue_lint "$lf" >/dev/null 2>&1; then
+    echo "❌ SELF-TEST: the shipped KNOWN_RESIDUE does not pass its own linter"
+    rc=1
+  fi
+
+  LEDGER_FILE="$keep_ledger_file"
+  rm -f "$lf" "$pr"
+
   if [ "$rc" -eq 0 ]; then
-    echo "self-test ok — both proofs held (copy excluded from CSV_INDEX; a real foreign CSV is still caught)"
+    echo "self-test ok — copy excluded from CSV_INDEX, a real foreign CSV still caught, and the"
+    echo "KNOWN_RESIDUE ratchet holds in both directions with malformed entries refused"
     return 1
   fi
   return 2
 }
+
+# ── the residue ledger is materialised and LINTED before anything else runs ───
+# Before the self-test too, and before the first cluster read: a ledger this script cannot parse
+# declares nothing, and every verdict below would then be describing a check that did not happen.
+# Exit 2, never 1 — in this tree 1 means "the thing I check is broken" and 2 means "I could not check
+# what I claim to check". 1 is also load-bearing: CI asserts --self-test exits exactly 1, so a
+# malformed-ledger rc of 1 would satisfy that assertion and pass for a healthy gate.
+LEDGER_FILE="${TMPDIR:-/tmp}/ogsr-known-residue.$$.ledger"
+if tmproot; then LEDGER_FILE="${TMPROOT}/known-residue.ledger"; fi
+known_residue > "$LEDGER_FILE"
+if ! LEDGER_PROBLEMS="$(residue_lint "$LEDGER_FILE")"; then
+  echo "❌ KNOWN_RESIDUE is malformed — refusing to run. A ledger this script cannot parse silently" >&2
+  echo "   declares nothing, and would report expected residue as a fresh leftover (or the reverse):" >&2
+  # sed, not `printf '   %s\n'`: the format is applied once per ARGUMENT, so a multi-line variable gets
+  # exactly one indent and every problem after the first hangs off the left margin.
+  printf '%s\n' "$LEDGER_PROBLEMS" | sed 's/^/   /' >&2
+  exit 2
+fi
 
 if [ "$SELF_TEST" = "true" ]; then
   self_test
@@ -1774,6 +2122,37 @@ section_webhooks
 section_labeled_objects
 section_crds
 
+# ── declared residue: the anti-rot half, then the debt block ──────────────────
+# Runs after every section, so it sees every observation the scan made. Printed BEFORE the verdict so
+# a run that ends in failure still carries the list of what was deliberately left behind.
+echo
+echo "$RULE"
+echo "DECLARED RESIDUE   (KNOWN_RESIDUE, top of this file — expected leftovers, not defects)"
+report_stale_residue "$LEDGER_FILE"
+if [ "$N_RESIDUE" -gt 0 ]; then
+  while IFS='|' read -r r_kind r_name r_ns r_why; do
+    [ -n "$r_kind" ] || continue
+    r_remedy="${r_why#*| remedy: }"; r_remedy="${r_remedy%%| decision:*}"
+    r_decision="${r_why##*| decision: }"
+    r_date="${r_why%%|*}"                    # the leading YYYY-MM-DD residue_lint enforces
+    r_head="${r_why#*| }"; r_head="${r_head%%| remedy:*}"
+    echo "   ⚠ ${r_kind}/${r_name}$([ "$r_ns" = "-" ] || printf ' -n %s' "$r_ns") — STILL ON THE CLUSTER, on purpose  (declared ${r_date% })"
+    echo "       why:      ${r_head% }"
+    echo "       remedy:   ${r_remedy% }"
+    echo "       decision: ${r_decision}"
+  done <<< "$RESIDUE_LINES"
+  echo "   These objects were NOT removed and are NOT counted as findings. That is a declared,"
+  echo "   owner-accepted outcome — not a clean bill for them. Each is re-checked on every run."
+fi
+if [ -n "$RESIDUE_NA" ]; then
+  echo "   ℹ  declared but not applicable on this cluster (the object is not here at all):"
+  printf '%s' "$RESIDUE_NA" | sed 's/^/        /'
+  echo "      Either this cluster never carried it, or it has since been removed. If a teardown now"
+  echo "      removes it everywhere, the entry has outlived its residue — delete it from KNOWN_RESIDUE."
+fi
+[ "$N_RESIDUE" -eq 0 ] && [ -z "$RESIDUE_NA" ] && [ "$N_LEDGER" -eq 0 ] && \
+  none "no declared residue applies to this cluster"
+
 # ── verdict ───────────────────────────────────────────────────────────────────
 echo
 echo "$RULE"
@@ -1783,11 +2162,22 @@ printf '   %-42s %s\n' "cluster-health findings"             "$N_HEALTH"
 printf '   %-42s %s\n' "workshop leftovers (ours: delete)"   "$N_WS"
 printf '   %-42s %s\n' "our marks on the org's resources"    "$N_TRACE"
 printf '   %-42s %s\n' "needs a human decision"              "$N_DECIDE"
+printf '   %-42s %s\n' "declared residue (expected, kept)"   "$N_RESIDUE"
+printf '   %-42s %s\n' "stale ledger declarations"           "$N_LEDGER"
 [ -n "$DISCOVERY_NOTE" ] && echo "   (partial scan: ${DISCOVERY_NOTE%; })"
 echo
-
-if [ "$((N_ADOPTED + N_HEALTH + N_WS + N_TRACE + N_DECIDE))" -eq 0 ]; then
-  echo "✅ clean — nothing from this workshop remains and no namespace is wedged."
+# Declared residue is the ONE row above that does not enter this sum — that is the whole point of the
+# ledger. A stale declaration does, because a ledger that cannot rot is the price of that exemption.
+if [ "$((N_ADOPTED + N_HEALTH + N_WS + N_TRACE + N_DECIDE + N_LEDGER))" -eq 0 ]; then
+  if [ "$N_RESIDUE" -gt 0 ]; then
+    # Deliberately NOT "nothing from this workshop remains": ${N_RESIDUE} object(s) listed above are
+    # still on the cluster. A green line that claims otherwise is the false all-clear this whole script
+    # exists to prevent, and it would be a lie told by the very mechanism that suppressed the finding.
+    echo "✅ no UNEXPECTED leftover — no namespace is wedged, and the only thing this workshop left is"
+    echo "   the ${N_RESIDUE} declared residue item(s) listed above, which remain ON THE CLUSTER by owner decision."
+  else
+    echo "✅ clean — nothing from this workshop remains and no namespace is wedged."
+  fi
   exit 0
 fi
 if [ "$N_ADOPTED" -gt 0 ]; then
@@ -1800,6 +2190,12 @@ if [ "$N_TRACE" -gt 0 ]; then
   echo "⚠️  ${N_TRACE} finding(s) are OUR MARK on a resource the org owns. Each is printed with a"
   echo "   'strip:' command that removes the label or annotation and leaves the object alone."
   echo "   Do NOT delete these objects — they were here before the workshop and must outlive it."
+fi
+if [ "$N_LEDGER" -gt 0 ]; then
+  echo "❌ ${N_LEDGER} KNOWN_RESIDUE entry(ies) no longer describe anything this scan reports, while the"
+  echo "   object is still on the cluster. This is a defect in the LEDGER, not in the cluster: fix or"
+  echo "   delete the entry (top of this file). A declaration that outlives its residue is a green tick"
+  echo "   over an unread doc, which is the exact failure the ledger convention exists to prevent."
 fi
 if [ "$N_DECIDE" -gt 0 ]; then
   echo "❓ ${N_DECIDE} finding(s) could not be attributed. No removal command was printed for them"

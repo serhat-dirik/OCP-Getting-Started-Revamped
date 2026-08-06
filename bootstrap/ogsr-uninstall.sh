@@ -2310,11 +2310,24 @@ step_stop_reconciliation() {  # 1 — no app-of-apps may re-create a child mid-t
 # namespace to take it: if this step does not remove it, nothing ever does. That is the whole of the
 # measured defect and it is the whole of what this step claims.
 #
-# TWO THINGS ARE NEVER TOUCHED, checked per object rather than assumed:
+# TWO THINGS ARE NEVER TOUCHED, checked per object rather than assumed, and PROTECTION IS TESTED FIRST:
+#   • anything carrying Prune=false,Delete=false — a protection mark, whether install.sh stamped it on
+#     an adopted resource or a chart ships it on an operand we only patch. Either way the object STAYS.
 #   • anything Argo currently tracks — the ordered cascade prunes it in reverse sync-wave order, which
 #     is strictly better ordering than this step has; racing it would only break that.
-#   • anything carrying Prune=false,Delete=false — install.sh's protection mark for an adopted
-#     resource. An adopted operator's operand belongs to the org.
+#
+# WHY THAT ORDER, given both branches merely `continue`. It is not a behaviour fix — it is a TRUTH fix
+# for the sentence this step prints. The two marks are not mutually exclusive: TektonConfig/config
+# carries our own `pp-openshift-pipelines:…` tracking-id AND
+# `SkipDryRunOnMissingResource=true,Prune=false,Delete=false` (measured on a live cluster 2026-08-06;
+# the mark is hardcoded in platform-portfolio/components/openshift-pipelines/tekton-config.yaml, NOT
+# applied by install.sh's adoption logic, because the Pipelines operator creates the object itself and
+# an Argo cascade taking it would tear down the ENTIRE Tekton install on a cluster where Pipelines
+# belongs to the org). With the Argo test first, that object printed "the ordered cascade prunes it in
+# wave order" — and `Delete=false` is precisely the instruction NOT to prune it. An operator reading
+# that line was told the object was being handled while it was being left behind, permanently.
+# Protection first means the sentence that survives is the one that matches what happens; a third
+# sentence names the both-true case explicitly rather than letting either half stand in for it.
 #
 # TWO PASSES, because an operator can re-create a child operand from a parent that has not gone yet
 # (TektonConfig owns TektonPipeline/TektonTrigger/…, and the CRDS_CREATED_SET has no parent-child
@@ -2353,17 +2366,26 @@ step_delete_operator_operands() {  # 2 — operands only their own operator can 
       [[ -n "$crd" ]] || continue
       while IFS= read -r inst; do
         [[ -n "$inst" ]] || continue
+        # Protection first — see the ORDER argument in this step's header. The nested argo_manages
+        # runs only on pass 1 (pass 2 prints nothing) and only for an operand that is already
+        # protected, so the extra read costs one call per protected operand per teardown.
+        if is_protected "$crd" "$inst"; then
+          if [[ "$pass" == "1" ]]; then
+            skipped=$((skipped + 1))
+            if argo_manages "$crd" "$inst"; then
+              echo "   • skip ${crd}/${inst} — Argo tracks it, but Delete=false tells the cascade NOT to prune it:"
+              echo "     it STAYS on the cluster after this teardown, on purpose. ./bootstrap/ogsr-check-clean.sh"
+              echo "     reports it as declared residue and prints the command if you do want it gone."
+            else
+              echo "   • skip ${crd}/${inst} — marked Prune=false,Delete=false; this operand is the org's"
+            fi
+          fi
+          continue
+        fi
         if argo_manages "$crd" "$inst"; then
           if [[ "$pass" == "1" ]]; then
             skipped=$((skipped + 1))
             echo "   • skip ${crd}/${inst} — Argo tracks it, so the ordered cascade prunes it in wave order"
-          fi
-          continue
-        fi
-        if is_protected "$crd" "$inst"; then
-          if [[ "$pass" == "1" ]]; then
-            skipped=$((skipped + 1))
-            echo "   • skip ${crd}/${inst} — marked Prune=false,Delete=false; this operand is the org's"
           fi
           continue
         fi
