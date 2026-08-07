@@ -130,13 +130,38 @@ SITES = [
     (REPO / "gitops/workshop-config/values.yaml",
      _compile("SITES[3]", r'^\s*maasEndpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
      "values.yaml maasEndpoint"),
+    # THE FOUR ENTRY STATES — added 2026-08-07 after two independent module audits found the same
+    # stale literal in all of them while this guard reported clean. It policed content/antora.yml
+    # and workshop-config/values.yaml only, so `maasModel: llama-scout-17b` sat in every AI module's
+    # entry state, contradicting versions.yaml (`qwen3-14b`, verified live 2026-07-31 by reading
+    # maas-config in user6-ai and user6-batch).
+    #
+    # This is not cosmetic drift. MaaS keys are MODEL-SCOPED: a fallback naming the wrong model is
+    # an HTTP 401 key_model_access_denied that the attendee meets INSIDE the AI module, long after
+    # the installer said "complete" — the exact incident this file's header already documents, one
+    # layer deeper than it was looking.
+    #
+    # Corroborated independently by the module text itself: jobs-batch-kueue leans on `/no_think`,
+    # which is a Qwen3 hybrid-reasoning control token. Llama 4 Scout has no such switch. So either
+    # the grounding run was on qwen3 and the caption naming llama-scout is wrong, or it was on
+    # llama-scout and `/no_think` was a no-op credited with an effect it never had. Both are defects.
+    #
+    # ENDPOINT deliberately NOT policed here. Unlike the model it is the same host for every install
+    # and emptying it is a behaviour change that cannot be tested without a fresh install; flagged
+    # for a later pass rather than changed blind.
+    *[
+        (REPO / f"gitops/entry-states/{slug}/values.yaml",
+         _compile(f"SITES[entry:{slug}]", r'^\s*maasModel\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
+         f"entry-states/{slug} maasModel")
+        for slug in ("agentic-ai", "ai-assisted-development", "app-modernization", "jobs-batch-kueue")
+    ],
 ]
 
 # A LITERAL, deliberately not len(SITES): the point is that shrinking SITES must not be able to
 # shrink its own floor. Truncating the list the driver iterates (`SITES[:1]`) collapses the count
 # below this; editing SITES itself trips the self-test, which asserts the two agree. Adding a site
 # means bumping this number in the same change.
-MIN_SITES = 4
+MIN_SITES = 8
 
 # A value is acceptable ONLY if it is visibly not a real setting. The trailing "@" is Antora's
 # soft-set marker and is stripped before judging.
