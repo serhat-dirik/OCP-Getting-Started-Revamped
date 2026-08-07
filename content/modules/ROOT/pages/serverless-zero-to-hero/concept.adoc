@@ -6,7 +6,8 @@ include::partial$version-attributes.adoc[]
 // appear ONLY as attributes; the product version ONLY via version-attributes (OpenShift Serverless
 // {serverless_version}). Everything described here was performed on OCP 4.21.22 (Kubernetes 1.34)
 // against a live OpenShift Serverless control plane (Knative Serving + Eventing) in the {user}-dev
-// namespace on 2026-07-13: the scale-to-zero ksvc, the ~15 s JVM cold start, the concurrency-driven
+// namespace on 2026-07-13: the scale-to-zero ksvc, that day's 15.27 s JVM cold start (a RECORD of one
+// run — the page promises the ~15-30 s range, see the note at the cold-start diagram), the concurrency-driven
 // autoscale to the max-scale ceiling, the 80/20 tag-based revision split, and the source->broker->trigger
 // eventing taste (a real delivery that returns 405 Method Not Allowed — the app serves / for GET but has
 // no POST event handler yet) are real captures, not from memory. Knative auto-creates the ksvc's edge Route — the content NEVER hand-rolls
@@ -94,13 +95,18 @@ The catch is the *cold start*. When a request arrives at a scaled-to-zero servic
 include::example$diagrams/serverless-zero-to-hero/02-cold-start-timeline.mmd[]
 ....
 
-The *amber* row is the cold path and every box in it is real work — the activator is *holding* the request, not failing it. The *green* row is the same request against a warm pod. Same service, same code, two orders of magnitude apart; the numbers are the ones measured on this cluster, and you measure them yourself in the lab.
+The *amber* row is the cold path and every box in it is real work — the activator is *holding* the request, not failing it. The *green* row is the same request against a warm pod. Same service, same code, two orders of magnitude apart; the cold figure is a *range* because that is what repeated runs on this cluster produced, and you measure it yourself in the lab.
 
 [NOTE]
 .Cold start is real — plan for it, don't hide it
 ====
-Parasol's claims-processor is a JVM application (Quarkus on the JVM). Its *first* request from zero — measured on this cluster — took *about 15 seconds*: pod schedule, JVM boot, Hibernate schema check, then the activator hands the request through. Every *subsequent* request, while the pod is warm, returns in about *a tenth of a second*.
-That 15 seconds is not a bug — it's the honest cost of trading idle capacity for scale-to-zero, and you plan around it:
+// Cold start is a RANGE, not a number — the same ruling this module's lab.adoc records above its
+// cold-start capture: three measurements on this cluster, 15.27 s / 18.81 s / 26.51 s. Naming the
+// fastest of the three ("about 15 seconds") is what made a working autoscaler look broken, because
+// the lab's own recovery step then timed out. Do not re-narrow this to a single observed number, and
+// keep it in step with the diagram above and the lab's caption.
+Parasol's claims-processor is a JVM application (Quarkus on the JVM). Its *first* request from zero is a *range, not a number* — measured three times on this cluster at *15.27 s*, *18.81 s* and *26.51 s*, so expect *anywhere from ~15 to ~30 seconds*: pod schedule, JVM boot, Hibernate schema check, then the activator hands the request through. Every *subsequent* request, while the pod is warm, returns in about *a tenth of a second*.
+That wait is not a bug — it's the honest cost of trading idle capacity for scale-to-zero, and you plan around it:
 
 * For a *latency-sensitive* path, set `min-scale: "1"` so one pod is always warm — you give up scale-to-*zero* but keep autoscaling above the floor.
 * For a *bursty, latency-tolerant* path (a nightly feed, an internal tool), scale-to-zero is a clear win and the cold start is acceptable.
@@ -174,7 +180,7 @@ ifdef::demo[]
 .Presenter framing
 ====
 Spend no more than five minutes here before the live demo.
-Three ideas must land: (1) a *Knative Service* scales *to zero* when idle and *bursts* on traffic — you pay for requests, not idle pods — and Knative *auto-creates its Route*, so `ksvc.status.url` is the address; (2) every change mints an *immutable revision*, which makes a traffic split (and a rollback) a *weight change* on one Route, not a redeploy; (3) the *cold start is real and honest* — about 15 seconds for this JVM service from zero, a tenth of a second warm — and you plan around it with `min-scale` or a native build.
+Three ideas must land: (1) a *Knative Service* scales *to zero* when idle and *bursts* on traffic — you pay for requests, not idle pods — and Knative *auto-creates its Route*, so `ksvc.status.url` is the address; (2) every change mints an *immutable revision*, which makes a traffic split (and a rollback) a *weight change* on one Route, not a redeploy; (3) the *cold start is real and honest* — a *range* of ~15–30 seconds for this JVM service from zero (three runs here: 15.27 s, 18.81 s, 26.51 s), a tenth of a second warm — and you plan around it with `min-scale` or a native build. Promise the range, not a number, then read out whatever the screen actually shows.
 The demo is the ten-minute arc: wake the service from zero and *feel* the cold start, burst load and watch it autoscale to the ceiling then melt back to zero, then flip an 80/20 revision split and roll it back live.
 Close on the punchline: "scale-to-zero economics, revisions you can split and roll back in one line, and an honest cold start you plan for — request-driven compute, owned by the platform."
 ====
