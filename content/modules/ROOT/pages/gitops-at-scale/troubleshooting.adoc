@@ -67,13 +67,36 @@ Cause:: Two different things.
 "No Rollout" means the prod Application was not created (the ApplicationSet was not applied, or its prod element does not point at `rollouts`).
 "command not found" is expected — the terminal has `oc` but *not* the Argo Rollouts plugin.
 Fix:: For a missing Rollout, confirm the ApplicationSet exists and generated `claims-prod-{user}` (Argo UI), and that its prod element path is `rollouts` (not `overlays/prod`).
-The Argo CD *Rollout view* does not currently render on this GitOps operator build — its extension asset 404s regardless of URL — so do not go looking for it; `oc` is the only working way to inspect a canary:
+Nothing in this lab depends on a rich Rollouts UI — `oc` inspects a canary completely, and it reads the same whether or not such a view is available on your cluster:
+// The sentence here used to assert "its extension asset 404s regardless of URL". That specific claim
+// is FALSE on the cluster this was re-run against (2026-08-07, GitOps 1.21.1): the student Argo CD
+// route serves /extensions.js with HTTP 200 and 4.8 MB of Rollout-extension JS, staged by the
+// rollout-extension init container. Whether the view then DRAWS is untested — that needs a signed-in
+// Argo CD session, which this lane could not open — so the text now asserts neither. See the dated
+// block at the top of lab.adoc; settling it needs one human login.
 +
 [source,sh,role=execute]
 ----
 oc get rollout parasol-claims -n $PROD \
   -o jsonpath='phase={.status.phase} step={.status.currentStepIndex}/5 image={.spec.template.spec.containers[0].image}{"\n"}'
 ----
+
+== I patched my blue-green Rollout to promote it, `oc` said `patched`, and nothing moved
+
+Symptom:: The throwaway blue-green Rollout from the Challenge sits at `phase: Paused`, you patch it, `oc` reports success — and *active* never cuts over to the preview version.
+Cause:: The promotion gate is not `spec.paused` (that field is never set on a blue-green pause).
+It is a *pause condition the controller wrote into `status`* — `pauseConditions: [{"reason":"BlueGreenPause", …}]` — and `status` is a *subresource*.
+A patch carrying a `status` block without `--subresource status` has that half discarded by the API server: `oc` prints `patched (no change)` and the object never changed.
+Patching `spec.paused: false` prints `patched` and promotes nothing, for the same reason — it was never what held the gate.
+Fix:: Clear the pause condition *on the status subresource* — that is the signal the controller waits for:
++
+[source,sh]
+----
+oc patch rollout <name> -n $PROD --subresource status \
+  --type merge -p '{"status":{"pauseConditions":null}}'
+----
++
+`status.blueGreen.activeSelector` moves to the green pod-hash within a second and `status.stableRS` follows; the blue ReplicaSet scales to zero about 30 seconds after that, on the blue-green scale-down delay.
 
 == The Rollout is stuck `Progressing` and the canary pods never become ready
 

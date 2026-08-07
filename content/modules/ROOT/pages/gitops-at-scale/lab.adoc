@@ -50,6 +50,39 @@ include::partial$version-attributes.adoc[]
 // 404s, so there is no canary/step/analysis VISUALIZATION anywhere in the console — for watching the
 // canary progress the terminal loops are still the view.
 // Console nav reuses platform-orientation/build-deliver live-grounded 4.21 labels.
+// Blue-green promotion (Challenge, last bullet) PERFORMED 2026-08-07 as user7, in the real cockpit
+// ttyd terminal, from this module's ENTRY state (ws start gitops-at-scale --user user7), on OCP 4.22 /
+// GitOps 1.21.1. A throwaway blueGreen Rollout (2 replicas, activeService+previewService,
+// autoPromotionEnabled:false) in {user}-prod paused ~4s after the image change with
+// status.phase=Paused, status.message=BlueGreenPause, pauseConditions=[{"reason":"BlueGreenPause",
+// "startTime":…}], status.controllerPause=true, blueGreen.activeSelector=<blue> /
+// previewSelector=<green> — and spec.paused UNSET, which is why unpausing it does nothing.
+// MEASURED, both ways round: `oc patch rollout <n> --subresource status --type merge -p
+// '{"status":{"pauseConditions":null}}'` flipped activeSelector to the green hash and stableRS to the
+// green RS in under a second (blue RS scaled 2->0 ~30s later — measured, and the attendee text names
+// no field for it because the CRD's own blueGreen schema was not read before the cluster went away);
+// the same patch
+// WITHOUT --subresource printed "patched (no change)" and left it Paused; '{"spec":{"paused":false}}'
+// printed "patched" and promoted nothing. '{"status":{"promoteFull":true}}' on the status subresource
+// promotes identically (the controller consumes and clears the flag). RBAC holds: as user7,
+// `oc auth can-i patch rollouts.argoproj.io/status` is yes in own ns, no in a neighbour's. The plugin
+// really is absent (`kubectl argo rollouts` -> unknown command; `oc plugin list` -> none), and
+// `oc set image rollout/...` fails with `no kind "Rollout" is registered ... in scheme` — ship a new
+// image by re-applying the manifest. Single-path on purpose: the promote could NOT be clicked here.
+// The gitops-plugin's own locale bundle (locales/en/plugin__gitops-plugin.json, served through the
+// plugin service) DOES carry "Promote" / "Full Promote" / "Abort" / "Retry" alongside "Rollout
+// details", so its console Rollout details page very likely offers the action — unproven, because
+// clicking it needs a signed-in console session. Same for the Argo CD Rollouts UI extension: on THIS
+// cluster its asset SERVES (student-gitops route /extensions.js -> 200, 4.8 MB, from the
+// rollout-extension init container), which contradicts the older "404s regardless of URL" note above
+// — whether the view then draws is untested here. Both need one human console/Argo login to settle;
+// do not write a Console:: tab for the promote until someone has clicked it.
+// Two AsciiDoc traps that block carries, both caught by READING THE RENDERED PAGE, not the source:
+// (1) a bare subs="attributes" REPLACES the default substitutions, so specialchars is dropped and the
+// browser swallows a literal <name> placeholder as an unknown tag — it vanished from the page while
+// the source looked perfect. subs="attributes+" APPENDS and keeps both. (2) a // comment line between
+// a list-continuation `+` and its block detaches the block: the next `+` then renders as a literal
+// plus AND the attributes stop resolving. Keep continuation comments out of the bullet.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -913,10 +946,22 @@ In your fork's `applicationset.yaml`, add a `qa` element (`env: qa`, `path: over
 Re-run a failing canary and `oc logs` the analysis Job's pod (`oc get pods -n {user}-prod -l job-name`) — the probe prints exactly why it failed.
 * *Stand up a blue-green Rollout.*
 Deploy a second, throwaway Rollout using the `blueGreen` strategy (`activeService` + `previewService` + `autoPromotionEnabled: false`), push a new image, and watch the *preview* service point at the new version while *active* stays on the old — inspect both with `oc get rollout <name> -n {user}-prod -o jsonpath='{.status.blueGreen}'`.
-Promoting it normally means the Argo CD Rollout view's *Promote* button, or the `kubectl-argo-rollouts` CLI plugin's `promote` command — neither is available here (the Rollout view does not render on this cluster; the plugin is not installed in this terminal).
-// TODO(verify-on-cluster): the exact object-level mechanism to clear a paused blue-green promotion
-// gate without either the UI extension or the CLI plugin has not been grounded here.
-This is genuinely a no-hand-holding step: look up how the Rollouts controller expects a promotion to be signalled and try it against your throwaway Rollout, then watch active cut over.
+Two things surprise almost everyone here, and both look like success.
+First, `oc set image` cannot touch a Rollout at all (`no kind "Rollout" is registered for version "argoproj.io/v1alpha1"` — that verb only knows the built-in workload kinds), so ship the new version by editing your manifest and re-applying it.
+Second, the paused Rollout is *not* held by `spec.paused`; that field is never set.
+It is held by a *pause condition the controller wrote into `status`* — `phase: Paused`, `message: BlueGreenPause`, `pauseConditions: [{"reason":"BlueGreenPause", …}]` — with `status.blueGreen.activeSelector` still on the blue pod-hash while `previewSelector` has already moved to the green one.
+Promoting means clearing that condition — normally a *Promote* button in a Rollouts UI, or the Argo Rollouts CLI plugin's `promote` command.
+That plugin is not installed in this terminal (`oc plugin list` finds none), so signal the promotion on the object yourself — on the *status subresource*:
++
+[source,sh,subs="attributes+"]
+----
+oc patch rollout <name> -n {user}-prod --subresource status \
+  --type merge -p '{"status":{"pauseConditions":null}}'
+----
++
+*Active* cuts over to the green pod-hash within a second, `status.stableRS` becomes the green ReplicaSet, and blue scales to zero about 30 seconds later — the blue-green scale-down delay, which is why the old version is still there to fall back to for a moment.
+Leave `--subresource status` off and the API server silently drops the status half of your patch: `oc` prints `patched (no change)` and the Rollout stays paused — the same false success `oc patch … -p '{"spec":{"paused":false}}'` hands you.
+(A `'{"status":{"promoteFull":true}}'` patch on the same subresource promotes it too — the controller acts on that flag and clears it again.)
 (The Rollouts controller serves blue-green with no extra infrastructure — same pod-ratio-free cutover you read about above.)
 * *Break the ordering on purpose.*
 Reason about what would happen if the migration hook were wave `3` instead of `1` — would the app come up before the schema was ready?
