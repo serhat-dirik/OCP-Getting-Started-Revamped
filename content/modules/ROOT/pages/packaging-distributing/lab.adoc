@@ -74,10 +74,19 @@ oc get route parasol-notifications -n $NS -o jsonpath='{"https://"}{.spec.host}{
 +
 "One command, a running release, a URL. That's the difference between a folder of YAML and a product."
 
+// The 90-second wait below is DELIBERATE and must not be shortened away. Both implementations of the
+// service serve /health and nothing else (apps/parasol-notifications/node/server.js:71,
+// apps/parasol-notifications/python/app.py:59), so /healthz 404s and the probe can NEVER pass —
+// `--wait` therefore holds the release open for the full timeout and then reports
+// `UPGRADE FAILED: context deadline exceeded` (the captured run is in exercise 4 of this page, which
+// runs the identical command). That refusal IS the beat. What the arc was missing is a talk track
+// sized to the wait, so the presenter is not watching a frozen terminal: the second-terminal proof
+// below turns the 90 seconds into the strongest evidence in the arc — the app answering while the
+// upgrade is stuck.
 [demo-block]
 [TIME 4m]
-Say:: "Now the scary part — an upgrade. I'll ship a *broken* config: a probe pointing at a health path that doesn't exist. Watch Helm *refuse to call it done*, watch the old pods *keep serving*, and watch me roll back in one command."
-Show:: `helm upgrade --wait` failing; `helm history` showing revision 3 `failed`; the app still returning `{"status":"UP"}`; then `helm rollback` and green.
+Say:: "Now the scary part — an upgrade. I'll ship a *broken* config: a probe pointing at a health path that doesn't exist — the service serves `/health`, and I'm going to tell it `/healthz`. Watch Helm *refuse to call it done*, watch the old pods *keep serving*, and watch me roll back in one command. The waiting is the demo here: `--wait` holds the release open for a full *ninety seconds* before Helm gives up, and I'll spend that ninety seconds proving there was no outage."
+Show:: `helm upgrade --wait` sitting there for ninety seconds; a *second* terminal showing one new pod at `0/1` beside the old ones at `1/1` and the service still answering; then `UPGRADE FAILED`, `helm history` showing revision 3 `failed`; then `helm rollback` and green.
 Do:: Break it, prove no outage, recover:
 +
 [source,sh,role=execute]
@@ -87,6 +96,20 @@ helm upgrade parasol-notifications ./parasol-notifications -n $NS \
   --set 'livenessProbe.httpGet.path=/healthz' \
   --set 'readinessProbe.httpGet.path=/healthz' --wait --timeout=90s
 ----
++
+That command now blocks for ninety seconds. Do not watch it — switch to a second terminal and spend
+the wait on the payoff:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc get pods -n {user}-dev -l app.kubernetes.io/instance=parasol-notifications
+curl -sk "https://$(oc get route parasol-notifications -n {user}-dev -o jsonpath='{.spec.host}')/health"; echo
+----
++
+"Helm is *still* waiting — and here is what it is waiting for: one new pod stuck at ``0/1``, the old
+ones still ``1/1``. And the service, right now, mid-failure — ``UP``. That is the whole argument for
+packaging: Helm will not promote a release whose pods never became ready, so a bad config never
+reaches a customer. In a moment it will give up and say so."
 +
 "``UPGRADE FAILED`` — the new pod never passed its probe, so Helm never promoted it. The app never went down. Now —"
 +

@@ -42,6 +42,26 @@ ifdef::demo[]
 Run `ws solve config-multienv --user {user}` a few minutes ahead so the end state is up: the claims app fully configured in `{user}-dev`, and promoted to `{user}-stage` (2 replicas) and `{user}-prod` (3 replicas).
 Have a terminal logged in as `{user}` and the web console *Topology* for `{user}-dev` open.
 The command outputs below were captured from a live run; your pod names and image digests will differ.
+
+*Check all three environments before you promise beat 4.* `ws solve` stands stage and prod up through
+Argo, and each of them boots a Postgres of its own — so "the command returned" is not the same as
+"the environment is up". Beat 4 prints one line per environment and has nothing to say if a line is
+empty. Run this while you still have time to fix it:
++
+[source,sh,role=execute,subs="attributes"]
+----
+for ns in {user}-dev {user}-stage {user}-prod; do
+  printf "%-16s ready=%s\n" "$ns" \
+    "$(oc -n $ns get deploy parasol-claims -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+done
+----
++
+*If it prints `1`, `2` and `3`*, beat 4 runs exactly as scripted.
+*If a line comes back empty*, that environment is not serving yet — re-run the check a minute later,
+and if it is still empty, run `ws solve config-multienv --user {user}` again and wait for all three.
+Do *not* fill a missing environment in by hand with `oc apply -k overlays/stage` from the demo
+terminal: that is the attendee's exercise, it costs minutes of dead air on stage, and the arc is
+meant to *show* a promoted outcome, not perform one.
 ====
 
 [demo-block]
@@ -62,15 +82,26 @@ oc -n {user}-dev get deploy parasol-claims \
 [TIME 4m]
 Say:: "I'll break the readiness check — point it at a URL that doesn't exist — and roll it out. This is the failure the platform is built to contain."
 Show:: The terminal, then the Topology node going out of rotation, then the Route returning 503.
-Do:: Break readiness, roll the whole deployment onto the broken probe, and hit the Route:
+Do:: Break readiness, roll the whole deployment onto the broken probe, and hit the Route.
+The sampler in the middle is your talk track — while it prints, say: "the container is *up*; the
+process is fine. What is failing is the platform's *question* — can you serve? Watch the READY
+column, not STATUS."
 +
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/typo
 # scale to 0 then 1 so the only pod uses the broken readiness check
 oc -n {user}-dev scale deploy/parasol-claims --replicas=0
+# wait for the old pod to actually go, so exactly one pod is left and it is the broken-probe one
+for i in $(seq 1 20); do [ "$(oc -n {user}-dev get pods -l app=parasol-claims --no-headers 2>/dev/null | wc -l | tr -d ' ')" = 0 ] && break; sleep 2; done
 oc -n {user}-dev scale deploy/parasol-claims --replicas=1
-sleep 40
+# then sample the new pod instead of sleeping blind: it reaches Running in ~20-30s and then HOLDS at
+# 0/1, because readiness never passes. The loop stops the moment the container reports started.
+for i in $(seq 1 12); do
+  oc -n {user}-dev get pods -l app=parasol-claims --no-headers
+  oc -n {user}-dev get pods -l app=parasol-claims -o jsonpath='{.items[0].status.containerStatuses[0].started}' | grep -q true && break
+  sleep 3
+done
 oc -n {user}-dev get endpoints parasol-claims
 CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
 curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
@@ -88,6 +119,9 @@ Do:: Restore the readiness path:
 ----
 oc -n {user}-dev set probe deploy/parasol-claims --readiness --get-url=http://:8080/q/health/ready
 oc -n {user}-dev rollout status deploy/parasol-claims
+# re-derive the host rather than reusing $CLAIMS: a fresh terminal between beats would leave it
+# empty, and `curl http:///api/claims` prints "Route: 000" — which reads exactly like a failed fix
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
 curl -s -o /dev/null -w "Route: %\{http_code}\n" http://$CLAIMS/api/claims
 ----
 +
@@ -110,6 +144,28 @@ done
 ----
 +
 "Same image digest in all three — the exact bytes we tested. Different replica counts and config per environment. Promotion here means applying config, not rebuilding."
+
+[NOTE]
+.If the three digests do not match
+====
+This is the one way beat 4 fails, and it fails on the exact sentence you just said out loud.
+A differing digest is *not* a broken promotion — it is the *mutable-tag trap*: the shared
+`parasol-claims:1.0` tag was rebuilt after some nodes had already cached the older image, and
+`imagePullPolicy: IfNotPresent` let an earlier-scheduled pod keep the cached bytes.
+Delete the odd pod out and the fresh pull converges the digests:
+
+[source,sh,role=execute,subs="attributes"]
+----
+ODD={user}-stage        # the namespace whose digest differed; change it if it was another one
+oc -n $ODD delete pod -l app=parasol-claims
+oc -n $ODD rollout status deploy/parasol-claims
+----
+
+Then re-run the comparison block above.
+Do not skip past it in silence — say the quiet part instead: "that is a *tag* being mutable, and it
+is precisely why the supply-chain answer is to promote by *digest*, not by tag." The trap makes a
+better ending than the clean run did.
+====
 
 [demo-block]
 [TIME 1m]

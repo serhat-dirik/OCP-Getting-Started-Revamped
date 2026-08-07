@@ -46,6 +46,33 @@ Run `ws prep jobs-batch-kueue --user {user}` a few minutes ahead, and set `NS={u
 This demo runs from the *entry* state (a seeded dataset + an empty queue), not from `ws solve`.
 The money moment is the preemption in beat 3 — rehearse it once so the timing lands.
 Keep the terminal font large; this is all CLI.
+
+*Rehearsed already? Empty the queue before the room.* Your ClusterQueue `cq-{user}` carries `500m`
+CPU and `512Mi` — room for exactly *two* of the jobs beat 2 submits, which is the only reason "two
+admitted, three pending" is true. Those jobs `sleep 600`, so a rehearsal inside the last ten minutes
+is still holding the entire quota: beat 2 then shows *nothing* admitted, and beat 3 has nothing to
+preempt. Check it:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-batch get workloads
+----
++
+*If it says `No resources found`*, the queue is empty and beats 2–3 run exactly as scripted.
+*If anything is listed*, that is the rehearsal still occupying the quota. Clear it, and re-run the
+read until the Workloads are gone — quota is freed when the Workload object goes, not when you press
+Enter:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-batch delete jobs -l kueue.x-k8s.io/queue-name=user-queue
+oc -n {user}-batch get workloads
+----
++
+Never raise the `nominalQuota` on `cq-{user}` to get more jobs admitted. A *full* queue is the entire
+lesson — a bigger one means no pending Workloads and no preemption, so you would have deleted the
+demo in order to save it. (It is also a cluster-scoped object shared with the workshop's per-user
+isolation, so the edit does not stay in your lane.)
 ====
 
 [demo-block]
@@ -131,6 +158,37 @@ oc -n $NS get workloads -o custom-columns='WORKLOAD:.metadata.name,PRIORITY:.spe
 ----
 +
 "There it is — the high-priority job preempted a low one, kicked it back into the queue, and took its place. That eviction *is* admission control. No spreadsheet, no Slack argument — policy as code."
++
+If the `PREEMPTED` column is still blank, you read it too early — Kueue writes the condition after
+it has evicted the Workload, not when the high-priority Job is created. Re-run the same
+`oc get workloads` line; it is a read, it costs nothing, and saying "watch — here it comes" while
+you re-run it is a better beat than a column that filled in silently.
+
+[NOTE]
+.Before beat 4: check whether the model path is live on this cluster
+====
+The MaaS credential is per-cluster, and the entry state *validates* it at sync time and writes the
+verdict down — so read the answer now rather than discovering it in front of a customer:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-batch get cm maas-config -o jsonpath='ai={.data.aiPathAvailable} reason={.data.aiPathReason} model={.data.model}{"\n"}'
+----
+
+*If `ai=true`*, beat 4 runs as scripted: four claims come back `low` / `medium` / `high`.
+
+*If `ai=false` or `ai=unverified`*, the beat still works and you must say so *before* it lands, not
+after. The Job is still admitted by the same ClusterQueue and still completes — the model call is
+the only thing that fails, and every line prints `fraud-risk: unknown` instead of a verdict. Narrate
+that on purpose: "the verdict column is the model's job; the point of this beat is that the platform
+never had to care — same object, same label, same admission, same preemption rules." One timing
+warning for `ai=unverified` specifically (endpoint unreachable from the cluster): each of the four
+`curl` calls burns its full `--max-time 40`, so the `oc wait` can run most of its 180 seconds — say
+the line above while it does, or trim the Job to one claim before the room.
+
+Do not paste an API key into the Job on stage to rescue the verdicts. The per-user key is
+model-scoped, it is not something to type in front of a customer, and this beat does not need it.
+====
 
 [demo-block]
 [TIME 3m]
