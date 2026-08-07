@@ -156,6 +156,70 @@ oc get cm maas-config -n {user}-ai \
 
 *Fix:* This is expected on the workshop cluster — tracing is the `[ADD-ON]` observability tie to Observability (a separate module). To send traces, set `QUARKUS_OTEL_SDK_DISABLED=false` and `OTEL_EXPORTER_OTLP_ENDPOINT` to a collector, and each answer becomes a distributed trace. The *metrics* (`/q/metrics`) and the per-answer `toolCalls`/`tokenUsage` are the live observability here.
 
+== The injection "worked" — the agent answered correctly
+
+*Symptom:* Exercise 6's first block returns the true record (`Denied`, `8400.00 USD`) instead of the fabricated settlement, or the record-framed block answers correctly.
+
+*Cause:* Expected. The outcome is *not stable*, and that instability is the finding the exercise is built on. Measured on `{maas_model}` at temperature 0: the first block fabricated the figure in 7 runs out of 9 and broke off mid-answer in the other 2 — never answering correctly — while the record-framed block answered correctly in 2 runs out of 5. A correct answer is a draw from the same distribution, not a fault.
+
+*Fix:* Send the block again — the checkpoint expects you to. If it answers correctly *every* time across about five runs, check which model is actually in force (`curl -ksS "$AGENT/agent/info" | jq -r .model`): a different model draws the line somewhere else, which is the exercise's own point rather than a broken lab.
+
+== Exercise 6: `toolCalls` is empty and the answer contains `[get_claim(...)]`
+
+*Symptom:* The injection blocks return the tool call typed out as text, with `toolCalls: []`, so there is nothing to compare against.
+
+*Cause:* The *weak entry grounding* is still in force, or the exercise-2 rollout has not finished. The injection beat needs an agent that actually calls tools; against the entry draft it never does, and the whole exercise collapses.
+
+*Fix:* `oc rollout status deploy/parasol-agent -n $NS`, then `curl -ksS "$AGENT/agent/info" | jq -r .groundingPrompt` — if that prints the three-line "Keep answers short and professional" draft, go back and finish exercise 2.
+
+== The `grep` over the pod log returns nothing
+
+*Symptom:* `oc logs deploy/parasol-agent ... | grep -A2 '"role" : "tool"'` (exercise 6) or the `search_policies` schema grep (exercise 5) prints nothing at all.
+
+*Cause:* The `--tail` window no longer reaches a model request. The agent logs every request, so a busy or long-running pod pushes the block you want past the tail — and a pod that has just been rolled has not served one yet.
+
+*Fix:* Ask the agent a question *first*, then run the `grep` — in that order. If it still prints nothing, raise `--tail` (`--tail=800`, `--tail=2000`). A pod restarted since your last question has an empty request log by definition.
+
+== `langchain4j_aiservices_timed_seconds_max` is `0.0`
+
+*Symptom:* `/q/metrics` reports a healthy `_count` and `_sum` for the timer, but `_max` is `0.0` — on an agent that has demonstrably served requests.
+
+*Cause:* Not a broken metric. `_max` is a *rolling window* maximum, not an all-time high: it reports the slowest call *recently*, and decays to zero when the agent has been idle. Observed four times on the live agent — for example `_count 5.0`, `_sum 8.757`, `_max 0.0` while idle, then `_count 6.0`, `_sum 9.991`, `_max 1.2335` immediately after one question, the `_max` being exactly the `_sum` delta because that call was the only one in the window.
+
+*Fix:* Ask the agent something, then read `/q/metrics` straight away. For a number that does not decay, use the mean: `_sum / _count`. A `0.0` there means *nothing recent*, never *nothing slow*.
+
+== Exercise 5: the build fails cloning the repository
+
+*Symptom:* `oc logs build/policy-docs-mine-1 -n {user}-ai` ends in a `git clone` failure — a TLS/certificate error, or a host that cannot be resolved.
+
+*Cause:* The `BuildConfig` clones the workshop's *in-cluster* Gitea mirror over HTTPS. Two things can break that: the mirror being unreachable, or — the one that surprises people — an ingress certificate the build pod does not trust. The build pod trusts the cluster's normal certificate authority bundle; on a cluster whose ingress serves a *self-signed* certificate the clone fails inside the build, where nobody thinks to look.
+
+*Fix:* First confirm the mirror answers at all: `curl -sI {gitea_url}` from your terminal. If that is fine and the build still fails on the certificate, this is a cluster-provisioning property rather than a lab error — tell your instructor, who can point `spec.source` at a certificate authority reference. Note that `oc` succeeding from your terminal proves nothing about the build pod: they trust different things.
+
+== Exercise 5: `oc new-app` created a Service on the wrong port
+
+*Symptom:* Registration appears to work but `/q/health/ready` reports `policy-docs: DOWN`, or the agent's rollout never completes after `oc set env`.
+
+*Cause:* The registration URL is `http://policy-docs-mine:8080/mcp/sse`, and `oc new-app` derives the Service port from the image's `EXPOSE`. If the derived port is not `8080`, the agent dials a port nothing is listening on and its readiness probe — which pings its MCP servers — correctly refuses to pass.
+
+*Fix:* `oc get svc policy-docs-mine -n {user}-ai -o jsonpath='{.spec.ports[0].port}'` should print `8080`. If it does not, use the port it did derive in the `oc set env` URL. Either way you can always get back to a working agent with the hand-back command: `oc set env deploy/parasol-agent POLICY_DOCS_MCP_URL=http://policy-docs:8080/mcp/sse -n {user}-ai`.
+
+== Exercise 7: the runner scores `0/5` and every row says `FAIL`
+
+*Symptom:* `AGENT="$AGENT" bash /tmp/eval-run.sh` prints five `FAIL` rows with `GROUNDED NO` and an empty `-> answered:` line, and `SCORE: 0/5` — even though the agent answers fine when you `curl` it by hand.
+
+*Cause:* The script cannot reach the agent. Either `$AGENT` did not make it into the script, or the endpoint is not answering. `AGENT=` is set as a plain shell variable at the top of the lab, and `bash <script>` starts a *child* shell that does not inherit one — which is why the lab runs it with the `AGENT="$AGENT"` prefix. Drop the prefix and the script sees an empty host.
+
+*Fix:* Re-run it exactly as printed, with the prefix. If it still scores `0/5`, check the endpoint itself — `echo "$AGENT"` should print your Route, and `curl -ksS "$AGENT/agent/info"` should answer. A `502` there is the expired-MaaS-key case above, not a scoring problem.
+
+== Exercise 7: `ws verify` went red in the middle of the exercise
+
+*Symptom:* Part-way through scoring the baseline, `ws verify agentic-ai` reports the *entry* state and the grounding checks are red.
+
+*Cause:* Correct, and temporary. Scoring a baseline means putting the *weak* draft back and rolling the agent onto it, so for those few minutes the agent genuinely is at the entry state. Nothing is broken.
+
+*Fix:* Finish the exercise — the next step restores your own prompt from the `/tmp/grounding-mine.txt` snapshot you took, and verify goes green again. If you lost the snapshot, re-apply the prompt from exercise 2's *Write a grounding that works* step and roll the agent.
+
 == A pod is `ImagePullBackOff`
 
 *Symptom:* `parasol-agent`, `claims-db`, or `policy-docs` won't start; events show `ImagePullBackOff`.

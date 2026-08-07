@@ -38,9 +38,11 @@ include::partial$prep-while-you-read.adoc[]
 == What you'll learn
 
 * The *anatomy of an agent* — model plus instructions plus *tools* plus memory — and why the tools, not the model, are where the real answers come from.
-* Why *MCP tools are your APIs*: the *Model Context Protocol* (MCP) lets a model call your claims database and your policy search as ordinary services, so the agent reads *live* data instead of hallucinating it.
-* *Retrieval-Augmented Generation* (RAG) *honestly* — how grounding an answer in retrieved policy passages works, when it helps, and how it fails.
+* Why *MCP tools are your APIs*: the *Model Context Protocol* (MCP) lets a model call your claims database and your policy search as ordinary services, so the agent reads *live* data instead of hallucinating it. In the lab you *build one* — the same tool server, compiled from source in your own project and registered with one environment variable.
+* *Retrieval-Augmented Generation* (RAG) *honestly* — how grounding an answer in retrieved policy passages works, when it helps, and how it fails. Including the part most demos skip: a *citation is an assertion* the model made, and a *tool call is the receipt*.
 * That *grounding is engineered, not guaranteed* — the model *decides* whether to call a tool, and the instruction that sways that decision is a *system prompt you write*, shipped as ordinary configuration. In the lab you write it.
+* That *everything the agent reads is input* — free text from a claim can carry an instruction, and *prompt injection* is what decides whether an agent goes near a real claims queue. You make it happen, and then build the control that catches it, which is not a prompt.
+* How you would *know if it got worse* — a fixed question set, scored on whether a tool ran and whether the grounded facts came back, small enough to write in a lab and to run in a pipeline.
 * Where *guardrails*, a *Llama Stack* agent runtime, and a production *vector database* fit — the `[ADD-ON]` platform layer above the graded path — and *when* to reach for each.
 * The thesis that ties the whole week together: *the same platform disciplines apply* — health, config, metrics, tracing, and the golden path are identical for an AI app.
 
@@ -67,7 +69,7 @@ include::example$diagrams/agentic-ai/01-agent-anatomy.mmd[]
 * *Model* — the reasoning engine. On this workshop it is `{maas_model}`, served over an OpenAI-compatible *Models-as-a-Service* (MaaS) endpoint. The agent is *model-agnostic*: the same code runs against any served model; only an environment value changes.
 * *Instructions* — the *system prompt* that sets the agent's job and its rules: _use your tools instead of guessing, never invent claim details, cite the policy id you relied on._ This is where you encode *behaviour*, and it is ordinary text you can read and change — on Parasol's agent it lives in a ConfigMap rather than in the image, which is what makes it yours to engineer.
 * *Tools* — the functions the model may call. For Parasol these are the two *MCP servers*: `claims-db` (look up a claim, list by status, fetch history) and `policy-docs` (search the policy corpus). The tools are the whole point: they are how the agent touches *your* world.
-* *Memory* — where the multi-step tool conversation is held. Parasol's agent uses a *fresh, per-request* memory: it remembers within a single answer (question → tool call → tool result → answer) but shares nothing between requests, which — with *temperature 0* — keeps answers reproducible.
+* *Memory* — where the multi-step tool conversation is held. Parasol's agent uses a *fresh, per-request* memory: it remembers within a single answer (question → tool call → tool result → answer) but shares nothing between requests, so no earlier conversation can steer a later one. Pair that with *temperature 0*, which makes the model take the highest-probability token at each step rather than sampling — that *minimizes* randomness, and it is worth doing, but it does not *guarantee* determinism. Identical requests to one model at temperature 0 have been measured on this workshop returning the same substance in different packaging, and an agent under adversarial input can fail two different ways minutes apart. Pin what you can, then *measure* rather than assume.
 
 == MCP tools are your APIs
 
@@ -90,7 +92,9 @@ Three things follow, and they are why MCP matters to a platform team:
 
 `policy-docs` is a *RAG* tool. *Retrieval-Augmented Generation* means: before the model answers, *retrieve* the few relevant documents and let the model *generate* its answer *from those passages* — not from its memory.
 
-When a staffer asks about the auto deductible, the agent calls `search_policies("auto collision deductible")`, gets back the `POL-AUTO-01` passage, and answers from it — for example: _"500 USD per incident, as stated in policy POL-AUTO-01."_ The exact wording is the model's; the figure and the citation are the tell — a grounded answer can *point at its source*.
+When a staffer asks about the auto deductible, the agent calls `search_policies("auto collision deductible")`, gets back the `POL-AUTO-01` passage, and answers from it — for example: _"500 USD per incident, as stated in policy POL-AUTO-01."_ The exact wording is the model's.
+
+Be precise about what that citation is worth, because it is the single easiest thing to get wrong about RAG. A citation is *the model's own claim* about where it looked, produced by the same machinery as the rest of the sentence — a model can emit a perfectly well-formed policy id straight out of its weights, and a hallucination that cites its source is still a hallucination. The *evidence* is the agent's record that the tool ran: which tool, with what arguments, reported alongside the answer. A citation is an assertion; a tool call is a receipt. In the lab you check both, and then open the cited document and read the figure in it.
 
 Be honest about what RAG does and does not do:
 
@@ -127,7 +131,11 @@ The harder truth, and the one the lab measures, is that the *wording of the syst
 
 == Guardrails are a platform concern `[ADD-ON]`
 
-An agent that reads live claims can also *leak* them, or be *steered* into answering something it should not. You do not want that protection scattered through every agent's code — you want it as a *platform layer* the request passes through, the same way a service mesh handles TLS or a gateway handles rate limits.
+An agent that reads live claims can also *leak* them, or be *steered* into answering something it should not.
+
+That second one has a name — *prompt injection* — and it is worth understanding before you meet it. Everything the model receives is one flat list of text: your system prompt, the user's question, and whatever your tools returned. A claim's free-text description is text. A timeline note somebody typed is text. Nothing in that list carries a trust level, so an instruction sitting in a claim record reads exactly like an instruction sitting in your system prompt, and the model may follow it. The lab makes that happen on the live agent — and the useful finding is what *does not* fix it: a rule in the system prompt forbidding it, which the agent will cheerfully break. The controls that work are ordinary engineering, outside the model: validate the answer against what the tools returned, design tools whose output gives prose nowhere to hide, keep every tool read-only until a human is in the loop — and put the detector in the platform.
+
+You do not want that protection scattered through every agent's code — you want it as a *platform layer* the request passes through, the same way a service mesh handles TLS or a gateway handles rate limits.
 
 On Red Hat OpenShift AI that layer is the *TrustyAI FMS Guardrails Orchestrator* (generally available). Its lightweight, GPU-free option is a *regex-detector sidecar*: a `GuardrailsOrchestrator` with `enableBuiltInDetectors` scans inputs and outputs for patterns like Social Security numbers, credit-card numbers, and emails, and *blocks* or *masks* the message before it reaches — or leaves — the model.
 
