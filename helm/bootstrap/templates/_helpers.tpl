@@ -131,6 +131,46 @@ ogsr-uninstall.sh derives the same operator set for a non-destructive uninstall.
 {{- end -}}
 
 {{/*
+The three cockpit attributes that describe THIS deployment: {cluster_ocp_version}, {maas_model} and
+{maas_endpoint}. Each helper returns the value to hand workshop-config, or "" for "we do not know".
+
+"" IS A MEANINGFUL ANSWER AND IS NEVER A GUESS. workshop-config emits each ConfigMap key only when
+its value is non-empty, so "" lets content/antora.yml's visible placeholder through instead of
+merging a blank over it. Same contract bootstrap/install.sh relies on — these helpers exist so the
+two paths make the identical decision from different inputs, rather than the FSC path passing
+nothing at all (which is what made an RHDP deployment serve the sentinels by construction).
+
+MaaS: both values are gated on lightspeedEnabled, not on litemaas.enabled alone. A deployment whose
+credential was withheld or hard-disabled has no model, and a cockpit must not name one it cannot
+reach. maasModel stays "" when the deployer did not PIN one, because the model is then discovered
+in-cluster by job-maas-secret and no render-time input can know its name.
+*/}}
+{{- define "ogsr-bootstrap.cockpitMaasEndpoint" -}}
+{{- if eq (include "ogsr-bootstrap.lightspeedEnabled" .) "true" -}}
+{{- trim (toString ((.Values.litemaas | default dict).apiUrl | default "")) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "ogsr-bootstrap.cockpitMaasModel" -}}
+{{- if eq (include "ogsr-bootstrap.lightspeedEnabled" .) "true" -}}
+{{- trim (toString ((.Values.litemaas | default dict).model | default "")) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Deployer-asserted OpenShift release, SHAPE-VALIDATED. Anything not release-shaped becomes "" — the
+same rejection bootstrap/install.sh applies to its live read, and for the same reason: this string
+is interpolated into a YAML document inside a ConfigMap, so a malformed value must be rejected
+rather than passed through. Rejection is silent HERE by design (a `fail` would deny the operator a
+whole workshop over one rendered word) and loud in job-cockpit-attributes.yaml, which re-applies
+this exact regex against the live cluster and reports the mismatch with the real value.
+*/}}
+{{- define "ogsr-bootstrap.cockpitOcpVersion" -}}
+{{- $v := trim (toString ((.Values.showroom | default dict).ocpVersion | default "")) -}}
+{{- if regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][A-Za-z0-9._-]+)?$" $v -}}{{- $v -}}{{- end -}}
+{{- end -}}
+
+{{/*
 Space-separated attendee usernames. Uses the explicit FSC roster
 (multi_user.users[].username) when provided, else userPrefix1..num_users.
 Consumed by the workshop-users Job to build the htpasswd file.

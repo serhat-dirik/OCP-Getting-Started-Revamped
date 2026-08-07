@@ -1,0 +1,175 @@
+# =============================================================================
+# Cockpit-attribute truth check (Sync hook, wave -7) — the only thing on this path that can
+# compare what the cockpits WILL SAY against what is actually true on this cluster.
+#
+# WHY A JOB AND NOT A CHART VALUE. Two of the three attributes this chart passes to
+# workshop-config ({cluster_ocp_version}, {maas_model}) are only knowable from the live cluster,
+# and NOTHING that renders this chart can read one. Argo CD's repo-server renders with
+# `helm template`, which opens no cluster connection at all (measured 2026-08-08: a deliberately
+# bogus KUBECONFIG produced rc=0 and an empty `lookup` map, not "Kubernetes cluster unreachable"),
+# so `lookup` is out. And a Job cannot inject one either: every object this chart renders is owned
+# by the `field-content` Application, which runs selfHeal=true, so a patched-in helm parameter is
+# reverted on the next reconcile — the cockpits would flap between right and wrong, rolling every
+# attendee's pod each time (workshop-config hashes these attributes into checksum/user-data).
+#
+# So this Job does the one useful thing that IS available: it READS the truth and SAYS it. Every
+# gap is reported with the exact string that closes it, so a deployer who ran the order without
+# these values gets `showroom.ocpVersion=4.22.8` handed to them rather than a concept to go
+# research. That matters because the failure it guards is not loud on its own — a missing override
+# renders as plausible-looking prose on a served page, and the first person to notice was an SA
+# reading a literal `set-from-cluster` in front of a customer.
+#
+# ALWAYS EXITS 0. These attributes are documentation-cosmetic: every module works without them, so
+# denying a 15-25 minute workshop deployment over one rendered word is disproportionate — the same
+# trade bootstrap/install.sh makes at its own version read. Loud, never fatal.
+#
+# KNOWN LIMIT (repo-wide, not specific to this Job): Argo auto-heal does not re-execute a Sync-phase
+# hook when nothing else drifted, so this reports on real syncs, not continuously. `ws doctor`'s
+# cockpit-attributes row is the continuous check.
+#
+# READS ONE SECRET KEY BY NAME, NEVER A RANGE: `{.data.model}` / `{.data.endpoint}` print those two
+# values only. The apitoken in the same Secret is never read and never printed.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogsr-cockpit-attributes
+  namespace: {{ .Values.namespaces.system }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-7"
+  labels:
+    {{- include "ogsr-bootstrap.ownerLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "ogsr-bootstrap.ownerLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: ogsr-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: attributes
+          image: {{ .Values.images.cli }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: STATE_NS
+              value: {{ .Values.namespaces.system | quote }}
+            # What the chart ACTUALLY passed to workshop-config — the same helper calls
+            # templates/applications.yaml renders, so this Job can never grade a different value
+            # than the one the cockpits will serve.
+            - name: DECLARED_OCP
+              value: {{ include "ogsr-bootstrap.cockpitOcpVersion" . | quote }}
+            - name: DECLARED_MODEL
+              value: {{ include "ogsr-bootstrap.cockpitMaasModel" . | quote }}
+            - name: DECLARED_ENDPOINT
+              value: {{ include "ogsr-bootstrap.cockpitMaasEndpoint" . | quote }}
+            # The RAW deployer input, before shape validation. Carried separately so a value that
+            # was REJECTED for its shape reports as a rejection ("you typed 4.22") instead of
+            # looking identical to having typed nothing at all.
+            - name: RAW_OCP
+              value: {{ (.Values.showroom | default dict).ocpVersion | default "" | quote }}
+            - name: MAAS_ON
+              value: {{ include "ogsr-bootstrap.lightspeedEnabled" . | quote }}
+          args:
+            - |
+              set -euo pipefail
+              ok(){ echo "✅ $*"; }; info(){ echo "▶ $*"; }
+              warn(){ echo "⚠️  $*" >&2; }; err(){ echo "❌ $*" >&2; }
+              GAPS=0
+
+              echo "▶ cockpit attributes — what the served pages will say about THIS deployment"
+              echo "  (these three describe the environment, not the product: a wrong one is read"
+              echo "   aloud in front of a customer, so every gap below names its own fix)"
+
+              # ── {cluster_ocp_version} ────────────────────────────────────────────────────────
+              # .status.desired.version is the release the CVO is converging on; on a settled
+              # cluster it IS the running one, and mid-upgrade it names the target — the more
+              # useful answer for a workshop about to run on it. Same field install.sh reads.
+              LIVE_OCP="$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)"
+              if [[ -z "$LIVE_OCP" ]]; then
+                warn "could not read clusterversion/version — cannot grade {cluster_ocp_version} on this cluster"
+                warn "   check: oc get clusterversion version -o jsonpath='{.status.desired.version}'"
+                GAPS=$((GAPS + 1))
+              elif [[ -n "$DECLARED_OCP" && "$DECLARED_OCP" == "$LIVE_OCP" ]]; then
+                ok "{cluster_ocp_version} = ${DECLARED_OCP} — matches the live cluster"
+              elif [[ -n "$DECLARED_OCP" ]]; then
+                err "{cluster_ocp_version} IS WRONG: the cockpits will say '${DECLARED_OCP}', this cluster runs '${LIVE_OCP}'"
+                err "   every page that names the release is now confidently wrong — nobody questions a plausible number"
+                err "   fix: set showroom.ocpVersion=${LIVE_OCP} on the order, then re-sync field-content"
+                GAPS=$((GAPS + 1))
+              elif [[ -n "$RAW_OCP" ]]; then
+                err "showroom.ocpVersion='${RAW_OCP}' was REJECTED — not release-shaped (expected e.g. 4.22.8)"
+                err "   it was dropped rather than served, so the cockpits render the visible placeholder instead"
+                err "   fix: set showroom.ocpVersion=${LIVE_OCP} on the order, then re-sync field-content"
+                GAPS=$((GAPS + 1))
+              else
+                warn "{cluster_ocp_version} is UNSET — every cockpit renders the placeholder from content/antora.yml"
+                warn "   this cluster runs ${LIVE_OCP}"
+                warn "   fix: set showroom.ocpVersion=${LIVE_OCP} on the order, then re-sync field-content"
+                warn "   (it cannot be read automatically on this path — see values.yaml 'showroom:')"
+                GAPS=$((GAPS + 1))
+              fi
+
+              # ── {maas_model} + {maas_endpoint} ───────────────────────────────────────────────
+              if [[ "$MAAS_ON" != "true" ]]; then
+                info "no MaaS credential on this deployment — {maas_model}/{maas_endpoint} are"
+                info "   intentionally absent and the AI beats report 'AI path unavailable'. Not a gap."
+              else
+                # What ogsr-maas-secret actually staged: the model CONFIRMED against the endpoint's
+                # own /v1/models, or DISCOVERED from that list when the deployer pinned nothing.
+                # Absent when the credential failed its gate (that Job already said so, loudly).
+                RESOLVED_MODEL=""
+                RESOLVED_ENDPOINT=""
+                if oc get secret ogsr-maas-credentials -n "$STATE_NS" >/dev/null 2>&1; then
+                  RESOLVED_MODEL="$(oc get secret ogsr-maas-credentials -n "$STATE_NS" -o jsonpath='{.data.model}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+                  RESOLVED_ENDPOINT="$(oc get secret ogsr-maas-credentials -n "$STATE_NS" -o jsonpath='{.data.endpoint}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+                fi
+
+                if [[ -z "$RESOLVED_MODEL" ]]; then
+                  warn "no staged MaaS credential to grade against — ogsr-maas-secret did not stage one"
+                  warn "   {maas_model}/{maas_endpoint} will render placeholders; see that Job's log for the cause"
+                  GAPS=$((GAPS + 1))
+                elif [[ -z "$DECLARED_MODEL" ]]; then
+                  warn "{maas_model} is UNSET — every cockpit renders the placeholder where the model name belongs"
+                  warn "   the modules will correctly USE '${RESOLVED_MODEL}' (discovered in-cluster); only the PAGES are wrong"
+                  warn "   fix: set litemaas.model=${RESOLVED_MODEL} on the order, then re-sync field-content"
+                  warn "   (an unpinned model is discovered after render, so no chart value can know its name)"
+                  GAPS=$((GAPS + 1))
+                elif [[ "$DECLARED_MODEL" != "$RESOLVED_MODEL" ]]; then
+                  err "{maas_model} DISAGREES WITH THE CREDENTIAL: pages say '${DECLARED_MODEL}', the modules use '${RESOLVED_MODEL}'"
+                  err "   fix: set litemaas.model=${RESOLVED_MODEL} on the order, then re-sync field-content"
+                  GAPS=$((GAPS + 1))
+                else
+                  ok "{maas_model} = ${DECLARED_MODEL} — matches the credential the modules use"
+                fi
+
+                if [[ -z "$DECLARED_ENDPOINT" ]]; then
+                  warn "{maas_endpoint} is UNSET — set litemaas.apiUrl on the order"
+                  GAPS=$((GAPS + 1))
+                elif [[ -n "$RESOLVED_ENDPOINT" && "$DECLARED_ENDPOINT" != "$RESOLVED_ENDPOINT" ]]; then
+                  err "{maas_endpoint} DISAGREES WITH THE CREDENTIAL: pages say '${DECLARED_ENDPOINT}', the credential was issued for '${RESOLVED_ENDPOINT}'"
+                  GAPS=$((GAPS + 1))
+                else
+                  ok "{maas_endpoint} = ${DECLARED_ENDPOINT}"
+                fi
+              fi
+
+              # Exit 0 either way — see the header. The verdict is the log, not the status.
+              if [[ "$GAPS" -eq 0 ]]; then
+                ok "all cockpit attributes describe this cluster truthfully"
+              else
+                warn "${GAPS} cockpit attribute(s) will render a placeholder or a wrong value."
+                warn "   The workshop still works — every module is unaffected. What breaks is the"
+                warn "   page's claim about THIS environment, which is the sentence a presenter reads out."
+              fi
+              exit 0
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi

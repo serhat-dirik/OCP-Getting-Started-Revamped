@@ -124,7 +124,8 @@ every key named in `residue_keys`, present or absent. Restore what `residue_note
 | -9   | Job (hook)   | `ogsr-argocd-health-tuning`               | application-controller sizing + Subscription health check |
 | -9   | Job (hook)   | `ogsr-node-shaping`                       | batch pool + synthetic zones (deployment-targets-scheduling / resilience-multicluster-dr) |
 | -8   | Job (hook)   | `ogsr-workshop-users` / `ogsr-maas-secret` | htpasswd + OAuth IdP / MaaS secret |
-| -1   | ConfigMap    | `ogsr-userinfo`                           | `demo.redhat.com/userinfo` (URLs, roster, password) |
+| -7   | Job (hook)   | `ogsr-cockpit-attributes`                 | reads the live cluster and reports which per-deployment attributes the pages will get wrong |
+| -1   | ConfigMap    | `ogsr-userinfo`                           | `demo.redhat.com/userinfo` (URLs, roster, password, content notice) |
 | 0    | Application  | `pp-core-devtools`                        | **mirror anchor**: gitea + git-mirror + dev tooling (from GitHub) |
 | 1    | Application  | `pp-batch` (+ `pp-ai-assist`/`pp-auth`/`pp-resilience`) | platform stacks, from the mirror |
 | 1    | Job (hook)   | `ogsr-gitea-seed-secret`                  | shared-password secret for Gitea/Showroom seeding |
@@ -157,6 +158,7 @@ comments in `values.yaml`).
 | `gitops.repoURL` / `.revision` / `.path` | this repo / `main` / `helm/bootstrap` | self-reference for child app sources |
 | `litemaas.enabled` / `.apiUrl` / `.apiKey` / `.model` | `false` / `""` / `""` / `""` | MaaS LLM; Lightspeed installs only when enabled AND apiUrl + apiKey are set, else auto-skips. **`model` empty = discover** from the endpoint — MaaS keys are model-scoped, so a guessed name is a 401 inside the AI modules. A key the endpoint refuses is never staged |
 | `lightspeed` | unset | set `false` to hard-off the assistant while keeping the workshop's own MaaS credential (which four modules' AI beats read). Not the same as `litemaas.enabled=false`, which withholds that credential too |
+| `showroom.ocpVersion` | `""` | the OpenShift release the lab pages name (`{cluster_ocp_version}`). **Deployer-asserted: nothing that renders this chart can read a cluster** (see Known differences). Release-shaped or it is rejected. Empty = pages show a visible placeholder. `ogsr-cockpit-attributes` prints the exact value to set |
 | `argocd.manageControllerResources` / `.controllerResources` | `true` / 6Gi limit, 2Gi request | raise the application-controller above the operator-default 2Gi. **2Gi is OOMKilled before the workshop layer materializes.** Set `false` only when the Argo CD belongs to your organisation and you will raise it yourself; the prior value is recorded before patching so `ogsr-uninstall.sh` restores it |
 | `multi_user.num_users` / `.users` / `.userPrefix` / `.manageHtpasswd` | `5` / `[]` / `user` / `true` | attendee roster; `manageHtpasswd=false` if the base CI provisions userN |
 | `workshop_user_password` | `openshift` | shared, throwaway, non-secret console/Gitea password |
@@ -194,6 +196,23 @@ field deployment discover it at an event. These are open, not settled:
   the batch-pool taint. A PostSync hook fires while the stacks are still deploying and cannot tell
   a transient Pending from a starved one, so porting it would fail good installs. The taint *floor*
   (3-worker minimum, ported in 0.4.0) removes the cause the gate exists to catch.
+- **`{cluster_ocp_version}` cannot be read live on this path; the script reads it.** `install.sh`
+  runs `oc get clusterversion version` in preflight and passes the answer. Nothing here can do
+  that. Argo CD's repo-server renders with `helm template`, which opens **no cluster connection at
+  all** — measured 2026-08-08: against a deliberately bogus `KUBECONFIG` it returned rc=0 with
+  `lookup` yielding an empty map, rather than the "Kubernetes cluster unreachable" a connection
+  attempt would produce. So `lookup` is out. A Job *can* read the version but cannot inject it:
+  everything this chart renders is owned by the `field-content` Application, which runs
+  `selfHeal: true`, so a patched-in helm parameter is reverted on the next reconcile — and because
+  `workshop-config` hashes these attributes into `checksum/user-data`, the cockpits would roll every
+  attendee's pod on each flap. `showroom.ocpVersion` is therefore a deployer input, and
+  `ogsr-cockpit-attributes` reads the live cluster after the sync to say whether it is right and, if
+  it is unset, to print the exact string to put on the order. Closing this properly needs a design
+  decision (see that Job's header for the three options).
+- **`{maas_model}` is only right when the model is PINNED.** `litemaas.model` empty means *discover*,
+  and discovery happens in-cluster (`ogsr-maas-secret`) after the chart has rendered. The modules
+  still use the discovered model correctly — only the *pages* fall back to a placeholder. Pin
+  `litemaas.model` to make the pages name it; `ogsr-cockpit-attributes` prints the discovered name.
 - **`workshop_user_password` has no `CHANGEME` → generate.** The script mints one and writes
   `.credentials.local.txt`; a Job has no such file to write to, and the value is published through
   the UserInfo ConfigMap, so it must be a values input.
