@@ -548,6 +548,49 @@ jobs:
           fi
           echo "self-test ok — every proof in the suite held (rc=1)."
 
+  digest-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The curated Parasol task library must ship no floating image tags
+        # WHY THIS JOB EXISTS. pipelines/tasks/image-size-report.yaml shipped
+        # `registry.redhat.io/openshift4/ose-cli:latest` for the whole life of the module that
+        # TEACHES digest pinning, and nothing in this workflow was looking: there were guards for
+        # pull policy, CDN assets, API-key shapes and eight kinds of copy drift, and none asserted
+        # that an image reference is immutable.
+        #
+        # The tag had also drifted somewhere nobody could see from the manifest. On the el8
+        # `openshift4/ose-cli` repository `latest` is the ONLY short tag published — v4.16 through
+        # v4.22 do not exist there — and it has been frozen on v4.15.0 since 2025-09-25 with
+        # freshness grade D and unapplied Critical errata. A floating tag was resolving to a client
+        # seven minors OLDER than versions.yaml's own OCP floor.
+        #
+        # SCOPE IS DELIBERATELY THE CURATED LIBRARY, NOT THE TREE. Measured 2026-08-08: 55 floating
+        # `image:` tags outside tools/lint fixtures, 44 of them one-shot `kind: Job` install/seed
+        # hooks. A gate that opened on 44 pre-existing findings gets switched off inside a day and
+        # takes the findings that matter with it, so this polices the artifact whose whole value is
+        # immutability — the Tasks every app pipeline taskRefs by cluster resolver. Ten of its
+        # eleven real step images were already pinned (the twelfth `image:` field is a ${IMAGE}
+        # parameter), so pinning the last one made the convention unanimous and the tree passes
+        # today. The guard's own docstring records what is out of scope and why; widen it there,
+        # not here.
+        run: |
+          rc=0
+          python3 tools/lint/digest-pin-guard.py --self-test || rc=$?
+          # Exactly 1 = every floating-tag and malformed-digest canary fired AND every correct
+          # form (bare digest, tag@digest, parameter placeholder, prose in a comment) stayed
+          # clean. 0 = the detectors are blind; 2 = a canary went undetected, a correct form was
+          # false-positived, or the scope floors did not refuse a collapsed input set. Detection
+          # is unproven in every one of those cases, so fail rather than trust a clean tree run.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::digest-pin-guard self-test must exit 1 (floating tags detected, correct" \
+                 "pins stay clean); got rc=$rc. The guard's detection is unproven — refusing" \
+                 "to trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — floating tags fail, correct pins pass, collapsed scope refuses (rc=1)."
+          python3 tools/lint/digest-pin-guard.py
+
   maas-model-no-default:
     runs-on: ubuntu-latest
     steps:
