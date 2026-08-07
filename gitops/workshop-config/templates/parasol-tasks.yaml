@@ -185,7 +185,13 @@ spec:
   steps:
     - name: generate-settings
       # Same image as the build step below, so this costs no extra pull: it is already on the node.
-      image: registry.access.redhat.com/ubi9/openjdk-21:latest
+      # PINNED BY DIGEST, not `:latest` — the org-standard Task models the org standard the
+      # supply-chain module teaches, and the shipped `maven` Task it replaces is digest-pinned too.
+      # TAG → DIGEST resolved 2026-08-07: ubi9/openjdk-21:latest → sha256:24dad82…, image
+      # 1.24-3.1785873424, JAVA_VERSION=21, MAVEN_VERSION=3.9. This is the multi-arch INDEX digest,
+      # not a per-arch child, so the library Task is not pinned to one node architecture.
+      # Re-resolve: oc image info --show-multiarch registry.access.redhat.com/ubi9/openjdk-21:latest
+      image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
       volumeMounts:
         - name: maven-settings
           mountPath: /maven-settings
@@ -250,7 +256,9 @@ spec:
         fi
     - name: mvn-goals
       # UBI9 OpenJDK 21 builder image — ships Maven 3.9 at /usr/bin/mvn; JDK 21 matches the app.
-      image: registry.access.redhat.com/ubi9/openjdk-21:latest
+      # THE SAME DIGEST as generate-settings above, on purpose: one pull, and both steps provably
+      # run the same JDK. Change both or neither; provenance is on that step.
+      image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
       workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
       volumeMounts:
         - name: maven-settings
@@ -386,6 +394,11 @@ spec:
 # LOCKSTEP with pipelines/tasks/sonar-scan.yaml. Contract: a `sonar-auth` Secret (keys sonar-token +
 # sonar-host-url) in the run namespace — the appsec stack mints it in sonarqube/sonar-ci-token, the
 # app-security-testing entry state copies it per-user into {user}-cicd.
+# Read that file's header for WHY the optional maven-cache workspace exists: the compile step had the
+# same uncached-Maven defect maven-jdk21 had, and it bites harder here because sonar-scan is the FIRST
+# gate in the capstone (so the whole dependency tree was re-downloaded before anything else ran) and
+# because the capstone's designed loop is several red-gate → fix → re-run iterations. Same design as
+# maven-jdk21, deliberately — one Maven-caching pattern in the library, not two.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -399,7 +412,8 @@ spec:
   description: >-
     Runs a SonarQube (Community Build) SAST analysis of a Maven project and fails the build on a red
     quality gate (sonar.qualitygate.wait=true). Reads the SonarQube endpoint + analysis token from the
-    sonar-auth Secret in the run namespace.
+    sonar-auth Secret in the run namespace. Reuses a persistent Maven local repository when the
+    optional maven-cache workspace is bound, and honours a repository mirror via MAVEN_MIRROR_URL.
   params:
     - name: SONAR_PROJECT_KEY
       type: string
@@ -417,23 +431,120 @@ spec:
       type: string
       description: '"true" blocks on the quality gate and exits non-zero when it is red (the SAST gate).'
       default: "true"
+    - name: MAVEN_MIRROR_URL
+      type: string
+      description: >-
+        Repository mirror URL (a corporate Nexus/Artifactory) for the compile step. Empty — the
+        default — leaves Maven pointed at its own repositories. Same param NAME and semantics as the
+        shipped upstream `maven` Task and as the curated maven-jdk21 (mirror id "mirror.default",
+        mirrorOf "central"), so an org adopting this library configures both Tasks the same way.
+      default: ""
   workspaces:
     # The source checkout (git-clone writes here); compile + scan run against it in place.
     - name: source
+    # The Maven local repository, reused BETWEEN runs. OPTIONAL: an unbound caller still runs, just
+    # uncached. Bind it to an EXISTING PVC — a volumeClaimTemplate is per-run and caches nothing
+    # between runs. The per-user PVC lives in the app-security-testing entry state that owns
+    # {user}-cicd, which is the same PVC the capstone Pipeline already gives unit-test.
+    - name: maven-cache
+      optional: true
+  volumes:
+    # Carries the generated settings.xml from generate-settings to compile. NOT the source
+    # workspace: a stray file there lands in what SonarQube analyses (sonar.sources) and in any
+    # later build context. Not the cache workspace either — it must exist when the cache is unbound.
+    - name: maven-settings
+      emptyDir: {}
   results:
     - name: quality-gate-passed
       description: '"true" if the SonarQube quality gate passed, else "false".'
   steps:
+    - name: generate-settings
+      # Same image as the compile step below, so this costs no extra pull: it is already on the node.
+      # PINNED BY DIGEST, not `:latest` — and here it also protects the gate: a floating tag means
+      # the bytecode SonarQube analyses can come from a different JDK build between two runs of the
+      # same pipeline, which is exactly the unrecorded variable a SAST gate must not have.
+      # TAG → DIGEST resolved 2026-08-07: ubi9/openjdk-21:latest → sha256:24dad82…, image
+      # 1.24-3.1785873424, JAVA_VERSION=21, MAVEN_VERSION=3.9. Multi-arch INDEX digest, not a
+      # per-arch child. Same digest as maven-jdk21 on purpose: one image for the library.
+      # Re-resolve: oc image info --show-multiarch registry.access.redhat.com/ubi9/openjdk-21:latest
+      image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
+      volumeMounts:
+        - name: maven-settings
+          mountPath: /maven-settings
+      env:
+        # "true"/"false". An UNBOUND optional workspace resolves $(workspaces.maven-cache.path) to
+        # the EMPTY STRING, so -Dmaven.repo.local=$(…path) would expand to `-Dmaven.repo.local=` and
+        # break Maven outright. `.bound` is the only honest discriminator.
+        - name: CACHE_BOUND
+          value: $(workspaces.maven-cache.bound)
+        - name: CACHE_PATH
+          value: $(workspaces.maven-cache.path)
+        - name: MAVEN_MIRROR_URL
+          value: $(params.MAVEN_MIRROR_URL)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SETTINGS=/maven-settings/settings.xml
+
+        # XML-escape the mirror URL before it goes into an element: an `&` in a query string makes
+        # settings.xml unparseable and Maven then fails with "Non-parseable settings", which reads
+        # like a broken Task rather than a bad parameter. `&` first — escaping it after `<`/`>`
+        # would double-escape the ampersands those two just introduced.
+        MIRROR_ESC="$(printf '%s' "${MAVEN_MIRROR_URL}" \
+          | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+
+        if [ "${CACHE_BOUND}" = "true" ]; then
+          mkdir -p "${CACHE_PATH}/repository"
+        fi
+
+        {
+          echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">'
+          # <localRepository> rather than -Dmaven.repo.local, so the ONE generated file carries both
+          # the cache and the mirror and the compile step below stays a plain `mvn` invocation.
+          if [ "${CACHE_BOUND}" = "true" ]; then
+            echo "  <localRepository>${CACHE_PATH}/repository</localRepository>"
+          fi
+          if [ -n "${MAVEN_MIRROR_URL}" ]; then
+            echo '  <mirrors>'
+            echo '    <mirror>'
+            echo '      <id>mirror.default</id>'
+            echo "      <url>${MIRROR_ESC}</url>"
+            echo '      <mirrorOf>central</mirrorOf>'
+            echo '    </mirror>'
+            echo '  </mirrors>'
+          fi
+          echo '</settings>'
+        } > "${SETTINGS}"
+
+        if [ "${CACHE_BOUND}" = "true" ]; then
+          echo "✅ Maven local repository: ${CACHE_PATH}/repository (persistent — survives this run)"
+        else
+          echo "⚠️  no maven-cache workspace bound — Maven re-downloads its whole dependency tree."
+          echo "   This run still works; it is just slow. To reuse a cache between runs, bind the"
+          echo "   workspace to an EXISTING PersistentVolumeClaim (never a volumeClaimTemplate):"
+          echo "     tkn pipeline start … --workspace name=maven-cache,claimName=maven-cache"
+        fi
+        if [ -n "${MAVEN_MIRROR_URL}" ]; then
+          echo "✅ repository mirror: ${MAVEN_MIRROR_URL} (mirrorOf central)"
+        fi
     - name: compile
       # SonarQube Java rules need compiled bytecode (sonar.java.binaries) — produce target/classes with
       # the same UBI9 OpenJDK 21 runner as the parasol-tasks maven-jdk21 Task.
-      image: registry.access.redhat.com/ubi9/openjdk-21:latest
+      # THE SAME DIGEST as generate-settings above, on purpose: one pull, and the settings that step
+      # wrote provably belong to this Maven. Change both or neither; provenance is on that step.
+      image: registry.access.redhat.com/ubi9/openjdk-21@sha256:24dad82bd5d25d9b0c85f0e9c976e47ccce787cc73792355462bf54fe03d9a77
       workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      volumeMounts:
+        - name: maven-settings
+          mountPath: /maven-settings
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
         echo "▶ compiling for SonarQube analysis (Java rules require bytecode)…"
-        /usr/bin/mvn -B -ntp -DskipTests compile
+        # -s points Maven at the generated settings.xml, which is what carries the persistent local
+        # repository (and the mirror) — without it this step re-downloads the whole tree every run.
+        /usr/bin/mvn -s /maven-settings/settings.xml -B -ntp -DskipTests compile
     - name: sonar-scanner
       # SonarScanner CLI 12.x, digest-pinned (verified live 2026-07-15). Third-party OSS.
       image: docker.io/sonarsource/sonar-scanner-cli:12@sha256:23ca0f137965d9dff2198074043fd48d386280bc5d0ccac8c8349cea4cf096a9
