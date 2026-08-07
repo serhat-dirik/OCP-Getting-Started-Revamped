@@ -59,6 +59,16 @@ MAAS_ENDPOINT="$(v '.maas.endpoint')"
 # said "complete". Empty here means DISCOVER it from the endpoint (discover_maas_model below); a value
 # set in vars.yaml is honoured but still validated against what the endpoint actually offers.
 MAAS_MODEL="$(v '.maas.model')"; [[ -n "$MAAS_MODEL" && "$MAAS_MODEL" != "null" ]] || MAAS_MODEL=""
+# vars.example.yaml ships `model` as an angle-bracketed PLACEHOLDER so the key is visible and visibly
+# unset (there is no default model to ship — owner ruling 2026-07-30). An unedited copy of that file
+# therefore hands us a non-empty string, which would otherwise sail past discovery's "you set it
+# explicitly, using it anyway" branch and become a 401 inside the AI modules — the exact failure the
+# placeholder exists to prevent. Treat placeholder shapes as unset, i.e. ask the endpoint instead.
+# Same guard the endpoint placeholder already gets in the maas_configured block below.
+MAAS_MODEL_WAS_PLACEHOLDER="false"
+case "$MAAS_MODEL" in
+  *"<"*|*">"*|CHANGEME) MAAS_MODEL_WAS_PLACEHOLDER="true"; MAAS_MODEL="" ;;
+esac
 WS_PASS="$(v '.workshop_user_password')"
 # Console plugins default ON (owner 2026-07-19: mostly console links). Explicit `false` opts out; the
 # workshop-config hook stays append-if-absent and skips any name without a matching ConsolePlugin CR.
@@ -251,6 +261,34 @@ if [[ -z "$DOMAIN" || "$DOMAIN" == "null" ]]; then
   if [[ -n "$DOMAIN" ]]; then ok "auto-detected cluster domain: ${DOMAIN}"; else err "could not auto-detect cluster domain — content attributes may be blank"; fi
 fi
 
+# The cluster's LIVE OpenShift release → the cockpits' {cluster_ocp_version} attribute (Helm parameter
+# showroom.ocpVersion below). This is the only honest source for "the cluster in front of you runs X".
+# Deliberately NOT {ocp_version}, which is generated from versions.yaml where it is documented as a
+# supported MINIMUM and which freezes at content-build time — it rendered 4.22.6 across 85 uses on a
+# 4.22.8 cluster (2026-08-07, F-05). `.status.desired.version` is the release the CVO is converging on;
+# on a settled cluster it IS the running one (read live 2026-08-07: 4.22.8, matching the CLI's own
+# "Cluster version is 4.22.8" status line). Mid-upgrade it names the target, which is the more useful
+# answer for a workshop that is about to run on it.
+#
+# ON FAILURE WE DO NOT ABORT and we do not substitute a value. The attribute is documentation-cosmetic:
+# every module works without it, so failing a 40-minute install over one rendered word is
+# disproportionate — but silence is not an option either, so the failure is loud HERE and stays visible
+# to the attendee THERE. Empty makes the chart omit the key, so content/antora.yml's `set-from-cluster@`
+# soft default renders instead: a placeholder every reader questions, rather than a blank sentence
+# (emitting "" would merge over the soft default) or a plausible-but-wrong number nobody questions.
+# The shape check is a guard, not a formality — this string is interpolated into a YAML document inside
+# a ConfigMap, so anything that is not release-shaped is rejected rather than passed through.
+OCP_VERSION="$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || true)"
+if [[ "$OCP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]; then
+  ok "cluster OpenShift release: ${OCP_VERSION} (docs render it as {cluster_ocp_version})"
+else
+  warn "could not read a release-shaped version from clusterversion/version (got: '${OCP_VERSION:-<empty>}')"
+  warn "   effect: the cockpits will render {cluster_ocp_version} as the visible placeholder"
+  warn "   'set-from-cluster' instead of this cluster's release. Nothing else is affected."
+  warn "   check: oc get clusterversion version -o jsonpath='{.status.desired.version}'"
+  OCP_VERSION=""
+fi
+
 # Lightspeed pre-installed detection + AI model resolution. Both are READ-ONLY and both run HERE, in
 # preflight, deliberately: they are the two inputs whose failure would otherwise surface long after the
 # install mutated the cluster (a wrong model only fails inside the AI modules). Detection first, so a
@@ -269,6 +307,12 @@ fi
 # Lightspeed's Azure AD JWT instead — green install, 401 for every attendee (2026-07-29). If the
 # operator put a key in vars.yaml they mean the AI modules to work; prove it here, at the gate.
 if [[ "$maas_configured" == "true" ]]; then
+  # Say so when the deployer left the placeholder in — they intended to name a model, and a silent
+  # substitution is how "my key is scoped to something else" becomes an attendee's 401 three hours in.
+  if [[ "$MAAS_MODEL_WAS_PLACEHOLDER" == "true" ]]; then
+    warn "maas.model in ${VARS} is still the placeholder from vars.example.yaml — ignoring it and asking the endpoint instead."
+    warn "   pin the model your api_key is scoped to if the endpoint offers more than one (see the note in vars.example.yaml)."
+  fi
   discover_maas_model
 fi
 
@@ -1287,6 +1331,12 @@ spec:
         # Modules hidden from the attendee showroom nav/library (comma-joined slugs; "" = show all).
         - name: modulesDisabledCSV
           value: "${DISABLED_CSV}"
+        # This cluster's live OpenShift release → {cluster_ocp_version} in both cockpits. Read in
+        # preflight above; "" when that read failed or returned something not release-shaped, which
+        # makes the chart OMIT the attribute so antora.yml's visible 'set-from-cluster' placeholder
+        # survives. Never blank, never guessed — see the preflight comment for why.
+        - name: showroom.ocpVersion
+          value: "${OCP_VERSION}"
         # The two in-cluster BuildConfigs (Parasol images, showroom antora-ext) clone the workshop
         # source directly, so they follow repo_url too — otherwise a fork install would quietly
         # build its cockpit and app images from the upstream project. Scalars only: Argo's
