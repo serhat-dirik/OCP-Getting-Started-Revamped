@@ -810,10 +810,73 @@ ifdef::demo[]
 [NOTE]
 .Before you present
 ====
-Start from the *entry* (unprotected) state: `ws prep securing-apps-keycloak --user {user} --yes`, then confirm the open API (`curl` the claims route) prints *200* with no token.
+Start from the *entry* (unprotected) state: `ws prep securing-apps-keycloak --user {user} --yes`.
 In a terminal logged in as `{user}`, define the shell variables and helpers from the top of the lab (`NS`, `CLAIMS`, `WEB`, `FRAUD`, `REALM`, and the `get_token` / `decode` functions) so the beats below stay short, and open a browser tab on the web frontend.
-The encore beat calls the `parasol-fraud` service, which the entry state does *not* deploy — run `ws solve securing-apps-keycloak --user {user}` first to have it in place (or apply the manifest from the lab's exercise 7 live, before that beat).
 The whole arc is *config, applied live* — the drama is the status codes changing while the room watches, so narrate through each ~20s rollout.
+
+*Do not `ws solve` first — it takes the opening beat away.*
+`ws solve` sets the entry chart's `solve` flag, and that one flag does two things, not one: it adds `parasol-fraud` *and* it switches `parasol-claims` and `parasol-web` into their OIDC-protected form.
+On a pre-solved namespace beat 1 answers *401* instead of the open *200* the whole arc is built on, and beat 2's `oc set env` writes exactly the values the chart has already applied — you would be describing a change the room cannot see.
+Deploy the encore's `parasol-fraud` service live instead (heredoc below): it adds only fraud, and touches neither app you are about to protect on stage.
+
+*Check the opening state before you promise beat 1.* With the shell variables set, run this first:
+
+[source,sh,role=execute]
+----
+curl -ks -o /dev/null -w 'claims, no token -> %{http_code}\n' "$CLAIMS/api/claims"
+curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=parasol-web \
+  -d username=adjuster -d password=parasol -d scope=openid | jq -r 'if .access_token then "realm            -> token OK" else "realm            -> \(.error)" end'
+oc get deploy parasol-fraud -n "$NS" --ignore-not-found -o name
+----
+
+*If that prints `200`, `token OK`, and no `parasol-fraud` line*, you are in the entry state and the arc runs exactly as scripted.
+*If the first line prints `401`* (usually with a `parasol-fraud` line under it), this namespace is already protected — a `ws solve`, or a previous run's live flip. Re-run `ws prep securing-apps-keycloak --user {user} --yes` and check again before you open. Never start on the protected state and describe the open one: beat 1's `jq` prints nothing at all against a 401, thirty seconds into the demo.
+*If the realm line prints anything but `token OK`*, stop — the workshop Keycloak (`sso-workshop`) or your realm is down, and *no* beat in this arc works without it. Your own OpenShift console login does not prove it is up: the cluster login runs on a *different* Keycloak. Fix it before the room, not on stage.
+
+*Stage `parasol-fraud` during beat 4's narration* (the machine-identity beat changes nothing on the cluster, and the rollout is ~20-30s on a cached image), so the encore opens on a warm service:
+
+[source,sh,role=execute]
+----
+cat <<EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: parasol-fraud } }
+  template:
+    metadata: { labels: { app: parasol-fraud } }
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-fraud:1.0
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: QUARKUS_OIDC_TENANT_ENABLED, value: "true" }
+            - { name: QUARKUS_OIDC_AUTH_SERVER_URL, value: "$REALM" }
+            - { name: QUARKUS_OIDC_APPLICATION_TYPE, value: "service" }
+            - { name: QUARKUS_OIDC_TOKEN_AUDIENCE, value: "parasol-fraud" }
+            - { name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_PATHS, value: "/api/fraud,/api/fraud/*" }
+            - { name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_POLICY, value: "authenticated" }
+          readinessProbe: { httpGet: { path: /q/health/ready, port: 8080 }, initialDelaySeconds: 5, periodSeconds: 10 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
+spec:
+  selector: { app: parasol-fraud }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
+spec:
+  to: { kind: Service, name: parasol-fraud }
+  port: { targetPort: http }
+  tls: { termination: edge, insecureEdgeTerminationPolicy: Redirect }
+EOF
+oc rollout status deployment/parasol-fraud --timeout=180s
+----
 ====
 
 [demo-block]
@@ -918,9 +981,33 @@ curl -ks "$REALM/protocol/openid-connect/token" \
 "401 for the wrong audience. 200 once it's re-audienced — still as the adjuster. And when I try to exchange toward a service claims has no business reaching: *refused*. Downscope, never escalate — that's what makes a service chain provably safe."
 
 [NOTE]
+.Have these ready before you present — the three ways this arc fails live
+====
+Every beat is a status code, so a failure here does not look like a failure: it looks like a *different* number under a script that promised the right one. Keep this in your buffer.
+
+*The encore prints `401` twice.* The second one is supposed to be `200`. `XCHG` is set from `jq -r .access_token`, which prints `null` when Keycloak answers with an error instead of a token — so a failed exchange becomes a literal `Bearer null` and fraud correctly rejects it. Do not re-run the beat blind; read the error the pipeline swallowed:
+
+[source,sh,role=execute]
+----
+curl -ks "$REALM/protocol/openid-connect/token" \
+  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  -d client_id=parasol-claims -d client_secret=parasol-claims-secret \
+  -d subject_token="$ADJ" -d subject_token_type=urn:ietf:params:oauth:token-type:access_token \
+  -d audience=parasol-fraud | jq '{error, error_description}'
+----
+
+`invalid_grant` means `$ADJ` aged out (tokens live 30 minutes) — `ADJ=$(get_token adjuster)` and the beat runs clean. Anything naming the *client* or the *audience* is a realm-seeding problem you cannot fix on stage: close on beat 4's machine identity instead and say the exchange is in the hands-on lab. It is an encore; the arc's argument is already made without it.
+
+*The fraud calls do not answer at all* (`000`, or the router's error page rather than a status line). `parasol-fraud` is not there — `ws prep` deletes it, so a reset between your rehearsal and the room takes it with them. Re-apply the heredoc from *Before you present*; it is ~20-30s on a cached image, which fits under the encore's Say line.
+
+*Beat 3's browser lands straight in the app with no login page.* The frontend deliberately keeps its session cookie readable across restarts (that is what `QUARKUS_OIDC_TOKEN_STATE_MANAGER_ENCRYPTION_REQUIRED=false` in the command above is for), so a browser you logged into while rehearsing can restore that session instead of bouncing to Keycloak — and the redirect *is* the beat. Present beat 3 from a *fresh private window*; if you have already opened the normal one, open a private window and reload rather than narrating a redirect that is not going to happen.
+====
+
+[NOTE]
 .Resetting between runs
 ====
 `ws prep securing-apps-keycloak --user {user} --yes` returns `{user}-dev` to the clean *unprotected* entry state (removes the OIDC env from both apps and deletes the fraud service) so the arc starts fresh.
-The `parasol-fraud` service used in the encore comes from `ws solve securing-apps-keycloak --user {user}` — run that once before presenting if you want fraud already deployed, or deploy it live from the lab's exercise 7 manifest.
+Run it after every rehearsal, and re-run the opening-state check above — a rehearsal leaves the namespace protected, which is the one state this arc cannot open on.
+Do *not* reach for `ws solve` to get `parasol-fraud` back: the same flag that deploys fraud also protects both apps. Re-apply the heredoc from *Before you present* instead.
 ====
 endif::demo[]
