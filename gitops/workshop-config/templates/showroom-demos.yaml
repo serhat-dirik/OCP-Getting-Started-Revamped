@@ -45,12 +45,57 @@
   content only — no /tty-* routes, so no long HAProxy websocket timeouts needed on the Route
   either) + content (nookbag UI over /showroom/www, :8000).
 */ -}}
+{{- /*
+  ONE SOURCE FOR THIS COCKPIT'S ATTRIBUTES — the ConfigMap's payload and the Deployment's
+  checksum/user-data annotation are the same bytes. Same shape, same reasoning and the same
+  self-reference problem as showroom.yaml's workshop-config.showroomUserData (read that one's header
+  for the full account); this cockpit needs its own template because its payload is genuinely a
+  different document — cluster-wide keys only, no `user`/`page-user`, no module-hidden attributes.
+
+  It matters MORE here, not less, despite being one pod. This cockpit's own history is the argument:
+  it did not emit maas_model/maas_endpoint at all until 2026-08-07, so an SA demoing the AI track
+  read the literal sentinel off their own screen in front of a customer. Wiring the value without
+  wiring the restart would have left exactly that failure standing for one more pod lifetime.
+*/ -}}
+{{- define "workshop-config.showroomDemosUserData" }}
+    cluster_domain: {{ .domain }}
+    ocp_console_url: https://console-openshift-console.{{ .domain }}
+    gitea_url: https://{{ .giteaHost }}
+    devspaces_url: https://devspaces.{{ .domain }}
+    {{- /* The cluster's LIVE OpenShift release — same value, same reasoning as showroom.yaml's copy
+           (see the long note there): BARE, no `@`, because this ConfigMap merges into the component
+           descriptor and must outrank showroom/site-demo.yml's `set-from-cluster@` soft default.
+           Omitted, never blanked, when install.sh could not read clusterversion. Shares
+           .Values.showroom.ocpVersion rather than owning a showroomDemos copy — one cluster, one
+           release, exactly like showroom.images (see this file's header). */ -}}
+    {{- if .root.Values.showroom.ocpVersion }}
+    cluster_ocp_version: {{ .root.Values.showroom.ocpVersion | quote }}
+    {{- end }}
+    {{- /* The MaaS model and endpoint, shared from the same values as the attendee cockpit for the
+           same one-cluster reason. This cockpit serves the DEMO rendering of the SAME pages, so the
+           AI modules reference {maas_model} here too — and until 2026-08-07 this template did not
+           emit them at all, so an SA demoing the AI track read the literal sentinel off their own
+           screen in front of a customer. Omitted when empty so antora.yml's visible placeholder
+           survives rather than a blank swallowing the sentence. `ws doctor`'s "cockpit attributes"
+           row grades this cockpit too, so the omission is now a red row rather than something only
+           the person presenting can discover. */ -}}
+    {{- if .root.Values.showroom.maasModel }}
+    maas_model: {{ .root.Values.showroom.maasModel | quote }}
+    {{- end }}
+    {{- if .root.Values.showroom.maasEndpoint }}
+    maas_endpoint: {{ .root.Values.showroom.maasEndpoint | quote }}
+    {{- end }}
+    guid: sa-demo
+    lab_name: OpenShift Application Platform — Getting Started — Demo Guide
+{{- end }}
 {{- if .Values.showroomDemos.enabled }}
 {{- $ns := .Values.showroomDemos.namespace | default .Values.showroom.namespace }}
 {{- $domain := .Values.clusterDomain }}
 {{- $giteaHost := printf "gitea-%s.%s" .Values.giteaNamespace .Values.clusterDomain }}
 {{- $mirrorUrl := printf "https://gitea-%s.%s/%s/%s.git" .Values.giteaNamespace .Values.clusterDomain .Values.mirrorOrg .Values.mirrorRepo }}
 {{- $img := .Values.showroom.images }}
+{{- /* The one context both the userdata ConfigMap and the Deployment's checksum render from. */ -}}
+{{- $userData := dict "domain" $domain "giteaHost" $giteaHost "root" $ }}
 # The cockpit Namespace is declared ONCE, in templates/showroom-namespace.yaml — see that file.
 ---
 # nginx reverse proxy for the SA-Demos pod: / → nookbag content (:8000) only. No /tty-top or
@@ -98,34 +143,10 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
 data:
+  # Body lives in the workshop-config.showroomDemosUserData template at the top of this file — the
+  # SAME bytes the Deployment below hashes into checksum/user-data.
   user_data.yml: |
-    cluster_domain: {{ $domain }}
-    ocp_console_url: https://console-openshift-console.{{ $domain }}
-    gitea_url: https://{{ $giteaHost }}
-    devspaces_url: https://devspaces.{{ $domain }}
-    {{- /* The cluster's LIVE OpenShift release — same value, same reasoning as showroom.yaml's copy
-           (see the long note there): BARE, no `@`, because this ConfigMap merges into the component
-           descriptor and must outrank showroom/site-demo.yml's `set-from-cluster@` soft default.
-           Omitted, never blanked, when install.sh could not read clusterversion. Shares
-           .Values.showroom.ocpVersion rather than owning a showroomDemos copy — one cluster, one
-           release, exactly like showroom.images (see this file's header). */ -}}
-    {{- if .Values.showroom.ocpVersion }}
-    cluster_ocp_version: {{ .Values.showroom.ocpVersion | quote }}
-    {{- end }}
-    {{- /* The MaaS model and endpoint, shared from the same values as the attendee cockpit for the
-           same one-cluster reason. This cockpit serves the DEMO rendering of the SAME pages, so the
-           AI modules reference {maas_model} here too — and until 2026-08-07 this template did not
-           emit them at all, so an SA demoing the AI track read the literal sentinel off their own
-           screen in front of a customer. Omitted when empty so antora.yml's visible placeholder
-           survives rather than a blank swallowing the sentence. */ -}}
-    {{- if .Values.showroom.maasModel }}
-    maas_model: {{ .Values.showroom.maasModel | quote }}
-    {{- end }}
-    {{- if .Values.showroom.maasEndpoint }}
-    maas_endpoint: {{ .Values.showroom.maasEndpoint | quote }}
-    {{- end }}
-    guid: sa-demo
-    lab_name: OpenShift Application Platform — Getting Started — Demo Guide
+{{- include "workshop-config.showroomDemosUserData" $userData }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -148,6 +169,13 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        # why: identical to showroom.yaml's — the cockpit builds its content at POD INIT from this
+        # ConfigMap, so an attribute that changes here reaches a presenter only when the pod
+        # restarts, and editing a ConfigMap restarts nothing. No reserved-session gate on this one:
+        # there is no per-user reservation for a single shared cockpit, and any chart change already
+        # Recreate-rolls it, so this adds no class of interruption that did not exist.
+        checksum/user-data: {{ include "workshop-config.showroomDemosUserData" $userData | sha256sum | quote }}
       labels:
         app.kubernetes.io/name: showroom-demos
         app.kubernetes.io/instance: showroom-demos

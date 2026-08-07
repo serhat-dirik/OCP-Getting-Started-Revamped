@@ -2,6 +2,28 @@ apiVersion: v2
 name: workshop-config
 description: "Workshop layer: attendee users, platform-observer RBAC, per-user namespaces/quotas, entry-state AppProject, htpasswd IdP, and Gitea user seeding. One Argo CD Application (helm params userCount, clusterDomain)."
 type: application
+# 0.3.5: BOTH cockpit Deployments gain a checksum/user-data pod-template annotation over their own
+# user_data.yml, so an attribute change actually reaches a reader. It is the missing half of 0.3.4
+# and 0.1.28: a cockpit builds its content at POD INIT (the antora-build initContainer reads
+# /user_data/user_data.yml), so wiring maas_model and cluster_ocp_version put the values in a
+# ConfigMap that nothing restarted — they sat there, correct and unread, with Argo, `ws git-refresh`
+# and `helm template` all reporting success. Two properties, both measured by rendering rather than
+# reasoned about:
+#   (1) IT IS THE SAME BYTES. The stock incantation — `include (print $.Template.BasePath
+#       "/<cm>.yaml") . | sha256sum` — is unusable here because each ConfigMap and its Deployment
+#       live in the SAME file (self-referential include, and it would hash every OTHER user's
+#       objects too, rolling the whole cohort on one attendee's change). Hashing a hand-listed set
+#       of values instead goes stale the first time somebody adds a key. So each payload moved into
+#       a named template (workshop-config.showroomUserData / …DemosUserData) that the ConfigMap
+#       `include`s and the Deployment `include | sha256sum`es — they cannot disagree. Verified: all
+#       three rendered ConfigMap payloads are BYTE-IDENTICAL to 0.3.4's.
+#   (2) IT MOVES ONLY WHEN THE PAYLOAD MOVES. maasModel qwen3-14b→granite-3-8b moves all three
+#       checksums; homeStorage 5Gi→10Gi moves none. Presence alone would have been the wrong test.
+# Reserved sessions (.Values.reservedUsers) render NO annotation, the same call the postStart block
+# in showroom.yaml already makes: an attribute change is a chart change, and a reserved user is a
+# live session that a chart change must not Recreate-roll. They take it on the deliberate update.
+# Rendering change on a chart Argo caches, so the bump is load-bearing — without it the cockpits
+# keep rendering from the cached manifest and the annotation never appears.
 # 0.3.4: both cockpits' user_data.yml now carry cluster_ocp_version — the LAST wiring point of an
 # attribute that was already defined (softly, `set-from-cluster@`) in content/antora.yml,
 # showroom/site.yml and site-demo.yml but never injected, so every page referencing it rendered the
@@ -62,4 +84,4 @@ type: application
 # 0.1.27: parasol-tasks hook redacts JWT-shaped material from the raw stderr it prints (the hook
 # hands a ServiceAccount token to the command whose errors it echoes). Hook-only change, so the bump
 # is load-bearing against Argo's manifest cache.
-version: 0.3.4
+version: 0.3.5

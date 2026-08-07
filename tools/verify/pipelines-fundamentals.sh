@@ -126,7 +126,17 @@ check "Pipeline parasol-claims-build-test-deploy present" oc get pipelines.tekto
 # credibility. Absence is worth a check of its own because every PipelineRun in this module binds
 # the claim BY NAME: with the claim gone the TaskRun pod does not run uncached, it sits Pending.
 check "maven-cache claim present in ${NS} (the between-run Maven cache)" oc get pvc maven-cache -n "$NS" || hint "entry app not synced — ws start pipelines-fundamentals --user ${USER_NAME}. Until it exists, every run that binds workspace maven-cache=claimName:maven-cache leaves its TaskRun pod Pending (oc describe pod … → 'persistentvolumeclaim \"maven-cache\" not found')"
-check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing — re-run: ws start pipelines-fundamentals --user ${USER_NAME} (fork job)"
+# THE HINT DELIBERATELY DOES NOT SAY "re-run ws start". A missing fork has one common cause and it
+# is the ONE condition in which `ws start` cannot help: the fork Job is an Argo Sync hook at wave 1
+# (fork-and-seed.yaml), so it does not run at all while wave 0 is unhealthy — and wave 0 carries the
+# maven-cache PVC, which on a WaitForFirstConsumer default StorageClass sits Pending until something
+# mounts it. Measured 2026-08-07: op=Running, "waiting for healthy state of
+# /PersistentVolumeClaim/maven-cache", 16 minutes in, with the fork Job simply absent while other
+# users' existed. `ws start` then burns its full timeout and re-running it re-enters the same wait.
+# gitops/entry-states/pipelines-fundamentals/templates/maven-cache-bind.yaml is the fix (a binder Job
+# in wave 0) and names this hint as the second casualty of the same wedge — so the hint names the
+# WEDGE, in the order that tells the two worlds apart, and only then offers a command.
+check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing. Do NOT just re-run \`ws start\` — the fork Job is a wave-1 Argo Sync hook, so if the entry sync is wedged in wave 0 it never runs and a re-run waits on the same thing. Ask in this order: (1) did the Job ever exist — oc get job pipelines-fundamentals-fork-${USER_NAME} -n ogsr-gitea (instructor identity; that namespace is not attendee-readable). Absent = the sync never reached wave 1, so go to (2); present+Failed = a real fork failure, read oc logs job/pipelines-fundamentals-fork-${USER_NAME} -n ogsr-gitea. (2) is wave 0 stuck on the cache claim — oc get pvc maven-cache -n ${NS} and oc get job maven-cache-bind-${USER_NAME} -n ${NS}. Pending claim WITH a Completed binder Job = still settling, wait. Pending claim with NO binder Job = this entry state predates the fix: ws git-refresh, then ws reset pipelines-fundamentals --user ${USER_NAME}. Only once wave 0 is healthy does ws reset pipelines-fundamentals --user ${USER_NAME} re-run the fork hook."
 check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset pipelines-fundamentals --user ${USER_NAME} re-asserts the fork's app content from the mirror"
 check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset pipelines-fundamentals --user ${USER_NAME}"
 check "curated library task image-size-report reachable"  oc get tasks.tekton.dev image-size-report -n ogsr-parasol-tasks    || hint "parasol-tasks library missing — sync the workshop-config Argo app"

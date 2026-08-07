@@ -248,6 +248,30 @@ rollout_absent() {
   oc_absent get rollout "$1" -n "$2" -o name
 }
 
+# --- what a red Rollout check tells the attendee to RUN -----------------------
+#
+# THERE IS NO ARGO ROLLOUTS CLI PLUGIN IN THE COCKPIT TERMINAL, and two hints below used to send
+# the attendee to `oc argo rollouts get rollout …` anyway. Measured 2026-08-07 in the real ttyd
+# terminal as user7: `kubectl argo rollouts` answers `error: unknown command "argo"`, `command -v
+# kubectl-argo-rollouts` finds nothing, and `oc plugin list` reports no kubectl plugins on PATH at
+# all. That last one is what makes this a property of the TERMINAL rather than of one binary — oc
+# and kubectl resolve `<cmd> <word>` through the same kubectl-<word> plugin lookup, so neither form
+# can work with no plugin installed. What the `oc` spelling prints was never captured (only the
+# kubectl form was), so nothing here quotes an error text for it; the module's troubleshooting page
+# does assert one, which is unmeasured and flagged upstream rather than copied.
+#
+# A hint naming a command the attendee cannot run is worse than no hint: it turns one red check
+# into a second dead end, on the exact step where they are already stuck. Both hints therefore ask
+# the OBJECT, which is the same information the plugin would have formatted — and it is quoted into
+# a variable here rather than retyped per site precisely because it was wrong in two places at once.
+ROLLOUT_INSPECT="oc get rollout parasol-claims -n ${PROD} -o jsonpath='phase={.status.phase} step={.status.currentStepIndex} paused={.status.pauseConditions[*].reason} active={.status.blueGreen.activeSelector}{\"\n\"}'"
+# Clearing a blue-green pause is a STATUS-SUBRESOURCE patch, and BOTH of its lookalikes report
+# success while promoting nothing (measured 2026-08-07, both ways round; lab.adoc and
+# troubleshooting.adoc document the same trap in the same words, and this hint must keep agreeing
+# with them). The trap is in the hint rather than left to the page because an attendee who reaches
+# for the obvious `spec.paused` is told `patched` and gets no promotion, with nothing to say why.
+ROLLOUT_PROMOTE_HINT="clear the condition ON THE STATUS SUBRESOURCE — oc patch rollout <name> -n ${PROD} --subresource status --type merge -p '{\"status\":{\"pauseConditions\":null}}'. Both lookalikes lie: the SAME patch without --subresource status prints 'patched (no change)', and -p '{\"spec\":{\"paused\":false}}' prints 'patched'. Neither promotes anything"
+
 # The claims Route answers HTTP 200 on the readiness endpoint (also proves DB connectivity).
 route_ready_200() {
   local ns="$1" host
@@ -321,13 +345,13 @@ else
         ;;
     esac
   fi
-  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "not done yet? the entry state deliberately leaves ${PROD} WITHOUT a Rollout — converting it (rollouts/ overlay) IS the lab, so this red is expected before you start. If you HAVE converted it and it is not Healthy, that one is real: the cluster RolloutManager must be present — oc argo rollouts get rollout parasol-claims -n ${PROD} (ws solve gitops-at-scale --user ${USER_NAME} does the conversion)"
+  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "not done yet? the entry state deliberately leaves ${PROD} WITHOUT a Rollout — converting it (rollouts/ overlay) IS the lab, so this red is expected before you start (ws solve gitops-at-scale --user ${USER_NAME} does the conversion). If you HAVE converted it and it is not Healthy, that one is real. Read the object — ${ROLLOUT_INSPECT} — and start from .status.phase. Progressing with no ready canary pods is usually quota: oc get events -n ${PROD} --sort-by=.lastTimestamp | tail -10. A Rollout that never leaves its initial state at all means no controller is serving it (instructor/admin: oc get rolloutmanager -n openshift-gitops). Paused is not broken — a canary pause step is waiting for YOU, and a blue-green pause is waiting for a promotion: ${ROLLOUT_PROMOTE_HINT}"
   # The outcome above says prod runs a Rollout; this says ARGO put it there. `oc apply -k rollouts/`
   # from the clone the lab already has you make produces an identically Healthy Rollout with no Argo
   # anywhere near it, and that is not this module. Attendee-readable (own namespace), so unlike the
   # ApplicationSet check this one grades on an attendee's own run too.
   check "prod Rollout was delivered by Argo CD (tracking annotation)" rollout_gitops_managed parasol-claims "$PROD" || hint "not done yet? no Rollout in ${PROD} yet means no annotation either — do the check above first. If the Rollout IS there and this is red, that one is real: it was applied by hand rather than generated from git. Delete it and let the ApplicationSet create it — oc get rollout parasol-claims -n ${PROD} -o jsonpath='{.metadata.annotations}'"
-  check "route parasol-claims answers 200 in ${PROD}"     route_ready_200 "$PROD"                            || hint "not done yet? until the Rollout above exists there is nothing in ${PROD} to answer, so this red follows from that one and is equally expected. If the Rollout IS Healthy and the Route still does not answer 200, that one is real: oc get pods -n ${PROD}; oc argo rollouts get rollout parasol-claims -n ${PROD}"
+  check "route parasol-claims answers 200 in ${PROD}"     route_ready_200 "$PROD"                            || hint "not done yet? until the Rollout above exists there is nothing in ${PROD} to answer, so this red follows from that one and is equally expected. If the Rollout IS Healthy and the Route still does not answer 200, that one is real: oc get pods -n ${PROD}; ${ROLLOUT_INSPECT}; and check the Service the Route targets actually selects the active pods (a blue-green cutover moves that selector) — oc get route parasol-claims -n ${PROD} -o jsonpath='to={.spec.to.name}{\"\n\"}'"
 fi
 
 verify_summary

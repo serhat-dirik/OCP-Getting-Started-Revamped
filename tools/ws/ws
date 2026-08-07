@@ -2539,6 +2539,76 @@ for item in data or []:
   return 1
 }
 
+# ── is the cockpit serving an UNRESOLVED PLACEHOLDER? ──────────────────────────────────────────────
+#
+# ORIGIN, twice over. content/antora.yml, showroom/site.yml and showroom/site-demo.yml define
+# maas_model and cluster_ocp_version as SOFT defaults whose value is a visible sentinel —
+# `set-from-ogsr-maas-credentials@` / `set-from-cluster@`. Soft means the deploy-time channel (the
+# showroom-userdata ConfigMap) overrides them; it also means that when that channel says nothing, the
+# sentinel is what the page renders, on an rc-0 build with no warning at any log level. Two costs
+# already paid:
+#   • the invisible-model SEV1 — every cockpit rendered `set-from-ogsr-maas-credentials` where the
+#     model name belongs. Nothing detected it. An SSA found it by READING A PAGE.
+#   • the RHDP/FSC gap — the declarative install path cannot supply these helm parameters at all, so
+#     on that path the keys are simply absent and the sentinel is served by construction.
+# Both have the same signature in the one object a tool can read, which is why this is one check.
+#
+# WHAT IT GRADES, and the two shapes it must tell apart:
+#   (1) a sentinel that reached the ConfigMap AS A VALUE — someone passed the literal through. Always
+#       wrong, whatever else is configured.
+#   (2) a sentinel-defaulted key that is ABSENT while content referencing it is still enabled. That
+#       is the SEV1 shape and the FSC shape, and it is invisible in the object unless you know which
+#       keys have sentinel defaults — hence the list below rather than a generic "no empty values".
+#
+# THE ANCHORED PATTERN IS LOAD-BEARING, not tidiness. showroom.yaml deliberately keeps its notes
+# about the sentinel in TEMPLATE comments rather than `#` ones, precisely so the string never lands
+# in the rendered ConfigMap — its own header says a `#` comment naming the sentinel would make
+# anyone grepping the live object conclude it is set. A bare substring grep here would resurrect
+# that trap as a false ❌ the moment somebody writes a `#` note. So: key-colon-value only.
+DOCTOR_ATTR_SENTINELS='set-from-cluster|set-from-ogsr-maas-credentials'
+# Modules whose pages reference {maas_model}/{maas_endpoint}. KEEP IN LOCKSTEP WITH CONTENT — the
+# same discipline the "parasol images" row states for its image set, and for the same reason: this
+# list is what stops the check red-flagging a cockpit whose AI modules are switched off, where an
+# absent maas_model is correct and nobody can see a placeholder. Derived by grep over
+# content/modules/ROOT/pages, 2026-08-07.
+DOCTOR_MAAS_MODULES="agentic-ai ai-assisted-development app-modernization"
+
+doctor_cockpit_attr_findings() {  # <cockpit label> <user_data.yml body> → one finding per line; rc 0
+  # PURE: no cluster reads, no globals written. The caller does the reading and owns the ⚠/➖/❌
+  # decision; this only says what is wrong with a body it is handed. That split is what lets the
+  # fixtures under tools/lint/doctor-degraded-fixtures exercise it without a cluster.
+  local label="$1" body="$2" slug visible=""
+  if [[ -z "$body" ]]; then
+    echo "${label}: no user_data.yml — the cockpit has no deploy-time attributes at all, so EVERY overridable value falls back to the git-baked default"
+    return 0
+  fi
+  if grep -Eq "^[[:space:]]*[A-Za-z0-9_-]+:[[:space:]]*\"?(${DOCTOR_ATTR_SENTINELS})" <<<"$body"; then
+    echo "${label}: a placeholder was passed through AS A VALUE (set-from-… ) — that literal is what the page renders"
+  fi
+  # The omission shape. Only maas_model is graded: it is the one sentinel-defaulted key whose
+  # referencing modules are known and switchable. cluster_ocp_version is NOT graded for absence on
+  # purpose — no page under content/modules/ROOT/pages referenced {cluster_ocp_version} when this
+  # was written (checked), so calling its absence a failure would be a red row about a placeholder
+  # no attendee can see, and a false ❌ costs every other ✅ its credibility. Its sentinel is still
+  # caught by the value check above, which is the half that is unambiguous.
+  if ! grep -Eq "^[[:space:]]*maas_model:" <<<"$body"; then
+    for slug in $DOCTOR_MAAS_MODULES; do
+      # A cockpit hides a module by carrying module-<slug>-hidden: "true" (showroom.yaml, from
+      # modulesDisabledCSV). Read the ENABLEMENT out of the same object being graded rather than
+      # from the repo: a tool with only API access must reach the same verdict ws does, the rule the
+      # "argo applications" row states for its degraded-by-design label. The SA-Demos cockpit emits
+      # no hide keys at all — correctly, it serves every module — so all three count as visible there.
+      if ! grep -Eq "^[[:space:]]*module-${slug}-hidden:[[:space:]]*\"?true" <<<"$body"; then
+        visible="${visible} ${slug}"
+      fi
+    done
+    if [[ -n "$visible" ]]; then
+      echo "${label}: no maas_model — the pages of${visible} render antora.yml's set-from-ogsr-maas-credentials placeholder where the model name belongs"
+    fi
+  fi
+  return 0
+}
+
 cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT-WIDE row to one attendee;
   # empty = the whole cohort (unchanged default). The platform rows (gitops operator, gitea, mirror,
   # workshop layer, build images, IdP, cohort size) are NOT scoped: when one attendee is broken, the
@@ -2763,6 +2833,82 @@ cmd_doctor() {  # environment sanity. READ-ONLY. [--user U] narrows every COHORT
     unknown "not checked (needs access to ${SHOWROOM_NS})"
   else
     ok "n/a (showroom build not deployed)"
+  fi
+  printf "  %-28s" "cockpit attributes"
+  # Is the cockpit SERVING an unresolved placeholder? See doctor_cockpit_attr_findings above for the
+  # two incidents this exists for and for what counts as a finding. The row grades the deploy-time
+  # object — the showroom-userdata ConfigMap — because that is the thing the cockpit's antora-build
+  # init merges over the git-baked soft defaults, and it is one cheap read rather than fetching and
+  # parsing a rendered page.
+  #
+  # MODE SPLIT, and it is the whole reason this row can exist at all. It has three ways to not be a
+  # ❌, and each maps to a real cluster:
+  #   ➖ nothing to grade — no cockpit ConfigMap exists (portfolio-only cluster, showroom.enabled
+  #      false, a repo checkout with no workshop installed). Nothing is missing and no action is
+  #      available, which is exactly skip()'s contract.
+  #   ⚠ could not look — ogsr-showroom is not attendee-readable, and `ws doctor` is attendee-
+  #      runnable. Same Forbidden-branch shape as the four rows above and below; does NOT set fail.
+  #   ❌ looked, and the cockpit serves a placeholder.
+  # A REAL READ decides between them, never `oc auth can-i`: this repo measured can-i answering a
+  # false YES for a cluster-scoped read held through a namespaced binding, and a false YES here
+  # would open the gate on a read that then comes back empty — grading "no cockpit deployed" on a
+  # cluster full of them, the clean-looking verdict produced by having looked at nothing.
+  #
+  # ONE representative attendee cockpit, not all N. Every attendee cockpit renders these keys from
+  # the same chart values (only user/page-user/guid differ per user), so a second one answers the
+  # same question at another round trip — the same canary logic as the "user namespaces" row. Under
+  # --user it is that attendee's own; cohort-wide it is whichever the list returns first, and the
+  # row NAMES which one it graded so the reader is never guessing. The SA-Demos cockpit is graded
+  # separately because its ConfigMap is a genuinely different document.
+  local ck_list ck_lrc=0 ck_cms=() ck_findings="" ck_graded=() ck_unread="" ck_name ck_body ck_brc ck_f
+  ck_list="$(oc get cm -n "$SHOWROOM_NS" -l "workshop.redhat.com/user${scope_user:+=${scope_user}}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1)" || ck_lrc=$?
+  if [[ "$ck_lrc" -ne 0 ]] && printf '%s' "$ck_list" | grep -qi forbidden; then
+    unknown "not checked (reading ConfigMaps in ${SHOWROOM_NS} is Forbidden — needs instructor/admin access)"
+  elif [[ "$ck_lrc" -ne 0 ]]; then
+    unknown "not checked (the cockpit ConfigMaps in ${SHOWROOM_NS} could not be listed — retry, or run as instructor/admin)"
+  else
+    ck_name="$(printf '%s\n' "$ck_list" | grep . | head -1 || true)"
+    if [[ -n "$ck_name" ]]; then ck_cms+=("$ck_name"); fi
+    # The SA-Demos cockpit is optional (showroomDemos.enabled) and shares this namespace. A NotFound
+    # here means it is simply not deployed and must stay silent — only a body that EXISTS is graded.
+    ck_cms+=("showroom-demos-userdata")
+    for ck_name in "${ck_cms[@]}"; do
+      ck_brc=0
+      # Combined capture, the same idiom the gitops-operator / user-namespaces / IdP / cohort-size
+      # rows use, and for the same reason: the failure has to be CLASSIFIED. `2>/dev/null` here would
+      # make "this cockpit is not deployed" and "the API did not answer" byte-identical, and the
+      # second one would then fall through to the ➖ branch below — a report saying "no cockpit
+      # deployed" on a cluster full of them, produced by having looked at nothing. NotFound is the
+      # only failure that means absent; anything else is an honest "could not read".
+      ck_body="$(oc get cm "$ck_name" -n "$SHOWROOM_NS" -o jsonpath='{.data.user_data\.yml}' 2>&1)" || ck_brc=$?
+      if [[ "$ck_brc" -ne 0 ]]; then
+        if ! printf '%s' "$ck_body" | grep -qi notfound; then ck_unread="${ck_unread} ${ck_name}"; fi
+        continue
+      fi
+      ck_graded+=("$ck_name")
+      while IFS= read -r ck_f; do
+        [[ -n "$ck_f" ]] || continue
+        ck_findings="${ck_findings}${ck_findings:+ · }${ck_f}"
+      done < <(doctor_cockpit_attr_findings "$ck_name" "$ck_body")
+    done
+    # ORDER IS THE CONTRACT: a real finding leads, an unreadable cockpit is ⚠ next, and only a
+    # cluster where every cockpit answered "not there" gets ➖. "Some rows were unreadable" may never
+    # soften a real failure, and an unreadable one may never harden into a clean ➖.
+    if [[ -n "$ck_findings" ]]; then
+      # THE FIX HINT NAMES THE THING THAT ACTUALLY MOVES THIS ROW, and the near-miss is worth
+      # recording: `ws maas set` looks like the answer and is not. It stages the ogsr-maas-credentials
+      # Secret and re-converges the AI namespaces — the RUNTIME half — and never touches
+      # showroom.maasModel, which is a helm parameter on the workshop-config Application and is the
+      # DOCS half. Sending an operator there would have reproduced, inside the fix for it, exactly the
+      # defect this row exists to catch: a hint that leads to a dead end.
+      nok "${ck_findings}. These are helm parameters on the workshop-config Application (showroom.maasModel · showroom.maasEndpoint · showroom.ocpVersion), NOT runtime config: \`ws maas set\` stages the credential and re-converges the AI namespaces but does not change what the docs render. Get the authoritative values — ws maas show (model + endpoint), oc get clusterversion version -o jsonpath='{.status.desired.version}' (release) — then set them on that Application and let it sync; the cockpits now roll themselves when the value lands (checksum/user-data, chart 0.3.5). bootstrap/install.sh passes all three; helm/bootstrap (the RHDP/FSC path) passes none, so on that path this row is expected until it does"; fail=1
+    elif [[ -n "$ck_unread" ]]; then
+      unknown "not graded (could not read:${ck_unread} in ${SHOWROOM_NS} — retry, or run as instructor/admin)"
+    elif [[ "${#ck_graded[@]}" -eq 0 ]]; then
+      skip "n/a (no cockpit deployed in ${SHOWROOM_NS})"
+    else
+      ok "no unresolved placeholders in ${#ck_graded[@]} cockpit ConfigMap(s): ${ck_graded[*]}"
+    fi
   fi
   printf "  %-28s" "parasol images"
   # Many entry states pull parasol-claims/parasol-web:1.0|1.1, parasol-fraud:1.0, and the four

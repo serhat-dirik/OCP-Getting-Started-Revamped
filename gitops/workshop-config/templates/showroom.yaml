@@ -14,6 +14,99 @@
   ROLLOUT: .Values.showroom.pilotUser gates a two-phase rollout — when set, ONLY that user is
   rendered (the PM verifies the pilot before it scales to all userCount). Empty string = all users.
 */ -}}
+{{- /*
+  ONE SOURCE FOR THE COCKPIT'S ATTRIBUTES — the ConfigMap's payload AND the Deployment's
+  checksum/user-data annotation are the same bytes, produced here once.
+
+  WHY IT IS A TEMPLATE RATHER THAN AN INLINE BLOCK. A cockpit builds its content at POD INIT
+  (antora-build reads /user_data/user_data.yml), so a changed attribute reaches a reader only when
+  the pod restarts. Neither Deployment carried a checksum over its user-data ConfigMap, so an
+  attribute change — the MaaS model and the live cluster version both landed 2026-08-07 — settled
+  into the ConfigMap and was served to nobody until somebody remembered `oc rollout restart`. The
+  standard Helm cure is `checksum/… : {{ include (print $.Template.BasePath "/<cm>.yaml") . |
+  sha256sum }}`, which is NOT available here: the ConfigMap and the Deployment live in the SAME
+  file, so that include would be self-referential (and would also hash every other user's objects,
+  rolling the whole cohort on any one user's change). Hashing a hand-listed set of values instead
+  would go stale the first time somebody adds a key — the failure this repo keeps paying for. A
+  named template is the only shape where the annotation cannot disagree with the payload: they are
+  `include` and `include | sha256sum` over the identical bytes.
+
+  CONTEXT is a dict because the body needs the loop's $user plus three file-level derivations; `.`
+  alone would only carry the chart root. Emits its lines ALREADY INDENTED four spaces (the block
+  scalar's body) and with NO trailing newline, so the ConfigMap below stays byte-for-byte what it
+  rendered before this template existed.
+*/ -}}
+{{- define "workshop-config.showroomUserData" }}
+    user: {{ .user }}
+    # page-user surfaces in handlebars as page.attributes.user (Antora only exposes page-* attrs);
+    # it drives the "You are {user}" header greeting. Plain `user` stays for {user} body substitution.
+    page-user: {{ .user }}
+    cluster_domain: {{ .domain }}
+    ocp_console_url: https://console-openshift-console.{{ .domain }}
+    gitea_url: https://{{ .giteaHost }}
+    devspaces_url: https://devspaces.{{ .domain }}
+    # MTA (Migration Toolkit for Applications) console — route `mta` in openshift-mta; host follows the
+    # standard <route>-<namespace>.<domain> pattern (verified live). Overrides antora.yml's example.com
+    # soft default so m23/app-modernization renders a real clickable link instead of example.com.
+    mta_url: https://mta-openshift-mta.{{ .domain }}
+    # SonarQube + RHACS Central consoles — same story as mta_url above, and MISSING until 2026-07-31.
+    # A cold-start smoke of app-security-testing found both rendering as dead `apps.example.com`
+    # links: content references {sonarqube_url} and {acs_console_url}, this ConfigMap never emitted
+    # them, so antora.yml's example.com soft default won and the attendee got a link that goes
+    # nowhere. That killed the Console tab of exercises 2 and 4 and two of the six rows in exercise 7
+    # — a whole half of the module, on every attendee, silently.
+    # Worth noting WHY it hid: the CLI tab of each dual-path step worked perfectly, so nothing failed
+    # and no check went red. A soft default is a fallback that renders successfully while being wrong.
+    # Hosts follow the standard <route>-<namespace>.<domain> pattern, verified live on-cluster:
+    # route `sonarqube` in ns `sonarqube`, route `central` in ns `stackrox`.
+    sonarqube_url: https://sonarqube-sonarqube.{{ .domain }}
+    acs_console_url: https://central-stackrox.{{ .domain }}
+    # MaaS (Model-as-a-Service) model + endpoint. Overrides antora.yml's soft defaults so docs render
+    # the model THIS cluster's key actually serves — per-user MaaS keys are model-scoped, and two
+    # clusters this project has used were scoped to OPPOSITE models, so no static antora.yml default
+    # is ever right everywhere (its default already flipped once for exactly this reason — see its
+    # comment).
+    {{- /* NOW WIRED (2026-08-07): install.sh passes showroom.maasModel/maasEndpoint from the values
+           it resolved in preflight — the model confirmed against the endpoint's own /v1/models, or
+           discovered from that list. Until this was wired these fell back to the values.yaml
+           sentinel, and every cockpit rendered that sentinel where the model name belongs, which is
+           the finding an SSA raised from a delivery dry run.
+           Emitted only when non-empty, same reason as ocpVersion below: a blank merges OVER
+           antora.yml's soft default and the sentence loses its subject with no warning, whereas an
+           omitted key lets the visible placeholder through — wrong, but legibly wrong.
+           `ws doctor`'s "cockpit attributes" row grades exactly that omission, so this key going
+           missing is now a red row rather than something only a reader of the page can notice.
+           A TEMPLATE comment, not a `#` one, deliberately: a `#` comment naming the sentinel is
+           copied into every rendered ConfigMap, so anyone grepping the LIVE ConfigMap for that
+           string gets hits and concludes it is set. A false signal about the very field this
+           block exists to make truthful — and now also a false ❌ in the doctor row above. */ -}}
+    {{- if .root.Values.showroom.maasModel }}
+    maas_model: {{ .root.Values.showroom.maasModel | quote }}
+    {{- end }}
+    {{- if .root.Values.showroom.maasEndpoint }}
+    maas_endpoint: {{ .root.Values.showroom.maasEndpoint | quote }}
+    {{- end }}
+    {{- /* The cluster's LIVE OpenShift release. BARE (no `@`) on purpose: precedence is
+           playbook-hard > component descriptor > playbook-soft, and this ConfigMap merges into the
+           component descriptor, so it must outrank content/antora.yml's `set-from-cluster@` soft
+           default. An `@` here would make the two peers and the git-baked placeholder could win.
+           Omitted entirely when Values.showroom.ocpVersion is empty (a failed clusterversion read in
+           install.sh) so the visible placeholder survives — emitting "" would merge a BLANK over the
+           soft default and the sentence would silently lose its subject, which is the worse failure.
+           Quoted because this value is a deploy-time cluster read arriving through an Argo helm
+           parameter: quoting keeps the embedded YAML document well-formed whatever comes back. */ -}}
+    {{- if .root.Values.showroom.ocpVersion }}
+    cluster_ocp_version: {{ .root.Values.showroom.ocpVersion | quote }}
+    {{- end }}
+    {{- /* One hide-attribute per disabled module: content guards its nav entry + library row with
+           ifndef::module-<slug>-hidden[]. Only DISABLED modules emit a key, so an all-modules
+           delivery injects nothing and every module renders (default behaviour unchanged). */ -}}
+    {{- range $slug := .disabledModules }}
+    module-{{ $slug }}-hidden: "true"
+    {{- end }}
+    guid: {{ .user }}
+    lab_name: OpenShift Application Platform — Getting Started
+{{- end }}
 {{- if .Values.showroom.enabled }}
 {{- $ns := .Values.showroom.namespace }}
 {{- $domain := .Values.clusterDomain }}
@@ -147,6 +240,8 @@ data:
        update (drop them from .Values.reservedUsers, then sync). This guards the Argo self-heal vector
        the ws CLI's WS_RESERVED_USERS cannot (that only gates `ws git-refresh --restart-terminals`). */ -}}
 {{- $reserved := has $user (default (list) $.Values.reservedUsers) }}
+{{- /* The one context both the userdata ConfigMap and the Deployment's checksum render from. */ -}}
+{{- $userData := dict "user" $user "domain" $domain "giteaHost" $giteaHost "disabledModules" $disabledModules "root" $ }}
 ---
 # Per-user Antora attributes → injected as build-time doc attributes so instructions render
 # personalized clickable links ({user}, {cluster_domain}, {ocp_console_url}, {gitea_url}, ...).
@@ -164,74 +259,11 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "2"
 data:
+  # Body lives in the workshop-config.showroomUserData template at the top of this file — the SAME
+  # bytes the Deployment below hashes into checksum/user-data, which is what makes a changed
+  # attribute actually restart the cockpit that serves it.
   user_data.yml: |
-    user: {{ $user }}
-    # page-user surfaces in handlebars as page.attributes.user (Antora only exposes page-* attrs);
-    # it drives the "You are {user}" header greeting. Plain `user` stays for {user} body substitution.
-    page-user: {{ $user }}
-    cluster_domain: {{ $domain }}
-    ocp_console_url: https://console-openshift-console.{{ $domain }}
-    gitea_url: https://{{ $giteaHost }}
-    devspaces_url: https://devspaces.{{ $domain }}
-    # MTA (Migration Toolkit for Applications) console — route `mta` in openshift-mta; host follows the
-    # standard <route>-<namespace>.<domain> pattern (verified live). Overrides antora.yml's example.com
-    # soft default so m23/app-modernization renders a real clickable link instead of example.com.
-    mta_url: https://mta-openshift-mta.{{ $domain }}
-    # SonarQube + RHACS Central consoles — same story as mta_url above, and MISSING until 2026-07-31.
-    # A cold-start smoke of app-security-testing found both rendering as dead `apps.example.com`
-    # links: content references {sonarqube_url} and {acs_console_url}, this ConfigMap never emitted
-    # them, so antora.yml's example.com soft default won and the attendee got a link that goes
-    # nowhere. That killed the Console tab of exercises 2 and 4 and two of the six rows in exercise 7
-    # — a whole half of the module, on every attendee, silently.
-    # Worth noting WHY it hid: the CLI tab of each dual-path step worked perfectly, so nothing failed
-    # and no check went red. A soft default is a fallback that renders successfully while being wrong.
-    # Hosts follow the standard <route>-<namespace>.<domain> pattern, verified live on-cluster:
-    # route `sonarqube` in ns `sonarqube`, route `central` in ns `stackrox`.
-    sonarqube_url: https://sonarqube-sonarqube.{{ $domain }}
-    acs_console_url: https://central-stackrox.{{ $domain }}
-    # MaaS (Model-as-a-Service) model + endpoint. Overrides antora.yml's soft defaults so docs render
-    # the model THIS cluster's key actually serves — per-user MaaS keys are model-scoped, and two
-    # clusters this project has used were scoped to OPPOSITE models, so no static antora.yml default
-    # is ever right everywhere (its default already flipped once for exactly this reason — see its
-    # comment).
-    {{- /* NOW WIRED (2026-08-07): install.sh passes showroom.maasModel/maasEndpoint from the values
-           it resolved in preflight — the model confirmed against the endpoint's own /v1/models, or
-           discovered from that list. Until this was wired these fell back to the values.yaml
-           sentinel, and every cockpit rendered that sentinel where the model name belongs, which is
-           the finding an SSA raised from a delivery dry run.
-           Emitted only when non-empty, same reason as ocpVersion below: a blank merges OVER
-           antora.yml's soft default and the sentence loses its subject with no warning, whereas an
-           omitted key lets the visible placeholder through — wrong, but legibly wrong.
-           A TEMPLATE comment, not a `#` one, deliberately: a `#` comment naming the sentinel is
-           copied into every rendered ConfigMap, so anyone grepping the LIVE ConfigMap for that
-           string gets hits and concludes it is set. A false signal about the very field this
-           block exists to make truthful. */ -}}
-    {{- if $.Values.showroom.maasModel }}
-    maas_model: {{ $.Values.showroom.maasModel | quote }}
-    {{- end }}
-    {{- if $.Values.showroom.maasEndpoint }}
-    maas_endpoint: {{ $.Values.showroom.maasEndpoint | quote }}
-    {{- end }}
-    {{- /* The cluster's LIVE OpenShift release. BARE (no `@`) on purpose: precedence is
-           playbook-hard > component descriptor > playbook-soft, and this ConfigMap merges into the
-           component descriptor, so it must outrank content/antora.yml's `set-from-cluster@` soft
-           default. An `@` here would make the two peers and the git-baked placeholder could win.
-           Omitted entirely when Values.showroom.ocpVersion is empty (a failed clusterversion read in
-           install.sh) so the visible placeholder survives — emitting "" would merge a BLANK over the
-           soft default and the sentence would silently lose its subject, which is the worse failure.
-           Quoted because this value is a deploy-time cluster read arriving through an Argo helm
-           parameter: quoting keeps the embedded YAML document well-formed whatever comes back. */ -}}
-    {{- if $.Values.showroom.ocpVersion }}
-    cluster_ocp_version: {{ $.Values.showroom.ocpVersion | quote }}
-    {{- end }}
-    {{- /* One hide-attribute per disabled module: content guards its nav entry + library row with
-           ifndef::module-<slug>-hidden[]. Only DISABLED modules emit a key, so an all-modules
-           delivery injects nothing and every module renders (default behaviour unchanged). */ -}}
-    {{- range $slug := $disabledModules }}
-    module-{{ $slug }}-hidden: "true"
-    {{- end }}
-    guid: {{ $user }}
-    lab_name: OpenShift Application Platform — Getting Started
+{{- include "workshop-config.showroomUserData" $userData }}
 ---
 # Per-user terminal home. Survives pod restarts so attendee scratch work + kubeconfig persist.
 # SAME sync-wave as the Deployment (3), NOT earlier: the default StorageClass is
@@ -281,6 +313,26 @@ spec:
     type: Recreate
   template:
     metadata:
+{{- if not $reserved }}
+      annotations:
+        # why: the cockpit builds its content at POD INIT from this ConfigMap (the antora-build
+        # initContainer reads /user_data/user_data.yml), so a changed attribute reaches a reader
+        # only when the pod restarts — and a ConfigMap edit alone does not restart anything. Before
+        # this annotation existed, `maas_model` and `cluster_ocp_version` both landed in the
+        # ConfigMap and were served to nobody until an operator remembered `oc rollout restart`,
+        # with every layer (Argo, `ws git-refresh`) reporting success throughout. Hashing the SAME
+        # bytes the ConfigMap above is rendered from makes the pod template differ exactly when the
+        # payload differs — no more, no less. It is not a content checksum: the mirror clone is
+        # unaffected, so this rolls on ATTRIBUTE changes only.
+        #
+        # RESERVED SESSIONS GET NO ANNOTATION AT ALL, which is the same call the postStart block
+        # further down already makes and for the same reason: a reserved user is a LIVE session that
+        # must not be Recreate-rolled by a chart change, and an attribute change is a chart change.
+        # Rendering the annotation for them would defeat the guard through a new door. They pick the
+        # new attributes up the way they pick up every other pending change — dropped from
+        # .Values.reservedUsers, then synced, which makes this annotation appear and rolls them once.
+        checksum/user-data: {{ include "workshop-config.showroomUserData" $userData | sha256sum | quote }}
+{{- end }}
       labels:
         app.kubernetes.io/name: showroom
         app.kubernetes.io/instance: showroom-{{ $user }}
