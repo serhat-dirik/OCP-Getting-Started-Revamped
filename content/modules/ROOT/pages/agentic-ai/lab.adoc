@@ -916,7 +916,9 @@ The code is one small class and you can absorb it in a sitting; the part people 
 [TIP]
 .Start the build first, then read
 ====
-The build below runs *on the cluster* and takes several minutes — *6 minutes* when this workshop built the very same source with the very same container recipe on this cluster, and 4 to 9 in general, depending on whether the node already holds the Red Hat Universal Base Image 9 (UBI9) Java 21 builder image.
+The build below runs *on the cluster*, and how long it takes depends almost entirely on one thing: whether the node it lands on already holds the Red Hat Universal Base Image 9 (UBI9) Java 21 builder image.
+Two measurements of this identical source and container recipe bracket it — *1 minute 54 seconds* for a lone attendee build in a `{user}-ai` project on a warm node, and *6 minutes* for the same source built in the shared images project while seven other builds competed for the same nodes.
+Budget a few minutes and expect the short end; a cold node that has to pull the builder image first is the slow case.
 Kick it off now and read the walkthrough while it runs.
 It will very likely finish before you do; the collect step later waits out whatever is left.
 ====
@@ -965,9 +967,13 @@ oc apply -f /tmp/policy-docs-mine.yaml -n $NS
 oc start-build policy-docs-mine -n $NS
 ----
 
-// TODO(verify-on-cluster) #1 — run the block above as {user} in {user}-ai and capture the real
-// output (three lines: imagestream created, buildconfig created, build ... started), then add it
-// here as an `.Expected output` [source,texinfo] block. Predicted shape only, not captured.
+.Expected output
+[source,texinfo]
+----
+imagestream.image.openshift.io/policy-docs-mine created
+buildconfig.build.openshift.io/policy-docs-mine created
+build.build.openshift.io/policy-docs-mine-1 started
+----
 
 Your first build is numbered `-1`, which is worth a glance: this `BuildConfig` declares no triggers, so nothing raced you to number one.
 A `BuildConfig` that carries a `ConfigChange` trigger — the shape most templates ship — fires a build the moment it is created, and your first manual build is then number *two*.
@@ -1184,13 +1190,32 @@ for i in $(seq 1 60); do
   sleep 12
 done
 -----
+
+.A captured poll — one line every 12 seconds until the phase changes; your clock times and how many `Running` lines you collect are your build's
+[source,texinfo]
+-----
+  01:37:31  policy-docs-mine-1: Running
+  01:37:45  policy-docs-mine-1: Running
+...
+  01:39:08  policy-docs-mine-1: Running
+  01:39:22  policy-docs-mine-1: Complete
+  ✔ image built and pushed to your project's registry
+-----
 --
 ====
 
-// TODO(verify-on-cluster) #2 — run the poll loop for a real build in {user}-ai, capture the
-// abbreviated converging output plus the measured wall-clock, and add it as a collapsible
-// `.Expected output` block. Cite the measured time in the ⏱ chip and in instructor.adoc if it
-// differs materially from the 6m00s measured for the identical shared build.
+However you watched it, the build records its own duration, so you can read the real number rather than trusting a stopwatch:
+
+[source,sh,role=execute]
+----
+oc get build policy-docs-mine-1 -n $NS -o jsonpath='{.status.duration}{"\n"}'
+----
+
+.Expected output — nanoseconds, so 114000000000 is 1 minute 54 seconds
+[source,texinfo]
+----
+114000000000
+----
 
 That build compiled the Java you just read, produced a Quarkus fast-jar, and packed it into a UBI9 runtime image that runs as the non-root user `185` — every one of those decisions is in the `Containerfile` in that directory, and none of them is AI-specific.
 
@@ -1204,13 +1229,63 @@ oc new-app policy-docs-mine:latest -n $NS
 oc rollout status deploy/policy-docs-mine -n $NS --timeout=180s
 ----
 
-// TODO(verify-on-cluster) #3 — capture the real `oc new-app` + `oc rollout status` output. Confirm
-// in particular that oc new-app derives the Service port from the Containerfile's EXPOSE 8080
-// (`oc get svc policy-docs-mine -n $NS -o jsonpath='{.spec.ports[0].port}'` should print 8080);
-// the whole registration step below depends on that port being 8080.
+.Expected output
+[%collapsible]
+====
+[source,texinfo,subs="attributes"]
+----
+warning: Cannot check if git requires authentication.
+--> Found image ... in image stream "{user}-ai/policy-docs-mine" under tag "latest" for "policy-docs-mine:latest"
+    Java Applications
+    ...
+--> Creating resources ...
+    deployment.apps "policy-docs-mine" created
+    service "policy-docs-mine" created
+--> Success
+    Application is not exposed. You can expose services to the outside world by executing one or more of the commands below:
+     'oc expose service/policy-docs-mine'
+    Run 'oc status' to view your app.
+Waiting for deployment "policy-docs-mine" rollout to finish: 0 of 1 updated replicas are available...
+deployment "policy-docs-mine" successfully rolled out
+----
+====
 
-`oc new-app` reads the image, finds the port it exposes, and creates a *Deployment* and a *Service* — no Route, because nothing outside the cluster needs to talk to this thing.
+Two lines in there look like problems and are not.
+`warning: Cannot check if git requires authentication` is `oc new-app` noting it did not probe a source repository — you handed it an image stream tag, so there was nothing to probe.
+`Application is not exposed` is a statement of fact and the intended outcome: you do not want this on the internet.
+
+`Java Applications` is worth one glance too, because it is not something `oc` worked out about your code — it is reading *labels off the image*, and your `Containerfile` sets none, so that description is inherited from the UBI9 Java runtime you built `FROM`.
+
+`oc new-app` reads the image, finds the ports it exposes, and creates a *Deployment* and a *Service* — no Route, because nothing outside the cluster needs to talk to this thing.
 Your MCP server is an internal service, reachable at `policy-docs-mine:8080`, exactly like a database or a cache.
+Check the port it picked, because everything below depends on it:
+
+[source,sh,role=execute]
+----
+oc get svc policy-docs-mine -n $NS
+----
+
+.Expected output — two ports, and only the first one is yours
+[source,texinfo]
+----
+NAME               TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)             AGE
+policy-docs-mine   ClusterIP   172.231.91.27   <none>        8080/TCP,8443/TCP   11s
+----
+
+`8080` is the one your `Containerfile` declares with `EXPOSE 8080`, and the one the agent will dial.
+`8443` arrives uninvited, and it is worth meeting once: `oc new-app` reads the *finished image's* exposed ports, not your `Containerfile`, and the finished image also carries whatever its base image declared.
+Nothing is listening on 8443 here, and an unused Service port costs nothing. Recognizing it is the point — _"my Service has a port my application never opened"_ is a puzzle that has cost people an afternoon, and one command settles it:
+
+[source,sh,role=execute]
+----
+oc get istag policy-docs-mine:latest -n $NS -o jsonpath='{.image.dockerImageMetadata.Config.ExposedPorts}{"\n"}'
+----
+
+.Expected output — both ports are baked into the image, so both become Service ports
+[source,texinfo]
+----
+{"8080/tcp":{},"8443/tcp":{}}
+----
 
 Now let it introduce itself:
 
@@ -1280,9 +1355,16 @@ curl -ksS "$AGENT/agent/info" | jq '{claimsDbMcpUrl, policyDocsMcpUrl}'
 curl -ksS "$AGENT/q/health/ready" | jq -r '.status, (.checks[].data | tostring)'
 ----
 
-// TODO(verify-on-cluster) #4 — capture the real output of the three commands above after a real
-// `oc set env`. Expected shape: policyDocsMcpUrl == http://policy-docs-mine:8080/mcp/sse, status
-// UP, and both MCP clients OK. Add it as an `.Expected output` [source,json]/[texinfo] block.
+.Expected output (the agent is now pointed at your build, and it answered the handshake)
+[source,texinfo]
+----
+{
+  "claimsDbMcpUrl": "http://claims-db:8080/mcp/sse",
+  "policyDocsMcpUrl": "http://policy-docs-mine:8080/mcp/sse"
+}
+UP
+{"claims-db":"OK","policy-docs":"OK"}
+----
 
 Read the readiness line rather than skipping past it, because it is doing real work for you here.
 The agent's readiness probe *pings its MCP servers*, so `status: UP` with `policy-docs: OK` means your pod completed an MCP handshake with the agent.
@@ -1302,10 +1384,20 @@ curl -ksS -X POST "$AGENT/agent/ask" -H 'content-type: application/json' \
   | jq -r '.answer, (.toolCalls[] | .tool + " " + .arguments)'
 ----
 
-// TODO(verify-on-cluster) #5 — capture this answer with the agent wired to policy-docs-mine, and
-// add it as a `.A captured answer` [source,texinfo] block. What must match: the tool call
-// (search_policies) and the grounded facts (500 USD, POL-AUTO-01); the sentence is the model's
-// own phrasing, as everywhere else on this page.
+.A captured answer, served by the attendee's own `policy-docs-mine` (the tool call and the grounded facts are what to check; the sentence is the model's phrasing)
+[source,texinfo]
+----
+The standard deductible for an auto collision claim is 500 USD per incident, as stated in
+policy POL-AUTO-01. This means that the policyholder pays the deductible, and Parasol pays
+the remaining approved repair cost.
+search_policies {"query": "auto collision deductible"}
+list_policies {}
+----
+
+Two things about that capture, both worth knowing before you compare it with your own.
+The *facts* were identical across five runs — `500 USD`, `POL-AUTO-01`, `search_policies` every time — and they are what this beat is about.
+The *list of tool calls* was not: three of those five runs also called `list_policies`, as printed above, and the other two called `search_policies` alone with an explicit `"maxResults": 3`.
+Both shapes are the model exercising its own discretion over a tool set that never changed, and neither alters the answer. So compare on the tool that did the work and the figures it grounded, not on the number of lines.
 
 `500 USD`, cited to `POL-AUTO-01`, from `search_policies` — the same figure, the same citation, the same tool name as exercise 4, served this time by an image you built from source in your own project.
 That is the finding, and it is a boring one on purpose: *a tool is a contract, and a contract does not care who implements it.*
@@ -1324,6 +1416,30 @@ oc set env deploy/parasol-agent POLICY_DOCS_MCP_URL=http://policy-docs:8080/mcp/
 oc rollout status deploy/parasol-agent -n $NS --timeout=180s
 ----
 
+.Expected output
+[source,texinfo]
+----
+deployment.apps/parasol-agent updated
+Waiting for deployment "parasol-agent" rollout to finish: 1 old replicas are pending termination...
+deployment "parasol-agent" successfully rolled out
+----
+
+Confirm it landed, because this is the state everything after this page assumes:
+
+[source,sh,role=execute]
+----
+curl -ksS "$AGENT/agent/info" | jq -r .policyDocsMcpUrl
+curl -ksS "$AGENT/q/health/ready" | jq -r '.status, (.checks[].data | tostring)'
+----
+
+.Expected output (back on the shipped server, and it answered the handshake)
+[source,texinfo]
+----
+http://policy-docs:8080/mcp/sse
+UP
+{"claims-db":"OK","policy-docs":"OK"}
+----
+
 This is a required step, and the reason is worth a sentence.
 The agent's readiness *depends* on whatever you register — you proved that two commands ago — so an agent wired to your instance is an agent that goes NotReady if your instance ever does.
 Nothing further in this workshop teaches you anything by leaving it that way, and `ws verify` and every later module expect the end state the platform ships.
@@ -1332,13 +1448,8 @@ So the lesson stays and the dependency goes.
 Your `policy-docs-mine` Deployment keeps running and is still yours to play with — re-point the agent at it any time by rerunning the `oc set env` from the previous step with `policy-docs-mine`.
 `ws reset agentic-ai` clears your `BuildConfig`, `ImageStream`, `Deployment` and `Service` along with everything else in the project, so there is nothing to tidy by hand.
 
-// TODO(verify-on-cluster) #7 — capture the hand-back: `oc set env` back to policy-docs, rollout
-// completes, and `curl -ksS $AGENT/agent/info | jq -r .policyDocsMcpUrl` reports
-// http://policy-docs:8080/mcp/sse with /q/health/ready still UP. This is the state the final
-// checkpoint and `ws verify` grade, so it is the one capture that must not be skipped.
-
 [TIP]
-.Optional (~2 min): break the registration and read the failure
+.Optional (~4 min): break the registration and read the failure
 ====
 Exercise 1 made a claim you have not tested — that a *Ready* agent has *proven* its tool wiring. Test it. Register a service that does not exist, and watch:
 
@@ -1347,15 +1458,88 @@ Exercise 1 made a claim you have not tested — that a *Ready* agent has *proven
 oc set env deploy/parasol-agent POLICY_DOCS_MCP_URL=http://policy-docs-typo:8080/mcp/sse -n $NS
 oc rollout status deploy/parasol-agent -n $NS --timeout=90s
 oc get pods -l app=parasol-agent -n $NS
-oc describe pod -l app=parasol-agent -n $NS | grep -A3 -i 'readiness\|conditions'
 ----
 
-The rollout does not complete inside the timeout, and the *old* pod is still the one taking traffic.
-Nothing crashed — the process is fine — but the new pod cannot reach a tool server, so its readiness probe never passes, so the Service never sends it a request and the Deployment never finishes replacing the old one.
-That is the whole safety property in one sentence: a dependency your agent cannot reach makes it *not ready to serve*, and the rollout stalls rather than swapping a working pod for a broken one.
-Read the pod's own status before you fix it — whatever shape it took is what your platform would show you at three in the morning.
+.Expected output — the rollout gives up, and you are left holding two pods
+[source,texinfo]
+----
+deployment.apps/parasol-agent updated
+Waiting for deployment "parasol-agent" rollout to finish: 1 old replicas are pending termination...
+error: timed out waiting for the condition
+NAME                             READY   STATUS    RESTARTS   AGE
+parasol-agent-7f49478bd4-fj6r6   0/1     Running   0          92s
+parasol-agent-978d4b7f7-bgnlr    1/1     Running   0          2m14s
+----
 
-Put it back — the same value you handed the agent back with a moment ago — and the rollout completes:
+There is the safety property, in one line of `oc get pods`: the new pod is `0/1`, the old pod is `1/1`, and the Deployment refuses to finish the swap.
+Prove the old one is still doing the work — this is the sentence the whole detour exists for:
+
+[source,sh,role=execute]
+----
+curl -ksS "$AGENT/agent/info" | jq -r .policyDocsMcpUrl
+----
+
+.Expected output — the agent is still up, still answering, still on the shipped server
+[source,texinfo]
+----
+http://policy-docs:8080/mcp/sse
+----
+
+Now read *why* the new pod never arrived, because the shape of this failure is not the one most people guess:
+
+[source,sh,role=execute]
+----
+oc describe pod -l app=parasol-agent -n $NS | grep -E 'Unhealthy|Killing|Restart Count|Last State|Exit Code'
+----
+
+.Expected output — captured a few minutes into the stall, once the restarts had started. `describe` covers *both* pods, so the broken one's block comes first and the healthy one's `Restart Count: 0` follows
+[source,texinfo]
+----
+    Last State:     Terminated
+      Exit Code:    137
+    Restart Count:  2
+  Warning  Unhealthy  105s (x6 over 4m)      kubelet  Liveness probe failed: Get "http://10.232.0.112:8080/q/health/live": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  Warning  Unhealthy  104s (x18 over 4m32s)  kubelet  Readiness probe failed: Get "http://10.232.0.112:8080/q/health/ready": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  Normal   Killing    0s (x3 over 3m30s)     kubelet  Container parasol-agent failed liveness probe, will be restarted
+    Restart Count:  0
+...
+----
+
+Three details in there are each worth more than the exercise took.
+
+*The probe timed out; it did not come back unhealthy.* `context deadline exceeded` is the kubelet saying the pod never answered at all — not that `/q/health/ready` reported `DOWN`. A health endpoint that *reports* a broken dependency and one that *stops responding because of it* look identical from the outside and are diagnosed completely differently.
+
+*The process did not crash on its own — the platform killed it.* `Exit Code: 137` is `SIGKILL`, and the `Killing` event names who did it and why: the *liveness* probe failed too, so the kubelet restarted the container, and `Restart Count` climbs for as long as you leave the typo in place. A pod that boots fine and is then killed for being unresponsive reads, at three in the morning, exactly like a crash — and it is not one.
+
+*And the cause is one line in the pod's own log.* The application started normally, and then:
+
+[source,sh,role=execute]
+----
+BAD=$(oc get pods -l app=parasol-agent -n $NS \
+        -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==false)]}{.metadata.name}{"\n"}{end}' | head -1)
+oc logs "$BAD" -n $NS | grep -E 'started in|Failed to connect to the SSE channel|has been blocked for' | head -4
+----
+
+.Expected output — wrapped here; each of these is one long line
+[source,texinfo]
+----
+2026-08-07 22:44:51,232 INFO  [io.quarkus] (main) parasol-agent 1.0.0 on JVM (powered by
+Quarkus 3.33.3.1) started in 6.885s. Listening on: http://0.0.0.0:8080
+2026-08-07 22:44:58,857 WARN  [io.quarkiverse.langchain4j.mcp.runtime.http.QuarkusHttpMcpTransport]
+(vert.x-eventloop-thread-1) Failed to connect to the SSE channel, the MCP client will not be used:
+jakarta.ws.rs.ProcessingException: java.net.UnknownHostException: policy-docs-typo: Name or
+service not known
+2026-08-07 22:45:00,943 WARN  [io.vertx.core.impl.BlockedThreadChecker] (vertx-blocked-thread-checker)
+Thread Thread[vert.x-eventloop-thread-1,5,main] has been blocked for 2086 ms, time limit is 2000 ms
+----
+
+That is the whole story, in order: the agent *started* in under seven seconds; the MCP client could not resolve `policy-docs-typo`; and the retry ran *on an event-loop thread and blocked it*. A blocked event loop is why the health endpoints went silent rather than reporting a problem — the same threads that would have served `/q/health/ready` were busy failing to reach your tool server.
+
+NOTE: If that last command prints nothing, the container has just been restarted and its log started over — add `--previous` to read the instance that was killed.
+
+The lesson generalizes past this agent: *"my dependency is down" and "my pod is unresponsive" are the same incident here*, because the client retried on the thread that answers probes. That is a design decision inside a library you did not write, and it is the kind of thing you only ever learn by breaking something on purpose.
+
+Put it back — the same value you handed the agent back with a moment ago:
 
 [source,sh,role=execute]
 ----
@@ -1363,21 +1547,39 @@ oc set env deploy/parasol-agent POLICY_DOCS_MCP_URL=http://policy-docs:8080/mcp/
 oc rollout status deploy/parasol-agent -n $NS --timeout=180s
 ----
 
+.Expected output — no waiting at all, and that is the point
+[source,texinfo]
+----
+deployment.apps/parasol-agent updated
+deployment "parasol-agent" successfully rolled out
+----
+
+That returned in about two seconds, where the hand-back a moment ago took closer to twenty-five. The difference is the whole safety property paying out: restoring the old value restores the *old pod template*, and the healthy pod running it never went away — so there was nothing to roll. The Deployment simply stopped trying to replace it and discarded the broken one.
 That leaves you exactly where the hand-back left you, so this detour costs the rest of the lab nothing.
 ====
 
-// TODO(verify-on-cluster) #6 — run the optional break-and-fix and pin down the ACTUAL failure
-// shape, then name it in the prose above (it is deliberately left unnamed rather than guessed).
-// Two outcomes are plausible and they read very differently to an attendee:
-//   (a) the pod starts and sits NotReady (0/1 Running) because the MCP health check reports DOWN;
-//   (b) the pod never finishes booting — apps/parasol-agent/src/main/resources/application.properties
-//       warns that "booting the app without the MCP servers makes the langchain4j MCP client block
-//       the event loop retrying dead endpoints", which would look like a hung start, not a probe
-//       failure.
-// Whichever it is, also confirm the OLD pod keeps serving while the new one is stuck — with this
-// TIP placed AFTER the hand-back, `curl $AGENT/agent/info` should still answer, still reporting
-// http://policy-docs:8080/mcp/sse. That sentence is the point of the beat. If (b) turns out to be
-// slow and ugly, consider demoting this whole TIP or moving it to troubleshooting.
+// THE BREAK-AND-FIX FAILURE MODE IS MEASURED, AND IT IS NEITHER OF THE TWO THAT WERE PREDICTED.
+// Performed twice as user1 in user1-ai on 2026-08-07 (OCP 4.22.8), both runs identical:
+//   NOT (a) "pod sits NotReady because the MCP health check reports DOWN" — /q/health/ready never
+//     reports DOWN at all. It stops answering: measured 30s with zero bytes received from inside
+//     the pod, and the kubelet's 1s probe therefore records `context deadline exceeded`, not a 503.
+//   NOT (b) "the pod never finishes booting" — it boots normally, `started in 6.885s` / `7.289s`.
+//   WHAT ACTUALLY HAPPENS: boot succeeds, the MCP client fails to resolve the host
+//     (UnknownHostException) and retries ON A VERT.X EVENT-LOOP THREAD, BlockedThreadChecker logs
+//     the thread blocked for 2s, 4s, 6s… and the pod's whole HTTP surface goes silent. The
+//     LIVENESS probe then fails the same way, so the kubelet SIGKILLs the container: Exit Code 137,
+//     `failed liveness probe, will be restarted`, Restart Count climbing (0 at the 90s rollout
+//     timeout, 2 by ~4 minutes). So "Nothing crashed — the process is fine", which this TIP used to
+//     say, was FALSE and is now removed. The application.properties note (b) came from was right
+//     about the mechanism (blocked event loop) and wrong about the symptom (not a hung start).
+// CONFIRMED, and it is the reason the beat stays rather than being demoted to troubleshooting:
+//   the OLD pod keeps serving throughout — the Service endpoint list holds only the old pod's IP,
+//   and `curl $AGENT/agent/info` answers with http://policy-docs:8080/mcp/sse the whole time.
+//   Recovery is also instant (measured 2s, twice) because restoring the value restores the pod
+//   template the healthy ReplicaSet is already running, so nothing has to roll.
+// The `oc describe … | grep -A3 -i 'readiness\|conditions'` this block used to run was replaced:
+//   it interleaved both pods three lines at a time and missed the Killing/Exit-Code evidence
+//   entirely. The grep now names the fields that carry the finding.
 //
 // PLACEMENT IS DELIBERATE: this optional detour sits AFTER the required hand-back and restores to
 // the SHIPPED url, so that whether or not an attendee takes it, the last `oc set env` anyone runs
@@ -1389,11 +1591,17 @@ That leaves you exactly where the hand-back left you, so this detour costs the r
 ====
 
 // ---------------------------------------------------------------------------
-// OPEN CLUSTER TODOs FOR THIS SECTION are the seven verify-on-cluster
-// markers above — all of them commands that BUILD or DEPLOY, which the authoring
-// lane and the integrator were both barred from running (read-only cluster
-// access, with a cluster lane holding the mutating path). Nothing in the prose is
-// presented as a capture that is not one.
+// NO OPEN CLUSTER TODOs FOR THIS SECTION. The seven verify-on-cluster markers this section shipped
+// with were all commands that BUILD or DEPLOY, which the authoring lane and the integrator were
+// both barred from running. They were performed and captured 2026-08-07 as the attendee identity
+// user1 in user1-ai, on cluster 4.22.8, model {maas_model}: the BuildConfig/ImageStream apply and
+// start-build; the poll loop to Complete (1m54s, status.duration 114000000000); oc new-app +
+// rollout status (and the two-port Service, 8443 inherited from the base image — verified against
+// the istag's Config.ExposedPorts); the post-registration /agent/info + /q/health/ready; the RAG
+// answer against the attendee's own policy-docs-mine (5 runs, facts identical, toolCalls shape
+// varying 3/5 vs 2/5 — the block prints the majority shape and the prose names the variance); the
+// hand-back; and the optional break-and-fix, run twice. Every output block in this section is a
+// capture. Nothing here is presented as a capture that is not one.
 // STILL TO GROUND IN A BROWSER (media pass, not cluster work): the two [CAPTURE-VERIFY] Console
 // tabs above — the Builds list/Logs path, and the Deployment Environment tab.
 //
