@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""digest-pin-guard.py — the curated Parasol task library ships NO floating image tags.
+"""digest-pin-guard.py — no floating image tags in the curated task library, and no floating
+ENTITLED-registry tag anywhere in the GitOps install path.
 
 WHY THIS EXISTS. `pipelines/tasks/image-size-report.yaml` shipped `ose-cli:latest` for the whole
 life of the module that TEACHES digest pinning. Nothing noticed, because nothing was looking: the
@@ -14,39 +15,62 @@ publishes (v4.16…v4.22 are all absent) and it has been frozen on v4.15.0 since
 freshness grade D and "unapplied Critical or Important security errata". A floating tag had drifted
 to something OLDER than the workshop's own OCP floor and nobody could see it from the manifest.
 
-SCOPE, AND WHY IT IS THIS AND NOT THE WHOLE REPO. Measured 2026-08-08 over the tracked tree:
+SCOPE — TWO TIERS, EACH ONE THE TREE PASSES TODAY.
 
-    git grep -nE '^[[:space:]]*(-[[:space:]]*)?image:[[:space:]]*[^[:space:]]+:latest'
-
-returned 55 occurrences outside this directory's own fixtures. FORTY-FOUR of them are `kind: Job` —
-one-shot install/seed/entry-state hooks that run once, on a cluster being built, and are deleted
-afterwards. Those are a real but different risk, and a gate that failed on 44 pre-existing findings
-would be switched off within a day, taking the 11 findings that matter with it. So this guard
-polices the artifact where immutability is the actual product:
+Tier 1, the curated Parasol task library, EVERY image whatever its registry:
 
     pipelines/tasks/*.yaml                              the 8 canonical curated Tasks
     gitops/workshop-config/templates/parasol-tasks.yaml the same 8, republished by the workshop layer
 
 That library is a platform team's published contract — `taskRef`'d by cluster resolver from every
 app pipeline, read by attendees as the exemplar, and the thing the supply-chain module points at.
-Its blast radius is every pipeline on the cluster, not one namespace being bootstrapped.
+Its blast radius is every pipeline on the cluster, not one namespace being bootstrapped. Measured on
+the canonical copy at the commit before this guard landed: 12 `image:` fields, 1 of them a `${IMAGE}`
+parameter, and TEN of the 11 real step images were already pinned. Pinning `image-size-report` made
+the convention unanimous rather than imposing a new one. Across both copies: 9 files, 24 fields, 22
+judged.
 
-The rule is one the tree passes today, which is the only kind of rule that survives. Measured on the
-canonical copy at the commit before this guard landed: 12 `image:` fields, of which 1 is a `${IMAGE}`
-parameter, leaving 11 real step images — and TEN of those 11 were already digest-pinned. The library
-had one floating tag, `image-size-report`, and pinning it made the convention unanimous rather than
-imposing a new one. Across both copies the guard now reads 9 files and 24 fields, judging 22.
+Tier 2, added 2026-08-08 once the sweep below made it passable: every ENTITLED-REGISTRY image
+reference in the install path —
+
+    gitops/**  platform-portfolio/**  helm/**  pipelines/**   (664 YAML files)
+
+— must be digest-pinned. "Entitled registry" means `registry.redhat.io/**`, the one that needs a
+pull secret and the one where this whole finding started. Measured after the sweep: 53 references
+judged, 2 exempt, 0 unpinned.
+
+WHY TIER 2 EXISTS NOW AND DID NOT THIS MORNING. The first version of this guard was deliberately
+tier 1 only, because a `git grep` for floating `image:` tags returned 55 hits outside this
+directory's fixtures and 44 of them were `registry.redhat.io/openshift4/ose-cli:latest` in one-shot
+hook Jobs. A gate that opens on 44 pre-existing findings gets switched off inside a day and takes
+the findings that matter with it. Those 44 have since been swept — surveyed by kind, checked for the
+≥512Mi and no-runtime-dnf constraints, proved on a live cluster, and repinned onto
+`ose-cli-rhel9:v4.22@sha256:…`. The scope note that said "worth fixing; needs its own sweep and a
+cluster smoke" got its sweep, so the rule it was waiting on is now a rule the tree passes.
+
+Tier 2 reads ANY YAML field whose value is an entitled reference, not just `image:`. Measured field
+names carrying one: `image`, `cli` (helm/bootstrap/values.yaml's `images.cli`, the single value that
+feeds ten bootstrap Jobs) and `udiImage`. A guard that only understood `image:` would have left the
+most leveraged reference in the tree unpoliced.
 
 DELIBERATELY OUT OF SCOPE, so nobody reads a green tick as more than it is:
-  * the 44 one-shot hook Jobs above (`gitops/entry-states/**`, `gitops/workshop-config/**`,
-    `platform-portfolio/components/**`). Worth fixing; needs its own sweep and a cluster smoke,
-    because those images are pulled during install and a bad pin breaks the installer, not a lab.
-  * the 3 remaining floating tags in Tekton PIPELINE step images
-    (`pipelines/pipeline/parasol-claims-devsecops.yaml`, and the app-security-testing /
-    trusted-supply-chain entry-state pipelines). Same rule, same argument, but each is a
-    lockstep copy pair and re-pinning them is a change that has to be run on a cluster first.
-  * `apps/parasol-legacy-claims/devfile.yaml`'s universal-developer-image, which is an IDE base
-    image chosen by Dev Spaces, not a supply-chain artifact.
+  * `registry.access.redhat.com` UBI base images. SIX floating tags remain in the install path
+    (`ubi9-minimal:latest` ×3, `ubi9/ubi-minimal:latest` ×3 in jobs-batch-kueue's solve endstate,
+    `ubi9/openjdk-21:latest` ×1). Same rule, same argument, and the next sweep — but UBI `:latest`
+    is ACTIVELY rebuilt, which is the opposite of the failure that motivated this file, so it is a
+    lower-grade risk and not worth blocking tier 2 on.
+  * in-cluster registry references (`image-registry.openshift-image-registry.svc:5000/...`, 3 of
+    them). Those resolve through ImageStreamTags the cluster owns — two are OpenShift's own
+    `openshift/tools` and `openshift/cli`, one is the workshop's own build output. A digest there
+    would pin away the thing the imagestream exists to do.
+  * Dev Spaces UDI images (`registry.redhat.io/devspaces/**`, 2 of them: an `udiImage` value and a
+    devfile). Entitled, but the IDE base image is chosen by the Dev Spaces operator and version-
+    tagged to the product release; the workshop pins the Dev Spaces VERSION via versions.yaml. Same
+    reasoning the sibling `apps/parasol-legacy-claims/devfile.yaml` was carved out under.
+  * `content/**` (15 floating tags). Attendee-authored YAML inside lab instructions — teaching
+    material, where a bare `ubi-minimal:latest` is sometimes the point. Note the two live exceptions
+    recorded in the backlog: observability-health-scale's `claims-burst` still runs the el8
+    `ose-cli:latest` by hand, and that one is a real finding awaiting its module owner.
 
 WHAT COUNTS AS PINNED. `repo@sha256:<64 lowercase hex>`, with or without a human-readable tag in
 front (`repo:v4.22@sha256:…`). The composite form is preferred and is what three sibling Tasks
@@ -62,7 +86,7 @@ A missing file, or a scope that collapses below its floor, is an ERROR (exit 2),
 pass — a guard that inspects nothing must not report clean.
 
 USAGE
-    tools/lint/digest-pin-guard.py              # check the curated library
+    tools/lint/digest-pin-guard.py              # check both tiers; rc 2 outranks 1 outranks 0
     tools/lint/digest-pin-guard.py --self-test  # prove it fires; must exit 1
 """
 
@@ -149,6 +173,21 @@ DIGEST = _compile("DIGEST", r"@sha256:[0-9a-f]{64}$")
 # embeds a sample Deployment whose `image: ${IMAGE}` is the artifact under test.
 PARAM_REF = _compile("PARAM_REF", r"\$\{|\$\(|\{\{")
 
+# TIER 2's field regex. ANY YAML scalar field whose value is an entitled reference — not just
+# `image:`. Measured on this tree, three field names carry one: `image`, `udiImage`, and `cli`
+# (helm/bootstrap/values.yaml's `images.cli`, the single value ten bootstrap Jobs read). Anchored to
+# the start of a line so a comment — including this file's own prose, and the `# Digest-pinned; el8
+# ose-cli:latest was …` note the sweep left at 44 sites — is never read as a field.
+ENTITLED_FIELD = _compile(
+    "ENTITLED_FIELD",
+    r"^[ \t]*(?:-[ \t]+)?[A-Za-z][A-Za-z0-9_.-]*:[ \t]*[\"']?(registry\.redhat\.io/[^\s\"'#]+)",
+    re.M)
+
+# Dev Spaces IDE base images. Entitled, but chosen by the Dev Spaces operator and version-tagged to
+# the product release rather than pinned by this repo — the same carve-out the sibling
+# apps/parasol-legacy-claims/devfile.yaml has. See the docstring's out-of-scope list.
+DEVSPACES_UDI = _compile("DEVSPACES_UDI", r"^registry\.redhat\.io/devspaces/")
+
 
 def is_parameter(ref: str) -> bool:
     """Is this a substitution placeholder rather than a real image reference?
@@ -169,6 +208,20 @@ def is_digest_pinned(ref: str) -> bool:
     return bool(DIGEST.search(ref))
 
 
+def is_entitled_scope(ref: str) -> bool:
+    """Is this a reference TIER 2 is responsible for?
+
+    True for `registry.redhat.io/**` — the entitled registry, the one that needs a pull secret and
+    the one `ose-cli:latest` rotted on — except Dev Spaces UDI images, which the Dev Spaces operator
+    version-tags for itself.
+
+    Blinding this True drags the UBI base images and the Dev Spaces UDIs into scope and reports
+    their floating tags (rc 1); blinding it False empties tier 2 and collapses its scope floor
+    (rc 2). Both directions move an exit code, which is what makes it a detector and not a comment.
+    """
+    return bool(ref.startswith("registry.redhat.io/") and not DEVSPACES_UDI.search(ref))
+
+
 def scope_files() -> list[Path]:
     """The curated library's files, canonical copy first.
 
@@ -178,6 +231,37 @@ def scope_files() -> list[Path]:
     """
     tasks = sorted(p for p in CANONICAL_DIR.glob("*.yaml") if p.name != "kustomization.yaml")
     return tasks + [LIBRARY_COPY]
+
+
+# TIER 2's roots: the GitOps install path. Everything an `oc`-bearing hook Job, a portfolio
+# component or a bootstrap chart can pull during a cluster build.
+INSTALL_ROOTS = ("gitops", "platform-portfolio", "helm", "pipelines")
+
+
+def install_path_files() -> list[Path]:
+    """Every YAML file under the install path, sorted.
+
+    A glob rather than a list for the same reason as scope_files(): a new entry-state chart is
+    policed the day it lands. The floor below is what notices when the glob stops matching.
+    """
+    found = set()
+    for root in INSTALL_ROOTS:
+        for ext in ("yaml", "yml"):
+            found.update((REPO / root).glob(f"**/*.{ext}"))
+    return sorted(found)
+
+
+# Floors, measured 2026-08-08 after the ose-cli sweep: 664 install-path YAML files carrying 53
+# entitled references (plus 2 Dev Spaces UDIs, exempt). Set well below today's numbers so ordinary
+# growth and small deletions do not redden main, and far above what any plausible truncation
+# produces — one root's worth, or the `[:1]` that _scope.py exists to catch.
+MIN_INSTALL_FILES = 400
+MIN_INSTALL_IMAGES = 40
+
+# Tier 2's label, used for its scope-ledger dimension names and its verdict line. A constant so
+# the self-test's probes report under the SAME tier as the real run — a canary that prints "curated
+# task library" while exercising the install path is a log that lies about what it proved.
+T2 = "entitled references in the install path"
 
 
 # Floors, measured 2026-08-08 on this tree: 9 files (8 curated Tasks + the republished copy) and 24
@@ -191,18 +275,30 @@ MIN_FILES = 9
 MIN_IMAGES = 20
 
 
-def check(files, min_files: int = 1, min_images: int = 1) -> int:
-    """Judge every image field in `files`. Returns 0 clean, 1 findings, 2 could-not-inspect."""
-    problems, judged, skipped = [], 0, 0
+def check(files, min_files: int = 1, min_images: int = 1,
+          field=None, only=None, tier: str = "curated task library") -> int:
+    """Judge the image fields in `files`. Returns 0 clean, 1 findings, 2 could-not-inspect.
+
+    `field` is the field regex (tier 1's `image:`-only IMAGE_FIELD by default, tier 2's
+    ENTITLED_FIELD for the install path) and `only` an optional responsibility predicate: a ref it
+    rejects is EXEMPT — counted, reported, and never judged. Both are parameters rather than two
+    copies of this loop because every emit site below, and the scope ledger under it, has to be the
+    same code in both tiers; a second implementation is a second thing to blind.
+    """
+    field = IMAGE_FIELD if field is None else field
+    problems, judged, skipped, exempt = [], 0, 0, 0
     for path in files:
         if not path.exists():
             print(f"ERROR: {path} is missing — refusing to report clean", file=sys.stderr)
             return 2
         text = path.read_text(encoding="utf-8", errors="replace")
-        for m in IMAGE_FIELD.finditer(text):
+        for m in field.finditer(text):
             ref = m.group(1)
             if is_parameter(ref):
                 skipped += 1
+                continue
+            if only is not None and not only(ref):
+                exempt += 1
                 continue
             judged += 1
             line = text.count("\n", 0, m.start()) + 1
@@ -228,25 +324,30 @@ def check(files, min_files: int = 1, min_images: int = 1) -> int:
                         f"or, on a cluster, `oc image info --show-multiarch <ref>`.")
 
     scope = Scope("digest-pin-guard")
-    scope.require("library files", min_files,
-                  "the 8 curated Tasks in pipelines/tasks plus the workshop layer's republished "
-                  "copy. Reading fewer is not a clean result, it is an unread file.")
-    scope.require("image fields judged", min_images,
-                  "every step image in the curated library. A judged count that collapses means "
-                  "the field regex stopped matching, not that the images went away.")
-    scope.add("library files", len(files))
-    scope.add("image fields judged", judged)
+    scope.require(f"{tier} files", min_files,
+                  "tier 1 is the 8 curated Tasks in pipelines/tasks plus the workshop layer's "
+                  "republished copy; tier 2 is every YAML file under the install path. Reading "
+                  "fewer is not a clean result, it is an unread file.")
+    scope.require(f"{tier} image fields judged", min_images,
+                  "every step image in the curated library (tier 1) / every entitled reference in "
+                  "the install path (tier 2). A judged count that collapses means the field regex "
+                  "or the responsibility predicate stopped matching, not that the images went "
+                  "away.")
+    scope.add(f"{tier} files", len(files))
+    scope.add(f"{tier} image fields judged", judged)
     collapsed = scope.enforce()
     if collapsed:
         return collapsed
 
+    tail = (f"{skipped} parameter reference(s) skipped"
+            + (f", {exempt} out-of-scope reference(s) exempt" if only is not None else ""))
     if problems:
-        print(f"digest-pin-guard: {len(problems)} unpinned image(s) in the curated task library "
-              f"({judged} judged, {skipped} parameter reference(s) skipped).")
+        print(f"digest-pin-guard: {len(problems)} unpinned image(s) in the {tier} "
+              f"({judged} judged, {tail}).")
         print("\n".join(problems))
         return 1
-    print(f"digest-pin-guard: clean ({len(files)} file(s), {judged} image(s) digest-pinned, "
-          f"{skipped} parameter reference(s) skipped).")
+    print(f"digest-pin-guard: clean — {tier}: {len(files)} file(s), {judged} image(s) "
+          f"digest-pinned, {tail}.")
     return 0
 
 
@@ -319,6 +420,50 @@ def self_test() -> int:
                 print(f"SELF-TEST FAILED: {complaint}", file=sys.stderr)
                 ok = False
 
+        # ── TIER 2's own canaries, run through check() with the tier-2 field regex and
+        # responsibility predicate, exactly as main() calls it. Each non-entitled case is paired
+        # with a pinned ENTITLED anchor for the reason spelled out above: a probe that judges
+        # nothing collapses the scope floor and would report rc 2 for the wrong reason, which is
+        # indistinguishable from the exemption working.
+        anchor = f"    image: registry.redhat.io/anchor/tool@sha256:{good}\n"
+        tier2_cases = [
+            # Negative canaries — the forms tier 2 must NOT fire on.
+            ("t2-entitled-pinned.yaml", anchor, 0,
+             "a correctly pinned entitled reference was flagged by tier 2"),
+            ("t2-nonimage-field.yaml",
+             f'  cli: "registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:{good}"\n', 0,
+             "helm/bootstrap/values.yaml's `images.cli` shape was not read as a field, or was "
+             "flagged while pinned. That single value feeds ten bootstrap Jobs — an `image:`-only "
+             "regex leaves the most leveraged reference in the tree unpoliced"),
+            ("t2-unentitled-floating.yaml",
+             anchor + "    image: registry.access.redhat.com/ubi9/ubi-minimal:latest\n", 0,
+             "tier 2 fired on a registry.access.redhat.com UBI tag. Those SIX floating tags are "
+             "documented out of scope; firing on them is the 'gate opens on pre-existing findings' "
+             "failure this tier was sequenced to avoid"),
+            ("t2-incluster-floating.yaml",
+             anchor + "    image: image-registry.openshift-image-registry.svc:5000/openshift/"
+                      "tools:latest\n", 0,
+             "tier 2 fired on an in-cluster ImageStreamTag reference — a digest there pins away "
+             "the thing the imagestream exists to do"),
+            ("t2-devspaces-udi.yaml",
+             anchor + "    image: registry.redhat.io/devspaces/udi-rhel9:3.29\n", 0,
+             "the Dev Spaces UDI exemption did not hold. It is entitled and unpinned by design; "
+             "the Dev Spaces operator version-tags it and versions.yaml pins the product"),
+
+            # Positive canary — the defect this tier exists for.
+            ("t2-entitled-floating.yaml",
+             "    image: registry.redhat.io/openshift4/ose-cli:latest\n", 1,
+             "the exact string this whole sweep removed — an entitled floating tag in the install "
+             "path — did not trip tier 2. That is the regression this tier exists to prevent"),
+        ]
+        for name, text, expected, complaint in tier2_cases:
+            probe = Path(d) / name
+            probe.write_text(text)
+            if check([probe], field=ENTITLED_FIELD, only=is_entitled_scope,
+                     tier=T2) != expected:
+                print(f"SELF-TEST FAILED: {complaint}", file=sys.stderr)
+                ok = False
+
         # A file that is GONE must be rc 2, not a clean zero-image pass. A renamed or moved Task is
         # how a curated artifact quietly stops being policed, and "I read nothing" must never be
         # spelled the same way as "I read everything and it was fine".
@@ -335,6 +480,24 @@ def self_test() -> int:
             print("SELF-TEST FAILED: a collapsed FILE set did not exit 2 — a broken glob would "
                   "report clean over a library it never opened.", file=sys.stderr)
             ok = False
+        # Tier 2's own floors, the same two failures. The second is the one that matters most here:
+        # a responsibility predicate blinded to False exempts EVERYTHING, and without this the tier
+        # would print "clean — 0 image(s) digest-pinned, 53 exempt" and exit 0.
+        if check([one], min_files=MIN_INSTALL_FILES,
+                 field=ENTITLED_FIELD, only=is_entitled_scope, tier=T2) != 2:
+            print("SELF-TEST FAILED: a collapsed tier-2 FILE set did not exit 2 — a broken "
+                  "install-path glob would report clean over a tree it never opened.",
+                  file=sys.stderr)
+            ok = False
+        all_exempt = Path(d) / "t2-all-exempt.yaml"
+        all_exempt.write_text("    image: registry.redhat.io/devspaces/udi-rhel9:3.29\n")
+        if check([all_exempt], min_images=MIN_INSTALL_IMAGES,
+                 field=ENTITLED_FIELD, only=is_entitled_scope, tier=T2) != 2:
+            print("SELF-TEST FAILED: a tier-2 run that judged ZERO references did not exit 2 — an "
+                  "exemption predicate that widened to everything would report clean.",
+                  file=sys.stderr)
+            ok = False
+
         empty = Path(d) / "no-images.yaml"
         empty.write_text("kind: Task\nmetadata:\n  name: nothing-here\n")
         if check([empty], min_images=MIN_IMAGES) != 2:
@@ -351,6 +514,19 @@ def self_test() -> int:
               f"A curated Task was added or removed without re-stating the floor, so the floor has "
               f"stopped asserting the real set.", file=sys.stderr)
         ok = False
+
+    # Tier 2's discovery is a FLOOR, not an equality (664 files today against a floor of 400), so
+    # there is no MIN==found assertion to make. What must hold is that discovery still clears its
+    # own floor on the real tree: a glob that stops matching would otherwise only be caught on
+    # whatever push happened to follow it.
+    install_found = len(install_path_files())
+    if install_found < MIN_INSTALL_FILES:
+        print(f"SELF-TEST FAILED: install-path discovery finds {install_found} file(s), below its "
+              f"own floor of {MIN_INSTALL_FILES}. Either the glob broke or the roots "
+              f"{list(INSTALL_ROOTS)} moved; re-state the floor deliberately, do not lower it to "
+              f"whatever the bug returns.", file=sys.stderr)
+        ok = False
+
     for failure in Scope.self_check():
         print(f"SELF-TEST FAILED: {failure}", file=sys.stderr)
         ok = False
@@ -360,7 +536,10 @@ def self_test() -> int:
     print("self-test ok — floating tags (:latest, a version tag, and no tag at all) fail; "
           "malformed digests fail; bare and composite digest pins pass, as do parameter "
           "placeholders and prose in comments; a missing file and a collapsed file or image scope "
-          "are refusals, not clean runs; the file floor matches discovery.")
+          "are refusals, not clean runs; the file floor matches discovery. Tier 2: an entitled "
+          "floating tag fails; a pinned `cli:` value, a UBI tag, an in-cluster ImageStreamTag and "
+          "a Dev Spaces UDI are all correctly left alone; a collapsed file set and a run that "
+          "exempts everything are refusals.")
     return 1
 
 
@@ -383,7 +562,14 @@ def main(argv=None) -> int:
 
     if args.self_test:
         return self_test()
-    return check(scope_files(), MIN_FILES, MIN_IMAGES)
+
+    # BOTH tiers run before either verdict is returned, deliberately: a tier-1 finding must not
+    # hide a tier-2 one from whoever is reading the log. rc 2 dominates rc 1 dominates rc 0, which
+    # `max` gives directly — "could not inspect" outranks "found something" outranks "clean".
+    tier1 = check(scope_files(), MIN_FILES, MIN_IMAGES)
+    tier2 = check(install_path_files(), MIN_INSTALL_FILES, MIN_INSTALL_IMAGES,
+                  field=ENTITLED_FIELD, only=is_entitled_scope, tier=T2)
+    return max(tier1, tier2)
 
 
 if __name__ == "__main__":
