@@ -21,6 +21,32 @@ content:
 
 asciidoc:
   attributes:
+    # ── READ THIS BEFORE ADDING AN ENVIRONMENT VALUE HERE ──────────────────────────────────────
+    # This block is the PLAYBOOK layer, and the playbook layer OUTRANKS the deploy-time injection.
+    # A plain (non-`@`) value written here therefore does not "pass a variable to the cockpit" — it
+    # BAKES one from git and silently defeats the per-deployment value, which is the F-05 defect in
+    # reverse. Measured 2026-08-07 on Antora 3.1.15 against this repo's real content, by building
+    # twice and changing exactly one character (`idseparator`, which content/antora.yml hard-sets to
+    # "-", overridden from a playbook file):
+    #   playbook `idseparator: "Q"`   -> section id `preQflightQchecklist`  (playbook HARD wins)
+    #   playbook `idseparator: "Q@"`  -> section id `pre-flight-checklist`  (descriptor wins)
+    # A third build (`--attribute ocp_version=PROBE-INJECTED`) rendered "OCP PROBE-INJECTED" on a
+    # page whose partial assigns `:ocp_version:`, so the playbook layer also outranks an in-document
+    # assignment. Order, measured end to end: playbook-hard > component descriptor > playbook-soft.
+    #
+    # WHERE DEPLOY-TIME VALUES ACTUALLY ENTER (this file cannot receive them — nothing templates or
+    # mounts over it; the cockpit clones it verbatim from the mirror, and the antora image rewrites
+    # ONLY `.antora.extensions` in it). The wired channel is the COMPONENT DESCRIPTOR:
+    #   ConfigMap showroom-userdata-{user}  (gitops/workshop-config/templates/showroom.yaml)
+    #     -> mounted at /user_data/user_data.yml in the antora-build initContainer
+    #     -> `yq -i '.asciidoc.attributes *= load(...)' <start_path>/antora.yml` by the image's
+    #        /usr/local/bin/entrypoint.sh (read from the running image 2026-08-07)
+    #     -> content/antora.yml, whose `@`-soft defaults it replaces.
+    # `start_path` below is what selects that antora.yml, so this playbook already "wires" the
+    # injection — it just must not compete with it. Add cluster-specific values to the ConfigMap,
+    # never here; if a cockpit-only default is genuinely needed, it MUST carry the `@` suffix so it
+    # yields, exactly like cluster_ocp_version below.
+    #
     # UI macros (kbd:/btn:/menu:) and stable deep-link IDs — mirror content/antora.yml.
     experimental: true
     idprefix: ""
@@ -28,6 +54,19 @@ asciidoc:
     # Flavor flag: the cockpit serves the WORKSHOP rendering; modules/ROOT/nav.adoc selects
     # nav-workshop.adoc from this. Without it the sidebar renders EMPTY (nav wiring, 2026-07-10).
     workshop: true
+    # The OpenShift release of the cluster THIS cockpit serves — a live environment value, and the
+    # only honest source for "the cluster in front of you runs X". Deliberately NOT {ocp_version}:
+    # that one is generated from versions.yaml, where it is documented as a MINIMUM, not a cap, and
+    # it is frozen at content-build time (it read 4.22.6 on a 4.22.8 cluster, 2026-08-07 — F-05).
+    # One attribute cannot be both a pinned floor and a live reading, so this is a second name.
+    #
+    # SOFT (`@`) ON PURPOSE — see the precedence note above. This is a fallback, not a value: the
+    # real one arrives from the showroom-userdata-{user} ConfigMap, which overrides it. Plain text,
+    # never angle-bracketed: "<set-from-...>" was parsed as an unknown HTML tag and DROPPED by every
+    # browser, so the sentence lost its subject with no build warning (content/antora.yml, measured
+    # 2026-07-31). And never a version-shaped default — a wrong-looking release is worse than a
+    # visible placeholder, because nobody questions "4.22.6" and everybody questions this.
+    cluster_ocp_version: "set-from-cluster@"
 
 antora:
   extensions:
