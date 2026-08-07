@@ -124,24 +124,43 @@ oc patch image.config.openshift.io/cluster --type=merge \
 oc import-image demo-blocked -n user3-dev --from=docker.io/library/nginx:latest --confirm
 ----
 
-// VERIFIED on a disposable OpenShift Local 4.22.1 cluster (kubeadmin, 2026-07-31) — not on the shared build
-// cluster, which is live with four attendee identities and cannot take a cluster-wide image-policy
-// mutation. Command: `oc import-image demo-blocked -n test --from=docker.io/library/nginx:latest --confirm`
-// with `spec.allowedRegistriesForImport` set to `[registry.redhat.io, registry.access.redhat.com]`.
-// Literal denial (identical via both `oc import-image -v=6` and a raw POST to
-// `imagestreamimports`, HTTP 422 Unprocessable Entity — an admission-time *validation* error, not
-// a 403 Forbidden):
+// MAINTAINER NOTES on the capture rendered below. Method: `oc import-image demo-blocked -n test
+// --from=docker.io/library/nginx:latest --confirm` with `spec.allowedRegistriesForImport` set to
+// `[registry.redhat.io, registry.access.redhat.com]`, on a disposable OpenShift Local 4.22.1 cluster
+// as kubeadmin, 2026-07-31 — NOT on the shared build cluster, which is live with four attendee
+// identities and cannot take a cluster-wide image-policy mutation. Cross-checked two ways: the text
+// is identical via `oc import-image -v=6` and via a raw POST to `imagestreamimports`, which is what
+// pins the response as HTTP 422 Unprocessable Entity rather than 403.
+// The rendered block below ELIDES the repeated whitelist on the second cause. Byte-exact original,
+// for anyone re-capturing or diffing:
 //   The ImageStream "demo-blocked" is invalid:
 //   * spec.tags[latest].from.name: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
 //   * status.tags[latest].items[0].dockerImageReference: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
-// CORRECTION to the talk track below: cluster-admin is NOT exempt. Tested as `kubeadmin` (confirmed
-// `oc auth can-i '*' '*' --all-namespaces` → yes) and the import was denied identically to a normal
-// user. The prior "cluster-admins are exempt" line was ungrounded guesswork; removed.
-// Side note from this run: patching this singleton triggers a real openshift-apiserver pod rollout
-// (it's config the apiserver operator watches) — on the shared cluster that's a live, if brief,
-// disruption to the whole image/route/project API surface for every tenant, which is exactly why
-// the module restricts this beat to a tight announced window. Marker resolved; not reopening.
-Talk track: the import is *refused* at admission time with an `Invalid` (HTTP 422) error — not a `403 Forbidden` — whose field-level causes name `docker.io` as a registry not on the whitelist. It's *instant*, with no node change. It applies to *everyone*, cluster-admin included — there is no exemption, so demonstrate it from whatever identity is convenient. Then revert:
+// Evidence for the no-exemption claim: run as kubeadmin with `oc auth can-i '*' '*' --all-namespaces`
+// → yes, and the import was denied identically to a normal user. The prior "cluster-admins are
+// exempt" talk-track line was ungrounded guesswork; removed. Marker resolved; not reopening.
+// The rendered text below is the presenter-facing half of this note — keep the two in step. The demo
+// arc in lab.adoc deliberately does NOT script the wording (one cluster on one release is not a
+// promise about the presenter's); it narrates the same SHAPE, so change both or neither.
+
+What the refusal actually looks like — read the *shape*, and expect your own cluster's wording to differ in detail:
+
+[source,texinfo]
+----
+The ImageStream "demo-blocked" is invalid:
+* spec.tags[latest].from.name: Forbidden: registry "docker.io" not allowed by whitelist: "image-registry.openshift-image-registry.svc:5000", "registry.redhat.io:443", "registry.access.redhat.com:443"
+* status.tags[latest].items[0].dockerImageReference: Forbidden: registry "docker.io" not allowed by whitelist: <the same three entries again>
+----
+
+Three things to get right in front of the room, because the screen invites the wrong reading:
+
+* *It is an `Invalid` response — HTTP `422`, a validation error — not a `403`.* The word `Forbidden` is on screen, but as the *per-field cause reason*, not as the HTTP status. Do not narrate it as a 403 Forbidden.
+* *There are two causes for one import*, the same message on `spec` and again on `status`. A multi-line wall of red is the correct result, not a second failure.
+* *There is no exemption.* This was captured as `kubeadmin`, and the import was refused exactly as it is for an attendee — so demonstrate it from whatever identity is convenient.
+
+Captured on a disposable OpenShift Local *4.22.1* cluster as `kubeadmin` on *2026-07-31*; the second cause's repeated registry list is elided above. That is one cluster on one release, and it is the only place this can be captured: the shared workshop cluster can never host the check, because the same patch triggers a real `openshift-apiserver` rollout — observed on that run — that briefly disrupts the image, route and project API surface for *every* tenant. That is the reason for the tight announced window, and it is permanent, not a gap waiting on a better cluster.
+
+Talk track: the import is *refused* at admission time — the `Invalid` block above, whose field-level causes name `docker.io` as a registry not on the whitelist. It's *instant*, with no node change, and it applies to *everyone*, cluster-admin included. Then revert:
 
 [source,sh,role=execute]
 ----
