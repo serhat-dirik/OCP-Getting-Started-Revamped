@@ -3,25 +3,34 @@
 #
 #   ws help                          this message (also: ws -h / ws --help / bare ws)
 #   ws list                          the module catalog (number · slug · title) from modules.yaml
-#   ws prep   <module> [--yes]       ATTENDEE self-service: detect leftovers, offer wipe, prepare
+#   ws prep   <module> [--user U] [--yes]   ATTENDEE self-service: detect leftovers, offer wipe, prepare
 #   ws start  <module> [--user U]    materialize the entry state — does NOT purge leftovers first
 #                                    (on a used namespace prefer prep; --all-users = the whole cohort)
-#   ws verify <module> [--user U]    run the module's verification script
-#   ws smoke  <module> [userN]       G1 attendee-cockpit gate: run the attendee path IN the live cockpit
+#   ws verify <module> [--user U] [--entry-only|--solve]   run the module's verification script
+#   ws smoke  <module> [--user U]    G1 attendee-cockpit gate: run the attendee path IN the live cockpit
 #   ws reset  <module> [--user U]    return the user's world to the module's entry state
 #   ws solve  <module> [--user U]    materialize the END state (instructor only)
-#   ws git-refresh [--restart-terminals]   re-sync mirror+Argo; opt-in: restart cockpit terminal pods
+#   ws git-refresh [--restart-terminals] [--user U | --all] [--exclude U]
+#                                    re-sync mirror+Argo; opt-in: restart cockpit terminal pods
 #   ws session-refresh --all|--user U SA/admin: re-mint attendee logins before a session (no restart)
 #   ws doctor [--user U]             environment sanity: login, argo, gitea, operators, image drift
 #                                    (--user narrows the cohort-wide rows to one attendee)
 #   ws passwd [--user U] [NEWPASS]   SA/admin: rotate the shared workshop login password (cohort-wide)
-#   ws cohort-reset [--yes]          SA/admin: wipe ALL per-user state for a fresh cohort (keeps platform)
+#   ws cohort-reset [--yes] [--restart-terminals]   SA/admin: wipe ALL per-user state (keeps platform)
 #   ws scale-users N [--yes]         SA/admin: grow/shrink the workshop cohort to N users
 #   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
 #   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
 #   ws diag [--user U] [<module>]    SA/admin: read-only troubleshooting bundle for a stuck attendee
-#   ws maas show|set [options]       SA/admin: inspect / change the MaaS model+key (no reinstall)
-#   ws rebuild-images [--check]      SA/admin: rebuild workshop images and roll every stale consumer
+#   ws maas show|set [options]       SA/admin: inspect / change the MaaS model+key (see: ws maas --help)
+#   ws rebuild-images [--check|--no-build] [--image NAME] [--user U | --all]
+#                                    SA/admin: rebuild workshop images and roll every stale consumer
+#
+# --user names the ATTENDEE whose world the command touches, and every verb above that takes a
+# <module> accepts it (also as a bare token: `ws prep m07 user3` == `ws prep m07 --user user3`).
+# An attendee in their own cockpit terminal never needs it — ws uses their login. An SA or instructor
+# on an ADMIN context always does, because ws refuses to guess whose namespaces to wipe. Presenting a
+# demo IS that case, and --user is the whole of it — there is no separate presenter mode:
+#     ws prep <module> --user user1 --yes      # pick ONE identity, keep it for the whole run
 #
 # <module> is a position number (m08) OR a slug (app-security-testing) — both resolve via modules.yaml
 # (position → slug); everything internal keys off the slug. `ws list` shows the mapping.
@@ -388,8 +397,34 @@ require_user_token() {  # value [context] → die unless the value is a canonica
   die "${ctx}: '${v}' is not an attendee identity — expected userN, e.g. user1 (see: ws status)"
 }
 
+# _attendee_hint runs ONLY from user_arg's admin branch — a path that is already terminating — so the
+# one extra API read it costs is never paid by a working invocation. Both happy paths are untouched:
+# an explicit `--user userN` returns before any oc call at all, and an attendee in their cockpit pays
+# only the single `oc whoami` user_arg already makes. That is the whole trade-off, and it is why the
+# lookup lives here rather than anywhere earlier: the question "who are the attendees?" is worth a
+# round trip exactly once, at the moment someone has demonstrably failed to answer it.
+#
+# Time-boxed on purpose — an error message that hangs on an unreachable API is worse than a terse one.
+# Every failure mode (no workshop layer, no permission, API down) degrades to the generic line.
+_attendee_hint() {  # → one line naming the attendee identities that ACTUALLY exist on this cluster
+  local raw users=() n
+  raw="$(oc get group workshop-attendees -o jsonpath='{.users[*]}' --request-timeout=5s 2>/dev/null || true)"
+  read -r -a users <<<"$raw" || true
+  n=${#users[@]}
+  if (( n == 0 )); then
+    echo "attendees are named user1, user2, … (this cluster's cohort could not be read; see: ws status)"
+  elif (( n <= 8 )); then
+    echo "attendees on this cluster (${n}): ${users[*]}"
+  else
+    # A 30-attendee roster printed in full buries the sentence above it; the shape is what matters.
+    echo "attendees on this cluster (${n}): ${users[*]:0:6} … ${users[$((n-1))]}"
+  fi
+}
+
 user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee self-service)
-  local u="${1:-}"
+  # $2/$3 = the verb and the RAW module token the caller typed, used only to echo their own command
+  # back at them in the failures below. Cosmetic; both may be empty and neither affects resolution.
+  local u="${1:-}" cmd="${2:-prep}" mod="${3:-}"
   if [[ -z "$u" ]]; then
     u="$(oc whoami 2>/dev/null || true)"
     # Cluster admins get no implicit identity — they must say who they provision for. The line below
@@ -402,9 +437,37 @@ user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee 
     #
     # Refusing costs an admin one flag. Guessing costs an attendee their work, and the guess is
     # never checkable after the fact because the wipe looks exactly like a normal prep.
-    if [[ -z "$u" || "$u" == system:admin || "$u" == *"kube:admin"* || "$u" == "admin" ]]; then
-      die "you are '${u:-<not logged in>}', which is not an attendee — say who this is for: --user userN
-   e.g.  ws prep platform-orientation --user user3
+    #
+    # REFUSING IS THE RULE AND DOES NOT MOVE. What the three branches below change is how well the
+    # refusal explains itself, because this is the FIRST thing the ws CLI ever says to an SA: an SA
+    # rehearsing on their own demo cluster is in an admin context essentially always, so the very
+    # first command of most demo preps lands here (SA demo review, F-03, 2026-08-08). One shared
+    # sentence could not serve them, since "oc is missing", "you are not logged in" and "you are
+    # logged in as an admin" have three different fixes and only the last one is `--user`.
+    local example target="${mod:-<module>}"
+    if [[ "$cmd" == "diag" ]]; then target="$mod"; fi   # diag's module is optional; don't demand one
+    example="ws ${cmd}${target:+ ${target}} --user userN"
+    if ! command -v oc >/dev/null 2>&1; then
+      die "oc not found in PATH — install the OpenShift CLI, then run:
+   ${example}"
+    fi
+    if [[ -z "$u" ]]; then
+      die "not logged in, so ws cannot tell who you are (KUBECONFIG=${KUBECONFIG:-~/.kube/config}).
+   1. log in:  oc login <api-url> -u <you>
+   2. then:    ${example}"
+    fi
+    if [[ "$u" == system:admin || "$u" == *"kube:admin"* || "$u" == "admin" ]]; then
+      # No backticks anywhere in this string: it is double-quoted, so a backtick would be command
+      # substitution, not punctuation.
+      die "you are '${u}' — an admin identity, not an attendee. ws will not guess whose environment
+   to touch: prep/reset/solve WIPE the namespaces of whoever they resolve to.
+
+   Name the attendee. --user is also the presenter path — there is no separate demo mode, so
+   pick ONE identity and stay on it for the whole run:
+
+       ${example}
+
+   $(_attendee_hint)
    Attendees never need the flag: inside your own cockpit terminal, ws uses your login."
     fi
   fi
@@ -2239,8 +2302,9 @@ cmd_rebuild_images() {
       user[0-9]*)  scope="$1"; require_user_token "$scope" "rebuild-images"; shift ;;
       --all)       all=true; shift ;;
       # Line window over this file's OWN header comment — adding a line up there shifts it. Ends at
-      # the last `ws <cmd>` row; the global help below deliberately runs further, to 26.
-      -h|--help)   grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,24p'; return 0 ;;
+      # the last `ws <cmd>` row (26 = rebuild-images' own two lines); the global help below
+      # deliberately runs further, to 36, to include the --user paragraph and the <module> note.
+      -h|--help)   grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,26p'; return 0 ;;
       *) die "rebuild-images: unknown option '$1' — see: ws help" ;;
     esac
   done
@@ -4960,7 +5024,9 @@ main() {
   # `entry--<user>` Application (bug 2026-07-17: `ws prep m27`, a number past the catalog). Resolve
   # up front into the locals and propagate the failing status so we die before creating any app.
   case "$cmd" in
-    prep|start|verify|smoke|reset|solve|diag) user="$(user_arg "$user")"     || exit $?;;
+    # cmd + the RAW module token go in so user_arg's refusal can echo the caller's OWN command back
+    # with --user appended, instead of a fixed example for some other module.
+    prep|start|verify|smoke|reset|solve|diag) user="$(user_arg "$user" "$cmd" "$module")" || exit $?;;
   esac
   case "$cmd" in
     prep|start|verify|smoke|reset|solve)      module="$(module_arg "$module")" || exit $?;;
@@ -4980,10 +5046,12 @@ main() {
     # The range is a LINE COUNT into the header block, so it drifts the moment the block grows — adding
     # doctor's --user line pushed the closing "<module> is a position number…" note out of it. Bumped
     # with that line; anything else added above must bump it again (verify with: ws help | tail -2).
-    # Window over this file's OWN header comment (see the note at rebuild-images' -h): ends at 27 so
-    # the two-line "<module> is a position number OR a slug" paragraph prints WHOLE. Cutting it at 26
-    # leaves the sentence hanging mid-clause. (27, not 26, since the `ws help` line was added.)
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,27p';;
+    # Window over this file's OWN header comment (see the note at rebuild-images' -h): ends at 36 so
+    # BOTH closing paragraphs print WHOLE — the --user/presenter note and the two-line "<module> is a
+    # position number OR a slug" note. Cutting it short leaves a sentence hanging mid-clause. (36, up
+    # from 27: the F-03 banner correction added nine header lines — two wrapped command rows, the
+    # blank, and the six-line --user/presenter paragraph.)
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,36p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
