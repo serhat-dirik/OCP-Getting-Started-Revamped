@@ -107,6 +107,12 @@ attendee_reads_task_library() {
 check "namespace ${NS} exists"                              oc get ns "$NS"                                        || hint "run: ws start app-security-testing --user ${USER_NAME}"
 check "entry marker ws-entry-app-security-testing present"                   oc get cm ws-entry-app-security-testing -n "$NS"                        || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
 check "Pipeline parasol-claims-devsecops present"           oc get pipelines.tekton.dev parasol-claims-devsecops -n "$NS"      || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
+# EXISTENCE, deliberately not Bound: the default StorageClass binds WaitForFirstConsumer, so a
+# correctly-materialized cache claim sits Pending until the first TaskRun mounts it. Grading Bound
+# here would print ❌ on every freshly-prepared world. Absence is worth its own check because the
+# module's PipelineRuns bind this claim BY NAME: with it gone the TaskRun pod does not run
+# uncached, it sits Pending — and this module's fix loop is six sequential runs.
+check "maven-cache claim present in ${NS} (the between-run Maven cache)" oc get pvc maven-cache -n "$NS" || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}. Until it exists, every run that binds workspace maven-cache=claimName:maven-cache leaves its TaskRun pod Pending (oc describe pod … → 'persistentvolumeclaim \"maven-cache\" not found')"
 check "sonar-auth copied into ${NS} (SAST-gate secret)"     oc get secret sonar-auth -n "$NS"                      || hint "the secrets hook copies it from sonarqube/sonar-ci-token — ws reset app-security-testing --user ${USER_NAME} (needs the appsec stack)"
 check "rox-api-token copied into ${NS} (scan-gate secret)"  oc get secret rox-api-token -n "$NS"                   || hint "the secrets hook copies it from stackrox — ws reset app-security-testing --user ${USER_NAME} (needs the trust stack)"
 check "ephemeral claims-db present (deploy target)"         oc get deploy claims-db -n "$NS"                       || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"

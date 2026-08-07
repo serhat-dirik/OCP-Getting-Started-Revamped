@@ -7,6 +7,15 @@
 # library; every app pipeline references it by cluster resolver. This is the module's honest,
 # real-world answer to "why does a platform team curate a task library?".
 #
+# WHY IT HAS A CACHE WORKSPACE (added 2026-08-07). The first cut declared ONE workspace and invoked
+# /usr/bin/mvn directly, so Maven's local repository lived in the container filesystem and died with
+# the TaskRun pod: EVERY run re-downloaded the whole dependency tree. Measured on the workshop
+# cluster — a green run of parasol-claims-build-test-deploy took 20m49s, and two consecutive runs
+# measured `unit-test` at 11m20s then 11m33s. Two identical numbers are the finding: there was no
+# warm cache to warm, so "run one pipeline first to warm the nodes" could not work and the node
+# image cache was never the variable anyone thought it was. The optional maven-cache workspace makes
+# the local repository a real, run-surviving volume.
+#
 # CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
 # workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — kept in lockstep by
 # tools/lint/copy-drift-guard.py (pair "parasol-task-maven-jdk21", lint workflow's copy-drift job).
@@ -22,7 +31,9 @@ metadata:
 spec:
   description: >-
     Runs Maven goals against a workspace checkout using a JDK 21 runner (Red Hat UBI9 OpenJDK 21,
-    Maven 3.9). The Parasol org standard for building/testing its JDK 21 services.
+    Maven 3.9). The Parasol org standard for building/testing its JDK 21 services. Reuses a
+    persistent local repository when the optional maven-cache workspace is bound, and honours a
+    repository mirror via MAVEN_MIRROR_URL.
   params:
     - name: GOALS
       type: array
@@ -35,16 +46,115 @@ spec:
       type: string
       description: Path within the workspace that holds the pom.xml.
       default: "."
+    - name: MAVEN_MIRROR_URL
+      type: string
+      description: >-
+        Repository mirror URL (a corporate Nexus/Artifactory). Empty — the default — leaves Maven
+        pointed at its own repositories. Same param NAME and semantics as the shipped upstream
+        `maven` Task (mirror id "mirror.default", mirrorOf "central"), which this curated copy had
+        dropped: an org adopting the library could not point it at their own mirror without forking
+        the Task, which is the opposite of what a curated library is for.
+      default: ""
   workspaces:
     # The source checkout (git-clone writes here); Maven runs against it in place.
     - name: source
+    # The Maven local repository (~/.m2/repository), as a volume that OUTLIVES the TaskRun pod.
+    # OPTIONAL on purpose: this Task is referenced by cluster resolver from pipelines this repo does
+    # not own, and a required workspace would break every existing caller the moment it landed. A
+    # caller that does not bind it still runs, just uncached — see generate-settings, which prints
+    # exactly that and how to fix it. Bind it to a PersistentVolumeClaim, NOT a volumeClaimTemplate:
+    # a template is created and destroyed per run, which caches nothing between runs, which is the
+    # whole measured defect.
+    - name: maven-cache
+      optional: true
+  volumes:
+    # Carries the generated settings.xml from the first step to the second. NOT the source
+    # workspace: that directory is the buildah build context, and a stray file there changes what
+    # gets built. Not the cache workspace either — it must exist when the cache is unbound.
+    - name: maven-settings
+      emptyDir: {}
   steps:
+    - name: generate-settings
+      # Same image as the build step below, so this costs no extra pull: it is already on the node.
+      image: registry.access.redhat.com/ubi9/openjdk-21:latest
+      volumeMounts:
+        - name: maven-settings
+          mountPath: /maven-settings
+      env:
+        # "true"/"false". An UNBOUND optional workspace resolves $(workspaces.maven-cache.path) to
+        # the EMPTY STRING, so -Dmaven.repo.local=$(…path) would expand to `-Dmaven.repo.local=` and
+        # break Maven outright. `.bound` is the only honest discriminator, and reading it needs a
+        # shell — which is why this Task now has one step that is a script. (Same shape as the
+        # library's roxctl-deployment-check, which reads $(workspaces.source.bound) the same way.)
+        - name: CACHE_BOUND
+          value: $(workspaces.maven-cache.bound)
+        - name: CACHE_PATH
+          value: $(workspaces.maven-cache.path)
+        - name: MAVEN_MIRROR_URL
+          value: $(params.MAVEN_MIRROR_URL)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SETTINGS=/maven-settings/settings.xml
+
+        # XML-escape the mirror URL before it goes into an element: an `&` in a query string makes
+        # settings.xml unparseable and Maven then fails with "Non-parseable settings", which reads
+        # like a broken Task rather than a bad parameter. `&` first — escaping it after `<`/`>`
+        # would double-escape the ampersands those two just introduced.
+        MIRROR_ESC="$(printf '%s' "${MAVEN_MIRROR_URL}" \
+          | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+
+        if [ "${CACHE_BOUND}" = "true" ]; then
+          mkdir -p "${CACHE_PATH}/repository"
+        fi
+
+        {
+          echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">'
+          # <localRepository> rather than -Dmaven.repo.local, so the ONE generated file carries both
+          # the cache and the mirror and the build step below stays a plain `mvn` invocation.
+          if [ "${CACHE_BOUND}" = "true" ]; then
+            echo "  <localRepository>${CACHE_PATH}/repository</localRepository>"
+          fi
+          if [ -n "${MAVEN_MIRROR_URL}" ]; then
+            echo '  <mirrors>'
+            echo '    <mirror>'
+            echo '      <id>mirror.default</id>'
+            echo "      <url>${MIRROR_ESC}</url>"
+            echo '      <mirrorOf>central</mirrorOf>'
+            echo '    </mirror>'
+            echo '  </mirrors>'
+          fi
+          echo '</settings>'
+        } > "${SETTINGS}"
+
+        if [ "${CACHE_BOUND}" = "true" ]; then
+          echo "✅ Maven local repository: ${CACHE_PATH}/repository (persistent — survives this run)"
+        else
+          echo "⚠️  no maven-cache workspace bound — Maven re-downloads its whole dependency tree."
+          echo "   This run still works; it is just slow. To reuse a cache between runs, bind the"
+          echo "   workspace to an EXISTING PersistentVolumeClaim (never a volumeClaimTemplate):"
+          echo "     tkn pipeline start … --workspace name=maven-cache,claimName=maven-cache"
+        fi
+        if [ -n "${MAVEN_MIRROR_URL}" ]; then
+          echo "✅ repository mirror: ${MAVEN_MIRROR_URL} (mirrorOf central)"
+        fi
     - name: mvn-goals
       # UBI9 OpenJDK 21 builder image — ships Maven 3.9 at /usr/bin/mvn; JDK 21 matches the app.
       image: registry.access.redhat.com/ubi9/openjdk-21:latest
       workingDir: $(workspaces.source.path)/$(params.SUBDIRECTORY)
+      volumeMounts:
+        - name: maven-settings
+          mountPath: /maven-settings
       command:
         - /usr/bin/mvn
-      # Array param expands to individual args (e.g. -B -ntp test); no shell involved.
+      # Array param expands to individual args (e.g. -B -ntp test); no shell in THIS step, which is
+      # what keeps the attendee-facing "the Task just runs mvn" reading true. The conditional work
+      # lives in generate-settings above and reaches Maven as a plain -s file. Deliberately NOT a
+      # single `script:` step consuming $(params.GOALS[*]) as "$@": Tekton overwrites a script
+      # step's command and its own source comments the intent as "we'll clear out the Args", so
+      # relying on args surviving into a script would be relying on a documented non-contract.
       args:
+        - -s
+        - /maven-settings/settings.xml
         - $(params.GOALS[*])

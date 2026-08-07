@@ -120,6 +120,12 @@ check "namespace ${NS} exists"                            oc get ns "$NS"       
 check "entry marker ws-entry-pipelines-fundamentals present"                 oc get cm ws-entry-pipelines-fundamentals -n "$NS"                    || hint "entry app not synced — ws start pipelines-fundamentals --user ${USER_NAME}"
 check "claims-db deployment ready in ${NS}"               deploy_ready claims-db "$NS"                       || hint "the ephemeral DB is entry state — ws reset pipelines-fundamentals --user ${USER_NAME}"
 check "Pipeline parasol-claims-build-test-deploy present" oc get pipelines.tekton.dev parasol-claims-build-test-deploy -n "$NS" || hint "entry app not synced — ws start pipelines-fundamentals --user ${USER_NAME}"
+# EXISTENCE, deliberately not Bound: the default StorageClass binds WaitForFirstConsumer, so a
+# correctly-materialized cache claim sits Pending until the first TaskRun mounts it. Grading Bound
+# here would print ❌ on every freshly-prepared world — the false ❌ that costs every other ✅ its
+# credibility. Absence is worth a check of its own because every PipelineRun in this module binds
+# the claim BY NAME: with the claim gone the TaskRun pod does not run uncached, it sits Pending.
+check "maven-cache claim present in ${NS} (the between-run Maven cache)" oc get pvc maven-cache -n "$NS" || hint "entry app not synced — ws start pipelines-fundamentals --user ${USER_NAME}. Until it exists, every run that binds workspace maven-cache=claimName:maven-cache leaves its TaskRun pod Pending (oc describe pod … → 'persistentvolumeclaim \"maven-cache\" not found')"
 check "Gitea fork ${USER_NAME}/parasol-claims answers"    gitea_repo_exists "$USER_NAME" parasol-claims      || hint "fork missing — re-run: ws start pipelines-fundamentals --user ${USER_NAME} (fork job)"
 check "fork carries the Ex3 break-fix target (ClaimResourceTest toggle)" gitea_raw_contains "$USER_NAME" parasol-claims "src/test/java/com/parasol/claims/ClaimResourceTest.java" main "assignAdjusterBeforeApproval" || hint "stale fork — Ex3 is unperformable; ws reset pipelines-fundamentals --user ${USER_NAME} re-asserts the fork's app content from the mirror"
 check ".tekton/pull-request.yaml seeded in the fork"      gitea_file_exists "$USER_NAME" parasol-claims ".tekton/pull-request.yaml" || hint "re-run the fork/seed job: ws reset pipelines-fundamentals --user ${USER_NAME}"

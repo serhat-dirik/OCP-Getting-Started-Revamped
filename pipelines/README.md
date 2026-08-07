@@ -86,6 +86,20 @@ tkn pipelinerun logs -Lf -n <user>-cicd
   *less* memory than the console *Actions → Start* form. Size the namespace, not the run.
 - **JDK:** the bundled `maven` task is pinned to a JDK 17 image with no image param, so it cannot
   build this JDK 21 app; the curated `maven-jdk21` library Task is why.
+- **Maven cache:** `maven-jdk21` declares an **optional** `maven-cache` workspace holding the local
+  repository (`<localRepository>` in a settings.xml the Task generates), because it used to keep the
+  repository in the TaskRun container's filesystem — so it died with the Pod and every run
+  re-downloaded the whole dependency tree. Measured 2026-08-06: two *consecutive* runs whose
+  `unit-test` took 11m20s then 11m33s, and a green pipeline run of 20m49s. Bind it to an **existing
+  PVC** (`claimName`), never a `volumeClaimTemplate` — a template is pruned with the run and caches
+  nothing for the next one. The per-user claim is materialized by the `pipelines-fundamentals` /
+  `app-security-testing` entry states; a caller that binds nothing still runs, just uncached. Note
+  the ceiling: `build-image` runs its own `mvn package` inside the `Containerfile`, which is a
+  buildah build and cannot see a Tekton workspace, so one of the two downloads per run remains.
+- **Mirror:** `maven-jdk21` also takes `MAVEN_MIRROR_URL` (default empty), the same param name and
+  semantics as the shipped upstream `maven` Task — mirror id `mirror.default`, `mirrorOf central`.
+  The curated copy had dropped it, which meant an org adopting this library could not point it at
+  their own Nexus/Artifactory without forking the Task.
 - **Deploy target + Route:** the pipeline deploys into its own `-cicd` namespace to stay self-contained,
   and its `deploy` step creates the Service and an edge-terminated Route itself (no hand `oc expose`).
   The parasol-claims prod profile needs a PostgreSQL datasource, so the pipelines-fundamentals entry state must provide a

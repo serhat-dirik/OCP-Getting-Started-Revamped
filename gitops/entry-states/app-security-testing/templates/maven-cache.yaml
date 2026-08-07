@@ -1,0 +1,46 @@
+# The per-user Maven local repository, as a claim that OUTLIVES a single PipelineRun.
+#
+# WHY IT EXISTS. maven-jdk21 used to run `mvn` with the local repository inside the container
+# filesystem, so it died with the TaskRun pod and every run re-downloaded the whole dependency
+# tree. Measured on the workshop cluster 2026-08-06 on the pipelines-fundamentals pipeline, which
+# runs the same Task: two consecutive runs measured `unit-test` at 11m20s then 11m33s — two
+# identical numbers, i.e. nothing was ever warming. This module pays that cost hardest: its designed
+# fix loop is six sequential PipelineRuns.
+#
+# WHY A PLAIN PVC AND NOT A volumeClaimTemplate. A template is materialized per PipelineRun and
+# pruned with it — it shares a cache between the Tasks of ONE run, which is not the problem. Only a
+# named, already-existing claim survives from one run to the next.
+#
+# SELF-CONTAINMENT, NOT DUPLICATION BY ACCIDENT: this is a deliberate copy of the same claim in
+# gitops/entry-states/pipelines-fundamentals/templates/maven-cache.yaml. Entry states compose and
+# never chain, so app-security-testing materializes everything it needs itself. The two modules are
+# declared mutual `conflictsWith` in ws-meta.yaml (both live in {user}-cicd), so only one of the two
+# entry Applications is ever materialized for a user and the two copies never fight over the object.
+#
+# LIFECYCLE. Entry state, so `ws reset` (which runs `oc delete all,pvc --all` in {user}-cicd) drops
+# it and the entry app re-creates it empty — a reset costs one cold build, by design.
+#
+# COST. One claim against the {user}-cicd quota's `persistentvolumeclaims: "10"`, which also carries
+# up to six per-run workspace PVCs during this module's fix loop (see
+# gitops/workshop-config/templates/per-user-limits.yaml). That quota counts CLAIMS, not bytes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maven-cache
+  namespace: {{ .Values.user }}-cicd
+  labels:
+    app: maven-cache
+    workshop.redhat.com/module: app-security-testing
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    workshop.redhat.com/owner: ogsr
+spec:
+  # RWO is correct and sufficient: a user's runs are serial, and one TaskRun pod mounts it at a
+  # time. It does pin the run to the node the claim attached to on a topology-aware CSI (the
+  # per-run shared-workspace PVC is created fresh, so the scheduler co-locates it).
+  accessModes:
+    - ReadWriteOnce
+  # No storageClassName: take the cluster's default class, like every other entry-state claim
+  # (portfolio rule "auto-detect where possible").
+  resources:
+    requests:
+      storage: {{ .Values.mavenCacheSize }}

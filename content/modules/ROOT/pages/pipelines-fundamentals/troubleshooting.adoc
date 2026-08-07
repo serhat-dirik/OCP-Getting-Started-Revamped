@@ -11,12 +11,27 @@ Most terminal commands assume you set `NS={user}-cicd` at the start of the lab.
 
 == The first pipeline run takes 10+ minutes
 
-Symptom:: `tkn pipelinerun logs --last -f` sits for a long time on `unit-test`, then again on `build-image`, before the run finishes — around 13 minutes total the first time.
-Cause:: This is *expected* on a cold node.
-The pipeline builds `parasol-claims` from source, so Maven downloads its dependency tree — *twice*, once for the test Task and once inside the image build.
-On a node that has never built this app, that download dominates the run.
+// The old text here claimed "the next run on the same node is roughly half the time because the
+// artifacts are cached". That was false and had never been measured: the Maven repository lived in
+// the TaskRun container's filesystem, so it died with the Pod and nothing on the node cached
+// anything. Measured 2026-08-06 — two CONSECUTIVE runs, unit-test 11m20s then 11m33s.
+// TODO(verify-on-cluster): time a run with maven-cache bound and a run with it already warm, then
+// put the measured pair in this entry. Until then this entry deliberately quotes no "after" number.
+Symptom:: `tkn pipelinerun logs --last -f` sits for a long time on `unit-test`, then again on `build-image`, before the run finishes — 20 minutes or more the first time.
+Cause:: This is *expected* on the first run.
+The pipeline builds `parasol-claims` from source, so Maven downloads its dependency tree — *twice*, once for the test Task and once inside the image build, which runs its own `mvn` in the `Containerfile`.
+With nothing cached, that download dominates the run.
 Fix:: Nothing is wrong — let it run (start exercise 2 while it builds).
-The *next* run on the same node is roughly half the time because the artifacts are cached.
+Later runs reuse the `maven-cache` workspace this run filled, so the test Task skips the download; the image build still does its own.
+Check that the cache really was attached — this is the single most common reason a *second* run is as slow as the first:
++
+[source,sh,role=execute]
+----
+tkn pipelinerun describe --last -n $NS | grep -A4 'Workspaces'
+----
++
+`maven-cache` must appear, bound to the `maven-cache` PersistentVolumeClaim.
+If it is missing, the run was started without `--workspace name=maven-cache,claimName=maven-cache` (or without the *maven-cache* field set in the *Start* form) and Maven downloaded everything again.
 You can confirm progress at any point with `tkn pipelinerun describe --last -n $NS` (it shows which Task is running).
 
 == The build dies mid-`mvn` with `OutOfMemoryError` / the Task is `OOMKilled`
@@ -49,6 +64,25 @@ tkn pipelinerun describe --last -n $NS | grep -A3 'Workspaces'
 ----
 +
 It should show `shared-workspace` bound to a PVC, not an `EmptyDir`. The workspace choice cannot be changed on a run already in progress — cancel/delete it and start again with *VolumeClaimTemplate* set.
+
+== A Task Pod stays `Pending` and never starts (`persistentvolumeclaim "maven-cache" not found`)
+
+Symptom:: The run is created but `unit-test` never starts; `oc get pods -n $NS` shows a `…-unit-test-pod` stuck in `Pending`, and `oc describe pod <name> -n $NS` ends with `persistentvolumeclaim "maven-cache" not found`.
+Cause:: The run asked for the `maven-cache` claim *by name* and the claim is not in this project.
+Unlike the shared workspace — where *VolumeClaimTemplate* makes a new volume on the spot — `claimName` attaches an *existing* one, which is exactly what makes the cache survive between runs.
+The claim ships with your project's entry state, so it is normally already there.
+Fix:: Check for it, then re-materialize the project world if it is gone:
++
+[source,sh,role=execute]
+----
+oc get pvc maven-cache -n $NS
+----
++
+`Pending` is a perfectly healthy state for it before the first run — the cluster's storage class waits for the first Pod that mounts it.
+Only `NotFound` is the problem, and `ws prep pipelines-fundamentals` puts it back.
+In a hurry, you can also start the run *without* the `maven-cache` workspace at all: it is optional, and the run then works exactly as it did before the cache existed — correct, just slow.
++
+Delete the stuck run before retrying (`tkn pipelinerun delete --last -n $NS`); a Pending run holds its own workspace PVC against your project quota.
 
 == `unit-test` fails with `release version 21 not supported`
 

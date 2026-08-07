@@ -5,7 +5,10 @@
 # pipeline still has minutes to go and Topology is empty (caught live, first cycle 2026-07-10 — the
 # original fire-and-forget let `ws solve` report ready ~7 min early). The blocking hook keeps the
 # Argo sync OPERATION Running, which ws's wait now gates on (operationState.phase), sized by
-# ws-meta `waitSeconds` — the pipeline is ~9 min; window 1200s covers a cold cluster.
+# ws-meta `waitSeconds`. Window 1800s, raised from 1200 on 2026-08-07: a green run of this pipeline
+# was MEASURED at 20m49s (2026-08-06), which the old window would have killed — reporting a failed
+# solve for a pipeline that was on its way to success. Keep waitSeconds, activeDeadlineSeconds and
+# the poll loop below in step with each other.
 #
 # Job pod templates are immutable, so re-solve must recreate the Job: the BeforeHookCreation delete
 # policy + the -{user}-suffixed name handle that. The PipelineRun uses generateName (unique per run)
@@ -47,6 +50,12 @@ data:
               resources:
                 requests:
                   storage: 1Gi
+        # The persistent Maven local repository this chart materializes (templates/maven-cache.yaml).
+        # claimName, NOT a volumeClaimTemplate: this run is also the instructor's pre-warm, so what
+        # it downloads has to still be there for the attendee's own runs afterwards.
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: maven-cache
 ---
 apiVersion: batch/v1
 kind: Job
@@ -63,7 +72,12 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 1200
+  # 1800, raised from 1200 (2026-08-07). The window has to outlive the pipeline it waits on, and a
+  # green run of that pipeline was measured at 20m49s on 2026-08-06 — past the old 1200s deadline,
+  # so the Job would have been killed and `ws solve` would have reported FAILURE on a pipeline that
+  # was going to succeed. This solve run is also the COLD one by definition (it is what fills the
+  # maven-cache claim), so the cache does not shrink this number for the first solve of a user.
+  activeDeadlineSeconds: 1800
   template:
     metadata:
       labels:
@@ -88,8 +102,11 @@ spec:
               set -euo pipefail
               echo "▶ launching the build-test-deploy pipeline (solve end-state)…"
               PR="$(oc create -o name -f /solve/pipelinerun.yaml)"
-              echo "  ✓ started ${PR#*/} — waiting for it (build+test+deploy ≈ 9 min)…"
-              for i in $(seq 1 110); do
+              echo "  ✓ started ${PR#*/} — waiting for it (build+test+deploy; measured 20m49s on a"
+              echo "    cold cache, so give it the full window rather than assuming it hung)…"
+              # 170 x 10s = ~28 min of polling, inside the Job's 1800s activeDeadlineSeconds. Both
+              # were raised together: the old 110 iterations gave up at ~18 min, under a measured run.
+              for i in $(seq 1 170); do
                 s="$(oc get "$PR" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || true)"
                 case "$s" in
                   True)
@@ -101,6 +118,6 @@ spec:
                 esac
                 sleep 10
               done
-              echo "  ❌ pipeline still not finished after ~18 min — inspect: oc get ${PR}"
+              echo "  ❌ pipeline still not finished after ~28 min — inspect: oc get ${PR}"
               exit 1
 {{- end }}
