@@ -31,18 +31,15 @@ Before you order anything, settle three things — they drive the sizing math be
 
 1. **How many attendees?** Sets `users` in `bootstrap/vars.yaml` and the sizing table's row
    (Small/Normal/Large — [INSTALL.md §2](INSTALL.md#2-sizing-the-cluster)).
-2. **How long is the session?** README's delivery table gives four proven shapes — pick one or
-   assemble your own subset, since every module is self-contained:
-
-   | Delivery | Modules | Total |
-   |---|---|---|
-   | Half-day taster | M01 → M02 → M07 → M10 → M24 | ~3 h |
-   | Full-day essentials | M01 → M02 → M03 → M04 → M07 → M10 → M12 → M13 → M24 | ~6 h |
-   | 2-day core | everything except M15, M17, M18, M21, M22, M23, M25, M26 | ~12 h |
-   | 3-day full workshop | all 26 — Day 1 M01–M08 · Day 2 M09–M17 · Day 3 M18–M26 | ~17 h |
-
-   See [README.md's module table](README.md#workshop-content) for the per-module time figure
-   behind these totals — that same figure is what you pace against in [§4](#4-during).
+2. **How long is the session?** [README's delivery table](README.md#workshop-content) gives four
+   proven shapes — half-day taster, full-day essentials, 2-day core, and the 3-day full workshop —
+   or assemble your own subset, since every module is self-contained. Read the module lists and the
+   totals off that table rather than off a copy here: they are summed from the per-module time
+   figure in the module table just above it, which is also what you pace against in
+   [§4](#4-during), so a second copy in this file silently contradicts the real one the first time
+   a module is re-measured — which is exactly what happened to the copy that used to sit here.
+   Whichever shape you pick, its module list is what you translate into `modules_disabled` in
+   step 3 below.
 3. **Which modules are actually in scope?** Anything you're dropping goes in `modules_disabled`
    in `vars.yaml` (`mNN` or slug). This isn't just a content choice — it changes what you need to
    order:
@@ -114,9 +111,9 @@ front of the room is measurably slower than a warm one:
 | Platform Orientation & First App | Deploy-and-delete the claims image once as a sample user | Warms the 410 MB image on a node — first pull is ~18 s, subsequent starts are seconds |
 | Ways to Build & Deliver Apps | `ws solve build-deliver --user <u>` before the session | First S2I build is ~4.5 min warm but up to **~11 min** on a cold node (Maven Central + no builder-image cache) |
 | Dev Spaces & the Inner Loop | Start one workspace before the room arrives (pulls the universal developer image onto a node) | First workspace start is ~85 s cold vs ~20 s once a node has the image; for a large event, ask the platform team to enable Dev Spaces' `imagePuller` on the CheCluster instead |
-| Pipelines Fundamentals & Task Libraries | `ws solve pipelines-fundamentals --user <u>` before the room (blocks ~8–13 min) | Warms the Maven/Quarkus cache on the worker nodes — the first attendee run drops from ~13 min cold to ~7 min warm |
+| Pipelines Fundamentals & Task Libraries | `ws solve pipelines-fundamentals --user <u>` before the room — it blocks for a whole pipeline run (measured 7m45s, but 20m49s for the same pipeline on a slower cluster; budget the worst) | The `maven-cache` is a **per-user PVC**, not a node cache: solving `user1` warms `user1` and nobody else, so warming a room costs one full run per attendee. No cached run has been timed yet, so promise the room no number — the alternative is to accept that every attendee's first run is the slow one and let exercise 2 fill the wait, which is what the module is designed for |
 | Trusted Software Supply Chain | Run the seeded pipeline once on a sample user, ~1 hour before the session | The RHACS vulnerability store needs ~1 hour to populate on a freshly installed cluster before the Log4Shell policy fires; separately, every `ws start`/`prep`/`solve` for this module blocks ~8 min building a warm signed image — budget that into provisioning too, not just the day before |
-| Application Security Testing | Have attendees clone and start their first run before you deliver the concept | No cache survives a run (unit tests ~5.5 min + image build ~4 min every time) — hands-on is really ~85–105 min, not the 60 min chip; pre-warming the first run (or running the demo flavor) is how you close that gap |
+| Application Security Testing | Have attendees clone and start their first run before you deliver the concept | No cache survives a run (unit tests ~5.5 min + image build ~4 min every time), so hands-on is ~85–105 min — a genuine double slot, and the module table's 100 min is a figure inside that band, not a slot you can compress. Pre-warming the first run closes part of the gap; the demo flavor (one narrated red-to-green pass, ~15 min of room time) is the honest choice if all you have is a single hour |
 | Multi-Tenancy & Workload Security | Warm the `openshift/tools` image on a node (`oc run` it once, then delete) | Exercise 1's fix and exercise 5's SCC demo both stall on a cold image pull (up to ~20 s) otherwise |
 | Developer Hub & Golden Paths | Sign in as guest and open the Catalog filtered to `parasol-claims` before the room | So the first beat is one glance, not a cold login + navigation |
 | GitOps Fundamentals / GitOps at Scale | `ws solve <slug> --user <u>` before the room | Leaves a pre-solved, pre-signed-in state ready as your opening visual — but note it performs a real sync to the entry Git revision, so a private rehearsal of the later beats is a second sync/self-heal cycle against that same revision |
