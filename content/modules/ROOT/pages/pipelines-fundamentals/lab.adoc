@@ -51,12 +51,48 @@ ifdef::demo[]
 [NOTE]
 .Before you present
 ====
-Two prep steps, both *before the room*:
+Three prep steps, all *before the room*:
 
 . Run `ws solve pipelines-fundamentals --user {user}`.
 It runs the build-test-deploy pipeline to completion and leaves `parasol-claims` deployed and healthy — your destination to show.
 *This blocks for ~8–10 minutes by design* (it waits for the real build), so do it early; it is truthful when it returns.
-. Set up the Pipelines-as-Code webhook on your fork (instructor guide, "Demo-mode notes") so the *live push* in beats 3–4 fires the pipeline.
+. *Wire the Pipelines-as-Code webhook on your fork.* Beats 3–4 are a live push, and without this they do nothing at all.
+It is lab exercise 4's setup done ahead of time.
+In Gitea: avatar → *Settings* → *Applications* → *Manage Access Tokens* → name a token `pac`, scope *write:repository*, *Generate Token*, and copy it.
+Then store it alongside a webhook secret you invent:
++
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-cicd
+read -rsp "paste your Gitea token, then press Enter: " GITEA_TOKEN; echo
+----
++
+[source,sh,role=execute,subs="attributes"]
+----
+WEBHOOK_SECRET="parasol-$(openssl rand -hex 6)"
+echo "webhook secret — paste this into the Gitea form: $WEBHOOK_SECRET"
+echo "target URL     — https://pipelines-as-code-controller-openshift-pipelines.{cluster_domain}"
+oc delete secret gitea-pac-secret -n $NS --ignore-not-found=true
+oc create secret generic gitea-pac-secret -n $NS \
+  --from-literal=token="$GITEA_TOKEN" \
+  --from-literal=webhook-secret="$WEBHOOK_SECRET"
+----
++
+Then, in your fork: *Settings* → *Webhooks* → *Add Webhook* → *Gitea*, with *Target URL* and *Secret* set to the two values just printed, *HTTP Method* `POST`, *POST Content Type* `application/json`, *Trigger On* *Push Events*, and *Active* checked.
+. *Prove the webhook fires — before the room, not on stage.* Make one throwaway commit in your fork (edit `README.md` in the Gitea UI), then:
++
+[source,sh,role=execute]
+----
+oc get repository parasol-claims -n $NS \
+  -o jsonpath='provider={.spec.git_provider.type}  reads-secret={.spec.git_provider.secret.name}{"\n"}'
+oc get pipelinerun -n $NS --sort-by=.metadata.creationTimestamp --no-headers \
+  -o custom-columns='RUN:.metadata.name,SUCCEEDED:.status.conditions[?(@.type=="Succeeded")].status' | tail -1
+----
++
+*If the second line names a `parasol-claims-pull-request-…` run*, the webhook is live and beats 3–4 run exactly as written.
+*If it still names the solve run*, nothing fired: read Gitea *Settings → Webhooks → Recent Deliveries* for the POST and its response code, confirm the `webhook-secret` you stored matches what you pasted into the form, and confirm the first line printed `provider=gitea` — a `Repository` that has lost `git_provider` makes Pipelines-as-Code reject the push outright.
+If you cannot clear it in the time you have, present beats 3–4 from "If the webhook stays silent" below.
+Do not walk in hoping.
 
 Have your fork open at {gitea_url}/{user}/parasol-claims[{user}/parasol-claims^] and a terminal with `NS={user}-cicd` set.
 The money moment is beat 3: a push turns the pipeline *red*, then beat 4 turns it *green* — rehearse the file edit once so it lands.
@@ -65,17 +101,24 @@ The money moment is beat 3: a push turns the pipeline *red*, then beat 4 turns i
 [demo-block]
 [TIME 4m]
 Say:: "Parasol's claims service now builds, tests, and deploys through one pipeline — five steps, and not one of them is code we wrote. Here's a finished run."
-Show:: The Terminal.
-`tkn pipelinerun describe --last` — walk the five Tasks, then the *Results* block at the bottom.
+Show:: The Terminal — two short outputs, not a screenful.
+The five Tasks with *where each one comes from*, then only the *Results* block of the finished run.
 Do::
 +
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-cicd
-tkn pipelinerun describe --last -n $NS
 ----
 +
-"Clone, test, build, *report*, deploy. The report step is a Task our platform team wrote — it measured the image at 391 MB against a 500 MB budget and published that as a *result*. Pipelines produce data, not just images."
+[source,sh,role=execute]
+----
+oc get pipeline parasol-claims-build-test-deploy -n $NS \
+  -o jsonpath='{range .spec.tasks[*]}{.name}{" -> "}{.taskRef.params[1].value}{"/"}{.taskRef.params[2].value}{"\n"}{end}'
+tkn pipelinerun describe --last -n $NS | sed -n '/Results/,$p' | head -n 5
+----
++
+"Clone, test, build, *report*, deploy — and read the right-hand column: three of those Tasks come from the catalog OpenShift ships, two from our own library. Not one of them is code this team wrote.
+The report step is the one our platform team wrote — it measured the image at 391 MB against a 500 MB budget and published that as a *result*. Pipelines produce data, not just images."
 
 [demo-block]
 [TIME 3m]
@@ -95,31 +138,88 @@ oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='our maven
 [TIME 3m]
 Say:: "Now watch the pipeline earn its keep. I'll push a one-line change that tries to approve a claim with no adjuster assigned — something the claims service itself refuses to do."
 Show:: The Gitea web UI — edit `ClaimResourceTest.java`, flip the toggle to `false`, commit.
-Then the Terminal: the pipeline fires and goes red at the test step.
+Then the Terminal: a one-line status check proves the push started a run, and later four grepped lines carry the verdict.
 Do:: In Gitea, edit `src/test/java/com/parasol/claims/ClaimResourceTest.java`, change `assignAdjusterBeforeApproval = true` to `false`, and *Commit Changes* to `main`.
-Then:
+Then show that the *push* — not you — started a run:
 +
 [source,sh,role=execute]
 ----
-tkn pipelinerun logs --last -f -n $NS
+oc get pipelinerun -n $NS --sort-by=.metadata.creationTimestamp --no-headers \
+  -o custom-columns='RUN:.metadata.name,SUCCEEDED:.status.conditions[?(@.type=="Succeeded")].status' | tail -1
 ----
 +
-"The push fired the pipeline — no one pressed a button. And it's *red* at `unit-test`: the API answered *409* — 'cannot be Approved while its adjuster is Unassigned.' That's the service enforcing a business rule, and the test catching it. The build never ran. A failing test *stopped* the deploy."
+"A run called `parasol-claims-pull-request-…`, four seconds after the commit. Nobody pressed a button."
++
+That one line is your progress bar: `SUCCEEDED` reads `Unknown` while the run works, then `False` here and `True` in beat 4.
+*Never follow the log on a projector* — this run is minutes of Maven download and none of it is worth showing.
+Re-run the line above between sentences while you narrate the task-library story from beat 2, and when it turns `False`, read only the verdict:
++
+[source,sh,role=execute]
+----
+oc get taskrun -n $NS -l tekton.dev/pipelineTask=unit-test --sort-by=.metadata.creationTimestamp \
+  -o name | tail -1 | cut -d/ -f2 | xargs -I{} tkn taskrun logs -n $NS {} | grep -iE "AssertionFailedError|Tests run:|FAILURE"
+tkn pipelinerun describe --last -n $NS | sed -n '/Skipped Tasks/,$p'
+----
++
+"It's *red* at `unit-test`: the API answered *409* — 'cannot be Approved while its adjuster is Unassigned.' That's the service enforcing a business rule, and the test catching it. And look at the second output — `build-image`, `image-report` and `deploy` are *skipped*. The build never ran. A failing test *stopped* the deploy."
 
 [demo-block]
 [TIME 3m]
 Say:: "That's the pipeline doing its job. Now I fix the code and push again — and the fix flows all the way to a running app, hands-free."
 Show:: Gitea — revert the toggle to `true`, commit.
-Then the Terminal: a new run fires and goes green through deploy.
+Then the Terminal: the same one-line status check, and when it turns `True`, the run's published results beside a running app.
 Do:: In Gitea, flip the toggle back to `true` and *Commit Changes*.
-Then watch the new run:
+The same one line tracks the new run — keep talking, and keep re-running it:
 +
 [source,sh,role=execute]
 ----
-tkn pipelinerun logs --last -f -n $NS
+oc get pipelinerun -n $NS --sort-by=.metadata.creationTimestamp --no-headers \
+  -o custom-columns='RUN:.metadata.name,SUCCEEDED:.status.conditions[?(@.type=="Succeeded")].status' | tail -1
 ----
 +
-"Same push mechanism, green this time — test passes, image builds, app rolls out. From a Git commit to a deployed, tested service with nobody touching the cluster. That's the whole point: the pipeline lives with the code, and every push is built the same way."
+When `SUCCEEDED` reads `True`, land the beat on what the run *published* and on the app it left running:
++
+[source,sh,role=execute]
+----
+tkn pipelinerun describe --last -n $NS | sed -n '/Results/,$p' | head -n 5
+oc get deploy parasol-claims -n $NS \
+  -o jsonpath='parasol-claims ready: {.status.readyReplicas}/{.spec.replicas}{"\n"}'
+----
++
+"Same push mechanism, green this time — test passes, image builds, app rolls out, and the run publishes its own measurements. From a Git commit to a deployed, tested service with nobody touching the cluster. That's the whole point: the pipeline lives with the code, and every push is built the same way."
+
+[NOTE]
+.If the webhook stays silent — or the run is slow
+====
+Keep this in your buffer. It lands beats 3 and 4 from any of the three ways they go wrong, and it takes seconds.
+
+*The status line still names the solve run 30 seconds after your commit* — the webhook did not fire.
+Start the identical run by hand, and reframe the Say line to "a push fires this; I'm starting it by hand so you can see the gate" — the red-to-green story is unharmed, only its trigger changes:
+[source,sh,role=execute]
+----
+FORK="http://gitea.ogsr-gitea.svc:3000/${NS%-cicd}/parasol-claims.git"
+cat > /tmp/vct.yaml <<'EOF'
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+EOF
+tkn pipeline start parasol-claims-build-test-deploy -n $NS \
+  --use-param-defaults \
+  -p git-url="$FORK" \
+  --serviceaccount pipeline \
+  --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
+  --workspace name=maven-cache,claimName=maven-cache
+----
+Note there is no `--showlog` on that command, deliberately — it starts the run and hands you the prompt back.
+
+*A run fired but is still working when you run out of talk track* — you have beat 2's task-library story and the `maven-cache` argument in reserve; use them.
+Never fill the gap by following the log.
+
+*Neither beat concludes in the time you have* — fall back to the run `ws solve` left behind.
+It is still in the list, and beat 1's two commands read it: the five Tasks with their sources, and the `image-within-budget` result.
+Narrate the red-to-green from there — "a failing test would have stopped this before `build-image` ever started" — and move on.
+Never stall on a progress bar.
+====
 
 [NOTE]
 .Reset between runs
