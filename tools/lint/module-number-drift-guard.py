@@ -46,6 +46,7 @@ Self-test: tools/lint/module-number-drift-guard.py --self-test   (must exit exac
 
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
@@ -250,15 +251,34 @@ def self_test(root: Path) -> int:
     return 2
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    """Entry point. `argv=None` reads sys.argv; a LIST is the coverage harness calling in.
+
+    THE `argv` PARAMETER IS LOAD-BEARING — do not simplify it away. tools/lint/_canary-coverage.py
+    proves each detector is falsifiable by importing this module and calling `mod.main(argv)` with
+    a positional list. The first cut of this guard was `def main()` reading sys.argv directly, so
+    that call raised TypeError, the harness's `except BaseException: return 2` caught it, and BOTH
+    baseline modes came back rc 2. The gate reported `COULD NOT INSPECT — unmutated control ran
+    2/2, not 0/1` and refused to sweep: four canaries that looked proven had never been measured
+    at all. Caught by the nightly whole-tree sweep on 2026-08-07, not by any push run.
+
+    Nothing about the guard was broken — run from a shell it was 0 clean / 1 self-test throughout,
+    which is exactly why this hid. Sibling guards (api-key-shape, maas-model-no-default, …) all
+    carry `main(argv=None)` for this reason; match them.
+
+    argparse, not a hand-rolled `args == ["--self-test"]` comparison: argparse names an unknown
+    argument and exits 2, and its SystemExit is what the harness reads as the exit code.
+    """
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--self-test", action="store_true",
+                        help="run the canaries and exit 1 when every one behaved (by contract)")
+    args = parser.parse_args(argv)
+
     root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"],
                                capture_output=True, text=True, check=True).stdout.strip())
-    args = sys.argv[1:]
-    if args == ["--self-test"]:
+    if args.self_test:
         return self_test(root)
-    if args:
-        print(f"usage: {sys.argv[0]} [--self-test]", file=sys.stderr)
-        return 2
     return report(*scan(root, modules(root), PATHSPEC))
 
 
