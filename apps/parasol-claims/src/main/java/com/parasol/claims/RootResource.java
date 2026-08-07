@@ -67,10 +67,21 @@ public class RootResource {
         // Compact "site":"<SITE>" marker — present only when SITE is set, which no workshop
         // deployment does today, so every current landing is the clean single-site one.
         site.filter(value -> !value.isBlank()).ifPresent(value -> body.put("site", value));
-        body.put("links", Map.of(
-                "claims", "/api/claims",
-                "health", "/q/health",
-                "metrics", "/q/metrics"));
+        // LinkedHashMap here too, for the same reason as the outer one and NOT as a style
+        // preference. This was Map.of until 2026-08-07, and Map.of iterates in an order derived
+        // from a per-JVM hash seed: five local boots of this app produced THREE different key
+        // orders in this object. Module 4's lab quotes this response, so the page was asserting
+        // output the service only produces some of the time — a reader hitting one of the other
+        // orders has no way to tell a real defect from a coin flip.
+        //
+        // ClaimResource already carries the same rule for TYPES/STATUSES via its ordered() helper,
+        // with a comment saying Set.of/Map.of are unsafe for anything docs or tests assert
+        // against. This class was simply never given the same treatment. Keep them consistent.
+        Map<String, Object> links = new LinkedHashMap<>();
+        links.put("claims", "/api/claims");
+        links.put("health", "/q/health");
+        links.put("metrics", "/q/metrics");
+        body.put("links", links);
         return body;
     }
 }
