@@ -3178,6 +3178,15 @@ carry_residue_or_delete_state_ns() {
   echo "   the only record of them: delete it and the next install snapshots OUR value as the org's."
   echo "   Apply the restores above, then:  oc delete namespace ${STATE_NS}"
 
+  # THE WORKSHOP'S OWN MaaS KEY MUST NOT SURVIVE THIS BRANCH (F-3, measured 2026-08-07).
+  # install.sh creates secrets/ogsr-maas-credentials in STATE_NS. The delete branch above takes it
+  # with the namespace, so this was invisible until a run ended with residue: that path KEEPS the
+  # namespace for the prior values, and a live model credential rode along on a cluster the teardown
+  # had just reported clean. Nobody reading "uninstall complete" expects a key to remain.
+  # It is deleted, not carried: a residue key is by definition the ORG'S prior value, and this
+  # Secret is ours — it can never be something this teardown owes anyone back.
+  sub del_obj secret ogsr-maas-credentials "$STATE_NS"
+
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "   • WOULD keep ${STATE_NS} and prune ${STATE_CM} to: $(printf '%s' "$RESIDUE_KEYS" | tr '\n' ' ' | xargs || true)"
     return 0
