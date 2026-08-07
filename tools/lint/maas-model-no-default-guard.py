@@ -124,12 +124,27 @@ SITES = [
     (REPO / "content/antora.yml",
      _compile("SITES[1]", r'^\s*maas_endpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
      "antora.yml maas_endpoint"),
+    # THESE TWO MAY BE EMPTY, AND EMPTY IS THE PREFERRED VALUE — note the `*?` where every other
+    # site has `+?`. They are Helm chart defaults, not rendered attributes, and the templates emit
+    # the key ONLY when the value is non-empty. So empty here means "omit the key", which lets
+    # content/antora.yml's visible `set-from-ogsr-maas-credentials@` soft default through.
+    #
+    # Carrying the sentinel HERE was the second half of the invisible-model SEV1 (fixed 2026-08-07).
+    # A sentinel in a chart default is a REAL VALUE with real precedence: it merged over antora.yml's
+    # soft default through the component descriptor, so every cockpit rendered the sentinel as if it
+    # were a model name. Making the page's placeholder visible fixed how it *looked*; nothing set the
+    # value until install.sh began passing the model it resolves in preflight.
+    #
+    # Empty stays a FAILURE at the antora.yml sites above, and that asymmetry is the whole point:
+    # there, empty renders as nothing and the sentence loses its subject — which is the original
+    # SEV1. A chart default and a rendered attribute fail in opposite directions, so one rule cannot
+    # serve both.
     (REPO / "gitops/workshop-config/values.yaml",
-     _compile("SITES[2]", r'^\s*maasModel\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
-     "values.yaml maasModel"),
+     _compile("SITES[2]", r'^\s*maasModel\s*:\s*"?([^"\n#]*?)"?\s*$', re.M),
+     "values.yaml maasModel", True),
     (REPO / "gitops/workshop-config/values.yaml",
-     _compile("SITES[3]", r'^\s*maasEndpoint\s*:\s*"?([^"\n#]+?)"?\s*$', re.M),
-     "values.yaml maasEndpoint"),
+     _compile("SITES[3]", r'^\s*maasEndpoint\s*:\s*"?([^"\n#]*?)"?\s*$', re.M),
+     "values.yaml maasEndpoint", True),
     # THE FOUR ENTRY STATES — added 2026-08-07 after two independent module audits found the same
     # stale literal in all of them while this guard reported clean. It policed content/antora.yml
     # and workshop-config/values.yaml only, so `maasModel: llama-scout-17b` sat in every AI module's
@@ -182,10 +197,22 @@ MIN_SITES = 8
 PLACEHOLDER = _compile("PLACEHOLDER", r"^<[^>]+>$|^set-from-[\w.-]+$|(^|\.)example\.com(/|$)")
 
 
-def judge(value: str) -> str | None:
-    """Return a failure reason, or None if the value is an acceptable placeholder."""
+def judge(value: str, allow_empty: bool = False) -> str | None:
+    """Return a failure reason, or None if the value is an acceptable placeholder.
+
+    `allow_empty` is per-site and is NOT a relaxation — it is the opposite rule for the opposite
+    kind of file. At a RENDERED attribute (content/antora.yml) empty is a defect: the page shows
+    nothing where the model name belongs and the sentence loses its subject, which is the original
+    invisible-model SEV1. At a HELM CHART DEFAULT empty is the *strongest* compliance available:
+    the showroom templates emit the key only when it is non-empty, so empty means "omit the key"
+    and the rendered page falls back to its own visible placeholder. A sentinel there is worse than
+    nothing, because a chart default is a real value with real precedence and it merged over the
+    page's soft default in every cockpit.
+    """
     v = value.strip().rstrip("@").strip()
     if not v:
+        if allow_empty:
+            return None
         return "empty — cannot tell an unset parameter from a deleted line"
     if PLACEHOLDER.search(v):
         return None
@@ -203,7 +230,12 @@ def check(sites, min_sites: int = 1) -> int:
     concrete model can hide went unread (audit 2026-08-01).
     """
     problems, checked = [], 0
-    for path, rx, label in sites:
+    for site in sites:
+        # 3-tuple = empty is a failure (rendered attributes); 4-tuple carries the per-site
+        # allow_empty flag. Unpacked this way so adding the flag did not have to touch the
+        # self-test's single-site canaries, which stay 3-tuples and keep the stricter rule.
+        path, rx, label = site[0], site[1], site[2]
+        allow_empty = site[3] if len(site) > 3 else False
         if not path.exists():
             print(f"ERROR: {path} is missing — refusing to report clean", file=sys.stderr)
             return 2
@@ -212,7 +244,7 @@ def check(sites, min_sites: int = 1) -> int:
             print(f"ERROR: {label}: expected exactly one value, found {len(hits)}", file=sys.stderr)
             return 2
         checked += 1
-        why = judge(hits[0])
+        why = judge(hits[0], allow_empty)
         if why:
             problems.append(f"  {label}: {why}")
     scope = Scope("maas-model-no-default-guard")
@@ -265,7 +297,35 @@ def self_test() -> int:
             # zero hits and exit 2 ("expected exactly one value"). That is also a refusal to report
             # clean, by a different route, and it is recorded here so the next reader does not
             # "fix" the fixture by adding a case that can only ever exit 2.
+            #
+            # …and that note is exactly what bit on 2026-08-07: the chart defaults were legitimately
+            # changed to `maasModel: ""`, those two sites produced zero hits, and the guard exited 2
+            # against a tree that was MORE compliant than before. The allow_empty sites below use a
+            # `*?` regex so an empty value reaches judge() instead of vanishing before it.
         ]
+
+        # ── The allow_empty asymmetry (added 2026-08-07) ────────────────────────────────────────
+        # Three properties, and the third is the one that matters: relaxing empty must NOT relax
+        # anything else. A flag that quietly stopped catching concrete models would be worse than
+        # the bug it was added for.
+        rx_star = re.compile(r'^\s*maasModel\s*:\s*"?([^"\n#]*?)"?\s*$', re.M)
+        empty_cases = [
+            ("chart-empty.yml", '  maasModel: ""\n', True, 0,
+             "an EMPTY chart default was flagged — but empty is how the template omits the key, "
+             "which is the only way the page's visible placeholder survives"),
+            ("rendered-empty.yml", '  maasModel: ""\n', False, 1,
+             "an empty value passed at a site where empty is NOT allowed — that is the original "
+             "invisible-model SEV1, where the sentence loses its subject with no build warning"),
+            ("chart-concrete.yml", '  maasModel: "llama-scout-17b"\n', True, 1,
+             "a CONCRETE model passed at an allow_empty site — the flag relaxed more than empty, "
+             "so the guard would no longer catch the defect it exists for"),
+        ]
+        for name, text, allow_empty, expected, complaint in empty_cases:
+            probe = Path(d) / name
+            probe.write_text(text)
+            if check([(probe, rx_star, f"canary-{name}", allow_empty)]) != expected:
+                print(f"SELF-TEST FAILED: {complaint}", file=sys.stderr)
+                ok = False
         for name, text, expected, complaint in cases:
             probe = Path(d) / name
             probe.write_text(text)
