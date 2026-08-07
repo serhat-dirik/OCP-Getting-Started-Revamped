@@ -1337,6 +1337,27 @@ spec:
         # survives. Never blank, never guessed — see the preflight comment for why.
         - name: showroom.ocpVersion
           value: "${OCP_VERSION}"
+        # The MaaS model and endpoint this install actually resolved → {maas_model} and
+        # {maas_endpoint} in both cockpits. WITHOUT THESE TWO the chart falls back to its
+        # values.yaml sentinel and every cockpit renders the literal string
+        # "set-from-ogsr-maas-credentials" where the model name belongs — which is the finding an
+        # SSA raised from a delivery dry run (17 places across 6 served pages, the first sentence
+        # introducing the model among them). That was half-fixed by making the sentinel VISIBLE
+        # instead of an unescaped <angle-bracketed> value the browser dropped silently; this is
+        # the other half, and without it the page is still wrong, just legibly wrong.
+        #
+        # MAAS_MODEL is resolved in preflight — confirmed against the endpoint's own /v1/models
+        # when the deployer pinned one, discovered from that list when they did not. So this is
+        # the value the workshop will really serve, not a copy of an intention.
+        #
+        # Empty is a real and correct state (no MaaS configured — the AI modules are then not
+        # installed), and empty makes the chart omit the key, leaving the visible sentinel. Same
+        # shape as ocpVersion above, and for the same reason: a blank attribute loses the
+        # sentence's subject with no warning at any log level.
+        - name: showroom.maasModel
+          value: "${MAAS_MODEL}"
+        - name: showroom.maasEndpoint
+          value: "${MAAS_ENDPOINT}"
         # The two in-cluster BuildConfigs (Parasol images, showroom antora-ext) clone the workshop
         # source directly, so they follow repo_url too — otherwise a fork install would quietly
         # build its cockpit and app images from the upstream project. Scalars only: Argo's
