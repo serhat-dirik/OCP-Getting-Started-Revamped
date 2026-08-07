@@ -118,7 +118,7 @@ tkn pipelinerun describe --last -n $NS | sed -n '/Results/,$p' | head -n 5
 ----
 +
 "Clone, test, build, *report*, deploy — and read the right-hand column: three of those Tasks come from the catalog OpenShift ships, two from our own library. Not one of them is code this team wrote.
-The report step is the one our platform team wrote — it measured the image at 391 MB against a 500 MB budget and published that as a *result*. Pipelines produce data, not just images."
+The report step is the one our platform team wrote — read the number off the screen: it measured the image against a 500 MB budget and published that as a *result*. Pipelines produce data, not just images."
 
 [demo-block]
 [TIME 3m]
@@ -409,10 +409,36 @@ That is the whole point of the cache — it has to still be there when the next 
 // `unit-test` at 11m20s then 11m33s on two CONSECUTIVE runs: two near-identical numbers, which is
 // how we learned the Maven repository was living in the container filesystem and dying with the
 // pod. That is what the maven-cache workspace fixes.
+//
+// ❗ BLOCKER MEASURED 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / OpenShift Pipelines 1.23.1) — the
+// maven-cache workspace has NEVER been run on a cluster, and binding it as this page instructs
+// makes every run of this pipeline fail in ~23 SECONDS. Reported to the PM; do not "fix" it here,
+// because the same binding lives in five other places and they have to move together.
+//   What happens: the run reaches unit-test and the TaskRun is rejected before any step starts —
+//     tkn: unit-test  Failed(TaskRunValidationFailed)  0s
+//     oc:  message: [User error] more than one PersistentVolumeClaim is bound
+//     PipelineRun: Tasks Completed: 2 (Failed: 1, Cancelled 0), Skipped: 3
+//   Why: Tekton's Affinity Assistant. `oc get cm feature-flags -n openshift-pipelines` reads
+//   coschedule=workspaces (the operator default — platform-portfolio's tekton-config.yaml patches
+//   only spec.result.*, so spec.pipeline is untouched), and the failed TaskRun carries
+//   pipeline.tekton.dev/affinity-assistant=… . Tekton's own docs for that mode: "Only one
+//   pvc-backed workspace can be mounted to each TaskRun in this mode." The unit-test task binds
+//   TWO — shared-workspace (a volumeClaimTemplate) and maven-cache (a claimName).
+//   NOT a workspace-binding-name error: both names are declared by the resolved Task
+//   (`oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='{.spec.workspaces[*].name}'`
+//   → source maven-cache), and the same run with maven-cache OMITTED gets past validation and
+//   builds normally. That single-variable control is how the cause was isolated.
+//   Same shape, same failure, in: this page (3 CLI blocks + 2 Console steps + the demo arc),
+//   gitops/entry-states/pipelines-fundamentals/templates/{pipeline,solve-endstate}.yaml,
+//   gitops/entry-states/app-security-testing/templates/{pipeline,solve-endstate}.yaml,
+//   pipelines/pipeline/parasol-claims-{build,devsecops}.yaml,
+//   pipelines/pipelinerun/*.yaml and pipelines/.tekton/parasol-claims-pull-request.yaml
+//   (so exercise 4's push-fired run and `ws solve` are hit too).
+//   Every figure below is therefore still an UNCACHED run, and is the only kind anyone has.
 This first run is the slow one, and it downloads Maven's dependency tree *twice*: once in `unit-test`, filling the cache you just attached, and once more inside the image build, which runs its own `mvn` in the `Containerfile` and cannot see that cache.
-On the build cluster a first run with nothing cached took *20m49s*; an earlier capture on a faster cluster finished the same run in *10m22s*.
-Both are real — how long the download takes is a property of the cluster you are on, which is exactly why the next runs stop paying for it.
-Later runs reuse what `unit-test` left in `maven-cache`, so that half of the work is skipped.
+On the build cluster a first run with nothing cached took *20m49s*; an earlier capture on a faster cluster finished the same run in *10m22s*, and a third cluster finished it in *13m27s*.
+All three are real — how long the download takes is a property of the cluster you are on.
+The `maven-cache` workspace exists so that later runs can reuse what `unit-test` downloaded and skip that half of the work; if your run fails within seconds instead of building, see xref:pipelines-fundamentals/troubleshooting.adoc[the troubleshooting page] before you retry.
 Watch it fill in on the console graph, or stream the step logs from the terminal — clicking a Task node shows exactly what that Task is doing:
 
 // Grounded live on OCP 4.22.5 (2026-07-26): the PipelineRun detail tab row is
@@ -463,6 +489,10 @@ First the *results* — the data the pipeline published, not just the image:
 // Real run: image-size-mb = 391, image-within-budget = true. Total run time 12m — an UNCACHED run,
 // like every run of this pipeline measured so far (the page no longer promises a range; see the
 // MEASUREMENT STATUS note at the first Start step for why uncached figures are the ones we ship).
+// Re-measured 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / Pipelines 1.23.1): image-size-mb = 392,
+// image-within-budget = true — so the value DRIFTS with the UBI base image and the body's "a
+// number in the high 300s" hedge is the right way to state it. The 391 in the captured block and
+// in the screenshot alt-text below is left exactly as captured; do not retro-fit it to 392.
 [tabs]
 ====
 Console::
@@ -649,7 +679,7 @@ You can explain why the platform team curated the library.
 ****
 
 == 3. Break the build: a failing test stops the pipeline
-⏱ *~10 min* · edit a test in your fork, watch the pipeline refuse the bad change, then fix it
+⏱ *~10 min of your hands, but budget ~20 — it is two more full pipeline runs* · edit a test in your fork, watch the pipeline refuse the bad change, then fix it
 
 A pipeline that tests but ships anyway is theater.
 The value is that a *failing test stops the build* — a broken change never becomes a deployed image.
@@ -740,19 +770,22 @@ Follow the run — this time it *fails fast*, at the test, and never reaches the
 tkn pipelinerun logs --last -f -n $NS
 ----
 
-The `unit-test` step goes red with a readable message (your claim number will differ — it is assigned at test time — and the `Tests run` total grows as the suite does, so read `Failures: 1`, not the count):
+The `unit-test` step goes red with a readable message (your claim number and the `Time elapsed` figure will differ — both are produced at test time — and the `Tests run` total grows as the suite does, so read `Failures: 1`, not the count):
 
 // GROUNDING for the run summary below.
 //
-// PROVENANCE, 2026-08-07: the failure message and "Tests run: 30, Failures: 1, Errors: 0,
-// Skipped: 0" were captured from a real `mvn -B -ntp test` on apps/parasol-claims with
-// assignAdjusterBeforeApproval flipped to false — the same goal set this pipeline's unit-test task
-// runs (GOALS: [ -B, -ntp, test ], see the `tkn pipeline describe` output in exercise 1). The
-// proxy was validated first: the UNMODIFIED tree reported "Tests run: 28" locally, which is
-// exactly the number a field tester had captured verbatim from a real PipelineRun on 2026-08-02 —
-// so the local count and the in-cluster count agree, and 30 is 28 plus the two tests added with
-// the rule (approvingAnUnassignedClaimIsRefused, noSeededClaimIsApprovedWithoutAnAdjuster).
-// Do NOT "correct" the number against a count of @Test annotations in apps/parasol-claims: that
+// PROVENANCE, 2026-08-07 — this is now a REAL RUN, not a local proxy. Captured from
+// `tkn pipelinerun logs parasol-claims-build-test-deploy-run-jzrm5 -n user2-cicd` on
+// cluster-6xxpf (OCP 4.22.8 / OpenShift Pipelines 1.23.1), after flipping
+// assignAdjusterBeforeApproval to false in user2's Gitea fork and starting the pipeline against
+// that fork — i.e. exercise 3 performed exactly as written. The run Failed at unit-test in 7m39s
+// wall clock, and the claim the test opened that run was CLM-2000.
+// Superseded provenance: until this capture the block was taken from a local `mvn -B -ntp test`
+// on apps/parasol-claims (the same goal set this pipeline's unit-test task runs — GOALS:
+// [ -B, -ntp, test ]) and validated against a field tester's earlier verbatim PipelineRun count.
+// The in-cluster run confirms every line of it, and corrects one: surefire 3.5.2 prints
+// `-- Time elapsed: N s` in the per-test FAILURE header, which the local capture had dropped.
+// Do NOT "correct" the 30 against a count of @Test annotations in apps/parasol-claims: that
 // counts 35, because surefire's "Tests run" reflects what the Maven invocation actually executes,
 // not every annotation in the tree.
 //
@@ -764,11 +797,22 @@ The `unit-test` step goes red with a readable message (your claim number will di
 // the lab tells them to open and read. ClaimResource.updateStatus now enforces the rule (409), and
 // the test asserts the refusal, so the message below quotes the service's own response body.
 //
-// LINE WRAPPING: surefire prints the AssertionFailedError message on ONE long line. It is wrapped
-// here to fit the page, as the previous capture was. Everything else is verbatim.
-[source,texinfo]
+// LINE WRAPPING and the STEP PREFIX: surefire prints the AssertionFailedError message on ONE long
+// line, wrapped here to fit the page as the previous capture was. `tkn pipelinerun logs` also
+// prefixes every line with `[unit-test : mvn-goals] ` (the task and step it came from); that
+// prefix is stripped here so the Maven output reads at page width. Everything else is verbatim.
+//
+// subs="-callouts" IS LOAD-BEARING — do not drop it. The last line ends `but was: <409>`, and
+// `<N>` at the end of a line inside a listing block is AsciiDoc CALLOUT syntax. Without this,
+// Asciidoctor rendered that as <i class="conum" data-value="409"></i> — a callout glyph — so the
+// published page read `==> expected: <200> but was:` and the 409, the one number this whole
+// exercise turns on, was NOT ON THE PAGE. (`<200>` survived only because it is mid-line.) Found
+// 2026-08-07 by grepping the built site for class="conum"; every other conum in the workshop is a
+// deliberate single digit. Escaping as `\<409>` also works but leaves a backslash in a block whose
+// whole point is that it is verbatim.
+[source,texinfo,subs="-callouts"]
 ----
-[ERROR] com.parasol.claims.ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster <<< FAILURE!
+[ERROR] com.parasol.claims.ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster -- Time elapsed: 0.409 s <<< FAILURE!
 org.opentest4j.AssertionFailedError: Parasol rule enforced: the API refused to approve claim
 CLM-XXXX while its adjuster was Unassigned - an adjuster must own a claim before it can be
 approved. PUT /api/claims/CLM-XXXX/status answered 409 {"error":"claim CLM-XXXX cannot be
@@ -846,6 +890,30 @@ Then re-run against your fork:
 // MEASUREMENT STATUS (settled 2026-08-07): every number in this comment is an UNCACHED run, and
 // those are the figures we ship — they are the ceiling, and the cache can only beat them. Do not
 // quote a "warm re-run" figure anywhere until one has actually been timed.
+//
+// RE-PERFORMED END TO END 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / OpenShift Pipelines 1.23.1) as
+// user2 — the first time this exercise's red AND green halves were both driven on a cluster since
+// the service started enforcing the adjuster rule. Toggle flipped to false in user2's Gitea fork
+// via the same contents API the entry state's fork Job uses (what a Gitea web-UI commit does):
+//   RED   run …-jzrm5  Failed     22:41:17Z -> 22:48:56Z =  7m39s
+//                      fetch-source 21s Succeeded · unit-test 7m12s StepFailed ·
+//                      build-image / image-report / deploy Skipped
+//                      failure: ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster:549,
+//                      "answered 409 … cannot be Approved while its adjuster is Unassigned",
+//                      "Tests run: 30, Failures: 1, Errors: 0, Skipped: 0" — i.e. the block quoted
+//                      above, verbatim, from a real run rather than a local proxy.
+//   GREEN run …-t8hvk  Succeeded  22:49:34Z -> 23:03:01Z = 13m27s
+//                      fetch-source 21s · unit-test 7m19s · build-image 5m1s · image-report 6s ·
+//                      deploy 38s; "Tasks Completed: 5 (Failed: 0, Cancelled 0), Skipped: 0";
+//                      results image-size-mb=392 / image-within-budget=true.
+// The red and green unit-test runs came in at 7m12s and 7m19s — near-identical again, and for the
+// same reason as the 2026-08-06 pair: nothing was cached. Both runs had to OMIT the maven-cache
+// workspace, because binding it kills the run outright (see the ❗ BLOCKER note at the first Start
+// step). So there is STILL no timed cached run, and there cannot be one until that is fixed.
+// The deployed pod was checked against the image the run built: pod imageID and the user2-cicd
+// `parasol-claims:latest` istag were the same digest, imagePullPolicy Always — no stale-digest gap.
+// The rule was then probed on that pod: a claim created with no adjuster (CLM-1031) answered 409 on
+// PUT {"status":"Approved"}, and CLM-1019 (adjuster Rebecca Torres) answered 200.
 // Only the modal Start form still needs a by-hand capture (see the first Start step).
 [tabs]
 ====
@@ -1128,7 +1196,7 @@ You have the mechanics.
 Try these on your own:
 
 * *Tighten the budget.*
-Re-run the pipeline with `-p max-size-mb=300` (add a `params` entry, or `tkn pipeline start ... -p max-size-mb=300`) and read the `image-report` step: the image is 391&nbsp;MB, so `within-budget` flips to `false`.
+Re-run the pipeline with `-p max-size-mb=300` (add a `params` entry, or `tkn pipeline start ... -p max-size-mb=300`) and read the `image-report` step: the image is in the high 300s of MB, so `within-budget` flips to `false`.
 Notice the run still *succeeds* — the report *flags*, it does not *fail* the build.
 How would you make it a hard gate?
 * *Read a Task's full body.*
