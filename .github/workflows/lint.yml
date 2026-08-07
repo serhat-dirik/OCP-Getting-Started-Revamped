@@ -1925,3 +1925,61 @@ jobs:
             exit 1
           fi
           bash tools/lint/doctor-degraded-guard.sh
+
+  demo-beat-chip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A demo beat's timing chip can vanish and no build says so
+        # WHY THIS IS A JOB AND NOT A BUILD CHECK. Every beat in every demo arc is two block
+        # attribute lines above a Say/Show/Do list. Asciidoctor's block STYLE is positional
+        # attribute 1, so the second line replaces the first: `demo-block` never reaches the HTML
+        # and `TIME 3m` is emitted verbatim into the list wrapper's class attribute, which is what
+        # content/supplemental-ui/partials/head-styles.hbs paints the presenter's timing chip from.
+        #
+        # That makes `[TIME Nm]` a load-bearing hook whose failure is INVISIBLE. Measured end to
+        # end 2026-08-08 by moving ONE heading in networking-dev-devops/lab.adoc — the module whose
+        # correct form is committed as 17d74b2 — below its `[TIME 3m]` line and building that copy
+        # with this repo's own Antora: the page went from 5 rendered chip elements to 4 (site total
+        # 104 to 103), and `antora --log-failure-level=warn site-demo.yml` still returned rc 0 with
+        # a zero-line log. No build can fail on HTML it considers perfectly valid, so nothing else
+        # in this workflow can see it — and a sweep inserting `=== Beat N — label` headings across
+        # the catalogue is exactly the edit that introduces it.
+        #
+        # The rules are narrower than they look, and deliberately so. Nine authored shapes were
+        # rendered through the engine Antora builds with and the wrapper's class attribute read
+        # directly; four that a stricter guard would have flagged turn out to render the chip
+        # perfectly (a blank line, a comment, a block title and a role line between the attribute
+        # and its list; and no `[demo-block]` line at all, which that stylesheet's own comment says
+        # may be deleted). A guard that fires on correct pages gets switched off, taking the one
+        # detector that matters with it.
+        run: |
+          rc=0
+          python3 tools/lint/demo-beat-chip-guard.py --self-test || rc=$?
+          # Exactly 1 = every detector fired on a canary line only IT fires on, AND the reference
+          # shape, the tolerated variations and the near-miss transposition that still renders
+          # every chip all stayed silent. 0 = a detector is blind; 2 = a canary slipped through,
+          # the fixture is missing, or the scope ledger broke.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::demo-beat-chip-guard self-test must exit 1 (each detector witnessed on" \
+                 "its own line, correct shapes silent); got rc=$rc. Detection is unproven —" \
+                 "refusing to trust a clean scan of the real tree."
+            exit 1
+          fi
+          python3 tools/lint/demo-beat-chip-guard.py
+      - name: What this job does NOT prove
+        # Said out loud, because a source-only gate that reads as complete is worse than no gate.
+        # The step above reasons about authored source against measured Asciidoctor behaviour. It
+        # cannot see a chip lost DOWNSTREAM of the source — a dropped stylesheet rule, an extension
+        # that rewrites classes, a theme whose CSS wins the cascade. The guard has a mode that
+        # closes exactly that gap by counting rendered chip elements by their opening div tag, and
+        # it is not run here because every job in this workflow is checkout-plus-a-script and a
+        # gate that needs a site build is a gate that gets skipped. Run it by hand after a build:
+        run: |
+          echo "Source-only. To check the RENDERED chips as well (needs a build):"
+          echo "  cd content && npx antora --to-dir /tmp/demo site-demo.yml"
+          echo "  cd content && npx antora --to-dir /tmp/workshop site-workshop.yml"
+          echo "  tools/lint/demo-beat-chip-guard.py --built-demo /tmp/demo \\"
+          echo "      --built-non-demo /tmp/workshop"
+          echo "Measured 2026-08-08 on a fresh build of this tree: 104 source chip sites, 104"
+          echo "rendered chip elements in the demo build, 0 in the workshop build."

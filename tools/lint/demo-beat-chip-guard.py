@@ -21,25 +21,34 @@ that grepping the RENDERED CLASS ATTRIBUTE self-matches the inlined stylesheet o
 honest grep is for the opening `<div` tag. This guard follows that rule.
 
 The consequence is that `[TIME Nm]` is a load-bearing hook whose failure is INVISIBLE. Measured
-2026-08-08 with a real transposition: `npx antora --log-failure-level=warn` returns rc 0 with a
-zero-line log while the chip is gone from the page. Nothing else in this repo can see it — a build
-cannot fail on HTML it considers perfectly valid.
+2026-08-08 end to end, by moving ONE heading in networking-dev-devops/lab.adoc (the module whose
+correct form is committed as 17d74b2) below its `[TIME 3m]` line and building that copy with the
+repo's own Antora: `antora --log-failure-level=warn site-demo.yml` returned **rc 0 with a zero-line
+log**, and the built page went from 5 rendered chip elements to 4 (site total 104 → 103). Nothing
+else in this repo can see it — a build cannot fail on HTML it considers perfectly valid.
 
 WHAT WAS MEASURED, AND WHY THE RULES ARE NARROWER THAN THEY LOOK. Every shape below was rendered
 through `node_modules/@asciidoctor/core` 2.2.9 — the engine Antora builds this site with — and the
 wrapper div's class attribute was read directly. Reasoning about the parser was NOT enough: four of
 the shapes a stricter guard would have flagged turn out to render the chip perfectly.
 
-    CHIP SURVIVES                                      CHIP LOST
-    heading / blank / demo-block / TIME / Say  (ref)   a section heading between TIME and the list
-    a blank line between TIME and the list             a style attribute line AFTER TIME
-    a `//` comment line between them                   the run attaching to a source block
-    a block title (`.Title`) between them              the run attaching to a paragraph
-    a conditional (`endif::demo[]`) between them       the run attaching to an admonition
-    a ROLE line (`[.lead]`) after TIME                  (a heading with no list after it at all)
+    CHIP SURVIVES                                       CHIP LOST
+    heading / blank / demo-block / TIME / Say  (ref)    a section heading between TIME and the list
+    a blank line between TIME and the list              a style attribute line AFTER TIME
+    a `//` comment line between them                    the run attaching to a source block
+    a block title (`.Title`) between them               the run attaching to a paragraph
+    a conditional (`endif::demo[]`) between them        the run attaching to an admonition
+    a ROLE line (`[.lead]`) after TIME                   (a heading with no list after it at all)
     no `[demo-block]` line at all
     two `[TIME]` lines — the last one wins
     a value with no rule (`90s`) — bare glyph, no number
+    a heading between `demo-block` and TIME — the NEAR MISS
+
+THE NEAR MISS IS THE ONE TO KEEP IN MIND. A heading one line too high — between `[demo-block]` and
+`[TIME Nm]` rather than between `[TIME Nm]` and the list — renders EVERY chip, because `TIME` is
+still the last style before the list. Measured on the real module both ways: 5 chips before, 4 after
+the true transposition, 5 after the near miss. So the rule is about what sits between `[TIME Nm]`
+and its block, not about the heading's position relative to `[demo-block]`.
 
 So this guard does NOT require adjacency, does NOT require `[demo-block]` (the stylesheet's comment
 says plainly that the line is inert and may be deleted), and does not treat a role line as a style
@@ -399,23 +408,34 @@ def scan_page(rel, lines):
         elif kind == "dlist" and not style_lines:
             working.add(lineno)
 
+        # `start <= i`, NOT `start < i`. `start` is already the index of the line AFTER the heading,
+        # so the strict form excluded a chip site sitting immediately below its own heading and
+        # reported it as belonging to no beat. Found 2026-08-08 by transposing a heading in
+        # networking-dev-devops/lab.adoc into the gap between `[demo-block]` and `[TIME 3m]`: that
+        # shape renders all five chips (measured through asciidoctor.js), and the guard flagged it
+        # anyway. The self-test's negative arm now carries that exact shape.
         if kind != "superseded" and page_uses_beats \
-                and not any(start < i < end for _ln, _t, start, end in beats):
+                and not any(start <= i < end for _ln, _t, start, end in beats):
             findings.append((rel, lineno, "chip-without-beat",
                              f"[TIME {value}] is under no === Beat heading, on a page that uses "
                              f"them"))
 
     # Pass 4 — conservation from the beat's side.
     for lineno, title, start, end in beats:
-        if not any(start < ln - 1 < end for ln in working):
+        if not any(start <= ln - 1 < end for ln in working):   # same boundary as pass 3
             findings.append((rel, lineno, "beat-without-chip",
                              f"{title!r} has no working [TIME Nm] site under it"))
 
     return findings, counters, len(working)
 
 
-def scan(paths, floors=(MIN_PAGES, MIN_DEMO_REGIONS, MIN_CHIP_SITES)):
-    """(findings, per-page working-site counts, scope-collapse rc)."""
+def scan(paths, floors=(MIN_PAGES, MIN_DEMO_REGIONS, MIN_CHIP_SITES), quiet=False):
+    """(findings, per-page working-site counts, scope-collapse rc, measurement summary).
+
+    `quiet` suppresses the scope ledger's `::error::` lines for the self-test's DELIBERATE collapse
+    case, on _scope.py's own reasoning: printing them on a passing run teaches a reader of a green
+    CI log to skim past that string, which is the one string that must never be skimmed past.
+    """
     findings = []
     per_page = {}
     scope = Scope("demo-beat-chip-guard")
@@ -438,7 +458,7 @@ def scan(paths, floors=(MIN_PAGES, MIN_DEMO_REGIONS, MIN_CHIP_SITES)):
         findings.extend(page_findings)
         per_page[rel] = working
         scope.merge(counters)
-    return findings, per_page, scope.enforce(), scope.summary()
+    return findings, per_page, scope.enforce(quiet=quiet), scope.summary()
 
 
 def check_built(demo_dirs, non_demo_dirs, per_page):
@@ -503,8 +523,8 @@ def report(findings, per_page, summary, built_note="") -> int:
             print(f"   … and {len(hits) - 20} more")
         print(f"   FIX: {KINDS[kind]}")
     print(f"\n{len(findings)} demo-beat chip defect(s). None of these fails a build: "
-          f"`npx antora --log-failure-level=warn` returns rc 0 with a zero-line log while the chip "
-          f"is missing from the page (measured 2026-08-08).")
+          f"`antora --log-failure-level=warn` returns rc 0 with a zero-line log while the chip is "
+          f"missing from the page (measured 2026-08-08 on a real transposition).")
     return 1
 
 
@@ -564,8 +584,12 @@ def self_test(tmpdir: Path) -> int:
         ok = False
 
     # The NEGATIVE arm, standalone. Without it, a guard that flagged everything would satisfy every
-    # assertion above and distinguish nothing. This is the committed reference shape from
-    # networking-dev-devops/lab.adoc, plus the four variations measured to still paint the chip.
+    # assertion above and distinguish nothing. Beat 1 is the committed reference shape from
+    # networking-dev-devops/lab.adoc; Beat 2 stacks the variations measured to still paint the
+    # chip; Beat 3 is the near-miss transposition — the heading lands between `[demo-block]` and
+    # `[TIME]` rather than between `[TIME]` and the list, which renders ALL its chips (measured on
+    # the real module: 5 before, 5 after) and must therefore stay silent. Beat 3 is also the
+    # boundary witness for a chip site sitting on the line immediately below its own heading.
     clean = [
         "ifdef::demo[]",
         "== Demo arc",
@@ -586,16 +610,22 @@ def self_test(tmpdir: Path) -> int:
         ".A title",
         "Say:: one",
         "",
+        "[demo-block]",
+        "=== Beat 3 — the near miss: the heading landed one line too high",
+        "[TIME 4m]",
+        "Say:: TIME is still the last style before the list, so every chip still renders",
+        "",
         "endif::demo[]",
     ]
     clean_findings, _c, clean_working = scan_page("clean.adoc", clean)
     if clean_findings:
         print(f"❌ SELF-TEST FAILED: the CORRECT fixture was flagged ({clean_findings}). A guard "
-              f"that fires on the reference shape will be switched off by the first person it "
-              f"annoys, taking the one detector that matters with it.", file=sys.stderr)
+              f"that fires on the reference shape — or on a transposition that renders every chip "
+              f"— will be switched off by the first person it annoys, taking the one detector that "
+              f"matters with it.", file=sys.stderr)
         ok = False
-    if clean_working != 2:
-        print(f"❌ SELF-TEST FAILED: the correct fixture has 2 chip sites and the guard counted "
+    if clean_working != 3:
+        print(f"❌ SELF-TEST FAILED: the correct fixture has 3 chip sites and the guard counted "
               f"{clean_working} — the working-site count feeds the built-output comparison, so a "
               f"wrong count there is a wrong verdict here.", file=sys.stderr)
         ok = False
@@ -626,7 +656,7 @@ def self_test(tmpdir: Path) -> int:
               f"the per-page counts are what the built-output comparison is measured against.",
               file=sys.stderr)
         ok = False
-    if scan([CANARY], floors=(MIN_PAGES, MIN_DEMO_REGIONS, MIN_CHIP_SITES))[2] != 2:
+    if scan([CANARY], floors=(MIN_PAGES, MIN_DEMO_REGIONS, MIN_CHIP_SITES), quiet=True)[2] != 2:
         print(f"❌ SELF-TEST FAILED: scanning ONE page did not collapse the scope floors "
               f"({MIN_PAGES}/{MIN_DEMO_REGIONS}/{MIN_CHIP_SITES}) — file discovery could shrink to "
               f"a single page and still report clean.", file=sys.stderr)
@@ -702,10 +732,12 @@ def self_test(tmpdir: Path) -> int:
     if not ok:
         return 2
     print(f"self-test ok — {len(findings)} finding(s) on the canary, each on a line only its own "
-          f"detector fires on, and all seven source kinds present; the reference shape and the "
-          f"four measured variations stay silent; the built comparison catches a short page and a "
-          f"chip in a non-demo rendering while passing a matching one; {len(real)} tracked .adoc "
-          f"file(s) visible to the real scan, none of them a fixture.")
+          f"detector fires on, and all seven source kinds present; the reference shape, the "
+          f"measured tolerated variations and the near-miss transposition that still renders every "
+          f"chip all stay silent; the driver carries findings up and collapses on a one-page scope; "
+          f"the built comparison catches a short page and a chip in a non-demo rendering while "
+          f"passing a matching one; {len(real)} tracked .adoc file(s) visible to the real scan, "
+          f"none of them a fixture.")
     return 1
 
 
