@@ -99,9 +99,50 @@ oc start-build parasol-fraud -n ogsr-parasol-images --follow
 
 ## Intentional flaws — do not fix
 
-None. This service is deliberately simple and correct.
+**None.** This service carries no deliberate fault — its whole curricular job is to be the
+*audience* of a token exchange, and a second lesson hidden inside the scoring function would
+only blur that.
 
 The workshop's deliberate faults live elsewhere: a seeded vulnerable dependency on the
 `parasol-claims` `seed-vulnerable` branch (*Trusted Software Supply Chain*), an N+1 query
 endpoint on `parasol-claims` (*Observability, Health & Scale*), and the legacy patterns
 throughout `parasol-legacy-claims` (*Application Modernization*).
+
+### That claim is now checkable — it did not used to be
+
+This section used to read *"None. This service is deliberately simple and correct."* On
+2026-08-07 a field tester read `scoreFor` on JDK 21 and found it was neither. Both defects were
+real, both are fixed, and each is pinned by a named test so the claim above is evidence rather
+than assertion:
+
+| Defect in the old `long` arithmetic | Symptom | Pinned by |
+|---|---|---|
+| `Long.parseLong(digits) * 37` overflowed for an 18-digit id, and `%` keeps the dividend's sign | `CLM-249299106394725033` scored **-95** and was published as risk **"low"** — the javadoc promised `[0,99]` | `scoreStaysInsideItsDocumentedRange`, `noClaimIdInTheFormerOverflowWindowEscapesTheRange` |
+| A 20-digit id is one digit past `Long.MAX_VALUE`, so `parseLong` threw `NumberFormatException` | **HTTP 500** on caller-controlled path input | `oversizedClaimIdIsScoredNotAServerError` |
+
+The fix reduces the digits with `BigInteger` — the same judgement that makes claim amounts
+`BigDecimal` in `parasol-claims`: when a domain value can outgrow a primitive, use exact
+arithmetic instead of hoping it will not. `BigInteger.mod` is never negative, so `[0,99]` now
+holds by construction. `FraudResource.scoreFor`'s javadoc carries the full reasoning, including
+why `Math.floorMod` would have hidden the bug rather than fixed it.
+
+**No published value changed.** 600,008 claim ids were scored under both the old and the new
+code, covering every id the workshop can produce (`CLM-1`…`CLM-100000`, the `CLM-1001`…`CLM-1030`
+seeds, the no-digit hash branch) plus a half-million random ids from the range the old code
+handled correctly: **zero differences**. The new code differs only where the old code was
+already wrong or threw. `CLM-1001` still scores 37/low and `CLM-1005` still scores 85/high, so
+lab text, verify scripts and captured output are unaffected.
+
+### Why these were fixed rather than declared teaching flaws
+
+Overflow and unhandled input *are* good teaching material, and shipping deliberate faults is an
+established pattern here — so this was a real choice, not a default. Three things decided it:
+
+1. **No module could reach it.** A teachable flaw has to be triggerable by a lab. Every claim id
+   the workshop generates has one to four digits; the overflow window starts at eighteen. The
+   flaw would have existed only in prose.
+2. **It failed silently, in the wrong direction.** The workshop's real faults are *observable* —
+   a slow trace, a red scan gate, legacy code you can read. This one returned a well-formed
+   `200` with a nonsense number and called it low risk.
+3. **An undeclared flaw behind a README claiming correctness is just a bug.** Attendees read
+   this code in the IDE; that is exactly why the false claim cost more than the defects did.

@@ -200,7 +200,26 @@ public class ClaimResource {
         return Response.status(Response.Status.CREATED).entity(claim).build();
     }
 
-    /** Advance a claim to a new workflow status (Submitted -> UnderReview -> Approved/Denied). */
+    /**
+     * Advance a claim to a new workflow status (Submitted -&gt; UnderReview -&gt; Approved/Denied).
+     *
+     * <p><strong>There is deliberately no adjuster check here, and its absence is load-bearing
+     * for Pipelines Fundamentals.</strong> Parasol's stated rule — <em>a claim cannot be
+     * Approved while its adjuster is still Unassigned</em> — is <em>not</em> enforced by this
+     * service. Measured 2026-08-07: {@code PUT {"status":"Approved"}} against a claim created
+     * without an adjuster returns <strong>200</strong> and persists
+     * {@code status=Approved, adjuster=Unassigned}. The rule lives only as an assertion inside
+     * {@code ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster()}, whose one-line
+     * toggle is that module's break-fix device.
+     *
+     * <p>Enforcing it here would <em>break</em> that lab rather than improve it. The toggle
+     * works by changing what the test POSTs, and a rule the server enforces cannot be violated
+     * from the outside: with the toggle flipped the service would refuse the approval, the test
+     * would go green, and the failure message the lab quotes verbatim would never appear.
+     * Making the rule real is therefore a coordinated app + content change — move the toggle
+     * into this method, then re-ground the lab's expected Maven output and its {@code Tests run}
+     * count — not a one-line fix. See "Intentional flaws" in this app's README.
+     */
     @PUT
     @Path("/{claimNumber}/status")
     @Transactional

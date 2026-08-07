@@ -1,5 +1,6 @@
 package com.parasol.fraud;
 
+import java.math.BigInteger;
 import java.util.Map;
 
 import jakarta.ws.rs.GET;
@@ -32,6 +33,12 @@ import jakarta.ws.rs.core.Response;
 @Produces(MediaType.APPLICATION_JSON)
 public class FraudResource {
 
+    /** Spreads adjacent claim numbers across the bands — coprime with 100, so no score is unreachable. */
+    private static final BigInteger MULTIPLIER = BigInteger.valueOf(37);
+
+    /** Scores are published as two digits, so the score space is exactly [0,99]. */
+    private static final BigInteger SCORE_MODULUS = BigInteger.valueOf(100);
+
     /**
      * Score a claim. Returns a deterministic pseudo-score in [0,99] and a risk band,
      * derived only from the claim id so results are stable and reproducible.
@@ -60,19 +67,36 @@ public class FraudResource {
      * Deterministic score in [0,99]. Uses the digits of the claim id when present
      * (so CLM-1001 -&gt; 1001 -&gt; 37), else a stable hash of the whole string. No
      * randomness, no clock — the same id always yields the same score.
+     *
+     * <p>The claim id is caller-controlled path input of unbounded length, so the digits are
+     * reduced with {@link BigInteger} rather than parsed into a {@code long}. Same judgement
+     * that makes claim amounts {@code BigDecimal} in parasol-claims: when a domain value can
+     * outgrow a primitive, use exact arithmetic instead of hoping it will not. The {@code long}
+     * version this replaces overflowed to a <em>negative</em> score, which {@link #riskBand}
+     * then published as "low", and threw NumberFormatException — HTTP 500 — on a 20-digit id.
+     *
+     * <p>{@link BigInteger#mod} is the load-bearing call: unlike {@code %} it is never negative,
+     * so [0,99] holds by construction. {@code Math.floorMod} is <em>not</em> an equivalent fix —
+     * it would return an in-range but wrong number for an overflowed product, hiding the bug
+     * instead of removing it. Both failure modes are pinned by tests in {@code FraudResourceTest};
+     * the README has the full account.
      */
     static int scoreFor(String claimId) {
-        long basis;
         String digits = claimId.replaceAll("\\D", "");
-        if (!digits.isEmpty()) {
-            basis = Long.parseLong(digits);
-        } else {
-            basis = Integer.toUnsignedLong(claimId.hashCode());
-        }
-        return (int) ((basis * 37) % 100);
+        BigInteger basis = digits.isEmpty()
+                ? BigInteger.valueOf(Integer.toUnsignedLong(claimId.hashCode()))
+                : new BigInteger(digits);
+        return basis.multiply(MULTIPLIER).mod(SCORE_MODULUS).intValueExact();
     }
 
-    /** Map a score to a low/medium/high risk band. */
+    /**
+     * Map a score to a low/medium/high risk band.
+     *
+     * <p>Deliberately open at the bottom: it trusts {@link #scoreFor} to have already
+     * guaranteed [0,99]. That trust is why the old overflow was invisible — an out-of-range
+     * score fell through {@code score < 40} and was published as "low" instead of failing
+     * loudly. Keep the guarantee in {@code scoreFor}, where it can be enforced exactly.
+     */
     static String riskBand(int score) {
         if (score < 40) {
             return "low";

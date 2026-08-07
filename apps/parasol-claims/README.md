@@ -242,3 +242,32 @@ green.
    a claim cannot be approved while still unassigned, and **passes as shipped**. That module has
    attendees flip its one-line toggle in their own fork so the pipeline's test task goes red with
    a readable message, then revert it to green. Do **not** remove or "simplify" it away.
+
+   **Read this before you "fix" it:** the rule lives *only in that test*. The service does not
+   enforce it. Measured 2026-08-07 — `PUT {"status":"Approved"}` on a claim created without an
+   adjuster returns **200** and persists `status=Approved, adjuster=Unassigned`:
+
+   ```
+   created CLM-1031 with adjuster=Unassigned
+   PUT {"status":"Approved"} -> HTTP 200
+   {"claimNumber":"CLM-1031", ... "status":"Approved", "adjuster":"Unassigned"}
+   ```
+
+   So the toggle changes what the *test* POSTs, not what the *service* allows. That is a real
+   gap between the lab's framing ("a real business rule") and the code, and it is recorded here
+   rather than quietly patched, because **enforcing the rule in `updateStatus` would break the
+   lab**: a rule the server enforces cannot be violated from outside, so with the toggle flipped
+   the service would refuse the approval, the test would go *green*, and the `AssertionFailedError`
+   the lab quotes verbatim would never appear.
+
+   Making the rule real is a coordinated **app + content** change, not a one-line fix:
+
+   | Step | Where |
+   |---|---|
+   | Reject `Approved` when the adjuster is `Unassigned` (409) | `ClaimResource.updateStatus` |
+   | Move the one-line toggle out of the test and into `updateStatus` | `ClaimResource` + `ClaimResourceTest` |
+   | Re-ground the expected Maven failure output and the `Tests run` count | *Pipelines Fundamentals* lab |
+
+   Until all three land together, the code stays as it is and this note is the honest record.
+   `ClaimResource.updateStatus`'s javadoc carries the same warning for anyone reading the code
+   without the README.
