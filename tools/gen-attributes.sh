@@ -6,7 +6,18 @@
 # Content references product versions ONLY through these attributes (04-STYLE-GUIDE §5):
 # a page writes `{gitops_version}`, never the literal "1.21.1". This script emits one
 # `:<key>_version:` attribute for every top-level product entry in versions.yaml that
-# has a `version:` field (entries without one, e.g. gitea, are skipped).
+# has a `version:` field (entries without one, e.g. zap / gateway_api / maas, are skipped).
+#
+# TWO CARVE-OUTS, and both bite hardest on the OpenShift release itself:
+#   1. {ocp_version} is versions.yaml's supported FLOOR, frozen at content-build time — not a
+#      reading of the reader's cluster. That reading is {cluster_ocp_version}, which is NOT
+#      generated here: it is a soft attribute in content/antora.yml + showroom/site*.yml that
+#      bootstrap/install.sh sets per deploy from the live cluster. Read the mechanism at that
+#      attribute in content/antora.yml. tools/lint/version-anchor-guard.py keeps {ocp_version}
+#      and bare 4.NN literals out of concept/lab/wrapup.
+#   2. Past-tense provenance ("performed on OpenShift 4.22.5, 2026-07-31") is a FROZEN literal on
+#      purpose. An attribute there re-dates the record every time versions.yaml moves, converting
+#      a measurement into a claim about a release nobody ran it on.
 #
 # Idempotent: same versions.yaml -> byte-identical output. CI runs this and then
 # `git diff --exit-code` on the output file as a drift gate — if versions.yaml changed
