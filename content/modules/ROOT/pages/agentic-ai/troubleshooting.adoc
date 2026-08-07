@@ -28,6 +28,21 @@ include::partial$version-attributes.adoc[]
 // with a terse question that grounds perfectly well, and the old wording told them that was
 // impossible. The NOTE now says what is true: the outcome is deterministic per prompt and you
 // cannot predict it by reading, so ASK before concluding anything about their prompt.
+// FOURTH REALIGNMENT (2026-08-08), from the cluster pass that performed exercise 5 end to end as
+// user1 in user1-ai (lab.adoc, commit 827fc2e). Two additions, both grounded there:
+//   * The wrong-port entry's jsonpath prints 8080 and is correct, but a plain `oc get svc` shows
+//     8080/TCP,8443/TCP — oc new-app derives Service ports from the FINISHED IMAGE, and 8443 comes
+//     from the UBI9 Java base image (verified against the istag's Config.ExposedPorts), not from
+//     our Containerfile, which EXPOSEs only 8080. Without saying so, the extra port reads as the
+//     fault. Do not tell anyone to edit the Service.
+//   * NEW ENTRY for the break-and-fix failure mode: an unresolvable MCP host does NOT make
+//     readiness report DOWN and does NOT hang the boot. The app starts (~7s), the MCP client
+//     retries the UnknownHostException on a Vert.x EVENT-LOOP thread, BlockedThreadChecker logs the
+//     block past 2000 ms, the pod's whole HTTP surface goes silent, the LIVENESS probe fails too
+//     and the kubelet SIGKILLs it (Exit Code 137, restart count 2 by ~4 min). Recovery is ~2s
+//     because restoring the value restores a pod template the healthy ReplicaSet already runs.
+//     THIS IS ONE ACCOUNT SHARED WITH lab.adoc's optional break-and-fix TIP — if either changes,
+//     change both; do not let two differently-worded versions of this mechanism ship.
 
 Each entry is symptom → cause → fix. All were seen (or deliberately induced) while performing this module live against the running `parasol-agent` on the workshop cluster.
 
@@ -148,6 +163,8 @@ oc get cm maas-config -n {user}-ai \
 
 *Fix:* Check the tool servers: `oc get pods -n {user}-ai`. If `claims-db` or `policy-docs` is not `1/1`, that is the real problem — describe it (`oc describe pod ...`) or `ws reset agentic-ai --user <u>` to re-materialize. Once both MCP servers are `OK`, the agent's readiness flips to `UP` on its own.
 
+*Check that readiness actually answered before you use this entry.* This is the case where `/q/health/ready` *reports* `DOWN`. If instead it does not answer at all — the probe events say `context deadline exceeded` rather than a failed check — you are in a different failure, and it is the one where the pod is killed with `Exit Code: 137` (see the exercise-5 entry below).
+
 == There are no traces in Tempo
 
 *Symptom:* You expected the model call and tool calls to appear as spans in a tracing backend, but nothing shows up.
@@ -203,6 +220,59 @@ oc get cm maas-config -n {user}-ai \
 *Cause:* The registration URL is `http://policy-docs-mine:8080/mcp/sse`, and `oc new-app` derives the Service port from the image's `EXPOSE`. If the derived port is not `8080`, the agent dials a port nothing is listening on and its readiness probe — which pings its MCP servers — correctly refuses to pass.
 
 *Fix:* `oc get svc policy-docs-mine -n {user}-ai -o jsonpath='{.spec.ports[0].port}'` should print `8080`. If it does not, use the port it did derive in the `oc set env` URL. Either way you can always get back to a working agent with the hand-back command: `oc set env deploy/parasol-agent POLICY_DOCS_MCP_URL=http://policy-docs:8080/mcp/sse -n {user}-ai`.
+
+*A plain `oc get svc` shows `8080/TCP,8443/TCP`, and the second port is not the fault.* The `jsonpath` above deliberately reads only the *first* port, which is yours. `8443` is inherited: `oc new-app` derives Service ports from the *finished image's* exposed ports, not from your `Containerfile` — and your `Containerfile` declares only `EXPOSE 8080`, while the UBI9 Java base image it builds `FROM` declares `8443` as well. Confirm it rather than wondering, with the image's own metadata:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get istag policy-docs-mine:latest -n {user}-ai \
+  -o jsonpath='{.image.dockerImageMetadata.Config.ExposedPorts}{"\n"}'
+----
+
+That prints `{"8080/tcp":{},"8443/tcp":{}}`, which is where both Service ports came from. Nothing listens on `8443`, an unused Service port costs nothing, and the agent only ever dials the URL you register. Do not "fix" it by editing the Service — if the agent is unhealthy, the cause is the port you put in `POLICY_DOCS_MCP_URL`, not the extra one the image brought with it.
+
+== Exercise 5: after registering a tool server, the agent pod is killed with `Exit Code: 137`
+
+*Symptom:* You point `POLICY_DOCS_MCP_URL` at a host that does not resolve (a typo, or a Service that was never created). `oc rollout status` runs out its timeout — `error: timed out waiting for the condition` — and leaves you holding two pods, the new one `0/1 Running` and the old one `1/1 Running`. A few minutes later `oc describe` shows the new one has been *killed and restarted*: `Exit Code: 137`, `Restart Count: 2` by around four minutes, with `Killing … Container parasol-agent failed liveness probe, will be restarted`.
+
+*Cause:* Not a crash, and not the readiness failure most people expect — the container boots normally and is then killed for going silent. In order:
+
+. The application starts fine — `started in 6.885s` in its own log.
+. The MCP client cannot resolve the host: `UnknownHostException: policy-docs-typo: Name or service not known`.
+. It *retries on a Vert.x event-loop thread*, and `io.vertx.core.impl.BlockedThreadChecker` logs that thread `blocked for 2086 ms, time limit is 2000 ms` — growing from there.
+. Those are the same threads that serve HTTP, so the pod's *entire* HTTP surface goes silent. `/q/health/ready` never reports `DOWN`; it stops answering at all, which is why the kubelet records `context deadline exceeded` on the probe rather than a failed check.
+. *Liveness* is on the same surface, so it fails too — and that is the probe the kubelet acts on by restarting. `137` is `SIGKILL`.
+
+*This is the entry to read instead of "The agent is not Ready" above.* That one is a dependency that *reports* itself broken; this one is a dependency that *stops the pod answering*. They look identical from outside and are diagnosed completely differently.
+
+*Diagnosis:* read the fields that carry the finding — `describe` covers both pods, so the broken one's block comes first and the healthy one's `Restart Count: 0` follows:
+
+[source,sh,role=execute]
+----
+oc describe pod -l app=parasol-agent -n $NS \
+  | grep -E 'Unhealthy|Killing|Restart Count|Last State|Exit Code'
+----
+
+Then confirm the cause in the broken pod's own log:
+
+[source,sh,role=execute]
+----
+BAD=$(oc get pods -l app=parasol-agent -n $NS \
+        -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==false)]}{.metadata.name}{"\n"}{end}' | head -1)
+oc logs "$BAD" -n $NS | grep -E 'started in|Failed to connect to the SSE channel|has been blocked for' | head -4
+----
+
+If that prints nothing, the container has just restarted and its log started over — add `--previous` to read the instance that was killed.
+
+*Fix:* Set the variable back to a host that exists — the shipped server, or your own Service at the port `oc new-app` actually derived:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc set env deploy/parasol-agent POLICY_DOCS_MCP_URL=http://policy-docs:8080/mcp/sse -n {user}-ai
+oc rollout status deploy/parasol-agent -n {user}-ai --timeout=180s
+----
+
+*That returns in about two seconds*, and the speed is not luck — it is the safety property paying out. Restoring the value restores the *pod template the healthy ReplicaSet is already running*, so there is nothing to roll: the Deployment simply stops trying to replace the good pod and discards the broken one. Nothing was ever down — the old pod served `/agent/ask` and `/agent/info` throughout, because the Deployment refused to finish a rollout onto a pod that never became Ready.
 
 == Exercise 7: the runner scores `0/5` and every row says `FAIL`
 
