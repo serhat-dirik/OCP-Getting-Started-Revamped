@@ -59,6 +59,36 @@ ifdef::demo[]
 Run `ws solve resilience-multicluster-dr --user {user}` a few minutes ahead so the resilient sites, the client, the ingress gateway, *and the failover routing* are all up, and set `CLIENT={user}-client SITEA={user}-site-a SITEB={user}-site-b`.
 Open a terminal tailing the client log — `oc logs -f deploy/claims-client -n {user}-client` — with a large font; that live log flipping `SITE=A` → `SITE=B` is the whole demo.
 The money moment is beat 2: you *scale site A to zero* — the entire primary site is gone — and the client log *keeps printing `200`* while the site marker flips to `B`.
+
+*Read the client log before you promise beat 2.* The flip needs two things that are easy to lose between
+a rehearsal and the room: the failover routing programmed, and the *secondary* site serving. The reset at
+the bottom of this page (`ws prep`) deliberately *removes* the failover routing, so a
+rehearse-reset-present sequence leaves you on the entry state with a gateway that has no route at all.
+Run this first:
+
+[source,sh,subs="attributes"]
+----
+CLIENT={user}-client SITEA={user}-site-a SITEB={user}-site-b
+oc get deploy parasol-claims -n $SITEB
+oc logs deploy/claims-client -n $CLIENT --tail=3
+----
+
+*If the log reads `HTTP 200  served-by-site=A`* and site B shows its replicas ready, the arc runs exactly
+as scripted below.
+*If it reads `HTTP 404  served-by-site=none`*, the gateway has no route — you are on the entry state, not
+the solved one. Re-run `ws solve resilience-multicluster-dr --user {user}` and do not open beat 1 until the
+log says `served-by-site=A`: scaling site A to zero against a `404` log changes nothing on screen, and
+beat 2 has no visual at all.
+*If site B is not ready*, `oc scale deploy/parasol-claims -n $SITEB --replicas=3` and wait for it — with no
+secondary there is nothing to fail over *to*, and the marker will go to `none`, not to `B`.
+
+*Never pre-fail site A to "check that the flip works" and leave it failed.* The client would already be on
+`B` when the room walks in, beat 1's "it's steadily on site A" would be false on screen, and beat 2 would
+be you narrating a transition nobody saw. Rehearse it by all means — then scale site A back to 3 and wait
+for the log to return to `A` before you start. For the same reason, do not tune `baseEjectionTime` down to
+make the flip look snappier: a shorter ejection re-probes the dead primary mid-outage, which is a visible
+blip in the one beat you want clean, and the `~4 s` flip this arc is written from was measured at the
+30-second value.
 ====
 
 [demo-block]
@@ -90,6 +120,41 @@ oc scale deploy/parasol-claims -n {user}-site-a --replicas=0
 ----
 +
 "There it goes — `served-by-site=B`. The primary site is *gone*, and the client didn't drop a single request. It never changed its address; the mesh detected site A failing, ejected it, and retried onto site B. That's *automatic cross-site failover* — and I wrote three small resources to get it, zero application code."
++
+[NOTE]
+.If the log does not flip — a line for every outcome
+====
+This one beat is timing-dependent, so know what you say for each reading before you scale. Outlier detection sweeps
+the endpoints on a *5-second* `interval`, and the capture this arc is written from flipped in *~4 seconds*.
+
+*It flips within a few seconds.* Scripted. A one- or two-second *gap* between the last `A` and the first
+`B`, with no error line, is expected and worth naming out loud — that request took a retry hop, which is
+the whole reason nothing was dropped.
+
+*Nothing has moved after fifteen seconds.* Stop watching the stream and *pull* the answer instead — one
+request through the same stable endpoint, answered by whichever site is live right now:
+[source,sh]
+----
+oc exec deploy/claims-client -n $CLIENT -- curl -s -m3 http://claims-stable/
+----
+A body reading `"site":"B"` is exactly the proof the log line was going to give you, and it arrives on
+demand instead of on a timer.
+
+*The marker goes to `served-by-site=none`, or the code stops being `200`.* Site B is not serving, so there
+was nothing to fail over to. Say that rather than hide it — "this is what failover looks like when your
+secondary isn't there, which is precisely why you test it" — then bring the secondary up and let the flip
+happen live in front of them: `oc scale deploy/parasol-claims -n $SITEB --replicas=3`.
+
+*The tail died, or the screen scrolled past the flip.* The transition is in the log's *history*, not only
+in the live stream: the client writes one line a second and stays on `B` for as long as site A sits at
+zero, so `oc logs deploy/claims-client -n $CLIENT --tail=30` re-shows it. Only a restart of the client pod
+itself loses it.
+
+*Last resort — never stall on a stream that is not moving.* Show the recorded flip below, say plainly that
+it is a recording, and go to beat 3, which gives you a second live flip in the other direction:
+
+image::resilience-multicluster-dr/resilience-multicluster-dr-01-failover-log-flip.png["A terminal tailing the claims-client log across a site failure: nine consecutive lines read HTTP 200 served-by-site=A, then every following line reads HTTP 200 served-by-site=B, with the oc scale --replicas=0 command visible above."]
+====
 
 [demo-block]
 [TIME 3m]

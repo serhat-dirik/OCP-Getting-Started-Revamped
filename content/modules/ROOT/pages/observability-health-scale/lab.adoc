@@ -812,6 +812,7 @@ Run `ws solve observability-health-scale --user {user}` first: it materializes t
 Have the console open on *Observe → Metrics* with the 5xx-rate query ready, a second tab on the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^], and a terminal logged in as `{user}`.
 Use that project-scoped view, not the cluster-wide *Observe → Alerting* page: the cluster-wide page needs a cluster-monitoring grant your attendee identity does not have and renders *0 - 0 of 0*, and its *Source* filter defaults to *Platform* — the link above pins it to *User*.
 The database break plus a *concurrent burst* of failing load fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
+*You get one shot at that burst.* About thirty seconds after the break the readiness probe pulls the failing pod out of the router, and from then on the load gets router ``503``s that never reach the app — so the app's own counter freezes and a *second* burst cannot re-arm the alert. If you miss the window, the only way back is a full cycle (recover, wait for ``200``s, break and burst again), which is another three minutes. Rehearse the break-and-burst block once so you fire it cleanly in the room.
 ====
 
 [demo-block]
@@ -860,7 +861,7 @@ oc logs deploy/parasol-claims -n {user}-dev --tail=15
 
 [demo-block]
 [TIME 2m]
-Say:: "There it goes." (The alert should now be *Firing*.) "That's a page. In production this hits the on-call. Let's fix it — and notice the fix is two steps, because the app is holding dead connections."
+Say:: *Read the row before you say the line — you have one for either state.* If it reads *Firing*: "There it goes. That's a page — in production this hits the on-call." If it still reads *Pending*: "Look at that: *Pending*. The error rate is already over the line — what's counting down now is the rule's two-minute `for:` window, so a thirty-second blip never wakes anybody. It pages in a moment." Then, from either: "Let's fix it — and notice the fix is two steps, because the app is holding dead connections."
 Show:: The same project-scoped *Alerting rules* view — `ParasolClaimsErrorRateHigh` has moved off `-` and is now *Firing* — then the *Alerts* tab, which was empty at the healthy baseline.
 Do::
 +
@@ -871,6 +872,41 @@ oc rollout restart deploy/parasol-claims -n {user}-dev
 ----
 +
 "Database back, app restarted to drop the poisoned pool — and the alert stands down once the 5-minute rate decays. Now the happy problem: too much traffic."
++
+[NOTE]
+.If the alert has not fired yet — it is a clock, not a coin flip
+====
+`ParasolClaimsErrorRateHigh` fires on `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.1`
+held for `for: 2m`. Measured on this content: the 5xx rate cleared `0.1/s` about *50 seconds* after the
+database went away and the rule reached *Firing* about two minutes later — close to *three minutes* end to
+end. The previous beat's three minutes *is* that wait, deliberately. Finish it in two and you are ahead of
+the alert, not behind it.
+
+*The row reads `Pending`.* Nothing is wrong — the climb is already banked and the `for:` window is running.
+Take the *Pending* line above; it teaches the state machine, which is the better beat anyway. Do not
+re-fire the burst to "help it along": the counter has already frozen (see below) and you will only add
+noise.
+
+*The row still reads `-` several minutes in.* The burst missed its window. Once the readiness probe pulls
+the pod from the router the load gets router ``503``s that never reach the app, so nothing increments the
+app's counter and `rate()` sees a flat line — a second burst against that pod does nothing. The only way
+back is a full cycle: run the two recovery commands above, wait for the service to answer `200`, then
+re-run the break-and-burst block *together* and give it three minutes. Decide out loud whether the room
+has three minutes; if it does not, use the fallback below and move to the autoscaling beat.
+
+*The rules list is empty.* That is the *Source* filter, not your alert: the view defaults to *Platform* and
+this rule's source is *User*. The link in the prep block above pins it to *User* — open that one, not the
+cluster-wide *Observe → Alerting* page.
+
+*Neither state paints, or the console is not cooperating.* Show the captured firing row, say plainly that
+it is a capture, and keep the story moving:
+
+image::observability-health-scale/observability-health-scale-04-alert-firing.png["The project-scoped Alerting rules view with ParasolClaimsErrorRateHigh reading 1 Firing and a Warning severity badge, while the database is scaled to zero — the same row that showed an empty State at the healthy baseline."]
+
+Going the other way: after you recover, the rule *lingers* in Firing for roughly five more minutes while the
+burst's 5xx age out of the 5-minute window. If you overrun, the row is still Firing during the next beat —
+that is the window decaying, not a failed fix, and it is worth saying so before someone asks.
+====
 
 [demo-block]
 [TIME 4m]

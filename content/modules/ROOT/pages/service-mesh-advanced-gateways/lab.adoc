@@ -71,14 +71,16 @@ ifdef::demo[]
 ====
 Run `ws prep service-mesh-advanced-gateways --user {user}` a few minutes ahead, set `NS={user}-mesh`, and pre-open the *Kiali* console (`\https://kiali-istio-system.{cluster_domain}`, sign in with your cluster identity, select the `{user}-mesh` namespace).
 This demo runs from the *entry* state (un-meshed app), *not* from `ws solve` — the story is *building* the mesh live.
-Keep a terminal with large font on screen; the Kiali graph is the visual for beats 1–2, the `403` denial and the `429` rate-limit are the visuals for beats 4–5.
-The money moment is beat 4: `only claims may call fraud`, and a live `403` for the web tier.
+Keep a terminal with large font on screen; the Kiali graph is the visual for beats 1–2, and the `403` denial is the visual for beat 4.
+The money moment is beat 4: `only claims may call fraud`, and a live `403` for the web tier — and beat 4 is where the arc ends.
+The `429` rate-limit is *not* a beat here: it belongs to the *optional encore* described at the foot of this page, which needs a raw-TCP ingress Gateway and an `EnvoyFilter` this arc never stands up. Budget it separately (about eight minutes on top of the fifteen) or leave it out.
+*Sign in to Kiali before the room, not on stage* — it is a separate product console with its own OAuth client and no single sign-on from your OpenShift session, so an unauthenticated tab stalls beat 1 on a login screen.
 ====
 
 [demo-block]
 [TIME 4m]
 Say:: "Parasol's claims app is running, but it's naked — no encryption, no traffic control, no picture of what's talking to what. Watch me enroll it into the mesh: I add one label, the pods restart with a proxy beside them, and the graph lights up on its own."
-Show:: The app pods going from `1/1` to `2/2` (a sidecar appears); then the Kiali graph drawing `demo-client → web → claims → fraud` as traffic flows.
+Show:: The app pods going from `1/1` to `2/2` (a sidecar appears); then the Kiali graph lighting up from the traffic you drive — `demo-client → web`, and `claims → fraud` — every edge carrying a mutual-TLS padlock.
 Do:: Enroll the three app tiers and drive traffic:
 +
 [source,sh,role=execute,subs="attributes"]
@@ -88,12 +90,43 @@ for d in parasol-web parasol-claims parasol-fraud; do
   oc patch deploy $d -n $NS --type=merge \
     -p '{"spec":{"template":{"metadata":{"labels":{"sidecar.istio.io/inject":"true"}}}}}'
 done
+oc rollout status deploy/parasol-web -n $NS --timeout=120s
 oc rollout status deploy/parasol-claims -n $NS --timeout=120s
-# drive traffic so Kiali has something to draw:
+oc rollout status deploy/parasol-fraud -n $NS --timeout=120s
+----
++
+[source,sh,role=execute]
+----
+# this app makes no downstream calls of its own, so drive BOTH hops the graph needs:
+CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
 oc exec deploy/demo-client -n $NS -- sh -c 'for i in $(seq 1 40); do curl -s -o /dev/null http://parasol-web:8080/api/claims; done'
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 40); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
 ----
 +
 "Two-of-two — that second container is the Envoy proxy the mesh injected. Flip to Kiali: there's the graph, drawn from real traffic, with a padlock on every edge. That padlock is *mutual TLS*, and I wrote *zero* lines of code to get it."
++
+[NOTE]
+.If Kiali does not give you a graph
+====
+Kiali is a separate product console behind its own OAuth client, so the likeliest way this beat stalls is a
+*login screen*. Sign in before the room.
+
+*The graph is empty, or an edge is missing.* Two ordinary causes, both quick. The *time range* — Kiali draws
+a window, and the traffic you just drove is seconds old, so pick a recent one. And the *traffic itself* —
+this sample app makes no downstream calls on its own, so both hops above are driven by hand and a loop that
+did not run is an edge that is not there. Re-run the traffic block, wait a few seconds for the proxies'
+telemetry to be scraped, and refresh.
+
+*Kiali will not load at all.* Do not debug a product console in front of a customer. The proxies' own
+telemetry is the authoritative "traffic flowed" signal and it is one line in the terminal already on screen:
+[source,sh,role=execute]
+----
+oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null | grep -c parasol-fraud
+----
+A non-zero count is the claims proxy reporting its own calls to fraud — the same measurement the picture
+would have drawn. Describe what the graph shows, then go to beat 2, which reads that very telemetry for its
+numbers.
+====
 
 [demo-block]
 [TIME 4m]
@@ -152,14 +185,34 @@ spec:
 EOF
 
 CLAIMS=$(oc get pod -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.name}')
-oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 100); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
-oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
+split() { oc exec $CLAIMS -c istio-proxy -n $NS -- pilot-agent request GET 'stats?filter=istio_requests_total' 2>/dev/null \
   | grep reporter.source | grep response_code.200 \
   | sed -nE 's/.*destination_version\.(v[12])\..*: ([0-9]+)/\1 \2/p' \
-  | awk '{s[$1]+=$2} END{printf "v1=%d v2=%d\n", s["v1"], s["v2"]}'
+  | awk '{s[$1]+=$2} END{printf "v1=%d v2=%d\n", s["v1"], s["v2"]}'; }
+B=$(split)
+oc exec $CLAIMS -c parasol-claims -n $NS -- sh -c 'for i in $(seq 1 100); do curl -s -o /dev/null http://parasol-fraud:8080/api/fraud/score/CLM-$i; done'
+A=$(split)
+echo "before: $B"; echo "after:  $A"
 ----
 +
-"I sent a hundred requests from the claims pod. The mesh's own metrics show about ninety went to v1 and ten to v2 — the exact split I asked for, and I can pin *test users* to v2 with a header while everyone else stays on v1."
+"I sent a hundred requests from the claims pod. `istio_requests_total` is a *counter*, so the number that matters is the *delta* between those two lines — about ninety of the hundred landed on v1 and ten on v2, the split I asked for. And I can pin *test users* to v2 with a header while everyone else stays on v1."
++
+[NOTE]
+.If the delta is not ninety and ten
+====
+Read it *before* you narrate it, and say the shape rather than the number: over a hundred requests the split
+is statistical, so a delta of `v1=86 v2=14` is the same demo — and somebody in the room *will* do the
+arithmetic if you claim exact figures.
+
+A delta of `v1=100 v2=0` is a different thing and worth catching: the mesh routes only to *healthy*
+endpoints, so it means `parasol-fraud-v2` is not Ready. The `oc rollout status` above is the guard; if it
+timed out, wait for v2 and re-run the request loop and the two `split` reads — do not re-apply the routing,
+which is not what is wrong.
+
+The before/after pair is also what makes this beat *re-runnable*. A single absolute read would include every
+request the arc has already sent to fraud — beat 1's forty among them, and everything a rehearsal left
+behind — so it only ever reads 90/10 on a counter that happened to start at zero. The delta does not care.
+====
 
 [demo-block]
 [TIME 3m]
@@ -255,9 +308,31 @@ sleep 5
 WEB=$(oc get pod -n $NS -l app=parasol-web -o jsonpath='{.items[0].metadata.name}')
 oc exec $CLAIMS -c parasol-claims -n $NS -- curl -s -m5 -o /dev/null -w "claims -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 oc exec $WEB -c parasol-web -n $NS -- curl -s -m5 -w "web -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001 | tail -1
+oc exec deploy/demo-client -n $NS -- curl -s -m5 -o /dev/null -w "demo-client -> fraud: %{http_code}\n" http://parasol-fraud:8080/api/fraud/score/CLM-1001
 ----
 +
-"Claims gets a `200`. The web tier — a perfectly valid pod, one namespace over from nothing — gets `403 RBAC: access denied`. Not by IP, not by namespace: by *cryptographic identity*. That's 'only claims may call fraud,' enforced."
+"Claims gets a `200`. The web tier — a perfectly valid pod, one namespace over from nothing — gets `403 RBAC: access denied`, and so does the un-meshed client, which has no identity at all. Not by IP, not by namespace: by *cryptographic identity*. That's 'only claims may call fraud,' enforced."
++
+[NOTE]
+.If the web tier answers `200` — recovering the money moment
+====
+An `AuthorizationPolicy` reaches the proxies over the control plane's *push*, not the API server's write, so
+for a second or two after the apply every caller still gets through. The `sleep 5` covers the measured case.
+
+*Web still returns `200`.* Wait a few seconds and re-run just the three `curl` lines — the second reading is
+the one to put on the projector. Do *not* delete and re-apply the policy: you would restart the very
+propagation you are waiting on, in front of the room, and it looks like debugging.
+
+*Claims gets a `403` too.* The policy is denying more than you meant, and it is almost always the principal:
+it names `cluster.local/ns/{user}-mesh/sa/parasol-claims`, which is specific to both the identity and the
+namespace, so check the namespace in it is the one you are demoing in. A `403` on every caller is still a
+true statement — "it is refusing everyone because I told it to allow exactly one identity, and that is not
+it" — say that, fix the principal, re-run.
+
+*Nothing is denied at all.* An `AuthorizationPolicy` is enforced *by the proxy*, so a workload with no proxy
+cannot refuse anything. Every row of `oc get pods -n $NS -l app=parasol-fraud` must read `2/2`; a `1/1` says
+the enrollment in beat 1 did not take on fraud, and that — not the policy — is what to fix.
+====
 
 [NOTE]
 .Optional encore + reset between runs
