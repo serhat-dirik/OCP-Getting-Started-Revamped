@@ -11,19 +11,29 @@ include::partial$version-attributes.adoc[]
 Every entry below was either hit while building the module on the cluster or is a known failure mode to watch for.
 Set the shortcuts first: `NS={user}-dev` and `URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')`.
 
-== My first request hangs for ~15 seconds (or a short-timeout curl fails)
+// Cold start is a RANGE, not a number — the same ruling this module's lab.adoc records above its
+// cold-start capture (exercise 2): three measurements on this cluster, 15.27 s / 18.81 s / 26.51 s.
+// This entry used to say "about 15 seconds" (the fastest of the three) and its Fix command used
+// `-m 30`, which leaves 3.5 s of margin against the slowest. That is sharper HERE than in the lab:
+// an attendee reaches this entry precisely BECAUSE a cold start already looked like a hang, so a Fix
+// that itself times out prints `HTTP 000` — the exact symbol they were just taught means failure —
+// on the block presented to them as the remedy, and confirms the false diagnosis. Hence `-m 60`,
+// matching the lab's own correction. Do not re-narrow the range and do not tighten the timeout.
+== My first request hangs for ~15–30 seconds (or a short-timeout curl fails)
 
-Symptom:: The first request to the service takes about 15 seconds, or a `curl -m 5` returns `HTTP 000` / exit `28` ("timed out").
-Cause:: This is the *cold start*, not a fault. The service was scaled to *zero*; the first request waits while Knative schedules a pod, boots the JVM, checks the database, and hands the request through the activator. A client timeout *shorter* than the cold start abandons the request before it finishes.
+Symptom:: The first request to the service takes anywhere from *~15 to ~30 seconds*, or a `curl -m 5` returns `HTTP 000` / exit `28` ("timed out").
+Cause:: This is the *cold start*, not a fault. The service was scaled to *zero*; the first request waits while Knative schedules a pod, boots the JVM, checks the database, and hands the request through the activator. A client timeout *shorter* than the cold start abandons the request before it finishes. The wait is a *range*, not a fixed number — three runs on this cluster measured *15.27 s*, *18.81 s* and *26.51 s*, so size any timeout against the *slowest*, never the fastest.
 Fix:: Use a realistic client timeout, or keep one pod warm so there's no cold start on the critical path:
 +
 [source,sh,role=execute]
 ----
-# a timeout that allows for the cold start:
-oc exec deploy/demo-client -n $NS -- curl -s -k -m 30 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
+# a timeout with real margin over the cold start — 60s, not 30s (see the note below):
+oc exec deploy/demo-client -n $NS -- curl -s -k -m 60 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" "$URL/api/claims"
 # or pin a warm floor (gives up scale-to-zero, removes the cold start):
 kn service update parasol-claims -n $NS --scale-min 1 --no-wait
 ----
++
+The `-m 60` is deliberate — *don't tighten it back to 30*. The slowest cold start measured on this cluster is *26.51 s*, so `-m 30` leaves about *three and a half seconds* of margin: one slow pod schedule and this very command returns `HTTP 000`, which is the symptom that sent you to this entry in the first place. A remedy that can reproduce the fault it is curing is worse than no remedy, so the timeout clears the slowest measured start by more than double.
 +
 The warm request after the first is ~0.1 s. Put the floor back with `--scale-min 0` to return to scale-to-zero.
 
