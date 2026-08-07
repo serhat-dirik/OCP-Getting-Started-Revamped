@@ -258,6 +258,14 @@ Confirm what it is complaining about:
 oc logs deployment/parasol-claims --tail=40 | grep -iE 'UnknownHost|PSQLException|connection attempt|datasource' | head -3
 ----
 
+.Expected output
+[source,texinfo]
+----
+Caused by: org.postgresql.util.PSQLException: The connection attempt failed.
+Caused by: java.net.UnknownHostException: parasol-db
+----
+
+`parasol-db` is the datasource host the image falls back to when nothing sets `POSTGRESQL_HOST` — no Service by that name exists in your project yet, so the driver cannot resolve it.
 Leave it crash-looping — you will give it a database in exercise 4 and wire it up in exercise 5.
 This is a real dependency, and fixing it is the payoff at the end of the lab.
 ====
@@ -590,13 +598,16 @@ No readiness probe exists yet (that arrives in the next module), so if this show
 oc logs deployment/parasol-claims --tail=15
 ----
 
-.Expected output
+.Expected output (a sample — the timestamp, startup duration, and installed-features list vary run to run; each `INFO` line is prefixed with a timestamp and thread name, so a `--tail=15` window may not land on exactly this set of lines)
+[%collapsible]
+====
 [source,texinfo,subs="attributes"]
 ----
-INFO  [io.quarkus] (main) parasol-claims 1.0.0 on JVM (powered by Quarkus {quarkus_version}) started in 23.3s. Listening on: http://0.0.0.0:8080
-INFO  [io.quarkus] (main) Profile prod activated.
-INFO  [io.quarkus] (main) Installed features: [agroal, cdi, hibernate-orm, hibernate-orm-panache, jdbc-postgresql, micrometer, narayana-jta, ..., smallrye-health, vertx]
+2026-07-10 09:14:07,441 INFO  [io.quarkus] (main) parasol-claims 1.0.0 on JVM (powered by Quarkus {quarkus_version}) started in 23.3s. Listening on: http://0.0.0.0:8080
+2026-07-10 09:14:07,441 INFO  [io.quarkus] (main) Profile prod activated.
+2026-07-10 09:14:07,442 INFO  [io.quarkus] (main) Installed features: [agroal, cdi, hibernate-orm, hibernate-orm-panache, jdbc-postgresql, micrometer, narayana-jta, oidc, oidc-client, opentelemetry, rest, rest-jackson, security, smallrye-context-propagation, smallrye-health, vertx]
 ----
+====
 
 `agroal` (the JDBC connection pool) and `jdbc-postgresql` are active, and Quarkus reached *started* — which happens only after Hibernate connected to PostgreSQL, created the schema, and loaded the seed data.
 The `UnknownHostException` / `connection attempt failed` you saw in exercise 1 is gone: the app has its database.
@@ -616,13 +627,15 @@ Click the Route's *Open URL* arrow in Topology — or curl its root — and you 
 [source,sh,role=execute,subs="attributes"]
 ----
 # no readiness probe yet (that's the next module) — retry while Quarkus finishes starting
-curl -s --retry 10 --retry-connrefused --retry-delay 2 --retry-all-errors http://parasol-claims-{user}-dev.{cluster_domain}/
+# | jq -Sc . sorts keys: the JSON is correct either way, but the JVM does not
+# guarantee this object's own key order, so sorting is what makes it reproducible here
+curl -s --retry 10 --retry-connrefused --retry-delay 2 --retry-all-errors http://parasol-claims-{user}-dev.{cluster_domain}/ | jq -Sc .
 ----
 
 .Expected output
 [source,texinfo]
 ----
-{"service":"parasol-claims","description":"Parasol Insurance claims service (REST + PostgreSQL, Quarkus)","links":{"claims":"/api/claims","metrics":"/q/metrics","health":"/q/health"}}
+{"description":"Parasol Insurance claims service (REST + PostgreSQL, Quarkus)","links":{"claims":"/api/claims","health":"/q/health","metrics":"/q/metrics"},"service":"parasol-claims"}
 ----
 
 That landing is your own built image answering its `GET /` root — it names the service and points at the API.
@@ -630,13 +643,13 @@ Follow the `claims` link to the data itself:
 
 [source,sh,role=execute,subs="attributes"]
 ----
-curl -s http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | head -c 200
+curl -s http://parasol-claims-{user}-dev.{cluster_domain}/api/claims | jq -c '.[0]'
 ----
 
 .Expected output
 [source,texinfo]
 ----
-[{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,"incidentDate":"2026-05-14","adjuster":"Rebecca Torres"},...]
+{"claimNumber":"CLM-1001","claimant":"Alice Nguyen","type":"auto","status":"UnderReview","amount":4200.00,"incidentDate":"2026-05-14","adjuster":"Rebecca Torres"}
 ----
 
 There it is: a service that arrived as *source code* is now a running, database-backed API you built yourself — and the crash loop is gone because you gave it what it declared it needed.
