@@ -11,6 +11,13 @@
 -- Spread: 12 auto / 11 home / 7 life; statuses across the workflow; freshly
 -- Submitted claims are Unassigned.
 --
+-- INVARIANT — no row may be 'Approved' with adjuster 'Unassigned'. The service enforces
+-- Parasol's rule that an adjuster must own a claim before it can be approved
+-- (ClaimResource.updateStatus answers 409), so such a row would be a state the API can no
+-- longer produce: the seed contradicting its own service. All 11 approved rows below name a
+-- real adjuster; the 6 Unassigned rows are all 'Submitted'. Pinned by
+-- ClaimResourceTest.noSeededClaimIsApprovedWithoutAnAdjuster, which reads the live list.
+--
 -- Claim-number allocation. POST /api/claims takes its number from this sequence (see
 -- ClaimNumberSequence), NOT from "max(claim_number) + 1" — nextval is atomic, so
 -- concurrent replicas can never be handed the same number.

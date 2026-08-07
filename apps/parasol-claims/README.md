@@ -13,7 +13,7 @@ is the one worth reading first. Two entities and one resource class — about te
 | `GET /api/claims/{claimNumber}` | One claim, or 404 |
 | `GET /api/claims/{claimNumber}/history` | A claim's audit timeline — **deliberately inefficient**, see [Intentional flaws](#intentional-flaws--do-not-fix) |
 | `POST /api/claims` | Create a claim (the server assigns the number) |
-| `PUT /api/claims/{claimNumber}/status` | Advance a claim's workflow status |
+| `PUT /api/claims/{claimNumber}/status` | Advance a claim's workflow status — enforces the [adjuster rule](#the-adjuster-rule) |
 | `GET /q/health/live` · `/q/health/ready` | Liveness / readiness probes |
 | `GET /q/metrics` | Prometheus metrics, including `claims_created_total` |
 
@@ -39,8 +39,30 @@ The two write endpoints are the only place field names matter. Unknown propertie
 { "status": "Approved" }            // required: Submitted | UnderReview | Approved | Denied
 ```
 
-Every rejection is a **400** naming the one field it rejected and listing the accepted values —
-never a 500.
+Every rejection of the **body** is a **400** naming the one field it rejected and listing the
+accepted values — never a 500. One rejection is not about the body at all; see below.
+
+### The adjuster rule
+
+`updateStatus` enforces one business rule: **a claim cannot move to `Approved` while its adjuster
+is `Unassigned`.** Somebody has to own a claim before Parasol agrees to pay it.
+
+```bash
+$ curl -X PUT .../api/claims/CLM-1031/status -d '{"status":"Approved"}'   # adjuster: Unassigned
+HTTP 409
+{"error":"claim CLM-1031 cannot be Approved while its adjuster is Unassigned - assign an adjuster before approving it"}
+```
+
+**409, not 400,** and the difference is deliberate: the body is valid — the identical
+`{"status":"Approved"}` succeeds against a claim that has an adjuster — and what makes it
+unacceptable is the *current state of the claim*, which is what RFC 9110 defines 409 for. A
+caller can therefore tell *fix your request* (400) from *fix the claim* (409) by status code
+alone. A null or blank adjuster counts as unassigned too.
+
+Only the move to `Approved` is guarded: an unassigned claim may still be moved to `UnderReview`
+(that is how it reaches an adjuster) or to `Denied`. All 30 seeds satisfy the rule, and a test
+keeps it that way — see [Intentional flaws](#intentional-flaws--do-not-fix), where this rule also
+serves as the *Pipelines Fundamentals* break-fix device.
 
 ## Claim numbering
 
@@ -238,36 +260,41 @@ green.
    known-CVE `log4j-core` so the scan gate fails and the SBOM inspection finds it.
 
 3. **A toggleable failing test, green as shipped** — for *Pipelines Fundamentals*.
-   `ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster()` encodes the Parasol rule that
-   a claim cannot be approved while still unassigned, and **passes as shipped**. That module has
-   attendees flip its one-line toggle in their own fork so the pipeline's test task goes red with
-   a readable message, then revert it to green. Do **not** remove or "simplify" it away.
+   `ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster()` exercises the Parasol rule
+   that a claim cannot be approved while still unassigned, and **passes as shipped**. That module
+   has attendees flip its one-line toggle in their own fork so the pipeline's test task goes red
+   with a readable message, then revert it to green. Do **not** remove or "simplify" it away, and
+   keep the toggle's declaration on **one line** — the lab tells attendees to find
+   `assignAdjusterBeforeApproval` and edit exactly that line.
 
-   **Read this before you "fix" it:** the rule lives *only in that test*. The service does not
-   enforce it. Measured 2026-08-07 — `PUT {"status":"Approved"}` on a claim created without an
-   adjuster returns **200** and persists `status=Approved, adjuster=Unassigned`:
+   Unlike the other two entries, **this is not a flaw in the service.** The rule is real:
+   `ClaimResource.updateStatus` rejects `Approved` on a claim whose adjuster is `Unassigned` with
+   a **409 Conflict**. The toggle decides which side of the rule the test drives — `true` opens
+   the claim *with* an adjuster and the approval succeeds; `false` opens it with none and the
+   service refuses:
 
    ```
-   created CLM-1031 with adjuster=Unassigned
-   PUT {"status":"Approved"} -> HTTP 200
-   {"claimNumber":"CLM-1031", ... "status":"Approved", "adjuster":"Unassigned"}
+   $ curl -X PUT .../api/claims/CLM-1031/status -d '{"status":"Approved"}'
+   HTTP 409
+   {"error":"claim CLM-1031 cannot be Approved while its adjuster is Unassigned - assign an adjuster before approving it"}
    ```
 
-   So the toggle changes what the *test* POSTs, not what the *service* allows. That is a real
-   gap between the lab's framing ("a real business rule") and the code, and it is recorded here
-   rather than quietly patched, because **enforcing the rule in `updateStatus` would break the
-   lab**: a rule the server enforces cannot be violated from outside, so with the toggle flipped
-   the service would refuse the approval, the test would go *green*, and the `AssertionFailedError`
-   the lab quotes verbatim would never appear.
+   It is listed here anyway because it is a **deliberate teaching device with a moving part**,
+   and three things about it are load-bearing for the lab:
 
-   Making the rule real is a coordinated **app + content** change, not a one-line fix:
-
-   | Step | Where |
+   | Property | Why it matters |
    |---|---|
-   | Reject `Approved` when the adjuster is `Unassigned` (409) | `ClaimResource.updateStatus` |
-   | Move the one-line toggle out of the test and into `updateStatus` | `ClaimResource` + `ClaimResourceTest` |
-   | Re-ground the expected Maven failure output and the `Tests run` count | *Pipelines Fundamentals* lab |
+   | The toggle stays a one-line `final boolean` in the test | The lab quotes the line and tells attendees to edit it |
+   | The failure message quotes the service's own 409 body | It is what the lab prints as expected output |
+   | The suite's `Tests run` total is quoted in the lab | Adding or removing a test re-grounds that number |
 
-   Until all three land together, the code stays as it is and this note is the honest record.
-   `ClaimResource.updateStatus`'s javadoc carries the same warning for anyone reading the code
-   without the README.
+   Two sibling tests keep the rule honest whichever way the toggle is set, so neither the guard
+   nor the seed can rot unnoticed: `approvingAnUnassignedClaimIsRefused()` proves the 409 (and
+   that `UnderReview`/`Denied` are still allowed on an unassigned claim), and
+   `noSeededClaimIsApprovedWithoutAnAdjuster()` proves no `import.sql` row is in a state the API
+   would now refuse to create.
+
+   *History (2026-08-07):* until this change the rule was enforced **nowhere** — the service
+   returned 200 for an approval with no adjuster, and the rule existed only as an
+   `assertNotEquals` inside the test, while the lab told attendees they were "breaking a real
+   rule". The rule was made real in the service and the test reworked to assert the refusal.

@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import io.quarkus.hibernate.orm.panache.Panache;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 
 /**
  * Build-time smoke tests over the seeded API and the readiness probe, run against
@@ -49,6 +50,31 @@ class ClaimResourceTest {
                 .body("[0].claimant", is("Alice Nguyen"))
                 .body("[0].type", is("auto"))
                 .body("[0].status", is("UnderReview"));
+    }
+
+    /**
+     * The shipped data must obey the rule the shipped API enforces.
+     *
+     * <p>{@code updateStatus} refuses to approve a claim whose adjuster is {@code Unassigned}, so
+     * a seed row that is BOTH {@code Approved} and {@code Unassigned} would be a state the
+     * service can no longer produce — the database contradicting its own API, and a claim no lab
+     * could explain. All 11 approved seeds name a real adjuster today; this keeps it that way if
+     * someone edits {@code import.sql} for another module. It reads the live list rather than the
+     * file, so it also covers rows any other test created.
+     */
+    @Test
+    void noSeededClaimIsApprovedWithoutAnAdjuster() {
+        List<String> approvedButUnowned = given()
+                .when().get("/api/claims")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("findAll { it.status == 'Approved' && it.adjuster == 'Unassigned' }.claimNumber");
+
+        assertEquals(List.of(), approvedButUnowned,
+                "import.sql seeds a claim that is Approved while Unassigned - the API itself "
+                        + "would refuse to put it in that state (409). Give it an adjuster, or "
+                        + "leave it Submitted.");
     }
 
     @Test
@@ -214,16 +240,29 @@ class ClaimResourceTest {
                 .body("error", containsString("[Submitted, UnderReview, Approved, Denied]"));
     }
 
+    /**
+     * The happy path for the approval rule, and deliberately NOT on a Submitted claim.
+     *
+     * <p>It used to approve {@code CLM-1003}, which the seed opens {@code Submitted} with
+     * {@code adjuster=Unassigned} — so the moment {@code updateStatus} started enforcing
+     * Parasol's adjuster rule, this test was asking the service to break it and failing on the
+     * 409. {@code CLM-1019} is seeded {@code UnderReview} under Rebecca Torres, so approving it
+     * is a legal move that no other test in this class reads back.
+     *
+     * <p>This one carries no toggle: it is the permanent proof that a properly assigned claim
+     * still approves, and it stays green whichever way the break-fix toggle below is set.
+     */
     @Test
     void updateStatusAdvancesClaim() {
         given()
                 .contentType("application/json")
                 .body("{\"status\":\"Approved\"}")
-                .when().put("/api/claims/CLM-1003/status")
+                .when().put("/api/claims/CLM-1019/status")
                 .then()
                 .statusCode(200)
-                .body("claimNumber", is("CLM-1003"))
-                .body("status", is("Approved"));
+                .body("claimNumber", is("CLM-1019"))
+                .body("status", is("Approved"))
+                .body("adjuster", is("Rebecca Torres"));
     }
 
     @Test
@@ -409,9 +448,78 @@ class ClaimResourceTest {
     }
 
     /**
-     * M07 break-fix device (Pipelines lab), not a real feature - it encodes the Parasol
-     * rule that a claim cannot be Approved while still Unassigned. Flip the toggle below
-     * (true -> false) to inject the bug; the unit-test task goes red, then revert for green.
+     * The Parasol adjuster rule from the other side: the service must REFUSE to approve a claim
+     * nobody owns, and must not half-apply the change.
+     *
+     * <p>This test carries no toggle and is never edited by a lab. It is what keeps the rule
+     * honest: the break-fix test below approves a claim that HAS an adjuster in its shipped
+     * state, so without this one, deleting the guard out of {@code ClaimResource.updateStatus}
+     * would leave the whole suite green. It also pins the rule's SCOPE — an unassigned claim is
+     * still free to move to {@code UnderReview} or {@code Denied}; only {@code Approved} is
+     * guarded.
+     */
+    @Test
+    void approvingAnUnassignedClaimIsRefused() {
+        String claimNumber = given()
+                .contentType("application/json")
+                .body("{\"claimant\":\"Nobody Owns This\",\"type\":\"home\",\"amount\":4400.00}")
+                .when().post("/api/claims")
+                .then()
+                .statusCode(201)
+                .body("adjuster", is("Unassigned"))
+                .extract().path("claimNumber");
+
+        // 409, not 400: the body is valid, the CLAIM is not in a state that permits it.
+        given()
+                .contentType("application/json")
+                .body("{\"status\":\"Approved\"}")
+                .when().put("/api/claims/" + claimNumber + "/status")
+                .then()
+                .statusCode(409)
+                .body("error", containsString(claimNumber))
+                .body("error", containsString("Unassigned"));
+
+        // Refused means refused — nothing was persisted.
+        given()
+                .when().get("/api/claims/" + claimNumber)
+                .then()
+                .statusCode(200)
+                .body("status", is("Submitted"));
+
+        // Scope: the same unassigned claim may still be reviewed, and may still be denied.
+        given()
+                .contentType("application/json")
+                .body("{\"status\":\"UnderReview\"}")
+                .when().put("/api/claims/" + claimNumber + "/status")
+                .then()
+                .statusCode(200)
+                .body("status", is("UnderReview"));
+        given()
+                .contentType("application/json")
+                .body("{\"status\":\"Denied\"}")
+                .when().put("/api/claims/" + claimNumber + "/status")
+                .then()
+                .statusCode(200)
+                .body("status", is("Denied"));
+    }
+
+    /**
+     * The same rule as the test above, wired as the Pipelines Fundamentals break-fix device.
+     *
+     * <p>It is a real test of a real rule — {@code ClaimResource.updateStatus} enforces it — and
+     * the toggle decides which side of the rule this test drives:
+     *
+     * <ul>
+     *   <li>{@code true} (as shipped): the claim is opened WITH an adjuster, the service accepts
+     *       the approval with 200, and the test is green.</li>
+     *   <li>{@code false}: the claim is opened with no adjuster, the service refuses the
+     *       approval with 409, and the assertion below fails saying exactly that.</li>
+     * </ul>
+     *
+     * <p>Do not remove or rename the toggle, and keep its declaration on one line: the module's
+     * lab tells attendees to find {@code assignAdjusterBeforeApproval} in this file and edit that
+     * line, and quotes the resulting failure message verbatim. See "Intentional flaws" in the
+     * app README.
      */
     @Test
     void approvingAClaimRequiresAnAssignedAdjuster() {
@@ -429,18 +537,23 @@ class ClaimResourceTest {
                 .statusCode(201)
                 .extract().path("claimNumber");
 
-        // Approve it, then read back the adjuster the claim was approved under.
-        String adjuster = given()
+        // Ask the service to approve it and keep WHATEVER it answered - the status code included,
+        // because a refusal is the rule working, not a transport problem.
+        Response approval = given()
                 .contentType("application/json")
                 .body("{\"status\":\"Approved\"}")
                 .when().put("/api/claims/" + claimNumber + "/status")
                 .then()
-                .statusCode(200)
-                .body("status", is("Approved"))
-                .extract().path("adjuster");
+                .extract().response();
 
-        assertNotEquals("Unassigned", adjuster,
-                "Parasol rule violated: claim " + claimNumber + " was Approved while still "
-                        + "Unassigned - an adjuster must own a claim before it can be approved");
+        assertEquals(200, approval.statusCode(),
+                "Parasol rule enforced: the API refused to approve claim " + claimNumber
+                        + " while its adjuster was Unassigned - an adjuster must own a claim "
+                        + "before it can be approved. PUT /api/claims/" + claimNumber
+                        + "/status answered " + approval.statusCode() + " " + approval.asString());
+        assertEquals("Approved", approval.path("status"),
+                "claim " + claimNumber + " did not come back Approved");
+        assertNotEquals("Unassigned", approval.path("adjuster"),
+                "claim " + claimNumber + " was Approved while still Unassigned");
     }
 }

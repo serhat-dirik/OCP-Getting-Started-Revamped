@@ -93,7 +93,7 @@ oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='our maven
 
 [demo-block]
 [TIME 3m]
-Say:: "Now watch the pipeline earn its keep. I'll push a one-line change that breaks a test — a claim being approved with no adjuster, which Parasol's rules forbid."
+Say:: "Now watch the pipeline earn its keep. I'll push a one-line change that tries to approve a claim with no adjuster assigned — something the claims service itself refuses to do."
 Show:: The Gitea web UI — edit `ClaimResourceTest.java`, flip the toggle to `false`, commit.
 Then the Terminal: the pipeline fires and goes red at the test step.
 Do:: In Gitea, edit `src/test/java/com/parasol/claims/ClaimResourceTest.java`, change `assignAdjusterBeforeApproval = true` to `false`, and *Commit Changes* to `main`.
@@ -104,7 +104,7 @@ Then:
 tkn pipelinerun logs --last -f -n $NS
 ----
 +
-"The push fired the pipeline — no one pressed a button. And it's *red* at `unit-test`: 'Parasol rule violated — a claim was Approved while still Unassigned.' The build never ran. A failing test *stopped* the deploy."
+"The push fired the pipeline — no one pressed a button. And it's *red* at `unit-test`: the API answered *409* — 'cannot be Approved while its adjuster is Unassigned.' That's the service enforcing a business rule, and the test catching it. The build never ran. A failing test *stopped* the deploy."
 
 [demo-block]
 [TIME 3m]
@@ -555,15 +555,18 @@ A pipeline that tests but ships anyway is theater.
 The value is that a *failing test stops the build* — a broken change never becomes a deployed image.
 You will prove that by breaking a real rule, in *your own fork*.
 
-`parasol-claims` has a unit test that encodes a Parasol business rule: *a claim cannot be Approved while its adjuster is still Unassigned.*
-The test is green as shipped.
-You will flip a one-line toggle that violates the rule, watch the pipeline go red at the test, then revert.
+The rule is Parasol's: *a claim cannot be Approved while its adjuster is still Unassigned* — somebody has to own a claim before the company agrees to pay it.
+`parasol-claims` *enforces* it in the service: `ClaimResource.updateStatus()` answers a `PUT {"status":"Approved"}` against an unowned claim with *409 Conflict*, never 200.
+(409 rather than 400 is deliberate — the request body is perfectly valid, it is the *claim* that is not in a state that allows the change.)
+
+A unit test drives that rule from the outside, and it is green as shipped: it opens a claim *with* an adjuster, approves it, and the service accepts.
+You will flip a one-line toggle so the test opens the claim with *no* adjuster instead — the service then refuses the approval, the test fails on the 409, the pipeline goes red, and you revert.
 
 In your *Gitea tab* ({gitea_url}/{user}/parasol-claims[{user}/parasol-claims^]):
 
 . Open `src/test/java/com/parasol/claims/ClaimResourceTest.java`.
 . Click the *pencil* (Edit) icon.
-. Use your browser's find (kbd:[Ctrl+F] / kbd:[Cmd+F]) for `assignAdjusterBeforeApproval` — it is a single declaration, currently around line 417:
+. Use your browser's find (kbd:[Ctrl+F] / kbd:[Cmd+F]) for `assignAdjusterBeforeApproval` — it is a single declaration, currently around line 527:
 +
 [source,java]
 ----
@@ -575,8 +578,10 @@ final boolean assignAdjusterBeforeApproval = true;
 [NOTE]
 .No Dev Spaces required
 ====
-Editing the file in the Gitea web UI *is* a commit and push — that is all the pipeline needs.
-If you did the Dev Spaces module you can make the same edit there and `git push` instead; the result is identical.
+Editing the file in the Gitea web UI *is* a commit and push — that is all the pipeline needs, and it is the path this lab is written for.
+
+If you did the Dev Spaces module you can make the same edit *in your Dev Spaces workspace* and `git commit && git push` from *that* workspace's terminal instead; the result is identical.
+That has to be the *Dev Spaces* terminal, not the *Terminal* tab beside these instructions: the workspace was cloned with your Gitea credentials, and the cockpit terminal has none, so a `git push` there stops at `fatal: could not read Username for 'http://gitea.ogsr-gitea.svc:3000'`.
 ====
 
 Now run the pipeline against *your fork* (not the shared default).
@@ -637,22 +642,44 @@ tkn pipelinerun logs --last -f -n $NS
 
 The `unit-test` step goes red with a readable message (your claim number will differ — it is assigned at test time — and the `Tests run` total grows as the suite does, so read `Failures: 1`, not the count):
 
-// GROUNDING for the run summary below. "Tests run: 28, Failures: 1, Errors: 0, Skipped: 0" is NOT an
-// estimate and not a guess at the suite size — it is the line a field tester captured verbatim from a
-// real PipelineRun on 2026-08-02 after breaking the build exactly as this lab instructs (flip
-// assignAdjusterBeforeApproval to false, push, re-run). The guide had said 14; the suite had grown.
-// Recorded here because an adversarial review of this very edit flagged the number as a possible
-// fabrication — the value was right, the provenance was missing. Do NOT "correct" it against a count
-// of @Test annotations in apps/parasol-claims: that counts 33, because surefire's "Tests run" reflects
-// what THIS pipeline's Maven invocation actually executes, not every annotation in the tree.
+// GROUNDING for the run summary below.
+//
+// PROVENANCE, 2026-08-07: the failure message and "Tests run: 30, Failures: 1, Errors: 0,
+// Skipped: 0" were captured from a real `mvn -B -ntp test` on apps/parasol-claims with
+// assignAdjusterBeforeApproval flipped to false — the same goal set this pipeline's unit-test task
+// runs (GOALS: [ -B, -ntp, test ], see the `tkn pipeline describe` output in exercise 1). The
+// proxy was validated first: the UNMODIFIED tree reported "Tests run: 28" locally, which is
+// exactly the number a field tester had captured verbatim from a real PipelineRun on 2026-08-02 —
+// so the local count and the in-cluster count agree, and 30 is 28 plus the two tests added with
+// the rule (approvingAnUnassignedClaimIsRefused, noSeededClaimIsApprovedWithoutAnAdjuster).
+// Do NOT "correct" the number against a count of @Test annotations in apps/parasol-claims: that
+// counts 35, because surefire's "Tests run" reflects what the Maven invocation actually executes,
+// not every annotation in the tree.
+//
+// WHAT CHANGED, and why the old text is gone: until 2026-08-07 this block quoted
+// "Parasol rule violated: claim CLM-XXXX was Approved while still Unassigned ==> expected: not
+// equal but was: <Unassigned>". That was an assertNotEquals inside the test, and the rule was
+// enforced NOWHERE in the service — the API happily returned 200 for an approval with no
+// adjuster, so the page's claim that the attendee was "breaking a real rule" was false, in a file
+// the lab tells them to open and read. ClaimResource.updateStatus now enforces the rule (409), and
+// the test asserts the refusal, so the message below quotes the service's own response body.
+//
+// LINE WRAPPING: surefire prints the AssertionFailedError message on ONE long line. It is wrapped
+// here to fit the page, as the previous capture was. Everything else is verbatim.
 [source,texinfo]
 ----
 [ERROR] com.parasol.claims.ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster <<< FAILURE!
-org.opentest4j.AssertionFailedError: Parasol rule violated: claim CLM-XXXX was Approved while still
-Unassigned - an adjuster must own a claim before it can be approved ==> expected: not equal but was: <Unassigned>
-[ERROR] Tests run: 28, Failures: 1, Errors: 0, Skipped: 0
+org.opentest4j.AssertionFailedError: Parasol rule enforced: the API refused to approve claim
+CLM-XXXX while its adjuster was Unassigned - an adjuster must own a claim before it can be
+approved. PUT /api/claims/CLM-XXXX/status answered 409 {"error":"claim CLM-XXXX cannot be
+Approved while its adjuster is Unassigned - assign an adjuster before approving it"}
+==> expected: <200> but was: <409>
+[ERROR] Tests run: 30, Failures: 1, Errors: 0, Skipped: 0
 [INFO] BUILD FAILURE
 ----
+
+Read that message once more, because it is the whole point of a test in a pipeline: the `409` and the `{"error":...}` beside it are the *claims service's own words*.
+The test did not invent a rule — it asked the running API to approve an unowned claim, and the API refused.
 
 Now confirm the important part — the build and deploy *never ran*.
 
@@ -762,7 +789,7 @@ When `unit-test` reports `Failures: 0` and moves on to `build-image`, you have y
 
 [.checkpoint]
 ****
-✔ *Verify:* Your broken commit produced a `Failed` run with `unit-test` red (`Parasol rule violated`) and `build-image`/`deploy` *skipped*; after reverting, a new run passes `unit-test` (`Failures: 0`) and proceeds to build.
+✔ *Verify:* Your broken commit produced a `Failed` run with `unit-test` red (the claims API answered `409` and refused the approval) and `build-image`/`deploy` *skipped*; after reverting, a new run passes `unit-test` (`Failures: 0`) and proceeds to build.
 The test is a *gate*, not a report.
 ****
 

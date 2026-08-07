@@ -45,11 +45,24 @@ import jakarta.ws.rs.core.Response;
 @Consumes(MediaType.APPLICATION_JSON)
 public class ClaimResource {
 
+    /** The placeholder adjuster a claim carries until a human takes it. */
+    static final String UNASSIGNED = "Unassigned";
+
+    /**
+     * The one transition Parasol's adjuster rule guards — see {@link #updateStatus}.
+     *
+     * <p>Declared above {@code STATUSES} and used inside it on purpose: static initializers run in
+     * textual order, and the two must not be able to drift. If they held separate literals, renaming
+     * the state in {@code STATUSES} alone would leave the guard below comparing against a value the
+     * API no longer accepts — it would simply stop firing, silently, with every test still green.
+     */
+    static final String APPROVED = "Approved";
+
     /** Allowed lines of business — POST is rejected with 400 for anything else. Alphabetical. */
     static final Set<String> TYPES = ordered("auto", "home", "life");
 
     /** Allowed workflow states — the status update is rejected with 400 for anything else. */
-    static final Set<String> STATUSES = ordered("Submitted", "UnderReview", "Approved", "Denied");
+    static final Set<String> STATUSES = ordered("Submitted", "UnderReview", APPROVED, "Denied");
 
     /**
      * An unmodifiable set that iterates in declaration order — deliberately NOT {@code Set.of}.
@@ -191,7 +204,7 @@ public class ClaimResource {
         claim.type = input.type();
         claim.amount = input.amount() == null ? BigDecimal.ZERO : input.amount();
         claim.incidentDate = input.incidentDate() == null ? LocalDate.now() : input.incidentDate();
-        claim.adjuster = isBlank(input.adjuster()) ? "Unassigned" : input.adjuster();
+        claim.adjuster = isBlank(input.adjuster()) ? UNASSIGNED : input.adjuster();
         claim.status = "Submitted";
         claim.persist();
         // Custom business metric (curriculum: observability-health-scale). Micrometer
@@ -203,22 +216,26 @@ public class ClaimResource {
     /**
      * Advance a claim to a new workflow status (Submitted -&gt; UnderReview -&gt; Approved/Denied).
      *
-     * <p><strong>There is deliberately no adjuster check here, and its absence is load-bearing
-     * for Pipelines Fundamentals.</strong> Parasol's stated rule — <em>a claim cannot be
-     * Approved while its adjuster is still Unassigned</em> — is <em>not</em> enforced by this
-     * service. Measured 2026-08-07: {@code PUT {"status":"Approved"}} against a claim created
-     * without an adjuster returns <strong>200</strong> and persists
-     * {@code status=Approved, adjuster=Unassigned}. The rule lives only as an assertion inside
-     * {@code ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster()}, whose one-line
-     * toggle is that module's break-fix device.
+     * <p><strong>Parasol business rule, enforced here: a claim cannot be Approved while its
+     * adjuster is still {@code Unassigned}.</strong> Somebody has to own a claim before the
+     * company agrees to pay it. Only the move to {@code Approved} is guarded — an unassigned
+     * claim may still be moved to {@code UnderReview} (that is how it reaches an adjuster) or to
+     * {@code Denied} (Parasol denies claims that never warrant one).
      *
-     * <p>Enforcing it here would <em>break</em> that lab rather than improve it. The toggle
-     * works by changing what the test POSTs, and a rule the server enforces cannot be violated
-     * from the outside: with the toggle flipped the service would refuse the approval, the test
-     * would go green, and the failure message the lab quotes verbatim would never appear.
-     * Making the rule real is therefore a coordinated app + content change — move the toggle
-     * into this method, then re-ground the lab's expected Maven output and its {@code Tests run}
-     * count — not a one-line fix. See "Intentional flaws" in this app's README.
+     * <p><strong>Why 409 and not 400.</strong> Every other rejection on this resource is a 400,
+     * because the request body itself is wrong. Here the body is <em>fine</em> — the identical
+     * {@code {"status":"Approved"}} succeeds against a claim that has an adjuster — and what
+     * makes it unacceptable is the current state of the target claim. That is exactly what 409
+     * is defined for (RFC 9110, section 15.5.10: "the request could not be completed due to a
+     * conflict with the current state of the target resource"). Keeping the two codes apart is
+     * what lets a caller tell <em>fix your request</em> from <em>fix the claim</em>. 422 would
+     * say the content is unprocessable, which is not true of this content.
+     *
+     * <p>This rule is also the break-fix device for Pipelines Fundamentals:
+     * {@code ClaimResourceTest.approvingAClaimRequiresAnAssignedAdjuster()} opens a claim
+     * <em>with</em> an adjuster and approves it (green), and its one-line toggle opens the claim
+     * <em>without</em> one so this method refuses the approval and the test goes red quoting the
+     * 409. Read "Intentional flaws" in this app's README before changing either side.
      */
     @PUT
     @Path("/{claimNumber}/status")
@@ -241,6 +258,12 @@ public class ClaimResource {
         if (claim == null) {
             return notFound(claimNumber);
         }
+        // The Parasol adjuster rule. Checked after the claim is loaded, because it is a fact
+        // about the CLAIM, not about the request — which is also why it answers 409, not 400.
+        if (APPROVED.equals(update.status()) && isUnassigned(claim.adjuster)) {
+            return conflict("claim " + claimNumber + " cannot be Approved while its adjuster is "
+                    + UNASSIGNED + " - assign an adjuster before approving it");
+        }
         claim.status = update.status();
         return Response.ok(claim).build();
     }
@@ -254,8 +277,22 @@ public class ClaimResource {
         return Response.status(Response.Status.BAD_REQUEST).entity(Map.of("error", message)).build();
     }
 
+    private static Response conflict(String message) {
+        return Response.status(Response.Status.CONFLICT).entity(Map.of("error", message)).build();
+    }
+
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    /**
+     * A claim nobody owns yet. Both shapes count: the {@code Unassigned} placeholder that
+     * {@link #create} writes, and a null/blank adjuster, which is what a row loaded from an
+     * older database or a hand-written seed can carry. Neither is an owner, so neither may
+     * approve — a guard that only compared the literal string would let the blank case through.
+     */
+    private static boolean isUnassigned(String adjuster) {
+        return isBlank(adjuster) || UNASSIGNED.equalsIgnoreCase(adjuster);
     }
 
     /** Request body for {@code POST /api/claims}. */
