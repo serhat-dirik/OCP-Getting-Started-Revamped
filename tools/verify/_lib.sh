@@ -478,6 +478,102 @@ cm_key_set() {  # namespace configmap key → 0 when that key exists and is non-
   [[ -n "$OC_OUT" ]]
 }
 
+# ── Tekton's Affinity Assistant: the one-PVC-per-TaskRun rule ─────────────────────────────────────
+#
+# WHY THIS EXISTS. A Pipeline can be perfectly well-formed, pass `oc apply --dry-run=server`, sit in
+# the namespace looking healthy — and be UNABLE TO RUN. Measured on cluster-6xxpf (OCP 4.22.8 /
+# OpenShift Pipelines 1.23.1) 2026-08-07: parasol-claims-build-test-deploy reached `unit-test`, and
+# the TaskRun was rejected before any step started —
+#     tkn: unit-test  Failed(TaskRunValidationFailed)  0s
+#     oc:  message: [User error] more than one PersistentVolumeClaim is bound
+# 27 seconds from `oc create` to a red PipelineRun. Both verify scripts over that pipeline were
+# green at the time, because they asserted that the Pipeline and the cache CLAIM exist — which they
+# did. Nothing asked whether a TaskRun of that Pipeline could be admitted.
+#
+# THE MECHANISM. Tekton's Affinity Assistant coschedules the pods that share a workspace. In its
+# default mode (`coschedule: workspaces` — the OPERATOR default; the portfolio's tekton-config.yaml
+# patches only spec.result.*, so spec.pipeline is whatever the operator set) there is one assistant
+# per PVC-backed workspace, and a TaskRun may therefore mount only ONE of them. The other modes
+# (`pipelineruns`, `isolate-pipelinerun`) run one assistant per PipelineRun and lift the cap;
+# `disabled` has no assistant at all. So the rule is real ONLY in the default mode, and a check that
+# ignored the mode would be wrong on a cluster that had chosen another one.
+#
+# WHY THE MODE IS READ FROM TektonConfig AND NOT FROM feature-flags. Both carry it, and only one is
+# readable by the identity that runs these scripts. Attempted as user3 on cluster-6xxpf 2026-08-07
+# (a real read, not `oc auth can-i` — see the can-i caveats above):
+#   oc get cm feature-flags -n openshift-pipelines   → Forbidden: user "user3" cannot get configmaps
+#   oc get tektonconfigs.operator.tekton.dev config  → answers, "pipelineruns"
+# The second works because the OPERATOR ships `tekton-config-read-role` (get/watch/list on
+# tektonconfigs) bound to Group system:authenticated by `tekton-config-read-rolebinding` — a product
+# grant present on any cluster with OpenShift Pipelines, not something the workshop layer adds. So
+# this is attendee-runnable in the cockpit terminal, which is the contract these scripts hold to.
+AFFINITY_ASSISTANT_MODE=""
+affinity_assistant_mode() {  # → 0 + AFFINITY_ASSISTANT_MODE set; 1/2 exactly as oc_read
+  AFFINITY_ASSISTANT_MODE=""
+  # Plural written in full, like tasks.tekton.dev elsewhere in this suite. `tektonconfigs` is
+  # unambiguous on this cluster (checked: one API group claims it) — the full form costs nothing and
+  # survives a customer cluster where it is not.
+  oc_read get tektonconfigs.operator.tekton.dev config -o jsonpath='{.spec.pipeline.coschedule}' || return $?
+  # UNSET is not "no mode", it is the operator default, and the default is the RESTRICTIVE one. An
+  # empty answer here must therefore tighten the check, never relax it.
+  AFFINITY_ASSISTANT_MODE="${OC_OUT:-workspaces}"
+}
+
+# Does every TaskRun of this Pipeline bind at most one PVC-backed workspace — i.e. can this Pipeline
+# actually be admitted on THIS cluster? Two API reads, no PipelineRun, no minutes: the point is a
+# gate a verify script can afford, since running the real pipeline (measured 12-21 min) is not a
+# thing `ws verify` can do.
+#
+# THE PVC-BACKED SET IS PASSED IN, and it has to be: whether a workspace is PVC-backed is a property
+# of the PipelineRun's BINDING, not of the Pipeline. app-security-testing proves the point — its
+# `zap-work` and `k6-work` are declared exactly like `shared-workspace` at the Pipeline level, and
+# every runner in this repo binds those two `emptyDir: {}`. A naive "at most one workspace per task"
+# rule would therefore be asserting a constraint the assistant does not apply, and would red-flag a
+# capstone that runs fine the moment a task took the checkout plus one of them. Callers name the
+# workspaces their own PipelineRuns back with a PVC, and a name that is not currently declared is
+# harmless to list — that is what keeps the check firing if the binding is ever restored.
+PIPELINE_PVC_CONFLICT=""
+pipeline_pvc_workspaces_ok() {  # <pipeline> <namespace> <pvc-backed workspace>… → 0 = admissible
+  local pipeline="$1" ns="$2"; shift 2
+  PIPELINE_PVC_CONFLICT=""
+  (( $# > 0 )) || return 1   # a caller that names no PVC workspaces would assert nothing
+  affinity_assistant_mode || return $?
+  # Only the default mode caps a TaskRun at one PVC. Anything else and the question does not arise —
+  # report admissible rather than inventing a constraint this cluster does not enforce.
+  [[ "$AFFINITY_ASSISTANT_MODE" == "workspaces" ]] || return 0
+  # One line per task: `<task>|<taskWs>:<pipelineWs>,<taskWs>:<pipelineWs>,`. `finally` tasks are
+  # read too — they are TaskRuns like any other and the assistant does not exempt them.
+  oc_read get pipelines.tekton.dev "$pipeline" -n "$ns" -o jsonpath\
+='{range .spec.tasks[*]}{.name}{"|"}{range .workspaces[*]}{.name}{":"}{.workspace}{","}{end}{"\n"}{end}'\
+'{range .spec.finally[*]}{.name}{"|"}{range .workspaces[*]}{.name}{":"}{.workspace}{","}{end}{"\n"}{end}' \
+    || return $?
+  [[ -n "$OC_OUT" ]] || return 1   # a Pipeline with no tasks is not a pass
+  local line task bindings binding task_ws pipe_ws want n
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    task="${line%%|*}"
+    bindings="${line#*|}"
+    n=0
+    while [[ -n "$bindings" ]]; do
+      binding="${bindings%%,*}"
+      if [[ "$bindings" == *,* ]]; then bindings="${bindings#*,}"; else bindings=""; fi
+      [[ -n "$binding" ]] || continue
+      task_ws="${binding%%:*}"
+      pipe_ws="${binding#*:}"
+      # `workspace:` omitted → Tekton defaults the Pipeline workspace to the Task's own name.
+      [[ -n "$pipe_ws" ]] || pipe_ws="$task_ws"
+      for want in "$@"; do
+        if [[ "$pipe_ws" == "$want" ]]; then n=$((n+1)); break; fi
+      done
+    done
+    if (( n > 1 )); then
+      PIPELINE_PVC_CONFLICT="$task"
+      return 1
+    fi
+  done <<<"$OC_OUT"
+  return 0
+}
+
 # ── hoisted from the modules ──────────────────────────────────────────────────────────────────────
 # deploy_ready was copy-pasted, byte-for-byte apart from its argument style, into NINETEEN verify
 # scripts backing FIFTY-ONE call sites (counted 2026-08-01) — every copy swallowing the API error the

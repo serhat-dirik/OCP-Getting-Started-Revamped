@@ -107,12 +107,29 @@ attendee_reads_task_library() {
 check "namespace ${NS} exists"                              oc get ns "$NS"                                        || hint "run: ws start app-security-testing --user ${USER_NAME}"
 check "entry marker ws-entry-app-security-testing present"                   oc get cm ws-entry-app-security-testing -n "$NS"                        || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
 check "Pipeline parasol-claims-devsecops present"           oc get pipelines.tekton.dev parasol-claims-devsecops -n "$NS"      || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
-# EXISTENCE, deliberately not Bound: the default StorageClass binds WaitForFirstConsumer, so a
-# correctly-materialized cache claim sits Pending until the first TaskRun mounts it. Grading Bound
-# here would print ❌ on every freshly-prepared world. Absence is worth its own check because the
-# module's PipelineRuns bind this claim BY NAME: with it gone the TaskRun pod does not run
-# uncached, it sits Pending — and this module's fix loop is six sequential runs.
-check "maven-cache claim present in ${NS} (the between-run Maven cache)" oc get pvc maven-cache -n "$NS" || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}. Until it exists, every run that binds workspace maven-cache=claimName:maven-cache leaves its TaskRun pod Pending (oc describe pod … → 'persistentvolumeclaim \"maven-cache\" not found')"
+# THE PIPELINE EXISTING IS NOT THE PIPELINE RUNNING. A 2026-08-07 regression gave `sast-sonar` AND
+# `unit-test` a second PVC-backed workspace; under the operator's default Affinity Assistant mode
+# every run of this capstone then died at its first Maven task in seconds with
+# `TaskRunValidationFailed` / "[User error] more than one PersistentVolumeClaim is bound", while this
+# script stayed fully green — it graded the Pipeline object and the cache CLAIM, both present. See
+# pipeline_pvc_workspaces_ok in _lib.sh for the mechanism and the measurement.
+#
+# ONLY shared-workspace AND maven-cache ARE NAMED, and the omission is the interesting part: this
+# Pipeline also declares `zap-work` and `k6-work`, which look identical at the Pipeline level and are
+# bound `emptyDir: {}` by every runner in this repo (pipelines/pipelinerun/parasol-claims-devsecops-run.yaml
+# and the solve hook). An emptyDir workspace is not a PVC and the assistant does not count it, so
+# listing them here would be asserting something false about the run — and the day a task binds one
+# of them ALONGSIDE the checkout (dast-zap and perf-k6 take only their own today, checked on the live
+# object 2026-08-08) the check would fail a capstone that runs perfectly. Whether a workspace is
+# PVC-backed is a property of the RUN, not of the Pipeline, so the caller is the one who can say.
+# `maven-cache` stays named after its binding was retired, so this fires again if it comes back.
+check "every task of the capstone is admissible (at most one PVC-backed workspace per TaskRun)" \
+  pipeline_pvc_workspaces_ok parasol-claims-devsecops "$NS" shared-workspace maven-cache \
+  || hint "task '${PIPELINE_PVC_CONFLICT:-?}' binds two PVC-backed workspaces, and this cluster's Affinity Assistant (\`oc get tektonconfigs.operator.tekton.dev config -o jsonpath='{.spec.pipeline.coschedule}'\` → workspaces, the operator default) allows one. The capstone will fail that stage in seconds with 'more than one PersistentVolumeClaim is bound' — before any step starts, so there are no logs and it reads as a broken gate rather than a broken Pipeline. This is a defect in the shipped Pipeline, not a gate you can fix by changing code: report it"
+# The maven-cache PVC check that stood here was removed 2026-08-08 with the claim it graded — see
+# the equivalent note in tools/verify/pipelines-fundamentals.sh. It asserted the cache CLAIM existed,
+# which was true, while the workspace binding that claim was created for was what made every run of
+# this capstone fail validation. The admissibility check above is its replacement.
 check "sonar-auth copied into ${NS} (SAST-gate secret)"     oc get secret sonar-auth -n "$NS"                      || hint "the secrets hook copies it from sonarqube/sonar-ci-token — ws reset app-security-testing --user ${USER_NAME} (needs the appsec stack)"
 check "rox-api-token copied into ${NS} (scan-gate secret)"  oc get secret rox-api-token -n "$NS"                   || hint "the secrets hook copies it from stackrox — ws reset app-security-testing --user ${USER_NAME} (needs the trust stack)"
 check "ephemeral claims-db present (deploy target)"         oc get deploy claims-db -n "$NS"                       || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"

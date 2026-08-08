@@ -20,6 +20,32 @@
 # gitops/workshop-config/templates/per-user-limits.yaml, so a plain run — the console Actions -> Start
 # form, `tkn pipeline start`, a Pipelines-as-Code push, or `ws solve` — needs NO per-task memory
 # overrides. The Pipeline itself stays runtime-agnostic (no computeResources baked in).
+#
+# ONE PVC-BACKED WORKSPACE PER TASK. Settled by measurement 2026-08-08 on cluster-6xxpf (OCP 4.22.8 /
+# OpenShift Pipelines 1.23.1) after a persistent Maven cache added on 2026-08-07 made this Pipeline
+# unrunnable. Both halves matter, so both are recorded here rather than in a commit message nobody
+# reads at the point of temptation.
+#
+#   IT DOES NOT RUN. Tekton's Affinity Assistant defaults to `coschedule: workspaces` (the OPERATOR
+#   default — platform-portfolio's tekton-config.yaml patches only spec.result.*), and in that mode
+#   a TaskRun may mount exactly ONE PVC-backed workspace. `unit-test` bound two — shared-workspace
+#   (a volumeClaimTemplate) and maven-cache (a claimName) — and every run died 27 seconds in with
+#   `TaskRunValidationFailed` / "[User error] more than one PersistentVolumeClaim is bound", before
+#   any step started, so the logs were empty and it read like a broken cluster.
+#
+#   AND IT WAS NOT WORTH FIXING. `coschedule: pipelineruns` lifts the cap and was tried: three real
+#   runs of THIS Pipeline in one namespace, same source, same commit —
+#     cold cache (bound, empty)          806s wall · unit-test 423s · mvn 06:39
+#     warm cache (bound, 178MB/506 jars) 670s wall · unit-test 371s · mvn 05:42
+#     NO cache  (this shape, default mode) 678s wall · unit-test 377s · mvn 06:03
+#   A warm cache saved 8 seconds of an 11-minute run (1.2%) and the cold run — the one EVERY
+#   attendee pays, since the cache starts empty — cost 128 seconds MORE than no cache at all. The
+#   dependency download was never the expensive part; Quarkus compile and the test suite are.
+#
+# So: adding a second PVC-backed workspace here breaks the module on a stock cluster, and the only
+# reason anyone wanted one has been measured to be worth nothing. tools/verify/pipelines-fundamentals.sh
+# now asserts the constraint against the live Pipeline and the live cluster mode, so a re-add fails
+# `ws verify` in two API reads instead of in the room.
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
@@ -50,13 +76,11 @@ spec:
       default: "500"
   workspaces:
     # One shared PVC carries the checkout from git-clone through unit-test and the image build.
+    # EXACTLY ONE PVC-backed workspace, and that is a constraint, not an accident — see the
+    # header note. A second one was declared here on 2026-08-07 (a persistent Maven local
+    # repository) and removed on 2026-08-08 after it was measured: it made every run of this
+    # Pipeline unrunnable, and it bought nothing.
     - name: shared-workspace
-    # The Maven local repository, reused BETWEEN runs. Optional at both levels (here and on the
-    # maven-jdk21 Task), so a PipelineRun that omits it still runs — just uncached, which is what
-    # every run did before this workspace existed. Bind it to an EXISTING PersistentVolumeClaim:
-    # a volumeClaimTemplate is created and destroyed per run and would cache nothing.
-    - name: maven-cache
-      optional: true
   results:
     # Surface the library Task's verdict at the PipelineRun level for `tkn pr describe` / ws doctor.
     - name: image-size-mb
@@ -107,13 +131,12 @@ spec:
             - -ntp
             - test
       workspaces:
+        # ONE workspace, and it must stay one: maven-jdk21 also declares an optional `maven-cache`,
+        # and mapping it here alongside `source` gives this TaskRun two PVC-backed workspaces —
+        # which the Affinity Assistant refuses in its default mode. Read the header note before
+        # adding it back.
         - name: source
           workspace: shared-workspace
-        # The only Task in this Pipeline that downloads a dependency tree. Unbound at run time it
-        # is skipped silently by Tekton (the Task declares it optional), so this mapping is safe
-        # even for a PipelineRun that predates the cache.
-        - name: maven-cache
-          workspace: maven-cache
 
     # 3) Build the image from the Containerfile and push it to the internal registry.
     #    TLS_VERIFY=false: the in-cluster registry serves a service-CA cert the build pod

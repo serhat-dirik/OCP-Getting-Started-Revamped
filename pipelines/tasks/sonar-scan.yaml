@@ -6,19 +6,22 @@
 # (e.g. a hardcoded credential, rule S2068). Three steps: generate-settings, compile (Java rules need
 # bytecode), then scan.
 #
-# WHY IT HAS A CACHE WORKSPACE (added 2026-08-07). The `compile` step invoked /usr/bin/mvn with no
-# settings file and no cache volume, so Maven's local repository lived in the container filesystem
-# and died with the TaskRun pod — the identical defect measured on maven-jdk21 (read that file's
-# header: two consecutive unit-test runs timed at 11m20s and 11m33s, and the two matching numbers
-# ARE the finding — there was no warm cache to warm). It costs more here than there. sonar-scan is
-# the FIRST gate in the app-security-testing capstone (runAfter fetch-source), the capstone's
-# designed shape is a sequence of red-gate → fix → re-run iterations, and every one of those
-# iterations re-downloaded the whole dependency tree before any other task in the pipeline started.
+# WHY IT HAS A CACHE WORKSPACE, AND WHY NOTHING IN THIS REPO BINDS IT (2026-08-07 → 2026-08-08).
+# The `compile` step invoked /usr/bin/mvn with no settings file, so Maven's local repository lived in
+# the container filesystem and died with the TaskRun pod. The optional maven-cache workspace was
+# added to fix that; it is KEPT, because a curated org library should offer the capability, and
+# because MAVEN_MIRROR_URL and the settings.xml generation ride in the same step.
 #
-# The capstone Pipeline already declares an optional `maven-cache` workspace and maps it into
-# unit-test; mapping it into the sast-sonar task too is what turns this from a capability into a
-# saving — and because this step runs FIRST it then warms the repository the later maven-jdk21 task
-# reads, so even a cold first run pays the download once instead of twice.
+# The capstone STOPPED binding it on 2026-08-08, and an adopter should read why before turning it on.
+# Two findings, both measured on cluster-6xxpf (OCP 4.22.8 / Pipelines 1.23.1):
+#   * IT COULD NOT RUN. Binding it beside `source` gives the TaskRun two PVC-backed workspaces, and
+#     Tekton's Affinity Assistant permits one in its default `coschedule: workspaces` mode. Every
+#     capstone run failed at its first Maven gate in seconds — before a step started, so no logs.
+#   * IT WAS NOT WORTH THE WORKAROUND. With coschedule=pipelineruns (which lifts the cap), three
+#     real runs of the sibling pipeline gave: cold cache 806s, warm cache 670s, NO cache 678s. A
+#     warm cache saved 1.2%; the cold run every attendee actually pays cost 19% MORE than none.
+# The "six red-gate → fix → re-run iterations" argument that motivated this does not survive those
+# numbers: six times 1.2% of a run is under a minute of a capstone.
 #
 # The design is mirrored from pipelines/tasks/maven-jdk21.yaml — optional maven-cache workspace, one
 # generate-settings step that writes a single settings.xml, and the MAVEN_MIRROR_URL param — so the
@@ -169,10 +172,14 @@ spec:
         if [ "${CACHE_BOUND}" = "true" ]; then
           echo "✅ Maven local repository: ${CACHE_PATH}/repository (persistent — survives this run)"
         else
-          echo "⚠️  no maven-cache workspace bound — Maven re-downloads its whole dependency tree."
-          echo "   This run still works; it is just slow. To reuse a cache between runs, bind the"
-          echo "   workspace to an EXISTING PersistentVolumeClaim (never a volumeClaimTemplate):"
-          echo "     tkn pipeline start … --workspace name=maven-cache,claimName=maven-cache"
+          echo "ℹ️  no maven-cache workspace bound — Maven resolves into this pod's own filesystem,"
+          echo "   so the dependency tree is fetched on every run. That is what the Parasol"
+          echo "   pipelines do on purpose: measured 2026-08-08, a warm cache was worth 1.2% of an"
+          echo "   11-minute run, and the Affinity Assistant's default coschedule=workspaces mode"
+          echo "   allows one PVC-backed workspace per TaskRun — which \`source\` already is."
+          echo "   An org whose build really is download-bound can bind this workspace to an"
+          echo "   EXISTING PersistentVolumeClaim (never a volumeClaimTemplate) once its cluster"
+          echo "   sets TektonConfig spec.pipeline.coschedule to pipelineruns to make room for it."
         fi
         if [ -n "${MAVEN_MIRROR_URL}" ]; then
           echo "✅ repository mirror: ${MAVEN_MIRROR_URL} (mirrorOf central)"

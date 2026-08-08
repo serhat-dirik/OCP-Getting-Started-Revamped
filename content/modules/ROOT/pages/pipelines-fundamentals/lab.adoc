@@ -207,12 +207,11 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
   --use-param-defaults \
   -p git-url="$FORK" \
   --serviceaccount pipeline \
-  --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
-  --workspace name=maven-cache,claimName=maven-cache
+  --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml
 ----
 Note there is no `--showlog` on that command, deliberately — it starts the run and hands you the prompt back.
 
-*A run fired but is still working when you run out of talk track* — you have beat 2's task-library story and the `maven-cache` argument in reserve; use them.
+*A run fired but is still working when you run out of talk track* — you have beat 2's task-library story and the cluster-resolver argument in reserve; use them.
 Never fill the gap by following the log.
 
 *Neither beat concludes in the time you have* — fall back to the run `ws solve` left behind.
@@ -246,8 +245,8 @@ Before you run it, read what it is: the same five-Task anatomy from the concept,
 // each pipeline task with its resolved Task in parentheses — fetch-source (git-clone),
 // unit-test (maven-jdk21), build-image (buildah), image-report (image-size-report),
 // deploy (openshift-client) — plus a "Workspaces" entry reading `shared-workspace`.
-// [CAPTURE-VERIFY] The Workspaces entry now also lists `maven-cache` (added 2026-08-07); that half
-// of this grounding, and the screenshot below it, predate the second workspace.
+// A second workspace (`maven-cache`) existed between 2026-08-07 and 2026-08-08 and was removed
+// again, so this grounding and the screenshot below it are current: ONE workspace.
 [tabs]
 ====
 Console::
@@ -290,7 +289,6 @@ Results
 Workspaces
  NAME               OPTIONAL
  shared-workspace   false
- maven-cache        true
 
 Tasks
  NAME           RUNAFTER       PARAMS
@@ -304,9 +302,8 @@ Tasks
 --
 ====
 
-There is the whole anatomy from the concept, made concrete: four *parameters*, two *results*, two *workspaces*, and five *Tasks* in order (`fetch-source` → `unit-test` → `build-image` → `image-report` → `deploy`).
-The second workspace, `maven-cache`, is the one marked `OPTIONAL true` — Maven's downloaded dependencies, kept in a volume that outlives the run so the next run does not fetch them all over again.
-A run that leaves it unbound still works; it is just slow.
+There is the whole anatomy from the concept, made concrete: four *parameters*, two *results*, one *workspace*, and five *Tasks* in order (`fetch-source` → `unit-test` → `build-image` → `image-report` → `deploy`).
+That single workspace is how the checkout reaches the Tasks after it: `fetch-source` writes the source into it, `unit-test` runs Maven against it, `build-image` builds the Containerfile out of it.
 Now look at *where the Tasks come from* — none is defined inside the Pipeline:
 
 [source,sh,role=execute]
@@ -345,13 +342,9 @@ A PipelineRun is one execution: the *Start* form pre-fills the Pipeline's four p
 // opening the dropdown). An "Advanced options" toggle reveals "Show credential options".
 // Buttons: Cancel, Start.
 //
-// [CAPTURE-VERIFY] That grounding PREDATES the maven-cache workspace (added 2026-08-07). The
-// Workspaces section now carries a SECOND row, and how the console renders an OPTIONAL pipeline
-// workspace — whether the label loses its `*`, whether the row can be left unset, and what the
-// dropdown defaults to — has NOT been observed on a live form. The CLI tab beside this one is the
-// authoritative path until it has been. Re-ground the modal, then re-shoot
-// pipelines-fundamentals-05-pipeline-details-graph.png (its Workspaces entry reads
-// `shared-workspace` alone) and the Start-form capture.
+// The maven-cache workspace that briefly added a SECOND row to this modal (2026-08-07) was removed
+// again on 2026-08-08, so the grounding above stands as captured and the screenshots that read
+// `shared-workspace` alone are current. Do not re-shoot them for that reason.
 [tabs]
 ====
 Console::
@@ -365,10 +358,9 @@ Console::
 * *image* — your namespace's registry path,
 * *max-size-mb* — `500`.
 . Under *Workspaces*, set *shared-workspace* to *VolumeClaimTemplate* — a fresh PVC for this run, pruned when the run is deleted.
-. Set *maven-cache* to *PersistentVolumeClaim*, and pick the existing claim named `maven-cache`.
 +
-This one is deliberately *not* a VolumeClaimTemplate: a template is created and destroyed with the run, so it would cache nothing for next time.
-Your project was seeded with a `maven-cache` claim that outlives every run.
+That is the only workspace this Pipeline has, and one is the limit here: Tekton's Affinity Assistant keeps the Tasks that share a volume on the same node, and in its default mode it allows each Task *one* PVC-backed workspace.
+A run that asks for two is rejected before any step starts.
 . Click *Start*.
 +
 The console opens the new PipelineRun and draws it as a *graph*; the five Tasks fill in left to right as they run.
@@ -391,54 +383,37 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
   --use-param-defaults \
   --serviceaccount pipeline \
   --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
-  --workspace name=maven-cache,claimName=maven-cache \
   --showlog
 ----
 
-Note the difference between the two `--workspace` flags: `volumeClaimTemplateFile` makes a *new* volume for this run, `claimName` attaches an *existing* one.
-That is the whole point of the cache — it has to still be there when the next run starts.
+`volumeClaimTemplateFile` makes a *new* volume for this run; `claimName=<existing-pvc>` would attach one that already exists.
+This Pipeline wants the first kind — the checkout is this run's, not something to keep.
 --
 ====
 
-// MEASUREMENT STATUS (settled 2026-08-07). Every number on this page is an UNCACHED run, and that
-// is now a deliberate, permanent choice rather than an open gate: 20m49s is the CEILING, measured
-// 2026-08-06 on the build cluster. The maven-cache workspace can only make a run shorter, so an
-// instructor who plans to these figures never overruns. NO cached run has been timed, so no faster
-// figure is quoted anywhere on this page — do not let one appear without a measurement behind it,
-// and do not "improve" these by interpolation. The same measurement session timed
-// `unit-test` at 11m20s then 11m33s on two CONSECUTIVE runs: two near-identical numbers, which is
-// how we learned the Maven repository was living in the container filesystem and dying with the
-// pod. That is what the maven-cache workspace fixes.
+// MEASUREMENT STATUS (settled 2026-08-08). Every number on this page is an UNCACHED run, which is
+// now the only kind this pipeline does — the between-run Maven cache added 2026-08-07 was removed
+// again on 2026-08-08. Two reasons, both measured, both recorded in the header of
+// pipelines/pipeline/parasol-claims-build.yaml: bound alongside shared-workspace it gave unit-test
+// a second PVC-backed workspace and Tekton's Affinity Assistant rejected every run in 27 seconds;
+// and with the cluster mode changed so it COULD run, three runs on cluster-6xxpf 2026-08-08 gave
+// cold 13m26s / warm 11m10s / no cache 11m18s. A warm cache was worth 1.2% and the cold run every
+// attendee actually pays cost 19% MORE than none.
 //
-// ❗ BLOCKER MEASURED 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / OpenShift Pipelines 1.23.1) — the
-// maven-cache workspace has NEVER been run on a cluster, and binding it as this page instructs
-// makes every run of this pipeline fail in ~23 SECONDS. Reported to the PM; do not "fix" it here,
-// because the same binding lives in five other places and they have to move together.
-//   What happens: the run reaches unit-test and the TaskRun is rejected before any step starts —
-//     tkn: unit-test  Failed(TaskRunValidationFailed)  0s
-//     oc:  message: [User error] more than one PersistentVolumeClaim is bound
-//     PipelineRun: Tasks Completed: 2 (Failed: 1, Cancelled 0), Skipped: 3
-//   Why: Tekton's Affinity Assistant. `oc get cm feature-flags -n openshift-pipelines` reads
-//   coschedule=workspaces (the operator default — platform-portfolio's tekton-config.yaml patches
-//   only spec.result.*, so spec.pipeline is untouched), and the failed TaskRun carries
-//   pipeline.tekton.dev/affinity-assistant=… . Tekton's own docs for that mode: "Only one
-//   pvc-backed workspace can be mounted to each TaskRun in this mode." The unit-test task binds
-//   TWO — shared-workspace (a volumeClaimTemplate) and maven-cache (a claimName).
-//   NOT a workspace-binding-name error: both names are declared by the resolved Task
-//   (`oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks -o jsonpath='{.spec.workspaces[*].name}'`
-//   → source maven-cache), and the same run with maven-cache OMITTED gets past validation and
-//   builds normally. That single-variable control is how the cause was isolated.
-//   Same shape, same failure, in: this page (3 CLI blocks + 2 Console steps + the demo arc),
-//   gitops/entry-states/pipelines-fundamentals/templates/{pipeline,solve-endstate}.yaml,
-//   gitops/entry-states/app-security-testing/templates/{pipeline,solve-endstate}.yaml,
-//   pipelines/pipeline/parasol-claims-{build,devsecops}.yaml,
-//   pipelines/pipelinerun/*.yaml and pipelines/.tekton/parasol-claims-pull-request.yaml
-//   (so exercise 4's push-fired run and `ws solve` are hit too).
-//   Every figure below is therefore still an UNCACHED run, and is the only kind anyone has.
-This first run is the slow one, and it downloads Maven's dependency tree *twice*: once in `unit-test`, filling the cache you just attached, and once more inside the image build, which runs its own `mvn` in the `Containerfile` and cannot see that cache.
-On the build cluster a first run with nothing cached took *20m49s*; an earlier capture on a faster cluster finished the same run in *10m22s*, and a third cluster finished it in *13m27s*.
-All three are real — how long the download takes is a property of the cluster you are on.
-The `maven-cache` workspace exists so that later runs can reuse what `unit-test` downloaded and skip that half of the work; if your run fails within seconds instead of building, see xref:pipelines-fundamentals/troubleshooting.adoc[the troubleshooting page] before you retry.
+// So the four figures quoted below are directly comparable and all real:
+//   20m49s   build cluster, 2026-08-06     (the CEILING — plan to this)
+//   13m27s   a third cluster
+//   11m18s   cluster-6xxpf, 2026-08-08     (measured with the shape this page now teaches)
+//   10m22s   a faster cluster
+// The 4-minute spread across clusters is egress speed, not caching. Do not "improve" these by
+// interpolation, and do not quote a cached figure — there is nothing left to cache.
+// The same 2026-08-06 session timed `unit-test` at 11m20s then 11m33s on two CONSECUTIVE runs and
+// read the matching numbers as "nothing is warming"; the 2026-08-08 runs show what that pair could
+// not, which is that warming it was worth about six seconds.
+This first run is the slow one, and it resolves Maven's dependency tree *twice*: once in `unit-test`, and once more inside the image build, which runs its own `mvn` in the `Containerfile` and shares nothing with the Task before it.
+On the build cluster a first run took *20m49s*; the same run finished in *13m27s* on a second cluster, *11m18s* on a third, and *10m22s* on a fourth.
+All four are real — how fast the dependencies arrive is a property of the cluster you are on, not of anything you can set here.
+If your run fails within seconds instead of building, see xref:pipelines-fundamentals/troubleshooting.adoc[the troubleshooting page] before you retry.
 Watch it fill in on the console graph, or stream the step logs from the terminal — clicking a Task node shows exactly what that Task is doing:
 
 // Grounded live on OCP 4.22.5 (2026-07-26): the PipelineRun detail tab row is
@@ -729,7 +704,7 @@ Console::
 +
 --
 Open the `parasol-claims-build-test-deploy` Pipeline → *Actions* → *Start* again.
-This time change the *git-url* parameter to your fork's in-cluster address — `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git` — set *shared-workspace* to *VolumeClaimTemplate* and *maven-cache* to the existing `maven-cache` claim as before, then click *Start*.
+This time change the *git-url* parameter to your fork's in-cluster address — `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git` — set *shared-workspace* to *VolumeClaimTemplate* as before, then click *Start*.
 Open the new run under *Pipelines* → *PipelineRuns*: the graph goes *red at `unit-test`* and never reaches the build.
 --
 CLI::
@@ -750,7 +725,6 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
   -p git-url="$FORK" \
   --serviceaccount pipeline \
   --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
-  --workspace name=maven-cache,claimName=maven-cache \
   --showlog
 ----
 --
@@ -885,11 +859,14 @@ Then re-run against your fork:
 // Skipped: 0", results image-size-mb=391 / image-within-budget=true, 10m10s wall clock
 // (10:35:01Z -> 10:45:11Z). That observation — "the fix run is NOT faster than the first one,
 // because the workspace is a fresh VolumeClaimTemplate per run so Maven re-downloads every time" —
-// is the defect the maven-cache workspace fixes (2026-08-07). It was re-confirmed 2026-08-06 by two
-// consecutive runs whose unit-test measured 11m20s and 11m33s.
-// MEASUREMENT STATUS (settled 2026-08-07): every number in this comment is an UNCACHED run, and
-// those are the figures we ship — they are the ceiling, and the cache can only beat them. Do not
-// quote a "warm re-run" figure anywhere until one has actually been timed.
+// was read as a defect and a maven-cache workspace was added to fix it (2026-08-07). That reading
+// was wrong, and it was DISPROVED by measurement on 2026-08-08: with a genuinely warm cache the
+// same pipeline finished in 11m10s against 11m18s uncached — six seconds off unit-test. Re-running
+// is not faster because Quarkus compile and a 30-test suite dominate, not the download. The cache
+// was removed the same day; see the header note in pipelines/pipeline/parasol-claims-build.yaml.
+// MEASUREMENT STATUS (settled 2026-08-08): every number in this comment is an UNCACHED run, which
+// is the only kind this pipeline does. There is no "warm re-run" figure to quote — the one that
+// was measured is inside the noise of these.
 //
 // RE-PERFORMED END TO END 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / OpenShift Pipelines 1.23.1) as
 // user2 — the first time this exercise's red AND green halves were both driven on a cluster since
@@ -906,10 +883,11 @@ Then re-run against your fork:
 //                      fetch-source 21s · unit-test 7m19s · build-image 5m1s · image-report 6s ·
 //                      deploy 38s; "Tasks Completed: 5 (Failed: 0, Cancelled 0), Skipped: 0";
 //                      results image-size-mb=392 / image-within-budget=true.
-// The red and green unit-test runs came in at 7m12s and 7m19s — near-identical again, and for the
-// same reason as the 2026-08-06 pair: nothing was cached. Both runs had to OMIT the maven-cache
-// workspace, because binding it kills the run outright (see the ❗ BLOCKER note at the first Start
-// step). So there is STILL no timed cached run, and there cannot be one until that is fixed.
+// The red and green unit-test runs came in at 7m12s and 7m19s — near-identical, which was read at
+// the time as "nothing was cached". Both runs had to OMIT the maven-cache workspace, because
+// binding it killed the run outright. Settled 2026-08-08: a warm cache was timed at last and moved
+// unit-test by six seconds, so those two numbers being alike was never evidence about caching. The
+// workspace is gone and these figures are the shipped shape.
 // The deployed pod was checked against the image the run built: pod imageID and the user2-cicd
 // `parasol-claims:latest` istag were the same digest, imagePullPolicy Always — no stale-digest gap.
 // The rule was then probed on that pod: a claim created with no adjuster (CLM-1031) answered 409 on
@@ -920,7 +898,7 @@ Then re-run against your fork:
 Console::
 +
 --
-As before, open the Pipeline → *Actions* → *Start*, set *git-url* to `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git`, set *shared-workspace* to *VolumeClaimTemplate* and *maven-cache* to the existing `maven-cache` claim, and *Start*.
+As before, open the Pipeline → *Actions* → *Start*, set *git-url* to `http://gitea.ogsr-gitea.svc:3000/{user}/parasol-claims.git`, set *shared-workspace* to *VolumeClaimTemplate*, and *Start*.
 Watch the new run under *Pipelines* → *PipelineRuns*: this time `unit-test` goes *green* and the graph continues into `build-image`.
 --
 CLI::
@@ -939,7 +917,6 @@ tkn pipeline start parasol-claims-build-test-deploy -n $NS \
   -p git-url="$FORK" \
   --serviceaccount pipeline \
   --workspace name=shared-workspace,volumeClaimTemplateFile=/tmp/vct.yaml \
-  --workspace name=maven-cache,claimName=maven-cache \
   --showlog
 ----
 --

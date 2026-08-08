@@ -41,6 +41,10 @@ data:
         name: parasol-claims-build-test-deploy
       taskRunTemplate:
         serviceAccountName: pipeline
+      # ONE PVC-backed workspace — the Affinity Assistant's default mode allows exactly one per
+      # TaskRun, and this hook is the run `ws solve` blocks on, so an inadmissible binding here
+      # fails the solve in 27 seconds and reports it as a failed pipeline. See the header note in
+      # pipelines/pipeline/parasol-claims-build.yaml.
       workspaces:
         - name: shared-workspace
           volumeClaimTemplate:
@@ -50,12 +54,6 @@ data:
               resources:
                 requests:
                   storage: 1Gi
-        # The persistent Maven local repository this chart materializes (templates/maven-cache.yaml).
-        # claimName, NOT a volumeClaimTemplate: this run is also the instructor's pre-warm, so what
-        # it downloads has to still be there for the attendee's own runs afterwards.
-        - name: maven-cache
-          persistentVolumeClaim:
-            claimName: maven-cache
 ---
 apiVersion: batch/v1
 kind: Job
@@ -75,8 +73,9 @@ spec:
   # 1800, raised from 1200 (2026-08-07). The window has to outlive the pipeline it waits on, and a
   # green run of that pipeline was measured at 20m49s on 2026-08-06 — past the old 1200s deadline,
   # so the Job would have been killed and `ws solve` would have reported FAILURE on a pipeline that
-  # was going to succeed. This solve run is also the COLD one by definition (it is what fills the
-  # maven-cache claim), so the cache does not shrink this number for the first solve of a user.
+  # was going to succeed. Three more green runs on cluster-6xxpf 2026-08-08 came in at 11m18s-13m26s;
+  # the window absorbs the spread BETWEEN clusters, so it is sized to the slowest measured, not the
+  # fastest. Keep it in step with ws-meta's waitSeconds and the poll loop below.
   activeDeadlineSeconds: 1800
   template:
     metadata:
@@ -103,8 +102,9 @@ spec:
               set -euo pipefail
               echo "▶ launching the build-test-deploy pipeline (solve end-state)…"
               PR="$(oc create -o name -f /solve/pipelinerun.yaml)"
-              echo "  ✓ started ${PR#*/} — waiting for it (build+test+deploy; measured 20m49s on a"
-              echo "    cold cache, so give it the full window rather than assuming it hung)…"
+              echo "  ✓ started ${PR#*/} — waiting for it (build+test+deploy; measured between"
+              echo "    11m18s and 20m49s across clusters, so give it the full window rather than"
+              echo "    assuming it hung)…"
               # 170 x 10s = ~28 min of polling, inside the Job's 1800s activeDeadlineSeconds. Both
               # were raised together: the old 110 iterations gave up at ~18 min, under a measured run.
               for i in $(seq 1 170); do

@@ -10,22 +10,21 @@ This module has one dominant pacing fact: *the first pipeline run is long* — M
 Plan the room around the first run: start exercise 1, then send attendees into exercise 2 (the task library) while it builds — the module is *designed* so the reading fills the wait.
 
 [WARNING]
-.The "later runs are half the time" advice was wrong until 2026-08-07 — re-measure before you quote a number
+.There is no "later runs are half the time" — settled by measurement 2026-08-08
 ====
-Every timing on this page below the first run was measured on a pipeline that *had no cache at all*.
-The `maven-jdk21` Task kept Maven's local repository inside the TaskRun container, so it died with the Pod and every run re-downloaded everything.
-The proof is two *consecutive* runs measured 2026-08-06 whose `unit-test` took *11m20s* and *11m33s* — near-identical, because nothing was ever warming.
-The same session measured a full green run at *20m49s* and a red run at *12m08s*, against the *2m47s* this guide claims for a red run below.
+Every run of this pipeline is uncached, and that is now a decision rather than an omission.
+Do not tell a room that the second run will be quick.
 
-A persistent `maven-cache` workspace landed 2026-08-07 (a per-user PVC, bound by every run in the module).
-It changes the numbers in your favour, and *nobody has timed a cached run yet* — so no figure for one appears on this page.
-Time your own dry run and treat the table below as the uncached ceiling until it is replaced.
+The reasoning that suggested otherwise: two *consecutive* runs measured 2026-08-06 timed `unit-test` at *11m20s* and *11m33s* — near-identical, which was read as "nothing is warming".
+A persistent `maven-cache` workspace was added 2026-08-07 to fix it.
+It failed twice over, and both are measured on OCP 4.22.8 / OpenShift Pipelines 1.23.1:
 
-*Worse than untimed — as of 2026-08-07 that workspace has never run at all, and binding it stops the pipeline dead.*
-Measured 2026-08-07 on OCP 4.22.8 / OpenShift Pipelines 1.23.1: a run that binds both `shared-workspace` and `maven-cache` — which is what this module's pages, its `.tekton` file and `ws solve` all do — fails at `unit-test` in about *23 seconds* with `TaskRunValidationFailed` and the message `[User error] more than one PersistentVolumeClaim is bound`.
-Tekton's Affinity Assistant is on by default (`coschedule=workspaces`) and permits *one* PVC-backed workspace per TaskRun.
-Until that is resolved, run the pipeline *without* the `maven-cache` workspace — omit the `--workspace name=maven-cache,...` flag, or leave the field unset in the *Start* form.
-The Task declares it optional, so an unbound run works; it is just uncached, which is the shape every figure below was measured in anyway.
+* *It could not run.* Binding both `shared-workspace` and `maven-cache` gives `unit-test` two PVC-backed workspaces, and Tekton's Affinity Assistant permits one in its default `coschedule=workspaces` mode. Every run failed in about *27 seconds* with `TaskRunValidationFailed` / `[User error] more than one PersistentVolumeClaim is bound` — before a step started, so with no logs to read.
+* *It was not worth the workaround.* With the cluster's Affinity Assistant switched to `coschedule=pipelineruns` (which lifts the cap), three real runs on 2026-08-08 gave *cold cache 13m26s*, *warm cache 11m10s*, *no cache 11m18s*. A warm cache saved eight seconds; the cold run — the one an attendee actually pays, since the claim starts empty — cost two minutes more than no cache at all.
+
+The workspace, its PVC and its binder Job were removed on 2026-08-08.
+The dependency download was never the expensive part: Quarkus compile and a 30-test suite are.
+Every figure below is therefore the shipped shape, and the 10–21 minute spread across clusters is egress speed, not caching.
 ====
 The single most memorable beat is exercise 3: a one-line change turns the pipeline red at the test and the build never runs.
 
@@ -39,10 +38,9 @@ Attendee hands-on: *~40 min* (add ~12–15 min of concept up front).
 The gap is not slack — it is the pipeline, and it is measured, not estimated. Exercise 1's run alone
 was *20m49s*, exercise 3's red run *12m08s* and its green re-run *~10m*: **~43 min in three runs**,
 before exercise 4 starts. A room asked to sit through that with a "40 min" label on the door will
-read the module as broken when it is merely slow. Plan to these numbers. The `maven-cache` workspace
-was meant to remove one of each green run's two Maven downloads, but as of 2026-08-07 it cannot be
-bound at all (see the warning above), so nothing has shortened them — a full run measured *13m27s*
-on OCP 4.22.8 that same day, inside the same band.
+read the module as broken when it is merely slow. Plan to these numbers. A between-run Maven cache
+was tried and removed (see the warning above): it does not shorten a run, and nothing else will —
+full runs measured *13m27s* on OCP 4.22.8 and *11m18s* on cluster-6xxpf, both inside the same band.
 
 [cols="1,4,1,2",options="header"]
 |===
@@ -62,9 +60,8 @@ Where they disagree, both numbers are printed. The spread *is* the finding: with
 
 * *First run (exercise 1)* — Maven downloads its dependency tree *twice*: once in `unit-test`, once inside the image build's `Containerfile`.
 That is nearly the whole cost; the actual work (compile, image assembly, deploy + Route) is well under a minute of it.
-* *Later runs* — the `maven-cache` workspace (new, 2026-08-07) means `unit-test` reuses what the previous run downloaded.
-The image build still runs its own `mvn` inside the `Containerfile` and does *not* see that cache, so a green run does not become short — it loses one of its two downloads.
-*No cached run has been timed.*
+* *Later runs cost the same as the first.* This was tested rather than assumed: with a genuinely warm Maven repository the same pipeline finished in *11m10s* against *11m18s* with none (2026-08-08).
+Re-running is not cheaper because the download was never the expensive part — Quarkus compile and a 30-test suite are, and the image build runs its own `mvn` inside the `Containerfile` where no Tekton workspace reaches.
 * *A failing test fails fast in Task terms, not in wall-clock terms* — the RED break-fix run *fails at `unit-test`* and the three downstream Tasks (`build-image`, `image-report`, `deploy`) are *Skipped*, so it costs one Maven download rather than two.
 Uncached, that was still 12m08s on the 2026-08-06 cluster.
 * *PaC latency* — a pushed run appears *within a few seconds*; its duration is just a normal run.
@@ -82,10 +79,11 @@ ws start pipelines-fundamentals --user user1
 ws verify pipelines-fundamentals --user user1 --entry-only
 ----
 +
-Expect the `✅ all N checks passed` banner with no ❌: the `user1-cicd` namespace + entry marker, `claims-db` ready, the `parasol-claims-build-test-deploy` Pipeline, the `maven-cache` claim, the Gitea fork, its Ex3 break-fix target, its seeded `.tekton/pull-request.yaml`, and the curated `parasol-tasks` library reachable.
-// The count deliberately reads N, not a literal. It was written as "8" and had already drifted
-// (the script asserts more than that today, and gained the maven-cache check on 2026-08-07); a
-// number here rots on every added check and tells the reader to distrust a correct green run.
+Expect the `✅ all N checks passed` banner with no ❌: the `user1-cicd` namespace + entry marker, `claims-db` ready, the `parasol-claims-build-test-deploy` Pipeline, *every task of that Pipeline admissible*, the Gitea fork, its Ex3 break-fix target, its seeded `.tekton/pull-request.yaml`, and the curated `parasol-tasks` library reachable.
+The admissibility check is the one worth knowing about: it reads the Pipeline's workspace bindings against this cluster's Affinity Assistant mode and fails if any task would be rejected at run time.
+It exists because for one day in August 2026 every check on this list passed over a Pipeline that could not run at all.
+// The count deliberately reads N, not a literal. It was written as "8" and had already drifted;
+// a number here rots on every added check and tells the reader to distrust a correct green run.
 
 . *The curated library exists and its Tasks are readable.*
 +
@@ -129,35 +127,37 @@ Expect `2Gi`.
 This raised default is what lets attendees start the pipeline from the console *Actions → Start* form — which cannot set per-task memory — without an OOMKill, so no PipelineRun carries `taskRunSpecs`.
 If it reads `1Gi`, the `gitops/workshop-config` `per-user-limits` change has not synced; re-sync the workshop-config Argo app before the session, or the Start-form runs OOM at `unit-test`.
 
-. *The per-user Maven cache claim exists.*
+. *The Pipeline this cluster will actually admit.*
 +
 [source,sh,role=execute]
 ----
-oc get pvc maven-cache -n user1-cicd
+oc get tektonconfigs.operator.tekton.dev config \
+  -o jsonpath='affinity assistant mode: {.spec.pipeline.coschedule}{"\n"}'
 ----
 +
-Expect the claim to exist. `Pending` is correct and healthy before anyone runs a pipeline — the default StorageClass binds on first use.
-`NotFound` means the entry app has not synced the new template; re-run `ws start pipelines-fundamentals --user user1`.
-Every PipelineRun in this module attaches this claim *by name*, so without it a run's Task Pod sits `Pending` instead of building.
+Expect `workspaces` (the operator default) or an empty value, which means the same thing.
+In that mode a TaskRun may mount exactly *one* PVC-backed workspace, and this module's Pipeline is built for it — `shared-workspace` and nothing else.
+`ws verify --entry-only` grades this pairing for you; run the command above only when you want to see the cluster's own answer.
 +
-[WARNING]
-.Order of operations on a cluster that has not been updated yet
+[NOTE]
+.Why an instructor is told about a scheduling flag at all
 =====
-The `maven-cache` workspace is declared on the *library* Task `maven-jdk21` (shipped by the `workshop-config` Argo app) and mapped by the *per-user* Pipeline (shipped by the entry app).
-Sync `workshop-config` *first*.
-If a per-user entry state maps the workspace while the library still serves the old Task, the run fails with `workspace binding "maven-cache" does not match any declared workspace` — it does not fall back to uncached.
-Confirm the library is current before the room:
+Because a mismatch here does not look like a scheduling problem.
+For one day in August 2026 this module shipped a second PVC-backed workspace (a persistent Maven cache), and every run of the pipeline died at `unit-test` in 27 seconds with `[User error] more than one PersistentVolumeClaim is bound` — no step started, so no logs, and in the room it reads as a broken cluster.
+If you ever see that message, the Pipeline is asking for two PVCs somewhere. This prints each task and the workspaces it binds, so the offending one names itself:
 [source,sh,role=execute]
 ----
-oc get tasks.tekton.dev maven-jdk21 -n ogsr-parasol-tasks \
-  -o jsonpath='library task workspaces: {.spec.workspaces[*].name}{"\n"}'
+oc get pipelines.tekton.dev parasol-claims-build-test-deploy -n user1-cicd \
+  -o jsonpath='{range .spec.tasks[*]}{.name}: {range .workspaces[*]}{.workspace} {end}{"\n"}{end}'
 ----
-Expect `source maven-cache`.
 =====
 
-. *Pre-warm the Maven cache (recommended — and it now actually works).*
-Run one full pipeline on a sample user before the room.
-This fills that user's `maven-cache` claim, so their `unit-test` no longer downloads the dependency tree.
+. *There is nothing to pre-warm — do not plan a warm-up round.*
+The old advice here was to run one pipeline first so later runs would be quick.
+It is wrong, and it was tested: with a fully warm Maven repository the pipeline finished in *11m10s* against *11m18s* with none (2026-08-08, three runs, one namespace).
+Every attendee's every run costs the same, and exercise 2 is designed to fill the wait.
++
+`ws solve pipelines-fundamentals --user user1` is still worth running before the room — not to warm anything, but so a finished, healthy `parasol-claims` is your opening visual:
 +
 [source,sh,role=execute]
 ----
@@ -165,20 +165,12 @@ ws solve pipelines-fundamentals --user user1     # runs the real pipeline to com
 ----
 +
 [IMPORTANT]
-.Pre-warming is *per user*, not per node
-=====
-The cache is a PersistentVolumeClaim in `{user}-cicd`.
-Solving `user1` warms `user1` and nobody else — the old advice ("pre-warm the nodes and the first-run pain largely disappears") was wrong twice over: there was no cache to warm at all, and the thing that would have needed warming is per-user, not per-node.
-To warm a whole room you have to solve every user, which costs one full pipeline run each — decide whether that is worth the cluster time, or accept that every attendee's *first* run is the slow one and use exercise 2 to fill the wait, which is what the module is designed for.
-=====
-+
-[IMPORTANT]
 .`ws solve pipelines-fundamentals` blocks for the length of a whole pipeline run — that is correct, not a hang
 =====
 `ws solve` runs the actual build-test-deploy pipeline and *waits for it to finish* before returning (the engine gates on the Argo sync operation, sized by the module's `waitSeconds: 1200`).
 *Measured 2026-07-10:* `7m45s` end-to-end (the solve Job's own pipeline ran 7m15s), and it was *truthful on return* — the `parasol-claims` deploy was `1/1`, pod Running, `0` restarts against `claims-db`.
-That was an *uncached* run, like every solve measured so far; the 2026-08-06 cluster took *20m49s* for the same pipeline.
-Budget for the worst of those until someone times a solve against a warm `maven-cache`.
+The 2026-08-06 cluster took *20m49s* for the same pipeline, and cluster-6xxpf *11m18s* on 2026-08-08.
+Budget for the worst of those: the spread is how fast a given cluster pulls dependencies, and there is no cache that changes it.
 It prints "demo-ready" *only when the app is truly up*; earlier engine versions printed ready ~7 min early, and that was fixed for this module.
 Do not Ctrl-C it thinking it stalled.
 =====
@@ -203,7 +195,7 @@ You do not need a separate rubric for when the room is ready to move on: each ex
 Beyond the Say/Show/Do arc in the demo flavor:
 
 * *Pre-solve, and pre-wire the webhook, before the room.*
-Run `ws solve pipelines-fundamentals --user {user}` early (it blocks for a full pipeline run) so a finished, healthy `parasol-claims` is your opening visual — and, since 2026-08-07, so *your own* `maven-cache` claim is filled before you present.
+Run `ws solve pipelines-fundamentals --user {user}` early (it blocks for a full pipeline run) so a finished, healthy `parasol-claims` is your opening visual before you present.
 The demo's live beats (3–4) are a *PaC push*, so you also need the webhook set up on your fork *before* you present — do lab exercise 4's setup (create the Gitea token, the `gitea-pac-secret`, and the webhook) ahead of time.
 Rehearse the one-line test edit once.
 * *Talk through the build, never at it.*
@@ -249,7 +241,7 @@ Pushing an image straight from CI into prod is the anti-pattern GitOps exists to
 
 * *Two Maven downloads per run — the cache removes ONE of them.*
 `unit-test` (`mvn test`) and `build-image` (the `mvn package` inside the `Containerfile`) each resolve dependencies.
-The `maven-cache` workspace covers `unit-test` only: `build-image` runs Maven inside a buildah build, which has no access to a Tekton workspace, so it re-downloads on every run no matter what.
+Nothing shortens it: `build-image` runs Maven inside a buildah build, which no Tekton workspace reaches, so it resolves its dependencies on every run no matter what happens in `unit-test`.
 Expect the module's floor to be "one Maven download", not "no Maven download" — and re-measure rather than quoting a number for it.
 Pre-warm with a `ws solve` on the user you will demo as; it warms that user only.
 Never let the room sit watching the first build — that is what exercise 2 is for.

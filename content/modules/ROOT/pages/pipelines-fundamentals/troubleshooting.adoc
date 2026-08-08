@@ -15,34 +15,33 @@ Most terminal commands assume you set `NS={user}-cicd` at the start of the lab.
 // artifacts are cached". That was false and had never been measured: the Maven repository lived in
 // the TaskRun container's filesystem, so it died with the Pod and nothing on the node cached
 // anything. Measured 2026-08-06 — two CONSECUTIVE runs, unit-test 11m20s then 11m33s.
-// MEASUREMENT STATUS (settled 2026-08-07): this entry deliberately quotes no "after" number. The
-// uncached figures are the ones we ship — the cache can only beat them, so an instructor planning
-// to these never overruns. Add a measured pair here only if someone actually times a warm run.
-// 2026-08-07: the "check the cache was attached" advice that used to close this entry is GONE,
-// because following it produces the 23-second validation failure documented in the next entry —
-// the maven-cache workspace cannot currently be bound at all. Every run measured for this module,
-// on every cluster, has therefore been uncached, including a 7m39s red run and a 13m27s green run
-// on OCP 4.22.8 that day. Restore the cache advice in the same slice that fixes the binding.
+// MEASUREMENT STATUS (settled 2026-08-08): the warm-cache "after" number this entry used to be
+// waiting for was finally measured, and it is not worth quoting as an improvement — 11m10s warm
+// against 11m18s with no cache, three runs on cluster-6xxpf in one namespace. The between-run
+// maven-cache workspace was removed the same day; see the header note in
+// pipelines/pipeline/parasol-claims-build.yaml. Runs measured for this module, all uncached because
+// that is now the only shape: 7m39s red / 13m27s green (OCP 4.22.8, 2026-08-07), 11m18s green
+// (cluster-6xxpf, 2026-08-08), 20m49s green (build cluster, 2026-08-06).
 Symptom:: `tkn pipelinerun logs --last -f` sits for a long time on `unit-test`, then again on `build-image`, before the run finishes — 20 minutes or more the first time.
 Cause:: This is *expected*.
-The pipeline builds `parasol-claims` from source, so Maven downloads its dependency tree — *twice*, once for the test Task and once inside the image build, which runs its own `mvn` in the `Containerfile`.
-With nothing cached, that download dominates the run, and *every* run of this pipeline is currently uncached — see the next entry for why the `maven-cache` workspace cannot be attached yet.
+The pipeline builds `parasol-claims` from source, so Maven resolves its dependency tree — *twice*, once for the test Task and once inside the image build, which runs its own `mvn` in the `Containerfile`.
 Fix:: Nothing is wrong — let it run (start exercise 2 while it builds).
-Expect a later run to take about as long as the first; that is the same download being paid again, not a symptom.
+Expect a later run to take about as long as the first.
+That was tested rather than assumed: a run with every dependency already cached finished within eight seconds of one that cached nothing, because the compile and the 30-test suite are the cost, not the download.
 You can confirm progress at any point with `tkn pipelinerun describe --last -n $NS` (it shows which Task is running).
 
 == The run fails in seconds: `more than one PersistentVolumeClaim is bound`
 
-// Measured 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / OpenShift Pipelines 1.23.1) as user2, from a
-// run started exactly as exercise 3's CLI block instructs. Root cause is grounded, not inferred:
-// `oc get cm feature-flags -n openshift-pipelines -o jsonpath='{.data.coschedule}'` returned
-// `workspaces`, and the rejected TaskRun carried pipeline.tekton.dev/affinity-assistant=… . Tekton's
-// affinity-assistant docs for that mode: "Only one pvc-backed workspace can be mounted to each
-// TaskRun in this mode." Single-variable control: the identical run with maven-cache omitted got
-// past validation and ran to completion (Failed at the test as intended, 7m39s). This entry is a
-// stopgap so an attendee is not stranded — the real fix is one slice across the entry states, the
-// canonical pipelines/, the .tekton PaC file and this module's pages, and it is with the PM.
-Symptom:: The run goes red within about *23 seconds*. `tkn taskrun list -n $NS` shows `unit-test` as `Failed(TaskRunValidationFailed)` with a duration of `0s`, `build-image`/`image-report`/`deploy` are skipped, and no Maven output was ever produced.
+// Measured 2026-08-07 on cluster-6xxpf (OCP 4.22.8 / OpenShift Pipelines 1.23.1) as user2, and
+// reproduced 2026-08-08 as user3 (27s from `oc create` to a red PipelineRun; the rejected TaskRun
+// carried pipeline.tekton.dev/affinity-assistant=affinity-assistant-05a543dfc9, podName empty,
+// startTime == completionTime). Root cause is grounded, not inferred: `oc get cm feature-flags -n
+// openshift-pipelines -o jsonpath='{.data.coschedule}'` returned `workspaces`, whose Tekton docs
+// say "Only one pvc-backed workspace can be mounted to each TaskRun in this mode."
+// The shipped Pipeline no longer trips this — the second workspace was removed 2026-08-08 — so an
+// attendee reaching this entry is on a stale entry state or a hand-edited run. The entry stays
+// because the message names nothing an attendee could act on and reads as a broken cluster.
+Symptom:: The run goes red within about *27 seconds*. `tkn taskrun list -n $NS` shows `unit-test` as `Failed(TaskRunValidationFailed)` with a duration of `0s`, `build-image`/`image-report`/`deploy` are skipped, and no Maven output was ever produced.
 Ask the failed TaskRun why:
 +
 [source,sh,role=execute]
@@ -60,14 +59,23 @@ Message
 Params
 ----
 +
-Drop the `sed` to read the whole description: its `Workspaces` section names the two claims the Task was handed — `source` (this run's own volume) and `maven-cache`.
+Drop the `sed` to read the whole description: its `Workspaces` section names the claims the Task was handed.
 Cause:: Not your code — nothing was compiled or tested, so this is *not* the break-fix.
 Tekton's *Affinity Assistant* co-schedules the Pods of a run that share a volume, and in its default mode it allows *one* PVC-backed workspace per Task.
-The `unit-test` Task is being handed two: `shared-workspace` (a fresh per-run volume) and `maven-cache` (the persistent one).
-Fix:: Start the run *without* the `maven-cache` workspace — drop the `--workspace name=maven-cache,claimName=maven-cache` line from the `tkn pipeline start` command, or leave the *maven-cache* field unset in the console *Start* form.
+This Task was handed two.
+The Pipeline as shipped declares exactly one (`shared-workspace`), so something added a second — a `--workspace` flag copied from an older version of these instructions, a second row filled in on the console *Start* form, or an entry state that predates 2026-08-08.
+Fix:: Start the run with `shared-workspace` and nothing else — one `--workspace name=shared-workspace,volumeClaimTemplateFile=...` flag, or one row on the *Start* form.
 +
-The Task declares that workspace *optional*, so the run works unbound; Maven just re-downloads its dependencies, which is what every timing on these pages already assumes.
-Report it to your instructor — the pipeline definition needs the fix, not your run.
+Confirm what the Pipeline itself asks for before you retry:
++
+[source,sh,role=execute]
+----
+oc get pipelines.tekton.dev parasol-claims-build-test-deploy -n $NS \
+  -o jsonpath='{range .spec.tasks[*]}{.name}: {range .workspaces[*]}{.workspace} {end}{"\n"}{end}'
+----
++
+Every task should name at most one workspace.
+If one names two, the entry state is stale rather than your run: tell your instructor, who can re-materialize it.
 
 == The build dies mid-`mvn` with `OutOfMemoryError` / the Task is `OOMKilled`
 
@@ -100,22 +108,26 @@ tkn pipelinerun describe --last -n $NS | grep -A3 'Workspaces'
 +
 It should show `shared-workspace` bound to a PVC, not an `EmptyDir`. The workspace choice cannot be changed on a run already in progress — cancel/delete it and start again with *VolumeClaimTemplate* set.
 
-== A Task Pod stays `Pending` and never starts (`persistentvolumeclaim "maven-cache" not found`)
+== A Task Pod stays `Pending` and never starts (`persistentvolumeclaim "..." not found`)
 
-Symptom:: The run is created but `unit-test` never starts; `oc get pods -n $NS` shows a `…-unit-test-pod` stuck in `Pending`, and `oc describe pod <name> -n $NS` ends with `persistentvolumeclaim "maven-cache" not found`.
-Cause:: The run asked for the `maven-cache` claim *by name* and the claim is not in this project.
-Unlike the shared workspace — where *VolumeClaimTemplate* makes a new volume on the spot — `claimName` attaches an *existing* one, which is exactly what makes the cache survive between runs.
-The claim ships with your project's entry state, so it is normally already there.
-Fix:: Check for it, then re-materialize the project world if it is gone:
+// This entry used to be about a `maven-cache` claim the module shipped. That claim and the
+// workspace that bound it were removed 2026-08-08 (see the header note in
+// pipelines/pipeline/parasol-claims-build.yaml), so the only way to reach this now is a
+// `--workspace ...,claimName=<something>` flag or a *PersistentVolumeClaim* row on the Start form
+// naming a claim this project does not have — most likely copied from older instructions.
+Symptom:: The run is created but its first Task never starts; `oc get pods -n $NS` shows a `…-pod` stuck in `Pending`, and `oc describe pod <name> -n $NS` ends with `persistentvolumeclaim "<name>" not found`.
+Cause:: The run asked for a claim *by name* and there is no such claim in this project.
+`claimName` attaches an *existing* volume, unlike *VolumeClaimTemplate*, which makes a new one on the spot.
+This Pipeline needs only the second kind, so a `claimName` binding here is one you added.
+Fix:: Start the run again with `shared-workspace` as a *VolumeClaimTemplate* and no other workspace — that is the whole binding this Pipeline takes:
 +
 [source,sh,role=execute]
 ----
-oc get pvc maven-cache -n $NS
+oc get pipelines.tekton.dev parasol-claims-build-test-deploy -n $NS \
+  -o jsonpath='workspaces: {range .spec.workspaces[*]}{.name}{" "}{end}{"\n"}'
 ----
 +
-`Pending` is a perfectly healthy state for it before the first run — the cluster's storage class waits for the first Pod that mounts it.
-Only `NotFound` is the problem, and `ws prep pipelines-fundamentals` puts it back.
-In a hurry, you can also start the run *without* the `maven-cache` workspace at all: it is optional, and the run then works exactly as it did before the cache existed — correct, just slow.
+Expect `workspaces: shared-workspace`.
 +
 Delete the stuck run before retrying (`tkn pipelinerun delete --last -n $NS`); a Pending run holds its own workspace PVC against your project quota.
 

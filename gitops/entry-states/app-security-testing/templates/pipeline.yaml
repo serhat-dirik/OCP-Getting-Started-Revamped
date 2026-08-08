@@ -50,12 +50,11 @@ spec:
     - name: zap-work
     # k6 writes its HTML dashboard report here (the perf-k6 load-test gate).
     - name: k6-work
-    # The Maven local repository, reused BETWEEN runs — bound to the persistent maven-cache PVC
-    # this chart materializes (templates/maven-cache.yaml). This capstone's designed fix loop is
-    # six sequential runs, so an uncached dependency tree is paid six times. Optional at both
-    # levels (here and on the maven-jdk21 Task).
-    - name: maven-cache
-      optional: true
+    # ONE PVC-BACKED WORKSPACE, and only one: shared-workspace. zap-work and k6-work look identical
+    # here and are not the same thing — every runner binds them `emptyDir: {}`, so the Affinity
+    # Assistant does not count them. A persistent maven-cache claim was declared here 2026-08-07 and
+    # removed 2026-08-08 (it made every run fail validation in seconds; measured saving when it did
+    # run: 1.2%). See pipelines/pipeline/parasol-claims-build.yaml's header note.
   results:
     - name: sast-passed
       value: $(tasks.sast-sonar.results.quality-gate-passed)
@@ -97,16 +96,10 @@ spec:
       params:
         - {name: SONAR_PROJECT_KEY, value: $(params.sonar-project-key)}
       workspaces:
+        # ONE workspace. sonar-scan also declares an optional `maven-cache`; mapping it here beside
+        # `source` gives this TaskRun two PVC-backed workspaces and the Affinity Assistant rejects
+        # the run in its default mode (see the Pipeline's workspaces block above).
         - {name: source, workspace: shared-workspace}
-        # Binding a Maven cache to a SCANNER is not pointless, which is the reading to head off:
-        # sonar-scan's `compile` step is a real Maven build (Java rules need bytecode), and this is
-        # the FIRST task after the checkout — it runs BEFORE unit-test. So this mapping does two
-        # things, not one: it reuses the local repository between runs, AND it WARMS the repository
-        # that unit-test (via maven-jdk21) reads a few tasks later. Even a completely cold first run
-        # therefore pays the dependency download ONCE instead of twice. Unbound at run time this
-        # mapping is skipped (the Task declares it optional), so a PipelineRun that predates the
-        # cache still runs.
-        - {name: maven-cache, workspace: maven-cache}
 
     # 3) SCA: Trivy filesystem scan (dependency CVEs) + CycloneDX SBOM artifact. runAfter sast-sonar.
     - name: sca-trivy
@@ -133,10 +126,8 @@ spec:
         - name: GOALS
           value: ["-B", "-ntp", "test"]
       workspaces:
+        # ONE workspace — same constraint as sast-sonar above.
         - {name: source, workspace: shared-workspace}
-        # Unbound at run time this mapping is skipped (the Task declares it optional), so a
-        # PipelineRun that predates the cache still runs.
-        - {name: maven-cache, workspace: maven-cache}
 
     # 5) Build the image from the Containerfile; Tekton Chains SIGNS this TaskRun's image automatically.
     - name: build-image

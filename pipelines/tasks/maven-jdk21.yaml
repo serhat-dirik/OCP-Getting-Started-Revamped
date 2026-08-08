@@ -7,14 +7,29 @@
 # library; every app pipeline references it by cluster resolver. This is the module's honest,
 # real-world answer to "why does a platform team curate a task library?".
 #
-# WHY IT HAS A CACHE WORKSPACE (added 2026-08-07). The first cut declared ONE workspace and invoked
-# /usr/bin/mvn directly, so Maven's local repository lived in the container filesystem and died with
-# the TaskRun pod: EVERY run re-downloaded the whole dependency tree. Measured on the workshop
-# cluster — a green run of parasol-claims-build-test-deploy took 20m49s, and two consecutive runs
-# measured `unit-test` at 11m20s then 11m33s. Two identical numbers are the finding: there was no
-# warm cache to warm, so "run one pipeline first to warm the nodes" could not work and the node
-# image cache was never the variable anyone thought it was. The optional maven-cache workspace makes
-# the local repository a real, run-surviving volume.
+# WHY IT HAS A CACHE WORKSPACE, AND WHY NOTHING IN THIS REPO BINDS IT (2026-08-07 → 2026-08-08).
+# The first cut declared ONE workspace and invoked /usr/bin/mvn directly, so Maven's local repository
+# lived in the container filesystem and died with the TaskRun pod. The optional maven-cache workspace
+# was added to make it a run-surviving volume, and it is KEPT: a curated org library should offer the
+# capability, and MAVEN_MIRROR_URL rides in the same generated settings.xml.
+#
+# NO PIPELINE IN THIS REPO BINDS IT, deliberately, and an adopter should read why before turning it
+# on. The original motivation was a pair of measurements — a green parasol-claims-build-test-deploy
+# run at 20m49s, and `unit-test` at 11m20s then 11m33s on two consecutive runs, two matching numbers
+# showing nothing was warming. What that pair does NOT establish is that the download was the
+# expensive part, and on 2026-08-08 it was tested directly on cluster-6xxpf (OCP 4.22.8 / Pipelines
+# 1.23.1), three real runs of that pipeline, one namespace, same commit:
+#     cold cache (bound, empty)              806s wall · unit-test 423s · mvn 06:39
+#     warm cache (bound, 178MB / 506 jars)   670s wall · unit-test 371s · mvn 05:42
+#     NO cache                               678s wall · unit-test 377s · mvn 06:03
+# A warm cache was worth 8 seconds of an 11-minute run (1.2%); the COLD run — which is the one every
+# attendee pays, because the claim starts empty — cost 128 seconds MORE than no cache at all.
+# Quarkus compile and the test suite dominate; the dependency fetch never did.
+#
+# Binding it is also not free structurally: with `source` already PVC-backed it gives the TaskRun a
+# second PersistentVolumeClaim, which the Affinity Assistant refuses in its default
+# `coschedule: workspaces` mode. That is what made every run of this module die at `unit-test` in
+# 27 seconds between 2026-08-07 and 2026-08-08.
 #
 # CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
 # workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — kept in lockstep by
@@ -154,10 +169,14 @@ spec:
         if [ "${CACHE_BOUND}" = "true" ]; then
           echo "✅ Maven local repository: ${CACHE_PATH}/repository (persistent — survives this run)"
         else
-          echo "⚠️  no maven-cache workspace bound — Maven re-downloads its whole dependency tree."
-          echo "   This run still works; it is just slow. To reuse a cache between runs, bind the"
-          echo "   workspace to an EXISTING PersistentVolumeClaim (never a volumeClaimTemplate):"
-          echo "     tkn pipeline start … --workspace name=maven-cache,claimName=maven-cache"
+          echo "ℹ️  no maven-cache workspace bound — Maven resolves into this pod's own filesystem,"
+          echo "   so the dependency tree is fetched on every run. That is what the Parasol"
+          echo "   pipelines do on purpose: measured 2026-08-08, a warm cache was worth 1.2% of an"
+          echo "   11-minute run, and the Affinity Assistant's default coschedule=workspaces mode"
+          echo "   allows one PVC-backed workspace per TaskRun — which \`source\` already is."
+          echo "   An org whose build really is download-bound can bind this workspace to an"
+          echo "   EXISTING PersistentVolumeClaim (never a volumeClaimTemplate) once its cluster"
+          echo "   sets TektonConfig spec.pipeline.coschedule to pipelineruns to make room for it."
         fi
         if [ -n "${MAVEN_MIRROR_URL}" ]; then
           echo "✅ repository mirror: ${MAVEN_MIRROR_URL} (mirrorOf central)"
