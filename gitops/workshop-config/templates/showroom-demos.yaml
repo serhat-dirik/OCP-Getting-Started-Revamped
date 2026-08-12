@@ -48,8 +48,33 @@
           screen rather than assumed, which is the same reason the rest of this design exists.)
        b) THE HOME IS AN emptyDir, NOT A PVC. Whatever kubeconfig the SA creates lives only in the
           pod, so `oc delete pod -l app.kubernetes.io/instance=showroom-demos -n <ns>` is a logout
-          button, and any restart is an implicit logout. A PVC here would make an admin session
-          survive restarts indefinitely — the exact thing the constraint above forbids.
+          button, and any restart is an implicit logout. A PVC would make a session survive
+          restarts indefinitely.
+
+          READ THE LIMIT OF THIS HONESTLY — it was overstated here until an adversarial review
+          measured it (2026-08-12). emptyDir bounds the credential's LIFETIME. It does NOT bound
+          its AUDIENCE. Measured from outside the cluster with no credentials: GET /tty-top/
+          returns 200 with the full ttyd page and POST /tty-top/token returns {"token": ""} — the
+          image runs `ttyd … -W /usr/bin/bash` with no `-c`, so there is no authentication and
+          sessions are not exclusive. A second visitor gets a second bash in THIS container with
+          THIS $HOME. So while a login lives, it is held by anyone who has the URL.
+
+          That exposure is NOT new and NOT specific to this cockpit: showroom-{user}'s /tty-top/
+          answers 200 to the same unauthenticated request. It is the accepted posture for
+          ephemeral RHDP clusters — accepted because the identity behind an attendee cockpit is a
+          low-privilege attendee. What this template must therefore never do is invite a HIGHER
+          identity into the same shape. The banner originally said "Copy login command … paste the
+          oc login --token= line here", which is precisely an invitation to park cluster-admin
+          behind an open shell, and directly contradicts the owner constraint quoted above. It now
+          directs the SA to an attendee login and states the exposure in the first screenful.
+
+          A banner is guidance, not a control — this project's own m26 beat 3 is an argument that a
+          sentence forbidding something is not a control. The real control is authentication in
+          front of the Route (an oauth-proxy, or ttyd's `-c`), and both cost the zero-new-RBAC
+          property above. That is a posture trade for the owner, not a call to make at 3am; it is
+          filed as the SEV1 "SA-Demos terminal is an unauthenticated shell" task. Until it is
+          decided, the honest position is: same exposure as every attendee cockpit, attendee
+          identity only, and the limitation written where a presenter will read it.
        c) automountServiceAccountToken: false. Without it the logged-out state still hands a shell
           the `default` SA token. Low-privilege, but "logged out" should mean powerless, and the
           pod genuinely makes no API calls of its own.
@@ -364,15 +389,19 @@ spec:
                 echo '  echo'
                 echo '  echo "  SA-Demos cockpit — this terminal is NOT logged in to any cluster."'
                 echo '  echo'
-                echo '  echo "  Log in as yourself before the demo:"'
-                echo '  echo "    OpenShift console -> your name (top right) -> Copy login command,"'
-                echo '  echo "    then paste the oc login --token=... line here."'
+                echo '  echo "  ⚠ THIS SHELL IS REACHABLE BY ANYONE WHO HAS THIS URL."'
+                echo '  echo "    There is no authentication in front of it, and sessions are not"'
+                echo '  echo "    exclusive — a second visitor gets a second shell in this same"'
+                echo '  echo "    container, sharing this same home directory and any kubeconfig in it."'
                 echo '  echo'
-                echo "  echo \"  Or:  oc login https://\${API_HOST:-$API_HOST} -u <your-user>\""
+                echo '  echo "  So log in as an ATTENDEE, never as admin:"'
+                echo "  echo \"    oc login https://\${API_HOST:-$API_HOST} -u user1\""
+                echo '  echo "    (shared workshop password; every demo arc runs in attendee namespaces,"'
+                echo '  echo "     so attendee rights are all a demo needs)"'
                 echo '  echo'
-                echo '  echo "  This session is ephemeral by design: the home is an emptyDir, so your"'
-                echo '  echo "  login lives only in this pod and is gone the moment it restarts."'
-                echo '  echo "  Deleting the pod is the logout button."'
+                echo '  echo "  Do NOT paste an admin token here. Whatever you log in as, anyone"'
+                echo '  echo "  reaching this URL holds until the pod restarts. Deleting the pod is"'
+                echo '  echo "  the logout button:  oc delete pod -l app.kubernetes.io/instance=showroom-demos"'
                 echo '  echo'
                 echo '  if command -v oc >/dev/null 2>&1; then'
                 echo '    if _who="$(oc whoami 2>/dev/null)"; then'
