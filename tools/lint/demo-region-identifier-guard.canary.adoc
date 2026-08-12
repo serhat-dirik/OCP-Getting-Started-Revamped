@@ -1,0 +1,129 @@
+= Canary — demo-region-identifier-guard
+// A DELIBERATELY BROKEN page. Every line this guard must flag carries the fire marker, and every
+// line that must stay quiet carries the quiet marker, so blinding any single rule flips a NAMED
+// line rather than a total (tools/lint/_scope.py, fixture_line_expectations). The markers ride as
+// shell comments because the lines that fire are INSIDE source blocks. This header deliberately
+// spells neither marker out: the harness reads them as expectations wherever they appear, and a
+// marker written in an explanation is an expectation attached to a line of prose.
+//
+// The three cases reproduce the three historical instances, one identifier KIND each:
+//   var   securing-apps-keycloak's $CLAIMS
+//   func  securing-apps-keycloak's get_token()
+//   file  ai-assisted-development's `ask-agent`
+
+ifndef::demo[]
+[source,sh]
+----
+CLAIMS=https://claims.example.com
+BRACED_ONLY=1
+DEFAULTED_NAME=2
+get_token() { curl -s "$CLAIMS/token"; }
+cat > ask-agent <<'EOF'
+#!/usr/bin/env bash
+echo "$UNSET_INSIDE_A_QUOTED_HEREDOC never expands, so it is not a use"
+EOF
+chmod +x ask-agent
+----
+endif::demo[]
+
+ifdef::demo[]
+== Demo arc
+
+[source,sh]
+----
+curl -ks "$CLAIMS/api/claims"        # MUST-FIRE  flavor-invisible-definition, kind var
+get_token adjuster                   # MUST-FIRE  flavor-invisible-definition, kind func
+ask-agent "diagnose the claims"      # MUST-FIRE  flavor-invisible-definition, kind file
+----
+
+[source,sh]
+----
+oc get pods -n $NS_DEFINED_LATER     # MUST-FIRE  use-before-definition (defined below, same flavor)
+NS_DEFINED_LATER=user1-dev
+----
+
+// Two spellings of a USE, and the difference between them is the whole false-positive story.
+[source,sh]
+----
+echo "${BRACED_ONLY}"                # MUST-FIRE  a use spelled ONLY with braces
+echo "${DEFAULTED_NAME:-fallback}"   # MUST-NOT-FIRE  `:-` tolerates unset even when the lab defines it
+oc get pods -n $INLINE_NS            # MUST-FIRE  defined only by an INLINE ifndef::demo[…] line
+----
+
+// A CORRECT exemption: a name the runtime provides, with the reason on the line.
+// lint-allow: demo-region-identifier COCKPIT_PROVIDED_TOKEN — injected into the cockpit terminal by the showroom deployment, never defined by any page
+[source,sh]
+----
+echo "$COCKPIT_PROVIDED_TOKEN"       # MUST-NOT-FIRE  exempted by the comment above
+----
+
+// A MALFORMED exemption: a name and no reason. The expectation is declared on THIS line for the
+// one below, because appending a marker to the exemption itself would make it an exemption WITH
+// trailing text — the legal form — so the line would stop being the defect it is here to prove.
+// MUST-FIRE-NEXT-LINE
+// lint-allow: demo-region-identifier NO_REASON_GIVEN
+
+// ── the shapes that must stay QUIET ──────────────────────────────────────────────────────────
+[source,sh]
+----
+echo "$HOME and $PATH"               # MUST-NOT-FIRE  the shell provides both
+echo "$KUBERNETES_SERVICE_HOST"      # MUST-NOT-FIRE  the kubelet injects it into every pod
+echo "${MAYBE_UNSET:-fallback}"      # MUST-NOT-FIRE  the :- form exists to tolerate an unset name
+oc whoami                            # MUST-NOT-FIRE  a real command, not a page-created file
+----
+
+.Captured output — texinfo, never harvested
+[source,texinfo]
+----
+$THIS_IS_PRINTED_OUTPUT is what the terminal SHOWED   # MUST-NOT-FIRE
+----
+endif::demo[]
+
+// A definition OUTSIDE every guard renders in both flavors — the shape the fix produces, and the
+// one a guard must never flag. The `ifndef::demo[…]` line beside it is the INLINE conditional form:
+// it opens no region, and the preprocessor keeps or drops the one line. It is here so the inline
+// form has a witness of its own — read as a region opener it would swallow the rest of the file,
+// and read as ordinary text it would leak a lab-only definition into the demo projection.
+[source,sh]
+----
+export SHARED_NS="$(oc whoami)-dev"
+ifndef::demo[INLINE_NS=lab-only-value]
+----
+
+// A definition inside a `[tabs]` block — this project's house standard for dual-path CLI|Console
+// steps. `====` is a CONTAINER delimiter, not a verbatim one; a guard that treats it as verbatim
+// goes blind to every shell block in every tabs block on the site. That bug was live in this file
+// for one hour on 2026-08-12 and produced two false positives on agentic-ai, so it gets a case.
+[tabs]
+====
+Console::
++
+--
+Open the console and read the namespace from the project selector.
+--
+CLI::
++
+--
+[source,sh]
+----
+TABBED_NS=$(oc project -q)
+----
+--
+====
+
+// Three assignments on ONE line, separated by spaces — a real shape in
+// resilience-multicluster-dr's demo arc, and the second false positive that hour: only the first
+// name is at the start of the line, so a definition pattern anchored on `^` misses the other two.
+[source,sh]
+----
+FIRST=a SECOND=b THIRD=c
+----
+
+ifdef::demo[]
+[source,sh]
+----
+oc get pods -n $SHARED_NS            # MUST-NOT-FIRE  defined in a shared, unguarded region above
+oc get pods -n $TABBED_NS            # MUST-NOT-FIRE  defined inside a [tabs] block above
+echo "$SECOND $THIRD"                # MUST-NOT-FIRE  space-separated assignments on one line
+----
+endif::demo[]
