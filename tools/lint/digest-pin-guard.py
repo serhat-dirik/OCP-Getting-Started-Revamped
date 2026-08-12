@@ -15,7 +15,7 @@ publishes (v4.16…v4.22 are all absent) and it has been frozen on v4.15.0 since
 freshness grade D and "unapplied Critical or Important security errata". A floating tag had drifted
 to something OLDER than the workshop's own OCP floor and nobody could see it from the manifest.
 
-SCOPE — TWO TIERS, EACH ONE THE TREE PASSES TODAY.
+SCOPE — THREE TIERS, EACH ONE THE TREE PASSES TODAY.
 
 Tier 1, the curated Parasol task library, EVERY image whatever its registry:
 
@@ -38,6 +38,17 @@ reference in the install path —
 — must be digest-pinned. "Entitled registry" means `registry.redhat.io/**`, the one that needs a
 pull secret and the one where this whole finding started. Measured after the sweep: 53 references
 judged, 2 exempt, 0 unpinned.
+
+Tier 3, added 2026-08-12: every ENTITLED-REGISTRY image reference that an attendee RUNS, inside
+`content/**` —
+
+    content/**/*.adoc, but ONLY inside a `[source,…,role=execute]` listing block   (141 files,
+                                                                                    1108 blocks)
+
+— must be digest-pinned. Measured today: 36 image references inside those blocks, of which 5 are
+entitled and judged, 30 exempt (16 UBI, 13 in-cluster, 1 `image: auto`) and 1 a Helm placeholder.
+0 unpinned. See "TIER 3 AND THE CARVE-OUT IT REPLACES" below for why this is a live-command tier and
+not a `content/**` sweep.
 
 WHY TIER 2 EXISTS NOW AND DID NOT THIS MORNING. The first version of this guard was deliberately
 tier 1 only, because a `git grep` for floating `image:` tags returned 55 hits outside this
@@ -67,24 +78,73 @@ DELIBERATELY OUT OF SCOPE, so nobody reads a green tick as more than it is:
     devfile). Entitled, but the IDE base image is chosen by the Dev Spaces operator and version-
     tagged to the product release; the workshop pins the Dev Spaces VERSION via versions.yaml. Same
     reasoning the sibling `apps/parasol-legacy-claims/devfile.yaml` was carved out under.
-  * `content/**`. Attendee-authored YAML inside lab instructions — teaching material, where a bare
-    `ubi-minimal:latest` is sometimes the point.
+  * everything in `content/**` that is NOT inside a `role=execute` block. That is the whole of
+    tier 3's design and it has its own section, next.
 
-    THE EXCEPTION THIS CARVE-OUT USED TO NAME IS CLOSED (2026-08-12): observability-health-scale's
-    `claims-burst` ran the frozen el8 `ose-cli:latest` by hand and is now pinned onto the same
-    `ose-cli-rhel9:v4.22@sha256:…` its own entry state runs. Do not restore the old wording — it
-    advertised a known-broken site as a documented exemption, which is how it survived the sweep
-    that fixed the other 44.
+TIER 3 AND THE CARVE-OUT IT REPLACES.
 
-    The carve-out itself STAYS, and widening it is not the obvious win it looks like. Content
-    legitimately contains image references this guard must not touch: captured output from a real
-    run (which stays as captured), dated `//` provenance comments recording what a command looked
-    like on the day it was measured, and prose that names an old tag precisely in order to warn
-    about it — the m13 fix ships one of each. A naive `content/**` sweep fails all three and would
-    push an author toward doctoring a captured record to appease a linter. If this is ever widened,
-    it needs to distinguish a LIVE command block from a record of one; until someone builds that,
-    the honest position is a scoped guard plus this note. See task: "should digest-pin-guard police
-    content/**".
+The old note here said `content/**` was out of scope entirely, and named observability-health-scale's
+hand-typed `claims-burst` as "a real finding awaiting its module owner". It waited 32 days. The sweep
+that repinned 44 sibling `ose-cli:latest` references walked straight past it, because the sweep read
+manifests and this one was a command an attendee TYPES; the module's own troubleshooting page already
+documented the symptom (ErrImagePull, and the HPA never moves). It was fixed in 78e71b0.
+
+The obvious response — "police `content/**` too" — is wrong as stated, and the reason is the whole
+design of this tier. Content legitimately contains image references a linter must not touch, and
+78e71b0 ships one of each kind as a ready-made fixture:
+
+  1. A live command block the attendee actually runs: `[source,sh,role=execute]` around
+     `oc run … --image=…`. THIS is what tier 3 polices, and nothing else.
+  2. Captured output from a real run. House rule: captured output stays exactly as captured.
+     `packaging-distributing/lab.adoc` carries a floating `redhat-operator-index:v4.22` inside a
+     `.Expected output` / `[source,texinfo]` block, under a grounding comment that says in as many
+     words not to re-template it; `pipelines-fundamentals/lab.adoc` carries an ELIDED
+     `ubi9/openjdk-17@sha256:...`, which a naive check reports as a MALFORMED digest — the worse of
+     this file's two findings, raised against a line nobody may edit.
+  3. A dated `//` provenance comment recording what a command looked like on the day it was
+     measured (`observability-health-scale/lab.adoc`, the 2026-07-31 as-run record that still names
+     `ose-cli:latest` on purpose), plus prose that names an old tag precisely in order to warn about
+     it. "Fixing" either would make it claim a run that never happened.
+
+A naive sweep fails 2 and 3 and pushes an author toward doctoring a captured record to appease a
+linter, which is worse than the gap it closes. So tier 3 keys on ASCIIDOC STRUCTURE, never on the
+image name: a reference is judged only when it sits inside a listing block whose opener carries
+`role=execute` — the same block the cockpit's click-to-run button sends to the attendee's terminal.
+Prose, `//` line comments, `////` comment blocks, `[source,yaml]` display manifests and
+`[source,texinfo]` captured output all open no such block and are therefore never read at all.
+
+WHY THIS IS WORTH A TIER, measured rather than asserted. Replaying this detector over the content
+tree's own history (`git ls-tree` at each revision, no working-tree mutation):
+
+    2026-07-11 → 2026-07-18   m08's instructor page, TWO sites: `--image=…/rhtas/client-server`
+                              and the same ref inside an `--overrides='{…"image":"…"}'` JSON body.
+                              No tag at all, so an implicit `:latest`. They left the tree when the
+                              module was rebalanced for unrelated reasons — nobody ever noticed the
+                              pin.
+    2026-07-11 → 2026-08-12   m12's `claims-burst`, TWO sites, 32 days, through the 44-site sweep
+                              and through two later commits that edited that very file.
+    today                     0.
+
+So the rule this tier enforces would have been RED for essentially the whole authoring life of the
+content tree, on defects that were real, and GREEN today. That is the evidence that decided it; a
+count of today's sites alone (5, all pinned) would have argued the other way.
+
+WHAT TIER 3 DELIBERATELY DOES NOT DO:
+  * It does not widen the registry rule. Only `registry.redhat.io/**` is judged, exactly as tier 2,
+    so UBI (16 sites in execute blocks, deliberately floating teaching material — `jobs-batch-kueue`
+    applies bare `ubi-minimal:latest` Jobs and that is the point), in-cluster ImageStreamTags (13)
+    and `docker.io` (the registry-governance module's subject matter) stay exempt. Widening would
+    open the gate on ~30 pre-existing findings, which is the failure tier 2 was sequenced to avoid.
+  * It does not read arbitrary `field: registry.redhat.io/…` YAML the way tier 2 does. In content
+    that over-fires: `registry-images-catalog-governance/instructor.adoc` puts an
+    ImageDigestMirrorSet in a `role=execute` heredoc whose `- source: registry.redhat.io/ubi9` is a
+    mirror-selector PREFIX, not a pullable image — digest-pinning it would break the mirror rule it
+    teaches. Tier 3 therefore recognizes only the three constructs that actually name a pull target,
+    and all three have real instances in this tree's history: `--image=`, a YAML `image:` field, and
+    a JSON `"image":` field.
+  * It does not exempt `#` shell comments inside an execute block. Click-to-run sends the whole
+    block, and a commented-out `oc run --image=…` is an example an attendee may uncomment; there are
+    zero such lines today, so no verdict rests on this either way.
 
 WHAT COUNTS AS PINNED. `repo@sha256:<64 lowercase hex>`, with or without a human-readable tag in
 front (`repo:v4.22@sha256:…`). The composite form is preferred and is what three sibling Tasks
@@ -202,6 +262,38 @@ ENTITLED_FIELD = _compile(
 # apps/parasol-legacy-claims/devfile.yaml has. See the docstring's out-of-scope list.
 DEVSPACES_UDI = _compile("DEVSPACES_UDI", r"^registry\.redhat\.io/devspaces/")
 
+# ── TIER 3's structure patterns. These decide WHERE a reference is, which is the only thing that
+# separates a command an attendee runs from a record of one. Deliberately the same shapes
+# click-to-run-guard.py uses, so the two guards agree on what an execute block is: both count 1108
+# blocks across 141 files on this tree, which is the cross-check that says this walk is right.
+
+# The block-opener line. Accepts `role=execute` bare and the quoted multi-word form
+# (`role="execute send-to-tty-bottom"`) that click-to-run.js also understands — zero of the latter
+# in content today, but a tier that silently stopped reading them would be invisible.
+EXEC_OPENER = _compile("EXEC_OPENER",
+                       r'^\[source\b[^\]]*\brole\s*=\s*(?:"(?P<qval>[^"]*)"|(?P<uval>[^,"\]]+))')
+
+# A listing delimiter: 2+ repeats of `-`, the only delimiter this repo's [source] blocks use.
+LISTING_DELIM = _compile("LISTING_DELIM", r"^-{2,}\s*$")
+
+# An AsciiDoc comment BLOCK fence. Everything between a matched pair is commented out of the
+# rendered page, so an execute block inside one is not a command anyone can run. Zero in content
+# today; handled anyway, because the alternative is a tier that fires on text no attendee can see.
+COMMENT_FENCE = _compile("COMMENT_FENCE", r"^/{4,}\s*$")
+
+# ── TIER 3's three image-bearing constructs. NOT "any field whose value is entitled" (tier 2's
+# rule): in content that reads an ImageDigestMirrorSet's `- source:` prefix as an image. Each of
+# these three has a real instance in this tree's history — see the docstring's replay.
+
+# `--image=<ref>` / `--image <ref>`, the shape m12's claims-burst and m08's cosign client both used.
+# `--image-pull-policy=…` does not match: `-` is not in the `[= ]` that must follow.
+IMAGE_FLAG = _compile("IMAGE_FLAG", r"--image[= ]\s*([^\s\\\"']+)")
+
+# `"image": "<ref>"`, the shape inside `oc run --overrides='{"spec":{"containers":[{…}]}}'`. m08
+# carried its unpinned reference twice on consecutive lines — once as a flag, once in this JSON —
+# and a guard that read only the flag would have called that line clean.
+IMAGE_JSON_FIELD = _compile("IMAGE_JSON_FIELD", r'"image"[ \t]*:[ \t]*"([^"]+)"')
+
 
 def is_parameter(ref: str) -> bool:
     """Is this a substitution placeholder rather than a real image reference?
@@ -234,6 +326,73 @@ def is_entitled_scope(ref: str) -> bool:
     (rc 2). Both directions move an exit code, which is what makes it a detector and not a comment.
     """
     return bool(ref.startswith("registry.redhat.io/") and not DEVSPACES_UDI.search(ref))
+
+
+def is_execute_block_opener(line: str) -> bool:
+    """Does this line open a listing block the attendee's click-to-run button will SEND?
+
+    This is the whole of tier 3's kind-1/kind-2/kind-3 distinction, and the reason it is a
+    predicate rather than an inline regex test is that it has to be blindable in both directions:
+
+      blinded False — no block ever opens, tier 3 judges nothing, and its execute-block floor
+                      collapses to zero (rc 2). Silence would otherwise look exactly like a clean
+                      content tree.
+      blinded True  — EVERY line opens a block, so a `[source,texinfo]` opener followed by `----`
+                      turns captured output into a live command and the guard reports the frozen
+                      `redhat-operator-index:v4.22` in packaging-distributing's `.Expected output`
+                      (rc 1). That is the over-fire this tier exists to avoid, and it is worth as
+                      much of a canary as the under-fire.
+
+    `role` is split on whitespace rather than substring-matched so `role=executed-elsewhere` — or
+    any future role whose name merely contains the word — does not read as executable.
+    """
+    m = EXEC_OPENER.match(line.strip())
+    if not m:
+        return False
+    val = m.group("qval") if m.group("qval") is not None else m.group("uval")
+    return "execute" in val.split()
+
+
+def iter_execute_blocks(lines: list[str]):
+    """Yield (line_no, text) for every line inside a role=execute listing block.
+
+    The opener must be followed IMMEDIATELY by the delimiter — measured on this tree, all 1108
+    execute blocks are that shape and none is missed by requiring it, so the rule is the tree's
+    own, not a simplification of it.
+
+    Lines between a matched pair of `////` fences are skipped before any of this: they are
+    commented out of the rendered page, so an execute block in there is not a command anyone can
+    run, and firing on one would be firing on text no attendee can see.
+    """
+    # ONE append, not one per branch. A second `live.append(None)` for the fence line itself was
+    # the obvious way to write this and it is unprovable: blinding it only shifts the reported line
+    # numbers, so no exit code moves and `_canary-coverage` correctly reports a detector that can
+    # stop working in silence. With a single append, blinding it empties `live`, which finds zero
+    # execute blocks and collapses the block floor — a refusal, in both modes.
+    live = []
+    fenced = False
+    for line in lines:
+        fence = bool(COMMENT_FENCE.match(line))
+        live.append(None if (fenced or fence) else line)   # None keeps line numbers aligned
+        if fence:
+            fenced = not fenced
+
+    i, n = 0, len(live)
+    while i < n:
+        line = live[i]
+        if line is not None and is_execute_block_opener(line):
+            j = i + 1
+            if j < n and live[j] is not None and LISTING_DELIM.match(live[j]):
+                delim = live[j].rstrip()
+                k = j + 1
+                body = []
+                while k < n and not (live[k] is not None and live[k].rstrip() == delim):
+                    if live[k] is not None:
+                        body.append((k + 1, live[k]))
+                    k += 1
+                yield body
+                i = k          # resume after the closing delimiter (or EOF if unterminated)
+        i += 1
 
 
 def scope_files() -> list[Path]:
@@ -276,6 +435,34 @@ MIN_INSTALL_IMAGES = 40
 # the self-test's probes report under the SAME tier as the real run — a canary that prints "curated
 # task library" while exercising the install path is a log that lies about what it proved.
 T2 = "entitled references in the install path"
+
+# TIER 3's root and label. `content` rglob'd for `*.adoc`, which is exactly what
+# click-to-run-guard.py scans — the two guards must see the same 141 files, or one of them is
+# reading a set the other is not.
+CONTENT_ROOT = REPO / "content"
+T3 = "entitled references in attendee-run command blocks"
+
+
+def content_files() -> list[Path]:
+    """Every AsciiDoc page under content/, sorted. A glob for the same reason as its two siblings:
+    a module that lands tomorrow is policed tomorrow, and the floor below is what notices when the
+    glob stops matching instead."""
+    return sorted(CONTENT_ROOT.rglob("*.adoc"))
+
+
+# Floors, measured 2026-08-12 on this tree: 141 `.adoc` files carrying 1108 role=execute blocks, in
+# which 36 image references appear (5 entitled and judged, 30 exempt, 1 a `{{ .Values… }}`
+# placeholder). Set well below today's numbers, and far above what any plausible truncation gives.
+#
+# The third floor counts references BEFORE the entitled filter on purpose. Judged-only would be a
+# floor of 5 on a number that legitimately moves whenever a module is rewritten — it would redden
+# main for an editorial act. The candidate count is the structural quantity: labs will always run
+# containers, so a collapse there means IMAGE_FLAG / IMAGE_FIELD / IMAGE_JSON_FIELD stopped
+# matching, not that the workshop stopped using images. The entitled predicate collapsing is caught
+# by tier 2's `all_exempt` canary, which exercises the same shared `is_entitled_scope`.
+MIN_CONTENT_FILES = 100
+MIN_CONTENT_BLOCKS = 800
+MIN_CONTENT_REFS = 20
 
 
 # Floors, measured 2026-08-08 on this tree: 9 files (8 curated Tasks + the republished copy) and 24
@@ -361,6 +548,107 @@ def check(files, min_files: int = 1, min_images: int = 1,
         print("\n".join(problems))
         return 1
     print(f"digest-pin-guard: clean — {tier}: {len(files)} file(s), {judged} image(s) "
+          f"digest-pinned, {tail}.")
+    return 0
+
+
+def refs_in_command(text: str) -> list[str]:
+    """Every pull target named on one line of a command block, in the three constructs tier 3
+    recognizes. Order is stable so a line carrying two (m08's flag + `--overrides` JSON) reports
+    both, in the order a reader's eye takes them.
+
+    The YAML field reuses tier 1's IMAGE_FIELD rather than declaring a near-identical twin: it is
+    the same construct, and a second copy is a second thing that can be blinded without the first
+    noticing.
+    """
+    found = []
+    m = IMAGE_FLAG.search(text)
+    if m:
+        found.append(m.group(1))
+    m = IMAGE_FIELD.search(text)
+    if m:
+        found.append(m.group(1))
+    found.extend(m.group(1) for m in IMAGE_JSON_FIELD.finditer(text))
+    return found
+
+
+def check_content(files, min_files: int = 1, min_blocks: int = 1, min_refs: int = 1) -> int:
+    """TIER 3. Judge entitled image references inside role=execute blocks. 0/1/2 as everywhere.
+
+    This is NOT a `check()` call with different parameters, and the difference is the point.
+    `check()` runs a field regex over a whole FILE, which is the right shape for YAML and the wrong
+    shape here: in content, WHERE a reference sits is what decides whether it is a command or a
+    record of one, and a file-wide regex cannot see that. What the two share is the judgment —
+    `is_parameter`, `is_entitled_scope`, `is_digest_pinned` — so blinding any of those still moves
+    all three tiers, which is the property the anti-duplication rule in `check()` exists to protect.
+    """
+    problems, blocks, refs, judged, skipped, exempt = [], 0, 0, 0, 0, 0
+    for path in files:
+        if not path.exists():
+            print(f"ERROR: {path} is missing — refusing to report clean", file=sys.stderr)
+            return 2
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
+        for body in iter_execute_blocks(lines):
+            blocks += 1
+            for line_no, text in body:
+                for ref in refs_in_command(text):
+                    refs += 1
+                    if is_parameter(ref):
+                        skipped += 1
+                        continue
+                    if not is_entitled_scope(ref):
+                        exempt += 1
+                        continue
+                    judged += 1
+                    if is_digest_pinned(ref):
+                        continue
+                    if "@sha256:" in ref:
+                        problems.append(
+                            f"  {rel}:{line_no}: {ref}\n"
+                            f"      malformed digest in a block the attendee RUNS — a pin is "
+                            f"@sha256: followed by exactly 64 lowercase hex characters. This one "
+                            f"is not, so the pull fails in front of the room. If you meant to "
+                            f"ELIDE a digest for readability, that belongs in captured output or "
+                            f"prose, never in a role=execute block.")
+                    else:
+                        problems.append(
+                            f"  {rel}:{line_no}: {ref}\n"
+                            f"      floating tag in a block the attendee RUNS — whatever the "
+                            f"registry serves that minute. This is the m12 `claims-burst` defect: "
+                            f"the el8 `ose-cli` repository froze `:latest` on v4.15.0 and the lab "
+                            f"died with ErrImagePull. Pin it: repo:tag@sha256:<64 hex>, and prefer "
+                            f"the reference the module's own entry state already runs so the two "
+                            f"cannot drift.")
+
+    scope = Scope("digest-pin-guard")
+    scope.require(f"{T3} files", min_files,
+                  "every .adoc page under content/. Reading fewer is not a clean result, it is an "
+                  "unread page — and the count must match click-to-run-guard's, which walks the "
+                  "same set.")
+    scope.require(f"{T3} execute blocks", min_blocks,
+                  "every [source,…,role=execute] block. A collapse here means the opener or the "
+                  "delimiter stopped matching, so tier 3 read no commands at all — which prints "
+                  "identically to a content tree with nothing wrong in it.")
+    scope.require(f"{T3} image references", min_refs,
+                  "every image reference inside those blocks, BEFORE the entitled filter. Labs run "
+                  "containers; a collapse means a construct regex stopped matching, not that the "
+                  "workshop stopped using images.")
+    scope.add(f"{T3} files", len(files))
+    scope.add(f"{T3} execute blocks", blocks)
+    scope.add(f"{T3} image references", refs)
+    collapsed = scope.enforce()
+    if collapsed:
+        return collapsed
+
+    tail = (f"{blocks} execute block(s), {refs} image reference(s) in them, {skipped} parameter "
+            f"reference(s) skipped, {exempt} out-of-scope reference(s) exempt")
+    if problems:
+        print(f"digest-pin-guard: {len(problems)} unpinned image(s) in the {T3} "
+              f"({judged} judged, {tail}).")
+        print("\n".join(problems))
+        return 1
+    print(f"digest-pin-guard: clean — {T3}: {len(files)} file(s), {judged} image(s) "
           f"digest-pinned, {tail}.")
     return 0
 
@@ -478,6 +766,215 @@ def self_test() -> int:
                 print(f"SELF-TEST FAILED: {complaint}", file=sys.stderr)
                 ok = False
 
+        # ── TIER 3's canaries. Every fixture below is copied in SHAPE from a real page, named in
+        # its complaint, because this tier's whole claim is that it can tell a command from a
+        # record of one — and the records it must leave alone are real lines someone would have to
+        # doctor if it got this wrong.
+        #
+        # Each negative fixture carries a pinned entitled ANCHOR inside its own execute block, for
+        # the same reason tier 2's do: a probe that judges nothing would collapse a floor and
+        # report rc 2, which is indistinguishable from the exemption working.
+        pinned_ref = f"registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:{good}"
+        floating_ref = "registry.redhat.io/openshift4/ose-cli:latest"
+        anchor_block = ("[source,sh,role=execute]\n"
+                        "----\n"
+                        f"oc run anchor --image={pinned_ref} --restart=Never\n"
+                        "----\n")
+        adoc_cases = [
+            # ── KIND 2, captured output. The house rule is that captured output stays exactly as
+            # captured, so every one of these must be silent.
+            ("kind2-expected-output.adoc",
+             anchor_block +
+             ".Expected output (the catalog index image)\n"
+             "[source,texinfo]\n"
+             "----\n"
+             "catalog: Red Hat Operators  image: "
+             "registry.redhat.io/redhat/redhat-operator-index:v4.22\n"
+             "----\n", 0,
+             "a FLOATING tag inside `.Expected output` / [source,texinfo] was flagged. That is "
+             "packaging-distributing/lab.adoc's real captured line, sitting under a grounding "
+             "comment that says in as many words not to re-template it — flagging it asks an "
+             "author to doctor a record of a run that happened"),
+            ("kind2-elided-digest.adoc",
+             anchor_block +
+             ".Expected output (parameter names vary by Pipelines version)\n"
+             "[source,texinfo]\n"
+             "----\n"
+             "  registry.redhat.io/ubi9/openjdk-17@sha256:...\n"
+             "----\n", 0,
+             "an ELIDED digest in captured output was flagged. That is "
+             "pipelines-fundamentals/lab.adoc:603, and the finding it would raise is the MALFORMED "
+             "one — the worse of this file's two, against a line nobody may edit"),
+            ("kind2-plain-listing.adoc",
+             anchor_block +
+             "----\n"
+             f"    image: {floating_ref}\n"
+             "----\n", 0,
+             "a floating tag in an UNLABELLED `----` listing was flagged. A listing with no "
+             "[source] attribute line at all is display material, and the click-to-run button "
+             "never appears on it"),
+            ("kind2-source-yaml-display.adoc",
+             anchor_block +
+             "[source,yaml]\n"
+             "----\n"
+             f"            - name: start-nightly-build\n"
+             f"              image: {floating_ref}\n"
+             "----\n", 0,
+             "a floating tag in a [source,yaml] DISPLAY manifest was flagged. That is the exact "
+             "shape m07's concept page carried for weeks — a CronJob printed to illustrate a "
+             "point, not applied by anyone"),
+
+            # ── KIND 3, records and warnings. Rewriting any of these would make it claim
+            # something that never happened.
+            ("kind3-line-comment.adoc",
+             anchor_block +
+             "// GROUNDING 2026-07-31: driven with the exact command AS IT THEN STOOD —\n"
+             f"// `oc -n user3-dev run claims-burst --image={floating_ref} --restart=Never`.\n", 0,
+             "a dated // provenance comment was flagged. That is "
+             "observability-health-scale/lab.adoc:666, deliberately left as-run; 'fixing' it makes "
+             "it claim a measurement that never took place"),
+            ("kind3-prose.adoc",
+             anchor_block +
+             "A floating `" + floating_ref + "` would be whatever the registry served that "
+             "minute — and on this repository `latest` has been frozen since 2025.\n", 0,
+             "PROSE naming an old tag in order to WARN about it was flagged. The warning cannot be "
+             "written without naming the thing it warns about"),
+            ("kind3-comment-fence.adoc",
+             anchor_block +
+             "////\n"
+             "[source,sh,role=execute]\n"
+             "----\n"
+             f"oc run old --image={floating_ref} --restart=Never\n"
+             "----\n"
+             "////\n", 0,
+             "an execute block inside a //// comment fence was flagged. It is commented out of the "
+             "rendered page, so no attendee can run it and no click-to-run button exists for it"),
+
+            # ── Responsibility and shape, inside genuine execute blocks.
+            ("t3-pinned-anchor.adoc", anchor_block, 0,
+             "a correctly pinned entitled reference in a live command block was flagged"),
+            ("t3-mirror-source.adoc",
+             anchor_block +
+             "[source,sh,role=execute]\n"
+             "----\n"
+             "cat <<'EOF'\n"
+             "  imageDigestMirrors:\n"
+             "    - source: registry.redhat.io/ubi9\n"
+             "EOF\n"
+             "----\n", 0,
+             "an ImageDigestMirrorSet's `- source:` was read as an image. It is a mirror-selector "
+             "PREFIX, not a pull target — registry-images-catalog-governance/instructor.adoc:186 "
+             "ships one, and pinning it would break the very mirror rule that block teaches. This "
+             "is why tier 3 does not reuse tier 2's any-field regex"),
+            ("t3-ubi-exempt.adoc",
+             anchor_block +
+             "[source,sh,role=execute]\n"
+             "----\n"
+             "    image: registry.access.redhat.com/ubi9/ubi-minimal:latest\n"
+             "----\n", 0,
+             "tier 3 fired on a UBI tag in a live block. Sixteen of those run in jobs-batch-kueue's "
+             "Jobs on purpose; firing here opens the gate on pre-existing findings, which is the "
+             "failure tier 2 was sequenced to avoid"),
+            ("t3-incluster-exempt.adoc",
+             anchor_block +
+             "[source,sh,role=execute]\n"
+             "----\n"
+             "    image: image-registry.openshift-image-registry.svc:5000/openshift/tools:latest\n"
+             "----\n", 0,
+             "tier 3 fired on an in-cluster ImageStreamTag in a live block — a digest there pins "
+             "away the thing the imagestream exists to do"),
+            ("t3-param-skipped.adoc",
+             anchor_block +
+             "[source,sh,role=execute]\n"
+             "----\n"
+             "    image: {{ .Values.image }}\n"
+             "----\n", 0,
+             "a Helm placeholder inside a live block was judged instead of skipped — "
+             "packaging-distributing/lab.adoc:294 has one"),
+
+            # ── KIND 1, the positives. One per construct and one per emit site.
+            ("t3-flag-floating.adoc",
+             "[source,sh,role=execute]\n"
+             "----\n"
+             f"oc -n $NS run claims-burst --image={floating_ref} --restart=Never\n"
+             "----\n", 1,
+             "the m12 `claims-burst` defect — a floating entitled tag on `--image=` in a live "
+             "command block — did not trip tier 3. That is the regression this whole tier exists "
+             "to prevent, and it survived 32 days and a 44-site sweep without it"),
+            ("t3-yaml-field-floating.adoc",
+             "[source,sh,role=execute]\n"
+             "----\n"
+             "oc apply -f - <<'EOF'\n"
+             f"          image: {floating_ref}\n"
+             "EOF\n"
+             "----\n", 1,
+             "a floating entitled tag in a YAML `image:` field inside a heredoc the attendee "
+             "APPLIES did not trip tier 3"),
+            ("t3-json-field-floating.adoc",
+             "[source,sh,role=execute]\n"
+             "----\n"
+             "oc run c --overrides='{\"spec\":{\"containers\":[{\"name\":\"c\",\"image\":"
+             "\"registry.redhat.io/rhtas/client-server-rhel9\"}]}}'\n"
+             "----\n", 1,
+             "a floating entitled reference inside an `--overrides` JSON body did not trip tier 3. "
+             "m08 carried its unpinned ref on two consecutive lines, once as a flag and once like "
+             "this, and a guard reading only the flag would have called the second line clean. "
+             "Note it has NO tag at all, which is an implicit :latest wearing no clothes"),
+            ("t3-quoted-role.adoc",
+             '[source,sh,role="execute send-to-tty-bottom"]\n'
+             "----\n"
+             f"oc run x --image={floating_ref}\n"
+             "----\n", 1,
+             "the quoted multi-word `role=\"execute …\"` opener was not recognized as a live "
+             "block. click-to-run.js honours that form, so a block wearing it is one an attendee "
+             "can still click"),
+            ("t3-malformed.adoc",
+             "[source,sh,role=execute]\n"
+             "----\n"
+             "oc run x --image=registry.redhat.io/openshift4/ose-cli@sha256:deadbeef\n"
+             "----\n", 1,
+             "a truncated digest in a live command block did not trip tier 3. It has the SHAPE of "
+             "a pin, so it passes any '@sha256: appears in the string' check while failing the "
+             "pull in front of the room"),
+            ("t3-role-lookalike.adoc",
+             anchor_block +
+             "[source,sh,role=executed-elsewhere]\n"
+             "----\n"
+             f"oc run x --image={floating_ref}\n"
+             "----\n", 0,
+             "a role whose name merely CONTAINS the word execute was treated as executable. The "
+             "role value is split on whitespace for exactly this reason"),
+        ]
+        for name, text, expected, complaint in adoc_cases:
+            probe = Path(d) / name
+            probe.write_text(text)
+            if check_content([probe]) != expected:
+                print(f"SELF-TEST FAILED: {complaint}", file=sys.stderr)
+                ok = False
+
+        # Tier 3's floors, each exercised the way it actually fails. A page that is GONE first —
+        # same reasoning as the missing Task below.
+        if check_content([Path(d) / "no-such-page.adoc"]) != 2:
+            print("SELF-TEST FAILED: a missing content page did not exit 2 — a renamed module "
+                  "would read as a page with no unpinned commands.", file=sys.stderr)
+            ok = False
+        anchor_page = Path(d) / "t3-pinned-anchor.adoc"
+        if check_content([anchor_page], min_files=MIN_CONTENT_FILES) != 2:
+            print("SELF-TEST FAILED: a collapsed content FILE set did not exit 2 — a broken glob "
+                  "would report clean over pages it never opened.", file=sys.stderr)
+            ok = False
+        if check_content([anchor_page], min_blocks=MIN_CONTENT_BLOCKS) != 2:
+            print("SELF-TEST FAILED: a collapsed EXECUTE-BLOCK count did not exit 2. This is the "
+                  "one that matters most: a blinded opener or delimiter reads every page and finds "
+                  "no commands, which prints identically to a content tree with nothing wrong.",
+                  file=sys.stderr)
+            ok = False
+        if check_content([anchor_page], min_refs=MIN_CONTENT_REFS) != 2:
+            print("SELF-TEST FAILED: a collapsed IMAGE-REFERENCE count did not exit 2 — a "
+                  "construct regex that stopped matching would report clean over live commands.",
+                  file=sys.stderr)
+            ok = False
+
         # A file that is GONE must be rc 2, not a clean zero-image pass. A renamed or moved Task is
         # how a curated artifact quietly stops being policed, and "I read nothing" must never be
         # spelled the same way as "I read everything and it was fine".
@@ -541,6 +1038,28 @@ def self_test() -> int:
               f"whatever the bug returns.", file=sys.stderr)
         ok = False
 
+    # Tier 3's discovery, the same floor check as tier 2's — plus the cross-check that gives this
+    # tier its confidence: click-to-run-guard.py walks the same `content/**.adoc` set with an
+    # independently written opener and delimiter, and both count 1108 blocks. If the two ever
+    # disagree, one of them is reading a set of commands the other is not, and neither's clean
+    # result means what it says.
+    content_found = len(content_files())
+    if content_found < MIN_CONTENT_FILES:
+        print(f"SELF-TEST FAILED: content discovery finds {content_found} page(s), below its own "
+              f"floor of {MIN_CONTENT_FILES}. Either the glob broke or {CONTENT_ROOT.name}/ moved; "
+              f"re-state the floor deliberately, do not lower it to whatever the bug returns.",
+              file=sys.stderr)
+        ok = False
+    blocks_found = sum(1 for p in content_files()
+                       for _ in iter_execute_blocks(
+                           p.read_text(encoding="utf-8", errors="replace").splitlines()))
+    if blocks_found < MIN_CONTENT_BLOCKS:
+        print(f"SELF-TEST FAILED: the content walk finds {blocks_found} execute block(s), below "
+              f"its own floor of {MIN_CONTENT_BLOCKS}. Cross-check against "
+              f"`tools/lint/click-to-run-guard.py`, which counts the same blocks a different way; "
+              f"if it still reports ~1108, this walk is what broke.", file=sys.stderr)
+        ok = False
+
     for failure in Scope.self_check():
         print(f"SELF-TEST FAILED: {failure}", file=sys.stderr)
         ok = False
@@ -553,7 +1072,14 @@ def self_test() -> int:
           "are refusals, not clean runs; the file floor matches discovery. Tier 2: an entitled "
           "floating tag fails; a pinned `cli:` value, a UBI tag, an in-cluster ImageStreamTag and "
           "a Dev Spaces UDI are all correctly left alone; a collapsed file set and a run that "
-          "exempts everything are refusals.")
+          "exempts everything are refusals. Tier 3: a floating or malformed entitled reference "
+          "fails in a role=execute block, whether it arrives on --image=, in a YAML image: field "
+          "or in an --overrides JSON body, and whether the role is bare or quoted; captured output "
+          "(.Expected output, [source,texinfo], a bare listing, a [source,yaml] display manifest), "
+          "a dated // provenance comment, warning prose, a //// comment fence, an IDMS mirror "
+          "`source:` prefix, a UBI or in-cluster reference, a Helm placeholder and a role that "
+          "merely contains the word execute are ALL correctly left alone; a missing page and a "
+          "collapsed file, block or reference scope are refusals.")
     return 1
 
 
@@ -577,13 +1103,15 @@ def main(argv=None) -> int:
     if args.self_test:
         return self_test()
 
-    # BOTH tiers run before either verdict is returned, deliberately: a tier-1 finding must not
-    # hide a tier-2 one from whoever is reading the log. rc 2 dominates rc 1 dominates rc 0, which
-    # `max` gives directly — "could not inspect" outranks "found something" outranks "clean".
+    # ALL THREE tiers run before any verdict is returned, deliberately: a tier-1 finding must not
+    # hide a tier-2 or tier-3 one from whoever is reading the log. rc 2 dominates rc 1 dominates
+    # rc 0, which `max` gives directly — "could not inspect" outranks "found something" outranks
+    # "clean".
     tier1 = check(scope_files(), MIN_FILES, MIN_IMAGES)
     tier2 = check(install_path_files(), MIN_INSTALL_FILES, MIN_INSTALL_IMAGES,
                   field=ENTITLED_FIELD, only=is_entitled_scope, tier=T2)
-    return max(tier1, tier2)
+    tier3 = check_content(content_files(), MIN_CONTENT_FILES, MIN_CONTENT_BLOCKS, MIN_CONTENT_REFS)
+    return max(tier1, tier2, tier3)
 
 
 if __name__ == "__main__":
