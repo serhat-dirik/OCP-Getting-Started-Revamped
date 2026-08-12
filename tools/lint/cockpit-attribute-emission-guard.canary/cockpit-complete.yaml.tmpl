@@ -1,0 +1,73 @@
+{{- /*
+  Canary cockpit — the CORRECT shape. Every trap the real templates set for a text-level parser is
+  planted here on purpose, and the self-test asserts the exact extracted key set, so any one of
+  them regressing changes the answer.
+
+  Trap 1 — NESTED BLOCKS. Four `if`/`range` blocks sit between the first key and the last. A scan
+  that stopped at the first `{{- end }}` would return the first few keys and report the rest
+  missing, which is a guard that fires on a correct tree.
+
+  Trap 2 — A KEY-SHAPED LINE INSIDE THIS COMMENT. The next line is one:
+    fake_url: https://not-a-real-emission.invalid
+  showroom.yaml carries the same shape for real (`parameter: quoting keeps the embedded YAML
+  document well-formed …`). If Helm comments are not stripped before keys are matched, `fake_url`
+  is read as an emission that does not exist.
+
+  Named .yaml.tmpl, not .yaml: this is Helm, not YAML, and no linter should try to parse it.
+*/ -}}
+{{- define "canary.userData" }}
+    user: {{ .user }}
+    page-user: {{ .user }}
+    cluster_domain: {{ .domain }}
+    ocp_console_url: https://console-openshift-console.{{ .domain }}
+    # Trap 3 — a `#` YAML comment naming an attribute in KEY POSITION. Both real templates carry
+    # key-shaped `#` lines (`# why:`, `#   error:`). If they are not stripped, the line below reads
+    # as an emission and this cockpit looks complete while being short:
+    # never_emitted_url: https://not-a-real-emission.invalid
+    rhdh_url: https://backstage-developer-hub-rhdh.{{ .domain }}
+    student_argo_url: https://student-gitops-server-student-gitops.{{ .domain }}
+    sonarqube_url: https://sonarqube-sonarqube.{{ .domain }}
+    acs_console_url: https://central-stackrox.{{ .domain }}
+    mta_url: https://mta-openshift-mta.{{ .domain }}
+    real_host_url: https://gitea-ogsr-gitea.{{ .domain }}
+    {{- /* Trap 2, INSIDE the block — this is where it has to be to matter, because only the define
+           body is scanned. showroom.yaml carries the same shape for real: a Helm comment inside
+           its payload template whose prose wraps onto a line reading
+             parameter: quoting keeps the embedded YAML document well-formed whatever comes back.
+           The next line is that shape, naming an attribute in KEY POSITION. If Helm comments are
+           not stripped before keys are matched, it reads as an emission that does not exist:
+             devspaces_url: https://devspaces.example.com
+           and this cockpit would look like it emits an attribute it has never heard of. */ -}}
+    {{- /* Conditional emission, exactly as the real templates do it for maas_model /
+           maas_endpoint / cluster_ocp_version: emitting a BLANK merges over the soft default and
+           the sentence loses its subject, so the key is omitted rather than emptied when the value
+           is not known. A conditionally-emitted key COUNTS as emitted — the template knows about
+           it, which is the question a static file can answer. */ -}}
+    {{- if .root.Values.maasModel }}
+    maas_model: {{ .root.Values.maasModel | quote }}
+    {{- end }}
+    {{- if .root.Values.maasEndpoint }}
+    maas_endpoint: {{ .root.Values.maasEndpoint | quote }}
+    {{- end }}
+    {{- if .root.Values.ocpVersion }}
+    cluster_ocp_version: {{ .root.Values.ocpVersion | quote }}
+    {{- end }}
+    {{- /* Trap 4 — an INTERPOLATED key name. showroom.yaml emits `module-{{ $slug }}-hidden` this
+           way. It is not an antora.yml attribute, so it is correctly invisible; what matters is
+           that the range block's `end` is depth-matched rather than mistaken for the define's. */ -}}
+    {{- range $slug := .disabledModules }}
+    module-{{ $slug }}-hidden: "true"
+    {{- end }}
+    guid: {{ .user }}
+{{- end }}
+{{- /* Everything below the define is the rest of a cockpit chart. It carries keys of its own
+       (`name:`, `namespace:`, `kind:`) which must NOT be read as attribute emissions — the guard
+       reads the named template's body, not the file. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canary-userdata
+  namespace: canary
+data:
+  user_data.yml: |
+{{- include "canary.userData" . }}

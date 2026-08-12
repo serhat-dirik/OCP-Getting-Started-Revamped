@@ -607,8 +607,13 @@ jobs:
         # (664 files, 53 references, 0 unpinned). It reads any YAML field, not just `image:`,
         # because helm/bootstrap/values.yaml's `images.cli` is one value feeding ten Jobs.
         #
-        # UBI base images, in-cluster ImageStreamTags, Dev Spaces UDIs and content/** are still out
-        # of scope. The guard's own docstring records each one and why; widen it there, not here.
+        # UBI base images, in-cluster ImageStreamTags and Dev Spaces UDIs are still out of scope.
+        # content/** is NOT, since tier 3 (b8c7f41): an entitled image reference inside a listing
+        # block whose opener carries `role=execute` is a command an attendee actually runs, so it
+        # is policed like any other. What stays out of scope under content/** is everything that is
+        # not a live command — captured output, `//` provenance records and warning prose — which
+        # is the distinction the tier is built on. The guard's own docstring records each one and
+        # why; widen it there, not here.
         run: |
           rc=0
           python3 tools/lint/digest-pin-guard.py --self-test || rc=$?
@@ -2051,3 +2056,143 @@ jobs:
           echo "      npx antora --log-failure-level=warn \"site-\$f.yml\"; done)"
           echo "  tools/lint/demo-beat-chip-guard.py --built-demo www/demo \\"
           echo "      --built-non-demo www/workshop --built-non-demo www/instructor"
+
+  cockpit-attribute-emission:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # Hard dependency, same pin the image-pull-policy job uses. content/antora.yml is plain
+        # YAML and this guard parses it rather than pattern-matching it; a missing parser exits 2,
+        # which the self-test assertion below turns into a failure. It can never degrade into a
+        # silent pass — verified locally on an interpreter without PyYAML: rc 2 in both modes.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: A cockpit that does not emit an attribute serves the placeholder to every attendee
+        # THIS DEFECT HAS SHIPPED THREE TIMES. content/antora.yml gives an attribute a SOFT
+        # (@-suffixed) default pointing at apps.example.com; a cockpit ConfigMap is supposed to
+        # override it at deploy time; when the cockpit stays silent the placeholder wins and the
+        # reader gets a dead link. 2026-07-31: sonarqube_url + acs_console_url, which killed the
+        # Console tab of exercises 2 and 4 for every attendee. 2026-08-12: rhdh_url (12 content
+        # references) and student_argo_url (8), missing from BOTH cockpits — measured on the served
+        # cockpit as 6 and 3 placeholder hosts across seven lab pages. 2026-08-12: sonarqube_url,
+        # acs_console_url and mta_url never copied into showroom-demos.yaml. All three fixed in
+        # 44cc8f4, and showroom-demos.yaml's own comment asks for this gate by name.
+        #
+        # WHY IT IS A SOURCE-LEVEL CHECK AND NOT A BUILT-SITE ONE. A local Antora build renders the
+        # placeholder for EVERY one of these attributes by construction — there is no cluster, so
+        # the soft default always wins. Grepping a built site for example.com therefore fires on
+        # all of them, always, and distinguishes nothing. The invariant only exists across three
+        # inputs that must move together (content/antora.yml, content/modules/**, and BOTH cockpit
+        # templates), so that is where it is checked.
+        #
+        # Nothing here reasons about a live cluster. Whether an emitted value points at the RIGHT
+        # host is `ws doctor`'s "cockpit attributes" row, against a real deployment; this job
+        # answers only the question a file can answer — does the cockpit know about the key at all.
+        run: |
+          rc=0
+          python3 tools/lint/cockpit-attribute-emission-guard.py --self-test || rc=$?
+          # Exactly 1 = both placeholder families classified (and a real host that merely contains
+          # the word "example" correctly NOT), the Helm define-block parser survived nested
+          # if/range blocks and both comment styles, instance 2 was reconstructed and flagged per
+          # cockpit BY NAME, and every EXEMPTIONS rot direction fired. 0 = a detector is blind;
+          # 2 = a canary slipped through, a fixture is missing, PyYAML is absent, or the scope
+          # ledger broke. Detection is unproven in every one of those cases.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::cockpit-attribute-emission-guard self-test must exit 1 (canaries" \
+                 "detected, correct defaults stay silent); got rc=$rc. The guard's detection is" \
+                 "unproven — refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/cockpit-attribute-emission-guard.py
+      - name: Replay the three historical instances against COPIES of the real templates
+        # The step above proves the detector on FIXTURES. This one proves it on the actual
+        # production templates, because a gate nobody has watched fire is a gate nobody should
+        # trust — and a fixture can drift away from the shape of the thing it stands for without
+        # anyone noticing. Each instance is reconstructed by deleting the emission line(s) from a
+        # COPY; the real templates are never modified. The guard must exit 1 on every one, and 0 on
+        # the untouched tree, so "it fails on everything" cannot pass this step.
+        #
+        # A reconstruction that can no longer FIND the line it means to delete is a hard failure,
+        # not a skip: it means the templates changed shape and the replay is proving nothing.
+        run: |
+          set -u
+          tmp="$(mktemp -d)"
+          src=gitops/workshop-config/templates
+          fail=0
+
+          drop() {   # drop <out> <in> <key>...  — copy, then remove each `<key>: https://…` line
+            out="$1"; shift
+            in="$1"; shift
+            cp "$in" "$out"
+            for key in "$@"; do
+              if ! grep -qE "^[[:space:]]*${key}:[[:space:]]*https://" "$out"; then
+                echo "::error::reconstruction could not find an emission line for ${key} in" \
+                     "${in} — the templates changed shape, so this replay would prove nothing."
+                exit 1
+              fi
+              grep -vE "^[[:space:]]*${key}:[[:space:]]*https://" "$out" > "${out}.new"
+              mv "${out}.new" "$out"
+            done
+            return 0
+          }
+
+          expect_finding() {   # expect_finding <label> <guard args...>
+            label="$1"; shift
+            rc=0
+            # rc is read DIRECTLY, never through a pipeline: `$?` after a pipe is the LAST
+            # command's status, so `guard | tee` would report tee's 0 on every single run.
+            python3 tools/lint/cockpit-attribute-emission-guard.py "$@" \
+              > "$tmp/replay.out" 2>&1 || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::error::${label}: the guard exited ${rc}, expected 1 (a finding). This is a" \
+                   "MEASURED historical defect; a guard that does not catch it is not a gate."
+              cat "$tmp/replay.out"
+              fail=1
+            else
+              echo "PASS  ${label}"
+              grep -E '^  \{|missing from' "$tmp/replay.out" || true
+            fi
+            # An explicit return, because this function is called as a BARE COMMAND under `set -e`
+            # (GitHub runs `run:` as `bash -e`): a trailing statement that happens to exit non-zero
+            # would kill the whole step mid-replay and look like a different failure entirely.
+            return 0
+          }
+
+          drop "$tmp/i1-showroom.yaml" "$src/showroom.yaml" sonarqube_url acs_console_url
+          expect_finding \
+            "instance 1 (2026-07-31): sonarqube_url + acs_console_url absent from showroom.yaml" \
+            --cockpit "showroom.yaml=$tmp/i1-showroom.yaml"
+
+          drop "$tmp/i2-showroom.yaml" "$src/showroom.yaml" rhdh_url student_argo_url
+          drop "$tmp/i2-showroom-demos.yaml" "$src/showroom-demos.yaml" rhdh_url student_argo_url
+          expect_finding \
+            "instance 2 (2026-08-12): rhdh_url + student_argo_url absent from BOTH cockpits" \
+            --cockpit "showroom.yaml=$tmp/i2-showroom.yaml" \
+            --cockpit "showroom-demos.yaml=$tmp/i2-showroom-demos.yaml"
+
+          drop "$tmp/i3-showroom-demos.yaml" "$src/showroom-demos.yaml" \
+            sonarqube_url acs_console_url mta_url
+          expect_finding \
+            "instance 3 (2026-08-12): sonarqube_url + acs_console_url + mta_url absent from showroom-demos.yaml" \
+            --cockpit "showroom-demos.yaml=$tmp/i3-showroom-demos.yaml"
+
+          # THE NEGATIVE CONTROL. Without it, the three replays above are satisfied by a guard that
+          # fails on everything — which is the same amount of information as a guard that passes on
+          # everything, delivered more loudly.
+          rc=0
+          python3 tools/lint/cockpit-attribute-emission-guard.py > "$tmp/control.out" 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::negative control: the guard exited ${rc} on the UNMODIFIED tree." \
+                 "Without a clean control the three findings above prove only that it fails."
+            cat "$tmp/control.out"
+            fail=1
+          else
+            echo "PASS  negative control: the unmodified tree is clean, so the findings above are"
+            echo "      the removed keys and not a guard that fires on everything."
+          fi
+
+          rm -rf "$tmp"
+          exit "$fail"
