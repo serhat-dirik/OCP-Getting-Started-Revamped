@@ -122,6 +122,19 @@ import sys
 from pathlib import Path
 
 
+def _is_canary(path: str) -> bool:
+    """A fixture belonging to some guard's canary — never this guard's finding.
+
+    Matches BOTH shapes. `foo-guard.canary.adoc` is a single-file canary; `foo-guard.canary/` is a
+    directory canary holding a whole fake tree. The original test was `".canary." not in path`,
+    which silently covered only the first: a directory canary's path contains `.canary/`, with a
+    SLASH, so every .adoc inside it was scanned as real content. Latent in five guards until
+    2026-08-12, when cockpit-attribute-emission-guard became the first directory canary to hold
+    .adoc files and reddened attribute-interpolation-guard on a deliberately-malformed fixture.
+    """
+    return ".canary." in path or ".canary/" in path
+
+
 def _crash_exit_2(exc_type, exc, tb):
     """Any uncaught exception → rc 2, INCLUDING one raised at MODULE level.
 
@@ -318,7 +331,7 @@ def tracked_adocs():
         ).stdout.split()
     except Exception:  # noqa: BLE001 — no git, no scope; main() turns the empty list into rc 2
         return []
-    return [REPO / f for f in out if ".canary." not in f]
+    return [REPO / f for f in out if not _is_canary(f)]
 
 
 def _walk_to_target(lines, start):

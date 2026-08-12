@@ -96,6 +96,19 @@ _ANTORA_ATTR = re.compile(r"^\s{2,}([a-z][a-z0-9_-]*):\s")
 _PAGE_ATTR = re.compile(r"^:([a-z][a-z0-9_-]*):", re.MULTILINE)
 
 
+def _is_canary(path: str) -> bool:
+    """A fixture belonging to some guard's canary — never this guard's finding.
+
+    Matches BOTH shapes. `foo-guard.canary.adoc` is a single-file canary; `foo-guard.canary/` is a
+    directory canary holding a whole fake tree. The original test was `".canary." not in path`,
+    which silently covered only the first: a directory canary's path contains `.canary/`, with a
+    SLASH, so every .adoc inside it was scanned as real content. Latent in five guards until
+    2026-08-12, when cockpit-attribute-emission-guard became the first directory canary to hold
+    .adoc files and reddened attribute-interpolation-guard on a deliberately-malformed fixture.
+    """
+    return ".canary." in path or ".canary/" in path
+
+
 def declared_attributes() -> set[str]:
     names: set[str] = set()
     antora = REPO / "content" / "antora.yml"
@@ -197,7 +210,7 @@ def tracked_mmds():
         ).stdout.split()
     except Exception:
         return []
-    return [REPO / f for f in out if ".canary." not in f]
+    return [REPO / f for f in out if not _is_canary(f)]
 
 
 def scan_diagrams(paths, known=None):
@@ -228,7 +241,7 @@ def tracked_adocs():
         return []
     # Fixtures belonging to other guards are deliberately broken content — scanning them would
     # report another guard's canary as this guard's finding.
-    return [REPO / f for f in out if ".canary." not in f]
+    return [REPO / f for f in out if not _is_canary(f)]
 
 
 def report(leaks, diagrams=()) -> int:

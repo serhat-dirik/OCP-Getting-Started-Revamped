@@ -93,6 +93,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 
 
+def _is_canary(path: str) -> bool:
+    """A fixture belonging to some guard's canary — never this guard's finding.
+
+    Matches BOTH shapes. `foo-guard.canary.adoc` is a single-file canary; `foo-guard.canary/` is a
+    directory canary holding a whole fake tree. The original test was `".canary." not in path`,
+    which silently covered only the first: a directory canary's path contains `.canary/`, with a
+    SLASH, so every .adoc inside it was scanned as real content. Latent in five guards until
+    2026-08-12, when cockpit-attribute-emission-guard became the first directory canary to hold
+    .adoc files and reddened attribute-interpolation-guard on a deliberately-malformed fixture.
+    """
+    return ".canary." in path or ".canary/" in path
+
+
 def _compile(name: str, pattern: str, flags: int = 0):
     """re.compile, but a bad pattern exits 2 instead of crashing with Python's rc 1.
 
@@ -264,7 +277,7 @@ def tracked_adocs():
     # Fixtures belonging to other guards are deliberately broken content — scanning them would
     # report another guard's canary as this guard's finding. (credential-redaction-guard's canary
     # genuinely contains a leaked backtick, on purpose.)
-    return [REPO / f for f in out if ".canary." not in f]
+    return [REPO / f for f in out if not _is_canary(f)]
 
 
 def report(findings) -> int:

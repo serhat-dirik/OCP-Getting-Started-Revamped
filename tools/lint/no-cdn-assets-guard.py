@@ -135,6 +135,19 @@ BINARY_SUFFIXES = {
 # Every one of these exists because the project's own documentation MENTIONS the CDN it removed.
 # A guard that cannot tell a reference from a remark is a guard that gets switched off.
 
+def _is_canary(path: str) -> bool:
+    """A fixture belonging to some guard's canary — never this guard's finding.
+
+    Matches BOTH shapes. `foo-guard.canary.adoc` is a single-file canary; `foo-guard.canary/` is a
+    directory canary holding a whole fake tree. The original test was `".canary." not in path`,
+    which silently covered only the first: a directory canary's path contains `.canary/`, with a
+    SLASH, so every .adoc inside it was scanned as real content. Latent in five guards until
+    2026-08-12, when cockpit-attribute-emission-guard became the first directory canary to hold
+    .adoc files and reddened attribute-interpolation-guard on a deliberately-malformed fixture.
+    """
+    return ".canary." in path or ".canary/" in path
+
+
 def _strip_yaml_comments(text: str) -> str:
     """Quote-aware `#` stripping. `mermaid_library_url: "…"` is a quoted scalar, and the rationale
     comment above it contains the very URL detector [1] looks for."""
@@ -222,7 +235,7 @@ def _ls_files(*pathspecs: str) -> list[Path]:
         ).stdout.splitlines()
     except Exception:
         return []
-    return [REPO / f.strip() for f in out if f.strip() and ".canary." not in f]
+    return [REPO / f.strip() for f in out if f.strip() and not _is_canary(f)]
 
 
 def tracked_playbooks() -> list[Path]:

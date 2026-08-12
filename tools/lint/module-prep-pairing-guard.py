@@ -101,6 +101,19 @@ PAGE_MODULE_ID = re.compile(r"^:module-id:[ \t]*(\S+)")
 BLOCK_COMMENT = re.compile(r"^/{4,}$")
 
 
+def _is_canary(path: str) -> bool:
+    """A fixture belonging to some guard's canary — never this guard's finding.
+
+    Matches BOTH shapes. `foo-guard.canary.adoc` is a single-file canary; `foo-guard.canary/` is a
+    directory canary holding a whole fake tree. The original test was `".canary." not in path`,
+    which silently covered only the first: a directory canary's path contains `.canary/`, with a
+    SLASH, so every .adoc inside it was scanned as real content. Latent in five guards until
+    2026-08-12, when cockpit-attribute-emission-guard became the first directory canary to hold
+    .adoc files and reddened attribute-interpolation-guard on a deliberately-malformed fixture.
+    """
+    return ".canary." in path or ".canary/" in path
+
+
 def catalog_slugs(catalog: Path) -> list[str]:
     """Ordered module slugs from modules.yaml — position is the module number, slug is its identity."""
     try:
@@ -240,7 +253,7 @@ def tracked_pages(pages_root: Path) -> list[Path]:
         return []
     # Fixtures belonging to other guards are deliberately broken content — scanning them would
     # report another guard's canary as this guard's finding.
-    return [REPO / f for f in out if ".canary." not in f]
+    return [REPO / f for f in out if not _is_canary(f)]
 
 
 HEADLINE = {
