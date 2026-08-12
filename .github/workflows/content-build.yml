@@ -136,3 +136,34 @@ jobs:
             npx antora --fetch --log-failure-level=warn "site-${flavor}.yml"
             echo "::endgroup::"
           done
+
+      # The half of demo-beat-chip-guard that only exists once a site has been BUILT. lint.yml runs
+      # its source-side checks on every push; the --built-* comparison needs www/{workshop,demo,
+      # instructor}, so it belongs here — the one job that already produces all three. Adding it as a
+      # job in lint.yml would mean a second three-flavour Antora build, several minutes of every run
+      # for output this job already has on disk.
+      #
+      # WHAT ONLY THIS CATCHES, and why source-side checks cannot: a chip leaking into the workshop
+      # or instructor rendering (the demo-only invariant is a property of the OUTPUT — the source can
+      # be correct while an ifdef boundary moves), and a page that came out short, which is how a
+      # transposed heading silently deleted a timing chip at rc 0 with a zero-line Antora log.
+      #
+      # No working-directory: the step above sets it to `content`, but that is step-scoped, and the
+      # playbooks write ../www/<flavor> — so www/ is at the repo root from here.
+      - name: Demo timing chips, checked in the BUILT renderings
+        run: |
+          rc=0
+          python3 tools/lint/demo-beat-chip-guard.py --self-test || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::demo-beat-chip-guard self-test must exit 1 (canary detected); got" \
+                 "rc=$rc. Detection is unproven — refusing to trust a clean result on a built" \
+                 "tree. rc=0 means a detector went blind; rc=2 means the canary is missing, a" \
+                 "detector failed to fire, or head-styles.hbs lost its PAINTED-VALUES markers" \
+                 "(the guard reads the painted set from that stylesheet and will not guess)."
+            exit 1
+          fi
+          echo "self-test ok — every detector fired (rc=1)."
+          python3 tools/lint/demo-beat-chip-guard.py \
+            --built-demo www/demo \
+            --built-non-demo www/workshop \
+            --built-non-demo www/instructor

@@ -210,7 +210,47 @@ COMMENT = _compile("COMMENT", r"^//")
 BLOCK_TITLE = _compile("BLOCK_TITLE", r"^\.\S")
 # The values head-styles.hbs enumerates a `content:` rule for. Outside this set the chip renders a
 # bare glyph and the number is lost; the fix is one line in that file.
-PAINTED_VALUE = _compile("PAINTED_VALUE", r"^([1-9]|1[0-5])m$")
+#
+# READ FROM THE STYLESHEET, NOT COPIED FROM IT. This was `^([1-9]|1[0-5])m$` — a hand-maintained
+# duplicate of the enumeration, and the two could drift in a direction nothing could see: delete
+# `.\35 m::before` from the stylesheet and the five real 5m chips render bare while this guard still
+# calls 5m painted. CI green, chips silently lost. That is the same two-files-must-move-together
+# shape as versions.yaml/gen-attributes, and the fix is the same — make one of them derive from the
+# other. Adding a longer beat is now ONE line in head-styles.hbs, with no guard edit and no second
+# place to remember.
+PAINTED_BLOCK = _compile("PAINTED_BLOCK", r"PAINTED-VALUES-BEGIN(.*?)PAINTED-VALUES-END", re.S)
+# Each painted rule ends `content: "⏱ 5m";` — take the last whitespace-separated token inside the
+# quotes. Anchored on `content:` so the bare-glyph base rule (which paints no value) cannot leak in.
+PAINTED_RULE = _compile("PAINTED_RULE", r'content:\s*"[^"]*?\s(\S+)"\s*;')
+
+HEAD_STYLES = REPO / "content" / "supplemental-ui" / "partials" / "head-styles.hbs"
+
+
+def painted_values() -> set:
+    """The set of [TIME] values head-styles.hbs actually paints.
+
+    Exits 2 rather than returning an empty set when the stylesheet is unreadable or the markers are
+    missing. An empty set would flag all 106 chip sites at once, which reads as "the content tree
+    broke" and sends the reader to the wrong file entirely — the failure would be here.
+    """
+    try:
+        text = HEAD_STYLES.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"❌ cannot read {HEAD_STYLES}: {exc}")
+        print("   This guard derives the painted set from that stylesheet; it cannot run without it.")
+        raise SystemExit(2)
+    block = PAINTED_BLOCK.search(text)
+    if not block:
+        print(f"❌ no PAINTED-VALUES-BEGIN/END markers in {HEAD_STYLES}")
+        print("   Those markers delimit the painted enumeration this guard reads. If the rules were")
+        print("   restructured, restore the markers around them — do not reintroduce a hard-coded")
+        print("   value set here, which is exactly the drift this replaced.")
+        raise SystemExit(2)
+    values = set(PAINTED_RULE.findall(block.group(1)))
+    if not values:
+        print(f"❌ PAINTED-VALUES markers found in {HEAD_STYLES} but no `content:` rules inside them")
+        raise SystemExit(2)
+    return values
 
 # The rendered chip element, matched on its OPENING DIV TAG. head-styles.hbs is inlined into every
 # page of every flavour, so a pattern written against the class attribute alone self-matches that
@@ -385,7 +425,7 @@ def scan_page(rel, lines):
                              f"[TIME {value}] sits outside ifdef::demo[]"))
             continue
 
-        if not PAINTED_VALUE.match(value):
+        if value not in painted_values():
             findings.append((rel, lineno, "unpainted-value",
                              f"the stylesheet paints no rule for {value!r}"))
 
