@@ -11,16 +11,51 @@
   design call made while implementing this template; flagged here for review, not silently
   decided:
 
-  1. NO TERMINAL. showroom.yaml's terminal logs in as a SPECIFIC attendee ({user}) using the
-     shared workshop password read from a cross-namespace Secret. There is no attendee identity
-     for a shared, presenter-facing cockpit to borrow — picking any one real user (user1, the
-     reserved user5, ...) would be misleading (this cockpit is not "logged in as" that person) and
-     would silently break if that user's session is reset independently. So: no ttyd container, no
-     terminal-prep init step, no home PVC, and consequently no need for the `showroom` ServiceAccount
-     or its cross-namespace `workshop-user-creds` read Role at all — this template invents ZERO new
-     RBAC (a stricter bar than "no more than showroom.yaml's pattern"). A demo's Do:: blocks that
-     need a live shell use the SA's own already-authenticated attendee cockpit (their reserved
-     session is the natural fit) or the Console/Gitea/Argo tool tabs below, same as here.
+  1. A TERMINAL THAT STARTS LOGGED OUT. Revised 2026-08-12 (owner); the original decision and why
+     it changed are both recorded here, because the reasoning is what generalizes.
+
+     ORIGINALLY: no terminal at all. showroom.yaml's terminal does not just run a shell — it
+     PRE-AUTHENTICATES as a SPECIFIC attendee ({user}), via an init container that reads the shared
+     workshop password from a cross-namespace Secret and runs `oc login`. A shared presenter cockpit
+     has no attendee identity to borrow: picking any one real user would be misleading (this cockpit
+     is not "logged in as" that person) and would break silently when that user's session is reset.
+     Rejecting the borrowed identity meant rejecting the terminal, and that bought a real property —
+     the ServiceAccount, the cross-namespace Role, the home PVC and the login step ALL existed only
+     to serve the auto-login, so dropping it left this template inventing ZERO new RBAC.
+
+     WHAT CHANGED: "start logged out and let the SA authenticate as themselves" was never the option
+     that got rejected — auto-login-as-a-borrowed-attendee was. The logged-out shell beats it on
+     every count the original decision cared about: no borrowed identity, no coupling to any
+     attendee's session, and it STILL invents zero new RBAC, because we are not reading any
+     credential. Auto-login, not the terminal, was the expensive part.
+
+     THE CONSTRAINT THIS DESIGN IS BUILT TO (owner, 2026-08-12): "we don't want to run admin logged
+     in terminal." An SA presenting will log in with real authority — often cluster-admin — and this
+     Route is edge-TLS with no authentication in front of it, exactly like the attendee cockpits.
+     That posture is fine when the identity behind it is a low-privilege attendee and NOT fine for a
+     durable admin shell on a guessable URL. So three properties are load-bearing, not stylistic:
+
+       a) NO CREDENTIAL APPEARS ANYWHERE IN THIS TEMPLATE, and nothing in it authenticates. No
+          Secret is read, no Secret is even mounted, no token, no password. terminal-prep's only
+          executable statements are `mkdir` and one file write — verified by stripping comments
+          and echo payloads from the rendered args, because the string `oc login` DOES appear in
+          this file and a naive grep for it reports a false positive: it is banner text telling
+          the SA to run one, never a command we run. The terminal CANNOT come up already-admin,
+          because nothing here knows how to authenticate. That is a structural guarantee, not a
+          convention someone has to keep.
+          (The banner does run `oc whoami` at SHELL time — a read of whatever kubeconfig the SA
+          has, so it prints nothing until they log in. It exists so the identity in play is on
+          screen rather than assumed, which is the same reason the rest of this design exists.)
+       b) THE HOME IS AN emptyDir, NOT A PVC. Whatever kubeconfig the SA creates lives only in the
+          pod, so `oc delete pod -l app.kubernetes.io/instance=showroom-demos -n <ns>` is a logout
+          button, and any restart is an implicit logout. A PVC here would make an admin session
+          survive restarts indefinitely — the exact thing the constraint above forbids.
+       c) automountServiceAccountToken: false. Without it the logged-out state still hands a shell
+          the `default` SA token. Low-privilege, but "logged out" should mean powerless, and the
+          pod genuinely makes no API calls of its own.
+
+     The opening banner (terminal-prep below) tells the SA to log in and tells them the session is
+     ephemeral, so the expected first step is on screen rather than a bare `$`.
   2. REPLICAS = 1, same as every per-attendee showroom. It's a single presentation aid viewed by
      one presenter (or a few people on one screen-share) at a time, not a fan-out workload — no
      argument for more, and `Recreate` avoids two pods mid-rebuild serving inconsistent content.
@@ -41,9 +76,10 @@
 
   Serving pipeline (per pod, one pod total): init content-clone (mirror → /showroom/repo) → init
   antora-build (showroom/site-demo.yml → /showroom/www, cockpit-level attributes injected, NO
-  per-user attributes — see the userdata ConfigMap below). Runtime containers: nginx (8080 proxy,
-  content only — no /tty-* routes, so no long HAProxy websocket timeouts needed on the Route
-  either) + content (nookbag UI over /showroom/www, :8000).
+  per-user attributes — see the userdata ConfigMap below) → init terminal-prep (writes the shell
+  banner; NO login, see point 1). Runtime containers: nginx (8080 proxy: / → content, /tty-top →
+  ttyd) + content (nookbag UI over /showroom/www, :8000) + terminal (ttyd :7681, logged out).
+  The Route carries 1h HAProxy timeout/timeout-tunnel annotations for that websocket.
 */ -}}
 {{- /*
   ONE SOURCE FOR THIS COCKPIT'S ATTRIBUTES — the ConfigMap's payload and the Deployment's
@@ -119,6 +155,9 @@
 {{- if .Values.showroomDemos.enabled }}
 {{- $ns := .Values.showroomDemos.namespace | default .Values.showroom.namespace }}
 {{- $domain := .Values.clusterDomain }}
+{{- /* Same derivation as showroom.yaml:113 — used ONLY to print a runnable `oc login` in the
+       terminal banner. Nothing in this template authenticates; see header point 1(a). */ -}}
+{{- $apiHost := printf "api.%s:6443" (trimPrefix "apps." .Values.clusterDomain) }}
 {{- $giteaHost := printf "gitea-%s.%s" .Values.giteaNamespace .Values.clusterDomain }}
 {{- $mirrorUrl := printf "https://gitea-%s.%s/%s/%s.git" .Values.giteaNamespace .Values.clusterDomain .Values.mirrorOrg .Values.mirrorRepo }}
 {{- $img := .Values.showroom.images }}
@@ -126,8 +165,12 @@
 {{- $userData := dict "domain" $domain "giteaHost" $giteaHost "root" $ }}
 # The cockpit Namespace is declared ONCE, in templates/showroom-namespace.yaml — see that file.
 ---
-# nginx reverse proxy for the SA-Demos pod: / → nookbag content (:8000) only. No /tty-top or
-# /tty-bottom locations — see header point 1, there is no terminal to proxy to.
+# nginx reverse proxy for the SA-Demos pod: / → nookbag content (:8000), /tty-top and /tty-bottom
+# → the one ttyd (:7681), which forks an independent shell per websocket. The names are not free
+# choices: click-to-run.js hardcodes /tty-top as DEFAULT_PATH and /tty-bottom as the target for
+# `role="execute send-to-tty-bottom"` blocks, so a terminal mounted anywhere else leaves the demo
+# rendering's ▶ buttons dead — the exact defect this cockpit gained a terminal to fix. Both
+# locations exist because the tab is `type: double-terminal`; see the tabs block for why.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -144,6 +187,13 @@ data:
     error_log /dev/stdout info;
     http {
       include /etc/nginx/mime.types;
+      # REQUIRED by the /tty-top location's `Connection $connection_upgrade`. nginx refuses to start
+      # with `unknown "connection_upgrade" variable` if the location is copied without this map, and
+      # the pod then CrashLoops on a config error rather than serving the content it otherwise could.
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
       server {
         listen 8080;
         absolute_redirect off;
@@ -151,6 +201,26 @@ data:
           proxy_pass http://127.0.0.1:8000;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           proxy_set_header X-Forwarded-Proto $scheme;
+        }
+        location = /tty-top { return 302 /tty-top/; }
+        location /tty-top/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_read_timeout 43200000;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+        location = /tty-bottom { return 302 /tty-bottom/; }
+        location /tty-bottom/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_read_timeout 43200000;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         }
       }
     }
@@ -214,6 +284,12 @@ spec:
       # No serviceAccountName override (defaults to `default`): unlike showroom.yaml, nothing in
       # this pod talks to the k8s API — no oc-login step, so no need for the showroom SA or its
       # cross-namespace secret-read Role. See header point 1.
+      #
+      # ...and because nothing here calls the API, the token is pure liability: it would hand a
+      # shell on an unauthenticated Route whatever `default` can do in this namespace. Header point
+      # 1(c). Turning it off is what makes "logged out" mean powerless rather than merely
+      # unconfigured — the SA's own `oc login` is the ONLY way this terminal gains any authority.
+      automountServiceAccountToken: false
       initContainers:
         # 1) Clone the in-cluster monorepo mirror (public repo, valid RHDP wildcard cert → no auth).
         - name: content-clone
@@ -257,6 +333,59 @@ spec:
               subPath: www
             - name: userdata
               mountPath: /user_data/
+        # 3) Seed the terminal home with a greeting. This is showroom.yaml's terminal-prep with the
+        #    ENTIRE login half removed — no Secret read, no `oc login`, no kubeconfig, and therefore
+        #    no ServiceAccount and no RBAC (header point 1(a): the terminal CANNOT come up
+        #    authenticated, because nothing here knows how). All it does is write a text file.
+        - name: terminal-prep
+          image: {{ $img.terminal | quote }}
+          command: ["/bin/bash", "-c"]
+          env:
+            - name: HOME
+              value: /home/lab-user
+            - name: API_HOST
+              value: {{ $apiHost | quote }}
+          args:
+            - |
+              set -euo pipefail
+              # DROP-IN under ~/.bashrc.d/, NOT an append to ~/.bashrc — the terminal image's runttyd
+              # clobbers ~/.bashrc on first boot of a fresh home, and this home is an emptyDir, so
+              # EVERY pod start is a first boot and an appended block would be wiped every time.
+              # Both ~/.bashrc and bashrc.base source ~/.bashrc.d/*, which is why the drop-in
+              # survives (mechanism verified on-cluster for showroom.yaml, 2026-07-18).
+              # Single-quoted echoes, not a heredoc: an indented closing delimiter is invalid both in
+              # this YAML block scalar and to bash.
+              mkdir -p "$HOME/.bashrc.d"
+              {
+                echo '# OGSR_DEMO_BANNER — SA-Demos cockpit greeting. Managed by the terminal-prep'
+                echo '# init container; sourced by ~/.bashrc via its ~/.bashrc.d/* loop.'
+                echo 'if [ -z "${OGSR_DEMO_BANNER_SHOWN:-}" ]; then'
+                echo '  export OGSR_DEMO_BANNER_SHOWN=1'
+                echo '  echo'
+                echo '  echo "  SA-Demos cockpit — this terminal is NOT logged in to any cluster."'
+                echo '  echo'
+                echo '  echo "  Log in as yourself before the demo:"'
+                echo '  echo "    OpenShift console -> your name (top right) -> Copy login command,"'
+                echo '  echo "    then paste the oc login --token=... line here."'
+                echo '  echo'
+                echo "  echo \"  Or:  oc login https://\${API_HOST:-$API_HOST} -u <your-user>\""
+                echo '  echo'
+                echo '  echo "  This session is ephemeral by design: the home is an emptyDir, so your"'
+                echo '  echo "  login lives only in this pod and is gone the moment it restarts."'
+                echo '  echo "  Deleting the pod is the logout button."'
+                echo '  echo'
+                echo '  if command -v oc >/dev/null 2>&1; then'
+                echo '    if _who="$(oc whoami 2>/dev/null)"; then'
+                echo '      echo "  Currently logged in as: ${_who}"; echo'
+                echo '    fi'
+                echo '    unset _who'
+                echo '  fi'
+                echo 'fi'
+              } > "$HOME/.bashrc.d/00-ogsr-demo-banner.sh"
+              echo "✓ terminal banner written to $HOME/.bashrc.d/00-ogsr-demo-banner.sh"
+          volumeMounts:
+            - name: home
+              mountPath: /home/lab-user
       containers:
         # nginx proxy — the only container the Route targets.
         - name: nginx
@@ -302,10 +431,27 @@ spec:
                 antora:
                   name: modules
                 tabs:
-                  # No terminal tab — see header point 1. Tool tabs are external launchers for the
-                  # same reason showroom.yaml's are: every one of these sends a frame-blocking
-                  # header, so cross-origin iframe embedding is not possible without a cluster-wide
-                  # IngressController change we avoid (non-invasive rule).
+                  # Terminal first — it is what a presenter drives from, and click-to-run.js posts
+                  # to /tty-top by default (its DEFAULT_PATH), which is why the nginx locations
+                  # carry those exact names. A terminal mounted anywhere else would leave every ▶
+                  # button in the demo rendering still dead, which is the whole reason this exists.
+                  #
+                  # WHY double-terminal WHEN ZERO DEMO BLOCKS USE THE SECOND PANE (measured: 0
+                  # occurrences of send-to-tty-bottom in the entire content tree): `double-terminal`
+                  # is the ONLY tab type this repo has ever run. nookbag may well accept a
+                  # single-terminal type, but that is unverified — and an unrecognised tab type
+                  # fails SILENTLY, rendering no tab at all, which is exactly the failure class
+                  # this change was made to remove. Taking the known-working shape costs one extra
+                  # nginx location and nothing else: ONE ttyd backs both panes, forking an
+                  # independent shell per websocket. Narrow it to a single pane only after somebody
+                  # has watched a single-terminal tab actually render in a live cockpit.
+                  - name: Terminal 1
+                    secondary_name: Terminal 2
+                    type: double-terminal
+                  # Tool tabs stay external launchers for the same reason showroom.yaml's are:
+                  # every one of them sends a frame-blocking header, so cross-origin iframe
+                  # embedding is impossible without a cluster-wide IngressController change we
+                  # avoid (non-invasive rule).
                   - name: OCP Console
                     url: https://console-openshift-console.{{ $domain }}
                     external: true
@@ -348,8 +494,48 @@ spec:
               port: 8000
             initialDelaySeconds: 30
             periodSeconds: 20
+        # ttyd terminal — starts LOGGED OUT. Nothing in this chart writes a kubeconfig into this
+        # home (header point 1(a)), so the shell holds no cluster authority until the SA runs
+        # `oc login` themselves. HOME is overridden for the same reason showroom.yaml overrides it:
+        # the image's passwd sets HOME=/data, and our home volume is mounted at /home/lab-user.
+        #
+        # DELIBERATELY NOT COPIED from showroom.yaml's terminal: its lifecycle.postStart passwd
+        # rewrite. That exists so the JVM resolves user.home for `mvn`/`java` in the lab, and it
+        # POLLS for up to 10s racing runttyd. A presenter runs `oc` and `curl`, both of which read
+        # $HOME directly — importing the hook would import its race to fix a problem this pod does
+        # not have. If a future demo ever needs Maven in this terminal, take the hook then.
+        - name: terminal
+          image: {{ $img.terminal | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /home/lab-user
+            - name: API_HOST
+              value: {{ $apiHost | quote }}
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 7681
+              protocol: TCP
+          volumeMounts:
+            - name: home
+              mountPath: /home/lab-user
+          resources:
+            requests:
+              cpu: {{ $.Values.showroom.terminalResources.requests.cpu | quote }}
+              memory: {{ $.Values.showroom.terminalResources.requests.memory | quote }}
+            limits:
+              cpu: {{ $.Values.showroom.terminalResources.limits.cpu | quote }}
+              memory: {{ $.Values.showroom.terminalResources.limits.memory | quote }}
       volumes:
         - name: showroom-files
+          emptyDir: {}
+        # The presenter's shell home. emptyDir ON PURPOSE, not for want of a PVC — header point
+        # 1(b). Whatever kubeconfig the SA's `oc login` writes lives only in this pod, so a restart
+        # is an implicit logout and no admin session outlives the pod on an unauthenticated Route.
+        - name: home
           emptyDir: {}
         - name: userdata
           configMap:
@@ -382,8 +568,10 @@ spec:
       targetPort: 8080
       protocol: TCP
 ---
-# SA-Demos cockpit URL: showroom-demos.<apps-domain>. Default router timeouts are fine here (no
-# terminal websocket to keep alive, unlike showroom-{user}'s 1h haproxy timeout annotations).
+# SA-Demos cockpit URL: showroom-demos.<apps-domain>. Carries showroom-{user}'s haproxy timeout
+# annotations now that there IS a terminal websocket to keep alive: the default router timeout is
+# 30s, which would drop an idle presenter's shell mid-demo — the failure looks like the terminal
+# "froze" and is indistinguishable, on stage, from the cluster being broken.
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
@@ -394,6 +582,11 @@ metadata:
     {{- include "workshop-config.ownerLabels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
+    # Same pair showroom-{user} carries. `timeout` covers the HTTP request, `timeout-tunnel` the
+    # upgraded websocket — the tunnel one is what actually keeps an idle ttyd alive, and setting
+    # only `timeout` looks correct while still dropping the shell.
+    haproxy.router.openshift.io/timeout: 1h
+    haproxy.router.openshift.io/timeout-tunnel: 1h
 spec:
   host: showroom-demos.{{ $domain }}
   to:
