@@ -93,12 +93,38 @@ Measured `ws` lifecycle (admin/builder context, OCP 4.22.6, 2026-07-31):
 |===
 | Command | Time | What it does
 
-| `ws verify app-security-testing --user <u> --entry-only` | ~15–17 s | 11/11 entry checks
-| `ws verify app-security-testing --user <u>` | ~15–18 s | 13/13 (11 entry + 2 end) once a capstone run has Succeeded
-| `ws smoke app-security-testing <u>` | ~55 s | 11/11 attendee-cockpit gate (ws-on-PATH, identity, isolation, prep convergence)
+| `ws verify app-security-testing --user <u> --entry-only` | ~15–17 s | 14/14 — the 12 shared checks plus 2 clean-slate ones
+| `ws verify app-security-testing --user <u>` | ~15–18 s | 14/14 — the same 12 shared checks plus 2 *end-state* ones *replacing* the clean-slate pair, once a capstone run has Succeeded
+| `ws smoke app-security-testing <u>` | ~55 s | 13/13 attendee-cockpit gate — 11 generic (ws-on-PATH, identity, isolation, cockpit freshness, prep convergence, the cockpit's own entry verify) plus this module's 2 `smokeCommands`
 | `ws reset app-security-testing --user <u>` | ~2 min | purge `<u>-cicd` + re-materialize entry (Argo sync)
 | `ws solve app-security-testing --user <u>` | *~17–19 min* | runs the capstone on clean `main` (every gate passes) — blocks while it runs
 |===
+
+[NOTE]
+.Why both `ws verify` modes report the same total — and how to re-derive all three numbers
+====
+*The verify script is mode-split, not additive.* Twelve checks run in *every* mode; `--entry-only` then
+adds two *clean-slate* assertions (no capstone PipelineRun, no `parasol-claims` Route) and full mode adds
+the two *end-state* assertions that are their exact mirror. So full mode is *not* "entry plus two" — the
+second pair *replaces* the first, and both modes come to *14*.
+
+*Re-derive these rather than trusting this page.* Verify scripts grow, and a count written into a guide
+goes stale in silence: this table read 11/11 and 13/13 until 2026-08-12, by which point the script had
+gained three `check` call sites since those numbers were true — one shared, two clean-slate — so the
+entry total was out by three and the full total by one. The script states its own total on its last line
+(`✅ all 14 checks passed`), so a single run is the
+authoritative answer. With no cluster to hand, count the call sites instead —
+`+grep -c '^check ' tools/verify/app-security-testing.sh+` → *12* (the shared block, run in both modes) and
+`+grep -c '^  check ' tools/verify/app-security-testing.sh+` → *4* (two per mode branch); 12 + 2 = *14*
+either way. ``ws smoke``'s battery is the 11 checks in `cmd_smoke` (`tools/ws/ws`) plus one per entry in this
+module's `smokeCommands` list (`gitops/entry-states/app-security-testing/ws-meta.yaml`, currently 2). If the
+Gitea mirror HEAD cannot be read, the cockpit-freshness check is not emitted at all and the gate reports
+*12/12* — healthy, not a regression.
+
+*The seconds are older than the counts.* They were measured 2026-07-31, when the script emitted 11 and 13;
+the checks added since are additional API reads and have not been re-timed. Read the Time column as the
+right order of magnitude, not as a fresh measurement.
+====
 
 `ws smoke` needs the entry state materialized first; if the attendee-`ws prep` convergence check fails,
 run `ws reset app-security-testing --user <u>` (or `ws git-refresh --restart-terminals --user <u>` for a
@@ -185,23 +211,36 @@ The default gate must be *Parasol AppSec Gate* (condition: `vulnerabilities` is 
 ws verify app-security-testing --user user2 --entry-only
 ----
 
+// Shown IN FULL, not elided behind a "...", so a reader can count the lines and check the total against
+// their own run without a second source — this table's counts had drifted three checks behind the script
+// precisely because nothing on the page let a reader notice. Every line below is the literal `check`
+// description in tools/verify/app-security-testing.sh with ${NS} resolved to user2-cicd, confirmed
+// 2026-08-12 by executing the script in both modes and reading the emitted lines and the graded total.
 [source,texinfo]
 ----
 ✅ namespace user2-cicd exists
 ✅ entry marker ws-entry-app-security-testing present
 ✅ Pipeline parasol-claims-devsecops present
+✅ every task of the capstone is admissible (at most one PVC-backed workspace per TaskRun)
 ✅ sonar-auth copied into user2-cicd (SAST-gate secret)
 ✅ rox-api-token copied into user2-cicd (scan-gate secret)
 ✅ ephemeral claims-db present (deploy target)
 ✅ curated task sonar-scan reachable
-...
-✅ all 11 checks passed
+✅ curated task trivy-scan reachable
+✅ curated task roxctl-deployment-check reachable
+✅ curated task zap-baseline reachable
+✅ attendee can read the curated task library (parasol-tasks-readers)
+▶ entry state — these checks assert a CLEAN SLATE: they fail when the lab has already been run here, which is what tells 'ws prep' to purge and re-materialize
+✅ no parasol-claims-devsecops PipelineRun yet (running it IS the lab)
+✅ no parasol-claims Route yet (the deploy stage creates it)
+
+✅ all 14 checks passed
 ----
 
-Run this *after* a `ws reset`, not after a `ws solve`: in full mode (no `--entry-only`) the script adds
-two end-state checks and reports *13*, and those two correctly fail on a freshly reset slot because no
-capstone run has Succeeded yet. A red `2 of 13 checks failed` immediately after a reset is the script
-working, not a broken entry state.
+Run this *after* a `ws reset`, not after a `ws solve`. Full mode (no `--entry-only`) swaps the last two
+lines for the two *end-state* checks and still reports *14*; on a freshly reset slot those two correctly
+fail, because no capstone run has Succeeded yet. A red `❌ 2 of 14 checks failed` immediately after a
+reset is the script working, not a broken entry state.
 
 *7. The seeded fork exists* (the lab's build target). For a sample user, the `seed-appsec` branch carries the flaws:
 
