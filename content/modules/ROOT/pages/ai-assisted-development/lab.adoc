@@ -157,12 +157,18 @@ oc rollout status deploy/parasol-claims -n $NS --timeout=120s
 [demo-block]
 [TIME 4m]
 Say:: "Here's the part every demo hides. I'll ask the *same* agent to look at a *neighbouring* namespace — someone else's. It has no business there, and the platform is about to prove it."
-Show:: The trace: `pods_list_in_namespace` on the neighbouring namespace (`user1-dev` for most presenters; `user2-dev` if you are user1) returning `is forbidden`; the agent reporting the denial honestly.
-Do:: Point the agent at a namespace it was never granted — never your own, so pick the neighbour dynamically:
+Show:: The trace: `pods_list_in_namespace` on the neighbouring namespace (`user1-dev`, or `user2-dev` when you are the one logged in as `user1`) returning `is forbidden`; the agent reporting the denial honestly.
+Do:: Point the agent at a namespace it was never granted. The first line asks *the cluster* who you are and picks a namespace that is therefore never yours:
 +
-[source,sh,role=execute,subs="attributes"]
+// The neighbour MUST be derived at RUNTIME from `oc whoami`, never compared against
+// the build-time {user} attribute. See the identical block in exercise 4 for the
+// measurement that forced this — a page attribute cannot know who is logged in.
+[source,sh,role=execute]
 ----
-NEIGHBOUR=$([ "{user}" = "user1" ] && echo user2-dev || echo user1-dev)
+ME=$(oc whoami)
+NEIGHBOUR=user1-dev
+if [ "$NEIGHBOUR" = "${ME}-dev" ]; then NEIGHBOUR=user2-dev; fi
+echo "logged in as ${ME} - probing ${NEIGHBOUR}, which is not yours"
 ask-agent "Find out what is running in the neighbouring namespace $NEIGHBOUR. List the pods in namespace $NEIGHBOUR, and also read the recent events in namespace $NEIGHBOUR. Then report what you found."
 ----
 +
@@ -730,12 +736,26 @@ The *server* still offers every tool (you removed `--read-only` in exercise 3), 
 // NEIGHBOUR must never be the reader's OWN namespace. user1 is a normal attendee slot, so a
 // hardcoded `user1-dev` made this exercise silently INVERT for whoever holds it: the
 // "forbidden" call would read their own namespace and succeed, killing the module's climax.
-// Same fix as gitops-at-scale's neighbour probe.
-The first line picks a namespace that is *never yours*: everyone probes `user1-dev`, except `user1`, who probes `user2-dev` instead. That matters — pointed at your own namespace the agent would succeed, and the whole point of the exercise is watching it be refused.
+//
+// 2026-08-12 — the FIRST fix for that was `[ "{user}" = "user1" ]`, and it was dead code.
+// {user} is a BUILD-TIME Antora attribute; the identity that decides whether the probe is
+// self-directed is the RUNTIME login, and nothing makes those agree. The demos cockpit
+// renders {user} as the deliberate non-identity `your-user`
+// (gitops/workshop-config/templates/showroom-demos.yaml), so the comparison was ALWAYS false
+// and the branch could never be taken — a presenter logged in as user1 got `user1-dev`, their
+// OWN namespace, and the beat demonstrated ACCESS where it means to demonstrate DENIAL.
+// Proven by impersonation on cluster-m24jn: user1 listing user1-dev succeeds, user2-dev is
+// Forbidden. `oc whoami` is the only source that knows who is actually logged in, so the test
+// is now made there. Do NOT reintroduce a comparison against {user}, and note the block
+// deliberately carries NO subs="attributes" — that is what keeps a build-time identity out.
+The first line asks *the cluster* who you are, then picks a namespace that is therefore *never yours*: everyone probes `user1-dev`, except whoever is logged in as `user1`, who probes `user2-dev` instead. That matters — pointed at your own namespace the agent would succeed, and the whole point of the exercise is watching it be refused.
 
-[source,sh,role=execute,subs="attributes"]
+[source,sh,role=execute]
 ----
-NEIGHBOUR=$([ "{user}" = "user1" ] && echo user2-dev || echo user1-dev)
+ME=$(oc whoami)
+NEIGHBOUR=user1-dev
+if [ "$NEIGHBOUR" = "${ME}-dev" ]; then NEIGHBOUR=user2-dev; fi
+echo "logged in as ${ME} - probing ${NEIGHBOUR}, which is not yours"
 ask-agent "Find out what is running in the neighbouring namespace $NEIGHBOUR. List the pods in namespace $NEIGHBOUR, and also read the recent events in namespace $NEIGHBOUR. Then report what you found."
 ----
 
@@ -779,10 +799,12 @@ If your trace reads `TOOL-CALL TRACE (0 calls)`, the model *narrated* instead of
 
 Confirm the boundary from the other side — you don't need the agent to prove RBAC; ask the API server directly with impersonation:
 
-[source,sh,role=execute,subs="attributes"]
+[source,sh,role=execute]
 ----
 SA=system:serviceaccount:$NS:mcp-agent
-NEIGHBOUR=$([ "{user}" = "user1" ] && echo user2-dev || echo user1-dev)
+ME=$(oc whoami)
+NEIGHBOUR=user1-dev
+if [ "$NEIGHBOUR" = "${ME}-dev" ]; then NEIGHBOUR=user2-dev; fi
 echo "read pods in YOUR ns:        $(oc auth can-i get pods -n $NS --as=$SA 2>/dev/null)"
 echo "read pods in a NEIGHBOUR ns: $(oc auth can-i get pods -n $NEIGHBOUR --as=$SA 2>/dev/null)"
 echo "read cluster nodes:          $(oc auth can-i get nodes --as=$SA 2>/dev/null)"
