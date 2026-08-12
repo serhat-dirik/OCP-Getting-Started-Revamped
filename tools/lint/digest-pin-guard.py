@@ -67,10 +67,24 @@ DELIBERATELY OUT OF SCOPE, so nobody reads a green tick as more than it is:
     devfile). Entitled, but the IDE base image is chosen by the Dev Spaces operator and version-
     tagged to the product release; the workshop pins the Dev Spaces VERSION via versions.yaml. Same
     reasoning the sibling `apps/parasol-legacy-claims/devfile.yaml` was carved out under.
-  * `content/**` (15 floating tags). Attendee-authored YAML inside lab instructions — teaching
-    material, where a bare `ubi-minimal:latest` is sometimes the point. Note the two live exceptions
-    recorded in the backlog: observability-health-scale's `claims-burst` still runs the el8
-    `ose-cli:latest` by hand, and that one is a real finding awaiting its module owner.
+  * `content/**`. Attendee-authored YAML inside lab instructions — teaching material, where a bare
+    `ubi-minimal:latest` is sometimes the point.
+
+    THE EXCEPTION THIS CARVE-OUT USED TO NAME IS CLOSED (2026-08-12): observability-health-scale's
+    `claims-burst` ran the frozen el8 `ose-cli:latest` by hand and is now pinned onto the same
+    `ose-cli-rhel9:v4.22@sha256:…` its own entry state runs. Do not restore the old wording — it
+    advertised a known-broken site as a documented exemption, which is how it survived the sweep
+    that fixed the other 44.
+
+    The carve-out itself STAYS, and widening it is not the obvious win it looks like. Content
+    legitimately contains image references this guard must not touch: captured output from a real
+    run (which stays as captured), dated `//` provenance comments recording what a command looked
+    like on the day it was measured, and prose that names an old tag precisely in order to warn
+    about it — the m13 fix ships one of each. A naive `content/**` sweep fails all three and would
+    push an author toward doctoring a captured record to appease a linter. If this is ever widened,
+    it needs to distinguish a LIVE command block from a record of one; until someone builds that,
+    the honest position is a scoped guard plus this note. See task: "should digest-pin-guard police
+    content/**".
 
 WHAT COUNTS AS PINNED. `repo@sha256:<64 lowercase hex>`, with or without a human-readable tag in
 front (`repo:v4.22@sha256:…`). The composite form is preferred and is what three sibling Tasks
