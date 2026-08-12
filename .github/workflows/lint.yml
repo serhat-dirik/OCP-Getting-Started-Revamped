@@ -177,6 +177,32 @@ jobs:
           printf 'shellcheck: %s\n' "${files[@]}"
           shellcheck "${files[@]}"
 
+      # LINTING A GUARD IS NOT RUNNING IT. The step above lints ws-argparse-selftest.sh because it
+      # is a tracked *.sh — and that is all it does. Until something EXECUTES it, the 69 assertions
+      # protecting `ws`'s identity parsing are an unrun gate, which this project treats as worse
+      # than no gate: it reads as coverage while proving nothing.
+      #
+      # What it protects: `ws prep m07 user3 --user user4` used to silently resolve to user4, and
+      # `ws prep` WIPES the namespaces of whoever it resolves to. The wipe is indistinguishable
+      # from a normal run afterwards. A regression here is silent and destructive, so the gate runs
+      # on every push.
+      #
+      # Needs no cluster: the harness sources `ws`, stubs every dispatch target, and replaces `oc`
+      # with a function that fails loudly if anything reaches for it.
+      - name: ws argument-parsing gate (identity conflicts cannot pass silently)
+        run: |
+          rc=0
+          bash tools/ws/ws-argparse-selftest.sh --self-test || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::ws-argparse-selftest --self-test must exit 1 (canaries detected); got" \
+                 "rc=$rc. Detection is unproven, so a clean run below would mean nothing. rc=0" \
+                 "means a canary failed to trip a guard — most likely user_conflict_guard or" \
+                 "unexpected_positional stopped firing; rc=2 means the harness itself is broken."
+            exit 1
+          fi
+          echo "self-test ok — every canary let bad input through and every control held (rc=1)."
+          bash tools/ws/ws-argparse-selftest.sh
+
   helm:
     runs-on: ubuntu-latest
     steps:
