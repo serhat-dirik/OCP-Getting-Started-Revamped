@@ -33,6 +33,12 @@ include::partial$version-attributes.adoc[]
 // attendee's own rule is invisible there under every filter. The working surface is the PROJECT-scoped
 // view, /dev-monitoring/ns/<user>-dev/alertrules?alert-source=user, which lists the rule; its Source
 // filter defaults to Platform (0 rows for an attendee), which is why the deep links below pin it to User.
+// SUPERSEDED 2026-08-12: the "(the burst image pull adds ~30-60s before it bites)" clause above is
+// the 2026-07-11 record and stays as-run, but it no longer describes the shipped burst — that pull
+// delay belonged to the el8 `ose-cli:latest`, and the 2026-08-12 repin ended it. Re-measured the
+// same day as user4 on OCP 4.22.8: 12 verbatim runs, zero pulls (`already present on machine`),
+// container Running 1.3-2.8s after `oc run`; the ~30s an attendee actually waits is the metrics
+// path, not the image. The paragraph after the burst block and instructor.adoc carry the numbers.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -717,7 +723,20 @@ parasol-claims   Deployment/parasol-claims   cpu: 65%/60%    2         4        
 ====
 
 On this run the burst drove CPU well past the 60% target — peaking around *118%* — and once the load actually landed the HPA scaled to the *ceiling of 4* within about *10 seconds*, then settled toward the 60% target spread across four pods.
-Expect the burst to take up to a minute to bite: its container image must pull and start before it can generate any load, so `REPLICAS` sits at 2 (and `TARGETS` may even dip) for a short while first — the scale-out is fast, the *warm-up* is what you wait on.
+Expect about *half a minute* before the burst bites — and it is not the image you are waiting for.
+Measured over 12 runs of the block above, the container was up *1–3 seconds* after you pressed enter, and on every one of them the kubelet reported the image *already present on machine* and pulled nothing at all.
+What takes the time is the *metrics* path: CPU has to be scraped and handed to the autoscaler, which took *26–36 seconds* across three timed runs, so `REPLICAS` sits at 2 (and `TARGETS` may even dip) for a while first.
+The scale-out is fast — the *measurement* is what you wait on.
+// WARM-UP RE-MEASURED 2026-08-12 on OCP 4.22.8, as user4 in user4-dev, running the
+// block above VERBATIM 12 times. This paragraph read "up to a minute to bite: its container image
+// must pull and start" until today; that was measured against the el8 `ose-cli:latest` and did not
+// survive the 2026-08-12 repin, so it is gone rather than carried forward. All 12 runs reported
+// `Container image … already present on machine` — the kubelet pulled NOTHING — and `oc run` to
+// container Running was 1.3 1.3 1.7 1.7 2.0 2.0 2.2 2.3 2.4 2.4 2.7 2.8 s (median ~2.1). The
+// 26–36 s figure is when HPA `TARGETS` first moved off its idle reading, over three runs each
+// started from a settled 2-replica floor: 25.7 s / 29.4 s / 36.0 s. Full provenance — including
+// why a cold pull of this image cannot be produced on an OpenShift node at all — is in
+// instructor.adoc, under the "Why won't the HPA scale back down after I stop the load?" entry.
 Stop the load and clean up the burst pod:
 
 [source,sh,role=execute]
@@ -947,7 +966,7 @@ that is the window decaying, not a failed fix, and it is worth saying so before 
 [demo-block]
 [TIME 4m]
 Say:: "The service is at two replicas. I'll hammer it, and the HPA will add pods on its own — no human, no ticket."
-Show:: *Topology* on `parasol-claims` — click the node and open its *Resources* panel's *Pods* list at 2. Start the burst; after its image pulls (~30–60s) the Pods list grows to 4 (the status ring itself stays a solid color and does not subdivide by pod count — read the count from the Resources panel, not the ring). Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
+Show:: *Topology* on `parasol-claims` — click the node and open its *Resources* panel's *Pods* list at 2. Start the burst; the container is up in *1–3s* (this image never pulls — the kubelet already has it), but CPU takes *26–36s* to reach the autoscaler, so the Pods list grows to 4 about half a minute in (the status ring itself stays a solid color and does not subdivide by pod count — read the count from the Resources panel, not the ring). Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
 Do::
 +
 [source,sh,role=execute,subs="attributes"]
