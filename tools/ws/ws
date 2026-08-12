@@ -27,6 +27,8 @@
 #
 # --user names the ATTENDEE whose world the command touches, and every verb above that takes a
 # <module> accepts it (also as a bare token: `ws prep m07 user3` == `ws prep m07 --user user3`).
+# Give both spellings and they must AGREE: two different attendees in one command (`ws prep m07
+# user3 --user user4`) is refused outright, never silently resolved to one of them.
 # An attendee in their own cockpit terminal never needs it — ws uses their login. An SA or instructor
 # on an ADMIN context always does, because ws refuses to guess whose namespaces to wipe. Presenting a
 # demo IS that case, and --user is the whole of it — there is no separate presenter mode:
@@ -395,6 +397,81 @@ require_user_token() {  # value [context] → die unless the value is a canonica
     die "${ctx}: '${v}' is not an attendee identity — you meant 'user${v}' (attendees are user1, user2, …; see: ws status)"
   fi
   die "${ctx}: '${v}' is not an attendee identity — expected userN, e.g. user1 (see: ws status)"
+}
+
+# The DUAL-SPELLING conflict gate. `--user U` and a bare positional `userN` are EQUIVALENT (this
+# file's header) — deliberately, so `ws prep m07 user3` and `ws prep m07 --user user3` both work.
+# The cost of that equivalence is that a caller correcting themselves mid-command types BOTH:
+#
+#     ws prep m07 user3 --user user4        # "…no, user4" — appended after the fact
+#
+# Before this helper the LAST spelling parsed silently won, and only ONE of the two orders was
+# checked at all: the positional branch asked whether --user had already bound a value, so
+# `--user user4 user3` died while `user3 --user user4` resolved to user4 in complete silence
+# (measured on the shipped parser, both orders, every verb). `ws prep` DETECTS LEFTOVERS AND OFFERS
+# TO WIPE, so the silent order is a data-loss shape, not a cosmetic one — and afterwards the wipe is
+# indistinguishable from a normal prep, so nobody can tell which attendee's world went. This is the
+# same failure mode user_arg's admin branch was hardened for on 2026-08-02, reached by another door.
+#
+# Two DIFFERENT attendees in one command is never what anyone means. Two IDENTICAL ones is harmless
+# redundancy (`ws smoke m09 user1 --user user1`) and stays silent — refusing that would only teach
+# people to distrust the error. Repeated `--user U --user V` lands here too: it is the same shape.
+#
+# CALLED AS A BARE COMMAND, never inside a $(…) — die must end the PROCESS, not just a subshell
+# (the trap already written down at main()'s module_arg/user_arg resolution). No `cond && cmd` as a
+# last statement either: under `set -e` that shape returns 1 from a function called bare and kills
+# the caller, which is how ogsr-uninstall.sh once skipped five teardown steps in silence.
+# $4 is what the caller's command line carries BETWEEN the verb and the flag, so the worked example
+# is a command that verb actually accepts. Callers that take a module pass "<module>"; the rest
+# default to "…" rather than inventing an argument — `ws rebuild-images <module> --user user3` would
+# be a suggestion that dies on the next line, which is worse than no suggestion at all.
+user_conflict_guard() {  # <already-bound> <newly-seen> <verb> [<usage tail>] → 0, or dies naming BOTH
+  local have="${1:-}" want="${2:-}" verb="${3:-ws}" tail="${4:-…}"
+  if [[ -z "$have" || "$have" == "$want" ]]; then
+    return 0
+  fi
+  # --all-users is a SCOPE, not an identity, so it gets its own sentence: "two different attendees"
+  # would be a lie, and the real mistake (cohort-wide vs one attendee) is the thing worth naming.
+  if [[ "$have" == "--all-users" || "$want" == "--all-users" ]]; then
+    local named="$have"
+    if [[ "$named" == "--all-users" ]]; then named="$want"; fi
+    die "${verb}: --all-users and ${named} name DIFFERENT scopes — the whole cohort, or one attendee.
+   ws will not guess which you meant, and nothing has been touched. Pick one:
+       ws ${verb} ${tail} --user ${named}
+           …that attendee only
+       ws ${verb} ${tail} --all-users
+           …every attendee"
+  fi
+  die "${verb}: two different attendees in one command — '${have}' and '${want}'.
+   ws will not guess which you meant, and nothing has been touched. Guessing is not survivable in
+   this CLI: prep/reset/solve WIPE the namespaces of whoever they resolve to, and afterwards the
+   wipe looks exactly like a normal run.
+   Re-run naming ONE attendee, e.g.:
+       ws ${verb} ${tail} --user ${want}"
+}
+
+# The other half of "a typo must look like a typo". The positional attendee token is shape-checked
+# (^user[0-9]+$), so `user3x` dies — but a token that does not even LOOK like an attendee never
+# reached that branch: it fell through to `extra`, was passed to a cmd_* that ignores it, and the
+# command then resolved the user from `oc whoami` instead. Measured on the shipped parser:
+#
+#     ws prep m07 usr3      →  user=[] module=[m07] extra=[usr3]      … and prep ran on whoami
+#     ws doctor usr3        →  module=[usr3] (dropped) … and doctor reported COHORT-WIDE
+#
+# Silently changing the SCOPE of a command because one character was wrong is the same class of
+# defect as bug #102 (`--user 1` → a phantom entry-agentic-ai-1 Application), just quieter.
+#
+# Enforced ONLY for the verbs that take an attendee (see main()'s takes_user), and only for a token
+# that is not already the module: `ws list`, `ws help` and `ws preflight` keep today's tolerance,
+# and dash-prefixed flags still pass through untouched because cmd_verify forwards them verbatim to
+# the module's verify script (--entry-only / --solve) and cmd_prep reads --yes.
+unexpected_positional() {  # <token> <verb> <module-taking?> → never returns
+  local tok="${1:-}" verb="${2:-ws}" takes_module="${3:-false}" usage
+  if [[ "$takes_module" == true ]]; then usage="ws ${verb} <module> [--user userN]"
+  else usage="ws ${verb} [--user userN]"; fi
+  die "${verb}: unexpected argument '${tok}' — usage: ${usage}
+   If that was meant to be the attendee, the spelling is userN (e.g. user3): ws refuses to drop it
+   silently, because a dropped identity does not fail — it just acts on somebody else."
 }
 
 # _attendee_hint runs ONLY from user_arg's admin branch — a path that is already terminating — so the
@@ -1775,7 +1852,11 @@ cmd_git_refresh() {
       # git-refresh self-parses, so main()'s --user validation never sees these. Both flags name
       # attendees (restart_terminals resolves them to showroom-<user> Deployments), so both get the
       # canonical check — a typo here silently restarts nothing and reads as "the refresh did not work".
-      --user)                        target="${2:-}"; require_user_token "$target" "git-refresh --user"; shift 2;;
+      # No positional userN here (a bare token dies below), so the gate is about the REPEATED flag:
+      # `--user user3 --user user4` used to restart user4's cockpit and never mention user3.
+      --user)                        require_user_token "${2:-}" "git-refresh --user"
+                                     user_conflict_guard "$target" "${2:-}" "git-refresh"
+                                     target="${2:-}"; shift 2;;
       --exclude)                     require_user_token "${2:-}" "git-refresh --exclude"; excludes+=("$2"); shift 2;;
       *) die "git-refresh: unknown option '$1' — see: ws help";;
     esac
@@ -1828,7 +1909,9 @@ cmd_session_refresh() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --all)  all=true; shift;;
-      --user) target="${2:-}"; require_user_token "$target" "session-refresh --user"; shift 2;;
+      --user) require_user_token "${2:-}" "session-refresh --user"
+              user_conflict_guard "$target" "${2:-}" "session-refresh"
+              target="${2:-}"; shift 2;;
       *) die "session-refresh: unknown option '$1' — see: ws help";;
     esac
   done
@@ -2297,9 +2380,14 @@ cmd_rebuild_images() {
       --no-build)  no_build=true; shift ;;
       --image)     filter="${2:-}"; shift 2
                    [[ -n "$filter" ]] || die "rebuild-images: --image needs an image name (e.g. --image parasol-claims)" ;;
-      # rebuild-images self-parses, so main()'s --user validation never sees this value.
-      --user)      scope="${2:-}"; require_user_token "$scope" "rebuild-images --user"; shift 2 ;;
-      user[0-9]*)  scope="$1"; require_user_token "$scope" "rebuild-images"; shift ;;
+      # rebuild-images self-parses, so main()'s --user validation and its dual-spelling conflict gate
+      # never see these values — both spellings are re-implemented here and both need the gate.
+      --user)      require_user_token "${2:-}" "rebuild-images --user"
+                   user_conflict_guard "$scope" "${2:-}" "rebuild-images"
+                   scope="${2:-}"; shift 2 ;;
+      user[0-9]*)  require_user_token "$1" "rebuild-images"
+                   user_conflict_guard "$scope" "$1" "rebuild-images"
+                   scope="$1"; shift ;;
       --all)       all=true; shift ;;
       # Line window over this file's OWN header comment — adding a line up there shifts it. Ends at
       # the last `ws <cmd>` row (26 = rebuild-images' own two lines); the global help below
@@ -3288,6 +3376,8 @@ cmd_passwd() {  # SA/admin: rotate the shared workshop login password. Whole-coh
       --user)
         [[ $# -ge 2 ]] || die "passwd: --user needs a value (e.g. user3)"
         require_user_token "$2" "passwd --user"
+        # passwd's bare positional is NEWPASS, not a user, so this gate is about the REPEATED flag.
+        user_conflict_guard "$target_user" "$2" "passwd"
         target_user="$2"; shift 2 ;;
       -*) die "passwd: unknown option '$1' — usage: ws passwd [--user userN] [NEWPASS]" ;;
       *)
@@ -4675,8 +4765,14 @@ cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge t
       --key-stdin) key_stdin="true"; shift ;;
       --model)    opt_model="${2:-}"; shift 2 ;;
       --endpoint) opt_endpoint="${2:-}"; shift 2 ;;
-      --user)     scope_user="${2:-}"; shift 2 ;;
-      user[0-9]*) scope_user="$1"; shift ;;
+      # Both spellings, so both need the dual-spelling gate (maas set self-parses; main() never sees
+      # these). Shape-checked in-branch too, so `--user 1 user3` names the typo rather than a conflict.
+      --user)     require_user_token "${2:-}" "maas set --user"
+                  user_conflict_guard "$scope_user" "${2:-}" "maas set"
+                  scope_user="${2:-}"; shift 2 ;;
+      user[0-9]*) require_user_token "$1" "maas set"
+                  user_conflict_guard "$scope_user" "$1" "maas set"
+                  scope_user="$1"; shift ;;
       --no-converge) converge="false"; shift ;;
       --force)    force="true"; shift ;;
       -h|--help)  maas_usage; return 0 ;;
@@ -4948,8 +5044,14 @@ cmd_maas() {
       local u=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --user) u="${2:-}"; shift 2 ;;
-          user[0-9]*) u="$1"; shift ;;
+          # Both spellings, so both need the dual-spelling gate — and the shape check moves in-branch
+          # (it used to run once, after the loop, on whichever value happened to win).
+          --user) require_user_token "${2:-}" "maas show --user"
+                  user_conflict_guard "$u" "${2:-}" "maas show"
+                  u="${2:-}"; shift 2 ;;
+          user[0-9]*) require_user_token "$1" "maas show"
+                      user_conflict_guard "$u" "$1" "maas show"
+                      u="$1"; shift ;;
           -h|--help) maas_usage; return 0 ;;
           *) die "maas show: unknown argument '$1' — see: ws maas --help" ;;
         esac
@@ -4986,6 +5088,18 @@ main() {
   # generic parser below would otherwise bin as the module argument.
   [[ "$cmd" == "rebuild-images" ]] && { cmd_rebuild_images "$@"; return; }
   local user="" module="" extra=()
+  # Which verbs bind a bare token as <module>, and which take an attendee at all. Both drive the
+  # `*)` branch below: a bare token that is neither the module nor a userN is a typo on any verb
+  # that acts on an attendee, and dropping it silently CHANGES THE SCOPE of the command (see
+  # unexpected_positional). list/preflight/help take neither and keep today's tolerance.
+  local takes_module=false takes_user=false
+  case "$cmd" in
+    prep|start|verify|smoke|reset|solve|diag) takes_module=true; takes_user=true;;
+    doctor|status)                            takes_user=true;;
+  esac
+  # What user_conflict_guard's worked example puts between the verb and the flag (see its $4).
+  local conflict_tail="…"
+  if [[ "$takes_module" == true ]]; then conflict_tail="<module>"; fi
   # collect --user anywhere; a bare userN (e.g. `ws start m07 user2`) is the target user, exactly like
   # --user user2 — the first OTHER bare arg is the module. Honoring positional userN closes a footgun:
   # without it, `ws start m07 user2` silently dropped "user2" and provisioned for whoami's default
@@ -4994,15 +5108,26 @@ main() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       # Validate the FLAG VALUE with the same rule the positional token below already enforces —
-      # `--user 1` must die here, not become an Application named entry-<module>-1.
-      --user) user="${2:-}"; require_user_token "$user" "${cmd} --user"; shift 2;;
-      --all-users) user="--all-users"; shift;;
+      # `--user 1` must die here, not become an Application named entry-<module>-1. Shape FIRST, then
+      # the conflict gate: `user3 --user 1` should say "1 is not an attendee identity" (one thing to
+      # fix) rather than report a conflict between a name and a typo.
+      --user) require_user_token "${2:-}" "${cmd} --user"
+              user_conflict_guard "$user" "${2:-}" "$cmd" "$conflict_tail"
+              user="${2:-}"; shift 2;;
+      --all-users) user_conflict_guard "$user" "--all-users" "$cmd" "$conflict_tail"
+                   user="--all-users"; shift;;
       user[0-9]*)
         [[ "$1" =~ ^user[0-9]+$ ]] || die "bad user token '$1' — expected userN, e.g. user2"
-        [[ -n "$user" && "$user" != "$1" ]] && die "conflicting users: --user ${user} and positional ${1} — pass just one"
+        # Was `[[ -n "$user" && "$user" != "$1" ]] && die …` — a check that lived ONLY here, so it
+        # fired for `--user user4 user3` and never for `user3 --user user4`. The gate is now on every
+        # branch that binds the identity, so the order of the two spellings stops mattering.
+        user_conflict_guard "$user" "$1" "$cmd" "$conflict_tail"
         user="$1"; shift;;
       -*) extra+=("$1"); shift;;
-      *) [[ -z "$module" ]] && module="$1" || extra+=("$1"); shift;;
+      *) if [[ "$takes_module" == true && -z "$module" ]]; then module="$1"
+         elif [[ "$takes_user" == true ]]; then unexpected_positional "$1" "$cmd" "$takes_module"
+         else extra+=("$1"); fi
+         shift;;
     esac
   done
   # --all-users is ONLY meaningful to `ws start` (cmd_start's own instructor-cohort branch, line ~785).
@@ -5050,9 +5175,19 @@ main() {
     # BOTH closing paragraphs print WHOLE — the --user/presenter note and the two-line "<module> is a
     # position number OR a slug" note. Cutting it short leaves a sentence hanging mid-clause. (36, up
     # from 27: the F-03 banner correction added nine header lines — two wrapped command rows, the
-    # blank, and the six-line --user/presenter paragraph.)
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,36p';;
+    # blank, and the six-line --user/presenter paragraph. Then 38: the two-line "both spellings must
+    # AGREE" note that user_conflict_guard enforces.)
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,38p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }
-main "$@"
+
+# RUNNING this file executes main; SOURCING it defines the functions and runs nothing. The same
+# idiom tools/lint/_parse-guard-args.sh uses, and the seam tools/ws/ws-argparse-selftest.sh needs:
+# the argument parser can only be proven by EXERCISING it, and a self-test that shelled out to the
+# real `ws` would either reach a cluster or prove nothing. Nothing in this repo sources `ws` (checked
+# tree-wide), and every real entry point — PATH invocation, `bash tools/ws/ws`, and ws_stay_current's
+# `exec "$WS_SELF"` — has BASH_SOURCE[0] == $0, so this changes no invocation anyone makes.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
