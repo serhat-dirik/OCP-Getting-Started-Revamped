@@ -17,10 +17,29 @@
 # passes; the security seeds (per stage) make each fail deterministically — those seeds ship with the
 # app-security-testing content/app pass. The perf gate has no seeded regression yet; it passes on the healthy app.
 #
-# Memory for the Maven/Quarkus steps comes from the {user}-cicd namespace default container limit
-# (2Gi, gitops/workshop-config/templates/per-user-limits.yaml), not from this Pipeline and not from
-# per-task taskRunSpecs — so the Pipeline stays runtime-agnostic AND a run started from the console
-# *Actions -> Start* form (which cannot set per-task memory) gets the same memory as any other.
+# SIZE THE NAMESPACE, NOT THE RUN. Memory AND CPU for the Maven/Quarkus steps come from the
+# {user}-cicd namespace default container limit (gitops/workshop-config/templates/per-user-limits.yaml),
+# not from this Pipeline and not from per-task taskRunSpecs — so the Pipeline stays runtime-agnostic
+# AND a run started from the console *Actions -> Start* form, which cannot set either, gets what any
+# other run gets. That is also why this file has no knob for it: PipelineTask has no
+# computeResources field at all (tekton.dev/v1, checked with `oc explain` on Pipelines 1.23.1), so
+# the ONLY places a step's CPU can come from are the Task body, a PipelineRun's taskRunSpecs, and
+# the LimitRange — and of those three only the LimitRange reaches every run.
+#
+# THIS PIPELINE IS CPU-BOUND, AND THAT DEFAULT IS WHERE ITS RUNTIME IS DECIDED (measured on
+# cluster-m24jn, 2026-08-13, `default.cpu: 500m`). Every step runs pegged at its 500m ceiling —
+# `oc adm top pod` reads a flat 499m through the whole compile — and the same Maven work on the same
+# source, in the same image, on the same node class, at different CPU ceilings:
+#     phase                                    500m    1000m   2000m   4000m
+#     resolve 459 jars + compile (5 files)      92s      65s     43s     37s
+#     mvn test (30 tests / 6 Quarkus boots)    413s     256s    131s     59s
+#     mvn -DskipTests package                  185s      93s     47s     24s
+# The whole capstone's Maven work is ~690s at 500m and ~120s at 4000m. Nothing in the DAG or in a
+# dependency cache competes with that: the intra-run Maven repository tried on 2026-08-13 changed
+# unit-test by 6 seconds (see the workspaces block). If this capstone needs to be faster, raise the
+# namespace default — and check the {user}-cicd ResourceQuota when you do, because a step limit of
+# D gives sast-sonar's three-step pod 3×D against a `limits.cpu: 6` quota, so D above ~1900m stops
+# the pod being admitted at all.
 #
 # LOCKSTEP: this is the CANONICAL copy; the app-security-testing entry state ships the same Pipeline
 # at gitops/entry-states/app-security-testing/templates/pipeline.yaml. NOT byte-identical — that copy
@@ -72,6 +91,28 @@ spec:
     # pipelines/pipeline/parasol-claims-build.yaml for the failure and the measurement. The "six
     # sequential runs" argument that justified it does not survive the numbers: a warm cache was
     # worth 1.2% of a run, so six of them are worth about forty seconds of a capstone.
+    #
+    # AND THE INTRA-RUN VARIANT DOES NOT WORK EITHER — tried and measured 2026-08-13, so that the
+    # next person costs themselves an hour and not a release. The idea: give every `source` mapping
+    # `subPath: source` and map the two Maven tasks' optional `maven-cache` workspace to THIS SAME
+    # shared-workspace at `subPath: maven-repository`. It is genuinely admissible — both mappings
+    # resolve to one PersistentVolumeClaim, so the TaskRun mounts one claim and the Affinity
+    # Assistant is satisfied (Tekton counts claims, not workspace names; probe PipelineRun
+    # p1-probe-2ws-7t7rq Succeeded, its pod carrying a single volume mounted at two subPaths). It
+    # also demonstrably worked in the capstone: the run's sast-sonar wrote the tree to the claim and
+    # unit-test's Maven read it back. IT JUST DOES NOT MAKE THE RUN FASTER.
+    #   baseline (no cache)  unit-test 491s, Maven "Total time: 07:53"
+    #   intra-run repository unit-test 497s, Maven "Total time: 07:53"
+    # Identical to the second, on the same cluster an hour apart. The dependency fetch was never
+    # unit-test's cost: at the 500m CPU limit these steps run under, resolving all 459 jars is ~92s
+    # in isolation while the six Quarkus test-application boots are ~400s — and what the download
+    # saves, writing 154MB through the PVC gives back. Two independent reasons not to reach for a
+    # Maven cache here; the CPU limit is the thing that actually moves this pipeline.
+    # It has a second cost that is easy to miss: with both mappings naming shared-workspace,
+    # tools/verify/_lib.sh's pipeline_pvc_workspaces_ok counts BINDINGS to a PVC-backed pipeline
+    # workspace rather than distinct claims, so `ws verify app-security-testing` goes ❌ on a
+    # capstone that is running perfectly ("task 'sast-sonar' binds two PVC-backed workspaces").
+    # Anyone reviving this idea has to fix that helper in the same change.
   results:
     - name: sast-passed
       value: $(tasks.sast-sonar.results.quality-gate-passed)
@@ -100,8 +141,11 @@ spec:
       workspaces:
         - {name: output, workspace: shared-workspace}
 
-    # 2) SAST: SonarQube analysis + quality-gate gate. Runs before SCA so the gauntlet surfaces one red
-    #    security gate at a time (the source-analysis gates are sequential beats).
+    # 2) SAST: SonarQube analysis + quality-gate gate. FIRST GATE AFTER THE CHECKOUT, and that is an
+    #    attendee-experience decision as much as a narrative one: exercise 1's seeded hard-coded
+    #    credential (rule S2068) has to go red EARLY in the break-fix loop. Behind unit-test it
+    #    would be minutes of green log before the first red gate appears (measured: unit-test alone
+    #    is ~8 min of the run).
     - name: sast-sonar
       runAfter: [fetch-source]
       taskRef:
@@ -113,9 +157,9 @@ spec:
       params:
         - {name: SONAR_PROJECT_KEY, value: $(params.sonar-project-key)}
       workspaces:
-        # ONE workspace. sonar-scan also declares an optional `maven-cache`; mapping it here beside
-        # `source` gives this TaskRun two PVC-backed workspaces and the Affinity Assistant rejects
-        # the run in its default mode (see the Pipeline's workspaces block above).
+        # ONE workspace, even though sonar-scan also declares an optional `maven-cache`. Read the
+        # Pipeline's workspaces block above before binding it — both ways of doing so have been
+        # tried and measured, and neither is here by accident.
         - {name: source, workspace: shared-workspace}
 
     # 3) SCA: Trivy filesystem scan (dependency CVEs) + CycloneDX SBOM artifact. runAfter sast-sonar.
@@ -131,6 +175,12 @@ spec:
         - {name: source, workspace: shared-workspace}
 
     # 4) Unit tests (H2-backed, self-contained) — after the source gates pass. Curated maven-jdk21.
+    #    SEQUENTIAL AFTER sca-trivy ON PURPOSE, even though there is no data dependency and running
+    #    the two side by side would shave ~25s off a green run. The lab's break-fix ladder is six
+    #    runs, each red at ONE gate, and run 2 is "red at sca-trivy, ~3-4 min". A failed task does
+    #    not cancel an in-flight sibling — Tekton finalizes the PipelineRun only when the running
+    #    TaskRuns finish — so parallelising would make that 3-4 minute beat wait out an 8-minute
+    #    unit-test before it reads Failed. 25s of a green run is not worth 5 minutes of every red one.
     - name: unit-test
       runAfter: [sast-sonar, sca-trivy]
       taskRef:
@@ -143,7 +193,7 @@ spec:
         - name: GOALS
           value: ["-B", "-ntp", "test"]
       workspaces:
-        # ONE workspace — same constraint as sast-sonar above.
+        # ONE workspace — same maven-cache story as sast-sonar above.
         - {name: source, workspace: shared-workspace}
 
     # 5) Build the image from the Containerfile; Tekton Chains SIGNS this TaskRun's image automatically.

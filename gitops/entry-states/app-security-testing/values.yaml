@@ -5,6 +5,44 @@ clusterDomain: apps.example.com
 # ws solve sets true → additionally runs the capstone on the CLEAN main branch (every gate passes,
 # image deployed + Route created): the demo/instructor END state. See solve-endstate.yaml.
 solve: false
+
+# ── ONE CLOCK for the solve end-state ────────────────────────────────────────────────────────────
+# solvePipelineTimeoutSeconds is the AUTHORITY. It is the capstone PipelineRun's own hard stop, and
+# it is the ONLY number here anyone should tune. Every other wait that sits around that run is
+# DERIVED FROM IT by templates/solve-endstate.yaml, and every derived number is strictly LARGER, so
+# the innermost clock always fires first:
+#
+#   solvePipelineTimeoutSeconds       2100   PipelineRun spec.timeouts.pipeline   ← authoritative
+#   + solveHookGraceSeconds            180   the hook's poll budget (2280)
+#   + 60                                     the hook Job's activeDeadlineSeconds (2340)
+#   <  ws-meta.yaml waitSeconds       2400   the ws start/solve wait window (outermost)
+#
+# WHY THIS SHAPE. Before 2026-08-13 the three numbers were written out by hand and had drifted into
+# an inversion nobody could see: ws-meta said 1800, activeDeadlineSeconds said 1800, the poll loop
+# was `seq 1 170` × `sleep 10` = 1700s, and the PipelineRun declared NO timeout at all — so it
+# inherited Tekton's built-in 1h default and was allowed to run more than twice as long as the hook
+# waiting for it. The hook was therefore GUARANTEED to die first on any slow run, leaving an
+# orphaned PipelineRun still executing and a failed Argo sync. Deriving instead of retyping is what
+# makes that unrepresentable; the hook additionally re-asserts the ordering at RUN time against the
+# PipelineRun it actually created, so a hand-edited ConfigMap cannot re-open the gap silently.
+#
+# SIZED AGAINST MEASURED RUNS, not against what the capstone ought to cost. Two green end-to-end
+# runs on cluster-m24jn on 2026-08-13 took 1414s and 1419s, and an earlier one on a colder cluster
+# took 1625s, so 2100s is ~29% of headroom over the worst of those. A tighter cap is not a "faster
+# pipeline", it is `ws solve` failing on a slow morning.
+#
+# THIS NUMBER SHOULD COME DOWN, and there is a measurement waiting for whoever does it. The run is
+# CPU-bound on the {user}-cicd LimitRange `default.cpu: 500m`
+# (gitops/workshop-config/templates/per-user-limits.yaml); the SAME pipeline, same commit, same
+# cluster, with that ceiling simulated at 1500m, finished in 821s — 13m41s, all 12 gates green
+# (PipelineRun p1-after-c-4fpt5). When that default is raised, re-measure and bring this back to
+# roughly 1500 in the same change; the derived numbers below and ws-meta.yaml's waitSeconds follow
+# it automatically except for waitSeconds, which is hand-maintained and must stay the outermost.
+#
+# Raising this past (ws-meta waitSeconds - solveHookGraceSeconds - 60) puts the outermost wait back
+# inside the innermost one; raise ws-meta.yaml's waitSeconds in the same edit if you ever need to.
+solvePipelineTimeoutSeconds: 2100
+solveHookGraceSeconds: 180
 # In-cluster Gitea coordinates: fork-and-seed.yaml forks parasol/parasol-claims into {user}/parasol-claims
 # and publishes the seed-appsec branch carrying the four app-security-testing flaws (hard-coded credential, vulnerable dep,
 # image-baked log4shell, insecure Deployment manifest, missing security headers). The lab runs the capstone

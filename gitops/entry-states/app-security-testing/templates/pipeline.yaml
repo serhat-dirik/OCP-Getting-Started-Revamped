@@ -54,7 +54,10 @@ spec:
     # here and are not the same thing — every runner binds them `emptyDir: {}`, so the Affinity
     # Assistant does not count them. A persistent maven-cache claim was declared here 2026-08-07 and
     # removed 2026-08-08 (it made every run fail validation in seconds; measured saving when it did
-    # run: 1.2%). See pipelines/pipeline/parasol-claims-build.yaml's header note.
+    # run: 1.2%). The intra-run variant — maven-cache mapped to this same claim at another subPath,
+    # which IS admissible — was measured on 2026-08-13 and changed unit-test by 6 seconds, so it is
+    # not here either. Both stories, with the numbers, are in
+    # pipelines/pipeline/parasol-claims-devsecops.yaml's workspaces block.
   results:
     - name: sast-passed
       value: $(tasks.sast-sonar.results.quality-gate-passed)
@@ -83,8 +86,8 @@ spec:
       workspaces:
         - {name: output, workspace: shared-workspace}
 
-    # 2) SAST: SonarQube analysis + quality-gate gate. Runs before SCA so the gauntlet surfaces one red
-    #    security gate at a time (the source-analysis gates are sequential beats).
+    # 2) SAST: SonarQube analysis + quality-gate gate. First gate after the checkout, on purpose:
+    #    exercise 1's seeded hard-coded credential must go red early in the break-fix loop.
     - name: sast-sonar
       runAfter: [fetch-source]
       taskRef:
@@ -96,9 +99,6 @@ spec:
       params:
         - {name: SONAR_PROJECT_KEY, value: $(params.sonar-project-key)}
       workspaces:
-        # ONE workspace. sonar-scan also declares an optional `maven-cache`; mapping it here beside
-        # `source` gives this TaskRun two PVC-backed workspaces and the Affinity Assistant rejects
-        # the run in its default mode (see the Pipeline's workspaces block above).
         - {name: source, workspace: shared-workspace}
 
     # 3) SCA: Trivy filesystem scan (dependency CVEs) + CycloneDX SBOM artifact. runAfter sast-sonar.
@@ -114,6 +114,8 @@ spec:
         - {name: source, workspace: shared-workspace}
 
     # 4) Unit tests (H2-backed, self-contained) — after the source gates pass. Curated maven-jdk21.
+    #    Sequential after sca-trivy on purpose: a failed task does not cancel an in-flight sibling,
+    #    so parallelising would make the lab's "red at sca-trivy, ~3-4 min" beat wait out unit-test.
     - name: unit-test
       runAfter: [sast-sonar, sca-trivy]
       taskRef:
@@ -126,7 +128,6 @@ spec:
         - name: GOALS
           value: ["-B", "-ntp", "test"]
       workspaces:
-        # ONE workspace — same constraint as sast-sonar above.
         - {name: source, workspace: shared-workspace}
 
     # 5) Build the image from the Containerfile; Tekton Chains SIGNS this TaskRun's image automatically.

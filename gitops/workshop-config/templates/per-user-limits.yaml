@@ -17,7 +17,15 @@ spec:
   hard:
     requests.cpu: "3"
     requests.memory: 6Gi
-    limits.cpu: "6"
+    # RAISED 6 -> 8 on 2026-08-13, together with the LimitRange cpu default below; the two must move
+    # together and neither works alone. A step ceiling of D costs 3xD in a 3-step pod, and
+    # `sast-sonar` is exactly that: measured peak 5550m of 6000m at a 1500m default, so 6 left no
+    # margin and a 2000m default would need exactly 6000m and never be admitted at all.
+    # This is a CEILING, not a reservation — requests.cpu stays at 3 and defaultRequest stays 100m,
+    # so nothing extra is scheduled and cluster capacity is untouched until a pipeline actually
+    # bursts. Measured headroom at the time of the change: 93 allocatable cores across 6 nodes;
+    # eight attendees all running the capstone at once burst to roughly 36.
+    limits.cpu: "8"
     limits.memory: 12Gi
     # Headroom for pipeline-heavy modules: app-security-testing's designed fix loop is six
     # sequential PipelineRuns, each holding a workspace PVC until that run is deleted (Tekton's
@@ -38,7 +46,29 @@ spec:
   limits:
     - type: Container
       default:
-        cpu: 500m
+        # 500m -> 1500m, 2026-08-13. THIS ONE LINE IS THE WHOLE PIPELINE-SPEED FIX: the capstone
+        # went 1414s -> 821s (23m34s -> 13m41s) with nothing else changed, verified by a run whose
+        # every step container carried limits.cpu 1500m.
+        #
+        # Memory was tuned for these steps long ago; CPU never was, so every Maven, Quarkus and ZAP
+        # step ran pegged at half a core — `oc adm top pod` showed a flat 499m for an entire compile,
+        # and Maven reported "Total time: 01:38" to compile FIVE source files. Quarkus's first boot
+        # took 229s here against 55s at four cores.
+        #
+        # It has to live in the LimitRange and nowhere else. `PipelineTask` has no
+        # `computeResources` field (oc explain, Pipelines 1.23.1), and the lab drives runs from the
+        # console *Actions -> Start* form, which cannot set taskRunSpecs — so a per-run override
+        # reaches neither path. Only the namespace default reaches every run.
+        #
+        # DO NOT "optimise" this back by adding a Maven dependency cache instead. Measured
+        # 2026-08-13 across 500m/1000m/2000m/4000m: warm repo is within noise of cold at EVERY
+        # level, so the download was never the cost. A cache was also tried end to end (source and
+        # maven-cache on one pipeline workspace at different subPaths — admissible, no Affinity
+        # Assistant problem) and moved unit-test 491s -> 497s: what the skipped download saves,
+        # writing 154MB through the PVC gives back.
+        #
+        # Raising this REQUIRES the quota above at 8 — see the note there.
+        cpu: 1500m
         # The -cicd namespace runs Tekton image builds (Maven + buildah on a Quarkus app), which need
         # more than the 1Gi app-namespace default or they OOMKill mid-build. Sizing the namespace
         # DEFAULT here — instead of per-PipelineRun taskRunSpecs — is what lets attendees run a pipeline

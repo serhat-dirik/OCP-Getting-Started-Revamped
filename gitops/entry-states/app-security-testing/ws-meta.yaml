@@ -21,14 +21,29 @@ conflictsWith:
   - pipelines-fundamentals
   - trusted-supply-chain
 # The solve hook BLOCKS while the 12-stage capstone runs on clean main (SAST + SCA + unit-test +
-# build + image scan/report + sign + deployment-check + deploy + DAST + perf ≈ 15 min; cold cluster
-# longer), so ws start/solve wait windows must outlive it. Count and enumeration re-derived from
-# pipelines/pipeline/parasol-claims-devsecops.yaml on 2026-08-12 — it said 11 and omitted perf-k6,
-# which is how it drifted: the perf gate was added after this line was written and nothing here
-# pointed at the pipeline as the source. Re-derive rather than trust this line:
+# build + image scan/report + sign + deployment-check + deploy + DAST + perf — measured 1414s and
+# 1419s green end-to-end on cluster-m24jn 2026-08-13, ~24 min; a cold cluster is longer, and the
+# same pipeline is 821s once the {user}-cicd CPU default is raised — see values.yaml), so ws
+# start/solve wait windows must outlive it. Count and enumeration re-derived
+# from pipelines/pipeline/parasol-claims-devsecops.yaml on 2026-08-12 — it said 11 and omitted
+# perf-k6, which is how it drifted: the perf gate was added after this line was written and nothing
+# here pointed at the pipeline as the source. Re-derive rather than trust this line:
 #   python3 -c "import yaml;print(len(yaml.safe_load(open('pipelines/pipeline/parasol-claims-devsecops.yaml'))['spec']['tasks']))"
-# Engine default is 300s; the solve Job's own activeDeadlineSeconds (1800) is the hard stop.
-waitSeconds: 1800
+#
+# THE OUTERMOST OF FOUR NESTED CLOCKS, and the only one of them that is NOT derived — this file is
+# read by `ws`, not rendered by Helm, so it cannot compute itself. The other three live in
+# values.yaml's "ONE CLOCK" block, which is the authority; read it before touching this number.
+# The ordering that must hold, innermost first:
+#   PipelineRun spec.timeouts.pipeline   2100  (values.yaml solvePipelineTimeoutSeconds)
+#   solve hook poll budget               2280  (+ solveHookGraceSeconds)
+#   solve Job activeDeadlineSeconds      2340  (+ 60)
+#   waitSeconds (this line)              2400
+# Lowering this below the Job's activeDeadlineSeconds re-creates the inversion fixed on 2026-08-13,
+# where the PipelineRun declared no timeout at all and could run an hour while the hook gave up at
+# 1700s — and where this line and activeDeadlineSeconds were BOTH 1800, so ws stopped waiting at
+# the same instant the hook was killed. Engine default is 300s; the solve Job's own
+# activeDeadlineSeconds is the hard stop under this one.
+waitSeconds: 2400
 
 # Representative attendee muscle app-security-testing leans on, beyond the generic cockpit/identity battery.
 # Same shape as pipelines-fundamentals (both are tkn-driven -cicd modules, and module independence means

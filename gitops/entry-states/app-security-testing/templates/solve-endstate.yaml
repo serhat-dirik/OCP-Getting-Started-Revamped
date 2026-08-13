@@ -36,6 +36,11 @@ data:
           value: parasol-claims-{{ .Values.user }}
       taskRunTemplate:
         serviceAccountName: pipeline
+      # THE AUTHORITATIVE CLOCK for this end-state (values.yaml solvePipelineTimeoutSeconds). Nothing
+      # declared one before, so this run inherited Tekton's built-in 1h default and could outlive the
+      # hook below by half an hour. Everything that waits on this run derives from THIS number.
+      timeouts:
+        pipeline: {{ .Values.solvePipelineTimeoutSeconds }}s
       workspaces:
         - name: shared-workspace
           volumeClaimTemplate:
@@ -73,7 +78,10 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 1800
+  # DERIVED, never retyped: the PipelineRun's own timeout + the hook's poll grace + 60s, so this
+  # Job outlives its own poll loop, which outlives the run it is polling. See values.yaml's
+  # "ONE CLOCK" block for the full ordering and why it is derived rather than written out.
+  activeDeadlineSeconds: {{ add .Values.solvePipelineTimeoutSeconds .Values.solveHookGraceSeconds 60 }}
   template:
     metadata:
       labels:
@@ -97,10 +105,41 @@ spec:
           args:
             - |
               set -euo pipefail
+              # POLL_BUDGET is DERIVED from the PipelineRun's own timeout (values.yaml
+              # solvePipelineTimeoutSeconds + solveHookGraceSeconds) and never typed independently —
+              # see the "ONE CLOCK" block there. POLL_STEP is the sleep, so the loop count follows
+              # from the budget instead of being a third number that can drift out of step with it.
+              POLL_STEP=10
+              POLL_BUDGET={{ add .Values.solvePipelineTimeoutSeconds .Values.solveHookGraceSeconds }}
               echo "▶ launching the DevSecOps capstone on main (solve end-state)…"
               PR="$(oc create -o name -f /solve/pipelinerun.yaml)"
-              echo "  ✓ started ${PR#*/} — waiting (SAST + SCA + build + scans + sign + deploy + DAST + perf ≈ 15 min)…"
-              for i in $(seq 1 170); do
+
+              # STRUCTURAL ASSERT, at run time, against the object actually created — not against
+              # what this template believes it rendered. If the PipelineRun's hard stop is ever
+              # allowed to reach or exceed this hook's poll budget, the hook is guaranteed to die
+              # first and orphan a still-running PipelineRun behind a failed Argo sync. That is the
+              # exact defect this block exists to make impossible, so it fails LOUDLY and cleans up
+              # rather than waiting ~28 minutes to fail confusingly.
+              PIPELINE_TIMEOUT="$(oc get "$PR" -o jsonpath='{.spec.timeouts.pipeline}' 2>/dev/null || true)"
+              case "${PIPELINE_TIMEOUT}" in
+                *[0-9]s)
+                  PIPELINE_TIMEOUT_S="${PIPELINE_TIMEOUT%s}" ;;
+                *)
+                  echo "  ❌ the PipelineRun declares no seconds-valued spec.timeouts.pipeline (got: '${PIPELINE_TIMEOUT:-<none>}')."
+                  echo "     Without it the run inherits Tekton's 1h default and outlives this hook."
+                  oc delete "$PR" --ignore-not-found >/dev/null 2>&1 || true
+                  exit 1 ;;
+              esac
+              if [ "${POLL_BUDGET}" -le "${PIPELINE_TIMEOUT_S}" ]; then
+                echo "  ❌ budget inversion: this hook waits ${POLL_BUDGET}s but the PipelineRun may run ${PIPELINE_TIMEOUT_S}s."
+                echo "     Fix values.yaml (solvePipelineTimeoutSeconds / solveHookGraceSeconds), not this script."
+                oc delete "$PR" --ignore-not-found >/dev/null 2>&1 || true
+                exit 1
+              fi
+
+              echo "  ✓ started ${PR#*/} — waiting up to ${POLL_BUDGET}s for a run capped at ${PIPELINE_TIMEOUT_S}s"
+              echo "    (SAST + SCA + unit-test + build + scans + sign + deploy + DAST + perf ≈ 24 min)…"
+              for i in $(seq 1 $((POLL_BUDGET / POLL_STEP))); do
                 s="$(oc get "$PR" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || true)"
                 case "$s" in
                   True)
@@ -110,8 +149,10 @@ spec:
                     echo "  ❌ pipeline FAILED — inspect: tkn pipelinerun logs ${PR##*/}"
                     exit 1;;
                 esac
-                sleep 10
+                sleep "${POLL_STEP}"
               done
-              echo "  ❌ pipeline still not finished after ~28 min — inspect: oc get ${PR}"
+              # Unreachable on a healthy cluster: the run's own ${PIPELINE_TIMEOUT_S}s cap fires
+              # first and flips the condition to False, which the loop above reports.
+              echo "  ❌ pipeline still not finished after ${POLL_BUDGET}s — inspect: oc get ${PR}"
               exit 1
 {{- end }}
