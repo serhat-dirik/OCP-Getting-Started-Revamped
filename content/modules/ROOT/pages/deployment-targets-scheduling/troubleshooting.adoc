@@ -119,12 +119,15 @@ oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
 +
 `minAvailable` must be *strictly less* than the replica count (`1` of `3`) so a disruption can proceed while the service stays up.
 
-// Captured live as user2 on OCP 4.22.5 / Kubernetes 1.35, 2026-07-28, by raising the parasol-claims CPU
-// limit to 2 in a {user}-dev namespace whose workshop-quota caps limits.cpu at 6.
+// RE-CAPTURED live as user3 on OCP 4.22.6, 2026-08-14, by raising the parasol-claims CPU limit to 4 in a
+// {user}-dev namespace whose workshop-quota caps limits.cpu at 8. The original capture (user2, OCP
+// 4.22.5 / Kubernetes 1.35, 2026-07-28) used limit 2 against a cap of 6; commit 13ed4ef moved that cap
+// to 8, at which point 2 is admitted for two of three replicas and only wedges on the third — a
+// DIFFERENT symptom, documented as its own entry below. 4 is what reproduces "never starts" now.
 == The rollout never starts — "0 out of N new replicas have been updated"
 
 Symptom:: `oc rollout status` sits at `Waiting for deployment "parasol-claims" rollout to finish: 0 out of 3 new replicas have been updated...` until it times out, and `oc get deploy` still shows the *old* generation. Meanwhile the capacity sampler from exercise 5 prints a reassuring `available=3/3` for the whole window.
-Cause:: The new ReplicaSet cannot create its pods. The usual reason in this lab is the `{user}-dev` `workshop-quota`, which caps `limits.cpu` at *6*: the namespace's other workloads hold *1300m*, so three claims replicas plus the `maxSurge: 1` pod fit at `limits.cpu: 1` (*5300m*) but not at `2` (*7300m*). The second reason is scheduling — no node has room for the surge pod. `maxUnavailable: 0` keeps the *old* pods serving throughout, which is why the capacity number stays flat and *proves nothing about the roll*.
+Cause:: The new ReplicaSet cannot create its pods — *not one of them*. The usual reason in this lab is the `{user}-dev` `workshop-quota`, which caps `limits.cpu` at *8*: the namespace's other workloads hold *1300m*, so three claims replicas plus the `maxSurge: 1` pod fit at `limits.cpu: 1` (*5300m*) and are refused outright at `4`, where the very first surge pod would take the namespace to *8300m*. The second reason is scheduling — no node has room for the surge pod. `maxUnavailable: 0` keeps the *old* pods serving throughout, which is why the capacity number stays flat and *proves nothing about the roll*.
 Fix:: Read the ReplicaSet, which names the cause exactly, then bring the request back inside the cap:
 +
 [source,sh,role=execute]
@@ -144,7 +147,7 @@ Conditions:
 Events:
   Type     Reason        Age   From                   Message
   ----     ------        ----  ----                   -------
-  Warning  FailedCreate  85s   replicaset-controller  Error creating: pods "parasol-claims-79664894df-4gfvd" is forbidden: exceeded quota: workshop-quota, requested: limits.cpu=2, used: limits.cpu=4300m, limited: limits.cpu=6
+  Warning  FailedCreate  86s   replicaset-controller  Error creating: pods "parasol-claims-b49959c69-qcsr6" is forbidden: exceeded quota: workshop-quota, requested: limits.cpu=4, used: limits.cpu=4300m, limited: limits.cpu=8
 ----
 +
 `ReplicaFailure=True` with `FailedCreate` and `exceeded quota` means *no pod object was ever created* — this is an admission refusal, not a slow rollout. Lower the container's `limits.cpu` back to `1` (`oc set resources deploy/parasol-claims -n $NS --limits=cpu=1,memory=512Mi --requests=cpu=200m,memory=256Mi`) and the roll proceeds. Do *not* raise the quota: it is a shared workshop-wide object, and every other module's resource lesson depends on it.
@@ -152,6 +155,36 @@ Events:
 If instead the ReplicaSet has *no* `ReplicaFailure` and the new pod exists but sits `Pending`, the pod was admitted and the problem is *placement*, not quota — read `oc get events -n $NS --field-selector reason=FailedScheduling` and expect `Insufficient cpu`/`Insufficient memory`. That is a cluster-headroom problem for whoever provisioned the cluster, not something to fix from inside the namespace.
 +
 Either way, the lesson for the sampler is the same: `available=N/N` tells you the *floor held*, never that the roll *landed*. Confirm with `oc rollout status` before you believe it.
+
+// Measured live as user3 on OCP 4.22.6, 2026-08-14, by raising the parasol-claims CPU limit to 2 against
+// the current cap of 8: two of the three new replicas came up Running at limits.cpu=2 while the old
+// ReplicaSet still held one pod, and only the third was refused. Recorded because it reads nothing like
+// the clean refusal above and is the more likely thing an attendee experimenting upward will hit.
+== The rollout gets *partway* and stops — some pods on the new limit, some on the old
+
+Symptom:: `oc rollout status` sits at `2 out of 3 new replicas have been updated...` and times out, and `oc get pods` shows a *mixture*: two pods carrying your new CPU limit and one still on the old one. The ReplicaSet has `ReplicaFailure=True`, but the event says `used` is *higher* than the number in the `describe quota` you read before you started.
+Cause:: The same quota ceiling as above, hit *mid-roll* rather than at the first pod. A surge roll admits its new pods one at a time, retiring an old pod between each, so the namespace total walks upward as it goes: at `limits.cpu: 2` from a `4300m` baseline it goes `6300m` (first new pod in), `5300m` (first old pod out), `7300m` (second new pod in), `6300m` (second old pod out) — and the third new pod would need `8300m`, which the `8` cap refuses. The roll is stuck holding two generations at once.
+Fix:: Read the `used` figure out of the *event*, not out of your earlier `describe quota` — mid-roll it is the only number that describes the moment the refusal happened:
++
+[source,sh,role=execute]
+----
+NEWRS=$(oc get rs -n $NS -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+oc describe rs $NEWRS -n $NS | grep 'exceeded quota' | tail -1
+oc get pods -n $NS -l app=parasol-claims -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,CPULIM:.spec.containers[0].resources.limits.cpu'
+----
++
+.The partial-wedge signature — one `used` value per rung of the walk
+[source,texinfo]
+----
+(combined from similar events): Error creating: pods "parasol-claims-7cd998dfcc-cww5t" is forbidden: exceeded quota: workshop-quota, requested: limits.cpu=2, used: limits.cpu=6300m, limited: limits.cpu=8
+
+NAME                              STATUS    CPULIM
+parasol-claims-7cd998dfcc-6546l   Running   2
+parasol-claims-7cd998dfcc-c8qsx   Running   2
+parasol-claims-846bc8d48f-gp7lv   Running   1
+----
++
+The fix is the same one — `oc set resources deploy/parasol-claims -n $NS --limits=cpu=1,memory=512Mi --requests=cpu=200m,memory=256Mi` — and it is *safe from here*: lowering the limit shrinks every pod the next roll creates, so the walk fits and the mixed generations converge. Do not "unstick" it by deleting the old pod: that drops you below the floor `maxUnavailable: 0` exists to hold, and the replacement is refused for the same reason.
 
 == A rollout drops requests even with `maxUnavailable: 0`
 

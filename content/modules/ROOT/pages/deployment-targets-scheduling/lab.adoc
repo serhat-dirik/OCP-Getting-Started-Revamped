@@ -15,12 +15,19 @@ include::partial$version-attributes.adoc[]
 // 1 batch pool) 2026-07-18; the shown 6/5 are that cluster's example, not a fixed fact. Console
 // click-paths are grounded against the unified console (OCP 4.19+, no perspective switch); labels a
 // build couldn't click get CAPTURE-VERIFY + the authoritative CLI.
-// 2026-07-28 re-grounding (exercise 5): the hardening step's CPU limit was lowered from 2 to 1. At 2 the
-// three replicas plus the maxSurge pod ask 7300m against the {user}-dev workshop-quota cap of
+// 2026-07-28 re-grounding (exercise 5): the hardening step's CPU limit was lowered from 2 to 1, because
+// at 2 the three replicas plus the maxSurge pod asked 7300m against a {user}-dev workshop-quota cap of
 // limits.cpu: 6, so the new ReplicaSet could never create a pod and the roll wedged while the capacity
 // sampler still printed available=3/3 — a silent false pass. At 1 the same roll peaks at 5300m. The
-// quota numbers, the describe-quota block, the cold-start figures and the PDB outputs below were
-// captured as user2 on OCP 4.22.5 / Kubernetes 1.35 that day.
+// cold-start figures and the PDB outputs below were captured as user2 on OCP 4.22.5 / Kubernetes 1.35
+// that day.
+// 2026-08-14: that quota cap moved 6 -> 8 (commit 13ed4ef, a pipeline-speed change in
+// workshop-config's per-user-limits.yaml that raised BOTH the LimitRange cpu default and this quota
+// across dev/stage/prod/cicd). 1 is still the right answer — the surge ceiling is (8000m - 1300m) / 4 =
+// 1675m per replica — but 2 no longer reproduces the refusal, so exercise 5's counter-example is now 4.
+// Re-measured as user3 on OCP 4.22.6: describe-quota reads 4300m/8; at 4 the first surge pod is refused
+// at 8300m with the roll never starting; at 2 two of three replicas are admitted and only the third is
+// refused (used 6300m). See the NOTE at exercise 5 for the full provenance.
 
 ifndef::demo[]
 include::partial$prereq-ws-start.adoc[]
@@ -905,15 +912,30 @@ oc rollout status deploy/parasol-claims -n $NS --timeout=180s
 --
 ====
 
-// Quota arithmetic measured live on OCP 4.22.5 as user2, 2026-07-28: `oc describe quota workshop-quota`
-// read 4300m/6 with the three replicas at limits.cpu=1, and the live admission controller accepted a
-// further 1000m surge pod (5300m) while refusing the 2-CPU equivalent — the exact numbers below.
+// Quota arithmetic RE-MEASURED live on OCP 4.22.6 as user3, 2026-08-14, after the {user}-dev
+// workshop-quota limits.cpu ceiling moved 6 -> 8: `oc describe quota workshop-quota` reads 4300m/8 with
+// the three replicas at limits.cpu=1, and the admission controller still accepts the further 1000m surge
+// pod (5300m). The REFUSED case had to be re-derived, and both candidates were run:
+//   * limits.cpu=4 — refused before any pod exists: `0 out of 3 new replicas have been updated`,
+//     ReplicaFailure/FailedCreate, `requested: limits.cpu=4, used: limits.cpu=4300m, limited:
+//     limits.cpu=8`. Same shape as the old 2-against-6 capture, so the beat is unchanged apart from
+//     its constants. This is the number below.
+//   * limits.cpu=2 — NO LONGER REFUSED as the page used to claim. Measured the same day: two of the
+//     three new replicas are ADMITTED and Running, and only the third is refused (`used: limits.cpu=
+//     6300m`). The roll still wedges, but it does NOT "never start", so 2 cannot carry this beat.
+// Do not restore 2 here without re-running it against whatever the quota says at the time.
+// The 1675m ceiling in the prose is measured, not just derived: a full surge roll at exactly
+// limits.cpu=1675m succeeded rc 0 and settled at 6325m/8, so its peak was 1300m + 4 x 1675m = 8000m —
+// EXACTLY the cap, and admitted. ResourceQuota refuses only when used + requested EXCEEDS hard; equal
+// fits. Worth knowing before anyone re-derives a ceiling one milli-core too conservatively.
 [NOTE]
 .Why `1`, and not a bigger number — your namespace caps `limits.cpu`
 ====
-`{user}-dev` carries a `workshop-quota` `ResourceQuota` with `limits.cpu: 6`, and the namespace's other four workloads (`claims-db`, `parasol-web`, `statement-batch`, `claims-load`) already hold *1300m* of it.
+`{user}-dev` carries a `workshop-quota` `ResourceQuota` with `limits.cpu: 8`, and the namespace's other four workloads (`claims-db`, `parasol-web`, `statement-batch`, `claims-load`) already hold *1300m* of it.
 At `limits.cpu: 1` the three claims replicas take *3000m* and the `maxSurge: 1` pod another *1000m* — *5300m* in total, inside the cap with room to spare.
-Ask for `2` instead and the same roll needs *7300m*: the quota *refuses to create the new pods at all*, the ReplicaSet reports `ReplicaFailure`/`FailedCreate`, and the rollout never finishes — see the troubleshooting page if you experiment upward and the roll stalls.
+Ask for `4` instead and the *first* surge pod alone puts the namespace at *8300m* (`1300m` + three `1000m` replicas still running + one `4000m` newcomer): the quota *refuses to create the new pods at all*, the ReplicaSet reports `ReplicaFailure`/`FailedCreate`, and the rollout never finishes — see the troubleshooting page if you experiment upward and the roll stalls.
+Carry the *arithmetic*, not the number: a surge roll of `N` replicas at limit `L` peaks at `other + (N + 1) × L`, so the most this namespace can give one replica is `(8000m - 1300m) ÷ 4`, about *1.6* cores.
+`1` fits with headroom; `4` does not fit at all.
 ====
 
 Read your own headroom any time — the quota is yours to inspect:
@@ -930,7 +952,7 @@ Name:                   workshop-quota
 Namespace:              {user}-dev
 Resource                Used    Hard
 --------                ----    ----
-limits.cpu              4300m   6
+limits.cpu              4300m   8
 limits.memory           2816Mi  12Gi
 persistentvolumeclaims  0       10
 pods                    7       30
@@ -938,7 +960,7 @@ requests.cpu            1       3
 requests.memory         1408Mi  6Gi
 ----
 
-`4300m` of `6` — the `1300m` the rest of the namespace holds plus your three `1000m` replicas. The `1700m` left over covers the `1000m` surge pod the next rollout will ask for, with `700m` to spare.
+`4300m` of `8` — the `1300m` the rest of the namespace holds plus your three `1000m` replicas. The `3700m` left over covers the `1000m` surge pod the next rollout will ask for, with `2700m` to spare.
 
 [IMPORTANT]
 .Use a *strategic* patch for the container change
@@ -1017,7 +1039,9 @@ oc rollout restart deploy/parasol-claims -n $NS >/dev/null
 wait
 ----
 
-// Grounded live on OCP 4.22.5 as user2, 2026-07-29, at limits.cpu=1 / three replicas / quota 4300m of 6.
+// Grounded live on OCP 4.22.5 as user2, 2026-07-29, at limits.cpu=1 / three replicas / quota 4300m used
+// (the cap read 6 that day and reads 8 since 13ed4ef; the USED figure and these drop counts are
+// unaffected — re-confirmed at 4300m/8 as user3 on OCP 4.22.6, 2026-08-14).
 // FOUR probe runs, every one on a roll `oc rollout status` confirmed as "successfully rolled out" (so
 // none is the wedged false pass the WARNING below describes):
 //   with schema-management=none (this step's full fix): ok=285 dropped=1 · ok=282 dropped=3
