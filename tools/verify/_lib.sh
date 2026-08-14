@@ -532,6 +532,16 @@ affinity_assistant_mode() {  # → 0 + AFFINITY_ASSISTANT_MODE set; 1/2 exactly 
 # capstone that runs fine the moment a task took the checkout plus one of them. Callers name the
 # workspaces their own PipelineRuns back with a PVC, and a name that is not currently declared is
 # harmless to list — that is what keeps the check firing if the binding is ever restored.
+#
+# IT COUNTS DISTINCT CLAIMS, NOT BINDINGS, and the difference is not academic. The assistant caps a
+# TaskRun at one PersistentVolumeClaim; two of a Task's OWN workspaces mapped to the SAME pipeline
+# workspace are one claim mounted at two subPaths, which is legal and which Tekton itself admits.
+# Measured 2026-08-13 while probing an intra-run Maven cache for parasol-claims-devsecops: mapping
+# `source` and `maven-cache` both to shared-workspace at different subPaths produced PipelineRun
+# p1-probe-2ws-7t7rq → Succeeded, its pod carrying a SINGLE volume mounted twice. An earlier draft
+# incremented once per BINDING, so that shape read as two PVCs and reddened a capstone that runs
+# perfectly — the false-❌ direction, which costs every other ✅ its credibility. The counter is
+# therefore a set: a pipeline workspace already counted for this task is not counted again.
 PIPELINE_PVC_CONFLICT=""
 pipeline_pvc_workspaces_ok() {  # <pipeline> <namespace> <pvc-backed workspace>… → 0 = admissible
   local pipeline="$1" ns="$2"; shift 2
@@ -548,12 +558,17 @@ pipeline_pvc_workspaces_ok() {  # <pipeline> <namespace> <pvc-backed workspace>�
 '{range .spec.finally[*]}{.name}{"|"}{range .workspaces[*]}{.name}{":"}{.workspace}{","}{end}{"\n"}{end}' \
     || return $?
   [[ -n "$OC_OUT" ]] || return 1   # a Pipeline with no tasks is not a pass
-  local line task bindings binding task_ws pipe_ws want n
+  local line task bindings binding task_ws pipe_ws want n is_pvc seen
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     task="${line%%|*}"
     bindings="${line#*|}"
-    n=0
+    # `seen` is the set of PVC-backed pipeline workspaces already counted for THIS task, as
+    # `|a|b|c|`. A `|`-delimited string rather than an associative array: workspace names are
+    # DNS-1123 labels (lowercase alphanumerics and `-`), so none can contain the delimiter, and this
+    # library is extracted function-by-function by tools/lint/pipeline-admissibility-guard.sh — a
+    # `declare -A` at function scope survives that, but a string needs nothing declared at all.
+    n=0; seen="|"
     while [[ -n "$bindings" ]]; do
       binding="${bindings%%,*}"
       if [[ "$bindings" == *,* ]]; then bindings="${bindings#*,}"; else bindings=""; fi
@@ -562,9 +577,16 @@ pipeline_pvc_workspaces_ok() {  # <pipeline> <namespace> <pvc-backed workspace>�
       pipe_ws="${binding#*:}"
       # `workspace:` omitted → Tekton defaults the Pipeline workspace to the Task's own name.
       [[ -n "$pipe_ws" ]] || pipe_ws="$task_ws"
+      is_pvc=0
       for want in "$@"; do
-        if [[ "$pipe_ws" == "$want" ]]; then n=$((n+1)); break; fi
+        if [[ "$pipe_ws" == "$want" ]]; then is_pvc=1; break; fi
       done
+      # One CLAIM per distinct pipeline workspace: a second binding onto one already counted is the
+      # same PVC at another subPath, not a second PVC. See the header measurement.
+      if (( is_pvc )) && [[ "$seen" != *"|${pipe_ws}|"* ]]; then
+        seen="${seen}${pipe_ws}|"
+        n=$((n+1))
+      fi
     done
     if (( n > 1 )); then
       PIPELINE_PVC_CONFLICT="$task"

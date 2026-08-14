@@ -18,12 +18,12 @@
 #
 # WHAT THIS GUARD DOES — it EXECUTES the real predicate, never greps it. The functions are extracted
 # verbatim from tools/verify/_lib.sh (tools/lint/_extract-func.sh) and driven against a stubbed `oc`
-# through six cases whose right answers are known from a live cluster (cluster-6xxpf, OCP 4.22.8 /
+# through eight cases whose right answers are known from a live cluster (cluster-6xxpf, OCP 4.22.8 /
 # OpenShift Pipelines 1.23.1, 2026-08-08): the same two Pipelines were applied broken and fixed with
 # the cluster mode held constant, and this predicate returned 1 (naming `unit-test`, then
 # `sast-sonar`) and then 0. A source scan proves the text; only execution proves the behaviour.
 #
-# THE SIX CASES, and why each is here rather than being "more of the same":
+# THE EIGHT CASES, and why each is here rather than being "more of the same":
 #   [a] restrictive mode, a task with TWO PVC-backed workspaces  → 1, and it must NAME the task.
 #       The regression itself. The name is asserted because the hint an attendee reads is built from
 #       PIPELINE_PVC_CONFLICT — a detector that fires with an empty name sends them nowhere.
@@ -43,6 +43,18 @@
 #   [f] a task binding that omits `workspace:` → resolved by the Task's own workspace name → 1.
 #       Tekton's own defaulting rule. Missing it would read the pipeline-level name as empty and
 #       silently stop counting, which is a false PASS on a genuinely broken Pipeline.
+#   [g] restrictive mode, ONE task binding TWO of its own workspaces to the SAME pipeline workspace
+#       → 0. The predicate counts CLAIMS, and this is one claim at two subPaths. Legal, and Tekton
+#       admits it: measured 2026-08-13 on the intra-run Maven cache probe for parasol-claims-
+#       devsecops (PipelineRun p1-probe-2ws-7t7rq Succeeded, its pod carrying a single volume
+#       mounted twice). An earlier draft incremented once per BINDING and called this a conflict,
+#       so a capstone that runs perfectly went ❌ — and the workaround written into
+#       pipelines/pipeline/parasol-claims-devsecops.yaml's own comment was "anyone reviving this
+#       idea has to fix that helper". This case is that fix, pinned.
+#   [h] restrictive mode, one task binding the SAME workspace twice AND a genuinely second PVC
+#       workspace → 1, naming the task. [g]'s companion and the reason it cannot be satisfied
+#       cheaply: "stop counting after the first PVC binding" would pass [g] and this one turns it
+#       straight back into the 2026-08-07 regression. Deduplicating is not the same as capping.
 #
 # Exit codes (the shared contract):
 #   0  the predicate behaves correctly in all six cases
@@ -107,6 +119,15 @@ dast-zap|source:shared-workspace,zap-work:zap-work,'
 # so this task really does bind maven-cache twice over from the assistant's point of view.
 FIXTURE_DEFAULTED='fetch-source|output:shared-workspace,
 unit-test|source:shared-workspace,maven-cache:,'
+# TWO of the task's OWN workspaces onto ONE pipeline workspace — the shape the intra-run Maven cache
+# experiment produced. `source` and `cache` are distinct task workspaces; both resolve to
+# shared-workspace, so the TaskRun mounts ONE claim at two subPaths and Tekton admits it.
+FIXTURE_SAME_WS_TWICE='fetch-source|output:shared-workspace,
+unit-test|source:shared-workspace,cache:shared-workspace,'
+# The same doubled binding PLUS a genuinely second claim. Distinct claims = 2, so this must fail —
+# a predicate that deduplicates by giving up after the first PVC binding would pass it.
+FIXTURE_SAME_WS_PLUS_SECOND='fetch-source|output:shared-workspace,
+unit-test|source:shared-workspace,cache:shared-workspace,maven-cache:maven-cache,'
 
 # run_case <lib> <coschedule> <pipeline-output> <pvc-workspace…> → stdout "RC=<n> CONFLICT=<task>"
 #
@@ -224,6 +245,35 @@ run_check() {
     rc=1
   fi
 
+  # [g] one PVC at two subPaths is ONE claim — the false-positive direction, distinct-claims edition
+  out="$(run_case "$lib" workspaces "$FIXTURE_SAME_WS_TWICE" shared-workspace maven-cache)"
+  got="$(_field "$out" RC)"
+  if [[ "$got" != "0" ]]; then
+    bad "[g] two task workspaces mapped to the SAME pipeline workspace is ONE PVC and must PASS; got rc=${got:-<none>}. Output: ${out}"
+    note "The predicate must count DISTINCT CLAIMS, not bindings. Measured 2026-08-13: probe"
+    note "PipelineRun p1-probe-2ws-7t7rq Succeeded with a single volume mounted at two subPaths."
+    note "Counting bindings reddens 'ws verify app-security-testing' on a capstone that runs fine —"
+    note "and pipelines/pipeline/parasol-claims-devsecops.yaml's own comment names this helper."
+    rc=1
+  fi
+
+  # [h] deduplicating must not become "stop counting"
+  out="$(run_case "$lib" workspaces "$FIXTURE_SAME_WS_PLUS_SECOND" shared-workspace maven-cache)"
+  got="$(_field "$out" RC)"
+  if [[ "$got" != "1" ]]; then
+    bad "[h] a doubled binding PLUS a genuinely second PVC workspace is TWO claims and must FAIL; got rc=${got:-<none>}. Output: ${out}"
+    note "This is [g] read too eagerly: a predicate that stops counting after the first PVC binding"
+    note "satisfies [g] and is the 2026-08-07 regression again. Dedupe, do not cap."
+    rc=1
+  else
+    got="$(_field "$out" CONFLICT)"
+    if [[ "$got" != "unit-test" ]]; then
+      bad "[h] the offending task must be named in PIPELINE_PVC_CONFLICT; got '${got}', expected 'unit-test'."
+      note "The attendee-facing hint is built from that variable — an empty name sends them nowhere."
+      rc=1
+    fi
+  fi
+
   return "$rc"
 }
 
@@ -232,55 +282,96 @@ run_check() {
 # Each canary is a one-line MUTATION of a copy of the real _lib.sh — the plausible way to get this
 # predicate wrong, not a synthetic one — and every mutation must be caught by run_check. A canary
 # that goes undetected is exit 2: it means this guard would certify the mutated predicate as fine.
+
+# _mutate <n> <src> <dst> <sed-expr> → 0 when the mutation actually landed.
+#
+# A canary whose sed matched NOTHING is byte-identical to the real predicate. run_check then passes
+# it, the old code printed "canary N UNDETECTED", and a maintainer went hunting for a hole in a
+# detector that was fine — the real fault being an anchor that had moved. This is not hypothetical:
+# canary 4's anchor moved on 2026-08-14, when the predicate was fixed to count distinct claims and
+# its one-line `if … then n=$((n+1)); break; fi` became a multi-line block. The cmp tells "the
+# mutant was not built" apart from "the mutant was not caught". Same helper, same reason, as
+# _build() in verify-summary-skip-guard.sh.
+_mutate() {  # <n> <src> <dst> <sed-expr> → 0 built, 1 the sed matched nothing
+  local n="$1" src="$2" dst="$3" expr="$4"
+  sed "$expr" "$src" > "$dst"
+  if cmp -s "$src" "$dst"; then
+    bad "canary ${n} COULD NOT BE BUILT — its sed matched nothing, so the mutant is byte-identical"
+    note "to the real predicate. The anchor it targets was renamed or reformatted; the canary is"
+    note "proving nothing, which is NOT the same as the predicate being clean."
+    return 1
+  fi
+  return 0
+}
+
+# _canary <n> <expected-rc> <src> <dst> <sed-expr> <caught-msg> <missed-msg> → 0 caught, 1 not
+_canary() {
+  local n="$1" want="$2" src="$3" dst="$4" expr="$5" caught="$6" missed="$7" rc=0
+  _mutate "$n" "$src" "$dst" "$expr" || return 1
+  run_check "$dst" >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" -eq "$want" ]]; then
+    ok "canary ${n} caught: ${caught}"
+    return 0
+  fi
+  bad "canary ${n} UNDETECTED (rc=${rc}, expected ${want}) — ${missed}"
+  return 1
+}
+
 _self_test() {
   local src="$1" tmp fail=0 rc
   tmp="$(mktemp -d)"
 
   cp "$src" "${tmp}/clean.sh"
   run_check "${tmp}/clean.sh" >/dev/null 2>&1; rc=$?
-  if [[ "$rc" -eq 0 ]]; then ok "the real predicate passes all six cases"
+  if [[ "$rc" -eq 0 ]]; then ok "the real predicate passes all eight cases"
   else bad "the REAL predicate failed the case battery (rc=${rc}) — see the plain run for which case"; fail=1; fi
 
   # Canary 1: absence read as permission. The exact inversion case [d] exists for.
-  sed 's/OC_OUT:-workspaces/OC_OUT:-pipelineruns/' "$src" > "${tmp}/c1.sh"
-  run_check "${tmp}/c1.sh" >/dev/null 2>&1; rc=$?
-  if [[ "$rc" -eq 1 ]]; then ok "canary 1 caught: an unset coschedule defaulted to the PERMISSIVE mode"
-  else bad "canary 1 UNDETECTED (rc=${rc}) — a predicate that reads absence as permission passes this guard"; fail=1; fi
+  _canary 1 1 "$src" "${tmp}/c1.sh" 's/OC_OUT:-workspaces/OC_OUT:-pipelineruns/' \
+    "an unset coschedule defaulted to the PERMISSIVE mode" \
+    "a predicate that reads absence as permission passes this guard" || fail=1
 
   # Canary 2: off-by-one on the cap. Two PVCs would be tolerated and three would not.
-  sed 's/if (( n > 1 )); then/if (( n > 2 )); then/' "$src" > "${tmp}/c2.sh"
-  run_check "${tmp}/c2.sh" >/dev/null 2>&1; rc=$?
-  if [[ "$rc" -eq 1 ]]; then ok "canary 2 caught: the cap raised from one PVC to two"
-  else bad "canary 2 UNDETECTED (rc=${rc}) — the regression itself would pass this guard"; fail=1; fi
+  _canary 2 1 "$src" "${tmp}/c2.sh" 's/if (( n > 1 )); then/if (( n > 2 )); then/' \
+    "the cap raised from one PVC to two" \
+    "the regression itself would pass this guard" || fail=1
 
   # Canary 3: the mode gate inverted, so the check only runs where it does not apply.
   # shellcheck disable=SC2016  # the $ are literal text in a sed script, not expansions
-  sed 's/\[\[ "\$AFFINITY_ASSISTANT_MODE" == "workspaces" \]\] || return 0/[[ "$AFFINITY_ASSISTANT_MODE" != "workspaces" ]] || return 0/' "$src" > "${tmp}/c3.sh"
-  run_check "${tmp}/c3.sh" >/dev/null 2>&1; rc=$?
-  if [[ "$rc" -eq 1 ]]; then ok "canary 3 caught: the restrictive-mode gate inverted"
-  else bad "canary 3 UNDETECTED (rc=${rc}) — the predicate could grade the wrong clusters"; fail=1; fi
+  _canary 3 1 "$src" "${tmp}/c3.sh" \
+    's/\[\[ "\$AFFINITY_ASSISTANT_MODE" == "workspaces" \]\] || return 0/[[ "$AFFINITY_ASSISTANT_MODE" != "workspaces" ]] || return 0/' \
+    "the restrictive-mode gate inverted" \
+    "the predicate could grade the wrong clusters" || fail=1
 
-  # Canary 4: the PVC-backed set ignored, so every workspace counts. Fails [e].
-  # shellcheck disable=SC2016  # ditto — literal $ inside a sed script
-  sed 's/if \[\[ "\$pipe_ws" == "\$want" \]\]; then n=\$((n+1)); break; fi/n=$((n+1)); break/' "$src" > "${tmp}/c4.sh"
-  run_check "${tmp}/c4.sh" >/dev/null 2>&1; rc=$?
-  if [[ "$rc" -eq 1 ]]; then ok "canary 4 caught: every workspace counted, PVC-backed or not"
-  else bad "canary 4 UNDETECTED (rc=${rc}) — emptyDir workspaces would red-flag a working capstone"; fail=1; fi
+  # Canary 4: the PVC-backed set ignored, so every workspace counts. Fails [e]. Anchored on the
+  # per-binding reset rather than on the match itself: forcing is_pvc high before the loop makes
+  # every workspace look PVC-backed, and the anchor is a whole line that cannot be reflowed away.
+  _canary 4 1 "$src" "${tmp}/c4.sh" 's/is_pvc=0/is_pvc=1/' \
+    "every workspace counted, PVC-backed or not" \
+    "emptyDir workspaces would red-flag a working capstone" || fail=1
 
   # Canary 5: the function renamed out from under the extractor. Must be rc 2 (could not inspect),
   # NOT rc 1 — "I could not look" and "I looked and it is broken" are different answers, and only
   # one of them should let a maintainer go on believing the predicate was checked.
-  sed 's/^pipeline_pvc_workspaces_ok() {/pipeline_pvc_workspaces_okay() {/' "$src" > "${tmp}/c5.sh"
-  run_check "${tmp}/c5.sh" >/dev/null 2>&1; rc=$?
-  if [[ "$rc" -eq 2 ]]; then ok "canary 5 caught: a renamed predicate reports 'could not inspect', not 'clean'"
-  else bad "canary 5 UNDETECTED (rc=${rc}, expected 2) — a guard pointing at nothing must never read as a pass"; fail=1; fi
+  _canary 5 2 "$src" "${tmp}/c5.sh" 's/^pipeline_pvc_workspaces_ok() {/pipeline_pvc_workspaces_okay() {/' \
+    "a renamed predicate reports 'could not inspect', not 'clean'" \
+    "a guard pointing at nothing must never read as a pass" || fail=1
+
+  # Canary 6: the distinct-claims fix reverted — the membership test neutered so every PVC-backed
+  # BINDING counts again. This is the predicate exactly as it shipped before 2026-08-14, and case
+  # [g] is the only thing that fails on it: [a]-[f] all still pass, which is precisely why the
+  # defect survived a guard with five canaries and six cases.
+  # shellcheck disable=SC2016  # literal $ inside a sed script, not an expansion
+  _canary 6 1 "$src" "${tmp}/c6.sh" 's/"\$seen" != /"" != /' \
+    "the claim-dedupe reverted to counting bindings" \
+    "one PVC at two subPaths would again fail a capstone that runs perfectly" || fail=1
 
   rm -rf "$tmp"
   if [[ "$fail" -ne 0 ]]; then
     bad "self-test FAILED — this guard cannot be trusted on the real tree"
     return 2
   fi
-  printf '  pipeline-admissibility-guard: self-test passed (five canaries, every one caught)\n'
+  printf '  pipeline-admissibility-guard: self-test passed (six canaries, every one caught)\n'
   return 1
 }
 
@@ -299,7 +390,7 @@ fi
 
 run_check "$LIB"; RC=$?
 case "$RC" in
-  0) printf 'pipeline-admissibility-guard: clean (pipeline_pvc_workspaces_ok executed against 6 stubbed clusters).\n' ;;
+  0) printf 'pipeline-admissibility-guard: clean (pipeline_pvc_workspaces_ok executed against 8 stubbed clusters).\n' ;;
   1) printf '\n%s\n'   "  tools/verify/_lib.sh's admissibility predicate no longer distinguishes a Pipeline that"
      printf '%s\n'     "  can run from one that cannot. Both pipelines-fundamentals and app-security-testing"
      printf '%s\n'     "  depend on it to fail a module whose runs die at validation with no logs — the exact"
