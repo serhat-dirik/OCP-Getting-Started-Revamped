@@ -10,7 +10,7 @@ include::partial$version-attributes.adoc[]
 // to 0 under a concurrent 5xx burst, with the ServiceMonitor scraping every 10s (re-measured on user2,
 // OCP 4.21.22, 2026-07-19 — the 10s scrape makes the fire deterministic; a 30s scrape flaked at G3),
 // parasol-claims traces in Observe -> Traces with metric->trace exemplars, a CPU HPA that scaled 2->4
-// within ~10s of the load landing (the burst image pull adds ~30-60s before it bites), and a PDB that
+// (timing SUPERSEDED — see the 2026-08-14 re-measurement note below), and a PDB that
 // returned "Cannot evict pod as it would violate the pod's
 // disruption budget" on the last eviction. Timings in the chips are measured from that run.
 // Those product versions are FROZEN LITERALS, not {cluster_observability_operator_version} /
@@ -18,11 +18,16 @@ include::partial$version-attributes.adoc[]
 // those attributes float (versions.yaml has since moved Tempo to 0.21.0-3 and OTel to 0.152.0-2).
 // The literals match this module's already-frozen siblings — instructor.adoc:6-7 and :219, and
 // troubleshooting.adoc:177 — which describe the same 2026-07-11 run.
-// CORRECTION 2026-08-08: the HPA line above read "scaled 1->4 in ~24s" until today, and both halves
+// CORRECTION 2026-08-08: the HPA line above read "scaled 1->4 in ~24s" until then, and both halves
 // were wrong. The HPA carries a min=2 floor, so the event is 2->4; and ~24s came from an earlier
-// pre-floor run that instructor.adoc:182-186 had already retracted, leaving this comment as the last
-// copy of a withdrawn number (the module's SA outline had copied the wrong pair from here). Aligned
-// to what instructor.adoc:29 (timing table) and :180 record: 2 -> 4 within ~10s of the load landing.
+// pre-floor run that instructor.adoc had already retracted, leaving this comment as the last
+// copy of a withdrawn number (the module's SA outline had copied the wrong pair from here). It was
+// aligned to the then-current "~10s of the load landing".
+// CORRECTION 2026-08-14: that ~10s is now retired too, on four timed runs as user5 (full table in
+// the comment under the post-burst paragraph). The scale-out is RELIABLE — 5 of 5 runs reached the
+// ceiling of 4 — but it takes 47-115s from pressing enter, not ~10s under any reading. The one
+// thing that is instant is the autoscaler's DECISION, which is most likely what the old figure was
+// really describing. Whoever refreshes the SA outline: it still carries "2->4 within ~10s".
 // Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks
 // using $NS / $CLAIMS shell vars or jsonpath {..} braces omit subs. Console labels I could not ground
 // from a screenshot in the build env are marked // CAPTURE-VERIFY for the media pass.
@@ -604,17 +609,22 @@ oc get hpa parasol-claims -n $NS
 [source,texinfo]
 ----
 horizontalpodautoscaler.autoscaling/parasol-claims autoscaled
-NAME             REFERENCE                   TARGETS        MINPODS   MAXPODS   REPLICAS
-parasol-claims   Deployment/parasol-claims   cpu: 15%/60%   2         4         2
+NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS
+parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2
 ----
 =====
+// The AGE column `oc get hpa` also prints is elided here so the block stays narrow; the -w capture
+// further down keeps it. The idle percentage is a real settled reading (2026-08-14, user5). It is
+// not a constant: across five settled floors that night it read 4%, 4%, 5%, 9% and 13%, so an
+// attendee landing anywhere in roughly 4-15% is normal — the number to react to is the target.
 
 [NOTE]
 =====
 That is the *settled* reading, not what you see the instant you run the two commands back to back.
 A brand-new HPA has no metrics sample yet, so the first `oc get hpa` typically shows
-`TARGETS <unknown>/60%` and `REPLICAS 0`. Measured on this cluster (2026-08-02): `<unknown>` at
-15 s, settling to `cpu: 15%/60%` with 2 replicas at *58 s*. Re-run the `oc get hpa` line after a
+`TARGETS <unknown>/60%` and `REPLICAS 0` — re-confirmed on 2026-08-14, where the reading straight
+after `oc autoscale` was exactly that. Measured on this cluster (2026-08-02): `<unknown>` at
+15 s, settling to a real percentage with 2 replicas at *58 s*. Re-run the `oc get hpa` line after a
 minute — nothing is wrong.
 =====
 --
@@ -712,31 +722,59 @@ oc get hpa parasol-claims -n $NS -w
 =====
 [source,texinfo]
 ----
-NAME             REFERENCE                   TARGETS         MINPODS   MAXPODS   REPLICAS
-parasol-claims   Deployment/parasol-claims   cpu: 15%/60%    2         4         2
-parasol-claims   Deployment/parasol-claims   cpu: 118%/60%   2         4         2
-parasol-claims   Deployment/parasol-claims   cpu: 108%/60%   2         4         4
-parasol-claims   Deployment/parasol-claims   cpu: 65%/60%    2         4         4
+NAME             REFERENCE                   TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+parasol-claims   Deployment/parasol-claims   cpu: 9%/60%   2         4         2          7m18s
+parasol-claims   Deployment/parasol-claims   cpu: 100%/60%   2         4         2          7m49s
+parasol-claims   Deployment/parasol-claims   cpu: 167%/60%   2         4         4          8m4s
+parasol-claims   Deployment/parasol-claims   cpu: 174%/60%   2         4         4          8m19s
+parasol-claims   Deployment/parasol-claims   cpu: 132%/60%   2         4         4          8m34s
 ----
 =====
 --
 ====
 
-On this run the burst drove CPU well past the 60% target — peaking around *118%* — and once the load actually landed the HPA scaled to the *ceiling of 4* within about *10 seconds*, then settled toward the 60% target spread across four pods.
-Expect about *half a minute* before the burst bites — and it is not the image you are waiting for.
-Measured over 12 runs of the block above, the container was up *1–3 seconds* after you pressed enter, and on every one of them the kubelet reported the image *already present on machine* and pulled nothing at all.
-What takes the time is the *metrics* path: CPU has to be scraped and handed to the autoscaler, which took *26–36 seconds* across three timed runs, so `REPLICAS` sits at 2 (and `TARGETS` may even dip) for a while first.
-The scale-out is fast — the *measurement* is what you wait on.
-// WARM-UP RE-MEASURED 2026-08-12 on OCP 4.22.8, as user4 in user4-dev, running the
-// block above VERBATIM 12 times. This paragraph read "up to a minute to bite: its container image
-// must pull and start" until today; that was measured against the el8 `ose-cli:latest` and did not
-// survive the 2026-08-12 repin, so it is gone rather than carried forward. All 12 runs reported
-// `Container image … already present on machine` — the kubelet pulled NOTHING — and `oc run` to
-// container Running was 1.3 1.3 1.7 1.7 2.0 2.0 2.2 2.3 2.4 2.4 2.7 2.8 s (median ~2.1). The
-// 26–36 s figure is when HPA `TARGETS` first moved off its idle reading, over three runs each
-// started from a settled 2-replica floor: 25.7 s / 29.4 s / 36.0 s. Full provenance — including
-// why a cold pull of this image cannot be produced on an OpenShift node at all — is in
-// instructor.adoc, under the "Why won't the HPA scale back down after I stop the load?" entry.
+The burst drives CPU well past the 60% target — across five runs it peaked between *132%* and *250%* — and the HPA reached the *ceiling of 4* on every one of them, then settled back toward the target spread across four pods.
+What it does *not* do is happen in a few seconds. Reaching 4 replicas took between *42* and *115 seconds* from the moment you press enter (42 / 47 / 70 / 83 / 115 s over the five runs), so give this beat a couple of minutes before you decide something is wrong.
+Two things stretch it, and neither is the image: the container is up *3–4 seconds* after `oc run`, and the kubelet reports it *already present on machine* and pulls nothing at all.
+First the *metrics* path — CPU has to be scraped and handed to the autoscaler, which took *10–33 seconds* before `TARGETS` moved off its idle reading at all, and *24–40 seconds* before it first read above 60%, so `REPLICAS` sits at 2 (and `TARGETS` may even dip) for a while.
+Second, the climb is often a *staircase*: three of the five runs went 2 → 3 → 4 rather than straight to the ceiling, and every step waits on another CPU sample — which is what puts the slowest run near two minutes.
+The autoscaler's *decision* is the fast part: in every instrumented run `desiredReplicas` moved in the very same sampling interval that first showed CPU over target.
+What you wait on is the measurement, and then the pods.
+// SCALE-OUT RE-MEASURED 2026-08-14 on OCP 4.22.8, as user5 in user5-dev, running the burst block
+// above VERBATIM five times, each from a settled 2-replica floor. Runs 1-4 sampled the HPA every
+// 2s; run 5 was captured through `oc get hpa -w` and is the transcript in the block above.
+// THE "~10 SECONDS" CLAIM IS RETIRED — it was never re-measured after the min=2 floor landed (see
+// instructor.adoc's own note admitting it was left alone "deliberately"), and it does not survive
+// contact with a clock under ANY reading of "the load landing":
+//   run  container  TARGETS off idle  first >60%  desired>2  first new pod  at 4 replicas  peak
+//   1    3 s        33 s (->174%)     33 s        33 s       47 s           47 s           250%
+//   2    3 s        23 s (->45%)      38 s        38 s       55 s           83 s           135%
+//   3    4 s        10 s (->17%)      24 s        24 s       39 s           70 s           132%
+//   4    3 s        23 s (->57%)      40 s        40 s       54 s           115 s          141%
+//   5    -          -                 ~31 s       -          -              42 s           174%
+// (run 5 is the -w capture, so it has only the granularity `oc get hpa -w` itself prints: 15s.)
+// From `oc run` to 4 replicas: 42/47/70/83/115 s. From CPU first reading over target to 4 replicas:
+// 14/45/46/75 s over the four instrumented runs. Even the FASTEST run's fastest reading is 14 s,
+// so ~10 s was wrong end to end, under every reading of "the load landing".
+// WHAT IS ~INSTANT, and what the old figure was probably describing: the autoscaler's DECISION.
+// In all four instrumented runs `desiredReplicas` moved in the same 2-3 s sample in which CPU first read over
+// target — zero measurable lag between the reading and the decision. The wait is the reading.
+// WHY THE TAIL IS LONG: 3 of 5 runs stepped 2 -> 3 -> 4; runs 1 and 5 went straight to the ceiling
+// and are also the two fastest, which is the whole correlation — each extra step waits on a fresh
+// CPU sample. Steady state at 4 replicas over the last minute of the four 6-minute runs:
+// 81% / 75% / 62% / 62% average. Do NOT quote 42s or 47s alone as "the" number; the staircase runs
+// are the majority and 115s is a legitimate attendee experience.
+// IMAGE FINDINGS FROM 2026-08-12 STILL HOLD and were re-confirmed here: every run logged
+// `Container image … already present on machine`, kubelet pulled nothing. Container Running was
+// 3/3/4/3 s tonight against 1.3-2.8 s measured over 12 runs on 2026-08-12 — the older figure read
+// "1-3 s"; widened to 3-4 s to match what these runs actually showed. Full provenance on why a
+// cold pull of this image cannot be produced on an OpenShift node at all is in instructor.adoc,
+// under the "Why won't the HPA scale back down after I stop the load?" entry.
+// NOT THE CAUSE, ruled out by measurement: the 2026-08-13 LimitRange change (500m -> 1500m default)
+// DOES reach this beat — `claims-burst` is created by the attendee's own `oc run` with no resource
+// flags, so it takes the namespace default, and it was recorded at limits.cpu 1500m and observed
+// pegged at 1498-1507m. The entry-state `claims-load` generator is NOT involved: it pins its own
+// 100m limit and idled at 1-14m throughout, nowhere near its ceiling, exactly as designed.
 Stop the load and clean up the burst pod:
 
 [source,sh,role=execute]
@@ -966,7 +1004,11 @@ that is the window decaying, not a failed fix, and it is worth saying so before 
 [demo-block]
 [TIME 4m]
 Say:: "The service is at two replicas. I'll hammer it, and the HPA will add pods on its own — no human, no ticket."
-Show:: *Topology* on `parasol-claims` — click the node and open its *Resources* panel's *Pods* list at 2. Start the burst; the container is up in *1–3s* (this image never pulls — the kubelet already has it), but CPU takes *26–36s* to reach the autoscaler, so the Pods list grows to 4 about half a minute in (the status ring itself stays a solid color and does not subdivide by pod count — read the count from the Resources panel, not the ring). Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
+Show:: *Topology* on `parasol-claims` — click the node and open its *Resources* panel's *Pods* list at 2. Start the burst; the container is up in *3–4s* (this image never pulls — the kubelet already has it), but CPU takes *24–40s* to reach the autoscaler, and the Pods list then climbs to 4 somewhere between *45 seconds and two minutes* in — often via 3 rather than straight to 4 (the status ring itself stays a solid color and does not subdivide by pod count — read the count from the Resources panel, not the ring). Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
+// TIMING NOTE for the presenter: this beat is budgeted 4m and the scale-out is the LAST thing to
+// land — measured 42/47/70/83/115s to reach 4 on 2026-08-14. Start the burst EARLY in the beat and
+// narrate the metrics path while it cooks; do not stand in silence waiting for the fourth pod.
+// The old script promised it "about half a minute in", which under-sold the wait by up to 4x.
 Do::
 +
 [source,sh,role=execute,subs="attributes"]

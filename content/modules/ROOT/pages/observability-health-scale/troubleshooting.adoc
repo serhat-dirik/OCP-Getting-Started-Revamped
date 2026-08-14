@@ -168,8 +168,30 @@ then re-issue the `oc run` from the lab.
 Symptom:: Just after `oc autoscale`, `oc get hpa` shows `TARGETS` as `<unknown>/60%` and the app is not scaling.
 Cause:: Two possibilities: the metrics pipeline has not reported CPU for the new HorizontalPodAutoscaler (HPA) yet (it takes a short interval after creation), or the target container has no CPU *request*, so utilization cannot be computed.
 The entry-state app *does* set a 200m CPU request, so on this lab it is almost always the former.
-Fix:: Wait ~30 seconds and re-check — `TARGETS` resolves to a real percentage (e.g. `18%/60%`) once the first CPU sample lands.
+Fix:: Wait ~30 seconds and re-check — `TARGETS` resolves to a real percentage once the first CPU sample lands.
+At an idle floor that reading is low: measured across five settled floors on 2026-08-14 it was 4%, 4%, 5%, 9% and 13% against the 60% target.
 If it stays `<unknown>`, confirm the request is present: `oc get deploy parasol-claims -n <user>-dev -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}{"\n"}'` should print `200m`.
+
+== The burst is running but `REPLICAS` is still 2
+
+Symptom:: `claims-burst` is `Running`, but `oc get hpa` still shows `REPLICAS 2` — sometimes with `TARGETS` sitting below 60%, sometimes already above it — and it has been like that for a minute.
+
+Cause:: Almost always *nothing is wrong and you have not waited long enough*.
+Measured over five runs on 2026-08-14, `REPLICAS` reached the ceiling of 4 between *42 and 115 seconds* after the burst started — every run got there, but the slowest took nearly two minutes.
+Two delays stack up. CPU has to be scraped and handed to the autoscaler, which took *24–40 seconds* before `TARGETS` first read above 60% at all; then the climb is often a *staircase* (2 → 3 → 4, three of the five runs), and each step waits for another CPU sample before the autoscaler will take it.
+
+Fix:: Watch it rather than re-running it — `oc get hpa parasol-claims -n <user>-dev -w` — and give it a full *two minutes* before concluding anything.
+Re-issuing the burst does not help and starting a *second* one skews the reading.
+If you are past two minutes with `TARGETS` still stuck at its idle percentage, check that the burst is actually generating traffic:
++
+[source,sh,role=execute]
+----
+oc get pod claims-burst -n <user>-dev
+oc adm top pod claims-burst -n <user>-dev
+----
++
+A healthy burst reads *hundreds of millicores* — it was measured pegged near *1500m*.
+A burst showing single-digit `m` is not driving load: delete it and re-issue the `oc run` from the lab, taking the command from the lab's block rather than hand-copying it.
 
 == The HPA will not scale back down after I stop the load
 
@@ -178,8 +200,8 @@ Cause:: The default *5-minute scale-down stabilization window*.
 The HPA holds the higher count so a brief lull does not cause a shrink-then-grow flap.
 Fix:: Nothing — this is correct.
 Wait ~5 minutes and it steps back toward the floor of 2.
-(Scale-*up* has no such delay, which is why the burst grew it in seconds.)
+(Scale-*up* has no equivalent hold, but it is not instant either — measured 2026-08-14, reaching 4 replicas took *42–115 seconds* from starting the burst, often stepping 2 → 3 → 4.)
 
 '''
 
-_Last verified on OpenShift 4.21.22 with the Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19; the "Observe → Alerting shows no rules" entry grounded in an authenticated attendee console on 2026-07-28. The `claims-burst` image-pull entry was updated on 2026-08-12 when the burst was repinned off the frozen el8 `ose-cli:latest`; its `claims-load` cross-check is read from this module's entry-state chart, not from a fresh cluster run._
+_Last verified on OpenShift 4.21.22 with the Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack — 2026-07-11; the alert-beat entries (fire timing, scrape mechanics) re-verified against the 10s-scrape entry state on 2026-07-19; the "Observe → Alerting shows no rules" entry grounded in an authenticated attendee console on 2026-07-28. The `claims-burst` image-pull entry was updated on 2026-08-12 when the burst was repinned off the frozen el8 `ose-cli:latest`; its `claims-load` cross-check is read from this module's entry-state chart, not from a fresh cluster run. The two HPA-timing entries — "the burst is running but `REPLICAS` is still 2" and the scale-down entry's scale-up aside — were measured as `user5` on OCP 4.22.8 over five runs on 2026-08-14._

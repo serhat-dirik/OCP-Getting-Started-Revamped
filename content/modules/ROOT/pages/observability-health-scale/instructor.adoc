@@ -8,7 +8,8 @@ include::partial$version-attributes.adoc[]
 // The signature beat is the DB-break -> alert-fires cycle; the closer is the HPA scaling live.
 
 This module is console-heavy and its drama is *live*, not narrated: an alert that goes red while the room watches, and a pod ring that grows under load.
-The signature beat is exercise 3 — *break the database, watch the alert fire* — and the closer is exercise 5, the HorizontalPodAutoscaler (HPA) scaling from 2 to 4 pods in under half a minute.
+The signature beat is exercise 3 — *break the database, watch the alert fire* — and the closer is exercise 5, the HorizontalPodAutoscaler (HPA) scaling from 2 to 4 pods on its own.
+That closer is *reliable but not quick*: measured over five runs it reached the ceiling of 4 every time, between *42 seconds and just under two minutes* after the burst starts (this page said "under half a minute" until 2026-08-14 — it was wrong, and a presenter who believes it will be standing in silence).
 Two seams need your attention before you teach: attendees must have the *user-workload-monitoring editor* role in their `-dev` namespace or exercise 2 is a wall (pre-flight item 2), and the alert fires in *~3 minutes* — reliably now that the entry state scrapes every 10s, but only when attendees drive the *concurrent burst* the lab specifies (the 5xx window is only ~30s wide, so a gentle trickle or an edited-down serial loop banks too few 5xx to cross the threshold; see Q2 and the troubleshooting page), so coach them to run it as written and read the other signals while it cooks.
 
 include::partial$prep-before-you-teach.adoc[]
@@ -26,14 +27,14 @@ The two long poles are the alert's fire delay (mostly waiting, filled with the l
 | 2 | Alert on what matters | ~5 min | `oc apply` the PrometheusRule instant; the thanos-ruler reports it `inactive` within *~40s*, and it appears in the attendee's *project-scoped* Observe view (`/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user`) with an empty *State* column — the cluster-wide *Observe → Alerting* page shows them nothing (see Q1)
 | 3 | Break it, watch the alert catch it | ~6 min | DB scale-to-0 *plus a 20-worker concurrent burst* → 5-min 5xx rate peaks ~*1.1/s* → alert *Pending* at *~50s*, *Firing* at *~170s* (~3 min total); deterministic with the *10s* scrape (the ~30s 5xx window spans ≥3 scrapes, so `rate()` sees a rising counter) — a gentle trickle or an edited-down serial loop banks too few 5xx to cross the line; recovery needs DB back *plus* an app restart (poisoned connection pool)
 | 4 | Follow a request with a trace | ~7 min | traces present in *Observe → Traces* within seconds of a request; steady-state request durations are single-digit ms (the N+1 cost is structural, not wall-clock — see Q4)
-| 5 | Autoscale under load with an HPA | ~7 min | burst drove CPU past *100%* (peak ~118% here); HPA scaled *2 → 4* within ~10s of load landing; the burst image does *not* pull — every node already has it, so the container is up *1–3s* after `oc run` — and what delays the bite is the metrics path, *~26–36s* before CPU reaches the HPA (re-measured 2026-08-12 as user4 on 4.22.8, after the image repin); scale-down held for the *5-min* stabilization window
+| 5 | Autoscale under load with an HPA | ~7 min | burst drove CPU past *100%* every run (peaks *132–250%*); HPA reached the ceiling of *4* in *5 of 5* runs but took *42–115s* from `oc run` (42/47/70/83/115), often stepping *2 → 3 → 4*; the burst image does *not* pull — every node already has it, so the container is up *3–4s* — and the wait is the metrics path, *24–40s* before CPU first reads over 60% (re-measured 2026-08-14 as user5 on 4.22.8); settles *62–81%* at 4 replicas; scale-down held for the *5-min* stabilization window
 | 6 | Survive a node drain with a PodDisruptionBudget (PDB) | ~6 min | PDB create instant; `ALLOWED DISRUPTIONS` reflects `healthy − minAvailable`; the drain itself is your demo
 |===
 
 [NOTE]
 .How this timing was measured
 ====
-Every core number above was captured performing the lab, not estimated — the alert-beat numbers re-measured against the 10s-scrape entry state on 2026-07-19, the autoscaling row's warm-up figures re-measured as `user4` on OCP 4.22.8 on 2026-08-12 after the burst image was repinned, the rest as `user2` on 2026-07-11.
+Every core number above was captured performing the lab, not estimated — the alert-beat numbers re-measured against the 10s-scrape entry state on 2026-07-19, the *entire autoscaling row* re-measured as `user5` on OCP 4.22.8 on 2026-08-14 (five runs, each from a settled 2-replica floor), the rest as `user2` on 2026-07-11.
 The alert fire timing is real: with the database scaled to zero *and the 20-worker concurrent burst*, the 5-minute 5xx rate climbed off zero to a peak around *1.1/s* and the rule went *inactive → pending (T+50s) → firing (T+170s)* (the ruler's own state names — the console's *State* column shows an empty `-` for the inactive baseline).
 What makes it *deterministic* is the *10s* scrape: when the database dies the app returns 5xx only for the ~30-second window before its readiness probe pulls the pod from the router, and a 10s scrape samples that window three or four times, so `rate()` always sees the counter climb (a rising series like `3 → 9 → 112 → 298`) and the rule fires.
 At the old *30s* scrape that same window was barely one scrape — the counter could be sampled just once, at its frozen final value, so `rate()` read zero and the alert never fired (the G3 flake: byte-identical runs fired on one attendee and froze at zero on another).
@@ -139,7 +140,8 @@ This is the only pre-flight instrument that runs *as the attendee*, in the real 
 * *Start the database break first* (beat 2 of the arc) and let the ~3-minute fire timer run while you narrate the three signals — do not stand and wait for it.
 * *Park the alerting tab on the project-scoped view* — `{ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user`.
 Demoing from the cluster-wide *Observe → Alerting* page shows an empty list when you present as an attendee identity, and switching pages mid-beat costs you the reveal.
-* The HPA closer is the crowd-pleaser: the pod ring in *Topology* visibly grows.
+* The HPA closer is the crowd-pleaser, but show it in the right place: the *Resources* side panel's *Pods* list grows from 2 to 4.
+The Topology status *ring* does NOT subdivide by pod count — it is pixel-identical at 2 and at 4 replicas (grounded 2026-07-31), so pointing at the ring and saying "watch it grow" shows the room nothing.
 Have a terminal with `oc get hpa parasol-claims -w` on a second screen so the room sees CPU spike past 60% and replicas climb in real time.
 * Clean up the burst pod between runs (`oc delete pod claims-burst -n {user}-dev`) — a forgotten burst keeps CPU high and the HPA pinned at 4.
 
@@ -177,16 +179,24 @@ Do not promise a database-span staircase this image cannot render.
 The default *5-minute scale-down stabilization window*.
 The HPA deliberately holds the higher replica count for five minutes after utilization drops, so a brief lull does not trigger a shrink-then-grow flap.
 You will see `TARGETS` fall below 60% while `REPLICAS` stays at 4 — that is correct.
-Scale-*up* has no such delay: the HPA moved 2 → 4 within *~10s* of the load actually landing.
-Wall-clock from pressing enter is longer, but the image is not why: the burst container is up *1–3s* after `oc run` and pulls nothing at all, and it is the *metrics* path that costs *~26–36s* before CPU reaches the HPA.
+Scale-*up* has no equivalent stabilization window — but it is not instant either, and the room will notice.
+Measured over five runs, `REPLICAS` reached 4 between *42 and 115 seconds* after `oc run`, often stepping *2 → 3 → 4* rather than jumping.
+The image is not why: the burst container is up *3–4s* and pulls nothing at all.
+The wait is the *metrics* path — *24–40s* before CPU first reads above the 60% target, and then another sample for each step of the climb.
+What genuinely has no delay is the autoscaler's *decision*: in every instrumented run `desiredReplicas` moved in the very same sampling interval that first showed CPU over target.
 Tell the room they are waiting on a scrape, or the pause reads as a broken exercise.
+// HISTORICAL (2026-07-30), kept only to explain how the retired ~10s figure got here. Both the
+// prose it describes and the ~10s it settled on are GONE as of 2026-08-14 — do not chase the
+// quotation below, it no longer exists in lab.adoc. Read the 2026-08-14 block further down instead.
 // The figure here was ~24s until 2026-07-30. That number came from an earlier run that scaled
 // 1 -> 4, BEFORE the HPA gained its min=2 floor, and survived the config change unreconciled —
 // leaving this file quoting three different durations for one event (~10s in the timing table,
-// ~24s here, "under half a minute" in the intro). Aligned to the measured ~10s + pull delay,
-// which is what the timing table and lab.adoc's post-burst paragraph ("scaled to the *ceiling of
-// 4* within about *10 seconds*") already say. (That citation read "lab.adoc:634" until 2026-08-12
-// and was already off by ~70 lines — 634 is the Topology prose. Cite the sentence, not the line.)
+// ~24s here, "under half a minute" in the intro). It was aligned to the then-current ~10s + pull
+// delay. (That citation read "lab.adoc:634" until 2026-08-12 and was already off by ~70 lines —
+// 634 was the Topology prose. Cite the sentence, not the line.)
+// LESSON, since this is now the THIRD correction to the same number: every prior pass re-aligned
+// the figure to whatever the other files said instead of timing it. Nobody put a clock on it
+// against the min=2 floor until 2026-08-14. Consistency is not measurement.
 // PULL DELAY RE-MEASURED 2026-08-12 (this replaces the caveat that stood here the same morning,
 // which flagged ~30–60s as an un-re-measured estimate carried across the repin). Measured on
 // OCP 4.22.8, as user4 in user4-dev, running lab.adoc's burst block VERBATIM.
@@ -211,9 +221,28 @@ Tell the room they are waiting on a scrape, or the pause reads as a broken exerc
 // image, so treat it as gone, not as a worst case.
 // WHAT THE ROOM ACTUALLY WAITS FOR: the metrics path. Over three runs each begun from a settled
 // 2-replica floor, HPA `TARGETS` first moved off its idle reading at 25.7s / 29.4s / 36.0s after
-// `oc run`. That is the number in the timing table and in lab.adoc's post-burst paragraph.
-// NOT RE-MEASURED, deliberately: the ~10s scale-out above is a property of the HPA sync period,
-// not of the image, and was left alone.
+// `oc run`.
+// SCALE-OUT RE-MEASURED 2026-08-14 (user5, user5-dev, OCP 4.22.8, five runs from a settled floor,
+// HPA sampled every 2s). This closes the gap the note below used to leave open — the ~10s figure
+// had NEVER been timed against the min=2 floor, and it does not hold:
+//   run  container  TARGETS off idle  first >60%  desired>2  first new pod  at 4  peak  steady@4
+//   1    3 s        33 s              33 s        33 s       47 s           47 s  250%  81%
+//   2    3 s        23 s              38 s        38 s       55 s           83 s  135%  75%
+//   3    4 s        10 s              24 s        24 s       39 s           70 s  132%  62%
+//   4    3 s        23 s              40 s        40 s       54 s          115 s  141%  62%
+// 5 of 5 reached the ceiling, so the beat is RELIABLE — the defect was the clock, not the payoff.
+//   run 5 (captured via `oc get hpa -w`, 15s granularity): first read over target ~31s, 4 replicas
+//   at 42s, peak 174%. It is the transcript in lab.adoc's expected-output block.
+// `TARGETS` first moving off idle was 10-33s here, wider and faster at the low end than the
+// 25.7-36.0s above; the table now quotes 24-40s for the more teachable moment (first read OVER
+// target), which is what actually precedes the scale decision.
+// 3 of 4 runs stepped 2 -> 3 -> 4; only run 1 went straight to 4, which is why its 47s is an
+// outlier on the fast side rather than the norm. Do not quote 47s alone.
+// RULED OUT as the cause of the earlier "sometimes never scales" reports: the entry-state
+// `claims-load` generator, which pins its own 100m limit and idled at 1-14m throughout — it is the
+// gentle baseline by design and is not what drives this beat. The load comes from `claims-burst`,
+// which the attendee creates with a bare `oc run` and which therefore inherits the NAMESPACE
+// LimitRange default: recorded at limits.cpu 1500m and observed pegged at 1498-1507m.
 
 == Watchouts
 
@@ -246,5 +275,5 @@ Coach them to run the burst as written, and give the fire timer the full ~3 minu
 == Provenance
 
 Built fresh for this workshop; no content was ported from stale material.
-Every command, output, and timing on this page was produced performing the lab as `user2` on OpenShift 4.21.22 against the shared Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack on 2026-07-11 — the golden signals and `claims_created_total` in user-workload monitoring, the PrometheusRule's inactive → pending → firing progression, the `parasol-claims` traces in Tempo, the CPU HPA's 2 → 4 scale event, and the PodDisruptionBudget's eviction refusal — with the alert beat re-measured against the 10s-scrape entry state on 2026-07-19 (the 10s scrape makes the fire deterministic; a 30s scrape flaked at G3).
+Every command, output, and timing on this page was produced performing the lab as `user2` on OpenShift 4.21.22 against the shared Cluster Observability Operator 1.5.1 / Tempo 0.21.0-2 / Red Hat build of OpenTelemetry 0.152.0-1 stack on 2026-07-11 — the golden signals and `claims_created_total` in user-workload monitoring, the PrometheusRule's inactive → pending → firing progression, the `parasol-claims` traces in Tempo, the CPU HPA's 2 → 4 scale event, and the PodDisruptionBudget's eviction refusal — with the alert beat re-measured against the 10s-scrape entry state on 2026-07-19 (the 10s scrape makes the fire deterministic; a 30s scrape flaked at G3), and every HPA scale-out timing on this page re-measured as `user5` on OCP 4.22.8 over five runs on 2026-08-14 (the 2026-07-11 run established that the scale event happens; it did not establish how long it takes).
 The alerting *console surface* was re-grounded as `user1` in an authenticated console on 2026-07-28: the cluster-scoped *Observe → Alerting* page is `Forbidden` for an attendee and lists *0 - 0 of 0*, while the project-scoped `/dev-monitoring/ns/<user>-dev/alertrules?alert-source=user` view lists the rule (severity *Warning*, source *User*, *State* `-` at the healthy baseline).
