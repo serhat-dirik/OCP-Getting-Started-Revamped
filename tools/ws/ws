@@ -4548,18 +4548,30 @@ by_design_uncovered_kinds() {  # → kinds the CHARTS mark that the sweep above 
 cmd_by_design() {  # SA/admin: every resource this workshop breaks or drifts ON PURPOSE. READ-ONLY.
   need_oc
   echo "ws by-design — what this workshop breaks on purpose"
-  echo "   anything red that is NOT listed below is a real finding; treat it as one."
+  echo "   Anything red that is NOT listed below is a real finding; treat it as one."
+  echo "   Being listed is NOT a clean bill of health. These rows say \"a fault is EXPECTED here\","
+  echo "   not \"the fault you are looking at is that one\" — the symptoms come from the charts, not"
+  echo "   from probing your cluster. A module that plants a fault can ALSO break for a real reason."
   echo
   local apps rows uncovered n=0
   # Argo Applications first: that is the screen the question is usually asked from. The label is
   # stamped by render_app from ws-meta expectDegraded — the SAME source ws doctor and ws diag read.
   apps="$(oc get applications -n "$ARGO_NS" -l workshop.redhat.com/degraded-by-design=true \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' 2>/dev/null || true)"
-  echo "Argo Applications that are unhealthy BY DESIGN (ws-meta expectDegraded):"
+  # The label is a STATIC declaration from ws-meta; the health is LIVE. Reporting the first as if it
+  # were the second is what made an earlier version file a `Synced / Progressing` app under the
+  # heading "unhealthy by design" (found by review, 2026-08-14). An app can hold expectDegraded and
+  # still be broken for a reason that has nothing to do with its planted fault — or be perfectly
+  # fine — so classify every row against what the cluster actually reports.
+  echo "Argo Applications DECLARED expectDegraded in ws-meta (label), with their LIVE status:"
   if [[ -n "$apps" ]]; then
     printf '%s\n' "$apps" | while IFS=$'\t' read -r a s h; do
       [[ -n "$a" ]] || continue
-      printf "   %-42s %s / %s\n" "$a" "${s:-?}" "${h:-?}"
+      case "${h:-}" in
+        Degraded) printf "   %-42s %s / %-12s  matches the declaration\n" "$a" "${s:-?}" "${h:-?}" ;;
+        *)        printf "   %-42s %s / %-12s  ← NOT degraded right now; this row explains NOTHING you are seeing\n" \
+                    "$a" "${s:-?}" "${h:-?}" ;;
+      esac
     done
   else
     echo "   (none materialized)"
@@ -4568,7 +4580,11 @@ cmd_by_design() {  # SA/admin: every resource this workshop breaks or drifts ON 
   echo "Resources marked ${BY_DESIGN_LABEL}=true:"
   rows="$(by_design_rows)"
   if [[ -n "$rows" ]]; then
-    printf "   %-13s %-22s %-30s %s\n" "KIND" "NAMESPACE" "NAME" "SYMPTOM AN OPERATOR SEES"
+    # "SYMPTOM TO EXPECT", not "SYMPTOM AN OPERATOR SEES". This column is prose stamped into the
+    # chart; nothing here probes the live object, and the kinds involved (ConfigMap, Pipeline,
+    # Service) mostly have no readable health to probe. Stating it as observed fact invites the
+    # reader to stop looking — which is the false negative this command exists to prevent.
+    printf "   %-13s %-22s %-30s %s\n" "KIND" "NAMESPACE" "NAME" "SYMPTOM TO EXPECT (not verified live)"
     printf '%s\n' "$rows" | sort -t$'\t' -k4,4 -k2,2 | while IFS=$'\t' read -r kind ns name _mod sym; do
       [[ -n "$kind" ]] || continue
       printf "   %-13s %-22s %-30s %s\n" "$kind" "$ns" "$name" "$sym"
