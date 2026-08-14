@@ -1,0 +1,528 @@
+{{- /*
+  SHARED COCKPIT — one Showroom deployment behind an OpenShift OAuth front door, serving every
+  attendee. Identity is resolved AT REQUEST TIME from the logged-in user instead of being baked in
+  at build time, which is what lets a single build serve everyone.
+
+  WHY THIS EXISTS (owner ruling 2026-08-12, reaffirmed 2026-08-14). The shipped per-user cockpits
+  (showroom.yaml) publish a Route per attendee with NO authentication and a terminal ALREADY logged
+  in as that attendee. Measured from outside the cluster with no credentials: GET /tty-top/ returns
+  200 with a live shell, and POST /tty-top/token returns {"token": ""} — ttyd runs `-W /usr/bin/bash`
+  with no `-c`, so anyone with the URL gets that attendee's shell. On a disposable RHDP cluster that
+  was an accepted posture. On a CUSTOMER cluster it is a gap the workshop itself introduces, which
+  collides with the project's non-invasive rule. The owner's framing: "if someone deploys this
+  workshop on a customer cluster, they'd complain anybody with the url gain access to that user
+  credentials and terminal is already there."
+
+  THE SA-DEMOS CASE IS THE SAME CASE (owner, 2026-08-14). An SA does not get a special identity: they
+  "pick one user and login with that one", exactly like an attendee, and anything needing admin they
+  do from their own terminal rather than this one. So there is ONE identity model here, not two —
+  a demo deployment differs only in which content flavor its playbook builds.
+
+  ADDITIVE BY DESIGN. Renders NOTHING unless .Values.showroom.shared.enabled is true, and touches no
+  object showroom.yaml owns. Enabling it stands the shared cockpit up ALONGSIDE the per-user ones so
+  the two can be compared on a live cluster before anything is retired.
+
+  ── THE THREE MECHANISMS, each verified on cluster-m24jn 2026-08-14 ──────────────────────────────
+
+  1. IDENTITY IN THE CONTENT — nginx sub_filter.
+     The site is built ONCE with `user: __WS_USER__`, and nginx rewrites that sentinel to the
+     authenticated username on every response. Verified against the real quay.io/rhpds/nginx:1.25
+     (--with-http_sub_module is compiled in) that all four contexts substitute: body text, href
+     attributes, id attributes, and <code> blocks — the last matters because click-to-run sends the
+     block's text to the terminal, so the command an attendee runs carries their real username.
+     Scale of the problem this avoids: 3295 occurrences of the identity in one rendered flavor, 114
+     inside href/src and 5 inside id. A client-side DOM walk would have had to special-case
+     attributes and anchors; a response-stream rewrite does not distinguish them, which is why it is
+     the right layer.
+
+  2. IDENTITY IN THE TERMINAL — ttyd -H + TTYD_USER.
+     ttyd forks an independent shell per websocket (not per pod), and in auth-proxy mode (-H) it
+     exports the header value to that shell as TTYD_USER (confirmed present in the ttyd 1.7.7 binary
+     shipped in the terminal image). The wrapper below turns that into a per-session HOME, so two
+     attendees on ONE deployment get two shells with two homes and two kubeconfigs. WITHOUT THIS THE
+     SHARED MODEL WOULD BE STRICTLY WORSE THAN PER-USER: a single shared $HOME means every visitor
+     inherits whoever logged in last.
+
+  3. THE FRONT DOOR — oauth-proxy as a ServiceAccount OAuth client.
+     No cluster-scoped OAuthClient is created: the SA's redirect-reference annotation is the whole
+     registration, and it dies with the namespace. (A cluster-scoped OAuthClient would outlive a
+     namespace delete and breach the non-invasive rule.) SA-as-oauth-client caps the granted scope at
+     `user:info user:check-access` — enough to establish WHO the user is, which is all this needs.
+     The terminal does NOT inherit a cluster token from it; the attendee logs in themselves.
+
+  ── THE FAILURE MODE THIS GUARDS ─────────────────────────────────────────────────────────────────
+  If the identity header is ever absent, a naive sub_filter replaces the sentinel with an EMPTY
+  string and serves `ws prep agentic-ai --user  --yes` and `-dev` namespaces — corrupt commands, no
+  error, HTTP 200. That is measured, as the negative control of the experiment above, and it is
+  exactly the class of defect this project keeps paying for: correct in the source, broken in the
+  artefact, reported as success. An empty identity is therefore refused with 503, never rendered.
+*/ -}}
+{{- if and .Values.showroom.enabled .Values.showroom.shared.enabled }}
+{{- $ns := .Values.showroom.namespace }}
+{{- $domain := .Values.clusterDomain }}
+{{- $giteaHost := printf "gitea-%s.%s" .Values.giteaNamespace .Values.clusterDomain }}
+{{- $mirrorUrl := printf "https://gitea-%s.%s/%s/%s.git" .Values.giteaNamespace .Values.clusterDomain .Values.mirrorOrg .Values.mirrorRepo }}
+{{- $img := .Values.showroom.images }}
+{{- $name := "showroom-shared" }}
+{{- $host := printf "%s-%s.%s" $name $ns $domain }}
+{{- $apiUrl := printf "https://api.%s:6443" (trimPrefix "apps." $domain) }}
+{{- /* Same derivation as showroom.yaml: a comma-joined scalar, because Argo cannot carry a list. */ -}}
+{{- $disabledModules := list }}
+{{- range $s := splitList "," (default "" .Values.modulesDisabledCSV) }}{{- if trim $s }}{{- $disabledModules = append $disabledModules (trim $s) }}{{- end }}{{- end }}
+---
+# The OAuth client IS this ServiceAccount. The redirect-reference annotation registers the Route
+# below as a legal callback — that is the entire client registration, and it dies with the namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    serviceaccounts.openshift.io/oauth-redirectreference.primary: >-
+      {"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"{{ $name }}"}}
+---
+# oauth-proxy validates tokens and SubjectAccessReviews through the API server, which needs the
+# auth-delegator role. Cluster-scoped, therefore owner-labelled so teardown can find and remove it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogsr-{{ $name }}-auth-delegator
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $ns }}
+---
+# The serving-cert annotation makes the service CA mint the TLS pair oauth-proxy listens with, so the
+# Route can be reencrypt and no certificate is ever committed to this repo.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    service.beta.openshift.io/serving-cert-secret-name: {{ $name }}-tls
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ $name }}
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    # Terminal websockets idle for long stretches while an attendee reads. Both timeouts are needed —
+    # the tunnel one is what actually keeps an upgraded connection alive.
+    haproxy.router.openshift.io/timeout: 1h
+    haproxy.router.openshift.io/timeout-tunnel: 1h
+spec:
+  host: {{ $host }}
+  to:
+    kind: Service
+    name: {{ $name }}
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-proxy
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  nginx.conf: |
+    events {}
+    error_log /dev/stdout info;
+    http {
+      include /etc/nginx/mime.types;
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+      # An absent identity must never reach sub_filter — see the header. 1 = refuse.
+      map $http_x_forwarded_user $ws_identity_missing {
+        default 0;
+        ''      1;
+      }
+      server {
+        listen 8080;
+        absolute_redirect off;
+        location / {
+          if ($ws_identity_missing) {
+            return 503 "cockpit: no authenticated identity (X-Forwarded-User absent) - refusing to serve content with an empty username";
+          }
+          proxy_pass http://127.0.0.1:8000;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # sub_filter cannot rewrite a compressed body. The content service is Python SimpleHTTP and
+          # sends none today (measured: Content-type text/html, no Content-Encoding), but asking for
+          # identity encoding costs nothing and makes this independent of that image's behaviour.
+          proxy_set_header Accept-Encoding "";
+          sub_filter '__WS_USER__' $http_x_forwarded_user;
+          sub_filter_once off;
+          # Default is text/html only; the built site also carries the identity inside .js and .json
+          # (search index, nookbag config), and a half-substituted site is worse than none.
+          sub_filter_types *;
+        }
+        location = /tty-top { return 302 /tty-top/; }
+        location /tty-top/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_read_timeout 43200000;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          # ttyd reads this header (-H) to name the session; the wrapper turns it into a per-session
+          # HOME. Set explicitly because proxy_pass forwards only headers nginx knows about.
+          proxy_set_header X-Forwarded-User $http_x_forwarded_user;
+        }
+        location = /tty-bottom { return 302 /tty-bottom/; }
+        location /tty-bottom/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_read_timeout 43200000;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-User $http_x_forwarded_user;
+        }
+      }
+    }
+---
+# Build-time attributes for the ONE build. Every environment value is real; only the identity is a
+# sentinel, because it is the only one that differs per reader.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-userdata
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  user_data.yml: |
+{{- include "workshop-config.showroomUserData" (dict "user" "__WS_USER__" "domain" $domain "giteaHost" $giteaHost "disabledModules" $disabledModules "root" .) }}
+---
+# One home per authenticated user, as subdirectories of one claim: the per-user cockpits take one
+# PVC each, this takes one for the whole cohort.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-homes
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.showroom.shared.homesStorage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/instance: {{ $name }}
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  # One RWO claim holds every home, so two pods could never both mount it. Recreate states that
+  # instead of letting a rollout wedge on an attach that cannot succeed.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ $name }}
+        workshop.redhat.com/layer: workshop-config
+    spec:
+      serviceAccountName: {{ $name }}
+      initContainers:
+        # 1) Clone the in-cluster monorepo mirror (public repo, valid RHDP wildcard cert → no auth).
+        - name: content-clone
+          image: {{ $img.gitCloner | quote }}
+          env:
+            - name: GIT_REPO_URL
+              value: {{ $mirrorUrl | quote }}
+            - name: GIT_REPO_REF
+              value: {{ $.Values.showroom.contentRef | quote }}
+            - name: CLONE_DIR
+              value: /showroom/repo
+          volumeMounts:
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+        # 2) Build the site ONCE, with __WS_USER__ standing in for the reader's identity.
+        - name: antora-build
+          image: {{ include "workshop-config.antoraImage" $ | quote }}
+          # Explicit, not relied-upon-by-default — see showroom.yaml's note: the helper's tag is
+          # :latest, and a later pin would silently flip this to IfNotPresent and reintroduce the
+          # stale-cockpit-build bug.
+          imagePullPolicy: Always
+          env:
+            - name: FILES_DIR
+              value: /showroom/repo
+            - name: OUTPUT_DIR
+              value: /showroom/www
+            - name: ANTORA_SITE_FILE
+              value: showroom/site.yml
+          volumeMounts:
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+            - name: showroom-files
+              mountPath: /showroom/www
+              subPath: www
+            - name: userdata
+              mountPath: /user_data/
+        # 3) Only the homes ROOT is prepared. Which users will sign in is unknowable here, and
+        #    pre-creating N homes would re-encode the per-user assumption this template removes —
+        #    the session wrapper creates a home on first connection instead.
+        - name: homes-prep
+          image: {{ $img.terminal | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p /homes
+              # NO chmod. Under restricted-v2 the PVC is mounted root-owned but group-owned by the
+              # namespace's fsGroup, which the container already runs as — so it is ALREADY writable,
+              # and chmod on a directory this UID does not own is refused. Measured 2026-08-14:
+              # "chmod: changing permissions of '/homes': Operation not permitted", rc 11, uid
+              # 1002200000 / fsGroup 1002200000 on OCP 4.22. Assert the property we need instead of
+              # trying to impose one we cannot.
+              test -w /homes || { echo "FATAL: /homes not writable by uid $(id -u) — per-session homes cannot be created"; exit 1; }
+              echo "✅ shared homes root ready (writable by uid $(id -u))"
+          volumeMounts:
+            - name: homes
+              mountPath: /homes
+      containers:
+        # ── the front door. Every other container listens on loopback only. ──
+        - name: oauth-proxy
+          image: {{ $img.oauthProxy | quote }}
+          ports:
+            - name: https
+              containerPort: 8443
+          # The cookie secret is minted per pod start rather than stored. There is ONE replica with a
+          # Recreate strategy, so a restart already invalidates every session — persisting a secret
+          # would buy nothing and would put a credential in the repo or in Argo's diff.
+          #
+          # NO --openshift-sar, and that is deliberate. The obvious-looking guard
+          #   --openshift-sar={"namespace":"<showroom-ns>","resource":"services","verb":"get"}
+          # LOCKS OUT EVERY ATTENDEE. Measured 2026-08-14:
+          #   oc auth can-i get services -n ogsr-showroom --as=user1 --as-group=workshop-attendees → no
+          #   oc auth can-i get services -n user1-dev     --as=user1 --as-group=workshop-attendees → yes
+          # Attendees hold rights in their OWN namespaces and deliberately none in the showroom
+          # namespace ("attendees never touch this namespace directly" — showroom.yaml). A SAR names
+          # ONE static namespace, so it cannot express "their own namespace, whoever they are", and
+          # any namespace we could name is one they have no rights in. The bar is therefore
+          # authentication itself: a signed-in cluster user reaches the cockpit. Against the model
+          # this replaces — no authentication whatsoever, a live root-capable shell to anyone holding
+          # the URL — that is the whole of the fix, and a broken SAR would have been a worse outcome
+          # than none, because it fails CLOSED on the exact people the workshop is for.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              exec /usr/bin/oauth-proxy \
+                --https-address=:8443 \
+                --http-address= \
+                --provider=openshift \
+                --openshift-service-account={{ $name }} \
+                --upstream=http://127.0.0.1:8080 \
+                --tls-cert=/etc/tls/private/tls.crt \
+                --tls-key=/etc/tls/private/tls.key \
+                --cookie-secret="$(head -c 32 /dev/urandom | base64 | head -c 32)" \
+                --pass-user-headers=true
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/tls/private
+        - name: nginx
+          image: {{ $img.nginx | quote }}
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-pid
+              mountPath: /var/run
+        - name: content
+          image: {{ $img.content | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            # These four are NOT optional: without ANTORA_PLAYBOOK the content image looks for
+            # site.yml at the repo root and dies with "No Antora playbook found" (measured
+            # 2026-08-14 — omitting them CrashLoops this container while nginx and oauth-proxy stay
+            # happily Ready, so the pod reads 2/4 and the cockpit serves nothing).
+            - name: GIT_REPO_URL
+              value: {{ $mirrorUrl | quote }}
+            - name: GIT_REPO_REF
+              value: {{ $.Values.showroom.contentRef | quote }}
+            - name: ANTORA_PLAYBOOK
+              value: showroom/site.yml
+            - name: DOMAIN
+              value: {{ $domain | quote }}
+            - name: ZT_UI_ENABLED
+              value: "true"
+            - name: ZT_BUNDLE
+              value: {{ $.Values.showroom.nookbagBundle | quote }}
+            - name: SHOWROOM_UI_CONFIG
+              value: |
+                ---
+                type: showroom
+                default_width: 45
+                persist_url_state: true
+                view_switcher:
+                  enabled: true
+                  default_mode: split
+                antora:
+                  name: modules
+                tabs:
+                  - name: Terminal 1
+                    secondary_name: Terminal 2
+                    type: double-terminal
+                  # External launchers, not iframes — see showroom.yaml for why every one of these
+                  # tools sends a frame-blocking header and what embedding them would cost.
+                  - name: OCP Console
+                    url: https://console-openshift-console.{{ $domain }}
+                    external: true
+                  - name: Gitea
+                    url: https://{{ $giteaHost }}
+                    external: true
+          volumeMounts:
+            - name: userdata
+              mountPath: /user_data/
+            - name: showroom-files
+              mountPath: /showroom/repo
+              subPath: repo
+            - name: showroom-files
+              mountPath: /showroom/www
+              subPath: www
+        - name: terminal
+          image: {{ $img.terminal | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # The wrapper ttyd execs per websocket. TTYD_USER is set by ttyd from the -H header, so
+              # this is the ONLY place the connecting attendee's identity is known — the pod itself
+              # has no single user, which is the whole point.
+              #
+              # ECHO LINES, NOT A HEREDOC — and /tmp, not /usr/local/bin. Both learned the hard way
+              # on 2026-08-14. A quoted heredoc delimiter must sit at column 0, which is impossible
+              # inside this indented YAML block scalar: bash never closes the heredoc and instead
+              # tries to EXECUTE the following lines, which surfaces as the baffling
+              # "/bin/bash: line 5: /usr/local/bin/ws-session: Permission denied". showroom-demos.yaml
+              # carries the same warning; this is the second time the trap has been paid for. /usr/local/bin
+              # is also not writable by the random restricted-v2 UID, so the wrapper lives in /tmp.
+              #
+              # Single-quoted echoes keep every $VAR literal — they must expand in the ATTENDEE's
+              # shell at connection time, not in this container's shell at pod start. The one value
+              # that IS resolved here is the API URL, which Helm knows and the shell cannot.
+              {
+                echo '#!/bin/bash'
+                echo 'if [ -z "${TTYD_USER:-}" ]; then'
+                echo '  echo "No authenticated identity on this connection — refusing to open a shell."'
+                echo '  echo "Reach this terminal through the cockpit URL so the front door can identify you."'
+                echo '  exec sleep 5'
+                echo 'fi'
+                echo 'export HOME="/homes/${TTYD_USER}"'
+                echo 'mkdir -p "$HOME/.bashrc.d"'
+                echo 'cd "$HOME"'
+                echo 'if [ ! -e "$HOME/.ogsr-seeded" ]; then'
+                echo '  {'
+                echo "    echo '# OGSR cockpit greeting — managed by the shared cockpit terminal.'"
+                echo "    echo 'if [ -z \"\${OGSR_BANNER_SHOWN:-}\" ]; then'"
+                echo "    echo '  export OGSR_BANNER_SHOWN=1'"
+                echo "    echo '  echo'"
+                echo "    echo '  echo \"  You are signed in as \$TTYD_USER.\"'"
+                echo "    echo '  echo \"  This shell is not logged in to the cluster yet. Log in with:\"'"
+                echo "    echo '  echo \"    oc login {{ $apiUrl }} -u \$TTYD_USER\"'"
+                echo "    echo '  echo'"
+                echo "    echo '  echo \"  Anything needing cluster-admin belongs in your OWN terminal, not this one.\"'"
+                echo "    echo '  echo'"
+                echo "    echo 'fi'"
+                echo '  } > "$HOME/.bashrc.d/ogsr-cockpit.sh"'
+                echo '  touch "$HOME/.ogsr-seeded"'
+                echo 'fi'
+                echo 'exec /usr/bin/bash'
+              } > /tmp/ws-session
+              chmod 0755 /tmp/ws-session
+              # -H is what populates TTYD_USER. -W keeps the terminal writable. No -c: authentication
+              # is the front door's job, and a second password here would only be theatre.
+              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Forwarded-User /tmp/ws-session
+          resources:
+            {{- toYaml .Values.showroom.terminalResources | nindent 12 }}
+          volumeMounts:
+            - name: homes
+              mountPath: /homes
+      volumes:
+        - name: showroom-files
+          emptyDir: {}
+        - name: userdata
+          configMap:
+            name: {{ $name }}-userdata
+        - name: nginx-config
+          configMap:
+            name: {{ $name }}-proxy
+            defaultMode: 420
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-pid
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: {{ $name }}-tls
+        - name: homes
+          persistentVolumeClaim:
+            claimName: {{ $name }}-homes
+{{- end }}
