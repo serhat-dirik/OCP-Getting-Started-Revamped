@@ -63,12 +63,30 @@
 {{- $giteaHost := printf "gitea-%s.%s" .Values.giteaNamespace .Values.clusterDomain }}
 {{- $mirrorUrl := printf "https://gitea-%s.%s/%s/%s.git" .Values.giteaNamespace .Values.clusterDomain .Values.mirrorOrg .Values.mirrorRepo }}
 {{- $img := .Values.showroom.images }}
-{{- $name := "showroom-shared" }}
-{{- $host := printf "%s-%s.%s" $name $ns $domain }}
-{{- $apiUrl := printf "https://api.%s:6443" (trimPrefix "apps." $domain) }}
 {{- /* Same derivation as showroom.yaml: a comma-joined scalar, because Argo cannot carry a list. */ -}}
 {{- $disabledModules := list }}
 {{- range $s := splitList "," (default "" .Values.modulesDisabledCSV) }}{{- if trim $s }}{{- $disabledModules = append $disabledModules (trim $s) }}{{- end }}{{- end }}
+{{- $apiUrl := printf "https://api.%s:6443" (trimPrefix "apps." $domain) }}
+{{- /*
+     TWO INSTANCES, ONE DEFINITION. The attendee cockpit and the SA-Demos cockpit differ ONLY in
+     which Antora playbook they build — the workshop flavor or the demo flavor (Say/Show/Do). They
+     do NOT differ in identity: the owner's ruling (2026-08-14) is that an SA "picks one user and
+     logs in with that one", exactly like an attendee, and does anything needing admin from their
+     own terminal rather than this one.
+
+     That ruling is what collapses the old second identity model. The shipped SA-Demos cockpit
+     hardcodes `user: your-user` — a placeholder that is not an identity, which is why its 40
+     `ws prep … --user {user}` pre-flights across 19 modules were unrunnable, while its banner
+     hardcoded `-u user1` and would have WIPED a live attendee. Resolving identity from the login
+     makes every one of those call sites correct as written, with no content edit at all.
+*/ -}}
+{{- $instances := list
+      (dict "name" "showroom-shared"       "playbook" "showroom/site.yml"      "flavor" "workshop")
+      (dict "name" "showroom-shared-demos" "playbook" "showroom/site-demo.yml" "flavor" "demo") }}
+{{- range $inst := $instances }}
+{{- $name := $inst.name }}
+{{- $playbook := $inst.playbook }}
+{{- $host := printf "%s-%s.%s" $name $ns $domain }}
 ---
 # The OAuth client IS this ServiceAccount. The redirect-reference annotation registers the Route
 # below as a legal callback — that is the entire client registration, and it dies with the namespace.
@@ -79,7 +97,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "1"
     serviceaccounts.openshift.io/oauth-redirectreference.primary: >-
@@ -93,7 +111,7 @@ metadata:
   name: ogsr-{{ $name }}-auth-delegator
   labels:
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 roleRef:
@@ -114,7 +132,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
     service.beta.openshift.io/serving-cert-secret-name: {{ $name }}-tls
@@ -134,7 +152,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
     # Terminal websockets idle for long stretches while an attendee reads. Both timeouts are needed —
@@ -159,7 +177,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 data:
@@ -233,12 +251,12 @@ metadata:
   namespace: {{ $ns }}
   labels:
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 data:
   user_data.yml: |
-{{- include "workshop-config.showroomUserData" (dict "user" "__WS_USER__" "domain" $domain "giteaHost" $giteaHost "disabledModules" $disabledModules "root" .) }}
+{{- include "workshop-config.showroomUserData" (dict "user" "__WS_USER__" "domain" $domain "giteaHost" $giteaHost "disabledModules" $disabledModules "root" $) }}
 ---
 # One home per authenticated user, as subdirectories of one claim: the per-user cockpits take one
 # PVC each, this takes one for the whole cohort.
@@ -249,14 +267,14 @@ metadata:
   namespace: {{ $ns }}
   labels:
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "2"
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: {{ .Values.showroom.shared.homesStorage }}
+      storage: {{ $.Values.showroom.shared.homesStorage }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -266,7 +284,7 @@ metadata:
   labels:
     app.kubernetes.io/instance: {{ $name }}
     workshop.redhat.com/layer: workshop-config
-    {{- include "workshop-config.ownerLabels" . | nindent 4 }}
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
 spec:
@@ -313,7 +331,7 @@ spec:
             - name: OUTPUT_DIR
               value: /showroom/www
             - name: ANTORA_SITE_FILE
-              value: showroom/site.yml
+              value: {{ $playbook | quote }}
           volumeMounts:
             - name: showroom-files
               mountPath: /showroom/repo
@@ -408,7 +426,7 @@ spec:
             - name: GIT_REPO_REF
               value: {{ $.Values.showroom.contentRef | quote }}
             - name: ANTORA_PLAYBOOK
-              value: showroom/site.yml
+              value: {{ $playbook | quote }}
             - name: DOMAIN
               value: {{ $domain | quote }}
             - name: ZT_UI_ENABLED
@@ -430,13 +448,30 @@ spec:
                   - name: Terminal 1
                     secondary_name: Terminal 2
                     type: double-terminal
-                  # External launchers, not iframes — see showroom.yaml for why every one of these
-                  # tools sends a frame-blocking header and what embedding them would cost.
+                  # External launchers, not iframes — see showroom.yaml for the full reasoning: every
+                  # one of these tools sends a frame-blocking header, and embedding them would need a
+                  # cluster-wide IngressController rewrite or per-tool frame-ancestors config, both of
+                  # which change cluster behaviour the workshop must not touch.
                   - name: OCP Console
                     url: https://console-openshift-console.{{ $domain }}
                     external: true
                   - name: Gitea
                     url: https://{{ $giteaHost }}
+                    external: true
+                  - name: Dev Spaces
+                    url: https://devspaces.{{ $domain }}
+                    external: true
+                  - name: Argo CD
+                    url: https://student-gitops-server-student-gitops.{{ $domain }}
+                    external: true
+                  - name: Dev Hub
+                    url: https://backstage-developer-hub-rhdh.{{ $domain }}
+                    external: true
+                  - name: SonarQube
+                    url: https://sonarqube-sonarqube.{{ $domain }}
+                    external: true
+                  - name: Migration Toolkit
+                    url: https://mta-openshift-mta.{{ $domain }}
                     external: true
           volumeMounts:
             - name: userdata
@@ -501,7 +536,7 @@ spec:
               # is the front door's job, and a second password here would only be theatre.
               exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Forwarded-User /tmp/ws-session
           resources:
-            {{- toYaml .Values.showroom.terminalResources | nindent 12 }}
+            {{- toYaml $.Values.showroom.terminalResources | nindent 12 }}
           volumeMounts:
             - name: homes
               mountPath: /homes
@@ -525,4 +560,5 @@ spec:
         - name: homes
           persistentVolumeClaim:
             claimName: {{ $name }}-homes
+{{- end }}{{/* range $instances */}}
 {{- end }}
