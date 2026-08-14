@@ -3,23 +3,24 @@
 include::partial$version-attributes.adoc[]
 
 // Instructor runbook for Application Security Testing. Timings MEASURED against the live appsec + trust
-// stacks, not guessed (re-measured 2026-07-31, cluster 2, attendee slot user5; see "How this timing was
-// measured" below). Pre-flight commands show captured expected output (domains scrubbed to
-// placeholders). Environment values via attributes only.
+// stacks, not guessed (re-measured 2026-08-14, cluster-m24jn, attendee slot user7, AFTER commit 13ed4ef
+// raised the {user}-cicd LimitRange default.cpu 500m -> 1500m; see "How this timing was measured"
+// below — the pre-13ed4ef table is superseded, do not restore it). Pre-flight commands show captured
+// expected output (domains scrubbed to placeholders). Environment values via attributes only.
 
 include::partial$prep-before-you-teach.adoc[]
 
 == Timing (measured)
 
-*Read this before you schedule the module.* Total hands-on is *~85–105 min*, not one hour. With the
-concept and wrap-up, budget *~115–135 min* — a genuine double slot with no slack in it.
+*Read this before you schedule the module.* Total hands-on is *~65–85 min*, not one hour. With the
+concept and wrap-up, budget *~95–115 min* — a double slot, now with a little slack in it.
 
 The lab is *pipeline-bound*: from Exercise 3 onward, most of each exercise is *waiting for a re-run*,
 not doing the work. Nothing is cached between runs, so every re-run pays the full unit-test and image
 build again.
 
-Measured per stage on OCP 4.22.6, from *two complete green capstone runs plus one seeded (red)
-run* on the same cluster on 2026-07-31 — a record of what this measurement ran on, not a requirement for
+Measured per stage on OCP 4.22.8, from *three complete green capstone runs plus one seeded (red)
+run* on the same cluster on 2026-08-14 — a record of what this measurement ran on, not a requirement for
 yours. Ranges are the observed spread across those runs — treat them as typical, not as guarantees; a
 busier cluster or a cold Maven mirror pushes the long stages up.
 
@@ -27,17 +28,17 @@ busier cluster or a cold Maven mirror pushes the long stages up.
 |===
 | Stage | Time | Notes
 
-| `fetch-source` | ~20 s | git clone of the fork
-| `sast-sonar` | ~2.5 min | SonarQube analysis + quality-gate poll; same cost pass or fail
+| `fetch-source` | ~15–20 s | git clone of the fork; the only stage with its own CPU ceiling (the shipped `git-clone` step pins 100m), so nothing tuned in the namespace moves it
+| `sast-sonar` | ~1.5 min | SonarQube analysis + quality-gate poll; server-side, so pass and fail cost the same order (measured 85 s and 88 s green, 2m02s on the seeded red run)
 | `sca-trivy` | ~20 s | Trivy filesystem scan
-| `unit-test` | *~5.5 min* | Maven test — no dependency cache survives a run, so this is paid *every* time
-| `build-image` | *~4 min* | buildah; the second long pole
-| `image-scan` / `sign-check` / `image-report` | ~40 s | run in parallel after the build
-| `deployment-check` | ~10 s | roxctl deployment check
-| `deploy` | ~45 s | applies the manifest, creates the Route
-| `dast-zap` | ~2.5 min | ZAP baseline against the running Service
+| `unit-test` | *~2.5–3 min* | Maven test — no dependency cache survives a run, so this is paid *every* time
+| `build-image` | *~2–3 min* | buildah; the second long pole
+| `image-scan` / `sign-check` / `image-report` | ~25–35 s | run in parallel after the build
+| `deployment-check` | ~10–15 s | roxctl deployment check
+| `deploy` | ~30 s | applies the manifest, creates the Route
+| `dast-zap` | ~1.5 min | ZAP baseline against the running Service
 | `perf-k6` | ~40 s | k6 load test
-| *A complete run* | *~17–18 min* | measured 17m01s and 17m33s
+| *A complete run* | *~10.5–11.5 min* | measured 10m27s, 10m46s and 11m38s
 |===
 
 What that means for pacing — *how long a re-run takes to reach each gate*:
@@ -47,12 +48,12 @@ What that means for pacing — *how long a re-run takes to reach each gate*:
 | Segment | Time | Notes
 
 | Concept (five pillars, shift-left/right, defense-in-depth, reporting) | ~15 min | ≤15-min read; slides carry it
-| 1. Meet the seeded app + start the capstone | ~6–8 min | Read five flaws, start the run; it fails at SAST after *~3 min*
-| 2. SAST gate — externalize the credential | ~8–10 min | Read SonarQube, fix, commit; the re-run reaches the SCA gate in *~3–4 min*
-| 3. SCA gate — drop the vulnerable dep | *~15–18 min* | *The step-change.* This re-run is the first to build: fetch + SAST + SCA + unit-test + build + image-scan = *~13 min of pipeline* before it fails
-| 4. Image scan — log4shell + defense-in-depth | *~16–19 min* | The key beat; another full rebuild to reach `deployment-check` (*~13 min*)
-| 5. Config check — harden the manifest | *~18–21 min* | Full rebuild *plus* deploy and DAST — *~16.5–17 min* of pipeline before it fails at `dast-zap`
-| 6. DAST — add the security headers | *~19–22 min* | The final run goes the whole way: *~17–18 min*
+| 1. Meet the seeded app + start the capstone | ~5–7 min | Read five flaws, start the run; it fails at SAST after *~2.5 min*
+| 2. SAST gate — externalize the credential | ~7–9 min | Read SonarQube, fix, commit; the re-run reaches the SCA gate in *~2–2.5 min*
+| 3. SCA gate — drop the vulnerable dep | *~10–14 min* | *The step-change.* This re-run is the first to build: fetch + SAST + SCA + unit-test + build + image-scan = *~8 min of pipeline* before it fails
+| 4. Image scan — log4shell + defense-in-depth | *~11–15 min* | The key beat; another full rebuild to reach `deployment-check` (*~8–9 min*)
+| 5. Config check — harden the manifest | *~12–15 min* | Full rebuild *plus* deploy and DAST — *~10–11 min* of pipeline before it fails at `dast-zap`
+| 6. DAST — add the security headers | *~13–16 min* | The final run goes the whole way: *~10.5–11.5 min*
 | 7. Read the whole green run — *instructor-led* | ~5–8 min | You drive this one (see below)
 | Wrap-up + org mapping | ~15 min | Reporting, break-glass, pin-vs-float discussion
 |===
@@ -60,16 +61,24 @@ What that means for pacing — *how long a re-run takes to reach each gate*:
 [NOTE]
 .How this timing was measured
 ====
-Re-measured 2026-07-31 on cluster 2 as attendee slot `user5`, replacing an earlier table that was wrong by a wide margin (it claimed ~60 min hands-on and a ~7 min Exercise 3, both roughly half of reality).
-The numbers above come from *three* real runs, not one: two complete green capstone runs on clean `main` (17m01s and 17m33s wall) and one seeded red run on `seed-appsec` (2m50s to the SAST failure).
+Re-measured 2026-08-14 as attendee slot `user7`, because the *pipeline itself got faster*: the `{user}-cicd` LimitRange `default.cpu` went 500m → 1500m, and every step of this pipeline had been inheriting that default, so the whole capstone had been running pegged at half a core. The table this replaced was correct when it was taken and is now roughly *60% too long*.
+The numbers above come from *four* real runs, not one: three complete green capstone runs on clean `main` (11m38s and 10m27s started the way the lab starts them, 10m46s via `ws solve`) and one seeded red run on `seed-appsec` (2m35s to the SAST failure).
 
-Per-stage spread across the two green runs was under ~5%, which is why the *stage* table gives single ~figures while the *exercise* table gives ranges — the exercise numbers add the genuinely variable human reading/fix/commit time on top of the pipeline cost.
+Spread across the three green runs was ~11% on the whole run and wider on `build-image` alone (2m09s vs 3m02s), which is why the *stage* table gives ranges rather than the single figures it used to.
 Do not replace these with fresh point estimates from a single sample.
 
-The dominant, non-negotiable costs are `unit-test` (~5.5 min) and `build-image` (~4 min), paid on *every* re-run because no dependency cache survives a run — each PipelineRun claims a fresh workspace PVC.
+*How the per-gate figures in the exercise table were derived.* Only two rungs of the ladder were run
+directly: the seeded red run (Exercise 1) and the complete green run (Exercise 6). The middle rungs are
+*prefix wall-clock read off the green runs* — the time from PipelineRun `startTime` to the
+`completionTime` of the gate that rung stops at, which is exactly what a run that fails there costs. That
+respects the DAG's parallel fan-out after `build-image`, which a sum of the stage column would not.
+The human reading/fix/commit time carried over unchanged from the previous measurement; only the
+pipeline component was re-measured, because only the pipeline got faster.
+
+The dominant costs are still `unit-test` (~2.5–3 min) and `build-image` (~2–3 min), paid on *every* re-run because no dependency cache survives a run — each PipelineRun claims a fresh workspace PVC. They are still about *half* the run; that share did not move, the run simply got shorter. Two stages came out of the re-measurement unchanged, for two different reasons worth knowing before you tune anything: `fetch-source` never saw the raised ceiling at all (the shipped `git-clone` step declares its own 100m and overrides the namespace default), and `perf-k6` is wall-clock-bound by a fixed 30-second load profile rather than by CPU. `sca-trivy` and `deployment-check` are already short enough that nothing moved them either.
 ====
 
-*Running this in the time you actually have.* The six re-runs are ~66 min of pipeline on their own and
+*Running this in the time you actually have.* The six re-runs are ~40–45 min of pipeline on their own and
 that floor cannot be negotiated down. Options, in order of preference:
 
 * *Pre-warm.* The concept page now opens with a `ws prep app-security-testing` box, so the environment
@@ -78,7 +87,7 @@ that floor cannot be negotiated down. Options, in order of preference:
   start their first pipeline run *before* you deliver the concept talk. The SAST failure is then waiting
   for them, which removes Exercise 1's wait entirely. Order matters — the fork and the Pipeline come from
   the entry state, so the run has nothing to clone until prep has converged.
-* *Teach into the wait.* Exercises 3–6 each leave 13–18 idle minutes. That is where the concept material
+* *Teach into the wait.* Exercises 3–6 each leave 8–12 idle minutes. That is where the concept material
   on defense in depth, the org-mapping discussion, and the wrap-up questions belong — not bolted on at
   the end. Do not let the room watch a progress bar.
 * *Run the demo flavor instead.* One narrated red-to-green pass, ~15 min of *room* time. If you have a
@@ -87,7 +96,10 @@ that floor cannot be negotiated down. Options, in order of preference:
   already-finished PipelineRuns, which is a full lab pass beforehand (see *Demo-mode notes*). Stage it
   the day before, not on the morning.
 
-Measured `ws` lifecycle (admin/builder context, OCP 4.22.6, 2026-07-31):
+Measured `ws` lifecycle (admin/builder context). *Mixed provenance, deliberately:* `reset` and `solve`
+wrap cluster work the CPU change moved, so both were re-measured on OCP 4.22.8 on 2026-08-14; the two
+`verify` rows and `smoke` are API reads that it does not touch, so they still carry their OCP 4.22.6 /
+2026-07-31 figures — see the note below on why those seconds are the oldest thing in this table.
 
 [cols="2,1,3",options="header"]
 |===
@@ -96,8 +108,8 @@ Measured `ws` lifecycle (admin/builder context, OCP 4.22.6, 2026-07-31):
 | `ws verify app-security-testing --user <u> --entry-only` | ~15–17 s | 14/14 — the 12 shared checks plus 2 clean-slate ones
 | `ws verify app-security-testing --user <u>` | ~15–18 s | 14/14 — the same 12 shared checks plus 2 *end-state* ones *replacing* the clean-slate pair, once a capstone run has Succeeded
 | `ws smoke app-security-testing <u>` | ~55 s | 13/13 attendee-cockpit gate — 11 generic (ws-on-PATH, identity, isolation, cockpit freshness, prep convergence, the cockpit's own entry verify) plus this module's 2 `smokeCommands`
-| `ws reset app-security-testing --user <u>` | ~2 min | purge `<u>-cicd` + re-materialize entry (Argo sync)
-| `ws solve app-security-testing --user <u>` | *~17–19 min* | runs the capstone on clean `main` (every gate passes) — blocks while it runs
+| `ws reset app-security-testing --user <u>` | ~2 min | purge `<u>-cicd` + re-materialize entry (Argo sync); measured 2m23s on 2026-08-14
+| `ws solve app-security-testing --user <u>` | *~12–14 min* | runs the capstone on clean `main` (every gate passes) — blocks while it runs. Measured 12m12s end to end on 2026-08-14, of which 10m46s was the pipeline itself and the rest two Argo syncs
 |===
 
 [NOTE]
@@ -131,8 +143,8 @@ run `ws reset app-security-testing --user <u>` (or `ws git-refresh --restart-ter
 stale cockpit) and re-smoke.
 
 `ws solve` is *slow by design*: it runs the real capstone to completion so the green end state genuinely
-exists. It wraps the same ~17–18 min pipeline measured above, so start it *at least 25 minutes* before a
-demo — not five.
+exists. It wraps the same ~10.5–11.5 min pipeline measured above, so start it *at least 20 minutes* before
+a demo — not five.
 
 == Pre-flight checklist
 
@@ -145,7 +157,7 @@ Run these from an admin context *before* the session. Each shows the captured ex
 ws start app-security-testing --user user2
 ----
 
-Prep here is *light*: the module's only unguarded hooks copy the SonarQube/RHACS tokens (`sonar-rox-token-hook.yaml`) and refresh the Gitea fork + its `seed-appsec` branch (`fork-and-seed.yaml`) — neither runs the pipeline. The `waitSeconds: 1800` ceiling in `ws-meta.yaml` sizes `ws solve` (the capstone run, *~17-19 min* — see the `ws` lifecycle table below), not prep; do not expect this step to take anywhere near that long.
+Prep here is *light*: the module's only unguarded hooks copy the SonarQube/RHACS tokens (`sonar-rox-token-hook.yaml`) and refresh the Gitea fork + its `seed-appsec` branch (`fork-and-seed.yaml`) — neither runs the pipeline. The `waitSeconds` ceiling in `ws-meta.yaml` sizes `ws solve` (the capstone run, *~12-14 min* — see the `ws` lifecycle table below), not prep; do not expect this step to take anywhere near that long. That ceiling is the outermost of four nested clocks derived from `values.yaml`; read it there rather than quoting a number here, because it is sized against the *slowest* tolerable run and is currently much larger than the measured one.
 
 *2. The appsec stack (SonarQube) is healthy.*
 
@@ -258,8 +270,8 @@ You do not need a separate rubric for when the room is ready to move on: each ex
 
 == Demo-mode notes (beyond Say/Show/Do)
 
-* *Stage the whole ladder before the room — six finished runs, not two.* The demo arc is a *tour of already-finished PipelineRuns*: its five beats point at six different rungs, each stopping one gate later than the one before, so two warm runs do not cover it — beats 2, 3 and 4 each need their own. The prep is therefore *one full pass through this module's own lab* (Exercises 1–6) in the presenter's project, which is the *~66 min of pipeline* floor named in *Running this in the time you actually have* above, inside a *~85–105 min* hands-on pass. Do it days ahead, once: nothing prunes a finished PipelineRun, so all six survive in the project and one staging serves every customer. The lab's demo-flavor prep block carries the same rung-by-rung table, a one-command ladder check, and the fallback below.
-* *`ws solve` is the fallback, not the prep.* It creates exactly *one* PipelineRun, on clean `main` — `gitops/entry-states/app-security-testing/templates/solve-endstate.yaml` renders a single PostSync Job with `backoffLimit: 0` precisely so a retry cannot launch a second. It gives you beat 5's green graph and nothing at all for beats 2–4, and it *blocks for ~17–19 min*, so start it *at least 25 minutes* ahead — see Timing. Pair it with one seeded `seed-appsec` run (~3 min, red at `sast-sonar`) for beat 1 and describe the three middle rungs off the green run's stage list rather than pretending to show them.
+* *Stage the whole ladder before the room — six finished runs, not two.* The demo arc is a *tour of already-finished PipelineRuns*: its five beats point at six different rungs, each stopping one gate later than the one before, so two warm runs do not cover it — beats 2, 3 and 4 each need their own. The prep is therefore *one full pass through this module's own lab* (Exercises 1–6) in the presenter's project, which is the *~40–45 min of pipeline* floor named in *Running this in the time you actually have* above, inside a *~65–85 min* hands-on pass. Do it days ahead, once: nothing prunes a finished PipelineRun, so all six survive in the project and one staging serves every customer. The lab's demo-flavor prep block carries the same rung-by-rung table, a one-command ladder check, and the fallback below.
+* *`ws solve` is the fallback, not the prep.* It creates exactly *one* PipelineRun, on clean `main` — `gitops/entry-states/app-security-testing/templates/solve-endstate.yaml` renders a single PostSync Job with `backoffLimit: 0` precisely so a retry cannot launch a second. It gives you beat 5's green graph and nothing at all for beats 2–4, and it *blocks for ~12–14 min*, so start it *at least 20 minutes* ahead — see Timing. Pair it with one seeded `seed-appsec` run (~2.5 min, red at `sast-sonar`) for beat 1 and describe the three middle rungs off the green run's stage list rather than pretending to show them.
 * *Sign in to RHACS before the room, not during beat 3.* Central has its own login and rejects OpenShift tokens outright (see Watchouts), so it is the one console attendees never see — but *you* need it open and signed in on Violations before beat 3's log4shell reveal, or the beat stalls on a login screen. This warning is also carried in the lab's demo-flavor prep block: it is the one line that saves a demo, and a presenter mid-arc should not have to leave the page they are presenting from to find it.
 * *Open all four consoles in a fixed tab order that matches the beats.* Pipelines console (every beat), SonarQube (beat 1), RHACS (beat 3), a terminal in `{user}-cicd` (throughout) — arrange them once so you are never hunting for the right tab mid-sentence.
 * *Let beat 5's tour of green land before Q&A.* The close — SonarQube passed, RHACS clean, Tekton Results green, the Route open — is what makes "green now means safe" concrete. Do not rush from it straight into questions.
@@ -294,7 +306,7 @@ Complementary. Trusted Software Supply Chain proves the image is *provably yours
 * *The cluster-resolver task cache.* The pipeline references tasks by cluster resolver, which caches resolved Tasks briefly. If you *update* a curated task (e.g. `roxctl-deployment-check`), a run started within the cache TTL may still use the old body. Re-run after a minute, or bump nothing mid-session.
 * *`git push` prompts once.* The lab's fixes push to the attendee's fork; the first push prompts for their Gitea login. The lab sets `git config --global credential.helper store` so subsequent pushes are silent. If a push errors with "could not read Username", that helper line is the fix (also in Troubleshooting).
 * *ZAP gate is `FAIL_ON_WARN=true`.* The pipeline promotes missing-header *warnings* to build failures so the DAST gate bites. That means the *clean* app must set its headers or `ws solve` (clean `main`) would also fail DAST — the hardened `application.properties` on `main` carries them. If you fork the app, keep the headers.
-* *Build-bound lab.* Every re-run pays unit-test (~5.5 min) *and* the image build (~4 min) again — no cache survives a run. See the timing section: hands-on is ~85–105 min, not 60. Pre-warm the first run and teach into the waits, or run the demo flavor.
+* *Build-bound lab.* Every re-run pays unit-test (~2.5–3 min) *and* the image build (~2–3 min) again — no cache survives a run. See the timing section: hands-on is ~65–85 min, not 60. Pre-warm the first run and teach into the waits, or run the demo flavor.
 
 * *Six re-runs, one PVC quota, per attendee.* Every PipelineRun claims a fresh workspace PVC from its `volumeClaimTemplate`, and that PVC lives exactly as long as the run does — nothing in the flow deletes a finished run behind the attendee. The module's fix loop is six sequential re-runs per attendee, and across a full cohort that can walk the room straight into the per-namespace PVC quota. If a run never starts a pod and `oc describe pipelinerun` shows `exceeded quota … persistentvolumeclaims`, have the attendee prune their oldest *finished* runs first (each frees its PVC through the ownerReference) — the ceiling itself is workshop-tunable in `gitops/workshop-config/templates/per-user-limits.yaml` (Troubleshooting entry included).
 
