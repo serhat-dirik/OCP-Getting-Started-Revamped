@@ -450,7 +450,7 @@ else
     check "parasol-claims no longer reseeds the DB on boot (schema-management off drop-and-create)" claims_schema_not_reseed \
       || hint "stop the per-boot reseed of the shared DB: oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none"
     check "parasol-claims CPU limit raised above the cold-start-throttle floor (>500m)" claims_cpu_limit_raised \
-      || hint "give cold-starting pods headroom so the roll's capacity dip is brief: oc set resources deployment/parasol-claims --limits=cpu=1 --requests=cpu=200m (do NOT go above 1 — the namespace limits.cpu quota is 6 and 3 replicas + the surge pod would exceed it)"
+      || hint "give cold-starting pods headroom so the roll's capacity dip is brief: oc set resources deployment/parasol-claims --limits=cpu=1 --requests=cpu=200m (do NOT go above 1 — the namespace limits.cpu quota is 8, and with 1300m held by the other workloads a surge roll peaks at 4 replicas, so anything above 1675m is refused)"
     check "no parasol-claims ReplicaSet is being refused its pods (no ReplicaFailure)" claims_no_replica_failure \
       || hint "a ReplicaSet cannot create pods — read it: oc describe rs -n ${NS} \$(oc get rs -n ${NS} -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}'). 'exceeded quota: workshop-quota' means the CPU limit you set is too large for the namespace cap (use cpu=1); the roll is wedged even though availableReplicas still reads N/N"
   else
