@@ -98,6 +98,29 @@ spec:
         - name: solve
           # Digest-pinned; el8 `ose-cli:latest` was frozen on v4.15.0 with unapplied Critical errata.
           image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          # THIS BLOCK EXISTS TO STOP ws solve DEADLOCKING AGAINST ITSELF. Measured 2026-08-14: with
+          # no resources declared, this container inherited the namespace default (1500m as of
+          # 13ed4ef) and held it for the WHOLE poll — while waiting for a PipelineRun whose
+          # sast-sonar needs 4500m (three steps x 1500m). Against claims-db 1500m +
+          # parasol-claims 1500m + the affinity assistant 50m, the run it was waiting for could
+          # never be admitted:
+          #     exceeded quota: workshop-quota, requested: limits.cpu=4500m,
+          #     used: limits.cpu=4550m, limited: limits.cpu=8
+          # and because the failure is an admission refusal rather than an error, the hook simply
+          # polled until activeDeadlineSeconds — `ws solve` failing after ~39 MINUTES with nothing
+          # obviously wrong. It only bites when the namespace ALREADY has the app deployed, which is
+          # why a clean entry state (7550m of 8000m, 5.6% headroom) never showed it at build time.
+          #
+          # A poller needs almost no CPU, so capping it here returns 1400m to the quota and the
+          # contended case fits with room. Memory stays at 512Mi because ose-cli OOMs at 256Mi
+          # (recorded in the session card) — this is a CPU fix, not a memory one.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 512Mi
+            limits:
+              cpu: 100m
+              memory: 512Mi
           volumeMounts:
             - name: solve
               mountPath: /solve
