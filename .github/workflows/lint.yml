@@ -519,6 +519,58 @@ jobs:
           fi
           python3 tools/lint/copy-drift-guard.py
 
+  ns-policy-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Both sides are Helm templates and are RENDERED before comparison — a Helm template is not
+      # valid YAML until Helm has run. Same pin as the helm job so every job reads the same render.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # The guard parses rendered manifests properly rather than pattern-matching them, so the
+        # parser is a hard dependency. A missing one exits 2, which the self-test assertion below
+        # turns into a failure — it can never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Per-user namespace policy must agree in both places that define it
+        # WHY THIS JOB EXISTS (found 2026-08-14, one day after the defect landed). The per-user
+        # ResourceQuota/LimitRange policy is authored twice — gitops/workshop-config's
+        # per-user-*.yaml (live) and gitops/user-namespace's quotaSpec helper (canonical source for
+        # the 26 entry-state copies). Commit 13ed4ef raised the dev/stage/prod/cicd CPU ceiling
+        # (LimitRange default.cpu 500m -> 1500m, quota limits.cpu 6 -> 8), which took the
+        # app-security-testing capstone 1414s -> 821s, and updated only the first of the two.
+        #
+        # NOTHING IN THIS WORKFLOW COULD SEE IT. gen-entry-namespaces.sh --check proves the 26
+        # copies match the helper — and they did, all faithfully carrying the stale numbers.
+        # copy-drift-guard.py gates the helper against those same copies, not against
+        # workshop-config, and structurally cannot be extended to: its renderer cannot pass the
+        # `--set user=/suffixes=` the user-namespace chart requires, and its selector keys on
+        # kind+name while both sides name every object workshop-quota/workshop-limits and differ
+        # only by namespace. And the helper renders ZERO objects today (manageNamespaces=false in
+        # all 26 charts), so no cluster and no `ws doctor` had a symptom to show either.
+        #
+        # This guard renders BOTH charts and compares the effective .spec.hard / .spec.limits per
+        # namespace, ignoring the annotations, owner labels and comments that differ on purpose.
+        run: |
+          rc=0
+          python3 tools/lint/ns-policy-parity-guard.py --self-test || rc=$?
+          # Exactly 1 = every canary behaved as declared: the clean control stayed clean despite
+          # differing annotations/labels AND differing quantity spellings (30 vs "30", 1 vs 1000m),
+          # and the 500m/6 revert, the absent objects and the absent fields were each caught by
+          # their own detector. 0 = the guard is blind; 2 = a canary went undetected, the
+          # normalizer started conflating two different quantities, or a dependency is absent.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::ns-policy-parity-guard self-test must exit 1 (every canary detected," \
+                 "clean control silent); got rc=$rc. The guard's detection is unproven —" \
+                 "refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/ns-policy-parity-guard.py
+
   namespace-drift:
     runs-on: ubuntu-latest
     steps:
