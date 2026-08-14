@@ -21,6 +21,8 @@
 #   ws preflight                     SA/admin: pre-install readiness + adoption forecast (run before install)
 #   ws status [--user U]             SA/admin: one-glance cohort health (platform + per-user dashboard)
 #   ws diag [--user U] [<module>]    SA/admin: read-only troubleshooting bundle for a stuck attendee
+#   ws by-design                     SA/admin: every resource this workshop breaks/drifts ON PURPOSE
+#                                    — answers "is this Degraded/OutOfSync app expected?" in one step
 #   ws maas show|set [options]       SA/admin: inspect / change the MaaS model+key (see: ws maas --help)
 #   ws rebuild-images [--check|--no-build] [--image NAME] [--user U | --all]
 #                                    SA/admin: rebuild workshop images and roll every stale consumer
@@ -1547,24 +1549,34 @@ cmd_smoke() {
   #          checks are printed rather than swallowed, so a NEW skip is still visible to a reader.
   # The banner is captured (not >/dev/null'd) precisely so these lines can state counts instead of
   # asserting something about a run nobody looked at — the same defect one layer up.
+  #
+  # AND FOR A WHILE THEY DID NOT. Three of the four arms below read
+  # `check "ws verify … passes N/N in the cockpit"` — a LITERAL "N/N", never substituted, printed
+  # verbatim on every run beside a ✅ or a ❌. The capture above was already sitting in ev_banner and
+  # only the rc-3 arm quoted it. So the one gate whose whole job is to fail closed reported a count
+  # it had in hand and did not read, which is this repo's signature defect wearing the smallest
+  # possible disguise: a reader who saw "passes N/N" learned nothing, and a reader who assumed the
+  # N had been filled in learned something false. Every arm now states the run's real banner; the
+  # rc classification below is untouched. tools/lint/verify-summary-skip-guard.sh detector [6] pins
+  # it, because a label is exactly the kind of thing that rots back without anything going red.
   local ev_rc=0 ev_out="" ev_banner=""
   ev_out="$(pod_i "VERIFY_STRICT=1 ws verify ${module} --entry-only" 2>&1)" || ev_rc=$?
   # `|| true`: grep exits 1 when the run died before printing a banner (and pipefail would propagate
   # that), which is a normal outcome here — the rc already carries the verdict.
   ev_banner="$(printf '%s\n' "$ev_out" | grep -E '^(✅ all [0-9]|❌ [0-9]+ of |⚠ [0-9]+ passed|⚠ NOTHING)' | tail -1 || true)"
   case "$(doctor_verify_rc_outcome "$ev_rc")" in
-    pass) check "ws verify ${module} --entry-only passes N/N in the cockpit" true ;;
+    pass) check "ws verify ${module} --entry-only passes in the cockpit — ${ev_banner:-no banner captured}" true ;;
     skip)
       if (( ev_rc == 4 )); then
-        check "ws verify ${module} --entry-only passes N/N in the cockpit" false \
-          || hint "the cockpit verify graded NOTHING — every check was skipped (${ev_banner:-no banner captured}), so this is NOT proof the entry state is broken. Read what it could not answer: ws verify ${module} --user ${user}"
+        check "ws verify ${module} --entry-only passes in the cockpit — ${ev_banner:-no banner captured}" false \
+          || hint "the cockpit verify graded NOTHING — every check was skipped, so this is NOT proof the entry state is broken. Read what it could not answer: ws verify ${module} --user ${user}"
       else
         check "ws verify ${module} --entry-only passes in the cockpit — ${ev_banner:-some checks were not graded}" true
         info "(the ⚠ check(s) above were not graded as ${user} — usually cluster-scoped reads no attendee holds; read them with: ws verify ${module} --user ${user})"
       fi
       ;;
-    *)    check "ws verify ${module} --entry-only passes N/N in the cockpit" false \
-            || hint "entry checks are red in the cockpit${ev_banner:+ (${ev_banner})} — inspect: ws verify ${module} --user ${user}" ;;
+    *)    check "ws verify ${module} --entry-only passes in the cockpit — ${ev_banner:-no banner captured}" false \
+            || hint "entry checks are red in the cockpit — inspect: ws verify ${module} --user ${user}" ;;
   esac
 
   # ── per-module hook: representative click-to-run blocks (ws-meta smokeCommands, optional) ────────
@@ -4468,6 +4480,134 @@ maas_is_placeholder() {  # value → 0 when it is an unfilled vars.example.yaml 
   esac
 }
 
+# ── ws by-design ─────────────────────────────────────────────────────────────────────────────────
+# The operator's answer to "this app is Degraded / OutOfSync — is that expected?", in one command.
+#
+# WHY IT EXISTS. Two entry states are red at rest and both are correct: ai-assisted-development seeds a
+# 0/1 Deployment (diagnosing it IS the module) and agentic-ai's grounding ConfigMap goes OutOfSync the
+# moment the attendee does the lab (entry apps run selfHeal=false precisely so their edit survives).
+# Nothing on the Argo dashboard distinguished either from a real outage: on 2026-08-13 the project lead
+# started debugging the seeded fault before catching it. The charts now stamp the objects themselves
+# (entry-states/README.md rule 7); this reads those stamps back.
+#
+# The kinds swept are a LIST, not a whole-cluster walk, and that is measured rather than assumed:
+# `oc get "$(oc api-resources --verbs=list --namespaced -o name | tr '\n' ,)" -A -l …` took 87s on
+# cluster-m24jn (2026-08-14). Nobody mid-incident waits 87s, and a question that slow stops being
+# asked — which puts us back where we started. The list below answers in ~4s.
+BY_DESIGN_LABEL="workshop.redhat.com/by-design"
+BY_DESIGN_KINDS="deployment service configmap statefulset daemonset job cronjob pipelines.tekton.dev rollouts.argoproj.io"
+
+by_design_kinds() {  # → the comma-joined subset of BY_DESIGN_KINDS this cluster actually serves
+  # Filtered against the live API surface because an absent kind makes the whole multi-kind `oc get`
+  # fail — `--ignore-not-found` covers absent OBJECTS, never an absent RESOURCE TYPE. A cluster with no
+  # Argo Rollouts or no Pipelines is an ordinary cluster, not an error. Both names are written in FULL
+  # (pipelines.tekton.dev, not `pipelines`) for the reason CLAUDE.md records: several API groups claim
+  # these plurals, and a bare name silently resolves to whichever the discovery order hands back.
+  local avail k out=""
+  avail="$(oc api-resources --verbs=list -o name 2>/dev/null || true)"
+  for k in $BY_DESIGN_KINDS; do
+    case "$k" in
+      *.*) printf '%s\n' "$avail" | grep -qxF "$k" || continue ;;
+      *)   printf '%s\n' "$avail" | grep -qE "^${k}s?(\.|$)" || continue ;;
+    esac
+    out="${out:+${out},}${k}"
+  done
+  printf '%s' "$out"
+}
+
+by_design_rows() {  # → TSV "kind<TAB>ns<TAB>name<TAB>module<TAB>symptom" for every marked object
+  # The namespace, not a user column: the user label is not stamped on every marked object (a Service
+  # or a shared Pipeline carries none), while the namespace always names whose world it is.
+  local kinds; kinds="$(by_design_kinds)"
+  [[ -n "$kinds" ]] || return 0
+  oc get "$kinds" -A -l "${BY_DESIGN_LABEL}=true" --ignore-not-found \
+    -o jsonpath='{range .items[*]}{.kind}{"\t"}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.labels.workshop\.redhat\.com/module}{"\t"}{.metadata.annotations.workshop\.redhat\.com/by-design-symptom}{"\n"}{end}' \
+    2>/dev/null | awk -F'\t' 'NF{for(i=1;i<=5;i++) if($i=="") $i="-"; print}' OFS='\t' || true
+}
+
+by_design_uncovered_kinds() {  # → kinds the CHARTS mark that the sweep above would MISS, one per line
+  # A hard-coded kind list rots, and it rots in the worst direction: a marked object of an unswept kind
+  # is simply absent from this report, which reads as "not expected" — the exact false negative the
+  # marker exists to prevent, now wearing a tool's authority. So re-derive what the charts actually
+  # mark and let the report say so, instead of trusting BY_DESIGN_KINDS to have been maintained.
+  # Repo-side only (a cockpit clone always has it); silent when the tree is not there.
+  [[ -d "$ENTRY_DIR" ]] || return 0
+  local swept; swept="$(by_design_kinds)"
+  find "$ENTRY_DIR" -name '*.yaml' -path '*/templates/*' -exec \
+    awk '/^kind:[[:space:]]/{k=$2} $1=="workshop.redhat.com/by-design:" && k!=""{print tolower(k)}' {} + 2>/dev/null \
+    | sort -u | while IFS= read -r k; do
+        [[ -n "$k" ]] || continue
+        # A chart's `kind:` is singular and undotted (Pipeline); a swept entry may be either or both
+        # (pipelines.tekton.dev). The plural `s` and the group suffix are INDEPENDENTLY optional —
+        # written as `(s|\.…)?` this reported Pipeline as uncovered while it was being listed two
+        # paragraphs above, and a guard that cries wolf on a healthy tree is one people switch off.
+        printf '%s,' "$swept" | grep -qE "(^|,)${k}s?(\.[^,]*)?," || printf '%s\n' "$k"
+      done
+}
+
+cmd_by_design() {  # SA/admin: every resource this workshop breaks or drifts ON PURPOSE. READ-ONLY.
+  need_oc
+  echo "ws by-design — what this workshop breaks on purpose"
+  echo "   anything red that is NOT listed below is a real finding; treat it as one."
+  echo
+  local apps rows uncovered n=0
+  # Argo Applications first: that is the screen the question is usually asked from. The label is
+  # stamped by render_app from ws-meta expectDegraded — the SAME source ws doctor and ws diag read.
+  apps="$(oc get applications -n "$ARGO_NS" -l workshop.redhat.com/degraded-by-design=true \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' 2>/dev/null || true)"
+  echo "Argo Applications that are unhealthy BY DESIGN (ws-meta expectDegraded):"
+  if [[ -n "$apps" ]]; then
+    printf '%s\n' "$apps" | while IFS=$'\t' read -r a s h; do
+      [[ -n "$a" ]] || continue
+      printf "   %-42s %s / %s\n" "$a" "${s:-?}" "${h:-?}"
+    done
+  else
+    echo "   (none materialized)"
+  fi
+  echo
+  echo "Resources marked ${BY_DESIGN_LABEL}=true:"
+  rows="$(by_design_rows)"
+  if [[ -n "$rows" ]]; then
+    printf "   %-13s %-22s %-30s %s\n" "KIND" "NAMESPACE" "NAME" "SYMPTOM AN OPERATOR SEES"
+    printf '%s\n' "$rows" | sort -t$'\t' -k4,4 -k2,2 | while IFS=$'\t' read -r kind ns name _mod sym; do
+      [[ -n "$kind" ]] || continue
+      printf "   %-13s %-22s %-30s %s\n" "$kind" "$ns" "$name" "$sym"
+    done
+    n="$(printf '%s\n' "$rows" | grep -c . || true)"
+  else
+    # "nothing is marked" and "nothing is materialized" are DIFFERENT answers and only one of them
+    # means the cluster is clean. Reporting the second for the first is how an operator concludes a
+    # red is unexpected on a cluster whose entry states simply predate the marker — the same
+    # absent-vs-unrecorded conflation ogsr-uninstall.sh's adoption bug was. So look before saying.
+    local n_entry
+    n_entry="$(oc get applications -n "$ARGO_NS" -l workshop.redhat.com/owner=ogsr \
+                 -o name 2>/dev/null | grep -c '/entry-' || true)"
+    if [[ "${n_entry:-0}" -gt 0 ]]; then
+      echo "   (none found, but ${n_entry} entry app(s) ARE materialized — those charts predate the"
+      echo "    marker, or their app has not re-synced since. Do NOT read this as \"nothing is"
+      echo "    intentional here\": refresh with ws git-refresh, then ws start the module again.)"
+    else
+      echo "   (none — no entry state is materialized on this cluster)"
+    fi
+  fi
+  echo
+  echo "   why, in full:  oc get <kind> <name> -n <ns> \\"
+  echo "                    -o jsonpath='{.metadata.annotations.workshop\\.redhat\\.com/by-design-reason}'"
+  echo "   the marks live in the charts under gitops/entry-states/<module>/templates/ — see that"
+  echo "   directory's README.md rule 7 before adding, removing, or \"fixing\" any of them."
+  # A gap in the sweep is a false "not expected", so it is reported loudly rather than logged.
+  uncovered="$(by_design_uncovered_kinds)"
+  if [[ -n "$uncovered" ]]; then
+    echo
+    warn "these kinds are marked by a chart but NOT swept by this command, so anything of that kind is"
+    warn "MISSING from the list above: $(printf '%s' "$uncovered" | tr '\n' ' ')"
+    warn "fix: add them to BY_DESIGN_KINDS in tools/ws/ws."
+  fi
+  echo
+  echo "Summary: ${n} marked resource(s) · $(printf '%s\n' "$apps" | grep -c . || true) Application(s) degraded by design"
+  return 0
+}
+
 maas_is_jwt() {  # token → 0 when it is a 3-segment JSON Web Token.
   # A JWT is a control-plane bearer for SOME OTHER provider (an adopted Azure-OpenAI Lightspeed writes
   # exactly this into its `Bearer` key) and can never be an OpenAI-compatible API key. Rejecting it by
@@ -5166,6 +5306,9 @@ main() {
     solve)       cmd_solve "$user" "$module";;
     doctor)      cmd_doctor "$user";;
     preflight)   cmd_preflight;;
+    # No --user and no <module>: the question it answers ("is this red expected?") is asked ABOUT the
+    # cluster, not about one attendee, and the namespace column already says whose world each row is.
+    by-design)   cmd_by_design;;
     status)      cmd_status "$user";;
     diag)        cmd_diag "$user" "$module";;
     # The range is a LINE COUNT into the header block, so it drifts the moment the block grows — adding
@@ -5176,8 +5319,8 @@ main() {
     # position number OR a slug" note. Cutting it short leaves a sentence hanging mid-clause. (36, up
     # from 27: the F-03 banner correction added nine header lines — two wrapped command rows, the
     # blank, and the six-line --user/presenter paragraph. Then 38: the two-line "both spellings must
-    # AGREE" note that user_conflict_guard enforces.)
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,38p';;
+    # AGREE" note that user_conflict_guard enforces. Then 40: `ws by-design`'s two-line entry.)
+    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,40p';;
     *) die "unknown command '$cmd' — try: ws help";;
   esac
 }

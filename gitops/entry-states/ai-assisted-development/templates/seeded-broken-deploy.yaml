@@ -21,6 +21,13 @@ metadata:
     workshop.redhat.com/module: ai-assisted-development
     workshop.redhat.com/user: {{ .Values.user | quote }}
     workshop.redhat.com/owner: ogsr
+    {{- if not .Values.solve }}
+    # Broken ON PURPOSE — the one selector that finds every such object cluster-wide; see
+    # entry-states/README.md rule 7 for the full contract and `ws by-design` for the operator view.
+    # ENTRY ONLY: solve renders the correct path, and a fault marker left on a healthy object is
+    # noise that teaches people to ignore the marker.
+    workshop.redhat.com/by-design: "true"
+    {{- end }}
   annotations:
     # HIGHEST sync-wave on purpose: this Deployment is Running 0/1 BY DESIGN (the diagnosis target), so
     # it never goes Healthy. In an earlier/shared wave Argo gates the sync on its health, hits the
@@ -29,6 +36,21 @@ metadata:
     # the operation Succeeds; the app is then Degraded by design, which `ws start` tolerates via the
     # ws-meta `expectDegraded` flag (wait_materialized). Do NOT lower this wave.
     argocd.argoproj.io/sync-wave: "3"
+    {{- if not .Values.solve }}
+    # The two halves an operator needs the moment they hit this: WHAT they are looking at, and WHY it
+    # is fine. The Application already carries workshop.redhat.com/degraded-by-design (stamped by ws's
+    # render_app from ws-meta expectDegraded) — but nobody reaches this pod through the Application.
+    # They reach it through `oc get pods -n {user}-dev` or `oc describe deploy/parasol-claims`, where
+    # 0/1 had no explanation at all: the project lead started debugging it, and the owner would have
+    # lost a morning to it (2026-08-13). Split across two keys because a label VALUE cannot hold prose
+    # (63 chars, no spaces) and an annotation cannot be selected on — README.md rule 7 has the rest.
+    workshop.redhat.com/by-design-symptom: "Degraded — pod Running 0/1, Service endpoints empty"
+    workshop.redhat.com/by-design-reason: >-
+      ai-assisted-development seeds this readinessProbe path WRONG on purpose ({{ .Values.badProbePath }}
+      → HTTP 404, no liveness so there is no restart loop). Root-causing it with an AI agent over MCP
+      is the entire module. Do NOT "fix" it here — to see the repaired end state run
+      `ws solve ai-assisted-development --user {{ .Values.user }}`, which renders {{ .Values.goodProbePath }}.
+    {{- end }}
 spec:
   replicas: 1
   selector:
@@ -82,6 +104,19 @@ metadata:
     app: {{ .Values.seedName }}
     workshop.redhat.com/module: ai-assisted-development
     workshop.redhat.com/owner: ogsr
+    {{- if not .Values.solve }}
+    workshop.redhat.com/by-design: "true"
+    {{- end }}
+  {{- if not .Values.solve }}
+  annotations:
+    # Marked as well as the Deployment: "no endpoints" is a second, independently-alarming symptom —
+    # whoever chases the empty Service is not necessarily the person who saw the 0/1 pod.
+    workshop.redhat.com/by-design-symptom: "no ready endpoints"
+    workshop.redhat.com/by-design-reason: >-
+      ai-assisted-development: empty endpoints are downstream of the deliberately-broken readiness
+      probe on Deployment/{{ .Values.seedName }} in this namespace — read that object's
+      workshop.redhat.com/by-design-reason. The Service itself is correct.
+  {{- end }}
 spec:
   selector:
     app: {{ .Values.seedName }}

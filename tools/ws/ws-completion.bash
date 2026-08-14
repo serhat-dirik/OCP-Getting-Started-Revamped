@@ -7,7 +7,7 @@ _ws_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   # Keep this list equal to main()'s dispatch in tools/ws/ws (its `ws help` header is the same set).
   # session-refresh was dispatched and documented but absent here, so it never tab-completed.
-  subcmds="help list prep verify smoke reset start solve git-refresh session-refresh doctor passwd cohort-reset preflight status diag scale-users maas rebuild-images"
+  subcmds="help list prep verify smoke reset start solve git-refresh session-refresh doctor passwd cohort-reset preflight status diag by-design scale-users maas rebuild-images"
 
   # First word after `ws` → a subcommand.
   if [ "$COMP_CWORD" -eq 1 ]; then

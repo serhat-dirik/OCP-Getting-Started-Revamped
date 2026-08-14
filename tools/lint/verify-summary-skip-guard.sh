@@ -50,6 +50,12 @@
 #       the attendee's namespaces, so losing the rc-4 arm proposes a destructive rebuild over a run
 #       that merely could not read anything. (`ws smoke`, the one caller that must tell 3 from 4,
 #       reads the raw rc alongside this word — which is why the word itself can stay coarse.)
+#   [6] WS SMOKE'S LABELS. The gate that CONSUMES the banner may not print a count it never read.
+#       Same defect as [2], one layer up and in prose rather than in a counter: three of the four
+#       arms of cmd_smoke's entry-verify case shipped a literal "passes N/N in the cockpit", beside
+#       a ✅ or a ❌, on every G1 run — while the real counts sat unread in the captured banner two
+#       lines above. Source-inspected rather than executed: cmd_smoke drives a live cockpit over
+#       `oc exec`, which CI has no way to stand up, so this is the strictly weaker claim and says so.
 #
 # Runnable standalone (CI lint gate) and by hand; needs nothing but bash + grep + sed + awk.
 #
@@ -400,6 +406,102 @@ check_na_semantics() {  # warn_file summary_file na_file → 0 correct, 1 wrong
   return "$rc"
 }
 
+# ── [6] ws smoke may not print a count it never read ─────────────────────────
+# Found 2026-08-14. This whole file exists because a banner claimed a pass it had not graded; [6] is
+# the same defect one layer up, in the gate that CONSUMES the banner. Three of the four arms of
+# cmd_smoke's entry-verify case read:
+#
+#     check "ws verify ${module} --entry-only passes N/N in the cockpit" …
+#
+# — a LITERAL "N/N", never substituted, printed verbatim beside a ✅ or a ❌ on every G1 run. The
+# real counts were already sitting in the captured banner two lines above, and only the rc-3 arm
+# quoted it. cmd_smoke's own comment even said the capture existed "precisely so these lines can
+# state counts instead of asserting something about a run nobody looked at". They did not.
+#
+# WHY A LABEL IS WORTH A DETECTOR, given the rc logic was correct throughout. G1 is the gate whose
+# output is pasted into milestone reports and agent briefs; "passes N/N" is what a reader takes away
+# from it. A reader who noticed the literal learned nothing from the line, and a reader who assumed
+# the N had been filled in learned something false — over the one gate whose entire job is to fail
+# closed. Nothing goes red when a label rots, which is exactly why it needs a gate rather than a
+# reviewer.
+#
+# THE THREE ASSERTIONS, and why the last two are not the same one twice:
+#   [6.1] cmd_smoke still DERIVES a banner from the run it just made. Discovered, never hardcoded:
+#         the variable holding the `ws verify … --entry-only` output is found first, then the
+#         variable computed FROM it. A guard that hardcoded `ev_banner` would go quietly blind on a
+#         rename; one that accepted any variable would be satisfied by a constant.
+#   [6.2] every entry-verify check LABEL interpolates that variable. This is the direction that
+#         catches ">/dev/null it again and say nothing" — the label going silent rather than lying.
+#   [6.3] no check label in cmd_smoke states a hardcoded count at all (`N/N`, or a literal `7/9`).
+#         Not implied by [6.2]: a label can carry the banner AND a stale literal beside it, which is
+#         the worse shape of the two because it reads as though it had been computed.
+#
+# Comment lines are excluded before any label is read — the prose above quotes the defective label
+# verbatim, and a detector its own documentation can trip is a detector that gets deleted.
+_smoke_labels() {  # <cmd_smoke file> → one `check "…"` call per line, comments excluded
+  grep -vE '^[[:space:]]*#' "$1" | grep -oE 'check "[^"]*"'
+}
+_smoke_run_var() {  # <cmd_smoke file> → the variable capturing the entry-verify run's output
+  grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.*ws verify[^"]*--entry-only' "$1" \
+    | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' | sort -u
+}
+_smoke_banner_var() {  # <cmd_smoke file> <run-var> → the variable computed FROM that output
+  # `[$]` and `[{]`, not `\$` and `\{`. Whether a backslash-escaped `$` or `{` is literal in an ERE
+  # is implementation-defined and the two graders here are NOT the same tool — CI is GNU grep on
+  # ubuntu-latest, every maintainer run is BSD grep on macOS. A bracket expression means the same
+  # thing to both. Same reason the substring tests below use -F.
+  grep -oE "^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.*[\$][{]?${2}" "$1" \
+    | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' | sort -u
+}
+check_smoke_label_honesty() {  # smoke_fn_file → 0 correct, 1 wrong
+  ran_check
+  local sfile="$1" rc=0 run_var banner_var bad_labels
+
+  # [6.1] the banner is still derived from the run
+  run_var="$(_smoke_run_var "$sfile")"
+  if [[ -z "$run_var" || "$(wc -l <<< "$run_var")" -ne 1 ]]; then
+    bad "[6.1] cmd_smoke no longer has exactly one variable capturing a 'ws verify … --entry-only' run; found: ${run_var:-<none>}."
+    note "    Without it there is nothing to derive a count from, and every label below is a claim"
+    note "    about a run this gate did not read."
+    return 1
+  fi
+  banner_var="$(_smoke_banner_var "$sfile" "$run_var")"
+  if [[ -z "$banner_var" || "$(wc -l <<< "$banner_var")" -ne 1 ]]; then
+    bad "[6.1] cmd_smoke captures the entry verify into \$${run_var} but derives no single banner variable from it; found: ${banner_var:-<none>}."
+    note "    The capture exists so the labels can state real counts. Discarding it puts the gate"
+    note "    back to asserting something about a run nobody looked at."
+    return 1
+  fi
+
+  # [6.2] every entry-verify label reports it.
+  # -F on BOTH greps, and it is load-bearing rather than tidiness: `${ev_banner` as a REGEX leans on
+  # `$` being literal when it is not the last character, which POSIX leaves to the implementation.
+  # Measured 2026-08-14 — the identical pattern excluded the line under /usr/bin/grep and did NOT
+  # under another grep on the same machine, i.e. the detector silently becomes vacuous and fires on
+  # a tree that is perfectly correct. Both of these are substring tests; say so and the question
+  # cannot arise.
+  bad_labels="$(_smoke_labels "$sfile" | grep -F -- '--entry-only' | grep -vF "\${${banner_var}" || true)"
+  if [[ -n "$bad_labels" ]]; then
+    bad "[6.2] an entry-verify check label does not report \$${banner_var}, so it says nothing about what the cockpit actually graded:"
+    while IFS= read -r l; do [[ -n "$l" ]] && note "    ${l}"; done <<< "$bad_labels"
+    rc=1
+  fi
+
+  # [6.3] and none of them states a count that was never read
+  bad_labels="$(_smoke_labels "$sfile" | sed -E 's/\$\{[^}]*\}//g' \
+    | grep -E '(^|[^A-Za-z0-9])[Nn]/[Nn]([^A-Za-z0-9]|$)|[0-9]+/[0-9]+' || true)"
+  if [[ -n "$bad_labels" ]]; then
+    bad "[6.3] a check label in cmd_smoke states a HARDCODED count (shown with \${…} stripped):"
+    while IFS= read -r l; do [[ -n "$l" ]] && note "    ${l}"; done <<< "$bad_labels"
+    note "    A literal 'N/N' — or a frozen '7/9' — is printed beside a ✅ on every run and is a lie"
+    note "    in all of them. The counts are in \$${banner_var}; interpolate them."
+    rc=1
+  fi
+
+  [[ "$rc" -eq 0 ]] && ok "[6] ws smoke's entry-verify labels report the run's real banner (\$${banner_var}), never a hardcoded count"
+  return "$rc"
+}
+
 # ── driver ────────────────────────────────────────────────────────────────────
 extract_pair() {  # lib_file warn_out summary_out → 0 ok, 2 extraction failed
   local lib="$1"
@@ -433,14 +535,27 @@ extract_doctor_fn() {  # ws_cli_file fn_out → 0 ok, 2 extraction failed
   return 0
 }
 
-run_check() {  # warn_file summary_file doctor_fn_file na_file → 0 clean, 1 broken
+extract_smoke_fn() {  # ws_cli_file fn_out → 0 ok, 2 extraction failed
+  local ws_cli="$1"
+  extract_func "$ws_cli" cmd_smoke > "$2"
+  if [[ ! -s "$2" ]]; then
+    bad "could not extract cmd_smoke() from ${ws_cli} — the guard cannot inspect what it claims to."
+    note "    Renamed, moved, or reformatted so its definition no longer starts at column 0. Detector"
+    note "    [6] grades the G1 gate's own labels; silently not inspecting them is the shape it exists for."
+    return 2
+  fi
+  return 0
+}
+
+run_check() {  # warn_file summary_file doctor_fn_file na_file smoke_fn_file → 0 clean, 1 broken
   coverage_reset
-  local wf="$1" sf="$2" dff="$3" nf="$4" rc=0
+  local wf="$1" sf="$2" dff="$3" nf="$4" smf="$5" rc=0
   check_skip_counted  "$wf" "$sf" || rc=1
   check_banner_honesty "$wf" "$sf" || rc=1
   check_exit_contract  "$wf" "$sf" || rc=1
   check_doctor_rc_mapping "$dff" || rc=1
   check_na_semantics  "$wf" "$sf" "$nf" || rc=1
+  check_smoke_label_honesty "$smf" || rc=1
   # Nothing above proves run_check still CALLS what this guard declares — a deleted call site
   # leaves every canary passing and the real run reporting clean (see _check-coverage.sh).
   if [[ "$rc" -ne 2 ]]; then assert_all_checks_ran || rc=2; fi
@@ -503,18 +618,19 @@ self_test() {
   # No `got` here any more: every canary is judged by _expect_detect, which reads the rc AND the
   # finding. A leftover rc variable would be the same class of defect as an unreachable assertion —
   # it looks like coverage and is not.
-  local tmp wf sf dff nf real_rc blind=0
+  local tmp wf sf dff nf smf real_rc blind=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
-  wf="$tmp/warn.sh"; sf="$tmp/summary.sh"; dff="$tmp/doctor-rc.sh"; nf="$tmp/na.sh"
+  wf="$tmp/warn.sh"; sf="$tmp/summary.sh"; dff="$tmp/doctor-rc.sh"; nf="$tmp/na.sh"; smf="$tmp/smoke.sh"
   extract_pair "${REPO_ROOT}/${LIB}" "$wf" "$sf" || return 2
   extract_na "${REPO_ROOT}/${LIB}" "$nf" || return 2
   extract_doctor_fn "${REPO_ROOT}/${WS_CLI}" "$dff" || return 2
+  extract_smoke_fn "${REPO_ROOT}/${WS_CLI}" "$smf" || return 2
 
   # Proof 0: the real tree passes. A detector that fires on everything proves nothing either.
   real_rc=0
-  run_check "$wf" "$sf" "$dff" "$nf" >/dev/null 2>&1 || real_rc=$?
+  run_check "$wf" "$sf" "$dff" "$nf" "$smf" >/dev/null 2>&1 || real_rc=$?
   if [[ "$real_rc" -ne 0 ]]; then
     bad "SELF-TEST FAILED: the real ${LIB}/${WS_CLI} do not satisfy the contract (rc=${real_rc}). Run without --self-test."
     return 2
@@ -803,6 +919,40 @@ CANARY
   _expect_detect "doctor classifier that lost its rc-4 arm" "doctor_verify_rc_outcome 4 =>" \
     check_doctor_rc_mapping "$tmp/doctor-rc-drops-nothing-graded.sh" || blind=1
 
+  # ── [6] canaries: one per assertion, each isolated so the tag it prints is the one it proves ───
+  #
+  # Canary [6.1] — the banner capture reduced to a constant. `ws smoke` still runs the verify and
+  # still classifies its rc correctly; it simply stops deriving anything from the output, which is
+  # the "quietly >/dev/null it again" regression. Nothing about the gate's PASS/FAIL behaviour
+  # changes, so only a detector looking at the labels can see it.
+  _build "banner-not-derived" "$smf" "$tmp/smoke-banner-constant.sh" \
+    's/^\([[:space:]]*\)ev_banner=.*/\1ev_banner=""/' || return 2
+  _expect_detect "a cmd_smoke that derives no banner from the run" "[6.1]" \
+    check_smoke_label_honesty "$tmp/smoke-banner-constant.sh" || blind=1
+
+  # Canary [6.2] — the labels stop reporting the banner while the capture stays. The em-dash clause
+  # is dropped from every arm, so the labels are true but empty: "passes in the cockpit", over a run
+  # whose counts were read and then discarded.
+  # shellcheck disable=SC2016  # `${ev_banner…}` is the TEXT sed must match in the extracted
+  # cmd_smoke, not an expansion this script wants — expanding it here would match nothing.
+  _build "label-drops-banner" "$smf" "$tmp/smoke-label-silent.sh" \
+    's/ — ${ev_banner:-[^}]*}//g' || return 2
+  _expect_detect "entry-verify labels that report no counts at all" "[6.2]" \
+    check_smoke_label_honesty "$tmp/smoke-label-silent.sh" || blind=1
+
+  # Canary [6.3] — THE DEFECT VERBATIM, and deliberately the harder half of it: the literal "N/N" is
+  # reintroduced while the banner interpolation is LEFT IN PLACE. So [6.2] is satisfied and only
+  # [6.3] can fire. A label that carries both a real banner and a frozen literal is the worse of the
+  # two shapes — it reads as though the count had been computed.
+  _build "label-hardcodes-count" "$smf" "$tmp/smoke-label-nn.sh" \
+    's|passes in the cockpit — |passes N/N in the cockpit — |g' || return 2
+  if ! grep -q 'ev_banner:-' "$tmp/smoke-label-nn.sh"; then
+    bad "SELF-TEST FAILED: could not build the label-hardcodes-count canary — the mutation took the banner interpolation with it, so [6.2] would fire and [6.3] would still be unproven."
+    return 2
+  fi
+  _expect_detect "a label carrying the banner AND a hardcoded N/N" "[6.3]" \
+    check_smoke_label_honesty "$tmp/smoke-label-nn.sh" || blind=1
+
   # ── the coverage assertion itself ─────────────────────────────────────────────────────────────
   # Every canary above calls its detector DIRECTLY, so none of them can notice run_check() no longer
   # calling one. Deleting the assert_all_checks_ran line left --self-test at 1 and the real run at 0
@@ -814,7 +964,7 @@ CANARY
     # SC2317 on 0.9.x, SC2329 on >=0.10: both are named so the directive works on CI and locally.
     # shellcheck disable=SC2317,SC2329
     check_never_called() { ran_check; return 0; }
-    run_check "$wf" "$sf" "$dff" "$nf" >/dev/null 2>&1
+    run_check "$wf" "$sf" "$dff" "$nf" "$smf" >/dev/null 2>&1
   ) || cov=$?
   if [[ "$cov" -ne 2 ]]; then
     bad "SELF-TEST FAILED: a declared-but-never-called detector was not caught (rc=${cov}) — the coverage assertion is inert."
@@ -845,13 +995,17 @@ if [[ ! -f "${REPO_ROOT}/${WS_CLI}" ]]; then
   exit 2
 fi
 WARN_FILE="$(mktemp)"; SUMMARY_FILE="$(mktemp)"; DOCTOR_FN_FILE="$(mktemp)"; NA_FILE="$(mktemp)"
+SMOKE_FN_FILE="$(mktemp)"
+_cleanup_extracts() { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE" "$SMOKE_FN_FILE"; }
 extract_pair "${REPO_ROOT}/${LIB}" "$WARN_FILE" "$SUMMARY_FILE" \
-  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"; exit 2; }
+  || { _cleanup_extracts; exit 2; }
 extract_na "${REPO_ROOT}/${LIB}" "$NA_FILE" \
-  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"; exit 2; }
+  || { _cleanup_extracts; exit 2; }
 extract_doctor_fn "${REPO_ROOT}/${WS_CLI}" "$DOCTOR_FN_FILE" \
-  || { rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"; exit 2; }
+  || { _cleanup_extracts; exit 2; }
+extract_smoke_fn "${REPO_ROOT}/${WS_CLI}" "$SMOKE_FN_FILE" \
+  || { _cleanup_extracts; exit 2; }
 RC=0
-run_check "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE" || RC=$?
-rm -f "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE"
+run_check "$WARN_FILE" "$SUMMARY_FILE" "$DOCTOR_FN_FILE" "$NA_FILE" "$SMOKE_FN_FILE" || RC=$?
+_cleanup_extracts
 exit "$RC"
