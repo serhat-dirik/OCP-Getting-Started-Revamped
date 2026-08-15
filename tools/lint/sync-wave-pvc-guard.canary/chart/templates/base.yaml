@@ -1,0 +1,404 @@
+{{/*
+Emitted at every permutation. Each `# EXPECT:` names the rule the object must produce (or `none` for
+a control that must stay silent); self_test() asserts the same thing by object NAME, so a renamed or
+dropped object fails rather than shrinking a total.
+
+The five pairs below come from the named template in _helpers.tpl and exist as literal text NOWHERE.
+*/}}
+---
+# EXPECT: none — the control. PVC and consumer share wave 3, which is the fixed state of the real
+# incident (c7b3324 moved showroom-shared's homes PVC from wave 2 to 3). If this ever fires, the
+# guard flags every pair and the firing cases below prove nothing.
+{{ include "canary.pvcPair" (dict "name" "canary-equal-default" "namespace" .Values.namespace
+                                 "pvcWave" "3" "appWave" "3" "class" "") }}
+---
+# EXPECT: pvc-before-consumer — THE MEASURED BUG, byte for byte: PVC at wave 2, the Deployment that
+# mounts it at wave 3, no storageClassName so it takes the cluster default (WaitForFirstConsumer).
+# The claim stays Pending until a consumer pod is scheduled, wave 2 never goes Healthy, wave 3 is
+# never reached. 52 minutes, zero pods, cluster-m24jn 2026-08-15.
+{{ include "canary.pvcPair" (dict "name" "canary-early-default" "namespace" .Values.namespace
+                                 "pvcWave" "2" "appWave" "3" "class" "") }}
+---
+# EXPECT: pvc-after-consumer — the other direction, which deadlocks for EVERY storage class: Argo
+# creates the Deployment at wave 3, its pod is Pending on a claim that does not exist, wave 3 never
+# goes Healthy, wave 5 is never reached. Both directions have to be derived; checking only "the PVC
+# must not be earlier" would let this one through.
+{{ include "canary.pvcPair" (dict "name" "canary-late-plain" "namespace" .Values.namespace
+                                 "pvcWave" "5" "appWave" "3" "class" "") }}
+---
+# EXPECT: none (counted as an Immediate-class reliance) — an EARLIER PVC that is nevertheless safe,
+# because the class it names binds Immediately: the claim is bound before any pod exists, so there
+# is nothing to wait for. This is jobs-batch-kueue's real situation. It must not be flagged, and it
+# must not be silent either — the run reports it, because that safety is a property of the
+# deployer's cluster and not of this manifest.
+{{ include "canary.pvcPair" (dict "name" "canary-early-immediate" "namespace" .Values.namespace
+                                 "pvcWave" "2" "appWave" "3" "class" .Values.immediateClass) }}
+---
+# EXPECT: pvc-after-consumer — the SAME Immediate class, in the other direction, must still fire.
+# Binding mode is the precondition of the earlier-direction rule only; a PVC ordered after its
+# consumer hangs no matter how fast it would have bound. Without this case, widening the
+# Immediate carve-out to both directions would pass the self-test.
+{{ include "canary.pvcPair" (dict "name" "canary-late-immediate" "namespace" .Values.namespace
+                                 "pvcWave" "5" "appWave" "3" "class" .Values.immediateClass) }}
+---
+# EXPECT: pvc-before-consumer — the PVC carries NO sync-wave annotation. Argo treats that as wave 0,
+# so this is a wave-0 PVC under a wave-1 consumer: the same deadlock, written the way it is easiest
+# to write by accident (nobody annotates a PVC they are not thinking about). Modelling "absent" as
+# 0 rather than skipping the object is what catches it.
+{{ include "canary.pvcPair" (dict "name" "canary-early-unannotated" "namespace" .Values.namespace
+                                 "pvcWave" "" "appWave" "1" "class" "") }}
+---
+# EXPECT: pvc-after-consumer — the mirror: the CONSUMER carries no annotation (wave 0) while the PVC
+# is at wave 1. The implicit wave has to be modelled on both sides; treating only the PVC's absence
+# as 0 would miss this entirely.
+{{ include "canary.pvcPair" (dict "name" "canary-consumer-unannotated"
+                                 "namespace" .Values.namespace
+                                 "pvcWave" "1" "appWave" "" "class" "") }}
+---
+# EXPECT: none — a `hook: Sync` Job shares the sync phase's wave line with plain resources, so an
+# equal wave is equal. This is jobs-batch-kueue's exact shape (a plain PVC consumed by a Sync-hook
+# Job). A guard that put hooks in a world of their own would either skip this pair or compare it
+# against the wrong axis.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canary-equal-hook-sync
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: canary-equal-hook-sync-seed
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["/bin/true"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: canary-equal-hook-sync
+---
+# EXPECT: none — a PreSync PVC consumed by a PreSync Job at the same wave. Proves the phase axis is
+# modelled as an axis and not as "hooks are special": two objects in the SAME earlier phase at the
+# same wave are as safe as two plain ones.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canary-equal-presync
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: canary-equal-presync-seed
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["/bin/true"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: canary-equal-presync
+---
+# EXPECT: none — a CronJob mounts its claim at spec.jobTemplate.spec.template.spec.volumes[], two
+# levels deeper than a Deployment's. A walker that only knows the Deployment shape never reaches it,
+# so this pair would silently stop being judged and its wave could drift to anything.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canary-equal-cronjob
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: canary-equal-cronjob-nightly
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: run
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              command: ["/bin/true"]
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: canary-equal-cronjob
+---
+# EXPECT: none — a pair in a SECOND namespace, resolved by the (namespace, claimName) key. Claim
+# resolution is namespace-local on a cluster, so a guard keyed on name alone would pair objects that
+# can never see each other.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canary-cross-namespace-equal
+  namespace: {{ .Values.otherNamespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-cross-namespace-equal-app
+  namespace: {{ .Values.otherNamespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-cross-namespace-equal
+  template:
+    metadata:
+      labels:
+        app: canary-cross-namespace-equal
+    spec:
+      containers:
+        - name: app
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: canary-cross-namespace-equal
+---
+# EXPECT: none, but COUNTED and REPORTED — a PVC no rendered workload mounts. There is nothing for
+# it to deadlock against today, so it is not a violation; it is at an early wave with no consumer,
+# which is the same trap holding still until somebody adds one at wave 3.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canary-unmounted
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# EXPECT: pvc-before-consumer — the PVC declares a namespace and its consumer does NOT. Both land in
+# the Application's destination namespace at apply time, so they are the same pair; a resolver that
+# only ever matched on (namespace, claimName) would call this PVC unmounted and judge nothing. The
+# waves are deliberately unequal so the fallback's effect is a VIOLATION rather than a silence —
+# blinding it makes the finding vanish, not merely change shape.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canary-implicit-namespace
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-implicit-namespace-app
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-implicit-namespace
+  template:
+    metadata:
+      labels:
+        app: canary-implicit-namespace
+    spec:
+      containers:
+        - name: app
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: canary-implicit-namespace
+---
+# EXPECT: none, but COUNTED — a workload mounting a claim this render does not emit (the PVC is
+# created by another Application, or by hand). There is no pair to judge, and saying so is not the
+# same as having judged it: the count is what stops "we found nothing" reading like "we checked".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-unresolved-claim-app
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-unresolved-claim
+  template:
+    metadata:
+      labels:
+        app: canary-unresolved-claim
+    spec:
+      containers:
+        - name: app
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: canary-claim-from-another-application
+---
+# EXPECT: none, but COUNTED — `hook: Skip` means Argo NEVER applies the resource. The waves below
+# are deliberately mismatched (PVC 1, Deployment 5): if Skip handling regresses, this pair starts
+# firing and the by-name expectations catch it; if the Skip bookkeeping regresses instead, the
+# skipped count moves. Judging an object Argo does not create invents a deadlock that cannot happen.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canary-skip-hook
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: Skip
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-skip-hook-app
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: Skip
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-skip-hook
+  template:
+    metadata:
+      labels:
+        app: canary-skip-hook
+    spec:
+      containers:
+        - name: app
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: canary-skip-hook
+---
+# EXPECT: none — a StatefulSet whose storage comes from volumeClaimTemplates. Those PVCs are created
+# by the StatefulSet controller AFTER the StatefulSet is applied, so they are in no sync wave and
+# cannot deadlock against one. The template deliberately carries an explicit
+# `kind: PersistentVolumeClaim` — legal, and the shape that would fool a walker indexing by `kind`
+# alone into judging it as an Argo-created claim and flagging every StatefulSet in the tree.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: canary-sts
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  serviceName: canary-sts
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-sts
+  template:
+    metadata:
+      labels:
+        app: canary-sts
+    spec:
+      containers:
+        - name: db
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/data
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

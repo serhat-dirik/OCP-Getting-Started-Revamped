@@ -377,6 +377,67 @@ jobs:
           fi
           python3 tools/lint/image-pull-policy-guard.py
 
+  sync-wave-pvc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Same helm pin as the helm/copy-drift/image-pull-policy jobs so every job reads the same
+      # render.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Install kustomize (pinned)
+        # Same pin as the kustomize job. The portfolio's PVC-bearing components (keycloak,
+        # sonarqube) are kustomize, not Helm, and --enable-helm is what inflates the sonarqube
+        # chart that carries one of them.
+        run: |
+          curl -sfL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.0/kustomize_v5.8.0_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # Hard dependency: this guard parses rendered manifests rather than pattern-matching them.
+        # A missing parser exits 2, which the self-test assertion turns into a failure — it can
+        # never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: An Argo-created PVC must share its consumer's sync wave
+        # WHY THIS JOB EXISTS (measured 2026-08-15, fixed in c7b3324). showroom-shared.yaml put a
+        # PVC at sync-wave 2 and the Deployment that mounts it at 3. The default StorageClass on
+        # these clusters is WaitForFirstConsumer, so the PVC stayed Pending until its consumer pod
+        # was SCHEDULED — and Argo will not start wave 3 until wave 2 is Healthy. It waited for a
+        # PVC that could not bind until it created the very Deployment it was refusing to create.
+        # 52 minutes on cluster-m24jn, zero pods, Application stuck Progressing/Running on
+        # "waiting for healthy state of /PersistentVolumeClaim/showroom-shared-demos-homes".
+        #
+        # NOTHING IN THAT STATE IS AN ERROR — a Pending PVC is Normal/WaitForFirstConsumer and the
+        # operation is Running, not Failed — so it reads as a slow sync forever and no other gate,
+        # health check or `ws doctor` probe can see it. And the rule was already written down
+        # correctly in showroom.yaml next door ("proven on-cluster"); prose in a sibling template
+        # did not survive being re-applied in a new one. That is what a gate fixes.
+        #
+        # The guard RENDERS: showroom-shared emits the PVC and its Deployment from ONE `range`, so
+        # grep sees a single wave annotation and a single interpolated claimName and cannot pair
+        # them per instance — and the whole defect lives inside showroom.shared.enabled=true, a
+        # flag that is false by default, so it is invisible to any render nobody asked for.
+        run: |
+          rc=0
+          python3 tools/lint/sync-wave-pvc-guard.py --self-test || rc=$?
+          # Exactly 1 = both deadlock directions detected BY NAME, the equal-wave and
+          # Immediate-class controls silent, StatefulSet volumeClaimTemplates excluded, and an
+          # absent annotation modelled as wave 0. 0 = the guard is blind; 2 = a canary went
+          # undetected, a control fired, or a dependency is absent. Either way detection is
+          # unproven, so fail rather than trust a clean tree scan.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::sync-wave-pvc-guard self-test must exit 1 (every canary detected," \
+                 "every control silent); got rc=$rc. The guard's detection is unproven —" \
+                 "refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/sync-wave-pvc-guard.py
+
   hook-env:
     runs-on: ubuntu-latest
     steps:
