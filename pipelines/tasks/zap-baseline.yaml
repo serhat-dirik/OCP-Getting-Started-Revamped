@@ -5,9 +5,37 @@
 # FAIL rules. The reliable console surface is the TaskRun WARN/FAIL summary; the HTML/Markdown reports
 # are written to the zap-work workspace as an artifact.
 #
-# By default (FAIL_ON_WARN=false) ZAP runs with -I so WARN rules (e.g. missing security headers on a
-# not-yet-hardened app) do NOT fail the build — only FAIL rules do. Flip FAIL_ON_WARN=true (or promote
-# specific header rules to FAIL via a ZAP config) to make the header gate bite once the app is seeded.
+# FAIL_ON_WARN=false makes a WARN-only scan (e.g. missing security headers on a not-yet-hardened
+# app) SUCCEED instead of failing the build. It does NOT make it report a pass. Flip
+# FAIL_ON_WARN=true (or promote specific header rules to FAIL via a ZAP config) to make the header
+# gate bite once the app is seeded.
+#
+# FAIL_ON_WARN SOFTENS THE EXIT CODE. IT DOES NOT SOFTEN THE VERDICT — AND IT TOOK TWO GOES TO GET
+# THAT RIGHT, so both halves are recorded here; they are the same mistake at two depths.
+#   FIRST, this Task wrote dast-passed TWICE on the reporting branch — the truthful 'false', then a
+#   'true' straight over it — so a WARN-only run published a PASS while the log directly above it
+#   said ⚠️ issues were found. The result is now written ONCE, before the mode is consulted, and
+#   never rewritten.
+#   SECOND, and this is the one that survived the first fix and had to be caught on a live cluster
+#   (2026-08-16, a report-mode capstone run in user5-cicd on the seeded branch): the script ALSO
+#   passed zap-baseline.py `-I` whenever FAIL_ON_WARN=false. `-I` means "do not return failure on
+#   warning", so with it a WARN-only scan returns 0, NOT 2 — and the reporting branch below tests
+#   for 2. The very flag that selected report mode suppressed the exit code report mode was written
+#   against, so that branch was DEAD CODE and the run took the genuine-pass branch instead: ZAP
+#   found none of the five headers on the deployed app and the gate printed "✅ DAST passed — no
+#   gating alerts" and published dast-passed=true.
+# `-I` IS A DETECTION SWITCH, NOT AN ENFORCEMENT SWITCH — the same category as sonar-scan's
+# QUALITY_GATE_WAIT and trivy-scan's EXIT_CODE, both of which are deliberately pinned at their
+# gating values in report mode for exactly this reason. It is therefore GONE: this Task now calls
+# zap-baseline.py with an identical flag list in both modes, and FAIL_ON_WARN is consulted only
+# AFTER the exit code is in hand. Report mode must never change what the scanner measures.
+# CONSEQUENCE, stated plainly because it IS a behaviour change: at this Task's own FAIL_ON_WARN=false
+# default a WARN-only run still SUCCEEDS (exit 0, unchanged) but now returns rc 2 internally,
+# prints ⚠️, and publishes dast-passed=false. The Parasol capstone's ENFORCING path is untouched —
+# it never received `-I`, because the old line only added it at FAIL_ON_WARN=false.
+# NOT SOFTENED, on purpose: a ZAP FAIL rule (rc 1) and a ZAP error (rc 3) still fail this Task even
+# at FAIL_ON_WARN=false — a real gating alert, and a scan that did not run. Neither is a finding to
+# report past. (`-I` never affected those two anyway; it only ever suppressed WARN.)
 #
 # CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
 # workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — kept in lockstep by
@@ -32,7 +60,11 @@ spec:
       default: "http://parasol-claims:8080"
     - name: FAIL_ON_WARN
       type: string
-      description: '"false" runs ZAP with -I so only FAIL rules gate; "true" also gates on WARN rules.'
+      description: >-
+        "false" (default) lets a WARN-only scan succeed so only FAIL rules stop the build; "true"
+        also gates on WARN rules. It controls ENFORCEMENT only — it is read AFTER the scan, and never
+        changes the flags ZAP is given — so dast-passed reports what ZAP actually found either way,
+        and a WARN-only run at "false" succeeds AND publishes dast-passed=false.
       default: "false"
   workspaces:
     # ZAP writes its session + reports to /zap/wrk, which must be writable — mount a run-provided
@@ -67,9 +99,13 @@ spec:
         # timestamp disclosure (10096). A real CI ZAP baseline is always tuned like this — otherwise
         # informational noise makes a clean, hardened app fail. Config format: <ruleId>\t<action>\t<note>.
         printf '10015\tIGNORE\tcache-control\n10027\tIGNORE\tcomments\n10049\tIGNORE\tcacheable\n10055\tIGNORE\tcsp-directives\n10096\tIGNORE\ttimestamp\n' > zap.conf
+        # THE SAME FLAGS IN BOTH MODES, AND FAIL_ON_WARN IS DELIBERATELY NOT AMONG THEM. A
+        # `[ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)` line stood here until 2026-08-16 and is
+        # the defect this file's header describes at length: `-I` tells ZAP not to return failure on
+        # a warning, so it made a WARN-only scan exit 0 instead of 2 and killed the reporting branch
+        # below. Enforcement is decided AFTER the scan, from the exit code — never by handing the
+        # scanner a different instruction. Do not put a mode-dependent flag back in this array.
         FLAGS=(-t "${TARGET_URL}" -c zap.conf -r zap-report.html -w zap-report.md)
-        # -I: do NOT fail the exit code on WARN rules (only FAIL rules gate) — the default.
-        [ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)
         zap-baseline.py "${FLAGS[@]}"
         RC=$?
         # zap-baseline.py exit codes: 0 = clean, 1 = a FAIL rule fired, 2 = only WARN rules, 3 = error.
@@ -78,10 +114,26 @@ spec:
           printf 'true' > "$(results.dast-passed.path)"
           exit 0
         fi
+        # WRITTEN ONCE, BEFORE THE MODE IS CONSULTED, AND NEVER REWRITTEN BELOW. A second
+        # `printf 'true'` on the reporting branch is the defect described in this file's header:
+        # it makes a run that found the missing headers publish a PASS. Do not put one back.
         printf 'false' > "$(results.dast-passed.path)"
         if [ "$RC" -eq 2 ] && [ "${FAIL_ON_WARN}" = "false" ]; then
-          echo "⚠️  DAST found WARN-level issues only (not gating) — review the report."
-          printf 'true' > "$(results.dast-passed.path)"
+          echo "⚠️  DAST found WARN-level issues — REPORTING ONLY (FAIL_ON_WARN=false), so this gate"
+          echo "   did NOT stop the pipeline. Result dast-passed=false: the findings are real and"
+          echo "   still open. Findings: the WARN lines above, and the HTML/Markdown reports in the"
+          echo "   zap-work workspace (zap-report.html / zap-report.md)."
+          # An honest report has to say when it is reporting NOTHING. ZAP writes -r/-w only after a
+          # scan actually completed, so the report's presence separates "the app really is missing
+          # these headers" from "ZAP never reached the app". Message only — the exit status is 0
+          # either way, deliberately: reporting mode must not turn a broken scanner into a stop.
+          # (A scan that truly errors exits 3, not 2, and takes the ❌ branch below regardless.)
+          if [ -f zap-report.html ]; then
+            echo "   (ZAP completed and wrote its report, so this is a real DAST finding)"
+          else
+            echo "   (NOTE: no zap-report.html was written — ZAP may not have scanned the target."
+            echo "    Read the output above: 'not measured' is not 'clean'.)"
+          fi
           exit 0
         fi
         echo "❌ DAST FAILED — ZAP reported a gating alert on the running app."

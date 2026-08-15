@@ -407,6 +407,9 @@ spec:
 # the Affinity Assistant refuses in its default mode, and once that was worked around a warm cache
 # measured out at 1.2% of a run. Same design as maven-jdk21, deliberately — one Maven-caching
 # pattern in the library, not two.
+# Read it also for why REPORT MODE is FAIL_ON_VIOLATION=false and NOT QUALITY_GATE_WAIT=false:
+# wait=false stops the scanner polling the compute engine, so it returns 0 on a RED gate and this
+# Task would report a PASS it never measured.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -437,7 +440,19 @@ spec:
       default: "."
     - name: QUALITY_GATE_WAIT
       type: string
-      description: '"true" blocks on the quality gate and exits non-zero when it is red (the SAST gate).'
+      description: >-
+        The DETECTOR, not the report switch. "true" (default) polls the compute engine so the scanner
+        learns the gate's verdict and exits non-zero when it is red. "false" makes the scanner return
+        immediately with status 0 whatever the gate says — which blinds this Task, so it is NOT how
+        you run a reporting pass. Use FAIL_ON_VIOLATION=false for that.
+      default: "true"
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: >-
+        "true" (default) gates the build on a red quality gate; "false" runs REPORT MODE — the
+        analysis and the gate poll still happen, quality-gate-passed still records the TRUTH, and the
+        Task exits 0 so the pipeline continues. Same name/polarity as acs-image-check and
+        roxctl-deployment-check, so one pipeline param can drive every gate in this library.
       default: "true"
     - name: MAVEN_MIRROR_URL
       type: string
@@ -582,6 +597,8 @@ spec:
           value: $(params.SONAR_PROJECT_NAME)
         - name: QUALITY_GATE_WAIT
           value: $(params.QUALITY_GATE_WAIT)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
       script: |
         #!/usr/bin/env bash
         set -uo pipefail
@@ -600,7 +617,29 @@ spec:
           printf 'true' > "$(results.quality-gate-passed.path)"
           exit 0
         fi
+        # THE RESULT IS WRITTEN BEFORE THE MODE IS CONSULTED, and is never rewritten below. Report
+        # mode changes what this Task does to the PIPELINE (exit 0 instead of exit RC); it does not
+        # change what this Task SAYS about the code. Anything that reassigns this to 'true' on a
+        # non-zero RC has re-created the defect the header describes.
         printf 'false' > "$(results.quality-gate-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  SonarQube quality gate did NOT pass — REPORTING ONLY (FAIL_ON_VIOLATION=false),"
+          echo "   so this gate did NOT stop the pipeline. Result quality-gate-passed=false."
+          echo "   findings: ${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}  → Issues"
+          # An honest report has to say when it is reporting NOTHING. report-task.txt is written by
+          # the scanner the moment the analysis is accepted by the server, i.e. before any gate poll,
+          # so its presence separates "the gate really is red" from "the scanner never got that far"
+          # (bad token, unreachable host, no bytecode). Message only — the exit status above is the
+          # same either way, deliberately: report mode must not turn a broken scanner into a stop.
+          if [ -f .scannerwork/report-task.txt ]; then
+            echo "   (the analysis reached SonarQube — .scannerwork/report-task.txt exists — so this"
+            echo "    is a real gate verdict, not a scanner failure)"
+          else
+            echo "   (NOTE: no .scannerwork/report-task.txt — the analysis may never have reached"
+            echo "    SonarQube. Read the scanner output above: 'not measured' is not 'clean'.)"
+          fi
+          exit 0
+        fi
         echo "❌ SonarQube quality gate FAILED (or analysis error)."
         echo "   dashboard: ${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}"
         echo "   fix: resolve the new issues (e.g. remove the hardcoded credential — rule S2068), then re-run."
@@ -609,6 +648,8 @@ spec:
 ---
 # trivy-scan — curated Task: the Trivy SCA gate (dependency CVEs + copyleft licenses; app-security-testing).
 # LOCKSTEP with pipelines/tasks/trivy-scan.yaml. No auth; digest-pinned image (never the Trivy Action).
+# REPORT MODE is FAIL_ON_VIOLATION=false and NOT EXIT_CODE=0: at --exit-code 0 trivy prints the same
+# CVE table but returns 0 either way, so this Task would report a PASS it never measured.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -638,8 +679,20 @@ spec:
       default: "vuln,license"
     - name: EXIT_CODE
       type: string
-      description: '"1" gates the build on a finding; "0" reports only.'
+      description: >-
+        The DETECTOR, not the report switch — trivy's own `--exit-code` integer. "1" (default) makes
+        trivy exit non-zero when it finds a gating vulnerability, which is how this Task learns there
+        was one. "0" prints the same table but returns 0 either way, blinding the Task, so it is NOT
+        how you run a reporting pass. Use FAIL_ON_VIOLATION=false for that.
       default: "1"
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: >-
+        "true" (default) gates the build on a dependency CVE at SEVERITY; "false" runs REPORT MODE —
+        trivy still scans and still reports, scan-passed still records the TRUTH, and the Task exits 0
+        so the pipeline continues. Same name/polarity as acs-image-check, roxctl-deployment-check and
+        sonar-scan, so one pipeline param can drive every gate in this library.
+      default: "true"
     - name: TRIVY_DB_REPOSITORY
       type: string
       description: OCI repo for the Trivy vuln DB — point at a mirror to avoid rate limits at scale.
@@ -662,6 +715,8 @@ spec:
           value: $(params.SCANNERS)
         - name: EXIT_CODE
           value: $(params.EXIT_CODE)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
         - name: TRIVY_DB_REPOSITORY
           value: $(params.TRIVY_DB_REPOSITORY)
         # Writable DB/cache dir under restricted-v2 SCC (random UID cannot write the image HOME).
@@ -687,7 +742,31 @@ spec:
           printf 'true' > "$(results.scan-passed.path)"
           exit 0
         fi
+        # THE RESULT IS WRITTEN BEFORE THE MODE IS CONSULTED, and is never rewritten below. Report
+        # mode changes what this Task does to the PIPELINE (exit 0 instead of exit RC); it does not
+        # change what this Task SAYS about the dependencies. Anything that reassigns this to 'true'
+        # on a non-zero RC has re-created the defect the header describes.
         printf 'false' > "$(results.scan-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  ${SEVERITY} dependency vulnerabilities were found — REPORTING ONLY"
+          echo "   (FAIL_ON_VIOLATION=false), so this gate did NOT stop the pipeline."
+          echo "   Result scan-passed=false. Findings: the table above — one row per package, with"
+          echo "   the installed version, the CVE and the version that fixes it."
+          # An honest report has to say when it is reporting NOTHING. The SBOM pass above ran the
+          # same scanners against the same tree, so its artifact existing means trivy started and
+          # its vulnerability DB loaded — which separates a real finding from a scan that could not
+          # run (a DB pull rate-limited at ×N attendees is the realistic failure here). Message only:
+          # the exit status is 0 either way, deliberately — report mode must not turn a broken
+          # scanner into a stop.
+          if [ -f ./trivy-sbom.json ]; then
+            echo "   (trivy also wrote its SBOM this run, so the scanner and its DB were healthy —"
+            echo "    this is a real finding, not a scan that could not run)"
+          else
+            echo "   (NOTE: no trivy-sbom.json was written — trivy may not have reached its"
+            echo "    vulnerability DB. Read the output above: 'not measured' is not 'clean'.)"
+          fi
+          exit 0
+        fi
         echo "❌ SCA scan FAILED — a ${SEVERITY} dependency CVE was found."
         echo "   fix: bump or remove the flagged dependency (e.g. commons-collections 3.2.1 → CVE-2015-7501), then re-run."
         exit "$RC"
@@ -859,6 +938,14 @@ spec:
 ---
 # zap-baseline — curated Task: the ZAP (Zed Attack Proxy) DAST gate against the running app (app-security-testing).
 # LOCKSTEP with pipelines/tasks/zap-baseline.yaml. Digest-pinned image; targets in-cluster Service DNS.
+# FAIL_ON_WARN softens the EXIT CODE, not the verdict: dast-passed is written once, before the mode is
+# consulted, so a WARN-only run at FAIL_ON_WARN=false succeeds AND publishes dast-passed=false. Until
+# 2026-08-16 it published `true` there, which made the capstone's report-mode run claim a DAST pass
+# with every security header still missing — TWICE over, and the second cause is the subtle one: the
+# script also passed zap-baseline.py `-I` in that mode, which suppresses the WARN exit code the
+# reporting branch tests for and made it dead code. `-I` is a DETECTION switch, like sonar-scan's
+# QUALITY_GATE_WAIT and trivy-scan's EXIT_CODE, and is gone. Read that file's header before touching
+# the branch, and never add a mode-dependent flag to the FLAGS array.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -879,7 +966,11 @@ spec:
       default: "http://parasol-claims:8080"
     - name: FAIL_ON_WARN
       type: string
-      description: '"false" runs ZAP with -I so only FAIL rules gate; "true" also gates on WARN rules.'
+      description: >-
+        "false" (default) lets a WARN-only scan succeed so only FAIL rules stop the build; "true"
+        also gates on WARN rules. It controls ENFORCEMENT only — it is read AFTER the scan, and never
+        changes the flags ZAP is given — so dast-passed reports what ZAP actually found either way,
+        and a WARN-only run at "false" succeeds AND publishes dast-passed=false.
       default: "false"
   workspaces:
     # ZAP writes its session + reports to /zap/wrk, which must be writable — mount a run-provided
@@ -914,9 +1005,13 @@ spec:
         # timestamp disclosure (10096). A real CI ZAP baseline is always tuned like this — otherwise
         # informational noise makes a clean, hardened app fail. Config format: <ruleId>\t<action>\t<note>.
         printf '10015\tIGNORE\tcache-control\n10027\tIGNORE\tcomments\n10049\tIGNORE\tcacheable\n10055\tIGNORE\tcsp-directives\n10096\tIGNORE\ttimestamp\n' > zap.conf
+        # THE SAME FLAGS IN BOTH MODES, AND FAIL_ON_WARN IS DELIBERATELY NOT AMONG THEM. A
+        # `[ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)` line stood here until 2026-08-16 and is
+        # the defect this file's header describes at length: `-I` tells ZAP not to return failure on
+        # a warning, so it made a WARN-only scan exit 0 instead of 2 and killed the reporting branch
+        # below. Enforcement is decided AFTER the scan, from the exit code — never by handing the
+        # scanner a different instruction. Do not put a mode-dependent flag back in this array.
         FLAGS=(-t "${TARGET_URL}" -c zap.conf -r zap-report.html -w zap-report.md)
-        # -I: do NOT fail the exit code on WARN rules (only FAIL rules gate) — the default.
-        [ "${FAIL_ON_WARN}" = "false" ] && FLAGS+=(-I)
         zap-baseline.py "${FLAGS[@]}"
         RC=$?
         # zap-baseline.py exit codes: 0 = clean, 1 = a FAIL rule fired, 2 = only WARN rules, 3 = error.
@@ -925,10 +1020,26 @@ spec:
           printf 'true' > "$(results.dast-passed.path)"
           exit 0
         fi
+        # WRITTEN ONCE, BEFORE THE MODE IS CONSULTED, AND NEVER REWRITTEN BELOW. A second
+        # `printf 'true'` on the reporting branch is the defect described in this file's header:
+        # it makes a run that found the missing headers publish a PASS. Do not put one back.
         printf 'false' > "$(results.dast-passed.path)"
         if [ "$RC" -eq 2 ] && [ "${FAIL_ON_WARN}" = "false" ]; then
-          echo "⚠️  DAST found WARN-level issues only (not gating) — review the report."
-          printf 'true' > "$(results.dast-passed.path)"
+          echo "⚠️  DAST found WARN-level issues — REPORTING ONLY (FAIL_ON_WARN=false), so this gate"
+          echo "   did NOT stop the pipeline. Result dast-passed=false: the findings are real and"
+          echo "   still open. Findings: the WARN lines above, and the HTML/Markdown reports in the"
+          echo "   zap-work workspace (zap-report.html / zap-report.md)."
+          # An honest report has to say when it is reporting NOTHING. ZAP writes -r/-w only after a
+          # scan actually completed, so the report's presence separates "the app really is missing
+          # these headers" from "ZAP never reached the app". Message only — the exit status is 0
+          # either way, deliberately: reporting mode must not turn a broken scanner into a stop.
+          # (A scan that truly errors exits 3, not 2, and takes the ❌ branch below regardless.)
+          if [ -f zap-report.html ]; then
+            echo "   (ZAP completed and wrote its report, so this is a real DAST finding)"
+          else
+            echo "   (NOTE: no zap-report.html was written — ZAP may not have scanned the target."
+            echo "    Read the output above: 'not measured' is not 'clean'.)"
+          fi
           exit 0
         fi
         echo "❌ DAST FAILED — ZAP reported a gating alert on the running app."
@@ -939,6 +1050,10 @@ spec:
 # k6-load-test — curated Task: the load/performance gate against the running app (DevSecOps perf gate).
 # LOCKSTEP with pipelines/tasks/k6-load-test.yaml. Re-implements the reference Gatling perf test on k6
 # (container-native, threshold-gated). Targets in-cluster Service DNS; writes an HTML report to k6-work.
+# FAIL_ON_THRESHOLD softens the EXIT CODE, not the verdict: perf-passed is written once, before the
+# mode is consulted, so a breached run at FAIL_ON_THRESHOLD=false succeeds AND publishes
+# perf-passed=false. Until 2026-08-16 it published `true` there. Inert at this Task's own default
+# (true), where that branch is never reached.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -976,7 +1091,10 @@ spec:
       default: "0.01"
     - name: FAIL_ON_THRESHOLD
       type: string
-      description: '"true" fails the build on a breached threshold; "false" runs report-only.'
+      description: >-
+        "true" (default) fails the build on a breached threshold; "false" runs report-only. It
+        controls ENFORCEMENT only: perf-passed reports what k6 actually measured either way, so a
+        breached run at "false" succeeds AND publishes perf-passed=false.
       default: "true"
   workspaces:
     # k6 writes its HTML dashboard report here (the run mounts an empty workspace). The container FS is
@@ -1053,10 +1171,26 @@ spec:
           printf 'true' > "$(results.perf-passed.path)"
           exit 0
         fi
+        # WRITTEN ONCE, BEFORE THE MODE IS CONSULTED, AND NEVER REWRITTEN BELOW. A second
+        # `printf 'true'` on the report-only branch is the defect described in this file's header:
+        # it makes a run that blew its latency budget publish a PASS. Do not put one back.
         printf 'false' > "$(results.perf-passed.path)"
         if [ "${FAIL_ON_THRESHOLD}" = "false" ]; then
-          echo "⚠️  perf thresholds breached (reporting only — FAIL_ON_THRESHOLD=false). Review the k6 summary/report."
-          printf 'true' > "$(results.perf-passed.path)"
+          echo "⚠️  perf thresholds breached — REPORTING ONLY (FAIL_ON_THRESHOLD=false), so this gate"
+          echo "   did NOT stop the pipeline. Result perf-passed=false: the breach is real and still"
+          echo "   open. Findings: the k6 threshold summary above (the ✗ rows), and the HTML report"
+          echo "   in the k6-work workspace (k6-report.html)."
+          # An honest report has to say when it is reporting NOTHING. The web dashboard export is
+          # written at the END of a completed run, so its presence separates "the app really missed
+          # its budget" from "k6 never reached the target" (a non-zero exit covers both). Message
+          # only — the exit status is 0 either way, deliberately: report-only must not turn an
+          # unreachable target into a stop.
+          if [ -f k6-report.html ]; then
+            echo "   (k6 completed the run and wrote its report, so this is a real perf finding)"
+          else
+            echo "   (NOTE: no k6-report.html was written — k6 may never have reached the target."
+            echo "    Read the output above: 'not measured' is not 'fast enough'.)"
+          fi
           exit 0
         fi
         echo "❌ perf gate FAILED — a latency/error threshold was breached under load."

@@ -2,8 +2,18 @@
 # run/read/edit it. Builds the shared parasol-claims repo's clean main by default (every gate passes —
 # the entry state); the app-security-testing content/app pass adds the seeded-vulnerable fork + break-fix seeds and
 # points git-revision at them. Tasks are CLUSTER RESOLVER references (bundled + the curated
-# parasol-tasks library, incl. the four app-security-testing tasks) — no task bodies copied except the tiny inline
+# parasol-tasks library, incl. the five app-security-testing tasks) — no task bodies copied except the tiny inline
 # sign-check step.
+#
+# REPORT MODE — `enforce-gates=false` (default "true"). One param fanned out to every gate so a
+# single run can tour the whole chain on the seeded branch: all twelve stages execute, every scanner
+# runs and reports, nothing blocks. It softens ENFORCEMENT only — every detector stays at its gating
+# default, so each Task still measures the truth and still publishes it in its result. ALL SIX gate
+# results stay truthful on a report run, which is what tools/verify/app-security-testing.sh grades
+# (dast-passed and perf-passed only started telling the truth on 2026-08-16). The canonical
+# file's header carries the full rationale, including why sonar's QUALITY_GATE_WAIT and trivy's
+# EXIT_CODE are the wrong knobs (they blind the scanner, so the gate reports a pass it never made),
+# and which three stages have no toggle and stop a report run anyway.
 #
 # LOCKSTEP with the canonical pipelines/pipeline/parasol-claims-devsecops.yaml (the module's
 # readable artifact). NOT byte-identical: this copy adds metadata.namespace, and both files carry
@@ -43,6 +53,16 @@ spec:
       type: string
       description: Image size budget in MB, enforced (as a report) by image-size-report.
       default: "500"
+    - name: enforce-gates
+      type: string
+      # Positive polarity so every mapping below is a plain pass-through: Tekton cannot negate a
+      # param, and four of the six gates already spell their switch true-means-enforce.
+      description: >-
+        "true" (default) runs every security gate ENFORCED — the first violation stops the pipeline.
+        "false" runs REPORT MODE: every scanner still runs and still reports its findings, every
+        result still records the truth, and no gate blocks. Report mode does not disable unit-test,
+        build-image or sign-check, which have no toggle and still fail the run.
+      default: "true"
   workspaces:
     # One shared PVC carries the checkout from git-clone through SAST/SCA/unit-test and the image build.
     - name: shared-workspace
@@ -98,6 +118,8 @@ spec:
           - {name: namespace, value: ogsr-parasol-tasks}
       params:
         - {name: SONAR_PROJECT_KEY, value: $(params.sonar-project-key)}
+        # NOT QUALITY_GATE_WAIT — that one blinds the scanner instead of unblocking the pipeline.
+        - {name: FAIL_ON_VIOLATION, value: $(params.enforce-gates)}
       workspaces:
         - {name: source, workspace: shared-workspace}
 
@@ -110,12 +132,18 @@ spec:
           - {name: kind, value: task}
           - {name: name, value: trivy-scan}
           - {name: namespace, value: ogsr-parasol-tasks}
+      params:
+        # NOT EXIT_CODE — trivy's own integer flag; a "0" there stops trivy telling the Task
+        # anything, so the SCA result would publish `true` under a table full of CVEs.
+        - {name: FAIL_ON_VIOLATION, value: $(params.enforce-gates)}
       workspaces:
         - {name: source, workspace: shared-workspace}
 
     # 4) Unit tests (H2-backed, self-contained) — after the source gates pass. Curated maven-jdk21.
     #    Sequential after sca-trivy on purpose: a failed task does not cancel an in-flight sibling,
     #    so parallelising would make the lab's "red at sca-trivy, ~3-4 min" beat wait out unit-test.
+    #    NO REPORT-MODE TOGGLE: maven-jdk21 declares none, and a failing test is a broken build, not
+    #    a finding to tour. This stage stops even a report run.
     - name: unit-test
       runAfter: [sast-sonar, sca-trivy]
       taskRef:
@@ -131,6 +159,8 @@ spec:
         - {name: source, workspace: shared-workspace}
 
     # 5) Build the image from the Containerfile; Tekton Chains SIGNS this TaskRun's image automatically.
+    #    NO REPORT-MODE TOGGLE: the bundled buildah task has none, and a build that does not build has
+    #    nothing downstream to report on. This stage stops even a report run.
     - name: build-image
       runAfter: [unit-test]
       taskRef:
@@ -157,6 +187,7 @@ spec:
           - {name: namespace, value: ogsr-parasol-tasks}
       params:
         - {name: IMAGE, value: $(params.image)}
+        - {name: FAIL_ON_VIOLATION, value: $(params.enforce-gates)}
 
     # 7) Image size report (report-only) — the curated org library Task in action.
     - name: image-report
@@ -174,6 +205,10 @@ spec:
     # 8) Sign + attest: wait for Tekton Chains to sign the build TaskRun (async) and GATE if unsigned.
     #    Inline taskSpec — a small oc poll needs no curated task. cosign verify --key is the richer
     #    attendee terminal beat (trusted-supply-chain); the signed annotation is the authoritative in-pipeline signal.
+    #    NO REPORT-MODE TOGGLE, and deliberately not given one: `enforce-gates` softens gates that
+    #    judge the ATTENDEE'S CODE, and this one judges the CLUSTER (is Chains installed and signing?).
+    #    An unsigned image is a platform fault, not a finding to tour, so the inline `exit 1` below
+    #    stops a report run too. Nothing in the seeds touches signing, so it passes on seed-appsec.
     - name: sign-check
       runAfter: [build-image]
       taskSpec:
@@ -213,6 +248,7 @@ spec:
           - {name: namespace, value: ogsr-parasol-tasks}
       params:
         - {name: IMAGE, value: $(params.image)}
+        - {name: FAIL_ON_VIOLATION, value: $(params.enforce-gates)}
       workspaces:
         - {name: source, workspace: shared-workspace}
 
@@ -257,6 +293,21 @@ spec:
     # 11) DAST GATE: ZAP baseline against the RUNNING app over the in-cluster Service DNS. FAIL_ON_WARN
     #     is true so missing security headers (a WARN-level finding) gate the build — the seeded app
     #     ships without them (red), the fix adds the Quarkus headers (green).
+    #
+    #     REPORT MODE IS HONEST HERE TOO, AS OF 2026-08-16, AND IT WAS NOT BEFORE. zap-baseline and
+    #     k6-load-test each used to write their result twice — the truthful `false`, then a `true`
+    #     straight over it on the very branch their FAIL_ON_* switch selects — so with
+    #     enforce-gates=false these two stages printed an honest ⚠️ while `dast-passed` and
+    #     `perf-passed` published `true` on a run that found the missing headers. Both Tasks now
+    #     write their result once, before the mode is consulted, like the other four.
+    #     THE SECOND HALF OF THAT FIX WAS ONLY VISIBLE ON A CLUSTER: zap-baseline also handed ZAP
+    #     `-I` whenever FAIL_ON_WARN was false ("do not return failure on warning"), so a WARN-only
+    #     scan exited 0 instead of 2 and the reporting branch, which tests for 2, was dead code — a
+    #     report run printed "✅ DAST passed" and published dast-passed=true while the deployed app
+    #     served none of the five headers (measured 2026-08-16, user5-cicd). Report mode may change
+    #     what a gate DOES, never what it MEASURES; `-I` was a detection switch and is gone.
+    #     STILL NOT SOFTENED HERE, on purpose: a ZAP FAIL rule (rc 1) or a ZAP error (rc 3). The
+    #     seeded finding is WARN-level (missing headers), so a report run passes through.
     - name: dast-zap
       runAfter: [deploy]
       taskRef:
@@ -267,7 +318,8 @@ spec:
           - {name: namespace, value: ogsr-parasol-tasks}
       params:
         - {name: TARGET_URL, value: "http://parasol-claims.$(context.pipelineRun.namespace).svc:8080"}
-        - {name: FAIL_ON_WARN, value: "true"}
+        # Was the literal "true"; the param defaults to "true", so an unset run is unchanged.
+        - {name: FAIL_ON_WARN, value: $(params.enforce-gates)}
       workspaces:
         - {name: zap-work, workspace: zap-work}
 
@@ -285,6 +337,8 @@ spec:
           - {name: namespace, value: ogsr-parasol-tasks}
       params:
         - {name: TARGET_URL, value: "http://parasol-claims.$(context.pipelineRun.namespace).svc:8080"}
-        - {name: FAIL_ON_THRESHOLD, value: "true"}
+        # Was the literal "true"; the param defaults to "true", so an unset run is unchanged.
+        # Same result-overwrite caveat as dast-zap above — see that stage's ⚠️ note.
+        - {name: FAIL_ON_THRESHOLD, value: $(params.enforce-gates)}
       workspaces:
         - {name: k6-work, workspace: k6-work}

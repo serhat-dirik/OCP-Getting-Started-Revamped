@@ -35,6 +35,21 @@
 # sonarqube/sonar-ci-token; the app-security-testing entry state copies it per-user into {user}-cicd. The token is never
 # echoed. The community edition has no branch/PR analysis — this is main-revision analysis + a gate.
 #
+# REPORT MODE IS `FAIL_ON_VIOLATION=false`, AND IT IS *NOT* `QUALITY_GATE_WAIT=false`. That
+# distinction is the whole point and it is easy to get backwards, so it is spelled out here.
+# QUALITY_GATE_WAIT is the DETECTOR: `sonar.qualitygate.wait=false` makes sonar-scanner submit the
+# analysis and return WITHOUT polling the compute engine, so its exit status is 0 no matter what the
+# gate says. This Task would then take its success branch, print "✅ SonarQube quality gate PASSED"
+# and write quality-gate-passed=true — on a run whose gate is red and whose S2068 finding is sitting
+# on the dashboard. A "report" that asserts a pass is worse than no report, for the same reason
+# roxctl-deployment-check spells out at length: a security gate that reports GREEN because it did
+# not look is worse than no gate at all.
+# So report mode weakens ENFORCEMENT only, never DETECTION: QUALITY_GATE_WAIT stays "true", the
+# scanner still polls and still returns non-zero on a red gate, the Task still writes
+# quality-gate-passed=FALSE — and only the exit code is softened to 0 so the pipeline continues, with
+# a ⚠️ line that says in words that the gate did not enforce. Same shape, same param NAME and same
+# polarity as acs-image-check and roxctl-deployment-check in this library.
+#
 # CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
 # workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — kept in lockstep by
 # tools/lint/copy-drift-guard.py (pair "parasol-task-sonar-scan", lint workflow's copy-drift job).
@@ -68,7 +83,19 @@ spec:
       default: "."
     - name: QUALITY_GATE_WAIT
       type: string
-      description: '"true" blocks on the quality gate and exits non-zero when it is red (the SAST gate).'
+      description: >-
+        The DETECTOR, not the report switch. "true" (default) polls the compute engine so the scanner
+        learns the gate's verdict and exits non-zero when it is red. "false" makes the scanner return
+        immediately with status 0 whatever the gate says — which blinds this Task, so it is NOT how
+        you run a reporting pass. Use FAIL_ON_VIOLATION=false for that.
+      default: "true"
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: >-
+        "true" (default) gates the build on a red quality gate; "false" runs REPORT MODE — the
+        analysis and the gate poll still happen, quality-gate-passed still records the TRUTH, and the
+        Task exits 0 so the pipeline continues. Same name/polarity as acs-image-check and
+        roxctl-deployment-check, so one pipeline param can drive every gate in this library.
       default: "true"
     - name: MAVEN_MIRROR_URL
       type: string
@@ -226,6 +253,8 @@ spec:
           value: $(params.SONAR_PROJECT_NAME)
         - name: QUALITY_GATE_WAIT
           value: $(params.QUALITY_GATE_WAIT)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
       script: |
         #!/usr/bin/env bash
         set -uo pipefail
@@ -244,7 +273,29 @@ spec:
           printf 'true' > "$(results.quality-gate-passed.path)"
           exit 0
         fi
+        # THE RESULT IS WRITTEN BEFORE THE MODE IS CONSULTED, and is never rewritten below. Report
+        # mode changes what this Task does to the PIPELINE (exit 0 instead of exit RC); it does not
+        # change what this Task SAYS about the code. Anything that reassigns this to 'true' on a
+        # non-zero RC has re-created the defect the header describes.
         printf 'false' > "$(results.quality-gate-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  SonarQube quality gate did NOT pass — REPORTING ONLY (FAIL_ON_VIOLATION=false),"
+          echo "   so this gate did NOT stop the pipeline. Result quality-gate-passed=false."
+          echo "   findings: ${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}  → Issues"
+          # An honest report has to say when it is reporting NOTHING. report-task.txt is written by
+          # the scanner the moment the analysis is accepted by the server, i.e. before any gate poll,
+          # so its presence separates "the gate really is red" from "the scanner never got that far"
+          # (bad token, unreachable host, no bytecode). Message only — the exit status above is the
+          # same either way, deliberately: report mode must not turn a broken scanner into a stop.
+          if [ -f .scannerwork/report-task.txt ]; then
+            echo "   (the analysis reached SonarQube — .scannerwork/report-task.txt exists — so this"
+            echo "    is a real gate verdict, not a scanner failure)"
+          else
+            echo "   (NOTE: no .scannerwork/report-task.txt — the analysis may never have reached"
+            echo "    SonarQube. Read the scanner output above: 'not measured' is not 'clean'.)"
+          fi
+          exit 0
+        fi
         echo "❌ SonarQube quality gate FAILED (or analysis error)."
         echo "   dashboard: ${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}"
         echo "   fix: resolve the new issues (e.g. remove the hardcoded credential — rule S2068), then re-run."

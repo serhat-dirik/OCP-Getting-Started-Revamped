@@ -15,6 +15,18 @@
 # By default (FAIL_ON_THRESHOLD=true) a breached threshold fails the build. Set FAIL_ON_THRESHOLD=false
 # to run report-only (measure without gating) while you tune the budget to the cluster's node sizing.
 #
+# FAIL_ON_THRESHOLD SOFTENS THE EXIT CODE. IT DOES NOT SOFTEN THE VERDICT. Until 2026-08-16 this Task
+# wrote perf-passed TWICE on the report-only branch — the truthful 'false', then a 'true' straight
+# over it — so a run whose p95 blew the budget published a PASS while the log directly above it said
+# ⚠️ thresholds were breached. That is the defect roxctl-deployment-check's own comment warns about
+# ("a security gate that reports GREEN because it could not run is worse than no gate at all"), and
+# it bit hardest exactly where the gate is deliberately not enforcing: the capstone's report-mode
+# run, whose whole purpose is to publish findings without blocking. Now the result is written ONCE,
+# before the mode is consulted, and never rewritten. Report-only changes what this Task does to the
+# PIPELINE (exit 0); it does not change what this Task SAYS about the app's performance.
+# At this Task's own FAIL_ON_THRESHOLD=true default nothing changes at all — that branch was never
+# reached — so the correction is inert for every caller that has not opted into report-only.
+#
 # CANONICAL SOURCE. The identical Task body is installed into the shared parasol-tasks library by the
 # workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — kept in lockstep by
 # tools/lint/copy-drift-guard.py (pair "parasol-task-k6-load-test", lint workflow's copy-drift job).
@@ -55,7 +67,10 @@ spec:
       default: "0.01"
     - name: FAIL_ON_THRESHOLD
       type: string
-      description: '"true" fails the build on a breached threshold; "false" runs report-only.'
+      description: >-
+        "true" (default) fails the build on a breached threshold; "false" runs report-only. It
+        controls ENFORCEMENT only: perf-passed reports what k6 actually measured either way, so a
+        breached run at "false" succeeds AND publishes perf-passed=false.
       default: "true"
   workspaces:
     # k6 writes its HTML dashboard report here (the run mounts an empty workspace). The container FS is
@@ -132,10 +147,26 @@ spec:
           printf 'true' > "$(results.perf-passed.path)"
           exit 0
         fi
+        # WRITTEN ONCE, BEFORE THE MODE IS CONSULTED, AND NEVER REWRITTEN BELOW. A second
+        # `printf 'true'` on the report-only branch is the defect described in this file's header:
+        # it makes a run that blew its latency budget publish a PASS. Do not put one back.
         printf 'false' > "$(results.perf-passed.path)"
         if [ "${FAIL_ON_THRESHOLD}" = "false" ]; then
-          echo "⚠️  perf thresholds breached (reporting only — FAIL_ON_THRESHOLD=false). Review the k6 summary/report."
-          printf 'true' > "$(results.perf-passed.path)"
+          echo "⚠️  perf thresholds breached — REPORTING ONLY (FAIL_ON_THRESHOLD=false), so this gate"
+          echo "   did NOT stop the pipeline. Result perf-passed=false: the breach is real and still"
+          echo "   open. Findings: the k6 threshold summary above (the ✗ rows), and the HTML report"
+          echo "   in the k6-work workspace (k6-report.html)."
+          # An honest report has to say when it is reporting NOTHING. The web dashboard export is
+          # written at the END of a completed run, so its presence separates "the app really missed
+          # its budget" from "k6 never reached the target" (a non-zero exit covers both). Message
+          # only — the exit status is 0 either way, deliberately: report-only must not turn an
+          # unreachable target into a stop.
+          if [ -f k6-report.html ]; then
+            echo "   (k6 completed the run and wrote its report, so this is a real perf finding)"
+          else
+            echo "   (NOTE: no k6-report.html was written — k6 may never have reached the target."
+            echo "    Read the output above: 'not measured' is not 'fast enough'.)"
+          fi
           exit 0
         fi
         echo "❌ perf gate FAILED — a latency/error threshold was breached under load."

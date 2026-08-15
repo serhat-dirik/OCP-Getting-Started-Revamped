@@ -2,6 +2,65 @@ apiVersion: v2
 name: workshop-config
 description: "Workshop layer: attendee users, platform-observer RBAC, per-user namespaces/quotas, entry-state AppProject, htpasswd IdP, and Gitea user seeding. One Argo CD Application (helm params userCount, clusterDomain)."
 type: application
+# 0.3.10: zap-baseline stops passing ZAP `-I` in reporting mode. 0.3.9 removed the result-overwrite
+# and was CORRECT AND STILL INSUFFICIENT — the branch it fixed could not execute. `-I` means "do not
+# return failure on warning", and the script added it on exactly the FAIL_ON_WARN=false path, so a
+# WARN-only scan returned 0 instead of 2 while the reporting branch tests for 2. The branch was dead
+# code and the run took the genuine-pass branch: measured on a live report-mode capstone run
+# (2026-08-16, user5-cicd, seeded branch) the gate printed "✅ DAST passed — no gating alerts" and
+# published dast-passed=true while the deployed app served NONE of the five security headers.
+# THE RULE THIS ESTABLISHES, and it now has three members plus one former violator: report mode may
+# change what a gate DOES, never what it MEASURES. sonar-scan's QUALITY_GATE_WAIT and trivy-scan's
+# EXIT_CODE were pinned at their gating values for exactly this reason in 0.3.8; `-I` was the same
+# category wearing an enforcement switch's clothes. It is deleted rather than inverted — the flag
+# list handed to zap-baseline.py is now identical in both modes and FAIL_ON_WARN is consulted only
+# AFTER the exit code is in hand.
+# Enforcement is untouched: the old line only ever added `-I` at FAIL_ON_WARN=false, so the capstone's
+# gating path never received it. At this Task's own default (false) a WARN-only run still exits 0 and
+# still Succeeds; it now returns 2 internally, prints ⚠️, and publishes dast-passed=false.
+# The harness could not have caught this and now can: it stubbed the scanner with an INJECTED exit
+# code, which assumes away a bug about which exit code the real scanner returns. The stub now derives
+# its RC from the flags it was given (modelling `-I`, `--exit-code 0` and `qualitygate.wait=false`)
+# and records a DETECTION FINGERPRINT — argv plus every generated config file — so "report mode asks
+# the scanner for exactly what enforcement does" is asserted, not assumed. That assertion fails on
+# the old line. Verified: 80 checks green across the four gate Tasks, canary exits 1.
+# Task-body change on a chart Argo caches, so the bump is load-bearing.
+# 0.3.9: zap-baseline and k6-load-test stop overwriting their own result. Each wrote its verdict
+# TWICE on the branch its FAIL_ON_* switch selects — the truthful 'false', then a 'true' straight
+# over it — so a run that found the missing security headers, or blew its p95 budget, published a
+# PASS while the log immediately above said ⚠️ it had found something. The second write is deleted;
+# the ⚠️ line and the exit 0 stay, so enforcement behaviour is untouched and only the VERDICT moves.
+# It matters because of what reads those results: the capstone's report-mode run publishes all six
+# gate results, and tools/verify/app-security-testing.sh grades the six rather than the run's exit
+# status. Before this fix an attendee who fixed four of the five seeded findings and left the
+# security headers alone would have been told 6-of-6 — the two lanes were each right and jointly
+# wrong. Now a report run publishes false for every gate that found something, all six.
+# INERTNESS IS NOT SYMMETRIC HERE, and the asymmetry is the thing to check before shipping:
+#   * k6-load-test — fully inert. Its own default is FAIL_ON_THRESHOLD=true, where the corrected
+#     branch is unreachable.
+#   * zap-baseline — its own default is FAIL_ON_WARN=**false**, so a bare `tkn task start` on an
+#     app with WARN-level findings DOES change: same exit status (0, still Succeeds), but the
+#     published dast-passed goes true → false. That is the defect being fixed, not a regression.
+#     The Parasol capstone is unaffected either way — it maps FAIL_ON_WARN explicitly, and at its
+#     enforcing value that branch was never reached.
+# Verified by executing all four step scripts under a stubbed scanner across the RC×mode truth
+# table (56 checks), with a canary run asserting the harness can fail. Task-body change on a chart
+# Argo caches, so the bump is load-bearing.
+# 0.3.8: sonar-scan and trivy-scan gain a FAIL_ON_VIOLATION param (default "true" — enforcement is
+# unchanged) so the app-security-testing capstone can run a REPORTING pass in which every scanner
+# still runs and every finding is still published. The name and polarity are acs-image-check's and
+# roxctl-deployment-check's, so all four library gates now take the same switch.
+# WHAT THIS IS NOT is the point of the change. The knobs that look like report mode — sonar's
+# QUALITY_GATE_WAIT=false and trivy's EXIT_CODE=0 — are DETECTOR switches: they stop the tool
+# measuring, so the Task takes its success branch and publishes quality-gate-passed=true /
+# scan-passed=true on a run whose gate is red and whose CVE table is on the screen above. That is
+# the exact defect roxctl-deployment-check's own comment warns about ("a security gate that reports
+# GREEN because it could not run is worse than no gate at all"), and a naive report mode reintroduces
+# it at four of the six gates at once. FAIL_ON_VIOLATION leaves both detectors at their gating
+# defaults and softens only the exit status; each Task writes its result BEFORE consulting the mode
+# and never rewrites it. Verified by executing both step scripts under a stubbed scanner across the
+# RC×mode truth table: at the default the new code path is not entered and every branch is
+# byte-identical to 0.3.7's. Task-body change on a chart Argo caches, so the bump is load-bearing.
 # 0.3.5: BOTH cockpit Deployments gain a checksum/user-data pod-template annotation over their own
 # user_data.yml, so an attribute change actually reaches a reader. It is the missing half of 0.3.4
 # and 0.1.28: a cockpit builds its content at POD INIT (the antora-build initContainer reads
@@ -90,4 +149,4 @@ type: application
 # 0.1.27: parasol-tasks hook redacts JWT-shaped material from the raw stderr it prints (the hook
 # hands a ServiceAccount token to the command whose errors it echoes). Hook-only change, so the bump
 # is load-bearing against Argo's manifest cache.
-version: 0.3.7
+version: 0.3.10

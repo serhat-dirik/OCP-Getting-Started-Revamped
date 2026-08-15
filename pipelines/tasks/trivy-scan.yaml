@@ -13,6 +13,19 @@
 # CONTAINER image by digest and NEVER use the Action. Trivy pulls its vuln DB at scan time — override
 # TRIVY_DB_REPOSITORY to a mirror to avoid ×N-user rate limits (see the appsec/app-security-testing notes).
 #
+# REPORT MODE IS `FAIL_ON_VIOLATION=false`, AND IT IS *NOT* `EXIT_CODE=0`. EXIT_CODE is trivy's own
+# `--exit-code` integer and it is the DETECTOR: at 0, trivy still prints the CVE table but returns 0
+# whether or not it found anything, so this Task takes its success branch, prints "✅ SCA scan
+# passed — no HIGH,CRITICAL dependency vulnerabilities" and writes scan-passed=true on a run that
+# just listed CVEs on the screen above. A report that asserts a pass is worse than no report.
+# So report mode weakens ENFORCEMENT only, never DETECTION: EXIT_CODE stays "1", trivy still exits
+# non-zero on a finding, this Task still writes scan-passed=FALSE, and only the exit status is
+# softened to 0 so the pipeline continues — with a ⚠️ line that says the gate did not enforce.
+# EXIT_CODE is also why the report switch has to be a SEPARATE param and cannot be one boolean fanned
+# out from the pipeline: a "false" cannot be spelled into an integer flag. FAIL_ON_VIOLATION is the
+# same name and the same polarity as acs-image-check, roxctl-deployment-check and sonar-scan, so one
+# pipeline param drives all four.
+#
 # CANONICAL SOURCE. The identical Task is installed into the shared parasol-tasks library by the
 # workshop layer (gitops/workshop-config/templates/parasol-tasks.yaml) — kept in lockstep by
 # tools/lint/copy-drift-guard.py (pair "parasol-task-trivy-scan", lint workflow's copy-drift job).
@@ -45,8 +58,20 @@ spec:
       default: "vuln,license"
     - name: EXIT_CODE
       type: string
-      description: '"1" gates the build on a finding; "0" reports only.'
+      description: >-
+        The DETECTOR, not the report switch — trivy's own `--exit-code` integer. "1" (default) makes
+        trivy exit non-zero when it finds a gating vulnerability, which is how this Task learns there
+        was one. "0" prints the same table but returns 0 either way, blinding the Task, so it is NOT
+        how you run a reporting pass. Use FAIL_ON_VIOLATION=false for that.
       default: "1"
+    - name: FAIL_ON_VIOLATION
+      type: string
+      description: >-
+        "true" (default) gates the build on a dependency CVE at SEVERITY; "false" runs REPORT MODE —
+        trivy still scans and still reports, scan-passed still records the TRUTH, and the Task exits 0
+        so the pipeline continues. Same name/polarity as acs-image-check, roxctl-deployment-check and
+        sonar-scan, so one pipeline param can drive every gate in this library.
+      default: "true"
     - name: TRIVY_DB_REPOSITORY
       type: string
       description: OCI repo for the Trivy vuln DB — point at a mirror to avoid rate limits at scale.
@@ -69,6 +94,8 @@ spec:
           value: $(params.SCANNERS)
         - name: EXIT_CODE
           value: $(params.EXIT_CODE)
+        - name: FAIL_ON_VIOLATION
+          value: $(params.FAIL_ON_VIOLATION)
         - name: TRIVY_DB_REPOSITORY
           value: $(params.TRIVY_DB_REPOSITORY)
         # Writable DB/cache dir under restricted-v2 SCC (random UID cannot write the image HOME).
@@ -94,7 +121,31 @@ spec:
           printf 'true' > "$(results.scan-passed.path)"
           exit 0
         fi
+        # THE RESULT IS WRITTEN BEFORE THE MODE IS CONSULTED, and is never rewritten below. Report
+        # mode changes what this Task does to the PIPELINE (exit 0 instead of exit RC); it does not
+        # change what this Task SAYS about the dependencies. Anything that reassigns this to 'true'
+        # on a non-zero RC has re-created the defect the header describes.
         printf 'false' > "$(results.scan-passed.path)"
+        if [ "${FAIL_ON_VIOLATION}" = "false" ]; then
+          echo "⚠️  ${SEVERITY} dependency vulnerabilities were found — REPORTING ONLY"
+          echo "   (FAIL_ON_VIOLATION=false), so this gate did NOT stop the pipeline."
+          echo "   Result scan-passed=false. Findings: the table above — one row per package, with"
+          echo "   the installed version, the CVE and the version that fixes it."
+          # An honest report has to say when it is reporting NOTHING. The SBOM pass above ran the
+          # same scanners against the same tree, so its artifact existing means trivy started and
+          # its vulnerability DB loaded — which separates a real finding from a scan that could not
+          # run (a DB pull rate-limited at ×N attendees is the realistic failure here). Message only:
+          # the exit status is 0 either way, deliberately — report mode must not turn a broken
+          # scanner into a stop.
+          if [ -f ./trivy-sbom.json ]; then
+            echo "   (trivy also wrote its SBOM this run, so the scanner and its DB were healthy —"
+            echo "    this is a real finding, not a scan that could not run)"
+          else
+            echo "   (NOTE: no trivy-sbom.json was written — trivy may not have reached its"
+            echo "    vulnerability DB. Read the output above: 'not measured' is not 'clean'.)"
+          fi
+          exit 0
+        fi
         echo "❌ SCA scan FAILED — a ${SEVERITY} dependency CVE was found."
         echo "   fix: bump or remove the flagged dependency (e.g. commons-collections 3.2.1 → CVE-2015-7501), then re-run."
         exit "$RC"
