@@ -761,6 +761,8 @@ spec:
                 --tls-cert=/etc/tls/private/tls.crt \
                 --tls-key=/etc/tls/private/tls.key \
                 --cookie-secret="$(head -c 32 /dev/urandom | base64 | head -c 32)" \
+                --cookie-expire=24h \
+                --cookie-refresh=4h \
                 --pass-access-token=true \
                 --pass-user-headers=true
           # Every flag above was read out of THIS image's own `--help` on 2026-08-16, not recalled:
@@ -776,6 +778,35 @@ spec:
           # is where the "/oauth/callback" in both strings comes from.
           # --pass-user-headers STAYS: X-Forwarded-User is what the nginx sub_filter rewrites the
           # __WS_USER__ sentinel with, and that half is verified working with two concurrent logins.
+          #
+          # --cookie-refresh AND --cookie-expire ARE NOT TUNING. THEY ARE WHY THE TOKEN ARRIVES.
+          # First deploy of this design had neither, and every terminal opened, printed the wrapper's
+          # "sign-in has expired" and closed — the token never reached ttyd. What was eliminated first,
+          # each by measurement rather than by reading, so nobody repeats the search:
+          #   * the wrapper           — run by hand in the pod: refuses correctly with no token,
+          #                             reports expiry with a bad one. Correct.
+          #   * API reachability      — /version from inside the terminal container: 200, and a token
+          #                             authenticates there. Correct.
+          #   * nginx forwarding      — proxy_set_header X-Forwarded-Access-Token is present in BOTH
+          #                             /tty-*/ locations. Correct.
+          #   * ttyd's -H check       — probed through nginx with the header and without it: accepted
+          #                             BOTH (101), and neither probe added a "denied connection" line.
+          #                             So the deny lines in its log are NOT the auth header.
+          # What was left was oauth-proxy's own startup line:
+          #     Cookie settings: name:_oauth_proxy ... expiry:168h0m0s ... refresh:DISABLED
+          # With refresh disabled the session cookie carries identity but not the access token, so on
+          # every request AFTER the OAuth exchange there is no token for --pass-access-token to pass —
+          # which is exactly why X-Forwarded-User kept working while X-Forwarded-Access-Token did not.
+          # The proxy's own log says the token exists at exchange time ("Session{user6 token:true}")
+          # and that is the trap: the token is real, it just is not carried forward.
+          # 4h is comfortably inside the cluster's 24h token life so a refresh has something to
+          # validate, and 24h expiry stops a session cookie outliving the token it represents — the
+          # default 168h let a dead session look alive for six days.
+          #
+          # DIAGNOSING THIS AGAIN: do NOT patch this ConfigMap to add logging. nginx.conf is mounted
+          # with subPath, so a ConfigMap edit NEVER reaches the container, and Argo's selfHeal reverts
+          # it regardless. Read the proxy's startup "Cookie settings:" line instead — it states the
+          # refresh setting outright.
           volumeMounts:
             - name: tls
               mountPath: /etc/tls/private
