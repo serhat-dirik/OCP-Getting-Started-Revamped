@@ -328,6 +328,13 @@ class Recording:
     def run(self, argv: list[str]) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["PATH"] = f"{self.root / 'bin'}{os.pathsep}{env['PATH']}"
+        # `rebuild-images` and `doctor` are OPERATOR verbs, and since the ws/adm split the
+        # attendee entry point refuses them with exit 2 and prints nothing — which arrives
+        # here as "(no rows)" and "exit 2, expected 0", i.e. the guard reporting that the
+        # image-drift scan broke when what actually happened is that it was never run.
+        # Set by audience rather than pointing self.ws at tools/ws/adm: this guard MUTATES
+        # the ws file for its self-test, and adm is a 34-line wrapper with nothing to mutate.
+        env["WS_AUDIENCE"] = "admin"
         env["WS_STUB_CALLS"] = str(self.calls_path)
         env["WS_STUB_UNKNOWN"] = str(self.unknown)
         env["KUBECONFIG"] = str(self.root / "no-such-kubeconfig")
