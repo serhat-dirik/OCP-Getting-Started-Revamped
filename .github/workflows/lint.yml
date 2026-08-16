@@ -2354,3 +2354,49 @@ jobs:
           fi
           echo "self-test ok — every detector fired (rc=1)."
           python3 tools/lint/demo-region-identifier-guard.py
+
+  ttyd-auth-header:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Same helm pin as the helm/copy-drift/image-pull-policy/sync-wave-pvc jobs so every job reads
+      # the same render.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # Hard dependency: this guard parses the RENDERED chart rather than pattern-matching the
+        # template. A missing parser exits 2, which the self-test assertion below turns into a
+        # failure — it can never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Nothing token-shaped may be fed into the header ttyd reads
+        # Measured 2026-08-16, cost most of a day. ttyd/libwebsockets silently REFUSES a custom
+        # header whose value exceeds ~29 characters — bisected through the cockpit's own nginx with
+        # subprotocol tty: 10/15/20/25/28 accepted (101), 30/31/34/40/50/61 denied (502), while a
+        # 2.4 KB Cookie on the same request passed, so total header size is not the limit. An
+        # OpenShift access token is `sha256~` + 43 = 51 characters and can NEVER pass through -H.
+        # The original design interpolated $http_x_forwarded_access_token into it; every terminal
+        # died, and ttyd reports "refused for length" and "absent" IDENTICALLY — one closed socket,
+        # one client-side "reconnecting" — which sent the search to oauth-proxy, cookie refresh and
+        # websocket header stripping for hours, hunting a header that was never missing.
+        #
+        # The guard FOLLOWS `-H` from the rendered ttyd command line to the proxy_set_header that
+        # feeds it, rather than knowing today's header name. That is deliberate: hard-coding
+        # X-Ws-Session is the failure mode where a rename disarms the gate and it reports success
+        # forever, so the canary renames the header AND changes its case.
+        run: |
+          rc=0
+          python3 tools/lint/ttyd-auth-header-guard.py --self-test || rc=$?
+          # Exactly 1 = every canary detected. 0 = the guard is blind; 2 = the canary chart is
+          # missing, a case went undetected, a decoy fired, or a dependency is absent. Either way
+          # detection is unproven.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::ttyd-auth-header-guard self-test must exit 1 (canaries detected);" \
+                 "got rc=$rc. The guard's detection is unproven — refusing to trust a clean" \
+                 "result on the real tree."
+            exit 1
+          fi
+          python3 tools/lint/ttyd-auth-header-guard.py

@@ -1,0 +1,96 @@
+---
+# THE FOUR WAYS THE SAME EVENING COMES BACK WEARING A DIFFERENT COAT. One ttyd container per case,
+# one nginx location per case, so every violation is attributable to exactly one header name.
+#
+#   x-cockpit-identity  RENAMED + RE-CASED + fed through a map that FORWARDS.
+#                       Three disarm vectors in one line. A guard that hard-codes `X-Ws-Session`
+#                       reports nothing; a guard that compares field names case-sensitively reports
+#                       nothing; a guard that only looks at variables named directly in the value
+#                       reports nothing. `$canary_forwarded` carries no credential word in its own
+#                       name, so ONLY following the map catches it.
+#   x-set-session       fed through `set`, the other one-hop indirection.
+#   x-long-session      34 literal characters, no variables at all — over the measured deny floor
+#                       with nothing left to reason about at runtime.
+#   x-empty-session     the empty value. nginx does not send the field at all, ttyd denies the
+#                       websocket for an ABSENT header, and the attendee sees the identical
+#                       "reconnecting" they see when the value is too long. Same evening, other end.
+#
+# The four ttyd containers also spell the flag four different ways — `-H X`, `--auth-header X`,
+# `--auth-header=X`, `-HX` — because a parser that only understands the spelling in the real chart
+# is a parser that stops working the first time someone reformats it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canary-variants-proxy
+data:
+  nginx.conf: |
+    events {}
+    http {
+      # Results reference the source, so this map FORWARDS it. Contrast with clean.yaml's map,
+      # whose results are the constants 1 and 0.
+      map {{ .Values.tokenVar }} $canary_forwarded { default {{ .Values.tokenVar }}; '' ""; }
+      server {
+        listen 8080;
+        location /tty-renamed/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_set_header {{ .Values.renamedNginxFieldName }} "u={{ .Values.userVar }};t=$canary_forwarded";
+        }
+        location /tty-set/ {
+          proxy_pass http://127.0.0.1:7682/;
+          set $canary_via_set "{{ .Values.tokenVar }}";
+          proxy_set_header X-Set-Session "u={{ .Values.userVar }};t=$canary_via_set";
+        }
+        location /tty-long/ {
+          proxy_pass http://127.0.0.1:7683/;
+          proxy_set_header X-Long-Session "{{ .Values.overlongLiteral }}";
+        }
+        location /tty-empty/ {
+          proxy_pass http://127.0.0.1:7684/;
+          proxy_set_header X-Empty-Session "";
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-variants-cockpit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-variants-cockpit
+  template:
+    metadata:
+      labels:
+        app: canary-variants-cockpit
+    spec:
+      containers:
+        - name: terminal-renamed
+          image: quay.io/example/canary-terminal:1.0
+          args:
+            - /bin/bash
+            - -lc
+            - |
+              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H {{ .Values.renamedTtydFlagName }} /bin/bash
+        - name: terminal-set
+          image: quay.io/example/canary-terminal:1.0
+          args:
+            - /bin/bash
+            - -lc
+            - |
+              exec /usr/bin/ttyd -p 7682 -i 0.0.0.0 -W --auth-header X-Set-Session /bin/bash
+        - name: terminal-long
+          image: quay.io/example/canary-terminal:1.0
+          args:
+            - /bin/bash
+            - -lc
+            - |
+              exec /usr/bin/ttyd -p 7683 -i 0.0.0.0 -W --auth-header=X-Long-Session /bin/bash
+        - name: terminal-empty
+          image: quay.io/example/canary-terminal:1.0
+          args:
+            - /bin/bash
+            - -lc
+            - |
+              exec /usr/bin/ttyd -p 7684 -i 0.0.0.0 -W -HX-Empty-Session /bin/bash

@@ -1,0 +1,52 @@
+---
+# THE EXACT MEASURED REGRESSION, 2026-08-16. The OpenShift access token interpolated into the one
+# header ttyd reads. `sha256~` + 43 = 51 characters against a ~29-character ceiling, so every
+# websocket is refused and every terminal renders "reconnecting" with no reason given.
+#
+# TWO THINGS THIS FIXTURE PROVES BEYOND "a token is present":
+#
+#   1. THE `;` IS INSIDE THE QUOTES. The token sits AFTER it. A guard that reads the directive with
+#      a non-greedy match up to the first `;` sees only `"u=$http_x_forwarded_user` and reports this
+#      file clean — the guard would be blind to the precise line it exists to catch.
+#   2. THE TOKEN VARIABLE IS NOT IN THIS FILE. It arrives from values.yaml, so `git grep
+#      http_x_forwarded_access_token -- tools/lint/*.canary` does not find it here. Only a render
+#      sees it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canary-token-proxy
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 8080;
+        location /tty-top/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_set_header {{ .Values.sharedHeader }} "u={{ .Values.userVar }};t={{ .Values.tokenVar }}";
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-token-cockpit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-token-cockpit
+  template:
+    metadata:
+      labels:
+        app: canary-token-cockpit
+    spec:
+      containers:
+        - name: terminal
+          image: quay.io/example/canary-terminal:1.0
+          args:
+            - /bin/bash
+            - -lc
+            - |
+              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H {{ .Values.sharedHeader }} /bin/bash

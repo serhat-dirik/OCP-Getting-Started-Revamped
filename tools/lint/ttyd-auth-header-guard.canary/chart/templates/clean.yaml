@@ -1,0 +1,87 @@
+---
+# THE MUST-NOT-FIRE HALF. Everything in this file is a shape that looks like the defect and is not
+# one. A guard that flags any of it is a guard nobody will leave switched on.
+#
+#   * X-Forwarded-Access-Token ""      — a token header EMPTIED, on a location ttyd does not read.
+#                                        The empty-value rule is scoped to ttyd's own header; the
+#                                        real chart empties this exact field on its content
+#                                        location and that line must stay silent forever.
+#   * X-Other-Header <token>           — the token interpolated into a header ttyd does NOT read.
+#                                        Out of scope by construction: this guard is about the one
+#                                        header `-H` names, not a blanket "no tokens anywhere".
+#   * X-Ws-Session-Extra <token>       — a name that has ttyd's header as a PREFIX. Matching must
+#                                        be on the whole field name, not a prefix.
+#   * map … { default 1; '' 0; }       — a map whose results are constants COLLAPSES its source to
+#                                        a 0/1 flag. Feeding that into ttyd's header is safe, and
+#                                        the real chart derives its access-log presence flags this
+#                                        way. Naive taint propagation would flag it.
+#   * a ttyd with no -H at all         — the per-user cockpit shape (showroom.yaml). Nothing to
+#                                        follow, nothing to check, no blocker.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canary-clean-proxy
+data:
+  nginx.conf: |
+    events {}
+    http {
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+      # Results are constants, so the token cannot reach anything derived from this.
+      map {{ .Values.tokenVar }} $canary_hdr_token { default 1; '' 0; }
+      log_format canary '$canary_hdr_token';
+      server {
+        listen 8080;
+        location / {
+          proxy_pass http://127.0.0.1:8000;
+          proxy_set_header X-Forwarded-Access-Token "";
+          proxy_set_header X-Other-Header "{{ .Values.tokenVar }}";
+        }
+        location /tty-top/ {
+          proxy_pass http://127.0.0.1:7681/;
+          proxy_set_header {{ .Values.sharedHeader }} "u={{ .Values.userVar }};t=";
+          proxy_set_header X-Ws-Session-Extra "u={{ .Values.userVar }};t={{ .Values.tokenVar }}";
+          access_log /dev/stdout canary;
+        }
+        location /tty-bottom/ {
+          proxy_pass http://127.0.0.1:7681/;
+          # Fed from the COLLAPSED map above: one character, and provably not the token.
+          proxy_set_header {{ .Values.sharedHeader }} "u={{ .Values.userVar }};t=$canary_hdr_token";
+          access_log /dev/stdout canary;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: canary-clean-cockpit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canary-clean-cockpit
+  template:
+    metadata:
+      labels:
+        app: canary-clean-cockpit
+    spec:
+      containers:
+        - name: terminal
+          image: quay.io/example/canary-terminal:1.0
+          args:
+            - /bin/bash
+            - -lc
+            - |
+              # A shell comment naming the flag: `ttyd -H X-Not-A-Real-Header` must not be read as
+              # an invocation, or every runbook paragraph becomes a finding.
+              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H {{ .Values.sharedHeader }} /bin/bash
+        - name: terminal-no-auth-proxy
+          image: quay.io/example/canary-terminal:1.0
+          args:
+            - /bin/bash
+            - -lc
+            - |
+              exec /usr/bin/ttyd -p 7682 -i 0.0.0.0 -W /bin/bash
