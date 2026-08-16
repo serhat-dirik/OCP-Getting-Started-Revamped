@@ -624,19 +624,34 @@ data:
           proxy_read_timeout 43200000;
           proxy_set_header Host $http_host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          # ttyd reads ONE header (-H) and this is it. It is COMPOSED rather than forwarded, and
-          # that is the fix for the disconnect loop, not a tidy-up:
+          # ttyd reads ONE header (-H) and this is it. Two rules govern its value, both measured on
+          # this image on 2026-08-16, and the second is the one that cost a full evening.
           #
-          # ttyd's -H DENIES the websocket when its header is absent. A denied websocket is a
-          # closed socket, and a closed socket is the only thing the ttyd client can report —
-          # "reconnecting", forever. The wrapper's own refusal path closed the socket too. So a
-          # missing token, an expired token and a wrapper bug were three different faults wearing
-          # one indistinguishable symptom, and no fix to any of them could ever LOOK different.
+          # RULE 1 — IT MUST NEVER BE EMPTY. ttyd's -H DENIES the websocket when its header is
+          # absent, a denied websocket is a closed socket, and a closed socket is the only thing the
+          # ttyd client can render: "reconnecting", forever, with no reason. Composing the value
+          # here means ttyd can never deny anyone; the decision moves into the wrapper, which holds
+          # the connection open and says what happened.
           #
-          # This value is never empty — at worst it is literally "u=;t=" — so ttyd can no longer
-          # deny anyone, and the decision moves into the wrapper, which can hold the shell open
-          # and say which half arrived. Diagnosis stops costing a deploy.
-          proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=$http_x_forwarded_access_token";
+          # RULE 2 — IT MUST STAY UNDER ~29 CHARACTERS. ttyd/libwebsockets silently refuses a custom
+          # header whose VALUE is longer than that. Measured by bisection through this very nginx,
+          # subprotocol tty, one variable:
+          #     value length 10 15 20 25 28 -> 101 accepted
+          #     value length 30 31 34 40 50 61 -> 502 DENIED
+          # Total header size is NOT the limit — a 2.4 KB Cookie on the same request passes fine.
+          #
+          # THIS IS WHY THE TOKEN IS NOT HERE, AND IT IS NOT A PREFERENCE. An OpenShift access token
+          # is `sha256~` + 43 = 51 characters, so it can NEVER pass through -H. The original design
+          # sent exactly that and every terminal died — and the failure looked like "the token never
+          # arrived", which sent the search to oauth-proxy, cookie refresh, websocket header
+          # stripping and the proxy's source. The token was arriving the whole time: this location's
+          # own access_log records hdr_token=1 on the request ttyd rejected. It was refused for
+          # LENGTH, and ttyd reports refusal and absence identically.
+          #
+          # A username fits with room to spare (u=user6;t= is 10), so the wrapper takes the name
+          # from here and the credential from the shared workshop password. If a future cockpit ever
+          # needs a real secret on the connection, -H is not the channel — do not try again here.
+          proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=";
           access_log /dev/stdout ws_identity;
         }
         location = /tty-bottom { return 302 /tty-bottom/; }
@@ -648,7 +663,9 @@ data:
           proxy_read_timeout 43200000;
           proxy_set_header Host $http_host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=$http_x_forwarded_access_token";
+          # Same two rules as /tty-top/ above: never empty, never longer than ~29 characters. The
+          # token is deliberately absent — it is 51 characters and physically cannot pass -H.
+          proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=";
           access_log /dev/stdout ws_identity;
         }
       }
@@ -860,11 +877,17 @@ spec:
           # drawn from the bad probe sent the search to cookies for hours. If you probe a websocket,
           # send the subprotocol the real client sends, or you are testing a different code path.
           #
-          # WHY THE HEADER IS NO LONGER LOAD-BEARING. Whether --pass-access-token survives to the
-          # upstream on a WEBSOCKET is a property of the proxy build, not of this chart: oauth-proxy
-          # routes upgrades through yhat/wsutil instead of its normal reverse proxy (read
-          # UpstreamProxy.ServeHTTP). Rather than keep betting the terminal on that, nginx now
-          # composes a never-empty X-Ws-Session and the wrapper decides — see the ttyd invocation.
+          # --pass-access-token WORKS, INCLUDING ON WEBSOCKETS. This was doubted at length, because
+          # oauth-proxy routes upgrades through yhat/wsutil rather than its normal reverse proxy
+          # (read UpstreamProxy.ServeHTTP), and it was reasonable to suspect that hop dropped the
+          # header. It does not — wsutil shallow-copies the whole header map. MEASURED on the real
+          # browser request that failed: nginx logged `hdr_user=1 hdr_token=1` on the very
+          # /tty-top/ws upgrade ttyd then rejected. Both headers were present. The rejection was
+          # ttyd's ~29-character cap on a custom header value, not a missing token.
+          #
+          # The flag stays even though nginx no longer forwards the token to ttyd: it is what makes
+          # hdr_token=1 meaningful in the access log, which is now the standing proof that the front
+          # door is healthy. The token reaches nginx and stops there.
           #
           # DIAGNOSING THIS AGAIN: `oc logs -c nginx` now prints hdr_user=0|1 hdr_token=0|1 per tty
           # request (presence only — a token in a log is a credential in a log). That answers "did
@@ -1028,8 +1051,11 @@ spec:
                 echo '_kc="$(mktemp /tmp/.ws-kube.XXXXXXXXXX)" || { echo "❌ cannot create a session kubeconfig"; exec sleep 3600; }'
                 echo 'chmod 0600 "$_kc"'
                 echo 'WS_USER=""'
-                echo '# --- path 1: the front door passed an access token. Preferred, because the'
-                echo '# credential IS the attendee OAuth session and no shared secret is involved.'
+                echo '# --- path 1: an access token arrived on the connection. UNREACHABLE VIA -H TODAY,'
+                echo '# and kept deliberately: ttyd caps a custom header value at ~29 characters and an'
+                echo '# OpenShift token is 51, so nginx does not even send it (see the tty location).'
+                echo '# This branch is what a future per-connection channel would land in, and it costs'
+                echo '# one string test. Do NOT re-point nginx at -H to feed it.'
                 echo 'if [ -n "$_tok" ]; then'
                 echo '{'
                 echo '  echo "apiVersion: v1"'
