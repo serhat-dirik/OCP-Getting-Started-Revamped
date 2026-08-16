@@ -559,9 +559,9 @@ MUTANTS = [
      "takes a workload, but the SA reading the table to find which container is off-digest is "
      "given a name that is not in the pod"),
     ("check-exit-status-lost", "ws",
-     '      echo "   roll them:  ws rebuild-images --no-build ${hint_scope}'
+     '      echo "   roll them:  ${WS_CMD} rebuild-images --no-build ${hint_scope}'
      '${filter:+ --image ${filter}}"\n      rebuild_end; trap - EXIT\n      return 1',
-     '      echo "   roll them:  ws rebuild-images --no-build ${hint_scope}'
+     '      echo "   roll them:  ${WS_CMD} rebuild-images --no-build ${hint_scope}'
      '${filter:+ --image ${filter}}"\n      rebuild_end; trap - EXIT\n      return 0',
      "`--check` prints the drift and exits 0. ws doctor and CI consume that status as a pass/fail, "
      "so a drifted cluster reports healthy while the table on screen says otherwise"),
@@ -574,12 +574,12 @@ MUTANTS = [
     # status can no longer be split across fds (SEV3-I). These mutants must track that wording — a
     # mutant that no longer matches the source is a no-op, and a no-op mutant proves nothing.
     ("doctor-row-mark-softened", "ws",
-     'nok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
-     'ok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"',
+     'nok "${d_what}: ${d_names} — detail: ${WS_CMD} rebuild-images --check${d_fix}"; fail=1',
+     'ok "${d_what}: ${d_names} — detail: ${WS_CMD} rebuild-images --check${d_fix}"',
      "the drift row reports ✅ with the drift spelled out beside it, and ws doctor stops failing"),
     ("doctor-row-offenders-dropped", "ws",
-     'nok "${d_what}: ${d_names} — detail: ws rebuild-images --check${d_fix}"; fail=1',
-     'nok "${d_what} — detail: ws rebuild-images --check${d_fix}"; fail=1',
+     'nok "${d_what}: ${d_names} — detail: ${WS_CMD} rebuild-images --check${d_fix}"; fail=1',
+     'nok "${d_what} — detail: ${WS_CMD} rebuild-images --check${d_fix}"; fail=1',
      "the row keeps its mark and its counts but stops naming WHICH consumers drifted, so the "
      "reader is told a number and given nowhere to go"),
     ("unmodelled-oc-call-introduced", "ws",
