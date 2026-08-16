@@ -158,7 +158,7 @@ tools/ws/ws git-refresh --restart-terminals --all
 page — and each person signs in as their own attendee user:
 
 ```
-https://showroom-shared-ogsr-showroom.<cluster-domain>
+https://ogsr-showroom.<cluster-domain>
 ```
 
 They log in as `userN` with the shared workshop password (a deliberately memorable, non-secret
@@ -173,7 +173,7 @@ https://ogsr-pad.<cluster-domain>/p/workshop
 ```
 
 The SA demo cockpit, if you're using it, is
-`https://showroom-shared-demos-ogsr-showroom.<cluster-domain>`, behind the same login.
+`https://ogsr-demos.<cluster-domain>`, behind the same login.
 
 **One last glance before the room fills up:**
 

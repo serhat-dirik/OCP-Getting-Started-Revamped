@@ -146,7 +146,7 @@ restarted since an update runs the old copy. The symptom is `ws prep` being refu
 and tool tabs in a single browser page:
 
 ```
-https://showroom-shared-ogsr-showroom.<cluster-domain>
+https://ogsr-showroom.<cluster-domain>
 ```
 
 It sits behind an OpenShift login. Attendees sign in as their own `userN` with the shared password the
@@ -160,7 +160,7 @@ people claim so two attendees never take the same slot:
 https://ogsr-pad.<cluster-domain>/p/workshop
 ```
 
-The SA demo cockpit is `https://showroom-shared-demos-ogsr-showroom.<cluster-domain>`, behind the same
+The SA demo cockpit is `https://ogsr-demos.<cluster-domain>`, behind the same
 login.
 
 > Earlier releases gave each attendee a personal `showroom-<user>` URL with no authentication in front
