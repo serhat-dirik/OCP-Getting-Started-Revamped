@@ -463,6 +463,63 @@ spec:
                 workshop.redhat.com/layer=workshop-config \
                 workshop.redhat.com/owner=ogsr >/dev/null
 
+              # ── STABLE COOKIE SECRET ──────────────────────────────────────────────────────────
+              # oauth-proxy signs its session cookie with this. Until 2026-08-16 the Deployment drew
+              # it from /dev/urandom in its own command line, so it was NEW ON EVERY POD START and
+              # every rollout, drain, OOM kill or reschedule signed out the entire cohort mid-lab.
+              # Measured that day: a chart change rolled the pod, and the next request logged
+              # "Cookie Signature not valid" for a session eight minutes old. Minting it once here
+              # is what makes sessions survive a restart.
+              #
+              # LENGTH IS LOAD-BEARING AND DIFFERENT FROM THE CLIENT SECRET'S. oauth-proxy requires
+              # 16, 24 or 32 bytes after its own base64 decode and EXITS otherwise. 32 alnum
+              # characters are valid base64 of length 32, so they decode to exactly 24 bytes
+              # (AES-192). Do NOT reuse mint_into here: its 48 characters decode to 36 bytes and the
+              # proxy refuses to start.
+              mint_cookie_into() {
+                local raw gen=""
+                for _ in 1 2 3 4 5; do
+                  raw="$(head -c 64 /dev/urandom | base64)"
+                  gen="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9')"
+                  gen="${gen:0:32}"
+                  if [[ "${#gen}" -eq 32 ]]; then break; fi
+                done
+                [[ "${#gen}" -eq 32 ]] || die "could not draw a 32 character cookie secret from /dev/urandom in 5 attempts"
+                printf '%s' "$gen" > "$1"
+                return 0
+              }
+
+              # Same never-replace rule as the client secret, and for a sharper reason: moving this
+              # value signs every live attendee out, which is the exact failure it exists to prevent.
+              ensure_cookie_secret() {
+                local out
+                if out="$(oc get secret "$SECRET_NAME" -n "$NS" -o jsonpath='{.data.cookieSecret}' 2>/dev/null)" && [[ -n "$out" ]]; then
+                  ok "reusing the cookie secret already in ${NS}/${SECRET_NAME} — live sessions survive this restart"
+                  return 0
+                fi
+                info "no cookie secret yet — minting one (first install, or an upgrade from the per-pod /dev/urandom version)"
+                mint_cookie_into "$TMPD/cookieSecret"
+                # Both values come from FILES and the object is rebuilt from what is already in hand,
+                # so nothing is echoed and nothing becomes an argv. clientSecret is written back
+                # byte-identical to what was just read, so this is a no-op for that key.
+                if oc create secret generic "$SECRET_NAME" -n "$NS" \
+                     --from-file=clientSecret="$TMPD/clientSecret" \
+                     --from-file=cookieSecret="$TMPD/cookieSecret" \
+                     --dry-run=client -o yaml 2>"$TMPD/err" | oc apply -f - >/dev/null 2>>"$TMPD/err"; then
+                  ok "stored a stable cookie secret in ${NS}/${SECRET_NAME} (value not printed, here or anywhere)"
+                  return 0
+                fi
+                # DELIBERATELY NOT FATAL. Without this key the Deployment falls back to a per-pod
+                # random value, which is precisely the old behaviour — degraded, not broken. A
+                # cockpit that refuses to come up is a worse outcome than one whose sessions do not
+                # survive a restart, and this Job also owns the client secret the cockpit cannot
+                # start without.
+                err "could not store a cookie secret: $(tr '\n' ' ' < "$TMPD/err")"
+                err "the cockpit still starts, but each restart will sign attendees out — re-sync to retry"
+                return 0
+              }
+              ensure_cookie_secret
+
               # $(<file) is a bash builtin read — no `cat`, no extra process.
               CS_VAL="$(<"$TMPD/clientSecret")"
               [[ -n "$CS_VAL" ]] || die "client secret file is empty after ${NS}/${SECRET_NAME} was read/created"
@@ -829,6 +886,24 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
+              # THE COOKIE SECRET MUST OUTLIVE THIS POD. It signs the session cookie, so when it
+              # changes every attendee is signed out at once. Drawing it from /dev/urandom here —
+              # which is what this file did until 2026-08-16 — means a NEW one on every pod start,
+              # so a chart change, a node drain, an OOM kill or any reschedule evicts the whole
+              # cohort mid-lab. Measured that day: a rollout, then "Cookie Signature not valid" for
+              # a session eight minutes old.
+              #
+              # The bootstrap Job mints one ONCE into the same Secret that already holds the client
+              # secret. The fallback is deliberate and is NOT dead code: on a first install the
+              # Deployment can be applied before the hook Job has stored the key, and a cockpit that
+              # refuses to start is a worse failure than one whose sessions do not survive a restart.
+              # -s not -f: an empty file is as useless as a missing one and must take the fallback.
+              if [ -s /etc/oauth-cookie/cookie-secret ]; then
+                COOKIE_FLAG="--cookie-secret-file=/etc/oauth-cookie/cookie-secret"
+              else
+                echo "WARNING: no stored cookie secret — using a per-pod value; attendees will be signed out when this pod restarts" >&2
+                COOKIE_FLAG="--cookie-secret=$(head -c 32 /dev/urandom | base64 | head -c 32)"
+              fi
               exec /usr/bin/oauth-proxy \
                 --https-address=:8443 \
                 --http-address= \
@@ -840,7 +915,7 @@ spec:
                 --upstream=http://127.0.0.1:8080 \
                 --tls-cert=/etc/tls/private/tls.crt \
                 --tls-key=/etc/tls/private/tls.key \
-                --cookie-secret="$(head -c 32 /dev/urandom | base64 | head -c 32)" \
+                "$COOKIE_FLAG" \
                 --cookie-expire=24h \
                 --cookie-refresh=4h \
                 --pass-access-token=true \
@@ -899,6 +974,15 @@ spec:
               mountPath: /etc/tls/private
             - name: oauth-client
               mountPath: /etc/oauth
+              readOnly: true
+            # Separate volume from oauth-client ON PURPOSE, because the two keys need opposite
+            # failure behaviour. A missing clientSecret must block the pod — oauth-proxy cannot work
+            # without it, and failing fast is right. A missing cookieSecret must NOT, because it is
+            # absent for the seconds between a first install applying this Deployment and the wave-2
+            # hook storing the key. `optional` is a property of the whole volume, so the only way to
+            # have both is two volumes.
+            - name: oauth-cookie
+              mountPath: /etc/oauth-cookie
               readOnly: true
         - name: nginx
           image: {{ $img.nginx | quote }}
@@ -1236,6 +1320,19 @@ spec:
             items:
               - key: clientSecret
                 path: client-secret
+        # Same Secret, second key, and `optional: true` is the whole point — it is what lets a
+        # NAMED-BUT-ABSENT key be tolerated instead of wedging the pod in ContainerCreating. The
+        # container tests for the file with -s and falls back to a per-pod value, so the only cost
+        # of it being missing is that a restart signs attendees out, which is exactly the old
+        # behaviour rather than a new failure.
+        - name: oauth-cookie
+          secret:
+            secretName: {{ $clientSecretName }}
+            optional: true
+            defaultMode: 288
+            items:
+              - key: cookieSecret
+                path: cookie-secret
         - name: homes
           persistentVolumeClaim:
             claimName: {{ $name }}-homes
