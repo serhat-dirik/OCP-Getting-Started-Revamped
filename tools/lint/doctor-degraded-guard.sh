@@ -74,6 +74,12 @@ bad()  { echo "❌ $*" >&2; }
 note() { echo "   $*" >&2; }
 
 WS="tools/ws/ws"
+# `doctor` is an OPERATOR verb, and the attendee entry point now refuses it. This guard both
+# EXECUTES and sed-MUTATES the ws file for its self-test, so it must keep pointing at the real
+# file and ask for the operator surface by audience instead — pointing WS at tools/ws/adm makes
+# every mutant find nothing to replace, which reads as "ws was reworded" rather than "wrong file".
+WS_AUDIENCE="admin"
+export WS_AUDIENCE
 FIXTURES="${LINT_DIR}/doctor-degraded-fixtures"
 STUB="${FIXTURES}/cmd-stub.py"
 CASES=(attendee-forbidden admin-readable platform-down)
@@ -137,7 +143,12 @@ run_case() {  # <sandbox> <case-file> → runs ws once; sets CASE_OUT/CASE_RC/CA
   CASE_RC=0
   # Word splitting on $argv is intended: the recording stores the ws command line as text.
   # shellcheck disable=SC2086
-  env -i PATH="${dir}/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$dir" \
+  # WS_AUDIENCE must be listed HERE, not exported above: `env -i` scrubs the environment, so an
+  # export in this script never reaches ws. `doctor` is an operator verb and the attendee surface
+  # refuses it — without this the recorded run produces a refusal instead of rows, and the guard
+  # reports "ws doctor no longer reports what a recorded cluster must produce", which is true but
+  # points at the wrong thing entirely.
+  env -i PATH="${dir}/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$dir" WS_AUDIENCE="admin" \
       KUBECONFIG="${dir}/no-such-kubeconfig" \
       WS_STUB_CASE="$case_file" WS_STUB_UNKNOWN="$CASE_UNKNOWN" \
       bash "${dir}/${WS}" $argv > "$CASE_OUT" 2>&1 || CASE_RC=$?

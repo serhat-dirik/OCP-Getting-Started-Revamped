@@ -5599,8 +5599,73 @@ cmd_maas() {
   esac
 }
 
+# ── TWO ENTRY POINTS, ONE IMPLEMENTATION ────────────────────────────────────────────
+# `ws` is the ATTENDEE surface — the four verbs someone TAKING the workshop needs.
+# `adm` is the SA/operator surface — everything — and it is THIS SAME FILE, reached
+# through tools/ws/adm, which sets WS_AUDIENCE=admin and execs here.
+#
+# WHY NOT TWO FILES. A literal second copy was the other option and was rejected: the
+# two surfaces share ~5,000 lines of module resolution, Argo waits, identity handling
+# and cockpit plumbing, and this repo already ships copy-drift-guard because duplicated
+# logic here has rotted before. One file cannot drift from itself.
+#
+# WHAT THIS BUYS, STATED HONESTLY. It fixes the SURFACE. An attendee's `ws help` is four
+# verbs instead of twenty-one, and an operator verb typed into a cockpit terminal gets
+# one sentence instead of a late RBAC error naming a resource they have never heard of
+# and that reads like their fault. It is NOT an authorization boundary: the cockpit
+# mounts this repo read-only, so `…/tools/ws/adm` is reachable by path. The boundary is
+# where it always was — the attendee's own credentials, plus the privilege checks inside
+# the destructive verbs themselves. Do not let this gate be mistaken for those.
+WS_ATTENDEE_VERBS=(help list prep verify reset)
+
+ws_is_admin() { [[ "${WS_AUDIENCE:-attendee}" == "admin" ]]; }
+
+ws_verb_allowed() {  # verb → 0 if THIS entry point may run it
+  # Explicit ifs, not `cond && return`: this repo has already paid for an AND-list as a
+  # function's last statement returning 1 and killing the script under `set -e`.
+  if ws_is_admin; then return 0; fi
+  local v="$1" a
+  for a in "${WS_ATTENDEE_VERBS[@]}"; do
+    if [[ "$v" == "$a" ]]; then return 0; fi
+  done
+  return 1
+}
+
+ws_attendee_help() {
+  # Written for this audience rather than sliced out of the header comment. The header's
+  # own note says its line range must be re-counted whenever anything above it moves —
+  # deriving the attendee help from that range would inherit the same rot.
+  cat <<'EOF'
+ws — your workshop commands.
+
+  ws list                  every module, with its number and name
+  ws prep   <module>       set up a module's starting point — run this first
+  ws verify <module>       check your work
+  ws reset  <module>       put the module back to its starting point
+
+<module> is a number (m08) or a name (app-security-testing); `ws list` shows both.
+You never need to say who you are: ws uses the login this terminal already has.
+
+Running the workshop rather than taking it? The operator tool is `adm` — these four
+plus the cohort, install and troubleshooting commands:  adm help
+EOF
+}
+
 main() {
   local cmd="${1:-}"
+  # Refused HERE, before ws_stay_current or anything else runs. An operator verb that
+  # fails later fails as an RBAC denial about a resource the attendee did not ask for.
+  if ! ws_verb_allowed "${cmd:-help}"; then
+    printf '%s\n' \
+      "ws: '${cmd}' is an instructor/operator command, not part of your workshop." \
+      "" \
+      "  Yours:  ws list · ws prep <module> · ws verify <module> · ws reset <module>" \
+      "          ws help   for the details" \
+      "" \
+      "  Running the workshop rather than taking it? Use \`adm ${cmd}\` — same tool," \
+      "  operator surface." >&2
+    return 2
+  fi
   # Attendee-facing commands run from the cockpit's pod-local clone, which goes stale silently.
   # Refresh (and re-exec if `ws` itself moved) BEFORE any of them acts — see ws_stay_current.
   case "$cmd" in prep|start|verify|smoke|reset|solve) ws_stay_current "$@";; esac
@@ -5715,8 +5780,13 @@ main() {
     # from 27: the F-03 banner correction added nine header lines — two wrapped command rows, the
     # blank, and the six-line --user/presenter paragraph. Then 38: the two-line "both spellings must
     # AGREE" note that user_conflict_guard enforces. Then 40: `ws by-design`'s two-line entry.)
-    ""|help|-h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,40p';;
-    *) die "unknown command '$cmd' — try: ws help";;
+    ""|help|-h|--help)
+      # The header comment is the OPERATOR help and stays the full 21-verb list; the
+      # attendee gets a written-for-them four. Same file, two audiences.
+      if ws_is_admin; then grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,40p'
+      else ws_attendee_help; fi ;;
+    *) if ws_is_admin; then die "unknown command '$cmd' — try: adm help"
+       else die "unknown command '$cmd' — try: ws help"; fi ;;
   esac
 }
 

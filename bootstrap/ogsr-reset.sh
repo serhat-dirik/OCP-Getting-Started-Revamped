@@ -98,7 +98,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-WS_BIN="${REPO_ROOT}/tools/ws/ws"
+WS_BIN="${REPO_ROOT}/tools/ws/adm"   # SA verb (cohort-reset/scale-users): the operator entry point, not the attendee one
 
 DRY_RUN="false"
 ASSUME_YES="false"

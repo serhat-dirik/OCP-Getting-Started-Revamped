@@ -41,6 +41,15 @@ set -uo pipefail
 WS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="${WS_DIR}/ws"
 
+# THIS HARNESS TESTS THE PARSER, WHICH IS SHARED BY BOTH ENTRY POINTS. Its assertions
+# cover operator verbs too (diag, doctor, status), and those are refused on the attendee
+# surface — so without this the harness would grade the audience gate instead of the
+# argument parser, and report "a third bare token is refused" for a command that never
+# reached the parser at all. Set here rather than switching WS to tools/ws/adm because
+# adm EXECS ws, and several assertions source this file instead of running it.
+WS_AUDIENCE="admin"
+export WS_AUDIENCE
+
 fail() { echo "❌ $*" >&2; }
 note() { echo "   $*" >&2; }
 pass() { echo "✅ $*"; }
