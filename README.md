@@ -64,7 +64,7 @@ Alongside the per-attendee workshop cockpits, the install deploys an **SA-Demos 
 | `platform-portfolio/` | **Standalone GitOps installer** — operators/tools as composable Argo CD stacks, replicable on any OpenShift 4.20+ cluster. Workshop-agnostic; also usable alone for SA PoC/demo clusters. See its [README](platform-portfolio/README.md) |
 | `gitops/` | Workshop layer on top of the portfolio: users/RBAC/quotas, Gitea seeding, per-module **entry states**, promotion structures |
 | `pipelines/` | Parasol company task library + per-module pipeline definitions |
-| `tools/` | `ws` CLI (`ws start\|verify\|reset\|solve <module>`) + per-module verify scripts |
+| `tools/` | `ws` attendee CLI (list/prep/verify/reset) + `adm` operator CLI (start/solve/status/...), plus per-module verify scripts |
 | `bootstrap/` | Cluster installer: portfolio stacks + workshop layer in one command |
 | `helm/bootstrap/` | The same install as a Helm chart — how the Red Hat Demo Platform deploys the workshop from its catalog, instead of you running `bootstrap/install.sh` |
 | `showroom/` | Site configs that build the attendee cockpits and the SA demo cockpit |
@@ -113,10 +113,14 @@ The variables that matter:
 
 ## Starting the Workshop
 
+The commands below run from your own machine and manage the whole room — they use `adm`, the
+operator surface of the workshop CLI. Attendees only ever see `ws`, its four-verb surface
+(`list`/`prep`/`verify`/`reset`), inside the cockpit — steps 3 and 4 below are theirs.
+
 **1. On the morning of the session, refresh the attendee logins.**
 
 ```bash
-tools/ws/ws session-refresh --all
+tools/ws/adm session-refresh --all
 ```
 
 Each cockpit signs its attendee in when its pod starts, and that login expires on the cluster's own
@@ -135,7 +139,7 @@ at any point during the day. See [INSTALL.md §7.1](INSTALL.md) if you meet it l
 the logins *and* re-clones each cockpit, which the command above deliberately does not do:
 
 ```bash
-tools/ws/ws git-refresh --restart-terminals --all
+tools/ws/adm git-refresh --restart-terminals --all
 ```
 
 A cockpit clones the workshop when its pod starts and never again, so a cluster that has not been
@@ -191,13 +195,14 @@ That is the whole attendee loop — prep, do, verify. Nothing else is required o
 
 ### Managing the session
 
-From your admin machine, the same CLI runs against the whole cohort. It lives in the repo at
-`tools/ws/ws` (attendees get it on their `PATH` inside the cockpit; you call it by path):
+From your admin machine, `adm` — the operator surface of the same CLI — runs against the whole
+cohort. It lives in the repo at `tools/ws/adm` (attendees get `ws`, the four-verb attendee
+surface, on their `PATH` inside the cockpit; you call `adm` by path):
 
 ```bash
-tools/ws/ws status                     # fleet health at a glance
-tools/ws/ws start m01 --user user3     # prepare a module for someone who is stuck
-tools/ws/ws git-refresh                # publish content updates to a live session
+tools/ws/adm status                     # fleet health at a glance
+tools/ws/adm start m01 --user user3     # prepare a module for someone who is stuck
+tools/ws/adm git-refresh                # publish content updates to a live session
 ```
 
 ## Ending a Delivery
@@ -220,7 +225,7 @@ account, Gitea (with its repos), Keycloak (with its logins) and every cockpit st
 ./bootstrap/ogsr-reset.sh              # do it
 ```
 
-This is the one to run. (`ws cohort-reset` is the engine it calls internally — you do not need to run
+This is the one to run. (`adm cohort-reset` is the engine it calls internally — you do not need to run
 it yourself.)
 
 **c) Wipe users** — removes `user2`…`userN` entirely (namespaces, Keycloak identities, Gitea repos)

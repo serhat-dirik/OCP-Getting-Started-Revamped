@@ -2,8 +2,9 @@
 
 How to stand this workshop up on an OpenShift cluster, run a delivery, and clean up afterwards.
 
-All `ws` commands below are run from a clone of this repo as `tools/ws/ws`. Attendees get `ws` on their
-`PATH` inside their cockpit; you call it by path.
+Most commands below are `adm`, the operator surface of the workshop CLI, run from a clone of this repo
+as `tools/ws/adm`. Attendees get `ws`, its four-verb attendee surface (`list`/`prep`/`verify`/`reset`),
+on their `PATH` inside their cockpit; you call `adm` by path.
 
 **Contents**
 
@@ -238,7 +239,7 @@ Never plan to install in front of the room.
 ### 3.1 Preflight (read-only)
 
 ```bash
-tools/ws/ws preflight
+tools/ws/adm preflight
 ```
 
 Checks local tooling, cluster access, version, StorageClass and the worker count, then prints an
@@ -257,7 +258,7 @@ provider:
 component you did not expect them to have.
 
 **Those rows are not the whole picture.** Every *operator* is decided separately, per portfolio
-component, by a rule `ws preflight` does not run — cert-manager, Pipelines, RHACS and the rest never
+component, by a rule `adm preflight` does not run — cert-manager, Pipelines, RHACS and the rest never
 appear in the forecast above. Preview that decision with the command in the next section before you
 install on a cluster you do not own.
 
@@ -333,7 +334,7 @@ cp bootstrap/vars.example.yaml bootstrap/vars.yaml
 
 | Key | Meaning |
 |---|---|
-| `users` | Cohort size. Grow or shrink later with `ws scale-users N`. |
+| `users` | Cohort size. Grow or shrink later with `adm scale-users N`. |
 | `cluster_domain` | The `apps.` ingress domain. Leave `""` to auto-detect. |
 | `modules_disabled` | Modules to hide from this delivery — `mNN` or slugs. A disabled module is hidden from the cockpit and its components are not installed. |
 | `workshop_user_password` | Shared attendee password. Deliberately memorable, not a secret. |
@@ -369,9 +370,9 @@ It ends with a summary of what it adopted, and of which adopted resources are an
 ## 4. Verifying the install
 
 ```bash
-tools/ws/ws doctor                 # is the environment sane? (login, Argo, Gitea, operators)
-tools/ws/ws status                 # cohort dashboard: every platform app + every attendee
-tools/ws/ws status --user user1    # one attendee: namespaces + quota headroom
+tools/ws/adm doctor                 # is the environment sane? (login, Argo, Gitea, operators)
+tools/ws/adm status                 # cohort dashboard: every platform app + every attendee
+tools/ws/adm status --user user1    # one attendee: namespaces + quota headroom
 ```
 
 A healthy cluster looks like:
@@ -383,7 +384,7 @@ Summary: 8 user(s) · 8/8 cockpit(s) ready · 0 entry app(s) · platform all-Syn
 Then spot-check one module end to end:
 
 ```bash
-tools/ws/ws start  m01 --user user1
+tools/ws/adm start m01 --user user1
 tools/ws/ws verify m01 --user user1
 tools/ws/ws reset  m01 --user user1
 ```
@@ -401,16 +402,16 @@ commands.
 
 | Task | Command |
 |---|---|
-| Materialize a module for someone stuck | `tools/ws/ws start <module> --user userN` |
-| Show the finished state — **instructor only** | `tools/ws/ws solve <module> --user userN` |
+| Materialize a module for someone stuck | `tools/ws/adm start <module> --user userN` |
+| Show the finished state — **instructor only** | `tools/ws/adm solve <module> --user userN` |
 | Put someone back to the start | `tools/ws/ws reset <module> --user userN` |
-| Rotate the shared password | `tools/ws/ws passwd [NEWPASS]` |
-| Grow or shrink the cohort | `tools/ws/ws scale-users N` |
-| Push new content to cockpits | `tools/ws/ws git-refresh --restart-terminals --all` |
-| Change the AI model or rotate the key | `tools/ws/ws maas set` |
-| Check what the AI modules run on | `tools/ws/ws maas show` |
-| Are any pods running an old image? | `tools/ws/ws rebuild-images --check` |
-| Rebuild an app image everywhere | `tools/ws/ws rebuild-images --image <name> --all` |
+| Rotate the shared password | `tools/ws/adm passwd [NEWPASS]` |
+| Grow or shrink the cohort | `tools/ws/adm scale-users N` |
+| Push new content to cockpits | `tools/ws/adm git-refresh --restart-terminals --all` |
+| Change the AI model or rotate the key | `tools/ws/adm maas set` |
+| Check what the AI modules run on | `tools/ws/adm maas show` |
+| Are any pods running an old image? | `tools/ws/adm rebuild-images --check` |
+| Rebuild an app image everywhere | `tools/ws/adm rebuild-images --image <name> --all` |
 
 ### 5.1 Publishing content updates mid-session
 
@@ -421,7 +422,7 @@ early serves stale content and looks like your change never landed.
 One command does the sequencing:
 
 ```bash
-tools/ws/ws git-refresh --restart-terminals --all
+tools/ws/adm git-refresh --restart-terminals --all
 ```
 
 A scope is required — `--restart-terminals` on its own refuses with "restart needs a target" and
@@ -431,13 +432,13 @@ never mid-exercise.
 ### 5.2 Changing the AI model or rotating the key
 
 **No reinstall needed.** Each AI module reads its model and endpoint from a ConfigMap and its key from a
-Secret at runtime; `ws maas` is the entry point to them.
+Secret at runtime; `adm maas` is the entry point to them.
 
 ```bash
-tools/ws/ws maas show                            # what are the AI modules actually running on?
-tools/ws/ws maas set --model qwen3-14b           # same key, different model
-tools/ws/ws maas set --key-file ~/new-maas.key   # rotate the key, keep model + endpoint
-pbpaste | tools/ws/ws maas set --key-stdin       # paste a key without it touching disk or history
+tools/ws/adm maas show                            # what are the AI modules actually running on?
+tools/ws/adm maas set --model qwen3-14b           # same key, different model
+tools/ws/adm maas set --key-file ~/new-maas.key   # rotate the key, keep model + endpoint
+pbpaste | tools/ws/adm maas set --key-stdin       # paste a key without it touching disk or history
 ```
 
 Any value you do not supply falls back to `vars.yaml`, then to what is already on the cluster.
@@ -445,7 +446,7 @@ Any value you do not supply falls back to `vars.yaml`, then to what is already o
 There is deliberately **no `--key <value>` flag** — a key on the command line is readable by every user
 on the machine via `ps`.
 
-**Nothing is staged until the key, endpoint and model are proven together.** `ws maas set` checks the
+**Nothing is staged until the key, endpoint and model are proven together.** `adm maas set` checks the
 key's shape, asks the endpoint's `/v1/models` whether it offers your model, then spends one token on a
 real completion. A 401/403 refuses the change and cannot be overridden. All three values are written
 together, because a key from one source paired with an endpoint from another is a known way to break a
@@ -453,7 +454,7 @@ running cluster.
 
 Afterwards it re-converges every AI module for every attendee who has one materialized — without
 touching their lab work. Safe mid-session and safe to run twice. Scope with `--user userN`, or skip with
-`--no-converge`. Finish with `ws maas show` and confirm each attendee reads `working`.
+`--no-converge`. Finish with `adm maas show` and confirm each attendee reads `working`.
 
 ### 5.3 Rebuilding an app image mid-cluster
 
@@ -461,9 +462,9 @@ touching their lab work. Safe mid-session and safe to run twice. Scope with `--u
 container keeps its digest until something rolls it.
 
 ```bash
-tools/ws/ws rebuild-images --check                        # read-only: which pods are behind?
-tools/ws/ws rebuild-images --image parasol-claims --all   # build, then roll every stale consumer
-tools/ws/ws rebuild-images --no-build --user user3        # roll one attendee against current tags
+tools/ws/adm rebuild-images --check                        # read-only: which pods are behind?
+tools/ws/adm rebuild-images --image parasol-claims --all   # build, then roll every stale consumer
+tools/ws/adm rebuild-images --no-build --user user3        # roll one attendee against current tags
 ```
 
 It compares the digest each **running pod** reports against the digest its ImageStream tag points at
@@ -615,7 +616,7 @@ error: You must be logged in to the server (Unauthorized)
 before the room arrives:
 
 ```bash
-tools/ws/ws session-refresh --all
+tools/ws/adm session-refresh --all
 ```
 
 Each cockpit's kubeconfig is written **once**, when its pod starts, and holds an OAuth token that
@@ -632,7 +633,7 @@ Everything else looks healthy while this is happening — the pod is Running, th
 Synced, the cockpit page loads. Only the terminal is affected, and only from the attendee's side,
 which is why it is worth recognising on sight.
 
-`ws session-refresh` re-signs each attendee in **inside their own cockpit**: no pod restart, no
+`adm session-refresh` re-signs each attendee in **inside their own cockpit**: no pod restart, no
 content re-clone, nothing an attendee mid-exercise would notice. Scope it with `--user userN` for
 one person. It exits non-zero if any session could not be refreshed.
 
@@ -658,7 +659,7 @@ attendees may only use their own 'entries-<username>' AppProject
 The cockpit is running an **old copy of the `ws` CLI**. Fix:
 
 ```bash
-tools/ws/ws git-refresh --restart-terminals --all
+tools/ws/adm git-refresh --restart-terminals --all
 ```
 
 Each cockpit clones this repository when its pod starts, and never again. Attendee isolation has two
@@ -797,7 +798,7 @@ oc logs job/sonarqube-user-seed -n sonarqube --tail=20
 **MaaS keys are model-scoped.** A key issued for one model fails against another, and the error looks
 generic rather than saying so.
 
-Start with `tools/ws/ws maas show` — it prints, per attendee, the model and endpoint in use and a
+Start with `tools/ws/adm maas show` — it prints, per attendee, the model and endpoint in use and a
 working / degraded / unknown verdict. Two verdicts name this problem directly:
 
 - `credential-rejected-by-endpoint` — the key is wrong for this endpoint, **or** right for a different
@@ -805,7 +806,7 @@ working / degraded / unknown verdict. Two verdicts name this problem directly:
 - `credential-is-a-jwt-not-an-api-key` — the modules fell back to an adopted Lightspeed secret belonging
   to another provider. Stage the workshop's own credential.
 
-The fix is `ws maas set` ([§5.2](#52-changing-the-ai-model-or-rotating-the-key)), not a reinstall.
+The fix is `adm maas set` ([§5.2](#52-changing-the-ai-model-or-rotating-the-key)), not a reinstall.
 
 ### 7.10 MTA: attendees see each other's applications
 
@@ -839,14 +840,14 @@ and the networking module teaches the `<pending>` as real bare-metal behaviour.
 ### Collect this before escalating
 
 ```bash
-tools/ws/ws doctor                             # whole cluster
-tools/ws/ws doctor --user <userN>              # same checks, other attendees filtered out
-tools/ws/ws status
-tools/ws/ws diag --user <userN> [<module>]     # read-only bundle for one stuck attendee
+tools/ws/adm doctor                             # whole cluster
+tools/ws/adm doctor --user <userN>              # same checks, other attendees filtered out
+tools/ws/adm status
+tools/ws/adm diag --user <userN> [<module>]     # read-only bundle for one stuck attendee
 oc get applications -n openshift-gitops
 ```
 
-`ws diag` prints entry-app status and conditions, recent events per namespace, not-Ready pods, cockpit
+`adm diag` prints entry-app status and conditions, recent events per namespace, not-Ready pods, cockpit
 status and a logs pointer. It always exits 0 — it is a report, not a gate.
 
 ---
@@ -879,6 +880,6 @@ The litmus test for any change: *would anything of the cluster owner's differ af
   builds every attendee's world; a second, namespace-scoped instance is where attendees create their own
   Applications during the GitOps modules. Split that way, an attendee mistake cannot delete the
   machinery.
-- **Every attendee's starting state is an Argo Application**, not a script. `ws start` writes a small
+- **Every attendee's starting state is an Argo Application**, not a script. `adm start` writes a small
   Application and lets Argo materialize it, so entry states are reproducible and `ws reset` is a
   delete-and-resync rather than a cleanup script guessing what changed.

@@ -9,8 +9,10 @@ recommended delivery lengths; each module's `instructor.adoc` page (the *Instruc
 `site-instructor.yml`, or read directly under `content/modules/ROOT/pages/<slug>/instructor.adoc`)
 owns that module's own timing table, pre-flight checklist, demo notes, top questions, and
 watchouts. This runbook's job is to sequence all of that into one thing you check off on delivery
-day. Every command below is copied from `INSTALL.md`, `README.md`, or `tools/ws/ws --help` /
-`tools/ws/ws` itself — none are invented.
+day. Every command below is copied from `INSTALL.md`, `README.md`, or `tools/ws/adm --help` /
+`tools/ws/adm` itself — none are invented. Most of what follows is `adm`, the operator surface of
+the workshop CLI; attendees use `ws`, its four-verb surface (`list`/`prep`/`verify`/`reset`), inside
+the cockpit.
 
 **Contents**
 
@@ -80,13 +82,13 @@ none of that should be happening the morning of the session.
 Follow [INSTALL.md §3–§4](INSTALL.md#3-installing) start to finish:
 
 ```bash
-tools/ws/ws preflight                        # read-only: tooling, cluster access, adoption forecast
+tools/ws/adm preflight                        # read-only: tooling, cluster access, adoption forecast
 # review the adoption forecast — on a customer cluster, show it to the customer first
 cp bootstrap/vars.example.yaml bootstrap/vars.yaml
 # edit vars.yaml: users, cluster_domain, modules_disabled, workshop_user_password, maas.*
 ./bootstrap/install.sh                       # six phases, idempotent, ~15-20 min to the banner
-tools/ws/ws doctor                           # is the environment sane?
-tools/ws/ws status                           # cohort dashboard: every platform app + every attendee
+tools/ws/adm doctor                           # is the environment sane?
+tools/ws/adm status                           # cohort dashboard: every platform app + every attendee
 ```
 
 Then spot-check one module end to end, exactly as INSTALL.md prescribes — `ws verify` is
@@ -94,7 +96,7 @@ Then spot-check one module end to end, exactly as INSTALL.md prescribes — `ws 
 at the wrong point proves nothing:
 
 ```bash
-tools/ws/ws start  m01 --user user1
+tools/ws/adm start m01 --user user1
 tools/ws/ws verify m01 --user user1
 tools/ws/ws reset  m01 --user user1
 ```
@@ -109,14 +111,14 @@ front of the room is measurably slower than a warm one:
 | Module | What to warm/pre-open | Why |
 |---|---|---|
 | Platform Orientation & First App | Deploy-and-delete the claims image once as a sample user | Warms the 410 MB image on a node — first pull is ~18 s, subsequent starts are seconds |
-| Ways to Build & Deliver Apps | `ws solve build-deliver --user <u>` before the session | First S2I build is ~4.5 min warm but up to **~11 min** on a cold node (Maven Central + no builder-image cache) |
+| Ways to Build & Deliver Apps | `adm solve build-deliver --user <u>` before the session | First S2I build is ~4.5 min warm but up to **~11 min** on a cold node (Maven Central + no builder-image cache) |
 | Dev Spaces & the Inner Loop | Start one workspace before the room arrives (pulls the universal developer image onto a node) | First workspace start is ~85 s cold vs ~20 s once a node has the image; for a large event, ask the platform team to enable Dev Spaces' `imagePuller` on the CheCluster instead |
-| Pipelines Fundamentals & Task Libraries | `ws solve pipelines-fundamentals --user <u>` before the room — it blocks for a whole pipeline run (measured 7m45s, but 20m49s for the same pipeline on a slower cluster; budget the worst) | The `maven-cache` is a **per-user PVC**, not a node cache: solving `user1` warms `user1` and nobody else, so warming a room costs one full run per attendee. No cached run has been timed yet, so promise the room no number — the alternative is to accept that every attendee's first run is the slow one and let exercise 2 fill the wait, which is what the module is designed for |
-| Trusted Software Supply Chain | Run the seeded pipeline once on a sample user, ~1 hour before the session | The RHACS vulnerability store needs ~1 hour to populate on a freshly installed cluster before the Log4Shell policy fires; separately, every `ws start`/`prep`/`solve` for this module blocks ~8 min building a warm signed image — budget that into provisioning too, not just the day before |
+| Pipelines Fundamentals & Task Libraries | `adm solve pipelines-fundamentals --user <u>` before the room — it blocks for a whole pipeline run (measured 7m45s, but 20m49s for the same pipeline on a slower cluster; budget the worst) | The `maven-cache` is a **per-user PVC**, not a node cache: solving `user1` warms `user1` and nobody else, so warming a room costs one full run per attendee. No cached run has been timed yet, so promise the room no number — the alternative is to accept that every attendee's first run is the slow one and let exercise 2 fill the wait, which is what the module is designed for |
+| Trusted Software Supply Chain | Run the seeded pipeline once on a sample user, ~1 hour before the session | The RHACS vulnerability store needs ~1 hour to populate on a freshly installed cluster before the Log4Shell policy fires; separately, materializing this module at all — `adm start`/`solve`, or an attendee's own `prep` — blocks ~8 min building a warm signed image — budget that into provisioning too, not just the day before |
 | Application Security Testing | Have attendees clone and start their first run before you deliver the concept. **Running the demo flavor instead? Stage its six finished PipelineRuns days ahead** — the arc is a tour of runs that have already finished and triggers nothing live, so its prep is one full pass through this module's own lab (**~66 min of pipeline**, and that floor cannot be negotiated down) | No cache survives a run (unit tests ~5.5 min + image build ~4 min every time), so hands-on is ~85–105 min — a genuine double slot, and the module table's 100 min is a figure inside that band, not a slot you can compress. Pre-warming the first run closes part of the gap; the demo flavor (~15 min of room time) is the honest choice if all you have is a single hour — but that 15 min is *room* time only, and its preparation is the ~66 min above, so it is not a way to save the day-before |
 | Multi-Tenancy & Workload Security | Warm the `openshift/tools` image on a node (`oc run` it once, then delete) | Exercise 1's fix and exercise 5's SCC demo both stall on a cold image pull (up to ~20 s) otherwise |
 | Developer Hub & Golden Paths | Sign in as guest and open the Catalog filtered to `parasol-claims` before the room | So the first beat is one glance, not a cold login + navigation |
-| GitOps Fundamentals / GitOps at Scale | `ws solve <slug> --user <u>` before the room | Leaves a pre-solved, pre-signed-in state ready as your opening visual — but note it performs a real sync to the entry Git revision, so a private rehearsal of the later beats is a second sync/self-heal cycle against that same revision |
+| GitOps Fundamentals / GitOps at Scale | `adm solve <slug> --user <u>` before the room | Leaves a pre-solved, pre-signed-in state ready as your opening visual — but note it performs a real sync to the entry Git revision, so a private rehearsal of the later beats is a second sync/self-heal cycle against that same revision |
 | Securing Apps with Keycloak | Confirm the workshop `sso-workshop` Keycloak and each attendee's seeded realm are up (pre-flight items 2–3) | The whole module depends on both being healthy; also brief yourself not to let attendees "fix" exercise 4's deliberate break early |
 | Service Mesh 3 & Advanced Gateways | Pre-open Kiali, signed in, correct project selected, on a second screen | It's the visual for the enroll/traffic beats |
 | Resilience, Multi-Cluster & DR | Run `ws reset resilience-multicluster-dr` before the session, not live | It's slow |
@@ -140,7 +142,7 @@ while everything else — pod Running, Application Synced, cockpit page loaded �
 ([INSTALL.md §7.1](INSTALL.md#71-attendees-get-unauthorized-on-their-first-command)):
 
 ```bash
-tools/ws/ws session-refresh --all
+tools/ws/adm session-refresh --all
 ```
 
 Takes seconds, needs no pod restart, safe to run again at any point during the day.
@@ -151,7 +153,7 @@ the "`ws prep` refused with an AppProject error" failure at the same time
 ([README.md](README.md#starting-the-workshop), [INSTALL.md §7.2](INSTALL.md#72-ws-prep-fails-with-attendees-may-only-use-their-own-appproject)):
 
 ```bash
-tools/ws/ws git-refresh --restart-terminals --all
+tools/ws/adm git-refresh --restart-terminals --all
 ```
 
 **Hand out one link.** The whole room uses the same cockpit — guide + terminal + tool tabs in one
@@ -178,7 +180,7 @@ The SA demo cockpit, if you're using it, is
 **One last glance before the room fills up:**
 
 ```bash
-tools/ws/ws status
+tools/ws/adm status
 ```
 
 Confirm `N/N cockpit(s) ready` and `platform all-Synced` before you start talking.
@@ -244,10 +246,10 @@ module's materialized state in the same namespace (`gitops/entry-states/<slug>/w
 **In practice:** if an attendee wants to jump from one same-family module to another mid-day,
 warn them that starting the new one discards the old one's materialized state — the module itself
 isn't damaged (`ws reset`/`ws prep` bring it back cleanly), but any work in progress on top of it
-is gone. When *you* materialize a module for someone stuck, this cuts the other way too: `ws start`
+is gone. When *you* materialize a module for someone stuck, this cuts the other way too: `adm start`
 **does not purge** a module that's already resident for that attendee — it only evicts a different,
 *conflicting* module. If they already have that module materialized and you need them on a
-genuinely clean slate, run `ws reset <module> --user <u>`, not `ws start` again (documented against
+genuinely clean slate, run `ws reset <module> --user <u>`, not `adm start` again (documented against
 Serverless Zero-to-Hero's `instructor.adoc`, but the underlying behavior is in the shared `ws`
 code, not module-specific).
 
@@ -264,7 +266,7 @@ the token lifetime, then fix:
 
 ```bash
 oc get oauth cluster -o jsonpath='{.spec.tokenConfig.accessTokenMaxAgeSeconds}{"\n"}'   # empty = 24h default
-tools/ws/ws session-refresh --user <userN>          # or --all for the whole cohort
+tools/ws/adm session-refresh --user <userN>          # or --all for the whole cohort
 ```
 ([INSTALL.md §7.1](INSTALL.md#71-attendees-get-unauthorized-on-their-first-command))
 
@@ -276,7 +278,7 @@ restarts nothing):
 
 ```bash
 oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws
-tools/ws/ws git-refresh --restart-terminals --all
+tools/ws/adm git-refresh --restart-terminals --all
 ```
 
 Non-zero means current (a current cockpit prints `3`), `0` means old. There is one cockpit now, and
@@ -290,8 +292,8 @@ MaaS keys are model-scoped — a key issued for one model fails against another,
 generic. Diagnose per attendee, then fix without a reinstall:
 
 ```bash
-tools/ws/ws maas show          # per-attendee model/endpoint + working/degraded/unknown verdict
-tools/ws/ws maas set --model <model> --key-file <path>   # re-stage; re-converges every AI module live
+tools/ws/adm maas show          # per-attendee model/endpoint + working/degraded/unknown verdict
+tools/ws/adm maas set --model <model> --key-file <path>   # re-stage; re-converges every AI module live
 ```
 ([INSTALL.md §7.9](INSTALL.md#79-ai-modules-return-authentication-errors))
 
@@ -302,9 +304,9 @@ module's own `troubleshooting.adoc` (every module has one) and the rest of
 adopted cluster:
 
 ```bash
-tools/ws/ws doctor
-tools/ws/ws status
-tools/ws/ws diag --user <userN> [<module>]     # read-only bundle for one stuck attendee
+tools/ws/adm doctor
+tools/ws/adm status
+tools/ws/adm diag --user <userN> [<module>]     # read-only bundle for one stuck attendee
 oc get applications -n openshift-gitops
 ```
 
@@ -323,7 +325,7 @@ exactly as installed:
 ./bootstrap/ogsr-reset.sh --restart-terminals    # also cycle the cockpits for the new group
 ```
 
-(`ws cohort-reset` is the engine this script calls internally — run the script, not the raw `ws`
+(`adm cohort-reset` is the engine this script calls internally — run the script, not the raw `adm`
 command, so you get the dry-run and the scripted ordering.)
 
 **Handing the cluster back to its owner instead** (delivery is over, not just the cohort) — see
