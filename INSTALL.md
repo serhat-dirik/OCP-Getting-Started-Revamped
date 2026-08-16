@@ -670,13 +670,17 @@ refused by the policy the cluster just gained.
 Confirm which half a cockpit has:
 
 ```bash
-oc exec -n ogsr-showroom deploy/showroom-user1 -c terminal -- \
-  bash -lc 'grep -c ARGO_PROJECT_PIN ~/ocp-getting-started/tools/ws/ws'   # 1 = current, 0 = old
+oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws
 ```
 
-Keep the `bash -lc` and the single quotes: without a shell on the far side your *local* shell expands
-`~` to your own home directory, and the check fails on a path that was never there. A `0` also exits
-non-zero — that is `grep -c`, not a broken command. The number is the answer.
+A non-zero count means current, `0` means old — on a current cockpit this prints `3`. A `0` also exits
+non-zero, and that is `grep -c` reporting no matches rather than a broken command; the number is the
+answer.
+
+There is one cockpit now, not one per attendee, and `ws` reaches it through a read-only mount of the
+build's own clone at `/showroom/repo` rather than a copy in each attendee's home. So there is no
+`~/ocp-getting-started` to check, and no need for a login shell to expand `~` — which is why this
+command is a plain `grep` where earlier releases needed `bash -lc`.
 
 `--all` is required. `--restart-terminals` on its own refuses with "restart needs a target" and
 restarts nothing, which leaves you in exactly this half-state. Run it between modules or before a
@@ -761,8 +765,15 @@ Almost always the mirror-versus-restart ordering in [§5.1](#51-publishing-conte
 Confirm what is actually served rather than trusting the job that pushed it:
 
 ```bash
-curl -sk "https://showroom-user1.<apps-domain>/modules/<slug>/lab.html" | grep -o '<expected string>'
+oc exec -n ogsr-showroom deploy/showroom-shared -c content -- \
+  curl -s "http://127.0.0.1:8000/modules/<slug>/lab.html" | grep -o '<expected string>'
 ```
+
+Ask the content container directly rather than the Route. The cockpit sits behind an OpenShift login
+now, so an unauthenticated `curl` at the public URL returns the sign-in page — `<title>Log In</title>`,
+HTTP 403 — for *every* module, whatever is actually published. That looks identical to content being
+missing and is the wrong answer to this question. Going in at `127.0.0.1:8000` reads exactly what the
+cockpit serves, with no session involved.
 
 ### 7.8 An attendee cannot log into a tool
 

@@ -2,15 +2,13 @@
 
 A modern, modular **OpenShift enablement workshop**: 26 self-contained modules that take developers, DevOps engineers, and architects from "I have credentials to a cluster" to "I can develop, deliver, and operate applications on OpenShift — and I know why the platform works this way."
 
-The same content base doubles as a **presenter-led demo kit** for Red Hat Solution Architects: every module renders as an attendee workshop guide, an SA demo guide (talk track + click path), and an instructor runbook — from one AsciiDoc source.
-
 ## Workshop Content
 
 You join **Parasol Insurance** as an engineer on its claims platform, and the workshop is your first weeks on the job: you deploy the claims service for the first time, wire it to configuration and storage, put pipelines and security gates in front of every change, hand operations to GitOps, learn to observe and scale it, and finish with an AI-assisted platform that helps you modernize legacy code and build agents on top of the same services. Every module advances the same story on the same application — nothing is a toy example.
 
-The 26 modules are grouped into four blocks: **A · Foundations, B · Delivery & Trust, C · Platform & Tenancy, D · Advanced Electives**.
+The 26 modules are grouped into four blocks:
+**A · Foundations, B · Delivery & Trust, C · Platform & Tenancy, D · Advanced Electives**.
 
-**Prep** is how long `ws prep <module>` takes to build the module's starting environment before you can begin — it is a real wait, not a hang, so start it and read the concept page while it runs. The bands are estimated from what each module's entry state actually materialises (a namespace purge and Argo sync round-trip alone cost ~2 min; charts that seed a database, fork a Git repo, start a Dev Spaces workspace, or run a build cost more), anchored on one measured point — a mid-sized module preparing over a conflicting module took **183 s**. They vary with cluster speed, image-cache warmth, and how many attendees prep at once, so treat them as a planning guide rather than a promise. **M09 is the outlier**: its prep runs a full build-scan-sign pipeline so the trust lab has a signed image waiting, which is why it is minutes longer than everything else.
 
 | Block | # | Module | What you do | Prep | Time |
 |---|---|---|---|---|---|
@@ -43,7 +41,7 @@ The 26 modules are grouped into four blocks: **A · Foundations, B · Delivery &
 
 **Modules are flexible.** Every module is self-contained: automation materializes its starting environment per attendee, so no module assumes another one ran first. Attendees can start with any module, follow one of the recommended paths, or jump straight to the topic their team needs today.
 
-**Plan a delivery.** The whole catalog is about **18 hours**, so the designated full workshop is **3 days covering all 26 modules** — not a selection from them. Shorter formats drop modules rather than rush them:
+**Plan a delivery.** The whole catalog is about **18 hours**, so the designated full workshop is **3-4 days covering all 26 modules** — not a selection from them. Shorter formats drop modules rather than rush them:
 
 | Delivery | Modules | Total |
 |---|---|---|
@@ -52,11 +50,10 @@ The 26 modules are grouped into four blocks: **A · Foundations, B · Delivery &
 | 2-day core | everything except M15, M17, M18, M19, M20, M21, M22, M23, M25, M26 | ~12 h |
 | **3-day full workshop** | **all 26** — Day 1 M01–M08 · Day 2 M09–M17 · Day 3 M18–M26 | ~18 h |
 
-Each shorter path is a complete arc rather than a truncated one. The half day is deploy → build → automate the build → automate the delivery → and finish on the AI beat, so a taster still ends somewhere memorable; it closes on M25 rather than M24 because M24 alone runs 100 minutes, and a half day cannot hold that without rushing everything in front of it. The full day adds the inner loop, configuration and observability — enough that someone leaves able to work on the platform, not just describe it — and it is the shortest shape long enough to carry M24 properly; the developer portal came out of it to keep that true, because with M24 at 100 minutes one more module ran the day to nearly 7 hours, longer than the longest day of the 3-day plan. The 2-day core is the develop → deliver → operate spine end to end — all of Foundations, all of Delivery & Trust, plus identity, networking and the AI close — and it carries no other electives on purpose: M08 is a measured 100 minutes, and keeping the mesh and Knative modules on top of it asked both of its days to run longer than that same longest day.
 
-**About the times.** They are per-module planning figures for a mixed room, not stopwatch numbers, and they cover the hands-on lab itself — the concept read and the prep wait sit alongside them, not inside them. A confident attendee finishes a module in roughly half the stated time; someone new to OpenShift may need about a third longer. Plan the agenda on the stated figure and the room stays together. One thing the column cannot carry: in a few modules the attendee spends much of the lab *waiting* on a pipeline or a build rather than working, so the room's clock runs past the figure — **M07 is the sharpest case, and its instructor page says to budget ~60–70 min of wall clock and to schedule the module on that, not on the 40**. Each module's `instructor.adoc` names that gap where it exists and gives the measured number, so the totals above are hands-on floors rather than wall clock; read the page for anything on your agenda before you commit a slot to it. Because every module materializes its own starting state, any subset above — or one you assemble yourself — is a valid agenda; see **Modules are flexible**, above.
-
-**SA demo guides ship as a second showroom.** Alongside the per-attendee workshop cockpits, the install deploys an **SA-Demos showroom** — a presenter cockpit that renders every module's scripted demo (Say / Show / Do talk track with timings) plus one-click launchers into the Console, Gitea, Argo CD, Dev Spaces, Developer Hub, and SonarQube. A Solution Architect can run a customer demo end-to-end from that one browser tab, reusing all the workshop's preparation without the lab framing.
+**SA demo guides ship as a second showroom.**
+The same content base doubles as a **presenter-led demo kit** for Red Hat Solution Architects: every module renders as an attendee workshop guide, an SA demo guide (talk track + click path), and an instructor runbook — from one AsciiDoc source.
+Alongside the per-attendee workshop cockpits, the install deploys an **SA-Demos showroom** — a presenter cockpit that renders every module's scripted demo (Say / Show / Do talk track with timings) plus one-click launchers into the Console, Gitea, Argo CD, Dev Spaces, Developer Hub, and SonarQube. A Solution Architect can run a customer demo end-to-end from that one browser tab, reusing all the workshop's preparation without the lab framing.
 
 ## Project Content
 
@@ -144,16 +141,31 @@ A cockpit clones the workshop when its pod starts and never again, so a cluster 
 restarted since an update runs the old copy. The symptom is `ws prep` being refused —
 [INSTALL.md §7.2](INSTALL.md).
 
-**2. Give each attendee their cockpit link.** One personal URL per attendee — the guide, a terminal, and
-tool tabs in a single browser page:
+**2. Share one URL with the whole room.** Every attendee uses the same cockpit — the guide, a terminal,
+and tool tabs in a single browser page:
 
 ```
-https://showroom-user1.<cluster-domain>      # user1
-https://showroom-user2.<cluster-domain>      # user2, and so on
+https://showroom-shared-ogsr-showroom.<cluster-domain>
 ```
 
-They log in as `userN` with the shared password the installer prints at the end. The SA demo cockpit is
-`https://showroom-demos.<cluster-domain>`.
+It sits behind an OpenShift login. Attendees sign in as their own `userN` with the shared password the
+installer prints at the end, and the terminal comes up already logged in as that user — `oc whoami`
+returns their own identity, so the whole cohort is not sharing one account.
+
+The easiest way to hand it out is the cohort board, which carries the same URL plus a numbered list
+people claim so two attendees never take the same slot:
+
+```
+https://ogsr-pad.<cluster-domain>/p/workshop
+```
+
+The SA demo cockpit is `https://showroom-shared-demos-ogsr-showroom.<cluster-domain>`, behind the same
+login.
+
+> Earlier releases gave each attendee a personal `showroom-<user>` URL with no authentication in front
+> of it. Those are retired: enabling the shared cockpit (`showroom.shared.enabled`, the default) stops
+> rendering them, because leaving an unauthenticated shell reachable alongside a login page means the
+> login page is decorative. Set it to `false` only if you deliberately want the old per-user model.
 
 **3. Tell them to pick a module and prepare it.** The cockpit lists all modules; any module can be first.
 Inside the cockpit terminal:

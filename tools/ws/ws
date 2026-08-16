@@ -1798,6 +1798,23 @@ verify_terminal_head() {  # user ns want-sha — confirm the FRESH pod re-cloned
   fi
 }
 
+verify_shared_head() {  # dep ns want-sha — shared cockpit: ONE clone at /showroom/repo, read-only
+  local d="$1" ns="$2" want="$3" head
+  # -c safe.directory is not optional. The clone is written by the init container and read by the
+  # restricted-SCC uid the terminal runs as, so plain `git rev-parse` dies with "detected dubious
+  # ownership" and exit 128 — which reads as "no clone" rather than "different uid". Measured
+  # 2026-08-16 on the live pod: without it, exit 128; with it, the SHA.
+  head="$(oc exec "deploy/${d}" -n "$ns" -c terminal -- \
+            git -c safe.directory=/showroom/repo -C /showroom/repo rev-parse HEAD 2>/dev/null || true)"
+  if [[ -z "$head" ]]; then
+    info "  ${d}: restarted (clone HEAD not readable yet — pod still initializing)"
+  elif [[ -n "$want" && "$head" != "$want" ]]; then
+    err "  ${d}: pod re-cloned to ${head:0:8} but mirror serves ${want:0:8} — mirror lag? re-check shortly"
+  else
+    ok "  ${d}: pod re-cloned to ${head:0:8}${want:+ (matches mirror)}"
+  fi
+}
+
 restart_terminals() {  # target all-flag [exclude...] — opt-in restart of showroom cockpit pods so LIVE
   # attendees get re-rendered pages + re-cloned content. Rendered lab pages build at pod-init from the
   # mirror, so the CLI self-heal can't touch them — only a pod restart re-renders them. WS_RESERVED_USERS
@@ -1809,6 +1826,47 @@ restart_terminals() {  # target all-flag [exclude...] — opt-in restart of show
   local ns="${WS_SHOWROOM_NS:-ogsr-showroom}"
   local reserved=" ${WS_RESERVED_USERS:-} "
   local users=() u x skip
+
+  # ONE COCKPIT MEANS ONE RESTART. With showroom.shared.enabled there are no showroom-<user>
+  # Deployments at all — showroom.yaml stops rendering them, because leaving an unauthenticated
+  # cockpit up beside the login page makes the login page decorative — and a single pod serves the
+  # whole cohort. So "restart user6's terminal" and "restart the cohort's terminals" are the same
+  # action, and without this branch --all dies with "no showroom sessions to restart" while --user
+  # dies on a Deployment that was correctly removed. Either way the content update the operator just
+  # pushed reaches nobody, which is exactly the stale-cockpit failure this function exists to fix.
+  #
+  # Restarting mid-workshop is only tolerable because the oauth-proxy cookie secret is now minted
+  # once and stored, not redrawn per pod: attendees keep their sessions across this and just see the
+  # page reload. Before that fix this would have signed the entire room out.
+  local shared=() sd
+  for sd in showroom-shared showroom-shared-demos; do
+    if oc get deploy "$sd" -n "$ns" >/dev/null 2>&1; then shared+=("$sd"); fi
+  done
+  if (( ${#shared[@]} > 0 )); then
+    if [[ -n "$target" ]]; then
+      info "one shared cockpit serves every attendee — restarting it, which covers ${target} and everyone else"
+    fi
+    info "restarting shared cockpit(s): ${shared[*]}"
+    local swant sfailed=0
+    swant="$(mirror_head || true)"
+    for sd in "${shared[@]}"; do
+      info "  ${sd}: rollout restart…"
+      if ! oc rollout restart "deployment/${sd}" -n "$ns" >/dev/null 2>&1; then
+        err "  ${sd}: restart failed (RBAC? this is an operator/admin action)"; sfailed=1; continue
+      fi
+      if ! oc rollout status "deployment/${sd}" -n "$ns" --timeout=180s >/dev/null 2>&1; then
+        err "  ${sd}: not ready in 180s — check: oc rollout status deployment/${sd} -n ${ns}"; sfailed=1; continue
+      fi
+      verify_shared_head "$sd" "$ns" "$swant"
+    done
+    echo
+    if (( sfailed == 0 )); then
+      ok "shared cockpit restarted — every attendee's page re-renders on reload"
+      return 0
+    fi
+    return 1
+  fi
+
   if [[ -n "$target" ]]; then
     users=("$target")
     [[ "$reserved" == *" ${target} "* ]] && err "⚠ ${target} is a RESERVED live session — restarting it because you named it explicitly."

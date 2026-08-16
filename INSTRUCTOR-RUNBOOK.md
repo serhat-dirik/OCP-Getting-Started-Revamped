@@ -154,17 +154,26 @@ the "`ws prep` refused with an AppProject error" failure at the same time
 tools/ws/ws git-refresh --restart-terminals --all
 ```
 
-**Hand out cockpit links.** One personal URL per attendee, already the guide + terminal + tool tabs
-in one page:
+**Hand out one link.** The whole room uses the same cockpit — guide + terminal + tool tabs in one
+page — and each person signs in as their own attendee user:
 
 ```
-https://showroom-user1.<cluster-domain>      # user1
-https://showroom-user2.<cluster-domain>      # user2, and so on
+https://showroom-shared-ogsr-showroom.<cluster-domain>
 ```
 
 They log in as `userN` with the shared workshop password (a deliberately memorable, non-secret
-value you set in `vars.yaml`, printed again at the end of `install.sh`). The SA demo cockpit, if
-you're using it, is `https://showroom-demos.<cluster-domain>`.
+value you set in `vars.yaml`, printed again at the end of `install.sh`). The terminal comes up
+already logged in as that user, so `oc whoami` is their own identity.
+
+Read the cohort board out instead of the raw URL if you prefer — it carries the same link plus a
+numbered list people claim, which stops two attendees taking the same slot:
+
+```
+https://ogsr-pad.<cluster-domain>/p/workshop
+```
+
+The SA demo cockpit, if you're using it, is
+`https://showroom-shared-demos-ogsr-showroom.<cluster-domain>`, behind the same login.
 
 **One last glance before the room fills up:**
 
@@ -266,10 +275,13 @@ the scoped flag (not `--restart-terminals` alone, which "refuses with restart ne
 restarts nothing):
 
 ```bash
-oc exec -n ogsr-showroom deploy/showroom-user1 -c terminal -- \
-  bash -lc 'grep -c ARGO_PROJECT_PIN ~/ocp-getting-started/tools/ws/ws'   # 1 = current, 0 = old
+oc exec -n ogsr-showroom deploy/showroom-shared -c terminal -- grep -c ARGO_PROJECT_PIN /showroom/repo/tools/ws/ws
 tools/ws/ws git-refresh --restart-terminals --all
 ```
+
+Non-zero means current (a current cockpit prints `3`), `0` means old. There is one cockpit now, and
+`ws` reaches it through a read-only mount of the build's clone at `/showroom/repo`, so there is no
+per-attendee `~/ocp-getting-started` to check.
 ([INSTALL.md §7.2](INSTALL.md#72-ws-prep-fails-with-attendees-may-only-use-their-own-appproject))
 
 **3. An AI module (jobs-batch-kueue's batch beat, agentic-ai, ai-assisted-development,
