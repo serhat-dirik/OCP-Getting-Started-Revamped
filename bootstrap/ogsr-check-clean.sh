@@ -1448,11 +1448,22 @@ section_webhooks() {
 }
 
 # ── [8/9] objects still carrying a workshop label ─────────────────────────────
+#
+# This list is the FALLBACK ONLY — the live `oc api-resources --namespaced=false --verbs=list` sweep
+# below is what normally drives this section, and it already returns everything named here. The list
+# matters on exactly one path: discovery failed, and the check must still look somewhere. So a kind
+# belongs here when missing it would hide a leftover with a CONSEQUENCE, not merely litter.
+# oauthclients earns that (added 2026-08-16): the shared cockpit's OAuth front door creates one, it is
+# cluster-scoped so it outlives every namespace we delete, and it is created by a Sync-hook Job rather
+# than by Argo — so no cascade prunes it and a missed one is a standing OAuth grant on the org's
+# cluster. Verified the same day that live discovery does return `oauthclients.oauth.openshift.io`,
+# so this entry changes nothing on the ordinary path and closes the degraded one.
 CLUSTER_KINDS_FALLBACK="clusterroles.rbac.authorization.k8s.io clusterrolebindings.rbac.authorization.k8s.io
 groups.user.openshift.io customresourcedefinitions.apiextensions.k8s.io apiservices.apiregistration.k8s.io
 validatingwebhookconfigurations.admissionregistration.k8s.io mutatingwebhookconfigurations.admissionregistration.k8s.io
 clusterqueues.kueue.x-k8s.io resourceflavors.kueue.x-k8s.io workloadpriorityclasses.kueue.x-k8s.io
-gatewayclasses.gateway.networking.k8s.io storageclasses.storage.k8s.io consoleplugins.console.openshift.io"
+gatewayclasses.gateway.networking.k8s.io storageclasses.storage.k8s.io consoleplugins.console.openshift.io
+oauthclients.oauth.openshift.io"
 
 # Namespaced kinds worth sweeping cluster-wide. Not every namespaced kind: objects inside a namespace
 # we deleted are gone with it. What matters is what we left in namespaces we deliberately PRESERVED

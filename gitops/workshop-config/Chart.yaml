@@ -2,6 +2,38 @@ apiVersion: v2
 name: workshop-config
 description: "Workshop layer: attendee users, platform-observer RBAC, per-user namespaces/quotas, entry-state AppProject, htpasswd IdP, and Gitea user seeding. One Argo CD Application (helm params userCount, clusterDomain)."
 type: application
+# 0.3.11: the shared cockpit's TERMINAL gets an identity. It had none — `oc whoami` in it returned
+# `system:serviceaccount:ogsr-showroom:showroom-shared`, the pod's own SA, which holds only
+# system:auth-delegator, so pods/secrets/projects were all Forbidden and no `ws` verb could run (`ws`
+# resolves the attendee from `oc whoami`). The page half was already correct; the terminal half only
+# PRINTED an `oc login` instruction and left the human to finish it.
+# The fix passes the attendee's own OAuth access token through to the terminal and builds a
+# per-session kubeconfig from it, so the shell acts as the real user until the cluster expires the
+# token. That needed the front door to stop being a ServiceAccount-as-OAuth-client: measured on this
+# cluster from the owner's real logins, an SA client issues `[user:info user:check-access]` — enough
+# to say who you are, not to read a pod — while real OAuthClients on the same cluster issue
+# `user:full`. So a real OAuthClient is created, requesting user:full, with the cockpit Route as its
+# redirect URI and grantMethod auto.
+# ITS SECRET IS THE HARD PART, and the shape chosen is the one this chart already uses elsewhere: an
+# idempotent Sync-phase hook Job (wave 2, before the wave-3 Deployment) mints the value ONCE if the
+# Secret is absent, reuses it forever after, and converges OAuthClient.secret to it. Helm
+# `randAlphaNum` was never an option — Argo re-renders every sync, so the value would churn and sign
+# out every live session; `lookup` is empty under `helm template`. The rejected alternative was
+# letting Argo own the OAuthClient with `secret` omitted and the hook patching it in; that rests on
+# an untested assumption about Argo's three-way diff whose failure mode is selfHeal emptying the
+# field and breaking every login invisibly, and this repo's rule is that diff questions are settled
+# by experiment, not by reasoning.
+# THE TOKEN HAZARD, handled explicitly: ttyd exports its -H header as TTYD_USER whatever that header
+# is, so TTYD_USER now holds a bearer token. The old wrapper printed it in the login banner. It is now
+# copied to a non-exported local, `unset` immediately, written into the kubeconfig by bash builtins
+# (never an argv), kept out of the content upstream by an empty `proxy_set_header`, and never echoed;
+# the banner names `oc whoami`. One copy at rest per attendee, 0600 under a 0700 ~/.kube.
+# NON-INVASIVE: an OAuthClient is cluster-scoped and hook-created, so the uninstall cascade cannot
+# reach it — bootstrap/ogsr-uninstall.sh step 7 now sweeps `oauthclients.oauth.openshift.io` by owner
+# label, and ogsr-check-clean.sh names it in its fallback kind list (its live-discovery sweep already
+# returned it, verified 2026-08-16).
+# Whole feature stays behind showroom.shared.enabled, default false; the flag-off render is unchanged
+# byte for byte. Chart-body change on a chart Argo caches, so the bump is load-bearing.
 # 0.3.10: zap-baseline stops passing ZAP `-I` in reporting mode. 0.3.9 removed the result-overwrite
 # and was CORRECT AND STILL INSUFFICIENT — the branch it fixed could not execute. `-I` means "do not
 # return failure on warning", and the script added it on exactly the FAIL_ON_WARN=false path, so a
@@ -149,4 +181,4 @@ type: application
 # 0.1.27: parasol-tasks hook redacts JWT-shaped material from the raw stderr it prints (the hook
 # hands a ServiceAccount token to the command whose errors it echoes). Hook-only change, so the bump
 # is load-bearing against Argo's manifest cache.
-version: 0.3.10
+version: 0.3.11

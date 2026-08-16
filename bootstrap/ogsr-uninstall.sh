@@ -2963,6 +2963,23 @@ step_cluster_rbac() {  # 7 — cluster-scoped objects the cascade CANNOT reach, 
   # is the one leftover class that grants standing access after a teardown.
   sub del_labeled_cluster clusterrolebindings.rbac.authorization.k8s.io
   sub del_labeled_cluster clusterroles.rbac.authorization.k8s.io
+  # OAuthClients are the second member of that "imperative source" class, added 2026-08-16 with the
+  # shared cockpit's OAuth front door (gitops/workshop-config/templates/showroom-shared.yaml). The
+  # cockpit needs a REAL OAuthClient rather than a ServiceAccount-as-client — an SA client's tokens
+  # are capped at `user:info user:check-access`, which cannot drive a terminal — and the client's
+  # secret has to be minted IN the cluster and reused across syncs, so a Sync-hook Job creates it
+  # rather than Argo. That is exactly what puts it out of the cascade's reach: `argo_manages()`
+  # answers no, nothing prunes it, and an OAuthClient outlives the namespace it serves. Left behind
+  # it is a standing OAuth grant on someone else's cluster — the same "leftover with a security
+  # consequence" category as the RBAC above, which is why it is swept here and not merely reported.
+  #
+  # Safe as a label sweep because we never ADOPT one: the portfolio's kustomize label transformer
+  # stamps the owner label on resources in the components it manages, and no component manages an
+  # OAuthClient (measured on a live cluster 2026-08-16: the six present were console, kiali,
+  # openshift-browser-client, openshift-challenging-client, openshift-cli-client and
+  # openshift-devspaces-client, none of them ours and none owner-labelled). Every owner-labelled
+  # OAuthClient is therefore one this installer created.
+  sub del_labeled_cluster oauthclients.oauth.openshift.io
   # NOTE: del_appprojects deliberately does NOT run here. It moved to the LAST step, because an
   # AppProject removed while any Application still names it freezes those Applications permanently
   # (Argo will not process an app whose project is missing, not even to delete it). By step 10 the
@@ -3323,6 +3340,9 @@ cat <<'VERIFY'
      oc get ns -l workshop.redhat.com/owner=ogsr                 # expect: no resources
      oc get applications -n openshift-gitops | grep -E 'pp-|entry-|workshop-config'   # expect: none
      oc get clusterrole,clusterrolebinding -l workshop.redhat.com/owner=ogsr          # expect: none
+     # Cluster-scoped and hook-created (shared-cockpit front door), so no cascade could have pruned it;
+     # a leftover here is a standing OAuth grant on the org's cluster, not merely litter:
+     oc get oauthclients.oauth.openshift.io -l workshop.redhat.com/owner=ogsr         # expect: none
      # Operands their operator created for ITSELF: no Argo Application owns them, so only step [2/10]
      # can remove them, and a leftover here is a whole product still running with nothing managing it
      # (measured: TektonConfig alive with 18 pods and a bound 1Gi PVC after a "successful" teardown):

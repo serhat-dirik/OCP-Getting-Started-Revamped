@@ -35,20 +35,48 @@
      attributes and anchors; a response-stream rewrite does not distinguish them, which is why it is
      the right layer.
 
-  2. IDENTITY IN THE TERMINAL — ttyd -H + TTYD_USER.
+  2. IDENTITY IN THE TERMINAL — ttyd -H + TTYD_USER, fed by the ACCESS TOKEN.
      ttyd forks an independent shell per websocket (not per pod), and in auth-proxy mode (-H) it
-     exports the header value to that shell as TTYD_USER (confirmed present in the ttyd 1.7.7 binary
-     shipped in the terminal image). The wrapper below turns that into a per-session HOME, so two
-     attendees on ONE deployment get two shells with two homes and two kubeconfigs. WITHOUT THIS THE
-     SHARED MODEL WOULD BE STRICTLY WORSE THAN PER-USER: a single shared $HOME means every visitor
-     inherits whoever logged in last.
+     exports the header value to that shell as TTYD_USER. `-H` takes exactly ONE header name
+     (`-H, --auth-header  HTTP Header name for auth proxy` — read out of the running ttyd 1.7.7 on
+     2026-08-16), so the header it carries is a CHOICE, and this cockpit spends it on
+     X-Forwarded-Access-Token rather than X-Forwarded-User. The wrapper turns that token into a
+     per-session kubeconfig and derives the name from `oc whoami`, so the shell acts as the real
+     attendee for as long as the cluster says the token is good.
 
-  3. THE FRONT DOOR — oauth-proxy as a ServiceAccount OAuth client.
-     No cluster-scoped OAuthClient is created: the SA's redirect-reference annotation is the whole
-     registration, and it dies with the namespace. (A cluster-scoped OAuthClient would outlive a
-     namespace delete and breach the non-invasive rule.) SA-as-oauth-client caps the granted scope at
-     `user:info user:check-access` — enough to establish WHO the user is, which is all this needs.
-     The terminal does NOT inherit a cluster token from it; the attendee logs in themselves.
+     WHY THE HEADER MOVED (defect found by the owner on a live cockpit, 2026-08-16). With
+     `-H X-Forwarded-User` the terminal knew a NAME and held no credential, so `oc whoami` in it
+     returned `system:serviceaccount:ogsr-showroom:showroom-shared` — the pod's own SA, which holds
+     only system:auth-delegator. Reproduced here the same day: pods, secrets and projects all
+     Forbidden. Not a privilege leak, a dead end: no `ws` verb works, because `ws` resolves the
+     attendee from `oc whoami` (tools/ws/ws user_arg) and refuses to run without a login. The old
+     wrapper's answer was to PRINT `oc login … -u $TTYD_USER` and let the human finish the job — an
+     instruction, not an identity.
+
+  3. THE FRONT DOOR — oauth-proxy as a REAL OAuthClient (was: as the ServiceAccount).
+     A ServiceAccount-as-OAuth-client is SCOPE-CAPPED, and that cap is what forced this change.
+     Measured on this cluster 2026-08-16, on the owner's own real logins:
+
+         oc get oauthclientauthorizations -o custom-columns=CLIENT:.clientName,USER:.userName,SCOPES:.scopes
+         system:serviceaccount:ogsr-showroom:showroom-shared   user6   [user:info user:check-access]
+         system:serviceaccount:ogsr-showroom:showroom-shared   user7   [user:info user:check-access]
+
+     `user:info user:check-access` is enough to say WHO you are and nothing else — a token minted
+     under it cannot read a pod. Real OAuthClient objects on the same cluster (`console`,
+     `openshift-cli-client`, `openshift-devspaces-client`) issue `user:full`, which is what `oc login`
+     gets. So the SA-as-client had to be replaced by a real client for the terminal half to exist at
+     all; the SA remains only as the pod's identity and the auth-delegator holder.
+
+     THE NON-INVASIVE COST, PAID EXPLICITLY. An OAuthClient is CLUSTER-SCOPED — it outlives the
+     namespace, which is exactly why the previous design refused one. It is therefore owner-labelled
+     and its teardown is wired by hand, because nothing else would reach it: the client is created by
+     the bootstrap hook below rather than by Argo (see the hook's own header for why), so the
+     uninstall CASCADE cannot prune it. `bootstrap/ogsr-uninstall.sh` step 7 now sweeps
+     `oauthclients.oauth.openshift.io` by owner label alongside cluster RBAC, and
+     `bootstrap/ogsr-check-clean.sh` reports one while it remains (its cluster-scoped sweep is driven
+     by live `oc api-resources --namespaced=false --verbs=list` discovery, which returns
+     `oauthclients.oauth.openshift.io` — verified 2026-08-16 — and the hardcoded fallback list it
+     uses when discovery fails now names it too).
 
   ── THE FAILURE MODE THIS GUARDS ─────────────────────────────────────────────────────────────────
   If the identity header is ever absent, a naive sub_filter replaces the sentinel with an EMPTY
@@ -56,6 +84,27 @@
   error, HTTP 200. That is measured, as the negative control of the experiment above, and it is
   exactly the class of defect this project keeps paying for: correct in the source, broken in the
   artefact, reported as success. An empty identity is therefore refused with 503, never rendered.
+
+  ── THE HAZARD THE TOKEN INTRODUCES, AND WHERE IT IS CONTAINED ───────────────────────────────────
+  ttyd names its exported variable TTYD_USER whatever header feeds it, so on THIS cockpit TTYD_USER
+  holds a live bearer token. Every path it could take is closed deliberately, and each one is worth
+  naming because the previous wrapper took the first of them:
+
+    * THE BANNER. The old wrapper printed `You are signed in as $TTYD_USER` into the login greeting —
+      with this header that echoes a live credential to the screen, into scrollback, and into any
+      terminal capture. The wrapper now copies TTYD_USER into a NON-EXPORTED local and `unset`s it on
+      the second line; the banner names the user resolved from `oc whoami`.
+    * THE PROCESS TABLE. Every session in this pod runs as the SAME uid (measured: 1002180000), so
+      `ps eww` and /proc/<pid>/environ are readable across sessions. Unsetting TTYD_USER keeps the
+      token out of the environment, and the token never reaches an argv: the kubeconfig is written by
+      bash BUILTINS (echo into a redirect), never by `oc login --token=…`.
+    * NGINX. `proxy_set_header X-Forwarded-Access-Token ""` on the CONTENT location — an empty value
+      means nginx does not pass the header at all — so the token reaches the ttyd upstream and
+      nothing else. oauth-proxy's request logging is off by default (`-request-logging`, verified in
+      the running image) and nginx's access log format carries no arbitrary headers.
+    * AT REST. Exactly one copy exists per attendee: $HOME/.kube/config, written 0600 under a 0700
+      ~/.kube, replaced (not appended) on every connection. See the wrapper for the one thing file
+      MODE cannot buy here — the homes PVC is shared and so is the uid.
 */ -}}
 {{- if and .Values.showroom.enabled .Values.showroom.shared.enabled }}
 {{- $ns := .Values.showroom.namespace }}
@@ -87,9 +136,15 @@
 {{- $name := $inst.name }}
 {{- $playbook := $inst.playbook }}
 {{- $host := printf "%s-%s.%s" $name $ns $domain }}
+{{- $clientId := printf "ogsr-%s" $name }}
+{{- $clientSecretName := printf "%s-oauth-client" $name }}
+{{- $redirectUri := printf "https://%s/oauth/callback" $host }}
 ---
-# The OAuth client IS this ServiceAccount. The redirect-reference annotation registers the Route
-# below as a legal callback — that is the entire client registration, and it dies with the namespace.
+# The pod's identity and the auth-delegator holder — NOT the OAuth client any more. The
+# `serviceaccounts.openshift.io/oauth-redirectreference.primary` annotation was removed with the move
+# to a real OAuthClient (see the header): it registered this SA as a client whose tokens are capped at
+# `user:info user:check-access`, and leaving a registration nothing authenticates against is a stale
+# grant rather than a spare tyre.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -100,8 +155,6 @@ metadata:
     {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "1"
-    serviceaccounts.openshift.io/oauth-redirectreference.primary: >-
-      {"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"{{ $name }}"}}
 ---
 # oauth-proxy validates tokens and SubjectAccessReviews through the API server, which needs the
 # auth-delegator role. Cluster-scoped, therefore owner-labelled so teardown can find and remove it.
@@ -122,6 +175,293 @@ subjects:
   - kind: ServiceAccount
     name: {{ $name }}
     namespace: {{ $ns }}
+---
+# ── OAUTH CLIENT BOOTSTRAP (SA + RBAC + Sync hook) ───────────────────────────────────────────────
+#
+# WHY A HOOK AND NOT A DECLARED OAuthClient. The client needs a SECRET, and a secret in a chart is a
+# secret in git. Helm's `randAlphaNum` cannot help: Argo re-renders this chart on EVERY sync, so the
+# value would be different every reconcile — a new secret mid-workshop invalidates every live login,
+# and the app never converges. `lookup` is empty under Argo's `helm template` (values.yaml says so for
+# showroom.ocpVersion, same reason). So the value has to be minted IN THE CLUSTER, once, and read back
+# on every later sync — which is the established shape here: an idempotent Sync-phase hook Job, the
+# same one console-plugins-enable.yaml uses to converge a shared cluster singleton.
+#
+# THE ALTERNATIVE THAT WAS REJECTED, and why. Argo could own the OAuthClient with the `secret` field
+# simply OMITTED, letting this hook patch it in — a field absent from the desired manifest is absent
+# from last-applied too, so the three-way diff should ignore it and Argo should stay Synced. "Should"
+# is the problem. This repo's own rule is that diff questions are settled by a single-variable
+# experiment on a real object, never by reasoning about diff internals, and that experiment cannot be
+# run here (the live cockpit is serving a session; this lane does not mutate the cluster). The failure
+# mode if the reasoning is wrong is not cosmetic red — selfHeal re-applies the manifest, the `secret`
+# field goes empty, and EVERY attendee login breaks with no visible cause. Hook-owned has no such
+# dependency, and its one real cost — the cascade cannot prune what Argo does not manage — is a cost
+# that can be paid in full and verified: see the teardown wiring named in this file's header.
+#
+# SECRET IS THE SOURCE OF TRUTH, OAuthClient CONVERGES TO IT. The Job generates the value ONLY when
+# the Secret is absent, and then makes OAuthClient.secret equal it on every run. That direction is
+# what makes a deleted-and-recreated client (or a changed cluster domain, which changes redirectURIs)
+# heal on the next sync without rotating a credential that live sessions still hold.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-oauth-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+---
+# why: create/converge exactly ONE cluster-scoped OAuthClient — ours, by name. `create` is the only
+# verb that cannot be resourceName-scoped (the object does not exist yet to be named), the same
+# carve-out per-user-argo-rbac.yaml and console-plugins-enable.yaml document for their own creates.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ogsr-{{ $name }}-oauth-bootstrap
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: ["oauth.openshift.io"]
+    resources: ["oauthclients"]
+    verbs: ["get", "patch"]
+    resourceNames: [{{ $clientId | quote }}]
+  - apiGroups: ["oauth.openshift.io"]
+    resources: ["oauthclients"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogsr-{{ $name }}-oauth-bootstrap
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogsr-{{ $name }}-oauth-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}-oauth-bootstrap
+    namespace: {{ $ns }}
+---
+# why: hold the generated client secret in ONE namespaced Secret, by name. `patch` is for the owner
+# labels the Job stamps after creating it; there is deliberately no `list` and no `delete` — a hook
+# that cannot enumerate secrets cannot read another component's, and one that cannot delete cannot
+# rotate a credential live sessions are still using.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-oauth-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+    resourceNames: [{{ $clientSecretName | quote }}]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-oauth-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-oauth-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}-oauth-bootstrap
+    namespace: {{ $ns }}
+---
+# Argo Sync hook at wave 2 — AFTER the wave-1 RBAC above exists, BEFORE the wave-3 Deployment that
+# mounts the Secret this Job creates. A pod cannot start on a missing secret volume, so this ordering
+# is load-bearing, not tidiness. BeforeHookCreation so it re-runs (and re-converges) every sync.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-oauth-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}-oauth-bootstrap
+        workshop.redhat.com/layer: workshop-config
+    spec:
+      serviceAccountName: {{ $name }}-oauth-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: bootstrap
+          # Digest-pinned ose-cli-rhel9, the same reference every other hook Job in this chart uses.
+          # `oc` OOMs at 256Mi, hence the 512Mi limit (repo-wide hard-won fact).
+          image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {cpu: 300m, memory: 512Mi}
+          env:
+            - name: NS
+              value: {{ $ns | quote }}
+            - name: SECRET_NAME
+              value: {{ $clientSecretName | quote }}
+            - name: CLIENT_ID
+              value: {{ $clientId | quote }}
+            - name: REDIRECT_URI
+              value: {{ $redirectUri | quote }}
+          volumeMounts:
+            # Memory-backed: the plaintext client secret touches this filesystem and nothing else, and
+            # a tmpfs never reaches a disk or a node-local layer. Same choice as the credential handoff
+            # in the entry-state hooks.
+            - name: scratch
+              mountPath: /scratch
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              ok()   { echo "✅ $*"; }
+              info() { echo "▶ $*"; }
+              err()  { echo "❌ $*" >&2; }
+              die()  { err "$*"; exit 1; }
+
+              # NOTHING in this script echoes the client secret. It exists in three places only: a
+              # shell variable, a 0600 file on the tmpfs below, and the two API objects it belongs in.
+              TMPD="$(mktemp -d /scratch/oauth.XXXXXXXX)"
+              chmod 0700 "$TMPD"
+              trap 'rm -rf "$TMPD"' EXIT
+              umask 077
+
+              mint_into() {  # $1 = path — draw a fresh client secret. Never printed, never an argv.
+                local raw gen=""
+                for _ in 1 2 3 4 5; do
+                  # head is FIRST in the pipeline and base64 LAST, so nothing can take SIGPIPE under
+                  # `pipefail`; the alnum filter and the length trim are then done without a pipe.
+                  raw="$(head -c 48 /dev/urandom | base64)"
+                  gen="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9')"
+                  gen="${gen:0:48}"
+                  if [[ "${#gen}" -ge 32 ]]; then break; fi
+                done
+                [[ "${#gen}" -ge 32 ]] || die "could not draw a 32+ character client secret from /dev/urandom in 5 attempts"
+                printf '%s' "$gen" > "$1"
+                return 0
+              }
+
+              # THE ONE THING THIS FUNCTION MUST NEVER DO is mint a replacement for a secret that
+              # already exists — every live attendee session is signed out the moment the value moves.
+              # So "absent" has to be PROVEN, not inferred from a failed read: an existence probe that
+              # swallows stderr cannot tell NotFound from a timed-out etcd, and both look like absent.
+              # Three layers, because one is not enough:
+              #   1. the read distinguishes NotFound from every other error, and only NotFound mints;
+              #   2. `oc create` (never `apply`, never `patch`) means even a wrong "absent" verdict
+              #      collides with AlreadyExists instead of overwriting;
+              #   3. that collision is handled by RE-READING, so a genuine race between two syncs
+              #      converges on the value that won rather than failing the Job.
+              # NOTE for anyone editing: no branch here may end a function with `cond && cmd` — this
+              # repo has already paid for that shape (an AND-list as a function's last statement
+              # returns 1 and `set -e` kills the script). Every path below is an explicit return/die.
+              resolve_client_secret() {
+                local i out
+                for i in 1 2 3; do
+                  if out="$(oc get secret "$SECRET_NAME" -n "$NS" -o jsonpath='{.data.clientSecret}' 2>"$TMPD/err")"; then
+                    [[ -n "$out" ]] || die "secret ${NS}/${SECRET_NAME} exists but has no clientSecret key — refusing to mint a replacement, because that would sign every live session out. fix: oc delete secret ${SECRET_NAME} -n ${NS} && re-sync workshop-config"
+                    # printf is a bash BUILTIN, so the value never becomes an argv another process can read.
+                    printf '%s' "$out" | base64 -d > "$TMPD/clientSecret"
+                    ok "reusing the client secret already in ${NS}/${SECRET_NAME} (never regenerated on a re-sync — a new value would sign out every live session)"
+                    return 0
+                  fi
+                  grep -qiE 'notfound|not found' "$TMPD/err" \
+                    || die "cannot read secret ${NS}/${SECRET_NAME}: $(tr '\n' ' ' < "$TMPD/err") — this is NOT read as 'absent', so nothing is minted; the Job will retry"
+                  info "no client secret yet — minting one for OAuthClient/${CLIENT_ID} (attempt ${i}/3)"
+                  mint_into "$TMPD/clientSecret"
+                  if oc create secret generic "$SECRET_NAME" -n "$NS" \
+                       --from-file=clientSecret="$TMPD/clientSecret" 2>"$TMPD/err" >/dev/null; then
+                    ok "created secret ${NS}/${SECRET_NAME} (value not printed, here or anywhere)"
+                    return 0
+                  fi
+                  grep -qiE 'alreadyexists|already exists' "$TMPD/err" \
+                    || die "cannot create secret ${NS}/${SECRET_NAME}: $(tr '\n' ' ' < "$TMPD/err")"
+                  info "another sync created it first — discarding the value just drawn and re-reading theirs"
+                done
+                die "could not resolve the client secret in 3 attempts — see the errors above"
+              }
+              resolve_client_secret
+
+              oc label secret "$SECRET_NAME" -n "$NS" --overwrite \
+                workshop.redhat.com/layer=workshop-config \
+                workshop.redhat.com/owner=ogsr >/dev/null
+
+              # $(<file) is a bash builtin read — no `cat`, no extra process.
+              CS_VAL="$(<"$TMPD/clientSecret")"
+              [[ -n "$CS_VAL" ]] || die "client secret file is empty after ${NS}/${SECRET_NAME} was read/created"
+              {
+                echo 'apiVersion: oauth.openshift.io/v1'
+                echo 'kind: OAuthClient'
+                echo 'metadata:'
+                echo "  name: ${CLIENT_ID}"
+                echo '  labels:'
+                # Owner label = how bootstrap/ogsr-uninstall.sh finds this cluster-scoped object, and
+                # how ogsr-check-clean.sh reports it while it is still there. Without it the workshop
+                # leaves a permanent trace on a customer cluster.
+                echo '    workshop.redhat.com/layer: workshop-config'
+                echo '    workshop.redhat.com/owner: ogsr'
+                echo 'grantMethod: auto'
+                echo 'redirectURIs:'
+                echo "  - ${REDIRECT_URI}"
+                echo "secret: ${CS_VAL}"
+              } > "$TMPD/oauthclient.yaml"
+              chmod 0600 "$TMPD/oauthclient.yaml"
+              unset CS_VAL
+
+              if oc get oauthclients.oauth.openshift.io "$CLIENT_ID" >/dev/null 2>&1; then
+                # --patch-file, NOT -p: a -p body is an argv, and this body carries the secret.
+                oc patch oauthclients.oauth.openshift.io "$CLIENT_ID" \
+                  --type=merge --patch-file "$TMPD/oauthclient.yaml" >/dev/null
+                ok "converged OAuthClient/${CLIENT_ID} → redirect ${REDIRECT_URI}, grantMethod auto, secret == ${NS}/${SECRET_NAME}"
+              else
+                # `oc create`, not `oc apply`: apply would store the whole body — secret included — in
+                # a last-applied annotation on a cluster-scoped object, a second copy nothing needs.
+                oc create -f "$TMPD/oauthclient.yaml" >/dev/null
+                ok "created OAuthClient/${CLIENT_ID} → redirect ${REDIRECT_URI}, grantMethod auto"
+              fi
+
+              # Readiness assertion consumable by `ws doctor`/CI: prove the two agree WITHOUT printing
+              # either. Compare hashes, not values.
+              LIVE_H="$(oc get oauthclients.oauth.openshift.io "$CLIENT_ID" -o jsonpath='{.secret}' | sha256sum | cut -d' ' -f1)"
+              FILE_H="$(sha256sum < "$TMPD/clientSecret" | cut -d' ' -f1)"
+              [[ "$LIVE_H" == "$FILE_H" ]] || die "OAuthClient/${CLIENT_ID}.secret does not match ${NS}/${SECRET_NAME} after converging — every login would fail. fix: oc delete oauthclient ${CLIENT_ID} && re-sync workshop-config"
+              ok "OAuthClient/${CLIENT_ID} and ${NS}/${SECRET_NAME} agree (sha256 compared, neither value printed)"
+      volumes:
+        - name: scratch
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
 ---
 # The serving-cert annotation makes the service CA mint the TLS pair oauth-proxy listens with, so the
 # Route can be reencrypt and no certificate is ever committed to this repo.
@@ -205,6 +545,12 @@ data:
           proxy_pass http://127.0.0.1:8000;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           proxy_set_header X-Forwarded-Proto $scheme;
+          # THE CONTENT UPSTREAM MUST NOT SEE THE TOKEN. nginx forwards the client's headers to a
+          # proxied server by default, so oauth-proxy's X-Forwarded-Access-Token would reach the
+          # content container for free. An EMPTY proxy_set_header value means the field is not passed
+          # at all — that is nginx's documented behaviour and the whole point of this line. The token
+          # is needed by exactly one upstream (ttyd, below) and goes to exactly that one.
+          proxy_set_header X-Forwarded-Access-Token "";
           # sub_filter cannot rewrite a compressed body. The content service is Python SimpleHTTP and
           # sends none today (measured: Content-type text/html, no Content-Encoding), but asking for
           # identity encoding costs nothing and makes this independent of that image's behaviour.
@@ -224,8 +570,10 @@ data:
           proxy_read_timeout 43200000;
           proxy_set_header Host $http_host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          # ttyd reads this header (-H) to name the session; the wrapper turns it into a per-session
-          # HOME. Set explicitly because proxy_pass forwards only headers nginx knows about.
+          # ttyd reads ONE header (-H) and this is it: the attendee's OAuth access token, which the
+          # session wrapper turns into a per-session kubeconfig. Both are set explicitly because
+          # proxy_pass rewrites Host and Connection and these must survive that.
+          proxy_set_header X-Forwarded-Access-Token $http_x_forwarded_access_token;
           proxy_set_header X-Forwarded-User $http_x_forwarded_user;
         }
         location = /tty-bottom { return 302 /tty-bottom/; }
@@ -237,6 +585,7 @@ data:
           proxy_read_timeout 43200000;
           proxy_set_header Host $http_host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Access-Token $http_x_forwarded_access_token;
           proxy_set_header X-Forwarded-User $http_x_forwarded_user;
         }
       }
@@ -404,15 +753,35 @@ spec:
                 --https-address=:8443 \
                 --http-address= \
                 --provider=openshift \
-                --openshift-service-account={{ $name }} \
+                --client-id={{ $clientId }} \
+                --client-secret-file=/etc/oauth/client-secret \
+                --redirect-url={{ $redirectUri }} \
+                --scope="user:full" \
                 --upstream=http://127.0.0.1:8080 \
                 --tls-cert=/etc/tls/private/tls.crt \
                 --tls-key=/etc/tls/private/tls.key \
                 --cookie-secret="$(head -c 32 /dev/urandom | base64 | head -c 32)" \
+                --pass-access-token=true \
                 --pass-user-headers=true
+          # Every flag above was read out of THIS image's own `--help` on 2026-08-16, not recalled:
+          #   -client-id string / -client-secret-file string "a file containing the client-secret"
+          #   -scope string "OAuth scope specification"
+          #   -pass-access-token "pass OAuth access_token to upstream via X-Forwarded-Access-Token"
+          #   -pass-user-headers "pass X-Forwarded-User and X-Forwarded-Email information to upstream"
+          # --client-secret-FILE, never --client-secret: a flag value is an argv, and an argv is
+          # readable from the process table. --openshift-service-account is GONE — it is the flag that
+          # capped every issued token at `user:info user:check-access` (see the header's measurement).
+          # --redirect-url is pinned rather than derived per-request so the value oauth-proxy SENDS is
+          # textually the value the OAuthClient REGISTERS; -proxy-prefix defaults to "/oauth", which
+          # is where the "/oauth/callback" in both strings comes from.
+          # --pass-user-headers STAYS: X-Forwarded-User is what the nginx sub_filter rewrites the
+          # __WS_USER__ sentinel with, and that half is verified working with two concurrent logins.
           volumeMounts:
             - name: tls
               mountPath: /etc/tls/private
+            - name: oauth-client
+              mountPath: /etc/oauth
+              readOnly: true
         - name: nginx
           image: {{ $img.nginx | quote }}
           imagePullPolicy: IfNotPresent
@@ -503,6 +872,27 @@ spec:
               # this is the ONLY place the connecting attendee's identity is known — the pod itself
               # has no single user, which is the whole point.
               #
+              # ON THIS COCKPIT TTYD_USER IS A BEARER TOKEN, NOT A NAME. ttyd names that variable
+              # after its own flag, whatever header feeds it, and -H here carries
+              # X-Forwarded-Access-Token. Read the header block for the full leak inventory; the four
+              # rules the generated wrapper obeys are:
+              #   1. copy it to a NON-EXPORTED local and `unset TTYD_USER` on the next line, so it is
+              #      gone from the environment before anything else runs — /proc/<pid>/environ is
+              #      readable by every other session in this pod (all of them run as the same uid).
+              #   2. never echo it, never let it become an argv (kubeconfig written by builtins).
+              #   3. one copy at rest, 0600, under 0700 ~/.kube, replaced per connection.
+              #   4. the banner names `oc whoami`, never the variable.
+              #
+              # WHAT MODE 0600 DOES *NOT* BUY, stated plainly because it looks like it does. /homes is
+              # `drwxrwsr-x root:1002180000` and every session in this pod runs as uid 1002180000
+              # (measured on the live pod, 2026-08-16) — so the OWNER of every kubeconfig here is the
+              # same uid as every other attendee's shell. 0600 removes group and other, which is
+              # correct hygiene against any other uid, and it does NOT isolate attendee from attendee:
+              # `cat /homes/userN/.kube/config` works from any session. That is a property of one pod
+              # shared by a cohort, not of this file, and it is reported to the PM rather than papered
+              # over here. What this wrapper CAN do it does: nothing is in the environment, nothing is
+              # in a process argument, and there is one file rather than one per connection.
+              #
               # ECHO LINES, NOT A HEREDOC — and /tmp, not /usr/local/bin. Both learned the hard way
               # on 2026-08-14. A quoted heredoc delimiter must sit at column 0, which is impossible
               # inside this indented YAML block scalar: bash never closes the heredoc and instead
@@ -513,16 +903,87 @@ spec:
               #
               # Single-quoted echoes keep every $VAR literal — they must expand in the ATTENDEE's
               # shell at connection time, not in this container's shell at pod start. The one value
-              # that IS resolved here is the API URL, which Helm knows and the shell cannot.
+              # that IS resolved here is the API URL, which Helm knows and the shell cannot; it is the
+              # ONLY double-quoted generator line below, and it contains no $ of its own.
+              #
+              # THE GENERATED WRAPPER RUNS WITHOUT `set -e`, deliberately. A session wrapper that dies
+              # on a benign non-zero closes the attendee's terminal with no message at all, which is a
+              # worse outcome than the non-zero. `-u` and `pipefail` stay; everything that must not
+              # fail silently is checked explicitly and prints its own ❌.
               {
                 echo '#!/bin/bash'
-                echo 'if [ -z "${TTYD_USER:-}" ]; then'
+                echo 'set -uo pipefail'
+                echo 'umask 077'
+                echo '# Rule 1: token out of the environment before anything else can read it.'
+                echo '_tok="${TTYD_USER:-}"'
+                echo 'unset TTYD_USER'
+                echo "WS_API='{{ $apiUrl }}'"
+                echo 'if [ -z "$_tok" ]; then'
                 echo '  echo "No authenticated identity on this connection — refusing to open a shell."'
                 echo '  echo "Reach this terminal through the cockpit URL so the front door can identify you."'
-                echo '  exec sleep 5'
+                echo '  exec sleep 10'
                 echo 'fi'
-                echo 'export HOME="/homes/${TTYD_USER}"'
-                echo 'mkdir -p "$HOME/.bashrc.d"'
+                echo '# Bootstrap kubeconfig, written by BUILTINS into a 0600 mktemp file: no `oc login'
+                echo '# --token=…`, because a flag value is visible in the process table to every other'
+                echo '# session in this pod. HOME cannot be known yet — it is derived from the identity'
+                echo '# this file is what proves — so the first write lands outside the shared PVC.'
+                echo '_kc="$(mktemp /tmp/.ws-kube.XXXXXXXXXX)" || { echo "❌ cannot create a session kubeconfig"; exec sleep 10; }'
+                echo 'chmod 0600 "$_kc"'
+                echo '{'
+                echo '  echo "apiVersion: v1"'
+                echo '  echo "kind: Config"'
+                echo '  echo "clusters:"'
+                echo '  echo "- name: ogsr"'
+                echo '  echo "  cluster:"'
+                echo '  echo "    server: $WS_API"'
+                echo '  echo "    insecure-skip-tls-verify: true"'
+                echo '  echo "contexts:"'
+                echo '  echo "- name: ogsr"'
+                echo '  echo "  context:"'
+                echo '  echo "    cluster: ogsr"'
+                echo '  echo "    user: ogsr"'
+                echo '  echo "current-context: ogsr"'
+                echo '  echo "users:"'
+                echo '  echo "- name: ogsr"'
+                echo '  echo "  user:"'
+                echo '  echo "    token: $_tok"'
+                echo '} > "$_kc"'
+                echo '# The name comes from the CLUSTER, never from a header we could be fed. This is'
+                echo '# also the expiry probe: a dead token cannot answer whoami.'
+                echo 'WS_USER="$(KUBECONFIG="$_kc" oc whoami 2>/dev/null || true)"'
+                echo 'if [ -z "$WS_USER" ]; then'
+                echo '  rm -f "$_kc"; unset _tok'
+                echo '  echo'
+                echo '  echo "  Your cockpit sign-in has expired."'
+                echo '  echo "  Reload the cockpit page in your browser to sign in again, then reopen"'
+                echo '  echo "  this terminal. (Sessions last as long as the cluster allows — 24h by default.)"'
+                echo '  echo'
+                echo '  exec sleep 15'
+                echo 'fi'
+                echo '# $HOME is built from this string, so anything that is not a plain name is refused'
+                echo '# rather than turned into a path. htpasswd names are plain; an OIDC identity need'
+                echo '# not be, and "../.." must never become a home directory.'
+                echo 'case "$WS_USER" in'
+                echo '  *[!A-Za-z0-9._@-]* | .* | -* )'
+                echo '    rm -f "$_kc"; unset _tok'
+                echo '    echo "❌ the cluster returned a username this cockpit will not turn into a home directory."'
+                echo '    echo "   Ask your instructor — the shared cockpit expects plain workshop usernames."'
+                echo '    exec sleep 15 ;;'
+                echo 'esac'
+                echo 'export HOME="/homes/${WS_USER}"'
+                echo 'mkdir -p "$HOME/.kube" "$HOME/.bashrc.d" || { echo "❌ cannot create ${HOME}"; rm -f "$_kc"; exec sleep 10; }'
+                echo 'chmod 0700 "$HOME/.kube"'
+                echo '# Copy-then-rename INSIDE ~/.kube so the swap is an atomic same-filesystem rename:'
+                echo '# a second tab connecting at the same moment can never read a half-written config.'
+                echo 'cp -f "$_kc" "$HOME/.kube/.config.$$" && chmod 0600 "$HOME/.kube/.config.$$" \'
+                echo '  && mv -f "$HOME/.kube/.config.$$" "$HOME/.kube/config" \'
+                echo '  || { echo "❌ cannot write ${HOME}/.kube/config"; rm -f "$_kc" "$HOME/.kube/.config.$$"; exec sleep 10; }'
+                echo 'rm -f "$_kc"'
+                echo '# Last reference to the token in this shell. It was never exported, so the bash we'
+                echo '# exec below would not have inherited it either way — this is belt and braces.'
+                echo 'unset _tok'
+                echo 'export KUBECONFIG="$HOME/.kube/config"'
+                echo 'export WS_USER'
                 echo 'cd "$HOME"'
                 echo '# ws on PATH, from the clone the content build already made. The attendee'
                 echo '# cockpit clones the repo into each home; here one clone at /showroom/repo is'
@@ -530,28 +991,28 @@ spec:
                 echo '# clones. This is what makes an SA "just another workshop user" — the owner'
                 echo '# ruling is same identity, same tools, and every demo pre-flight is ws prep.'
                 echo 'export PATH="$PATH:/showroom/repo/tools/ws"'
-                echo 'if [ ! -e "$HOME/.ogsr-seeded" ]; then'
-                echo '  {'
-                echo "    echo '# OGSR cockpit greeting — managed by the shared cockpit terminal.'"
-                echo "    echo 'if [ -z \"\${OGSR_BANNER_SHOWN:-}\" ]; then'"
-                echo "    echo '  export OGSR_BANNER_SHOWN=1'"
-                echo "    echo '  echo'"
-                echo "    echo '  echo \"  You are signed in as \$TTYD_USER.\"'"
-                echo "    echo '  echo \"  This shell is not logged in to the cluster yet. Log in with:\"'"
-                echo "    echo '  echo \"    oc login {{ $apiUrl }} -u \$TTYD_USER\"'"
-                echo "    echo '  echo'"
-                echo "    echo '  echo \"  Anything needing cluster-admin belongs in your OWN terminal, not this one.\"'"
-                echo "    echo '  echo'"
-                echo "    echo 'fi'"
-                echo '  } > "$HOME/.bashrc.d/ogsr-cockpit.sh"'
-                echo '  touch "$HOME/.ogsr-seeded"'
-                echo 'fi'
+                echo 'oc project "${WS_USER}-dev" >/dev/null 2>&1 || true'
+                echo '# Printed HERE, not seeded into ~/.bashrc.d. The wrapper already runs exactly'
+                echo '# once per websocket, which is the once-per-session semantics the old'
+                echo '# OGSR_BANNER_SHOWN guard was imitating — and a fresh /homes/<user> has no'
+                echo '# ~/.bashrc, so nothing was sourcing that drop-in in the first place.'
+                echo 'echo'
+                echo 'echo "  You are signed in as ${WS_USER} — this shell is already logged in to the cluster."'
+                echo 'echo "  Try: oc whoami   ·   ws prep <module>"'
+                echo 'echo'
+                echo 'echo "  If a command comes back Unauthorized, your sign-in has expired: reload the"'
+                echo 'echo "  cockpit page in your browser, then reopen this terminal."'
+                echo 'echo'
+                echo 'echo "  Anything needing cluster-admin belongs in your OWN terminal, not this one."'
+                echo 'echo'
                 echo 'exec /usr/bin/bash'
               } > /tmp/ws-session
               chmod 0755 /tmp/ws-session
-              # -H is what populates TTYD_USER. -W keeps the terminal writable. No -c: authentication
-              # is the front door's job, and a second password here would only be theatre.
-              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Forwarded-User /tmp/ws-session
+              # -H is what populates TTYD_USER, and it takes exactly ONE header — spent here on the
+              # access token, because a name without a credential is the defect this replaces. -W keeps
+              # the terminal writable. No -c: authentication is the front door's job, and a second
+              # password here would only be theatre.
+              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Forwarded-Access-Token /tmp/ws-session
           resources:
             {{- toYaml $.Values.showroom.terminalResources | nindent 12 }}
           volumeMounts:
@@ -582,6 +1043,26 @@ spec:
         - name: tls
           secret:
             secretName: {{ $name }}-tls
+        # Created by the wave-2 bootstrap hook above, not by Argo — so this Deployment (wave 3) is
+        # ordered after it on purpose: a pod cannot start on a secret volume that does not exist.
+        #
+        # 288 = 0440, and the 40 is MEASURED, not chosen for looking strict. A projected secret file
+        # under restricted-v2 is owned `root:<fsGroup>` while the container runs as a non-root uid
+        # that holds fsGroup as a SUPPLEMENTARY group — read live on this pod 2026-08-16:
+        #     uid=1002180000 gid=0(root) groups=0(root),1002180000
+        #     -rw-r--r--. 1 0 1002180000  tls.crt
+        # so the process is never the file's OWNER and reaches it through the GROUP bit. 0400 (owner
+        # only) would therefore have made the client secret unreadable and crash-looped oauth-proxy on
+        # a file it can see; 0440 is the tightest mode that is still readable, and it is tighter than
+        # the 0644 default the sibling tls volume gets. One item, so the volume exposes the single key
+        # oauth-proxy needs and nothing else the Secret might grow later.
+        - name: oauth-client
+          secret:
+            secretName: {{ $clientSecretName }}
+            defaultMode: 288
+            items:
+              - key: clientSecret
+                path: client-secret
         - name: homes
           persistentVolumeClaim:
             claimName: {{ $name }}-homes
