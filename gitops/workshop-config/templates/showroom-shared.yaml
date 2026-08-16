@@ -176,6 +176,52 @@ subjects:
     name: {{ $name }}
     namespace: {{ $ns }}
 ---
+# why (cross-namespace read): the session wrapper's SECOND identity path. When the front door hands
+# the terminal a username but no access token, the wrapper signs that user in with the shared
+# workshop password — the same secret, in the same namespace, that the Gitea/SonarQube/Etherpad seeds
+# already read, so there is one source of truth for it and no copy in git.
+#
+# THE GRANT IS `get` ON ONE NAMED SECRET, and it is worth stating what it does NOT contain: every
+# session in this pod runs as the same uid and the pod SA token is on that filesystem, so any
+# attendee who wants the workshop password can already read it here. The password is non-secret by
+# owner ruling (it is printed in the attendee materials); this Role changes who is *convenient* for,
+# not who it is *available* to. The exposure that matters is the SA token itself, which is tracked
+# separately rather than pretended away here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-session-creds
+  namespace: {{ $.Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["workshop-user-creds"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-session-creds
+  namespace: {{ $.Values.giteaNamespace }}
+  labels:
+    workshop.redhat.com/layer: workshop-config
+    {{- include "workshop-config.ownerLabels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-session-creds
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $ns }}
+---
 # ── OAUTH CLIENT BOOTSTRAP (SA + RBAC + Sync hook) ───────────────────────────────────────────────
 #
 # WHY A HOOK AND NOT A DECLARED OAuthClient. The client needs a SECRET, and a secret in a chart is a
@@ -535,6 +581,14 @@ data:
         default 0;
         ''      1;
       }
+      # PRESENCE, NEVER VALUE. These two exist so the question "did the front door send it?"
+      # is answerable from `oc logs -c nginx` instead of from a rebuild-and-guess cycle. A
+      # token in an access log is a credential in a log, so what is logged is 0 or 1 and the
+      # value is never interpolated anywhere near log_format.
+      map $http_x_forwarded_user         $ws_hdr_user  { default 1; '' 0; }
+      map $http_x_forwarded_access_token $ws_hdr_token { default 1; '' 0; }
+      log_format ws_identity '$time_iso8601 $request_method $uri upgrade="$http_upgrade" '
+                             'hdr_user=$ws_hdr_user hdr_token=$ws_hdr_token -> $status';
       server {
         listen 8080;
         absolute_redirect off;
@@ -570,11 +624,20 @@ data:
           proxy_read_timeout 43200000;
           proxy_set_header Host $http_host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          # ttyd reads ONE header (-H) and this is it: the attendee's OAuth access token, which the
-          # session wrapper turns into a per-session kubeconfig. Both are set explicitly because
-          # proxy_pass rewrites Host and Connection and these must survive that.
-          proxy_set_header X-Forwarded-Access-Token $http_x_forwarded_access_token;
-          proxy_set_header X-Forwarded-User $http_x_forwarded_user;
+          # ttyd reads ONE header (-H) and this is it. It is COMPOSED rather than forwarded, and
+          # that is the fix for the disconnect loop, not a tidy-up:
+          #
+          # ttyd's -H DENIES the websocket when its header is absent. A denied websocket is a
+          # closed socket, and a closed socket is the only thing the ttyd client can report —
+          # "reconnecting", forever. The wrapper's own refusal path closed the socket too. So a
+          # missing token, an expired token and a wrapper bug were three different faults wearing
+          # one indistinguishable symptom, and no fix to any of them could ever LOOK different.
+          #
+          # This value is never empty — at worst it is literally "u=;t=" — so ttyd can no longer
+          # deny anyone, and the decision moves into the wrapper, which can hold the shell open
+          # and say which half arrived. Diagnosis stops costing a deploy.
+          proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=$http_x_forwarded_access_token";
+          access_log /dev/stdout ws_identity;
         }
         location = /tty-bottom { return 302 /tty-bottom/; }
         location /tty-bottom/ {
@@ -585,8 +648,8 @@ data:
           proxy_read_timeout 43200000;
           proxy_set_header Host $http_host;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Access-Token $http_x_forwarded_access_token;
-          proxy_set_header X-Forwarded-User $http_x_forwarded_user;
+          proxy_set_header X-Ws-Session "u=$http_x_forwarded_user;t=$http_x_forwarded_access_token";
+          access_log /dev/stdout ws_identity;
         }
       }
     }
@@ -779,34 +842,35 @@ spec:
           # --pass-user-headers STAYS: X-Forwarded-User is what the nginx sub_filter rewrites the
           # __WS_USER__ sentinel with, and that half is verified working with two concurrent logins.
           #
-          # --cookie-refresh AND --cookie-expire ARE NOT TUNING. THEY ARE WHY THE TOKEN ARRIVES.
-          # First deploy of this design had neither, and every terminal opened, printed the wrapper's
-          # "sign-in has expired" and closed — the token never reached ttyd. What was eliminated first,
-          # each by measurement rather than by reading, so nobody repeats the search:
-          #   * the wrapper           — run by hand in the pod: refuses correctly with no token,
-          #                             reports expiry with a bad one. Correct.
-          #   * API reachability      — /version from inside the terminal container: 200, and a token
-          #                             authenticates there. Correct.
-          #   * nginx forwarding      — proxy_set_header X-Forwarded-Access-Token is present in BOTH
-          #                             /tty-*/ locations. Correct.
-          #   * ttyd's -H check       — probed through nginx with the header and without it: accepted
-          #                             BOTH (101), and neither probe added a "denied connection" line.
-          #                             So the deny lines in its log are NOT the auth header.
-          # What was left was oauth-proxy's own startup line:
-          #     Cookie settings: name:_oauth_proxy ... expiry:168h0m0s ... refresh:DISABLED
-          # With refresh disabled the session cookie carries identity but not the access token, so on
-          # every request AFTER the OAuth exchange there is no token for --pass-access-token to pass —
-          # which is exactly why X-Forwarded-User kept working while X-Forwarded-Access-Token did not.
-          # The proxy's own log says the token exists at exchange time ("Session{user6 token:true}")
-          # and that is the trap: the token is real, it just is not carried forward.
-          # 4h is comfortably inside the cluster's 24h token life so a refresh has something to
-          # validate, and 24h expiry stops a session cookie outliving the token it represents — the
-          # default 168h let a dead session look alive for six days.
+          # --cookie-refresh AND --cookie-expire ARE HYGIENE, NOT THE FIX. An earlier version of this
+          # comment claimed they were "why the token arrives". THEY ARE NOT: with
+          # `refresh:after 4h0m0s` confirmed live in the startup line, every terminal still failed
+          # identically. Keep them — 4h sits inside the cluster's 24h token life so a refresh has
+          # something to validate, and 24h expiry stops a session cookie outliving the token it
+          # represents (the default 168h let a dead session look alive for six days) — but do not
+          # credit them with delivering the token.
           #
-          # DIAGNOSING THIS AGAIN: do NOT patch this ConfigMap to add logging. nginx.conf is mounted
-          # with subPath, so a ConfigMap edit NEVER reaches the container, and Argo's selfHeal reverts
-          # it regardless. Read the proxy's startup "Cookie settings:" line instead — it states the
-          # refresh setting outright.
+          # A FALSIFIED MEASUREMENT LIVED HERE FOR A DAY. It read: "ttyd's -H check — probed through
+          # nginx with and without the header: accepted BOTH (101)". That probe was WRONG, and it is
+          # recorded rather than deleted because it cost the most time of anything in this file. It
+          # omitted `Sec-WebSocket-Protocol: tty`, and ttyd only reaches its auth check on a genuine
+          # subprotocol handshake. Re-probed correctly:
+          #     subproto tty, NO header  -> 502      subproto tty, WITH header -> 101
+          # So -H does enforce, the deny lines in ttyd's log ARE the auth header, and the conclusion
+          # drawn from the bad probe sent the search to cookies for hours. If you probe a websocket,
+          # send the subprotocol the real client sends, or you are testing a different code path.
+          #
+          # WHY THE HEADER IS NO LONGER LOAD-BEARING. Whether --pass-access-token survives to the
+          # upstream on a WEBSOCKET is a property of the proxy build, not of this chart: oauth-proxy
+          # routes upgrades through yhat/wsutil instead of its normal reverse proxy (read
+          # UpstreamProxy.ServeHTTP). Rather than keep betting the terminal on that, nginx now
+          # composes a never-empty X-Ws-Session and the wrapper decides — see the ttyd invocation.
+          #
+          # DIAGNOSING THIS AGAIN: `oc logs -c nginx` now prints hdr_user=0|1 hdr_token=0|1 per tty
+          # request (presence only — a token in a log is a credential in a log). That answers "did
+          # the front door send it?" outright. Do NOT patch the ConfigMap to add logging: nginx.conf
+          # is mounted with subPath so a ConfigMap edit never reaches the container, and Argo's
+          # selfHeal reverts it regardless. Change the chart and bump its version.
           volumeMounts:
             - name: tls
               mountPath: /etc/tls/private
@@ -945,21 +1009,28 @@ spec:
                 echo '#!/bin/bash'
                 echo 'set -uo pipefail'
                 echo 'umask 077'
-                echo '# Rule 1: token out of the environment before anything else can read it.'
-                echo '_tok="${TTYD_USER:-}"'
+                echo '# Rule 1: the session header leaves the environment before anything else runs.'
+                echo '_sess="${TTYD_USER:-}"'
                 echo 'unset TTYD_USER'
                 echo "WS_API='{{ $apiUrl }}'"
-                echo 'if [ -z "$_tok" ]; then'
-                echo '  echo "No authenticated identity on this connection — refusing to open a shell."'
-                echo '  echo "Reach this terminal through the cockpit URL so the front door can identify you."'
-                echo '  exec sleep 10'
-                echo 'fi'
+                echo "WS_GITEA_NS='{{ $.Values.giteaNamespace }}'"
+                echo '# nginx composes "u=<name>;t=<token>" and never sends it empty, so reaching this'
+                echo '# line proves the socket opened and NOTHING about identity. Either half may be'
+                echo '# absent; each is handled on its own below, and neither absence closes the socket.'
+                echo '_hu="${_sess%%;t=*}"; _hu="${_hu#u=}"'
+                echo '_tok="${_sess#*;t=}"'
+                echo 'unset _sess'
+                echo '_why=""'
                 echo '# Bootstrap kubeconfig, written by BUILTINS into a 0600 mktemp file: no `oc login'
                 echo '# --token=…`, because a flag value is visible in the process table to every other'
                 echo '# session in this pod. HOME cannot be known yet — it is derived from the identity'
                 echo '# this file is what proves — so the first write lands outside the shared PVC.'
-                echo '_kc="$(mktemp /tmp/.ws-kube.XXXXXXXXXX)" || { echo "❌ cannot create a session kubeconfig"; exec sleep 10; }'
+                echo '_kc="$(mktemp /tmp/.ws-kube.XXXXXXXXXX)" || { echo "❌ cannot create a session kubeconfig"; exec sleep 3600; }'
                 echo 'chmod 0600 "$_kc"'
+                echo 'WS_USER=""'
+                echo '# --- path 1: the front door passed an access token. Preferred, because the'
+                echo '# credential IS the attendee OAuth session and no shared secret is involved.'
+                echo 'if [ -n "$_tok" ]; then'
                 echo '{'
                 echo '  echo "apiVersion: v1"'
                 echo '  echo "kind: Config"'
@@ -982,14 +1053,50 @@ spec:
                 echo '# The name comes from the CLUSTER, never from a header we could be fed. This is'
                 echo '# also the expiry probe: a dead token cannot answer whoami.'
                 echo 'WS_USER="$(KUBECONFIG="$_kc" oc whoami 2>/dev/null || true)"'
+                echo '[ -n "$WS_USER" ] || _why="the access token the front door passed is not valid here — the sign-in has expired"'
+                echo 'fi'
+                echo '# --- path 2: only a NAME arrived. Sign in with the shared workshop password, which'
+                echo '# is the same mechanism the per-user cockpits have always used. This path exists'
+                echo '# because oauth-proxy proxies websockets through a different handler than plain'
+                echo '# HTTP, and whether the access token survives that hop is a property of the proxy'
+                echo '# build, not of this chart — see the header. A name is not a credential, so a'
+                echo '# forged one buys nothing the shared password does not already give everybody.'
+                echo 'if [ -z "$WS_USER" ] && [ -n "$_hu" ]; then'
+                echo '  case "$_hu" in'
+                echo '    *[!A-Za-z0-9._@-]* | .* | -* )'
+                echo '      _why="the front door sent a username this cockpit will not use" ;;'
+                echo '    * )'
+                echo '      _pw="$(oc get secret workshop-user-creds -n "$WS_GITEA_NS" -o "jsonpath={.data.password}" 2>/dev/null | base64 -d 2>/dev/null || true)"'
+                echo '      if [ -z "$_pw" ]; then'
+                echo '        _why="no access token arrived, and the shared workshop password is not readable from this pod"'
+                echo '      else'
+                echo '        KUBECONFIG="$_kc" oc login --server="$WS_API" --insecure-skip-tls-verify=true -u "$_hu" -p "$_pw" >/dev/null 2>&1 || true'
+                echo '        unset _pw'
+                echo '        WS_USER="$(KUBECONFIG="$_kc" oc whoami 2>/dev/null || true)"'
+                echo '        [ -n "$WS_USER" ] || _why="could not sign in as ${_hu} with the shared workshop password"'
+                echo '      fi ;;'
+                echo '  esac'
+                echo 'fi'
+                echo '# --- neither path produced an identity. HOLD THE SOCKET OPEN. Closing it here is'
+                echo '# what made three unrelated faults look like one "reconnecting" loop for a whole'
+                echo '# evening: the client cannot render a reason it never received. `sleep` and not'
+                echo '# bash, because an unidentified session must not get a shell — the pod SA token is'
+                echo '# on this filesystem.'
                 echo 'if [ -z "$WS_USER" ]; then'
+                echo '  _got_u=no; [ -n "$_hu" ] && _got_u=yes'
+                echo '  _got_t=no; [ -n "$_tok" ] && _got_t=yes'
                 echo '  rm -f "$_kc"; unset _tok'
+                echo '  [ -n "$_why" ] || _why="the cockpit front door sent neither a username nor an access token"'
                 echo '  echo'
-                echo '  echo "  Your cockpit sign-in has expired."'
-                echo '  echo "  Reload the cockpit page in your browser to sign in again, then reopen"'
-                echo '  echo "  this terminal. (Sessions last as long as the cluster allows — 24h by default.)"'
+                echo '  echo "  This terminal could not identify you, so it has not opened a shell."'
                 echo '  echo'
-                echo '  exec sleep 15'
+                echo '  echo "  Reason:   ${_why}"'
+                echo '  echo "  Received: username=${_got_u}  token=${_got_t}"'
+                echo '  echo'
+                echo '  echo "  Reload the cockpit page in your browser to sign in again, then reopen this"'
+                echo '  echo "  terminal. This connection stays open so the message stays readable."'
+                echo '  echo'
+                echo '  exec sleep 3600'
                 echo 'fi'
                 echo '# $HOME is built from this string, so anything that is not a plain name is refused'
                 echo '# rather than turned into a path. htpasswd names are plain; an OIDC identity need'
@@ -999,23 +1106,23 @@ spec:
                 echo '    rm -f "$_kc"; unset _tok'
                 echo '    echo "❌ the cluster returned a username this cockpit will not turn into a home directory."'
                 echo '    echo "   Ask your instructor — the shared cockpit expects plain workshop usernames."'
-                echo '    exec sleep 15 ;;'
+                echo '    exec sleep 3600 ;;'
                 echo 'esac'
                 echo 'export HOME="/homes/${WS_USER}"'
-                echo 'mkdir -p "$HOME/.kube" "$HOME/.bashrc.d" || { echo "❌ cannot create ${HOME}"; rm -f "$_kc"; exec sleep 10; }'
+                echo 'mkdir -p "$HOME/.kube" "$HOME/.bashrc.d" || { echo "❌ cannot create ${HOME}"; rm -f "$_kc"; exec sleep 3600; }'
                 echo 'chmod 0700 "$HOME/.kube"'
                 echo '# Copy-then-rename INSIDE ~/.kube so the swap is an atomic same-filesystem rename:'
                 echo '# a second tab connecting at the same moment can never read a half-written config.'
                 echo 'cp -f "$_kc" "$HOME/.kube/.config.$$" && chmod 0600 "$HOME/.kube/.config.$$" \'
                 echo '  && mv -f "$HOME/.kube/.config.$$" "$HOME/.kube/config" \'
-                echo '  || { echo "❌ cannot write ${HOME}/.kube/config"; rm -f "$_kc" "$HOME/.kube/.config.$$"; exec sleep 10; }'
+                echo '  || { echo "❌ cannot write ${HOME}/.kube/config"; rm -f "$_kc" "$HOME/.kube/.config.$$"; exec sleep 3600; }'
                 echo 'rm -f "$_kc"'
                 echo '# Last reference to the token in this shell. It was never exported, so the bash we'
                 echo '# exec below would not have inherited it either way — this is belt and braces.'
                 echo 'unset _tok'
                 echo 'export KUBECONFIG="$HOME/.kube/config"'
                 echo 'export WS_USER'
-                echo 'cd "$HOME"'
+                echo 'cd "$HOME" || { echo "❌ cannot enter ${HOME}"; exec sleep 3600; }'
                 echo '# ws on PATH, from the clone the content build already made. The attendee'
                 echo '# cockpit clones the repo into each home; here one clone at /showroom/repo is'
                 echo '# mounted read-only and shared by every session, so N logins do not mean N'
@@ -1039,11 +1146,20 @@ spec:
                 echo 'exec /usr/bin/bash'
               } > /tmp/ws-session
               chmod 0755 /tmp/ws-session
-              # -H is what populates TTYD_USER, and it takes exactly ONE header — spent here on the
-              # access token, because a name without a credential is the defect this replaces. -W keeps
-              # the terminal writable. No -c: authentication is the front door's job, and a second
-              # password here would only be theatre.
-              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Forwarded-Access-Token /tmp/ws-session
+              # -H populates TTYD_USER and takes exactly ONE header, so nginx composes both halves of
+              # the identity into one: X-Ws-Session = "u=<name>;t=<token>".
+              #
+              # IT IS DELIBERATELY A HEADER THAT IS NEVER EMPTY. ttyd's -H is an ENFORCEMENT point: an
+              # absent header means it denies the websocket, and a denied websocket is a closed socket,
+              # which the ttyd client can only render as "reconnecting" — forever, with no reason shown.
+              # That is how a missing token, an expired token and a wrapper fault presented as one
+              # identical symptom on 2026-08-16 and cost an evening. Enforcement now lives in the
+              # wrapper, which can hold the connection open and name the reason. Do not "tidy" this
+              # back into -H X-Forwarded-Access-Token: that reinstates the silent failure mode.
+              #
+              # -W keeps the terminal writable. No -c: authentication is the front door's job, and a
+              # second password here would only be theatre.
+              exec /usr/bin/ttyd -p 7681 -i 0.0.0.0 -W -H X-Ws-Session /tmp/ws-session
           resources:
             {{- toYaml $.Values.showroom.terminalResources | nindent 12 }}
           volumeMounts:
