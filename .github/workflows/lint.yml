@@ -2036,11 +2036,11 @@ jobs:
         # each detector is individually load-bearing. This job asserts the second thing, so the
         # audit does not have to be re-run by hand to stay true.
         #
-        # RUNTIME. Within a sweep, the gate covers a guard when the diff touched it (always) or
-        # when its projected cost fits --budget (default 240s). Nothing hardcodes which guard is the
-        # expensive one — projected cost is measured per run, so a guard that gets slow drops out on
-        # its own and a guard that gets fast comes back. Whether a sweep happens AT ALL is decided by
-        # the scope step above.
+        # RUNTIME. On a push the gate covers exactly the guards the diff touched, and no others —
+        # see the --budget 0 rationale on the run step below, and note that "touched" includes a
+        # guard's canary fixtures, which the tool maps back to it. On the schedule, a PR, or a
+        # dispatch it covers every guard. Whether a sweep happens AT ALL is decided by the scope
+        # step above.
         #
         # NO LIVE COUNTS HERE, DELIBERATELY. This comment used to read "nine of ten guards in
         # ~2 minutes; rebuild-scan-guard costs ~75s per detector" — both written as illustration and
@@ -2065,14 +2065,30 @@ jobs:
           BASE: ${{ github.event_name == 'pull_request'
                     && github.event.pull_request.base.sha || github.event.before }}
         run: |
-          # An all-zero SHA is a first push to a branch with no predecessor to diff against. Pass
-          # no --changed-from at all there: the budget still sweeps nine guards, and claiming a
-          # base we do not have would be worse than sweeping the cheap set.
-          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
-            set -- --changed-from "$BASE"
+          # A PUSH sweeps exactly the guards it touched — `--budget 0` turns off the "and anything
+          # cheap enough" clause entirely. Everything else (PR, the 03:00 schedule, a manual
+          # dispatch, or a push whose base we cannot resolve) sweeps EVERYTHING.
+          #
+          # WHY NOT A BUDGET. Measured 2026-08-16: `--budget 240` skipped ZERO of 27 guards and the
+          # job took 988s of the workflow's 1014s wall clock. The projection it filters on
+          # (baseline seconds x detector count) is a proxy, and it under-predicts the one guard
+          # that matters — rebuild-scan projected under 240s and cost 304s. So the threshold
+          # admitted precisely the guard it existed to exclude, and did it while looking MORE
+          # thorough. A number that has to stay true as guards are added will go stale again; a
+          # binary will not. Coverage is unchanged over a day: the nightly --all re-proves every
+          # detector, and a guard edit still sweeps that guard on the push that makes it.
+          #
+          # An all-zero SHA is a first push with no predecessor to diff against — that is the
+          # unresolvable case, and it sweeps. FAIL SAFE stays the rule: anything we cannot
+          # determine sweeps, because treating an unanswerable question as "nothing changed" is
+          # how a gate goes quiet.
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "$BASE" ] \
+             && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
+            set -- --changed-from "$BASE" --budget 0
+            echo "push: sweeping only the guards this diff touched (nightly --all covers the rest)"
           else
-            set --
-            echo "no resolvable base commit; sweeping by budget only (touched-guard rule is off)"
+            set -- --all
+            echo "event '${{ github.event_name }}' (or no resolvable base): sweeping EVERY guard"
           fi
           # rc 1 = a detector can be blinded with no CI signal. rc 2 = the gate could not inspect
           # a guard at all (it does not import, its unmutated control is not 0/1, a mutation

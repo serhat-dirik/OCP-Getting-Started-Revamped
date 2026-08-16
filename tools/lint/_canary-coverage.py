@@ -67,6 +67,17 @@ the expensive one; a guard that becomes slow drops out on its own, and one that 
 rejoins on its own. The consequence, stated plainly: an expensive guard's detectors are re-proven
 when it or its fixtures change, not on every push.
 
+THE BUDGET ROTTED, and it rotted GREEN. Measured 2026-08-16: 27 guards, 0 skipped, 988s — 63% of
+the workflow's entire 1014s wall clock, against the 155s/170s recorded when the scoping above was
+written. `projected = baseline_seconds * len(detectors)` is a proxy, not a cost: `rebuild-scan`
+projected under 240s and actually cost 304s, so the one guard the budget exists to exclude was the
+one it admitted. A threshold that stops filtering does not fail loudly — it looks MORE thorough
+while making every push wait, which is how a gate ends up switched off by a frustrated human
+rather than by a decision. So CI no longer passes a number it has to keep true: push events run
+`--changed-from BASE --budget 0` (sweep exactly what the diff touched, and nothing else), and the
+nightly schedule runs `--all`. A binary cannot drift out of calibration the way 240 did. The
+budget knob stays for local use, where picking your own ceiling is the point.
+
 WHAT THIS GATE DOES NOT COVER, stated so nobody reads its green tick as more than it is:
   * The 16 Bash guards. They have no module-level attribute to patch; `_check-coverage.sh` asserts
     every `check_*` RAN, which is a strictly weaker claim than "its finding could not be silenced".
@@ -889,6 +900,14 @@ def run_gate(guard_paths, changed, budget, jobs, timeout, quiet=False):
         if rep.error:
             continue
         touched = sweep_all or rep.guard in changed
+        # `--budget 0` is the push-time mode: sweep what the diff touched, nothing else. Decided
+        # HERE, before measure_baseline, because a baseline is two real guard runs — paying 27 of
+        # them to then skip 27 guards is how a scoped run stays as slow as a full one. Measured
+        # 2026-08-16: baselines were 144s of this job's 972s.
+        if not touched and budget <= 0:
+            rep.skipped = ("skipped (untouched; --budget 0 sweeps only what the diff touched — "
+                           "the nightly --all run is what re-proves this guard)")
+            continue
         plain, selft, seconds = measure_baseline(path, timeout)
         rep.baseline = (plain, selft)
         if (plain, selft) != (BASELINE_PLAIN, BASELINE_SELF_TEST):
@@ -992,7 +1011,17 @@ def run_gate(guard_paths, changed, budget, jobs, timeout, quiet=False):
     swept = [r for r in reports if not r.skipped and not r.error]
     if not quiet:
         proven_n = sum(len(r.proven) for r in swept)
-        if EXEMPT or KNOWN_UNPROVEN:
+        if not swept:
+            # An empty sweep is rc 0 because there is no finding to report — but it is NOT proof,
+            # and the line below refuses to imply it is. The previous wording rendered this case as
+            # "0 detector(s) proven across 0 swept guard(s); every blinding moved an exit code",
+            # a green tick over an inspection that never happened. Same rule as the declared-debt
+            # block above: exit 0 has never meant "no hole", and must not read that way.
+            print(f"\n✅ _canary-coverage: swept NOTHING — all {len(reports)} guard(s) were "
+                  f"skipped, so this run proves nothing about any detector. Exit 0 is a statement "
+                  f"about this run, not about the guards. Whole-tree coverage comes from the "
+                  f"nightly --all sweep; 'gh workflow run lint' forces one now.")
+        elif EXEMPT or KNOWN_UNPROVEN:
             # NOT "every blinding moved an exit code" — that sentence is false the moment a ledger
             # has one entry, and it was printed anyway, over an EXEMPT entry that was never even
             # named. Exit 0 means "no NEW unproven detector"; it must never be printed as "no
@@ -1177,6 +1206,43 @@ def self_test() -> int:
                             f"ledger entry was in force. That claim is false for the declared "
                             f"detector, which is exactly the sentence C2c forbids.")
 
+    # ── The push-time scope (--budget 0), each claim against its own control ───────────────────
+    # Added 2026-08-16, after this job reached 988s of a 1014s wall clock — 63% of every push's CI
+    # — by sweeping all 27 guards on every push. Both halves of the fix fail in the direction that
+    # looks like success, so both get a case:
+    #   1. budget 0 must skip an untouched guard WITHOUT measuring its baseline. A baseline is two
+    #      real guard runs; skipping only after paying for them is a scoped run that is not faster,
+    #      and the wasted time is invisible in the output.
+    #   2. a sweep that covered nothing must not print a green line that reads as proof.
+    # The CONTROL is the third block: budget 0 must still sweep a guard the diff TOUCHED. Without
+    # it, "skips everything untouched" is satisfied by skipping everything full stop — a gate that
+    # never runs, wearing a green tick. That is this file's own founding defect, applied to itself.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc_untouched, untouched_reports = run_gate([proven_fixture], set(), 0.0, 4, timeout)
+    untouched_out = buf.getvalue()
+    if rc_untouched != 0:
+        problems.append(f"--budget 0 over an untouched guard gave rc={rc_untouched}, expected 0. "
+                        f"'There was nothing to sweep' is not a finding about a guard.")
+    if untouched_reports[0].baseline is not None:
+        problems.append("--budget 0 measured a baseline for an untouched guard — two real guard "
+                        "runs paid to decide not to sweep it. The skip must precede the measure, "
+                        "or the push-time mode costs what the full sweep costs.")
+    if "swept NOTHING" not in untouched_out:
+        problems.append("a sweep that covered no guard never said so. A run that inspected zero "
+                        "detectors and prints an unqualified green line is the false all-clear "
+                        "this whole file exists to make impossible.")
+    if "every blinding moved an exit code" in untouched_out:
+        problems.append("an empty sweep printed 'every blinding moved an exit code' — a claim "
+                        "about detectors, none of which were run.")
+    rc_touched, touched_reports = run_gate([proven_fixture], {proven_fixture.name}, 0.0, 4,
+                                           timeout, quiet=True)
+    if rc_touched != 0 or touched_reports[0].skipped or not touched_reports[0].proven:
+        problems.append(f"--budget 0 did not sweep {proven_fixture.name} even though the diff "
+                        f"TOUCHED it (rc={rc_touched}, skipped={touched_reports[0].skipped!r}). "
+                        f"Touched-is-always-swept is the entire contract of the scoped mode; "
+                        f"without it the push-time gate sweeps nothing, ever, and stays green.")
+
     if problems:
         print("❌ SELF-TEST FAILED — the gate cannot tell a proven detector from an unproven one:",
               file=sys.stderr)
@@ -1188,7 +1254,9 @@ def self_test() -> int:
           f"classified UNPROVEN, and {len(cases)} ledger cases held (both rot directions of both "
           "ledgers, four malformed shapes rejected with rc 2, and a declared entry named in the "
           "output with the green line refusing to claim blanket success — each against its own "
-          "control). Exiting 1 — the gate's detection is proven.")
+          "control), and the --budget 0 scope held (an untouched guard skipped before its baseline "
+          "was ever measured, an empty sweep refusing to read as proof, against the control that a "
+          "TOUCHED guard is still swept). Exiting 1 — the gate's detection is proven.")
     return 1
 
 
