@@ -305,7 +305,86 @@ Your new claim, written by the workspace dev instance, is visible through the se
 ✔ *Verify:* `curl .../api/claims/ping` returns your string, the dev-mode terminal shows a `Live reload` line, and the claim you POSTed appears through the deployed Route.
 ****
 
-== 4. Push your change and ship it as a running Deployment
+== 4. Extend the workspace: add a Valkey cache to the devfile
+⏱ *~7 min* · the devfile is yours to change — restart the workspace from it
+
+A workspace is not fixed — it is whatever its devfile says.
+Add a second container (a Valkey cache the app could use) and a command to talk to it, then restart the workspace *from the devfile* so the new container appears.
+
+[NOTE]
+.Why Valkey, not Redis
+====
+*Valkey* is the Linux Foundation's BSD-licensed continuation of Redis, created after Redis changed its license.
+Red Hat ships a supported *Valkey* image and it is a drop-in for the same in-memory cache role — the wire protocol and the client commands (`PING`, `SET`, `GET`, …) are unchanged, so what you learn here transfers directly.
+====
+
+Stop dev mode (*Ctrl+C*).
+In the IDE Explorer, open `devfile.yaml` at the repository root.
+Under `components:`, add a `cache` component, and under `commands:`, add a `cache-ping` command:
+
+[source,yaml]
+----
+  # add under components:
+  - name: cache
+    container:
+      # pinned by digest: tags move, digests don't — a devfile exists to be reproducible
+      image: registry.redhat.io/rhel9/valkey-8@sha256:21f04dd3590cbb3561af0ced8e0e1e8cc1039023d808adcbb0c1cf10dca5b6fa
+      memoryLimit: 256Mi
+      endpoints:
+        - name: valkey
+          targetPort: 6379
+          exposure: internal
+----
+
+[source,yaml]
+----
+  # add under commands:
+  - id: cache-ping
+    exec:
+      label: Ping the Valkey cache
+      component: cache
+      commandLine: valkey-cli ping
+----
+
+Save the file.
+Now restart the workspace so Dev Spaces rebuilds it from the updated devfile:
+
+. Open the *Command Palette*: menu *View → Command Palette…* (keyboard: kbd:[Cmd+Shift+P] on a Mac, kbd:[Ctrl+Shift+P] on Windows/Linux).
+. Type `Restart Workspace` and choose *Dev Spaces: Restart Workspace from Local Devfile*.
+
+When the workspace comes back, the `cache` container is part of it.
+Confirm it by running the devfile command you just declared — this one is a *task*, not a command, so it lives in a different menu: *Terminal → Run Task…* → *devfile: Ping the Valkey cache*.
+It executes `valkey-cli ping` *inside the `cache` container* (the `valkey-cli` binary lives there, not in your `tools` terminal).
+
+.Expected output
+[source,texinfo]
+----
+PONG
+----
+
+The two containers share the workspace Pod's network, so your app — and your terminal — can reach Valkey at `localhost:6379`.
+Prove it from the *workspace terminal* without any Valkey tooling, using bash's built-in TCP support:
+
+[source,sh]
+----
+exec 3<>/dev/tcp/localhost/6379 && printf 'PING\r\n' >&3 && head -c 7 <&3
+----
+
+.Expected output
+[source,texinfo]
+----
++PONG
+----
+
+No service, no route — just a sidecar you declared in Git.
+
+[.checkpoint]
+****
+✔ *Verify:* After the restart, the *devfile: Ping the Valkey cache* task returns `PONG`, and the workspace now runs a `cache` container (the terminal TCP probe answers `+PONG` too).
+If the restart fails, your devfile has a YAML error — check the indentation of the two blocks you added (see xref:devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
+****
+
+== 5. Push your change and ship it as a running Deployment
 ⏱ *~10 min* · the hand-off from inner loop to outer loop, all the way to a running container
 
 Your `/ping` change lives only in the workspace.
@@ -420,85 +499,6 @@ That is the outer loop taking your change: from here a pipeline and GitOps would
 [.checkpoint]
 ****
 ✔ *Verify:* `oc -n {user}-dev get deploy parasol-claims-mine` shows the Deployment available, and `curl https://$MINE/api/claims/ping` returns your `/ping` string from the *deployed* container (not dev mode).
-****
-
-== 5. Extend the workspace: add a Valkey cache to the devfile
-⏱ *~7 min* · the devfile is yours to change — restart the workspace from it
-
-A workspace is not fixed — it is whatever its devfile says.
-Add a second container (a Valkey cache the app could use) and a command to talk to it, then restart the workspace *from the devfile* so the new container appears.
-
-[NOTE]
-.Why Valkey, not Redis
-====
-*Valkey* is the Linux Foundation's BSD-licensed continuation of Redis, created after Redis changed its license.
-Red Hat ships a supported *Valkey* image and it is a drop-in for the same in-memory cache role — the wire protocol and the client commands (`PING`, `SET`, `GET`, …) are unchanged, so what you learn here transfers directly.
-====
-
-Stop dev mode (*Ctrl+C*).
-In the IDE Explorer, open `devfile.yaml` at the repository root.
-Under `components:`, add a `cache` component, and under `commands:`, add a `cache-ping` command:
-
-[source,yaml]
-----
-  # add under components:
-  - name: cache
-    container:
-      # pinned by digest: tags move, digests don't — a devfile exists to be reproducible
-      image: registry.redhat.io/rhel9/valkey-8@sha256:21f04dd3590cbb3561af0ced8e0e1e8cc1039023d808adcbb0c1cf10dca5b6fa
-      memoryLimit: 256Mi
-      endpoints:
-        - name: valkey
-          targetPort: 6379
-          exposure: internal
-----
-
-[source,yaml]
-----
-  # add under commands:
-  - id: cache-ping
-    exec:
-      label: Ping the Valkey cache
-      component: cache
-      commandLine: valkey-cli ping
-----
-
-Save the file.
-Now restart the workspace so Dev Spaces rebuilds it from the updated devfile:
-
-. Open the *Command Palette*: menu *View → Command Palette…* (keyboard: kbd:[Cmd+Shift+P] on a Mac, kbd:[Ctrl+Shift+P] on Windows/Linux).
-. Type `Restart Workspace` and choose *Dev Spaces: Restart Workspace from Local Devfile*.
-
-When the workspace comes back, the `cache` container is part of it.
-Confirm it by running the devfile command you just declared — this one is a *task*, not a command, so it lives in a different menu: *Terminal → Run Task…* → *devfile: Ping the Valkey cache*.
-It executes `valkey-cli ping` *inside the `cache` container* (the `valkey-cli` binary lives there, not in your `tools` terminal).
-
-.Expected output
-[source,texinfo]
-----
-PONG
-----
-
-The two containers share the workspace Pod's network, so your app — and your terminal — can reach Valkey at `localhost:6379`.
-Prove it from the *workspace terminal* without any Valkey tooling, using bash's built-in TCP support:
-
-[source,sh]
-----
-exec 3<>/dev/tcp/localhost/6379 && printf 'PING\r\n' >&3 && head -c 7 <&3
-----
-
-.Expected output
-[source,texinfo]
-----
-+PONG
-----
-
-No service, no route — just a sidecar you declared in Git.
-
-[.checkpoint]
-****
-✔ *Verify:* After the restart, the *devfile: Ping the Valkey cache* task returns `PONG`, and the workspace now runs a `cache` container (the terminal TCP probe answers `+PONG` too).
-If the restart fails, your devfile has a YAML error — check the indentation of the two blocks you added (see xref:devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
 ****
 
 == 6. Take-home: the same loop, locally
