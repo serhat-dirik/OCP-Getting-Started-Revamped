@@ -114,11 +114,11 @@ The workspace is *declared* and waiting; starting it is what pulls the image and
 Open your workspace:
 
 . Open the {devspaces_url}[Dev Spaces dashboard^] and sign in as `{user}` (same credentials as the console).
-. On the dashboard you already have a workspace named *parasol-claims*. Click it to start it.
-. If Dev Spaces asks *"Do you trust the authors of this repository?"*, click *Continue* — it is your own fork.
+. On the dashboard you already have a workspace named *parasol-claims*. Click its *Open* link to start it — clicking the name only opens the workspace's detail page.
 . Wait for the workspace to start.
 The *first* start pulls the universal developer image and can take around a minute and a half; later starts take about twenty seconds.
 When it finishes, the che-code editor (VS Code in your browser) opens with the `parasol-claims` project loaded.
+. If the editor then asks *"Do you trust the authors of this repository?"*, click *Continue* — it is your own fork.
 
 [NOTE]
 .Two harmless prompts on the way in
@@ -305,90 +305,11 @@ Your new claim, written by the workspace dev instance, is visible through the se
 ✔ *Verify:* `curl .../api/claims/ping` returns your string, the dev-mode terminal shows a `Live reload` line, and the claim you POSTed appears through the deployed Route.
 ****
 
-== 4. Extend the workspace: add a Valkey cache to the devfile
-⏱ *~7 min* · the devfile is yours to change — restart the workspace from it
-
-A workspace is not fixed — it is whatever its devfile says.
-Add a second container (a Valkey cache the app could use) and a command to talk to it, then restart the workspace *from the devfile* so the new container appears.
-
-[NOTE]
-.Why Valkey, not Redis
-====
-*Valkey* is the Linux Foundation's BSD-licensed continuation of Redis, created after Redis changed its license.
-Red Hat ships a supported *Valkey* image and it is a drop-in for the same in-memory cache role — the wire protocol and the client commands (`PING`, `SET`, `GET`, …) are unchanged, so what you learn here transfers directly.
-====
-
-Stop dev mode (*Ctrl+C*).
-In the IDE Explorer, open `devfile.yaml` at the repository root.
-Under `components:`, add a `cache` component, and under `commands:`, add a `cache-ping` command:
-
-[source,yaml]
-----
-  # add under components:
-  - name: cache
-    container:
-      # pinned by digest: tags move, digests don't — a devfile exists to be reproducible
-      image: registry.redhat.io/rhel9/valkey-8@sha256:21f04dd3590cbb3561af0ced8e0e1e8cc1039023d808adcbb0c1cf10dca5b6fa
-      memoryLimit: 256Mi
-      endpoints:
-        - name: valkey
-          targetPort: 6379
-          exposure: internal
-----
-
-[source,yaml]
-----
-  # add under commands:
-  - id: cache-ping
-    exec:
-      label: Ping the Valkey cache
-      component: cache
-      commandLine: valkey-cli ping
-----
-
-Save the file.
-Now restart the workspace so Dev Spaces rebuilds it from the updated devfile:
-
-. Open the command palette (*F1* or *Ctrl+Shift+P*).
-. Run *Dev Spaces: Restart Workspace from Local Devfile*.
-
-When the workspace comes back, the `cache` container is part of it.
-Confirm it by running the devfile command you just declared: open the command palette (*F1*) → *Tasks: Run Task* → *devfile: Ping the Valkey cache*.
-It executes `valkey-cli ping` *inside the `cache` container* (the `valkey-cli` binary lives there, not in your `tools` terminal).
-
-.Expected output
-[source,texinfo]
-----
-PONG
-----
-
-The two containers share the workspace Pod's network, so your app — and your terminal — can reach Valkey at `localhost:6379`.
-Prove it from the *workspace terminal* without any Valkey tooling, using bash's built-in TCP support:
-
-[source,sh]
-----
-exec 3<>/dev/tcp/localhost/6379 && printf 'PING\r\n' >&3 && head -c 7 <&3
-----
-
-.Expected output
-[source,texinfo]
-----
-+PONG
-----
-
-No service, no route — just a sidecar you declared in Git.
-
-[.checkpoint]
-****
-✔ *Verify:* After the restart, the *devfile: Ping the Valkey cache* task returns `PONG`, and the workspace now runs a `cache` container (the terminal TCP probe answers `+PONG` too).
-If the restart fails, your devfile has a YAML error — check the indentation of the two blocks you added (see xref:devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
-****
-
-== 5. Commit and push your change
-⏱ *~6 min* · the hand-off from inner loop to outer loop
+== 4. Push your change and ship it as a running Deployment
+⏱ *~10 min* · the hand-off from inner loop to outer loop, all the way to a running container
 
 Your `/ping` change lives only in the workspace.
-Commit it and push it to your fork — this is the moment the inner loop hands off to the outer loop that the rest of the workshop builds (pipelines, GitOps).
+Commit it, push it to your fork, and then let the platform build and run it — this is the moment the inner loop hands off to the outer loop that the rest of the workshop builds (pipelines, GitOps).
 
 In the workspace terminal, first tell git who you are — a fresh workspace container has no git identity yet (set it once per workspace; the values only label your commits):
 
@@ -398,7 +319,15 @@ git config --global user.email "{user}@parasol.example.com"
 git config --global user.name "{user}"
 ----
 
-Then commit and push:
+Your workspace can *read* your fork, but it has no credentials to *write* to it yet.
+Tell git to remember what you type, so you are asked once and never again:
+
+[source,sh]
+----
+git config --global credential.helper store
+----
+
+Now commit and push:
 
 [source,sh]
 ----
@@ -408,26 +337,16 @@ git commit -m "Add /api/claims/ping endpoint"
 git push origin main
 ----
 
-The *first* push will likely fail asking for credentials:
+[IMPORTANT]
+.The password prompt appears ABOVE the terminal, not in it
+====
+On the push, che-code asks for your Git credentials in an *input box at the top of the editor* — not on the terminal line.
+The terminal looks frozen until you answer it, so if nothing seems to happen, look up.
 
-.Expected output (the auth wall)
-[source,texinfo]
-----
-fatal: could not read Username for 'https://...': No such device or address
-----
+Enter your workshop username (`{user}`) and password — the same ones you signed in with.
+`credential.helper store` saves them, so later pushes go straight through.
+====
 
-That is expected: your workspace can *read* the public repo but has no credentials to *write* to it yet.
-Give it your workshop credentials once, then push again:
-
-[source,sh,subs="attributes"]
-----
-git config --global credential.helper store
-printf 'https://{user}:YOUR_PASSWORD@%s\n' "$(echo {gitea_url} | sed 's#https://##')" > ~/.git-credentials
-chmod 600 ~/.git-credentials
-git push origin main
-----
-
-Replace `YOUR_PASSWORD` with your workshop password.
 The push succeeds:
 
 .Expected output
@@ -441,7 +360,7 @@ To https://.../{user}/parasol-claims.git
 .The IDE has a Git UI too
 ====
 You do not have to use the terminal.
-The che-code *Source Control* panel (the branch icon in the left rail) stages, commits, and pushes with buttons, and it prompts for your username and password in a dialog the first time you push — no credential file needed.
+The che-code *Source Control* panel (the branch icon in the left rail) stages, commits, and pushes with buttons, and it asks for your username and password in the same input box the first time you push.
 Use whichever you prefer; the result is the same commit on your fork.
 ====
 
@@ -451,160 +370,13 @@ Use whichever you prefer; the result is the same commit on your fork.
 Open your fork in the {gitea_url}[Git server^] (browse to `{user}/parasol-claims`) and confirm the latest commit is your `/ping` change.
 ****
 
-== 6. Debug a live request
-⏱ *~6 min* · attach a debugger to the running service
-
-Quarkus dev mode opens a Java debug port (5005) automatically, so you can attach a debugger to the *running* dev instance and step through a real request — the JVM is genuinely listening for one.
-
-[IMPORTANT]
-.The graphical debugger needs two extensions; a terminal fallback always works
-====
-The breakpoint-and-step (GUI) half of this exercise needs che-code to have *Language Support for Java* and *Debugger for Java* — neither ships with the editor, and both live in this cluster's extension registry.
-Open the *Extensions* view in the left rail and install them by name.
-(If your fork carries a `.vscode/extensions.json`, che-code offers to install them for you the first time you open the workspace — click *Install*.)
-If the registry is unreachable — a disconnected cluster — the GUI flow is instructor-demo / optional: use the guaranteed `jdb` terminal path below instead.
-It needs no extension and proves the same thing.
-====
-
-Start dev mode again (wired to the database, as in exercise 2 — the environment variables are gone after a restart):
-
-[source,sh,subs="attributes"]
-----
-cd /projects/parasol-claims
-export QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://claims-db.{user}-dev.svc:5432/parasol
-export QUARKUS_DATASOURCE_USERNAME=parasol
-export QUARKUS_DATASOURCE_PASSWORD=parasol
-export QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update
-./mvnw quarkus:dev
-----
-
-Confirm the debug port is live — you will see this line in the dev-mode output:
-
-[source,texinfo]
-----
-Listening for transport dt_socket at address: 5005
-----
-
-=== Attach the IDE debugger (if the Java extensions are installed)
-
-. In the IDE Explorer, open `ClaimResource.java` and click in the left margin next to the first line of the `list(...)` method (`PanacheQuery<Claim> query = Claim.findAll(...)`) to set a *breakpoint* (a red dot appears).
-. Open the *Run and Debug* view (the play-with-bug icon in the left rail).
-. Start the *Attach to Quarkus (5005)* configuration — your fork ships it in `.vscode/launch.json`, ready-made.
-If it does not appear in the dropdown, the Java extensions are not installed — take the `jdb` path below rather than hand-building a launch configuration; it reaches the same breakpoint in less time.
-. From your second terminal tab, hit the endpoint to trigger the breakpoint:
-+
-[source,sh]
-----
-curl http://localhost:8080/api/claims
-----
-. Execution pauses on your breakpoint.
-Inspect variables, step over a few lines, then resume.
-
-// media-pass: image::devspaces-inner-loop/devspaces-inner-loop-02-debug-5005.png[che-code paused on a breakpoint in ClaimResource with the debug toolbar] — see media-manifest.md
-// (screenshot uncaptured: the Java debugger is NOT preinstalled in che-code, so reaching this state
-//  needs a manual extension install first. Both extensions ARE in the cluster registry (verified
-//  2026-07-10), so this shot is capturable — it is queued, not blocked. See media-manifest.md.)
-
-=== Guaranteed fallback: attach `jdb` from the terminal
-
-This path needs no IDE extension — it uses the JDK's own command-line debugger (`jdb`, shipped with the JDK) to prove 5005 is a real, attachable debug port.
-In a *second* workspace terminal tab (leave dev mode running in the first):
-
-[source,sh]
-----
-jdb -attach localhost:5005
-----
-
-It connects to the running JVM.
-At the `>` prompt, list the live threads, set a breakpoint on the list method, and continue:
-
-[source,text]
-----
-> threads
-> stop in com.parasol.claims.ClaimResource.list
-> cont
-----
-
-The thread list shows the Quarkus main thread and the vert.x event-loop threads — you are attached to the real, running service, not a copy.
-Now trigger the endpoint from a *third* terminal tab:
-
-[source,sh]
-----
-curl http://localhost:8080/api/claims
-----
-
-`jdb` halts at the method.
-`locals` prints the method's variables and `where` the call stack; `cont` resumes and `exit` detaches.
-Same idea as the IDE debugger — a debugger attached to a live in-cluster request — with nothing to install.
-
-[.checkpoint]
-****
-✔ *Verify:* Either a `curl` to `/api/claims` pauses on your breakpoint in the IDE with the method's variables visible, *or* `jdb -attach localhost:5005` connects and `threads` lists the running Quarkus and vert.x threads (and stops at `ClaimResource.list` on the next request once you set the breakpoint).
-If neither attaches, confirm dev mode is running and printed the `Listening for transport dt_socket at address: 5005` line.
-****
-
-== 7. Beyond dev mode: reach the database and ship a container
-⏱ *~7 min* · port-forward an internal service, then deploy your change as a real Deployment
-
-Dev mode is the fast heart of the inner loop, but two everyday developer moves live just past it: reaching a cluster service directly with your own tools, and turning a change into a running Deployment the platform manages.
-Both are the bridge from the inner loop to the outer loop.
-
-[IMPORTANT]
-.These steps run in the *Showroom terminal*, not the workspace
-====
-The `oc` inside the *workspace* terminal is authenticated as the workspace's *ServiceAccount*, scoped to your `{user}-devspaces` project — it cannot read or change anything in `{user}-dev` (run `oc whoami` in the workspace terminal and you will see a `system:serviceaccount:…` identity, not `{user}`).
-So the cluster-side steps below run in the *Showroom terminal*, where you are signed in as `{user}` with full rights in your own `{user}-dev` project.
-====
-
-=== Port-forward the database to your localhost
-
-The `claims-db` PostgreSQL database has *no Route* — it is internal-only, reachable inside the cluster by DNS (that is the `claims-db.{user}-dev.svc` name your dev instance used).
-To reach it from a database tool on your own machine — `psql`, a GUI client, or your IDE's database panel — bridge it to a local port with `oc port-forward`.
-In the *Showroom terminal*:
-
-[source,sh,role=execute,subs="attributes"]
-----
-oc -n {user}-dev port-forward svc/claims-db 5432:5432
-----
-
-.Expected output (it keeps running — leave it)
-[source,texinfo]
-----
-Forwarding from 127.0.0.1:5432 -> 5432
-Forwarding from [::1]:5432 -> 5432
-----
-
-`localhost:5432` in your environment is now the in-cluster database: point any PostgreSQL client at it and you are querying the real `claims-db`, through a temporary tunnel that closes when you press *Ctrl+C*.
-
-[TIP]
-.Prove the tunnel carries PostgreSQL (optional)
-====
-The Showroom terminal ships no `psql`, but bash can speak enough of the wire protocol to prove what is on the other end — the same TCP trick you used for the cache.
-In a second terminal tab, send a PostgreSQL SSL-negotiation request and read the one-byte reply:
-
-[source,sh]
-----
-exec 3<>/dev/tcp/localhost/5432
-printf '\x00\x00\x00\x08\x04\xd2\x16\x2f' >&3
-read -t 3 -n1 reply <&3 && echo "claims-db answered on localhost:5432 with: $reply"
-----
-
-A reply of `N` (SSL off) or `S` (SSL on) is PostgreSQL's own answer — you have reached the database through the tunnel.
-Press *Ctrl+C* on the port-forward when you are done.
-====
-
-[.checkpoint]
-****
-✔ *Verify:* `oc port-forward` prints `Forwarding from 127.0.0.1:5432 -> 5432` and holds the terminal — the internal database is now on your `localhost:5432`.
-****
-
-=== Ship your pushed change as a running Deployment
+=== Now ship it: turn the pushed commit into a running Deployment
 
 Dev mode is for iterating; it is not where the app runs for real.
-The `/api/claims/ping` endpoint you pushed to your fork in exercise 5 is only source right now — turn it into a running container the platform builds, runs, and heals.
+The `/api/claims/ping` endpoint you just pushed is only source right now — turn it into a running container the platform builds, runs, and heals.
 `oc new-app` does the whole source-to-Deployment step from your fork in one command (the same on-ramp the *Ways to Build & Deliver Apps* module covers in depth).
 
-In a *fresh Showroom terminal tab* (so the port-forward keeps running):
+These steps talk to the cluster rather than to the workspace, so run them in the *Showroom terminal* — the tab beside these instructions:
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -650,31 +422,86 @@ That is the outer loop taking your change: from here a pipeline and GitOps would
 ✔ *Verify:* `oc -n {user}-dev get deploy parasol-claims-mine` shows the Deployment available, and `curl https://$MINE/api/claims/ping` returns your `/ping` string from the *deployed* container (not dev mode).
 ****
 
-=== Going further: debug and hot-reload the running container
+== 5. Extend the workspace: add a Valkey cache to the devfile
+⏱ *~7 min* · the devfile is yours to change — restart the workspace from it
 
-You attached a debugger to dev mode in exercise 6; the same attach works against a *deployed* container once you open its debug port.
-Turn JDWP on for your Deployment and forward the port from the *Showroom terminal*:
+A workspace is not fixed — it is whatever its devfile says.
+Add a second container (a Valkey cache the app could use) and a command to talk to it, then restart the workspace *from the devfile* so the new container appears.
 
-[source,sh,subs="attributes"]
+[NOTE]
+.Why Valkey, not Redis
+====
+*Valkey* is the Linux Foundation's BSD-licensed continuation of Redis, created after Redis changed its license.
+Red Hat ships a supported *Valkey* image and it is a drop-in for the same in-memory cache role — the wire protocol and the client commands (`PING`, `SET`, `GET`, …) are unchanged, so what you learn here transfers directly.
+====
+
+Stop dev mode (*Ctrl+C*).
+In the IDE Explorer, open `devfile.yaml` at the repository root.
+Under `components:`, add a `cache` component, and under `commands:`, add a `cache-ping` command:
+
+[source,yaml]
 ----
-oc -n {user}-dev set env deploy/parasol-claims-mine \
-  JAVA_TOOL_OPTIONS='-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005'
-oc -n {user}-dev rollout status deploy/parasol-claims-mine
-oc -n {user}-dev port-forward deploy/parasol-claims-mine 5005:5005
+  # add under components:
+  - name: cache
+    container:
+      # pinned by digest: tags move, digests don't — a devfile exists to be reproducible
+      image: registry.redhat.io/rhel9/valkey-8@sha256:21f04dd3590cbb3561af0ced8e0e1e8cc1039023d808adcbb0c1cf10dca5b6fa
+      memoryLimit: 256Mi
+      endpoints:
+        - name: valkey
+          targetPort: 6379
+          exposure: internal
 ----
 
-// [UNVERIFIABLE-PERMANENT] The final debugger *attach* step is inherently not exercisable by browser or
-// CLI automation: it requires a graphical IDE (or a JDK's `jdb` shell) running on a host that can reach
-// the forwarded port — a human's own machine, not something any cluster credential or console session
-// unlocks. What would close this: a human at a real IDE (or `jdb`) attaching to `localhost:5005` after
-// the port-forward below. The oc scaffolding above (JDWP env + rollout + port-forward) IS grounded
-// on-cluster; the attach itself mirrors the already-verified exercise 6 debugger flow.
-With `5005` forwarded, attach a debugger to `localhost:5005` from a client that can reach that port — `jdb -attach localhost:5005`, or your IDE's *Attach* configuration from exercise 6 — and you are stepping through the *deployed* container instead of dev mode.
+[source,yaml]
+----
+  # add under commands:
+  - id: cache-ping
+    exec:
+      label: Ping the Valkey cache
+      component: cache
+      commandLine: valkey-cli ping
+----
 
-For a live *edit-and-see* loop against a running Pod (not just local dev mode), Quarkus offers *remote development mode*: you run a mutable build in the cluster with `QUARKUS_LAUNCH_DEVMODE=true` and connect to it with `./mvnw quarkus:remote-dev`, so a saved file hot-reloads straight into the Pod.
-It is an advanced pattern — the Quarkus link in the wrap-up has the details.
+Save the file.
+Now restart the workspace so Dev Spaces rebuilds it from the updated devfile:
 
-== 8. Take-home: the same loop, locally
+. Open the *Command Palette*: menu *View → Command Palette…* (keyboard: kbd:[Cmd+Shift+P] on a Mac, kbd:[Ctrl+Shift+P] on Windows/Linux).
+. Type `Restart Workspace` and choose *Dev Spaces: Restart Workspace from Local Devfile*.
+
+When the workspace comes back, the `cache` container is part of it.
+Confirm it by running the devfile command you just declared — this one is a *task*, not a command, so it lives in a different menu: *Terminal → Run Task…* → *devfile: Ping the Valkey cache*.
+It executes `valkey-cli ping` *inside the `cache` container* (the `valkey-cli` binary lives there, not in your `tools` terminal).
+
+.Expected output
+[source,texinfo]
+----
+PONG
+----
+
+The two containers share the workspace Pod's network, so your app — and your terminal — can reach Valkey at `localhost:6379`.
+Prove it from the *workspace terminal* without any Valkey tooling, using bash's built-in TCP support:
+
+[source,sh]
+----
+exec 3<>/dev/tcp/localhost/6379 && printf 'PING\r\n' >&3 && head -c 7 <&3
+----
+
+.Expected output
+[source,texinfo]
+----
++PONG
+----
+
+No service, no route — just a sidecar you declared in Git.
+
+[.checkpoint]
+****
+✔ *Verify:* After the restart, the *devfile: Ping the Valkey cache* task returns `PONG`, and the workspace now runs a `cache` container (the terminal TCP probe answers `+PONG` too).
+If the restart fails, your devfile has a YAML error — check the indentation of the two blocks you added (see xref:devspaces-inner-loop/troubleshooting.adoc[troubleshooting]).
+****
+
+== 6. Take-home: the same loop, locally
 ⏱ *~5 min* · read
 
 In-cluster workspaces are one end of a spectrum.
@@ -685,6 +512,198 @@ When you want the inner loop entirely on your own machine — on a plane, air-ga
 
 Both run the same images and, in OpenShift Local's case, the same objects you have been using all along — the skills transfer directly.
 When you are done for the day, your Dev Spaces workspace idles automatically after 30 minutes of inactivity to free cluster resources, and resumes where you left off.
+
+== Optional exercises
+
+[NOTE]
+====
+Everything the module sets out to teach is done.
+The two exercises below go further — a debugger against a live request, and reaching past the workspace to the database itself.
+Take them if you are curious; skip them and you have still finished.
+====
+
+== Optional: Debug a live request
+[.optional-lab]
+_Not needed to finish the module — take it if you want to see the debugger._
+⏱ *~6 min* · attach a debugger to the running service
+
+Quarkus dev mode opens a Java debug port (5005) automatically, so you can attach a debugger to the *running* dev instance and step through a real request — the JVM is genuinely listening for one.
+
+[IMPORTANT]
+.Your workspace already has the Java extensions
+====
+The breakpoint-and-step (GUI) half of this exercise needs *Language Support for Java* and *Debugger for Java*, and they are already installed — your fork carries a `.vscode/extensions.json` that asks for them, and che-code installs what a project recommends when the workspace starts.
+That file is worth knowing about: it is how a team makes every workspace on a repo arrive with the same tooling, the same way the devfile does for the container.
+If the IDE offers to *update* an extension, dismiss it — you do not need a newer one for this.
+A terminal path using `jdb` is given at the end if you would rather not use the GUI.
+It needs no extension and proves the same thing.
+====
+
+Start dev mode again (wired to the database, as in exercise 2, *Wire dev mode to the in-cluster database* — the environment variables are gone after a restart):
+
+[source,sh,subs="attributes"]
+----
+cd /projects/parasol-claims
+export QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://claims-db.{user}-dev.svc:5432/parasol
+export QUARKUS_DATASOURCE_USERNAME=parasol
+export QUARKUS_DATASOURCE_PASSWORD=parasol
+export QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=update
+./mvnw quarkus:dev
+----
+
+Confirm the debug port is live — you will see this line in the dev-mode output:
+
+[source,texinfo]
+----
+Listening for transport dt_socket at address: 5005
+----
+
+=== Attach the IDE debugger
+
+. In the IDE Explorer, open `ClaimResource.java` and click in the left margin next to the first line of the `list(...)` method (`PanacheQuery<Claim> query = Claim.findAll(...)`) to set a *breakpoint* (a red dot appears).
+. Open the *Run and Debug* view (the play-with-bug icon in the left rail).
+. Start the *Attach to Quarkus (5005)* configuration — your fork ships it in `.vscode/launch.json`, ready-made.
+If it does not appear in the dropdown, give the Java extension a moment to finish loading (the status bar shows its progress), then reopen the view.
+. From your second terminal tab, hit the endpoint to trigger the breakpoint:
++
+[source,sh]
+----
+curl http://localhost:8080/api/claims
+----
+. Execution pauses on your breakpoint.
+Inspect variables, step over a few lines, then resume.
+
+// media-pass: image::devspaces-inner-loop/devspaces-inner-loop-02-debug-5005.png[che-code paused on a breakpoint in ClaimResource with the debug toolbar] — see media-manifest.md
+// (screenshot uncaptured. The old reason given here — "the Java debugger is NOT preinstalled, so
+//  reaching this state needs a manual extension install first" — was FALSE and is corrected:
+//  measured 2026-08-17 in a running workspace, redhat.java-1.55.0 and vscjava.vscode-java-debug-0.59.0
+//  are both present under /checode/remote/extensions, installed from the fork's
+//  .vscode/extensions.json. Nothing blocks this shot; it is queued. See media-manifest.md.)
+
+=== Prefer the terminal? Attach `jdb` instead
+
+This path needs no IDE extension — it uses the JDK's own command-line debugger (`jdb`, shipped with the JDK) to prove 5005 is a real, attachable debug port.
+In a *second* workspace terminal tab (leave dev mode running in the first):
+
+[source,sh]
+----
+jdb -attach localhost:5005
+----
+
+It connects to the running JVM.
+At the `>` prompt, list the live threads, set a breakpoint on the list method, and continue:
+
+[source,text]
+----
+> threads
+> stop in com.parasol.claims.ClaimResource.list
+> cont
+----
+
+The thread list shows the Quarkus main thread and the vert.x event-loop threads — you are attached to the real, running service, not a copy.
+Now trigger the endpoint from a *third* terminal tab:
+
+[source,sh]
+----
+curl http://localhost:8080/api/claims
+----
+
+`jdb` halts at the method.
+`locals` prints the method's variables and `where` the call stack; `cont` resumes and `exit` detaches.
+Same idea as the IDE debugger — a debugger attached to a live in-cluster request — with nothing to install.
+
+[.checkpoint]
+****
+✔ *Verify:* Either a `curl` to `/api/claims` pauses on your breakpoint in the IDE with the method's variables visible, *or* `jdb -attach localhost:5005` connects and `threads` lists the running Quarkus and vert.x threads (and stops at `ClaimResource.list` on the next request once you set the breakpoint).
+If neither attaches, confirm dev mode is running and printed the `Listening for transport dt_socket at address: 5005` line.
+****
+
+== Optional: Beyond dev mode — reach the database directly
+[.optional-lab]
+_Not needed to finish the module — take it if you are curious how the workspace reaches the rest of the cluster._
+⏱ *~5 min* · port-forward an internal service straight into your workspace
+
+Dev mode is the fast heart of the inner loop, but two everyday developer moves live just past it: reaching a cluster service directly with your own tools, and turning a change into a running Deployment the platform manages.
+Both are the bridge from the inner loop to the outer loop.
+
+[IMPORTANT]
+.Which terminal? The workspace one — it is you
+====
+`oc` in the *workspace* terminal is signed in as *you*, not as a service account: run `oc whoami` there and it prints `{user}`.
+It has the same rights in `{user}-dev` as the Showroom terminal does.
+
+That matters for the next step: a port-forward only exists on the machine that runs it.
+Forward a port from the *workspace* terminal and the workspace — including the IDE and its debugger — can reach it on `localhost`.
+Forward it from the Showroom terminal and only the Showroom terminal can.
+====
+
+=== Port-forward the database to your localhost
+
+The `claims-db` PostgreSQL database has *no Route* — it is internal-only, reachable inside the cluster by DNS (that is the `claims-db.{user}-dev.svc` name your dev instance used).
+To reach it from a database tool on your own machine — `psql`, a GUI client, or your IDE's database panel — bridge it to a local port with `oc port-forward`.
+In the *workspace terminal* (so the forwarded port lands where your IDE and tools are):
+
+[source,sh,subs="attributes"]
+----
+oc -n {user}-dev port-forward svc/claims-db 5432:5432
+----
+
+.Expected output (it keeps running — leave it)
+[source,texinfo]
+----
+Forwarding from 127.0.0.1:5432 -> 5432
+Forwarding from [::1]:5432 -> 5432
+----
+
+`localhost:5432` in your environment is now the in-cluster database: point any PostgreSQL client at it and you are querying the real `claims-db`, through a temporary tunnel that closes when you press *Ctrl+C*.
+
+[TIP]
+.Prove the tunnel carries PostgreSQL (optional)
+====
+The workspace ships no `psql`, but bash can speak enough of the wire protocol to prove what is on the other end — the same TCP trick you used for the cache.
+In a second terminal tab, send a PostgreSQL SSL-negotiation request and read the one-byte reply:
+
+[source,sh]
+----
+exec 3<>/dev/tcp/localhost/5432
+printf '\x00\x00\x00\x08\x04\xd2\x16\x2f' >&3
+read -t 3 -n1 reply <&3 && echo "claims-db answered on localhost:5432 with: $reply"
+----
+
+A reply of `N` (SSL off) or `S` (SSL on) is PostgreSQL's own answer — you have reached the database through the tunnel.
+Press *Ctrl+C* on the port-forward when you are done.
+====
+
+[.checkpoint]
+****
+✔ *Verify:* `oc port-forward` prints `Forwarding from 127.0.0.1:5432 -> 5432` and holds the terminal — the internal database is now on your `localhost:5432`.
+****
+
+=== Going further: debug and hot-reload the running container
+
+You attached a debugger to dev mode in the *Debug a live request* exercise; the same attach works against a *deployed* container once you open its debug port.
+Turn JDWP on for your Deployment, then forward its debug port *from the workspace terminal* — the IDE that will attach runs inside the workspace, so the port has to land on the workspace's `localhost`, not the Showroom terminal's:
+
+[source,sh,subs="attributes"]
+----
+oc -n {user}-dev set env deploy/parasol-claims-mine \
+  JAVA_TOOL_OPTIONS='-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005'
+oc -n {user}-dev rollout status deploy/parasol-claims-mine
+oc -n {user}-dev port-forward deploy/parasol-claims-mine 5005:5005
+----
+
+// VERIFIABLE, contrary to what this comment used to claim. It read "[UNVERIFIABLE-PERMANENT] …
+// requires a graphical IDE running on a host that can reach the forwarded port — a human's own
+// machine". That was wrong, and it is why the WRONG TERMINAL went unnoticed here: the IDE is IN the
+// workspace, so a workspace-side port-forward is reachable by it, and the attach can be exercised
+// the same way exercise "Debug a live request" is. The old instruction forwarded 5005 from the
+// Showroom terminal, which binds a DIFFERENT pod's localhost — the attach could never have worked.
+// Measured 2026-08-17: `oc whoami` in the workspace returns the attendee, and
+// `oc port-forward -n {user}-dev` succeeds from there.
+With `5005` forwarded inside the workspace, attach to `localhost:5005` the same way you did in the debugger exercise — the *Attach to Quarkus (5005)* configuration, or `jdb -attach localhost:5005` in a second workspace terminal — and you are stepping through the *deployed* container instead of dev mode.
+
+For a live *edit-and-see* loop against a running Pod (not just local dev mode), Quarkus offers *remote development mode*: you run a mutable build in the cluster with `QUARKUS_LAUNCH_DEVMODE=true` and connect to it with `./mvnw quarkus:remote-dev`, so a saved file hot-reloads straight into the Pod.
+It is an advanced pattern — the Quarkus link in the wrap-up has the details.
 
 == Challenge (optional)
 ⏱ *no hand-holding*
