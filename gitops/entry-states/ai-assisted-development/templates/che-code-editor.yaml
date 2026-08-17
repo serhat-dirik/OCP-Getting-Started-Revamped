@@ -1,0 +1,151 @@
+# THE EDITOR, AS A DevWorkspaceTemplate. This is what makes the workspace's terminal work.
+#
+# WHY THIS FILE EXISTS — read before "simplifying" it back to a one-line `uri:`.
+# A DevWorkspace contributes its editor one of two ways:
+#   contributions: [{name: editor, uri: <dashboard editors API>}]        <-- what we used, BROKEN
+#   contributions: [{name: editor, kubernetes: {name: <this template>}}] <-- what the dashboard does
+# The `uri` form produces a workspace that LOOKS fine: it reaches phase=Running, mainUrl populates,
+# che-code loads, files open, extensions activate. Its built-in "New Terminal" then does nothing at
+# all — panel opens, no shell, and NOTHING is logged as an error anywhere. Server side stays
+# healthy: ptyHost alive, ptyhost.log 0 bytes (never receives a request), and the remote agent logs
+# `RequestStore#acceptReply was called without receiving a matching request`. "New Terminal (Select
+# a Container)" keeps working the whole time, because the Che extension execs through the
+# Kubernetes API and never touches that path — which is what makes this read like a UI quirk.
+#
+# Proven 2026-08-17 on user8/cluster-m24jn by A/B against a workspace Serhat created from the
+# dashboard's "Quarkus Quick Start" sample, whose terminal worked. The ONLY difference that
+# mattered, after bisecting every other delta, was this: the dashboard materialises a
+# DevWorkspaceTemplate and references it by name. Falsified on the way, so nobody retries them:
+# stale vscode.lock, controller.devfile.io/merge-contribution, terminal.integrated.env.linux,
+# wiping the persistent /checode, SHELL=/bin/bash, the udi image tag-vs-digest, and the
+# JAVA_HOME/PATH override — none of them changed anything.
+#
+# WHAT THE uri FORM SILENTLY DROPS, visible by diffing this against a uri-contributed workspace:
+#   * the CHE_DASHBOARD_URL / CHE_PLUGIN_REGISTRY_URL / CLUSTER_CONSOLE_URL env below (their absence
+#     is logged by the extension host as "Environment variable ... is not set" and looks harmless),
+#   * `controller.devfile.io/container-contribution: true`, the real merge marker,
+#   * the `type: main` attribute on the che-code endpoint, which is what mints .status.mainUrl.
+#
+# MAINTENANCE. This is a snapshot of what THIS cluster's Dev Spaces serves from
+# /dashboard/api/editors/devfile?che-editor=che-incubator/che-code/latest, read 2026-08-17 on
+# Dev Spaces 3.29 / che-code 1.116.0. The two digests are values so a Dev Spaces upgrade is a
+# values bump, not a template edit. When Dev Spaces is upgraded, re-read that endpoint and refresh
+# this file + the digests; tools/lint/devworkspace-editor-guard.py fails the build if any chart
+# goes back to contributing an editor by `uri`.
+apiVersion: workspace.devfile.io/v1alpha2
+kind: DevWorkspaceTemplate
+metadata:
+  name: {{ .Values.cheEditorTemplateName }}
+  namespace: {{ .Values.user }}-devspaces
+  labels:
+    workshop.redhat.com/module: ai-assisted-development
+    workshop.redhat.com/user: {{ .Values.user | quote }}
+    {{- include "user-namespace.ownerLabels" . | nindent 4 }}
+spec:
+  commands:
+    - id: init-container-command
+      apply:
+        component: che-code-injector
+    - id: init-che-code-command
+      exec:
+        commandLine: nohup /checode/entrypoint-volume.sh > /checode/entrypoint-logs.txt 2>&1 &
+        component: che-code-runtime-description
+  components:
+    - name: che-code-injector
+      container:
+        image: {{ .Values.cheCodeInjectorImage | quote }}
+        command:
+          - /entrypoint-init-container.sh
+        cpuLimit: 500m
+        cpuRequest: 30m
+        memoryLimit: 256Mi
+        memoryRequest: 32Mi
+        sourceMapping: /projects
+        env:
+          - name: CHE_DASHBOARD_URL
+            value: https://devspaces.{{ .Values.clusterDomain }}
+          - name: CHE_PLUGIN_REGISTRY_URL
+            value: https://devspaces.{{ .Values.clusterDomain }}/plugin-registry/v3
+          - name: CHE_PLUGIN_REGISTRY_INTERNAL_URL
+            value: http://plugin-registry.openshift-devspaces.svc:8080/v3
+          - name: CLUSTER_CONSOLE_URL
+            value: https://console-openshift-console.{{ .Values.clusterDomain }}
+          - name: CLUSTER_CONSOLE_TITLE
+            value: OpenShift console
+          - name: OPENVSX_REGISTRY_URL
+            value: ""
+        volumeMounts:
+          - name: checode
+            path: /checode
+    - name: che-code-runtime-description
+      attributes:
+        app.kubernetes.io/component: che-code-runtime
+        app.kubernetes.io/part-of: che-code.eclipse.org
+        # The marker the controller merges this container INTO the dev container on. This is the
+        # attribute that actually matters — not merge-contribution on our own `tools` component,
+        # which the working dashboard workspace does not set at all.
+        controller.devfile.io/container-contribution: true
+      container:
+        image: {{ .Values.cheCodeRuntimeImage | quote }}
+        cpuLimit: 500m
+        cpuRequest: 30m
+        memoryLimit: 1024Mi
+        memoryRequest: 256Mi
+        sourceMapping: /projects
+        endpoints:
+          # `type: main` is what mints .status.mainUrl — the URL the dashboard waits for and gives
+          # up on with "The workspace has not received an IDE URL in the last 20 seconds".
+          - name: che-code
+            attributes:
+              type: main
+              cookiesAuthEnabled: true
+              discoverable: false
+              urlRewriteSupported: true
+            exposure: public
+            protocol: https
+            secure: true
+            targetPort: 3100
+          - name: code-redirect-1
+            attributes:
+              discoverable: false
+              urlRewriteSupported: false
+            exposure: public
+            protocol: https
+            targetPort: 13131
+          - name: code-redirect-2
+            attributes:
+              discoverable: false
+              urlRewriteSupported: false
+            exposure: public
+            protocol: https
+            targetPort: 13132
+          - name: code-redirect-3
+            attributes:
+              discoverable: false
+              urlRewriteSupported: false
+            exposure: public
+            protocol: https
+            targetPort: 13133
+        env:
+          - name: CHE_DASHBOARD_URL
+            value: https://devspaces.{{ .Values.clusterDomain }}
+          - name: CHE_PLUGIN_REGISTRY_URL
+            value: https://devspaces.{{ .Values.clusterDomain }}/plugin-registry/v3
+          - name: CHE_PLUGIN_REGISTRY_INTERNAL_URL
+            value: http://plugin-registry.openshift-devspaces.svc:8080/v3
+          - name: CLUSTER_CONSOLE_URL
+            value: https://console-openshift-console.{{ .Values.clusterDomain }}
+          - name: CLUSTER_CONSOLE_TITLE
+            value: OpenShift console
+          - name: OPENVSX_REGISTRY_URL
+            value: ""
+        volumeMounts:
+          - name: checode
+            path: /checode
+    - name: checode
+      volume: {}
+  events:
+    preStart:
+      - init-container-command
+    postStart:
+      - init-che-code-command

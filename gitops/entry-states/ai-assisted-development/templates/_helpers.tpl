@@ -17,4 +17,3 @@
 {{/* The che-code editor contribution URI (design call #40, closed — see devworkspace.yaml
      `contributions` for the full decision). In-cluster svc DNS only, resolved against the Dev Spaces
      dashboard's OWN documented editor API — never an external registry, never a cluster-domain URL. */}}
-{{- define "ai-assisted-development.cheEditorUri" -}}http://{{ .Values.cheDashboardService }}.{{ .Values.cheDashboardNamespace }}.svc:{{ .Values.cheDashboardPort }}/dashboard/api/editors/devfile?che-editor={{ .Values.cheEditorId }}{{- end -}}

@@ -1,5 +1,3 @@
-{{- define "devspaces-inner-loop.cheEditorUri" -}}http://{{ .Values.cheDashboardService }}.{{ .Values.cheDashboardNamespace }}.svc:{{ .Values.cheDashboardPort }}/dashboard/api/editors/devfile?che-editor={{ .Values.cheEditorId }}{{- end -}}
-
 {{/*
 user-namespace.ownerLabels — SAME shape and SAME value as
 gitops/workshop-config/templates/_helpers.tpl's workshop-config.ownerLabels, duplicated here (Helm
