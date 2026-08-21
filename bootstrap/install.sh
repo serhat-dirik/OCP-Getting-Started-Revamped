@@ -201,7 +201,10 @@ discover_maas_model() {
 
   if [[ -z "$ids" ]]; then
     err "model discovery failed — GET ${url} returned HTTP ${code} with no model list."
-    err "   401/403 → maas.api_key is wrong, expired, or not entitled on this endpoint"
+    err "   400     → the endpoint refused maas.api_key outright. A LiteLLM gateway answers an"
+    err "             EXPIRED key with 400 {\"type\":\"expired_key\"} rather than 401 — the single"
+    err "             likeliest cause of this line in the field. Mint a new key and re-run."
+    err "   401/403 → maas.api_key is wrong, revoked, or not entitled on this endpoint"
     err "   404     → maas.endpoint is not an OpenAI-compatible base (it should end in /v1)"
     err "   000     → endpoint unreachable from this machine (DNS / proxy / TLS)"
     # How hard this fails depends on what the key is FOR on this cluster. If we are installing

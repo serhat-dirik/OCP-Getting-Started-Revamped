@@ -162,6 +162,29 @@ jobs:
           echo "self-test ok — guard correctly rejected its own canary (rc=1)."
           python3 tools/lint/credential-redaction-guard.py
 
+      - name: The MaaS probe reason must carry the endpoint's words and no credential
+        # `ws maas set` read the probe's STATUS CODE ONLY, because LiteLLM's rejection bodies echo
+        # the token back. The cost surfaced 2026-08-21: an EXPIRED key answers 400
+        # {"type":"expired_key"}, `ws` classed 400 as "inconclusive — no verdict from the endpoint"
+        # and offered --force, which would have staged a dead credential across a whole cohort past
+        # the one guard written to stop that. maas_probe_reason() takes the body back and redacts
+        # instead; this is what makes that safe, on input an endpoint chooses rather than we do.
+        # Runs in a bare checkout — it sources tools/ws/ws (sourceable by its BASH_SOURCE guard) and
+        # calls the real function on synthetic bodies. No curl, no oc, no cluster.
+        run: |
+          rc=0
+          bash tools/ws/ws-maas-redaction-selftest.sh --self-test || rc=$?
+          # Exactly 1 = every credential assertion caught the unredacted canary. 0 = the naive
+          # body-dump passed and the assertions prove nothing; 2 = harness broken (ws unreadable,
+          # the function gone, or the synthetic tokens no longer key-shaped).
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::ws-maas-redaction-selftest --self-test must exit 1 (canary caught);" \
+                 "got rc=$rc. The redaction is unproven — refusing to trust a clean run."
+            exit 1
+          fi
+          echo "self-test ok — the naive body-dump was caught by every assertion (rc=1)."
+          bash tools/ws/ws-maas-redaction-selftest.sh
+
   # vale + yamllint run locally on maintainer machines (their configs are maintainer tooling,
   # kept out of the public tree per the 2026-07-19 owner review). CI keeps the checks that
   # guard the shipped artifact itself.

@@ -5037,13 +5037,28 @@ maas_list_models() {  # cfg base → newline-separated model ids the endpoint of
     | tr ',' '\n' | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
-maas_probe() {  # cfg base model → the HTTP status of ONE 1-token chat/completions call, or 000.
-  # STATUS CODE ONLY, deliberately: LiteLLM's 401 body echoes the whole token back, so capturing the
-  # body would put the credential in this terminal's scrollback. Same discipline as the hook Jobs.
-  curl -sS -o /dev/null -w '%{http_code}' --max-time 25 \
+maas_probe() {  # cfg base model [bodyfile] → HTTP status of ONE 1-token chat/completions call, or 000.
+  # The body goes to $4 when given and to /dev/null otherwise, and is NEVER printed raw: LiteLLM's
+  # rejection bodies echo the token back, so only maas_probe_reason() — which redacts — may read it.
+  curl -sS -o "${4:-/dev/null}" -w '%{http_code}' --max-time 25 \
     --config "$1" -H 'content-type: application/json' -X POST "${2}/chat/completions" \
     -d "{\"model\":\"${3}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
     2>/dev/null || echo 000
+}
+
+maas_probe_reason() {  # bodyfile token → the endpoint's own one-line reason, credential-free, or empty.
+  # WHY THIS IS WORTH THE REDACTION RISK. Without it an expired key reads as "inconclusive" (see the
+  # 400 note in cmd_maas_set): the operator is told the endpoint gave no verdict when it gave a precise
+  # one — "Expired Key. Key Expiry time 2026-08-20T12:00:10Z". Chasing that costs an afternoon.
+  # TWO redactions, belt and braces, because the input is attacker-shaped: the literal token if the
+  # body echoes it (LiteLLM's 401 does), and anything sk-shaped if the endpoint returns a DIFFERENT
+  # key than the one we sent. Proven by --self-test; see ws-maas-redaction-selftest.sh.
+  local body="${1:-}" token="${2:-}" line
+  [[ -s "$body" ]] || return 0
+  line="$(tr '\n' ' ' < "$body" | sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  [[ -n "$line" ]] || line="$(head -c 200 "$body" | tr '\n' ' ')"
+  [[ -n "$token" ]] && line="${line//$token/<redacted>}"
+  printf '%s' "$line" | sed -E 's/sk-[A-Za-z0-9._-]{4,}/sk-<redacted>/g' | cut -c1-220
 }
 
 maas_secret_field() {  # key → one field of the workshop credential as plaintext, or empty.
@@ -5419,7 +5434,9 @@ cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge t
   if [[ -z "${ids//[[:space:]]/}" ]]; then
     rm -f "$cfg"
     err "catalog — GET ${base}/models returned no model list."
-    err "   401/403 → the key is wrong, expired, or not entitled on this endpoint"
+    err "   400     → the endpoint refused the key outright — on a LiteLLM gateway an EXPIRED key"
+    err "             answers 400 {\"type\":\"expired_key\"}, not 401. Mint a new one."
+    err "   401/403 → the key is wrong, revoked, or not entitled on this endpoint"
     err "   404     → --endpoint is not an OpenAI-compatible base (it should end in /v1)"
     err "   000     → the endpoint is unreachable from THIS machine (DNS / proxy / TLS)"
     die "refusing to stage an unvalidated credential"
@@ -5444,16 +5461,25 @@ cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge t
     echo "⚠ catalog — '${model}' is NOT among the ${count} model(s) ${base}/models offers: $(printf '%s' "$ids" | tr '\n' ' ')"
   fi
 
-  local code; code="$(maas_probe "$cfg" "$base" "$model")"
-  rm -f "$cfg"
+  local pbody; pbody="$(mktemp "${TMPDIR:-/tmp}/.ws-maas-probe-body.XXXXXX")"
+  local code; code="$(maas_probe "$cfg" "$base" "$model" "$pbody")"
+  local reason; reason="$(maas_probe_reason "$pbody" "$key")"
+  rm -f "$cfg" "$pbody"
   case "$code" in
     2*)
       ok "live probe — HTTP ${code}: the endpoint accepted this key for model '${model}'" ;;
-    401|403)
+    # 400 belongs HERE, not in the inconclusive arm, and it is the arm that fires most often in the
+    # field. A LiteLLM gateway answers an EXPIRED key with 400 {"type":"expired_key"} — a definitive
+    # refusal. Classed as inconclusive it printed "no verdict from the endpoint" and invited --force,
+    # which would then stage a dead credential across the whole cohort past the one guard meant to stop
+    # exactly that. Observed 2026-08-21 on maas-rhdp. A malformed-request 400 lands here too: refusing
+    # to stage a pair the endpoint rejects is the right answer either way, and $reason says which.
+    400|401|403)
       err "live probe — HTTP ${code}: the endpoint REJECTED this key for model '${model}'."
+      [[ -n "$reason" ]] && err "   endpoint says: ${reason}"
       err "   MaaS keys are MODEL-SCOPED, so this is as likely a wrong MODEL as a wrong key."
       err "   models this key can list: $(printf '%s' "$ids" | tr '\n' ' ')"
-      die "refusing to stage a credential the endpoint will not honour (--force cannot override a 401/403)" ;;
+      die "refusing to stage a credential the endpoint will not honour (--force cannot override a ${code})" ;;
     *)
       err "live probe — HTTP ${code}: inconclusive (no verdict from the endpoint)."
       err "   The cluster may still reach it while this machine cannot (proxy / split DNS)."
@@ -5562,7 +5588,7 @@ set options
   --vars <file>        alternate vars file (default: bootstrap/vars.yaml)
   --user userN         re-converge only this attendee (default: every attendee with an AI module)
   --no-converge        stage the Secret only; leave the modules on their current values
-  --force              stage despite an INCONCLUSIVE probe (never despite a 401/403)
+  --force              stage despite an INCONCLUSIVE probe (never despite a 400/401/403)
 
 Any field not given falls back to bootstrap/vars.yaml, then to what is already on the cluster — so
 "use a different model" is one flag. Nothing is staged until the assembled key+endpoint+model triple
