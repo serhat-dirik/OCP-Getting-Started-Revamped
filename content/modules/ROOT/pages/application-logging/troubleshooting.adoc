@@ -8,6 +8,30 @@ include::partial$version-attributes.adoc[]
 
 Every entry below was hit while building this module on the cluster, or is a failure mode the lab deliberately produces.
 
+== `jq: parse error: Invalid numeric literal at line 1, column 3`
+
+*Symptom:* A pipeline that reads the log through `jq` dies on the first line, even though the app is
+demonstrably emitting JSON.
+
+*Cause:* `oc logs -l` concatenates one stream *per pod*, and `jq` needs *every* line to be JSON.
+Any pod that predates the JSON switch is still writing free text, so one straggler kills the whole
+pipeline. This happens more often than it sounds: during a rollout both generations match the
+label, and exercise 1 deliberately manufactures a pod in exactly that state. Reproduced on
+2026-08-22 against an entry-state namespace — the bare pipeline errors, and nothing about the error
+mentions pods.
+
+*Fix:* Filter first. `jq -R 'fromjson? // empty'` reads each line as raw text, parses what parses,
+and silently drops what does not:
+
+[source,sh]
+----
+oc logs -l app=parasol-claims --tail=-1 | jq -R 'fromjson? // empty' | jq -r '.loggerName'
+----
+
+The shipped blocks already do this. If you are writing your own, do the same — and note that an
+empty result then means "no pod is emitting JSON", which is a different finding from a parse error
+and worth telling apart.
+
 == `oc logs … | jq` says `parse error: Invalid numeric literal`
 
 Symptom:: A `jq` step from exercise 2 onward fails with `jq: parse error: Invalid numeric literal at line 1, column 11` instead of printing a record.
