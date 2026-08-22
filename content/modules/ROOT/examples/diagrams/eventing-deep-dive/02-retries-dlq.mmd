@@ -1,25 +1,42 @@
-flowchart LR
-  B[("Broker: default")]
-  T{"Trigger claims-fraud-review<br/>delivery:<br/>retry: 3<br/>backoffPolicy: exponential<br/>backoffDelay: PT1S"}
-  subgraph ATTEMPTS["one try, then three retries — about 8s in total"]
-    direction TB
+%% Retries + dead-letter sink — Eventing Deep-Dive & Serverless Workflows.
+%% One failed delivery attempt plus its three retries against a broken consumer, ending at the
+%% dead-letter sink with the reason it died stamped on. Resized 2026-08-22 (was `flowchart LR`,
+%% 2320x363 — a nine-node single-row chain rendering as an unreadable 141px sliver at 0.39x text
+%% scale) by wrapping the chain onto two `direction LR` rows stacked `TB`, per brief rule 3 (the
+%% too-wide class) — nodes were not deleted to fix the width. The broken consumer keeps its four
+%% dotted "refused" edges, one from every attempt in both rows, preserving "the red consumer
+%% refuses all four" from the concept page prose.
+%% Corrected 2026-08-22, same day: those four dotted edges, plus the A1->A2 handoff, were node-to-node
+%% across the delivery/outcome subgraph boundary, silently disabling each row's `direction LR`. The
+%% A1->A2 handoff re-points cleanly to `delivery -->|"404"| outcome`. The four refusals collapse to two
+%% — `delivery -.-> C` and `outcome -.-> C`, one per row — rather than one: C is refused by both rows,
+%% and a single edge from either row alone would drop that row's refusals, which would be wrong, not
+%% just imprecise. Collapsing further than "one edge per row that refuses" isn't possible without
+%% losing that. C stays a standalone node outside both subgraphs, as before; node ids, classDef/class
+%% lines, and every label's wording are unchanged.
+flowchart TB
+  subgraph delivery["broker sends → trigger's first attempts"]
+    direction LR
+    B[("Broker: default")]
+    T{"Trigger claims-fraud-review<br/>retry: 3 · exponential backoff · delay 1s"}
     A0["try · t = 0s"]
     A1["retry 1 · +1s"]
+    B --> T --> A0
+    A0 -->|"404"| A1
+  end
+  subgraph outcome["two more retries (~8s total) → dead-letter sink"]
+    direction LR
     A2["retry 2 · +2s"]
     A3["retry 3 · +4s"]
-    A0 -->|"404"| A1 -->|"404"| A2 -->|"404"| A3
+    D["claims-dlq<br/>dead-letter sink"]
+    CARD["dead event stamped with WHY<br/>errorcode · errordest · original event intact"]
+    A2 -->|"404"| A3
+    A3 ==>|"retries exhausted — the event is NOT dropped"| D --> CARD
   end
-  C["claims-consumer — BROKEN<br/>its subscriber URI points at /process,<br/>so every delivery returns 404"]
-  D["claims-dlq<br/>dead-letter sink"]
-  CARD["the dead event arrives stamped with WHY<br/>knativeerrorcode: 404<br/>knativeerrordest: the address that kept failing<br/>the original CloudEvent, intact"]
-  B --> T
-  T --> ATTEMPTS
-  A0 -.-> C
-  A1 -.-> C
-  A2 -.-> C
-  A3 -.-> C
-  A3 ==>|"retries exhausted — the event is NOT dropped"| D
-  D --> CARD
+  C["claims-consumer — BROKEN<br/>subscriber URI points at /process → always 404"]
+  delivery -->|"404"| outcome
+  delivery -.-> C
+  outcome -.-> C
   classDef hub fill:#e8eaf6,stroke:#3949ab,color:#1a237e;
   classDef trig fill:#e6f4ea,stroke:#137333,color:#0d652d;
   classDef bad fill:#fce8e6,stroke:#c5221f,color:#a50e0e;
