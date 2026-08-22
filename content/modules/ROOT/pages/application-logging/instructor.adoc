@@ -1,0 +1,190 @@
+= Application Logging: Instructor Guide
+:module-id: application-logging
+include::partial$version-attributes.adoc[]
+
+// Internal delivery runbook. Every timing below is MEASURED — the whole lab and the whole demo arc
+// were performed command-by-command on cluster-m24jn (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22
+// against a parasol-claims deployment built from this repo's apps/parasol-claims. See "How this
+// timing was measured".
+
+This module exists because the catalogue had a hole in it.
+Measured on 2026-08-22, log aggregation was mentioned *once* across all 26 modules — in _Observability, Health & Scale_'s wrap-up, which says centralized aggregation is "not something this module builds or demonstrates."
+That was a deliberate deferral, not an oversight: a LokiStack is six to eight pods and needs object storage.
+But it left the catalogue teaching the two signals a platform gives you for free and skipping the one every developer touches every day.
+
+So the scope here is deliberately the *other half*: what an application emits.
+There is no operator to install, no ClusterLogForwarder, no object storage, nothing deployed beyond the claims service that already exists.
+Cluster logging appears in `concept.adoc` as prose and one diagram, and *nowhere* in the lab.
+If a question in the room pulls you toward standing up a log store, the honest answer is on the concept page and in the Top-5 below — take it there rather than into a terminal.
+
+The two ideas that must land are *"a log line is data a machine reads, not a sentence a human skims"* and *"what is in it was decided by the application, not by the platform."*
+Everything else — levels, redaction, correlation — is one of those two applied.
+
+include::partial$prep-before-you-teach.adoc[]
+
+== Timing
+
+Total hands-on: *~42 min* (plus an optional ~5 min challenge).
+Add ~10–12 min of in-room concept discussion up front.
+
+[cols="1,4,1,3",options="header"]
+|===
+| # | Exercise group | Attendee time | Measured core
+
+| 1 | Read what you have; break it; three replicas | ~7 min | pod boot *~10–14 s*; the invalid-level rollout *times out at 90 s* with the new pod at 3 restarts by ~55 s; the fix returns *instantly*; scale 1→3 in *~25 s*
+| 2 | Free text → structured JSON | ~7 min | `oc set env` + rollout *~26–32 s*; every query after that is instant
+| 3 | The level dial, and what the blunt version costs | ~9 min | three rollouts at *~30 s* each; 336 records at startup on root DEBUG, *+91 to +110* for four requests (measured twice)
+| 4 | The credential in the access log | ~8 min | two rollouts at *~32 s* each; the leak is visible on the *first* request
+| 5 | One request across three replicas | ~8 min | scale 1→3 *~25 s*; the correlation query is instant
+| 6 | Take-home: logs that outlive the pod | ~3 min | reading only — no checkpoint, nothing to run
+| C | Challenge (optional) | ~5 min | one rollout per attempt
+|===
+
+[NOTE]
+.How this timing was measured
+====
+Every block on the lab page was executed in order, from a pristine entry state, on 2026-08-22.
+The *Measured core* column is the command time of each group; *Attendee time* adds realistic reading, checkpoint and think-time.
+
+* *Exercise 1* took *155 s* of command time in three runs (12 s + 100 s + 43 s). The 100 s is almost entirely the deliberate break: `oc rollout status --timeout=90s` runs out, which is the intended outcome.
+* *Exercise 2* took *45 s*, of which 32 s was the one rollout.
+* *Exercise 3* took *136 s* across four blocks — it is the rollout-heaviest group, because the level has to reach a container start three separate times.
+* *Exercise 4* took *64 s*, two rollouts.
+* *Exercise 5* took *60 s*, one scale-up plus queries.
+
+The whole *demo arc* was performed separately from the end state: 21 s of commands across five beats, which is what leaves room for the 16 minutes of talking.
+====
+
+== What this module needs from the platform layer
+
+// This section is for whoever wires the module up, and it should be deleted from this page once the
+// entry state and verify script exist. It is here rather than in a side channel so the contract is
+// recorded with the content it constrains.
+
+[IMPORTANT]
+.Read this before the first delivery
+====
+The content is complete and performed; the *module wiring* is owned outside this module's territory and is listed here as the contract it needs.
+
+. *The shared image must be rebuilt.* The lab depends on three things added to `apps/parasol-claims` for this module: the `quarkus-logging-json` extension, `RequestIdFilter` (the `X-Request-Id` → MDC plumbing), and per-request log statements in `ClaimResource`. `ogsr-parasol-images/parasol-claims:1.0` must be rebuilt from current `main` or *exercises 2 and 5 cannot work at all*.
+. *The entry state* (`gitops/entry-states/application-logging/`) must materialize, in `{user}-dev`: `claims-db` (ephemeral PostgreSQL), `parasol-claims` at *one* replica from that shared image, a Service and a Route named `parasol-claims`, and a readiness probe on `/q/health/ready`. It must *not* create a ConfigMap named `claims-logging`, and it must leave `QUARKUS_LOG_CONSOLE_JSON_ENABLED` unset — both are things the attendee creates. The readiness probe is load-bearing for exercise 1: it is what keeps the old pod serving while the broken one crash-loops, which is the two-pod output the lab shows.
+. *The verify script* (`tools/verify/application-logging.sh`) needs, in `--entry-only` mode, that the claims Route answers and that no `claims-logging` ConfigMap exists; and in end mode, that `claims-logging` exists with `QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL` present and that the Deployment sources it. End-mode checks must tolerate a replica count of *one or three* — the lab legitimately ends at three, and an attendee who scaled back is not wrong.
+. *Same-namespace conflict:* this module lives in `{user}-dev` alongside _Ways to Build & Deliver Apps_, _Config, Secrets & Multi-Environment_ and _Observability, Health & Scale_. `ws-meta.yaml` needs `conflictsWith` entries in both directions with each of them.
+====
+
+== Pre-flight checklist
+
+Run these *before the session* (as an instructor/admin). Substitute a real attendee for `user1`.
+
+. *The entry state materializes and verifies* for a sample user.
++
+[source,sh,role=execute]
+----
+adm start application-logging --user user1
+ws verify application-logging --user user1 --entry-only
+----
+
+. *The image the lab depends on carries this module's additions.*
+This is the single most likely cause of a dead lab, and it is a two-line check: the image must exist, and it must be able to emit JSON.
++
+[source,sh,role=execute]
+----
+oc get istag parasol-claims:1.0 -n ogsr-parasol-images \
+  -o jsonpath='{.image.dockerImageReference}{"\n"}'
+oc -n user1-dev get deploy parasol-claims -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+----
++
+Expect a `…/ogsr-parasol-images/parasol-claims@sha256:…` reference from the first, and the `:1.0` tag from the second.
+If the ImageStream tag is missing, nothing in the lab runs — rebuild it (see the app README) before the session.
+
+. *The image really does have the logging extension* — the check that catches a stale rebuild, which the tag check above cannot.
++
+[source,sh,role=execute]
+----
+oc -n user1-dev set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED=true
+oc -n user1-dev rollout status deploy/parasol-claims --timeout=300s
+oc -n user1-dev logs deploy/parasol-claims --tail=1 | jq -r '.loggerName'
+oc -n user1-dev set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED-
+oc -n user1-dev rollout status deploy/parasol-claims --timeout=300s
+----
++
+Expect a logger name such as `io.quarkus`.
+A `jq: parse error` here means the image predates this module and *exercise 2 will fail in the room* — rebuild before you teach, not during.
+
+. *The correlation plumbing is in the image* — one request, one header, one answer.
++
+[source,sh,role=execute]
+----
+H=$(oc -n user1-dev get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -D - -H 'X-Request-Id: preflight-check' "http://$H/api/claims" | grep -i x-request-id
+----
++
+Expect `x-request-id: preflight-check`.
+Nothing back means `RequestIdFilter` is not in the image and exercise 5 has no punchline.
+
+. *`jq` is on the attendee's PATH*, since every exercise from 2 onward uses it.
+Verified present at `/usr/bin/jq` in the cockpit's terminal container on 2026-08-22, but confirm on your cluster:
++
+[source,sh,role=execute]
+----
+adm smoke application-logging user1
+----
+
+== Demo-mode notes
+
+Beyond the Say/Show/Do arc in the demo flavor:
+
+* *Solve first, always, and check two things.* The pre-flight block at the top of the demo page prints `ready=3` and a logger name. If the second one is a `jq` parse error, the solve did not take — re-run it. Do *not* fix it by switching JSON on from the demo terminal: that flip is beat 2's reveal and you will have spent your own punchline before you start.
+* *Never `--prefix` in the demo.* Learned the hard way on the dry run: the end state emits JSON, and `--prefix` glues a `[pod/…]` tag onto every record, which breaks `jq` and puts a wall of unreadable JSON on a projector. Beat 1's `jq -r '[.hostName, .message] | @tsv'` is the readable form and it still shows the pod.
+* *Generate the traffic; do not fish for it.* Beats 1 and 5 both send their own requests. An id scraped out of the existing log with `tail -1` is usually one the *service* generated for a single stray call and matches exactly one record — measured on the dry run, and it is a flat ending to a five-beat arc. Nine requests landed on all three replicas in 3 of 3 trials; four landed on one pod.
+* *Beat 3's root-DEBUG comparison is a captured block, on purpose.* Flipping the root level live costs a ~30 s rollout in the middle of a four-minute beat. If you have the time and want the drama, it is `oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL=DEBUG` and back — but rehearse it, and never do it as your first demo of the day.
+* *Beat 4 needs no cluster at all.* It runs on a frozen log line in a shell variable. That is deliberate: it makes the beat immune to a slow rollout, and it means you can deliver it from a laptop with no cluster if the wifi has betrayed you.
+* *Let the beat-5 output sit.* Ten lines, three distinct pod names, one id. Stop talking and let people read it — that picture is the whole module.
+
+== Top questions attendees ask
+
+*1. "Why aren't we setting up a log aggregation stack? That's what I came for."*::
+Because the half you *cannot buy* is this one, and because standing up the tier would teach the platform team's job rather than the developer's.
+Be concrete: a LokiStack is six to eight pods and needs object storage (an S3 bucket or an OpenShift Data Foundation tier), which is a dependency not every cluster has.
+The components are named on the concept page so anyone can go and read — `cluster-logging` owns the ClusterLogForwarder, `loki-operator` runs the store, `cluster-observability-operator` supplies the console view; all three are Red Hat operators, all three were present in this cluster's catalogue on 2026-08-22 (`cluster-logging` and `loki-operator` on channel `stable-6.6`, `cluster-observability-operator` on `stable`), and none is installed.
+Then land the point: every one of those components is *downstream* of what the application emits. A collector cannot name a field nobody wrote.
+
+*2. "Exercise 1 shows two pods and the app is still up. Did the break fail?"*::
+No — that is the readiness probe gating the rolling update, and it is worth thirty seconds because it surprises people.
+The new pod never becomes ready, so the platform holds it out of the Service and keeps the old, healthy pod serving; the Route stays `200`.
+Tell the room to watch the `READY` column (`0/1`), not `STATUS`, which oscillates between `Running`, `Error` and `CrashLoopBackOff` as the container boots and dies.
+The same behaviour is the spine of _Config, Secrets & Multi-Environment_ (a separate module), so if they have done that one, name the callback.
+
+*3. "The `--previous` flag printed 'unable to retrieve container logs'. Is that a permissions problem?"*::
+No. The container runtime rotates a dead container's log on its own schedule, so `--previous` frequently has nothing left to give you — and, measured on this cluster, it prints that message and *exits 0*, so any `--previous || fallback` construction silently does nothing.
+The lab's block reads the current container too, which is why it still finds the cause: a pod in `CrashLoopBackOff` is failing the same way every time.
+
+*4. "I changed the ConfigMap and nothing happened."*::
+That is exercise 3's second lesson and it catches nearly everyone.
+A ConfigMap consumed as *environment variables* is read when the container *starts* — changing the object does not reach a running process. `oc rollout restart` is the missing step.
+(Mounted as a *file*, the content does update in place — which is one of the honest reasons to prefer a mounted file, and is covered in the config module.)
+The related trap, if someone typed the variable by hand: `QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL` needs *double* underscores around the quoted segment. With single underscores it is simply an unrecognized environment variable — measured, Quarkus logs *no warning whatsoever*, and the level silently stays where it was.
+
+*5. "Isn't a request id just a trace id? Why are we doing this by hand?"*::
+Good question, and the honest answer has two halves.
+Yes — where distributed tracing is already in place, the trace id *is* the right value to put in the MDC, and you should not invent a second identifier. _Observability, Health & Scale_ (a separate module) is where that lives.
+But no — a trace answers "where did the time go across services" and a log answers "what exactly happened, in detail, here". They are different signals with different retention and different costs, and a trace with sampling turned on may not have kept the one request you care about, while the log almost certainly did.
+The mechanism in this lab is also what you use when there is no tracing at all, which is most brownfield estates.
+
+== Watchouts
+
+* *If the image was not rebuilt, exercises 2 and 5 fail silently-ish.* Exercise 2 shows a `jq` parse error where the lab promises an object; exercise 5's query returns nothing. Both look like attendee error and are not. Pre-flight checks 2–4 exist for exactly this; run them.
+* *Scaling the claims service re-seeds its database.* Every new replica runs `drop-and-create` against the same ephemeral PostgreSQL at boot, so claim numbers repeat across pods and the list count jumps. It is documented in the lab and in troubleshooting, and it is harmless here (nothing in this module asserts a claim number), but somebody will notice and ask.
+* *Exercise 3 is the rollout-heaviest group.* Three restarts, ~30 s each, and attendees will be tempted to skip the "nothing happened yet" step. Do not let them: that step *is* the lesson about env-from-ConfigMap.
+* *The `--tail=-1` flag is not decoration.* With a label selector, `oc logs` shows the last *10 lines per pod*. An attendee who drops it from the exercise-5 query gets an empty result and concludes the correlation id does not work. It is the first thing to check when someone says "my query returns nothing".
+* *`oc logs deploy/parasol-claims` with three replicas reads ONE pod* and says so on stderr (`Found 3 pods, using pod/…`). Where a step means "all replicas", the lab uses `-l app=parasol-claims`; if someone substitutes the deployment form they will get a confusing partial answer.
+* *The API key in exercise 4 is synthetic* (`PARASOL-PARTNER-EXAMPLE-4f9a2c7b` — note `EXAMPLE`) and authenticates nothing anywhere. If an attendee asks whether they should try it with a real key from their own environment, the answer is an emphatic no, and the reason is the exercise's own punchline: the log is append-only.
+* *Do not let the room "fix" the leak by tightening the `cut`.* If somebody proposes `cut -c1-55`, that is the module's lesson walking in the door — ask them what happens when the client IP is a character longer. The repo's own `tools/lint/credential-redaction-guard.py` docstring is the story if you want to read it out.
+* *Challenge 3 has an answer, in case you are asked:* `%R` (or `%\{REQUEST_PATH}`) is the access-log token for the path *without* the query string. `%U` is not — it is `REQUEST_URL` and, measured on this cluster, it still includes the query. The better answer to the challenge is still "ban credentials in URLs", and the token is the consolation prize.
+
+== Provenance
+
+Everything on the lab page was performed command-by-command on cluster-m24jn (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22, from a pristine entry state, in the order the page presents it; every expected-output block is from that run.
+The demo arc was then performed separately from the end state, which found and fixed three defects in it before it shipped: `--prefix` producing unreadable JSON on a projector, a beat whose talk track referenced framework loggers that are absent at the category level the end state uses, and a correlation id scraped from the log that matched a single record.
+The measurements quoted in prose — the root-DEBUG record counts, the character offset of the leaked key, the request spread across replicas — were each taken more than once, and the prose quotes ranges where the runs disagreed.
+The three logging operators named in concept.adoc were verified present in this cluster's catalogue on 2026-08-22 and confirmed *not* installed (no `LokiStack`, `ClusterLogForwarder` or `ClusterLogging` CRD exists).

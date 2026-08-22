@@ -155,11 +155,48 @@ its compact, un-prettified format stay covered by `RootResourceSiteTest`.
 - Extensions, each earning its place: `quarkus-rest-jackson`,
   `quarkus-hibernate-orm-panache`, `quarkus-jdbc-postgresql`, `quarkus-smallrye-health`,
   `quarkus-micrometer-registry-prometheus`, `quarkus-opentelemetry` (exporter off by default),
+  `quarkus-logging-json` (JSON output off by default — see below),
   `quarkus-oidc` and `quarkus-oidc-client` (tenant disabled by default — see below).
 - A **CycloneDX SBOM** is emitted on every build.
 - Health, metrics, tracing and externalized configuration are **on by default**. They are
   curriculum for *Config, Secrets & Multi-Environment* and *Observability, Health & Scale*, not
   optional extras.
+
+## Logging — structured on request, and never a credential
+
+Curriculum for *Application Logging*. Like the OpenTelemetry exporter and the OIDC tenant, the
+**capability ships in the image and the switch stays off**, so every other module sees the familiar
+human-readable Quarkus console it captured its output against. Three knobs, all per deployment, all
+runtime — none is a rebuild:
+
+| Property | Environment variable | Default | What it does |
+|---|---|---|---|
+| `quarkus.log.console.json.enabled` | `QUARKUS_LOG_CONSOLE_JSON_ENABLED` | `false` | One JSON object per record on stdout instead of a formatted sentence. The Quarkus startup banner is not emitted as a record, so with this on, *every* line is parseable and `oc logs \| jq` needs no filtering. |
+| `quarkus.log.category."com.parasol".level` | `QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL` | `INFO` | This app's own chatter only. Note the **double** underscores around the quoted segment; a single underscore is silently ignored by Quarkus with no warning. |
+| `quarkus.http.access-log.enabled` | `QUARKUS_HTTP_ACCESS_LOG_ENABLED` | `false` | One line per HTTP request from the server. Off by default because its default pattern writes the full request line **including the query string** — which is how a credential passed as `?api_key=…` reaches a log file. |
+
+**The level ladder is a design decision, not a habit** (see `ClaimResource`): business events that
+changed state (claim created, status advanced) at `INFO`; requests this service *refused* at `WARN`;
+reads at `DEBUG`, because a claims API serves far more lookups than creations and logging every read
+at `INFO` would bury the two lines that matter. Measured on cluster (2026-08-22), four identical
+requests cost **four** records with `com.parasol` at DEBUG and **91–110** with the *root* level at
+DEBUG — at which point Hibernate also prints every SQL statement it runs, so turning up the root
+level is a disclosure change as much as a volume change.
+
+**No log line here carries a claimant's name.** Claim numbers identify the record without naming the
+human; a log is copied, shipped and retained far more freely than the database it describes.
+
+**Anything caller-controlled is neutralized before it reaches a record.** `LogSafe.value()` reduces
+an identifier (a claim number off the path, a correlation id off a header) to `[A-Za-z0-9._:-]`, and
+`LogSafe.text()` strips the control range from a message that has to stay readable English. Both are
+transformations *of the thing* — never a character count, which is a coincidence rather than a
+control. Without them, a header containing a newline forges a second, entirely fictional log record.
+
+**`RequestIdFilter` gives every request an id**, from the `X-Request-Id` header or generated, puts it
+in the MDC so it appears as `mdc.requestId` on every record written while handling that request, and
+echoes it back in the response so the caller can quote it. `RequestIdFilterTest` pins the echo, the
+generation, and the sanitizing. `quarkus-smallrye-context-propagation` is already on the classpath,
+so the context survives the async hops between the I/O thread and the worker.
 
 ## Security — unprotected by default
 

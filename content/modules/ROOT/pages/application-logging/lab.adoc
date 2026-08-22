@@ -1,0 +1,1003 @@
+= Application Logging: {lab_page_label}
+:module-id: application-logging
+include::partial$version-attributes.adoc[]
+
+// Lab page for Application Logging. Workshop exercises are guarded ifndef::demo[]; the DEMO
+// rendering shows only the presenter arc. Every command runs in the SHOWROOM terminal as {user},
+// so blocks are role=execute (click-to-run) with subs="attributes" ONLY where {user} must
+// interpolate — blocks driven by the $CLAIMS/$RID shell variables or by jsonpath braces omit it
+// (CC-6). Every command and every captured output on this page was performed on cluster-m24jn
+// (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22 against a parasol-claims deployment built from
+// this repo's apps/parasol-claims; pod names, IP addresses, timestamps and claim numbers in the
+// expected-output blocks are from that run and will differ on yours.
+//
+// SCOPE: nothing on this page deploys a log store. Cluster log aggregation is concept.adoc's
+// business and is deliberately absent here (owner ruling — see the module spec).
+//
+// `jq` is used from exercise 2 onward. Verified present in the cockpit terminal container at
+// /usr/bin/jq on 2026-08-22.
+
+ifndef::demo[]
+include::partial$prereq-ws-start.adoc[]
+
+In this lab you take the claims service from a log nobody can query to one that answers questions.
+You read what the platform gives you for free and find the question it cannot answer, turn free text into structured records, move the log level into configuration and turn one category up without turning the whole app up, leak a credential into a log on purpose and learn why truncating it is not a fix, and finally follow one request across three replicas.
+Everything happens in `{user}-dev`, so nothing you do can affect another attendee.
+
+[TIP]
+.Two ways to do some steps
+====
+Reading logs, editing environment variables and creating a ConfigMap are offered two ways.
+Use the *Console* tab for the graphical workflow in the {ocp_console_url}[OpenShift web console^] (sign in as `{user}`), or the *CLI* tab for `oc` in the *Terminal* tab beside these instructions — the two paths do the same thing.
+The querying steps are CLI-only and say so: the console's log viewer can search for a string, but it cannot filter on a *field*, and filtering on fields is the entire point of exercises 2 through 5.
+====
+endif::demo[]
+
+// ============================================================================
+// DEMO FLAVOR — 16-minute presenter arc (unparseable -> queryable -> correlated)
+// ============================================================================
+ifdef::demo[]
+== Demo arc — From a log nobody can query to one request across three pods (16 min)
+
+[NOTE]
+.Before you present
+====
+Run `adm solve application-logging --user {user}` a few minutes ahead so the end state is up: the claims service in `{user}-dev` emitting structured JSON, its logging config in the `claims-logging` ConfigMap, and three replicas running.
+Have a terminal logged in as `{user}` and, optionally, the web console's *Logs* tab for one claims pod on a second screen — the contrast between what that view can do and what a field query can do is the whole demo.
+
+*Two things to check before you promise beat 5.* Both are one command:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev get deploy parasol-claims -o jsonpath='ready={.status.readyReplicas}{"\n"}'
+oc -n {user}-dev logs deploy/parasol-claims --tail=1 | jq -r '.loggerName'
+----
+
+*If the first prints `ready=3` and the second prints a logger name*, the arc runs as scripted.
+*If the second prints a `jq` parse error*, structured logging is off — the solve did not take. Re-run `adm solve application-logging --user {user}` and wait for the rollout; do not switch it on by hand from the demo terminal, because flipping it live is beat 2 and you will have spent your own punchline.
+====
+
+=== Beat 1 — The question the platform cannot answer
+
+[demo-block]
+[TIME 3m]
+Say:: "An adjuster calls: 'I approved a claim twenty minutes ago and it still shows as submitted.' This service runs three replicas. Her request was served by one of them, and right now nobody in this room can tell me which."
+Show:: The terminal, full width, with the log of all three pods on screen.
+Do:: Put nine claim submissions through the Route, then show every replica's log at once, projected down to the pod and the message:
++
+[source,sh,role=execute,subs="attributes"]
+----
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+for i in $(seq 1 9); do
+  curl -s -o /dev/null -X POST -H 'Content-Type: application/json' \
+    -d "{\"claimant\":\"Broker portal $i\",\"type\":\"home\",\"amount\":5$i.00}" \
+    "http://$CLAIMS/api/claims"
+done
+oc -n {user}-dev logs -l app=parasol-claims --tail=-1 \
+  | jq -r 'select(.loggerName=="com.parasol.claims.ClaimResource" and .level=="INFO")
+           | [.hostName, .message] | @tsv'
+----
++
+"I can see which pod wrote each line. I cannot see which line was hers, or what else happened while that one request was being handled. Those are different questions, and nothing on this screen answers the second one."
++
+NOTE: two things this beat was rebuilt to avoid, both measured on the solve state on 2026-08-22. Do not reach for `oc logs --prefix`: the solve state emits JSON, and `--prefix` glues a `[pod/…]` tag onto each record, which destroys `jq` and puts a wall of unreadable JSON on the projector. And do not just `tail` the log without generating traffic — `oc logs -l` concatenates one stream *per pod*, so a bare `tail -6` shows the last pod's tail and one pod name, which is the opposite of the point. Nine requests reliably spread across all three replicas (3 of 3 trials); four did not.
+
+=== Beat 2 — A sentence a human skims, versus data a machine reads
+
+[demo-block]
+[TIME 3m]
+Say:: "The reason it cannot answer is that every line you just saw is a sentence. Watch what happens when I ask a program to read one."
+Show:: The `jq` parse error on a frozen free-text line, then the live structured record.
+Do:: Fail first — on a captured line, so nothing on the cluster has to be broken to make the point:
++
+[source,sh,role=execute]
+----
+echo '2026-08-22 19:00:14,318 INFO  [com.parasol.claims.ClaimResource] (executor-thread-1) claim CLM-1031 created type=auto amount=1850.00' | jq .
+----
++
+"There it is — a parse error. That is the honest state of most production logs — a human can read them and nothing else can. Now the same event, out of the running service, with one setting changed. No rebuild, no new image."
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev logs deploy/parasol-claims --tail=1 | jq .
+----
++
+"Named fields. `level` is a value I can compare, not a word I hope does not appear in a message. And `hostName` is the pod — the record knows where it came from."
++
+NOTE: do NOT enable JSON live here. The solve state already emits it, the flip costs a 25-second rollout, and it is exercise 2's discovery — spending it on stage buys you nothing but dead air.
+
+=== Beat 3 — One dial for your code, another for everything
+
+[demo-block]
+[TIME 4m]
+Say:: "Every team eventually asks for more detail in production. Here is why the answer is 'which detail'."
+Show:: The live histogram — three loggers, nothing else — then the measured root-DEBUG comparison.
+Do:: Show who is writing to this log right now:
++
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-dev logs -l app=parasol-claims --tail=-1 | jq -r '.loggerName' | sort | uniq -c | sort -rn
+----
++
+"Three loggers. All three are this application. Now here is the same command on the same service with the *root* level turned up instead of the application's own category — captured, because it is a rollout and I would rather spend the time talking:"
++
+[source,sh,role=execute]
+----
+cat <<'EOF'
+  98 io.quarkus.micrometer.runtime.binder.vertx.VertxHttpServerMetrics
+  66 org.hibernate.SQL
+  39 io.quarkus.arc.runtime.BeanContainerImpl
+  30 jakarta.json.spi.JsonProvider
+  18 io.smallrye.config
+EOF
+----
++
+"Measured on this exact service, twice: four identical requests cost *four* records with `com.parasol` turned up, and *ninety to a hundred and ten* with the root level turned up. And here is the part people miss — look at the second line, `org.hibernate.SQL`. At root DEBUG the ORM prints every statement it runs. That is not just a bigger bill, it is a different set of things written down."
+
+=== Beat 4 — Truncation is not redaction
+
+[demo-block]
+[TIME 3m]
+Say:: "Now the failure that costs a company a credential rotation. A partner integration puts its API key in the query string, and somebody switches on an HTTP access log."
+Show:: The access-log line with the key in it, then the two 'fixes'.
+Do:: Show the leak and the arithmetic:
++
+[source,sh,role=execute,subs="attributes"]
+----
+ACCESS='10.235.0.2 - - [22/Aug/2026:19:17:32 +0000] "GET /api/claims?api_key=PARASOL-PARTNER-EXAMPLE-4f9a2c7b HTTP/1.1" 200 4798'
+echo "$ACCESS" | cut -c1-60
+echo "$ACCESS" | cut -c1-72
+echo "$ACCESS" | sed -E 's/(api_key=)[^ &"]*/\1<redacted>/'
+----
++
+"Sixty characters looks safe. It is safe by nine characters, and nobody chose nine — the client IP happened to be ten characters long. Change the pod and the same command prints part of the key. The fix on the third line is a redaction *of the thing*: it names the field, so the length stops mattering."
+
+=== Beat 5 — One request, three pods, one query
+
+[demo-block]
+[TIME 3m]
+Say:: "Back to the adjuster. Her request carried an id, that id is a field on every record it produced, and here is her whole story."
+Show:: The correlated output — several lines, more than one pod name.
+Do:: Perform her action — several calls behind one click, all carrying one id — then run the query beat 1 could not:
++
+[source,sh,role=execute,subs="attributes"]
+----
+RID="parasol-adjuster-$(date +%s)"
+CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
+for i in $(seq 1 9); do curl -s -o /dev/null -H "X-Request-Id: $RID" "http://$CLAIMS/api/claims"; done
+curl -s -o /dev/null -H "X-Request-Id: $RID" -X POST -H 'Content-Type: application/json' \
+  -d '{"claimant":"Dana Whitfield","type":"auto","amount":1850.00}' "http://$CLAIMS/api/claims"
+oc -n {user}-dev logs -l app=parasol-claims --tail=-1 \
+  | jq -r --arg rid "$RID" 'select(.mdc.requestId==$rid) | [.hostName,.level,.message] | @tsv'
+----
++
+NOTE: send the calls rather than fishing an id out of the existing log — an id picked with `tail -1` is usually one the *service* generated for a single stray call and matches exactly one record, which is a flat ending to the arc. Nine is not arbitrary either: measured on 2026-08-22, nine calls landed on all three replicas in 3 of 3 trials, while four landed on one pod.
++
+"Three pods, one request, one query. Nothing on this slide is a product — it is a filter, a level, a field, and an id, all decided in the application. That is the half nobody can buy."
+endif::demo[]
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+ifndef::demo[]
+
+== 1. Read what you have — and find the question it cannot answer
+⏱ *~7 min* · the free baseline, its limits, and the deliberate break
+
+Start with what every OpenShift cluster gives you with nothing installed and nothing configured.
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc project {user}-dev
+oc get pods -l app=parasol-claims
+oc logs deploy/parasol-claims --tail=4
+----
+
+.Expected output (sample — your pod name and timings differ)
+[source,texinfo]
+----
+NAME                             READY   STATUS    RESTARTS   AGE
+parasol-claims-6485b75f46-p9xqq   1/1     Running   0          3m
+
+2026-08-22 18:59:41,183 INFO  [com.parasol.claims.ClaimNumberSequence] (main) claim_number_seq ready (created at CLM-1031 if it was missing; an existing one is left where it is)
+2026-08-22 18:59:41,462 INFO  [io.quarkus] (main) parasol-claims 1.0.0 on JVM (powered by Quarkus 3.33.3.1) started in 10.4s. Listening on: http://0.0.0.0:8080
+2026-08-22 18:59:41,463 INFO  [io.quarkus] (main) Profile prod activated.
+2026-08-22 18:59:41,463 INFO  [io.quarkus] (main) Installed features: [agroal, cdi, hibernate-orm, ...]
+----
+
+That is the whole free tier, and it is more useful than most people expect.
+Now make the service say something about *business*, not about booting:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"claimant":"Dana Whitfield","type":"auto","amount":1850.00}' \
+  "http://$CLAIMS/api/claims" | jq -r '.claimNumber'
+oc logs deploy/parasol-claims --tail=1
+----
+
+.Expected output
+[source,texinfo]
+----
+CLM-1031
+2026-08-22 19:00:14,318 INFO  [com.parasol.claims.ClaimResource] (executor-thread-1) claim CLM-1031 created type=auto amount=1850.00
+----
+
+Two flags earn their keep straight away — `--timestamps` puts the *node's* clock on the line (useful when the app's own timestamp is in a different zone from yours), and `--since` bounds how far back you read:
+
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-claims --tail=1 --timestamps
+oc logs deploy/parasol-claims --since=10m | tail -1
+----
+
+// CAPTURE-VERIFY (media pass): the console strings below were taken from THIS cluster's own
+// console locale bundle on 2026-08-22 (/static/locales/en/public.json, which needs no login) —
+// "Logs", "Container", "Wrap lines", "Show full log", "Download", "Log type", and its two values
+// "Current log" / "Previous log" are all present verbatim. What is NOT grounded is the click path
+// and the placement of those controls; a browser pass should confirm both. The CLI tab beside it
+// is authoritative.
+[tabs]
+====
+Console::
++
+--
+The same log is in the web console, and it is worth knowing where before you need it in a hurry.
+
+. Go to *Workloads* → *Pods* and click your `parasol-claims` pod.
+. Open the *Logs* tab.
+. Note the controls along the top: a *Container* selector (for a pod with more than one), *Wrap lines*, *Show full log*, *Download*, and a *Log type* selector — that last one is the console's version of the flag you are about to need.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-claims --tail=20
+----
+--
+====
+
+=== Break it: a bad logging setting takes the app down
+
+Log configuration is configuration, and configuration can be wrong.
+Set an invalid level and watch what the platform does:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL=VERBOSE
+oc rollout status deploy/parasol-claims --timeout=90s
+oc get pods -l app=parasol-claims
+----
+
+.Expected output (sample — the timeout is the point)
+[source,texinfo]
+----
+deployment.apps/parasol-claims updated
+Waiting for deployment "parasol-claims" rollout to finish: 1 old replicas are pending termination...
+error: timed out waiting for the condition
+
+NAME                              READY   STATUS    RESTARTS      AGE
+parasol-claims-855cc98d4b-9x6hj   0/1     Error     3 (59s ago)   92s
+parasol-claims-d9bb4f78f-9jdx8    1/1     Running   0             4m5s
+----
+
+Two pods, and the app is still answering.
+That is not the break failing — it is the rolling update being *gated* by the readiness probe, so the old healthy pod keeps serving while the new one cannot start.
+(If your deployment carries no readiness probe you will see one pod instead, and it will be the broken one. Either way, the pod you want is the newest.)
+
+Read *why* it is failing.
+This is the one question `oc logs` cannot answer without a flag, because the container you care about is already gone:
+
+[source,sh,role=execute]
+----
+BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o name | tail -1)
+echo "newest pod: $BAD"
+oc logs $BAD --previous --tail=3
+echo
+echo "--- and the current container, failing the same way ---"
+oc logs $BAD --tail=3
+----
+
+// Verified live on cluster-m24jn (OCP 4.22.8), 2026-08-22, twice: `--previous` came back with the
+// rotation message on both runs, and there is NO blank line before the "---" banner — the oc
+// message ends WITHOUT a newline, so the bare `echo` in the block supplies that one newline and
+// nothing more. Leave the `echo` in: without it the banner glues onto the cri-o id (CC-3).
+.Expected output (sample — `--previous` may or may not have content; see below)
+[source,texinfo]
+----
+newest pod: pod/parasol-claims-65d7cb6dbb-6kgjz
+unable to retrieve container logs for cri-o://341f587e3586d898cc7b127366724091cba4d5b7e542db28...
+--- and the current container, failing the same way ---
+	Maximum pool size: undefined/unknown
+Configuration validation failed:
+	java.lang.IllegalArgumentException: SRCFG00039: The config property quarkus.log.level with the config value "VERBOSE" threw an Exception whilst being converted Unknown level "VERBOSE"
+----
+
+There is the cause, in one line: `Unknown level "VERBOSE"`.
+`--previous` reads the *previous generation* of the container in that pod, which is exactly what you want after a crash — but the container runtime rotates old container logs on its own schedule, so it often has nothing left to give you.
+That is why the block reads the current container too: a pod in `CrashLoopBackOff` is failing the same way every time, so the live log says the same thing.
+
+[IMPORTANT]
+.`oc logs --previous` fails quietly
+====
+When the previous container's log has already been rotated away, `oc logs --previous` prints `unable to retrieve container logs for cri-o://…` *and exits 0* — measured on this cluster.
+So a `cmd --previous || fallback` never runs its fallback.
+Always run the two reads as two commands, the way the block above does.
+====
+
+Now fix it and confirm the app is whole:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL-
+oc rollout status deploy/parasol-claims --timeout=120s
+oc get pods -l app=parasol-claims
+----
+
+The rollout returns almost instantly, because removing the variable restores the *previous* pod template — the healthy pod that never went away is already correct.
+
+=== Three replicas, three log streams
+
+Scale up and send six claim submissions through the Route:
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims --replicas=3
+oc rollout status deploy/parasol-claims --timeout=300s
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -X POST -H 'Content-Type: application/json' \
+    -d "{\"claimant\":\"Claimant $i\",\"type\":\"home\",\"amount\":9$i.00}" \
+    "http://$CLAIMS/api/claims"
+done
+oc logs -l app=parasol-claims --prefix --tail=-1 | grep 'claim CLM'
+----
+
+// Verified live on cluster-m24jn, 2026-08-22 — this is the run's output with the timestamp and
+// level trimmed to `...` so the block fits the column. Note CLM-1031 appearing twice: that is the
+// re-seed race the NOTE below explains, and it is real, not a transcription slip.
+.Expected output (sample — pod names, ordering and claim numbers differ)
+[source,texinfo]
+----
+[pod/parasol-claims-9fd87644f-2xlck/parasol-claims] ... claim CLM-1034 created type=home amount=94.00
+[pod/parasol-claims-9fd87644f-b5wgz/parasol-claims] ... claim CLM-1031 created type=home amount=91.00
+[pod/parasol-claims-9fd87644f-b5wgz/parasol-claims] ... claim CLM-1033 created type=home amount=93.00
+[pod/parasol-claims-9fd87644f-b5wgz/parasol-claims] ... claim CLM-1035 created type=home amount=95.00
+[pod/parasol-claims-9fd87644f-bqbm9/parasol-claims] ... claim CLM-1031 created type=auto amount=1850.00
+[pod/parasol-claims-9fd87644f-bqbm9/parasol-claims] ... claim CLM-1032 created type=home amount=92.00
+[pod/parasol-claims-9fd87644f-bqbm9/parasol-claims] ... claim CLM-1036 created type=home amount=96.00
+----
+
+[NOTE]
+.Three things in that output are worth a second look
+====
+`--prefix` tags each line with the pod that wrote it, and `--tail=-1` is not optional — with a *label selector*, `oc logs` shows only the last *10 lines per pod* unless you ask for everything (`oc logs --help` says so, and you will measure it in exercise 5).
+
+The lines are grouped *by pod*, not ordered by time: `oc logs -l` concatenates one stream per pod. Two lines next to each other did not necessarily happen next to each other.
+
+You may also see a claim number repeat across pods. Each new replica re-creates the schema and reloads the 30 seed claims at boot, against the same ephemeral database — so the numbering restarts. It is the shared throwaway database being shared, not a bug, and it does not affect anything you do with logs here.
+====
+
+Now the question this whole module exists for.
+Dana Whitfield's submission is in there somewhere.
+*Which pod served it, and what else happened while that one request was being handled?*
+Nothing in these lines connects them: not to her, not to each other.
+Every exercise from here on is about closing that gap.
+
+Scale back to one replica so the next three exercises are quick; you will come back to three once you can tell them apart:
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims --replicas=1
+oc rollout status deploy/parasol-claims --timeout=300s
+----
+
+[.checkpoint]
+****
+✔ *Verify:* `oc logs -l app=parasol-claims --prefix --tail=-1 | grep -c 'claim CLM'` returns *6 or more*, you saw more than one pod name in the prefixes, and you read `Unknown level "VERBOSE"` out of a crashed container's log.
+****
+
+== 2. Make it structured — a log line is data, not a sentence
+⏱ *~7 min* · free text → JSON, and the first question free text cannot answer
+
+Try to make a program read the log you have:
+
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-claims --tail=1 | jq .
+----
+
+.Expected output
+[source,texinfo]
+----
+jq: parse error: Invalid numeric literal at line 1, column 11
+----
+
+That is the honest state of most production logs: a human can read them and nothing else can.
+Fix it with one setting.
+
+The claims service already carries the Quarkus JSON logging extension — in your own project this is the line you would add to `pom.xml` and rebuild:
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.quarkus</groupId>
+  <artifactId>quarkus-logging-json</artifactId>
+</dependency>
+----
+
+It ships in the image with the *output* switched off, so every module you have run so far saw the familiar Quarkus console.
+Switching it on is configuration, not a rebuild:
+
+// CAPTURE-VERIFY (media pass): "Environment", "Single values (env)", "Add value" and "Save" are
+// verbatim strings from this cluster's console locale bundle (2026-08-22); the click path is not
+// browser-grounded. The CLI tab is authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *Workloads* → *Deployments* → `parasol-claims` → the *Environment* tab.
+. Under *Single values (env)*, click *Add value*.
+. Name `QUARKUS_LOG_CONSOLE_JSON_ENABLED`, value `true`.
+. Click *Save* and wait for the new pod to become ready.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED=true
+oc rollout status deploy/parasol-claims --timeout=300s
+----
+--
+====
+
+Now produce the *same event* as before and look at it again:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -o /dev/null -X POST -H 'Content-Type: application/json' \
+  -d '{"claimant":"Dana Whitfield","type":"auto","amount":1850.00}' \
+  "http://$CLAIMS/api/claims"
+oc logs deploy/parasol-claims --tail=1 | jq .
+----
+
+.Expected output (sample — one record, pretty-printed by `jq`)
+[source,texinfo]
+----
+{
+  "timestamp": "2026-08-22T18:45:43.744232192Z",
+  "sequence": 152,
+  "loggerClassName": "org.jboss.logging.Logger",
+  "loggerName": "com.parasol.claims.ClaimResource",
+  "level": "INFO",
+  "message": "claim CLM-1031 created type=auto amount=1850.00",
+  "threadName": "executor-thread-1",
+  "threadId": 17,
+  "mdc": {
+    "requestId": "f5a1634e"
+  },
+  "ndc": "",
+  "hostName": "parasol-claims-6dbd4f5986-q77nk",
+  "processName": "/usr/lib/jvm/java-21-openjdk-.../bin/java",
+  "processId": 1
+}
+----
+
+Same event, same words, but now every part of it has a *name*.
+Three of those names matter more than the rest: `level` is a value you can compare, `loggerName` is the category the level dial in exercise 3 operates on, and `hostName` is *the pod that wrote the record* — the log line now knows where it came from, with no `--prefix` and no guessing.
+`mdc` is empty-looking for most records and is the whole subject of exercise 5.
+
+Notice also what *disappeared*: the Quarkus startup banner. In JSON mode it is not emitted as a record, so every line is parseable and `oc logs | jq` needs no filtering.
+
+Now ask the log questions that free text cannot answer.
+Generate a couple of failures first, so there is something other than success to find:
+
+[source,sh,role=execute]
+----
+curl -s -o /dev/null "http://$CLAIMS/api/claims/CLM-9999"
+curl -s -o /dev/null -X POST -H 'Content-Type: application/json' \
+  -d '{"claimant":"Ada Reyes","type":"boat","amount":10}' "http://$CLAIMS/api/claims"
+oc logs deploy/parasol-claims | jq -r '.level' | sort | uniq -c
+oc logs deploy/parasol-claims | jq -r 'select(.level=="WARN" or .level=="ERROR") | .message'
+----
+
+.Expected output (sample)
+[source,texinfo]
+----
+   5 INFO
+   2 WARN
+claim CLM-9999 not found
+rejected: field 'type' must be one of [auto, home, life], not 'boat'
+----
+
+Read the second query carefully, because it is the argument for the whole exercise.
+`select(.level=="WARN")` is a *comparison on a field*.
+The free-text equivalent is `grep WARN`, which also matches any message that happens to contain the word — including, on a bad day, a log line about a warning that was successfully handled.
+One of those has a right answer and one has a hit rate.
+
+And this one is simply not expressible on free text at all — every record your own code wrote, whatever its wording:
+
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-claims \
+  | jq -r 'select(.loggerName | startswith("com.parasol")) | [.level, .message] | @tsv'
+----
+
+[.checkpoint]
+****
+✔ *Verify:* `oc logs deploy/parasol-claims --tail=1 | jq -r .loggerName` prints a logger name (not a parse error), and `oc logs deploy/parasol-claims | jq -r '.level' | sort | uniq -c` shows at least two different levels.
+****
+
+== 3. Turn one category up — without a rebuild, and without a firehose
+⏱ *~9 min* · the level dial, where it lives, and what the blunt version costs
+
+Count what your own code has written, serve six lookups, and count again:
+
+[source,sh,role=execute]
+----
+# re-derive the Route host: a terminal restarted since exercise 2 has no $CLAIMS, and
+# `curl http:///api/claims` fails in a way that looks nothing like an empty variable
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+echo -n "records your code wrote, before six lookups: "
+oc logs deploy/parasol-claims | jq -r 'select(.loggerName | startswith("com.parasol")) | .level' | wc -l
+for i in 1 2 3 4 5 6; do curl -s -o /dev/null "http://$CLAIMS/api/claims"; done
+echo -n "records your code wrote, after six lookups:  "
+oc logs deploy/parasol-claims | jq -r 'select(.loggerName | startswith("com.parasol")) | .level' | wc -l
+----
+
+// Verified live 2026-08-22: the absolute number depends on what exercise 2 left in this pod's log
+// (4 on the straight-through run, 1 on a pod that had just restarted). What is invariant — and what
+// the text asserts — is that the two numbers are EQUAL.
+.Expected output (sample — your two numbers may not be 4, but they will be the same number)
+[source,texinfo]
+----
+records your code wrote, before six lookups: 4
+records your code wrote, after six lookups:  4
+----
+
+Six requests, zero new records.
+That is deliberate: the claims service logs *writes* at INFO and *reads* at DEBUG, because a claims API serves far more lookups than creations and logging every read at INFO would bury the lines that matter under their own volume.
+
+The detail is still there; you just have to ask for it.
+
+=== Put the logging configuration where configuration belongs
+
+You switched JSON on with a one-off `oc set env`, which is fine for an experiment and wrong as a habit — it leaves your logging setup as an ad-hoc edit on a Deployment that nobody can review or promote.
+Move it into a ConfigMap, exactly as _Config, Secrets & Multi-Environment_ taught you (a separate module):
+
+// CAPTURE-VERIFY (media pass): "ConfigMaps", "Create ConfigMap", "Key", "Value", "Add more",
+// "Add from ConfigMap or Secret" and "All values from existing ConfigMaps or Secrets (envFrom)"
+// are verbatim strings from this cluster's console locale bundle (2026-08-22); the click path and
+// the form layout are not browser-grounded. The CLI tab is authoritative.
+[tabs]
+====
+Console::
++
+--
+. Go to *ConfigMaps* → *Create ConfigMap*.
+. Name it `claims-logging`, and under *Data* add two keys with *Add more*:
++
+[cols="1,1"]
+|===
+| *Key* | *Value*
+| `QUARKUS_LOG_CONSOLE_JSON_ENABLED` | `true`
+| `QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL` | `INFO`
+|===
++
+. *Create*.
+. Then go to *Workloads* → *Deployments* → `parasol-claims` → *Environment*, remove the single `QUARKUS_LOG_CONSOLE_JSON_ENABLED` value you added in exercise 2, and under *All values from existing ConfigMaps or Secrets (envFrom)* click *Add from ConfigMap or Secret* and pick `claims-logging`. *Save*.
+--
+CLI::
++
+--
+[source,sh,role=execute]
+----
+oc create configmap claims-logging \
+  --from-literal=QUARKUS_LOG_CONSOLE_JSON_ENABLED=true \
+  --from-literal=QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL=INFO
+oc set env deploy/parasol-claims QUARKUS_LOG_CONSOLE_JSON_ENABLED-
+oc set env deploy/parasol-claims --from=configmap/claims-logging
+oc rollout status deploy/parasol-claims --timeout=300s
+oc set env deploy/parasol-claims --list | tail -2
+----
+--
+====
+
+.Expected output
+[source,texinfo]
+----
+# QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL from configmap claims-logging, key QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL
+# QUARKUS_LOG_CONSOLE_JSON_ENABLED from configmap claims-logging, key QUARKUS_LOG_CONSOLE_JSON_ENABLED
+----
+
+That variable name deserves one sentence, because it is where people get stuck.
+The property is `quarkus.log.category."com.parasol".level`; as an environment variable, dots become underscores and the *quoted* segment is delimited by *double* underscores — hence `QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL`.
+`com.parasol` is a *prefix* of the logger name, so this one key controls every logger in the application and nothing outside it.
+
+=== Flip the dial
+
+[source,sh,role=execute]
+----
+oc set data configmap/claims-logging --from-literal=QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL=DEBUG
+for i in 1 2 3; do curl -s -o /dev/null "http://$CLAIMS/api/claims"; done
+oc logs deploy/parasol-claims | jq -r 'select(.loggerName | startswith("com.parasol")) | .level' | sort | uniq -c
+----
+
+.Expected output
+[source,texinfo]
+----
+configmap/claims-logging data updated
+   1 INFO
+----
+
+Still nothing — and that is the second lesson in this exercise.
+A ConfigMap consumed as *environment variables* is read when the container *starts*.
+Changing the ConfigMap does not reach a process that is already running; "no rebuild" is not the same as "no restart".
+
+[source,sh,role=execute]
+----
+oc rollout restart deploy/parasol-claims
+oc rollout status deploy/parasol-claims --timeout=300s
+for i in 1 2 3; do curl -s -o /dev/null "http://$CLAIMS/api/claims"; done
+curl -s -o /dev/null "http://$CLAIMS/api/claims/CLM-1005"
+oc logs deploy/parasol-claims | jq -r 'select(.loggerName | startswith("com.parasol")) | [.level,.message] | @tsv'
+----
+
+.Expected output (sample)
+[source,texinfo]
+----
+INFO	claim_number_seq ready (created at CLM-1031 if it was missing; an existing one is left where it is)
+DEBUG	claim list served: 30 of 30
+DEBUG	claim list served: 30 of 30
+DEBUG	claim list served: 30 of 30
+DEBUG	claim CLM-1005 served
+----
+
+Four requests, four records, and the whole application went from silent to explicit with a config change and a restart.
+
+=== What the blunt version costs
+
+There is another dial: the *root* level, which turns up everything at once.
+Measure the difference rather than taking anyone's word for it.
+First, note where you are now:
+
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-claims | wc -l
+----
+
+.Expected output
+[source,texinfo]
+----
+8
+----
+
+Eight records is this pod's entire life: three Quarkus startup lines, one from the claim-number sequence, and the four requests you just made.
+
+Then turn the root level up and count again — once after the restart, before any traffic, and once after the identical four requests:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL=DEBUG
+oc rollout status deploy/parasol-claims --timeout=300s
+echo "records written just to start up:"
+oc logs deploy/parasol-claims | wc -l
+for i in 1 2 3; do curl -s -o /dev/null "http://$CLAIMS/api/claims"; done
+curl -s -o /dev/null "http://$CLAIMS/api/claims/CLM-1005"
+echo "records after the same four requests:"
+oc logs deploy/parasol-claims | wc -l
+oc logs deploy/parasol-claims | jq -r '.loggerName' | sort | uniq -c | sort -rn | head -5
+----
+
+// Verified live on cluster-m24jn, 2026-08-22, on two separate runs: startup was 336 records both
+// times; the same four requests then took it to 446 on one run and 427 on the other (110 and 91
+// request-attributable records). The prose therefore quotes a RANGE — do not replace it with one
+// number, and do not tighten the checkpoint to a count.
+.Expected output (sample — the ratio is the point, not the exact numbers)
+[source,texinfo]
+----
+records written just to start up:
+336
+records after the same four requests:
+427
+  98 io.quarkus.micrometer.runtime.binder.vertx.VertxHttpServerMetrics
+  66 org.hibernate.SQL
+  39 io.quarkus.arc.runtime.BeanContainerImpl
+  30 jakarta.json.spi.JsonProvider
+  18 io.smallrye.config
+----
+
+Eight records became several hundred, and the same four requests cost *ninety to a hundred and ten* records instead of four — measured twice, minutes apart, on the same service.
+That is the cost argument, and it is a real bill: ingestion, storage, retention, and a slower logging path inside the request itself.
+
+But look at the second-busiest logger, because volume is not the only thing that changed:
+
+[source,sh,role=execute]
+----
+oc logs deploy/parasol-claims | jq -r 'select(.loggerName=="org.hibernate.SQL") | .message' | tail -2
+----
+
+.Expected output (sample)
+[source,texinfo]
+----
+select c1_0.claim_number,c1_0.adjuster,c1_0.amount,c1_0.claimant,c1_0.incident_date,c1_0.status,c1_0.claim_type from claim c1_0 order by c1_0.claim_number
+select c1_0.claim_number,c1_0.adjuster,c1_0.amount,c1_0.claimant,c1_0.incident_date,c1_0.status,c1_0.claim_type from claim c1_0 where c1_0.claim_number=?
+----
+
+Root DEBUG put your database queries in the log.
+On a different service that is where bound parameters, request headers and configuration values land too — none of which anyone decided to retain.
+*Turning up the root level is a disclosure change as much as a volume change*, which is the bridge into the next exercise.
+
+Put it back:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL-
+oc rollout status deploy/parasol-claims --timeout=300s
+----
+
+[.checkpoint]
+****
+✔ *Verify:* `oc get cm claims-logging -o jsonpath='{.data.QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL}{"\n"}'` prints `DEBUG`, `oc set env deploy/parasol-claims --list | grep -c claims-logging` returns `2`, and your own `com.parasol` DEBUG records are in the log while the root level is back to its default.
+****
+
+== 4. Never log a secret — and never call truncation a fix
+⏱ *~8 min* · the deliberate leak, the arithmetic that "protects" it, and the real fix
+
+Parasol's broker portal calls the claims API as a partner integration, and — as an enormous number of real integrations do — it puts its API key in the *query string*.
+Nobody at Parasol logs that key. They do not have to.
+
+Turn on the HTTP access log, which is a completely reasonable thing to do while investigating a routing problem:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_HTTP_ACCESS_LOG_ENABLED=true
+oc rollout status deploy/parasol-claims --timeout=300s
+----
+
+Now make the call the broker portal makes:
+
+[source,sh,role=execute]
+----
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+curl -s -o /dev/null "http://$CLAIMS/api/claims?api_key=PARASOL-PARTNER-EXAMPLE-4f9a2c7b"
+oc logs deploy/parasol-claims \
+  | jq -r 'select(.loggerName=="io.quarkus.http.access-log") | .message' | tail -3
+----
+
+// Verified live on cluster-m24jn, 2026-08-22. The key is a synthetic partner key invented for this
+// lab (note EXAMPLE in the middle) — it authenticates nothing anywhere, which is what lets the page
+// print it. Never substitute a real-looking token here.
+.Expected output (sample — the key is the point)
+[source,texinfo]
+----
+10.234.0.2 - - [22/Aug/2026:19:17:30 +0000] "GET /q/health/ready HTTP/1.1" 200 220
+10.235.0.2 - - [22/Aug/2026:19:17:32 +0000] "GET /api/claims?api_key=PARASOL-PARTNER-EXAMPLE-4f9a2c7b HTTP/1.1" 200 4798
+----
+
+There it is, in your log, in plain text, written by a component nobody thought of as handling secrets.
+The access log's default pattern records the full request line, and the full request line contains the query string.
+
+Two other things are worth noticing in those two lines.
+The first line is the *kubelet's readiness probe* — turning on an access log means paying to record a health check every few seconds, per pod, forever.
+And the key was written the moment the request arrived: no code of yours ran, no `log.info` was called.
+
+=== The fix that is not a fix
+
+The instinct, when you find this, is to show less of the line.
+Run all three of these and compare:
+
+[source,sh,role=execute]
+----
+ACCESS=$(oc logs deploy/parasol-claims \
+  | jq -r 'select(.loggerName=="io.quarkus.http.access-log") | .message' | grep api_key | tail -1)
+echo "$ACCESS" | cut -c1-60
+echo "$ACCESS" | cut -c1-72
+echo "$ACCESS" | sed -E 's/(api_key=)[^ &"]*/\1<redacted>/'
+----
+
+.Expected output (sample — from a run where the client IP was ten characters long)
+[source,texinfo]
+----
+10.235.0.2 - - [22/Aug/2026:19:17:32 +0000] "GET /api/claims
+10.235.0.2 - - [22/Aug/2026:19:17:32 +0000] "GET /api/claims?api_key=PAR
+10.235.0.2 - - [22/Aug/2026:19:17:32 +0000] "GET /api/claims?api_key=<redacted> HTTP/1.1" 200 4798
+----
+
+Sixty characters looked safe.
+On that run the key value started at character *70*, so sixty cleared it by *nine characters* — and nobody chose nine.
+The client IP happened to be ten characters long; a router pod with a longer address, a different date format, or one more character in the path, and the same command prints part of the key.
+Seventy-two, which looks just as arbitrary and just as safe, prints three characters of it.
+
+This is not a hypothetical.
+This repository ships `tools/lint/credential-redaction-guard.py` because a diagnostic here printed a model-gateway error through `cut -c1-200` and the credential in that message began at character *201* — safe by ten characters, by arithmetic, not by design.
+The same sweep found the identical shape already live one module over, with the credential at character 75.
+
+The third line is what a redaction looks like: it names *the field* and replaces its value, so the length of anything stops mattering.
+Note what it is not, though — it is a fix applied while *reading*. The credential is still in the log.
+
+=== The real fix, and the part you cannot undo
+
+A credential does not belong in a URL.
+URLs are logged by servers, proxies, routers and browsers, they end up in referrer headers and in bookmarks, and none of that is under your control.
+Move it to a header, which the default access-log pattern does not record, and make the same call:
+
+[source,sh,role=execute]
+----
+curl -s -o /dev/null -H 'Authorization: Bearer PARASOL-PARTNER-EXAMPLE-4f9a2c7b' \
+  "http://$CLAIMS/api/claims"
+oc logs deploy/parasol-claims \
+  | jq -r 'select(.loggerName=="io.quarkus.http.access-log") | .message' | grep -v health | tail -1
+echo -n "records still containing the key: "
+oc logs deploy/parasol-claims \
+  | jq -r 'select(.loggerName=="io.quarkus.http.access-log") | .message' | grep -c 'PARASOL-PARTNER'
+----
+
+.Expected output (sample)
+[source,texinfo]
+----
+10.233.2.2 - - [22/Aug/2026:19:17:49 +0000] "GET /api/claims HTTP/1.1" 200 4798
+records still containing the key: 1
+----
+
+The new request logged the path and nothing else.
+The count is still `1`, and that is the most important line on this page: *the leak that already happened is still there.*
+A log is append-only. Once a credential is written it is in the node's file, in whatever collected it, in a backup, and possibly in a third-party index — so the remediation is not a code fix, it is a *credential rotation*. The code fix only stops the next one.
+
+[WARNING]
+.The access-log pattern is a security surface
+====
+`quarkus.http.access-log.pattern` accepts `%\{i,HeaderName}`, which logs a *request header*.
+Add `%\{i,Authorization}` to "help with debugging" and you have put every bearer token through the door you just closed — measured on this cluster, that pattern writes `hdr=Bearer PARASOL-PARTNER-EXAMPLE-4f9a2c7b` into the access log, in full.
+Treat the pattern the way you would treat a log statement, because that is exactly what it is.
+====
+
+Turn the access log back off — you switched it on to investigate something, and leaving it on is both the bill from exercise 3 and the risk from this one:
+
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_HTTP_ACCESS_LOG_ENABLED-
+oc rollout status deploy/parasol-claims --timeout=300s
+----
+
+[.checkpoint]
+****
+✔ *Verify:* you found the key in an `io.quarkus.http.access-log` record, you saw `cut -c1-72` print part of it, the header-borne call logged a request line with no key in it, and `oc set env deploy/parasol-claims --list | grep -c ACCESS_LOG` now returns `0`.
+****
+
+== 5. Follow one request across three replicas
+⏱ *~8 min* · the answer to the question exercise 1 left hanging
+
+Go back to three replicas:
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims --replicas=3
+oc rollout status deploy/parasol-claims --timeout=300s
+oc get pods -l app=parasol-claims -o name
+----
+
+Now perform one *user action* — the kind that is several API calls behind a single click — and give the whole action one id:
+
+[source,sh,role=execute]
+----
+RID="parasol-$(date +%s)"
+echo "request id: $RID"
+CLAIMS=$(oc get route parasol-claims -o jsonpath='{.spec.host}')
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -H "X-Request-Id: $RID" "http://$CLAIMS/api/claims"
+done
+curl -s -o /dev/null -H "X-Request-Id: $RID" -X POST -H 'Content-Type: application/json' \
+  -d '{"claimant":"Dana Whitfield","type":"auto","amount":1850.00}' "http://$CLAIMS/api/claims"
+----
+
+Those seven calls were load-balanced across three pods.
+Ask for all of them, from every replica, in one query:
+
+[source,sh,role=execute]
+----
+oc logs -l app=parasol-claims --tail=-1 \
+  | jq -r --arg rid "$RID" 'select(.mdc.requestId==$rid) | [.hostName,.level,.message] | @tsv'
+----
+
+// Verified live on cluster-m24jn, 2026-08-22 (and reproduced on a second run with a different
+// split across pods). Seven calls, seven records, three distinct hostNames — the checkpoint asserts
+// "more than one" rather than three, because the router is free to send all seven to one pod.
+.Expected output (sample — your pod names and the split across them differ)
+[source,texinfo]
+----
+parasol-claims-78c4c9c996-klgvt	DEBUG	claim list served: 30 of 30
+parasol-claims-78c4c9c996-mv6z4	DEBUG	claim list served: 30 of 30
+parasol-claims-78c4c9c996-mv6z4	DEBUG	claim list served: 30 of 30
+parasol-claims-78c4c9c996-mv6z4	DEBUG	claim list served: 30 of 30
+parasol-claims-78c4c9c996-2dxck	DEBUG	claim list served: 30 of 30
+parasol-claims-78c4c9c996-2dxck	DEBUG	claim list served: 30 of 30
+parasol-claims-78c4c9c996-2dxck	INFO	claim CLM-1031 created type=auto amount=1850.00
+----
+
+That is the answer to exercise 1, and it is worth being precise about why it works.
+
+* The id is a *field*, not part of the message, so `select(.mdc.requestId==$rid)` is a comparison rather than a string search.
+* It reached those records without any log statement mentioning it. A small filter in the claims service puts it in the *MDC* — the mapped diagnostic context, a per-request map the logging backend attaches to every record written on that thread — and the DEBUG lines you are reading were written by code that has never heard of a request id.
+* `hostName` names the pod, so you did not need `--prefix`, and the output is still valid JSON per line, which `--prefix` would have destroyed.
+* You only saw the DEBUG lines because exercise 3 turned that category up. At the default level this query returns one line, not seven — which is the level dial doing exactly what it is for.
+
+The id is also handed *back*, which is how a support ticket becomes searchable:
+
+[source,sh,role=execute]
+----
+curl -s -o /dev/null -D - -H "X-Request-Id: $RID" "http://$CLAIMS/api/claims" | grep -i x-request-id
+curl -s -o /dev/null -D - "http://$CLAIMS/api/claims" | grep -i x-request-id
+----
+
+.Expected output (sample — the second id is generated, so yours differs)
+[source,texinfo]
+----
+x-request-id: parasol-1787426338
+x-request-id: f2eaf218
+----
+
+Send one and it is echoed unchanged; send none and the service invents one and tells you what it chose.
+Either way the caller ends up holding a value that finds the request.
+
+Two footnotes that will save you an afternoon.
+
+The first is the flag you have been using since exercise 1.
+Measure what it does:
+
+[source,sh,role=execute]
+----
+for i in $(seq 1 20); do curl -s -o /dev/null "http://$CLAIMS/api/claims"; done
+echo -n "default, with a selector: "; oc logs -l app=parasol-claims | wc -l
+echo -n "with --tail=-1:           "; oc logs -l app=parasol-claims --tail=-1 | wc -l
+----
+
+// Verified live 2026-08-22. The twenty extra requests are LOAD-BEARING: run the two counts before
+// them and both print the same number, because each pod is still under ten lines and the cap never
+// bites. Measured that way first — 21 and 21 — which would have taught the opposite of the lesson.
+.Expected output (sample — the two numbers differ, which is the point)
+[source,texinfo]
+----
+default, with a selector: 30
+with --tail=-1:           41
+----
+
+With a *label selector*, `oc logs` defaults to the last *10 lines per pod*; without a selector it shows everything.
+A correlation query that quietly reads 10 lines per pod will quietly find nothing.
+
+The second is that the id came from the *caller*, and a caller can put anything in a header — including a newline, which forges a second, entirely fictional log record.
+The claims service neutralizes it before it reaches the logging context; you can read the helper in `apps/parasol-claims/src/main/java/com/parasol/claims/LogSafe.java` and the test that pins it in `RequestIdFilterTest`.
+The rule is the same one as exercise 4: transform *the thing*, at the boundary, before it can do anything.
+
+[.checkpoint]
+****
+✔ *Verify:* one `jq` query filtering on `.mdc.requestId` returned *more than one line* and *more than one distinct `hostName`*, and a `curl -D -` showed an `x-request-id` response header.
+****
+
+== 6. Take it home: when logs must outlive the pod
+⏱ *~3 min* · reading only — nothing to run
+
+Everything you did in this lab works on any OpenShift cluster with nothing installed, and it stops at the same two edges: `oc logs` reads *one pod at a time*, and the node *rotates* what it keeps.
+Delete the pod and its log goes with it.
+
+The tier that removes those edges is a platform team's build, not a developer's, and it has three named pieces — `cluster-logging` (which owns the *ClusterLogForwarder*: what is collected, from where, filtered how, sent where), `loki-operator` (which runs the *LokiStack* that stores it, with one tenant per namespace), and `cluster-observability-operator` (which puts the query surface in the web console).
+The concept page for this module describes what each one does and why this workshop does not stand one up: a LokiStack is six to eight pods and needs object storage.
+
+The thing to take away is the direction of the dependency.
+Every one of those components is *downstream* of the decisions you just made.
+A collector cannot give a field a name that the application never emitted, a store cannot index a level the application never set, and no retention policy can un-write a credential.
+The expensive tier is worth its cost exactly to the degree that what feeds it is disciplined — and that half is done in application code, by you, before any of it is installed.
+
+== Challenge — no hand-holding
+⏱ *~5 min* · optional
+
+. Your structured records carry `processName`, `processId`, `ndc` and `loggerClassName` on *every line*, and nobody has ever queried them. Find the Quarkus setting that drops keys from the JSON output, apply it through the `claims-logging` ConfigMap, and measure the bytes you saved on a hundred records.
+. Write a single command that reports, for the last ten minutes only, how many records each pod wrote at each level — pod down the side, level across, no `grep`.
+. Exercise 4 moved the credential out of the URL. Find the access-log format token that would have logged the *path without the query string* instead, try it, and then decide which of the two you would actually ship — and why "log less" is the weaker of the two answers.
+
+endif::demo[]

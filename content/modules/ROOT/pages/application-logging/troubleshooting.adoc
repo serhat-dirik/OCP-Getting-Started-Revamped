@@ -1,0 +1,163 @@
+= Application Logging: Troubleshooting
+:module-id: application-logging
+include::partial$version-attributes.adoc[]
+
+// Real entries from performing the module on cluster-m24jn (OCP 4.22.8 / Quarkus 3.33.3.1),
+// 2026-08-22 — frozen provenance literals; see lab.adoc's header comment.
+// Format: Symptom / Cause / Fix.
+
+Every entry below was hit while building this module on the cluster, or is a failure mode the lab deliberately produces.
+
+== `oc logs … | jq` says `parse error: Invalid numeric literal`
+
+Symptom:: A `jq` step from exercise 2 onward fails with `jq: parse error: Invalid numeric literal at line 1, column 11` instead of printing a record.
+Cause:: The pod is still emitting *free text*. Column 11 is where the timestamp's `-` lands, which is where `jq` first gives up on a line that was never JSON. Three things produce this, in descending order of likelihood: the `QUARKUS_LOG_CONSOLE_JSON_ENABLED=true` rollout has not finished; the variable was set but the pod was never restarted; or the image predates this module and has no JSON logging extension in it at all.
+Fix:: Check which one, in that order:
++
+[source,sh,role=execute]
+----
+oc rollout status deploy/parasol-claims --timeout=120s
+oc set env deploy/parasol-claims --list | grep -i JSON
+oc logs deploy/parasol-claims --tail=1
+----
++
+If the variable is absent, set it (exercise 2). If it is present and the last line is still free text after a completed rollout, the image is the problem — tell your instructor; it is a rebuild, not something you can fix from the terminal.
+This is exactly the first line of the exercise-2 step, so a *deliberate* parse error there is the lab working, not failing.
+
+== `oc logs --previous` prints `unable to retrieve container logs for cri-o://…` — and exits 0
+
+Symptom:: In exercise 1, `oc logs $BAD --previous --tail=3` prints `unable to retrieve container logs for cri-o://<id>` and no log content. The message also runs straight into whatever the terminal prints next, with no line break.
+Cause:: `--previous` asks the container runtime for the *immediately preceding* terminated container in that pod. A `CrashLoopBackOff` container restarts on its own schedule and CRI-O rotates old container logs independently of anything you do, so by the time the command runs, that instance is frequently already gone. It reproduced on both measured runs of this module.
++
+Two details make it worse than it looks. The command *exits 0*, so a `oc logs … --previous \|\| fallback` construction never runs its fallback — measured on this cluster. And the message carries no trailing newline, which is why the lab's block has a bare `echo` after it.
+Fix:: Read the current container instead. A pod in `CrashLoopBackOff` is failing the same way every time, so the live log contains the same cause:
++
+[source,sh,role=execute]
+----
+BAD=$(oc get pods -l app=parasol-claims --sort-by=.metadata.creationTimestamp -o name | tail -1)
+oc logs $BAD --tail=5
+----
++
+The lab's block already does both reads for this reason. Do not "tidy" it into one command with a `||`.
+
+== I set the log level and nothing changed
+
+Symptom:: `oc set data configmap/claims-logging …` reports `configmap/claims-logging data updated`, requests are served, and no new records appear.
+Cause:: A ConfigMap consumed as *environment variables* is read when the container *starts*. Updating the object does not reach a process that is already running. "No rebuild" is not the same as "no restart".
+Fix:: Restart the workload, then re-send traffic:
++
+[source,sh,role=execute]
+----
+oc rollout restart deploy/parasol-claims
+oc rollout status deploy/parasol-claims --timeout=300s
+----
++
+(Delivered as a *mounted file* instead, the content does update in place — one of the honest reasons to prefer a file, covered in _Config, Secrets & Multi-Environment_, a separate module.)
+
+== I set the level, restarted, and *still* nothing changed
+
+Symptom:: As above, but the restart completed and the DEBUG records still are not there.
+Cause:: The environment-variable spelling. The property is `quarkus.log.category."com.parasol".level`, and the *quoted* segment is delimited by **double** underscores: `QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL`. A single underscore anywhere in that name produces a variable Quarkus simply does not recognize — and, measured on this cluster, it logs *no warning at all*. Nothing tells you that you set something meaningless.
+Fix:: Compare the name character by character against what is actually on the Deployment:
++
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims --list | grep -i CATEGORY
+oc get cm claims-logging -o jsonpath='{.data}{"\n"}' | tr ',' '\n'
+----
++
+Count the underscores: two after `CATEGORY`, two before `LEVEL`.
+
+== My correlation query returns nothing
+
+Symptom:: The exercise-5 `jq` filter on `.mdc.requestId` prints nothing, even though the requests plainly succeeded.
+Cause:: Almost always the missing `--tail=-1`. With a *label selector*, `oc logs` shows the last *10 lines per pod*; without a selector it shows everything (`oc logs --help` states this). Ten lines per pod is easily less than the pod's startup chatter, so the query reads only the boot records and finds no request id.
++
+The other two causes, in order: the app's category is not at DEBUG, so the `GET` records were never written (only the one `INFO` create line will match); or the shell has been restarted since, so `$RID` is empty and the filter compares against an empty string.
+Fix::
++
+[source,sh,role=execute]
+----
+echo "RID is: '$RID'"
+oc logs -l app=parasol-claims --tail=-1 | jq -r 'select(.mdc.requestId != null) | .mdc.requestId' | sort -u | head
+----
++
+The second command lists every request id actually present; pick one from it and re-run the filter with that value.
+
+== `oc logs -l … --prefix | jq` fails once logging is structured
+
+Symptom:: Combining the two things the lab teaches — `--prefix` for the pod name and `jq` for the fields — produces a parse error on every line.
+Cause:: `--prefix` writes `[pod/<name>/<container>] ` in front of each line, so the line is no longer JSON. The two flags are mutually exclusive by construction.
+Fix:: You do not need `--prefix` once records are structured: the pod name is already *in* the record as `hostName`.
++
+[source,sh,role=execute]
+----
+oc logs -l app=parasol-claims --tail=-1 | jq -r '[.hostName, .level, .message] | @tsv'
+----
+
+== `oc logs deploy/parasol-claims` says `Found 3 pods, using pod/…`
+
+Symptom:: With three replicas, a command that used to read "the log" now prints that line and shows far fewer records than expected.
+Cause:: The deployment form of `oc logs` picks *one* pod and tells you which on stderr. It is not an error, and it is not reading your other two replicas.
+Fix:: Use the label selector where you mean all replicas — and remember `--tail=-1` with it:
++
+[source,sh,role=execute]
+----
+oc logs -l app=parasol-claims --tail=-1 | jq -r '[.hostName, .message] | @tsv'
+----
+
+== Lines from different pods appear out of chronological order
+
+Symptom:: In `oc logs -l …` output, a line with a later timestamp appears above one with an earlier timestamp.
+Cause:: `oc logs -l` concatenates one stream *per pod*; it does not merge them by time. Two adjacent lines from different pods say nothing about their order.
+Fix:: Sort on the field, now that there is one:
++
+[source,sh,role=execute]
+----
+oc logs -l app=parasol-claims --tail=-1 | jq -r '[.timestamp, .hostName, .message] | @tsv' | sort
+----
+
+== Claim numbers repeat across pods, and the list count jumps
+
+Symptom:: After scaling to three replicas, two different pods report creating `CLM-1031`, and `claim list served: N of N` reports a smaller `N` than a moment ago.
+Cause:: Nothing to do with logging. Every replica runs Hibernate's `drop-and-create` schema import against the *same* ephemeral PostgreSQL at boot, so a new pod reloads the 30 seed claims and resets the number sequence underneath the pods that were already running. It is the shared throwaway database being shared, by design (see `apps/parasol-claims/src/main/resources/application.properties`).
+Fix:: None needed — no step in this module asserts a claim number, and every log exercise works regardless. If you want stable numbering across a scale-up, that is what persistent storage is for (_Storage & Stateful Apps_, a separate module).
+
+== The access log is full of `/q/health/ready`
+
+Symptom:: With `QUARKUS_HTTP_ACCESS_LOG_ENABLED=true`, most access-log records are the readiness probe rather than real traffic.
+Cause:: The kubelet probes every pod on a schedule, and an access log records *every* request, including that one. On three replicas at a 10-second period that is eighteen records a minute before any user arrives.
+Fix:: It is one of the two reasons the lab turns the access log back off at the end of exercise 4 — the other being the credential. If you genuinely need one in production, `quarkus.http.access-log.exclude-pattern` takes a regular expression on the path, and excluding `/q/.*` removes both the probes and the metrics scrape.
+
+== Root DEBUG made the pod slow and the log enormous
+
+Symptom:: After setting `QUARKUS_LOG_LEVEL=DEBUG`, the pod takes noticeably longer to become ready and `oc logs | wc -l` is in the hundreds before any traffic.
+Cause:: That is the measurement exercise 3 asks for: 336 records at startup on this cluster, against 8 with only the application's own category turned up. Every one of them is formatted, written, and (in a real cluster) collected and stored.
+Fix:: Remove the root override and use the category dial instead — that is the exercise's conclusion, not a workaround:
++
+[source,sh,role=execute]
+----
+oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL-
+oc rollout status deploy/parasol-claims --timeout=300s
+----
+
+== `oc set data` is not a command
+
+Symptom:: `oc set data configmap/claims-logging …` reports an unknown command.
+Cause:: An older `oc` client. The verb exists in the client shipped in this workshop's terminal (verified 2026-08-22), but a laptop client may predate it.
+Fix:: Use the terminal beside the instructions, which has a current client. If you must use your own, the equivalent is:
++
+[source,sh,role=execute]
+----
+oc create configmap claims-logging \
+  --from-literal=QUARKUS_LOG_CONSOLE_JSON_ENABLED=true \
+  --from-literal=QUARKUS_LOG_CATEGORY__COM_PARASOL__LEVEL=DEBUG \
+  --dry-run=client -o yaml | oc apply -f -
+----
++
+On a ConfigMap that already exists, `oc apply` warns that the object is missing its
+`last-applied-configuration` annotation and then patches it anyway. That warning is harmless here.
+
+'''
+
+_Last verified on cluster-m24jn (OCP 4.22.8, Quarkus 3.33.3.1) on 2026-08-22, by performing every lab exercise in order from a pristine entry state and then performing the demo arc from the end state._

@@ -10,6 +10,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.jboss.logging.Logger;
+
 import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.hibernate.orm.panache.Panache;
 import io.quarkus.hibernate.orm.panache.PanacheQuery;
@@ -44,6 +46,31 @@ import jakarta.ws.rs.core.Response;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class ClaimResource {
+
+    /**
+     * The service's own log (curriculum: Application Logging).
+     *
+     * <p>The category is this class's fully-qualified name, which is what makes
+     * {@code quarkus.log.category."com.parasol".level} a usable dial: one setting turns this
+     * service's chatter up without touching the framework's. What lands at which level is a
+     * deliberate choice, not a habit:
+     *
+     * <ul>
+     *   <li><strong>INFO</strong> — business events that changed state: a claim was created, a
+     *       claim's status moved. Rare, permanently interesting, and worth paying to keep.</li>
+     *   <li><strong>WARN</strong> — a request this service refused. Nothing is broken here, but a
+     *       caller is doing something wrong and somebody should see the pattern.</li>
+     *   <li><strong>DEBUG</strong> — reads. A claims API serves far more reads than writes, so
+     *       logging them at INFO would bury the two lines above under their own volume. They are
+     *       still there when you turn the category up to answer a question, which is exactly the
+     *       trade the lab measures.</li>
+     * </ul>
+     *
+     * <p>Note what is <em>absent</em>: no line here logs {@code claim.claimant}. The claimant is a
+     * named person, and a log is copied, shipped and retained far more freely than the database it
+     * came from. Claim numbers identify the record without naming the human.
+     */
+    private static final Logger LOG = Logger.getLogger(ClaimResource.class);
 
     /** The placeholder adjuster a claim carries until a human takes it. */
     static final String UNASSIGNED = "Unassigned";
@@ -113,6 +140,7 @@ public class ClaimResource {
             int pageSize = size == null ? DEFAULT_PAGE_SIZE : Math.min(Math.max(size, 1), MAX_PAGE_SIZE);
             claims = query.page(Page.of(pageIndex, pageSize)).list();
         }
+        LOG.debugf("claim list served: %d of %d", claims.size(), total);
         return Response.ok(claims).header("X-Total-Count", total).build();
     }
 
@@ -124,6 +152,7 @@ public class ClaimResource {
         if (claim == null) {
             return notFound(claimNumber);
         }
+        LOG.debugf("claim %s served", LogSafe.value(claimNumber));
         return Response.ok(claim).build();
     }
 
@@ -210,6 +239,9 @@ public class ClaimResource {
         // Custom business metric (curriculum: observability-health-scale). Micrometer
         // appends _total to counters, so this is scraped at /q/metrics as claims_created_total.
         registry.counter("claims_created").increment();
+        // A business event, at INFO: state changed and the record now exists. Fields, not a
+        // sentence — the claim number, the line of business, the amount. No claimant name.
+        LOG.infof("claim %s created type=%s amount=%s", claim.claimNumber, claim.type, claim.amount);
         return Response.status(Response.Status.CREATED).entity(claim).build();
     }
 
@@ -265,19 +297,29 @@ public class ClaimResource {
                     + UNASSIGNED + " - assign an adjuster before approving it");
         }
         claim.status = update.status();
+        LOG.infof("claim %s status=%s", claim.claimNumber, claim.status);
         return Response.ok(claim).build();
     }
 
     private static Response notFound(String claimNumber) {
+        // The claim number came off the wire, so it goes through LogSafe before it is written —
+        // see that class. The RESPONSE body may echo it raw; a JSON string is not a log record.
+        LOG.warnf("claim %s not found", LogSafe.value(claimNumber));
         return Response.status(Response.Status.NOT_FOUND)
                 .entity(Map.of("error", "No claim with number " + claimNumber)).build();
     }
 
     private static Response badRequest(String message) {
+        // WARN, not ERROR: this service is fine. A caller is not, and the pattern is worth seeing.
+        // Two of these messages quote the rejected value back, which makes the message partly
+        // caller-controlled — hence LogSafe.text on the way to the log. The RESPONSE body keeps
+        // the value verbatim, because a JSON string is not a log record.
+        LOG.warnf("rejected: %s", LogSafe.text(message));
         return Response.status(Response.Status.BAD_REQUEST).entity(Map.of("error", message)).build();
     }
 
     private static Response conflict(String message) {
+        LOG.warnf("rejected: %s", LogSafe.text(message));
         return Response.status(Response.Status.CONFLICT).entity(Map.of("error", message)).build();
     }
 

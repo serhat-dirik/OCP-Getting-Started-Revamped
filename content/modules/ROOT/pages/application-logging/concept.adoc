@@ -1,0 +1,215 @@
+= Application Logging: Concept
+:module-id: application-logging
+include::partial$version-attributes.adoc[]
+
+// Concept page for Application Logging. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// SCOPE BOUNDARY, and it is deliberate: cluster log aggregation is covered HERE, as prose and one
+// diagram, and nowhere in lab.adoc. The lab is about the half a developer controls — what the
+// application emits. Nothing in this module deploys a log store.
+
+[.lead]
+A Parasol adjuster calls the service desk: "I approved claim CLM-1031 twenty minutes ago and it is still showing as submitted."
+
+The claims service runs three replicas, so the request she is describing was served by one pod out of three, and nobody can say which.
+This module is about making that question answerable — and about the fact that the answer is decided by *your application*, long before any platform tooling gets involved.
+
+include::partial$prep-while-you-read.adoc[]
+
+== What you'll learn
+
+* Why a container writes its log to *stdout* and never to a file, and what the platform does with that stream for free on every cluster.
+* What each *log level* is for, and why leaving DEBUG on in production is a cost and disclosure decision rather than a courtesy.
+* Why a log line is *data a machine reads*, not a sentence a human skims — and what becomes possible the moment records are structured.
+* What must never appear in a log line — credentials, tokens, personally identifiable information (PII) — and why safety has to be a redaction *of the thing*, never a character count.
+* How a *correlation id* carried through the logging context makes one request findable across every replica that touched it.
+* What a *ClusterLogForwarder* and a *LokiStack* actually do, who owns them, and when log volume justifies that tier — concept only; this module does not build one.
+
+== stdout is the interface
+
+A container's log is not a file.
+It is a *stream*, and the contract is exactly one line long: write to standard output (stdout) or standard error (stderr), and the platform takes it from there.
+
+That is worth being blunt about, because writing to a file inside a container is a habit that survives from servers, and on a cluster it is a bug rather than a preference.
+Three separate things go wrong at once.
+The file lives on the container's own writable layer, so it is *deleted with the pod* — and the pod you most want the log from is the one that just died.
+Nothing collects it: `oc logs` reads the stream, not your file, so the log exists but is invisible to every tool anyone will reach for.
+And it is *unbounded* — nothing rotates it, so a chatty service quietly fills the node's disk and takes its neighbours down with it.
+
+Write to the stream and you get the opposite of all three, for free:
+
+[mermaid]
+....
+include::example$diagrams/application-logging/01-log-line-journey.mmd[]
+....
+
+The container runtime — CRI-O on OpenShift — captures what your process writes and hands it to the kubelet, which stores it under `/var/log/pods/` on the node and rotates it.
+`oc logs` and the console's *Logs* tab both read that.
+This is why the baseline works on any cluster, with nothing installed and nothing configured.
+
+It is also why the baseline has a hard edge, and it is worth knowing where that edge is before you rely on it: the node's copy is *rotated*, and it is per pod.
+Delete the pod and the log goes with it.
+That is the boundary between the half you control and the half a platform team owns, and the last section of this page is about what lives on the other side of it.
+
+== Levels are a budget, not a mood
+
+Every log record carries a *level*, and the level is how you tell the difference between a line that must survive and a line that only matters while you are staring at it.
+The names are shared across every logging framework you will meet; what people get wrong is what belongs at each.
+
+[cols="1,3,3",options="header"]
+|===
+| Level | What belongs here | The test
+
+| *ERROR* | Something failed that a human has to deal with. | Would you page someone? If not, it is not an ERROR.
+| *WARN* | Nothing is broken, but something is off — a caller sending bad requests, a retry that succeeded. | Is the *pattern* worth seeing, even though this one occurrence is fine?
+| *INFO* | Business events that changed state: a claim created, a status advanced. | Would you still want this line in six months?
+| *DEBUG* | The detail you need to answer a question you are asking right now. | Is this line for a person who is currently looking?
+| *TRACE* | Framework-level minutiae. Almost never on outside a developer's laptop. | —
+|===
+
+Two ideas make levels useful rather than decorative.
+
+The first is that *reads and writes do not belong at the same level*.
+The claims service serves far more lookups than it does creations, so logging every read at INFO would bury the handful of lines that record real state changes under their own volume.
+Reads go at DEBUG; they are still there when you turn the dial up to answer a question.
+
+The second is that *the dial is per category, not per app*.
+Every logger has a name — usually the class that owns it, so `com.parasol.claims.ClaimResource` — and levels are set on a *prefix* of that name.
+Setting `com.parasol` to DEBUG turns up your code and nothing else.
+Setting the *root* level to DEBUG turns up everything: the HTTP layer, the JSON provider, the bean container, and the ORM, which at DEBUG prints *every SQL statement it runs*.
+On this workshop's own claims service, measured live, the same four requests cost *four* records with the category dial and *ninety to a hundred and ten* with the root one.
+
+That is why "DEBUG in production" is a decision and not a kindness.
+It costs storage and ingestion at a multiple you can measure, it costs latency in the logging path, and — the part that gets missed — it *changes what is in the log*.
+The framework internals you just switched on were written to help a developer, not to be retained: query text, bound parameters, headers, config values.
+Turning up the root level is a disclosure change as much as a volume change.
+
+== A log line is data, not a sentence
+
+Here is the same event twice.
+Free text, the shape most services still emit:
+
+[source,texinfo]
+----
+2026-08-22 18:40:33,606 INFO  [com.parasol.claims.ClaimResource] (executor-thread-1) claim CLM-1031 created type=auto amount=1850.00
+----
+
+and structured, as one JSON object per record:
+
+[source,json]
+----
+{"timestamp":"2026-08-22T18:40:33.606Z","loggerName":"com.parasol.claims.ClaimResource",
+ "level":"INFO","message":"claim CLM-1031 created type=auto amount=1850.00",
+ "mdc":{"requestId":"f5a1634e"},"hostName":"parasol-claims-6dbd4f5986-q77nk"}
+----
+
+A human reads the first one slightly faster.
+Everything else prefers the second, and the gap is not stylistic.
+
+*The fields have names.* "Show me every WARN and ERROR" is a comparison on `level` — a question with a right answer. On free text it is `grep WARN`, which also matches a message that happens to contain the word.
+*The record knows where it came from.* `hostName` is the pod name, so a structured record answers "which replica wrote this" by itself, with no `--prefix` flag and no guessing.
+*It survives being carried.* Once a collector, a store, and a query language are involved, the fields are what you filter and group on. Free text arrives as one opaque string per line and every consumer has to re-invent a parser for your format — and re-invent it again the day someone reorders your message.
+*Context attaches without being written.* Fields put into the *mapped diagnostic context* — the MDC, a per-request map the logging backend attaches to every record written on that thread — appear on lines from code that never heard of them. That is how a correlation id reaches a stack trace thrown three layers down.
+
+The cost is real and small: JSON is more bytes per record, and it is harder to skim in a terminal.
+For a service that anything will ever collect, that trade is not close.
+
+== What must never be in a log line
+
+A log is copied, shipped, retained, and read far more freely than the database it describes.
+Treat every line as something that will end up somewhere you did not choose.
+
+Three families never go in: *credentials* of any kind (passwords, API keys, bearer tokens, connection strings with a password in them), *personal data* beyond what the record needs to be useful, and *whole payloads* — the request body, the response body, the entity you just loaded — because a payload is a container for the first two that you have not looked inside.
+
+The interesting failures are not the obvious ones.
+Nobody writes `log.info("password=" + password)`.
+What actually happens is:
+
+* *The credential travels somewhere you forgot was logged.* An HTTP access log writes the full request line, and the full request line includes the query string — so a partner integration that appends `?api_key=…` to every call has been writing its key into your log since the day someone enabled that log. You will do exactly this in the lab.
+* *A helpful diagnostic echoes an upstream error* that contains what was sent, including the header that was sent with it.
+* *DEBUG got left on*, and the framework is more thorough than you are.
+
+And when a leak is found, the tempting fix is to show *less* of the line — to pipe it through `cut -c1-200` and move on.
+That is not a redaction, and this repository has its own near-miss to prove it: a diagnostic printed a model-gateway error through exactly that truncation, and the credential in the message began at character *201*.
+It was safe by ten characters, and nobody chose those ten — the arithmetic did.
+One reword upstream, one longer hostname, one different pod IP, and the same command prints a token.
+Read `tools/lint/credential-redaction-guard.py` if you want the whole story; it exists because the same shape had already gone live one module over, with the credential at character 75.
+
+The rule that follows is short: *the safety must be a transformation of the thing.*
+Redact by field name, or by credential shape, or by not printing it at all.
+A character count is not a control; it is a coincidence you are relying on.
+
+== Finding one request among three replicas
+
+Now back to the adjuster on the phone.
+
+Three replicas mean three independent log streams, and `oc logs -l app=parasol-claims --prefix` will happily show you all three with the pod name attached — which tells you *where every line came from* and still cannot tell you *which line was hers*.
+Nothing in the record ties the list call, the lookup, and the status change to one another, or to her.
+
+A *correlation id* is the fix, and it is almost embarrassingly simple: accept an id on the way in (or invent one), put it in the MDC so every record written while handling that request carries it as a field, and hand it back to the caller in the response so both ends of the conversation know it.
+
+[mermaid]
+....
+include::example$diagrams/application-logging/02-correlate-across-replicas.mmd[]
+....
+
+That is the whole mechanism, and it is the difference between "somewhere in three pods" and one query.
+It also has a property worth noticing: the id is only useful because the log is *structured*. In free text you would be grepping a string and hoping nothing else contains it.
+
+One caution, because it is the mistake this pattern invites.
+The id arrives in a header, which means the *caller* chooses it — and a value containing a newline forges a second, entirely fictional log record.
+Anything caller-controlled is neutralized before it reaches a log line; the claims service does that in a small `LogSafe` helper you can read.
+
+== The other half: what a platform team adds
+
+Everything above is yours.
+This section is the half you do not own, described so you know what to ask for — and *this module does not build any of it*.
+
+The baseline you get free stops at one pod at a time, and at the node's rotation.
+When that stops being enough — an incident that spans a rollout, a compliance retention window, a question about last Tuesday — the answer is a *log aggregation tier*, and on OpenShift it has three named pieces you can go and read about:
+
+* *`cluster-logging`* — the operator that owns the *ClusterLogForwarder*, which is the object that decides what gets collected, from which namespaces, how it is filtered, and where it is sent. It is a cluster-scoped policy object: a platform team's business, not a tenant's.
+* *`loki-operator`* — the operator that runs a *LokiStack*, the log store itself. Loki indexes labels rather than full text, which is what makes retention affordable, and it supports *per-tenant* separation so an attendee querying their own namespace sees their own namespace.
+* *`cluster-observability-operator`* — the operator that ships the console's logging view, so the query surface lands in the same web console you already use.
+
+All three are Red Hat operators, present in this cluster's catalogue.
+None of them is installed here, and the reason is worth stating plainly rather than hiding: a LokiStack is six to eight pods and it needs *object storage* — an S3-compatible bucket or an OpenShift Data Foundation tier — which is a dependency not every cluster has and not one a workshop should manufacture.
+Standing one up would also teach the wrong lesson for this module: it is the platform team's build, not the developer's.
+
+What per-namespace tenancy buys *you*, as the person who owns an application, is the thing to take away: your logs outlive your pods, they are queryable across replicas and across time, and the query is scoped to what you are allowed to see.
+The half you control is what makes that tier worth paying for.
+Ship unstructured, unlevelled, credential-bearing lines into a LokiStack and you have bought expensive storage for a haystack.
+
+== The log layer over the Parasol platform
+
+Earlier modules gave the claims service metrics, traces, health probes and autoscaling.
+This module adds the signal that every one of those hands off to when the question becomes "what exactly happened, to this one request".
+
+[mermaid]
+....
+include::example$diagrams/application-logging/03-platform-accretion.mmd[]
+....
+
+== How this shows up in real orgs
+
+* *The on-call rota gets shorter conversations.*
+"Which pod?" and "can you reproduce it?" both stop being questions once a correlation id is in the record and the record is queryable.
+A support ticket that quotes a request id is a ticket someone can close.
+* *Log spend becomes a thing you can steer.*
+Teams discover their logging bill the way they discover a cloud bill — all at once. Levels set per category, reads at DEBUG, and payload logging that was never on are what keep it flat, and all three are decisions made in application code long before anyone tunes a collector.
+* *A credential in a log is an incident, not a bug.*
+Once it is written it is in a store, in a backup, and possibly in a third-party index; the remediation is a rotation, not a code fix.
+Organizations that take this seriously make it a review item — "does this change log anything caller-supplied?" — and back it with a mechanical check, because it is invisible at review time right up until the message changes.
+* *It is not free.*
+Structured logs are more bytes, a correlation id is plumbing to maintain, and a service with one replica and two users does not need any of it.
+The wrap-up is honest about where this discipline earns its keep.
+
+ifdef::demo[]
+[NOTE]
+.Presenter framing
+====
+Five minutes here, no more, and land two sentences before you touch a terminal: *a log line is data a machine reads, not a sentence a human skims*, and *what is in it was decided by the application, not by the platform*.
+Everything you show live — free text that `jq` cannot parse, then the same event as an object you can filter, then one request found across three pods — is a proof of those two sentences.
+If the room is a platform-team audience, use the last section as the hook: name `cluster-logging` and `loki-operator`, then say the quiet part — the tier is only worth its cost if the applications feeding it are disciplined, and that is the part nobody buys as a product.
+====
+endif::demo[]
