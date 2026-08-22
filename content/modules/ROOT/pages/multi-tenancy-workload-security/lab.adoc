@@ -751,6 +751,42 @@ limits={"cpu":"1500m","memory":"1Gi"}
 You declared nothing, yet the Pod arrived with `requests` of `100m`/`256Mi` and `limits` of `1500m`/`1Gi` — the LimitRange stamped its defaults so the quota-enforced namespace would accept it.
 Quota is the budget; LimitRange makes sure every Pod shows up with a price tag.
 
+So who reads the bill?
+Open the console's *Observe → Metrics* page, and run this — it needs no cost product and nothing installed, because cluster monitoring has been recording it all along:
+
+[source,text]
+----
+sum by (namespace) (kube_pod_container_resource_requests{resource="cpu",namespace=~"{user}-.*"})
+----
+
+That is what each of your namespaces *reserved*. Now ask what they actually burned:
+
+[source,text]
+----
+sum by (namespace) (rate(container_cpu_usage_seconds_total{namespace=~"{user}-.*",container!=""}[5m]))
+----
+
+The gap between the two numbers is your waste, and it is the number a chargeback model bills you for — you pay for the reservation, not the usage.
+Compare them against the `3` cores your quota allows and you have the whole showback story on one screen.
+
+[NOTE]
+.Rolling it up per team, not per namespace
+====
+A platform team does not care about `{user}-dev`; it cares about what a *team* costs across every namespace it owns.
+That is a label join — group by a namespace label instead of by namespace:
+
+[source,text]
+----
+sum by (label_workshop_redhat_com_user) (
+  sum by (namespace) (kube_pod_container_resource_requests{resource="cpu"})
+  * on (namespace) group_left(label_workshop_redhat_com_user) kube_namespace_labels
+)
+----
+
+This workshop stamps `workshop.redhat.com/user` on every namespace it creates, so the join resolves here; in your own cluster substitute whatever label carries your team or cost-centre name.
+Reading every namespace this way needs `cluster-monitoring-view`, which a tenant does not have — so this one is your instructor's screen, not yours, and that asymmetry is the point: showback is a platform-team view built from tenant-scoped facts.
+====
+
 Clean up the two workloads you created here:
 
 [source,sh,role=execute]
@@ -760,7 +796,7 @@ oc delete deploy/quota-buster pod/no-resources-pod -n $NS
 
 [.checkpoint]
 ****
-✔ *Verify:* You read `workshop-quota` (couldn't change it), watched an `8Gi` Deployment be refused with `exceeded quota … limited: requests.memory=6Gi`, fixed it within budget, and saw a LimitRange inject default `requests`/`limits` onto a Pod that declared none.
+✔ *Verify:* You read `workshop-quota` (couldn't change it), watched an `8Gi` Deployment be refused with `exceeded quota … limited: requests.memory=6Gi`, fixed it within budget, saw a LimitRange inject default `requests`/`limits` onto a Pod that declared none, and read your own reserved-vs-used gap in *Observe → Metrics*.
 ****
 
 == 6. How you were provisioned
