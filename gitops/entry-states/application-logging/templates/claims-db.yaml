@@ -1,0 +1,100 @@
+# PostgreSQL for the claims service in {user}-dev — composed directly (ADR-0001), the same shape
+# config-multienv/observability-health-scale ship, so application-logging never depends on any
+# earlier module having run. Ephemeral (emptyDir): persistence is a later module's lesson (Storage
+# & Stateful Apps). The lab NAMES this consequence — every claims replica runs drop-and-create
+# against this one throwaway database at boot, so claim numbers repeat across pods when the
+# attendee scales up. That is documented behaviour here, not a defect to fix.
+#
+# Sync-wave "0": the whole DB lands, and reaches Healthy, before parasol-claims (wave "1") is even
+# applied. The claims app re-creates its schema at boot, so a pod that starts against an unreachable
+# database fails startup and crash-loops until the DB arrives. Ordering the wave is the fix; nothing
+# here sleeps and hopes.
+---
+# why: the claims datasource credentials, consumed by BOTH the DB (to initialize) and the app (to connect).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: application-logging
+    workshop.redhat.com/owner: ogsr
+type: Opaque
+stringData:
+  POSTGRESQL_USER: parasol
+  POSTGRESQL_PASSWORD: parasol
+  POSTGRESQL_DATABASE: parasol
+---
+# why: the PostgreSQL 15 server the claims app reads/writes; env-driven from the Secret above.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: application-logging
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claims-db
+  template:
+    metadata:
+      labels:
+        app: claims-db
+        workshop.redhat.com/module: application-logging
+    spec:
+      containers:
+        - name: postgresql
+          # Internal imagestream tag (RHEL9 PostgreSQL 15) — already cached, no external pull secret.
+          # Pinned upstream tag, not a workshop-built one, so the kubelet's IfNotPresent default is correct here.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: claims-db
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        # Ephemeral on purpose — killing this Pod loses data (the pain storage-stateful fixes with a PVC).
+        - name: data
+          emptyDir: {}
+---
+# why: the stable in-cluster address the claims app resolves as claims-db.{user}-dev.svc:5432.
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: application-logging
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: claims-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432

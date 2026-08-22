@@ -1,0 +1,171 @@
+# The claims service in {user}-dev with its logging LEFT ALONE — that absence is the entry state.
+# What is deliberately NOT here, and why:
+#   * no ConfigMap named claims-logging. Exercise 3 creates it with `oc create configmap`, a
+#     CREATE-only verb at a fixed name, so a pre-existing one is a hard "already exists" collision
+#     rather than harmless residue. It is rendered ONLY under .Values.solve (solve-endstate.yaml).
+#   * QUARKUS_LOG_CONSOLE_JSON_ENABLED unset. Exercise 2's whole discovery is switching structured
+#     output on with one setting; shipping it on spends the lesson before the attendee arrives.
+#   * no QUARKUS_LOG_LEVEL and no QUARKUS_HTTP_ACCESS_LOG_ENABLED. Exercise 1 sets the first to an
+#     invalid value on purpose and exercise 4 turns the second on; both are removed again by the
+#     lab, and both must start from "not present" for `oc set env …-` to read as a clean removal.
+# The only logging-adjacent thing the entry state owns is the image, which ships the
+# quarkus-logging-json extension with its OUTPUT off and the X-Request-Id -> MDC filter installed.
+# Runs the SHARED prebuilt image so application-logging never depends on any per-user build.
+---
+# why: the running claims REST API (%prod profile); datasource is env-driven at Service claims-db.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    # Sync-wave "1": applied only after claims-db (wave "0") reports Healthy. This app re-creates its
+    # schema at boot, so a pod that starts against an unreachable database crash-loops until the DB
+    # arrives — and exercise 1 opens by reading a clean startup log, which a recovered crash loop
+    # muddies. Ordering the dependency is the fix.
+    argocd.argoproj.io/sync-wave: "1"
+    #
+    # Replace=true, and ONLY on this Deployment. This is the object the whole lab mutates: exercise 1
+    # adds and removes an env var and scales 1 -> 3 -> 1, exercise 2 adds
+    # QUARKUS_LOG_CONSOLE_JSON_ENABLED as an inline value, exercise 3 removes that and adds TWO
+    # per-key `valueFrom` entries (`oc set env --from=configmap/claims-logging` writes per-key
+    # configMapKeyRef, not envFrom — the lab's own captured `--list` output shows both keys as
+    # "from configmap claims-logging, key …"), the console path adds an `envFrom` block instead,
+    # exercise 4 adds and removes the access-log flag, and exercise 5 scales to 3 and stops there.
+    #
+    # A three-way merge preserves every one of those: they are fields this chart does not name, so
+    # neither the desired manifest nor last-applied claims them, and re-running `ws start` would
+    # re-materialize an entry state that still carries the previous attendee's work. `ws start` twice
+    # must be pristine twice, and the entry-only verify asserts exactly the absences listed above —
+    # so a merge would leave a green start and a red verify.
+    #
+    # Replace, not merge, because on re-materialize this Deployment's spec SHOULD come from the chart
+    # wholesale, discarding whatever the lab turned it into. Same call, and the same annotation, as
+    # config-multienv's parasol-claims — where a merge was additionally MEASURED to fail outright
+    # (2026-08-01: the API rejects an env entry carrying both `value` and `valueFrom`, and that entry
+    # app parked at Failed permanently). Server-side apply does not fix that class: a second field
+    # manager owns the `valueFrom` entries, so both keys coexist and the object is rejected the same way.
+    argocd.argoproj.io/sync-options: Replace=true
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: application-logging
+    workshop.redhat.com/owner: ogsr
+spec:
+  # Entry = ONE replica: exercises 2-4 are quicker to read on one log stream, and the lab scales up
+  # itself (exercise 1 briefly, exercise 5 for good). Solve = THREE, because the demo arc's beats 1
+  # and 5 are about one request landing on one of several pods, and its pre-flight asserts `ready=3`.
+  replicas: {{ if .Values.solve }}3{{ else }}1{{ end }}
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: application-logging
+    spec:
+      containers:
+        - name: parasol-claims
+          # Shared image built once into parasol-images. THIS TAG MUST CARRY THIS MODULE'S ADDITIONS:
+          # the quarkus-logging-json extension, RequestIdFilter (X-Request-Id -> MDC) and the
+          # per-request statements in ClaimResource. Without them exercise 2 shows a jq parse error
+          # where the lab promises an object and exercise 5's correlation query returns nothing —
+          # both of which look like attendee error and are not. The instructor guide's pre-flight
+          # checks 2-4 exist to catch a stale rebuild before a session, not during one.
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
+          # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Point the %prod datasource at the claims-db Service in this namespace. This is the ONLY
+            # inline env var the chart renders — deliberately, so that exercise 3's
+            # `oc set env deploy/parasol-claims --list | tail -2` shows the attendee's own two
+            # claims-logging keys and nothing else competing for the last two lines.
+            - name: POSTGRESQL_HOST
+              value: claims-db
+          envFrom:
+            # POSTGRESQL_USER / _PASSWORD / _DATABASE — the same Secret the DB was initialized with.
+            - secretRef:
+                name: claims-db
+{{- if .Values.solve }}
+            # SOLVE (end state) ONLY: the logging configuration a completed lab produces, wired the
+            # way the console path wires it (envFrom). The CLI path produces per-key valueFrom
+            # entries instead — ws verify's end mode accepts BOTH, because both are correct.
+            - configMapRef:
+                name: claims-logging
+{{- end }}
+          # THE READINESS PROBE IS LOAD-BEARING CONTENT, not hygiene. Exercise 1 sets an invalid log
+          # level on purpose; the new pod fails config validation and crash-loops, never becomes
+          # Ready, and the rolling update therefore holds the old healthy pod in the Service. The two
+          # pods the lab shows — one 0/1 Error, one 1/1 Running, and a Route still answering 200 —
+          # are that behaviour. Change the path and exercise 1 has no punchline.
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # No liveness and no startup probe, on purpose. Probes are Config, Secrets &
+          # Multi-Environment's lesson (a separate module) and this module needs exactly one of them;
+          # adding a liveness probe with no startup probe in front of a JVM boot only buys a restart
+          # loop on a slow node, and would put a second, unrelated reason for a pod to die into the
+          # namespace where exercise 1 is teaching the first one.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+# why: stable in-cluster address for the claims API (port 8080).
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: application-logging
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: publishes the claims API at parasol-claims-{user}-dev.{clusterDomain} (host auto-generated) —
+# every exercise drives traffic through it with curl, and exercise 5 sends the X-Request-Id header there.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: application-logging
+    workshop.redhat.com/owner: ogsr
+spec:
+  to:
+    kind: Service
+    name: parasol-claims
+  port:
+    targetPort: http
+  tls:
+    # Browser-facing Route: MUST be edge-terminated. A plain HTTP Route answers 200 on http:// and
+    # 503 on https:// — and the console renders route links as https, while browsers upgrade via
+    # HSTS, so an attendee clicking through gets "Application is not available" (measured on the
+    # config-multienv route, 2026-07-26).
+    # insecureEdgeTerminationPolicy: Allow, NOT Redirect — Redirect makes `curl http://...` return an
+    # empty 302, and every traffic-generating block in this lab is plain-http curl.
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow

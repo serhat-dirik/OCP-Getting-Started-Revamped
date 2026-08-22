@@ -188,6 +188,36 @@ jobs:
   # vale + yamllint run locally on maintainer machines (their configs are maintainer tooling,
   # kept out of the public tree per the 2026-07-19 owner review). CI keeps the checks that
   # guard the shipped artifact itself.
+  conflicts-symmetry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: conflictsWith must be declared in both directions
+        # `gc_conflicts()` in tools/ws/ws reads only the STARTING module's list, so a mutual
+        # conflict has to be hand-written into both ws-meta.yaml files and nothing checked that it
+        # was. The 18 charts sharing a {user}-dev namespace form a clique — 306 entries that must
+        # all agree. It failed the first time it was tested: application-logging landed declaring
+        # all 18 of its conflicts and none of the 18 declared it back, which leaves a dormant
+        # entry-application-logging-<user> Application owning workloads in the namespace the next
+        # module is about to use. Same shape as the G4 SEV2 observability-health-scale hit on
+        # 2026-07-12, found then by an attendee rather than by CI. Adding a module is exactly when
+        # this breaks and exactly when nobody is looking at the other 18 files.
+        run: |
+          pip install --quiet pyyaml
+          rc=0
+          python3 tools/lint/conflicts-symmetry-guard.py --self-test || rc=$?
+          # Exactly 1 = every relation shape classified: one-way edges, dangling targets and a
+          # clique missing a single back-edge all caught, symmetric graphs silent. 0 = guard blind;
+          # 2 = harness broken. Either way detection is unproven, so fail rather than trust a clean
+          # scan of the real charts.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::conflicts-symmetry-guard self-test must exit 1 (canary detected);" \
+                 "got rc=$rc. Detection is unproven — refusing to trust a clean result."
+            exit 1
+          fi
+          echo "self-test ok — every asymmetric shape caught (rc=1)."
+          python3 tools/lint/conflicts-symmetry-guard.py
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
