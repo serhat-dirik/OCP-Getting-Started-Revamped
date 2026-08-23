@@ -248,6 +248,54 @@ jobs:
           fi
           printf 'shellcheck: %s\n' "${files[@]}"
           shellcheck "${files[@]}"
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: ShellCheck the bash EMBEDDED in Helm Job templates
+        # WHY THIS EXISTS. The step above lints tracked *.sh files. helm/bootstrap ships ten Job
+        # templates carrying ~870 lines of bash inside container args, and `git ls-files -- '*.sh'`
+        # has never seen a line of it. On 2026-08-23 a SEV1 lived in exactly that blind spot: the
+        # embedded snapshot_operators() in job-state-capture.yaml globbed a stack's apps/ directory
+        # and recorded `created:` for operators the workshop never installs, which at teardown
+        # authorized deleting the customer's CSV. Its two sibling implementations in bootstrap/*.sh
+        # were linted the whole time; the third was not, because it is a string inside YAML.
+        #
+        # Renders the chart rather than regexing the template, because the bash only exists after
+        # Helm has substituted its values.
+        run: |
+          mkdir -p /tmp/embedded
+          helm template t helm/bootstrap > /tmp/rendered.yaml
+          python3 - <<'PY'
+          import pathlib, yaml
+          out = pathlib.Path("/tmp/embedded"); n = 0
+          for d in yaml.safe_load_all(open("/tmp/rendered.yaml")):
+              if not isinstance(d, dict) or d.get("kind") != "Job":
+                  continue
+              spec = d["spec"]["template"]["spec"]
+              for key in ("initContainers", "containers"):
+                  for c in spec.get(key) or []:
+                      for field in ("args", "command"):
+                          for a in c.get(field) or []:
+                              if isinstance(a, str) and len(a.splitlines()) > 5 and ("#!" in a or "set -" in a):
+                                  body = a if a.lstrip().startswith("#!") else "#!/usr/bin/env bash\n" + a
+                                  (out / f"{d['metadata']['name']}--{c['name']}.sh").write_text(body)
+                                  n += 1
+          print(f"extracted {n} embedded script(s)")
+          raise SystemExit(0 if n else 1)
+          PY
+          if [ ! "$(ls -A /tmp/embedded 2>/dev/null)" ]; then
+            echo "::error::extracted zero embedded scripts. helm/bootstrap ships Job templates with" \
+                 "inline bash, so an empty selection means this step is broken — refusing to pass" \
+                 "on an empty scope."
+            exit 1
+          fi
+          printf 'embedded: %s\n' /tmp/embedded/*.sh
+          shellcheck /tmp/embedded/*.sh
 
       # LINTING A GUARD IS NOT RUNNING IT. The step above lints ws-argparse-selftest.sh because it
       # is a tracked *.sh — and that is all it does. Until something EXECUTES it, the 69 assertions
