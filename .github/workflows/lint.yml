@@ -334,6 +334,51 @@ jobs:
           echo "self-test ok — detectors fire, both scope halves floor-checked, real tree clean (rc=1)."
           ./tools/lint/route-tls-guard.sh
 
+  devworkspace-editor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Same helm pin as the helm/copy-drift jobs so every job reads the same render.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # Hard dependency: this guard parses rendered manifests rather than pattern-matching them.
+        # A missing parser exits 2, which the self-test assertion turns into a failure — it can
+        # never degrade into a silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: A DevWorkspace must contribute its editor by template name, never by `uri`
+        # WHY THIS JOB EXISTS. The guard was written 2026-08-17 and then wired into nothing: on
+        # 2026-08-23 a `_canary-coverage.py` sweep found it was the ONLY one of the 47 guards in
+        # tools/lint with no CI step at all. So the regression it was written to prevent —
+        # `contributions: [{name: editor, uri: ...}]`, which ships an IDE that opens and a built-in
+        # terminal that silently does nothing, with no error logged anywhere — was ungated for six
+        # days after being fixed, in the two charts it had already broken once.
+        #
+        # The same sweep scored its detection 0/5. Its --self-test asserted a LOCAL
+        # REIMPLEMENTATION of the classification and returned before main()'s real emission sites
+        # ran, so it exited 1 whatever the guard did. It now drives the real main() over
+        # devworkspace-editor-guard.canary/ — one fixture per detector, each tripping exactly one —
+        # and scores 6/6.
+        run: |
+          rc=0
+          python3 tools/lint/devworkspace-editor-guard.py --self-test || rc=$?
+          # Exactly 1 = every detector fired on its own fixture and the control stayed silent.
+          # 0 = the guard went blind; 2 = a fixture, helm, or the harness is broken. Either way
+          # detection is unproven, so fail rather than trust a clean scan of the real charts.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::devworkspace-editor-guard self-test must exit 1 (uri form, missing" \
+                 "editor, editor with neither key, dangling template reference and an" \
+                 "unrenderable chart each caught on their own fixture); got rc=$rc. Detection is" \
+                 "unproven — refusing to trust a clean result."
+            exit 1
+          fi
+          echo "self-test ok — every detector fired on exactly its own fixture (rc=1)."
+          python3 tools/lint/devworkspace-editor-guard.py
+
   kustomize:
     runs-on: ubuntu-latest
     steps:
