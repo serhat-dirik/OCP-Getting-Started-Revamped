@@ -40,7 +40,8 @@ Before you order anything, settle three things — they drive the sizing math be
    figure in the module table just above it, which is also what you pace against in
    [§4](#4-during), so a second copy in this file silently contradicts the real one the first time
    a module is re-measured — which is exactly what happened to the copy that used to sit here.
-   Whichever shape you pick, its module list is what you translate into `modules_disabled` in
+   Whichever shape you pick, its module list is what you translate into `modules_enabled` (list the
+   modules you ARE teaching — usually shorter) or `modules_disabled` (list the ones you are not) in
    step 3 below.
 3. **Which modules are actually in scope?** Anything you're dropping goes in `modules_disabled`
    in `vars.yaml` (`mNN` or slug). This isn't just a content choice — it changes what you need to
@@ -85,7 +86,8 @@ Follow [INSTALL.md §3–§4](INSTALL.md#3-installing) start to finish:
 tools/ws/adm preflight                        # read-only: tooling, cluster access, adoption forecast
 # review the adoption forecast — on a customer cluster, show it to the customer first
 cp bootstrap/vars.example.yaml bootstrap/vars.yaml
-# edit vars.yaml: users, cluster_domain, modules_disabled, workshop_user_password, maas.*
+# edit vars.yaml: users, cluster_domain, modules_enabled OR modules_disabled,
+#                 workshop_user_password, maas.*
 ./bootstrap/install.sh                       # six phases, idempotent, ~15-20 min to the banner
 tools/ws/adm doctor                           # is the environment sane?
 tools/ws/adm status                           # cohort dashboard: every platform app + every attendee

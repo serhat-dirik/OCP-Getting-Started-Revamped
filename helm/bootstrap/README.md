@@ -163,6 +163,7 @@ comments in `values.yaml`).
 | `multi_user.num_users` / `.users` / `.userPrefix` / `.manageHtpasswd` | `5` / `[]` / `user` / `true` | attendee roster; `manageHtpasswd=false` if the base CI provisions userN |
 | `workshop_user_password` | `openshift` | shared, throwaway, non-secret console/Gitea password |
 | `modulesDisabled` | `[]` | modules to drop (mNN or slugs); hides them + skips stacks only they need. Empty = whole workshop |
+| `modulesEnabled` | `[]` | the allow-list: modules to KEEP (mNN or slugs); everything else is dropped. **Empty = whole workshop, never none.** Mutually exclusive with `modulesDisabled` |
 | `consolePlugins.enabled` | `true` | merge Pipelines/GitOps/ACS console plugins (append-if-absent; set false to leave the console untouched) |
 | `stacks.<name>` | `false` | expert additive overrides only — force a stack on with no matching module (core-devtools/batch/progressive-delivery are always on) |
 | `namespaces.gitea` / `.showroom` / `.system` | `ogsr-gitea` / `ogsr-showroom` / `ogsr-system` | parameterized so the `ogsr-` rename is a values flip |

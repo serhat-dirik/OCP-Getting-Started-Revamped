@@ -158,6 +158,10 @@ oc get nodes -l node-role.kubernetes.io/worker
 
 ```yaml
 modules_disabled: [deployment-targets-scheduling]
+
+# …or, for a short workshop, say what you ARE teaching and let everything else drop:
+#   modules_enabled: [m1, m2, m3, m4, m5]
+# Empty or absent means the whole catalog. The two keys cannot both be set.
 ```
 
 Then the capacity column governs — 3 workers for a small cohort, 4 for normal. `modules_disabled`
