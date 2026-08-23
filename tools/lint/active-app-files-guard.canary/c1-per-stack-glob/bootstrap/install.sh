@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
+# CI shellchecks every tracked *.sh, and these are FIXTURES: they source a relative library
+# that is not on shellcheck's input list (SC1091), and c3 leaves a variable unused ON PURPOSE
+# because modelling a caller that never sources the reader is the entire canary (SC2034).
+# shellcheck disable=SC1091,SC2034
 # CANARY. Partially converted, which is the realistic reintroduction: one walk on the shared reader,
 # a second one still globbing. The glob is written exactly as the shipped defect was — with the
 # closing quote INSIDE the path, ahead of the /*.yaml — so this fixture also proves the scanner's
