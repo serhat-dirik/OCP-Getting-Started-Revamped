@@ -666,6 +666,23 @@ resolve_operator_csv() {  # <subname> <ns> <package> → "<csv>|<how>" ("" when 
 # The allowlist is structural on top of that: the only producer of deletion candidates walks the
 # `created` branch of enumerate_operators, and the `adopted`/`unknown` branch has no call path to a
 # delete at all — it can only strip labels.
+# OWNER RULE (2026-08-23): UNINSTALL NEVER REMOVES A LOGGING OPERATOR, whatever the state says.
+# "on uninstall don't touch logging, leave it behind for that cluster admin to decide what to do."
+#
+# This is a NAME gate, deliberately independent of the three state gates below, because the thing it
+# protects against is the state being WRONG. That is not hypothetical: until 8e5de9f a glob credited
+# the disabled loki-logging component's Subscriptions to the install and recorded
+# op_loki-operator=created:, which authorised exactly this deletion. That bug is fixed; this gate is
+# what makes the outcome hold even if a future one recurs, and it also covers the legitimate case —
+# somebody enables the capacity-gated loki-logging app, we really do install it, and the rule still
+# says leave it.
+#
+# Why logging specifically and not everything: a log store is something the rest of a cluster grows
+# to depend on. Other workloads forward to it, dashboards read it, retention policies assume it.
+# Removing it on our way out breaks things that have nothing to do with this workshop, and the
+# cluster admin is the only person who can judge that.
+NEVER_DELETE_OPERATORS="cluster-logging loki-operator"
+
 PROTECTED_CSVS=""
 PROTECTED_CSVS_BUILT="false"
 protected_csv_set() {  # → " <ns>/<csv> … " for every operator the state does NOT record as created
@@ -692,6 +709,9 @@ protected_csv_set() {  # → " <ns>/<csv> … " for every operator the state doe
 # therefore recorded under gitops_preexisted instead.
 csv_delete_authorized_by_state() {  # <subname> <ns>
   local name="$1" ns="$2"
+  # GATE 0 — the owner rule above. Ahead of every state read on purpose: it must hold when the
+  # state is wrong, which is the only situation in which it matters.
+  case " ${NEVER_DELETE_OPERATORS} " in *" ${name} "*) return 1 ;; esac
   if [[ "$name" == "openshift-gitops-operator" && "$ns" == "openshift-gitops-operator" ]]; then
     [[ "$(state gitops_preexisted '')" == "false" ]]
     return
@@ -703,6 +723,13 @@ del_created_csv() {  # <csv> <ns> <subname> <package> <how> — the ONE place th
   local csv="$1" ns="$2" name="$3" pkg="$4" how="$5" info copied ipkg
   [[ -n "$csv" && -n "$ns" ]] || return 0
 
+  case " ${NEVER_DELETE_OPERATORS} " in
+    *" ${name} "*)
+      ok "   PRESERVING csv/${csv} -n ${ns}: ${name} is a logging operator, and uninstall never removes"
+      ok "      one — the cluster admin decides what happens to a log store. (state reads"
+      ok "      '$(state "op_${name}" '<no record>')'; this gate does not consult it.)"
+      return 0;;
+  esac
   if ! csv_delete_authorized_by_state "$name" "$ns"; then
     err "   REFUSING to delete csv/${csv} -n ${ns}: the install state does not record ${name} as created"
     err "      by us in ${ns} (it reads '$(state "op_${name}" '<no record>')'). An adopted operator's CSV"

@@ -253,7 +253,11 @@ owner. Adopted operators and anything the cluster had before the install are pre
 ./bootstrap/ogsr-check-clean.sh           # read-only report; the admin decides what else to remove
 ```
 
-Two things the teardown deliberately leaves behind, and says so on every run: declared residue, and
+**Logging is never removed.** `cluster-logging` and `loki-operator` are preserved by name, whatever
+the install state records — a log store is something the rest of a cluster grows to depend on, and the
+cluster admin is the only person who can judge that. The uninstall says `PRESERVING` and moves on.
+
+Two further things the teardown deliberately leaves behind, and says so on every run: declared residue, and
 **cluster-scoped CRDs the organisation still depends on** — one another operator also owns, or that
 still has their instances in it. Deleting such a CRD would delete every instance of it in every
 namespace, so it is named with its evidence and a read-only `oc get <crd> -A`, never a delete command.
