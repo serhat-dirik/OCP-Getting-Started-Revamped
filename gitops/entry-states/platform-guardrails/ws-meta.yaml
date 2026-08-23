@@ -1,0 +1,88 @@
+# Namespaces this module needs to EXIST before its entry state can materialize. Consumed by
+# `ws prep` -> the per-user namespace Application, so a namespace is created on demand rather
+# than all 13 existing up front. NOT the same list as purgeNamespaces below: that answers
+# "what do I empty on reset", and at least one module (multi-tenancy-workload-security) needs a
+# namespace it deliberately must NOT purge, because a cohabitant module's work lives there.
+namespaces:
+  - "dev"
+
+# ws reset purges user-created leftovers from these namespaces before re-materializing.
+# platform-guardrails' whole world is {user}-dev: OpenBao + its token Secret, the SecretStore and
+# ExternalSecret, claims-db + parasol-claims + Services + Route (all chart-owned, so the Argo
+# finalizer prunes them). `oc delete all,cm` is what returns the namespace to entry.
+#
+# THE SECRET THIS PURGE MUST NOT BE TRUSTED TO REACH is claims-creds: nothing in this chart renders
+# it, ESO does, so it is not chart-owned and an Argo prune does not see it. It IS deleted anyway —
+# `creationPolicy: Owner` puts an ESO ownerReference on it, so deleting the ExternalSecret garbage-
+# collects the Secret. That is why the ExternalSecret's creationPolicy is written out explicitly in
+# secret-store.yaml instead of left to default: reset correctness depends on it.
+purgeNamespaces:
+  - "${USER}-dev"
+# platform-guardrails materializes the SAME named workloads into {user}-dev that the rest of the dev
+# cohort own (parasol-claims / claims-db), so coexisting entry apps deadlock on SharedResourceWarning
+# (G3-config-multienv). Same-namespace modules are MUTUAL conflicts (ADR-0001 amendment, 2026-07-10
+# policy): ws start/prep/solve evicts the conflicting entry app and purges {user}-dev before
+# materializing. THE RECIPROCAL HALF IS NOT IN THIS FILE and must land beside it: gc_conflicts()
+# reads only the STARTING module's list, so until each module below lists platform-guardrails back,
+# starting one of THEM over a materialized platform-guardrails leaves a dormant
+# entry-platform-guardrails orphan (the exact G4 SEV2 shape observability-health-scale hit on
+# 2026-07-12). jobs-batch-kueue ({user}-batch), pipelines-fundamentals/trusted-supply-chain
+# ({user}-cicd) and resilience-multicluster-dr ({user}-client/-site-a/-site-b) are disjoint
+# namespaces → they truly coexist untouched.
+#
+# THE COHABITANT HAZARD IS SHARPER HERE THAN ANYWHERE ELSE IN THE COHORT, and it is why this list
+# has to be complete rather than approximately right. Every other dev-cohort chart ships a `claims-db`
+# SECRET carrying POSTGRESQL_PASSWORD; this one deliberately does not, and hands the workloads
+# `claims-creds` instead. A leftover `claims-db` Secret from a cohabitant is harmless (nothing here
+# reads it), but the reverse is not: a cohabitant materialized over a live platform-guardrails finds
+# its own claims-db Deployment already at a password it does not know, and its app fails to
+# authenticate against a database this module initialized. The purge is what prevents that.
+conflictsWith:
+  - platform-orientation
+  - build-deliver
+  - devspaces-inner-loop
+  - config-multienv
+  - application-logging
+  - storage-stateful
+  - gitops-fundamentals
+  - gitops-at-scale
+  - developer-hub-golden-paths
+  - observability-health-scale
+  - securing-apps-keycloak
+  - multi-tenancy-workload-security
+  - networking-dev-devops
+  - deployment-targets-scheduling
+  - registry-images-catalog-governance
+  - serverless-zero-to-hero
+  - eventing-deep-dive
+  - ai-assisted-development
+  - packaging-distributing
+
+# Representative attendee muscle platform-guardrails leans on, beyond the generic cockpit/identity
+# battery. Both are properties of the ENVIRONMENT rather than of the entry state, which is exactly
+# what belongs here — nothing else in this module's lifecycle would notice either one disappearing.
+# (1) Reading an ExternalSecret is the module's central verb, and external-secrets.io is a CRD group:
+#     the built-in `admin` ClusterRole aggregates only what carries the aggregate-to-admin label, so
+#     a namespace where `oc get deploy` works and `oc get externalsecret` returns "the server doesn't
+#     have a resource type" is a real, reachable state that would kill the module at its first
+#     command. (Granted on this cluster today — ESO's CRDs do carry the label — so this smoke is the
+#     thing that would notice if a future operator build stopped shipping it.)
+# (2) `oc exec` into the vault IS the rotation exercise. pods/exec is a SUBRESOURCE, granted
+#     separately from the pods read the generic battery covers, so a cockpit where `oc get pods`
+#     works and `oc exec` does not is a distinct, reachable failure. Running `bao version` also
+#     proves the CLI is on PATH inside the image, which is what the lab's one-line rotation assumes.
+# ${USER} resolves per-run.
+# QUOTING: single-quotes only, no double-quotes (meta_list strips them).
+#
+# NOT LISTED, AND IT SHOULD BE — READ THIS BEFORE THE MODULE SHIPS. The policy half of this module
+# has the attendee READ the live ValidatingAdmissionPolicy ogsr-attendee-entry-app-guard. Probed as
+# a real read on cluster-m24jn 2026-08-23 (impersonating user1 with --as-group=workshop-attendees,
+# not `oc auth can-i`): Forbidden — `platform-observer`, the only ClusterRole bound to
+# workshop-attendees, carries no admissionregistration.k8s.io rule. Server-side dry-run of a policy
+# is refused for the same reason: --dry-run=server is authorized as a real create. Both need a rule
+# in gitops/workshop-config (platform-observer), which is not this chart's to add. A smoke command
+# for it is deliberately withheld until that lands rather than shipped permanently red — a gate that
+# is always red is a gate operators learn to ignore.
+smokeCommands:
+  - "oc get externalsecret claims-creds -n ${USER}-dev"
+  - "oc exec deploy/openbao -n ${USER}-dev -- bao version"

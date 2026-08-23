@@ -1,0 +1,154 @@
+= Platform Guardrails: Concept
+:module-id: platform-guardrails
+include::partial$version-attributes.adoc[]
+
+// Concept page for Platform Guardrails. Renders in all three flavors (workshop/demo/instructor).
+// Environment values appear ONLY as attributes; product versions ONLY via version-attributes.
+// SCOPE BOUNDARY, and it is deliberate: this module is about the two guardrails a developer meets
+// on day one — where a secret comes from, and what the cluster refuses to accept. It does NOT
+// cover RHACS deploy-time policy (that is the supply-chain module) and it does NOT ask attendees
+// to create cluster-scoped objects. See "Why you will not create a policy" below.
+
+[.lead]
+A Parasol developer commits `application.properties` with the claims database password in it.
+
+Someone spots it in review and the commit is reverted within the hour.
+The password is still in the repository's history, on every laptop that cloned it, in the CI cache, and in the fork somebody made on Tuesday.
+Reverting a commit removes a line from the tip of a branch. It does not remove a secret from the world.
+
+The only fix that works is the one where the password was never in Git at all.
+
+include::partial$prep-while-you-read.adoc[]
+
+== What you'll learn
+
+* Where a running application's credential should come from, and how it gets there without passing through a repository
+* Why *rotation* — not storage — is the test of whether a secret is actually managed
+* What admission control is, and why "no" is cheapest at the moment of the request
+* How to read a `ValidatingAdmissionPolicy`, including the one that is governing *your* actions in this workshop right now
+* Why you will author a policy but not create one, and what that says about how clusters are actually run
+
+== A reverted commit is not a deleted secret
+
+The problem is not that developers are careless. The problem is that a repository is a *distribution mechanism*, and a secret placed into one is distributed.
+
+So the credential has to live somewhere that is not the repository, and the application has to get it at run time. That is the whole idea, and everything else is mechanism.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/01-secret-path.mmd[]
+....
+
+On the right-hand path nothing in Git ever holds the value. The repository holds a *reference* — "the claims database password lives at `parasol/claims-db`" — which is not a secret and can be reviewed, diffed, and published like any other line of configuration.
+
+== The secret your app reads is not the secret you store
+
+Your application does not talk to the secret store. It reads an ordinary Kubernetes `Secret`, through an ordinary `secretKeyRef`, exactly as it would if you had created that Secret by hand.
+
+Between the two sits the **External Secrets Operator**. It watches a custom resource you write — an `ExternalSecret` — and its entire job is to keep one Kubernetes Secret equal to one value in an external store.
+
+[cols="1,3",options="header"]
+|===
+| Object | What it is for
+
+| `SecretStore`
+| Where the values live and how to authenticate to it. Namespaced, so one team's store is not another team's.
+
+| `ExternalSecret`
+| One mapping: "take `parasol/claims-db` from that store and keep `Secret/claims-creds` equal to it." Carries the refresh interval.
+
+| `Secret`
+| The ordinary Kubernetes object your Deployment already knows how to consume. **Created and owned by the operator** — if you delete it, it comes back.
+|===
+
+That last row is the one worth pausing on. The Secret is *derived*. It is not a thing you maintain; it is a thing the cluster maintains from a source of truth that lives elsewhere. Editing it by hand is not a fix, because it will be overwritten — and being overwritten is the feature.
+
+== Rotation is the test
+
+Any system can store a secret. The question that separates secret *management* from a fancy file is what happens when the value changes.
+
+If rotating a credential means editing a manifest, re-running a pipeline, or redeploying an application, then the credential is not managed — it is merely hidden, and it will not be rotated, because rotating it is a project.
+
+With the mapping above, rotation is a write to the store. The operator notices within its refresh interval and updates the Secret. In the lab you will change a value in OpenBao and watch the Kubernetes Secret follow it, and the elapsed time will be seconds.
+
+[NOTE]
+====
+Whether the *application* picks up the new value is a separate question, and a good one to ask out loud.
+A Secret consumed as an environment variable is read once, at container start — so the Secret changes and the process does not.
+A Secret consumed as a mounted volume is updated in place by the kubelet, and an application that re-reads the file will see the new value without a restart.
+Neither is wrong. But they are different, and the difference is invisible until the day you rotate.
+====
+
+== Admission is where "no" is cheapest
+
+Now the second guardrail, and a different kind.
+
+Every request to create or change an object in OpenShift passes through the same sequence: the API server works out *who you are*, then whether RBAC permits you to touch that kind of object at all, and then — before anything is written down — whether the object you sent is *acceptable*.
+
+That last step is **admission**, and it is the last moment at which refusing costs nothing. Refuse there and nothing was created, nothing partially applied, and nothing needs cleaning up. The alternative is a controller that finds the bad object later and tries to undo it, which is strictly harder and often impossible.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/02-admission-gate.mmd[]
+....
+
+RBAC and admission answer genuinely different questions, and conflating them is the most common misunderstanding in this area:
+
+* **RBAC** answers *may this user create Applications at all?* It is about verbs and kinds. It cannot see inside the object.
+* **Admission** answers *is THIS Application acceptable?* It reads the object's contents and can refuse based on what is in it.
+
+You cannot express "attendees may create Applications, but only ones that point at their own project" in RBAC, because RBAC never sees `spec.project`. That is an admission rule, and it needs something that can read the object.
+
+== The policy that is governing you right now
+
+OpenShift ships this capability in the platform: `ValidatingAdmissionPolicy` is a built-in Kubernetes API, and its rules are written in **CEL** — a small expression language evaluated by the API server itself. No webhook to run, no operator to install, no pod that can be down.
+
+This workshop uses one. It is called `ogsr-attendee-entry-app-guard`, it has been live since the cluster was built, and it is the reason your `ws prep` works the way it does. It says, in four expressions, that an attendee may only create an Argo Application that:
+
+* uses their own `entries-<username>` project,
+* has a single source rather than several,
+* is named `entry-<module>-<their own username>`,
+* and points at a path under `gitops/entry-states/`.
+
+Read that list again and notice what it is doing: it is letting you do a real thing on a shared cluster, on purpose, by being exact about the shape of the thing you are allowed to do. That is what a guardrail is. It is not a locked door — a locked door would be RBAC saying no. It is a door you can walk through in one direction.
+
+In the lab you will read this policy, then deliberately break each of its four rules and watch the cluster refuse you, in its own words.
+
+== Why you will not create a policy
+
+`ValidatingAdmissionPolicy` objects are **cluster-scoped**. There is one namespace-free list of them for the whole cluster, and writing to it is a cluster-admin action.
+
+On a shared workshop cluster with a dozen attendees that is a genuine problem, and it is worth being honest about rather than papering over: if everyone created policies, everyone would need cluster-scoped write, their names would collide, and one attendee's `failurePolicy: Fail` typo would start refusing everybody's traffic.
+
+So you will author a policy properly — and validate it with `--dry-run=server`, which sends the object to the API server for full validation and then throws it away. You get the real verdict, including real CEL compilation errors, without anything being created.
+
+This is not a workshop compromise. It is how policy is developed in an organisation that has more than one cluster: you write it, you validate it against a real API server, and it reaches production through review and GitOps — not because you had permission to apply it by hand.
+
+== Where this sits among the other guardrails
+
+This module is the developer's-eye view. Two neighbours cover the same territory from different angles, and it is worth knowing which is which:
+
+[cols="1,3",options="header"]
+|===
+| Where | What it guards
+
+| *This module*
+| Admission — refusing a bad object at the moment it is submitted, using rules the platform evaluates itself.
+
+| Trusted Software Supply Chain
+| Provenance — refusing an *image* that is unsigned or unattested, no matter how correct its Deployment looks.
+
+| Multi-Tenancy & Workload Security
+| Blast radius — what a workload may do once it is running: its SCC, its network reach, its quota.
+|===
+
+None of the three replaces the others. An image can be perfectly signed and still be deployed with a manifest that names somebody else's project.
+
+== What you will have built
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/04-what-you-built.mmd[]
+....
+
+Two guardrails, from two directions. One keeps a value out of a place it must never be. The other keeps a shape out of a cluster that should not accept it. Both are the platform doing work so that a person does not have to remember to.

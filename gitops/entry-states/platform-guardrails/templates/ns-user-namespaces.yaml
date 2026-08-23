@@ -1,0 +1,227 @@
+{{/*
+  GENERATED — do not hand-edit. Canonical source: gitops/user-namespace/templates/.
+  Regenerate with tools/gen-entry-namespaces.sh; tools/lint/copy-drift-guard.py holds the copies
+  in lockstep, so an edit here without one there fails CI.
+
+  WHY EACH ENTRY CHART CARRIES THIS. Namespaces must exist before this module's objects land in
+  them, and an attendee CANNOT create one: probed on cluster 2026-08-02 as user1, both
+  `namespaces` create and `resourcequotas` create come back Forbidden. So `ws prep`, which runs AS
+  the attendee, can never apply these — Argo has to, and the only Application an attendee is
+  permitted to create is `entry-<module>-<user>` sourced from gitops/entry-states/ (enforced by
+  ValidatingAdmissionPolicy ogsr-attendee-entry-app-guard). That makes the entry chart itself the
+  one place these can legally come from.
+
+  The suffix list is read from this chart's OWN ws-meta.yaml `namespaces:` key rather than passed
+  in, so there is exactly one source of truth per module and `ws` needs no new parameter.
+
+  GATED behind manageNamespaces (values.yaml, default false): gitops/workshop-config still creates
+  all 13 per-user namespaces eagerly today, and rendering the same Namespace from two Applications
+  at once would fight over ownership (see values.yaml's comment on the flag). Flipping it to true
+  is a deliberate migration step, not a per-chart decision.
+*/}}
+{{- if .Values.manageNamespaces }}
+{{- $meta := .Files.Get "ws-meta.yaml" | fromYaml -}}
+{{- $suffixes := $meta.namespaces | default (list) -}}
+{{- if not $suffixes -}}
+{{- fail (printf "%s/ws-meta.yaml has no `namespaces:` list — ws prep cannot know which namespaces to create, and the module would materialize into namespaces that may not exist" .Chart.Name) -}}
+{{- end -}}
+{{- $user := .Values.user -}}
+
+{{/* ---- from user-namespace/templates/namespace.yaml ---- */}}
+{{/*
+Faithful re-encoding of gitops/workshop-config/templates/per-user-namespaces.yaml (dev/stage/prod/
+cicd) plus the Namespace block at the top of each per-user-<module>.yaml (ai/batch/mesh/modernize/
+partner/gitops, and the three resilience-multicluster-dr namespaces client/site-a/site-b) — one
+suffix per iteration of .Values.suffixes instead of one suffix per source file.
+*/}}
+{{- range $raw := $suffixes }}
+{{- $suffix := trim $raw }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $user }}-{{ $suffix }}
+  annotations:
+    # Namespaces sync first on create / last on delete (platform-portfolio/README.md wave table).
+    argocd.argoproj.io/sync-wave: "-2"
+    # These namespaces are SHARED across modules that can be materialized independently at the same
+    # time (e.g. config-multienv's dev/stage/prod Application and gitops-fundamentals's {user}-gitops
+    # Application coexist). Pruning one module's Application must never delete a namespace another
+    # module still needs, so nothing this chart renders is ever prune-eligible — namespace lifecycle
+    # is owned by `ws` (create-if-missing / never delete-on-Application-removal), not by Argo prune.
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+    {{- if or (eq $suffix "dev") (eq $suffix "stage") (eq $suffix "prod") }}
+    # ADR-0002 amendment 1: the namespace-scoped student-gitops instance may deploy only into
+    # namespaces carrying this label (the operator then creates its controller/server RBAC here).
+    # gitops-fundamentals/gitops-at-scale deploy claims into dev/stage/prod via the student instance; cicd stays pipeline-only (pipelines-fundamentals).
+    # VALUE MUST BE THE INSTANCE'S NAMESPACE, NOT ITS NAME: the operator's managed-by enrollment
+    # keys off the ArgoCD CR's namespace (ogsr-student-gitops, student-argocd.yaml), not .metadata.name
+    # (which stays 'student-gitops' unprefixed for Route-host stability). A bare 'student-gitops'
+    # here matches nothing, so the operator never creates the RoleBindings — SEV1 2026-07-18.
+    argocd.argoproj.io/managed-by: {{ required "studentArgoNamespace is required (ws passes it; see tools/ws/ws render_app) — a null here silently stops the student Argo operator creating its RoleBindings, SEV1 2026-07-18" $.Values.studentArgoNamespace }}
+    {{- end }}
+    {{- if eq $suffix "batch" }}
+    # Load-bearing: the per-user ClusterQueue cq-{user} selects namespaces by this label —
+    # a LocalQueue here can only bind cq-{user} because the namespace carries it.
+    # OPT-IN GATE (verified on-cluster, jobs-batch-kueue build): Red Hat build of Kueue's Job admission
+    # webhooks (mjob.kb.io / vjob.kb.io) only intercept Jobs in namespaces carrying this label.
+    # Without it, a Job with a queue-name label runs immediately, unmanaged — no Workload, no quota.
+    kueue.openshift.io/managed: "true"
+    {{- end }}
+    {{- if or (eq $suffix "mesh") (eq $suffix "client") (eq $suffix "site-a") (eq $suffix "site-b") }}
+    # Load-bearing (verified live 2026-07-13): the shared OSSM3 istiod's meshConfig.discoverySelectors
+    # matches istio-discovery=enabled, so this namespace is in-mesh. Stable — never toggled by the lab.
+    istio-discovery: enabled
+    {{- end }}
+    {{- if eq $suffix "partner" }}
+    # Load-bearing (verified on-cluster, networking-dev-devops build): OVN-Kubernetes only lets a namespace host a
+    # Primary UserDefinedNetwork if it carries this opt-in label from creation. Empty value is valid.
+    k8s.ovn.org/primary-user-defined-network: ""
+    {{- end }}
+{{- end }}
+
+{{/* ---- from user-namespace/templates/limits.yaml ---- */}}
+{{/*
+Faithful re-encoding of gitops/workshop-config/templates/per-user-limits.yaml plus the
+ResourceQuota/LimitRange block in each per-user-<module>.yaml. The per-suffix numbers themselves
+live in templates/_helpers.tpl's user-namespace.quotaSpec — see that file's header comment for why
+they're centralized there instead of duplicated per-suffix in this file.
+*/}}
+{{- range $raw := $suffixes }}
+{{- $suffix := trim $raw }}
+{{- $spec := include "user-namespace.quotaSpec" $suffix | fromYaml }}
+---
+# Caps total compute/PVCs/pods a user can request per namespace.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workshop-quota
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    # See namespace.yaml: nothing in this chart is prune-eligible — these namespaces (and the quota/
+    # limits/RBAC inside them) are SHARED across modules and must outlive any one module's Application.
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ $spec.reqCpu | quote }}
+    requests.memory: {{ $spec.reqMem | quote }}
+    limits.cpu: {{ $spec.limCpu | quote }}
+    limits.memory: {{ $spec.limMem | quote }}
+    {{- if $spec.pvc }}
+    persistentvolumeclaims: {{ $spec.pvc | quote }}
+    {{- end }}
+    pods: {{ $spec.pods | quote }}
+---
+# Default container requests/limits so bare pods don't consume the whole quota unbounded.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workshop-limits
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: {{ $spec.limDefaultCpu | quote }}
+        memory: {{ $spec.limDefaultMem | quote }}
+      defaultRequest:
+        cpu: {{ $spec.limReqCpu | quote }}
+        memory: {{ $spec.limReqMem | quote }}
+{{- end }}
+
+{{/* ---- from user-namespace/templates/rbac.yaml ---- */}}
+{{/*
+Faithful re-encoding of gitops/workshop-config/templates/per-user-rbac.yaml (admin +
+monitoring-edit on dev/stage/prod/cicd) plus the admin RoleBinding in each per-user-<module>.yaml,
+and the extra kueue-batch-user RoleBinding from per-user-batch.yaml.
+*/}}
+{{- range $raw := $suffixes }}
+{{- $suffix := trim $raw }}
+---
+# Each attendee is admin on their own namespace (and nothing else at namespace scope).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-admin
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- if or (eq $suffix "dev") (eq $suffix "stage") (eq $suffix "prod") (eq $suffix "cicd") }}
+---
+# PLUS monitoring-edit: OpenShift's built-in `admin` ClusterRole deliberately OMITS
+# monitoring.coreos.com, so without this an attendee cannot create a PrometheusRule or even read
+# their own ServiceMonitor — which breaks observability-health-scale (Observability) exercises AND attendee-run
+# `ws verify observability-health-scale` (the 15/15 only passed because `ws prep` runs verify as admin). Found at observability-health-scale G1,
+# 2026-07-11. monitoring-edit grants create/edit on servicemonitors/podmonitors/prometheusrules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-monitoring-edit
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: monitoring-edit
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}
+{{- if eq $suffix "batch" }}
+---
+# The default `admin` role does NOT include Kueue's workload API (the kueue.x-k8s.io CRDs carry
+# no aggregate-to-admin label — verified on-cluster, jobs-batch-kueue build). The operator ships
+# kueue-batch-user-role (localqueues/workloads read + pending) — bind it per user.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $user }}-kueue-batch-user
+  namespace: {{ $user }}-{{ $suffix }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    workshop.redhat.com/user: {{ $user | quote }}
+    {{- include "user-namespace.ownerLabels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kueue-batch-user-role
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ $user | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

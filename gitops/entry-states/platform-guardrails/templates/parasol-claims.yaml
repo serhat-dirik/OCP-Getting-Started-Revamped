@@ -1,0 +1,147 @@
+# The claims service in {user}-dev, authenticating to PostgreSQL with a password it never had in its
+# manifest — the app-side end of the credential path this module traces. Runs the SHARED prebuilt
+# image so platform-guardrails never depends on any per-user build.
+#
+# What is deliberately NOT here:
+#   * no `claims-db` Secret and no inline POSTGRESQL_PASSWORD. The whole point is that the only
+#     Secret in this namespace carrying a password is claims-creds, and claims-creds is not in Git.
+#   * no NetworkPolicy. {user}-dev carries none by default (checked on-cluster 2026-08-23), so
+#     shipping one here would ISOLATE the pods it selects rather than merely permitting something —
+#     an attendee curling OpenBao from a debug pod would silently start getting connection refused.
+#     The policy this module actually needs lives in the ESO operand namespace; see secret-store.yaml.
+---
+# why: the running claims REST API (%prod profile); datasource is env-driven at Service claims-db.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    # Sync-wave "4": applied only after claims-db (wave "3") reports Healthy. This app re-creates its
+    # schema at boot, so a pod that starts against an unreachable database crash-loops until the DB
+    # arrives. Ordering the dependency is the fix; nothing here sleeps and hopes.
+    argocd.argoproj.io/sync-wave: "4"
+    #
+    # Replace=true, and ONLY on this Deployment. This is an object the lab mutates: the rotation
+    # exercise ends with `oc rollout restart` (which writes a
+    # kubectl.kubernetes.io/restartedAt annotation into the pod template), and an attendee exploring
+    # the credential path may well `oc set env` their way around it. On re-materialize this
+    # Deployment's spec SHOULD come from the chart wholesale — `ws start` twice must be pristine
+    # twice, and the entry-only verify asserts the absences listed above, so a three-way merge would
+    # leave a green start and a red verify. Same call, and the same annotation, as
+    # application-logging's and config-multienv's parasol-claims.
+    argocd.argoproj.io/sync-options: Replace=true
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+spec:
+  # ONE replica at entry AND at solve. This module never scales anything — the lesson is where a
+  # credential comes from, not how many copies consume it — so a second replica would only double
+  # the pods that have to be restarted after a rotation.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-claims
+  template:
+    metadata:
+      labels:
+        app: parasol-claims
+        workshop.redhat.com/module: platform-guardrails
+    spec:
+      containers:
+        - name: parasol-claims
+          # Shared image built once into parasol-images.
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-claims:1.0
+          # Mutable workshop tag - rebuilt in place, so a node-cached IfNotPresent layer served the OLD image (measured 2026-07-29).
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # Point the %prod datasource at the claims-db Service in this namespace. The ONLY inline
+            # env var the chart renders, and deliberately so: a host name is not a credential, and
+            # having exactly one of these makes the contrast with the two envFrom sources obvious.
+            - name: POSTGRESQL_HOST
+              value: claims-db
+          envFrom:
+            # Same split as claims-db: POSTGRESQL_USER/_DATABASE from Git-managed config,
+            # POSTGRESQL_PASSWORD from the ESO-materialized Secret. Both workloads read the SAME
+            # claims-creds, which is why one `bao kv put` moves the whole system at once.
+            - configMapRef:
+                name: claims-db-config
+            - secretRef:
+                name: claims-creds
+          # The readiness probe gates on the datasource, so it is also the fastest honest answer to
+          # "did the rotation land on BOTH sides?" — measured 2026-08-23: after a rotation without the
+          # paired `oc rollout restart deploy/claims-db`, this pod crash-loops on Agroal datasource
+          # init and never goes Ready, while the rolling update keeps the OLD pod serving, so the
+          # Route still answers 200 and nothing looks wrong from outside.
+          # tools/verify/platform-guardrails.sh's hint on this Deployment says exactly that.
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # No liveness and no startup probe, on purpose. Probes are Config, Secrets &
+          # Multi-Environment's lesson; a liveness probe with no startup probe in front of a JVM boot
+          # only buys a restart loop on a slow node, and would put a second, unrelated reason for a
+          # pod to die into the namespace where a credential mismatch is the thing being taught.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+# why: stable in-cluster address for the claims API (port 8080).
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: parasol-claims
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# why: publishes the claims API at parasol-claims-{user}-dev.{clusterDomain} (host auto-generated) —
+# the attendee-visible proof that the app is actually serving on a credential it got from the vault.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-claims
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  labels:
+    app: parasol-claims
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+spec:
+  to:
+    kind: Service
+    name: parasol-claims
+  port:
+    targetPort: http
+  tls:
+    # Browser-facing Route: MUST be edge-terminated. A plain HTTP Route answers 200 on http:// and
+    # 503 on https:// — and the console renders route links as https, while browsers upgrade via
+    # HSTS, so an attendee clicking through gets "Application is not available" (measured on the
+    # config-multienv route, 2026-07-26).
+    # insecureEdgeTerminationPolicy: Allow, NOT Redirect — Redirect makes `curl http://...` return an
+    # empty 302, and the traffic-generating blocks in this lab are plain-http curl.
+    termination: edge
+    insecureEdgeTerminationPolicy: Allow

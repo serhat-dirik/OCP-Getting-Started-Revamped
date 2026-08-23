@@ -1,0 +1,122 @@
+# PostgreSQL for the claims service in {user}-dev — composed directly (ADR-0001), the same shape
+# application-logging/config-multienv ship, so platform-guardrails never depends on any earlier module
+# having run. Ephemeral (emptyDir): persistence is Storage & Stateful Apps' lesson.
+#
+# ONE DIFFERENCE FROM EVERY OTHER DEV-COHORT CHART, AND IT IS THE MODULE. The other charts carry a
+# `claims-db` Secret holding POSTGRESQL_USER/_PASSWORD/_DATABASE and hand it to both workloads. Here
+# the password is NOT in a manifest at all: the non-secret half (user, database) is a ConfigMap, and
+# the password arrives only in Secret claims-creds, which ESO materializes from OpenBao. The split is
+# the teaching point twice over — a database NAME is configuration and belongs in Git, a password is
+# not and does not.
+#
+# THE CONSEQUENCE THE LAB MUST NAME: this database takes its password at initdb time, and its storage
+# is an emptyDir. So rotating in OpenBao changes what the APP will present before it changes what the
+# DATABASE expects, and the two only re-converge when this Deployment restarts (a restart re-runs
+# initdb against an empty volume with the new password). That is real credential rotation, not a
+# workshop artifact — rotating a database password in production is a two-sided operation too.
+# MEASURED END TO END on cluster-m24jn 2026-08-23, and the shape matters because it is not the one
+# people expect: after a rotation, NOTHING BREAKS until something restarts. The running app keeps
+# serving on the connection and env it already had. Restart the app ALONE and its new pod
+# crash-loops on Agroal datasource init (5 restarts observed) while the rolling update holds the old
+# pod in the Service, so the Route still answers 200 — a failure that is invisible from the outside.
+# `oc rollout restart deploy/claims-db deploy/parasol-claims -n {user}-dev` recovers both in ~2min.
+# The rotation exercise has to end with that command, or the module leaves a landmine behind it.
+#
+# Sync-wave "3": the whole DB lands, and reaches Healthy, before parasol-claims (wave "4") is even
+# applied. Wave 3 also puts it after the ExternalSecret (wave 2), because a Pod whose `envFrom`
+# names a Secret that does not exist yet sits in CreateContainerConfigError until it does.
+---
+# why: the NON-secret half of the datasource — a database name and a role name are configuration, and
+# putting them in a Secret alongside the password is the habit this module is trying to break.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claims-db-config
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+data:
+  POSTGRESQL_USER: parasol
+  POSTGRESQL_DATABASE: parasol
+---
+# why: the PostgreSQL 15 server the claims app reads/writes. Its password comes from claims-creds,
+# which exists only because ESO put it there — there is no manifest anywhere carrying that value.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claims-db
+  template:
+    metadata:
+      labels:
+        app: claims-db
+        workshop.redhat.com/module: platform-guardrails
+    spec:
+      containers:
+        - name: postgresql
+          # Internal imagestream tag (RHEL9 PostgreSQL 15) — already cached, no external pull secret.
+          # Pinned upstream tag, not a workshop-built one, so the kubelet's IfNotPresent default is correct here.
+          image: image-registry.openshift-image-registry.svc:5000/openshift/postgresql:15-el9
+          ports:
+            - containerPort: 5432
+          envFrom:
+            # ORDER IS NOT SIGNIFICANT here (the two sources share no key) but the SPLIT is: config
+            # from Git, credential from the vault. An attendee reading this block can see the whole
+            # argument of the module in six lines.
+            - configMapRef:
+                name: claims-db-config
+            - secretRef:
+                name: claims-creds
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pg_isready -h 127.0.0.1 -p 5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+      volumes:
+        # Ephemeral on purpose — and here it is what makes a rollout restart re-initialize the
+        # database with the rotated password rather than keep the old one forever.
+        - name: data
+          emptyDir: {}
+---
+# why: the stable in-cluster address the claims app resolves as claims-db.{user}-dev.svc:5432.
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims-db
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  labels:
+    app: claims-db
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: claims-db
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432

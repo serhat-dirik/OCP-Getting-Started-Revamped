@@ -1,0 +1,202 @@
+# The external secret manager the whole module hangs off: an OpenBao dev server in {user}-dev,
+# holding parasol/claims-db. Composed directly into this chart (ADR-0001) rather than shared from a
+# platform namespace, for two reasons the lab depends on:
+#   * the attendee ROTATES the value, and rotating is a write. A shared instance would need per-user
+#     policies and tokens to keep one attendee's rotation out of another's namespace; a per-user
+#     instance makes `oc exec deploy/openbao -- bao kv put …` a namespace-admin verb they already have.
+#   * self-containment (entry states compose, never chain): nothing here waits on another module or
+#     on a portfolio stack having seeded anything.
+#
+# Sync-wave "0": OpenBao is Ready — and Ready HERE MEANS SEEDED, see the readiness probe — before the
+# SecretStore (wave 1) is applied. Nothing sleeps; the wave is the ordering.
+#
+# TWO SETTINGS ARE LOAD-BEARING AND BOTH LOOK LIKE NOISE (measured while building the eso-probe
+# reference implementation, carried here verbatim):
+#   * HOME=/home/bao onto an emptyDir. OpenBao dev mode writes its token file to $HOME, and under the
+#     restricted-v2 SCC $HOME is `/`, which is read-only. The pod unseals cleanly and THEN exits 1 —
+#     it reads as a crash with no obvious cause, not as a permissions problem.
+#   * SKIP_CHOWN=true. The image's entrypoint otherwise tries to chown its data directory, which a
+#     random high UID cannot do.
+---
+# why: the dev-mode root token, in the one place both the server and the SecretStore read it from —
+# rotate it here and both follow. DERIVED from the username rather than written as a literal: it is a
+# per-user workshop fixture like the `parasol` database password, not a credential, and a literal
+# token-shaped string in values.yaml is exactly what the repo's privacy guard exists to keep out.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openbao-token
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: openbao
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+type: Opaque
+stringData:
+  token: "ogsr-{{ .Values.user }}-bao-root"
+---
+# why: the OpenBao dev server itself — an in-memory, auto-unsealed kv-v2 store that stands in for the
+# corporate vault. Ephemeral ON PURPOSE and named as such in the lab: killing this Pod loses every
+# rotation the attendee made, and the seed below puts the world back exactly where `ws start` left it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openbao
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: openbao
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openbao
+  template:
+    metadata:
+      labels:
+        app: openbao
+        workshop.redhat.com/module: platform-guardrails
+    spec:
+      containers:
+        - name: openbao
+          # Pinned upstream tag, not a workshop-built one, so the kubelet's IfNotPresent default is correct here.
+          image: {{ .Values.openbaoImage }}
+          args:
+            - server
+            - -dev
+            # 0.0.0.0, not the dev default 127.0.0.1: the ESO controller connects from ANOTHER
+            # namespace through the Service, so a loopback-only listener answers `oc exec` probes
+            # perfectly and refuses every real client.
+            - -dev-listen-address=0.0.0.0:8200
+          env:
+            # The dev server's root token, and — because these are set in the container's own
+            # environment — what makes the attendee's `oc exec deploy/openbao -- bao kv put …` work
+            # with no export, no login and no token file. That ergonomics is why the lab can show a
+            # rotation as ONE command.
+            - name: BAO_DEV_ROOT_TOKEN_ID
+              valueFrom:
+                secretKeyRef: {name: openbao-token, key: token}
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef: {name: openbao-token, key: token}
+            - name: BAO_ADDR
+              value: http://127.0.0.1:8200
+            # Read by the postStart seed below. Kept as env rather than inlined into the script so
+            # `oc set env` can show an instructor what this instance was seeded with.
+            - name: BAO_SEED_PASSWORD
+              value: {{ .Values.claimsDbPassword | quote }}
+{{- if .Values.solve }}
+            - name: BAO_SEED_PASSWORD_ROTATED
+              value: {{ .Values.claimsDbPasswordRotated | quote }}
+{{- end }}
+            # See the header: without these two the pod unseals and then exits 1 under restricted-v2.
+            - name: HOME
+              value: /home/bao
+            - name: SKIP_CHOWN
+              value: "true"
+          ports:
+            - name: api
+              containerPort: 8200
+          # SEEDING, as a postStart hook rather than an Argo Sync-hook Job — deliberately, and this is
+          # the one place this chart departs from gitops/entry-states/README.md rule 4. A hook Job runs
+          # ONCE per sync; this store is in-memory, so any Pod restart (eviction, node drain, an image
+          # re-pull) would leave an empty vault behind a perfectly Synced Application, and the module
+          # would be silently dead until someone ran `ws reset`. A postStart re-seeds on every start,
+          # which makes the restart a no-op instead of an outage.
+          # Idempotent by construction: the mount is re-created because dev-mode memory is empty, and
+          # `bao kv put` is a write, not a create. Fails LOUDLY: a non-zero exit here has the kubelet
+          # kill and restart the container with a FailedPostStartHook event, which is the correct
+          # outcome for a vault that cannot be seeded — rather than a healthy pod serving nothing.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    set -eu
+                    # Bounded wait for the dev server to accept API calls. Not a sleep-and-hope: the
+                    # loop exits on the first success, and falling out of it un-seeded makes the
+                    # `bao kv put` below fail, which is the loud failure this hook wants.
+                    i=0
+                    while [ "$i" -lt 60 ]; do
+                      if bao status >/dev/null 2>&1; then break; fi
+                      i=$((i + 1))
+                      sleep 2
+                    done
+                    # `|| true`: on a fresh dev server this always succeeds (memory is empty), and on
+                    # any path where the mount already exists "path is already in use" is the state we
+                    # wanted anyway. The `kv put` below is the real assertion.
+                    bao secrets enable -path=parasol kv-v2 >/dev/null 2>&1 || true
+                    bao kv put -mount=parasol claims-db password="$BAO_SEED_PASSWORD" >/dev/null
+{{- if .Values.solve }}
+                    # SOLVE (end state) ONLY: the SECOND write is the rotation itself. Writing a
+                    # second version — rather than seeding the rotated value once — is what makes the
+                    # end state reachable the same way an attendee reaches it, and what makes kv-v2's
+                    # current_version (1 at entry, 2 here) the thing ws verify grades instead of a
+                    # password string the attendee chooses for themselves.
+                    bao kv put -mount=parasol claims-db password="$BAO_SEED_PASSWORD_ROTATED" >/dev/null
+{{- end }}
+          # READY MEANS SEEDED. An HTTP probe on /v1/sys/health goes green the moment the dev server
+          # unseals, which is BEFORE the postStart hook has written parasol/claims-db — so wave 1's
+          # SecretStore and wave 2's ExternalSecret would start against an empty vault and spend a
+          # refresh interval in SecretSyncedError on a world that is actually fine. Probing the seeded
+          # path instead makes "Ready" mean the thing the next wave depends on.
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "bao kv get -mount=parasol -field=password claims-db >/dev/null 2>&1"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - name: home
+              mountPath: /home/bao
+      volumes:
+        # Writable $HOME for the token file — see the header. Ephemeral like the vault's own storage.
+        - name: home
+          emptyDir: {}
+---
+# why: the stable in-cluster address the ESO controller dials as http://openbao.{user}-dev.svc:8200 —
+# a cross-namespace call, and the reason the ESO namespace needs an egress NetworkPolicy (see
+# secret-store.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao
+  namespace: {{ .Values.user }}-dev
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: openbao
+    workshop.redhat.com/module: platform-guardrails
+    workshop.redhat.com/owner: ogsr
+spec:
+  selector:
+    app: openbao
+  ports:
+    - name: api
+      port: 8200
+      targetPort: api

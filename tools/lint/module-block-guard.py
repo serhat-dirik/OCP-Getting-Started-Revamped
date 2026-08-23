@@ -142,6 +142,30 @@ def main(argv: list[str] | None = None) -> int:
                 f"{expected}. A heading dropped here still passes check-module-order.sh — that "
                 f"guard asserts module ORDER, and a missing heading is not a module.")
 
+    # D6 — README's own module table is a FIFTH rendering of the catalogue, alongside the three
+    # navs and index.adoc. On 2026-08-23 a rotation swept four of the five and left this one
+    # naming `B | M07 | Pipelines Fundamentals` after pipelines had become M09 — 20 of its 26 rows
+    # wrong, and every other guard green. Asserted on the (block letter, number) SEQUENCE rather
+    # than on titles: README deliberately carries richer titles than the SSOT ("… (Vibe Coding,
+    # Safely)"), and policing those would force good copy to be flattened for a machine.
+    readme = read(root, "README.md")
+    if readme:
+        seen_rows = [(m.group(1), int(m.group(2)))
+                     for m in re.finditer(r'^\| ([A-D]) \| M(\d\d) \| ', readme, re.M)]
+        if seen_rows:
+            want_rows = [(m["block"][0], i + 1) for i, m in enumerate(mods) if m.get("block")]
+            if seen_rows != want_rows:
+                first = next((k for k, (a, b) in enumerate(zip(seen_rows, want_rows)) if a != b),
+                             min(len(seen_rows), len(want_rows)))
+                shown = seen_rows[first] if first < len(seen_rows) else "<no row>"
+                expect = want_rows[first] if first < len(want_rows) else "<no module>"
+                problems.append(
+                    f"README.md's module table has {len(seen_rows)} row(s) against {len(want_rows)} "
+                    f"module(s), and first diverges at row {first + 1}: the table says "
+                    f"{shown}, the catalogue says {expect}. That table is a fifth rendering of "
+                    f"modules.yaml — a renumber that sweeps the navs and index.adoc and forgets it "
+                    f"leaves every other guard green.")
+
     # D5 — prose that counts the catalogue must count it correctly.
     for rel in ("README.md",):
         text = read(root, rel)
@@ -191,6 +215,7 @@ CASES = [
     ("canary-double-row", 1, "table row(s), not"),
     ("canary-dropped-heading", 1, "section headings are"),
     ("canary-stale-count", 1, "but modules.yaml holds"),
+    ("canary-table-drift", 1, "first diverges at row"),
     ("canary-empty", 1, "[scope]"),
 ]
 

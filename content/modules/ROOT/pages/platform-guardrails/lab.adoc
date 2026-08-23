@@ -1,0 +1,371 @@
+= Platform Guardrails: {lab_page_label}
+:module-id: platform-guardrails
+include::partial$version-attributes.adoc[]
+
+// Lab page for Platform Guardrails. Workshop exercises are guarded ifndef::demo[]; the DEMO
+// rendering shows only the presenter arc. Every command runs in the SHOWROOM terminal as {user},
+// so blocks are role=execute (click-to-run) with subs="attributes" ONLY where {user} must
+// interpolate — blocks driven by shell variables or by jsonpath braces omit it (CC-6).
+//
+// PROVENANCE. Every command and every captured output on this page was performed on cluster-m24jn
+// (OCP 4.22.8, External Secrets Operator 1.2.0, OpenBao 2.6.2) on 2026-08-23, against user4-dev
+// materialized from this module's own entry-state chart. Hashes, resourceVersions and elapsed
+// times are from that run and will differ on yours; the SHAPE of every output will not.
+//
+// SCOPE, and it is deliberate: attendees never create a cluster-scoped object. They READ the
+// policy that governs them and they BREAK it on purpose. They do not author one — a
+// ValidatingAdmissionPolicy is cluster-scoped, `--dry-run=server` is authorized as a real CREATE,
+// and granting attendees cluster-scoped create to practise authoring would dismantle the very
+// guardrail the module is about. Exercise 4 substitutes predict-then-verify, which teaches reading
+// CEL harder than writing it would.
+
+[.lead]
+Your claims service is running and talking to its database. Nothing you can find in Git tells it the password.
+
+include::partial$prereq-ws-start.adoc[]
+
+[TIP]
+====
+Everything below runs in the terminal beside these instructions, already logged in as *{user}*.
+Click any command block to run it.
+====
+
+// ============================================================================
+// DEMO FLAVOR — 14-minute presenter arc
+// ============================================================================
+
+== Demo arc — Two guardrails, from opposite directions (14 min)
+
+[NOTE]
+====
+Beats 1–2 are the secrets half and are visual: a value changes in one system and follows into another while the room watches a clock.
+Beats 3–4 are the policy half and are textual — slow down, and read the denial message aloud.
+====
+
+*Beat 1 — the credential that is not in Git (3 min).* Show the running app. Show the Secret it reads. Then show that nothing created that Secret from a manifest.
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc describe secret claims-creds -n {user}-dev | sed -n '/^Data/,$p'
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}{"\n"}'
+----
+
+....
+Data
+====
+POSTGRESQL_PASSWORD:  18 bytes
+
+ExternalSecret/claims-creds
+....
+
+Land the ownership line. The Secret is *derived*: delete it and it comes back, because a controller is holding it equal to something else.
+
+*Beat 2 — rotation is the test (4 min).* Write a new value into the vault and watch the Kubernetes Secret follow. Use a hash so nothing sensitive reaches the screen.
+
+*Beat 3 — read the rule that is governing you (3 min).* The policy in the next beat is not a fixture. It has constrained every attendee on this cluster since it was built.
+
+*Beat 4 — break it on purpose (4 min).* Submit a deliberately wrong Application and read the refusal. Nothing is created, so there is nothing to clean up. Do this one twice if the room is engaged — the second denial names a different rule, and that is the lesson.
+
+// ============================================================================
+// WORKSHOP FLAVOR — hands-on exercise groups
+// ============================================================================
+
+ifndef::demo[]
+
+== Exercise 1 — Find out where your password comes from
+
+The claims service is up. Confirm it, then work backwards to the credential.
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get deploy -n {user}-dev
+----
+
+Three deployments, all ready: `openbao`, `claims-db`, `parasol-claims`.
+
+Now ask which keys the app's Secret carries. Ask for the *key names* — never the values:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc describe secret claims-creds -n {user}-dev | sed -n '/^Data/,$p'
+----
+
+....
+Data
+====
+POSTGRESQL_PASSWORD:  18 bytes
+....
+
+[WARNING]
+====
+Do not reach for `-o jsonpath='{.data}'` here.
+`.data` is a map of key to base64 *value*, so that command prints the secret material itself — to your screen, to your scrollback, and to anyone watching.
+Base64 is encoding, not encryption.
+====
+
+Who owns it?
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}{"\n"}'
+----
+
+....
+ExternalSecret/claims-creds
+....
+
+That ownerReference is the whole design in one line. The Secret is not a thing anyone maintains — it is derived, and the thing it is derived from lives outside the cluster's manifests entirely.
+
+Read the mapping that produces it:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get externalsecret claims-creds -n {user}-dev -o jsonpath='{.spec.refreshInterval}{"\n"}{.spec.data[0].remoteRef.key}{"/"}{.spec.data[0].remoteRef.property}{"\n"}'
+----
+
+....
+15s
+claims-db/password
+....
+
+Fifteen seconds is how often the operator re-checks. `claims-db/password` is *a reference*, not a secret — it is safe to review, diff and publish, which is exactly why it can live in Git when the value cannot.
+
+=== Now go looking for the password in Git
+
+Search this repository for a Secret manifest called `claims-creds`:
+
+[source,sh,role=execute]
+----
+grep -rl "name: claims-creds" --include="*.yaml" . | xargs grep -l "kind: Secret"
+----
+
+You will find one — and it is *not* the one your app is using:
+
+....
+./gitops/promotion/claims-config-template/base/claims-creds-secret.yaml
+....
+
+Open it.
+
+[source,sh,role=execute]
+----
+sed -n '5,12p' gitops/promotion/claims-config-template/base/claims-creds-secret.yaml
+----
+
+....
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claims-creds
+type: Opaque
+stringData:
+  POSTGRESQL_USER: parasol
+  POSTGRESQL_PASSWORD: parasol
+....
+
+That file belongs to a different module, and it is the pattern this one replaces: a password sitting in a repository in plain text, reviewable by anyone with read access, permanent in the history.
+
+Now confirm that *your* namespace's Secret did not come from any such file — nothing in this module's chart creates it:
+
+[source,sh,role=execute]
+----
+grep -rl "kind: Secret" gitops/entry-states/platform-guardrails/templates/ || echo "no Secret manifest in this module's chart"
+----
+
+The chart ships a Secret for OpenBao's *own* access token, and none for your application's password. That absence is the lesson, and you just checked it yourself rather than taking anyone's word for it.
+
+== Exercise 2 — Rotate it, and prove the rotation lands
+
+Record what the Secret holds now. Hash it, so the value never reaches your screen:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
+oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | grep -o '"current_version":[0-9]*'
+----
+
+....
+690c7bf39c96
+"current_version":1
+....
+
+Version 1 — the vault has been written once, when this environment was built.
+
+Now rotate. Pick your own value:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc exec -n {user}-dev deploy/openbao -- bao kv put -mount=parasol claims-db password=rotated-by-me
+----
+
+Watch the Kubernetes Secret follow. Run this a few times over the next twenty seconds:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
+----
+
+On the measured run the hash changed between the ninth and fifteenth second:
+
+....
+t+3s    690c7bf39c96
+t+9s    690c7bf39c96
+t+15s   a195862ede2e
+....
+
+Nobody edited a manifest. Nobody redeployed. The `refreshInterval` you read in exercise 1 is exactly the window you just watched.
+
+Confirm the vault agrees:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | grep -o '"current_version":[0-9]*'
+----
+
+....
+"current_version":2
+....
+
+[NOTE]
+====
+Your *running* app did not notice, and that is not a bug — it is the distinction worth taking away.
+`POSTGRESQL_PASSWORD` reaches the container as an environment variable, and environment is read once, at container start.
+The Secret changed; the process did not.
+A Secret mounted as a *volume* is updated in place by the kubelet, and an application that re-reads the file would pick this up without a restart.
+Neither is wrong. They are different, and the difference is invisible until the day you rotate.
+====
+
+== Exercise 3 — Read the rule that is governing you
+
+Everything so far was about a value. This is about a shape.
+
+There is a `ValidatingAdmissionPolicy` on this cluster that constrains what *you* are allowed to create. Read its rules:
+
+[source,sh,role=execute]
+----
+oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{range .spec.validations[*]}{"- "}{.message}{"\n"}{end}'
+----
+
+....
+- attendees may only use their own 'entries-<username>' AppProject
+- attendees may only create single-source Applications
+- attendees may only create Applications named entry-<module-slug>-<their own username>
+- attendees may only source Applications from gitops/entry-states/
+....
+
+Four rules. Now read the expressions that enforce them:
+
+[source,sh,role=execute]
+----
+oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{range .spec.validations[*]}{.expression}{"\n"}{end}'
+----
+
+These are CEL. They are short on purpose, and two things in them are worth noticing: `request.userInfo.username` — the policy is written once and evaluates differently for every attendee — and `has(object.spec.project)`, which guards a field access, because an expression that errors is an expression that cannot decide.
+
+Read the condition that decides whether the policy applies at all:
+
+[source,sh,role=execute]
+----
+oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{.spec.matchConditions[*].expression}{"\n"}'
+----
+
+....
+'workshop-attendees' in request.userInfo.groups
+....
+
+That is why the platform team can create whatever they need on this cluster while you cannot. Same policy, different identity.
+
+== Exercise 4 — Predict, then break it
+
+Read the four rules again and *predict* before you run anything: which rule will this Application trip?
+
+[source,sh,role=execute,subs="attributes"]
+----
+cat > /tmp/try-1.yaml <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: not-the-right-name
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: "https://example.com/x.git"
+    path: "gitops/entry-states/platform-guardrails"
+    targetRevision: main
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: {user}-dev
+EOF
+oc create -f /tmp/try-1.yaml
+----
+
+....
+Error from server (Forbidden): error when creating "/tmp/try-1.yaml":
+applications.argoproj.io "not-the-right-name" is forbidden:
+ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard'
+denied request: attendees may only use their own 'entries-<username>' AppProject
+....
+
+That manifest broke *two* rules — the project and the name — and the message named only the first. A policy reports the first validation that evaluates false, in declaration order. It is not a report card.
+
+Fix the project and the name, and leave one thing wrong:
+
+[source,sh,role=execute,subs="attributes"]
+----
+cat > /tmp/try-2.yaml <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: entry-platform-guardrails-{user}
+  namespace: openshift-gitops
+spec:
+  project: entries-{user}
+  source:
+    repoURL: "https://example.com/x.git"
+    path: "apps/parasol-claims"
+    targetRevision: main
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: {user}-dev
+EOF
+oc create -f /tmp/try-2.yaml
+----
+
+....
+denied request: attendees may only source Applications from gitops/entry-states/
+....
+
+A different rule, named precisely.
+
+Now confirm what a refusal at admission actually costs:
+
+[source,sh,role=execute]
+----
+oc get application not-the-right-name -n openshift-gitops
+----
+
+....
+Error from server (NotFound): applications.argoproj.io "not-the-right-name" not found
+....
+
+Nothing was created. Nothing partially applied. Nothing to clean up. That is the argument for putting the rule at admission rather than in a controller that finds the bad object later and tries to undo it.
+
+[NOTE]
+====
+You cannot create a policy of your own here, and the reason is the module's own subject matter.
+`ValidatingAdmissionPolicy` is cluster-scoped, and `oc apply --dry-run=server` is authorized as a real `create` — so "just validating" a cluster-scoped policy still requires cluster-scoped write.
+Granting every attendee that permission, in order to practise guardrails, would remove the guardrail.
+In an organisation this is the same shape: you author the policy, and it reaches the cluster through review and GitOps, not because you had permission to apply it by hand.
+====
+
+=== Check your work
+
+[source,sh,role=execute,subs="attributes"]
+----
+ws verify platform-guardrails
+----
+
+The rotation you performed in exercise 2 is exactly what this grades — it checks that the vault's version counter has moved past 1 and that the Kubernetes Secret still equals what the vault holds *right now*. It deliberately does not check *which* password you chose; grading your own choice of value would print a ❌ over correct work.
+
+endif::[]

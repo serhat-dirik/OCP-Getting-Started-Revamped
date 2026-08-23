@@ -1,0 +1,96 @@
+= Platform Guardrails: Instructor Guide
+:module-id: platform-guardrails
+include::partial$version-attributes.adoc[]
+
+// Instructor guide. Timings marked MEASURED were taken on cluster-m24jn (OCP 4.22.8, ESO 1.2.0,
+// OpenBao 2.6.2) on 2026-08-23 while capturing lab.adoc against user4-dev. Timings marked
+// ESTIMATED are the measured command latency plus room for reading and discussion, and are the
+// numbers to correct after you have delivered this once.
+
+*Read this before you schedule the module.* Hands-on is *~35 min* estimated; with the concept page and wrap-up, budget *~50 min*.
+
+The module has two halves that feel completely different in a room, and knowing which one you are in is most of delivering it well.
+Exercises 1–2 are the secrets half: concrete, visual, and they end with a clock.
+Exercises 3–4 are the policy half: textual and slower, and the payoff is a sentence on a screen rather than a state change.
+Do not try to give them the same energy.
+
+== Timings
+
+[cols="1,4,1,3",options="header"]
+|===
+| Ex | What happens | Time | What is actually slow
+
+| 1
+| Read the Secret, its owner, its mapping; then go looking for the password in Git
+| ~8 min
+| Nothing technically — every command returns instantly. The time is reading and the Git search.
+
+| 2
+| Rotate the value in OpenBao, watch the Kubernetes Secret follow
+| ~9 min
+| *MEASURED: the Secret changed 15 s after the vault write* (`refreshInterval: 15s`). Budget the silence — see below.
+
+| 3
+| Read the live policy: its messages, its CEL, its match condition
+| ~8 min
+| Reading CEL out loud. Do not rush this; it is the only place they meet the language.
+
+| 4
+| Predict which rule a bad Application trips, then submit two of them
+| ~10 min
+| *MEASURED: both denials return immediately.* The time is the prediction, which is the point.
+|===
+
+== The beat that needs handling: fifteen seconds of nothing
+
+In exercise 2 the attendee writes to the vault and then watches a hash that does not change, twice, before it does.
+
+That silence is the single most valuable moment in the module and it is also where a room gets restless. Say what is happening before it happens: *"the operator re-checks every fifteen seconds, so you are about to watch nothing happen twice."* Then let it be quiet.
+
+If you fill the silence with talking, the moment the hash flips goes unnoticed, and the module's central claim lands as an assertion instead of an observation.
+
+== What must not appear on screen
+
+Exercise 1 has a `WARNING` block telling attendees not to run `-o jsonpath='{.data}'`. Someone will run it anyway.
+
+That is recoverable and worth using: the value they just printed is a workshop fixture, not a real credential, and the base64 on their screen is the whole point — encoding is not encryption, and it just travelled into their scrollback. Make it the lesson rather than an incident. But do not demonstrate it yourself from the presenter machine, because a recording keeps it.
+
+== Top questions attendees ask
+
+*1. "Why can't I write my own policy? That's the interesting part."*::
+Because a `ValidatingAdmissionPolicy` is cluster-scoped, and `--dry-run=server` is authorized as a real `create` — so even "just validating" one needs cluster-scoped write.
+Granting every attendee that permission in order to practise guardrails would remove the guardrail.
+Then land the honest version: in an organisation you author the policy and it reaches the cluster through review and GitOps, not because you had permission to apply it by hand. The workshop is not simplifying here; it is matching how this actually works.
+
+*2. "The Secret changed but my app is still using the old password. Is that broken?"*::
+No, and this is the best question in the module.
+Environment variables are read once, at container start. The Secret changed; the process did not.
+A Secret mounted as a volume is updated in place by the kubelet, and an app that re-reads the file picks it up without a restart.
+Neither is wrong — but the difference is invisible until the day you rotate, which is exactly when you least want to discover it.
+
+*3. "So the password IS in Git — I found the file."*::
+They found `gitops/promotion/claims-config-template/base/claims-creds-secret.yaml`, and exercise 1 sends them there deliberately.
+It belongs to a different module and it is the anti-pattern this one replaces: same name, same value, plaintext `stringData`.
+The precise claim is that nothing in *this* module's chart creates `claims-creds` — their namespace's Secret exists only because the operator materialized it. Have them re-run the `grep` against `gitops/entry-states/platform-guardrails/templates/` and see the difference.
+
+*4. "Couldn't I just read the vault directly and skip all this?"*::
+They can, from inside the namespace, and that is worth acknowledging rather than dodging: this is a dev-mode OpenBao holding a fixture, with the token in a Secret next to it.
+What the module is teaching is the *shape* — a value that lives in one system, a controller that derives a Kubernetes Secret from it, and a rotation that is a write rather than a project. Production differs in the vault's auth model, not in that shape.
+
+*5. "What happens if the operator is down?"*::
+The existing Secret keeps working — it is an ordinary object and nothing deletes it.
+What stops is reconciliation: a rotation would not propagate, and you would not be told. That is worth naming, because "the sync silently stopped" is the realistic failure, not an outage.
+
+== Failure modes you may hit live
+
+*The ExternalSecret says `SecretSyncedError` for the first few seconds after prep.* Expected — MEASURED at 15 s on a fresh install, and it clears on the first successful reconcile. Do not start exercise 1 until `oc get externalsecret claims-creds` reports `SecretSynced`.
+
+*A denial that names a rule the attendee thought they had satisfied.* A policy reports the first validation that evaluates false, in declaration order — it stops at the first failure. Exercise 4's first manifest breaks two rules on purpose and names only one; if someone fixes that and is refused again, the guardrail is working.
+
+*Exercise 3 returns `Forbidden`.* The attendee-facing read of a cluster-scoped policy needs `admissionregistration.k8s.io` get/list/watch on `platform-observer`, which ships in `gitops/workshop-config`. If it is Forbidden, that grant did not reach the cluster — check the `workshop-config` Application is Synced rather than debugging the attendee's identity.
+
+== If you are short on time
+
+Cut exercise 3's second and third commands — the raw CEL and the match condition — and keep the messages list. The policy half still works: they read what the rules *say*, then watch two of them refuse. What they lose is meeting CEL as a language, which is the part they can read about afterwards.
+
+Do not cut exercise 2. It is the module.

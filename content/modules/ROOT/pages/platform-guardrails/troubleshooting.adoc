@@ -1,0 +1,70 @@
+= Platform Guardrails: Troubleshooting
+:module-id: platform-guardrails
+include::partial$version-attributes.adoc[]
+
+// Entries below come from two sources, and each says which: failures hit while proving the
+// ESO + OpenBao chain on cluster-m24jn (OCP 4.22.8) on 2026-08-22, and failure modes the lab
+// deliberately produces. Format: Symptom / Cause / Fix.
+
+Every entry below was either hit while building this module on the cluster, or is a failure the lab produces on purpose.
+
+== `invalid vault credentials: context deadline exceeded`
+
+*Symptom:* The `ExternalSecret` never syncs. Its status names a credentials problem, so you check the token, the path, the policy, and the role — and all of them are correct.
+
+*Cause:* This is not an authentication failure. It is a **blocked TCP connection**, reported by a client that could not tell the difference between "you are not allowed in" and "nothing answered".
+
+The External Secrets Operator ships a NetworkPolicy called `eso-sys-deny-all-traffic` with an empty pod selector and *both* `Ingress` and `Egress` in its policy types, plus narrow allow-lists for the Kubernetes API server and DNS. Nothing else is reachable. Your secret store is not on that list, so the operator's connection attempt runs to its deadline and dies — and the message it prints is about credentials.
+
+Hit on 2026-08-22 while first standing up the chain; it cost the better part of an hour precisely because the error names the wrong layer.
+
+*Fix:* Ship an egress NetworkPolicy allowing the operator's pods to reach the store. Confirm the diagnosis first, so you are not fixing by coincidence — exec into the operator pod and try the store's address directly. A connection that hangs rather than refusing is the signature.
+
+== The OpenBao pod unseals, logs nothing alarming, and then exits 1
+
+*Symptom:* The container starts, prints its normal dev-mode banner including the unseal and root-token lines, and then terminates with exit code 1. The logs contain no error that explains it.
+
+*Cause:* In dev mode OpenBao writes its root token to a file under `$HOME`. Under OpenShift's default `restricted-v2` SCC the container runs as an arbitrary high UID with no matching passwd entry, so `$HOME` resolves to `/` — which is read-only. The write fails *after* the server has already announced that it is up, which is why the useful part of the output looks healthy.
+
+Hit on 2026-08-22. The banner is what makes this one expensive: everything you would normally read as "it worked" is printed before the failure.
+
+*Fix:* Give the process a writable `HOME` — set the environment variable to a path backed by an `emptyDir`. Do not reach for a custom SCC or `runAsUser`; the SCC is not the problem and relaxing it would be a real regression in a workshop whose whole promise is that it is non-invasive.
+
+== `oc get secret ... -o jsonpath='{.data}'` prints the values, not the key names
+
+*Symptom:* You wanted to confirm *which keys* the operator created, ran a jsonpath over `.data`, and put base64-encoded secret material on screen — in a shared terminal, in a recording, or in a support ticket.
+
+*Cause:* `.data` is a map of key to base64 *value*. A jsonpath that ranges over it emits the values. Base64 is not encryption; anything that reaches a screen this way has been disclosed.
+
+*Fix:* Ask for the key names only:
+
+[source,sh,role=execute]
+----
+oc describe secret claims-creds | sed -n '/^Data/,$p'
+----
+
+When you genuinely need to confirm a value, compare a hash rather than printing it.
+
+== `SecretSynced` is `False` while the `SecretStore` says `Valid`
+
+*Symptom:* The store's status is healthy and its capabilities read `ReadWrite`, but the one `ExternalSecret` you care about will not sync.
+
+*Cause:* These two objects answer different questions. `SecretStore: Valid` means *the operator authenticated to the store*. It says nothing about whether the path and key your `ExternalSecret` names actually exist. A typo in `remoteRef.key` produces exactly this split: a healthy store and one unhappy mapping.
+
+*Fix:* Read the `ExternalSecret`'s own conditions rather than the store's — the message names the path it could not resolve. Then list what is actually at that path in the store. Almost always the path is right and the *key within it* is not.
+
+== The policy denied you and you cannot tell which rule
+
+*Symptom:* `oc apply` is refused by admission, and the message names one problem when you believe you have several — or names a rule you thought you had satisfied.
+
+*Cause:* A `ValidatingAdmissionPolicy` reports the first `validations` entry that evaluates false, in order. It is not a report card; it stops at the first failure. So fixing what it told you about can simply reveal the next rule.
+
+*Fix:* Read the policy rather than guessing from the message — the expressions are in the object and they are short. Fix them in the order they are declared, and expect to be refused more than once. Being refused repeatedly is the guardrail working, not a fault.
+
+== `--dry-run=server` reports a CEL compile error
+
+*Symptom:* Your policy is refused with a message about a CEL expression rather than about the object.
+
+*Cause:* This is the point of `--dry-run=server`, and it is worth recognising as success rather than failure. The API server compiles every expression before it will accept the policy, so a reference to a field that does not exist, or a type mismatch, is caught here — at authoring time — instead of at the moment the policy would first have refused somebody's real request.
+
+*Fix:* Read the expression index in the message; it is the position in your `validations` list. The most common causes are reaching for a field that is absent on the object (guard it with `has()` first) and comparing a string to a non-string.
