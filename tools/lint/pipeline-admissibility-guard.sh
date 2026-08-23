@@ -56,11 +56,49 @@
 #       cheaply: "stop counting after the first PVC binding" would pass [g] and this one turns it
 #       straight back into the 2026-08-07 regression. Deduplicating is not the same as capping.
 #
+# WHAT PROVES THE CASES THEMSELVES — the witness table.
+#
+# NEITHER coverage meta-tool in tools/lint can see these cases. _canary-coverage.py mutates Python
+# ASTs and cannot reach Bash at all; _check-coverage.sh reads Bash but only understands a run_check()
+# driver plus top-level check_*() detector functions, and this guard's cases are inline [a]…[h]
+# blocks driving functions extracted from another file. It therefore names this guard in its
+# not-inspected list, and that is expected to stay true — the shape has not changed. What changed on
+# 2026-08-23 is that the cases stopped relying on being seen by a meta-tool and started proving
+# themselves, because "it ships a --self-test" was never the same claim as "each of its cases can
+# still fail".
+#
+# The mechanism: run_check records the id of every case that objects (CASES_FAILED), and each canary
+# asserts the EXACT set, not just the exit code. Most mutants trip several cases, so an rc-only
+# assertion let any one of them carry the canary — measured before the change, blinding [a],
+# [a-name], [b], [c], [f], [h] or [h-name] one at a time left --self-test at 1. Seven of the ten
+# objections were proving nothing. Now blinding any single one changes a set and --self-test exits 2.
+#
+#   case      witnessed by   the blinding shows up as
+#   [a]       canary 2, 3    the set loses `a`
+#   [a-name]  canary 7, 8    the set loses `a-name`
+#   [b]       canary 7       the set loses `b`      ← had NO canary at all before 2026-08-23
+#   [c]       canary 3       the set loses `c`
+#   [d]       canary 1, 2, 3 canary 1 goes UNDETECTED (it is its only case); 2 and 3 lose `d`
+#   [e]       canary 4, 7    canary 4 goes UNDETECTED; 7 loses `e`
+#   [f]       canary 2, 3    the set loses `f`
+#   [g]       canary 6, 7    canary 6 goes UNDETECTED; 7 loses `g`
+#   [h]       canary 2, 3    the set loses `h`
+#   [h-name]  canary 7, 8    the set loses `h-name` ← had NO canary at all before 2026-08-23
+#
+# The extraction preamble is witnessed by canary 5, whose expected set is EMPTY: rc 2 with any id
+# recorded would mean the battery ran against a library missing the function under test.
+#
+# Verified by hand, since no meta-tool can do it: each of the ten `_fail <id>` lines replaced with
+# `:` in a scratch copy, one at a time, `--self-test` exiting 2 on all ten. Re-verify that way after
+# adding or removing a case — and update the expected set of every canary the new case objects to,
+# or the canaries will report the addition as a blinding.
+#
 # Exit codes (the shared contract):
-#   0  the predicate behaves correctly in all six cases
+#   0  the predicate behaves correctly in all eight cases
 #   1  it does not — or, under --self-test, every planted canary was correctly caught
-#   2  the guard could not do its job (the functions could not be extracted, or a canary went
-#      UNdetected). Never confuse this with a clean result.
+#   2  the guard could not do its job (the functions could not be extracted, a canary went
+#      UNdetected, or a canary was caught by the WRONG set of cases — one of its detectors has gone
+#      blind even though the exit code still looks right). Never confuse this with a clean result.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -75,6 +113,22 @@ LIB_DEFAULT="tools/verify/_lib.sh"
 ok()   { printf '  ✅ %s\n' "$*"; }
 bad()  { printf '  ❌ %s\n' "$*"; }
 note() { printf '     %s\n' "$*"; }
+
+# CASES_FAILED — the ids of the cases that objected on the last run_check, in case order (`a,d,f,h`).
+#
+# This is what makes each inline case individually PROVEN rather than merely present. The cases are
+# not top-level check_*() functions, so tools/lint/_check-coverage.sh cannot see them and
+# _canary-coverage.py cannot reach Bash at all; without the id, a canary is satisfied by ANY ONE of
+# the cases that object to it. Measured on this guard 2026-08-23, before this variable existed:
+# blinding [a], [a-name], [b], [c], [f], [h] or [h-name] one at a time left --self-test at 1 — seven
+# of the ten objections were proving nothing. Each canary now asserts the EXACT set, so blinding any
+# single objection changes that set and --self-test exits 2.
+CASES_FAILED=""
+
+# _fail <case-id> — the ONE way a case objects. Recording the id and failing the run are the same
+# act deliberately: if a case could still redden run_check without naming itself, an objection could
+# be blinded while the set stayed intact and the witness would be worthless.
+_fail() { CASES_FAILED="${CASES_FAILED}${CASES_FAILED:+,}${1}"; }
 
 # ── the stub cluster ─────────────────────────────────────────────────────────────────────────────
 #
@@ -166,8 +220,13 @@ _field() {  # <harness-output> <field> → value
 }
 
 # run_check <lib> → 0 every case correct · 1 a case is wrong · 2 the predicate could not be extracted
+#
+# Also sets CASES_FAILED to the ids of the cases that objected. Reset here, not at declaration:
+# _canary calls this repeatedly in the SAME shell, so a set left over from the previous canary would
+# be read as this one's.
 run_check() {
   local lib="$1" rc=0 out got
+  CASES_FAILED=""
 
   local fn
   for fn in oc_read affinity_assistant_mode pipeline_pvc_workspaces_ok; do
@@ -185,13 +244,13 @@ run_check() {
     bad "[a] two PVC-backed workspaces on one task must fail in the default mode; got rc=${got:-<none>}. Output: ${out}"
     note "This is the 2026-08-07 regression verbatim. A pass here is a verify suite that goes"
     note "green over a module whose every run dies in 27 seconds with no logs."
-    rc=1
+    _fail a
   else
     got="$(_field "$out" CONFLICT)"
     if [[ "$got" != "unit-test" ]]; then
       bad "[a] the offending task must be named in PIPELINE_PVC_CONFLICT; got '${got}', expected 'unit-test'."
       note "The attendee-facing hint is built from that variable — an empty name sends them nowhere."
-      rc=1
+      _fail a-name
     fi
   fi
 
@@ -201,7 +260,7 @@ run_check() {
   if [[ "$got" != "0" ]]; then
     bad "[b] a Pipeline with one PVC-backed workspace per task must PASS; got rc=${got:-<none>}. Output: ${out}"
     note "A false ❌ on a working module destroys attendee trust in every other ✅."
-    rc=1
+    _fail b
   fi
 
   # [c] the permissive mode really is permissive
@@ -211,7 +270,7 @@ run_check() {
     bad "[c] coschedule=pipelineruns lifts the one-PVC cap and must PASS; got rc=${got:-<none>}. Output: ${out}"
     note "Measured on cluster-6xxpf 2026-08-08: the identical two-PVC Pipeline ran to completion"
     note "in that mode. Failing it here would invent a constraint the cluster does not enforce."
-    rc=1
+    _fail c
   fi
 
   # [d] absence is the operator default, and the default is restrictive
@@ -221,7 +280,7 @@ run_check() {
     bad "[d] an UNSET coschedule must be read as the restrictive default and FAIL; got rc=${got:-<none>}. Output: ${out}"
     note "An empty .spec.pipeline.coschedule is what a stock cluster reports. Reading it as"
     note "permission would pass exactly the clusters this whole check exists to protect."
-    rc=1
+    _fail d
   fi
 
   # [e] an emptyDir workspace is not a PVC
@@ -232,7 +291,7 @@ run_check() {
     note "app-security-testing's dast-zap/perf-k6 shape. zap-work and k6-work are declared like"
     note "any other workspace and bound emptyDir by every runner — counting them fails a"
     note "capstone that runs perfectly."
-    rc=1
+    _fail e
   fi
 
   # [f] Tekton's own defaulting rule for an omitted `workspace:`
@@ -242,7 +301,7 @@ run_check() {
     bad "[f] a binding that omits 'workspace:' defaults to the Task's own name and must still count; got rc=${got:-<none>}. Output: ${out}"
     note "Reading the omitted field as an empty pipeline-workspace name silently stops counting —"
     note "a false PASS on a Pipeline that is genuinely broken."
-    rc=1
+    _fail f
   fi
 
   # [g] one PVC at two subPaths is ONE claim — the false-positive direction, distinct-claims edition
@@ -254,7 +313,7 @@ run_check() {
     note "PipelineRun p1-probe-2ws-7t7rq Succeeded with a single volume mounted at two subPaths."
     note "Counting bindings reddens 'ws verify app-security-testing' on a capstone that runs fine —"
     note "and pipelines/pipeline/parasol-claims-devsecops.yaml's own comment names this helper."
-    rc=1
+    _fail g
   fi
 
   # [h] deduplicating must not become "stop counting"
@@ -264,16 +323,20 @@ run_check() {
     bad "[h] a doubled binding PLUS a genuinely second PVC workspace is TWO claims and must FAIL; got rc=${got:-<none>}. Output: ${out}"
     note "This is [g] read too eagerly: a predicate that stops counting after the first PVC binding"
     note "satisfies [g] and is the 2026-08-07 regression again. Dedupe, do not cap."
-    rc=1
+    _fail h
   else
     got="$(_field "$out" CONFLICT)"
     if [[ "$got" != "unit-test" ]]; then
       bad "[h] the offending task must be named in PIPELINE_PVC_CONFLICT; got '${got}', expected 'unit-test'."
       note "The attendee-facing hint is built from that variable — an empty name sends them nowhere."
-      rc=1
+      _fail h-name
     fi
   fi
 
+  # The verdict is DERIVED from the recorded set rather than tracked alongside it. Two counters for
+  # one fact drift: an objection that bumped rc without naming itself would redden the real tree
+  # while leaving every canary's set unchanged — the exact blind spot the ids exist to close.
+  [[ -z "$CASES_FAILED" ]] || rc=1
   return "$rc"
 }
 
@@ -304,17 +367,44 @@ _mutate() {  # <n> <src> <dst> <sed-expr> → 0 built, 1 the sed matched nothing
   return 0
 }
 
-# _canary <n> <expected-rc> <src> <dst> <sed-expr> <caught-msg> <missed-msg> → 0 caught, 1 not
+# _canary <n> <expected-rc> <expected-cases> <src> <dst> <sed-expr> <caught-msg> <missed-msg>
+#         → 0 caught by exactly the right cases, 1 not
+#
+# <expected-cases> is the comma-joined, case-ordered set of ids that MUST object to this mutant —
+# empty for a canary that never reaches the battery (canary 5, which fails extraction). Asserting the
+# exact set, not merely the exit code, is the whole point: most mutants trip several cases, so an
+# rc-only assertion lets any ONE of them carry the canary while the rest go unproven. With the set
+# pinned, blinding a single case changes it and this reports the blinding instead of shrugging.
 _canary() {
-  local n="$1" want="$2" src="$3" dst="$4" expr="$5" caught="$6" missed="$7" rc=0
+  # ARITY CHECKED, and `${8:-}` rather than `$8`, because the alternative is a crash that exits 1 —
+  # the ONE code that means "self-test passed, every canary caught". Measured 2026-08-23: a call site
+  # left at this function's previous seven arguments dies on `$8: unbound variable` under `set -u`,
+  # bash exits 1, and CI's `--self-test must exit EXACTLY 1` assertion reads a guard that never
+  # finished running as a clean bill of health. A wrong call must reach the rc-2 path like any other
+  # broken harness, so the check runs before anything can trip over a missing argument.
+  if (( $# != 8 )); then
+    bad "canary ${1:-?}: _canary needs 8 arguments (n want cases src dst expr caught missed), got $#."
+    note "A stale call site. Left to \`set -u\` this exits 1, which is indistinguishable from a"
+    note "self-test that passed — so it is reported here instead, and the self-test exits 2."
+    return 1
+  fi
+  local n="$1" want="$2" want_cases="$3" src="$4" dst="$5" expr="$6" caught="$7" missed="${8:-}" rc=0
   _mutate "$n" "$src" "$dst" "$expr" || return 1
   run_check "$dst" >/dev/null 2>&1 || rc=$?
-  if [[ "$rc" -eq "$want" ]]; then
-    ok "canary ${n} caught: ${caught}"
-    return 0
+  if [[ "$rc" -ne "$want" ]]; then
+    bad "canary ${n} UNDETECTED (rc=${rc}, expected ${want}) — ${missed}"
+    return 1
   fi
-  bad "canary ${n} UNDETECTED (rc=${rc}, expected ${want}) — ${missed}"
-  return 1
+  if [[ "$CASES_FAILED" != "$want_cases" ]]; then
+    bad "canary ${n} was caught, but by the WRONG cases: got '${CASES_FAILED:-<none>}', expected '${want_cases:-<none>}'."
+    note "The exit code is right and the detectors are NOT. Either a case stopped objecting to a"
+    note "mutant it must object to — the blind spot these ids exist to catch — or a case was added,"
+    note "removed or renamed and this expectation was not updated with it. Read the difference: an"
+    note "id that vanished is a detector to fix, an id that appeared is an expectation to widen."
+    return 1
+  fi
+  ok "canary ${n} caught by [${want_cases:-extraction}]: ${caught}"
+  return 0
 }
 
 _self_test() {
@@ -323,22 +413,25 @@ _self_test() {
 
   cp "$src" "${tmp}/clean.sh"
   run_check "${tmp}/clean.sh" >/dev/null 2>&1; rc=$?
-  if [[ "$rc" -eq 0 ]]; then ok "the real predicate passes all eight cases"
-  else bad "the REAL predicate failed the case battery (rc=${rc}) — see the plain run for which case"; fail=1; fi
+  if [[ "$rc" -eq 0 && -z "$CASES_FAILED" ]]; then ok "the real predicate passes all eight cases"
+  else bad "the REAL predicate failed the case battery (rc=${rc}, cases '${CASES_FAILED:-<none>}') — see the plain run"; fail=1; fi
 
   # Canary 1: absence read as permission. The exact inversion case [d] exists for.
-  _canary 1 1 "$src" "${tmp}/c1.sh" 's/OC_OUT:-workspaces/OC_OUT:-pipelineruns/' \
+  _canary 1 1 "d" "$src" "${tmp}/c1.sh" 's/OC_OUT:-workspaces/OC_OUT:-pipelineruns/' \
     "an unset coschedule defaulted to the PERMISSIVE mode" \
     "a predicate that reads absence as permission passes this guard" || fail=1
 
   # Canary 2: off-by-one on the cap. Two PVCs would be tolerated and three would not.
-  _canary 2 1 "$src" "${tmp}/c2.sh" 's/if (( n > 1 )); then/if (( n > 2 )); then/' \
+  _canary 2 1 "a,d,f,h" "$src" "${tmp}/c2.sh" 's/if (( n > 1 )); then/if (( n > 2 )); then/' \
     "the cap raised from one PVC to two" \
     "the regression itself would pass this guard" || fail=1
 
-  # Canary 3: the mode gate inverted, so the check only runs where it does not apply.
+  # Canary 3: the mode gate inverted, so the check only runs where it does not apply. [d] is in its
+  # set alongside the restrictive-mode cases because an UNSET coschedule resolves to `workspaces`
+  # before the gate is reached — the inverted gate then waves it through, which is the same cluster
+  # the regression broke.
   # shellcheck disable=SC2016  # the $ are literal text in a sed script, not expansions
-  _canary 3 1 "$src" "${tmp}/c3.sh" \
+  _canary 3 1 "a,c,d,f,h" "$src" "${tmp}/c3.sh" \
     's/\[\[ "\$AFFINITY_ASSISTANT_MODE" == "workspaces" \]\] || return 0/[[ "$AFFINITY_ASSISTANT_MODE" != "workspaces" ]] || return 0/' \
     "the restrictive-mode gate inverted" \
     "the predicate could grade the wrong clusters" || fail=1
@@ -346,14 +439,16 @@ _self_test() {
   # Canary 4: the PVC-backed set ignored, so every workspace counts. Fails [e]. Anchored on the
   # per-binding reset rather than on the match itself: forcing is_pvc high before the loop makes
   # every workspace look PVC-backed, and the anchor is a whole line that cannot be reflowed away.
-  _canary 4 1 "$src" "${tmp}/c4.sh" 's/is_pvc=0/is_pvc=1/' \
+  _canary 4 1 "e" "$src" "${tmp}/c4.sh" 's/is_pvc=0/is_pvc=1/' \
     "every workspace counted, PVC-backed or not" \
     "emptyDir workspaces would red-flag a working capstone" || fail=1
 
   # Canary 5: the function renamed out from under the extractor. Must be rc 2 (could not inspect),
   # NOT rc 1 — "I could not look" and "I looked and it is broken" are different answers, and only
-  # one of them should let a maintainer go on believing the predicate was checked.
-  _canary 5 2 "$src" "${tmp}/c5.sh" 's/^pipeline_pvc_workspaces_ok() {/pipeline_pvc_workspaces_okay() {/' \
+  # one of them should let a maintainer go on believing the predicate was checked. Its expected case
+  # set is EMPTY, and that is an assertion too: run_check must bail at the extraction preamble, so a
+  # single id here would mean the battery ran against a library missing the very function under test.
+  _canary 5 2 "" "$src" "${tmp}/c5.sh" 's/^pipeline_pvc_workspaces_ok() {/pipeline_pvc_workspaces_okay() {/' \
     "a renamed predicate reports 'could not inspect', not 'clean'" \
     "a guard pointing at nothing must never read as a pass" || fail=1
 
@@ -362,16 +457,36 @@ _self_test() {
   # [g] is the only thing that fails on it: [a]-[f] all still pass, which is precisely why the
   # defect survived a guard with five canaries and six cases.
   # shellcheck disable=SC2016  # literal $ inside a sed script, not an expansion
-  _canary 6 1 "$src" "${tmp}/c6.sh" 's/"\$seen" != /"" != /' \
+  _canary 6 1 "g" "$src" "${tmp}/c6.sh" 's/"\$seen" != /"" != /' \
     "the claim-dedupe reverted to counting bindings" \
     "one PVC at two subPaths would again fail a capstone that runs perfectly" || fail=1
+
+  # Canary 7: the cap tightened by one instead of loosened — `n > 0`, so a SINGLE PVC-backed
+  # workspace is called a conflict. Canary 2's mirror image, and the only mutant any of the
+  # must-PASS cases object to: added 2026-08-23 because [b] — the false-positive direction, the case
+  # whose whole job is to stop a working module going ❌ — had no canary at all, and neither did
+  # either PIPELINE_PVC_CONFLICT name assertion. Both fall out of this one mutant: every fixture's
+  # `fetch-source` binds one PVC workspace, so it now trips first and is named instead of
+  # `unit-test`, which is exactly how a real off-by-one would misdirect the attendee's hint.
+  _canary 7 1 "a-name,b,e,g,h-name" "$src" "${tmp}/c7.sh" 's/if (( n > 1 )); then/if (( n > 0 )); then/' \
+    "the cap tightened from one PVC to none — a working module reddened, and the wrong task named" \
+    "a predicate that reddens every Pipeline with a workspace at all passes this guard" || fail=1
+
+  # Canary 8: the verdict kept, the NAME dropped. rc stays 1 on [a] and [h], so an rc-only guard sees
+  # nothing wrong, and the attendee gets `❌ … conflicting PVC workspaces on task ''`. This is the
+  # cheap refactor failure — the assignment lost while the `return 1` beside it survives — and it is
+  # the one both name assertions are for.
+  # shellcheck disable=SC2016  # literal $ inside a sed script, not an expansion
+  _canary 8 1 "a-name,h-name" "$src" "${tmp}/c8.sh" 's/PIPELINE_PVC_CONFLICT="\$task"/PIPELINE_PVC_CONFLICT=""/' \
+    "the conflicting task no longer named, though the verdict is still right" \
+    "the hint an attendee reads would point at no task and this guard would not notice" || fail=1
 
   rm -rf "$tmp"
   if [[ "$fail" -ne 0 ]]; then
     bad "self-test FAILED — this guard cannot be trusted on the real tree"
     return 2
   fi
-  printf '  pipeline-admissibility-guard: self-test passed (six canaries, every one caught)\n'
+  printf '  pipeline-admissibility-guard: self-test passed (eight canaries, each caught by exactly the cases that must object)\n'
   return 1
 }
 
