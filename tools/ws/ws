@@ -5309,6 +5309,69 @@ maas_await_converge() {  # module user want-model timeout → 0 once a FRESH hoo
   return 1
 }
 
+# ── cockpit parameters (MAAS-1) ───────────────────────────────────────────────────────────────────
+# The cockpit renders the model and endpoint from HELM PARAMETERS on the workshop-config
+# Application, NOT from the runtime Secret this command stages. Measured 2026-08-22: rotating the
+# key left `showroom.maasModel` naming the previous model, so every AI module's docs told the
+# attendee to call a model the runtime no longer served — while `maas show` reported everything
+# healthy, because the Secret and the namespaces genuinely agreed. `doctor` detects the split and
+# tells the operator to fix it by hand; this closes it instead, which is the whole point of
+# "a config change is not a reinstall".
+#
+# Patched BY INDEX rather than by rewriting the parameter array: the array also carries repo URLs
+# and revisions, and reconstructing it in shell to change two strings risks mangling a value that
+# has nothing to do with MaaS. jq is deliberately not used — `ws` does not depend on it.
+maas_param_index() {  # app ns key → 0-based index in .spec.source.helm.parameters, or empty
+  oc get application "$1" -n "$2" \
+     -o jsonpath='{range .spec.source.helm.parameters[*]}{.name}{"\n"}{end}' 2>/dev/null \
+    | awk -v k="$3" '$0 == k { print NR - 1; exit }'
+}
+
+maas_sync_cockpit_params() {  # model endpoint → 0 synced or nothing to do, 1 tried and failed
+  local model="$1" endpoint="$2" app="workshop-config" ns="openshift-gitops"
+  local key val idx cur rc=0 changed=0
+
+  if ! oc get application "$app" -n "$ns" >/dev/null 2>&1; then
+    info "no ${app} Application in ${ns} — cockpit parameters not managed here (standalone or FSC install)"
+    return 0
+  fi
+
+  for key in showroom.maasModel showroom.maasEndpoint; do
+    case "$key" in
+      showroom.maasModel)    val="$model" ;;
+      showroom.maasEndpoint) val="$endpoint" ;;
+    esac
+    cur="$(oc get application "$app" -n "$ns" \
+           -o jsonpath="{.spec.source.helm.parameters[?(@.name=='${key}')].value}" 2>/dev/null)"
+    if [[ "$cur" == "$val" ]]; then continue; fi
+    idx="$(maas_param_index "$app" "$ns" "$key")"
+    if [[ -n "$idx" ]]; then
+      if oc patch application "$app" -n "$ns" --type=json \
+           -p "[{\"op\":\"replace\",\"path\":\"/spec/source/helm/parameters/${idx}/value\",\"value\":\"${val}\"}]" \
+           >/dev/null 2>&1; then
+        ok "  ${key}: ${cur:-<unset>} → ${val}"; changed=1
+      else
+        err "  ${key}: could not patch ${app} — check: oc auth can-i patch applications -n ${ns}"; rc=1
+      fi
+    else
+      if oc patch application "$app" -n "$ns" --type=json \
+           -p "[{\"op\":\"add\",\"path\":\"/spec/source/helm/parameters/-\",\"value\":{\"name\":\"${key}\",\"value\":\"${val}\"}}]" \
+           >/dev/null 2>&1; then
+        ok "  ${key}: added → ${val}"; changed=1
+      else
+        err "  ${key}: could not add to ${app} — check: oc auth can-i patch applications -n ${ns}"; rc=1
+      fi
+    fi
+  done
+
+  if [[ "$rc" -eq 0 && "$changed" -eq 0 ]]; then
+    ok "  cockpit parameters already name ${model} — nothing to change"
+  elif [[ "$rc" -eq 0 ]]; then
+    info "  Argo will re-render the cockpits; the chart rolls them on the value change (0.3.5)."
+  fi
+  return "$rc"
+}
+
 cmd_maas_set() {  # SA/admin: stage the workshop MaaS credential + re-converge the AI modules. WRITES.
   local vars_file="$MAAS_VARS_DEFAULT" key_file="" key_stdin="false"
   local opt_model="" opt_endpoint="" scope_user="" converge="true" force="false"
@@ -5558,6 +5621,12 @@ YAML
     fi
   done <<< "$pairs"
   echo
+
+  # MAAS-1: the docs render from the Application's helm parameters, not from the Secret above.
+  info "Syncing the cockpit's rendered model + endpoint (workshop-config helm parameters)"
+  maas_sync_cockpit_params "$model" "$endpoint" || true
+  echo
+
   if [[ "$n_bad" -eq 0 ]]; then
     ok "MaaS credential staged and ${n_ok} module instance(s) converged — no reinstall was needed."
   else
