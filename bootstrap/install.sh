@@ -113,8 +113,44 @@ resolve_slug() {
 
 # Space-fenced set of disabled slugs (leading + trailing space so membership globs match whole slugs),
 # plus a comma-joined CSV for the workshop-config showroom-hiding parameter.
+# ── modules_enabled: the ALLOW-list, resolved FIRST ──────────────────────────────────────────────
+# Owner ask 2026-08-23: "if no include specified it's all modules, if include list specified then
+# that list should be installed." Teaching M1-5 out of a 27-module catalogue meant listing 22
+# modules you do NOT want, which is both tedious and wrong every time the catalogue grows.
+#
+# THE ASYMMETRY THAT MATTERS, and the reason this is not a one-liner: an ABSENT list means ALL
+# modules; an EMPTY list means the same. Neither may ever mean "none". A `modules_enabled: []`
+# treated as "install nothing" would produce a cluster with no modules and no error, which is the
+# single worst outcome this file can produce — the deployer gets a green install and an empty
+# workshop. `[]` and absent are therefore indistinguishable here, on purpose.
+ENABLED_SET=" "
+ENABLED_ANY="false"
+while IFS= read -r tok; do
+  if [[ -z "$tok" ]]; then continue; fi
+  if ! slug="$(resolve_slug "$tok")"; then
+    die "modules_enabled: unknown or out-of-range module '$tok' (use mNN like m13 or a slug from modules.yaml)"
+  fi
+  ENABLED_ANY="true"
+  case "$ENABLED_SET" in *" $slug "*) continue ;; esac
+  ENABLED_SET="${ENABLED_SET}${slug} "
+done < <(yq -r '.modules_enabled[]?' "$VARS" 2>/dev/null || true)
+
 DISABLED_SET=" "
 DISABLED_CSV=""
+
+# When an allow-list is given, everything NOT on it is disabled. The two keys are mutually
+# exclusive (enforced below): an allow-list can already express any subset, so supporting
+# "these, except those" would buy nothing and cost a foot-gun — modules_enabled:[m1] with
+# modules_disabled:[m1] is a silent empty workshop, and no error a deployer would ever see.
+if [[ "$ENABLED_ANY" == "true" ]]; then
+  while IFS= read -r slug; do
+    if [[ -z "$slug" ]]; then continue; fi
+    case "$ENABLED_SET" in *" $slug "*) continue ;; esac
+    DISABLED_SET="${DISABLED_SET}${slug} "
+    DISABLED_CSV="${DISABLED_CSV:+$DISABLED_CSV,}${slug}"
+  done <<< "$ALL_SLUGS"
+fi
+
 while IFS= read -r tok; do
   # `cond && cmd` written as a statement is the shape that silently skipped five teardown steps on
   # 2026-07-25 (fixed in 8722a79). It is only fatal inside a function called as a bare command, which
@@ -123,6 +159,9 @@ while IFS= read -r tok; do
   if [[ -z "$tok" ]]; then continue; fi
   if ! slug="$(resolve_slug "$tok")"; then
     die "modules_disabled: unknown or out-of-range module '$tok' (use mNN like m13 or a slug from modules.yaml)"
+  fi
+  if [[ "$ENABLED_ANY" == "true" ]]; then
+    die "modules_enabled and modules_disabled are mutually exclusive — you set both. An allow-list already expresses any subset: to teach m1-m5 without m3, write modules_enabled: [m1, m2, m4, m5]."
   fi
   case "$DISABLED_SET" in *" $slug "*) continue ;; esac
   DISABLED_SET="${DISABLED_SET}${slug} "
@@ -249,7 +288,15 @@ discover_maas_model() {
 
 echo "▶ Workshop bootstrap"
 echo "  users     : ${USER_PREFIX}1..${USER_PREFIX}${USERS}"
-echo "  modules   : ${MODULE_COUNT} in catalog · disabled: ${DISABLED_CSV:-none}"
+# Print what will be INSTALLED, not just what was excluded. With an allow-list the disabled CSV is
+# the long list and the interesting one is the short one, and a deployer who mistyped a slug should
+# see a count that does not match their intent here, before 40 minutes of installing.
+ENABLED_COUNT=$(( MODULE_COUNT - $(printf '%s' "${DISABLED_CSV}" | awk -F, 'NF{print NF}END{if(!NR)print 0}') ))
+if [[ "$ENABLED_ANY" == "true" ]]; then
+  echo "  modules   : ${ENABLED_COUNT} of ${MODULE_COUNT} — allow-list from modules_enabled: ${ENABLED_SET# }"
+else
+  echo "  modules   : ${MODULE_COUNT} in catalog · disabled: ${DISABLED_CSV:-none}"
+fi
 echo "  lightspeed: ${LIGHTSPEED}"
 echo "  source    : ${REPO_URL} @ ${REVISION}"
 

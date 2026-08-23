@@ -40,6 +40,41 @@ render loudly rather than silently ignoring a typo that would leave a module une
 {{- define "ogsr-bootstrap.disabledSlugs" -}}
 {{- $catalog := .Values.moduleCatalog | default (list) -}}
 {{- $out := list -}}
+{{/*
+   modulesEnabled — the ALLOW-list, the declarative twin of bootstrap/install.sh's modules_enabled.
+   Resolved FIRST: everything not on it is disabled, and modulesDisabled may not also be set.
+
+   An EMPTY or absent list means ALL modules, never none. A `modulesEnabled: []` read as "install
+   nothing" would render a green Application set with no modules in it — the FSC path's version of
+   the same silent empty workshop install.sh guards against.
+*/}}
+{{- $enabled := list -}}
+{{- range $tok := (.Values.modulesEnabled | default (list)) -}}
+{{- $t := $tok | toString | trim | lower -}}
+{{- if $t -}}
+{{- if regexMatch "^m[0-9]+$" $t -}}
+{{- $idx := sub (atoi (trimPrefix "m" $t)) 1 -}}
+{{- if and (ge $idx 0) (lt $idx (len $catalog)) -}}
+{{- $enabled = append $enabled (index $catalog $idx).slug -}}
+{{- else -}}
+{{- fail (printf "modulesEnabled: module number %q is out of range (1..%d)" $t (len $catalog)) -}}
+{{- end -}}
+{{- else -}}
+{{- $known := false -}}
+{{- range $m := $catalog -}}{{- if eq $m.slug $t -}}{{- $known = true -}}{{- end -}}{{- end -}}
+{{- if $known -}}{{- $enabled = append $enabled $t -}}
+{{- else -}}{{- fail (printf "modulesEnabled: unknown module %q (use mNN or a slug from modules.yaml)" $t) -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $enabled -}}
+{{- if (.Values.modulesDisabled | default (list)) -}}
+{{- fail "modulesEnabled and modulesDisabled are mutually exclusive — you set both. An allow-list already expresses any subset: to teach m1-m5 without m3, write modulesEnabled: [m1, m2, m4, m5]." -}}
+{{- end -}}
+{{- range $m := $catalog -}}
+{{- if not (has $m.slug $enabled) -}}{{- $out = append $out $m.slug -}}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- range $tok := (.Values.modulesDisabled | default (list)) -}}
 {{- $t := $tok | toString | trim | lower -}}
 {{- if $t -}}
