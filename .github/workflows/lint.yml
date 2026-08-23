@@ -2595,3 +2595,60 @@ jobs:
             exit 1
           fi
           python3 tools/lint/ttyd-auth-header-guard.py
+
+  active-app-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML (pinned)
+        # Hard dependency: the behavioural half parses each stack's kustomization independently of
+        # the shipped awk, and comparing two answers is the whole point. A missing parser exits 2,
+        # which the self-test assertion below turns into a failure — it can never degrade into a
+        # silent pass.
+        run: python3 -m pip install --quiet --disable-pip-version-check 'PyYAML==6.0.2'
+      - name: Nothing decides what a named stack ships by globbing its apps/ directory
+        # 2026-08-23. platform-portfolio/argocd-bootstrap/lib-components.sh states the rule in its
+        # own header — "Any new consumer must use active_app_files(), never a glob" — and provides
+        # the function. Two consumers never got converted: bootstrap/install.sh's
+        # snapshot_operators() and bootstrap/ogsr-uninstall.sh's enumerate_operators() both globbed
+        # apps/*.yaml, so both credited stacks/observability/apps/loki-logging.yaml — a file
+        # deliberately commented OUT of that stack's kustomization, therefore never rendered — to
+        # the workshop. The install recorded op_loki-operator=created:openshift-operators-redhat and
+        # op_cluster-logging=created:openshift-logging for two operators nobody installed.
+        #
+        # `created:<ns>` is the SOLE authorization csv_delete_authorized_by_state() consults, and
+        # del_created_csv() — "the ONE place that deletes a CSV" — deletes on it. So once the org
+        # installed OpenShift Logging under those standard names, this workshop's uninstall would
+        # have deleted THEIR CSV: verbatim the outcome del_created_csv's own refusal message exists
+        # to prevent, reached by feeding the guard a false record upstream rather than by defeating
+        # it. That is a breach of the project's hardest rule (leave no trace on someone else's
+        # cluster), which is why this is a gate and not a note.
+        #
+        # The guard is aimed at the DUPLICATION, not the two symptoms: one derivation in a library
+        # and three hand-rolled copies beside it is how the drift happened. It holds seven
+        # properties — no per-stack glob, exactly one definition of the reader, every caller sources
+        # it, the install/teardown pair converted symmetrically, the library's answer equal to an
+        # independent parse of every kustomization, no stack whose resources: cannot be read at all,
+        # and no ledger entry outliving its defect.
+        #
+        # The false-positive it must NOT produce is the reason it ships a CONTROL case: a sweep of
+        # stacks/*/apps/*.yaml (check-teardown-invariants.sh, owning_stack_of_app) asks a question
+        # the directory IS the authority for, and stays silent.
+        run: |
+          rc=0
+          python3 tools/lint/active-app-files-guard.py --self-test || rc=$?
+          # Exactly 1 = the real tree is clean AND all eight canaries were detected AND the
+          # all-stacks-sweep control stayed silent. 0 = a detector is blind; 2 = a fixture is
+          # missing, bash or the library could not run, or the harness is broken. Either way
+          # detection is unproven, so fail rather than trust a clean result on the real tree.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::active-app-files-guard self-test must exit 1 (real tree clean, every" \
+                 "canary detected, control silent); got rc=$rc. The guard's detection is unproven" \
+                 "— refusing to trust a clean result on the real tree."
+            exit 1
+          fi
+          echo "self-test ok — every canary is detected, the control stays silent (rc=1)."
+          python3 tools/lint/active-app-files-guard.py

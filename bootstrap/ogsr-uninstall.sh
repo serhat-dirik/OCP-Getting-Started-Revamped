@@ -291,6 +291,27 @@ done
 # ── preflight ─────────────────────────────────────────────────────────────────
 command -v oc >/dev/null || die "oc not found in PATH"
 command -v yq >/dev/null || die "yq not found — needed to read component manifests (brew install yq)"
+
+# ── stack membership comes from the portfolio's own reader, never a glob ──────
+# THE SAME source line bootstrap/install.sh carries, pointing at THE SAME file, and that is the whole
+# point: the install decides who owns an operator and this script acts on that decision, so the two
+# can never hold two different opinions if neither of them owns the derivation. active_app_files()
+# answers "which apps/*.yaml does stack X actually ship?" from the stack's kustomization `resources:`
+# list — the authority — rather than from the directory, which also holds deliberately commented-out
+# app files (today stacks/observability/apps/loki-logging.yaml, capacity-gated).
+#
+# Globbing here was a live CSV-deletion hazard, not a tidiness nit: the glob credited loki-logging's
+# Subscriptions to the install, which recorded op_loki-operator=created:openshift-operators-redhat for
+# an operator nobody installed. csv_delete_authorized_by_state() below authorises a CSV deletion on
+# EXACTLY that `created:<ns>` record, so once the org installed OpenShift Logging themselves, this
+# teardown would have deleted their CSV — the outcome del_created_csv()'s own refusal message says
+# must never happen. tools/lint/active-app-files-guard.py holds the property mechanically.
+STACKS_DIR="${SCRIPT_DIR}/../platform-portfolio/stacks"
+COMPONENTS_LIB="${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/lib-components.sh"
+[[ -f "$COMPONENTS_LIB" ]] || die "missing ${COMPONENTS_LIB} — the shared stack reader; without it this teardown cannot tell which apps a stack shipped, and a wrong answer deletes an operator that is not ours"
+# shellcheck disable=SC1090  # runtime-derived path; lib-components.sh is linted standalone
+. "$COMPONENTS_LIB"
+
 oc whoami >/dev/null 2>&1 || die "not logged in — run: oc login …"
 oc auth can-i '*' '*' --all-namespaces >/dev/null 2>&1 \
   || die "need cluster-admin to uninstall (oc auth can-i '*' '*' failed as $(oc whoami))"
@@ -353,14 +374,19 @@ residue_record() {  # <state-key> <reason> — this teardown left OUR value on a
 # three-field `read` would silently absorb the package into $st and classify every operator as
 # "not created", so if you add a field here, fix all of them.
 enumerate_operators() {
-  local stacks stack app comp_path sub name ns st pkg _stacks
+  local stacks stack rel app comp_path sub name ns st pkg _stacks
   stacks="$(state installed_stacks)"
   [[ -n "$stacks" ]] || return 0
   IFS=',' read -ra _stacks <<< "$stacks"
   for stack in "${_stacks[@]}"; do
     stack="$(echo "$stack" | xargs)"
-    [[ -d "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps" ]] || continue
-    for app in "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+    [[ -f "${STACKS_DIR}/${stack}/kustomization.yaml" ]] || continue
+    # active_app_files, NOT a glob: see § stack membership in the preflight. An app the kustomization
+    # leaves commented out was never rendered, so no operator of ours exists behind it — and every
+    # consumer of this function's `created` verdict is a DELETE (del_created_csv, the namespace
+    # classifier, the CRD sweep). The install derives its half through the same function.
+    while IFS= read -r rel; do
+      app="${STACKS_DIR}/${stack}/${rel}"
       [[ -e "$app" ]] || continue
       comp_path="$(yq '.spec.source.path' "$app" 2>/dev/null || true)"
       [[ -n "$comp_path" && "$comp_path" != "null" ]] || continue
@@ -378,7 +404,7 @@ enumerate_operators() {
         [[ -n "$st" ]] || st="unknown"
         echo "${name} ${ns} ${st} ${pkg}"
       done
-    done
+    done < <(active_app_files "$stack")
   done
   # gitea-operator: installed via a remote rhpds/gitea-operator OLMDeploy kustomize base
   # (platform-portfolio/components/gitea/kustomization.yaml fetches it from a GitHub URL at build
@@ -1086,14 +1112,18 @@ report_shared_crds() {  # the named category — printed every run, in --dry-run
 # Emits "<stack>|<namespace>" so the same walk answers both questions asked of it: F2's delete
 # allowlist (namespace only) and "which stack owns this namespace?" (the cascade's phase-3 lookup).
 enumerate_installed_stack_ns_pairs() {
-  local stacks stack app comp_path nsfile _stacks n
+  local stacks stack rel app comp_path nsfile _stacks n
   stacks="$(state installed_stacks)"
   [[ -n "$stacks" ]] || return 0
   IFS=',' read -ra _stacks <<< "$stacks"
   for stack in "${_stacks[@]}"; do
     stack="$(echo "$stack" | xargs)"
-    [[ -d "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps" ]] || continue
-    for app in "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+    [[ -f "${STACKS_DIR}/${stack}/kustomization.yaml" ]] || continue
+    # active_app_files, NOT a glob — same authority, same reason, and here the stakes are a DELETE
+    # allowlist: classify_workshop_namespaces() emits `delete` for any owner-labelled namespace this
+    # walk claims for an installed stack. A commented-out app's namespaces were never created by us.
+    while IFS= read -r rel; do
+      app="${STACKS_DIR}/${stack}/${rel}"
       [[ -e "$app" ]] || continue
       comp_path="$(yq '.spec.source.path' "$app" 2>/dev/null || true)"
       [[ -n "$comp_path" && "$comp_path" != "null" ]] || continue
@@ -1107,7 +1137,7 @@ enumerate_installed_stack_ns_pairs() {
           echo "${stack}|${n}"
         done < <(yq 'select(.kind == "Namespace") | .metadata.name' "$nsfile" 2>/dev/null || true)
       done
-    done
+    done < <(active_app_files "$stack")
   done
   return 0
 }
@@ -1236,15 +1266,20 @@ mirror_stack() {  # → the installed stack that HOSTS the in-cluster git mirror
 }
 
 stack_child_app_names() {  # <stack> → the child Application names its app-of-apps declares
-  local stack="$1" app name
+  local stack="$1" rel app name
   [[ -n "$stack" ]] || return 0
-  [[ -d "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps" ]] || return 0
-  for app in "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+  [[ -f "${STACKS_DIR}/${stack}/kustomization.yaml" ]] || return 0
+  # active_app_files, NOT a glob. "Declares" is the kustomization's word, not the directory's: a
+  # commented-out app file names an Application Argo was never told to create. Converted alongside
+  # the two ownership walks above rather than left as the one survivor — a lone remaining glob is
+  # what the next person copies, and it is how this defect spread from one function to three.
+  while IFS= read -r rel; do
+    app="${STACKS_DIR}/${stack}/${rel}"
     [[ -e "$app" ]] || continue
     name="$(yq '.metadata.name' "$app" 2>/dev/null || true)"
     [[ -n "$name" && "$name" != "null" ]] || continue
     echo "$name"
-  done
+  done < <(active_app_files "$stack")
   return 0
 }
 

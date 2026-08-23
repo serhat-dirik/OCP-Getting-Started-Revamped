@@ -38,6 +38,28 @@ command -v openssl >/dev/null || die "openssl not found — needed to generate/h
 [[ -x "$PORTFOLIO_INSTALL" ]] || die "portfolio installer not found/executable: ${PORTFOLIO_INSTALL}"
 [[ -f "$MODULES_YAML" ]] || die "missing ${MODULES_YAML} — the module catalog drives stack selection"
 
+# ── stack membership comes from the portfolio's own reader, never a glob ──────
+# active_app_files() answers ONE question — "which apps/*.yaml does stack X actually ship?" — and the
+# authority for it is the stack's kustomization `resources:` list, not the directory. A stack may
+# carry a deliberately COMMENTED-OUT app file (today stacks/observability/apps/loki-logging.yaml,
+# capacity-gated), which is never rendered and whose operators are therefore never installed.
+#
+# This is SOURCED rather than re-implemented on purpose. snapshot_operators() below and
+# ogsr-uninstall.sh's enumerate_operators() both globbed apps/*.yaml, and the drift that created was
+# not cosmetic: the glob credited loki-logging's Subscriptions to us, so the state ConfigMap recorded
+# op_loki-operator=created:openshift-operators-redhat for an operator we never installed. `created:`
+# is the ONLY thing ogsr-uninstall.sh's csv_delete_authorized_by_state() consults before deleting a
+# CSV, so that false record authorises deleting the CSV of an operator the ORG later installs under
+# the same standard name — the exact outcome del_created_csv()'s refusal message says must never
+# happen. One function, one file, one answer: the install and the teardown cannot disagree about who
+# owns an operator if neither of them owns the derivation. tools/lint/active-app-files-guard.py holds
+# that property mechanically.
+STACKS_DIR="${SCRIPT_DIR}/../platform-portfolio/stacks"
+COMPONENTS_LIB="${SCRIPT_DIR}/../platform-portfolio/argocd-bootstrap/lib-components.sh"
+[[ -f "$COMPONENTS_LIB" ]] || die "missing ${COMPONENTS_LIB} — the shared stack reader; a checkout without it cannot tell which apps a stack ships"
+# shellcheck disable=SC1090  # runtime-derived path; lib-components.sh is linted standalone
+. "$COMPONENTS_LIB"
+
 v() { yq "$1" "$VARS" 2>/dev/null || true; }
 
 # ── read inputs (with safe defaults) ──────────────────────────────────────────
@@ -442,12 +464,16 @@ is_skipped_component() { case " ${SKIPPED_COMPONENTS} " in *" $1 "*) return 0 ;;
 # already exists (adopted → uninstall NEVER removes it) or will be created by us (created → uninstall
 # may remove it). Source of truth is the component subscription manifests — no brittle hardcoded map.
 snapshot_operators() {
-  local stacks_csv="$1" stack app comp_path comp sub name ns _stacks
+  local stacks_csv="$1" stack rel app comp_path comp sub name ns _stacks
   IFS=',' read -ra _stacks <<< "$stacks_csv"
   for stack in "${_stacks[@]}"; do
     stack="$(echo "$stack" | xargs)"
-    [[ -d "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps" ]] || continue
-    for app in "${SCRIPT_DIR}/../platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+    [[ -f "${STACKS_DIR}/${stack}/kustomization.yaml" ]] || continue
+    # active_app_files, NOT a glob: see § stack membership at the top of this file. A component the
+    # kustomization leaves commented out is never rendered, so nothing we could have created exists
+    # for it — recording it `created:` would licence the teardown to delete the ORG's operator.
+    while IFS= read -r rel; do
+      app="${STACKS_DIR}/${stack}/${rel}"
       [[ -e "$app" ]] || continue
       comp_path="$(yq '.spec.source.path' "$app" 2>/dev/null || true)"
       [[ -n "$comp_path" && "$comp_path" != "null" ]] || continue
@@ -471,7 +497,7 @@ snapshot_operators() {
           record_once "op_${name}" "created:${ns}"
         fi
       done
-    done
+    done < <(active_app_files "$stack")
   done
   # gitea-operator comes from an external rhpds OLMDeploy kustomize base (fetched at build time), so
   # the subscription*.yaml glob above can never find it — record it explicitly, gated on core-devtools

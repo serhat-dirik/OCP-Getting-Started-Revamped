@@ -19,6 +19,14 @@
 # No yq in the main image either: `oc create -f <file> --dry-run=client -o jsonpath=...`
 # parses a local manifest client-side (no server round-trip, no extra tooling needed).
 #
+# That sparse checkout is ALSO what makes this path stop owning a derivation it has no
+# business owning. platform-portfolio/argocd-bootstrap/lib-components.sh — the portfolio's
+# own reader, and the single answer to "which apps/*.yaml does stack X actually ship?" —
+# lives INSIDE platform-portfolio/, so it arrives on the volume already. The capture
+# script sources it and calls active_app_files(), exactly as bootstrap/install.sh and
+# bootstrap/ogsr-uninstall.sh do; see the § at snapshot_operators() for the defect that
+# a third hand-rolled copy re-armed on this, the field-deployment, path.
+#
 # gitea-operator is a deliberate, explicit exception to the generic per-stack walk: it
 # comes from an external rhpds/gitea-operator OLMDeploy kustomize base (a GitHub URL
 # platform-portfolio/components/gitea/kustomization.yaml fetches at build time), so it
@@ -161,6 +169,35 @@ spec:
                 oc create -f "$1" --dry-run=client -o jsonpath="$2" 2>/dev/null || true
               }
 
+              # Stack MEMBERSHIP is not this container's question to answer. active_app_files() in the
+              # portfolio's own lib-components.sh is the single answer for the whole repo, and the
+              # init container already put it on the volume: the sparse checkout takes the whole of
+              # platform-portfolio/, and the library sits inside it. So this path SOURCES the library
+              # instead of deriving membership itself. A copy that does not exist cannot drift, which
+              # is the property being bought here — see § snapshot_operators() for what drift cost.
+              #
+              # It needs nothing this image lacks. The library's own header pins its dependencies to
+              # "grep/sed/awk only, no yq", and active_app_files() is precisely kustomize_resources()
+              # (one awk program) plus one `grep -E`; the OperatorGroup baseline further down already
+              # runs awk/sort/uniq/paste in this very container. Only the per-FIELD manifest reads
+              # need a YAML parser, and those stay on yaml_field() above — the library is never asked
+              # for them, so the missing yq never comes into it.
+              #
+              # Sourcing executes nothing: lib-components.sh is function definitions plus one scalar.
+              STACKS_DIR="${REPO_DIR}/platform-portfolio/stacks"
+              COMPONENTS_LIB="${REPO_DIR}/platform-portfolio/argocd-bootstrap/lib-components.sh"
+              # Fails the Sync hook rather than continuing. An unsourced active_app_files() is a 127
+              # inside a process substitution, which reads as "this stack ships no apps" — a silent
+              # empty snapshot, and a state ConfigMap that is quietly wrong is worse than no install.
+              if [[ ! -f "$COMPONENTS_LIB" ]]; then
+                echo "❌ missing ${COMPONENTS_LIB} — the portfolio's shared stack reader is not in the checkout." >&2
+                echo "   Fix: check the fetch-repo init container still sparse-checks out platform-portfolio/," >&2
+                echo "   and that gitops.repoURL @ gitops.revision carries argocd-bootstrap/lib-components.sh." >&2
+                exit 1
+              fi
+              # shellcheck disable=SC1090  # runtime-derived path; lib-components.sh is linted standalone
+              . "$COMPONENTS_LIB"
+
               info "cluster-monitoring-config (portfolio flips enableUserWorkload=true)"
               if oc get configmap cluster-monitoring-config -n openshift-monitoring >/dev/null 2>&1; then
                 record_once monitoring_cm_existed true
@@ -254,14 +291,39 @@ spec:
               # by us (created → uninstall may remove it). Mirrors bootstrap/install.sh's
               # snapshot_operators() field-for-field: source of truth is the component Subscription
               # manifests (no hardcoded operator map), just read via the init container's checkout +
-              # yaml_field() instead of a local clone + yq.
+              # yaml_field() instead of a local clone + yq, and stack membership from the SHARED
+              # active_app_files() — the same function, in the same file, that install.sh and
+              # ogsr-uninstall.sh call.
+              #
+              # THE KUSTOMIZATION IS THE AUTHORITY, NOT THE DIRECTORY, and here that is a safety
+              # property rather than a tidiness one. A stack may carry an app file its kustomization
+              # deliberately leaves commented out of `resources:` — today observability's
+              # loki-logging, capacity-gated behind ODF object storage. It is never rendered, its
+              # child Application never exists, and its operators are never installed. Enumerating
+              # the directory instead credited its Subscriptions to us and wrote
+              # op_loki-operator=created:openshift-operators-redhat and
+              # op_cluster-logging=created:openshift-logging for operators nobody installed.
+              # `created:<ns>` is the SOLE authorization ogsr-uninstall.sh's
+              # csv_delete_authorized_by_state() consults, and del_created_csv() — "the ONE place
+              # that deletes a CSV" — deletes on it. So a workshop deployed HERE, on the FSC/RHDP
+              # field path, then an org that installs OpenShift Logging later under those standard
+              # names, then ogsr-uninstall.sh, and the teardown removes the ORG's CSV: verbatim the
+              # outcome del_created_csv()'s own refusal message exists to prevent, reached by feeding
+              # it a false record upstream rather than by defeating it.
+              #
+              # bootstrap/install.sh and bootstrap/ogsr-uninstall.sh were converted onto
+              # active_app_files() first. This Job writes into the SAME ogsr-uninstall-state
+              # ConfigMap they read, so leaving a third hand-rolled walk here re-armed the identical
+              # defect on the one path customer engagements actually use.
+              # tools/lint/active-app-files-guard.py holds all three mechanically.
               snapshot_operators() {
-                local stacks_csv="$1" stack app comp_path sub name ns _stacks
+                local stacks_csv="$1" stack rel app comp_path sub name ns _stacks
                 IFS=',' read -ra _stacks <<< "$stacks_csv"
                 for stack in "${_stacks[@]}"; do
                   stack="$(echo "$stack" | xargs)"
-                  [[ -d "${REPO_DIR}/platform-portfolio/stacks/${stack}/apps" ]] || continue
-                  for app in "${REPO_DIR}/platform-portfolio/stacks/${stack}/apps"/*.yaml; do
+                  [[ -f "${STACKS_DIR}/${stack}/kustomization.yaml" ]] || continue
+                  while IFS= read -r rel; do
+                    app="${STACKS_DIR}/${stack}/${rel}"
                     [[ -e "$app" ]] || continue
                     comp_path="$(yaml_field "$app" '{.spec.source.path}')"
                     [[ -n "$comp_path" ]] || continue
@@ -280,7 +342,7 @@ spec:
                         record_once "op_${name}" "created:${ns}"
                       fi
                     done
-                  done
+                  done < <(active_app_files "$stack")
                 done
               }
 
