@@ -1,0 +1,49 @@
+#!/bin/sh
+# credential-redaction-guard canary sidecar #2 — the HTTP RESPONSE BODY blind spot (2026-08-23).
+#
+# Extensionless on purpose, exactly like pipeline-sidecar beside it: only the shebang sniff in
+# collect_files lets a directory walk pick this up at all, and SELF_EXCLUDED keeps it out of the real
+# tree's plain scan because the first function below is a genuine offender by design.
+#
+# WHAT ONLY THIS FIXTURE CAN PROVE. The .adoc canary is grouped by `----` blocks, so it exercises
+# rule 3's patterns but never _shell_functions / SHELL_FUNCTION_OPEN_RE — the grouper that makes rule 3
+# usable on real shell. Both halves of that grouper are asserted here, and they pull in opposite
+# directions, which is the point:
+#
+#   gateway_reason()       must FIRE. The only HTTP evidence is in the function's own header
+#                          comment, so the finding exists only if the whole function is one window.
+#                          A per-line window would see `head -c 300 "$body"` with no HTTP context
+#                          in reach and stay quiet — a false negative.
+#
+#   gateway_reason_safe()  must stay SILENT. Its `head -c 300` and its substitution are on DIFFERENT
+#                          lines, which is how tools/ws/ws's maas_probe_reason is actually written.
+#                          A per-line window would report the shipped, correct code — a false
+#                          positive, and the fastest way to get a guard switched off.
+#
+#   gateway_reason_clipped()  must FIRE, and is the LAST thing in this file with no closing `}`.
+#                          Only _shell_functions' unterminated-tail branch can produce a window for
+#                          it — the same branch, and the same reason, as the .adoc canary's final
+#                          unclosed `----`. Without this, that branch was measurably unproven:
+#                          _canary-coverage could blind it and both exit codes stayed on baseline.
+#
+# self_test() asserts EXACTLY TWO findings across this whole file — one per offender. Three means
+# the redacted twin regressed into a false positive; one means a window grouper stopped working.
+
+gateway_reason() {  # bodyfile → the endpoint's own one-line reason. A FINDING BY DESIGN.
+  body="$1"
+  [ -s "$body" ] || return 0
+  printf 'gateway said: %s\n' "$(head -c 300 "$body")"
+}
+
+gateway_reason_safe() {  # bodyfile token → the same reason, with the credential taken out first.
+  body="$1"
+  token="$2"
+  head -c 300 "$body" \
+    | sed -e "s|${token}|<redacted>|g" -e 's|sk-[A-Za-z0-9._-]\{4,\}|sk-<redacted>|g'
+}
+
+# Everything below is deliberately the LAST thing in this file, and the closing brace is deliberately
+# missing — a clipped paste, or a heredoc that swallowed it. Nothing may be added after it.
+gateway_reason_clipped() {  # bodyfile → the endpoint's reason, from a paste that lost its closer
+  body="$1"
+  printf 'gateway said: %s\n' "$(head -c 300 "$body")"

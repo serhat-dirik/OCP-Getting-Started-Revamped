@@ -24,6 +24,25 @@ WHAT IT FLAGS
      block clears the finding: the truncation is then a readability trim, not the control.
   2. Literal credential-shaped material (`sk-…`, a JWT) sitting in a command line — a hardcoded
      token, as opposed to a `$VARIABLE` reference.
+  3. An HTTP RESPONSE BODY printed through a fixed-width trim, with no redaction in the handler
+     that prints it (`head -c 300 "$body"`, `${resp_body:0:200}`, `r.text[:400]`).
+
+THE SECOND STREAM (blind spot found 2026-08-23, and it was the ORIGINAL one). Rules 1 and 2 read
+credential material from two places: vocabulary in the block, or `oc logs` — a stream whose contents
+this repo does not control. An endpoint's HTTP response body is exactly the same category of stream
+and was not in the list, so `curl … -o "$body"` followed by `head -c 300 "$body"` in some other
+function scanned CLEAN. Measured by running this guard over an unredacted copy of `maas_probe_reason`
+in tools/ws/ws — the very function whose redaction motivated the guard — and getting rc 0. That
+function reads a model-gateway error body, and LiteLLM's 400 for an expired key echoes the key that
+was sent to it, so the leak is not hypothetical: it is the live example this repo already redacts
+against. A guard that watched `oc logs` and not response bodies was watching the wrong stream.
+
+WHY RULE 3 IS A SEPARATE PASS, WITH A WIDER WINDOW. Rules 1 and 2 judge a finding inside ONE shell
+pipeline (or one `----` block). A body handler cannot be judged that way: `maas_probe_reason` reads
+the body on one line, redacts on the next, and trims on the one after that — three separate logical
+commands. With a per-pipeline window the CORRECT, shipped function is a false positive (measured).
+So rule 3's window is the enclosing shell FUNCTION, which is the unit that actually owns "capture →
+redact → print", falling back to one pipeline for top-level code and to the `----` block in AsciiDoc.
 
 WHAT IT DELIBERATELY DOES NOT FLAG — and why (the pushback is part of the design).
   `curl -H "Authorization: Bearer $TOKEN"` puts the token in argv, where `ps` can see it. This repo
@@ -32,6 +51,34 @@ WHAT IT DELIBERATELY DOES NOT FLAG — and why (the pushback is part of the desi
   shape would redden main on legitimate teaching material and train people to silence the guard,
   which costs more than it saves. A *literal* token in argv is a different thing entirely and is
   rule 2. If argv hygiene is ever wanted, it needs a `--config` convention first, not a linter.
+
+  RULE 3 IS A CONJUNCTION, and each half is a deliberate narrowing:
+
+  * `curl … | head -c 200` on its own is NOT rule 3. A body piped straight from the request is
+    already judged by rule 1, which sees the `Authorization` header sitting in the same pipeline —
+    correctly a finding when the request is authenticated, correctly silent for the unauthenticated
+    `…/api/claims | head -c 200` that this workshop teaches. Rule 3 exists for the case rule 1
+    cannot see: the body has been CAPTURED into a file or a variable and is dumped somewhere the
+    request is no longer in view. Re-flagging the piped shape would double-report and drag the
+    claims-API teaching line in with it.
+
+  * The trimmed thing must be NAMED like a response body (`$body`, `$bodyfile`, `$resp_body`,
+    `$http_out`, `resp.text`, …) AND the window must speak HTTP (`curl`, `wget`, `%{http_code}`,
+    `urlopen`, `requests.get`, `http…://`, `endpoint`, `bodyfile`). Either half alone is not the
+    claim this rule makes. Measured on this tree: the name alone flags `${tbody:0:100}` in
+    verify-mutation-guard.sh (a trap BODY, not a response) and `body[:3]` in api-key-shape-guard.py
+    (which is a redaction). With both halves required, rule 3 fires on 0 of the 1071 files this
+    tree held when it was measured, 2026-08-23.
+
+  * The honest cost of the conjunction, stated so nobody is surprised by it: a body handler whose
+    window carries NO HTTP vocabulary at all — no curl, no endpoint, not even `bodyfile` in its
+    doc comment — is NOT caught. Verified: strip the header comment off `maas_probe_reason` and
+    rule 3 goes silent. That is the price of not flagging every variable someone called `body`, and
+    it is bounded by this repo's own convention that every shell function carries a `# args → result`
+    comment. The alternative — accepting HTTP evidence from anywhere in the FILE — measures 0 false
+    positives too, but it cannot be proven by the canary (every canary file mentions `curl`, so
+    flooding the pattern would be a no-op), and an unprovable half of a rule is how a rule dies
+    quietly. Provable-and-narrower beats broader-and-unprovable.
 
 USAGE
     tools/lint/credential-redaction-guard.py [path ...]   # default: the repo's code+content roots
@@ -216,17 +263,78 @@ SYNTHETIC_MARKERS = _compile(
     r"abcdef0123456789|xxxx|<the-?key>|your-?key|test"
 )
 
+# ---------------------------------------------------------------------------------------------
+# Rule 3 — an HTTP response body dumped through a fixed-width trim.
+#
+# The two halves below are ANDed. Neither is the claim on its own: `$body` alone is any variable
+# somebody called body (this repo has a trap body and a function body), and `curl` alone is every
+# lab page in content/. Together they say "the thing being trimmed is a response body, in a window
+# that speaks HTTP" — which fires on 0 of this tree's 1071 files and on the unredacted
+# `maas_probe_reason` that proved the blind spot.
+# ---------------------------------------------------------------------------------------------
+
+# Written out rather than a `\w*body\w*` wildcard ON PURPOSE. Measured on this tree, the wildcard
+# form flags `${tbody:0:100}` (verify-mutation-guard.sh, a trap's body) — one letter away from a
+# name that IS a response body. An exact alternation is the difference between the two.
+_BODY_NAME = (r"(?:body|bodyfile|body_file|resp|resp_body|response|response_body"
+              r"|http_body|http_out|err_body|errbody|payload)")
+
+# The TRUNCATED THING is a response body. Not "a response body exists somewhere nearby" — the trim's
+# own operand, which is what makes this a leak rather than a coincidence.
+RESPONSE_BODY_RE = _compile(
+    "RESPONSE_BODY_RE",
+    rf"""(?xi)
+      \b(?:head|cut|tail)\s+(?:-{{1,2}}[A-Za-z-]+(?:[=\s]*\d\S*)?\s+)*
+        ["']?\$\{{?{_BODY_NAME}\}}?\b["']?                # head -c 300 "$body"
+    | \$\{{{_BODY_NAME}:\d+:\d+\}}                        # ${{resp_body:0:200}}
+    | \b{_BODY_NAME}\s*\[\s*:\s*\d+\s*\]                  # body[:400]   (python)
+    | \.(?:text|content)\s*\[\s*:\s*\d+\s*\]              # r.text[:400]
+    | \.(?:read|text|json)\s*\(\s*\)\s*\[\s*:\s*\d+\s*\]  # r.read()[:400]
+    """
+)
+
+# …and the window it sits in speaks HTTP, so "body" means a response and not a trap body. Generous
+# on purpose: the narrow half is RESPONSE_BODY_RE above, and a second narrow half would only add a
+# second way to go blind. `endpoint` and `bodyfile` are in here because they are this repo's own
+# words for "the model gateway" and "the file curl wrote the response into" — nobody names a
+# function-body variable `bodyfile`.
+HTTP_RESPONSE_RE = _compile(
+    "HTTP_RESPONSE_RE",
+    r"(?i)\bcurl\b|\bwget\b|\bhttp[_-]?code\b|%\{http|\burlopen\b"
+    r"|\brequests\.(?:get|post|put)\b|\bhttps?://|\bendpoint\b"
+    r"|\bbody-?file\b|\bresponse\s+body\b|\bHTTP/\d"
+)
+
+# The `name() {` … `}` pair, indentation-aware so shell embedded in a YAML entry-state template is
+# grouped the same way a standalone .sh file is. The `()` is REQUIRED (or the `function` keyword):
+# an optional-parens form would treat any `something {` line — a Go struct, an awk action, a jsonnet
+# object — as a shell function and swallow the rest of the file into one window.
+#
+# NOT in MUTABLE_PATTERNS, and that is deliberate: it is structure, not a detector, and the canary is
+# AsciiDoc — mutating it could not flip an `----` block, so a section naming it would prove nothing.
+# Its proof is the response-body sidecar in self_test(), whose finding exists only because these two
+# lines are grouped into one window (see the sidecar assertions below).
+SHELL_FUNCTION_OPEN_RE = _compile(
+    "SHELL_FUNCTION_OPEN_RE",
+    r"^(\s*)(?:function\s+[A-Za-z_][\w:.-]*\s*(?:\(\s*\))?|[A-Za-z_][\w:.-]*\s*\(\s*\))\s*\{\s*(?:#.*)?$"
+)
+
 # The rules this guard can emit, and every regex a canary section is allowed to mutate. Both are
 # coverage requirements: --self-test fails if any entry here has no canary section naming it, which
 # is what stops a new rule (or a new exemption) from shipping with no evidence behind it.
 RULE_TRUNCATION = "truncation-as-redaction"
 RULE_LITERAL = "literal-credential"
-RULES = (RULE_TRUNCATION, RULE_LITERAL)
+RULE_RESPONSE_BODY = "unredacted-response-body"
+RULES = (RULE_TRUNCATION, RULE_LITERAL, RULE_RESPONSE_BODY)
 
+# SHELL_FUNCTION_OPEN_RE is deliberately absent: it decides where a window STARTS, not whether
+# something is a finding, and the canary is AsciiDoc — no mutation of it could flip an `----` block.
+# It is proven instead by the response-body sidecar, which only produces its finding when these two
+# lines are grouped into one window. See the note beside its definition.
 MUTABLE_PATTERNS = (
     "TRUNCATION_RE", "CREDENTIAL_CONTEXT_RE", "UNAUDITABLE_STREAM_RE",
     "REDACTION_RE", "GENERATION_RE", "LITERAL_KEY_RE", "LITERAL_JWT_RE",
-    "SYNTHETIC_MARKERS",
+    "SYNTHETIC_MARKERS", "RESPONSE_BODY_RE", "HTTP_RESPONSE_RE",
 )
 
 
@@ -278,6 +386,55 @@ def _blocks_for(path: pathlib.Path, lines):
     return list(_logical_commands(lines))
 
 
+def _shell_functions(lines):
+    """Yield (start_index, end_index_exclusive) for each `name() { … }`, matched on INDENTATION.
+
+    Indentation rather than brace counting, because the input includes shell embedded in YAML entry
+    states, where the whole function is indented under a `script: |` — a column-0 closer never
+    arrives. The opener's own leading whitespace is what the closer must match.
+
+    An unterminated function (a clipped paste, a heredoc that ate the closer) yields its tail, the
+    same way _adoc_blocks treats an unclosed `----`: the alternative is silently dropping the region
+    a truncated file is MOST likely to be hiding something in.
+    """
+    open_at, indent = None, ""
+    for i, line in enumerate(lines):
+        if open_at is None:
+            match = SHELL_FUNCTION_OPEN_RE.match(line)
+            if match:
+                open_at, indent = i, match.group(1)
+        else:
+            rest = line[len(indent):]
+            if line.startswith(indent) and (rest.rstrip() == "}" or rest.startswith("} #")):
+                yield (open_at, i + 1)
+                open_at = None
+    if open_at is not None:
+        yield (open_at, len(lines))
+
+
+def _handler_windows(path: pathlib.Path, lines):
+    """The window RULE 3 is judged in — the FUNCTION, not the pipeline.
+
+    Rule 1 asks "is this one command safe on its own", and a pipeline is the honest unit for that.
+    Rule 3 asks "does the code that handles this response body redact it", and that is a question
+    about a function: tools/ws/ws's `maas_probe_reason` captures on one line, redacts on the next
+    and trims on the one after. Measured — with a per-pipeline window the SHIPPED, correctly
+    redacted function is a false positive, which is the fastest way to get a guard switched off.
+
+    Lines outside any function still get their pipeline window, so top-level script code is not
+    silently exempt. In AsciiDoc the `----` block is already the right unit and is reused as-is.
+    """
+    if path.suffix == ".adoc":
+        return _blocks_for(path, lines)
+    functions = list(_shell_functions(lines))
+    covered = set()
+    for start, end in functions:
+        covered.update(range(start, end))
+    loose = [(start, end) for start, end in _logical_commands(lines)
+             if not covered.intersection(range(start, end))]
+    return functions + loose
+
+
 def find_offenders(path: pathlib.Path):
     """Yield (line_no, rule, message) for each finding in one file, deduplicated."""
     try:
@@ -322,17 +479,44 @@ def find_offenders(path: pathlib.Path):
                     seen.add(finding[:2])
                     yield finding
 
+    # Rule 3: an HTTP response body trimmed to a character count, in a handler that never redacts.
+    # Same shape as rule 1 — context, then exemptions, then the offending line — but judged over the
+    # FUNCTION (see _handler_windows) and keyed on the trim's OPERAND rather than on vocabulary
+    # anywhere in reach. Both differences are what let it see `maas_probe_reason` without flagging
+    # the shipped, redacted version of it.
+    for start, end in _handler_windows(path, lines):
+        window = "\n".join(lines[start:end])
+        if not HTTP_RESPONSE_RE.search(window):
+            continue
+        if REDACTION_RE.search(window) or GENERATION_RE.search(window):
+            continue
+        for offset, line in enumerate(lines[start:end]):
+            if line.lstrip().startswith(("#", "//", "*")):
+                continue                          # prose and comments describe the rule, not break it
+            match = RESPONSE_BODY_RE.search(line)
+            if match:
+                finding = (start + offset + 1, RULE_RESPONSE_BODY,
+                           f"an HTTP response body is printed through a fixed-width trim "
+                           f"({match.group(0).strip()}) and nothing in this handler redacts it — an "
+                           f"endpoint's error body can echo back the credential you sent it "
+                           f"(LiteLLM's 400 for an expired key does exactly that). Redact the thing: "
+                           f"see maas_redact() and the `sed s/sk-…/` in tools/ws/ws")
+                if finding[:2] not in seen:
+                    seen.add(finding[:2])
+                    yield finding
+
 
 # This guard and its canary exist to CONTAIN the patterns it hunts — its docstring quotes `cut -c`
 # and `b[:400]`, and the canary is nothing but offenders. Scanning them during a real run reports
 # the detector to itself. lint.yml's privacy guard excludes its own file for exactly this reason.
 #
-# "pipeline-sidecar" is the extensionless, genuinely-offending fixture under
-# credential-redaction-guard.canary/ that self_test() walks with skip_self=False to prove the
-# shebang-sniff and the non-AsciiDoc block grouper (see self_test()). It must stay out of the real
-# tree's plain scan for the same reason the .adoc canary does — it is a finding by design.
+# "pipeline-sidecar" and "response-body-sidecar" are the extensionless, genuinely-offending fixtures
+# under credential-redaction-guard.canary/ that self_test() walks with skip_self=False to prove the
+# shebang-sniff and the two non-AsciiDoc window groupers — _logical_commands for rule 1 and
+# _shell_functions for rule 3 (see self_test()). They must stay out of the real tree's plain scan for
+# the same reason the .adoc canary does — they are findings by design.
 SELF_EXCLUDED = {"credential-redaction-guard.py", "credential-redaction-guard.canary.adoc",
-                 "pipeline-sidecar"}
+                 "pipeline-sidecar", "response-body-sidecar"}
 
 
 def require_tree_floors(scope, include_scan: bool = True) -> None:
@@ -617,27 +801,50 @@ def self_test():
         problems.append(f"[scope] collect_files([{CANARY_PATH}]) returned {named!r}, not "
                         f"[{CANARY_PATH}] — the explicitly-named-file branch is broken")
 
-    # Proof for the shebang-sniff predicate (_has_shebang) and the non-AsciiDoc block grouper
-    # (_logical_commands). Both need a WALKED directory — an explicitly-named file skips the
-    # suffix/shebang check entirely — holding an extensionless script whose credential-bearing
-    # pipeline rule 1 only catches if the grouper keeps its three lines together. SELF_EXCLUDED
-    # keeps the fixture out of the real tree's plain scan (it is a genuine offender by design);
-    # skip_self=False here is what lets THIS walk see it anyway.
+    # Proof for the shebang-sniff predicate (_has_shebang) and the two non-AsciiDoc window groupers.
+    # All of them need a WALKED directory — an explicitly-named file skips the suffix/shebang check
+    # entirely — holding extensionless scripts whose findings exist ONLY because of the grouper each
+    # one exercises. SELF_EXCLUDED keeps the fixtures out of the real tree's plain scan (they are
+    # genuine offenders by design); skip_self=False here is what lets THIS walk see them anyway.
+    #
+    #   pipeline-sidecar       _logical_commands — rule 1 sees it only if the three piped lines are
+    #                          kept together as one block.
+    #   response-body-sidecar  _shell_functions + SHELL_FUNCTION_OPEN_RE — rule 3 sees the leaking
+    #                          handler only if the function is one window (the HTTP context is in the
+    #                          function's own header comment, not on the offending line), and stays
+    #                          SILENT on the redacted twin below it only if the window is the whole
+    #                          function rather than the single line that does the trim. Its third
+    #                          function is UNCLOSED, so the second finding exists only via
+    #                          _shell_functions' unterminated-tail branch — measured 2026-08-23:
+    #                          without it, _canary-coverage could blind that branch and BOTH exit
+    #                          codes stayed on baseline. `exactly` asserts all three at once: two
+    #                          findings, never three (the twin regressed) and never one (a grouper
+    #                          stopped working).
     sidecar_dir = pathlib.Path(__file__).resolve().parent / "credential-redaction-guard.canary"
-    sidecar_expect = sidecar_dir / "pipeline-sidecar"
+    sidecars = {                                 # name → (rule it must produce, exact finding count)
+        "pipeline-sidecar": (RULE_TRUNCATION, 1),
+        "response-body-sidecar": (RULE_RESPONSE_BODY, 2),
+    }
+    sidecar_expect = sorted(sidecar_dir / name for name in sidecars)
     sidecar_files = collect_files([sidecar_dir], skip_self=False)
-    if sidecar_files != [sidecar_expect]:
+    if sidecar_files != sidecar_expect:
         problems.append(f"[scope] collect_files([{sidecar_dir}]) returned {sidecar_files!r}, not "
-                        f"[{sidecar_expect}] — the shebang-sniffed sidecar fixture is missing or "
-                        f"the walk did not find it, so neither _has_shebang nor "
-                        f"_logical_commands can be proven")
+                        f"{sidecar_expect!r} — a shebang-sniffed sidecar fixture is missing or the "
+                        f"walk did not find it, so neither _has_shebang nor the window groupers "
+                        f"(_logical_commands, _shell_functions) can be proven")
     else:
-        sidecar_rules = {rule for _, rule, _ in find_offenders(sidecar_expect)}
-        if RULE_TRUNCATION not in sidecar_rules:
-            problems.append(f"[blind rule] the pipeline sidecar fixture ({sidecar_expect}) "
-                            f"produced no {RULE_TRUNCATION!r} finding — either the shebang sniff "
-                            f"excluded it from the walk or _logical_commands stopped grouping its "
-                            f"pipeline into one block")
+        for sidecar in sidecar_expect:
+            rule, exactly = sidecars[sidecar.name]
+            found = list(find_offenders(sidecar))
+            if rule not in {r for _, r, _ in found}:
+                problems.append(f"[blind rule] the sidecar fixture ({sidecar}) produced no {rule!r} "
+                                f"finding — either the shebang sniff excluded it from the walk or "
+                                f"the window grouper it exercises stopped grouping its lines")
+            elif len(found) != exactly:
+                problems.append(f"[false positive] the sidecar fixture ({sidecar}) produced "
+                                f"{len(found)} finding(s), not {exactly} — its correctly-redacted "
+                                f"half is being reported, which is the shape that gets a guard "
+                                f"switched off: {[(f[0], f[1]) for f in found]}")
 
     # Proof 0 — the real tree still clears this guard's own floors, AND collect_files still records
     # what it walked. A count recorded nowhere fails the floor exactly like a walk that never ran,
