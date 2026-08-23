@@ -105,11 +105,30 @@ assert_all_checks_ran() {  # → 0 every declared detector ran as often as expec
 # a run_check() driver AND at least one check_*() detector — the exact shape the audit broke.
 coverage_wiring_scan() {  # <lint-dir> → 0 all wired, 1 a guard is unwired, 2 nothing inspected
   local dir="$1" f base n=0 rc=0 body fn fnbody
+  # WHAT THIS SCAN SKIPPED, tracked rather than discarded. The two `continue`s below used to drop a
+  # file on the floor: it was excluded from every count and named in none of them, so a guard that
+  # changed shape left coverage with no signal whatsoever. That is the same failure as 2026-08-23,
+  # when devworkspace-editor-guard.py turned out to be the only one of 47 guards with no CI step —
+  # invisible because nothing reported what it was NOT looking at. A skip is a decision; decisions
+  # get printed. It is deliberately NOT a finding: these shapes are legitimate, and reddening CI
+  # over them would get the whole gate switched off.
+  local skipped_n=0
+  local skipped_list=""
   for f in "$dir"/*-guard.sh; do
     [[ -f "$f" ]] || continue
-    grep -q '^run_check()' "$f" || continue
-    grep -qE '^check_[A-Za-z0-9_]*\(\)' "$f" || continue
     base="$(basename "$f")"
+    if ! grep -q '^run_check()' "$f"; then
+      skipped_n=$((skipped_n + 1))
+      skipped_list="${skipped_list}     • ${base} — no run_check() driver
+"
+      continue
+    fi
+    if ! grep -qE '^check_[A-Za-z0-9_]*\(\)' "$f"; then
+      skipped_n=$((skipped_n + 1))
+      skipped_list="${skipped_list}     • ${base} — has run_check() but no top-level check_*() detectors
+"
+      continue
+    fi
     n=$((n + 1))
 
     if ! grep -q '_check-coverage.sh' "$f"; then
@@ -151,6 +170,13 @@ coverage_wiring_scan() {  # <lint-dir> → 0 all wired, 1 a guard is unwired, 2 
   fi
   if [[ "$rc" -eq 0 ]]; then
     echo "✅ wiring: ${n} guard(s) with a run_check() driver, every declared detector registered and asserted"
+    if [[ "$skipped_n" -gt 0 ]]; then
+      echo "   ${skipped_n} file(s) this scan does NOT inspect, named rather than passed over in silence:"
+      printf '%s' "$skipped_list"
+      echo "   Their detectors are proven by neither meta-tool: _canary-coverage.py mutates Python"
+      echo "   ASTs and cannot reach Bash, and this scan only understands the run_check()+check_*()"
+      echo "   shape. Each ships its own --self-test; none has a mutation witness."
+    fi
   fi
   return "$rc"
 }
@@ -251,7 +277,28 @@ FIXTURE
       exit 2
     fi
 
-    echo "✅ self-test ok — dropped call site caught, wired driver silent, multiplicity enforced, unwired guard caught, wired guard silent."
+    # Canary F — a file this scan cannot inspect must be NAMED, not silently dropped. Without this
+    # assertion the reporting added on 2026-08-23 could be deleted and every mode would stay on its
+    # baseline: the scan would still exit 0 and still print a tick. Asserted on the FILENAME
+    # appearing in the output, because a count without names is the same silence with a number in
+    # front of it.
+    cat > "${_tmp}/oddshape-guard.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+run_check() { return 0; }
+FIXTURE
+    _out="$(coverage_wiring_scan "$_tmp" 2>&1)" || _rc=$?
+    _rc=0; coverage_wiring_scan "$_tmp" >/dev/null 2>&1 || _rc=$?
+    if [[ "$_rc" -ne 0 ]]; then
+      _cov_err "SELF-TEST FAILED: a file outside this scan's shape made it FAIL (rc=${_rc}). These shapes are legitimate; reddening over them gets the gate switched off."
+      exit 2
+    fi
+    if ! grep -q 'oddshape-guard.sh' <<< "$_out"; then
+      _cov_err "SELF-TEST FAILED: a file the scan skipped was not named in its report — the exclusion is silent, which is exactly the 2026-08-23 failure."
+      exit 2
+    fi
+    rm -f "${_tmp}/oddshape-guard.sh"
+
+    echo "✅ self-test ok — dropped call site caught, wired driver silent, multiplicity enforced, unwired guard caught, wired guard silent, skipped file named."
     # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
     exit 1
   fi
