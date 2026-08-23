@@ -80,6 +80,57 @@ WHAT IT DELIBERATELY DOES NOT FLAG, and why (the pushback is part of the design)
     four-line edge labels ever appear, that is a NEW rule with its own measurement, not a quiet
     widening of this one.
 
+THE DELIBERATE EXCEPTION, AND WHY IT IS PER RULE (2026-08-23). Some diagrams cannot be made smaller
+without being made wrong. Four in this corpus: an AuthorizationPolicy scoped to one service rather
+than to the namespace, a decision node whose three outcomes are three different colours, two honest
+resolutions of which only one reaches Admitted, and a browser IDE whose whole lesson is that it does
+NOT reach the workspace directly. In each, the boundary-crossing edge IS the meaning, and promoting
+it to a container edge would draw something false. Mark those, on a line of their own, anywhere in
+the file:
+
+    %% diagram-size-ok: <rule> — <why size and meaning genuinely conflict here>
+
+It names ONE of the three rules and suppresses ONLY that rule, for that file. A diagram excepted for
+`ignored-direction` is still checked for `tall-label`: the two defects have nothing to do with each
+other, and a per-FILE exemption would silently pre-approve every future edit to that file. This is
+the whole reason the marker carries a rule name at all.
+
+Three ways to get it wrong, each a finding in its own right rather than a silent no-op — a marker
+that does nothing while LOOKING like it does something is worse than no marker at all:
+
+  optout-unknown-rule  names no rule, or names one this guard cannot emit (a typo, a renamed rule).
+  optout-no-reason     the reason is empty or whitespace. Mandatory, because without one the
+                       convention degrades into a rubber stamp and the next reader has nothing to
+                       judge against.
+  optout-stale         names a real rule that DOES NOT FIRE on that file. A stale exception is a lie
+                       about the tree: it claims a conflict that is not there, and it pre-approves a
+                       defect nobody has looked at. It is also why an exception cannot be registered
+                       in ADVANCE of the finding it excuses — three diagrams a lane had flagged as
+                       deliberate turned out not to fire at all, and marking them would have been
+                       exactly this.
+
+AND EVERY HONOURED OPT-OUT IS PRINTED ON EVERY RUN — file, rule and reason — including the clean
+one, whose summary line carries the count. A guard that goes quiet about what it stopped checking is
+the failure mode every docstring in this directory warns about. The list that is PRINTED is the same
+list the suppression reads: they cannot drift apart, because there is only one of them, and
+no-op'ing the append that builds it brings every suppressed finding straight back (which is what
+proves it load-bearing).
+
+WRITING A MARKER IS AN OWNER DECISION, NOT AN AGENT'S — the same rule `tools/lint/LEDGERS.md` §C6
+states for this repo's three declared-debt ledgers, for the same reason: a marker converts a red
+gate into accepted debt, which is a call about shipping a known defect. An agent that finds this
+guard red has three options — fix the diagram, fix the guard if the guard is wrong, or report it and
+stop. The four markers in the corpus today were nominated by the project owner by name, with the
+conflict in each already argued in that diagram's own `%%` header.
+
+WHERE THIS SITS RELATIVE TO LEDGERS.md, stated so the gap is visible rather than discovered. This is
+an INLINE per-item exception like version-anchor-guard's `// version-anchor-ok:`, not a central list
+inside the gate, and LEDGERS.md registers neither. It meets §C2 (named on every run, reprinted with
+its own reason, count in the success line), §C3 both directions (an unmarked defect still fails; a
+marker matching nothing this run fails and says to delete it) and §C5. It does NOT carry §C1's date
+and decision-pointer fields, and a malformed marker is rc 1 — a finding about the tree — rather than
+§C4's rc 2. Both are consequences of the format the owner specified; raise them there, not here.
+
 USAGE
     tools/lint/diagram-size-guard.py [path ...]   # default: content/modules/ROOT/examples/diagrams
     tools/lint/diagram-size-guard.py --self-test  # per-fixture canary assertions; MUST exit 1
@@ -95,7 +146,11 @@ subgraph joined container-to-container, a subgraph that declares no `direction`,
 edges are all internal, a three-line label, a six-node chain, a seven-node chain in a TB diagram.
 Those controls are what a naive implementation fails: "any subgraph with a crossing edge", "any file
 containing `<br/>`", "any LR file with seven node ids" each pass all the canaries and fail the
-controls. And because a detector can be silent for the wrong reason, every fixture also names ONE
+controls. The `r4-` family does the same for the opt-out: a marker with no reason, a marker naming a
+rule that does not exist, a marker naming a rule that does not fire, a marker that is honoured, and —
+the one that matters most — a file with TWO defects and a marker for one of them, which stays
+red for the other. A per-FILE exemption passes every other fixture here and fails that one.
+And because a detector can be silent for the wrong reason, every fixture also names ONE
 module-level pattern and a mutation (`blind` / `flood`); the fixture's outcome must FLIP when that
 pattern is mutated, or the fixture is reported as not testing what it claims. A blind rule, a false
 positive on a control, a mutation that changes nothing, an uncovered rule, an uncovered pattern, a
@@ -231,6 +286,23 @@ EDGE_SPLIT_RE = _compile("EDGE_SPLIT_RE", r"""(?x)
 # The identifier at the head of a node reference: `payments-ci` out of `payments-ci["…"]`.
 NODE_ID_RE = _compile("NODE_ID_RE", r"^[A-Za-z_][A-Za-z0-9_-]*")
 
+# The deliberate exception: `%% diagram-size-ok: <rule> — <reason>` on a line of its own.
+#
+# DELIBERATELY LOOSE, because a marker this pattern does not match is a marker that silently does
+# NOTHING while its author believes it does something — the worst outcome available here. So the
+# match needs only the keyword; the rule name, the separator and the reason are all optional in the
+# REGEX and are judged in Python, where a missing one can be reported as the specific mistake it is
+# rather than vanishing. The separator accepts an em dash, an en dash or a plain hyphen: which one an
+# editor inserts is not a thing to fail a build over.
+#
+# Anchored at the start of the line on purpose. Mermaid comments own their line — a trailing `%%`
+# inside a node label is diagram text, not a comment — so a marker cannot legally trail live syntax.
+OPTOUT_RE = _compile("OPTOUT_RE",
+                     r"^\s*%%\s*diagram-size-ok\b[ \t]*:?[ \t]*"
+                     r"(?P<rule>[A-Za-z][A-Za-z0-9_-]*)?[ \t]*"
+                     r"(?:[-‐-―]+[ \t]*)?"
+                     r"(?P<reason>.*?)[ \t]*$")
+
 # ---------------------------------------------------------------------------------------------
 # Thresholds. Each is a BOUNDARY a control fixture sits exactly on, so an off-by-one is a failing
 # self-test rather than a silent widening: three lines is fine and four is not; six nodes is fine
@@ -243,14 +315,26 @@ MAX_CHAIN_NODES = 6           # 6 ranks across a 900px column is legible. 7 is t
 RULE_IGNORED_DIRECTION = "ignored-direction"
 RULE_TALL_LABEL = "tall-label"
 RULE_WIDE_CHAIN = "wide-chain"
-RULES = (RULE_IGNORED_DIRECTION, RULE_TALL_LABEL, RULE_WIDE_CHAIN)
+
+# The three SIZE rules — and the only three names a `%% diagram-size-ok:` marker may cite. Kept
+# separate from RULES below because the marker must name a shape the guard measures, never one of
+# the meta-findings about the marker itself: `%% diagram-size-ok: optout-stale` is nonsense, and
+# accepting it would build a mute button for the machinery that keeps the mute button honest.
+SIZE_RULES = (RULE_IGNORED_DIRECTION, RULE_TALL_LABEL, RULE_WIDE_CHAIN)
+
+# The three ways an opt-out is itself the defect. Findings, not warnings, and never silent no-ops.
+RULE_OPTOUT_UNKNOWN = "optout-unknown-rule"
+RULE_OPTOUT_NO_REASON = "optout-no-reason"
+RULE_OPTOUT_STALE = "optout-stale"
+
+RULES = SIZE_RULES + (RULE_OPTOUT_UNKNOWN, RULE_OPTOUT_NO_REASON, RULE_OPTOUT_STALE)
 
 # Every pattern a fixture is allowed to mutate. This is a COVERAGE requirement, not a list of
 # conveniences: --self-test fails if any entry here is named by no fixture, which is what stops a
 # new pattern shipping with nothing to notice when it stops working.
 MUTABLE_PATTERNS = (
     "COMMENT_RE", "HEADER_RE", "SUBGRAPH_RE", "END_RE", "DIRECTION_RE",
-    "LABEL_BREAK_RE", "EDGE_LABEL_RE", "EDGE_SPLIT_RE", "NODE_ID_RE",
+    "LABEL_BREAK_RE", "EDGE_LABEL_RE", "EDGE_SPLIT_RE", "NODE_ID_RE", "OPTOUT_RE",
 )
 
 
@@ -379,6 +463,7 @@ class Diagram:
         self.subgraphs = []      # (line_no, name, has_direction, frozenset(member ids))
         self.labels = []         # (line_no, label_text)  — top level and inside subgraphs alike
         self.edges = []          # (line_no, src, dst)    — EVERY link, wherever it was declared
+        self.optouts = []        # (line_no, rule_text, reason_text) — RAW, judged in find_offenders
 
 
 def parse(text: str) -> Diagram:
@@ -406,6 +491,17 @@ def parse(text: str) -> Diagram:
             stack[-1][3].add(node_id)
 
     for n, raw in enumerate(text.splitlines(), 1):
+        # BEFORE the comment strip, and this ordering is the whole mechanism: the marker IS a
+        # mermaid comment, so COMMENT_RE would erase it a line before anything could read it.
+        # `groupdict().get(...)` rather than `.group(...)` so that a MUTATED OPTOUT_RE — the
+        # self-test floods it with a group-less pattern — raises no IndexError. A crash here would
+        # exit 2 and read as "a canary fired", which this file spends 40 lines refusing to allow.
+        marker = OPTOUT_RE.match(raw)
+        if marker:
+            groups = marker.groupdict()
+            doc.optouts.append((n, groups.get("rule") or "", groups.get("reason") or ""))
+            continue
+
         line = COMMENT_RE.sub("", raw)
         if not line.strip():
             continue
@@ -528,13 +624,14 @@ def _longest_chain(edges):
 # independently and watch exactly one fixture go quiet.
 # ---------------------------------------------------------------------------------------------
 
-def find_offenders(path: pathlib.Path):
-    """Yield (line_no, rule, message) for each finding in one .mmd file."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
-        return
-    doc = parse(text)
+def _size_findings(doc: Diagram):
+    """Yield (line_no, rule, message) for the three SIZE rules on one parsed diagram.
+
+    Separated from find_offenders() so that staleness can be judged: "does this rule actually fire
+    on this file" is not answerable until every size rule has run, and an opt-out that names a rule
+    which does not fire is itself a finding. One `yield` per rule, unchanged, so `_canary-coverage`
+    can still no-op each emission site independently and watch exactly one fixture go quiet.
+    """
     if not doc.direction:
         return                       # not a flowchart (or not a diagram at all): nothing to say
 
@@ -575,6 +672,74 @@ def find_offenders(path: pathlib.Path):
                    f"a subgraph does not remove one — that renders around 2000px wide and the 900px "
                    f"cap scales it DOWN, which is the shape measured at 0.44x text. Break the run, "
                    f"or stack it as rows under a `TB` parent joined container-to-container.")
+
+
+def find_offenders(path: pathlib.Path):
+    """(findings, honoured) for one .mmd file.
+
+    findings  [(line_no, rule, message)] — every size finding the file's opt-outs did NOT excuse,
+              plus one finding per opt-out that is itself broken.
+    honoured  [(line_no, rule, reason)]  — the opt-outs in force.
+
+    TWO RETURN VALUES RATHER THAN A SIDE CHANNEL, and `honoured` is BOTH the list main() prints and
+    the list the suppression reads. That identity is the point: an opt-out that silences a rule
+    without appearing in the output is precisely the "guard goes quiet about what it stopped
+    checking" failure this convention exists to prevent, and two lists — one to suppress, one to
+    report — would drift apart the first time someone edited one of them. It also makes the
+    suppression mechanically witnessable: no-op the single `honoured.append` below and every
+    excused finding in the corpus comes straight back, moving the plain run off 0.
+
+    PRECEDENCE AMONG THE THREE MARKER FAULTS is unknown-rule, then no-reason, then stale — ONE
+    finding per marker, never a pile. A marker can easily be two of them at once (a typo'd rule
+    never fires either), and reporting both would make the author fix a consequence.
+    """
+    findings: list[tuple[int, str, str]] = []
+    honoured: list[tuple[int, str, str]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return findings, honoured
+
+    doc = parse(text)
+    size = list(_size_findings(doc))
+    fired = {rule for _, rule, _ in size}
+
+    for line_no, rule, reason in doc.optouts:
+        if rule not in SIZE_RULES:
+            findings.append((line_no, RULE_OPTOUT_UNKNOWN,
+                             f"`%% diagram-size-ok:` names {rule!r}, which is not one of this "
+                             f"guard's rules {list(SIZE_RULES)}. An opt-out is PER RULE — a file "
+                             f"excused for one shape must still be checked for the other two — so a "
+                             f"marker that names no rule this guard can emit excuses nothing at "
+                             f"all, while reading as though it does."))
+            continue
+        if not reason.strip():
+            findings.append((line_no, RULE_OPTOUT_NO_REASON,
+                             f"`%% diagram-size-ok: {rule}` gives no reason. Write "
+                             f"`%% diagram-size-ok: {rule} — <why size and meaning genuinely "
+                             f"conflict here>`. The reason is mandatory because without one the "
+                             f"convention is a rubber stamp: the next reader cannot tell a diagram "
+                             f"that must stay this shape from one nobody got to."))
+            continue
+        if rule not in fired:
+            also = ", ".join(sorted(fired)) if fired else "nothing"
+            findings.append((line_no, RULE_OPTOUT_STALE,
+                             f"`%% diagram-size-ok: {rule}` excuses a finding this file does not "
+                             f"produce (it produces: {also}). A stale exception is a lie about the "
+                             f"tree — it claims a conflict that is not there, and it pre-approves "
+                             f"whatever a future edit to this file does. Delete it; if the shape "
+                             f"ever comes back, so can the marker."))
+            continue
+        honoured.append((line_no, rule, reason.strip()))
+
+    excused = {rule for _, rule, _ in honoured}
+    for line_no, rule, message in size:
+        if rule in excused:
+            continue
+        findings.append((line_no, rule, message))
+
+    findings.sort(key=lambda finding: (finding[0], finding[1]))
+    return findings, honoured
 
 
 # ---------------------------------------------------------------------------------------------
@@ -650,6 +815,15 @@ EXPECT_RE = _compile("EXPECT_RE",
                      r"^%%\s*EXPECT:\s*(?P<rule>[a-z-]+)\s*\|\s*(?P<mode>blind|flood|-)"
                      r"\s*(?P<pattern>[A-Z_]*)")
 
+# The fixture family that is allowed to carry a LIVE opt-out. Any other fixture falling silent
+# because of a marker would be a control muted by one line, indistinguishable from a clean one.
+OPTOUT_FIXTURE_PREFIX = "r4-"
+
+# The reason written into r4-control-optout-honoured.mmd. self_test() asserts this exact text
+# reaches main()'s stdout: "every opt-out is printed, with its reason" is a promise this file makes
+# in its docstring, and a promise no test drives is a promise that stops being true quietly.
+OPTOUT_PRINT_PROOF = "the marker must reach the report"
+
 # %% MUST-FIRE — declares that the next non-comment line is the offender. Deferred to the NEXT line
 # because mermaid comments must own their line: a trailing `%%` inside a node label is diagram text,
 # not a comment, so a marker cannot sit on the line it describes.
@@ -673,7 +847,14 @@ def _fixture_contract(path: pathlib.Path):
         if MUST_FIRE_RE.match(line.strip()):
             pending = True
             continue
-        if pending and line.strip() and not line.strip().startswith("%%"):
+        # `%%` lines are skipped because a mermaid comment is not diagram source — EXCEPT a
+        # `%% diagram-size-ok:` line, which is the one comment this guard reports ON. Its findings
+        # are anchored to the marker's own line, so without this exception no opt-out fault could
+        # ever be pinned to a line and the three marker rules would be asserted as "a finding
+        # somewhere in the file" — the exact weakness the MUST-FIRE convention exists to remove.
+        # version-anchor-guard's fixture hit the identical shape with its bare `// …-ok:` line.
+        stripped = line.strip()
+        if pending and stripped and (not stripped.startswith("%%") or OPTOUT_RE.match(line)):
             must_fire.add(n)
             pending = False
     return rule, mode, pattern, must_fire
@@ -735,9 +916,20 @@ def self_test():  # noqa: C901 — one linear proof per fixture reads better tha
                             f"`%% MUST-FIRE` line — the contract contradicts itself")
             continue
 
-        base = list(find_offenders(fixture))
+        base, base_honoured = find_offenders(fixture)
         base_lines = {line_no for line_no, _, _ in base}
         base_rules = {found for _, found, _ in base}
+
+        # A control that is silent because an opt-out excused it must SAY it carries one, and a
+        # canary must not be silently propped up by one. Without this, `EXPECT: none` and
+        # `%% diagram-size-ok:` would be interchangeable ways to make a fixture quiet, and the
+        # honoured-opt-out control would prove nothing that an empty file does not prove.
+        if base_honoured and not name.startswith(OPTOUT_FIXTURE_PREFIX):
+            problems.append(f"fixture {name!r} carries a live `%% diagram-size-ok:` opt-out but is "
+                            f"not named `{OPTOUT_FIXTURE_PREFIX}…` — a fixture excused by a marker "
+                            f"must say so in its filename, or the next reader cannot tell "
+                            f"silence-because-clean from silence-because-excused, and any control "
+                            f"here could be quietly muted with one line")
 
         if rule:
             if rule not in base_rules:
@@ -763,7 +955,7 @@ def self_test():  # noqa: C901 — one linear proof per fixture reads better tha
         if mode != "-" and pattern:
             original = _mutate(pattern, mode)
             try:
-                mutated_rules = {found for _, found, _ in find_offenders(fixture)}
+                mutated_rules = {found for _, found, _ in find_offenders(fixture)[0]}
             finally:
                 globals()[pattern] = original
             if rule:
@@ -794,7 +986,12 @@ def self_test():  # noqa: C901 — one linear proof per fixture reads better tha
         problems.append(f"[control missing] {REAL_CONTROL} is gone — the one real file proving "
                         f"these rules pass real work is no longer there to prove it")
     else:
-        real = list(find_offenders(REAL_CONTROL))
+        real, real_honoured = find_offenders(REAL_CONTROL)
+        if real_honoured:
+            problems.append(f"[control muted] the real-file control {REAL_CONTROL.name} has "
+                            f"acquired a `%% diagram-size-ok:` marker. Its whole job is to show "
+                            f"these rules stay quiet on a diagram a human measured and called good; "
+                            f"a control that passes because it is EXEMPT proves nothing at all.")
         if real:
             problems.append(f"[false positive] the real-file control {REAL_CONTROL.name} produced "
                             f"{len(real)} finding(s) — first at line {real[0][0]}: {real[0][2]}. "
@@ -813,6 +1010,18 @@ def self_test():  # noqa: C901 — one linear proof per fixture reads better tha
     with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
         rc_offending = main([str(p) for p in offending]) if offending else None
         rc_quiet = main([str(p) for p in quiet]) if quiet else None
+    printed = sink.getvalue()
+
+    # The opt-out report, driven end to end. find_offenders can excuse a finding perfectly and
+    # main() can still fail to SAY SO, which is the one outcome this convention cannot tolerate: an
+    # exception nobody sees is a rule that quietly stopped being enforced. Asserted on the reason
+    # TEXT, not on a count — a report that prints "1 rule excused" and not which one, or which file,
+    # is the same silence with a number in front of it.
+    if OPTOUT_PRINT_PROOF not in printed:
+        problems.append(f"[cli] the honoured opt-out's reason ({OPTOUT_PRINT_PROOF!r}) never "
+                        f"reached the report. Suppression without publication is how a guard "
+                        f"quietly stops checking something; the docstring promises every opt-out is "
+                        f"printed with its file and its reason, and nothing else drives that path.")
     if rc_offending != 1:
         problems.append(f"[cli] `diagram-size-guard.py <{len(offending)} canary fixture(s)>` exited "
                         f"{rc_offending}, not 1. find_offenders can be perfect and still report "
@@ -853,8 +1062,9 @@ def self_test():  # noqa: C901 — one linear proof per fixture reads better tha
 
     print(f"✅ self-test ok — {len(fixtures)} fixture(s): every rule in {list(RULES)} fires on its "
           f"own marked line, every near-miss control stays silent, mutating each of the "
-          f"{len(MUTABLE_PATTERNS)} named patterns flips its fixture, and the real-file control "
-          f"{REAL_CONTROL.name} scans clean.")
+          f"{len(MUTABLE_PATTERNS)} named patterns flips its fixture, an opt-out suppresses ONLY "
+          f"the rule it names and is printed with its reason, and the real-file control "
+          f"{REAL_CONTROL.name} scans clean and un-excused.")
     # House convention: --self-test exits EXACTLY 1 when every canary was correctly caught.
     return 1
 
@@ -889,16 +1099,33 @@ def main(argv=None):
         return 2
 
     findings = []
+    excused = []
     for f in files:
         scope.add("diagrams parsed")        # recorded HERE: downstream of collect_diagrams' return
-        for line_no, rule, message in find_offenders(f):
+        file_findings, file_honoured = find_offenders(f)
+        for line_no, rule, message in file_findings:
             findings.append((f, line_no, rule, message))
+        for line_no, rule, reason in file_honoured:
+            excused.append((f, line_no, rule, reason))
 
     # Judged BEFORE the findings are reported: over a collapsed scope neither answer is trustworthy.
     # rc 2 says the guard could not inspect what it claims to — a different thing from rc 1.
     collapsed = scope.enforce()
     if collapsed:
         return collapsed
+
+    # EVERY opt-out, on EVERY run, before either verdict — the clean one included, and the header
+    # line prints even at zero so the convention never disappears from the log. A guard that stops
+    # checking something and does not say so out loud has quietly become a different guard. Printed
+    # with an unconditional loop and nothing branching on it, deliberately: this list is REPORTING,
+    # and dressing it up as an outcome-deciding local would enumerate it as a detector that no
+    # mutation could ever witness. What proves it load-bearing is `honoured` in find_offenders,
+    # which is this same data on the suppression side. The self-test asserts this text appears.
+    print(f"diagram-size-guard: {len(excused)} rule(s) excused by `%% diagram-size-ok:` — these are "
+          f"NOT being checked:")
+    for f, line_no, rule, reason in excused:
+        rel = f.relative_to(ROOT) if f.is_relative_to(ROOT) else f
+        print(f"  {rel}:{line_no} [{rule}] {reason}")
 
     if findings:
         for f, line_no, rule, message in findings:
@@ -911,7 +1138,11 @@ def main(argv=None):
               file=sys.stderr)
         return 1
 
+    # The excused count rides on the SUCCESS line too, not only in the block above. LEDGERS.md §C2
+    # asks for exactly this: a green line that reads identically whether nothing was skipped or
+    # eleven findings were, is a green line that has stopped carrying the information.
     summary = scope.summary() if not explicit else f"{len(files)} diagram(s) scanned"
+    summary = f"{summary}, {len(excused)} rule(s) excused"
     print(f"diagram-size-guard: clean ({summary}). This does NOT mean the diagrams are the right "
           f"size — nothing here measures pixels. It means none of them is back in one of the three "
           f"authoring shapes that produced every measured offender.")

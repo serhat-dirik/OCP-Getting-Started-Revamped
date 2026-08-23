@@ -128,6 +128,45 @@ jobs:
           echo "self-test ok — all detectors fired and the opt-out suppressed (rc=1)."
           python3 tools/lint/version-anchor-guard.py content/modules/ROOT/pages
 
+      - name: Diagram size guard (no mermaid diagram is back in an unreadable shape)
+        # head-styles.hbs:41 forces every rendered diagram to a 900px column, so intrinsic size is
+        # irrelevant and only `900 x h/w` and `900/w` matter: a narrow diagram is UPSCALED, not
+        # shrunk. Measured in a browser on 2026-08-22 across all 107 diagrams — 30 over 500px tall,
+        # 14 with text past 1.6x, 7 shrunk below 0.6x, one to a 66px sliver at 0.44x. The owner
+        # spotted it by eye in two modules before any of it was measured, and nothing in CI could.
+        #
+        # This guard cannot measure pixels (mermaid layout needs a browser, and this job has no
+        # cheap way to run one), so it enforces the three AUTHORING shapes that produced the
+        # offenders instead — chiefly a `subgraph` that declares `direction` while an edge crosses
+        # its boundary, which is the case where mermaid SILENTLY DISCARDS the direction the author
+        # wrote. Read its docstring before treating a green tick as "the diagrams are sized right".
+        #
+        # Four diagrams carry a `%% diagram-size-ok: <rule> — <reason>` marker, where the crossing
+        # edge IS the meaning and a container edge would draw something false. The marker suppresses
+        # ONE named rule on ONE file, a missing or stale reason is itself a finding, and every
+        # exception in force is printed in this job's log with its file and its reason — so read
+        # them rather than treating the green tick as "nothing was skipped".
+        #
+        # Belongs here rather than in lint.yml only because this is the content job; it reads .mmd
+        # sources and needs no build. Same self-test-first discipline as every other guard on this
+        # page — an unproven detector must not certify a tree.
+        run: |
+          rc=0
+          python3 tools/lint/diagram-size-guard.py --self-test || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::diagram-size-guard self-test must exit 1 (every canary caught); got" \
+                 "rc=$rc. Detection is unproven — refusing to trust a clean result on the real" \
+                 "corpus. rc=0 means a detector went blind; rc=2 means a canary was missed, a" \
+                 "near-miss control false-positived, a mutation stopped flipping its fixture, an" \
+                 "opt-out over-suppressed or stopped being reported, the real-file control" \
+                 "regressed, or a scope floor was breached."
+            exit 1
+          fi
+          echo "self-test ok — all three detectors fire on their own marked lines, every near-miss" \
+               "control stays silent, mutating each named pattern flips its fixture, and an" \
+               "opt-out suppresses only the rule it names (rc=1)."
+          python3 tools/lint/diagram-size-guard.py
+
       - name: Build all three renderings (warnings fail the build)
         working-directory: content
         run: |
