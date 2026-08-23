@@ -1,0 +1,58 @@
+# THE FILE THIS COMPONENT EXISTS FOR. Without it every SecretStore in the workshop fails, and it
+# fails with an error message that points at the wrong layer.
+#
+# ESO hardens its own operand namespace: reconciling ExternalSecretsConfig installs
+# `eso-sys-deny-all-traffic` in `external-secrets` (podSelector {}, policyTypes Ingress AND Egress)
+# plus allow-lists for the API server and for openshift-dns, and nothing else. A NetworkPolicy is
+# additive-only, so once ANY egress policy selects a pod, all egress not matched by some rule is
+# dropped. The ESO core controller therefore cannot open a TCP connection to port 8200 in any tenant
+# namespace — which is precisely what a `SecretStore` with a Vault/OpenBao provider has to do.
+#
+# WHY THE ERROR POINTS AT THE WRONG LAYER, and this is the sentence worth keeping. ESO validates a
+# store by talking to the backend, and it reports every failure of that call through the credential
+# path. A dropped SYN produces:
+#     invalid vault credentials: context deadline exceeded
+# on the SecretStore's Ready condition. "Invalid credentials" is an authentication verdict; the
+# actual fault is a blocked TCP connection three layers down, and the token in the message was never
+# read by anybody. Hours go into re-issuing tokens, re-checking tokenSecretRef keys and re-seeding
+# the vault before someone thinks to look at NetworkPolicies in a namespace they did not create.
+# `context deadline exceeded` is the only tell — an auth rejection returns in milliseconds with a
+# 403; a timeout means the packet never arrived.
+#
+# SCOPE: one policy covers every attendee. It grants egress to namespaces carrying
+# workshop.redhat.com/owner=ogsr, which the workshop layer stamps on every user namespace it creates
+# — so a 12-attendee event needs this policy once, not twelve times, and an attendee namespace that
+# is not ours gets no grant. Port 8200/TCP only (the OpenBao/Vault API), never a blanket egress.
+#
+# NOT A LOOSENING OF THE ORG'S POSTURE: this adds one narrow allow next to ESO's deny-all; it does
+# not delete, patch or replace any eso-sys-* policy. Removing it (uninstall prunes it at wave 3,
+# before anything else) restores the operator's shipped posture exactly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ogsr-allow-eso-to-secret-store
+  # The ESO OPERAND namespace, which this component does not create — the operator does, when it
+  # reconciles ExternalSecretsConfig (wave 2). Hence wave 3 plus the child Application's retry
+  # backoff: the first sync attempt on a cold cluster can legitimately land before the namespace
+  # exists, and Argo retries rather than the install sleeping and hoping.
+  namespace: external-secrets
+  annotations:
+    # Wave 3 = work needing a READY operand. See platform-portfolio/README.md § Sync waves.
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  # The ESO core controller pods — the label ESO's own eso-sys-* policies select them by.
+  # kustomization.yaml sets includeSelectors:false precisely so the owner-label transformer cannot
+  # leak workshop.redhat.com/owner into this selector and silently match nothing.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              workshop.redhat.com/owner: ogsr
+      ports:
+        - port: 8200
+          protocol: TCP
