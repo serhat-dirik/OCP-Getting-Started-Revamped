@@ -1,12 +1,12 @@
 # OpenShift Application Platform — Getting Started
 
-A modern, modular **OpenShift enablement workshop**: 26 self-contained modules that take developers, DevOps engineers, and architects from "I have credentials to a cluster" to "I can develop, deliver, and operate applications on OpenShift — and I know why the platform works this way."
+A modern, modular **OpenShift enablement workshop**: 27 self-contained modules that take developers, DevOps engineers, and architects from "I have credentials to a cluster" to "I can develop, deliver, and operate applications on OpenShift — and I know why the platform works this way."
 
 ## Workshop Content
 
 You join **Parasol Insurance** as an engineer on its claims platform, and the workshop is your first weeks on the job: you deploy the claims service for the first time, wire it to configuration and storage, put pipelines and security gates in front of every change, hand operations to GitOps, learn to observe and scale it, and finish with an AI-assisted platform that helps you modernize legacy code and build agents on top of the same services. Every module advances the same story on the same application — nothing is a toy example.
 
-The 26 modules are grouped into four blocks:
+The 27 modules are grouped into four blocks:
 **A · Foundations, B · Delivery & Trust, C · Platform & Tenancy, D · Advanced Electives**.
 
 
@@ -41,14 +41,14 @@ The 26 modules are grouped into four blocks:
 
 **Modules are flexible.** Every module is self-contained: automation materializes its starting environment per attendee, so no module assumes another one ran first. Attendees can start with any module, follow one of the recommended paths, or jump straight to the topic their team needs today.
 
-**Plan a delivery.** The whole catalog is about **18 hours**, so the designated full workshop is **3-4 days covering all 26 modules** — not a selection from them. Shorter formats drop modules rather than rush them:
+**Plan a delivery.** The whole catalog is about **18 hours**, so the designated full workshop is **3-4 days covering all 27 modules** — not a selection from them. Shorter formats drop modules rather than rush them. These are **starting points, not prescriptions** — the delivering SA chooses the set with `modules_enabled` in `bootstrap/vars.yaml` (see INSTALL.md):
 
 | Delivery | Modules | Total |
 |---|---|---|
-| Half-day taster | M01 → M02 → M07 → M10 → M25 | ~3 h |
-| Full-day essentials | M01 → M02 → M03 → M04 → M07 → M10 → M13 → M24 | ~6 h |
+| Half-day taster | M01 → M02 → M09 → M12 → M25 | ~3 h |
+| Full-day essentials | M01 → M02 → M03 → M04 → M07 → M09 → M12 → M24 | ~6 h |
 | 2-day core | everything except M15, M17, M18, M19, M20, M21, M22, M23, M25, M26 | ~12 h |
-| **3-day full workshop** | **all 26** — Day 1 M01–M08 · Day 2 M09–M17 · Day 3 M18–M26 | ~18 h |
+| **3-day full workshop** | **all 27** — Day 1 M01–M08 (block A) · Day 2 M09–M19 (B+C) · Day 3 M20–M27 (D) | ~18 h |
 
 
 **SA demo guides ship as a second showroom.**
