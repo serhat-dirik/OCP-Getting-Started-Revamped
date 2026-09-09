@@ -357,16 +357,27 @@ self_test() {  # → 1 every canary caught (the PASS) · 2 a canary was missed o
   # check_file call left every other canary here green, because nothing else plants a defect a
   # RENDER has to surface. Each half therefore gets its own end-to-end canary.
   #
-  # One scratch copy serves both: gitops/workshop-config/templates/showroom.yaml is simultaneously a
-  # static manifest the grep finds AND a Helm template that renders six Routes under the DEFAULT
-  # values, so stripping its `termination:` lines is a defect both halves must independently catch.
+  # One scratch copy serves both halves, and it mutates BOTH cockpit templates on purpose.
   # `insecureEdgeTerminationPolicy:` survives the sed (capital T after "termination"), which keeps
   # the fixture realistic rather than gutting the whole tls block.
+  #
+  # WHY BOTH FILES. This used to strip only showroom.yaml, chosen because it was "a Helm template
+  # that renders six Routes under the DEFAULT values". That was true until 2026-09-09, when
+  # showroom.shared.enabled became true by default: showroom.yaml renders `{{- if ... (not
+  # .Values.showroom.shared.enabled) }}` and now emits NOTHING under the defaults, so canary K —
+  # the half that needs a RENDERED defect — planted a Route that never rendered and reported rc=0.
+  # The static half (J) stayed green the whole time because it greps the file text, which is
+  # exactly how a one-sided fixture hides a broken half.
+  #
+  # Mutating both templates makes this canary independent of WHICH cockpit model ships as the
+  # default: whichever of the two renders, K sees a TLS-less Route, and J finds both in the text.
   d="$(mktemp -d)"
   cp -R gitops "$d/gitops"
   cp -R helm "$d/helm"
-  sed -i.bak '/termination:/d' "$d/gitops/workshop-config/templates/showroom.yaml"
-  rm -f "$d/gitops/workshop-config/templates/showroom.yaml.bak"
+  for _t in showroom.yaml showroom-shared.yaml; do
+    sed -i.bak '/termination:/d' "$d/gitops/workshop-config/templates/$_t"
+    rm -f "$d/gitops/workshop-config/templates/$_t.bak"
+  done
 
   # J — the STATIC half: the mutated copy as the gitops root, real charts, real portfolio root. Same
   # file count as the real tree, so both floors are still met and rc=2 cannot mask the finding.
