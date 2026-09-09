@@ -223,6 +223,7 @@ OBSERVABILITY="$(stack_toggle observability observability)"
 APPSEC="$(stack_toggle appsec appsec)"
 PORTAL="$(stack_toggle portal portal)"
 TRUST="$(stack_toggle trust trust)"
+SECRETS="$(stack_toggle secrets secrets)"
 # trust-demo: expert-override only (RHTPA is a demo-flavor add-on; no module requires it).
 TRUST_DEMO="$(v '.trust_demo')"; [[ "$TRUST_DEMO" == "true" ]] || TRUST_DEMO="false"
 
@@ -980,6 +981,13 @@ STACKS="core-devtools,batch,progressive-delivery"
 [[ "$APPSEC" == "true" ]] && STACKS="${STACKS},appsec"
 [[ "$PORTAL" == "true" ]] && STACKS="${STACKS},portal"
 [[ "$TRUST" == "true" ]] && STACKS="${STACKS},trust"
+# secrets stack (External Secrets Operator) for platform-guardrails. The module's entry state
+# applies SecretStore/ExternalSecret, so WITHOUT this stack M20 is still listed in the cockpit and
+# fails at sync with `no matches for kind "SecretStore"` — found 2026-09-09 on a cold-start install,
+# eleven days after M20 shipped. modules.yaml declared `stacks: [secrets]` from day one; these two
+# lines were the half of the wiring that is hand-written. tools/lint/stack-wiring-guard.py now holds
+# modules.yaml and this file to the same set so the next stack cannot land half-wired.
+[[ "$SECRETS" == "true" ]] && STACKS="${STACKS},secrets"
 [[ "$TRUST_DEMO" == "true" ]] && STACKS="${STACKS},trust-demo"
 # ── component adoption plan (read-only) ───────────────────────────────────────
 # Ask the portfolio installer — which OWNS the detection — which components it will skip because
