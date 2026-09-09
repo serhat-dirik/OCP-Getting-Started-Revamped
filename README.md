@@ -80,10 +80,17 @@ troubleshooting, see **[INSTALL.md](INSTALL.md)**.
 **Prerequisites**
 
 * An OpenShift **4.20+** cluster with a default StorageClass and **`linux/amd64` workers** (any footprint: self-managed, ROSA/ARO, or an RHDP sandbox). ODF/NooBaa is needed only if you enable M22 (its backup target is an in-cluster S3 bucket).
-* **Red Hat SAs:** order [**Field Sourced Content - OpenShift Base**](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod) from the Red Hat Demo Platform (internal) with **3 worker nodes**, which is the dedicated-worker floor this workshop needs — size up first via [INSTALL.md §2](INSTALL.md#2-sizing-the-cluster) if you are running a larger room.
+* **Red Hat SAs:** order [**Field Sourced Content - OpenShift Base**](https://catalog.demo.redhat.com/catalog/babylon-catalog-prod?item=babylon-catalog-prod/published.ocp-field-asset.prod) from the Red Hat Demo Platform (internal) and **set worker nodes to 3** — the catalog item does not default to 3, and 3 dedicated workers is the floor this workshop needs. Size up first via [INSTALL.md §2](INSTALL.md#2-sizing-the-cluster) if you are running a larger room.
+  * **With only 2 workers the install still succeeds**, and everything works except one half of one exercise: M18 `deployment-targets-scheduling` needs a node it can taint, and with two workers the installer deliberately withholds the taint rather than starve the cluster. The `nodeSelector` half of that lab still runs and is graded; the toleration half cannot be demonstrated, and `adm verify` reports it not-applicable rather than failed. Everything else is unaffected.
 * `cluster-admin` access, with the `oc` CLI logged in to that cluster.
 * On the machine you install from: `git`, `yq`, `htpasswd`, `openssl`. See [INSTALL.md](INSTALL.md) for why each is needed.
-* The installer is **non-invasive on existing clusters**: an operator already present is adopted wherever adopting it is safe (never overwritten or upgraded) and otherwise the workshop's own is installed *alongside* it rather than over it, attendees live in their own identity provider, and nothing about the cluster's default behavior is changed. Preview the exact per-component decision before you install — read-only, applies nothing: `platform-portfolio/argocd-bootstrap/install.sh --stacks "$(ls platform-portfolio/stacks | tr '\n' ',' | sed 's/,$//')" --adoption-plan`. See [INSTALL.md §3.1](INSTALL.md).
+* The installer is **non-invasive on existing clusters**: an operator already present is adopted wherever adopting it is safe (never overwritten or upgraded) and otherwise the workshop's own is installed *alongside* it rather than over it, attendees live in their own identity provider, and nothing about the cluster's default behavior is changed. Check your cluster and preview every adoption decision before you install — read-only, applies nothing:
+
+  ```bash
+  tools/ws/adm preflight
+  ```
+
+  It verifies local tooling, cluster-admin, the OpenShift version, the StorageClass and the worker count, then prints what an install would adopt versus create. **On a customer cluster, show this to them before installing.** For the per-operator detail behind those rows, see [INSTALL.md §3.1](INSTALL.md#31-preflight-read-only).
 
 **1. Clone this repository**
 
