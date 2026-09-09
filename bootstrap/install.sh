@@ -1590,7 +1590,7 @@ emit_bootstrap_verdict() {
   echo "   gitea   : https://${GITEA_HOST}"
   echo "   users   : ${USER_PREFIX}1 … ${USER_PREFIX}${USERS} (shared password)"
   echo "   creds   : ${CREDS_FILE} (gitignored)"
-  echo "   next    : ws doctor   ·   ws start m01 --user ${USER_PREFIX}1"
+  echo "   next    : tools/ws/adm doctor   ·   tools/ws/adm start m01 --user ${USER_PREFIX}1"
 }
 
 echo
