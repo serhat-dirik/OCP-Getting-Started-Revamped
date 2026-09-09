@@ -528,6 +528,44 @@ done
 [[ -z "$CSV_WATCH_TABLE" ]] || rm -f "$CSV_WATCH_TABLE"
 
 if [[ "$ADOPTION_PLAN_ONLY" == "true" ]]; then
+  # Header, legend and totals go to STDERR — never stdout. bootstrap/install.sh captures this
+  # command with $(...) and parses it line-by-line on tabs, and `grep -q '^refuse'` decides whether
+  # to abort the whole install; one extra stdout line would be read as a component, or worse, shift
+  # a refusal out of first position. stderr reaches the human running it by hand (README sends SAs
+  # here) and is invisible to the caller. Before 2026-09-09 this printed bare tab-separated rows
+  # with no header at all, and an SA reading `refuse ai-assist ...` had no way to tell whether two
+  # rows meant two problems out of two components or two out of forty.
+  {
+    _rows=0; _skips=0; _refusals=0
+    if [[ -n "$ADOPTION_PLAN" ]]; then
+      _rows=$(printf '%s\n' "$ADOPTION_PLAN" | grep -c .)
+      _skips=$(printf '%s\n' "$ADOPTION_PLAN" | grep -c '^skip' || true)
+      _refusals=$(printf '%s\n' "$ADOPTION_PLAN" | grep -c '^refuse' || true)
+    fi
+    echo "Adoption plan — read-only, nothing was changed."
+    echo "  stacks examined : ${STACKS}"
+    echo "  components that need a decision: ${_rows} (${_skips} skip, ${_refusals} refuse)"
+    echo "  Components not listed below install normally; only decisions are printed."
+    echo
+    echo "  skip   = this cluster already provides it. Ours is dropped from the render, theirs is"
+    echo "           left untouched, and teardown preserves it. Nothing for you to do."
+    echo "  refuse = it cannot be made safe automatically, because the component ships operand CRs"
+    echo "           as well as an operator. ./bootstrap/install.sh STOPS on a refusal."
+    echo
+    echo "  NOTE: this judges the stacks named above. ./bootstrap/install.sh chooses its own set"
+    echo "        from your enabled modules AND from the cluster — notably it drops ai-assist"
+    echo "        entirely when OpenShift Lightspeed is already installed. So a refusal shown here"
+    echo "        for a stack the installer would not select is NOT a blocker. To see the set the"
+    echo "        installer will actually use, run: tools/ws/adm preflight"
+    echo
+    if [[ "$_rows" -gt 0 ]]; then
+      printf '  %-7s  %-14s  %-22s  %s\n' VERDICT STACK COMPONENT REASON
+      printf '%s\n' "$ADOPTION_PLAN" \
+        | awk -F'\t' 'NF { printf "  %-7s  %-14s  %-22s  %s\n", $1, $2, $3, $7 }'
+    else
+      echo "  Nothing to decide — every selected component installs its own operator."
+    fi
+  } >&2
   [[ -n "$ADOPTION_PLAN" ]] && printf '%s\n' "$ADOPTION_PLAN"
   exit 0
 fi
