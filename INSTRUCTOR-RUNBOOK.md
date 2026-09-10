@@ -136,26 +136,23 @@ just read-only verification rather than something to warm.
 
 ## 3. Morning of
 
-**Refresh attendee logins first — this is the single most likely day-of failure.** Each cockpit's
-kubeconfig is written once, when its pod starts, and holds an OAuth token that expires on the
-cluster's own schedule (24 hours unless the cluster overrides it). Installing the day before is the
-normal case, so without this step the first thing an attendee types comes back `Unauthorized`
-while everything else — pod Running, Application Synced, cockpit page loaded — looks fine
-([INSTALL.md §7.1](INSTALL.md#71-attendees-get-unauthorized-on-their-first-command)):
+**There is no morning login step.** One cockpit serves the whole room behind an OpenShift login,
+and its terminal mints each attendee's kubeconfig from that sign-in every time they open it — there
+is no pod-start token to go stale, so installing the day before is fine. (`adm session-refresh`
+belongs to the retired per-user cockpit; against the shared one it reports `nothing to refresh`.)
 
-```bash
-tools/ws/adm session-refresh --all
-```
-
-Takes seconds, needs no pod restart, safe to run again at any point during the day.
-
-**If you pushed content or updated the workshop since installing**, use this instead — it covers
-the logins *and* re-clones each cockpit (which `session-refresh` deliberately does not do), fixing
-the "`ws prep` refused with an AppProject error" failure at the same time
+**If you pushed content or updated the workshop since installing**, do this — it re-clones each
+cockpit, fixing the "`ws prep` refused with an AppProject error" failure
 ([README.md](README.md#starting-the-workshop), [INSTALL.md §7.2](INSTALL.md#72-ws-prep-fails-with-attendees-may-only-use-their-own-appproject)):
 
 ```bash
 tools/ws/adm git-refresh --restart-terminals --all
+```
+
+Otherwise the morning is: check the room is healthy, hand out the link.
+
+```bash
+tools/ws/adm doctor
 ```
 
 **Hand out one link.** The whole room uses the same cockpit — guide + terminal + tool tabs in one
@@ -263,12 +260,12 @@ The three failures most likely to actually happen in a live room, in the order y
 meet them, each drawn straight from [INSTALL.md §7](INSTALL.md#7-troubleshooting):
 
 **1. An attendee's terminal says `Unauthorized` on the very first command.**
-Almost always the morning-of session refresh didn't happen or didn't reach that attendee. Confirm
-the token lifetime, then fix:
+Their *browser* sign-in lapsed, not the cluster. They fix it themselves: reload the cockpit page,
+sign in again, reopen the terminal. Nothing to run on your side. Confirm from your machine if you
+want to see it — an attendee who has never signed in has no home directory there at all:
 
 ```bash
-oc get oauth cluster -o jsonpath='{.spec.tokenConfig.accessTokenMaxAgeSeconds}{"\n"}'   # empty = 24h default
-tools/ws/adm session-refresh --user <userN>          # or --all for the whole cohort
+oc exec deploy/showroom-shared -n ogsr-showroom -c terminal -- ls -l /homes/<userN>/.kube/config
 ```
 ([INSTALL.md §7.1](INSTALL.md#71-attendees-get-unauthorized-on-their-first-command))
 
