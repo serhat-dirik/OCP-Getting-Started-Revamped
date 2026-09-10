@@ -201,9 +201,9 @@ scaffold_repo_present() {
 
 # --- entry state (what `ws start developer-hub-golden-paths` materializes) --------------------------
 check "namespace ${DEV} exists"                          oc get ns "$DEV"                          || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-developer-hub-golden-paths in ${DEV}"              oc get cm ws-entry-developer-hub-golden-paths -n "$DEV"          || hint "entry app not synced — ws start developer-hub-golden-paths --user ${USER_NAME}"
+check "entry marker ws-entry-developer-hub-golden-paths in ${DEV}"              oc get cm ws-entry-developer-hub-golden-paths -n "$DEV"          || hint "entry app not synced — ws prep developer-hub-golden-paths (or ws start developer-hub-golden-paths --user ${USER_NAME})"
 check "shared RHDH portal is reachable"                  rhdh_up                                   || hint "portal stack down — sync pp-portal (platform-portfolio/stacks/portal)"
-check "Parasol catalog populated (parasol-claims)"       catalog_has_parasol                       || hint "catalog not wired — check app-config-rhdh catalog.locations + Gitea seeding (ws git-refresh)"
+check "Parasol catalog populated (parasol-claims)"       catalog_has_parasol                       || hint "catalog not wired — check app-config-rhdh catalog.locations + Gitea seeding (adm git-refresh)"
 check "golden-path template registered"                  template_registered                       || hint "template not registered — check the parasol-service-template location in app-config-rhdh"
 check "scaffold org ${SCAFFOLD_ORG} exists"              scaffold_org_exists                       || hint "org hook didn't run — ws reset developer-hub-golden-paths --user ${USER_NAME} (or check gitea-scaffold-org-developer-hub-golden-paths-${USER_NAME} Job in ns gitea)"
 
@@ -220,7 +220,7 @@ else
   # Gitea's own answer, this ❌ now covers "answered, and the org holds nothing" AND "answered with
   # something that is not a repo list", and asserting the first when it was the second is the same
   # false-confidence bug one layer up (cf. check()'s "could not check:" prefix rationale in _lib.sh).
-  check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "not done yet — running the 'New Parasol microservice' template in RHDH IS the lab, so an empty ${SCAFFOLD_ORG} is the expected state before you start, not a broken portal (ws solve developer-hub-golden-paths materializes ${SCAFFOLD_ORG}/parasol-golden). If instead Gitea answered /api/v1/orgs/${SCAFFOLD_ORG}/repos with a non-200 or with something that is not a repo list, that IS broken — tell your instructor"
+  check "${USER_NAME} scaffolded >=1 golden-path service" scaffold_repo_present                    || hint "not done yet — running the 'New Parasol microservice' template in RHDH IS the lab, so an empty ${SCAFFOLD_ORG} is the expected state before you start, not a broken portal (adm solve developer-hub-golden-paths materializes ${SCAFFOLD_ORG}/parasol-golden). If instead Gitea answered /api/v1/orgs/${SCAFFOLD_ORG}/repos with a non-200 or with something that is not a repo list, that IS broken — tell your instructor"
 fi
 
 verify_summary

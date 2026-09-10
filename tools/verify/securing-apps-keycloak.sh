@@ -105,8 +105,8 @@ no_fraud_yet() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                         || hint "run: ws start securing-apps-keycloak --user ${USER_NAME}"
-check "entry marker ws-entry-securing-apps-keycloak present"               oc get cm ws-entry-securing-apps-keycloak -n "$NS"         || hint "entry app not synced — ws start securing-apps-keycloak --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                         || hint "run: ws prep securing-apps-keycloak (or ws start securing-apps-keycloak --user ${USER_NAME})"
+check "entry marker ws-entry-securing-apps-keycloak present"               oc get cm ws-entry-securing-apps-keycloak -n "$NS"         || hint "entry app not synced — ws prep securing-apps-keycloak (or ws start securing-apps-keycloak --user ${USER_NAME})"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db "$NS"            || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment has >=1 ready replica" deploy_ready parasol-claims "$NS"       || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"
 check "parasol-web deployment has >=1 ready replica"    deploy_ready parasol-web "$NS"          || hint "wait for rollout: oc rollout status deploy/parasol-web -n ${NS}"

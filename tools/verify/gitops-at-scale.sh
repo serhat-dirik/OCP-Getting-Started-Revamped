@@ -284,7 +284,7 @@ route_ready_200() {
 
 # --- entry state (what `ws start gitops-at-scale` materializes) --------------------------
 check "namespace ${GITOPS} exists"                       oc get ns "$GITOPS"                                 || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-gitops-at-scale in ${GITOPS}"           oc get cm ws-entry-gitops-at-scale -n "$GITOPS"                 || hint "entry app not synced — ws start gitops-at-scale --user ${USER_NAME}"
+check "entry marker ws-entry-gitops-at-scale in ${GITOPS}"           oc get cm ws-entry-gitops-at-scale -n "$GITOPS"                 || hint "entry app not synced — ws prep gitops-at-scale (or ws start gitops-at-scale --user ${USER_NAME})"
 check "student-gitops Argo CD instance reachable"        student_argo_up                                     || hint "student instance missing — sync workshop-config (student-argocd.yaml)"
 check "argocd CLI served for the appset-create beat"     cli_download_ready                                   || hint "server not serving /download/argocd-linux-amd64 — check the student-gitops server route"
 check "AppProject proj-${USER_NAME} exists"              oc get appproject "proj-${USER_NAME}" -n ogsr-student-gitops || hint "per-user AppProject missing — sync workshop-config (student-appprojects.yaml)"
@@ -345,7 +345,7 @@ else
         ;;
     esac
   fi
-  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "not done yet? the entry state deliberately leaves ${PROD} WITHOUT a Rollout — converting it (rollouts/ overlay) IS the lab, so this red is expected before you start (ws solve gitops-at-scale --user ${USER_NAME} does the conversion). If you HAVE converted it and it is not Healthy, that one is real. Read the object — ${ROLLOUT_INSPECT} — and start from .status.phase. Progressing with no ready canary pods is usually quota: oc get events -n ${PROD} --sort-by=.lastTimestamp | tail -10. A Rollout that never leaves its initial state at all means no controller is serving it (instructor/admin: oc get rolloutmanager -n openshift-gitops). Paused is not broken — a canary pause step is waiting for YOU, and a blue-green pause is waiting for a promotion: ${ROLLOUT_PROMOTE_HINT}"
+  check "parasol-claims runs as a Rollout in ${PROD} (Healthy)" rollout_healthy parasol-claims "$PROD"       || hint "not done yet? the entry state deliberately leaves ${PROD} WITHOUT a Rollout — converting it (rollouts/ overlay) IS the lab, so this red is expected before you start (adm solve gitops-at-scale --user ${USER_NAME} does the conversion). If you HAVE converted it and it is not Healthy, that one is real. Read the object — ${ROLLOUT_INSPECT} — and start from .status.phase. Progressing with no ready canary pods is usually quota: oc get events -n ${PROD} --sort-by=.lastTimestamp | tail -10. A Rollout that never leaves its initial state at all means no controller is serving it (instructor/admin: oc get rolloutmanager -n openshift-gitops). Paused is not broken — a canary pause step is waiting for YOU, and a blue-green pause is waiting for a promotion: ${ROLLOUT_PROMOTE_HINT}"
   # The outcome above says prod runs a Rollout; this says ARGO put it there. `oc apply -k rollouts/`
   # from the clone the lab already has you make produces an identically Healthy Rollout with no Argo
   # anywhere near it, and that is not this module. Attendee-readable (own namespace), so unlike the

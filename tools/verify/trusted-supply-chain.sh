@@ -202,12 +202,12 @@ keyless_bundle_recorded() {
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
-check "namespace ${NS} exists"                             oc get ns "$NS"                                     || hint "run: ws start trusted-supply-chain --user ${USER_NAME}"
-check "entry marker ws-entry-trusted-supply-chain present"                  oc get cm ws-entry-trusted-supply-chain -n "$NS"                     || hint "entry app not synced — ws start trusted-supply-chain --user ${USER_NAME}"
-check "Pipeline parasol-claims-supply-chain present"       oc get pipelines.tekton.dev parasol-claims-supply-chain -n "$NS" || hint "entry app not synced — ws start trusted-supply-chain --user ${USER_NAME}"
+check "namespace ${NS} exists"                             oc get ns "$NS"                                     || hint "run: ws prep trusted-supply-chain (or ws start trusted-supply-chain --user ${USER_NAME})"
+check "entry marker ws-entry-trusted-supply-chain present"                  oc get cm ws-entry-trusted-supply-chain -n "$NS"                     || hint "entry app not synced — ws prep trusted-supply-chain (or ws start trusted-supply-chain --user ${USER_NAME})"
+check "Pipeline parasol-claims-supply-chain present"       oc get pipelines.tekton.dev parasol-claims-supply-chain -n "$NS" || hint "entry app not synced — ws prep trusted-supply-chain (or ws start trusted-supply-chain --user ${USER_NAME})"
 check "rox-api-token copied into ${NS} (scan-gate secret)" oc get secret rox-api-token -n "$NS"                || hint "the secrets hook copies it from stackrox — ws reset trusted-supply-chain --user ${USER_NAME} (needs the trust stack)"
 check "chains-cosign-pub copied into ${NS} (verify key)"   oc get cm chains-cosign-pub -n "$NS"                || hint "the secrets hook copies it from openshift-pipelines — needs the trust-signing component"
-check "Gitea fork ${USER_NAME}/parasol-claims answers"     gitea_repo_exists "$USER_NAME" parasol-claims       || hint "fork missing — re-run: ws start trusted-supply-chain --user ${USER_NAME} (fork job)"
+check "Gitea fork ${USER_NAME}/parasol-claims answers"     gitea_repo_exists "$USER_NAME" parasol-claims       || hint "fork missing — re-run: ws prep trusted-supply-chain (or ws start trusted-supply-chain --user ${USER_NAME}) (fork job)"
 check "fork branch seed-vulnerable exists"                 gitea_branch_exists "$USER_NAME" parasol-claims seed-vulnerable || hint "re-run the fork/seed job: ws reset trusted-supply-chain --user ${USER_NAME}"
 check "curated library task acs-image-check reachable"     oc get tasks.tekton.dev acs-image-check -n ogsr-parasol-tasks        || hint "parasol-tasks library missing — sync the workshop-config Argo app"
 # --- the pre-scanned trust artifact (warm-clean-image hook; present from prep, survives the lab) --------

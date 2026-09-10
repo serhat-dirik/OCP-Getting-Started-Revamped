@@ -305,7 +305,7 @@ else
   # there, so any correct solution (helm install OR ws solve) stays green (rule 14) …
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
   check "notifications app parasol-notifications deployed" deploy_present \
-    || hint "not done yet — the entry state deliberately deploys nothing here, because running the chart IS the lab: helm install parasol-notifications ./parasol-notifications -n ${NS} (or: ws solve packaging-distributing --user ${USER_NAME}). Red before that is the expected state, not a broken environment"
+    || hint "not done yet — the entry state deliberately deploys nothing here, because running the chart IS the lab: helm install parasol-notifications ./parasol-notifications -n ${NS} (or: adm solve packaging-distributing --user ${USER_NAME}). Red before that is the expected state, not a broken environment"
   # … and then grade the DECLARATION the attendee wrote, because the outcome alone is satisfied by an
   # `oc create deployment` that skips the entire Helm lesson (F-10). On a world `ws solve` built there
   # is no release to find and there never should be — that is a known, correct absence (na), not an

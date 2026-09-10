@@ -81,10 +81,10 @@ clean_slate_no_parasol_web() {
 }
 
 # --- entry state (what `ws start platform-orientation` materializes) --------------------------
-check "namespace ${NS} exists"                 oc get ns "$NS"                      || hint "run: ws start platform-orientation --user ${USER_NAME}"
-check "entry marker ws-entry-platform-orientation present"       oc get cm ws-entry-platform-orientation -n "$NS"      || hint "entry app not synced — ws start platform-orientation --user ${USER_NAME}"
+check "namespace ${NS} exists"                 oc get ns "$NS"                      || hint "run: ws prep platform-orientation (or ws start platform-orientation --user ${USER_NAME})"
+check "entry marker ws-entry-platform-orientation present"       oc get cm ws-entry-platform-orientation -n "$NS"      || hint "entry app not synced — ws prep platform-orientation (or ws start platform-orientation --user ${USER_NAME})"
 check "workshop quota present in ${NS}"         oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
-check "Gitea account ${USER_NAME} answers (API 200)" gitea_user_exists "$USER_NAME" || hint "Gitea seeding incomplete — check the workshop layer / ws git-refresh"
+check "Gitea account ${USER_NAME} answers (API 200)" gitea_user_exists "$USER_NAME" || hint "Gitea seeding incomplete — check the workshop layer / adm git-refresh"
 
 # platform-orientation's entry state is an EMPTY {user}-dev "ready to receive a first deployment". A leftover
 # parasol-web means a previous run was not reset; assert the clean slate at ENTRY so `ws prep`

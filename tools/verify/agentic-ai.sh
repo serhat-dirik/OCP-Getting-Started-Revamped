@@ -331,7 +331,7 @@ else
   # 1. THE DECLARATION THE ATTENDEE WROTE. This is the grade: the system prompt in their namespace now
   #    tells the model it has tools. Graded on that property, never on wording (rule 14).
   check "grounding prompt directs the model at its tools (your edit to cm/parasol-agent-grounding)" configmap_grounding_directs_tools \
-    || hint "not done yet — the entry state deliberately ships a weak prompt that never mentions tools, and rewriting it is the lab, so this red is expected before you start. Edit it (oc edit cm parasol-agent-grounding -n ${NS}) so it tells the model it has tools and when to call them. To see a worked answer: ws solve agentic-ai --user ${USER_NAME}"
+    || hint "not done yet — the entry state deliberately ships a weak prompt that never mentions tools, and rewriting it is the lab, so this red is expected before you start. Edit it (oc edit cm parasol-agent-grounding -n ${NS}) so it tells the model it has tools and when to call them. To see a worked answer: adm solve agentic-ai --user ${USER_NAME}"
   # 2. AND IT REACHED THE WORKLOAD. A separate outcome, not a restatement: PARASOL_AGENT_GROUNDING_PROMPT
   #    is an environment variable, and an env var cannot change under a running pod. An attendee who
   #    edited the ConfigMap and never rolled the Deployment still has an agent running the weak draft —

@@ -533,7 +533,7 @@ else
   # Asserting the marker there false-REDs a correctly-completed lab.
   if [[ "$SOLVE_MODE" == "true" ]]; then
     check "solve marker present (ws-solve-resilience-multicluster-dr)"        solved \
-      || hint "ws solve did not stamp the marker — re-run: ws solve resilience-multicluster-dr --user ${USER_NAME}"
+      || hint "adm solve did not stamp the marker — re-run: adm solve resilience-multicluster-dr --user ${USER_NAME}"
   else
     info "closing verify: the failover OUTCOME below is the proof (the ws-solve marker is stamped only by ws solve; a hand-completed lab legitimately has none)"
   fi

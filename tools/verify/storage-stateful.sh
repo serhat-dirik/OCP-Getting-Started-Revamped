@@ -82,8 +82,8 @@ headless_svc() {
 }
 
 # --- shared checks (hold at BOTH entry and end) ------------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws start storage-stateful --user ${USER_NAME}"
-check "entry marker ws-entry-storage-stateful present"               oc get cm ws-entry-storage-stateful -n "$NS"              || hint "entry app not synced — ws start storage-stateful --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws prep storage-stateful (or ws start storage-stateful --user ${USER_NAME})"
+check "entry marker ws-entry-storage-stateful present"               oc get cm ws-entry-storage-stateful -n "$NS"              || hint "entry app not synced — ws prep storage-stateful (or ws start storage-stateful --user ${USER_NAME})"
 check "workshop quota present in ${NS}"                 oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
 check "claims-db deployment has >=1 ready replica"      deploy_ready claims-db "$NS"                 || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment has >=1 ready replica" deploy_ready parasol-claims "$NS"            || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"

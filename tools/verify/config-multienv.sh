@@ -119,12 +119,12 @@ cm_app_env() {
 }
 
 # --- entry state (what `ws start config-multienv` materializes) --------------------------
-check "namespace ${DEV} exists"                        oc get ns "$DEV"                            || hint "run: ws start config-multienv --user ${USER_NAME}"
+check "namespace ${DEV} exists"                        oc get ns "$DEV"                            || hint "run: ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
 check "namespace ${STAGE} exists"                      oc get ns "$STAGE"                          || hint "workshop layer not applied — run bootstrap/install.sh"
 check "namespace ${PROD} exists"                       oc get ns "$PROD"                           || hint "workshop layer not applied — run bootstrap/install.sh"
-check "entry marker ws-entry-config-multienv in ${DEV}"            oc get cm ws-entry-config-multienv -n "$DEV"            || hint "entry app not synced — ws start config-multienv --user ${USER_NAME}"
-check "entry marker ws-entry-config-multienv in ${STAGE}"          oc get cm ws-entry-config-multienv -n "$STAGE"          || hint "entry app not synced — ws start config-multienv --user ${USER_NAME}"
-check "entry marker ws-entry-config-multienv in ${PROD}"           oc get cm ws-entry-config-multienv -n "$PROD"           || hint "entry app not synced — ws start config-multienv --user ${USER_NAME}"
+check "entry marker ws-entry-config-multienv in ${DEV}"            oc get cm ws-entry-config-multienv -n "$DEV"            || hint "entry app not synced — ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
+check "entry marker ws-entry-config-multienv in ${STAGE}"          oc get cm ws-entry-config-multienv -n "$STAGE"          || hint "entry app not synced — ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
+check "entry marker ws-entry-config-multienv in ${PROD}"           oc get cm ws-entry-config-multienv -n "$PROD"           || hint "entry app not synced — ws prep config-multienv (or ws start config-multienv --user ${USER_NAME})"
 check "workshop quota present in ${DEV}"               oc get resourcequota workshop-quota -n "$DEV" || hint "workshop layer not applied — run bootstrap/install.sh"
 check "Gitea fork ${USER_NAME}/claims-config exists"   fork_exists                                 || hint "fork job didn't run — ws reset config-multienv --user ${USER_NAME} (or check the gitea-fork-config-multienv-${USER_NAME} Job in ns gitea)"
 check "claims-db deployment ready in ${DEV}"           deploy_ready claims-db "$DEV"               || hint "wait for rollout: oc rollout status deploy/claims-db -n ${DEV}"

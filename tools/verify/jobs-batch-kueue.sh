@@ -223,8 +223,8 @@ cq_active() {
 }
 
 # --- entry state (what `ws start jobs-batch-kueue` materializes) --------------------------
-check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws start jobs-batch-kueue --user ${USER_NAME}"
-check "entry marker ws-entry-jobs-batch-kueue present"               oc get cm ws-entry-jobs-batch-kueue -n "$NS"              || hint "entry app not synced — ws start jobs-batch-kueue --user ${USER_NAME}"
+check "namespace ${NS} exists"                          oc get ns "$NS"                              || hint "run: ws prep jobs-batch-kueue (or ws start jobs-batch-kueue --user ${USER_NAME})"
+check "entry marker ws-entry-jobs-batch-kueue present"               oc get cm ws-entry-jobs-batch-kueue -n "$NS"              || hint "entry app not synced — ws prep jobs-batch-kueue (or ws start jobs-batch-kueue --user ${USER_NAME})"
 check "workshop quota present in ${NS}"                 oc get resourcequota workshop-quota -n "$NS" || hint "entry app not synced — ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "namespace opted into Kueue (kueue.openshift.io/managed=true)" ns_kueue_managed                || hint "without this label Kueue ignores labeled Jobs — ws reset jobs-batch-kueue --user ${USER_NAME}"
 check "LocalQueue user-queue is Active (bound to ${CQ})" localqueue_active                            || hint "LocalQueue missing/inactive — check the workshop layer created ${CQ}: ws reset jobs-batch-kueue --user ${USER_NAME}"
@@ -243,7 +243,7 @@ case "$seed_rc" in
   4) warn "$SEED_DESC — the cluster API did not answer"
      hint "not your lab, and not graded: the cluster could not be asked whether the seed Job ran. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor" ;;
   *) check "$SEED_DESC" false \
-       || hint "namespace ${NS} does not exist — ws start jobs-batch-kueue --user ${USER_NAME}" ;;
+       || hint "namespace ${NS} does not exist — ws prep jobs-batch-kueue (or ws start jobs-batch-kueue --user ${USER_NAME})" ;;
 esac
 # THE DATASET ITSELF — graded, and on a number the seed derived from the file it wrote (see
 # seeded_rows_state). Runs unconditionally, NOT gated on seed_rc: the marker is durable and the Job
@@ -266,7 +266,7 @@ case "$rows_rc" in
   2) warn "$ROWS_DESC — this entry state predates the seed's row-count record"
      hint "not your lab, and not graded: your namespace was materialized before the seed began recording what it wrote, so this check has nothing to read. The seed Job check above still applies. For a real verdict on the data, re-materialize when you are between exercises: ws reset jobs-batch-kueue --user ${USER_NAME}" ;;
   3) check "$ROWS_DESC" false \
-       || hint "the entry marker ConfigMap is missing entirely, so nothing recorded what was seeded — see the marker check above: ws start jobs-batch-kueue --user ${USER_NAME}" ;;
+       || hint "the entry marker ConfigMap is missing entirely, so nothing recorded what was seeded — see the marker check above: ws prep jobs-batch-kueue (or ws start jobs-batch-kueue --user ${USER_NAME})" ;;
   *) warn "$ROWS_DESC — the cluster API did not answer"
      hint "not your lab, and not graded: the cluster could not be asked what the seed recorded. Re-run the same ws verify in a moment; if it keeps happening, check your session with 'oc whoami' and tell your instructor" ;;
 esac
@@ -343,14 +343,14 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # attendee their very first `oc apply` to an immutable-name collision.
   info "entry state — these checks assert a CLEAN SLATE: they fail when the lab has already been run here, which is what tells 'ws prep' to purge and re-materialize"
   check "no attendee-created Job yet (you create the first in exercise 1)"     no_attendee_jobs                       || hint "this is LEFTOVER from an earlier run, not a broken environment — the entry state's own seed/copy Jobs are excluded by label, so what is here is yours from last time. The lab's Job names are fixed, so re-applying over it fails on an immutable pod template. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
-  check "no nightly-statement CronJob yet (you create it in exercise 4)"       obj_absent cronjob nightly-statement "$NS" || hint "this is LEFTOVER from an earlier run (or from ws solve) — the entry state ships no CronJob. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
+  check "no nightly-statement CronJob yet (you create it in exercise 4)"       obj_absent cronjob nightly-statement "$NS" || hint "this is LEFTOVER from an earlier run (or from adm solve) — the entry state ships no CronJob. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
   check "no admitted Kueue Workload yet (exercises 5/6 submit the first)"      no_workload_admitted                   || hint "this is LEFTOVER from an earlier run — a Workload reaches Admitted only after a Job is submitted through LocalQueue user-queue, which the entry state never does. Clear it: ws reset jobs-batch-kueue --user ${USER_NAME}"
 else
   # --- end state (what a completed lab / `ws solve jobs-batch-kueue` looks like) -----------
   info "end state — these checks grade a COMPLETED lab; every ❌ hint says whether it means 'not done yet' (expected before you start) or 'actually broken'"
-  check "an attendee-created Job has Completed"          any_attendee_job_complete                    || hint "not done yet — you run the monthly-statement Job in lab exercise 1, so no completed Job before then is expected, not a fault (or: ws solve jobs-batch-kueue --user ${USER_NAME}). If you DID run it and it never Completed, that one is real: oc get jobs -n ${NS}"
-  check "nightly-statement CronJob exists"               oc get cronjob nightly-statement -n "$NS"    || hint "not done yet — you create this CronJob in lab exercise 4, so it is expected to be missing before then (or: ws solve jobs-batch-kueue --user ${USER_NAME})"
-  check "a Kueue Workload shows Admitted=True"           any_workload_admitted                        || hint "not done yet — you submit a Job through the LocalQueue in lab exercises 5/6, so no admitted Workload before then is expected (or: ws solve jobs-batch-kueue --user ${USER_NAME}). If you DID submit one and it is still not Admitted, that one is real — it is queued behind the ClusterQueue's quota: oc get workloads -n ${NS}"
+  check "an attendee-created Job has Completed"          any_attendee_job_complete                    || hint "not done yet — you run the monthly-statement Job in lab exercise 1, so no completed Job before then is expected, not a fault (or: adm solve jobs-batch-kueue --user ${USER_NAME}). If you DID run it and it never Completed, that one is real: oc get jobs -n ${NS}"
+  check "nightly-statement CronJob exists"               oc get cronjob nightly-statement -n "$NS"    || hint "not done yet — you create this CronJob in lab exercise 4, so it is expected to be missing before then (or: adm solve jobs-batch-kueue --user ${USER_NAME})"
+  check "a Kueue Workload shows Admitted=True"           any_workload_admitted                        || hint "not done yet — you submit a Job through the LocalQueue in lab exercises 5/6, so no admitted Workload before then is expected (or: adm solve jobs-batch-kueue --user ${USER_NAME}). If you DID submit one and it is still not Admitted, that one is real — it is queued behind the ClusterQueue's quota: oc get workloads -n ${NS}"
 fi
 
 verify_summary

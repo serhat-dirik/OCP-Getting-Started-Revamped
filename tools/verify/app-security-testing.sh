@@ -238,9 +238,9 @@ attendee_reads_task_library() {
 }
 
 # --- entry state that SURVIVES lab completion (checked in BOTH modes) --------
-check "namespace ${NS} exists"                              oc get ns "$NS"                                        || hint "run: ws start app-security-testing --user ${USER_NAME}"
-check "entry marker ws-entry-app-security-testing present"                   oc get cm ws-entry-app-security-testing -n "$NS"                        || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
-check "Pipeline parasol-claims-devsecops present"           oc get pipelines.tekton.dev parasol-claims-devsecops -n "$NS"      || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
+check "namespace ${NS} exists"                              oc get ns "$NS"                                        || hint "run: ws prep app-security-testing (or ws start app-security-testing --user ${USER_NAME})"
+check "entry marker ws-entry-app-security-testing present"                   oc get cm ws-entry-app-security-testing -n "$NS"                        || hint "entry app not synced — ws prep app-security-testing (or ws start app-security-testing --user ${USER_NAME})"
+check "Pipeline parasol-claims-devsecops present"           oc get pipelines.tekton.dev parasol-claims-devsecops -n "$NS"      || hint "entry app not synced — ws prep app-security-testing (or ws start app-security-testing --user ${USER_NAME})"
 # THE PIPELINE EXISTING IS NOT THE PIPELINE RUNNING. A 2026-08-07 regression gave `sast-sonar` AND
 # `unit-test` a second PVC-backed workspace; under the operator's default Affinity Assistant mode
 # every run of this capstone then died at its first Maven task in seconds with
@@ -266,7 +266,7 @@ check "every task of the capstone is admissible (at most one PVC-backed workspac
 # this capstone fail validation. The admissibility check above is its replacement.
 check "sonar-auth copied into ${NS} (SAST-gate secret)"     oc get secret sonar-auth -n "$NS"                      || hint "the secrets hook copies it from sonarqube/sonar-ci-token — ws reset app-security-testing --user ${USER_NAME} (needs the appsec stack)"
 check "rox-api-token copied into ${NS} (scan-gate secret)"  oc get secret rox-api-token -n "$NS"                   || hint "the secrets hook copies it from stackrox — ws reset app-security-testing --user ${USER_NAME} (needs the trust stack)"
-check "ephemeral claims-db present (deploy target)"         oc get deploy claims-db -n "$NS"                       || hint "entry app not synced — ws start app-security-testing --user ${USER_NAME}"
+check "ephemeral claims-db present (deploy target)"         oc get deploy claims-db -n "$NS"                       || hint "entry app not synced — ws prep app-security-testing (or ws start app-security-testing --user ${USER_NAME})"
 check "curated task sonar-scan reachable"                   oc get tasks.tekton.dev sonar-scan -n ogsr-parasol-tasks                || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
 check "curated task trivy-scan reachable"                   oc get tasks.tekton.dev trivy-scan -n ogsr-parasol-tasks                || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
 check "curated task roxctl-deployment-check reachable"      oc get tasks.tekton.dev roxctl-deployment-check -n ogsr-parasol-tasks   || hint "parasol-tasks library missing the app-security-testing tasks — sync the workshop-config Argo app"
@@ -296,7 +296,7 @@ else
   # red or unreported), and an attendee mid-lab needs the gate names, not a bare ❌.
   check "capstone run drove EVERY gate green (one Succeeded run, all six gate results true)" \
     devsecops_gates_all_green "$NS" sast-passed sca-passed image-scan-passed config-check-passed dast-passed perf-passed \
-    || hint "${DEVSECOPS_GATE_DETAIL:-no verdict could be read}. Not done yet? Before you start, this red is EXPECTED — driving the secured pipeline until every gate is green IS the lab (or: ws solve app-security-testing --user ${USER_NAME} runs the clean main end to end). NOTE a run that merely SUCCEEDS is not the finish line: the report-mode run succeeds with findings still open, which is why this grades the six gate verdicts and not the run's overall status. Read your own runs' verdicts with: oc get pipelineruns.tekton.dev -n ${NS} -l tekton.dev/pipeline=parasol-claims-devsecops -o jsonpath='{range .items[*]}{.metadata.name}{\": \"}{range .status.results[*]}{.name}{\"=\"}{.value}{\" \"}{end}{\"\\n\"}{end}' — a gate MISSING from that line never produced a verdict at all (its task did not complete), which is a different problem from a gate that answered false: fix the false ones, report the missing ones"
+    || hint "${DEVSECOPS_GATE_DETAIL:-no verdict could be read}. Not done yet? Before you start, this red is EXPECTED — driving the secured pipeline until every gate is green IS the lab (or: adm solve app-security-testing --user ${USER_NAME} runs the clean main end to end). NOTE a run that merely SUCCEEDS is not the finish line: the report-mode run succeeds with findings still open, which is why this grades the six gate verdicts and not the run's overall status. Read your own runs' verdicts with: oc get pipelineruns.tekton.dev -n ${NS} -l tekton.dev/pipeline=parasol-claims-devsecops -o jsonpath='{range .items[*]}{.metadata.name}{\": \"}{range .status.results[*]}{.name}{\"=\"}{.value}{\" \"}{end}{\"\\n\"}{end}' — a gate MISSING from that line never produced a verdict at all (its task did not complete), which is a different problem from a gate that answered false: fix the false ones, report the missing ones"
   check "deploy stage created the parasol-claims Route"     oc get route parasol-claims -n "$NS"                   || hint "not done yet — the deploy stage creates this Route ('oc create route edge parasol-claims') and it appears only after a Succeeded run, so it is expected to be missing until you run the pipeline"
 fi
 

@@ -138,7 +138,7 @@ else
   # Naming the wrong cause first is how a correct ❌ gets ignored.
   check "modernized service parasol-claims-modernized deployed + Ready" deploy_ready parasol-claims-modernized \
     || { if no_modernized; then
-           hint "parasol-claims-modernized does not exist — the lab has not been done yet. That is the expected state on a fresh entry, not a fault (ws solve app-modernization --user ${USER_NAME} materializes it)"
+           hint "parasol-claims-modernized does not exist — the lab has not been done yet. That is the expected state on a fresh entry, not a fault (adm solve app-modernization --user ${USER_NAME} materializes it)"
          else
            hint "parasol-claims-modernized EXISTS but is not Ready — this one is broken, not undone. If it CrashLoops it needs QUARKUS_DATASOURCE_ACTIVE=false (DB-free); check: oc logs deploy/parasol-claims-modernized -n ${NS}"
          fi; }

@@ -221,7 +221,7 @@ eso_egress_gate() {  # 0 = an allow is REQUIRED · 1 = nothing restricts egress 
 
 # --- shared checks (hold at BOTH entry and end) ----------------------------------------------------
 check "namespace ${NS} exists"                                oc get ns "$NS"                                    || hint "run: ws prep platform-guardrails (or ws start platform-guardrails --user ${USER_NAME})"
-check "entry marker ws-entry-platform-guardrails in ${NS}"    oc get cm ws-entry-platform-guardrails -n "$NS"     || hint "entry app not synced — ws start platform-guardrails --user ${USER_NAME}"
+check "entry marker ws-entry-platform-guardrails in ${NS}"    oc get cm ws-entry-platform-guardrails -n "$NS"     || hint "entry app not synced — ws prep platform-guardrails (or ws start platform-guardrails --user ${USER_NAME})"
 check "workshop quota present in ${NS}"                       oc get resourcequota workshop-quota -n "$NS"        || hint "workshop layer not applied — run bootstrap/install.sh"
 check "openbao deployment ready in ${NS}"                     deploy_ready openbao "$NS"                          || hint "the vault is not up: oc get pods -l app=openbao -n ${NS}. A pod that unseals and then exits 1 is the read-only-\$HOME trap — the chart sets HOME=/home/bao onto an emptyDir for exactly that reason, so a pod without it has been edited"
 check "SecretStore parasol-bao is Ready (store validated)"    eso_condition_is secretstore parasol-bao Valid      || hint "ESO cannot validate the store. If openbao itself is Ready above, this is almost certainly NOT the token: it is the ESO namespace's deny-all NetworkPolicy blocking egress to port 8200 — read the real reason with 'oc get events -n ${NS} | grep secretstore', where a blocked connection prints 'invalid vault credentials: context deadline exceeded'. The egress allow is platform-layer (see the check below), not something you can fix from this namespace"
@@ -272,7 +272,7 @@ if [[ "$ENTRY_ONLY" == "true" ]]; then
   # prepared", because the rotation exercise's whole payoff is watching a value CHANGE, and a value
   # that is already the rotated one changes to nothing.
   check "OpenBao holds exactly one version of parasol/claims-db (you rotate it)"  vault_kv_version_is 1                                   || hint "parasol/claims-db is already at version ${VAULT_KV_VERSION:-2+}, so someone has rotated it and the exercise has nothing left to show — ws reset platform-guardrails --user ${USER_NAME} for a clean entry (the vault is in-memory, so a reset genuinely starts it over)"
-  check "no ws-solve marker in ${NS} (this world was not machine-solved)"         obj_absent configmap ws-solve-platform-guardrails "$NS"  || hint "this namespace was materialized by 'ws solve', which rotates the credential for you — that is the END state, not the entry one. ws reset platform-guardrails --user ${USER_NAME} to start the lab from the beginning"
+  check "no ws-solve marker in ${NS} (this world was not machine-solved)"         obj_absent configmap ws-solve-platform-guardrails "$NS"  || hint "this namespace was materialized by 'adm solve', which rotates the credential for you — that is the END state, not the entry one. ws reset platform-guardrails --user ${USER_NAME} to start the lab from the beginning"
   check "no Git-style claims-db Secret in ${NS} (the password is not in Git)"     obj_absent secret claims-db "$NS"                       || hint "a claims-db Secret survives from another module in this shared namespace — nothing here reads it, but the module opens by asking WHERE the password comes from and a second candidate makes that question unanswerable. ws reset platform-guardrails --user ${USER_NAME}"
 else
   # --- end state (what a completed lab looks like) ---------------------------
@@ -284,7 +284,7 @@ else
   if [[ "$SOLVE_MODE" == "true" ]]; then
     # ONLY under --solve. An attendee who rotated by hand has a fully correct end state and no
     # marker, and a ❌ over correct work destroys trust in every other ✅ (parse_verify_args, _lib.sh).
-    check "ws-solve marker present in ${NS}"                                      oc get cm ws-solve-platform-guardrails -n "$NS"          || hint "'ws solve platform-guardrails' did not complete — re-run it: ws solve platform-guardrails --user ${USER_NAME}"
+    check "ws-solve marker present in ${NS}"                                      oc get cm ws-solve-platform-guardrails -n "$NS"          || hint "'adm solve platform-guardrails' did not complete — re-run it: adm solve platform-guardrails --user ${USER_NAME}"
   fi
 fi
 

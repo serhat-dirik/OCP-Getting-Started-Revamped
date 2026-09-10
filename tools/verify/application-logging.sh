@@ -144,8 +144,8 @@ logs_are_structured_json() {
 }
 
 # --- entry state (what `ws start application-logging` materializes) --------------------------
-check "namespace ${NS} exists"                                oc get ns "$NS"                                     || hint "run: ws start application-logging --user ${USER_NAME}"
-check "entry marker ws-entry-application-logging in ${NS}"    oc get cm ws-entry-application-logging -n "$NS"      || hint "entry app not synced — ws start application-logging --user ${USER_NAME}"
+check "namespace ${NS} exists"                                oc get ns "$NS"                                     || hint "run: ws prep application-logging (or ws start application-logging --user ${USER_NAME})"
+check "entry marker ws-entry-application-logging in ${NS}"    oc get cm ws-entry-application-logging -n "$NS"      || hint "entry app not synced — ws prep application-logging (or ws start application-logging --user ${USER_NAME})"
 check "workshop quota present in ${NS}"                       oc get resourcequota workshop-quota -n "$NS"         || hint "workshop layer not applied — run bootstrap/install.sh"
 check "claims-db deployment ready in ${NS}"                   deploy_ready claims-db "$NS"                        || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"
 check "parasol-claims deployment ready in ${NS}"              deploy_ready parasol-claims "$NS"                   || hint "wait for rollout: oc rollout status deploy/parasol-claims -n ${NS}"

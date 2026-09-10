@@ -245,8 +245,8 @@ workspace_started() {
 }
 
 # --- entry state (what `ws start devspaces-inner-loop` materializes) --------------------------
-check "namespace ${NS} exists"                       oc get ns "$NS"                              || hint "run: ws start devspaces-inner-loop --user ${USER_NAME}"
-check "entry marker ws-entry-devspaces-inner-loop present"            oc get cm ws-entry-devspaces-inner-loop -n "$NS"              || hint "entry app not synced — ws start devspaces-inner-loop --user ${USER_NAME}"
+check "namespace ${NS} exists"                       oc get ns "$NS"                              || hint "run: ws prep devspaces-inner-loop (or ws start devspaces-inner-loop --user ${USER_NAME})"
+check "entry marker ws-entry-devspaces-inner-loop present"            oc get cm ws-entry-devspaces-inner-loop -n "$NS"              || hint "entry app not synced — ws prep devspaces-inner-loop (or ws start devspaces-inner-loop --user ${USER_NAME})"
 check "workshop quota present in ${NS}"              oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
 check "Gitea fork ${USER_NAME}/parasol-claims exists" fork_exists                                 || hint "fork job didn't run — ws reset devspaces-inner-loop --user ${USER_NAME} (or check the gitea-fork-devspaces-inner-loop-${USER_NAME} Job in ns gitea)"
 check "claims-db deployment has >=1 ready replica"   deploy_ready claims-db "$NS"                 || hint "wait for rollout: oc rollout status deploy/claims-db -n ${NS}"

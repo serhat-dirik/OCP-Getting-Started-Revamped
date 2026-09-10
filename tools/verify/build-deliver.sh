@@ -80,11 +80,11 @@ no_deploymentconfig() {
 }
 
 # --- entry state (what `ws start build-deliver` materializes) --------------------------
-check "namespace ${NS} exists"                       oc get ns "$NS"                            || hint "run: ws start build-deliver --user ${USER_NAME}"
-check "entry marker ws-entry-build-deliver present"            oc get cm ws-entry-build-deliver -n "$NS"            || hint "entry app not synced — ws start build-deliver --user ${USER_NAME}"
+check "namespace ${NS} exists"                       oc get ns "$NS"                            || hint "run: ws prep build-deliver (or ws start build-deliver --user ${USER_NAME})"
+check "entry marker ws-entry-build-deliver present"            oc get cm ws-entry-build-deliver -n "$NS"            || hint "entry app not synced — ws prep build-deliver (or ws start build-deliver --user ${USER_NAME})"
 check "workshop quota present in ${NS}"              oc get resourcequota workshop-quota -n "$NS" || hint "workshop layer not applied — run bootstrap/install.sh"
-check "Gitea fork ${USER_NAME}/parasol-claims answers"        gitea_repo_exists "$USER_NAME" parasol-claims        || hint "fork missing — re-run: ws start build-deliver --user ${USER_NAME} (fork job)"
-check "Gitea fork ${USER_NAME}/parasol-notifications answers" gitea_repo_exists "$USER_NAME" parasol-notifications || hint "fork missing — re-run: ws start build-deliver --user ${USER_NAME} (fork job)"
+check "Gitea fork ${USER_NAME}/parasol-claims answers"        gitea_repo_exists "$USER_NAME" parasol-claims        || hint "fork missing — re-run: ws prep build-deliver (or ws start build-deliver --user ${USER_NAME}) (fork job)"
+check "Gitea fork ${USER_NAME}/parasol-notifications answers" gitea_repo_exists "$USER_NAME" parasol-notifications || hint "fork missing — re-run: ws prep build-deliver (or ws start build-deliver --user ${USER_NAME}) (fork job)"
 check "Parasol PostgreSQL catalog Template present"  oc get template parasol-postgresql-ephemeral -n openshift || hint "template missing — sync the workshop-config Argo app"
 # The Template object existing is not the outcome — the attendee FINDING it in the Software Catalog
 # is. The catalog lists namespace-visible templates from openshift/, so the attendee needs the read.
