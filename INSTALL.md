@@ -808,7 +808,99 @@ working / degraded / unknown verdict. Two verdicts name this problem directly:
 
 The fix is `adm maas set` ([§5.2](#52-changing-the-ai-model-or-rotating-the-key)), not a reinstall.
 
-### 7.10 MTA: attendees see each other's applications
+### 7.10 Lightspeed never becomes ready: "Waiting for OpenShift Lightspeed service"
+
+```
+Waiting for OpenShift Lightspeed service
+The OpenShift Lightspeed service is not yet ready to receive requests.
+If this message persists, please check the OLSConfig.
+```
+
+**This usually arrives with the cluster, not with the workshop.** RHDP's OpenShift base image ships
+Lightspeed already installed and pointed at Azure OpenAI, authenticating with an Entra ID service
+principal. When that app registration has been removed from the tenant — which happens routinely, and
+silently — every readiness probe fails and the console shows the banner above forever.
+
+The workshop does not cause this and does not fix it on its own: an `OLSConfig` on the cluster means
+the `ai-assist` stack is never requested and **the existing provider secret is deliberately left
+untouched** ([§3.1](#31-preflight-read-only)). Adopted means adopted.
+
+**The AI modules are unaffected.** They read `ogsr-system/ogsr-maas-credentials`, which they prefer
+over any adopted Lightspeed secret. Only the console assistant is dead. If you are not demoing that
+button, you can ignore this entirely.
+
+**Confirm it is this and not something else:**
+
+```bash
+oc -n openshift-lightspeed get pods | grep app-server
+```
+
+A pod stuck at `1/2 Running` — the `lightspeed-service-api` container never ready — is the signature.
+Then read the cause:
+
+```bash
+oc -n openshift-lightspeed logs deploy/lightspeed-app-server -c lightspeed-service-api --tail=50 | grep -iE "AADSTS|LLM connection"
+```
+
+`AADSTS700016: Application with identifier '...' was not found in the directory '...'` is the dead
+service principal. The readiness endpoint says the same thing more briefly:
+`{"detail":{"response":"Service is not ready","cause":"LLM is not ready"}}`.
+
+**Fix — repoint Lightspeed at the workshop's own MaaS endpoint.** Save the original first; the
+uninstall has no record of this change, because the installer never made it:
+
+```bash
+oc get olsconfig cluster -o yaml > ../Project-Shared/olsconfig-cluster-ORIGINAL.yaml
+```
+
+Copy the workshop's credential into the Lightspeed namespace (the `openai` provider type expects the
+key to be named `apitoken`):
+
+```bash
+oc -n openshift-lightspeed create secret generic ogsr-maas-apitoken \
+  --from-literal=apitoken="$(oc -n ogsr-system get secret ogsr-maas-credentials -o jsonpath='{.data.apitoken}' | base64 -d)"
+```
+
+Point the CR at it, substituting your endpoint and model — `adm maas show` prints both:
+
+```bash
+oc patch olsconfig cluster --type merge -p '{
+  "spec": {
+    "llm": {"providers": [{
+      "name": "MaaS",
+      "type": "openai",
+      "url": "https://YOUR-MAAS-ENDPOINT/v1",
+      "credentialsSecretRef": {"name": "ogsr-maas-apitoken"},
+      "models": [{"name": "YOUR-MODEL"}]
+    }]},
+    "ols": {"defaultProvider": "MaaS", "defaultModel": "YOUR-MODEL"}
+  }
+}'
+```
+
+The operator rolls the app-server automatically. It is fixed when the pod reaches `2/2` and the log
+says `LLM connection checked - LLM is ready`:
+
+```bash
+oc -n openshift-lightspeed get pods | grep app-server
+```
+
+Reload the console tab afterwards — the banner does not clear on its own.
+
+**Two things to carry forward.** The console assistant now answers from the same model the lab pages
+name, which removes a mismatch worth knowing about if you demo both. And your MaaS key now lives in
+**two** places — `ogsr-system/ogsr-maas-credentials` for the modules and
+`openshift-lightspeed/ogsr-maas-apitoken` for the console — so a key rotation
+([§5.2](#52-changing-the-ai-model-or-rotating-the-key)) has to update both, and `adm maas set` only
+knows about the first.
+
+To hand the cluster back as you found it:
+
+```bash
+oc replace -f ../Project-Shared/olsconfig-cluster-ORIGINAL.yaml
+```
+
+### 7.11 MTA: attendees see each other's applications
 
 Expected — brief the room. The Hub is one shared instance with no per-user view, and MTA's roles are
 personas rather than tenants, so enabling authentication would not change what anyone sees.
@@ -817,7 +909,7 @@ This is why the lab has each attendee name their application `parasol-legacy-cla
 state lives in the Hub database, not the attendee's namespace, so `ws reset` does not remove it — delete
 stale applications in the MTA console between cohorts.
 
-### 7.11 A hook Job fails immediately
+### 7.12 A hook Job fails immediately
 
 Two recurring causes:
 
@@ -825,13 +917,13 @@ Two recurring causes:
 - **No runtime `dnf`** under the restricted SCC. Use a purpose-built image rather than installing
   packages at runtime.
 
-### 7.12 `parasol-web` / `parasol-claims` never become Ready
+### 7.13 `parasol-web` / `parasol-claims` never become Ready
 
 They run images built into the cluster by the workshop's image-load step. If those ImageStreams have not
 populated, the Deployments exist but never start — check the `ogsr-parasol-images` namespace. This is a
 provisioning timing issue, not a module defect.
 
-### 7.13 A `LoadBalancer` Service sits `<pending>` forever
+### 7.14 A `LoadBalancer` Service sits `<pending>` forever
 
 Expected. There is no MetalLB on purpose — it is a cluster-wide networking component, and installing it
 would change the character of a cluster we do not own. The workshop exposes everything through Routes,
