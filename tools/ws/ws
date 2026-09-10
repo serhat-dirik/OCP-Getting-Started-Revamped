@@ -529,7 +529,10 @@ user_arg() {  # $1 = --user value or empty → default from oc whoami (attendee 
     # logged in as an admin" have three different fixes and only the last one is `--user`.
     local example target="${mod:-<module>}"
     if [[ "$cmd" == "diag" ]]; then target="$mod"; fi   # diag's module is optional; don't demand one
-    example="ws ${cmd}${target:+ ${target}} --user userN"
+    # ${WS_CMD}, never a literal `ws`: this fires from BOTH entry points, and on the operator
+    # one it was telling SAs to run `ws start …`, which the attendee entry point exits 2 on.
+    # ${cmd} is already the verb they typed, so the name is the only half that needed fixing.
+    example="${WS_CMD} ${cmd}${target:+ ${target}} --user userN"
     if ! command -v oc >/dev/null 2>&1; then
       die "oc not found in PATH — install the OpenShift CLI, then run:
    ${example}"
@@ -1250,7 +1253,7 @@ cmd_list() {
   done < <(_module_rows)
   [[ "$i" -gt 0 ]] || echo "  (catalog is empty — check ${MODULES_YAML})"
   echo
-  echo "  Use:  ${WS_CMD} start <number|slug>   e.g.  ${WS_CMD} start m08   or   ${WS_CMD} start app-security-testing"
+  echo "  Use:  ${WS_CMD} ${WS_VERB} <number|slug>   e.g.  ${WS_CMD} ${WS_VERB} m08   or   ${WS_CMD} ${WS_VERB} app-security-testing"
 }
 
 cmd_start() {
@@ -1302,7 +1305,7 @@ cmd_start() {
            -p '{"operation":{"initiatedBy":{"username":"ws"},"sync":{"revision":"'"${SOURCE_REVISION}"'","prune":true}}}' >/dev/null 2>&1; then
         started=$((started+1))
       else
-        warn "could not start a sync on ${a} — retry with: ${WS_CMD} start ${module} --user ${a##*-}"
+        warn "could not start a sync on ${a} — retry with: ${WS_CMD} ${WS_VERB} ${module} --user ${a##*-}"
       fi
     done
     ok "entry apps applied and ${started}/${n} sync operations started (watch: oc get applications -n ${ARGO_NS})"
@@ -1774,7 +1777,7 @@ cmd_smoke() {
           || hint "the cockpit verify graded NOTHING — every check was skipped, so this is NOT proof the entry state is broken. Read what it could not answer: ws verify ${module} --user ${user}"
       else
         check "ws verify ${module} --entry-only passes in the cockpit — ${ev_banner:-some checks were not graded}" true
-        info "(the ⚠ check(s) above were not graded as ${user} — usually cluster-scoped reads no attendee holds; read them with: ws verify ${module} --user ${user})"
+        info "(the ⚠ check(s) above were not graded as ${user} — usually cluster-scoped reads no attendee holds; read them with: ${WS_CMD} verify ${module} --user ${user})"
       fi
       ;;
     *)    check "ws verify ${module} --entry-only passes in the cockpit — ${ev_banner:-no banner captured}" false \
@@ -2493,7 +2496,7 @@ rebuild_print_table() {  # rows-file → the report; → 0 when nothing needs ac
   echo
   if [[ "$n" -eq 0 ]]; then
     info "no workshop-built image consumers found in scope."
-    echo "   Nothing consumes ${PARASOL_IMAGES_NS} or a per-user build here — materialize a module first (${WS_CMD} start <module> --user userN)."
+    echo "   Nothing consumes ${PARASOL_IMAGES_NS} or a per-user build here — materialize a module first (${WS_CMD} ${WS_VERB} <module> --user userN)."
     return 0
   fi
   if [[ "$n_stale" -eq 0 && "$n_bad" -eq 0 ]]; then
@@ -4675,7 +4678,7 @@ diag_entry_app() {  # app user — print one entry app's sync/health/op-phase + 
   # derived from the entry-<module>-<user> name shape callers already use — app_name's own format).
   local app="$1" user="$2" sync health phase msg conds cline module degraded exp
   if ! oc get application "$app" -n "$ARGO_NS" >/dev/null 2>&1; then
-    echo "  ${app}: absent (not materialized — ${WS_CMD} start/prep it, or re-check the user/module)"
+    echo "  ${app}: absent (not materialized — ${WS_CMD} ${WS_VERB} it, or re-check the user/module)"
     return 0
   fi
   sync="$(oc get application "$app" -n "$ARGO_NS" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
@@ -4725,7 +4728,7 @@ cmd_diag() {  # SA troubleshooting bundle for a stuck attendee. READ-ONLY. cmd_d
              | sed 's|.*/||' | grep '^entry-' || true)"
   fi
   if [[ -z "$apps" ]]; then
-    echo "  (no entry-* apps for ${user}${module:+ matching ${module}}) — has ${WS_CMD} start/prep run?"
+    echo "  (no entry-* apps for ${user}${module:+ matching ${module}}) — has ${WS_CMD} ${WS_VERB} run?"
   else
     while IFS= read -r app; do
       [[ -n "$app" ]] || continue
@@ -5000,7 +5003,7 @@ cmd_by_design() {  # SA/admin: every resource this workshop breaks or drifts ON 
     if [[ "${n_entry:-0}" -gt 0 ]]; then
       echo "   (none found, but ${n_entry} entry app(s) ARE materialized — those charts predate the"
       echo "    marker, or their app has not re-synced since. Do NOT read this as \"nothing is"
-      echo "    intentional here\": refresh with ${WS_CMD} git-refresh, then ${WS_CMD} start the module again.)"
+      echo "    intentional here\": refresh with ${WS_CMD} git-refresh, then ${WS_CMD} ${WS_VERB} the module again.)"
     else
       echo "   (none — no entry state is materialized on this cluster)"
     fi
@@ -5136,7 +5139,7 @@ cmd_maas_show() {  # READ-ONLY. [user] scopes the verdict block to one attendee.
   if [[ -z "${rows//[[:space:]]/}" ]]; then
     echo "  (none — no AI module entry state is materialized on this cluster yet)"
     echo
-    echo "Summary: nothing to report — materialize one with: ${WS_CMD} start agentic-ai --user user1"
+    echo "Summary: nothing to report — materialize one with: ${WS_CMD} ${WS_VERB} agentic-ai --user user1"
     return 0
   fi
   printf "  %-18s %-26s %-18s %-9s %s\n" "NAMESPACE" "MODULE" "MODEL" "AI PATH" "SOURCE"
@@ -5610,7 +5613,7 @@ YAML
   local targets; targets="$(maas_converge_targets "$scope_user" || true)"
   if [[ -z "${targets//[[:space:]]/}" ]]; then
     info "No AI module entry states are materialized${scope_user:+ for ${scope_user}} — nothing to re-converge."
-    echo "   The next \`${WS_CMD} start <ai-module>\` picks the new credential up automatically."
+    echo "   The next \`${WS_CMD} ${WS_VERB} <ai-module>\` picks the new credential up automatically."
     echo "   Check: ${WS_CMD} maas show"
     return 0
   fi
@@ -5743,6 +5746,12 @@ ws_is_admin() { [[ "${WS_AUDIENCE:-attendee}" == "admin" ]]; }
 # NOT `ws_is_admin && WS_CMD=adm`: a failing AND-list as a standalone statement is the set -e
 # trap this file has already paid for once (see ws_verb_allowed's comment).
 if ws_is_admin; then WS_CMD="adm"; else WS_CMD="ws"; fi
+# The verb that MATERIALIZES a module, named for the surface the caller is on. `start` is an
+# operator verb and `ws` rejects it outright, so a hint that hardcoded "start" told an attendee to
+# run a command the tool refuses — the same defect as install.sh's old "next: ws doctor" line
+# (6efb5b7). They are not aliases: cmd_prep detects what the attendee already has, asks consent and
+# purges first, where cmd_start just materializes. Same end state, right path per surface.
+if ws_is_admin; then WS_VERB="start"; else WS_VERB="prep"; fi
 
 ws_verb_allowed() {  # verb → 0 if THIS entry point may run it
   # Explicit ifs, not `cond && return`: this repo has already paid for an AND-list as a
