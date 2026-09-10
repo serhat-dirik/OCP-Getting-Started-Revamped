@@ -847,10 +847,11 @@ service principal. The readiness endpoint says the same thing more briefly:
 `{"detail":{"response":"Service is not ready","cause":"LLM is not ready"}}`.
 
 **Fix — repoint Lightspeed at the workshop's own MaaS endpoint.** Save the original first; the
-uninstall has no record of this change, because the installer never made it:
+uninstall has no record of this change, because the installer never made it. `*-ORIGINAL.yaml` is
+gitignored, so this snapshot cannot be committed by accident:
 
 ```bash
-oc get olsconfig cluster -o yaml > ../Project-Shared/olsconfig-cluster-ORIGINAL.yaml
+oc get olsconfig cluster -o yaml > olsconfig-cluster-ORIGINAL.yaml
 ```
 
 Copy the workshop's credential into the Lightspeed namespace (the `openai` provider type expects the
@@ -897,7 +898,7 @@ knows about the first.
 To hand the cluster back as you found it:
 
 ```bash
-oc replace -f ../Project-Shared/olsconfig-cluster-ORIGINAL.yaml
+oc replace -f olsconfig-cluster-ORIGINAL.yaml
 ```
 
 ### 7.11 MTA: attendees see each other's applications
