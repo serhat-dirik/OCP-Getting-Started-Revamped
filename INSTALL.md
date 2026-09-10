@@ -616,41 +616,37 @@ name-matching, and says so — treat anything it prints in that mode as a sugges
 error: You must be logged in to the server (Unauthorized)
 ```
 
-**This is the normal outcome of installing a day before the workshop.** Fix it in one command,
-before the room arrives:
+**The attendee's browser sign-in has lapsed — the cluster is fine.** They fix it themselves:
 
-```bash
-tools/ws/adm session-refresh --all
-```
+> Reload the cockpit page, sign in again, and reopen the terminal.
 
-Each cockpit's kubeconfig is written **once**, when its pod starts, and holds an OAuth token that
-expires on the cluster's own schedule — 24 hours unless your cluster overrides it:
+One shared cockpit serves the whole cohort behind an OpenShift login, and its terminal mints that
+attendee's kubeconfig from the sign-in **each time they open it**. There is no pod-start token to go
+stale, so installing the day before a workshop does not cause this, and no morning command prevents
+it. What expires is the browser session, on the cluster's own schedule — 24 hours unless overridden:
 
 ```bash
 oc get oauth cluster -o jsonpath='{.spec.tokenConfig.accessTokenMaxAgeSeconds}{"\n"}'   # empty = the 24h default
 ```
 
-The terminal's home directory is a persistent volume, so the expired kubeconfig survives anything
-short of a pod restart. Nothing renews it on its own.
-
 Everything else looks healthy while this is happening — the pod is Running, the Application is
-Synced, the cockpit page loads. Only the terminal is affected, and only from the attendee's side,
-which is why it is worth recognising on sight.
+Synced, the cockpit page loads. Only that attendee's terminal is affected, which is why it is worth
+recognising on sight.
 
-`adm session-refresh` re-signs each attendee in **inside their own cockpit**: no pod restart, no
-content re-clone, nothing an attendee mid-exercise would notice. Scope it with `--user userN` for
-one person. It exits non-zero if any session could not be refreshed.
-
-Restarting the pods works too, and is the right reflex if you are already restarting them for
-another reason:
+Confirm one attendee's session from your own machine:
 
 ```bash
-oc delete pod -n ogsr-showroom -l app.kubernetes.io/name=showroom
+oc exec deploy/showroom-shared -n ogsr-showroom -c terminal -- ls -l /homes/user1/.kube/config
 ```
 
-Cockpits provisioned by a current install also **re-sign themselves in** when the terminal opens, so
-this should not reach an attendee at all. A cluster built before that change has no such profile —
-refresh it once with the command above, or restart the pods to pick it up permanently.
+An attendee who has **never** signed in has no home directory there at all. That is expected before
+the first sign-in of a delivery, and it is also why `adm smoke` refuses to run as a user nobody has
+opened the cockpit as.
+
+> **`adm session-refresh` does not apply here.** It belongs to the retired per-user cockpit, where
+> each pod held one long-lived token written once at pod start. Against the shared cockpit it reports
+> `nothing to refresh` and changes nothing. It remains the right command if you deliberately set
+> `showroom.shared.enabled: false`, where the old failure mode — and the old fix — still hold.
 
 ### 7.2 `ws prep` fails with "attendees may only use their own AppProject"
 

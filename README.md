@@ -127,34 +127,32 @@ The commands below run from your own machine and manage the whole room — they 
 operator surface of the workshop CLI. Attendees only ever see `ws`, its four-verb surface
 (`list`/`prep`/`verify`/`reset`), inside the cockpit — steps 3 and 4 below are theirs.
 
-**1. On the morning of the session, refresh the attendee logins.**
-
-```bash
-tools/ws/adm session-refresh --all
-```
-
-Each cockpit signs its attendee in when its pod starts, and that login expires on the cluster's own
-schedule — 24 hours unless your cluster says otherwise. **Installing the day before a workshop is the
-normal case**, so without this the first thing an attendee types comes back:
-
-```
-error: You must be logged in to the server (Unauthorized)
-```
-
-Nothing else looks wrong when that happens — the pod is Running and the cockpit page loads — so it is
-worth doing rather than diagnosing. It takes seconds, needs no pod restart, and is safe to run again
-at any point during the day. See [INSTALL.md §7.1](INSTALL.md) if you meet it live.
-
-**If you have pushed content or updated the workshop since installing**, use this instead — it covers
-the logins *and* re-clones each cockpit, which the command above deliberately does not do:
+**1. If you have pushed content since installing, re-clone the cockpit.**
 
 ```bash
 tools/ws/adm git-refresh --restart-terminals --all
 ```
 
 A cockpit clones the workshop when its pod starts and never again, so a cluster that has not been
-restarted since an update runs the old copy. The symptom is `ws prep` being refused —
-[INSTALL.md §7.2](INSTALL.md).
+restarted since an update serves the old copy. The symptom is `ws prep` being refused —
+[INSTALL.md §7.2](INSTALL.md). Skip this if nothing has changed since the install.
+
+**Attendee logins need no morning refresh.** One cockpit serves the whole cohort behind an OpenShift
+login, and its terminal mints each attendee's kubeconfig from that sign-in — there is no pod-start
+token to go stale, so **installing the day before a workshop is fine**. If an attendee's first
+command returns:
+
+```
+error: You must be logged in to the server (Unauthorized)
+```
+
+their *browser* sign-in has lapsed, not the cluster: they reload the cockpit page and reopen the
+terminal. Nothing else looks wrong when that happens — the pod is Running and the page loads — so it
+is worth recognising on sight rather than diagnosing. See [INSTALL.md §7.1](INSTALL.md).
+
+> `adm session-refresh` belongs to the retired per-user cockpit, where each pod held one long-lived
+> token. Against the shared cockpit it reports `nothing to refresh` and changes nothing. It is still
+> the right command if you deliberately set `showroom.shared.enabled: false`.
 
 **2. Share one URL with the whole room.** Every attendee uses the same cockpit — the guide, a terminal,
 and tool tabs in a single browser page:
