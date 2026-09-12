@@ -48,27 +48,68 @@ endif::demo[]
 // DEMO FLAVOR — ~10-minute presenter arc: wake -> burst -> split -> roll back
 // ============================================================================
 ifdef::demo[]
-== Demo arc — Scale-to-zero, burst, and a one-line rollback (10 min)
+== The service that holds zero pods until it is called · 10 min
 
-[NOTE]
-.Before you present
+Parasol's claims service costs nothing while it is idle: it wakes on the first request, scales out under a burst, and shifts traffic between versions as a weight on one Route.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `ws prep serverless-zero-to-hero --user {user} --yes` a few minutes ahead, set `NS={user}-dev` and `URL=$(oc get ksvc parasol-claims -n $NS -o jsonpath='{.status.url}')`, and let the service settle back to *zero* pods (about a minute of no traffic).
-This demo runs from the *entry* state (a single scale-to-zero revision) — the story is *building* the split live, not starting from `adm solve`.
-Also mint the tuned `parasol-claims-v2` revision off-screen, before the audience arrives — beat 2's "capped at three pods" and beat 3's split both assume it already exists: `kn service update parasol-claims -n $NS --revision-name parasol-claims-v2 --concurrency-limit 2 --scale-max 3 --no-wait` (100% traffic moves to `v2` automatically; let it settle back to zero pods again after).
-Keep a terminal with large font on screen and a second pane running `oc get pods -n $NS -w` so the audience *sees* pods appear and vanish.
-The money moment is beat 1: the *cold start* on screen, then a warm request in a tenth of a second — the tradeoff made visceral.
-Do not promise a number: this JVM cold start is a *range*, measured three times on this cluster at 15.27 s, 18.81 s and 26.51 s. Expect *15–30 seconds*, and say what the screen says.
+This demo runs from the *entry* state — a single scale-to-zero revision of the claims service — because the traffic split is built live rather than staged. Return the world to that state a few minutes ahead:
+
+[source,sh,role=execute]
+----
+ws prep serverless-zero-to-hero
+----
+
+Step 3 splits traffic across two revisions, and the three-pod ceiling step 2 climbs to comes from the same update. Create `parasol-claims-v2` ahead of the session — it takes 100% of the traffic automatically:
+
+[source,sh,role=execute,subs="attributes"]
+----
+NS={user}-dev
+oc delete revision parasol-claims-v2 -n $NS --ignore-not-found=true
+kn service update parasol-claims -n $NS --revision-name parasol-claims-v2 --concurrency-limit 2 --scale-max 3 --no-wait
+----
+
+Then leave the service alone until it settles back to *zero* pods — about a minute with no traffic. Steps 1 and 2 both depend on starting from zero: from zero the activator sees the whole burst and adds capacity at once, while a service left warm by an earlier request scales on measured average concurrency and can sit at one pod indefinitely. A second terminal pane running `oc get pods -n $NS -w` shows pods appearing and vanishing while the steps run.
+
+NOTE: The cold start in step 1 is a *range*, not a fixed figure — measured three times on this cluster at 15.27 s, 18.81 s and 26.51 s. Expect *15–30 seconds*, and read the figure off the screen rather than quoting one in advance.
+
+CAUTION: `ws prep serverless-zero-to-hero` is also the reset between runs. It returns the entry state — one scale-to-zero revision, no traffic split, no eventing — so the `parasol-claims-v2` update above has to be run again after each reset.
 ====
 
-=== Beat 1 — Zero pods, then a cold start on the first request
+=== Brief
 
-[demo-block]
-[TIME 3m]
-Say:: "Parasol's claims-processor is running, but it's holding *zero* pods — it costs nothing while it's idle. Watch what happens when the first request arrives: the platform starts a pod, and that first caller pays the cold start. Then watch the second request."
-Show:: `oc get pods` showing *no* claims pod; then a `curl` that hangs 15–30 s and returns `200`; a pod appearing; a second `curl` returning in a tenth of a second.
-Do:: Wake the service from zero and contrast cold vs warm:
-+
+image::serverless-zero-to-hero/serverless-zero-to-hero-01-request-driven-compute.svg["A Knative Service: a client calling an auto-created edge Route, the Route splitting traffic 80/20 across two immutable revisions, a Configuration minting the next revision, the Knative Pod Autoscaler scaling revisions between zero and N pods on concurrency, and an event source feeding a broker and trigger that wake the service."]
+
+*One object, and the platform builds the rest*
+
+A Deployment is always on. You pick a replica count, and those pods hold their CPU and memory against quota whether they are serving thousands of requests a second or none at all. For a claims service that is hammered during business hours and quiet overnight, that is capacity paid for and not used for most of the day — while the Deployment still has to be sized for the busiest minute.
+
+OpenShift Serverless answers with request-driven compute. You create *one* object, a Knative Service, and the platform materializes the rest: a Deployment with a request-driven autoscaler, an in-cluster Service, an edge Route published on the service as `status.url`, and an immutable Revision for every version shipped. Nobody creates a Route by hand here — the operator owns it.
+
+*The autoscaler, and the honest cold start*
+
+Knative scales on *concurrency* — requests in flight — rather than CPU, and it is the autoscaler that can go all the way to zero: no traffic, no pods, no cost beyond the configuration. A ceiling set per service caps how far a burst can climb, so one tenant cannot exhaust the cluster.
+
+The trade is the *cold start*. The first request into a scaled-to-zero service waits while a pod is scheduled and the runtime boots — 15 to 30 seconds for this JVM service, against about a tenth of a second warm. That is a tunable cost rather than a defect: a `min-scale` floor of one keeps a pod warm for a latency-sensitive path, and a natively compiled build shrinks the start to milliseconds.
+
+*In this demo*
+
+. A service holding zero pods, woken by its first request — the cold start measured, then the same request warm
+. A burst of concurrent traffic climbing to the ceiling, then melting back to zero
+. An 80/20 split across two revisions, and a rollback that is one line
+
+=== 1 · Zero pods, then the first request — 3 min
+
+The claims service is Ready and holding no pods at all. The first request pays for that: the activator buffers it while a pod is scheduled and the JVM boots. The request straight after it lands on a warm pod.
+
+image::serverless-zero-to-hero/serverless-zero-to-hero-01-topology-scaled-to-zero.png["Topology view of the {user}-dev project at rest: claims-db and demo-client are drawn as Deployment nodes with solid blue readiness rings, while the parasol-claims Knative Service sits inside a dashed grouping box with a REV badge on its revision and a 100 percent traffic badge. Its readiness ring is a hollow outline rather than a filled band — the service is carrying all of the traffic while running zero pods.",role=lightbox]
+
+*Why it matters*
+
+Nothing is hidden. Scale-to-zero buys an idle cost of nothing and charges for it on the first request, and the charge is measurable per service rather than a rule of thumb. Where a path cannot tolerate the wait, a warm floor of one pod removes it — giving up scale-to-zero for that service deliberately, instead of discovering the wait in production.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-dev
@@ -77,17 +118,30 @@ oc get pods -n $NS -l serving.knative.dev/service=parasol-claims    # none — s
 oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "cold start: HTTP %\{http_code} in %\{time_total}s\n" "$URL/api/claims"
 oc exec deploy/demo-client -n $NS -- curl -s -k -o /dev/null -w "warm:       HTTP %\{http_code} in %\{time_total}s\n" "$URL/api/claims"
 ----
-+
-"That is the cold start you just watched — and a tenth of a second warm. That wait is the honest cost of scale-to-zero — and if a path can't tolerate it, I set a warm floor with `min-scale: 1`. Nothing hidden."
 
-=== Beat 2 — A burst climbs to the ceiling, then melts back to zero
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Now a sudden burst. Knative scales on *concurrency* — in-flight requests — and I've capped this service at three pods. Watch it climb from zero to the ceiling, then melt back down when the load stops."
-Show:: `oc get pods -w` going `0 → 1 → 2 → 3`, holding at 3, then dropping back to `0` after the load ends.
-Do:: *Confirm you are at zero first* (`oc get pods -n $NS -l serving.knative.dev/service=parasol-claims` — nothing running), then drive the burst and watch the autoscaler:
-+
+The pod listing was empty while the service was still Ready — a scaled-to-zero service keeps its Route and its configuration and holds no capacity. The first request returned `200` after paying the full startup cost; the second returned in about a tenth of a second, against the pod the first one started.
+
+=== 2 · A burst to the ceiling, and back to zero — 3 min
+
+Twelve concurrent callers for ninety seconds, against a service that has settled back to zero. The autoscaler adds pods in proportion to in-flight requests, up to the three-pod ceiling set on this revision, and removes them again once the load stops.
+
+image::serverless-zero-to-hero/serverless-zero-to-hero-02-topology-scaled-up.png["Topology view of the {user}-dev project during the burst: claims-db, demo-client and the parasol-claims Knative Service, which sits in a dashed grouping box with a REV badge on revision v2 and a 100 percent traffic badge. Its readiness ring is a thick solid blue band rather than the hollow outline it shows at rest — the revision has scaled up under load and is running pods.",role=lightbox]
+
+*Why it matters*
+
+Capacity follows offered load instead of a replica count someone guessed at sizing time, and it follows it in both directions — the quiet hours cost nothing at all. The ceiling is set per service, so a burst is absorbed up to a bound the platform team chose rather than up to whatever the cluster has left.
+
+Confirm the service is back at zero first. If a pod is still listed, give it another minute of quiet and run this again:
+
+[source,sh,role=execute]
+----
+oc get pods -n $NS -l serving.knative.dev/service=parasol-claims
+----
+
+Then drive the burst and watch the autoscaler; `Ctrl-C` ends the watch:
+
 [source,sh,role=execute]
 ----
 oc exec deploy/demo-client -n $NS -- sh -c '
@@ -97,19 +151,21 @@ oc exec deploy/demo-client -n $NS -- sh -c '
   done; wait' &
 oc get pods -n $NS -l serving.knative.dev/service=parasol-claims -w
 ----
-+
-NOTE: *Two things here will embarrass you in front of a room if you skip them.* The burst must be *90s*, not 35 — measured on this cluster, the third pod lands at *t+49s*, so a 35-second burst ends before the ceiling is ever reached and the demo simply does not happen. And you must start from *zero*: from zero the activator sees the whole burst and adds capacity at once, but a service left warm by an earlier step scales on measured average concurrency and will sit at *one pod indefinitely*. Rehearse it cold, and give it the full minute — the pause between the first pod and the next two is the demo, not dead air.
-+
-"First pod almost immediately — that's the activator holding your requests until there's somewhere to put them. Then a pause, and around forty-five seconds the autoscaler has seen enough sustained concurrency to decide one isn't enough, and takes it to the ceiling I set. Once the burst is over, back to zero. Pay for the burst, nothing for the quiet."
 
-=== Beat 3 — An 80/20 split, and a one-line rollback
+*What just happened*
 
-[demo-block]
-[TIME 4m]
-Say:: "Parasol wants to ship a v2 of the claims-processor — carefully, 20% of traffic first. With a Knative Service the old version is a *revision that already exists*, so the split — and the rollback — is a *one-line* change to one Route. No second Deployment, no load-balancer ticket."
-Show:: A tuned v2 revision; an 80/20 tag split read straight from `kn`; then a *rollback* to 100% stable in one command.
-Do:: Split 80/20, then roll back to 100% stable (v2 was created off-screen with `kn service update … --revision-name parasol-claims-v2`):
-+
+The first pod appears almost immediately — the activator holding requests until there is somewhere to put them. Then a pause, because the autoscaler averages concurrency over a stable window before it commits: on this cluster the third pod lands around *t+49 s*. That pause is the mechanism working rather than a stall, which is why the load runs for the full ninety seconds. When it stops, the pods go away and the service is back at zero.
+
+=== 3 · An 80/20 split, and a one-line rollback — 4 min
+
+A new version of this service is already a revision: immutable, addressable, and still there after the next one ships. Sending 20% of traffic to it — and taking it all back — is a weight on one Route.
+
+image::serverless-zero-to-hero/serverless-zero-to-hero-03-serverless-services-revisions.png["The parasol-claims Service Details tab under Serverless, Serving, Services, showing the Revisions section: parasol-claims-v1 at 80 percent with its stable- prefixed sub-route URL, and parasol-claims-v2 at 20 percent with its candidate- prefixed sub-route URL — the tag names appear inside those URLs rather than as a separate column.",role=lightbox]
+
+*Why it matters*
+
+There is no second Deployment to create, no load-balancer change to request, and nothing to rebuild in order to go back. The previous revision never went away, so the rollback is the same one-line command as the rollout with different numbers — which is what turns progressive delivery into something a team will actually use on a Tuesday afternoon.
+
 [source,sh,role=execute]
 ----
 # 80/20 blue-green split across the two revisions, each tag also gets its own sub-route:
@@ -117,19 +173,34 @@ kn service update parasol-claims -n $NS \
   --tag parasol-claims-v1=stable --tag parasol-claims-v2=candidate \
   --traffic stable=80 --traffic candidate=20 --no-wait
 kn revision list -n $NS
-# ...and the rollback: 100% back to stable, in one line
+----
+
+*On screen* — *Serverless → Serving → Services → parasol-claims → Details*: the Revisions section reads 80% against v1 and 20% against v2, each with its own tagged sub-route URL that addresses that revision directly.
+
+Then the rollback — one line, with the candidate left in place, ready to be re-weighted:
+
+[source,sh,role=execute]
+----
 kn service update parasol-claims -n $NS --traffic stable=100 --traffic candidate=0 --no-wait
 kn revision list -n $NS
 ----
-+
-"Eighty/twenty, then — one line — a hundred percent back to stable. The candidate revision is still there, ready to re-weight. That's rollout *and* rollback as a Route weight, because a revision is a frozen version that never went away."
 
-[NOTE]
-.Optional closer + reset between runs
-====
-If the room is engaged, the *eventing taste* is a strong closer: `kn broker create default`, a `PingSource`, and a `Trigger` to the `ksvc` — the service *wakes from zero on an event*. Be honest that the delivery returns `HTTP 405` — Method Not Allowed is even sharper than a 404: the request genuinely arrived; the app just has no POST event handler yet (that's the next module) — so frame it as "the plumbing works; the processing is Eventing."
-`ws prep serverless-zero-to-hero --user {user} --yes` returns the world to the entry state (one scale-to-zero revision, no split, no eventing).
-====
+== Frequently asked questions
+
+*The first request took twenty seconds. Is something broken?*::
+No — that is the cold start, and it is the cost of holding zero pods. A scaled-to-zero service has no capacity until a request arrives; the activator buffers that request while a pod is scheduled and the JVM boots, which on this cluster measured between 15 s and 27 s. Every request after it is about 0.1 s. Where the wait is unacceptable, `min-scale: 1` keeps one pod warm, and a natively compiled build cuts the start to tens of milliseconds. It is a tuning decision per service, not a defect.
+
+*Why is a pod still running when nothing is calling the service?*::
+Two Knative defaults add up: the stable window the autoscaler averages over (about 60 s) plus the scale-to-zero grace period (about 30 s). A service settles to zero roughly a minute to a minute and a half after the last request, not the instant traffic stops. Anything that keeps sending traffic — a health checker, a scheduled event source — keeps it awake, which is expected behaviour rather than a leak.
+
+*Why scale on concurrency rather than CPU?*::
+The Knative Pod Autoscaler scales on requests in flight, and it is the only autoscaler here that can reach zero. The Horizontal Pod Autoscaler scales an ordinary Deployment on CPU or memory and has a floor of one pod. Concurrency tracks offered load directly instead of its CPU side effect, which is usually the better signal for a request-driven service. An HPA can still be attached to a Knative revision for CPU-based scaling, but only the KPA scales to zero.
+
+*Where does the URL come from — do we create the Route?*::
+No, and creating one by hand fights the operator. OpenShift Serverless auto-creates an edge-terminated Route, backed by the Kourier ingress, in a namespace the application team does not manage, and publishes the address on the service itself as `status.url`. Every command here reads the address from there, which is also how an application team confirms the Route exists without access to the ingress namespace.
+
+*Can the service wake on an event rather than an HTTP call?*::
+Yes. An event source feeding a broker, with a trigger delivering to this service, wakes it from zero exactly as a request does — the same scale-from-zero path, driven by an event instead of a caller. Filtering, retries and dead-letter handling for those events are Knative Eventing, which the next module builds on this same state.
 endif::demo[]
 
 // ============================================================================
