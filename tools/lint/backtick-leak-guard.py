@@ -36,8 +36,10 @@ choice ("it cannot false-positive"), and measuring it is what ruled it out:
   * ONE SOURCE, THREE RENDERINGS, AND EACH HIDES PART OF THE DEFECT. Every page was rendered with
     real Asciidoctor twice, once plain and once with `demo` set. The workshop rendering exposes 4
     of the 9 surviving sites; the demo rendering exposes the other 5; the two sets are DISJOINT,
-    because half the leaks live in [demo-block] Say/Do lines that ifdef::demo removes from the
-    workshop pages entirely. An HTML gate would have to build all three sites and union them, and
+    because half the leaks lived in demo-only lines that ifdef::demo removes from the workshop
+    pages entirely. (Measured 2026-08 against the Say/Do beats of the day; the SA-Demos redesign
+    replaced those with Prep/Brief/step blocks, still inside `ifdef::demo[]`, so the asymmetry the
+    measurement found is unchanged.) An HTML gate would have to build all three sites and union them, and
     a rendering added later drops out of coverage silently. The source IS the union.
   * THE HTML SYMPTOM IS NOT A RELIABLE SIGNAL. Counting backticks in rendered prose finds a
     SUBSET, and which subset depends on the apostrophe: `' collapses to ’ and the swallowed
