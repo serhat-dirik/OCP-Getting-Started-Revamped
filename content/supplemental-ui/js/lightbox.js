@@ -67,6 +67,17 @@
       clone.style.width = Math.round(w) + 'px';
       clone.style.height = Math.round(h) + 'px';
     } else {
+      // RE-ABSOLUTIZE THE SOURCE BEFORE THE CLONE CHANGES DOCUMENTS. Antora emits page images as
+      // RELATIVE urls ("../_images/<module>/<shot>.png"), and cloneNode copies that attribute
+      // verbatim. A relative url resolves against the document it lands in, and this clone lands in
+      // the HOST document — in the cockpit that is the top frame, whose base is the site root, not
+      // this page's directory. So the overlay asked for /_images/… , got a 404, and showed the
+      // alt text where the screenshot should be (owner, 2026-09-12, gitops-fundamentals). The .src
+      // PROPERTY is already fully resolved, so assigning it writes a url that means the same thing
+      // in any document. Only raster images were ever affected: an inline Mermaid <svg> carries no
+      // external url, which is why the diagrams enlarged correctly and the screenshots did not —
+      // and why the standalone site never showed it, there the host document IS this document.
+      clone.src = node.currentSrc || node.src;
       clone.style.width = 'auto'; clone.style.height = 'auto';
       clone.style.maxWidth = '92vw'; clone.style.maxHeight = '88vh';
     }
