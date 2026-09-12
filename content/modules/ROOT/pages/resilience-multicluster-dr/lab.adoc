@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Resilience, Multi-Cluster & DR. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
-// presenter arc. Attendee steps run in the Showroom terminal as {user} and are [source,sh,role=execute].
+// SA demo guide. Attendee steps run in the Showroom terminal as {user} and are [source,sh,role=execute].
 // The FIRST block sets CLIENT={user}-client / SITEA={user}-site-a / SITEB={user}-site-b (subs=attributes);
 // later blocks use $CLIENT/$SITEA/$SITEB with NO subs so jsonpath braces stay literal. All commands +
 // outputs + timings were PERFORMED on OCP 4.21.22 against OpenShift Service Mesh 3.3.5
@@ -48,139 +48,162 @@ Namespaces in the output below render with *your* user (`{user}`). Everything el
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — ~11-minute presenter arc: resilient service → fail the whole site → client flips A→B (no drops) → recover
+// DEMO FLAVOR — 11-minute demo guide: a resilient primary → fail the whole site → the client flips A→B with no drops → recover
+// The title's minutes are the sum of the three step headings below (3+5+3); keep them in step.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — Fail an entire site; the client never notices (11 min)
+== The site that went dark, and the client that never noticed · 11 min
 
-[NOTE]
-.Before you present
+An entire primary site is scaled to zero mid-flight; the mesh ejects it, retries onto the secondary, and the client — which never changes its address — keeps reading `HTTP 200`.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `adm solve resilience-multicluster-dr --user {user}` a few minutes ahead so the resilient sites, the client, the ingress gateway, *and the failover routing* are all up, and set `CLIENT={user}-client SITEA={user}-site-a SITEB={user}-site-b`.
-Open a terminal tailing the client log — `oc logs -f deploy/claims-client -n {user}-client` — with a large font; that live log flipping `SITE=A` → `SITE=B` is the whole demo.
-The money moment is beat 2: you *scale site A to zero* — the entire primary site is gone — and the client log *keeps printing `200`* while the site marker flips to `B`.
-
-*Read the client log before you promise beat 2.* The flip needs two things that are easy to lose between
-a rehearsal and the room: the failover routing programmed, and the *secondary* site serving. The reset at
-the bottom of this page (`ws prep`) deliberately *removes* the failover routing, so a
-rehearse-reset-present sequence leaves you on the entry state with a gateway that has no route at all.
-Run this first:
+This demo starts from the finished lab state. Stage it before the session from your own terminal, signed in with a cluster-admin account:
 
 [source,sh,subs="attributes"]
 ----
-CLIENT={user}-client SITEA={user}-site-a SITEB={user}-site-b
+adm solve resilience-multicluster-dr --user {user}
+----
+
+That leaves both sites running the resilient claims tier, the client calling the stable endpoint once a second, the mesh ingress gateway in front of them, and the failover routing already programmed; it waits up to five minutes for all three namespaces to converge and normally returns well inside that, so start it ahead of the session.
+
+The account in that command is the one you signed in to this cockpit with.
+
+`ws prep resilience-multicluster-dr` is not a way back to this starting point — it *removes* the failover routing and leaves a gateway with no route at all. Between runs, stage the demo again with the command above rather than resetting.
+
+Confirm the starting state: the client on site A, and site B ready to receive traffic.
+
+[source,sh,role=execute,subs="attributes"]
+----
+CLIENT={user}-client
+SITEA={user}-site-a
+SITEB={user}-site-b
 oc get deploy parasol-claims -n $SITEB
 oc logs deploy/claims-client -n $CLIENT --tail=3
 ----
 
-*If the log reads `HTTP 200  served-by-site=A`* and site B shows its replicas ready, the arc runs exactly
-as scripted below.
-*If it reads `HTTP 404  served-by-site=none`*, the gateway has no route — you are on the entry state, not
-the solved one. Re-run `adm solve resilience-multicluster-dr --user {user}` and do not open beat 1 until the
-log says `served-by-site=A`: scaling site A to zero against a `404` log changes nothing on screen, and
-beat 2 has no visual at all.
-*If site B is not ready*, `oc scale deploy/parasol-claims -n $SITEB --replicas=3` and wait for it — with no
-secondary there is nothing to fail over *to*, and the marker will go to `none`, not to `B`.
+`HTTP 200  served-by-site=A`, with site B's replicas ready, is the state the steps below are written from. `HTTP 404  served-by-site=none` means the gateway has no route — that is the entry state rather than the finished one, so stage it again. If site B is not ready, `oc scale deploy/parasol-claims -n $SITEB --replicas=3` and wait for it: with no secondary there is nothing to fail over to, and the marker would go to `none` rather than to `B`.
 
-*Never pre-fail site A to "check that the flip works" and leave it failed.* The client would already be on
-`B` when the room walks in, beat 1's "it's steadily on site A" would be false on screen, and beat 2 would
-be you narrating a transition nobody saw. Rehearse it by all means — then scale site A back to 3 and wait
-for the log to return to `A` before you start. For the same reason, do not tune `baseEjectionTime` down to
-make the flip look snappier: a shorter ejection re-probes the dead primary mid-outage, which is a visible
-blip in the one beat you want clean, and the `~4 s` flip this arc is written from was measured at the
-30-second value.
-====
+Keep a second terminal tailing the client log for the whole demo — the flip in that log is what the steps read from:
 
-=== Beat 1 — A resilient primary, and a client watching it
-
-[demo-block]
-[TIME 3m]
-Say:: "Parasol's claims service runs in two sites — A and B — and a client is calling it right now through one stable address, logging which site answers. Watch: it's steadily on site A, the primary. Site A itself is *resilient* — three replicas, a disruption budget, spread across nodes — so it survives a pod or a node dying. But watch what happens when the *whole site* goes down."
-Show:: The live client log printing `HTTP 200  served-by-site=A` once a second; alongside it, `oc get deploy,pdb,hpa -n $SITEA` showing the resilient tier.
-Do:: Show the resilient primary and the steady client log:
-+
 [source,sh,subs="attributes"]
 ----
-SITEA={user}-site-a
-oc get deploy,pdb,hpa -n $SITEA
-# in a second terminal, tailing the client (leave it running for the whole demo):
 oc logs -f deploy/claims-client -n {user}-client --tail=5
 ----
-+
-"Three of three, a budget that keeps two alive, an autoscaler holding the floor. The client is happily on site A."
 
-=== Beat 2 — The disaster: scale the entire primary site to zero
+NOTE: Step 2 is timing-dependent. Outlier detection sweeps the endpoints every five seconds and the measured flip took about four seconds, so a one- or two-second gap between the last `A` line and the first `B` line is expected and worth naming — that request took a retry hop. If nothing has moved after fifteen seconds, stop watching the stream and pull the answer instead, with the `curl` in step 2. If the tail dies or the output scrolls past the transition, it is still in the log's history: `oc logs deploy/claims-client -n $CLIENT --tail=30` re-shows it.
 
-[demo-block]
-[TIME 5m]
-Say:: "Now the disaster: site A — the entire primary site — fails. A power cut, a cluster outage, a bad deploy. I'll simulate it the bluntest way possible: scale it to *zero*. There is no site A anymore. Keep your eyes on the client log."
-Show:: `oc scale ... --replicas=0` on site A; the client log flipping from `served-by-site=A` to `served-by-site=B` within a few seconds — *every line still `HTTP 200`*.
-Do:: Fail the whole primary site:
-+
-[source,sh,subs="attributes"]
-----
-oc scale deploy/parasol-claims -n {user}-site-a --replicas=0
-# watch the tailing client log flip A → B, all 200s
-----
-+
-"There it goes — `served-by-site=B`. The primary site is *gone*, and the client didn't drop a single request. It never changed its address; the mesh detected site A failing, ejected it, and retried onto site B. That's *automatic cross-site failover* — and I wrote three small resources to get it, zero application code."
-+
-[NOTE]
-.If the log does not flip — a line for every outcome
+CAUTION: After rehearsing the failure, scale site A back to three replicas and wait for the log to read `served-by-site=A` again. A world left failed over starts with the client already on site B, and step 2's transition has already happened. Leave `baseEjectionTime` at its 30-second value as well: a shorter ejection re-probes the dead primary during the outage and shows a visible blip, and the four-second failover below was measured at 30 seconds.
 ====
-This one beat is timing-dependent, so know what you say for each reading before you scale. Outlier detection sweeps
-the endpoints on a *5-second* `interval`, and the capture this arc is written from flipped in *~4 seconds*.
 
-*It flips within a few seconds.* Scripted. A one- or two-second *gap* between the last `A` and the first
-`B`, with no error line, is expected and worth naming out loud — that request took a retry hop, which is
-the whole reason nothing was dropped.
+=== Brief
 
-*Nothing has moved after fifteen seconds.* Stop watching the stream and *pull* the answer instead — one
-request through the same stable endpoint, answered by whichever site is live right now:
-[source,sh]
+image::resilience-multicluster-dr/resilience-multicluster-dr-01-resilience-ladder.svg["The resilience ladder as two rows of rungs. The lower row is in-site resilience: a pod crash absorbed by Deployment replicas and probes, a node failure or drain absorbed by a PodDisruptionBudget with spread constraints, anti-affinity and autoscaler headroom, then a zone loss. The upper row is beyond one site: a whole site lost, absorbed by cross-site failover over the service mesh and Red Hat Service Interconnect, then a region lost, absorbed by OADP and GitOps re-materialization, and finally the service surviving."]
+
+*The resilience ladder*
+
+Every resilience mechanism absorbs one specific failure. Replicas and probes absorb a crashing pod. A PodDisruptionBudget, spread constraints and an autoscaler carry a service through a node drain or the loss of a zone. Those rungs are in-site resilience, and most teams already own them.
+
+A whole site going dark — a data center, a cluster, in this demo a namespace — is a different class of problem. No number of replicas *inside* that site helps, because the site is the thing that is gone. Surviving it means failing over to another site automatically, with no client reconfigured and no request dropped.
+
+*Cross-site failover with Service Mesh*
+
+OpenShift Service Mesh puts an ingress gateway in front of both sites as one stable endpoint, and three small traffic rules do the rest. A `ServiceEntry` declares the two sites and tags each with its locality. A `DestinationRule` turns on locality-aware load balancing, so the primary is preferred, and outlier detection, so a site whose requests start failing is ejected from the pool. A `VirtualService` routes the stable endpoint through that host with retries.
+
+Nothing about the client changes. It calls the same address before, during and after the failure — and the requests that would have been dropped at the moment of failure are the ones the retries carry across to the second site.
+
+*In this demo*
+
+. A claims service running resiliently in a primary site, and a client logging which site answers it
+. The entire primary site scaled to zero, and the client flipping to the secondary with every response still `HTTP 200`
+. The primary restored, and traffic returning to it with nothing changed on the client
+
+=== 1 · A resilient primary, and a client watching it — 3 min
+
+Parasol's claims service runs in two sites, A and B, and a client calls it through one stable address once a second, logging which site answered. It reads site A, the primary — and site A is itself resilient: three replicas, a disruption budget, spread across nodes, an autoscaler holding the floor.
+
+image::resilience-multicluster-dr/resilience-multicluster-dr-02-resilient-site.png["The OpenShift console Deployments list for the site-a project, with one row for parasol-claims showing a status of 3 of 3 pods and the labels app=parasol-claims and site=A."]
+
+*Why it matters*
+
+This is the resilience most teams already have, and it is genuinely good: a pod crash or a node drain is a non-event here. It is also the prerequisite for what comes next rather than a substitute for it — every one of these replicas lives in the site that is about to fail.
+
+[source,sh,role=execute,subs="attributes"]
+----
+CLIENT={user}-client
+SITEA={user}-site-a
+SITEB={user}-site-b
+oc get deploy,pdb,hpa -n $SITEA
+oc logs deploy/claims-client -n $CLIENT --tail=5
+----
+
+*What just happened*
+
+Three of three replicas, a budget that keeps two of them available through any voluntary disruption, and an autoscaler holding the floor at three. Every one of the client's last five lines reads `HTTP 200  served-by-site=A`.
+
+=== 2 · The whole primary site fails — 5 min
+
+The disaster is the bluntest one available: site A is scaled to zero. There is no primary site any more — no replicas to reschedule, nothing left to retry against locally. The client is not told, and its address does not change.
+
+image::resilience-multicluster-dr/resilience-multicluster-dr-01-failover-log-flip.png["A terminal tailing the claims-client log across a site failure: nine consecutive lines read HTTP 200 served-by-site=A, then every following line reads HTTP 200 served-by-site=B, with the oc scale --replicas=0 command visible above."]
+
+*Why it matters*
+
+"We have a second data center" and "we fail over to it automatically" are different capabilities, and only one of them survives a bad night. This is the game-day drill that tells them apart — and the routing that produces it is three small resources and no application code.
+
+[source,sh,role=execute]
+----
+oc scale deploy/parasol-claims -n $SITEA --replicas=0
+----
+
+*On screen* — the tailing client log flips from `served-by-site=A` to `served-by-site=B` within a few seconds, and every line on both sides of the flip is still `HTTP 200`. A single request through the same stable endpoint, answered by whichever site is live, makes the same point on demand:
+
+[source,sh,role=execute]
 ----
 oc exec deploy/claims-client -n $CLIENT -- curl -s -m3 http://claims-stable/
 ----
-A body reading `"site":"B"` is exactly the proof the log line was going to give you, and it arrives on
-demand instead of on a timer.
 
-*The marker goes to `served-by-site=none`, or the code stops being `200`.* Site B is not serving, so there
-was nothing to fail over to. Say that rather than hide it — "this is what failover looks like when your
-secondary isn't there, which is precisely why you test it" — then bring the secondary up and let the flip
-happen live in front of them: `oc scale deploy/parasol-claims -n $SITEB --replicas=3`.
+*What just happened*
 
-*The tail died, or the screen scrolled past the flip.* The transition is in the log's *history*, not only
-in the live stream: the client writes one line a second and stays on `B` for as long as site A sits at
-zero, so `oc logs deploy/claims-client -n $CLIENT --tail=30` re-shows it. Only a restart of the client pod
-itself loses it.
+The primary site is gone and the client did not drop a request. Outlier detection noticed site A failing and ejected it from the pool, so new requests went to site B; the retries caught the handful of in-flight requests that raced the ejection and landed them on site B too. About four seconds, end to end, on the cluster this was measured on.
 
-*Last resort — never stall on a stream that is not moving.* Show the recorded flip below, say plainly that
-it is a recording, and go to beat 3, which gives you a second live flip in the other direction:
+=== 3 · Recovery, with nothing changed on the client — 3 min
 
-image::resilience-multicluster-dr/resilience-multicluster-dr-01-failover-log-flip.png["A terminal tailing the claims-client log across a site failure: nine consecutive lines read HTTP 200 served-by-site=A, then every following line reads HTTP 200 served-by-site=B, with the oc scale --replicas=0 command visible above."]
-====
+Site A comes back with three replicas. Once the fresh pods have scheduled and passed readiness — roughly thirty to ninety seconds — the mesh trusts the primary again and traffic returns to it.
 
-=== Beat 3 — Recovery: traffic returns to the primary
+image::resilience-multicluster-dr/resilience-multicluster-dr-02-mesh-failover.svg["The failover path: an external client calling one stable endpoint, a mesh ingress gateway pinned to site A's locality, a bold arrow to site A's three claims replicas as the normal locality-preferred path, and a dashed arrow to site B's replicas labeled: on A failure, outlier detection ejects A and retries flip to B."]
 
-[demo-block]
-[TIME 3m]
-Say:: "And recovery is just as automatic. I bring site A back, and once the mesh trusts it again, traffic returns to the primary — still with no client change."
-Show:: `oc scale ... --replicas=3` on site A; the client log flipping back to `served-by-site=A` after the site is healthy again.
-Do:: Recover the primary:
-+
-[source,sh,subs="attributes"]
+*Why it matters*
+
+Failover that cannot fail back is a one-way door, and a door nobody wants to open. Here both directions are the same mechanism — locality prefers the primary, outlier detection decides whether it is trustworthy — so returning to normal is not a second procedure to write, test and remember.
+
+[source,sh,role=execute]
 ----
-oc scale deploy/parasol-claims -n {user}-site-a --replicas=3
-# ~30-90s later (once the fresh pods are Ready) the client log flips back to served-by-site=A
+oc scale deploy/parasol-claims -n $SITEA --replicas=3
+# 30-90s later, once the fresh pods are Ready, the client log returns to served-by-site=A
 ----
-+
-"Back on A. Failover *and* failback, automatic, invisible to the client. If site A were a real data center and site B a real second cluster, this is exactly how you'd survive losing one — and Red Hat Service Interconnect is how you'd connect two real sites in the first place, which is the add-on section of the lab."
 
-[NOTE]
-.Reset between runs
-====
-`ws prep resilience-multicluster-dr --user {user} --yes` returns the world to the entry state — the resilient sites and the client up, but the failover routing *removed* (so a re-run rebuilds it). The shared Service Mesh and Service Interconnect operators are platform substrate and are untouched.
-====
+*What just happened*
+
+Failover and failback, both automatic, both invisible to the client. If site A were a real data center and site B a real second cluster, this is how losing one would look — and Red Hat Service Interconnect is how the two sites would be connected in the first place, over a mutual-TLS overlay rather than a VPN.
+
+== Frequently asked questions
+
+*The whole primary site went to zero — how did the client not drop a single request?*::
+Two mesh features cooperate. Outlier detection on the `DestinationRule` notices site A's requests failing and ejects it from the load-balancing pool, so new requests go to site B. Retries on the `VirtualService` catch the handful of in-flight requests that raced the ejection: a request that lands on the just-failed site is retried and answered by site B. Without the retries there would be a brief burst of errors at the moment of failure; with them, the failover drops nothing.
+
+*Why does traffic prefer site A instead of splitting evenly across both sites?*::
+Because the ingress gateway is pinned to site A's locality and the `DestinationRule` turns on locality-aware load balancing. Istio sends traffic to the nearest locality first — site A at priority 0, site B as the failover at priority 1 — which is primary/backup by design. Remove the locality pin and the same three resources round-robin both sites instead.
+
+*Is this a real multi-cluster failover, or a simulation?*::
+The topology is simulated and the plumbing is real. Three namespaces on one cluster stand in for the client and the two sites. The `ServiceEntry`, `DestinationRule` and `VirtualService`, the locality-aware routing, the outlier detection and the retries are identical across two real clusters in two regions: the endpoints would point at the other cluster's services, reached over a Service Interconnect network, and the gateway would be pinned to the local region.
+
+*Several teams share this mesh and want the same stable hostname — don't they collide?*::
+They would, which is why all three resources set `+exportTo: ["."]+` to scope them to their own namespace. Istio's default is to publish a traffic resource mesh-wide, so without that field one merged view of the hostname is assembled from every team's endpoints and a gateway can be programmed with someone else's sites — returning `200` the whole time, which is what makes it hard to spot. A single global service name is the pattern; the scope, not the name, is what keeps teams apart.
+
+*Where do backup and restore fit alongside this?*::
+Underneath it, as the platform's safety net for the catastrophes failover cannot cover — destroyed data, a lost cluster or region. OpenShift API for Data Protection backs up and restores an application's Kubernetes objects and its persistent-volume data, and a GitOps-managed platform re-materializes itself on a fresh cluster from Git. The division of labor is the useful part: the platform has your back for disaster recovery, and designing the service to be resilient and to fail over is the application team's job — which is what this demo shows.
 endif::demo[]
 
 // ============================================================================
