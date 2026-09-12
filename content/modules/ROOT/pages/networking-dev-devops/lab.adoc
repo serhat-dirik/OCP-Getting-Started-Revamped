@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Networking for Dev & DevOps. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
-// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// SA demo page. Every command runs in the Showroom terminal as {user}, so blocks are
 // [source,sh,role=execute]. The FIRST block sets NS={user}-dev and PARTNER={user}-partner
 // (subs=attributes) and every later block uses $NS/$PARTNER with NO subs so heredoc/jsonpath braces
 // stay literal. All commands + outputs were performed on OCP 4.21.22 (OVN-Kubernetes) as user1
@@ -12,12 +12,12 @@ include::partial$version-attributes.adoc[]
 // and the LoadBalancer <pending> are real captures. Cluster-domain values in output are scrubbed to
 // the placeholder apps.example.com. Console click-paths are grounded against the unified console
 // (OCP 4.19+, no perspective switch); labels a build couldn't click get CAPTURE-VERIFY + the CLI.
-// The re-encrypt beat at the end of exercise 2 was added 2026-07-25 and performed as user7 on the
+// The re-encrypt segment at the end of exercise 2 was added 2026-07-25 and performed as user7 on the
 // same cluster: the serving-cert Secret, the Quarkus "Listening on: … and https://0.0.0.0:8443" line,
 // the two-port Service, the admitted reencrypt Route with NO destinationCACertificate, and the
 // two-hop certificate capture are real. Namespace values in its output blocks are normalized from
 // user7-dev to user1-dev for page consistency (the same declared scrub as the cluster domain);
-// nothing else in those blocks is altered. Measured command time for the beat: 46 s, of which 26 s
+// nothing else in those blocks is altered. Measured command time for that segment: 46 s, of which 26 s
 // is the single parasol-web rollout.
 
 ifndef::demo[]
@@ -48,45 +48,92 @@ Keep the terminal open regardless: the `$NS`/`$PARTNER` shortcuts you just set l
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — 12-minute presenter arc: flat network → locked down → UDN reveal
+// DEMO FLAVOR — the 12-minute SA demo page: flat network -> locked down -> UDN reveal.
+// The title's minutes are the sum of the five step headings below (2+3+3+2+2); keep them in step.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — From a flat network to a controlled one in twelve minutes (12 min)
+== The database that answers only the API · 12 min
 
-[NOTE]
-.Before you present
+A namespace where any pod can open the claims database becomes one where only the API can — and then a partner namespace that is isolated with no policy at all.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `ws prep networking-dev-devops --user {user} --yes` a few minutes ahead, and set `NS={user}-dev` and `PARTNER={user}-partner` in your terminal.
-This demo runs from the *entry* state (flat, open network — no policy, no Route), *not* from `adm solve`.
-The money moment is beat 4 — the probe pod *blocked* from the database while the API still reaches it.
-Keep the terminal font large; this is all CLI, and the reachability probes are the visual.
+Stage the module from the cockpit terminal a few minutes ahead:
+
+[source,sh,role=execute]
+----
+ws prep networking-dev-devops
+----
+
+This demo runs from the *entry* state: a flat, open network with no NetworkPolicy and no Route, and the `demo-client` probe pod free to reach anything. The controls are built live, so the finished lab state is deliberately not staged first.
+
+The same command resets that world between runs — without it, a second run starts from a namespace that is already locked down and step 1 shows nothing.
+
+Everything runs in the cockpit terminal, so a large terminal font is worth setting beforehand: the reachability probes are the evidence, and each is a single line.
+
+CAUTION: The last line of step 1 also confirms the demo is starting from the right state — it must print `OPEN`. In step 2 the last line prints the actual database health-down message from `parasol-claims`; if it prints a "step failed" hint instead, the pod has not reached that state yet, so run the block again rather than reading the hint as the policy at work.
 ====
 
-=== Beat 1 — The flat network
+=== Brief
 
-[demo-block]
-[TIME 2m]
-Say:: "This is Parasol's claims app — web, API, database — on a completely flat network. Watch: this `demo-client` pod is *not* part of the app, and it can walk straight into the database."
-Show:: The three ClusterIP Services, then a debug pod opening a TCP connection to `claims-db:5432`.
-Do:: Show the open network:
-+
+image::networking-dev-devops/networking-dev-devops-01-traffic-directions.svg["Two directions of traffic: a browser outside the cluster reaching a namespace north-south, labelled what you expose — Route or Gateway API; and inside that namespace the web tier calling the api tier calling the database east-west, labelled who may talk to whom — NetworkPolicy or UserDefinedNetwork."]
+
+*Two directions of traffic*
+
+Every conversation on a cluster runs in one of two directions. *North-south* crosses the cluster boundary — a browser reaching a front end — and is controlled by choosing what to expose. *East-west* is traffic between pods inside the cluster — the front end calling the API, the API querying the database — and is controlled by policy.
+
+This demo is entirely east-west, because that is where the default is uncomfortable.
+
+*The default is wide open*
+
+Inside the cluster, every pod can open a connection to every other pod, in any namespace, on any port. For a three-tier application that means the database will accept a connection from the front end, from a debugging pod, from anything that happens to share the namespace. Security here is not something to switch on; it is something to add.
+
+*Two ways to add it*
+
+*NetworkPolicy* is the workhorse: a default-deny baseline so nothing may talk, then precise allows for the flows the application genuinely needs. It is per pod and per port, expressed as labels and enforced in the data plane — no sidecar, no appliance. The allows are also the documentation, which is what makes the result auditable.
+
+A *UserDefinedNetwork* is the stronger, simpler answer when isolation is a property of a whole namespace. The namespace gets its own Layer 2 segment, so its pods are isolated from every other namespace natively, with no policy to write and none to get wrong.
+
+*In this demo*
+
+. A flat namespace, where a pod unrelated to the application opens the claims database
+. One default-deny policy — and the application breaking with it, DNS included
+. The flows the application needs re-opened, explicitly and only those
+. The database answering the API, and refusing the same pod as before
+. A partner namespace already isolated by its own network, with no policy written
+
+=== 1 · The flat network — 2 min
+
+Parasol's claims application runs in one namespace as three tiers — `parasol-web`, `parasol-claims` and `claims-db`. Alongside them sits `demo-client`, a pod with nothing to do with the application, which opens a connection straight to the database.
+
+image::networking-dev-devops/networking-dev-devops-01-services-clusterip.png["The project's Services list in the web console: claims-db, parasol-claims and parasol-web, each showing one internal cluster address and port — 5432 or 8080 — with no external address anywhere on the page, which is what ClusterIP means."]
+
+*Why it matters*
+
+"Can the database be reached from anywhere it shouldn't be?" is the question a security review asks, and on a flat namespace the honest answer is "yes — from everything." Nothing here is misconfigured; this is what a namespace looks like before anyone decides who may talk to whom.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-dev; PARTNER={user}-partner
 oc get svc -n $NS
 echo -n "demo-client -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'
 ----
-+
-"Nothing is stopping it. On a fresh namespace, every pod can reach every other pod, on every port."
 
-=== Beat 2 — Default-deny breaks the API
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Let's lock it down. One policy — default-deny — and *nothing* may talk. That includes the app itself, and it includes DNS. Watch the API break."
-Show:: Applying `default-deny-all`; `parasol-claims` falls to `0/1` because it can no longer reach the database.
-Do:: Apply the baseline and watch the break:
-+
+Three ClusterIP Services, reachable in-cluster and invisible from outside — and one unrelated pod holding an open TCP connection to Postgres. On a fresh namespace, every pod can reach every other pod, on every port.
+
+=== 2 · Default-deny, and the application goes down with it — 3 min
+
+One policy closes the namespace: an empty pod selector with both Ingress and Egress listed. Nothing may talk — and that includes the application itself.
+
+image::networking-dev-devops/networking-dev-devops-03-networkpolicy-yaml.png["The default-deny-all NetworkPolicy on its YAML tab in the web console: podSelector is an empty pair of braces, which matches every pod in the project rather than none, and policyTypes lists both Ingress and Egress — the two lines that turn an empty selector into a deny."]
+
+*Why it matters*
+
+A default-deny baseline is the only starting point that is honest about what a namespace allows, and the breakage that follows is the lesson rather than a fault. `parasol-claims` falls to `0/1` because its readiness probe checks a database it can no longer reach; the pod does not crash, it is simply marked NotReady. The same policy also blocks DNS, which is why a first default-deny so often gets blamed on the application.
+
 [source,sh,role=execute]
 ----
 oc apply -n $NS -f - <<'EOF'
@@ -100,18 +147,23 @@ oc get pods -n $NS -l app=parasol-claims
 MSG=$(oc logs -n $NS deploy/parasol-claims --tail=20 2>/dev/null | grep -o 'health down.*Acquisition timeout' | tail -1)
 echo "${MSG:-step failed: no DB health-down line in the logs yet — check the pod exists and is Running (oc get pods -n $NS -l app=parasol-claims), then re-run}"
 ----
-+
-"The API is `0/1` — its database health check times out. Default-deny is doing its job a little *too* well: it even ate DNS."
-(The last line prints the *actual* health-down log line; if it prints a "step failed" hint instead, the observable isn't there yet — don't present it as the policy at work.)
 
-=== Beat 3 — Re-open only what the app needs
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Now I re-open *only* what the app needs — DNS, and the API-to-database hop — and nothing else. This is least-privilege, but for the network."
-Show:: Applying the DNS egress allow (note the CoreDNS port) and the database allow pair; `parasol-claims` returns to `1/1`.
-Do:: Restore only the necessary flows:
-+
+The last line is the application's own log: the database health check timed out. Nothing was deployed, scaled or edited — one policy took the namespace from wide open to silent.
+
+=== 3 · Re-open only what the application needs — 3 min
+
+Three policies restore exactly two flows: DNS resolution for every pod, and the API's connection to the database. Nothing else comes back.
+
+image::networking-dev-devops/networking-dev-devops-05-network-policy-layers.svg["Three layers of east-west control in increasing strength: NetworkPolicy with a default-deny baseline plus precise per-pod, per-port allows; a UserDefinedNetwork giving a namespace its own isolated network with no policy to write; and a service mesh adding mutual-TLS identity and layer-7 policy."]
+
+*Why it matters*
+
+This is least privilege applied to the network, and it is written down. Each allow names a source, a destination and a port, so the policy set answers "what may talk to what?" without anyone inspecting the cluster.
+
+The DNS allow is the one everybody gets wrong the first time. It has to name the CoreDNS pods' own ports — `dns` and `dns-tcp`, which are `5353` — because the rule is evaluated against the destination pod, not against the Service's port 53.
+
 [source,sh,role=execute]
 ----
 oc apply -n $NS -f - <<'EOF'
@@ -141,34 +193,45 @@ spec:
 EOF
 oc rollout status deploy/parasol-claims -n $NS --timeout=40s
 ----
-+
-"Back to `1/1`. The API can reach the database again — because I *said* it could, explicitly."
 
-=== Beat 4 — The payoff: the probe is blocked
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "Here's the payoff. The API reaches the database — but that `demo-client` pod, the one that walked right in a minute ago, is now *blocked*. Same database, same namespace. The difference is one policy."
-Show:: Side-by-side probes: `parasol-claims` → `claims-db:5432` OPEN, `demo-client` → `claims-db:5432` blocked (times out).
-Do:: Prove the isolation:
-+
+The API is back to `1/1`. It reaches the database because a rule says it may — not because nothing was stopping it.
+
+=== 4 · The API reaches the database; nothing else does — 2 min
+
+The same two probes as before, one after the other: the API opens the database, and the pod that walked in during step 1 does not.
+
+[mermaid]
+....
+include::example$diagrams/networking-dev-devops/06-one-allowed-path.mmd[]
+....
+
+*Why it matters*
+
+Same database, same namespace, same port — the only difference is a policy set that fits on one screen. That is micro-segmentation, and it is the sentence a security review is looking for.
+
 [source,sh,role=execute]
 ----
 echo -n "parasol-claims (the API)   -> claims-db:5432 : "; oc exec deploy/parasol-claims -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'
 echo -n "demo-client (anything else) -> claims-db:5432 : "; oc exec deploy/demo-client -n $NS -- timeout 5 bash -c '</dev/tcp/claims-db/5432 && echo OPEN'; rc=$?
 [ $rc -eq 124 ] && echo "BLOCKED (connect timed out — the policy dropped it)" || { [ $rc -ne 0 ] && echo "step failed (exit $rc) — check the demo-client pod exists (oc get pods -n $NS -l app=demo-client)"; }
 ----
-+
-"The database now answers *only* the API. That is micro-segmentation — the security review's favourite sentence, in three NetworkPolicies."
 
-=== Beat 5 — Native isolation with a UserDefinedNetwork
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "One more, and it needs *zero* policy. This partner namespace runs on its own network — a UserDefinedNetwork — so its workload is isolated from our app *natively*. Look: no NetworkPolicy here at all, yet it can't reach our front end."
-Show:: `{user}-partner` has no NetworkPolicy; the partner workload sits on `ovn-udn1` (10.20.0.0/16) and cannot open the front end.
-Do:: Reveal native isolation:
-+
+The connection is dropped because no rule lets it through: `demo-client` was given no egress allow, and the database admits ingress only from `parasol-claims`. Both point the same way, which is the correct mental model — under default-deny, traffic needs a reason to exist.
+
+=== 5 · A namespace isolated with no policy at all — 2 min
+
+Parasol's partner namespace was created with its own primary network. It holds no NetworkPolicy, and its workload still cannot reach the application.
+
+image::networking-dev-devops/networking-dev-devops-03-platform-accretion.svg["The Parasol platform so far shown in grey — the application delivered by GitOps, and tenancy with workload security — with this module's layer highlighted above it: Service and Route for north-south traffic, NetworkPolicy for east-west, and UserDefinedNetwork."]
+
+*Why it matters*
+
+Where isolation is a property of the whole namespace, a UserDefinedNetwork gives it natively: there is no policy to write, and none to get wrong. The trade-off is a hard rule — a primary UDN must exist before the namespace's first pod, so it is a platform decision at namespace-creation time rather than something to retrofit. NetworkPolicy remains the answer wherever the flows are selective.
+
 [source,sh,role=execute]
 ----
 oc get networkpolicy -n $PARTNER || echo "(no NetworkPolicies)"
@@ -181,15 +244,27 @@ case "$rc:$OUT" in
   *) echo "step failed (exit $rc): $OUT" ;;
 esac
 ----
-+
-"Its own Layer 2 network — `10.20.0.0/16` on `ovn-udn1` — and it simply cannot route to our app. No policy to write, no policy to get wrong. That's the whole point of a UserDefinedNetwork."
 
-[NOTE]
-.Reset between runs
-====
-`ws prep networking-dev-devops --user {user} --yes` returns the world to the flat entry state — no policy, no Route, the probe pod free to roam again.
-Run it before a second demo so beat 1 lands clean.
-====
+*What just happened*
+
+The partner workload sits on `ovn-udn1`, a separate Layer 2 segment at `10.20.0.0/16`, and simply has no route to the application namespace. The database now answers only the API, and the partner workload is on its own network — none of it a firewall appliance.
+
+== Frequently asked questions
+
+*We applied default-deny and an application went 0/1 without anyone touching it — why?*::
+That is the policy working. A default-deny denies egress as well as ingress, so the application can no longer open its connection to its database; its readiness probe checks that database, the check fails, and the pod is marked NotReady. It does not crash — the status stays `Running`. Adding the two allows for that hop brings it straight back to `1/1`.
+
+*Our DNS allow uses `port: 53` and DNS is still broken. Why?*::
+Because OVN-Kubernetes evaluates an egress port against the *destination pod*, and the CoreDNS pods listen on `5353` — the `dns-default` Service is what maps 53 to 5353. A rule for `port: 53` never matches the pod, so DNS stays denied. Name the CoreDNS pods' own ports, `dns` and `dns-tcp`, which is what OpenShift's own operators do. It is the most common self-inflicted "my policy is correct but nothing works."
+
+*The partner workload still has an `eth0` on the cluster network — is it really isolated?*::
+Yes. A pod on a primary UDN keeps a cluster-network `eth0` for node-level infrastructure such as kubelet health checks, but its default route leaves through `ovn-udn1` on the UDN's own segment. OVN-Kubernetes enforces the isolation regardless of that extra interface: the pod cannot reach workload pods in other namespaces, as the timed-out connection shows, even though it can still resolve DNS through the shared cluster service.
+
+*Why would a `type=LoadBalancer` Service sit at `<pending>`?*::
+Because no provider answered — it means "nothing handed out an address," not "failed." A LoadBalancer Service needs a cloud load balancer or an add-on such as MetalLB on bare metal. Where there is none, the external IP never arrives, and the fix is either a Route, which needs no provider, or installing a provider if an L4 external IP is genuinely required.
+
+*Can you show the Gateway API end to end?*::
+Not on a cluster without a LoadBalancer provider. The OpenShift Gateway API implementation provisions its Gateway behind a LoadBalancer Service, which stays `<pending>` for the same reason above, so the Gateway never gets an address. The model — GatewayClass, then a platform-owned Gateway, then HTTPRoutes that application teams attach, including weighted splits — is worth walking through, and the end-to-end path runs on a cluster that has a provider. The Route is the exposure that runs here.
 endif::demo[]
 
 // ============================================================================
