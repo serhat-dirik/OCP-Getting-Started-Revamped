@@ -51,29 +51,68 @@ endif::demo[]
 // arc runs. Keep the header naming the arc's budget and nothing else.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — A safe sandbox for a team: grant, scope, enforce (11 min)
+== A safe sandbox for a team: grant, scope, enforce · 11 min
 
-[NOTE]
-.Before you present
+Two teammates and a workload share a namespace that governs none of them, and eleven minutes later each has exactly the access it should have — with the platform refusing root on its own.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `ws prep multi-tenancy-workload-security --user {user} --yes` a few minutes ahead, and set `NS={user}-dev` and `PROD={user}-prod` in your terminal.
-This demo runs from the *entry* state (ungoverned teammate ServiceAccounts + a root-demanding workload scaled to 0), *not* from `adm solve`.
-The money moment is beat 4 — the live restricted-v2 rejection — so let the audience read the error.
-Keep the terminal font large; this is all CLI.
+This demo runs from the module's *entry* state: two teammate ServiceAccounts that nothing has granted access to, and a root-demanding workload scaled to zero. Nothing later on is staged in advance — every grant, and the rejection, happens live. Materialize the entry state a few minutes ahead:
+
+[source,sh,role=execute]
+----
+ws prep multi-tenancy-workload-security
+----
+
+Warm the `openshift/tools` image on a node first — `oc run` it once, then delete it. Step 4 scales a workload built on that image, and a cold pull adds up to 20 seconds to a step that should take a few.
+
+Every step runs in this cockpit's terminal, so give the terminal most of the screen and a large font. The two shell shortcuts the later steps use are set in step 1's first command.
+
+CAUTION: `ws prep multi-tenancy-workload-security` is also the reset between runs. It returns the ServiceAccounts to ungoverned and the workload to zero replicas, and it removes the `edit` and `deployer` bindings and the `deployer` Role granted during an earlier run — so step 1 opens on a clean starting point every time.
 ====
 
-=== Beat 1 — Three ungoverned service accounts
+=== Brief
 
-[demo-block]
-[TIME 2m]
-Say:: "This is Parasol's payments team. Three service accounts live in their project — two teammates and one workload — and right now *none* of them is governed. Let's give them a safe sandbox."
-Show:: The three seeded ServiceAccounts and the not-yet-running workload.
-Do:: Show the ungoverned starting point:
-+
+image::multi-tenancy-workload-security/multi-tenancy-workload-security-01-identity-flow.svg["The chain from a login to a permission: an identity provider — htpasswd, Keycloak or LDAP — authenticates the user alice, who is a member of the payments-team group, which a RoleBinding ties to a Role or ClusterRole, which grants verbs such as get, list and create on resources such as pods, deployments and secrets."]
+
+*Identity, then authority*
+
+Every request to the cluster answers two questions in order. Authentication — who are you? — is settled by an identity provider wired into OpenShift's OAuth server: an htpasswd file, an LDAP directory, or an OpenID Connect provider such as Red Hat build of Keycloak. It proves you are `alice`, and says nothing about what you may do.
+
+Authorization — what may you do? — is settled by RBAC, and the design lever is the third link in that chain: bind to the group, not to the person. A new engineer inherits every permission the group already holds, with no hunt through dozens of individual bindings. Workloads are governed the same way, as ServiceAccounts, which is why a team's CI robot is an identity you bind a role to rather than a shared password.
+
+*Non-root by default*
+
+A container on OpenShift cannot run as root just by asking. Each project carries a UID range, the `restricted-v2` Security Context Constraint draws every Pod's UID from it, and a Pod demanding `runAsUser: 0` is refused at admission — with nothing to install and no way for a namespace admin to grant themselves around it, because RBAC forbids granting a permission you do not hold yourself.
+
+*In this demo*
+
+. Two teammate ServiceAccounts and a workload sharing a namespace, with nothing granted to any of them
+. A developer identity given full access in dev and read-only in prod, verified per environment
+. A CI identity given a custom Role that ships deployments but cannot read the payment secrets
+. A workload that demands root, refused by the platform at admission
+
+=== 1 · Three service accounts, none of them governed — 2 min
+
+Start where the payments team starts. Their dev namespace holds two teammate ServiceAccounts and one workload, and no role has been bound to any of them.
+
+image::multi-tenancy-workload-security/multi-tenancy-workload-security-03-resourcequota-gauges.png["The workshop-quota ResourceQuota detail page in the team's dev project, showing six used-versus-hard donut gauges across the top: limits.cpu at 2.5% used, limits.memory at 1% used, persistentvolumeclaims at 0 of 10, pods at 1 of 30, requests.cpu at 1.7% used and requests.memory at 1% used, above the Name, Namespace and Labels details."]
+
+*Why it matters*
+
+Half of the sandbox is already in place before the team asks for anything: the namespace was born under a ResourceQuota that caps what it may consume, and that half is the platform team's to set, not the tenant's. The other half is missing entirely — nothing yet says *who*, or *what*, may act inside it.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-dev; PROD={user}-prod
 oc get sa payments-ci payments-ops root-demander -n $NS
+----
+
+`oc adm policy who-can` answers the question an auditor asks first — who may change anything here — and today it names nobody from this team:
+
+[source,sh,role=execute]
+----
 if WHO=$(oc adm policy who-can update deployments -n $NS); then
   echo "$WHO" | grep -i payments || echo "payments teammates: UNGOVERNED (no access yet)"
 else
@@ -81,33 +120,55 @@ else
 fi
 ----
 
-=== Beat 2 — Full access in dev, read-only in prod
+=== 2 · Full access in dev, read-only in prod — 3 min
 
-[demo-block]
-[TIME 3m]
-Say:: "First teammate is a developer — full access in dev, read-only in prod. Different access per environment. Watch me grant it and prove it."
-Show:: `payments-ci` gets `edit` in dev and `view` in prod; `can-i` confirms it can change dev but only read prod.
-Do:: Grant per-environment access and verify:
-+
+Grant the first teammate — a developer identity — `edit` in the dev namespace and `view` in prod, then verify that one identity really does hold two different levels of access.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/05-access-per-namespace.mmd[]
+....
+
+*Why it matters*
+
+Access is granted per namespace, not per person. A RoleBinding grants its role in one namespace only, so the same identity can be a full developer in dev and a reader in prod — which is what makes an environment promotion a governance decision rather than a second account to manage.
+
+Grant the two roles:
+
 [source,sh,role=execute]
 ----
 oc adm policy add-role-to-user edit -z payments-ci -n $NS
 oc adm policy add-role-to-user view system:serviceaccount:$NS:payments-ci -n $PROD
+----
+
+Then verify the outcome rather than the intent:
+
+[source,sh,role=execute]
+----
 echo "--- can-i (the proof) ---"
 echo -n "dev  update deployments: "; oc auth can-i update deployments --as=system:serviceaccount:$NS:payments-ci -n $NS
 echo -n "prod update deployments: "; oc auth can-i update deployments --as=system:serviceaccount:$NS:payments-ci -n $PROD
 ----
-+
-"Edit in dev, read-only in prod — one identity, two levels of access, exactly what an environment promotion needs."
 
-=== Beat 3 — A CI robot that ships but cannot read secrets
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Second teammate is the CI robot. It must *ship* deployments but must *never* read the payment secrets. `edit` would let it read secrets — so I write a custom least-privilege Role instead."
-Show:: A `deployer` Role (deployments yes, secrets no) bound to `payments-ops`; `can-i` proves it can deploy but is blind to Secrets.
-Do:: Author and bind the custom Role, then prove the least-privilege boundary:
-+
+`yes` in dev, `no` in prod, for one identity — and the difference between them is two RoleBindings, not two accounts.
+
+=== 3 · A CI identity that ships but cannot read secrets — 3 min
+
+The second teammate is the CI robot. `edit` would let it deploy — and also read every Secret in the namespace — so give it a custom Role instead: deployments and pod logs, and nothing else.
+
+[mermaid]
+....
+include::example$diagrams/multi-tenancy-workload-security/06-deployer-boundary.mmd[]
+....
+
+*Why it matters*
+
+Least privilege stops being a slogan once it is an object you can review. Two ServiceAccounts on the same team, one able to read the payment secrets and one blind to them, and the difference is a Role that fits in a pull request.
+
+Author the Role:
+
 [source,sh,role=execute]
 ----
 oc apply -n $NS -f - <<'EOF'
@@ -118,21 +179,37 @@ rules:
   - {apiGroups: ["apps"], resources: ["deployments","deployments/scale"], verbs: ["get","list","watch","create","update","patch","delete"]}
   - {apiGroups: [""], resources: ["pods","pods/log"], verbs: ["get","list","watch"]}
 EOF
+----
+
+Bind it to the CI ServiceAccount:
+
+[source,sh,role=execute]
+----
 oc adm policy add-role-to-user deployer -z payments-ops --role-namespace=$NS -n $NS
+----
+
+Then check both halves of the boundary:
+
+[source,sh,role=execute]
+----
 echo -n "deploy? "; oc auth can-i create deployments --as=system:serviceaccount:$NS:payments-ops -n $NS
 echo -n "read secrets? "; oc auth can-i get secrets --as=system:serviceaccount:$NS:payments-ops -n $NS
 ----
-+
-"Ships deployments, blind to secrets. That's least privilege as code — and it's the difference between a CI token that's a convenience and one that's a breach."
 
-=== Beat 4 — The platform refuses root, live
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Last thing — the workload. It demands to run as root. Watch the platform refuse it, live. No admission controller I installed; this is how OpenShift ships."
-Show:: Scaling `root-demander` to 1 produces *no Pod* — the ReplicaSet event is a restricted-v2 rejection naming `runAsUser: 0`.
-Do:: Trigger the live rejection and read the decisive line:
-+
+The CI identity ships deployments and is blind to Secrets. That is the difference between a CI token that is a convenience and one that is a breach.
+
+=== 4 · The platform refuses root, live — 3 min
+
+Scale the root-demanding workload to one replica. No Pod appears — the ReplicaSet's own event carries the admission decision, naming the constraint that refused it and the value it refused.
+
+image::multi-tenancy-workload-security/multi-tenancy-workload-security-01-deploy-0of1-event.png["The root-demander ReplicaSet's Events tab, streaming one event from replicaset-controller and already repeated 16 times. The message is the whole lesson: Error creating: pods root-demander-... is forbidden: unable to validate against any security context constraint, followed by every SCC the platform tried and why each said no — provider restricted-v2 refusing .containers[0].runAsUser: Invalid value: 0: must be in the ranges 1001990000 to 1001999999, and every privileged provider simply Forbidden: not usable by user or serviceaccount."]
+
+*Why it matters*
+
+Nothing was installed to make this happen and nothing was configured: `restricted-v2` is the default constraint every workload on the cluster already runs under. A namespace admin cannot grant their way around it either — the built-in `admin` role has no rule for Security Context Constraints at all, which is exactly what makes the sandbox safe to hand to a team.
+
 [source,sh,role=execute]
 ----
 oc scale deploy/root-demander --replicas=1 -n $NS
@@ -143,14 +220,24 @@ MSG=$(oc get events -n $NS --field-selector involvedObject.name="${RS:-none}" -o
   | grep -o 'provider restricted-v2: [^,]*, [0-9]*]' | tail -1)
 echo "${MSG:-rejection event not found yet — wait a few seconds and re-run}"
 ----
-+
-"There it is — `restricted-v2: runAsUser: Invalid value: 0`. The platform gave this team speed *and* safety in five minutes, and none of it was a purchase. The fix is to stop demanding root — which is one line — and I'll show that in the module."
 
-[NOTE]
-.Reset between runs
-====
-`ws prep multi-tenancy-workload-security --user {user} --yes` returns the world to ungoverned teammates + a not-yet-run workload, and also removes the `edit`/`deployer` bindings (and the `deployer` Role) you created by hand, so the "ungoverned" opening lands clean on the next run.
-====
+*What just happened*
+
+The Deployment reports `0/1`, and the rejection names its reason exactly: `restricted-v2: runAsUser: Invalid value: 0`. There are two honest resolutions. Fix the image so it stops demanding root — almost always the right one, and usually one line — or grant a scoped exception to that one ServiceAccount. Blanket-granting `anyuid` re-opens the door the platform just closed.
+
+== Frequently asked questions
+
+*If `admin` means admin, why can a namespace admin not apply a ResourceQuota or grant an SCC?*::
+Because RBAC forbids privilege escalation: nobody can grant a permission they do not already hold. The built-in `admin` role deliberately omits write access to `resourcequotas` and `limitranges` and carries no SCC rule at all, so a namespace admin cannot lift their own quota or smuggle a workload to root. It means admin *of this namespace's contents and RBAC*, not admin of the cluster's guardrails — and that scoping is what makes the sandbox safe to hand to a team.
+
+*This image runs as root on other clusters — why does OpenShift reject it?*::
+The default `restricted-v2` constraint assigns every workload a non-root UID from the namespace's own range and refuses `runAsUser: 0`. It is a security default rather than a defect: most software does not need root, and the container only has to tolerate an arbitrary UID — a numeric non-root user and group-writable paths. Two fixes are legitimate: fix the image, which is almost always right, or grant a scoped exception to the one ServiceAccount that genuinely needs it (`oc adm policy add-scc-to-user nonroot-v2 -z <sa>`). Never blanket-grant `anyuid`.
+
+*`who-can get secrets` returns over a hundred subjects — is the cluster misconfigured?*::
+No, that is normal and healthy. Platform controllers, operators, the kubelet, and every namespace's own builder and deployer ServiceAccounts legitimately need Secret access somewhere; the count on a cluster like this one is around a hundred. That number is why the discipline is to always filter — `who-can … | grep <team>` for the subjects you actually govern. An audit that dumps a hundred rows is one nobody runs; a filtered `who-can` is a deliverable.
+
+*Should each team get its own namespace, or its own cluster?*::
+Default to namespace-per-team: RBAC, quota and NetworkPolicy isolate teams cheaply and densely on a shared cluster, and that is what everything shown here runs on. Step up only for a real boundary — hard regulatory separation, or a contractually capped blast radius — and even then, Hosted Control Planes (a per-tenant API server sharing worker capacity) is usually the right rung before a full cluster per team. Isolation is a cost multiplier; buy only what a specific requirement forces you to.
 endif::demo[]
 
 // ============================================================================
