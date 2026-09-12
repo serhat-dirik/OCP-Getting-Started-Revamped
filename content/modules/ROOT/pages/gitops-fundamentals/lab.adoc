@@ -58,95 +58,146 @@ endif::demo[]
 // DEMO FLAVOR — ~13-minute presenter arc: create an app, drift it, watch Argo revert
 // ============================================================================
 ifdef::demo[]
-== Demo arc — The cluster edit that would not stick (13 min)
+== The cluster edit that would not stick · 13 min
 
-[NOTE]
-.Before you present
+Someone changes the live cluster by hand. Git wins anyway — first with one sync, then on its own.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Two prep steps, both *before the room*:
+This demo starts from the finished lab state. Stage it before the session with the instructor tool, `adm`, from *your own terminal* rather than the cockpit:
 
-. Run `adm solve gitops-fundamentals --user {user}`.
-It creates the two Argo CD Applications and deploys the claims app GitOps-managed into `{user}-dev` and `{user}-stage`, then *blocks ~4–6 minutes by design* while both go Healthy — do it early; it is truthful when it returns.
-. Sign in to the student Argo CD UI ({student_argo_url}) as `{user}` and open the `claims-dev-{user}` application so its resource tree is your opening visual.
+[source,sh,subs="attributes"]
+----
+adm solve gitops-fundamentals --user {user}
+----
 
-Have a terminal with `DEV={user}-dev` set and the Argo CD `claims-dev-{user}` view on screen.
-The money moment is beat 2: a live console edit that Argo CD *erases*.
+The account in that command is the one you signed in to this cockpit with. It returns once both Applications are Healthy — typically *4–6 minutes* — so start it well ahead.
+
+Then sign in to the student Argo CD ({student_argo_url}) as `{user}` and open `claims-dev-{user}`; its resource tree is the starting view for step 1. Keep the cockpit terminal beside it.
+
+CAUTION: Leave a few minutes between a rehearsal and the live session. Argo CD backs off exponentially on repeated drift of the same resource, so a third scale-up in quick succession can take minutes to revert rather than seconds. Running `ws reset gitops-fundamentals` in the cockpit terminal also clears it; it returns the demo to its starting state, so run the solve above again afterwards.
 ====
 
-=== Beat 1 — One Git repo, and a controller that obeys it
+=== Brief
 
-[demo-block]
-[TIME 3m]
-Say:: "Everything Parasol runs in dev is described in one Git repo, and a controller inside the cluster keeps the cluster matching it. This is that controller — Argo CD — showing the claims app it deployed from Git."
-Show:: The Argo CD `claims-dev-{user}` application: the resource tree (ConfigMap, Secret, two Deployments, Services, Route), all green, *Synced* and *Healthy*.
-Do:: Trace the tree, then prove in the terminal that the running Deployment is GitOps-managed, not hand-applied:
-+
+image::gitops-fundamentals/gitops-fundamentals-01-push-vs-pull.svg["Push versus pull delivery: a pipeline pushing changes into a cluster from outside, compared with a controller inside the cluster pulling desired state from a Git repository and reconciling live state against it."]
+
+*Push versus pull*
+
+Most delivery pipelines push changes into a cluster: the pipeline holds cluster credentials and reaches in from outside. Once it finishes, nobody can say whether the cluster still matches what was delivered without inspecting the cluster itself.
+
+GitOps inverts that. A controller runs inside the cluster, watches a Git repository, and pulls the desired state in. No external system holds cluster credentials, and Git remains the answer to "what is supposed to be running" — not only at delivery time, but continuously.
+
+*Drift, and why Git wins*
+
+Clusters get changed by hand under pressure. With GitOps, that change is no longer silent: the controller compares Git against the live cluster, reports any difference as drift, and — with self-heal enabled — reverts it on its own within seconds. The cluster becomes a projection of Git.
+
+OpenShift GitOps, based on Argo CD, is that controller.
+
+*In this demo*
+
+. An application deployed from Git and managed by Argo CD
+. A change made by hand on the live cluster, detected as drift with the exact difference shown
+. The state defined in Git restored with a single sync
+. Self-heal enabled, and the same change reverted with no one acting
+
+=== 1 · One Git repository, one controller — 3 min
+
+Show the claims application that Argo CD deployed from Git — its resources, sync status, and health — and confirm from the terminal that the running Deployment is managed by Argo CD rather than applied by hand.
+
+image::gitops-fundamentals/gitops-fundamentals-04-app-synced-healthy.png["The claims-dev application in Argo CD: Synced and Healthy, with all of its resources green and nothing out of sync or missing."]
+
+*Why it matters*
+
+Everything the application needs in this environment is described in one Git repository. The controller keeps the cluster matching that description, so what is running is always traceable to a reviewed change.
+
+*On screen* — Argo CD `claims-dev-{user}`: the resource tree, *Synced* and *Healthy*. Then confirm from the terminal:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 DEV={user}-dev
-oc get deploy parasol-claims -n $DEV \
-  -o jsonpath='managed-by: {.metadata.annotations.argocd\.argoproj\.io/tracking-id}{"\n"}'
+oc get deploy parasol-claims -n $DEV -o jsonpath='managed-by: {.metadata.annotations.argocd\.argoproj\.io/tracking-id}{"\n"}'
 ----
-+
-"That annotation is Argo CD's fingerprint — this Deployment came from Git, through the controller, not from someone's `oc apply`."
 
-=== Beat 2 — Drift it by hand: one replica becomes three
+*What just happened*
 
-[demo-block]
-[TIME 4m]
-Say:: "Now watch what GitOps is really for. I'll reach into the running app by hand — the way every real cluster gets changed — and scale it from one replica to three."
-Show:: The terminal scaling the Deployment, then the Argo CD UI going *OutOfSync* with a diff.
-Do:: Drift the live cluster, then switch to the Argo CD tab:
-+
+The tracking annotation is Argo CD's fingerprint on the object. It shows the Deployment was created by the controller from Git, not applied by hand.
+
+=== 2 · A change made by hand — 4 min
+
+Change the live cluster directly — scale the Deployment from one replica to three — and watch Argo CD flag the application as out of sync and show the exact difference against Git.
+
+image::gitops-fundamentals/gitops-fundamentals-05-drift-diff.png["The Argo CD diff view with compact diff enabled: a single differing line for the parasol-claims Deployment, replicas 3 on the live cluster against replicas 1 from Git."]
+
+*Why it matters*
+
+The question is not whether clusters get changed by hand, but whether anyone finds out. Argo CD compares desired state against live state continuously, so the change surfaces immediately as a precise difference rather than as a surprise months later.
+
 [source,sh,role=execute]
 ----
 oc scale deployment/parasol-claims --replicas=3 -n $DEV
 oc get deployment/parasol-claims -n $DEV -o jsonpath='live replicas now: {.spec.replicas}{"\n"}'
 ----
-+
-In Argo CD, press *Refresh*.
-"The app just went *OutOfSync*. Argo CD sees the drift and shows me the exact diff — live says three replicas, Git says one. It is not guessing; it is comparing desired to actual."
 
-=== Beat 3 — Make Git win with one Sync
+*On screen* — switch to Argo CD and choose *Refresh*. The application turns *OutOfSync*, and the diff names the one line that differs.
 
-[demo-block]
-[TIME 3m]
-Say:: "I never told anyone to scale this. So I make Git win — one click."
-Show:: The Argo CD *Sync* dialog, then the tree going green, then the terminal.
-Do:: In Argo CD click *Sync → Synchronize*, then back in the terminal:
-+
+=== 3 · Restore Git with one sync — 3 min
+
+Apply the state defined in Git with a single sync, and confirm from the terminal that the replica count is back to one.
+
+image::gitops-fundamentals/gitops-fundamentals-02-reconcile-loop.svg["The reconcile loop: the Application reads desired state from Git, compares it against the live cluster, and a sync applies Git whenever they differ."]
+
+*Why it matters*
+
+Recovery is not a rollback procedure or a change ticket. Git already holds the intended state, so bringing the cluster back into line is a single action.
+
+*On screen* — *Sync → Synchronize*, then confirm from the terminal:
+
 [source,sh,role=execute]
 ----
 sleep 8
-oc get deployment/parasol-claims -n $DEV -o jsonpath='replicas after Sync: {.spec.replicas}{"\n"}'
+oc get deployment/parasol-claims -n $DEV -o jsonpath='replicas after sync: {.spec.replicas}{"\n"}'
 ----
-+
-"Back to one. The console change is gone — the cluster matches Git again. That is the reconcile: Git is the source of truth, and Sync makes reality agree with it."
 
-=== Beat 4 — Self-heal reverts drift unaided
+=== 4 · Self-heal — 3 min
 
-[demo-block]
-[TIME 3m]
-Say:: "Pressing Sync is the training-wheels version. In production you turn on *self-heal*, and Argo CD does that revert for you — continuously — whenever anyone drifts the cluster."
-Show:: The Argo CD app details → *Sync Policy* → *Enable Auto-Sync* and *Self Heal*; then drift again and let it revert unaided.
-Do:: Enable *Auto-Sync* and *Self Heal* in the UI, then drift once more:
-+
+Enable automated sync with self-heal, repeat the same manual change, and watch Argo CD revert it within seconds without anyone acting.
+
+image::gitops-fundamentals/gitops-fundamentals-06-enable-selfheal.png["The application's Sync Policy settings in Argo CD: Enable Auto-Sync and Self Heal selected, Prune Resources left cleared."]
+
+*Why it matters*
+
+A manual sync demonstrates the idea; self-heal is the operating model. The controller corrects drift continuously, so the cluster cannot slowly accumulate undocumented changes.
+
+*On screen* — application details → *Sync Policy* → enable *Auto-Sync* and *Self Heal*. Then make the same change again and take no further action:
+
 [source,sh,role=execute]
 ----
 oc scale deployment/parasol-claims --replicas=3 -n $DEV
-echo "drifted to 3 — now nobody touches Argo CD; watch it snap back on its own in seconds"
+echo "Scaled to 3 replicas by hand — no action taken in Argo CD"
 ----
-+
-"I'm not going to press anything — and within seconds Argo CD catches the drift and puts it back to one, the platform enforcing Git without a human. That is GitOps: the cluster is a projection of Git, and anything that diverges gets corrected on its own."
 
-[NOTE]
-.The self-heal beat lands live
-====
-Self-heal is watch-triggered — it reverts drift in a few seconds (measured ~4s on this cluster), so this beat lands live with no waiting.
-Both the manual Sync (beat 3) and self-heal (beat 4) are near-instant, so the whole drift-revert arc stays snappy.
-One caution if you rehearse: Argo CD backs off exponentially on *repeated* drift of the same resource, so a third scale-to-3 in quick succession can take a couple of minutes to revert instead of seconds.
-Leave a few minutes between your rehearsal and the live run — or `ws reset gitops-fundamentals --user {user}` in between, which returns everything to the entry state.
-====
+*What just happened*
+
+The change was reverted in about four seconds, unattended. That is the difference between a tool that reports drift and a platform that removes it.
+
+== Frequently asked questions
+
+*Why is the Application created through Argo CD rather than with `oc apply`?*::
+It can be applied directly. The point is that nothing else should be: the Application is the one object managed by hand, and it manages everything else.
+
+*How quickly does self-heal revert a change?*::
+It is triggered by watching the resource, so it reacts within seconds — about four seconds on this cluster. Repeated drift of the same resource is reverted with exponential back-off, so a rapid repeated test looks slower than normal operation.
+
+*Kustomize or Helm?*::
+Argo CD renders both. Kustomize suits overlays on manifests you own; Helm suits consuming a packaged chart from someone else.
+
+*Is deploying straight from Git how production works?*::
+Yes — with the promotion gate in Git rather than on the cluster: a reviewed pull request into the environment's branch or folder, instead of a person with cluster access.
+
+*What is the difference between Refresh and Sync?*::
+Refresh re-reads Git and recalculates the difference. Sync applies it. Refresh changes nothing on the cluster.
 endif::demo[]
 
 // ============================================================================
