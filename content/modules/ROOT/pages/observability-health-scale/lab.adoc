@@ -12,7 +12,7 @@ include::partial$version-attributes.adoc[]
 // parasol-claims traces in Observe -> Traces with metric->trace exemplars, a CPU HPA that scaled 2->4
 // (timing SUPERSEDED — see the 2026-08-14 re-measurement note below), and a PDB that
 // returned "Cannot evict pod as it would violate the pod's
-// disruption budget" on the last eviction. Timings in the chips are measured from that run.
+// disruption budget" on the last eviction. Timings quoted on the demo page are from that run.
 // Those product versions are FROZEN LITERALS, not {cluster_observability_operator_version} /
 // {tempo_version} / {opentelemetry_version}: this is a dated record of what ran on 2026-07-11, and
 // those attributes float (versions.yaml has since moved Tempo to 0.21.0-3 and OTel to 0.152.0-2).
@@ -886,160 +886,211 @@ You instrumented nothing and consumed everything: the golden signals and a custo
 endif::demo[]
 
 ifdef::demo[]
-== Demo arc — break it live, then scale it live (15 min)
+== A service that tells you it is broken · 15 min
 
-[NOTE]
-.Before you present
+Parasol's claims service has been running blind all workshop; in fifteen minutes it notices its own failure, pages, absorbs a traffic spike with nobody watching, and rides out weekly node maintenance.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `adm solve observability-health-scale --user {user}` first: it materializes the *end state* — the claims app at 2 replicas with the CPU HorizontalPodAutoscaler (HPA), the `parasol-claims-alerts` rule, and the PodDisruptionBudget (PDB) already in place — so every signal is live and you only have to *drive* it.
-Have the console open on *Observe → Metrics* with the 5xx-rate query ready, a second tab on the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^], and a terminal logged in as `{user}`.
-Use that project-scoped view, not the cluster-wide *Observe → Alerting* page: the cluster-wide page needs a cluster-monitoring grant your attendee identity does not have and renders *0 - 0 of 0*, and its *Source* filter defaults to *Platform* — the link above pins it to *User*.
-The database break plus a *concurrent burst* of failing load fires the alert after ~3 minutes, so *start that beat first* and let it cook while you narrate.
-*You get one shot at that burst.* About thirty seconds after the break the readiness probe pulls the failing pod out of the router, and from then on the load gets router ``503``s that never reach the app — so the app's own counter freezes and a *second* burst cannot re-arm the alert. If you miss the window, the only way back is a full cycle (recover, wait for ``200``s, break and burst again), which is another three minutes. Rehearse the break-and-burst block once so you fire it cleanly in the room.
+This demo starts from the finished lab state. Stage it before the session from your own terminal, signed in with a cluster-admin account:
+
+[source,sh,subs="attributes"]
+----
+adm solve observability-health-scale --user {user}
+----
+
+It leaves the claims application at two replicas with its CPU HorizontalPodAutoscaler, the `parasol-claims-alerts` PrometheusRule and the `parasol-claims` PodDisruptionBudget already in place, and returns once the module's Argo Application is Healthy — inside the engine's five-minute ceiling and usually well short of it — so start it well ahead of the session.
+
+Have three surfaces open, all as `{user}`: the web console on *Observe → Metrics* with the 5xx-rate query pasted and ready, a second tab on the project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^], and the cockpit terminal.
+
+NOTE: Use that project-scoped link, not the cluster-wide *Observe → Alerting* page. The cluster-wide page reads a cluster-monitoring API a workshop account is not granted, so it renders *0 - 0 of 0*, and its *Source* filter defaults to *Platform* — the link above pins it to *User*.
+
+CAUTION: The burst in step 2 has one window. About thirty seconds after the database is scaled away the readiness probe pulls the failing pod out of the router, and from then on the load gets router ``503``s that never reach the application — its own counter freezes, so a second burst cannot re-arm the alert. Recovering from a missed window means a full cycle: recover, wait for the service to answer `200`, then break and burst again, which costs another three minutes. A rehearsal run of the break-and-burst block against a test account is what makes the live window land cleanly.
+
+NOTE: A row that reads *Pending* rather than *Firing* is not a failure — the climb is already banked and the rule's two-minute `for:` window is counting down. Re-running the burst to help it along only adds noise, because the application's counter has already frozen.
+
+CAUTION: The staging command above is idempotent — re-running it restores the end state, with the database back to one replica, the application back to two, and the HPA, alert rule and disruption budget in place. A burst pod left behind from an earlier run keeps CPU high and pins the autoscaler at four replicas; `oc delete pod claims-burst -n {user}-dev` removes it.
 ====
 
-=== Beat 1 — Three signals in one place
+=== Brief
 
-[demo-block]
-[TIME 2m]
-Say:: "Parasol's claims service has been running blind all workshop. The platform was already collecting metrics, logs and traces — we just point them at the app. Here are the three signals in one place."
-Show:: *Observe → Metrics*. Plot `sum(rate(http_server_requests_seconds_count[5m]))` (traffic), then `claims_created_total` (the business metric the team added). A steady line, a climbing counter.
-Do:: In the terminal, show the same numbers at the source:
-+
+image::observability-health-scale/observability-health-scale-01-three-signals.svg["The three signals: a claims request fanning out to metrics, logs and traces, with the question each answers best — metrics for how much, how fast and how bad, logs for what exactly happened in one event, traces for where the time went across services."]
+
+*The three signals, in five minutes*
+
+Observability rests on three kinds of telemetry, and each answers a question the others answer badly. *Metrics* are cheap numbers over time — request rate, error rate, latency, CPU. They are always on, they aggregate across every replica, and they are what you alert on. A metric will say the 5xx rate just tripled; it will not say which claim failed.
+
+*Logs* are individual events with full detail — the stack trace, the offending claim number. They answer "what exactly happened" for one occurrence, but at scale they are a firehose nobody reads live. *Traces* follow one request across every service and database call it touched, and show where the time went. The discipline is: metrics to notice and alert, traces to locate, logs to confirm the detail.
+
+None of that is a separate purchase. OpenShift ships user-workload monitoring built in, and getting an application into it is one small object — a *ServiceMonitor* saying "scrape this Service's `/q/metrics` every ten seconds". Tempo and OpenTelemetry install as operators under the same subscription. Teams that treat "add monitoring" as a procurement project are usually re-buying what they already own.
+
+*Scaling is a decision, not a reflex*
+
+"It's slow — add replicas" is only sometimes the right answer. A *HorizontalPodAutoscaler* adds replicas when CPU or memory climbs with traffic, and it is the workhorse. Serverless scales to zero for services that are idle for long stretches, KEDA scales on queue depth rather than CPU, and a VerticalPodAutoscaler right-sizes one pod instead of adding more.
+
+Autoscaling handles load. The other half of staying up is *voluntary disruption* — the node reboots and drains that happen every week for patching. A *PodDisruptionBudget* is the application's contract with the platform: take my pods for maintenance, but never leave me fewer than N.
+
+*In this demo*
+
+. The three signals for a live service, read in the console and at the source
+. The database taken away, and what each signal says about a fault in progress
+. The alert firing, and a recovery that takes two steps rather than one
+. The autoscaler absorbing a traffic spike with no human and no ticket
+. A disruption budget that keeps routine node maintenance from becoming an outage
+
+=== 1 · Three signals in one place — 2 min
+
+The claims service is already instrumented and already being scraped. Read its golden signals and a custom business metric in the console, then show the same numbers coming straight out of the application.
+
+image::observability-health-scale/observability-health-scale-01-observe-metrics.png["Observe Metrics view scoped to the user's project: the PromQL query sum(rate(http_server_requests_seconds_count{uri=\"/api/claims\"}[5m])) in the query box, a steady plotted line just above 0.5 across a thirty-minute window, and the current value 0.503 in the result table below it."]
+
+*Why it matters*
+
+Nothing here was built for this demo. The platform was already collecting; the only integration is a small object pointing at the Service. "Is the claims service healthy" stops being someone tailing logs and becomes a query — and it is the same signal both humans and the autoscaler act on.
+
+*On screen* — *Observe → Metrics* in `{user}-dev`: plot `sum(rate(http_server_requests_seconds_count[5m]))` for traffic, then `claims_created_total`, the business metric the application team added. A steady line, and a counter climbing.
+
+The same numbers at the source:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 curl -s http://parasol-claims-{user}-dev.{cluster_domain}/q/metrics \
   | grep -E '^claims_created_total|status="404"' | head
 ----
-+
-"Same numbers, two places — the ServiceMonitor is the bridge. Now let's make it hurt."
 
-=== Beat 2 — Take the database away, watch the alert
+*What just happened*
 
-[demo-block]
-[TIME 1m]
-Say:: "I'm going to take the database away. Watch the alert — it's armed and inactive right now."
-Show:: The project-scoped {ocp_console_url}/dev-monitoring/ns/{user}-dev/alertrules?alert-source=user[*Alerting rules* view for `{user}-dev`^] — one row, `ParasolClaimsErrorRateHigh`, severity *Warning*, source *User*, *State* `-`: loaded and watching, nothing active.
-Do:: Break it, then drive a *concurrent burst* of failing load — hundreds of 5xx banked into the ~30-second window before the readiness probe pulls the pod from the router, sampled often by the 10-second scrape so `rate()` sees the climb (a serial trickle banks too few) — note the time; it fires in about three minutes:
-+
+Two places, one set of numbers. The ServiceMonitor is the bridge between them: it tells user-workload monitoring to scrape `/q/metrics` every ten seconds, and both the graph and the alert in the next step ride on that one object.
+
+=== 2 · Take the database away, and read the signals — 4 min
+
+Scale the database to zero, drive a concurrent burst of failing load, and use the three minutes the alert needs to arm to show what metrics, logs and traces each say about a fault that is happening right now.
+
+image::observability-health-scale/observability-health-scale-05-observe-alerting-inactive.png["Project-scoped Alerting rules view for the user's namespace: ParasolClaimsErrorRateHigh listed with severity Warning and source User, and an empty State column because nothing is wrong yet — the before picture for the firing row later in the demo."]
+
+*Why it matters*
+
+The rule is loaded and watching before anything is wrong, which is the state a production alert spends almost all of its life in. The delay before it fires is a feature, not lag: `for: 2m` on a five-minute rate is what stops a thirty-second blip from waking anybody.
+
+*On screen* — the project-scoped *Alerting rules* view: one row, `ParasolClaimsErrorRateHigh`, severity *Warning*, source *User*, *State* empty.
+
+Then break it. Twenty concurrent workers bank hundreds of 5xx into the roughly thirty-second window before the readiness probe pulls the pod from the router — a serial trickle banks too few for `rate()` to see the climb. Note the time; the alert fires about three minutes from here:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc scale deploy/claims-db -n {user}-dev --replicas=0
-# 20 workers pound the now-failing API for ~90s, backgrounded so you can keep narrating:
+# 20 workers pound the now-failing API for ~90s, backgrounded so the terminal stays free:
 end=$(( $(date +%s) + 90 )); for w in $(seq 1 20); do \
   ( while [ "$(date +%s)" -lt "$end" ]; do curl -s -o /dev/null http://parasol-claims-{user}-dev.{cluster_domain}/api/claims; done ) & \
 done
 ----
-+
-"Three minutes to fire. While it cooks, let's see what the signals say — and why logs won't save us here."
 
-=== Beat 3 — Metrics say what, traces say where
+*On screen* — while the rule arms, walk the three signals against the live fault:
 
-[demo-block]
-[TIME 3m]
-Say:: "Metrics tell us *what*: the 5xx rate is climbing. Logs tell us almost *nothing* — a healthy app is quiet, and so is this one under load. Traces will tell us *where*."
-Show:: *Observe → Metrics* with `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))` rising off zero. Then `oc logs deploy/parasol-claims -n {user}-dev --tail=15` — terse. Then *Observe → Traces*, `{ resource.service.name = "parasol-claims" }`, open a request and read its route + status.
-Do::
-+
+* *Observe → Metrics* with `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))` — the error rate climbing off zero. The metric noticed.
+* *Observe → Traces*, filtered to the `parasol-claims` service — open a request and read its route and status. The trace located it.
+* The application's own logs, which say almost nothing:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc logs deploy/parasol-claims -n {user}-dev --tail=15
 ----
-+
-"This is the argument for observability in one screen: the metric noticed, the trace located, and the logs — which everyone reaches for first — barely helped."
 
-=== Beat 4 — It pages, and the fix is two steps
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: *Read the row before you say the line — you have one for either state.* If it reads *Firing*: "There it goes. That's a page — in production this hits the on-call." If it still reads *Pending*: "Look at that: *Pending*. The error rate is already over the line — what's counting down now is the rule's two-minute `for:` window, so a thirty-second blip never wakes anybody. It pages in a moment." Then, from either: "Let's fix it — and notice the fix is two steps, because the app is holding dead connections."
-Show:: The same project-scoped *Alerting rules* view — `ParasolClaimsErrorRateHigh` has moved off `-` and is now *Firing* — then the *Alerts* tab, which was empty at the healthy baseline.
-Do::
-+
+This is the argument for observability in one screen. The metric noticed, the trace located, and the logs — which everyone reaches for first — barely helped. A healthy Parasol request logs nothing by design, and a failing one under load is not much louder.
+
+=== 3 · It pages, and the fix takes two steps — 2 min
+
+The rule crosses its threshold and moves to *Firing*. Recovery is two commands rather than one, because a healthy database does not on its own heal an application still holding dead connections to the old one.
+
+image::observability-health-scale/observability-health-scale-04-alert-firing.png["Project-scoped Alerting rules view for the user's namespace: ParasolClaimsErrorRateHigh now reads 1 Firing with a Warning severity badge, while claims-db is scaled to zero — the same row that showed an empty State at the healthy baseline."]
+
+*Why it matters*
+
+This is where the platform stops needing a human to notice. In production the same transition reaches the on-call rotation, before a customer calls. The two-step recovery is the honest part of the story: the pool of dead connections is a real failure mode, and it is the restart, not the database, that clears it.
+
+*On screen* — the same *Alerting rules* view. `ParasolClaimsErrorRateHigh` has moved off an empty *State*: *Pending* while the two-minute `for:` window counts down, then *Firing*. The *Alerts* tab, empty at the healthy baseline, now carries it.
+
+Then recover:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc scale deploy/claims-db -n {user}-dev --replicas=1
 oc rollout restart deploy/parasol-claims -n {user}-dev
 ----
-+
-"Database back, app restarted to drop the poisoned pool — and the alert stands down once the 5-minute rate decays. Now the happy problem: too much traffic."
-+
-[NOTE]
-.If the alert has not fired yet — it is a clock, not a coin flip
-====
-`ParasolClaimsErrorRateHigh` fires on `sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.1`
-held for `for: 2m`. Measured on this content: the 5xx rate cleared `0.1/s` about *50 seconds* after the
-database went away and the rule reached *Firing* about two minutes later — close to *three minutes* end to
-end. The previous beat's three minutes *is* that wait, deliberately. Finish it in two and you are ahead of
-the alert, not behind it.
 
-*The row reads `Pending`.* Nothing is wrong — the climb is already banked and the `for:` window is running.
-Take the *Pending* line above; it teaches the state machine, which is the better beat anyway. Do not
-re-fire the burst to "help it along": the counter has already frozen (see below) and you will only add
-noise.
+*What just happened*
 
-*The row still reads `-` several minutes in.* The burst missed its window. Once the readiness probe pulls
-the pod from the router the load gets router ``503``s that never reach the app, so nothing increments the
-app's counter and `rate()` sees a flat line — a second burst against that pod does nothing. The only way
-back is a full cycle: run the two recovery commands above, wait for the service to answer `200`, then
-re-run the break-and-burst block *together* and give it three minutes. Decide out loud whether the room
-has three minutes; if it does not, use the fallback below and move to the autoscaling beat.
+Measured on this content: the 5xx rate cleared the rule's `0.1/s` threshold about fifty seconds after the database went away, and the row reached *Firing* about two minutes after that. Going the other way, the rule lingers in *Firing* for roughly five more minutes after recovery, while the burst's 5xx age out of the five-minute rate window — that is the window decaying, not a failed fix.
 
-*The rules list is empty.* That is the *Source* filter, not your alert: the view defaults to *Platform* and
-this rule's source is *User*. The link in the prep block above pins it to *User* — open that one, not the
-cluster-wide *Observe → Alerting* page.
+=== 4 · The autoscaler adds pods, with no human and no ticket — 4 min
 
-*Neither state paints, or the console is not cooperating.* Show the captured firing row, say plainly that
-it is a capture, and keep the story moving:
+With the fault cleared, the opposite problem: too much traffic. Drive CPU load at the service and watch the HorizontalPodAutoscaler take it from two replicas to four on its own.
 
-image::observability-health-scale/observability-health-scale-04-alert-firing.png["The project-scoped Alerting rules view with ParasolClaimsErrorRateHigh reading 1 Firing and a Warning severity badge, while the database is scaled to zero — the same row that showed an empty State at the healthy baseline."]
+image::observability-health-scale/observability-health-scale-03-topology-hpa-scale.png["OpenShift Topology view for the user's dev project with the Resources side panel open for the parasol-claims Deployment. The Pods section is headed \"View all 4\" and lists three pod rows, each reading Running, then a HorizontalPodAutoscalers section listing the parasol-claims HPA, followed by Services and Routes sections below."]
 
-Going the other way: after you recover, the rule *lingers* in Firing for roughly five more minutes while the
-burst's 5xx age out of the 5-minute window. If you overrun, the row is still Firing during the next beat —
-that is the window decaying, not a failed fix, and it is worth saying so before someone asks.
-====
+*Why it matters*
 
-=== Beat 5 — The HPA adds pods, no human, no ticket
+Sizing for peak means paying for peak all day. An HPA lets the claims service run lean and grow only under real load, and the decision needs no ticket, no change window and nobody awake to approve it.
 
-[demo-block]
-[TIME 4m]
-Say:: "The service is at two replicas. I'll hammer it, and the HPA will add pods on its own — no human, no ticket."
-Show:: *Topology* on `parasol-claims` — click the node and open its *Resources* panel's *Pods* list at 2. Start the burst; the container is up in *3–4s* (this image never pulls — the kubelet already has it), but CPU takes *24–40s* to reach the autoscaler, and the Pods list then climbs to 4 somewhere between *45 seconds and two minutes* in — often via 3 rather than straight to 4 (the status ring itself stays a solid color and does not subdivide by pod count — read the count from the Resources panel, not the ring). Flip to a terminal running `oc get hpa parasol-claims -w` showing CPU spike past 60% and replicas climb.
-// TIMING NOTE for the presenter: this beat is budgeted 4m and the scale-out is the LAST thing to
-// land — measured 42/47/70/83/115s to reach 4 on 2026-08-14. Start the burst EARLY in the beat and
-// narrate the metrics path while it cooks; do not stand in silence waiting for the fourth pod.
-// The old script promised it "about half a minute in", which under-sold the wait by up to 4x.
-Do::
-+
+Start the load first — the scale-out is the last thing to land:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev run claims-burst --restart=Never \
   --image=registry.redhat.io/openshift4/ose-cli-rhel9:v4.22@sha256:f8bbc73242af3eae3f8361a9611b29384d3577dba4d5e5b62f4beb2750862c19 \
   -- /bin/bash -c 'for i in $(seq 1 20); do ( while true; do curl -s -o /dev/null http://parasol-claims:8080/api/claims/CLM-1001/history; done ) & done; wait'
 ----
-+
-"CPU past 100%, scaled to four once the load landed. When the load drops it holds for five minutes before shrinking — no flapping."
 
-=== Beat 6 — Maintenance that never becomes an outage
+*On screen* — *Topology* on `parasol-claims`, with the node's *Resources* panel open on its *Pods* list at 2, and a terminal beside it watching the autoscaler:
 
-[demo-block]
-[TIME 3m]
-Say:: "Last thing: the platform patches nodes every week. A PodDisruptionBudget means that maintenance never becomes an outage."
-Show:: `oc get pdb parasol-claims -n {user}-dev` — `ALLOWED DISRUPTIONS 3` (the HPA is still holding four replicas from the last beat, so with `minAvailable: 1` three may go at once; it falls to one as the service settles back to two). Explain: on a node drain the platform evicts pods but never the last healthy one — the eviction API literally refuses once the budget is reached: `Cannot evict pod as it would violate the pod's disruption budget`.
-Do::
-+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get hpa parasol-claims -n {user}-dev -w
+----
+
+*What just happened*
+
+CPU reaches the autoscaler 24–40 seconds after the load starts, and the Pods list gets to 4 between 47 seconds and just under two minutes in, often stepping 2 → 3 → 4 rather than jumping. Read the count from the *Resources* panel: the Topology status ring is pixel-identical at two replicas and at four. When the load stops, the autoscaler holds four for five minutes before shrinking — a stabilization window that keeps it from flapping.
+
+=== 5 · Maintenance that never becomes an outage — 3 min
+
+The platform patches nodes every week, and every patch drains a node. A PodDisruptionBudget is what keeps that routine drain from taking the service down with it.
+
+image::observability-health-scale/observability-health-scale-05-what-you-built.svg["Everything the claims service gained: the application exposing /q/metrics and OpenTelemetry, a ServiceMonitor feeding user-workload monitoring, which in turn feeds Observe Metrics and a PrometheusRule that fires an alert; and from the application directly, Observe Traces via Tempo, an HPA scaling 2 to 4 on CPU, and a PDB that survives the drain."]
+
+*Why it matters*
+
+Without a budget, patching means asking every application team for a maintenance window. With one, the contract is declared in the application's own manifest and the drain honours it — so nodes get patched on a Tuesday afternoon instead of at 02:00 on a Sunday.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc get pdb parasol-claims -n {user}-dev
 oc delete pod claims-burst -n {user}-dev
 ----
-+
-"Metrics noticed, a trace located, an alert paged, the autoscaler absorbed the load, and the budget guards maintenance — that's observability, health and scale, and none of it was a separate product to buy."
 
-[NOTE]
-.Resetting between runs
-====
-`adm solve observability-health-scale --user {user}` is idempotent — re-run it to restore the end state (database back to 1, app to 2 replicas, HPA/alert/PDB in place).
-If you left the burst pod running, `oc delete pod claims-burst -n {user}-dev`.
-====
+*What just happened*
+
+`ALLOWED DISRUPTIONS` reads 3 while the autoscaler is still holding four replicas: with `minAvailable: 1`, three may go at once, and it falls to one as the service settles back to two. On a node drain the platform evicts pods but never the last healthy one — the eviction API refuses outright with `Cannot evict pod as it would violate the pod's disruption budget`.
+
+A metric noticed, a trace located, an alert paged, the autoscaler absorbed the load, and the budget guards the maintenance. None of it was a separate product to buy.
+
+== Frequently asked questions
+
+*How long does an alert take to fire, and is that tunable?*::
+This one took about three minutes: roughly fifty seconds for the five-minute error rate to climb past `0.1/s`, then the rule's `for: 2m` window on top. Both halves are yours to set. The delay is deliberate — it is what stops a two-second blip from paging anybody — and the practical floor is the scrape interval, because an alert can only react to what a scrape captured.
+
+*Why did recovery take two steps rather than one?*::
+Bringing the database back does not heal the application's connection pool, which is still full of dead connections pointing at the terminated database pod. The rollout restart is what actually fixes it. That is a real production failure mode rather than a quirk of the demo, and it is the kind of thing a trace makes obvious and a dashboard does not.
+
+*Do developers need cluster-wide access to see their own metrics and alerts?*::
+No, and they should not have it. Developers hold project-scoped monitoring rights: *Observe → Metrics* for PromQL and the project-scoped alert-rules view both query with the developer's own identity, restricted to their own namespaces. The cluster-wide alerting page needs a cluster-monitoring grant and is for the platform team. Same data, two audiences, one RBAC model.
+
+*Why does the trace show one span rather than every database query?*::
+This build emits the HTTP request span; per-query database spans need a build-time flag on the image. The distinction matters in practice: the trace tells you *which* endpoint is the outlier, and how much of its time is its own rather than a dependency's. Going a level deeper into individual queries is a configuration change, not a re-instrumentation project.
+
+*Why does the autoscaler hold the extra replicas after the load stops?*::
+A five-minute scale-down stabilization window, on by default. `TARGETS` falls below the 60% target while `REPLICAS` stays at 4 — that is correct behaviour, and it is what stops a brief lull from triggering a shrink-then-grow flap. Scale-up has no equivalent window, but it is not instant either: the wait is the metrics path, 24–40 seconds before CPU first reads above target.
 endif::demo[]
