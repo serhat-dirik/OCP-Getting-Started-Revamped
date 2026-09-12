@@ -3,15 +3,15 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Deployment Targets & Scheduling. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
-// presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// SA demo walkthrough. Every command runs in the Showroom terminal as {user}, so blocks are
 // [source,sh,role=execute]. The FIRST block sets NS={user}-dev (subs=attributes) and every later block
 // uses $NS with NO subs so jsonpath braces stay literal. All commands + outputs + timings were
 // performed on OCP 4.21.22 (Kubernetes 1.34, frozen provenance — not a requirement) as user2 on 2026-07-13: the FailedScheduling events,
 // the anti-affinity spread, the batch-pool break-and-fix, the maxUnavailable=0 capacity samples, the
 // PDB eviction 429, the DaemonSet inventory, and the hollow MachineSet are real captures. NODE NAMES in
 // output are scrubbed to generic worker-N / control-plane-N (they differ per cluster). NODE COUNTS are
-// derived live (ELIGIBLE=non-batch nodes for the scale-to-Pending beat; NODES=total for the DaemonSet
-// DESIRED filter) so the beats reproduce on any cluster size — re-grounded on C1 (6 nodes: 5 non-batch +
+// derived live (ELIGIBLE=non-batch nodes for the scale-to-Pending exercise; NODES=total for the DaemonSet
+// DESIRED filter) so those steps reproduce on any cluster size — re-grounded on C1 (6 nodes: 5 non-batch +
 // 1 batch pool) 2026-07-18; the shown 6/5 are that cluster's example, not a fixed fact. Console
 // click-paths are grounded against the unified console (OCP 4.19+, no perspective switch); labels a
 // build couldn't click get CAPTURE-VERIFY + the authoritative CLI.
@@ -57,48 +57,80 @@ Node names in the output below (`worker-2`, `control-plane-1`, …) are illustra
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — 10-minute presenter arc: dedicated pool + zero-downtime roll
+// DEMO FLAVOR — the 10-minute SA demo: a dedicated pool, then a rollout that keeps its data.
+// The title's minutes are the sum of the four step headings below (3+2+3+2); keep them in step.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — Dedicated nodes and a zero-downtime roll in ten minutes (10 min)
+== A dedicated pool and a rollout nobody notices · 10 min
 
-[NOTE]
-.Before you present
+A batch job stops competing with the live claims API for CPU, and the API redeploys under traffic without dipping below its replica count or discarding a customer's data.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `ws prep deployment-targets-scheduling --user {user} --yes` a few minutes ahead, and set `NS={user}-dev` in your terminal.
-This demo runs from the *entry* state (default scheduling, batch worker unpinned), *not* from `adm solve`.
-That entry state ships `parasol-claims` at *two* replicas and this arc never scales it, so beat 3's sampler reads `available=2/2`.
-The hands-on lab reads `3/3` only because its exercise 2 scales up — don't _correct_ one to match the other; `maxUnavailable: 0` holds the floor at whatever the desired count happens to be.
-Keep the terminal font large and `oc get pods -o wide` handy; node placement is the whole visual.
+Stage the module from the cockpit terminal:
 
-*Check the taint before you promise beat 1.* Bootstrap only applies the batch-pool *taint* on a worker
-pool of 3 or more nodes (below that floor it labels the node but withholds the taint — tainting one of
-only two workers once starved a platform component of capacity for 4h+, so bootstrap will not repeat
-that). Run this first:
+[source,sh,role=execute]
+----
+ws prep deployment-targets-scheduling
+----
+
+This demo runs from the *entry* state — default scheduling, the batch worker unpinned — not from a finished lab state.
+That entry state ships `parasol-claims` at *two* replicas and nothing here scales it, so the capacity sampler in step 3 reads `available=2/2`.
+The hands-on lab reads `3/3` only because its exercises scale up first; `maxUnavailable: 0` holds the floor at whatever the desired count happens to be, so both figures are correct.
+
+Node placement is the whole visual: set the terminal font large and keep `oc get pods -o wide` to hand.
+
+*Confirm the batch pool is tainted, not only labelled.* Bootstrap applies the batch-pool *taint* only on a worker pool of three or more nodes. Below that floor it labels the node and withholds the taint, because tainting one of only two workers once starved a platform component of capacity for hours.
 
 [source,sh,role=execute]
 ----
 oc get nodes -l workshop.redhat.com/pool=batch -o jsonpath='{.items[0].spec.taints}{"\n"}'
 ----
 
-*If that prints a `NoSchedule` taint*, beat 1 runs exactly as scripted below — the money moment is the
-batch pod stuck *Pending* on the untolerated taint, then *snapping* onto the batch node the instant you
-add the toleration.
-*If it prints nothing*, this cluster is below the floor: the `nodeSelector`-only patch will schedule
-the pod *immediately*, not go `Pending`. Don't stage the refusal — reframe the Say line to "the
-toleration is what you'd need if this node repelled you; on a bigger cluster it does" and skip straight
-to applying both fields together. Never hand-taint the node to force the original beat — that recreates
-the outage.
+If that prints a `NoSchedule` taint, step 1 behaves as written: the batch pod stays *Pending* on the untolerated taint until step 2 adds the toleration.
+If it prints nothing, this cluster is below the floor and the `nodeSelector`-only patch schedules the pod immediately — apply both fields together in step 1 instead, and describe the toleration as what the same pod would need on a cluster whose pool does repel it.
+
+CAUTION: Never hand-taint the batch node to reproduce the refusal. That is the outage the three-node floor exists to prevent.
+
+CAUTION: `ws prep deployment-targets-scheduling` returns the world to the entry state — default scheduling, the batch worker unpinned, no PodDisruptionBudget. Run it again between two runs of this demo so step 1 starts clean.
 ====
 
-=== Beat 1 — A selector alone: the batch pod is refused
+=== Brief
 
-[demo-block]
-[TIME 3m]
-Say:: "Parasol's monthly-statement *batch* job is running on the same nodes as the live claims API — fighting it for CPU. We have a *dedicated* pool of nodes for batch work. Watch me move it there — and watch it refuse, first, for a reason worth understanding."
-Show:: `statement-batch` on a general node; the batch pool node (labelled + tainted); then the pod going *Pending* on `nodeSelector` alone, and *scheduling* once the toleration is added.
-Do:: Pin the batch worker onto its pool:
-+
+image::deployment-targets-scheduling/deployment-targets-scheduling-01-scheduler-pipeline.svg["The scheduler pipeline: a Pending pod carrying its CPU and memory requests, tolerations and selectors enters kube-scheduler, which first filters to the nodes that can run it — enough free requests, taints tolerated, nodeSelector and affinity matched — then scores the survivors on free room, spread and anti-affinity and binds the winner; a dotted branch leaves the filter for the case where no node survives, ending in the pod staying Pending with a FailedScheduling event."]
+
+*Nothing chose these nodes*
+
+Parasol's claims API, its database and a monthly-statement batch job all landed wherever the scheduler found room. The batch job takes CPU from live traffic, replicas of the API can sit on one node together, and every mid-day rollout quietly drops requests. None of that needs a bigger cluster to fix — it needs the placement decisions to be made deliberately.
+
+*The scheduler in one mental model, and who seeks versus who repels*
+
+Every pod goes through the same two steps: *filter* to the nodes that can run it, *score* the survivors, bind the winner. The currency in the filter is the pod's *requests*, not its usage. When no node survives, the pod stays `Pending` and the scheduler writes a `FailedScheduling` event naming the reason node by node.
+
+The two ways to influence that are opposites, and confusing them is the most common scheduling mistake there is. *Affinity is the pod reaching toward a node* — `nodeSelector` and `nodeAffinity` attract, `podAntiAffinity` keeps replicas apart. *A taint is the node pushing pods away*, and a matching *toleration* only permits — it never attracts. Reserving a pool for batch, GPU or licensed workloads therefore takes all three: the label, the selector, and the toleration.
+
+*Two different enemies of a zero-downtime rollout*
+
+The first is a capacity dip while pods are replaced, and `maxUnavailable: 0` closes it: a new pod must pass readiness before an old one is retired. The second is invisible to that setting — an application that rebuilds shared state every time it boots. OpenShift keeps the pod count honest; the fix for the second one is to stop doing deploy-time work in the startup path.
+
+*In this demo*
+
+. A batch worker sent to its dedicated pool by a node selector, and refused by the node's taint
+. The toleration that permits it, and the pod landing on the pool
+. A redeploy under live traffic that holds capacity flat and stops discarding data on every boot
+. A disruption budget that makes a node drain wait its turn
+
+=== 1 · A selector sends the pod; the node refuses it — 3 min
+
+Parasol's monthly-statement batch job is running on the same nodes as the live claims API, competing with it for CPU. The cluster has a pool of nodes set aside for batch work, and a `nodeSelector` is the obvious way to move the job onto it — one patch, and the pod does not start.
+
+image::deployment-targets-scheduling/deployment-targets-scheduling-03-batch-pending.png["The web console pod detail page for a statement-batch pod in the user's dev project, with a Pending badge beside the name and the Events tab active. Two identical scheduler events, both generated from default-scheduler, read: 0/6 nodes are available: 1 node(s) had untolerated taint(s), 5 node(s) didn't match Pod's node affinity/selector — the one node the selector targets repels the pod, and the other five were never candidates."]
+
+*Why it matters*
+
+A node bought for one purpose — a GPU box, a node licensed for a commercial database, a batch pool — only earns its premium if the workload it was bought for lands on it and nothing else does. When that goes wrong the pod simply never starts, and the scheduler's own event is where the answer is: it gives a reason for every node in the cluster, which settles almost every "why will this not schedule".
+
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-dev
@@ -110,34 +142,42 @@ sleep 10
 oc get pods -n $NS -l app=statement-batch
 oc get events -n $NS --field-selector reason=FailedScheduling | tail -1
 ----
-+
-"'Untolerated taint' — the selector *sent* it to the batch node, but the node *repels* it. A selector attracts; it doesn't permit."
 
-=== Beat 2 — One toleration and it snaps into place
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "One toleration — 'this pod is allowed on the batch node' — and it snaps into place. Selector to *send* it, toleration to *permit* it. You need both."
-Show:: The toleration added; the pod now *Running* on the batch pool node.
-Do:: Add the toleration and confirm the pin:
-+
+`untolerated taint` — the selector sent the pod at the batch node, and the node pushed it back. A selector attracts; it does not permit.
+
+=== 2 · One toleration, and it lands — 2 min
+
+The pod is being sent to the right node and refused by it. A toleration is the pod's permission to be there, and with the selector still in place the pod schedules onto the batch pool within seconds.
+
+image::deployment-targets-scheduling/deployment-targets-scheduling-02-seek-vs-repel.svg["Two contrasted rows. In the upper row, affinity: a pod carrying a nodeSelector or nodeAffinity rule pulls toward a node with the matching label. In the lower row, a taint: the node pushes away a pod with no toleration, while a pod that carries the matching toleration is permitted onto it — permitted, the label notes, but not attracted."]
+
+*Why it matters*
+
+Affinity and taints are often described as two ways of doing the same thing. They are opposites, and both are needed here: the selector chooses the node, the toleration gets the pod past the node's guard. The mirror-image mistake is a toleration with no selector — the pod is then allowed on the premium node and just as likely to land anywhere else.
+
 [source,sh,role=execute]
 ----
 oc patch deploy statement-batch -n $NS --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"workshop.redhat.com/pool","operator":"Equal","value":"batch","effect":"NoSchedule"}]}}}}'
 oc rollout status deploy/statement-batch -n $NS --timeout=60s
 oc get pods -n $NS -l app=statement-batch -o wide
 ----
-+
-"On its own nodes now — the API never has to share a CPU with a statement run again."
 
-=== Beat 3 — Redeploy under live traffic without losing data
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Now the claims API. Every time a new pod boots it *reseeds the shared database* — silently discarding every claim filed since the last deploy. That's the real reason a naive rollout loses data, and no shutdown tuning fixes it. I'll stop the reseed, hold capacity flat, and redeploy under live traffic — the claim I plant first will still be there afterward."
-Show:: The schema strategy flipped to `none`, `maxUnavailable: 0` and a raised CPU limit applied; a value written before the roll still present after it; `availableReplicas` holding flat at 2 — the entry state's replica count — through the rollout restart.
-Do:: Stop the boot-time reseed, harden the roll, then redeploy under load:
-+
+The batch worker is on its own nodes. A statement run no longer takes CPU from the live claims API, and nothing without explicit permission can drift onto the pool that was set aside for it.
+
+=== 3 · A redeploy under live traffic that keeps its data — 3 min
+
+The claims API is redeployed in the middle of the day, with the load generator still driving traffic at it. Two things have to hold: the number of ready pods never dips, and a claim filed before the rollout is still there after it.
+
+image::deployment-targets-scheduling/deployment-targets-scheduling-04-reseed-on-boot.svg["A rolling update over one shared database: a client files a claim, the old pod that is still serving commits the insert into the single PostgreSQL, and the new pod booting alongside it runs Hibernate drop-and-create against that same database, dropping and reseeding the schema — the newly filed claim is discarded with no error returned to the client."]
+
+*Why it matters*
+
+"The deploy dropped requests again" is usually blamed on shutdown, and here that would be the wrong place to look. Every new pod boots with Hibernate set to drop-and-create and reseeds the *shared* database, discarding rows the pods still serving wrote minutes earlier — with no error, because the reseed commits cleanly. `maxUnavailable: 0` guarantees capacity and cannot see this at all. Setting the schema strategy to `none` moves seeding to deploy time, where it belongs, and a higher CPU limit shortens the JVM cold start each new pod makes the rollout wait for.
+
 [source,sh,role=execute]
 ----
 oc set env deployment/parasol-claims QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY=none -n $NS
@@ -149,17 +189,21 @@ oc rollout restart deploy/parasol-claims -n $NS
 for i in $(seq 1 10); do oc get deploy parasol-claims -n $NS -o jsonpath='available={.status.availableReplicas}/{.spec.replicas}{"\n"}'; sleep 4; done
 oc exec deploy/claims-load -n $NS -- curl -s http://parasol-claims:8080/api/claims/CLM-1001 | grep -o '"status":"[^"]*"'
 ----
-+
-"``available=2/2`` the whole way through — the floor never dips below what I asked for — and `CLM-1001` is *still* `Approved` after the roll, because the pods no longer reseed the database on boot. A mid-day redeploy the customers never felt."
 
-=== Beat 4 — A disruption budget makes a drain wait
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "Last piece: protect it during a *drain*. A disruption budget says 'never take me below one healthy pod.' An admin draining nodes has to *wait its turn* instead of evicting my last replica."
-Show:: The PDB created; an eviction *allowed*, then — with the budget exhausted — *denied* with the exact message a node drain hits.
-Do:: Show the budget in force:
-+
+`available=2/2` the whole way through — the floor never dips below the desired count — and `CLM-1001` is still `Approved` after the roll, because a booting pod no longer rebuilds the database underneath the pods that are serving.
+
+=== 4 · A disruption budget makes a drain wait — 2 min
+
+Nodes get drained for patching and upgrades, and a drain evicts whatever it finds. A PodDisruptionBudget puts a floor under that: the eviction API checks the budget first, and refuses the eviction that would breach it.
+
+image::deployment-targets-scheduling/deployment-targets-scheduling-04-pdb-allowed-disruptions.png["The PodDisruptionBudgets list for the project with a single row, parasol-claims: selector app=parasol-claims, availability Min available 1, and Allowed disruptions reading 2 — three healthy replicas minus the one the budget insists on keeping."]
+
+*Why it matters*
+
+Hardware failures cannot be budgeted. Voluntary disruptions can, and they are most of what actually takes a service down during a maintenance window. The budget does not stop the drain; it makes it wait its turn and take pods one at a time. The one trap is setting `minAvailable` equal to the replica count, which leaves no eviction room at all and deadlocks the drain forever.
+
 [source,sh,role=execute]
 ----
 oc apply -n $NS -f - <<'EOF'
@@ -180,15 +224,27 @@ POD=$(oc get pods -n $NS -l app=parasol-claims -o jsonpath='{.items[0].metadata.
 echo '{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"'"$POD"'"}}' | oc create --raw /api/v1/namespaces/$NS/pods/$POD/eviction -f - || true
 oc patch pdb parasol-claims -n $NS --type=merge -p '{"spec":{"minAvailable":1}}'
 ----
-+
-"'Cannot evict pod as it would violate the pod's disruption budget' — that's a node patch politely waiting instead of taking the service down."
 
-[NOTE]
-.Reset between runs
-====
-`ws prep deployment-targets-scheduling --user {user} --yes` returns the world to the entry state — default scheduling, the batch worker unpinned, no PDB.
-Run it before a second demo so beat 1 lands clean.
-====
+*What just happened*
+
+The first eviction is allowed, because the budget has headroom. Once the budget is exhausted the API answers `Cannot evict pod as it would violate the pod's disruption budget` — a node patch waiting politely instead of taking the service down with it.
+
+== Frequently asked questions
+
+*A pod is stuck in `Pending`. How do we find out why?*::
+Read the scheduler's own event: `oc get events -n <namespace> --field-selector reason=FailedScheduling`. It gives a reason per node — `untolerated taint(s)`, `didn't match Pod's node affinity/selector`, `didn't match pod anti-affinity rules`, `Insufficient cpu/memory` — and the counts add up to the whole cluster, so the line says both what is wrong and how widely.
+
+*We added a `nodeSelector` for our GPU pool and the pod will not schedule. What is missing?*::
+The toleration. Those nodes are tainted so that ordinary workloads stay off them, and a selector carries no permission: it attracts, the toleration permits. Pinning to a dedicated pool needs the pair. A toleration on its own is the inverse mistake — the pod may use the premium node but has no reason to prefer it.
+
+*Why does our rollout still drop requests when `maxUnavailable: 0` is set?*::
+Because that setting guarantees capacity — the count of ready pods never dips — and the loss is usually in the data plane at pod *startup*, not the connection plane at shutdown. An application that reseeds a schema, rebuilds a cache or runs a migration on every boot damages state the pods still serving are using. Move that work to deploy time and the class of failure disappears; shutdown-side tuning never addressed it. Some in-flight requests can still be lost as endpoints de-register asynchronously, which is what a `preStop` hook closes next.
+
+*A node drain is hanging and evicting nothing. Is the budget broken?*::
+One of two things, both budget-related. Either it is exhausted and the drain is correctly waiting for a pod to become ready elsewhere — the feature working — or `minAvailable` was set equal to the replica count, which leaves zero eviction room and deadlocks the drain permanently. `oc get pdb -n <namespace>` tells them apart: `ALLOWED DISRUPTIONS: 0` with `minAvailable` equal to the replicas is the deadlock.
+
+*With required anti-affinity, our rolling updates crawl. Is that normal?*::
+Yes, and it is deliberate. Required `podAntiAffinity` makes the roll sequential: with `maxSurge: 1`, each new pod needs a node holding no other replica, so it waits for one to vacate. The real trap is running as many replicas as there are eligible nodes — the surge pod then has nowhere to go and the rollout wedges. Keep the replica count below the number of nodes the workload may use.
 endif::demo[]
 
 // ============================================================================
