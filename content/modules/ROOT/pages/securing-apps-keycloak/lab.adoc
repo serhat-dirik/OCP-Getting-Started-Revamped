@@ -2,34 +2,150 @@
 :module-id: securing-apps-keycloak
 include::partial$version-attributes.adoc[]
 
-// Lab page for Securing Apps with Keycloak. Holds BOTH the workshop lab (ifndef::demo) and the demo arc (ifdef::demo).
+// Lab page for Securing Apps with Keycloak. Holds BOTH the workshop lab (ifndef::demo) and the Demo page (ifdef::demo).
 // Performed end-to-end as user1 on OCP 4.21.22 against the workshop Red Hat build of Keycloak
 // 26.6 (instance sso-workshop, realm realm-user1) on 2026-07-11: the open API (200, no token),
 // the bearer matrix (401 no token / 200 adjuster / 403 viewer / 401 bad token), the web-app break-fix
 // (http redirect_uri -> Keycloak 400 "Invalid parameter: redirect_uri" -> proxy-forwarding -> https 302
 // with response_type=code + PKCE S256), the parasol-batch client-credentials token, and the RFC 8693
 // exchange to aud=parasol-fraud (401 with the user token, 200 with the exchanged token, and the
-// escalation to aud=parasol-batch that Keycloak refused). Timings in the chips are measured from that run.
+// escalation to aud=parasol-batch that Keycloak refused). The minutes in the Demo page's step
+// headings are measured from that run.
 // Source-block rule: subs="attributes" ONLY where {user}/{cluster_domain} must interpolate; blocks using
 // $NS/$REALM/$CLAIMS shell vars omit subs. Console labels I could not ground from a screenshot in the
 // build env are marked // CAPTURE-VERIFY for the media pass.
 
 // ============================================================================
-// DEMO FLAVOR — the arc's OPENING. The rest of the arc resumes after the lab
-// body, below the `endif::demo[]` at the end of the workshop exercises. The two
-// halves are split ON PURPOSE so the shared setup blocks can sit between them
+// DEMO FLAVOR — the Demo page's OPENING: title, summary and Prep. The rest of the
+// page (Brief, steps, FAQ) resumes after the lab body, below the `endif::demo[]` at
+// the end of the workshop exercises. The two halves are split ON PURPOSE so the
+// shared setup blocks can sit between them
 // and render in BOTH flavors — see the SHARED SETUP banner further down before
 // you move any of this.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — open API to full SSO in eleven minutes, exchange as the encore (15 min)
+== From an open API to single sign-on · 15 min
 
-=== Set up your terminal first — every beat below depends on it
+Parasol's claims API answers anyone who can reach it, and over fifteen minutes it gains bearer authentication with a role check, a browser login, a machine identity for the nightly batch job and a delegated call to a second service — without a line of authentication code being written.
 
-Open a terminal logged in as `{user}` and run *both* blocks below before you do anything else.
-The opening-state check, the `parasol-fraud` heredoc, beat 4's machine token and the whole encore all read `$NS`, `$CLAIMS`, `$FRAUD`, `$REALM` and the two helper functions; with any of them unset, `curl` is handed an empty URL and every beat answers `000` — a number that looks exactly like a dead service and is not one.
+[IMPORTANT]
+.Prep — run before the session
+====
+This demo runs from the *entry* state, in which both Parasol applications are unprotected, and applies the protection live. Return `{user}-dev` to that state from the cockpit terminal:
 
-These are the *same two blocks the attendee lab opens with*, rendered here from one source, so the presenter guide and the lab can never drift apart.
+[source,sh,role=execute]
+----
+ws prep securing-apps-keycloak
+----
+
+*Then run both of the command blocks that follow this Prep block, in the terminal you use for the demo.* They define `NS`, `CLAIMS`, `WEB`, `FRAUD` and `REALM` and the `get_token` and `decode` helpers, which the steps below read. With any of them unset, `curl` is handed an empty URL and answers `000` — the same number a dead service reports. They are the same two blocks the attendee lab opens with, rendered here from one source, so the two pages cannot drift apart.
+
+*Do not stage the finished state.* `adm solve securing-apps-keycloak` sets the entry chart's `solve` flag, and that one flag does two things rather than one: it deploys `parasol-fraud` *and* it switches `parasol-claims` and `parasol-web` into their OIDC-protected form. On a solved namespace step 1 answers `401` instead of the open `200` the whole demo is built on, and step 2 writes exactly the values the chart has already applied. Deploy `parasol-fraud` from the manifest below instead — it adds the fraud service alone and touches neither application.
+
+*Confirm the shell is ready.* This reports whether those two setup blocks have been run in this terminal; it reads nothing on the cluster, so it can never be answered by a namespace problem:
+
+[source,sh,role=execute]
+----
+MISSING=""
+[ -n "${NS:-}" ]     || MISSING="$MISSING NS"
+[ -n "${CLAIMS:-}" ] || MISSING="$MISSING CLAIMS"
+[ -n "${FRAUD:-}" ]  || MISSING="$MISSING FRAUD"
+[ -n "${REALM:-}" ]  || MISSING="$MISSING REALM"
+command -v get_token >/dev/null 2>&1 || MISSING="$MISSING get_token()"
+command -v decode    >/dev/null 2>&1 || MISSING="$MISSING decode()"
+if [ -n "$MISSING" ]; then
+  echo "shell  -> not set in this shell:$MISSING"
+  echo "shell  -> run the two setup blocks that follow this block, then run this again"
+else
+  echo "shell  -> ready"
+fi
+----
+
+A fresh terminal tab, or a machine other than the one a rehearsal ran on, reports `not set in this shell`. That is a property of the terminal and of nothing else: re-preparing the module would destroy a working namespace and leave the shell exactly as it was.
+
+*Confirm the opening state.* This one reads the namespace directly rather than through those variables, so it answers the same way whatever the terminal holds:
+
+[source,sh,role=execute,subs="attributes"]
+----
+curl -ks -o /dev/null -w 'claims, no token -> %\{http_code}\n' https://parasol-claims-{user}-dev.{cluster_domain}/api/claims
+curl -ks "$(oc get cm ws-entry-securing-apps-keycloak -n {user}-dev -o jsonpath='{.data.authServerUrl}')/protocol/openid-connect/token" \
+  -d grant_type=password -d client_id=parasol-web -d username=adjuster -d password=parasol -d scope=openid \
+  | jq -r 'if .access_token then "realm            -> token OK" else "realm            -> \(.error // "no answer from Keycloak")" end'
+oc get deploy parasol-fraud -n {user}-dev --ignore-not-found -o name
+----
+
+Read the three lines together:
+
+*`200`, `token OK`, and no `parasol-fraud` line* — this is the entry state, and the demo runs as written.
+
+*`401` on the claims line*, usually with a `parasol-fraud` line under it — the namespace is already protected, either by a solve or by an earlier run of this demo. Run `ws prep securing-apps-keycloak` again and check again: against a `401`, step 1's `jq` prints nothing at all.
+
+*`000` on the claims line* — nothing answered at the route. Look before acting:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get route,deploy -n {user}-dev
+----
+
+No `parasol-claims` route or deployment at all means the entry state was never materialized, and `ws prep securing-apps-keycloak` is the right move. A route that exists but does not answer is a routing or pod problem that re-preparing will not fix.
+
+*Anything but `token OK` on the realm line* — the workshop Keycloak (`sso-workshop`) or the realm is down, and nothing on this page works without it. An OpenShift console login does not prove it is up: the cluster login runs on a different Keycloak.
+
+*Deploy `parasol-fraud` before step 5.* It is not part of the entry state. Step 4 changes nothing on the cluster and the rollout takes 20–30 seconds on a cached image, so applying this during step 4 leaves a warm service for step 5:
+
+[source,sh,role=execute,subs="attributes"]
+----
+cat <<EOF | oc apply -n {user}-dev -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: parasol-fraud } }
+  template:
+    metadata: { labels: { app: parasol-fraud } }
+    spec:
+      containers:
+        - name: parasol-fraud
+          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-fraud:1.0
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - { name: QUARKUS_OIDC_TENANT_ENABLED, value: "true" }
+            - { name: QUARKUS_OIDC_AUTH_SERVER_URL, value: "$(oc get cm ws-entry-securing-apps-keycloak -n {user}-dev -o jsonpath='{.data.authServerUrl}')" }
+            - { name: QUARKUS_OIDC_APPLICATION_TYPE, value: "service" }
+            - { name: QUARKUS_OIDC_TOKEN_AUDIENCE, value: "parasol-fraud" }
+            - { name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_PATHS, value: "/api/fraud,/api/fraud/*" }
+            - { name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_POLICY, value: "authenticated" }
+          readinessProbe: { httpGet: { path: /q/health/ready, port: 8080 }, initialDelaySeconds: 5, periodSeconds: 10 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
+spec:
+  selector: { app: parasol-fraud }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
+spec:
+  to: { kind: Service, name: parasol-fraud }
+  port: { targetPort: http }
+  tls: { termination: edge, insecureEdgeTerminationPolicy: Redirect }
+EOF
+oc rollout status deployment/parasol-fraud -n {user}-dev --timeout=180s
+----
+
+Keep the terminal beside a browser signed in as `{user}`, and open the {ocp_console_url}[OpenShift web console^] on the `parasol-claims` deployment in `{user}-dev` for step 2.
+
+CAUTION: Open the Parasol frontend in a *private browser window*. Step 3 shows the redirect to the Keycloak login page, and the frontend deliberately keeps its session cookie readable across restarts — that is what `QUARKUS_OIDC_TOKEN_STATE_MANAGER_ENCRYPTION_REQUIRED=false` in step 3's command is for — so a browser that logged in during a rehearsal restores that session instead of redirecting. If the ordinary window is already open, open a private one and reload.
+
+CAUTION: If step 5 answers `401` twice, the second call went out as a literal `Bearer null`: `XCHG` is read with `jq -r .access_token`, which prints `null` when Keycloak answers with an error instead of a token. Rather than running the step again, repeat its exchange call with `jq '{error, error_description}'` in place of `jq -r .access_token` and read the error the pipeline swallowed. `invalid_grant` means the token in `$ADJ` aged out — they live 30 minutes, so `ADJ=$(get_token adjuster)` and step 5 runs clean. An error naming the client or the audience is a realm-seeding problem that cannot be fixed from here; the case is complete after step 4, and the exchange is covered in the hands-on lab.
+
+CAUTION: If the fraud calls answer `000`, or return the router's error page rather than a status line, check `echo "$FRAUD"` before concluding anything. An empty line means this shell never ran the setup blocks and `curl` is requesting an empty URL — run them, and deploy nothing. If `$FRAUD` is a real URL, then `parasol-fraud` is not there: preparing the module deletes it, so a reset between a rehearsal and the session takes it too. Re-apply the manifest above.
+
+NOTE: `ws prep securing-apps-keycloak` returns `{user}-dev` to the clean unprotected entry state — it removes the OIDC settings from both applications and deletes the fraud service — so run it after every rehearsal and then confirm the opening state again. Do not reach for `adm solve` to bring `parasol-fraud` back: the same flag that deploys it also protects both applications. Re-apply the manifest above instead.
+====
 endif::demo[]
 
 ifndef::demo[]
@@ -843,141 +959,70 @@ You put a front door on Parasol: a browser login for the web frontend (auth-code
 ****
 endif::demo[]
 
-// DEMO FLAVOR — the arc RESUMES here. Its opening (the `== Demo arc` heading and
-// the "Set up your terminal first" section) is at the TOP of this file, above the
-// shared setup blocks; see the SHARED SETUP banner there.
+// DEMO FLAVOR — the Demo page RESUMES here, with the Brief. Its opening (the title,
+// the one-sentence summary and the whole Prep block) is at the TOP of this file, above
+// the shared setup blocks; see the SHARED SETUP banner there.
 ifdef::demo[]
-=== Before you present
+=== Brief
 
-[NOTE]
-.Start from the entry state — and check it before you promise beat 1
-====
-Start from the *entry* (unprotected) state: `ws prep securing-apps-keycloak --user {user} --yes`.
-You have already run the two setup blocks under *Set up your terminal first* — `NS`, `CLAIMS`, `WEB`, `FRAUD`, `REALM` and the `get_token` / `decode` helpers all come from there, and the check below refuses to run without them.
-Open a browser tab on the web frontend.
-The whole arc is *config, applied live* — the drama is the status codes changing while the room watches, so narrate through each ~20s rollout.
+image::securing-apps-keycloak/securing-apps-keycloak-01-four-flows.svg["The four OAuth and OpenID Connect flows this demo uses, in two groups. With a human present: authorization code with PKCE, where the browser logs in at Keycloak and the application never sees the password, and bearer tokens, where the caller presents a token the API validates before checking a role. With no human: client credentials, where a service authenticates as itself, and token exchange, where one service re-audiences a user's token to call another on that user's behalf. Arrows follow one user's token from the browser login into the API and on into the exchange."]
 
-*Do not `adm solve` first — it takes the opening beat away.*
-`adm solve` sets the entry chart's `solve` flag, and that one flag does two things, not one: it adds `parasol-fraud` *and* it switches `parasol-claims` and `parasol-web` into their OIDC-protected form.
-On a pre-solved namespace beat 1 answers *401* instead of the open *200* the whole arc is built on, and beat 2's `oc set env` writes exactly the values the chart has already applied — you would be describing a change the room cannot see.
-Deploy the encore's `parasol-fraud` service live instead (heredoc below): it adds only fraud, and touches neither app you are about to protect on stage.
+*Authentication is not authorization*
 
-*Check the opening state before you promise beat 1.* Run this first — it checks your shell *before* it checks the cluster, because the two failures look identical and have opposite cures:
+Two questions hide inside every "is this allowed?", and confusing them is the most common security bug there is. *Authentication* asks who you are, and a login, a token or a certificate answers it. *Authorization* asks what you may do, and a role, a group or an ownership rule answers it.
 
-[source,sh,role=execute]
-----
-# Guard FIRST. An unset variable makes curl request an empty URL, which reports
-# 000 — the same number a genuinely dead service reports. Never let the arc's
-# cluster advice fire on what is actually an unrun setup block.
-MISSING=""
-[ -n "${NS:-}" ]     || MISSING="$MISSING NS"
-[ -n "${CLAIMS:-}" ] || MISSING="$MISSING CLAIMS"
-[ -n "${FRAUD:-}" ]  || MISSING="$MISSING FRAUD"
-[ -n "${REALM:-}" ]  || MISSING="$MISSING REALM"
-command -v get_token >/dev/null 2>&1 || MISSING="$MISSING get_token()"
-command -v decode    >/dev/null 2>&1 || MISSING="$MISSING decode()"
-if [ -n "$MISSING" ]; then
-  echo "STOP - not set in THIS shell:$MISSING"
-  echo "You have not run the two blocks under 'Set up your terminal first'."
-  echo "Run them here, then re-run this check."
-  echo "Your namespace is NOT the problem - do NOT run 'ws prep' to fix this."
-else
-  curl -ks -o /dev/null -w 'claims, no token -> %{http_code}\n' "$CLAIMS/api/claims"
-  curl -ks "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=parasol-web \
-    -d username=adjuster -d password=parasol -d scope=openid | jq -r 'if .access_token then "realm            -> token OK" else "realm            -> \(.error // "no answer from Keycloak")" end'
-  oc get deploy parasol-fraud -n "$NS" --ignore-not-found -o name
-fi
-----
+A valid token answers only the first question. Parasol's `viewer` user logs in perfectly — correct password, valid token — and still must not list claims, because listing claims needs the `claims-adjuster` role. The platform reports the difference as two status codes: *401 Unauthorized* is "I do not know who you are", *403 Forbidden* is "I know exactly who you are, and the answer is no".
 
-Read the result against exactly these four outcomes — the first one is a *shell* diagnosis, the other three are *cluster* diagnoses, and only the cluster ones can ever justify touching your namespace:
+*Four flows cover an enterprise application*
 
-*If it prints `STOP - not set in THIS shell: …`*, nothing was checked and nothing is wrong with the cluster. Scroll up to *Set up your terminal first*, run both blocks in this terminal, and run the check again. A fresh terminal tab, a `ws` command that opened a new shell, or presenting from a machine you rehearsed on yesterday all land you here. `ws prep` would *destroy a working namespace* and leave you exactly as stuck.
+OAuth 2.0 and OpenID Connect define a family of flows — scripted conversations for getting a token — and four of them cover almost everything a business application needs:
 
-*If it prints `200`, `token OK`, and no `parasol-fraud` line*, you are in the entry state and the arc runs exactly as scripted.
+* *Authorization code + PKCE* protects a browser frontend. The browser is redirected to Keycloak, the person logs in there, and the application receives a short-lived code it swaps for tokens. PKCE adds a one-time secret per login, so a stolen code is useless.
+* *Bearer tokens* protect an API. The caller attaches a token, the API validates its signature, issuer, expiry and audience, then reads its roles to decide. No redirect and no session: every request stands alone.
+* *Client credentials* is for machines. A batch job has no human and no browser, so it authenticates as itself and gets a token that represents the service.
+* *Token exchange (RFC 8693)* is for one service calling another on a user's behalf. The token is re-audienced for the second service — same user, narrower scope.
 
-*If the claims line prints `401`* (usually with a `parasol-fraud` line under it), this namespace is already protected — a `adm solve`, or a previous run's live flip. Re-run `ws prep securing-apps-keycloak --user {user} --yes` and check again before you open. Never start on the protected state and describe the open one: beat 1's `jq` prints nothing at all against a 401, thirty seconds into the demo.
+*Identity is a platform capability, not a project*
 
-*If the claims line prints `000`* with the guard satisfied, your variables are set and `curl` still reached nothing — a real connection failure, not a protection state. Look before you act:
+Authentication is a solved problem, and getting it slightly wrong is the whole breach. Red Hat build of Keycloak provides password policies, multi-factor authentication, lockout, federation, token issuance and an audit trail, and it is included with the OpenShift subscription — the same product backs the OpenShift console login. What is left is describing who may do what, and pointing the applications at it.
 
-[source,sh,role=execute]
-----
-echo "CLAIMS=$CLAIMS"
-oc get route,deploy -n "$NS"
-----
+*In this demo*
 
-No `parasol-claims` route or deployment at all means the entry state was never materialized and `ws prep securing-apps-keycloak --user {user} --yes` is the right move. A route that exists but does not answer is a routing or pod problem, and re-prepping will not fix it — read the pods.
+. The claims API returning real claim records to an anonymous caller
+. Bearer authentication and a role check turned on live — 401, 200 and 403 from the same endpoint
+. A browser login for the frontend, which never sees the password
+. A machine identity for the nightly batch job
+. A token re-audienced for a second service, and the escalation Keycloak refuses
 
-*If the realm line prints anything but `token OK`*, stop — the workshop Keycloak (`sso-workshop`) or your realm is down, and *no* beat in this arc works without it. Your own OpenShift console login does not prove it is up: the cluster login runs on a *different* Keycloak. Fix it before the room, not on stage.
+=== 1 · The open API — 2 min
 
-*Stage `parasol-fraud` during beat 4's narration* (the machine-identity beat changes nothing on the cluster, and the rollout is ~20-30s on a cached image), so the encore opens on a warm service:
+Everything built in the earlier modules — the deployment, the configuration, the database, the pipeline — has been open by default. The claims API holds customer names, amounts and adjusters, and reading all of it takes no login and no token.
 
-[source,sh,role=execute]
-----
-cat <<EOF | oc apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
-spec:
-  replicas: 1
-  selector: { matchLabels: { app: parasol-fraud } }
-  template:
-    metadata: { labels: { app: parasol-fraud } }
-    spec:
-      containers:
-        - name: parasol-fraud
-          image: image-registry.openshift-image-registry.svc:5000/ogsr-parasol-images/parasol-fraud:1.0
-          ports: [{ name: http, containerPort: 8080 }]
-          env:
-            - { name: QUARKUS_OIDC_TENANT_ENABLED, value: "true" }
-            - { name: QUARKUS_OIDC_AUTH_SERVER_URL, value: "$REALM" }
-            - { name: QUARKUS_OIDC_APPLICATION_TYPE, value: "service" }
-            - { name: QUARKUS_OIDC_TOKEN_AUDIENCE, value: "parasol-fraud" }
-            - { name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_PATHS, value: "/api/fraud,/api/fraud/*" }
-            - { name: QUARKUS_HTTP_AUTH_PERMISSION_FRAUD_POLICY, value: "authenticated" }
-          readinessProbe: { httpGet: { path: /q/health/ready, port: 8080 }, initialDelaySeconds: 5, periodSeconds: 10 }
----
-apiVersion: v1
-kind: Service
-metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
-spec:
-  selector: { app: parasol-fraud }
-  ports: [{ name: http, port: 8080, targetPort: http }]
----
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata: { name: parasol-fraud, labels: { app: parasol-fraud } }
-spec:
-  to: { kind: Service, name: parasol-fraud }
-  port: { targetPort: http }
-  tls: { termination: edge, insecureEdgeTerminationPolicy: Redirect }
-EOF
-oc rollout status deployment/parasol-fraud --timeout=180s
-----
-====
+image::securing-apps-keycloak/securing-apps-keycloak-04-security-layer.svg["The identity and access layer this module adds — web login with authorization code and PKCE, a bearer-protected API with role checks, a machine identity from client credentials, and service-to-service token exchange — fed by Red Hat build of Keycloak with a realm per user and sitting in front of the Parasol claims platform built so far: the claims and web applications with their database, and the pipelines, GitOps and observability around them."]
 
-=== Beat 1 — The open API: no login, no token
+*Why it matters*
 
-[demo-block]
-[TIME 2m]
-Say:: "This is Parasol's claims API. It has customer names, amounts, adjusters. Watch what it takes to read all of it: nothing. No login, no token. This is what 'trusted network' security actually looks like."
-Show:: A terminal. The open API returning real data to an anonymous caller.
-Do::
-+
+This is the shape of most internal breaches: something reached the network, and everything on the network trusted it. "On the network" was a boundary when it meant a locked server room; it is not one when the network is a shared cluster, a partner integration and a mobile app.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 curl -ks https://parasol-claims-{user}-dev.{cluster_domain}/api/claims | jq -r '.[0:3][] | "\(.claimNumber)  \(.claimant)  $\(.amount)"'
 ----
-+
-"Every claimant, wide open. Let's put a door on it — without writing a line of auth code."
 
-=== Beat 2 — OIDC on: a valid token, then a role check
+*What just happened*
 
-[demo-block]
-[TIME 4m]
-Say:: "One config change turns on OpenID Connect and points the app at Keycloak. Now it demands a valid token — and then checks a role. Authentication *and* authorization."
-Show:: Apply the protection, wait for the rollout (narrate the four flows while it rolls), then run the matrix: no token, adjuster, viewer.
-Do::
-+
+Three real claim records came back to a caller who presented no credential of any kind.
+
+=== 2 · Bearer tokens and a role check — 4 min
+
+One configuration change turns on OpenID Connect and points the claims service at Keycloak. The API then demands a valid token, and checks a role before it answers.
+
+image::securing-apps-keycloak/securing-apps-keycloak-05-claims-env.png["The Environment tab of the parasol-claims deployment in the OpenShift web console, listing the settings this step applies: QUARKUS_OIDC_TENANT_ENABLED set to true, QUARKUS_OIDC_AUTH_SERVER_URL pointing at the user's Keycloak realm, QUARKUS_OIDC_APPLICATION_TYPE set to service, and the two QUARKUS_HTTP_AUTH_PERMISSION_CLAIMS entries restricting /api/claims to callers holding the adjuster policy."]
+
+*Why it matters*
+
+No authentication code was written. The runtime validates the token's signature, issuer and expiry against the realm, then reads `realm_access.roles` to decide — so authentication and authorization arrive as configuration and show up as two different status codes.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc set env deployment/parasol-claims -n {user}-dev \
@@ -989,24 +1034,30 @@ oc set env deployment/parasol-claims -n {user}-dev \
   QUARKUS_HTTP_AUTH_POLICY_ADJUSTER_ROLES_ALLOWED=claims-adjuster
 oc rollout status deployment/parasol-claims -n {user}-dev
 ----
-+
+
+The rollout takes about twenty seconds. Then call the same endpoint three times — with no token, as `adjuster`, and as `viewer`:
+
 [source,sh,role=execute]
 ----
 curl -ks -o /dev/null -w 'no token -> %{http_code}\n' "$CLAIMS/api/claims"
 curl -ks -o /dev/null -w 'adjuster -> %{http_code}\n' -H "Authorization: Bearer $(get_token adjuster)" "$CLAIMS/api/claims"
 curl -ks -o /dev/null -w 'viewer   -> %{http_code}\n' -H "Authorization: Bearer $(get_token viewer)" "$CLAIMS/api/claims"
 ----
-+
-"401 with no token. 200 for the adjuster. And 403 for the viewer — a real user, logged in fine, and told *no*. That's the difference between who you are and what you're allowed to do."
 
-=== Beat 3 — The browser login flow — the app never sees a password
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "The API takes tokens. The web app has to *get you logged in*. Here's the browser flow — and notice the app never sees your password."
-Show:: In the browser, open the frontend; it bounces to the Keycloak login page. Log in as `adjuster` / `parasol`; land back in the app.
-Do::
-+
+`401` with no token. `200` for the adjuster. And `403` for `viewer` — a real user, logged in correctly, and told no. That is the difference between who you are and what you are allowed to do.
+
+=== 3 · The browser login — 3 min
+
+The API takes tokens; the frontend has to get a person logged in. The same realm handles that with the authorization-code flow, and the application never sees the password.
+
+image::securing-apps-keycloak/securing-apps-keycloak-06-keycloak-login.png["The Red Hat build of Keycloak login page for the user's realm, headed PARASOL INSURANCE, reached by opening the protected parasol-web frontend without a session: a Sign in to your account card with an empty username or email field, an empty password field, and a Sign In button."]
+
+*Why it matters*
+
+The login page, the password policy, lockout, multi-factor authentication and the session all belong to Keycloak, which ships with OpenShift. Adding login to an application becomes a configuration change rather than a project, and every application in the estate gets the same one.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc set env deployment/parasol-web -n {user}-dev \
@@ -1019,34 +1070,44 @@ oc set env deployment/parasol-web -n {user}-dev \
   QUARKUS_HTTP_AUTH_PERMISSION_WEB_PATHS='/*' QUARKUS_HTTP_AUTH_PERMISSION_WEB_POLICY=authenticated
 oc rollout status deployment/parasol-web -n {user}-dev
 ----
-+
-"That login page, the password policy, the session — none of it is ours. It's Keycloak, and it ships with OpenShift."
 
-=== Beat 4 — A machine identity for the nightly batch job
+*On screen* — the Parasol frontend in a private browser window: the request redirects to the Keycloak login page for `realm-{user}`. Signing in as `adjuster` with the workshop password `parasol` lands back in the application.
 
-[demo-block]
-[TIME 2m]
-Say:: "Not every caller is a person. The nightly batch job authenticates as *itself* — its own identity, no human attached."
-Show:: A client-credentials token, decoded to the `service-account-parasol-batch` principal.
-Do::
-+
+*What just happened*
+
+The password went to Keycloak, never to Parasol, and the application received a code it swapped for tokens. `QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true` is what makes that work behind an edge Route: without it the application builds an `http://` callback URL and the realm, which trusts only the `https://` one, rejects the login.
+
+=== 4 · A machine identity for the batch job — 2 min
+
+Not every caller is a person. The nightly statement run has no human and no browser, so it authenticates as itself with a client id and secret and receives a token that represents the service.
+
+image::securing-apps-keycloak/securing-apps-keycloak-02-realm-model.svg["The realm model: one realm holding clients, roles and users. Its clients are parasol-web, a public client for the browser login, parasol-claims, a confidential API, parasol-fraud, a bearer-only API, and parasol-batch, a machine identity. Its one role is claims-adjuster, and its two users are adjuster, who holds that role, and viewer, who holds none."]
+
+*Why it matters*
+
+A machine principal can be audited, rotated and revoked without paging a person, and no engineer is tempted to run the job under a personal login. When someone leaves, nothing scheduled breaks with them.
+
 [source,sh,role=execute]
 ----
 curl -ks "$REALM/protocol/openid-connect/token" \
   -d grant_type=client_credentials -d client_id=parasol-batch -d client_secret=parasol-batch-secret \
   | jq -r .access_token | decode | jq '{azp, preferred_username}'
 ----
-+
-"A machine principal you can audit, rotate, and revoke — instead of a job running under someone's personal login."
 
-=== Beat 5 (encore) — Token exchange re-audiences the call
+*What just happened*
 
-[demo-block]
-[TIME 4m]
-Say:: "The encore. Claims needs to call the fraud service *as the adjuster* — but the adjuster's token is addressed to claims, not fraud. Token exchange re-audiences it. And crucially: it can narrow, never escalate."
-Show:: The user token rejected by fraud (401), the exchanged token accepted (200), and the escalation attempt Keycloak refuses.
-Do::
-+
+The decoded token names `service-account-parasol-batch` — an identity in its own right, with no person behind it. The client secret is a seeded workshop value shown here in the clear; in production it is generated, kept in a Secret and never printed.
+
+=== 5 · Token exchange — 4 min
+
+The claims service needs to call the fraud service as the adjuster, but the adjuster's token is addressed to claims. Token exchange re-audiences it — and it can narrow what the token reaches, never widen it.
+
+image::securing-apps-keycloak/securing-apps-keycloak-07-what-you-built.svg["What this demo leaves in place: the adjuster reaching parasol-web through authorization code with PKCE and parasol-claims with a bearer token that answers 401, 200 or 403; parasol-claims re-audiencing that token to call parasol-fraud, which enforces its audience; the batch job authenticating with client credentials; and Red Hat build of Keycloak, holding the user's realm, behind all three applications."]
+
+*Why it matters*
+
+This is delegation without impersonation. A chain of services can each see only what they need, and the refusal at the end is the proof: escalation is not merely discouraged, it is unavailable.
+
 [source,sh,role=execute]
 ----
 ADJ=$(get_token adjuster)
@@ -1063,37 +1124,22 @@ curl -ks "$REALM/protocol/openid-connect/token" \
   -d subject_token="$ADJ" -d subject_token_type=urn:ietf:params:oauth:token-type:access_token \
   -d audience=parasol-batch | jq -r '.error_description'
 ----
-+
-"401 for the wrong audience. 200 once it's re-audienced — still as the adjuster. And when I try to exchange toward a service claims has no business reaching: *refused*. Downscope, never escalate — that's what makes a service chain provably safe."
 
-[NOTE]
-.Have these ready before you present — the three ways this arc fails live
-====
-Every beat is a status code, so a failure here does not look like a failure: it looks like a *different* number under a script that promised the right one. Keep this in your buffer.
+*What just happened*
 
-*The encore prints `401` twice.* The second one is supposed to be `200`. `XCHG` is set from `jq -r .access_token`, which prints `null` when Keycloak answers with an error instead of a token — so a failed exchange becomes a literal `Bearer null` and fraud correctly rejects it. Do not re-run the beat blind; read the error the pipeline swallowed:
+`401` for the wrong audience. `200` once the token is re-audienced, still as the adjuster. And a refusal when the exchange aims at a service the claims application has no business reaching: `parasol-claims` may mint tokens for `parasol-fraud` alone, so Keycloak answers `Requested audience not available`.
 
-[source,sh,role=execute]
-----
-curl -ks "$REALM/protocol/openid-connect/token" \
-  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
-  -d client_id=parasol-claims -d client_secret=parasol-claims-secret \
-  -d subject_token="$ADJ" -d subject_token_type=urn:ietf:params:oauth:token-type:access_token \
-  -d audience=parasol-fraud | jq '{error, error_description}'
-----
+== Frequently asked questions
 
-`invalid_grant` means `$ADJ` aged out (tokens live 30 minutes) — `ADJ=$(get_token adjuster)` and the beat runs clean. Anything naming the *client* or the *audience* is a realm-seeding problem you cannot fix on stage: close on beat 4's machine identity instead and say the exchange is in the hands-on lab. It is an encore; the arc's argument is already made without it.
+*We required a role and never configured where roles live in the token — why did that work?*::
+The Parasol image ships `quarkus.oidc.roles.role-claim-path=realm_access/roles`. Keycloak puts realm roles under `realm_access.roles` rather than a top-level `roles` claim, so a framework has to be told where to look. On an application that does not set it, a user who genuinely holds the role still gets `403` — it is the most common Keycloak-with-Quarkus mistake, and decoding one token shows exactly where the role sits.
 
-*The fraud calls do not answer at all* (`000`, or the router's error page rather than a status line). Check `echo "$FRAUD"` before you conclude anything: an *empty* line means you are in a shell that never ran the setup blocks, and `curl` is requesting an empty URL — re-run them, deploy nothing. If `$FRAUD` is a real URL, then `parasol-fraud` is not there — `ws prep` deletes it, so a reset between your rehearsal and the room takes it with them. Re-apply the heredoc from *Before you present*; it is ~20-30s on a cached image, which fits under the encore's Say line.
+*Our logins fail with "Invalid parameter: redirect_uri" behind the load balancer — is that a Keycloak bug?*::
+No, it is the classic edge-termination trap. TLS ends at the Route and plain HTTP is forwarded to the pod, so the application builds an `http://` callback URL while the realm trusts only the `https://` one. Telling the runtime to honour the forwarded headers — `QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING=true` in step 3 — fixes it. If a login still fails afterwards, check the client id and the realm URL.
 
-*Beat 3's browser lands straight in the app with no login page.* The frontend deliberately keeps its session cookie readable across restarts (that is what `QUARKUS_OIDC_TOKEN_STATE_MANAGER_ENCRYPTION_REQUIRED=false` in the command above is for), so a browser you logged into while rehearsing can restore that session instead of bouncing to Keycloak — and the redirect *is* the beat. Present beat 3 from a *fresh private window*; if you have already opened the normal one, open a private window and reload rather than narrating a redirect that is not going to happen.
-====
+*The escalation attempt returns "Requested audience not available" — is that a misconfiguration?*::
+That refusal is the point. The `parasol-claims` client is configured to mint tokens only for the `parasol-fraud` audience, so Keycloak declines every other target. It is what makes a service chain provably safe: exchange can re-audience and downscope, and there is no path by which it escalates.
 
-[NOTE]
-.Resetting between runs
-====
-`ws prep securing-apps-keycloak --user {user} --yes` returns `{user}-dev` to the clean *unprotected* entry state (removes the OIDC env from both apps and deletes the fraud service) so the arc starts fresh.
-Run it after every rehearsal, and re-run the opening-state check above — a rehearsal leaves the namespace protected, which is the one state this arc cannot open on.
-Do *not* reach for `adm solve` to get `parasol-fraud` back: the same flag that deploys fraud also protects both apps. Re-apply the heredoc from *Before you present* instead.
-====
+*Is this the same Keycloak that signs us in to the OpenShift console?*::
+The same product, a deliberately separate instance. The cluster login runs on its own Keycloak; this module uses a workshop instance with a throwaway realm per user, so experiments cannot lock anyone out of the cluster. In a real estate the split is the same decision: one instance for platform access, one for applications, both the identity provider that comes with the subscription.
 endif::demo[]
