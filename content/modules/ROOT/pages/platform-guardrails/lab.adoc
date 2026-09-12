@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Platform Guardrails. Workshop exercises are guarded ifndef::demo[]; the DEMO
-// rendering shows only the presenter arc. Every command runs in the SHOWROOM terminal as {user},
+// rendering shows only the SA-Demos page. Every command runs in the SHOWROOM terminal as {user},
 // so blocks are role=execute (click-to-run) with subs="attributes" ONLY where {user} must
 // interpolate — blocks driven by shell variables or by jsonpath braces omit it (CC-6).
 //
@@ -31,19 +31,73 @@ Click any command block to run it.
 ====
 
 // ============================================================================
-// DEMO FLAVOR — 14-minute presenter arc
+// DEMO FLAVOR — the 14-minute Demo page: Prep, Brief, four steps, questions
 // ============================================================================
 
 ifdef::demo[]
-== Demo arc — Two guardrails, from opposite directions (14 min)
+== Two guardrails, from opposite directions · 14 min
 
-[NOTE]
+A running service reads a database password that exists in no manifest, follows a rotation within seconds, and the same cluster refuses a manifest that breaks the shape it publishes.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Beats 1–2 are the secrets half and are visual: a value changes in one system and follows into another while the room watches a clock.
-Beats 3–4 are the policy half and are textual — slow down, and read the denial message aloud.
+Stage the module from the cockpit terminal:
+
+[source,sh,role=execute]
+----
+ws prep platform-guardrails
+----
+
+That builds `{user}-dev` with OpenBao, the claims database and the claims service.
+
+The External Secrets Operator reports `SecretSyncedError` for the first few seconds after staging — measured at 15 s on a fresh install — and it clears on the first successful reconcile. Wait until `oc get externalsecret claims-creds -n {user}-dev` reports `SecretSynced` before step 1.
+
+Nothing on this page prints a secret value: the commands ask for key names, or hash the value and show twelve characters of the digest. Avoid `-o jsonpath='{.data}'` on a shared screen — `.data` is a map of key to base64 *value*, base64 is encoding rather than encryption, and a recording keeps it.
+
+Step 4 is refused at admission, so it creates nothing and leaves nothing to clean up. Step 2 does change state: it leaves the vault at version 2, holding the value it wrote. Nothing needs undoing, because the version counter only goes up; to start again from version 1, run `ws reset platform-guardrails` and stage the module once more.
+
+CAUTION: If step 3's read of the policy returns `Forbidden`, the grant that lets a workshop account read `admissionregistration.k8s.io` has not reached the cluster. Check that the `workshop-config` Application is Synced, rather than the signed-in identity.
 ====
 
-*Beat 1 — the credential that is not in Git (3 min).* Show the running app. Show the Secret it reads. Then show that nothing created that Secret from a manifest.
+=== Brief
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/01-secret-path.mmd[]
+....
+
+*The secret your app reads is not the secret you store*
+
+A password committed to a repository is distributed by it: it reaches every clone, every CI cache and the whole history. Reverting the commit removes a line from a branch, not a secret from the world. So the value has to live somewhere that is not the repository, and the application has to get it at run time.
+
+The application still reads an ordinary Kubernetes `Secret` through an ordinary `secretKeyRef`. Between that Secret and the store sits the External Secrets Operator, watching one mapping — an `ExternalSecret` that names a path rather than a value — and keeping the Secret equal to what the store holds. The Secret is derived rather than maintained, and rotation becomes a write to the store instead of a project.
+
+*Admission is where "no" is cheapest*
+
+Every request to create an object passes through the same sequence: who you are, then whether RBAC permits that kind of object at all, then — before anything is written down — whether the object you sent is acceptable. That last step is admission, and it is the last moment at which refusing costs nothing.
+
+RBAC and admission answer different questions. RBAC asks whether this user may create Applications at all; it never sees inside the object, so it cannot express "only ones that point at your own project". Admission reads the contents and refuses on what is in them. OpenShift evaluates those rules itself — `ValidatingAdmissionPolicy` is a built-in API written in CEL, with no webhook to run and no pod that can be down.
+
+*In this demo*
+
+. A running service whose database password appears in no manifest
+. A value rotated in the vault, and the Kubernetes Secret following it within seconds
+. The policy governing this cluster's workshop accounts, read from the cluster itself
+. A deliberately wrong manifest, refused at admission in the policy's own words
+
+=== 1 · The credential that is not in Git — 3 min
+
+The claims service is running and talking to its database. Ask its Secret which keys it carries, then ask who created it.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/05-derived-secret.mmd[]
+....
+
+*Why it matters*
+
+The repository holds the reference `parasol/claims-db`, which is safe to review, diff and publish, and never the password. Everything else is mechanism: a controller keeps one Kubernetes Secret equal to one value in a store that Git never sees.
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -59,14 +113,171 @@ POSTGRESQL_PASSWORD:  18 bytes
 ExternalSecret/claims-creds
 ....
 
-Land the ownership line. The Secret is *derived*: delete it and it comes back, because a controller is holding it equal to something else.
+*What just happened*
 
-*Beat 2 — rotation is the test (4 min).* Write a new value into the vault and watch the Kubernetes Secret follow. Use a hash so nothing sensitive reaches the screen.
+That ownerReference is the whole design in one line. The Secret is derived: delete it and it comes back, because the operator's job is to hold it equal to something that lives outside the cluster's manifests entirely.
 
-*Beat 3 — read the rule that is governing you (3 min).* The policy in the next beat is not a fixture. It has constrained every attendee on this cluster since it was built.
+=== 2 · Rotation is the test — 4 min
 
-*Beat 4 — break it on purpose (4 min).* Submit a deliberately wrong Application and read the refusal. Nothing is created, so there is nothing to clean up. Do this one twice if the room is engaged — the second denial names a different rule, and that is the lesson.
+Any system can store a secret. Change the value in the vault and watch the Kubernetes Secret follow it, with a hash standing in for the value so nothing sensitive reaches the screen.
 
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/06-rotation-follows.mmd[]
+....
+
+*Why it matters*
+
+If rotating a credential means editing a manifest, re-running a pipeline or redeploying an application, it will not be rotated — because rotating it is a project. Here it is a single write, and the platform does the rest inside its refresh interval.
+
+Record what the Secret holds now, and what the vault has:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
+oc exec -n {user}-dev deploy/openbao -- bao kv metadata get -mount=parasol -format=json claims-db | grep -o '"current_version":[0-9]*'
+----
+
+....
+690c7bf39c96
+"current_version":1
+....
+
+Version 1: the vault has been written once, when this environment was built. Now rotate it, with any value:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc exec -n {user}-dev deploy/openbao -- bao kv put -mount=parasol claims-db password=rotated-by-me
+----
+
+Then watch the Kubernetes Secret follow. Run this a few times over the next twenty seconds:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc get secret claims-creds -n {user}-dev -o jsonpath='{.data.POSTGRESQL_PASSWORD}' | shasum -a 256 | cut -c1-12
+----
+
+On the measured run the hash changed between the ninth and fifteenth second:
+
+....
+t+3s    690c7bf39c96
+t+9s    690c7bf39c96
+t+15s   a195862ede2e
+....
+
+*What just happened*
+
+Nobody edited a manifest and nobody redeployed. The `refreshInterval` on the `ExternalSecret` is fifteen seconds, and that is exactly the window. The running application still holds the old password, which is not a bug but the distinction worth taking away: an environment variable is read once, at container start.
+
+=== 3 · Read the rule that is governing you — 3 min
+
+The second guardrail is about a shape rather than a value. The policy read here is not a fixture — it has governed every workshop account on this cluster since it was built.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/02-admission-gate.mmd[]
+....
+
+*Why it matters*
+
+A rule the platform evaluates itself is a rule that is always on. There is nothing to deploy, nothing to keep running, and the same policy text applies to every identity on the cluster — which is what makes it safe to let people do real work on a shared one.
+
+Read what the rules say:
+
+[source,sh,role=execute]
+----
+oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{range .spec.validations[*]}{"- "}{.message}{"\n"}{end}'
+----
+
+....
+- attendees may only use their own 'entries-<username>' AppProject
+- attendees may only create single-source Applications
+- attendees may only create Applications named entry-<module-slug>-<their own username>
+- attendees may only source Applications from gitops/entry-states/
+....
+
+Then the expressions that enforce them:
+
+[source,sh,role=execute]
+----
+oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{range .spec.validations[*]}{.expression}{"\n"}{end}'
+----
+
+These are CEL, and two things in them repay a second look: `request.userInfo.username`, so the policy is written once and evaluates differently for every identity, and `has(object.spec.project)`, which guards a field access — an expression that errors is an expression that cannot decide.
+
+Finally, the condition that decides whether the policy applies at all:
+
+[source,sh,role=execute]
+----
+oc get validatingadmissionpolicy ogsr-attendee-entry-app-guard -o jsonpath='{.spec.matchConditions[*].expression}{"\n"}'
+----
+
+....
+'workshop-attendees' in request.userInfo.groups
+....
+
+*What just happened*
+
+That match condition is why the platform team can create whatever they need on this cluster while a workshop account cannot. Same policy, different identity.
+
+=== 4 · Break it on purpose — 4 min
+
+Submit an Application that is deliberately wrong — someone else's project, a name that is not the one this account may use — and read the refusal.
+
+[mermaid]
+....
+include::example$diagrams/platform-guardrails/04-what-you-built.mmd[]
+....
+
+*Why it matters*
+
+Refusing at admission costs nothing: nothing was created, nothing was partially applied, and nothing needs cleaning up. The alternative is a controller that finds the bad object later and tries to undo it, which is strictly harder and often impossible.
+
+[source,sh,role=execute,subs="attributes"]
+----
+cat > /tmp/try-1.yaml <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: not-the-right-name
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: "https://example.com/x.git"
+    path: "gitops/entry-states/platform-guardrails"
+    targetRevision: main
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: {user}-dev
+EOF
+oc create -f /tmp/try-1.yaml
+----
+
+....
+Error from server (Forbidden): error when creating "/tmp/try-1.yaml":
+applications.argoproj.io "not-the-right-name" is forbidden:
+ValidatingAdmissionPolicy 'ogsr-attendee-entry-app-guard' with binding 'ogsr-attendee-entry-app-guard'
+denied request: attendees may only use their own 'entries-<username>' AppProject
+....
+
+*What just happened*
+
+The cluster refused the request in the policy's own words: `denied request: attendees may only use their own 'entries-<username>' AppProject`. That manifest broke *two* rules — the project and the name — and the message named only the first, because a policy reports the first validation that evaluates false, in declaration order. It is not a report card. Nothing reached storage either, so asking for the object afterwards returns `NotFound`.
+
+== Frequently asked questions
+
+*Our application still uses the old password after a rotation. Is that broken?*::
+No, and it is the right question to ask. An environment variable is read once, at container start: the Secret changed and the process did not. A Secret consumed as a mounted volume is updated in place by the kubelet, and an application that re-reads the file picks up the new value without a restart. Neither is wrong, but the difference is invisible until the day you rotate — which is exactly when you least want to discover it.
+
+*Could an application read the vault directly and skip the operator?*::
+It can, from inside its own namespace. What this pattern buys is that the application needs no vault client, no vault credentials and no code change if the store is ever replaced — it consumes an ordinary Kubernetes Secret. The OpenBao here is a dev-mode instance holding a fixture; production differs in the vault's authentication model, not in the shape.
+
+*What happens if the operator is down?*::
+The existing Secret keeps working — it is an ordinary object and nothing deletes it. What stops is reconciliation: a rotation would not propagate, and nobody would be told. That silent stop is the realistic failure to plan for, rather than an outage.
+
+*Who writes these policies, and how do they reach the cluster?*::
+The platform team writes them, and they arrive the way the rest of the cluster's configuration does: reviewed in Git, applied by GitOps. A `ValidatingAdmissionPolicy` is cluster-scoped, and even `oc apply --dry-run=server` is authorized as a real create — so a policy is authored and validated against a real API server, then promoted through review, rather than applied by hand.
 endif::demo[]
 
 // ============================================================================
