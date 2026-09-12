@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Jobs, Batch & Queued Workloads. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only
-// the presenter arc. Every command runs in the Showroom terminal as {user}, so blocks are
+// the SA demo. Every command runs in the Showroom terminal as {user}, so blocks are
 // [source,sh,role=execute]. To avoid AsciiDoc attribute-substitution eating jsonpath braces,
 // the FIRST block sets NS={user}-batch (subs=attributes, no braces) and every later block uses
 // $NS with NO subs — so `{.status...}` stays literal. All commands + outputs were performed on
@@ -35,53 +35,88 @@ Keep the terminal open regardless: the `$NS` shortcut you set above (your `{user
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — 10-minute presenter arc: the queue, the preemption, the AI beat
+// DEMO FLAVOR — the 10-minute SA demo: a plain Job, a full queue, an eviction, AI batch.
+// The title's minutes are the sum of the four step headings below (2+2+3+3); keep them in step.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — The batch queue, and why AI batch is just batch (10 min)
+== When five teams submit at once · 10 min
 
-[NOTE]
-.Before you present
+Parasol's batch tier runs work that finishes, and an admission layer decides whose month-end run starts now, evicts a low-priority job when an urgent one arrives, and treats an AI inference job as exactly the same object.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `ws prep jobs-batch-kueue --user {user} --yes` a few minutes ahead, and set `NS={user}-batch` in your terminal.
-This demo runs from the *entry* state (a seeded dataset + an empty queue), not from `adm solve`.
-The money moment is the preemption in beat 3 — rehearse it once so the timing lands.
-Keep the terminal font large; this is all CLI.
+This demo runs from the module's *entry* state — a seeded claims dataset on a shared volume and an empty queue — not from a finished lab state. Stage it from the cockpit terminal a few minutes ahead:
 
-*Rehearsed already? Empty the queue before the room.* Your ClusterQueue `cq-{user}` carries `500m`
-CPU and `512Mi` — room for exactly *two* of the jobs beat 2 submits, which is the only reason "two
-admitted, three pending" is true. Those jobs `sleep 600`, so a rehearsal inside the last ten minutes
-is still holding the entire quota: beat 2 then shows *nothing* admitted, and beat 3 has nothing to
-preempt. Check it:
+[source,sh,role=execute]
+----
+ws prep jobs-batch-kueue
+----
+
+*The queue has to be empty at the start.* Your ClusterQueue `cq-{user}` carries `500m` CPU and `512Mi` — room for exactly *two* of the jobs step 2 submits, which is the only reason "two admitted, three pending" is true. Those jobs `sleep 600`, so an earlier run inside the last ten minutes is still holding the whole quota: step 2 would then show *nothing* admitted, and step 3 would have nothing to evict. Check it:
 
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-batch get workloads
 ----
-*If it says `No resources found`*, the queue is empty and beats 2–3 run exactly as scripted.
-*If anything is listed*, that is the rehearsal still occupying the quota. Clear it, and re-run the
-read until the Workloads are gone — quota is freed when the Workload object goes, not when you press
-Enter:
+
+`No resources found` means the queue is empty and steps 2–3 behave as written. Anything listed is an earlier run still occupying the quota. Clear it, then re-run the read until the Workloads are gone — quota is freed when the Workload object goes, not when the delete is issued:
 
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-batch delete jobs -l kueue.x-k8s.io/queue-name=user-queue
 oc -n {user}-batch get workloads
 ----
-Never raise the `nominalQuota` on `cq-{user}` to get more jobs admitted. A *full* queue is the entire
-lesson — a bigger one means no pending Workloads and no preemption, so you would have deleted the
-demo in order to save it. (It is also a cluster-scoped object shared with the workshop's per-user
-isolation, so the edit does not stay in your lane.)
+
+*Step 4 calls a model, and that path is per-cluster.* The entry state validates the Models-as-a-Service credential at sync time and writes the verdict down, so read it now rather than discovering it mid-demo:
+
+[source,sh,role=execute,subs="attributes"]
+----
+oc -n {user}-batch get cm maas-config -o jsonpath='ai={.data.aiPathAvailable} reason={.data.aiPathReason} model={.data.model}{"\n"}'
+----
+
+With `ai=true`, step 4 runs as written: four claims come back `low` / `medium` / `high`.
+
+With `ai=false` or `ai=unverified`, step 4 still works and the difference is worth naming before it lands rather than after. The Job is admitted by the same ClusterQueue and still completes; only the model call fails, so every line prints `fraud-risk: unknown` in place of a verdict — and that is a usable outcome, because the verdict column is the model's job while the point of the step is that the platform never had to care: same object, same label, same admission, same preemption rules. One timing caveat applies to `ai=unverified` specifically, where the endpoint is unreachable from the cluster: each of the four `curl` calls burns its full `--max-time 40`, so the `oc wait` can run most of its 180 seconds. Trim the Job to one claim beforehand if that wait is too long. Do not paste an API key into the Job to rescue the verdicts — the per-user key is model-scoped, and this step does not need it.
+
+CAUTION: Never raise the `nominalQuota` on `cq-{user}` to get more jobs admitted. A *full* queue is the entire lesson: a bigger one means no pending Workloads and no preemption, so raising it deletes the demo in order to save it. The ClusterQueue is also cluster-scoped and shared with the workshop's per-user isolation, so the edit does not stay in one account.
+
+NOTE: To run the demo again, `ws prep jobs-batch-kueue` clears every Job and requeues a clean world (self-service — it wipes and re-prepares your own environment). Deleting the demo jobs with `oc -n $NS delete jobs --all` is enough on its own when the dataset is untouched.
 ====
 
-=== Beat 1 — The overnight statement run, a plain Job
+=== Brief
 
-[demo-block]
-[TIME 2m]
-Say:: "This is Parasol's overnight statement run — a normal batch Job. Six segments, three Pods at a time, then it stops."
-Show:: The Job runs three Pods, they finish, three more run — `6/6` in about a minute.
-Do:: Run the monthly statement and watch the two waves:
-+
+image::jobs-batch-kueue/jobs-batch-kueue-02-kueue-admission.svg["Kueue admission in two rows. Top: a Job labelled with a queue name and a priority class is suspended by a webhook, becomes a Workload on the LocalQueue in its own namespace, and reaches the cluster-scoped ClusterQueue holding 500m CPU and 512Mi of quota, which asks whether there is enough room. Bottom: the three answers — admitted and its Pods run, pending and it waits in the queue, or, for a high-priority Job, admitted by preempting a lower-priority Workload, which is evicted and requeued."]
+
+*A Job runs to completion, then stops*
+
+Parasol answers a customer in milliseconds, and separately grinds through every open claim overnight: statements, fraud scoring, actuarial rollups. That second tier is *batch* — a bounded pile of work that runs start to finish and then stops. Nobody waits on a socket; what matters is that it finishes correctly and inside its window.
+
+A Deployment is the wrong object for it, because a Deployment is designed never to end. A *Job* starts one or more Pods, waits until a set number of them succeed, and stops. A *CronJob* starts one on a schedule.
+
+*Why batch needs a referee: admission control*
+
+Plain Jobs share a cluster badly. Nothing arbitrates between them: every Job the scheduler can place, it runs. A namespace quota caps one team's total, but it cannot say "the actuarial month-end run may use spare capacity, and if the fraud team submits something urgent, that goes first". Left alone, the greediest batch wins and everyone else waits — the starvation problem, which at organization scale is a recurring incident rather than a hypothetical.
+
+*Red Hat build of Kueue* is the referee. It sits above the Job controller as an admission layer: a Job opts in with a label, and Kueue holds it suspended until a queue has quota, admits it in priority order, and preempts lower-priority work to make room for urgent work. The same machinery is what stops teams fighting over scarce GPUs, which is why AI batch ends up on it.
+
+*In this demo*
+
+. An overnight statement run as a plain Job — parallel Pods in waves, then it stops
+. Five month-end jobs submitted at once, of which the queue admits two and holds three
+. An urgent job evicting a running one and taking its slot, with nothing dropped
+. An AI inference job going through the same queue as the same kind of object
+
+=== 1 · The overnight statement run — 2 min
+
+Parasol's monthly statement run is an ordinary Job: six segments of the seeded claims dataset, three Pods at a time, and then it is over.
+
+image::jobs-batch-kueue/jobs-batch-kueue-01-async-spectrum.svg["The async spectrum as three linked stages: request-driven work where a Deployment behind a Service holds a waiting caller at low latency, event-driven work where a handler reacts per message in seconds, and — highlighted as this module's subject — batch, where a Job or CronJob runs to completion and then stops."]
+
+*Why it matters*
+
+Every platform conversation starts with request traffic, and most of the compute bill is not request traffic. Giving batch its own object is what makes the overnight tier something the platform can schedule, bound and account for, instead of a server someone remembers to turn off.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 NS={user}-batch
@@ -105,17 +140,21 @@ spec:
 EOF
 oc -n $NS get job monthly-statement -w
 ----
-+
-"Nobody is waiting on a socket — we only care that it *finishes*. That's the batch tier."
 
-=== Beat 2 — Five teams at once: admission control
+*What just happened*
 
-[demo-block]
-[TIME 2m]
-Say:: "Now five teams submit their month-end jobs at the same instant. Watch what admission control does."
-Show:: Five Workloads appear; *two* are admitted and running, *three* sit `Pending`. The queue is full at two.
-Do:: Submit five labelled jobs and read the Workloads (the label at *creation* is what puts them under Kueue):
-+
+`completions: 6` with `parallelism: 3` ran three Pods, waited for them, then ran three more — two waves, `6/6` in about a minute, and the Job stopped there rather than being kept alive.
+
+=== 2 · Five teams submit at once — 2 min
+
+Five month-end jobs arrive at the same instant, each labelled for the queue. Admission control, not the scheduler, decides how many of them actually start.
+
+image::jobs-batch-kueue/jobs-batch-kueue-01-workloads-admitted.png["The Workloads list for the batch project: five rows, one per submitted low-priority Job, all on the queue named user-queue. The first two carry a ClusterQueue name in the Reserved in column and True in the Admitted column; the other three show a dash in both. Nothing has failed and nothing was rejected — there is quota for two, five were asked for, and three are held."]
+
+*Why it matters*
+
+The three held jobs are not errors and nobody had to negotiate for them. The quota is a platform-owned object, so "how much of the cluster may the batch tier use, and who goes first" is answered once, in code, instead of every month in a chat thread.
+
 [source,sh,role=execute]
 ----
 for i in 1 2 3 4 5; do
@@ -134,17 +173,21 @@ done
 sleep 8
 oc -n $NS get workloads -o custom-columns='WORKLOAD:.metadata.name,ADMITTED:.status.conditions[?(@.type=="Admitted")].status'
 ----
-+
-"Two admitted, three pending. The ClusterQueue only has room for two — nobody's month-end run can eat the whole cluster."
 
-=== Beat 3 — An urgent job preempts a running one
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Now the fraud team submits an *urgent* scoring job. Higher priority. Watch it jump the queue — by *evicting* one of the running jobs."
-Show:: A high-priority Workload arrives; one running low-priority Workload flips to `Preempted` and requeues; the high one is `Admitted`.
-Do:: Fire the high-priority job and watch the preemption:
-+
+Two admitted, three pending. The label at *creation* is what put these Jobs under Kueue: a mutating webhook suspended each one and created a Workload for it, and the ClusterQueue then un-suspended as many as its `500m` / `512Mi` would hold. Nobody's month-end run can take the whole cluster.
+
+=== 3 · An urgent job takes a running one's slot — 3 min
+
+The fraud team submits an urgent scoring job into a queue that is already full. Instead of waiting behind the three pending jobs, it evicts a running low-priority one.
+
+image::jobs-batch-kueue/jobs-batch-kueue-02-preempted-conditions.png["The detail page of the low-priority Workload that lost its slot: Reserved in shows a dash and Admitted is False, and the conditions table reads Quota Reserved False (Pending, insufficient unused quota for cpu and memory), Evicted True (Preempted), Admitted False (No Reservation), Preempted True (In Cluster Queue) and Requeued True (Preempted) — the messages saying it was preempted to accommodate another workload due to prioritization in the ClusterQueue, an eviction back into the queue rather than a failure."]
+
+*Why it matters*
+
+This is the part a namespace quota cannot do. Urgent work gets in without an administrator intervening, the displaced work is put back in line rather than dropped, and the policy that decided it is a priority class in a manifest — reviewable, and the same for every team.
+
 [source,sh,role=execute]
 ----
 oc -n $NS apply -f - <<EOF
@@ -161,48 +204,21 @@ EOF
 sleep 12
 oc -n $NS get workloads -o custom-columns='WORKLOAD:.metadata.name,PRIORITY:.spec.priority,ADMITTED:.status.conditions[?(@.type=="Admitted")].status,PREEMPTED:.status.conditions[?(@.type=="Preempted")].status'
 ----
-+
-"There it is — the high-priority job preempted a low one, kicked it back into the queue, and took its place. That eviction *is* admission control. No spreadsheet, no Slack argument — policy as code."
-+
-If the `PREEMPTED` column is still blank, you read it too early — Kueue writes the condition after
-it has evicted the Workload, not when the high-priority Job is created. Re-run the same
-`oc get workloads` line; it is a read, it costs nothing, and saying "watch — here it comes" while
-you re-run it is a better beat than a column that filled in silently.
 
-[NOTE]
-.Before beat 4: check whether the model path is live on this cluster
-====
-The MaaS credential is per-cluster, and the entry state *validates* it at sync time and writes the
-verdict down — so read the answer now rather than discovering it in front of a customer:
+*What just happened*
 
-[source,sh,role=execute,subs="attributes"]
-----
-oc -n {user}-batch get cm maas-config -o jsonpath='ai={.data.aiPathAvailable} reason={.data.aiPathReason} model={.data.model}{"\n"}'
-----
+The high-priority Workload is admitted; one low-priority Workload is now `Preempted` and requeued, and Kueue re-admits it as soon as quota frees. A blank `PREEMPTED` column means the read came too early — the condition is written once the eviction has happened, not when the high-priority Job is created. Re-running the same `oc get workloads` line costs nothing; it is a read.
 
-*If `ai=true`*, beat 4 runs as scripted: four claims come back `low` / `medium` / `high`.
+=== 4 · AI batch is the same object — 3 min
 
-*If `ai=false` or `ai=unverified`*, the beat still works and you must say so *before* it lands, not
-after. The Job is still admitted by the same ClusterQueue and still completes — the model call is
-the only thing that fails, and every line prints `fraud-risk: unknown` instead of a verdict. Narrate
-that on purpose: "the verdict column is the model's job; the point of this beat is that the platform
-never had to care — same object, same label, same admission, same preemption rules." One timing
-warning for `ai=unverified` specifically (endpoint unreachable from the cluster): each of the four
-`curl` calls burns its full `--max-time 40`, so the `oc wait` can run most of its 180 seconds — say
-the line above while it does, or trim the Job to one claim before the room.
+A fraud-scoring inference Job carries the same `queue-name` label as the statement run, becomes the same kind of Workload, and is admitted by the same ClusterQueue.
 
-Do not paste an API key into the Job on stage to rescue the verdicts. The per-user key is
-model-scoped, it is not something to type in front of a customer, and this beat does not need it.
-====
+image::jobs-batch-kueue/jobs-batch-kueue-04-what-you-built.svg["What the batch layer ties together: a Job or CronJob with its completions, parallelism, Indexed mode and schedule reaching a LocalQueue through the queue-name label, that LocalQueue pointing at the ClusterQueue that holds quota, priority and preemption, and the queue fanning out to two admitted, three pending and one preempted-then-requeued Workload — with an AI batch-inference job entering the same LocalQueue through the same label."]
 
-=== Beat 4 — AI batch is the same object
+*Why it matters*
 
-[demo-block]
-[TIME 3m]
-Say:: "Last thing. Everyone asks how AI workloads fit. The punchline: an inference job is *the same object*."
-Show:: A fraud-scoring inference Job — same `queue-name` label — becomes a Workload, is admitted by the same ClusterQueue, calls the model, writes one-line risk verdicts, and stops.
-Do:: Clear the queue, then run the AI batch through it — same `queue-name` label, calling the model from the project's MaaS ConfigMap and Secret:
-+
+Everyone asks where AI workloads fit, expecting a separate stack. An inference or evaluation job reads input, calls a model, writes output and stops: it is a Job. The quota, priority and preemption that keep a claims batch fair are what will keep teams from fighting over GPUs — a ResourceFlavor can describe GPU nodes and a ClusterQueue can hold GPU quota, and nothing else about this picture changes.
+
 [source,sh,role=execute]
 ----
 oc -n $NS delete jobs -l kueue.x-k8s.io/queue-name=user-queue --wait=false
@@ -238,15 +254,27 @@ EOF
 oc -n $NS wait --for=condition=complete job/fraud-inference --timeout=180s
 oc -n $NS logs -l job-name=fraud-inference --prefix=false | grep fraud-risk
 ----
-+
-"Same label, same queue, same admission and the same preemption. The machinery that keeps a claims batch fair is the machinery that will keep your teams from fighting over GPUs. *AI batch is just batch.*"
 
-[NOTE]
-.Reset between runs
-====
-`ws prep jobs-batch-kueue --user {user} --yes` clears every Job and requeues a clean world (self-service — it wipes and re-prepares your own environment).
-Or just delete the demo jobs (`oc -n $NS delete jobs --all`) before a second run so the queue starts empty.
-====
+*What just happened*
+
+Same label, same LocalQueue, same ClusterQueue, same admission and the same preemption rules — one risk verdict per claim, and then the Job stopped. *AI batch is just batch.*
+
+== Frequently asked questions
+
+*Why Kueue at all — isn't a ResourceQuota enough?*::
+A `ResourceQuota` caps one namespace: this team may use at most X. It cannot arbitrate between teams or express priority — there is no way to say "hold this job until there is room, and if an urgent job arrives, evict a lower-priority one". Kueue adds exactly that. You want both: quotas stop one team over-committing, Kueue makes many teams share fairly under contention.
+
+*Why exactly two admitted, and not three?*::
+Arithmetic against the ClusterQueue quota of `500m` CPU and `512Mi` memory. Each of these Jobs requests `200m` and `256Mi`, so two fit and a third would need `600m` and `768Mi` — over on both, with memory the tighter bound. Change the requests and the admitted count changes; that is the knob a platform team turns.
+
+*The preempted job — did it lose its work?*::
+The Workload is not lost: it is evicted, requeued, and re-admitted when quota frees. The Pod is killed, though, and starts from scratch on re-admission. That is the honest constraint on preemptible batch — it has to be idempotent and restartable, with checkpoints for long work. Preemption trades a restart for fairness.
+
+*Does every Job get queued, or does a team opt in?*::
+Opt in, twice over, and both are deliberate. The namespace carries `kueue.openshift.io/managed`, so the admission webhooks only touch projects the platform team enrolled; and the Job carries the `kueue.x-k8s.io/queue-name` label at creation, because Kueue suspends it through a creation webhook. Adding the label to a Job that is already running does nothing.
+
+*This inference job is a shell script calling curl — where is the ML infrastructure?*::
+That is the point. A batch-inference or evaluation job is an ordinary Job: it reads input, calls a model, writes output, and stops. OpenShift AI's distributed-workloads stack adds richer integrations — RayJob, PyTorchJob, JobSet — and GPU-aware ResourceFlavors, but the admission layer is identical: the same ClusterQueue, priorities and preemption used here. The control plane is what transfers, and it is the one that governs GPUs.
 endif::demo[]
 
 // ============================================================================
