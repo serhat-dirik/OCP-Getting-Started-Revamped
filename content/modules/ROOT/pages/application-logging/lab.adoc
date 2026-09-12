@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for Application Logging. Workshop exercises are guarded ifndef::demo[]; the DEMO
-// rendering shows only the presenter arc. Every command runs in the SHOWROOM terminal as {user},
+// rendering shows only the SA demo page. Every command runs in the SHOWROOM terminal as {user},
 // so blocks are role=execute (click-to-run) with subs="attributes" ONLY where {user} must
 // interpolate — blocks driven by the $CLAIMS/$RID shell variables or by jsonpath braces omit it
 // (CC-6). Every command and every captured output on this page was performed on cluster-m24jn
@@ -34,18 +34,27 @@ The querying steps are CLI-only and say so: the console's log viewer can search 
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — 16-minute presenter arc (unparseable -> queryable -> correlated)
+// DEMO FLAVOR — 16-minute SA demo: unparseable -> queryable -> correlated.
+// The title's minutes are the sum of the four step headings below (6+4+3+3); keep them in step.
 // ============================================================================
 ifdef::demo[]
-== Demo arc — From a log nobody can query to one request across three pods (16 min)
+== From an unreadable log to one query · 16 min
 
-[NOTE]
-.Before you present
+A claims service whose log no program can read becomes one that answers, in a single query, what happened to one customer's request across all three replicas.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Run `adm solve application-logging --user {user}` a few minutes ahead so the end state is up: the claims service in `{user}-dev` emitting structured JSON, its logging config in the `claims-logging` ConfigMap, and three replicas running.
-Have a terminal logged in as `{user}` and, optionally, the web console's *Logs* tab for one claims pod on a second screen — the contrast between what that view can do and what a field query can do is the whole demo.
+This demo starts from the finished lab state. Stage it before the session from your own terminal, signed in with a cluster-admin account:
 
-*Two things to check before you promise beat 5.* Both are one command:
+[source,sh,subs="attributes"]
+----
+adm solve application-logging --user {user}
+----
+
+It leaves the claims service in `{user}-dev` running three replicas that emit structured JSON, with its logging configuration in the `claims-logging` ConfigMap, and takes a few minutes to roll out.
+
+Confirm both halves of that state from the cockpit terminal once the staging returns:
 
 [source,sh,role=execute,subs="attributes"]
 ----
@@ -53,18 +62,58 @@ oc -n {user}-dev get deploy parasol-claims -o jsonpath='ready={.status.readyRepl
 oc -n {user}-dev logs deploy/parasol-claims --tail=1 | jq -r '.loggerName'
 ----
 
-*If the first prints `ready=3` and the second prints a logger name*, the arc runs as scripted.
-*If the second prints a `jq` parse error*, structured logging is off — the solve did not take. Re-run `adm solve application-logging --user {user}` and wait for the rollout; do not switch it on by hand from the demo terminal, because flipping it live is beat 2 and you will have spent your own punchline.
+The first line prints `ready=3` and the second a logger name. A `jq` parse error on the second means structured logging is off and the staging did not take: run the staging command again and wait for the rollout, rather than switching JSON on by hand — step 1 needs that setting already in place.
+
+Sign the cockpit terminal in as `{user}`. A second screen showing the web console's *Logs* tab for one claims pod is worth having: the contrast between what that view can do and what a field query can do is the whole demo.
+
+NOTE: Do not add `--prefix` to any `oc logs` command here. The staged service emits JSON, and `--prefix` glues a `[pod/…]` tag onto every record, which breaks `jq` and fills the screen with unreadable JSON. The `jq -r '[.hostName, .message] | @tsv'` form in step 1 stays readable and still names the pod.
+
+CAUTION: Steps 1 and 4 send their own traffic rather than reading whatever is already in the log, and the count matters. An id taken from the existing log with `tail -1` is usually one the service generated for a single stray call and matches exactly one record. Nine requests landed on all three replicas in 3 of 3 measured trials; four landed on one pod.
+
+NOTE: The captured comparison in step 2 is captured on purpose — turning the root level up live costs a rollout of about 30 seconds. If there is time for it, `oc set env deploy/parasol-claims QUARKUS_LOG_LEVEL=DEBUG` and back is the live version; rehearse it first. Step 3 needs no cluster at all, so it still works if the network does not.
 ====
 
-=== Beat 1 — The question the platform cannot answer
+=== Brief
 
-[demo-block]
-[TIME 3m]
-Say:: "An adjuster calls: 'I approved a claim twenty minutes ago and it still shows as submitted.' This service runs three replicas. Her request was served by one of them, and right now nobody in this room can tell me which."
-Show:: The terminal, full width, with the log of all three pods on screen.
-Do:: Put nine claim submissions through the Route, then show every replica's log at once, projected down to the pod and the message:
-+
+[mermaid]
+....
+include::example$diagrams/application-logging/01-log-line-journey.mmd[]
+....
+
+*stdout is the interface*
+
+A container's log is not a file. It is a stream, and the contract is one line long: write to standard output, and the platform takes it from there. CRI-O captures what the process writes, the kubelet stores it under `/var/log/pods/` and rotates it, and both `oc logs` and the console's *Logs* tab read that — on any cluster, with nothing installed and nothing configured.
+
+Writing to a file inside the container instead fails three ways at once: the file is deleted with the pod, nothing collects it, and nothing rotates it, so a chatty service quietly fills the node's disk.
+
+*A log line is data, not a sentence*
+
+That free baseline stops at one pod at a time, and where it stops is not a platform limit — it is a decision made in the application. A line of prose can be read by a person and by nothing else. "Show me every WARN" becomes `grep WARN`, which also matches the word inside a message, and "which replica served this request" has no answer at all.
+
+Structured records change both, and the switch is configuration rather than code: named fields to compare, the pod name carried in the record, and a correlation id put into the logging context so every line one request produced shares a value. OpenShift collects, rotates and serves whatever the application emits. Whether that is queryable is decided upstream of the platform, which is also why an aggregation tier is only worth its cost when the applications feeding it are disciplined.
+
+*In this demo*
+
+. Nine claim submissions spread across three replicas, and the two questions the resulting log cannot answer
+. The log level as a dial rather than a rebuild, and the difference between turning up your own code and turning up everything underneath it
+. A credential written into a log by an access log nobody thought about, and why shortening the line is not a fix
+. One customer's request found across all three replicas with a single query
+
+=== 1 · A log a human can read and nothing else can — 6 min
+
+Nine claim submissions go through the Route and land across all three replicas. The log that comes back names the pod that wrote each line and still cannot say which line belonged to one caller — because every record in it is a sentence rather than data.
+
+[mermaid]
+....
+include::example$diagrams/application-logging/02-correlate-across-replicas.mmd[]
+....
+
+*Why it matters*
+
+An adjuster calls the service desk: a claim she approved twenty minutes ago still shows as submitted. The service runs three replicas, so her request was served by one of them, and nothing in the log says which one, or what else happened while it was being handled. That is not a missing product; it is a property of what the application chose to write.
+
+Send the traffic, then project every replica's log down to the pod and the message:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 CLAIMS=$(oc -n {user}-dev get route parasol-claims -o jsonpath='{.spec.host}')
@@ -78,51 +127,50 @@ oc -n {user}-dev logs -l app=parasol-claims --tail=-1 \
   | jq -r 'select(.loggerName=="com.parasol.claims.ClaimResource" and .level=="INFO")
            | [.hostName, .message] | @tsv'
 ----
-+
-"I can see which pod wrote each line. I cannot see which line was hers, or what else happened while that one request was being handled. Those are different questions, and nothing on this screen answers the second one."
-+
-NOTE: two things this beat was rebuilt to avoid, both measured on the solve state on 2026-08-22. Do not reach for `oc logs --prefix`: the solve state emits JSON, and `--prefix` glues a `[pod/…]` tag onto each record, which destroys `jq` and puts a wall of unreadable JSON on the projector. And do not just `tail` the log without generating traffic — `oc logs -l` concatenates one stream *per pod*, so a bare `tail -6` shows the last pod's tail and one pod name, which is the opposite of the point. Nine requests reliably spread across all three replicas (3 of 3 trials); four did not.
 
-=== Beat 2 — A sentence a human skims, versus data a machine reads
+Which pod wrote each line is on the screen. Which line was hers is not, and neither is anything else that happened while her one request was in flight.
 
-[demo-block]
-[TIME 3m]
-Say:: "The reason it cannot answer is that every line you just saw is a sentence. Watch what happens when I ask a program to read one."
-Show:: The `jq` parse error on a frozen free-text line, then the live structured record.
-Do:: Fail first — on a captured line, so nothing on the cluster has to be broken to make the point:
-+
+The reason is the shape of the line. Ask a program to read one that was written as prose:
+
 [source,sh,role=execute]
 ----
 echo '2026-08-22 19:00:14,318 INFO  [com.parasol.claims.ClaimResource] (executor-thread-1) claim CLM-1031 created type=auto amount=1850.00' | jq .
 ----
-+
-"There it is — a parse error. That is the honest state of most production logs — a human can read them and nothing else can. Now the same event, out of the running service, with one setting changed. No rebuild, no new image."
-+
+
+A parse error, and it is the honest state of most production logs. Here is the same event out of the running service, with one setting changed:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev logs deploy/parasol-claims --tail=1 | jq .
 ----
-+
-"Named fields. `level` is a value I can compare, not a word I hope does not appear in a message. And `hostName` is the pod — the record knows where it came from."
-+
-NOTE: do NOT enable JSON live here. The solve state already emits it, the flip costs a 25-second rollout, and it is exercise 2's discovery — spending it on stage buys you nothing but dead air.
 
-=== Beat 3 — One dial for your code, another for everything
+*What just happened*
 
-[demo-block]
-[TIME 4m]
-Say:: "Every team eventually asks for more detail in production. Here is why the answer is 'which detail'."
-Show:: The live histogram — a handful of loggers, the application's own at the top — then the measured root-DEBUG comparison.
-Do:: Show who is writing to this log right now:
-+
+Named fields. `level` is a value to compare rather than a word to hope does not appear in a message, and `hostName` is the pod, so the record knows where it came from. Nothing was rebuilt and no new image was published: the JSON formatter is a configuration setting on the same running service.
+
+=== 2 · One dial for your code, another for every layer beneath it — 4 min
+
+The level is a runtime setting rather than a build-time one, and it is set per logger category. Turning up the application's own category and turning up the root level are different decisions, with a measurably different bill.
+
+[mermaid]
+....
+include::example$diagrams/application-logging/05-level-dial-scope.mmd[]
+....
+
+*Why it matters*
+
+"Give us more detail in production" is answered with "which detail". The category dial reaches your code. The root dial also reaches the HTTP layer, the bean container, the config system and the ORM — and the ORM at DEBUG prints every SQL statement it runs, with the query text and the bound parameters. That is a disclosure change as much as a volume change.
+
+Start with who is writing to this log right now:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 oc -n {user}-dev logs -l app=parasol-claims --tail=-1 \
   | jq -R 'fromjson? // empty' | jq -r '.loggerName' | sort | uniq -c | sort -rn
 ----
-+
-"A short list — and the application's own logger is at the top of it. The `io.quarkus` row is the boot banner, still in the buffer because `--tail=-1` reads the whole stream; everything below it is this application. Now here is the same command on the same service with the *root* level turned up instead of the application's own category — captured, because it is a rollout and I would rather spend the time talking:"
-+
+
+A short list, with the application's own logger at the top of it. The `io.quarkus` row is the boot banner, still in the buffer because `--tail=-1` reads the whole stream; everything below it is this application. The same command on the same service with the *root* level turned up instead is captured rather than run live, because it costs a rollout:
+
 [source,sh,role=execute]
 ----
 cat <<'EOF'
@@ -133,17 +181,24 @@ cat <<'EOF'
   18 io.smallrye.config
 EOF
 ----
-+
-"Measured on this exact service, twice: four identical requests cost *four* records with `com.parasol` turned up, and *ninety to a hundred and ten* with the root level turned up. And here is the part people miss — look at the second line, `org.hibernate.SQL`. At root DEBUG the ORM prints every statement it runs. That is not just a bigger bill, it is a different set of things written down."
 
-=== Beat 4 — Truncation is not redaction
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Now the failure that costs a company a credential rotation. A partner integration puts its API key in the query string, and somebody switches on an HTTP access log."
-Show:: The access-log line with the key in it, then the two 'fixes'.
-Do:: Show the leak and the arithmetic:
-+
+Measured twice on this exact service: four identical requests cost *four* records with `com.parasol` turned up, and *ninety to a hundred and ten* with the root level turned up. The second line of the captured output is the part people miss — `org.hibernate.SQL` at DEBUG is every statement the ORM ran, written down. A bigger bill and a different set of things retained.
+
+=== 3 · Truncation is not redaction — 3 min
+
+A partner integration puts its API key in the query string, and an HTTP access log writes the full request line. Two obvious fixes are applied to the same captured line: one of them is arithmetic, the other names the field.
+
+[mermaid]
+....
+include::example$diagrams/application-logging/06-truncation-versus-redaction.mmd[]
+....
+
+*Why it matters*
+
+A credential in a log is an incident rather than a bug. Once it is written it is in a store, in a backup and possibly in a third-party index, and the remediation is a credential rotation rather than a code fix. Nothing on the cluster is touched here — the line lives in a shell variable:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 ACCESS='10.235.0.2 - - [22/Aug/2026:19:17:32 +0000] "GET /api/claims?api_key=PARASOL-PARTNER-EXAMPLE-4f9a2c7b HTTP/1.1" 200 4798'
@@ -151,17 +206,24 @@ echo "$ACCESS" | cut -c1-60
 echo "$ACCESS" | cut -c1-72
 echo "$ACCESS" | sed -E 's/(api_key=)[^ &"]*/\1<redacted>/'
 ----
-+
-"Sixty characters looks safe. It is safe by nine characters, and nobody chose nine — the client IP happened to be ten characters long. Change the pod and the same command prints part of the key. The fix on the third line is a redaction *of the thing*: it names the field, so the length stops mattering."
 
-=== Beat 5 — One request, three pods, one query
+*What just happened*
 
-[demo-block]
-[TIME 3m]
-Say:: "Back to the adjuster. Her request carried an id, that id is a field on every record it produced, and here is her whole story."
-Show:: The correlated output — several lines, more than one pod name.
-Do:: Perform her action — several calls behind one click, all carrying one id — then run the query beat 1 could not:
-+
+Sixty characters looks safe. It is safe by nine characters, and nobody chose nine — the client IP happened to be ten characters long. One longer hostname, one different pod IP, one reworded message, and the same command prints part of the key. The third line is a redaction of the thing: it names the field, so the length stops mattering. The key in the example is synthetic and authenticates nothing.
+
+=== 4 · One request, three pods, one query — 3 min
+
+The adjuster's action is several calls behind one click. Each of them carries the same request id, that id is a field on every record they produce, and one query returns her whole story.
+
+[mermaid]
+....
+include::example$diagrams/application-logging/04-what-you-built.mmd[]
+....
+
+*Why it matters*
+
+Nothing in this query is a product. It is a filter, a level, a field and an id, all decided in application code — the half of a logging strategy that cannot be bought, and the half that decides whether a log aggregation tier is worth what it costs.
+
 [source,sh,role=execute,subs="attributes"]
 ----
 RID="parasol-adjuster-$(date +%s)"
@@ -172,10 +234,27 @@ curl -s -o /dev/null -H "X-Request-Id: $RID" -X POST -H 'Content-Type: applicati
 oc -n {user}-dev logs -l app=parasol-claims --tail=-1 \
   | jq -r --arg rid "$RID" 'select(.mdc.requestId==$rid) | [.hostName,.level,.message] | @tsv'
 ----
-+
-NOTE: send the calls rather than fishing an id out of the existing log — an id picked with `tail -1` is usually one the *service* generated for a single stray call and matches exactly one record, which is a flat ending to the arc. Nine is not arbitrary either: measured on 2026-08-22, nine calls landed on all three replicas in 3 of 3 trials, while four landed on one pod.
-+
-"Three pods, one request, one query. Nothing on this slide is a product — it is a filter, a level, a field, and an id, all decided in the application. That is the half nobody can buy."
+
+*What just happened*
+
+Ten records, three distinct pod names, one id: nine DEBUG lines for the reads and one INFO line for the state change. Together they are one request's entire history across every pod that touched it — the question step 1 could not answer, answered by a single query.
+
+== Frequently asked questions
+
+*Why does this demo not stand up a log aggregation stack?*::
+Because the half that cannot be bought is this one, and because building the tier teaches the platform team's job rather than the application team's. Concretely, a LokiStack is six to eight pods and needs object storage — an S3-compatible bucket or an OpenShift Data Foundation tier — which is a dependency not every cluster has. The pieces are all Red Hat operators and worth naming: `cluster-logging` owns the ClusterLogForwarder that decides what is collected and where it goes, `loki-operator` runs the store with one tenant per namespace, and `cluster-observability-operator` supplies the console's query view. Every one of them sits downstream of what the application emits, and a collector cannot name a field nobody wrote.
+
+*Is a request id just a trace id under another name?*::
+Where distributed tracing is already in place, the trace id is the right value to put into the logging context, and no second identifier should be invented. But the two answer different questions — a trace says where the time went across services, a log says what exactly happened here — with different retention and different costs, and a sampled trace may not have kept the one request you care about. This mechanism is also what you use where there is no tracing at all, which is most brownfield estates.
+
+*Can a leaked credential be handled by shortening the line?*::
+No, and step 3 is the arithmetic. A character count is a coincidence you are relying on: it holds until a hostname gets longer, a client IP changes or a message is reworded. Redact by field name, by credential shape, or do not print the value at all — and treat "does this change log anything caller-supplied?" as a review question, because a leak is invisible at review time right up until the message changes.
+
+*We changed the ConfigMap and nothing happened. Why?*::
+A ConfigMap consumed as environment variables is read when the container starts, so changing the object does not reach a running process; `oc rollout restart` is the missing step. Mounted as a file, the content does update in place, which is one of the honest reasons to prefer a mounted file.
+
+*What does structured logging cost?*::
+More bytes per record, and a log that is harder to skim in a terminal. For any service whose logs will ever be collected, that trade is not close: the fields are what a collector, a store and a query language filter and group on, while free text arrives as one opaque string per line that every consumer has to write a parser for — and write again the day someone reorders the message.
 endif::demo[]
 
 // ============================================================================
