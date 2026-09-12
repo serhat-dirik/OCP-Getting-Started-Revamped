@@ -3,7 +3,7 @@
 include::partial$version-attributes.adoc[]
 
 // Lab page for GitOps at Scale. Workshop exercises are guarded ifndef::demo[]; the DEMO rendering shows only the
-// presenter arc. Terminal commands run in the Showroom Terminal as {user}, so blocks are
+// SA-Demos page. Terminal commands run in the Showroom Terminal as {user}, so blocks are
 // [source,sh,role=execute]. The attendee OWNS {user}-dev/stage/prod, so every WORKLOAD view (deploys,
 // the Rollout, pods, the migration Job, AnalysisRuns, the route) is a real `oc` command there and is
 // load-bearing/verifiable. The Argo CD control plane (ogsr-student-gitops) is SHARED and attendees cannot
@@ -26,7 +26,7 @@ include::partial$version-attributes.adoc[]
 // Console dual-path retrofit (2026-07-11): the k8s-facing steps in YOUR namespaces carry [tabs]
 // Console|CLI — starting-point deploys, the migration Job + logs, the sync-wave annotations (YAML tab),
 // prod serving (Route), and the analysis-knob ConfigMap edit. Single-path (recorded): the ApplicationSet
-// beat is Argo CLI/API (Argo 3.4 UI has no appset create/read screen — deliberate, no console dual);
+// step is Argo CLI/API (Argo 3.4 UI has no appset create/read screen — deliberate, no console dual);
 // the git-clone/cat repo tour is pure-git; Gitea image edits are product-UI; and the canary/abort/
 // recovery WATCH loops stay CLI-only. No Argo Rollouts-SPECIFIC console plugin is installed (re-verified
 // 2026-07-31 on cluster2: `oc get consoleplugins.console.openshift.io` lists no rollouts-facing plugin),
@@ -39,7 +39,7 @@ include::partial$version-attributes.adoc[]
 // argoproj.io/v1alpha1 Rollout — the group/version of the Rollout CRD installed here. So Rollout DOES
 // have a console nav entry: GitOps > Rollouts (a LIST view). AnalysisRun has NO registration anywhere in
 // that manifest — it stays Home>Search only, and no step in this lab asks for one in the console
-// (every AnalysisRun beat is CLI).
+// (every AnalysisRun step is CLI).
 // SEEN, not inferred (2026-08-02): the page was opened with an authenticated ATTENDEE session (user2,
 // project user2-prod) and rendered — a list with Name / Status / Labels / Selector, showing
 // parasol-claims at "Phase: Paused, 4 of 4" mid-canary. It is badged *Tech preview*, which the
@@ -119,51 +119,92 @@ Open both now.
 endif::demo[]
 
 // ============================================================================
-// DEMO FLAVOR — ~12-minute presenter arc: one ApplicationSet, a green canary, then the auto-rollback
+// DEMO FLAVOR — the 12-minute SA-Demos page: one ApplicationSet, a green canary, then the auto-rollback
 // ============================================================================
 ifdef::demo[]
-== Demo arc — The bad release that rolled itself back (12 min)
+== The bad release that rolled itself back · 12 min
 
-[NOTE]
-.Before you present
+A new version reaches production by editing Git, takes traffic in slices while an automated check judges it, and — when that check fails — removes itself before anyone has to.
+
+[IMPORTANT]
+.Prep — run before the session
 ====
-Two prep steps, both *before the room*:
+This demo starts from the finished lab state. Stage it before the session from your own terminal, signed in with a cluster-admin account:
 
-. Run `adm solve gitops-at-scale --user {user}`.
-It creates the ApplicationSet-equivalent end state — the claims app GitOps-managed in `{user}-dev`/`{user}-stage` *and* running in `{user}-prod` as a canary *Rollout* (with the wave-ordered migration hook) — then *blocks ~4–6 minutes by design* while everything goes Healthy.
-Do it early; it is truthful when it returns.
-. Sign in to the student Argo CD UI ({student_argo_url}) as `{user}` and open the `claims-prod-{user}` application — its card (3 apps green, prod Healthy as a Rollout) is your opening visual.
-The Argo CD *Rollout view* is not available on this cluster (its UI extension is enabled but does not render — see the exercise 3 note in the workshop flavor); the polling loops below are the canary's dashboard here, so have a large terminal window ready too.
+[source,sh,subs="attributes"]
+----
+adm solve gitops-at-scale --user {user}
+----
 
-Have a terminal with `PROD={user}-prod` set.
-The money moment is beat 3: a bad release that the analysis gate *aborts* on its own, stable never leaving production.
+It leaves the claims service GitOps-managed in `{user}-dev` and `{user}-stage` and running in `{user}-prod` as a canary Rollout behind its wave-ordered migration hook, and it blocks for *4–6 minutes* until everything is Healthy, so start it well ahead.
+
+The account in that command is the one you signed in to this cockpit with. Sign in to the student Argo CD ({student_argo_url}) as `{user}` and open `claims-prod-{user}`; the three green applications are the starting view for step 1. Sign in to Gitea as well — {gitea_url}/{user}/claims-config[{user}/claims-config^] — because steps 2 and 3 ship a new version by editing that fork, and editing needs a signed-in session.
+
+Keep a large terminal window beside the browser. The Argo CD *Rollout view* does not render on this cluster: its UI extension is enabled but its assets do not resolve, so the polling loops in steps 2 and 3 are where the canary is watched.
+
+NOTE: The analysis verdict step 3 sets is a ConfigMap the module's entry state owns. Staging the module again — or a full entry re-sync — resets it to `pass`, and a canary that should abort will promote instead. If that happens, read `oc get cm gitops-at-scale-canary-control -n {user}-prod -o jsonpath='{.data.verdict}'` before looking for a deeper cause.
+
+CAUTION: `ws prep gitops-at-scale` returns everything to the entry state — namespaces purged, the fork restored, the ApplicationSet removed. Run the staging command above again after it.
 ====
 
-=== Beat 1 — One ApplicationSet, and prod is a canary
+=== Brief
 
-[demo-block]
-[TIME 3m]
-Say:: "Parasol runs a dozen services across three environments. Nobody hand-writes thirty-six Argo CD Applications — one ApplicationSet generates them. And production doesn't take a new build all at once; it takes it as a canary that has to prove itself."
-Show:: The Argo CD UI: the three `claims-{dev,stage,prod}-{user}` applications, all green (prod's card reads Healthy — the Rollout view that would normally show its 4 stable pods is not available on this cluster); then the terminal command below, which states the same fact directly.
-Do:: In the terminal, show that production really is a progressive-delivery Rollout, not a plain Deployment:
-+
+image::gitops-at-scale/gitops-at-scale-01-appset.svg["Two ways to run many environments: on the left, one hand-written Argo CD Application per environment, repeated again for every new service; on the right, a single ApplicationSet whose generator lists dev, stage and prod and stamps all three out of one Application template."]
+
+*One Application per environment does not scale*
+
+A dozen services across three environments is thirty-six Argo CD Applications — each a near-copy of another, differing in a repository path and a target namespace, and each one a thing a person has to create, keep consistent, and not forget.
+
+An ApplicationSet removes that work. The Application is described once as a template, and a generator supplies the parameter sets to stamp it out: a list of environments, the folders in a repository, or the registered clusters. Change the template and every generated Application changes; add an environment and one line of input adds its Application. Environments that differ in kind are still one object — dev and stage are plain Deployments, production is a progressive-delivery Rollout, and each generated Application simply points at the folder that describes it.
+
+*Shipping to production is still a bet*
+
+GitOps gets a new version's manifests into an environment. It does not answer the question that makes release nights tense: is this version healthy under real conditions? Replacing every production pod at once bets the environment on the answer being yes.
+
+Progressive delivery refuses that bet. A small slice of production runs the new version first, an automated analysis step judges it on evidence, and the slice widens only when that evidence arrives. When the analysis fails, the rollout aborts and the stable version — which never stopped serving — takes all the traffic back. Argo Rollouts is the controller that does this, and on this platform it shifts traffic by pod ratio, so no service mesh or traffic router has to be installed first.
+
+*In this demo*
+
+. Three environments generated from one ApplicationSet, with production running as a canary Rollout
+. A new version shipped by editing Git, taking traffic in slices as its analysis passes
+. A release whose analysis fails, aborted on its own with production never leaving the stable version
+. The analysis record that made the call, read the way an incident review is read
+
+=== 1 · One ApplicationSet, and production is a canary — 3 min
+
+Parasol's claims service runs in three environments, and nobody authored an Argo CD Application for any of them — one ApplicationSet generated all three. Production is the one that differs: it runs as a Rollout rather than a Deployment.
+
+image::gitops-at-scale/gitops-at-scale-05-what-you-built.svg["What the ApplicationSet ties together: the claims-config repository with its overlay and rollouts folders feeding a list-generator ApplicationSet, which generates claims-dev and claims-stage as Deployments and claims-prod as a Rollout, whose canary and analysis gate either promotes to 100 percent or aborts and rolls back to stable."]
+
+*Why it matters*
+
+"Onboard a new service" stops meaning "author more Applications by hand". The platform team owns one template, a line of generator input adds an environment, and the standards apply by construction rather than by review.
+
+*On screen* — the student Argo CD: `claims-dev-{user}`, `claims-stage-{user}` and `claims-prod-{user}`, all three green. Then confirm from the terminal that production really is a progressive-delivery Rollout:
+
 [source,sh,role=execute,subs="attributes"]
 ----
 PROD={user}-prod
 oc get rollout parasol-claims -n $PROD \
   -o jsonpath='prod is a {.kind}, strategy {.spec.strategy.canary.steps[*].setWeight}%, phase {.status.phase}{"\n"}'
 ----
-+
-"One object generated all three environments; prod is the one that runs progressive delivery."
 
-=== Beat 2 — Ship 1.1: edit Git, the canary takes over
+*What just happened*
 
-[demo-block]
-[TIME 4m]
-Say:: "Let's ship a new build of the claims service to production — version 1.1 — the GitOps way: I edit Git, and the canary takes over."
-Show:: The Gitea editor on `rollouts/claims-rollout.yaml`, bumping the image tag `1.0` → `1.1` and committing; then the terminal, where the polling loop below is the canary's dashboard on this cluster.
-Do:: After committing in Gitea, click *Refresh* on `claims-prod-{user}`, then narrate the steps as the terminal polls them (the Argo CD *Rollout view* that would normally animate this does not render here — the loop's `step N/5` / `canary-pods:X/4` / `analysis:` columns are the visual):
-+
+One object generated all three environments. The environment that had to differ differs by pointing at another folder, not by becoming another thing to manage.
+
+=== 2 · Ship a new version: edit Git, the canary takes over — 4 min
+
+Shipping version 1.1 of the claims service to production is a commit in the configuration repository. Argo CD syncs it, and the Rollout takes it from there — one slice of production at a time.
+
+image::gitops-at-scale/gitops-at-scale-04-canary-progressing.png["A terminal polling loop following the production Rollout: successive timestamped lines move from step 0 of 5 Progressing with one canary pod of four, through a Paused step and analysis Running at step 3 of 5, to step 5 of 5 Healthy with analysis Successful and a closing line reading promoted to 100 percent."]
+
+*Why it matters*
+
+The new version earns its traffic. A quarter of production runs it while three quarters stay on the proven version, an analysis Job probes the canary's real readiness endpoint, and only that evidence widens the slice — so a release is measured rather than hoped for.
+
+*On screen* — in Gitea, open `rollouts/claims-rollout.yaml` in `{user}/claims-config`, change the image tag from `1.0` to `1.1`, and commit. Then choose *Refresh* on `claims-prod-{user}` in Argo CD and follow the canary from the terminal, where the loop's `step N/5` and `analysis:` columns stand in for the Rollout view:
+
 [source,sh,role=execute]
 ----
 CANARY_STARTED=""
@@ -186,24 +227,30 @@ else
   done
 fi
 ----
-+
-"25% to the canary, a pause, 50%, then an *analysis* Job probes the new pods — it passes — and only now does 1.1 take 100%. The new version earned its traffic."
 
-=== Beat 3 — The analysis fails, production does not break
+*What just happened*
 
-[demo-block]
-[TIME 4m]
-Say:: "Now the beat that matters. I ship another release — but this time the canary's analysis will fail, the way it would if the new build spiked errors. Watch production *not* break."
-Show:: The terminal setting the analysis verdict to fail, the Gitea commit of the next build, then the terminal watch loop printing `Degraded` as the abort happens and the health-check curl proving stable never stopped serving.
-Do:: Force the analysis to fail, then ship:
-+
+25% to the canary, a pause, 50%, then the analysis Job probed the new pods. It passed, and only then did 1.1 take 100%.
+
+=== 3 · The analysis fails, and production does not — 4 min
+
+The next release is the one that should never reach users. With the analysis verdict set to fail — the signal a build that spiked errors would produce — production accepts the new version as a canary and then refuses it.
+
+image::gitops-at-scale/gitops-at-scale-05-canary-aborted.png["The same polling loop ending in rollout Degraded with analysis Failed and the line canary aborted, analysis failed; below it the Rollout's status message reads RolloutAborted, metric canary-health assessed Failed, and a curl against the production route answers prod health through the abort 200."]
+
+*Why it matters*
+
+Rollback stops being a person noticing, deciding and acting under pressure. The gate decides on evidence in the middle of the rollout, the stable pods never stop serving, and the outage that begins with "the deploy looked fine" does not begin.
+
+Set the analysis verdict, so the failure lands at a known moment:
+
 [source,sh,role=execute]
 ----
 oc patch configmap gitops-at-scale-canary-control -n $PROD --type merge -p '{"data":{"verdict":"fail"}}'
 ----
-+
-Then in Gitea bump `rollouts/claims-rollout.yaml` image `1.1` → `1.0` (a stand-in for "the next build"), commit, *Refresh* `claims-prod-{user}`, and watch:
-+
+
+*On screen* — in Gitea, change the same image tag from `1.1` back to `1.0`, standing in for the next build, commit, and *Refresh* `claims-prod-{user}`. Then watch the canary and the production route together:
+
 [source,sh,role=execute]
 ----
 for i in $(seq 1 20); do
@@ -216,31 +263,43 @@ done
 oc get route parasol-claims -n $PROD -o jsonpath='{.spec.host}' \
   | xargs -I{} curl -ks -o /dev/null -w "users still served: %{http_code}\n" http://{}/q/health/ready
 ----
-+
-"The analysis failed at 50%, the Rollout *aborted*, and it rolled back to the stable version on its own — production answered `200` the entire time. No human, no incident, no bad build in front of users."
 
-=== Beat 4 — The receipt: the AnalysisRun that decided
+*What just happened*
 
-[demo-block]
-[TIME 1m]
-Say:: "And here's the receipt — the analysis run that made the call."
-Show:: The failed `AnalysisRun` and its message.
-Do::
-+
+The analysis failed at 50%, the Rollout aborted and returned to the stable version on its own, and the route answered `200` the whole time. No human acted, and no bad build reached a user.
+
+=== 4 · The record of the decision — 1 min
+
+Every abort leaves a record in the cluster: the AnalysisRun that judged the canary, the metric that failed, and the threshold it breached.
+
+image::gitops-at-scale/gitops-at-scale-03-canary-analysis.svg["The canary sequence as a flow: a new version pushed via Git goes to 25 percent, pauses, widens to 50 percent, and reaches an analysis gate whose pass branch promotes to 100 percent and whose fail branch aborts and rolls back to stable."]
+
+*Why it matters*
+
+The decision is an object, not a story told afterwards. It reads like an incident review with the remediation already done — and it is the same evidence a release review or an auditor asks for.
+
 [source,sh,role=execute]
 ----
 oc get analysisrun -n $PROD --sort-by=.metadata.creationTimestamp \
   -o jsonpath='{.items[-1:].metadata.name}: {.items[-1:].status.phase} — {.items[-1:].status.message}{"\n"}'
 ----
-+
-"``Failed`` — the metric breached its threshold, so the rollout was aborted. Read like an incident review, except the rollback already happened."
 
-[NOTE]
-.Resetting between runs
-====
-`ws prep gitops-at-scale --user {user} --yes` returns everything to the entry state (namespaces purged, the fork restored, the attendee ApplicationSet cleared).
-The canary + auto-rollback arc is fast (each canary ~2 min); the abort lands live, no waiting to narrate around.
-====
+== Frequently asked questions
+
+*Is the canary really sending a quarter of the requests to the new version?*::
+Roughly, and by pod ratio rather than by counting requests: at `setWeight: 25` with four replicas the controller runs one canary pod beside three stable ones, and the single Service load-balances across all four. Exact request percentages, header-based routing or mirroring need a traffic router — an OpenShift Route plugin or a service mesh — which this platform deliberately does not require, so progressive delivery works here with nothing extra installed.
+
+*The canary aborted — why did production not go down?*::
+A Rollout keeps the stable ReplicaSet running the whole time and only scales the canary up to the current weight. An abort scales the canary back to zero, and the stable pods — which never stopped serving — carry all the traffic again. "Rolled back" here means the new version was never promoted, not that anything was torn down and redeployed.
+
+*Was that failure real, or forced?*::
+The verdict is deterministic on purpose, so the abort lands at the same moment every time. The analysis behind it is real: the same Job probes the canary's live readiness endpoint, so a build that never becomes ready, or whose database wiring is wrong, fails the gate on its own merits.
+
+*Canary or blue-green?*::
+Canary when you want to limit the blast radius and can measure health during the rollout — a bad build fails at 50% rather than at 100% — at the cost of one extra slice of capacity. Blue-green when you want a clean instant cutover after a full pre-flight on a preview URL, and can afford two complete versions during the switch. Argo Rollouts serves both strategies.
+
+*How is the ApplicationSet created — Argo CD has no screen for one?*::
+With the Argo CD CLI, or by applying the object itself; Argo CD 3.4 has no create or read screen for ApplicationSets. That suits GitOps rather than hindering it: the ApplicationSet is a manifest in a repository like everything else, and it is normally delivered by GitOps too instead of being created by hand.
 endif::demo[]
 
 // ============================================================================
