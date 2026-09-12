@@ -582,24 +582,7 @@ KINDS = {
 #
 # DO NOT add an entry to make a red run green. The only legitimate reason is the one below: the
 # page belongs to a change already in flight elsewhere.
-LEDGER = [
-    ("app-security-testing/lab.adoc", "flavor-invisible-definition", "var:NS",
-     "FOURTH instance of this class, found by this guard on the run that introduced it "
-     "(2026-08-12), and NOT a repeat of the three in the docstring. The demo arc's pre-flight runs "
-     "`oc get pipelinerun -n $NS …` while the only `NS={user}-cicd` assignment sits inside "
-     "`ifndef::demo[]` at line 27; the arc's own prose says 'Set NS={user}-cicd in your terminal', "
-     "which is the securing-apps-keycloak shape exactly — a presenter who clicks rather than "
-     "retypes gets `-n ''`. NOT FIXED HERE: app-security-testing belongs to another change in "
-     "flight and this one must not touch it. FILED — delete this entry with the fix, and note the "
-     "guard will fail on a stale entry if you forget."),
-    ("agentic-ai/lab.adoc", "flavor-invisible-definition", "var:NS",
-     "FIFTH instance, same class, same night. Verified by reading the file rather than trusting "
-     "the finding: `NS={user}-ai` is at line 100, inside `ifndef::demo[]` (93-117); the demo arc "
-     "is 136-327 and patches `cm parasol-agent-grounding -n $NS` at line 244; line 144 is the "
-     "prose 'Set `NS={user}-ai` … in the terminal'. Prose is not clickable, so the arc's own "
-     "`oc patch` runs with `-n ''`. NOT FIXED HERE — outside this change's write territory. "
-     "FILED — delete this entry with the fix."),
-]
+LEDGER = []
 # A THIRD entry — agentic-ai use-before-definition var:AGENT — was written here and then REMOVED,
 # because it was this guard's own false positive rather than a defect: `====` was being treated as
 # a verbatim delimiter, so every shell block inside a `[tabs]` block was invisible, and the demo
@@ -1202,12 +1185,19 @@ def self_test(tmpdir: Path) -> int:
     # matching, a filed defect silently becomes a red build; if it outlives its defect, a page
     # quietly stops being guarded. Both arms are asserted, on the REAL ledger, so an entry whose
     # key rots is caught here rather than by whoever hits the next instance on that page.
+    # The backlog emptied on 2026-09-12: both filed defects were fixed by the SA-Demos conversion,
+    # and their entries deleted. The arms below therefore run against a FIXTURE entry when the real
+    # LEDGER is empty — the suppression mechanism has to keep working while nothing is filed, or the
+    # next entry anyone files is trusted without any evidence that suppression still suppresses. A
+    # real entry, whenever there is one, is used in preference, so an entry whose key rots is still
+    # caught here rather than by whoever hits the next instance on that page.
+    global LEDGER
+    real_ledger = LEDGER
     if not LEDGER:
-        print("❌ SELF-TEST FAILED: the LEDGER is empty, so neither ledger arm below proves "
-              "anything. Assert against a fixture entry if the backlog ever empties.",
-              file=sys.stderr)
-        ok = False
-    else:
+        LEDGER = [("fixture-module/lab.adoc", "use-before-definition", "var:FIXTURE",
+                   "2026-09-12 | self-test fixture, not a filed defect | decision: keeps both "
+                   "ledger arms proven while the real backlog is empty")]
+    try:
         page, kind, key, _reason = LEDGER[0]
         matching = [(f"content/modules/ROOT/pages/{page}", 9, kind, "synthetic", key)]
         kept, suppressed, stale = apply_ledger(matching)
@@ -1237,6 +1227,8 @@ def self_test(tmpdir: Path) -> int:
                   f"(kept={wrong_kept}). If the keep path stops working every real finding is "
                   f"swallowed and the guard reports clean forever.", file=sys.stderr)
             ok = False
+    finally:
+        LEDGER = real_ledger
 
     if not ok:
         return 2
